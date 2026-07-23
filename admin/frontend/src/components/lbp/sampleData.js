@@ -51,7 +51,16 @@ export const SAMPLE_PROJECTS = [
     started: '2026-05-12', in_stage_days: 1, status: { kind: 'moved' },
     key_metric: { value: 31, label: 'Appointments self-booked', unit: '%', delta: 27, dir: 'up', good: 'up' },
     trend: [4, 9, 12, 18, 22, 27, 31],
-    scope: 'Front-desk pilot', description: 'Let patients book their own appointments online instead of calling.',
+    description: 'Let patients book, move, and cancel their own appointments from the reminder text link instead of calling the front desk. Connects the scheduler to the PMS so slots stay in sync.',
+    scope: { testing: 'Front desk + 20 pilot patients @ Springfield', site: 'Springfield', pods: ['Central'], region: null },
+    metrics: [
+      { name: 'Appointments self-booked', source: 'Scheduler DB · weekly export', target: null, unit: '%', value: 31, delta: 27, dir: 'up', good: 'up', since: 'since start', trend: [4, 9, 12, 18, 22, 27, 31] },
+      { name: 'No-show rate', source: 'PMS monthly report', target: '8%', unit: '%', value: 9.1, delta: 3.3, dir: 'down', good: 'down', since: 'since start', trend: [12.4, 11.8, 11, 10.2, 9.6, 9.3, 9.1] },
+    ],
+    learnings: [
+      { date: '7/14', tag: 'During', author: 'Marcus', body: 'Patients 65+ dropped off at the insurance step. Added a “skip this — we’ll confirm by phone” path; completion went from 61% to 84%.' },
+      { date: '6/20', tag: 'During', author: 'Dana', body: 'PMS sync must be one-directional (scheduler → PMS) for the pilot. Two-way sync doubled the build; not worth it yet.' },
+    ],
   },
   {
     id: 'p-eligibility', name: 'Insurance eligibility auto-check', beaf: ['Automated', 'Faster'],
@@ -60,7 +69,15 @@ export const SAMPLE_PROJECTS = [
     status: { kind: 'blocked', days: 3, reason: 'clearinghouse API credentials' },
     key_metric: { value: 33, label: 'Manual eligibility checks / day', unit: '', delta: 3, dir: 'down', good: 'down' },
     trend: [41, 38, 44, 36, 39, 34, 33],
-    scope: 'Billing team', description: 'Automatically verify insurance eligibility before the visit.',
+    description: 'Automatically verify insurance eligibility before the visit so the front desk stops running manual checks and denials drop.',
+    scope: { testing: 'Billing team (2 users)', site: null, pods: [], region: null },
+    metrics: [
+      { name: 'Manual eligibility checks / day', source: 'Front-desk log', target: '10', unit: '', value: 33, delta: 3, dir: 'down', good: 'down', since: 'since start', trend: [41, 38, 44, 36, 39, 34, 33] },
+      { name: 'Eligibility-related denials', source: 'Billing export', target: null, unit: '%', value: 6.2, delta: 1.1, dir: 'down', good: 'down', since: 'since start', trend: [8.1, 7.6, 7.9, 7.0, 6.8, 6.4, 6.2] },
+    ],
+    learnings: [
+      { date: '7/18', tag: 'During', author: 'Dana', body: 'Clearinghouse sandbox credentials take ~2 weeks to provision. Start the vendor paperwork the day the idea is greenlit, not at MVP.' },
+    ],
   },
   {
     id: 'p-labels', name: 'Intake label printers', beaf: ['Faster', 'Better'],
@@ -68,7 +85,15 @@ export const SAMPLE_PROJECTS = [
     started: '2026-03-02', in_stage_days: 11, status: { kind: 'moved' },
     key_metric: { value: 3.1, label: 'Check-in processing time', unit: 'min', delta: 2.7, dir: 'down', good: 'down' },
     trend: [7.2, 6.4, 5.8, 4.9, 4.1, 3.5, 3.1],
-    scope: '3 PODs live', description: 'Print intake labels at check-in to cut manual data entry errors.',
+    description: 'Print intake labels at check-in so demographics and specimen labels stop being hand-written — fewer errors, faster rooming.',
+    scope: { testing: 'Central POD staff', site: 'Springfield', pods: ['Central', 'North', 'West'], region: null },
+    metrics: [
+      { name: 'Check-in processing time', source: 'Time study', target: '3 min', unit: 'min', value: 3.1, delta: 2.7, dir: 'down', good: 'down', since: 'since start', trend: [7.2, 6.4, 5.8, 4.9, 4.1, 3.5, 3.1] },
+      { name: 'Label transcription errors', source: 'QA audit', target: null, unit: '/wk', value: 1, delta: 6, dir: 'down', good: 'down', since: 'since start', trend: [7, 6, 5, 4, 3, 2, 1] },
+    ],
+    learnings: [
+      { date: '5/02', tag: 'During', author: 'Marcus', body: 'Equipment wins are about error-reduction, not speed — the time saved is small, but the mislabeled-specimen rate going to near-zero is the real story.' },
+    ],
   },
   {
     id: 'p-turnover', name: 'Room turnover checklist app', beaf: ['Better', 'Easier'],
@@ -76,14 +101,24 @@ export const SAMPLE_PROJECTS = [
     started: '2026-04-21', in_stage_days: 19, status: { kind: 'idle', days: 8 },
     key_metric: { value: 11, label: 'Avg room turnover', unit: 'min', delta: 3.2, dir: 'down', good: 'down' },
     trend: [16, 15, 14.5, 13, 12.2, 11.4, 11],
-    scope: 'Pilot site', description: 'A shared checklist so rooms are turned over consistently and fast.',
+    description: 'A shared checklist on a wall tablet so rooms are turned over consistently and fast, freeing exam-room capacity.',
+    scope: { testing: 'Springfield nursing pods', site: 'Springfield', pods: ['Central', 'North'], region: null },
+    metrics: [
+      { name: 'Avg room turnover', source: 'Tablet app log', target: '10 min', unit: 'min', value: 11, delta: 3.2, dir: 'down', good: 'down', since: 'since start', trend: [16, 15, 14.5, 13, 12.2, 11.4, 11] },
+    ],
+    learnings: [
+      { date: '6/30', tag: 'During', author: 'Tara', body: 'Adoption stalls without a per-shift owner — the checklist only works when a lead is accountable for it each shift.' },
+    ],
   },
   {
     id: 'p-referralfax', name: 'Referral fax → shared inbox', beaf: ['Easier', 'Automated'],
     levers: ['volume'], stage: 'Idea', owner: 'TW',
     started: '2026-07-11', in_stage_days: 12, status: { kind: 'idle', days: 12 },
     key_metric: null, trend: [],
-    scope: null, description: 'Route inbound referral faxes into a shared, triageable inbox.',
+    description: 'Route inbound referral faxes into a shared, triageable inbox so referrals stop getting lost on a single desk.',
+    scope: { testing: null, site: null, pods: [], region: null },
+    metrics: [],
+    learnings: [],
   },
 ];
 
@@ -212,6 +247,57 @@ export const SAMPLE_MEETING = {
 export const SAMPLE_FOCUS = {
   category: 'volume',
   projects: ['p-selfsched', 'p-labels', 'p-referralfax'],
+};
+
+// ---- overall impact from Lean BEAF projects (by lever) ----
+// Aggregated contribution of the portfolio across a chosen date range. Sample
+// numbers per range until a data source is connected. `dir`/`good` drive the
+// green/red pill just like the metric deltas.
+
+export const IMPACT_RANGES = [
+  { key: 'last_week', label: 'From last week' },
+  { key: 'last_month', label: 'From last month' },
+  { key: 'last_quarter', label: 'From last quarter' },
+  { key: 'ytd', label: 'Year to date' },
+];
+
+export const SAMPLE_IMPACT = {
+  last_week: {
+    headline: '4 projects moved a metric', sub: '5 active · 2 rolled out',
+    levers: [
+      { key: 'volume', value: '+6%', note: 'appointments booked', dir: 'up', good: 'up' },
+      { key: 'charge', value: '+$12', note: 'charge per visit', dir: 'up', good: 'up' },
+      { key: 'efficiency', value: '−41 hrs', note: 'staff time / wk', dir: 'down', good: 'down' },
+      { key: 'experience', value: '−1.4%', note: 'no-show rate', dir: 'down', good: 'down' },
+    ],
+  },
+  last_month: {
+    headline: '5 projects moved a metric', sub: '5 active · 2 rolled out',
+    levers: [
+      { key: 'volume', value: '+14%', note: 'appointments booked', dir: 'up', good: 'up' },
+      { key: 'charge', value: '+$21', note: 'charge per visit', dir: 'up', good: 'up' },
+      { key: 'efficiency', value: '−168 hrs', note: 'staff time / mo', dir: 'down', good: 'down' },
+      { key: 'experience', value: '−5.2%', note: 'no-show rate', dir: 'down', good: 'down' },
+    ],
+  },
+  last_quarter: {
+    headline: '6 projects moved a metric', sub: '5 active · 2 rolled out',
+    levers: [
+      { key: 'volume', value: '+22%', note: 'appointments booked', dir: 'up', good: 'up' },
+      { key: 'charge', value: '+$34', note: 'charge per visit', dir: 'up', good: 'up' },
+      { key: 'efficiency', value: '−520 hrs', note: 'staff time / qtr', dir: 'down', good: 'down' },
+      { key: 'experience', value: '−9.8%', note: 'no-show rate', dir: 'down', good: 'down' },
+    ],
+  },
+  ytd: {
+    headline: '8 projects moved a metric', sub: '5 active · 2 rolled out',
+    levers: [
+      { key: 'volume', value: '+31%', note: 'appointments booked', dir: 'up', good: 'up' },
+      { key: 'charge', value: '+$47', note: 'charge per visit', dir: 'up', good: 'up' },
+      { key: 'efficiency', value: '−1,940 hrs', note: 'staff time YTD', dir: 'down', good: 'down' },
+      { key: 'experience', value: '−22%', note: 'no-show rate', dir: 'down', good: 'down' },
+    ],
+  },
 };
 
 // ---- derived helpers ----

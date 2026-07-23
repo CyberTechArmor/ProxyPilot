@@ -12,7 +12,6 @@
 
 import { Fragment, useCallback, useMemo, useRef, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { useTheme } from '@/context/ThemeContext';
 import { Button } from '@/components/ui/button';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -24,12 +23,12 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Plus, CalendarCheck, Sun, Moon, Settings, ChevronRight, ChevronDown, Target,
-  ArrowRight, Flag, X, Sparkles, Rocket,
+  Plus, CalendarCheck, Settings, ChevronRight, ChevronDown, Target, Play, Clock,
+  ArrowRight, ArrowLeft, Flag, X, Sparkles, Rocket, Pencil, TrendingUp,
 } from 'lucide-react';
 import {
   LEVERS, LEVER_ORDER, STAGES, SAMPLE_PROJECTS, SAMPLE_ARCHIVE, SAMPLE_METRICS,
-  SAMPLE_THRESHOLDS, SAMPLE_MEETING, SAMPLE_FOCUS,
+  SAMPLE_THRESHOLDS, SAMPLE_MEETING, SAMPLE_FOCUS, SAMPLE_IMPACT, IMPACT_RANGES,
 } from '@/components/lbp/sampleData';
 import {
   LeverDots, LeverChip, BeafTags, DeltaPill, OwnerAvatar, StatusChip, Sparkline,
@@ -47,7 +46,6 @@ const fmtDate = (iso) => {
 // ============================ top-level ============================
 
 export default function LeanBeafPro() {
-  const { theme, toggleTheme } = useTheme();
   const { setAssistant, assistantAvailable } = useOutletContext() || {};
   const [tab, setTab] = useState('Dashboard');
   const [projects, setProjects] = useState(SAMPLE_PROJECTS);
@@ -65,9 +63,12 @@ export default function LeanBeafPro() {
   // List deep-link filters (lever chips / digest categories jump here).
   const [listLever, setListLever] = useState('all');
   const [listStatus, setListStatus] = useState('all');
-  const [peekId, setPeekId] = useState(null);
+  // A selected project opens as a whole-page detail view (replaces the tab
+  // content); the header/nav stay put so any nav click leaves the detail.
+  const [openId, setOpenId] = useState(null);
 
-  const goList = (lever = 'all', status = 'all') => { setListLever(lever); setListStatus(status); setTab('List'); };
+  const goList = (lever = 'all', status = 'all') => { setOpenId(null); setListLever(lever); setListStatus(status); setTab('List'); };
+  const goTab = (t) => { setOpenId(null); setTab(t); };
 
   const advance = (id) => setProjects((prev) => prev.map((p) => {
     if (p.id !== id) return p;
@@ -76,12 +77,17 @@ export default function LeanBeafPro() {
   }));
   const setStage = (id, stage) => setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, stage, status: { kind: 'moved' }, in_stage_days: 0 } : p)));
   const breakBarrier = (id) => setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, status: { kind: 'moved' } } : p)));
-  const addReading = (id, value) => setProjects((prev) => prev.map((p) => {
-    if (p.id !== id || p.key_metric == null) return p;
-    return { ...p, trend: [...p.trend, value].slice(-8), key_metric: { ...p.key_metric, value } };
+  const addReading = (id, metricName, value) => setProjects((prev) => prev.map((p) => {
+    if (p.id !== id) return p;
+    const metrics = (p.metrics || []).map((mm) => (mm.name === metricName ? { ...mm, value, trend: [...(mm.trend || []), value].slice(-8) } : mm));
+    const key_metric = p.key_metric && p.key_metric.label === metricName ? { ...p.key_metric, value } : p.key_metric;
+    const trend = key_metric && p.key_metric?.label === metricName ? [...p.trend, value].slice(-8) : p.trend;
+    return { ...p, metrics, key_metric, trend };
   }));
+  const addLearning = (id, body) => setProjects((prev) => prev.map((p) => (p.id === id
+    ? { ...p, learnings: [{ date: 'today', tag: 'During', author: 'You', body }, ...(p.learnings || [])] } : p)));
 
-  const peekProject = projects.find((p) => p.id === peekId) || archive.find((p) => p.id === peekId) || null;
+  const openProject = projects.find((p) => p.id === openId) || archive.find((p) => p.id === openId) || null;
 
   return (
     <div className="flex w-full flex-1 flex-col gap-4">
@@ -103,9 +109,9 @@ export default function LeanBeafPro() {
             <button
               key={t}
               type="button"
-              onClick={() => setTab(t)}
+              onClick={() => goTab(t)}
               className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
-                tab === t ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground'
+                tab === t && !openId ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground'
               }`}
             >
               {t}
@@ -116,52 +122,49 @@ export default function LeanBeafPro() {
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setTab('Meetings')}
+            onClick={() => goTab('Meetings')}
             className="hidden items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground sm:inline-flex"
             title="Meetings"
           >
             <CalendarCheck className="h-3.5 w-3.5" /> Last meeting <b className="text-foreground">{SAMPLE_MEETING.last_ago}</b>
           </button>
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className="flex h-9 w-9 items-center justify-center rounded-lg border text-muted-foreground hover:text-foreground"
-            title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
-          >
-            {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </button>
-          <NewProjectButton onCreate={(p) => setProjects((prev) => [{ ...p }, ...prev])} />
+          <NewProjectButton onCreate={(p) => { setProjects((prev) => [{ ...p }, ...prev]); }} />
         </div>
       </div>
 
-      {tab === 'Dashboard' && (
-        <DashboardView
-          projects={projects}
-          focusCategory={focusCategory} setFocusCategory={setFocusCategory}
-          focusProjects={focusProjects} setFocusProjects={setFocusProjects}
-          thresholds={thresholds} setThresholds={setThresholds}
-          onOpenList={goList} onOpenProject={setPeekId}
+      {openProject ? (
+        <ProjectDetailPage
+          project={openProject}
+          onBack={() => setOpenId(null)}
+          onAdvance={advance} onSetStage={setStage} onBreakBarrier={breakBarrier}
+          onAddReading={addReading} onAddLearning={addLearning}
+          focused={focusProjects.includes(openProject.id)}
+          onToggleFocus={() => requestFocusProject({ id: openProject.id, focusProjects, setFocusProjects, focusCategory, projects })}
         />
+      ) : (
+        <>
+          {tab === 'Dashboard' && (
+            <DashboardView
+              projects={projects}
+              focusCategory={focusCategory} setFocusCategory={setFocusCategory}
+              focusProjects={focusProjects} setFocusProjects={setFocusProjects}
+              thresholds={thresholds} setThresholds={setThresholds}
+              onOpenList={goList} onOpenProject={setOpenId}
+            />
+          )}
+          {tab === 'Meetings' && <MeetingsView projects={projects} onOpenList={goList} onOpenProject={setOpenId} />}
+          {tab === 'List' && (
+            <ListView
+              projects={projects} lever={listLever} status={listStatus}
+              setLever={setListLever} setStatus={setListStatus}
+              focusProjects={focusProjects} onToggleFocus={(id) => requestFocusProject({ id, focusProjects, setFocusProjects, focusCategory, projects })}
+              onOpenProject={setOpenId} onOpenArchive={() => setTab('Archive')} onOpenStage={() => setTab('Board')}
+            />
+          )}
+          {tab === 'Board' && <BoardView projects={projects} onAdvance={advance} onOpenProject={setOpenId} />}
+          {tab === 'Archive' && <ArchiveView archive={archive} onOpenProject={setOpenId} />}
+        </>
       )}
-      {tab === 'Meetings' && <MeetingsView projects={projects} onOpenList={goList} onOpenProject={setPeekId} />}
-      {tab === 'List' && (
-        <ListView
-          projects={projects} lever={listLever} status={listStatus}
-          setLever={setListLever} setStatus={setListStatus}
-          focusProjects={focusProjects} onToggleFocus={(id) => requestFocusProject({ id, focusProjects, setFocusProjects, focusCategory, projects })}
-          onOpenProject={setPeekId} onOpenArchive={() => setTab('Archive')} onOpenStage={() => setTab('Board')}
-        />
-      )}
-      {tab === 'Board' && <BoardView projects={projects} onAdvance={advance} onOpenProject={setPeekId} />}
-      {tab === 'Archive' && <ArchiveView archive={archive} onOpenProject={setPeekId} />}
-
-      <ProjectPeek
-        project={peekProject}
-        onClose={() => setPeekId(null)}
-        onAdvance={advance} onSetStage={setStage} onBreakBarrier={breakBarrier} onAddReading={addReading}
-        focused={peekProject ? focusProjects.includes(peekProject.id) : false}
-        onToggleFocus={() => peekProject && requestFocusProject({ id: peekProject.id, focusProjects, setFocusProjects, focusCategory, projects })}
-      />
 
       {/* narrow-only assistant reach (the dock offers it on wide screens) */}
       {assistantAvailable && (
@@ -216,6 +219,9 @@ function DashboardView({ projects, focusCategory, setFocusCategory, focusProject
           onOpenProject={onOpenProject}
         />
       )}
+
+      {/* overall impact from the LBP portfolio (by lever), date-range switchable */}
+      <ImpactCard onOpenList={onOpenList} />
 
       <div className="flex justify-end">
         <button type="button" onClick={() => setGearOpen(true)} className="flex h-8 w-8 items-center justify-center rounded-lg border text-muted-foreground hover:text-foreground" title="Metric thresholds">
@@ -362,25 +368,29 @@ function PerAppointmentCard({ data, dim, focused, onFocus, onOpenList, onOpenPro
     <MetricCard lever="efficiency" title="Per appointment" source="all staff & all cost averaged" span="lg:col-span-4" focused={focused} dim={dim} onFocus={onFocus}
       footer={<CardFooter lever="efficiency" projectIds={data.projects} projects={projects} onOpenList={onOpenList} onOpenProject={onOpenProject} quiet={quiet} />}
     >
-      <div className="mt-3 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="grid flex-1 grid-cols-1 gap-4 sm:grid-cols-3">
-          {active.stats.map((s) => (
-            <div key={s.label}>
-              <span className={`block text-xs text-muted-foreground ${quiet} transition-opacity`}>{s.label}</span>
-              <b className="mt-0.5 block text-2xl font-extrabold tabular-nums">{s.value}</b>
-              <DeltaPill delta={s.delta} dir={s.dir} good={s.good} suffix="" className="mt-1" />
-              <span className={`ml-1 text-[11px] text-muted-foreground ${quiet} transition-opacity`}>vs prior qtr</span>
-            </div>
-          ))}
-        </div>
-        <div className="flex gap-0.5 self-start rounded-lg border bg-muted/40 p-0.5">
+      {/* segmented control sits at the top-right; the three stats spread evenly
+          across the full width with generous spacing (clean, airy). */}
+      <div className="mt-2 flex justify-end">
+        <div className="flex gap-0.5 rounded-lg border bg-muted/40 p-0.5">
           {data.segments.map((s) => (
             <button key={s.key} type="button" onClick={() => setSeg(s.key)}
-              className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${seg === s.key ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground'}`}>
+              className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-colors ${seg === s.key ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground'}`}>
               {s.label}
             </button>
           ))}
         </div>
+      </div>
+      <div className="mt-6 grid grid-cols-1 gap-8 pb-2 sm:grid-cols-3 sm:gap-4">
+        {active.stats.map((s) => (
+          <div key={s.label}>
+            <span className={`block text-xs text-muted-foreground ${quiet} transition-opacity`}>{s.label}</span>
+            <b className="mt-1 block text-3xl font-extrabold tabular-nums">{s.value}</b>
+            <div className="mt-1.5 flex items-center gap-2">
+              <DeltaPill delta={s.delta} dir={s.dir} good={s.good} suffix="" />
+              <span className={`text-[11px] text-muted-foreground ${quiet} transition-opacity`}>vs prior qtr</span>
+            </div>
+          </div>
+        ))}
       </div>
     </MetricCard>
   );
@@ -416,6 +426,56 @@ function WeeklyFocusStrip({ category, projects, focusProjects, onUnfocus, onOpen
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Overall impact from the LBP portfolio, aggregated by lever, over a chosen
+// date range (default: last week). Sample numbers until a source is connected.
+function ImpactCard({ onOpenList }) {
+  const [range, setRange] = useState('last_week');
+  const data = SAMPLE_IMPACT[range];
+  return (
+    <div className="rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+          <TrendingUp className="h-4 w-4" />
+        </span>
+        <div>
+          <b className="text-base">Impact from Lean BEAF projects</b>
+          <p className="text-xs text-muted-foreground">{data.headline} · {data.sub}</p>
+        </div>
+        <div className="ml-auto w-full sm:w-52">
+          <Select value={range} onValueChange={setRange}>
+            <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {IMPACT_RANGES.map((r) => <SelectItem key={r.key} value={r.key}>{r.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        {data.levers.map((l) => {
+          const lv = LEVERS[l.key];
+          const good = l.dir === l.good;
+          return (
+            <button
+              key={l.key}
+              type="button"
+              onClick={() => onOpenList(l.key)}
+              className={`rounded-xl border p-3 text-left transition-colors hover:border-primary/40 ${lv.soft}`}
+              title={`View ${lv.label} projects`}
+            >
+              <span className="flex items-center gap-1.5">
+                <i className={`h-2.5 w-2.5 rounded-full ${lv.dot}`} />
+                <span className="text-xs font-bold">{lv.label}</span>
+              </span>
+              <b className={`mt-1.5 block text-2xl font-extrabold tabular-nums ${good ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>{l.value}</b>
+              <span className="block text-[11px] text-muted-foreground">{l.note}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -710,85 +770,183 @@ function ArchiveView({ archive, onOpenProject }) {
   );
 }
 
-// ============================ Project peek ============================
+// ============================ Project detail (whole-page) ============================
 
-function ProjectPeek({ project, onClose, onAdvance, onSetStage, onBreakBarrier, onAddReading, focused, onToggleFocus }) {
-  const [reading, setReading] = useState('');
-  if (!project) return null;
+function ProjectDetailPage({ project, onBack, onAdvance, onSetStage, onBreakBarrier, onAddReading, onAddLearning, focused, onToggleFocus }) {
   const archived = !!project.outcome;
   const stageIdx = STAGES.indexOf(project.stage);
+  const nextStage = stageIdx < STAGES.length - 1 ? STAGES[stageIdx + 1] : null;
+  const metrics = project.metrics || [];
+  const learnings = project.learnings || [];
+  const scope = project.scope || {};
+  const [metricSel, setMetricSel] = useState(metrics[0]?.name || '');
+  const [reading, setReading] = useState('');
+  const [learn, setLearn] = useState('');
 
   return (
-    <Dialog open={!!project} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:max-h-[90vh] sm:rounded-lg overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">{project.name}</DialogTitle>
-          <DialogDescription>
-            {archived ? project.span : `${project.stage} · ${project.in_stage_days}d in stage · owner ${project.owner}`}
-          </DialogDescription>
-        </DialogHeader>
+    <div className="mx-auto w-full max-w-4xl space-y-4">
+      {/* breadcrumb */}
+      <button type="button" onClick={onBack} className="inline-flex items-center gap-1 text-sm font-semibold text-primary">
+        <ArrowLeft className="h-4 w-4" /> Lean BEAF Pro <span className="text-muted-foreground">/ {project.name}</span>
+      </button>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {project.levers.map((lv) => <LeverChip key={lv} leverKey={lv} />)}
-          {!archived && <StatusChip status={project.status} />}
-          {!archived && (
-            <button type="button" onClick={onToggleFocus} className={`ml-auto inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${focused ? 'border-amber-400 bg-amber-400/10 text-amber-600 dark:text-amber-400' : 'border-border text-muted-foreground'}`}>
-              {focused ? '★ Focused' : '☆ Focus this week'}
+      {/* title + actions */}
+      <div className="flex flex-wrap items-start gap-3">
+        <h1 className="text-2xl font-extrabold leading-tight">{project.name}</h1>
+        {!archived && (
+          <div className="ml-auto flex items-center gap-2">
+            <button type="button" onClick={onToggleFocus} className={`inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold ${focused ? 'border-amber-400 bg-amber-400/10 text-amber-600 dark:text-amber-400' : 'border-border text-muted-foreground hover:text-foreground'}`}>
+              {focused ? '★ Focused this week' : '◎ Focus this week'}
             </button>
-          )}
-        </div>
-
-        {!archived && project.status.kind === 'blocked' && (
-          <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-3">
-            <p className="text-sm font-semibold text-red-600 dark:text-red-400"><Flag className="mr-1 inline h-3.5 w-3.5" /> Blocked · {project.status.days}d</p>
-            <p className="text-xs text-muted-foreground">{project.status.reason}</p>
-            <Button size="sm" variant="outline" className="mt-2 h-8" onClick={() => onBreakBarrier(project.id)}>Break barrier</Button>
+            <button type="button" className="flex h-9 w-9 items-center justify-center rounded-lg border text-muted-foreground" title="Edit"><Pencil className="h-4 w-4" /></button>
           </div>
         )}
+      </div>
 
+      {/* meta chips */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs text-muted-foreground"><Play className="h-3 w-3" /> {fmtDate(project.started)}</span>
+        {!archived && <span className="inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs text-muted-foreground"><Clock className="h-3 w-3" /> {project.in_stage_days}d in stage</span>}
+        <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${LEVERS[project.levers[0]].chip}`}><i className={`h-1.5 w-1.5 rounded-full ${LEVERS[project.levers[0]].dot}`} /> {archived ? project.final_stage : project.stage}</span>
+        {!archived && <StatusChip status={project.status} />}
+        {project.levers.map((lv) => <LeverChip key={lv} leverKey={lv} />)}
+        <span className="inline-flex items-center gap-1.5"><OwnerAvatar initials={project.owner || 'ME'} /></span>
+      </div>
+
+      {/* stage stepper + actions */}
+      {!archived && (
+        <div className="rounded-xl border bg-card p-5">
+          <div className="flex items-start">
+            {STAGES.map((s, i) => (
+              <button key={s} type="button" onClick={() => onSetStage(project.id, s)} className="group relative flex flex-1 flex-col items-center" title={i === stageIdx ? `Currently at ${s}` : `Move to ${s}`}>
+                {i < STAGES.length - 1 && <span className={`pointer-events-none absolute left-[calc(50%+10px)] right-[calc(-50%+10px)] top-[9px] h-0.5 ${i < stageIdx ? 'bg-primary/60' : 'bg-border'}`} />}
+                <span className={`z-10 h-5 w-5 rounded-full border-2 ${i < stageIdx ? 'border-primary/60 bg-primary/60' : i === stageIdx ? 'border-primary bg-primary ring-4 ring-primary/15' : 'border-border bg-muted group-hover:border-primary'}`} />
+                <span className={`mt-1.5 text-[11px] font-bold ${i === stageIdx ? 'text-primary' : 'text-muted-foreground'}`}>{s}</span>
+              </button>
+            ))}
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            {nextStage && <Button className="h-9" onClick={() => onAdvance(project.id)}>Advance to {nextStage} ›</Button>}
+            <Button variant="outline" className="h-9 border-green-500/50 text-green-600 dark:text-green-400" onClick={() => onSetStage(project.id, 'All')}>✓ Rolled out</Button>
+            <Button variant="outline" className="h-9 border-red-500/50 text-red-600 dark:text-red-400">✕ Abandon</Button>
+            <span className="ml-auto text-xs text-muted-foreground">Tap any stage to move there — forward or back</span>
+          </div>
+        </div>
+      )}
+
+      {/* blocker banner */}
+      {!archived && project.status.kind === 'blocked' && (
+        <div className="rounded-xl border border-red-500/40 bg-red-500/5 p-4">
+          <p className="text-sm font-semibold text-red-600 dark:text-red-400"><Flag className="mr-1 inline h-3.5 w-3.5" /> Blocked · {project.status.days}d</p>
+          <p className="mt-0.5 text-sm text-muted-foreground">{project.status.reason}</p>
+          <Button size="sm" variant="outline" className="mt-2 h-8" onClick={() => onBreakBarrier(project.id)}>Break barrier</Button>
+        </div>
+      )}
+
+      {/* what & why */}
+      <div className="rounded-xl border bg-card p-5">
+        <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">What &amp; why</span>
+        <p className="mt-2 text-sm leading-relaxed">{project.description}</p>
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {project.beaf.map((b) => <span key={b} className="rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">{b}</span>)}
+        </div>
         {!archived && (
-          <div>
-            <div className="mb-1 flex items-center justify-between">
-              <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Stage</span>
-              <button type="button" onClick={() => onAdvance(project.id)} className="text-xs font-semibold text-primary">Advance →</button>
-            </div>
-            <div className="flex items-center gap-1">
-              {STAGES.map((s, i) => (
-                <button key={s} type="button" onClick={() => onSetStage(project.id, s)} className={`flex-1 rounded-md py-1 text-[10px] font-bold ${i === stageIdx ? 'bg-primary text-primary-foreground' : i < stageIdx ? 'bg-primary/20 text-primary' : 'bg-muted text-muted-foreground'}`} title={`Move to ${s}`}>{s}</button>
+          <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 border-t pt-3 text-xs">
+            <ScopeChip label="Testing" value={scope.testing} />
+            <ScopeChip label="Site" value={scope.site} />
+            <ScopeChip label="PODs" value={(scope.pods || []).join(', ')} />
+            <ScopeChip label="Region" value={scope.region} />
+          </div>
+        )}
+      </div>
+
+      {/* archived outcome, or metrics */}
+      {archived ? (
+        <div className="rounded-xl border bg-card p-5">
+          <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Outcome</span>
+          <p className="mt-2 text-sm leading-relaxed">{project.outcome_text}</p>
+          <p className="mt-2 text-xs font-semibold text-muted-foreground">Measured: {project.measured}</p>
+        </div>
+      ) : (
+        <div className="rounded-xl border bg-card p-5">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Metrics</span>
+            <span className="text-xs text-muted-foreground">what we measure &amp; where it comes from</span>
+            <Button size="sm" variant="outline" className="ml-auto h-8"><Plus className="mr-1 h-3.5 w-3.5" /> Metric</Button>
+          </div>
+          {metrics.length === 0 ? <p className="text-sm text-muted-foreground">No metrics yet.</p> : (
+            <div className="divide-y">
+              {metrics.map((mm) => (
+                <div key={mm.name} className="flex flex-wrap items-center gap-3 py-3">
+                  <div className="min-w-[180px] flex-1">
+                    <b className="text-sm">{mm.name}</b>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">{mm.source}</span>
+                      {mm.target && <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">target {mm.target}</span>}
+                    </div>
+                  </div>
+                  <Sparkline points={mm.trend} className="h-8 w-28" />
+                  <div className="text-right">
+                    <b className="block text-2xl font-extrabold tabular-nums">{mm.value}{mm.unit}</b>
+                    <span className={`text-[11px] font-semibold ${mm.dir === mm.good ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>{mm.dir === 'up' ? '↑' : '↓'} {mm.delta}{mm.unit} {mm.since}</span>
+                  </div>
+                </div>
               ))}
             </div>
-          </div>
-        )}
-
-        <div>
-          <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">What &amp; why</span>
-          <p className="mt-1 text-sm">{project.description}</p>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <BeafTags tags={project.beaf} />
-            {project.scope && <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">{project.scope}</span>}
-          </div>
+          )}
+          {metrics.length > 0 && (
+            <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
+              <span className="text-xs font-semibold text-muted-foreground">Quick entry</span>
+              <Select value={metricSel} onValueChange={setMetricSel}>
+                <SelectTrigger className="h-9 w-full sm:w-56"><SelectValue /></SelectTrigger>
+                <SelectContent>{metrics.map((mm) => <SelectItem key={mm.name} value={mm.name}>{mm.name}</SelectItem>)}</SelectContent>
+              </Select>
+              <Input type="number" value={reading} onChange={(e) => setReading(e.target.value)} placeholder="value" className="h-9 w-full sm:w-28" />
+              <Button className="h-9" disabled={reading === ''} onClick={() => { onAddReading(project.id, metricSel, Number(reading)); setReading(''); }}>Add today's reading</Button>
+            </div>
+          )}
         </div>
+      )}
 
-        {archived ? (
-          <div className="rounded-lg border bg-muted/30 p-3">
-            <p className="text-sm">{project.outcome_text}</p>
-            <p className="mt-2 text-xs font-semibold text-muted-foreground">Measured: {project.measured}</p>
+      {/* learnings */}
+      {!archived && (
+        <div className="rounded-xl border bg-card p-5">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Learnings</span>
+            <span className="text-xs text-muted-foreground">during &amp; after — feeds the archive and the AI</span>
           </div>
-        ) : project.key_metric && (
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{project.key_metric.label}</span>
-              <Sparkline points={project.trend} className="h-6 w-20" />
-              <b className="ml-auto tabular-nums">{project.key_metric.value}{project.key_metric.unit}</b>
-            </div>
-            <div className="mt-2 flex gap-2">
-              <Input value={reading} onChange={(e) => setReading(e.target.value)} placeholder="Add today's reading" className="h-9" type="number" />
-              <Button size="sm" className="h-9" disabled={reading === ''} onClick={() => { onAddReading(project.id, Number(reading)); setReading(''); }}>Add</Button>
-            </div>
+          <div className="mb-3 flex gap-2">
+            <Input value={learn} onChange={(e) => setLearn(e.target.value)} placeholder="Capture a learning…" className="h-9" />
+            <Button className="h-9" disabled={!learn.trim()} onClick={() => { onAddLearning(project.id, learn.trim()); setLearn(''); }}>Add</Button>
           </div>
-        )}
-      </DialogContent>
-    </Dialog>
+          {learnings.length === 0 ? <p className="text-sm text-muted-foreground">No learnings captured yet.</p> : (
+            <div className="space-y-3">
+              {learnings.map((l, i) => (
+                <div key={i} className="flex gap-3">
+                  <span className="w-12 shrink-0 pt-0.5 text-xs tabular-nums text-muted-foreground">{l.date}</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm">{l.body}</p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${l.tag === 'Outcome' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>{l.tag}</span>
+                      <span className="text-[11px] text-muted-foreground">{l.author}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScopeChip({ label, value }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="font-bold uppercase tracking-wide text-muted-foreground">{label}</span>
+      {value ? <span className="rounded-full bg-muted px-2 py-0.5 font-medium text-foreground">{value}</span> : <span className="text-muted-foreground">—</span>}
+    </span>
   );
 }
 
@@ -799,17 +957,20 @@ function NewProjectButton({ onCreate }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
-  const [lever, setLever] = useState('volume');
+  const [levers, setLevers] = useState(['volume']); // multi-select
+
+  const toggleLever = (k) => setLevers((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]));
 
   const submit = () => {
-    if (!name.trim()) return;
+    if (!name.trim() || levers.length === 0) return;
     onCreate({
-      id: `p-${Date.now()}`, name: name.trim(), beaf: [], levers: [lever], stage: 'Idea', owner: 'ME',
-      started: new Date().toISOString().slice(0, 10), in_stage_days: 0, status: { kind: 'idle', days: 0 },
-      key_metric: null, trend: [], scope: null, description: desc.trim() || 'New idea.',
+      id: `p-${Date.now()}`, name: name.trim(), beaf: [], levers: [...levers], stage: 'Idea', owner: 'ME',
+      started: '2026-07-23', in_stage_days: 0, status: { kind: 'idle', days: 0 },
+      key_metric: null, trend: [], description: desc.trim() || 'New idea.',
+      scope: { testing: null, site: null, pods: [], region: null }, metrics: [], learnings: [],
     });
     toast({ title: 'Project created', description: name.trim() });
-    setName(''); setDesc(''); setLever('volume'); setOpen(false);
+    setName(''); setDesc(''); setLevers(['volume']); setOpen(false);
   };
 
   return (
@@ -820,16 +981,25 @@ function NewProjectButton({ onCreate }) {
           <DialogHeader><DialogTitle>New project</DialogTitle><DialogDescription>Starts at the Idea stage.</DialogDescription></DialogHeader>
           <div className="space-y-3">
             <div className="space-y-1.5"><Label>Name</Label><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Online self-scheduling" /></div>
-            <div className="space-y-1.5"><Label>Lever</Label>
-              <Select value={lever} onValueChange={setLever}><SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{LEVER_ORDER.map((k) => <SelectItem key={k} value={k}>{LEVERS[k].label}</SelectItem>)}</SelectContent>
-              </Select>
+            <div className="space-y-1.5">
+              <Label>Levers <span className="font-normal text-muted-foreground">· pick one or more</span></Label>
+              <div className="flex flex-wrap gap-2">
+                {LEVER_ORDER.map((k) => {
+                  const on = levers.includes(k);
+                  return (
+                    <button key={k} type="button" onClick={() => toggleLever(k)}
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium ${on ? `${LEVERS[k].border} ${LEVERS[k].chip}` : 'border-border text-muted-foreground'}`}>
+                      <i className={`h-2 w-2 rounded-full ${LEVERS[k].dot}`} /> {LEVERS[k].label} {on && '✓'}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             <div className="space-y-1.5"><Label>Description</Label><Input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="What is it, and what should it change?" /></div>
           </div>
           <DialogFooter className="gap-2">
             <Button variant="outline" className="h-10" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button className="h-10" onClick={submit} disabled={!name.trim()}>Create</Button>
+            <Button className="h-10" onClick={submit} disabled={!name.trim() || levers.length === 0}>Create</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

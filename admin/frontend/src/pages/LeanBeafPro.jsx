@@ -35,7 +35,7 @@ import {
   VolumeBars, RecencyStack, FocusToggle,
 } from '@/components/lbp/redesignParts';
 
-const TABS = ['Dashboard', 'Meetings', 'List', 'Board', 'Archive'];
+const TABS = ['Dashboard', 'Meetings', 'List', 'Board', 'Archive', 'Reports'];
 
 const fmtDate = (iso) => {
   if (!iso) return '—';
@@ -90,7 +90,7 @@ export default function LeanBeafPro() {
   const openProject = projects.find((p) => p.id === openId) || archive.find((p) => p.id === openId) || null;
 
   return (
-    <div className="flex w-full flex-1 flex-col gap-4">
+    <div className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-4">
       {/* header */}
       <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
         <div className="flex items-center gap-2">
@@ -163,6 +163,7 @@ export default function LeanBeafPro() {
           )}
           {tab === 'Board' && <BoardView projects={projects} onAdvance={advance} onOpenProject={setOpenId} />}
           {tab === 'Archive' && <ArchiveView archive={archive} onOpenProject={setOpenId} />}
+          {tab === 'Reports' && <ReportsView onOpenList={goList} />}
         </>
       )}
 
@@ -211,7 +212,7 @@ function DashboardView({ projects, focusCategory, setFocusCategory, focusProject
   const dimOf = (lever) => focusCategory && focusCategory !== lever;
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-3">
       {focusCategory && (
         <WeeklyFocusStrip
           category={focusCategory} projects={projects} focusProjects={focusProjects}
@@ -232,9 +233,6 @@ function DashboardView({ projects, focusCategory, setFocusCategory, focusProject
         <AttributedCard data={m.attributed} dim={dimOf('experience')} focused={focusCategory === 'experience'} onFocus={() => toggleCat('experience')} onOpenList={onOpenList} onOpenProject={onOpenProject} projects={projects} />
         <PerAppointmentCard data={m.perAppointment} dim={dimOf('efficiency')} focused={focusCategory === 'efficiency'} onFocus={() => toggleCat('efficiency')} onOpenList={onOpenList} onOpenProject={onOpenProject} projects={projects} />
       </div>
-
-      {/* overall impact from the LBP portfolio (by lever) — at the bottom */}
-      <ImpactCard onOpenList={onOpenList} />
 
       <ThresholdsDialog open={gearOpen} onOpenChange={setGearOpen} thresholds={thresholds} onSave={setThresholds} />
     </div>
@@ -368,10 +366,22 @@ function PerAppointmentCard({ data, dim, focused, onFocus, onOpenList, onOpenPro
     <MetricCard lever="efficiency" title="Per appointment" source="all staff & all cost averaged" span="lg:col-span-4" focused={focused} dim={dim} onFocus={onFocus}
       footer={<CardFooter lever="efficiency" projectIds={data.projects} projects={projects} onOpenList={onOpenList} onOpenProject={onOpenProject} quiet={quiet} />}
     >
-      {/* segmented control sits at the top-right; the three stats spread evenly
-          across the full width with generous spacing (clean, airy). */}
-      <div className="mt-2 flex justify-end">
-        <div className="flex gap-0.5 rounded-lg border bg-muted/40 p-0.5">
+      {/* the three stats are grouped together on the left (not spread across the
+          full width) with the segmented control on the right of the same row. */}
+      <div className="mt-3 flex flex-col gap-4 pb-1 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-wrap gap-x-12 gap-y-4">
+          {active.stats.map((s) => (
+            <div key={s.label} className="min-w-[110px]">
+              <span className={`block text-xs text-muted-foreground ${quiet} transition-opacity`}>{s.label}</span>
+              <b className="mt-1 block text-2xl font-extrabold tabular-nums">{s.value}</b>
+              <div className="mt-1.5 flex items-center gap-2">
+                <DeltaPill delta={s.delta} dir={s.dir} good={s.good} suffix="" />
+                <span className={`text-[11px] text-muted-foreground ${quiet} transition-opacity`}>vs prior qtr</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-0.5 self-start rounded-lg border bg-muted/40 p-0.5 lg:self-center">
           {data.segments.map((s) => (
             <button key={s.key} type="button" onClick={() => setSeg(s.key)}
               className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-colors ${seg === s.key ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground'}`}>
@@ -379,18 +389,6 @@ function PerAppointmentCard({ data, dim, focused, onFocus, onOpenList, onOpenPro
             </button>
           ))}
         </div>
-      </div>
-      <div className="mt-4 grid grid-cols-1 gap-6 pb-1 sm:grid-cols-3 sm:gap-4">
-        {active.stats.map((s) => (
-          <div key={s.label}>
-            <span className={`block text-xs text-muted-foreground ${quiet} transition-opacity`}>{s.label}</span>
-            <b className="mt-1 block text-2xl font-extrabold tabular-nums">{s.value}</b>
-            <div className="mt-1.5 flex items-center gap-2">
-              <DeltaPill delta={s.delta} dir={s.dir} good={s.good} suffix="" />
-              <span className={`text-[11px] text-muted-foreground ${quiet} transition-opacity`}>vs prior qtr</span>
-            </div>
-          </div>
-        ))}
       </div>
     </MetricCard>
   );
@@ -477,6 +475,20 @@ function ImpactCard({ onOpenList }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ============================ Reports ============================
+
+function ReportsView({ onOpenList }) {
+  return (
+    <div className="mx-auto w-full max-w-[1400px] space-y-4">
+      <div>
+        <h2 className="text-lg font-bold leading-tight">Reports</h2>
+        <p className="text-xs text-muted-foreground">Portfolio impact &amp; rollups · sample data until a source is connected</p>
+      </div>
+      <ImpactCard onOpenList={onOpenList} />
     </div>
   );
 }

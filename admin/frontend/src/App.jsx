@@ -16,6 +16,7 @@ import Projects from '@/pages/Projects';
 import LeanBeafPro from '@/pages/LeanBeafPro';
 import LbpProjectDetail from '@/pages/LbpProjectDetail';
 import LbpBriefs from '@/pages/LbpBriefs';
+import LbpConnections from '@/pages/LbpConnections';
 import ProjectDetail from '@/pages/ProjectDetail';
 import ParentDomains from '@/pages/ParentDomains';
 import ModelConnectors from '@/pages/ModelConnectors';
@@ -101,6 +102,7 @@ function App() {
             authenticated non-pending user (R01); backend enforces the same. */}
         <Route path="lean-beaf" element={<LeanBeafPro />} />
         <Route path="lean-beaf/briefs" element={<LbpBriefs />} />
+        <Route path="lean-beaf/connections" element={<LbpConnections />} />
         <Route path="lean-beaf/:id" element={<LbpProjectDetail />} />
         <Route path="domains" element={<DomainProvisioning />} />
         {/* Admin-gated: the page renders inside the dashboard shell and the

@@ -1835,6 +1835,10 @@ export const api = {
     request('/lbp/brief/ai', { method: 'POST', body: JSON.stringify({ mode }) }),
   lbpBriefAsk: (question) =>
     request('/lbp/brief/ask', { method: 'POST', body: JSON.stringify({ question }) }),
+  lbpDashboardMetrics: () => request('/lbp/dashboard-metrics'),
+  lbpConnections: () => request('/lbp/connections'),
+  lbpSaveConnection: (key, data) =>
+    request(`/lbp/connections/${key}`, { method: 'PUT', body: JSON.stringify(data) }),
   lbpBriefRuns: () => request('/lbp/brief-runs'),
   lbpBriefSettings: () => request('/lbp/brief-settings'),
   lbpSaveBriefSettings: (data) =>

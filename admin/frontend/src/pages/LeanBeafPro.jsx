@@ -31,6 +31,7 @@ import {
   schedulesSummaryLocal, localScheduleToUtc, Avatars, LocationChip,
 } from '@/components/lbp/shared';
 import AiRunList from '@/components/lbp/AiRunList';
+import BusinessMetrics from '@/components/lbp/BusinessMetrics';
 
 const VIEWS = ['dashboard', 'list', 'board', 'archive'];
 const TABS = ['dashboard', 'list', 'board', 'assistant', 'archive'];
@@ -176,6 +177,9 @@ function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage
           </button>
         ))}
       </div>
+
+      {/* business-metrics band (dummy sample data until a source is connected) */}
+      <BusinessMetrics />
 
       {/* rollout pipeline — right under the tiles, above everything else. Each
           stage jumps to its Kanban column. Grounded: counts come from records. */}

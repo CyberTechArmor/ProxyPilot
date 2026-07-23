@@ -21,6 +21,7 @@ import { requireAdmin } from '../middleware/auth.js';
 import { logAudit } from '../db.js';
 import * as store from '../lib/lean-beaf-store.js';
 import { getBriefAiSettings, saveBriefAiSettings, generateAiBrief, answerBriefQuestion } from '../lib/lean-beaf-ai.js';
+import { sampleDashboardMetrics, getConnections, saveConnection, LBP_DATA_SOURCES } from '../lib/lean-beaf-metrics.js';
 import {
   LBP_STAGES, LBP_METRIC_UNITS, LBP_TIME_EVENT_TYPES, LBP_SENTIMENTS,
   isArchived, assertMutableProject, validateNewProject,
@@ -305,6 +306,42 @@ export function createLeanBeafRouter() {
       pipeline: pipelineCounts(projects),
       archived_count: projects.filter(isArchived).length,
     });
+  });
+
+  // ---- business metrics band + data-source connections ----
+
+  // Leadership metrics band (Volume & capacity, Charge per visit, Attributed
+  // lives, Per appointment cost) + the four levers. DUMMY sample data until a
+  // real source is connected — the payload is flagged `sample: true` so the UI
+  // labels it as not-yet-connected.
+  router.get('/dashboard-metrics', (_req, res) => {
+    res.json({ metrics: sampleDashboardMetrics() });
+  });
+
+  // Data-source connections (placeholder). Every member can see the wiring
+  // state; only an admin can change it. No live integration runs yet.
+  router.get('/connections', (_req, res) => {
+    res.json({ sources: LBP_DATA_SOURCES, connections: getConnections() });
+  });
+
+  const connectionSchema = z.object({
+    status: z.enum(['connected', 'disconnected']),
+    endpoint: z.string().max(500).nullable().optional(),
+    notes: z.string().max(1000).nullable().optional(),
+  });
+
+  router.put('/connections/:key', requireAdmin, (req, res) => {
+    const parsed = connectionSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'status (connected|disconnected) is required' });
+    const connection = saveConnection(req.params.key, {
+      status: parsed.data.status,
+      endpoint: parsed.data.endpoint,
+      notes: parsed.data.notes,
+      updatedBy: req.user.username || req.user.id,
+    });
+    if (!connection) return res.status(404).json({ error: 'Unknown data source' });
+    logAudit(req.user.id, 'LBP_CONNECTION_SET', 'lbp_connection', req.params.key, { status: connection.status }, req.ip);
+    res.json({ connection });
   });
 
   // Build the deterministic, record-grounded brief for a mode (R07). Shared by

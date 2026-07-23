@@ -19,10 +19,13 @@ blockers are captured as activity/comments, not a field.
   `lean-beaf-store.js` (main-DB CRUD, `lbp_*` tables), `lean-beaf-schema.js`
   (migrations 700–704, registered in `db.js`; block 700 reserved),
   `lean-beaf-ai.js` (AI brief writer — settings, model call, run recording),
-  `routes/lean-beaf.js` mounted at `/api/lbp`.
+  `lean-beaf-metrics.js` (dummy business-metrics band + data-source
+  connections placeholder), `routes/lean-beaf.js` mounted at `/api/lbp`.
 - Frontend: nav tab "Lean BEAF Pro" (`/lean-beaf`), pages
-  `LeanBeafPro.jsx` (Dashboard / List / Board / Archive) and
-  `LbpProjectDetail.jsx`, shared pieces in `components/lbp/shared.jsx`.
+  `LeanBeafPro.jsx` (Dashboard / List / Board / Archive),
+  `LbpProjectDetail.jsx`, `LbpConnections.jsx` (`/lean-beaf/connections`),
+  shared pieces in `components/lbp/shared.jsx`,
+  `components/lbp/BusinessMetrics.jsx` (dashboard metrics band).
 - Tests: `src/__tests__/lean-beaf-logic.test.js` (rules R01–R12).
 - SharePoint import: `admin/backend/scripts/lbp-import-sharepoint.mjs`
   (title→name, note→description, assigned users→assignees by
@@ -88,6 +91,31 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
 - The link is `lbp_projects.mock2_project_id`; LBP reads Mock2 state via
   dynamic import behind `resolveMock2Gate` so a disabled/pinned host
   never touches the gated module.
+
+## Business-metrics band + Connections (operator request, 2026-07-23)
+
+From a redesign concept the operator supplied. Two pieces:
+
+- **Dashboard business-metrics band** (`BusinessMetrics.jsx`, fed by
+  `GET /api/lbp/dashboard-metrics`): a leadership strip under the tiles with
+  four *levers* (Volume / Charge / Efficiency / Experience, each with a
+  current-vs-target and on-track/watch badge) and four metric cards —
+  Volume & capacity (per-day booked/capacity bullet bars), Charge per visit
+  (sparkline), Attributed lives (attribution-recency stack), and Per
+  appointment cost (Primary / Specialty / Diagnostic segmented control).
+- The figures are **dummy sample data** produced by
+  `sampleDashboardMetrics()` — deterministic (no clocks/randomness) and
+  flagged `sample: true`, so the band always shows a "Sample data · not
+  connected" badge. When a real feed is wired the same payload shape is
+  populated and the UI does not change.
+- **Connections** (`LbpConnections.jsx`, `/lean-beaf/connections`;
+  `GET /api/lbp/connections`, `PUT /api/lbp/connections/:key` admin-only):
+  a *placeholder* screen listing the data sources the band will draw from
+  (EHR/PM, Scheduling, Payer attribution, Cost accounting, Experience
+  surveys). Each can be marked connected/disconnected with an endpoint +
+  note, stored as one JSON blob in `app_settings.lbp_connections`. **No live
+  integration runs** — saving records intent only. Members see wiring state;
+  only admins can change it.
 
 ## NOTES — decided defaults (locked; do not re-ask)
 

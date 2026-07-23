@@ -211,7 +211,7 @@ function DashboardView({ projects, focusCategory, setFocusCategory, focusProject
   const dimOf = (lever) => focusCategory && focusCategory !== lever;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
       {focusCategory && (
         <WeeklyFocusStrip
           category={focusCategory} projects={projects} focusProjects={focusProjects}
@@ -220,21 +220,21 @@ function DashboardView({ projects, focusCategory, setFocusCategory, focusProject
         />
       )}
 
-      {/* overall impact from the LBP portfolio (by lever), date-range switchable */}
-      <ImpactCard onOpenList={onOpenList} />
-
-      <div className="flex justify-end">
+      <div className="-mb-1 flex justify-end">
         <button type="button" onClick={() => setGearOpen(true)} className="flex h-8 w-8 items-center justify-center rounded-lg border text-muted-foreground hover:text-foreground" title="Metric thresholds">
           <Settings className="h-4 w-4" />
         </button>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
         <VolumeCard data={m.volume} dim={dimOf('volume')} focused={focusCategory === 'volume'} onFocus={() => toggleCat('volume')} onOpenList={onOpenList} onOpenProject={onOpenProject} projects={projects} />
         <ChargeCard data={m.charge} dim={dimOf('charge')} focused={focusCategory === 'charge'} breach={chargeBreach} threshold={thresholds.charge} onFocus={() => toggleCat('charge')} onOpenList={onOpenList} onOpenProject={onOpenProject} projects={projects} />
         <AttributedCard data={m.attributed} dim={dimOf('experience')} focused={focusCategory === 'experience'} onFocus={() => toggleCat('experience')} onOpenList={onOpenList} onOpenProject={onOpenProject} projects={projects} />
         <PerAppointmentCard data={m.perAppointment} dim={dimOf('efficiency')} focused={focusCategory === 'efficiency'} onFocus={() => toggleCat('efficiency')} onOpenList={onOpenList} onOpenProject={onOpenProject} projects={projects} />
       </div>
+
+      {/* overall impact from the LBP portfolio (by lever) — at the bottom */}
+      <ImpactCard onOpenList={onOpenList} />
 
       <ThresholdsDialog open={gearOpen} onOpenChange={setGearOpen} thresholds={thresholds} onSave={setThresholds} />
     </div>
@@ -248,7 +248,7 @@ function MetricCard({ lever, title, source, focused, dim, breach, onFocus, span 
   const rootDim = dim && !breach;
   return (
     <div
-      className={`group flex flex-col rounded-xl border bg-card p-5 transition-all ${span} ${
+      className={`group flex flex-col rounded-xl border bg-card p-4 transition-all ${span} ${
         focused ? `ring-2 ${l.ring} ring-offset-2 ring-offset-background` : ''
       } ${rootDim ? 'opacity-45 hover:opacity-100' : ''}`}
     >
@@ -276,7 +276,7 @@ function MetricCard({ lever, title, source, focused, dim, breach, onFocus, span 
 // footer chips: lever chip (jumps to List filtered) + project chips
 function CardFooter({ lever, projectIds, projects, onOpenList, onOpenProject, quiet }) {
   return (
-    <div className={`mt-4 flex flex-wrap items-center gap-2 border-t pt-3 ${quiet} transition-opacity`}>
+    <div className={`mt-auto flex flex-wrap items-center gap-2 border-t pt-2.5 ${quiet} transition-opacity`}>
       <LeverChip leverKey={lever} onClick={() => onOpenList(lever)} />
       <span className="text-[11px] text-muted-foreground">{projectIds.length} project{projectIds.length === 1 ? '' : 's'}:</span>
       {projectIds.map((id) => {
@@ -298,13 +298,13 @@ function VolumeCard({ data, dim, focused, onFocus, onOpenList, onOpenProject, pr
     <MetricCard lever="volume" title="Volume & capacity" source="Scheduler · live" span="lg:col-span-2" focused={focused} dim={dim} onFocus={onFocus}
       footer={<CardFooter lever="volume" projectIds={data.projects} projects={projects} onOpenList={onOpenList} onOpenProject={onOpenProject} quiet={quiet} />}
     >
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <b className="text-4xl font-extrabold leading-none">{data.hero_pct}<span className="text-lg">%</span></b>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <b className="text-3xl font-extrabold leading-none">{data.hero_pct}<span className="text-base">%</span></b>
         <DeltaPill delta={`${data.delta_pts} pts`} dir={data.delta_dir} good="up" prefix="" />
         <span className={`text-xs text-muted-foreground ${quiet} transition-opacity`}>{data.slots_booked} of {data.slots_total} slots this 6-day week · vs prior 4-wk avg</span>
       </div>
-      <div className="mt-4"><VolumeBars days={data.days} /></div>
-      <p className={`mt-3 text-xs text-muted-foreground ${quiet} transition-opacity`}>notch on each bar = that day's prior 4-wk average · {data.caption}</p>
+      <div className="mt-3"><VolumeBars days={data.days} /></div>
+      <p className={`mt-2 text-xs text-muted-foreground ${quiet} transition-opacity`}>notch on each bar = that day's prior 4-wk average · {data.caption}</p>
     </MetricCard>
   );
 }
@@ -315,8 +315,8 @@ function ChargeCard({ data, dim, focused, breach, onFocus, onOpenList, onOpenPro
     <MetricCard lever="charge" title="Charge per visit" focused={focused} dim={dim} breach={breach} onFocus={onFocus}
       footer={<CardFooter lever="charge" projectIds={data.projects} projects={projects} onOpenList={onOpenList} onOpenProject={onOpenProject} quiet={quiet} />}
     >
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <b className="text-4xl font-extrabold leading-none">${data.hero}</b>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <b className="text-3xl font-extrabold leading-none">${data.hero}</b>
         <DeltaPill delta={`$${data.delta}`} dir={data.delta_dir} good="up" className={breach ? 'ring-2 ring-amber-400/60' : ''} />
       </div>
       <div className={`mt-2 ${quiet} transition-opacity`}>
@@ -342,8 +342,8 @@ function AttributedCard({ data, dim, focused, onFocus, onOpenList, onOpenProject
     <MetricCard lever="experience" title="Attributed lives" focused={focused} dim={dim} onFocus={onFocus}
       footer={<CardFooter lever="experience" projectIds={data.projects} projects={projects} onOpenList={onOpenList} onOpenProject={onOpenProject} quiet={quiet} />}
     >
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <b className="text-4xl font-extrabold leading-none tabular-nums">{data.hero.toLocaleString()}</b>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <b className="text-3xl font-extrabold leading-none tabular-nums">{data.hero.toLocaleString()}</b>
         <DeltaPill delta={data.delta} dir={data.delta_dir} good="up" />
         <span className={`text-xs text-muted-foreground ${quiet} transition-opacity`}>{data.delta_note}</span>
       </div>
@@ -380,11 +380,11 @@ function PerAppointmentCard({ data, dim, focused, onFocus, onOpenList, onOpenPro
           ))}
         </div>
       </div>
-      <div className="mt-6 grid grid-cols-1 gap-8 pb-2 sm:grid-cols-3 sm:gap-4">
+      <div className="mt-4 grid grid-cols-1 gap-6 pb-1 sm:grid-cols-3 sm:gap-4">
         {active.stats.map((s) => (
           <div key={s.label}>
             <span className={`block text-xs text-muted-foreground ${quiet} transition-opacity`}>{s.label}</span>
-            <b className="mt-1 block text-3xl font-extrabold tabular-nums">{s.value}</b>
+            <b className="mt-1 block text-2xl font-extrabold tabular-nums">{s.value}</b>
             <div className="mt-1.5 flex items-center gap-2">
               <DeltaPill delta={s.delta} dir={s.dir} good={s.good} suffix="" />
               <span className={`text-[11px] text-muted-foreground ${quiet} transition-opacity`}>vs prior qtr</span>
@@ -437,8 +437,8 @@ function ImpactCard({ onOpenList }) {
   const [range, setRange] = useState('last_week');
   const data = SAMPLE_IMPACT[range];
   return (
-    <div className="rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+    <div className="rounded-xl border bg-gradient-to-br from-card to-muted/30 p-4">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
           <TrendingUp className="h-4 w-4" />
         </span>

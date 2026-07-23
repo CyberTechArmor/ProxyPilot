@@ -123,7 +123,7 @@ export function Sparkline({ points = [], className = 'h-7 w-20', dir = 'up', goo
 // at that weekday's prior 4-week average. Today is emphasized (blue + outline).
 export function VolumeBars({ days = [] }) {
   const maxCap = Math.max(...days.map((d) => d.capacity), 1);
-  const H = 132; // px track height for the tallest capacity
+  const H = 96; // px track height for the tallest capacity
   return (
     <div className="flex items-end justify-between gap-2">
       {days.map((d) => {

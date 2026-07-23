@@ -92,7 +92,40 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
   dynamic import behind `resolveMock2Gate` so a disabled/pinned host
   never touches the gated module.
 
-## Business-metrics band + Connections (operator request, 2026-07-23)
+## Redesign to the concept mockup (operator request, 2026-07-23)
+
+The operator supplied a full redesign concept (four reference screens) and
+asked for the app to match it. The Dashboard, Meetings and List views were
+rebuilt to that spec, driven by an in-memory sample workspace
+(`components/lbp/sampleData.js`) since the real data sources are not connected
+yet — this is deliberately a high-fidelity, interactive mockup.
+
+- **Levers** are the connective tissue: every project is tagged with one or
+  more of Volume (blue) / Charge (orange) / Efficiency (emerald) / Experience
+  (amber). `sampleData.js` holds the levers, five active + two archived
+  projects (BEAF tags, stage, status, owner, key metric + trend), the four
+  dashboard metrics, the since-meeting digest + history, and a weekly focus.
+- **Dashboard = business metrics only**: four cards — Volume & capacity (hero
+  utilization %, 6-day booked/capacity bullet bars with a prior-4-wk notch and
+  an emphasized TODAY bar), Charge per visit (hero $ + sparkline + secondary
+  rows, with a live threshold breach), Attributed lives (recency stack +
+  frequency/monetization), and a full-width Per appointment (Primary/Specialty/
+  Diagnostic segmented, three stats). Each card has a ◎ Focus toggle; focusing
+  a category rings that card in its lever color, dims the others, and lets any
+  breached card punch through. A gear opens the thresholds modal. Focused
+  metrics/projects show in a "This week's focus" strip.
+- **Meetings** view: since-last-meeting digest in three tinted bands (Moved /
+  Blocked / No movement) with lever chips, plus expandable meeting history.
+- **List** view: rollout-pipeline strip, Lever + Status filter bars (compose),
+  and a dense table with a focus star, BEAF tags, lever dots, stage/status
+  chips, owner, started, in-stage days, key metric + delta, and a trend
+  sparkline. Board and Archive are also sample-driven for consistency.
+- Presentational primitives live in `components/lbp/redesignParts.jsx`.
+  The pre-redesign business-metrics band (`BusinessMetrics.jsx`) and the
+  `/lean-beaf/connections`, `/lean-beaf/briefs` and `/lean-beaf/:id` routes
+  remain in the tree but are no longer linked from the new top nav.
+
+## Business-metrics band + Connections (operator request, 2026-07-23, superseded by the redesign above)
 
 From a redesign concept the operator supplied. Two pieces:
 

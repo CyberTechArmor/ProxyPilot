@@ -116,6 +116,11 @@ yet — this is deliberately a high-fidelity, interactive mockup.
   metrics/projects show in a "This week's focus" strip.
 - **Meetings** view: since-last-meeting digest in three tinted bands (Moved /
   Blocked / No movement) with lever chips, plus expandable meeting history.
+- **Reports** view: portfolio impact by lever (Volume/Charge/Efficiency/
+  Experience) over a switchable date range (default "From last week"). Clicking
+  a project card opens a whole-page detail view (stage stepper, what & why,
+  metrics with quick-entry, learnings). Dashboard content is capped at
+  ~1400px so cards keep a comfortable max size on wide monitors.
 - **List** view: rollout-pipeline strip, Lever + Status filter bars (compose),
   and a dense table with a focus star, BEAF tags, lever dots, stage/status
   chips, owner, started, in-stage days, key metric + delta, and a trend

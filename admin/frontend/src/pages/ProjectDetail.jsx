@@ -14,7 +14,7 @@
 // full-screen-on-<sm delete dialog. Renders clean at 360px.
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams, Link, Navigate, useNavigate } from 'react-router-dom';
+import { useParams, Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -38,6 +38,8 @@ import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
 import ProjectTerminal from '@/components/mock2/ProjectTerminal';
 import BuildMode from '@/components/mock2/BuildMode';
+import Flightdeck from '@/components/mock2/Flightdeck';
+import { flightdeckPrefKey, readPref, writePref } from '@/lib/flightdeck';
 import ConnectVsCode from '@/components/mock2/ConnectVsCode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
 import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectComponentsCard } from '@/components/mock2/ProjectTimeCard';
@@ -70,6 +72,22 @@ export default function ProjectDetail() {
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
   const [provStatus, setProvStatus] = useState(null); // live provisioning progress + step log
   const [tab, setTab] = useState('chat'); // 'chat' | 'terminal' | 'details'
+  // Build-phase view: Flightdeck (IDE, default) vs the classic build view. The
+  // URL (?view=) wins for deep-links, else the per-project remembered choice,
+  // else Flightdeck. Persisted per project.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [buildView, setBuildViewState] = useState(() => {
+    const q = searchParams.get('view');
+    if (q === 'classic' || q === 'flightdeck') return q;
+    return readPref(flightdeckPrefKey(id), 'flightdeck') === 'classic' ? 'classic' : 'flightdeck';
+  });
+  const setBuildView = useCallback((v) => {
+    setBuildViewState(v);
+    writePref(flightdeckPrefKey(id), v);
+    const next = new URLSearchParams(searchParams);
+    if (v === 'flightdeck') next.delete('view'); else next.set('view', v);
+    setSearchParams(next, { replace: true });
+  }, [id, searchParams, setSearchParams]);
   // Once the Terminal tab has been opened we keep it mounted (forceMount below)
   // so its shell session survives switching to other tabs — the PTY only starts
   // on the first visit, not on page load.
@@ -372,21 +390,45 @@ export default function ProjectDetail() {
             <div className="flex h-full min-h-0 flex-col gap-3">
               <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} />
               {designApproved ? (
-                // Build mode — build information on the left, the build/run/
-                // maintenance chat on the right (the design conversation is
-                // archived read-only in the Details tab).
-                <BuildMode
-                  projectId={id}
-                  project={project}
-                  canEdit={canEdit}
-                  isAdmin={isAdmin}
-                  previewSrc={previewSrc}
-                  previewReloadNonce={previewReloadNonce}
-                  provLog={provStatus?.progress?.log || null}
-                  provMessage={provStatus?.progress?.message || null}
-                  onChanged={load}
-                  onBuilt={handleMockupChanged}
-                />
+                // Build phase — Flightdeck IDE workspace by default (files +
+                // editor + agent chat + terminal + preview, one shared sandbox),
+                // with a toggle back to the classic build view. Both drive the
+                // same harness; the design conversation is archived read-only in
+                // the Details tab.
+                buildView === 'flightdeck' ? (
+                  <Flightdeck
+                    projectId={id}
+                    project={project}
+                    canEdit={canEdit}
+                    isAdmin={isAdmin}
+                    previewSrc={previewSrc}
+                    provLog={provStatus?.progress?.log || null}
+                    provMessage={provStatus?.progress?.message || null}
+                    onChanged={load}
+                    onBuilt={handleMockupChanged}
+                    onSwitchView={() => setBuildView('classic')}
+                  />
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex justify-end">
+                      <Button variant="outline" size="sm" className="min-h-[36px]" onClick={() => setBuildView('flightdeck')}>
+                        Open Flightdeck
+                      </Button>
+                    </div>
+                    <BuildMode
+                      projectId={id}
+                      project={project}
+                      canEdit={canEdit}
+                      isAdmin={isAdmin}
+                      previewSrc={previewSrc}
+                      previewReloadNonce={previewReloadNonce}
+                      provLog={provStatus?.progress?.log || null}
+                      provMessage={provStatus?.progress?.message || null}
+                      onChanged={load}
+                      onBuilt={handleMockupChanged}
+                    />
+                  </div>
+                )
               ) : previewSrc ? (
                 // Design mode — the live mockup preview on the left, the design
                 // conversation on the right.

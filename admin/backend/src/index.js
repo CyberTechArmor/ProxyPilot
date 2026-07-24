@@ -23,6 +23,7 @@ import { backupsRouter } from './routes/backups.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { ldapRouter } from './routes/ldap.js';
 import { domainsRouter } from './routes/domains.js';
+import { tlsCertsRouter } from './routes/tls-certs.js';
 import { createLeanBeafRouter } from './routes/lean-beaf.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
@@ -473,6 +474,7 @@ app.use('/api/ldap', authenticateToken, ldapRouter);
 // per-request inside the router), while its /admin/* endpoints apply the
 // cookie-session middleware themselves.
 app.use('/api/domains', domainsRouter);
+app.use('/api/tls-certs', tlsCertsRouter);
 
 // Mock2 — absence-by-installation (ADR-001). The gate is evaluated with
 // no native imports; only when it resolves enabled do we dynamically

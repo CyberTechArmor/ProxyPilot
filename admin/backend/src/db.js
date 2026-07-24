@@ -113,6 +113,11 @@ export function getDb() {
 //               daily|weekly; migrates the legacy single weekly schedule).
 //   704 Lean BEAF Pro — lbp_brief_runs (AI brief generation audit: who ran
 //               it, mode, model, token usage, computed cost).
+//   705 Lean BEAF Pro — lbp_brief_runs.brief_text (persist the generated brief).
+//   800 Manual (pasted) TLS certificates — tls_certificates (admin-supplied
+//               PEM cert + encrypted key for ACME-blocked networks; the private
+//               key is encrypted at rest, covered names/fingerprint/validity are
+//               parsed metadata). Global tls_mode lives in app_settings.
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -1842,6 +1847,38 @@ export function initDatabase() {
   runMigration(db, 703, 'lean_beaf_pro_schedules', lbpMigration703Schedules);
   runMigration(db, 704, 'lean_beaf_pro_brief_runs', lbpMigration704BriefRuns);
   runMigration(db, 705, 'lean_beaf_pro_brief_run_text', lbpMigration705BriefRunText);
+
+  // Manual (pasted) TLS certificates (block 800). The private key is stored
+  // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;
+  // cert_pem / chain_pem are public. covered_names is a JSON array of the parsed
+  // CN + DNS SANs (incl. wildcards) used by the host→cert resolver. fingerprint
+  // is the SHA-256 hex. not_before/not_after drive the expiry monitor.
+  runMigration(db, 800, 'manual_tls_certificates', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS tls_certificates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        label TEXT NOT NULL,
+        cert_pem TEXT NOT NULL,
+        chain_pem TEXT,
+        key_pem_enc TEXT NOT NULL,
+        covered_names TEXT NOT NULL DEFAULT '[]',
+        fingerprint TEXT NOT NULL,
+        not_before TEXT,
+        not_after TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    d.exec('CREATE INDEX IF NOT EXISTS idx_tls_certificates_fingerprint ON tls_certificates(fingerprint)');
+  });
+  // Seed the global TLS mode from the install-time env (.env is authoritative on
+  // first boot; the UI toggle writes app_settings thereafter). Absent env → the
+  // default 'acme', so existing installs are unchanged.
+  if (process.env.TLS_MODE && !getSetting('tls_mode')) {
+    const mode = String(process.env.TLS_MODE).trim().toLowerCase() === 'manual' ? 'manual' : 'acme';
+    setSetting('tls_mode', mode);
+  }
 
   console.log('Database initialized');
 }

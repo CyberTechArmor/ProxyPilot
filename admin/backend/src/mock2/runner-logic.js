@@ -62,6 +62,34 @@ export const RUNNER_TOOLS = Object.freeze([
     },
   },
   {
+    name: 'apply_edit',
+    description:
+      'Make targeted edits to an EXISTING file by exact, anchored string replacement — NOT a whole-file rewrite. This is the preferred way to change a file you have already read: cheaper and safer than write_file. Each edit replaces old_string with new_string. old_string must be copied byte-for-byte from the file (exact whitespace and indentation) and must include enough surrounding context — usually 3+ lines — to match EXACTLY ONCE in the file. Errors are returned, not thrown, so you can fix and retry: NO_MATCH (old_string not found — re-read and copy the exact text; a hint of the nearest lines is included), AMBIGUOUS_MATCH (matched more than once — add more context or set replace_all:true), FILE_NOT_FOUND. The batch is all-or-nothing: if any edit fails, the file is left unchanged. On success you get a unified diff of exactly what changed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path relative to the app directory of the existing file to edit.' },
+        edits: {
+          type: 'array',
+          minItems: 1,
+          description: 'One or more replacements, applied in order. All must succeed or none are written.',
+          items: {
+            type: 'object',
+            properties: {
+              old_string: { type: 'string', description: 'Exact text to find, copied verbatim from the file (including indentation). Include 3+ lines of surrounding context so it is unique.' },
+              new_string: { type: 'string', description: 'Text to replace it with.' },
+              replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a single unique match. Default false.' },
+            },
+            required: ['old_string', 'new_string'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['path', 'edits'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'get_component',
     description:
       'Inspect a component from the installation\'s component library: its integration notes plus its sources (inline when small; larger components return a path/size/sha256 file MANIFEST instead — their contents are delivered whole by materialize_component, never through this tool). The available components are listed in your system prompt under "Component library" — when the task overlaps one, REUSE it instead of writing your own implementation.',
@@ -545,11 +573,18 @@ runs the live check after deploy (pending_verification is then your finish).
    nothing to change), do NOT fabricate a red test and do NOT reclassify —
    declare the honest kind (usually chore), leave the code untouched, and call
    finish; the orchestrator verifies the empty diff itself and accepts it.
-2. Read the relevant files to understand the current state.
+2. Read the relevant files to understand the current state. NEVER edit a file
+   you have not read this cycle.
 3. Make the smallest change that satisfies the requested task. Do not refactor,
    add features, or touch anything the task did not ask for. When a gate fires
    falsely, propose the gate/allowlist change as a reviewed act — NEVER reword
    or restructure product code just to slip past a detector pattern.
+   To CHANGE an existing file, use apply_edit (targeted anchored replacement) —
+   not a whole-file write_file. Copy old_string byte-for-byte from the file
+   (exact indentation) with 3+ lines of surrounding context so it is unique. On
+   NO_MATCH, re-read the file and copy the exact text; on AMBIGUOUS_MATCH, add
+   more context or set replace_all. Use write_file only to CREATE a new file (or
+   when a change is essentially a full rewrite).
 4. Call run_gates. If any gate is red, fix the cause and run them again.
 5. When every gate is green, call finish with a one-line summary, the
    human-runnable acceptance check(s) ("as <role>, do X, expect Y" — one per
@@ -767,6 +802,7 @@ export function describeRunnerStep(turn, toolCalls = []) {
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
   const parts = calls.map((c) => {
     if (c?.name === 'write_file') return `writing ${c.input?.path || 'a file'}`;
+    if (c?.name === 'apply_edit') return `editing ${c.input?.path || 'a file'}`;
     if (c?.name === 'read_file') return `reading ${c.input?.path || 'a file'}`;
     if (c?.name === 'exec_in_container') return `running \`${String(c.input?.command || '').replace(/\s+/g, ' ').trim().slice(0, 60)}\``;
     if (c?.name === 'get_component') return `fetching component ${c.input?.key || ''}`.trim();
@@ -844,7 +880,7 @@ export function updateProgress(state, { toolCalls = [], text = '' } = {}, limit 
   const s = { ...initProgressState(), ...(state || {}) };
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
   const hadTool = calls.length > 0;
-  const hadWrite = calls.some((c) => c?.name === 'write_file' || c?.name === 'Write' || c?.name === 'Edit');
+  const hadWrite = calls.some((c) => c?.name === 'write_file' || c?.name === 'apply_edit' || c?.name === 'Write' || c?.name === 'Edit');
   const toolSig = toolCallSignature(calls);
   const msgSig = progressSignature(text);
 

@@ -73,6 +73,7 @@ import {
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
 import { harnessForProject } from './harness.js';
+import { applyEdits } from './apply-edit-logic.js';
 import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
 import { listPublishedComponents, getPublishedComponentWithVersion, listProjectComponents } from './components.js';
 import {
@@ -1784,6 +1785,30 @@ async function executeTool({ call, cycle, containerName, holder, gateScripts }) 
       const r = await writeFileInContainer(containerName, String(call.input?.path || ''), String(call.input?.content ?? ''));
       touchLock(cycle.project_id, holder);
       return { content: r.ok ? `wrote ${call.input?.path}` : `error: ${r.error}` };
+    }
+    case 'apply_edit': {
+      // Anchored targeted edit of an EXISTING file. Read → applyEdits (pure,
+      // byte-exact, all-or-nothing) → write back only on ok. A failed read is
+      // surfaced as FILE_NOT_FOUND so the model reads/creates the file instead
+      // of retrying a mismatch; every other failure is the pure contract's
+      // structured error the model self-corrects from.
+      const relPath = String(call.input?.path || '');
+      const edits = Array.isArray(call.input?.edits) ? call.input.edits : [];
+      const read = await readFileInContainer(containerName, relPath);
+      if (!read.ok) {
+        return { content: `error: FILE_NOT_FOUND — could not read "${relPath}" (${read.error}). Use write_file to create a new file, or read_file to confirm the path.` };
+      }
+      const res = applyEdits(read.content, edits, { path: relPath });
+      if (!res.ok) {
+        const e = res.error || {};
+        const extra = e.code === 'AMBIGUOUS_MATCH' ? ` (count: ${e.count})`
+          : e.code === 'NO_MATCH' && e.nearest ? `\nnearest lines:\n${e.nearest}` : '';
+        return { content: `error: ${e.code} — ${e.message}${extra}` };
+      }
+      const w = await writeFileInContainer(containerName, relPath, res.content);
+      touchLock(cycle.project_id, holder);
+      if (!w.ok) return { content: `error: applied ${res.applied} edit(s) in memory but the write failed: ${w.error}` };
+      return { content: `applied ${res.applied} edit(s) to ${relPath}\n${res.diff}` };
     }
     case 'get_component': {
       // Library lookup is DB-only (no container access) and limited to the

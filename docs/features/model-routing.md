@@ -79,10 +79,78 @@ Connectors → Routing shows the dictionary and the **outcome scoreboard**
 - `GET /api/mock2/routing/outcomes?kind=` (admin) — aggregated scoreboard +
   the 50 most recent outcome rows.
 
+## OpenAI provider + cross-provider equivalence map
+
+OpenAI is a first-class provider (the neutral model client already spoke the
+chat-completions shape; only its catalog and a tier map were missing). Two
+additive pieces:
+
+- **Pricing** — `quota-logic.DEFAULT_MODEL_PRICES` now carries the OpenAI
+  frontier + utility catalog (cents per 1M tokens, input / output; verified
+  2026-07 — re-check before billing):
+
+  | Model | Input | Output | Role |
+  |---|---|---|---|
+  | `gpt-5.6-sol` | $5.00 | $30.00 | flagship, hardest coding + complex tool use |
+  | `gpt-5.6-terra` | $2.50 | $15.00 | balanced default production coding |
+  | `gpt-5.6-luna` | $1.00 | $6.00 | fast, low-cost |
+  | `gpt-5.3-codex` | $1.75 | $14.00 | coding specialist (400K context) |
+  | `gpt-5.4-mini` | $0.75 | $4.50 | cheap utility (below the Haiku floor) |
+  | `gpt-5.4-nano` | $0.20 | $1.25 | cheapest (below the Haiku floor) |
+
+  Cost accounting picks these up unchanged (`defaultModelPrice` → the same
+  cache-aware `costCentsForUsage`).
+
+- **Equivalence map** — `model-equivalence.js` aligns Anthropic and OpenAI by
+  capability tier (speed and rough cost track the tier within each provider), so
+  a connector chooser or a future cross-provider fallback can resolve one id to
+  its twin. Bidirectional; `mini`/`nano` have no Anthropic equivalent.
+
+  | Anthropic | OpenAI |
+  |---|---|
+  | `claude-fable-5` | `gpt-5.6-sol` |
+  | `claude-opus-4-8` | `gpt-5.6-sol` (coding cost-down: `gpt-5.3-codex`) |
+  | `claude-sonnet-5` | `gpt-5.6-terra` |
+  | `claude-haiku-4-5` | `gpt-5.6-luna` |
+
+  The reverse of Sol resolves to Opus 4.8 (the workhorse), not Fable 5, so a
+  round-trip lands on the everyday tier. Cross-provider *fallback* (retry the
+  mapped-equivalent model on the other provider) is intentionally left as a
+  future flag-gated wiring — the map is the prerequisite building block.
+
+OpenAI keys, like every non-Anthropic provider, come from the connector row
+(encrypted in the DB), never an env var — see the note in `.env.example`.
+
+## apply_edit — anchored targeted file editing
+
+The runner exposes `apply_edit` alongside `write_file`: instead of re-emitting a
+whole file, the model replaces exact, anchored substrings (`old_string` copied
+byte-for-byte with 3+ lines of context). Cheaper (output tokens cost 5–10×
+input) and safer — a mismatch is a **structured error the model retries on**,
+never a silent corrupt write:
+
+- `NO_MATCH` — not found; a nearest-lines hint helps re-anchor.
+- `AMBIGUOUS_MATCH` — matched >1 and `replace_all` is false; returns the count.
+- `PARSE_FAIL` — an optional post-apply validator rejected the result (rolled
+  back). The runner leaves the validator unset today and verifies via the gate
+  battery; the hook exists for a future syntax check.
+- `FILE_NOT_FOUND` / `INVALID_EDIT`.
+
+The batch is **all-or-nothing**: if any edit fails, the file is left untouched.
+On success the tool returns a unified diff. Pure logic in
+`apply-edit-logic.js` (tested: `src/__tests__/mock2-apply-edit.test.js`);
+`write_file` is unchanged, so existing behavior is preserved.
+
 ## Files
 
 - `admin/backend/src/mock2/routing-logic.js` — pure decisions (tested:
   `src/__tests__/mock2-routing.test.js`).
+- `admin/backend/src/mock2/model-equivalence.js` — the Anthropic↔OpenAI tier map
+  (tested: `src/__tests__/mock2-model-equivalence.test.js`).
+- `admin/backend/src/mock2/apply-edit-logic.js` — the `apply_edit` contract
+  (tested: `src/__tests__/mock2-apply-edit.test.js`).
+- `admin/backend/src/mock2/quota-logic.js` — `DEFAULT_MODEL_PRICES` (OpenAI
+  catalog; tested: `src/__tests__/mock2-quotas.test.js`).
 - `admin/backend/src/mock2/routing.js` — rules + outcomes DB half; the
   `finishCycle` hook records outcomes.
 - `admin/backend/src/mock2/runner.js` — the decision at `startCycle`, the

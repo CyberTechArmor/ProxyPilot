@@ -288,8 +288,13 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
               title={`${title || 'Project'} preview`}
               src={src}
               onLoad={() => onBufLoad(id)}
-              className="absolute inset-y-0 border-0 bg-white"
+              className="absolute border-0 bg-white"
               style={{
+                // Explicit height: an <iframe> is a REPLACED element, so
+                // top:0/bottom:0 does NOT stretch it — without height it falls
+                // back to the intrinsic 150px. top+height fills the container.
+                top: 0,
+                height: '100%',
                 width: w,
                 maxWidth: '100%',
                 left: width === 'mobile' ? '50%' : 0,

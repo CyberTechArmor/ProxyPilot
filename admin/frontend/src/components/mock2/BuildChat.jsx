@@ -15,12 +15,22 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, MapPin, History } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, MapPin, History, Download } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
+
+// Client-side JSON download (no server round-trip), same pattern as the classic
+// Change history. Used by Build History to save a build's full context.
+function downloadJson(filename, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 export default function BuildChat({ projectId, project, cycle = null, canEdit, online, active, job, needsFeedback = false, buildQueue = [], onStarted }) {
   const { toast } = useToast();
@@ -49,6 +59,8 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   const interactedRef = useRef(false);
   const lastUserMsgIdRef = useRef(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [requests, setRequests] = useState([]);
+  const [downloadingAll, setDownloadingAll] = useState(false);
   const onTyping = useTypingTracker(projectId, canEdit && online);
   const approvedAt = project?.design_approved_at || null;
   // Multi-modal: images pasted/dropped/picked ride the build instruction or the
@@ -61,6 +73,12 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   }, [projectId]);
 
   useEffect(() => { load(); }, [load]);
+
+  // The build requests (for Build History downloads). Refetched when the message
+  // count changes (a new build/ask adds a request) so the list stays current.
+  useEffect(() => {
+    api.mock2ListRequests(projectId).then((r) => setRequests(r.requests || [])).catch(() => {});
+  }, [projectId, data?.messages?.length]);
 
   // Poll while a build cycle is live, a rule question is open, or an ask is
   // being answered, so answers and transitions settle on their own. While an
@@ -422,6 +440,28 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     if (target) { interactedRef.current = true; target.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
     setShowHistory(false);
   };
+  // The build REQUESTS (each a full build with its own context log). Matched to a
+  // history message by instruction text so each card can download that build's
+  // whole context (task + cycles + change records + events), like the classic
+  // Change history download.
+  const requestForMessage = (m) => requests.find((r) => (r.instruction || '').trim() === (m.body || '').trim()) || null;
+  const downloadBuild = async (req) => {
+    try {
+      const log = await api.mock2GetRequestLog(projectId, req.id);
+      downloadJson(`build-${req.id}.json`, log);
+    } catch (err) { toast({ variant: 'destructive', title: 'Download failed', description: err.message }); }
+  };
+  const downloadAllBuilds = async () => {
+    if (!requests.length) return;
+    setDownloadingAll(true);
+    try {
+      const builds = [];
+      for (const req of requests) {
+        try { builds.push(await api.mock2GetRequestLog(projectId, req.id)); } catch { /* skip a failed one */ }
+      }
+      downloadJson(`build-history-project-${projectId}.json`, { project_id: projectId, count: builds.length, builds });
+    } finally { setDownloadingAll(false); }
+  };
 
   return (
     <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
@@ -443,19 +483,47 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
         </div>
       </CardHeader>
       {showHistory ? (
-        <div className="mx-4 mb-2 max-h-56 overflow-y-auto rounded-lg border bg-background/60 divide-y">
-          {buildRequests.map((m) => (
-            <button
-              key={m.id} type="button"
-              onClick={() => scrollToMessage(m.id)}
-              className="w-full text-left px-3 py-2 hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none"
-            >
-              <span className="block text-xs font-medium truncate">{(m.body || '').trim() || '(no text)'}</span>
-              {m.created_at ? (
-                <span className="block text-[10px] text-muted-foreground mt-0.5">{new Date(m.created_at).toLocaleString()}</span>
-              ) : null}
-            </button>
-          ))}
+        <div className="mx-4 mb-2 rounded-lg border bg-background/60">
+          <div className="flex items-center justify-between px-3 py-1.5 border-b">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Build History</span>
+            {requests.length > 0 ? (
+              <button
+                type="button" onClick={downloadAllBuilds} disabled={downloadingAll}
+                className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline disabled:opacity-50"
+                title="Download the full context of every build as one file"
+              >
+                {downloadingAll ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />} Download all
+              </button>
+            ) : null}
+          </div>
+          <div className="max-h-56 overflow-y-auto divide-y">
+            {buildRequests.map((m) => {
+              const req = requestForMessage(m);
+              return (
+                <div key={m.id} className="flex items-stretch">
+                  <button
+                    type="button" onClick={() => scrollToMessage(m.id)}
+                    className="flex-1 min-w-0 text-left px-3 py-2 hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none"
+                  >
+                    <span className="block text-xs font-medium truncate">{(m.body || '').trim() || '(no text)'}</span>
+                    {m.created_at ? (
+                      <span className="block text-[10px] text-muted-foreground mt-0.5">{new Date(m.created_at).toLocaleString()}</span>
+                    ) : null}
+                  </button>
+                  {req ? (
+                    <button
+                      type="button" onClick={() => downloadBuild(req)}
+                      className="shrink-0 px-3 flex items-center text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                      title="Download this build's full context (task, cycles, change records, events)"
+                      aria-label="Download this build's context"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
         </div>
       ) : null}
       <CardContent className="flex flex-1 min-h-0 flex-col gap-3">
@@ -678,35 +746,6 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                 </>
               )}
             </div>
-            {/* Suggestion handling for quick updates: Off (build exactly what
-                you type) / Ask (show the additions card, default) / Auto
-                (always include every surfaced expectation). Saved per project. */}
-            {!resumeMode ? (
-              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
-                <Sparkles className="h-3 w-3 shrink-0" />
-                <span className="mr-0.5">Suggestions:</span>
-                {[
-                  { key: 'off', label: 'Off', hint: 'Build exactly what you type — expert suggestions are never added.' },
-                  { key: 'ask', label: 'Ask', hint: 'Show suggested additions as a card so you pick what to include (default).' },
-                  { key: 'auto', label: 'Auto', hint: 'Automatically include every suggested addition — no card.' },
-                ].map((opt) => (
-                  <button
-                    key={opt.key} type="button" title={opt.hint}
-                    onClick={() => saveSuggestMode(opt.key)}
-                    className={`h-9 rounded-md border px-3 text-xs transition-colors ${suggestMode === opt.key
-                      ? 'border-primary bg-primary/10 font-medium text-foreground'
-                      : 'border-input bg-transparent hover:bg-muted'}`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-                <span className="basis-full sm:basis-auto sm:ml-1">
-                  {suggestMode === 'off' ? 'builds exactly what you type'
-                    : suggestMode === 'auto' ? 'expert additions are always included'
-                      : 'you pick suggested additions per build'}
-                </span>
-              </div>
-            ) : null}
             {/* The build queue — "building now / up next", each queued entry
                 cancellable. Submissions while a build runs land here and run
                 back-to-back automatically. */}

@@ -72,6 +72,8 @@ export default function Flightdeck({
   // whole center column (full height) — an option alongside the docked bottom panel.
   const [centerTab, setCenterTab] = useState('editor');
   const [terminalMax, setTerminalMax] = useState(false);
+  // Expand the preview to full height (over the terminal's space too).
+  const [previewFull, setPreviewFull] = useState(false);
   // Mobile single-panel switch.
   const [mobilePanel, setMobilePanel] = useState('editor');
 
@@ -161,13 +163,18 @@ export default function Flightdeck({
                 <div className="flex items-center gap-1 px-2 h-8 border-b bg-muted/20 shrink-0">
                   <button onClick={() => setCenterTab('editor')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'editor' ? 'bg-background border' : 'text-muted-foreground'}`}><Code2 className="h-3.5 w-3.5 inline mr-1" />Editor</button>
                   <button onClick={() => setCenterTab('preview')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'preview' ? 'bg-background border' : 'text-muted-foreground'}`}><Eye className="h-3.5 w-3.5 inline mr-1" />Preview</button>
+                  {centerTab === 'preview' ? (
+                    <button onClick={() => setPreviewFull((v) => !v)} title={previewFull ? 'Restore terminal' : 'Full-height preview (over the terminal)'} className="p-1 rounded hover:bg-muted">
+                      {previewFull ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                    </button>
+                  ) : null}
                   <div className="flex-1" />
                   <button onClick={() => setL({ showLeft: !layout.showLeft })} title="Toggle Explorer" className="p-1 rounded hover:bg-muted"><PanelLeftClose className="h-3.5 w-3.5" /></button>
                   <button onClick={() => setL({ showBottom: !layout.showBottom })} title="Toggle Terminal" className="p-1 rounded hover:bg-muted"><PanelBottom className="h-3.5 w-3.5" /></button>
                   <button onClick={() => setL({ showRight: !layout.showRight })} title="Toggle Chat" className="p-1 rounded hover:bg-muted"><PanelRightClose className="h-3.5 w-3.5" /></button>
                 </div>
                 <div className="flex-1 min-h-0">{centerTab === 'editor' ? editorPane : previewPane}</div>
-                {layout.showBottom && (
+                {layout.showBottom && !(centerTab === 'preview' && previewFull) && (
                   <>
                     <div onMouseDown={onDragStart('bottom')} className="h-1 cursor-row-resize hover:bg-primary/40 shrink-0" />
                     <div style={{ height: layout.bottom }} className="shrink-0 border-t min-h-0 bg-black flex flex-col">

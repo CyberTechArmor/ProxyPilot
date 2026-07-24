@@ -107,6 +107,7 @@ import { resolveHarness } from './runner-logic.js';
 import { claudeHarnessStatus } from './harness.js';
 import { deployProjectStatus } from './deploy-logic.js';
 import { requireMock2Role } from './authz.js';
+import { registerFlightdeckRoutes } from './flightdeck.js';
 import {
   startProvision,
   startArchive,
@@ -4544,6 +4545,11 @@ export function createMock2Router() {
       reported_outcome: reportedCycleOutcome(getCycle(cycle.id)),
     });
   });
+
+  // Flightdeck IDE — file-CRUD endpoints (tree/read/save/create/rename/delete)
+  // against the project container. Same auth chain as the rest of the router;
+  // each route adds requireMock2Role (viewer read / editor write).
+  registerFlightdeckRoutes(router, refuseIfArchived);
 
   return router;
 }

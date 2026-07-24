@@ -187,6 +187,30 @@ test('buildMock2SiteBlock: placeholder HTML quotes are escaped for the Caddyfile
   assert.doesNotMatch(block, /lang="en"/);
 });
 
+test('buildMock2SiteBlock: frameAncestor relaxes the live route so the dashboard can embed it', () => {
+  // The generated app refuses framing (constitution §5); when the caller supplies
+  // the admin origin, the live route drops X-Frame-Options and scopes CSP
+  // frame-ancestors to that origin so ONLY the dashboard preview can embed it.
+  const block = buildMock2SiteBlock({
+    fqdn: 'notes.mock2.example.com', upstream: '10.0.0.5:8080', frameAncestor: 'https://admin.example.com',
+  });
+  assert.match(block, /reverse_proxy 10\.0\.0\.5:8080 \{/);
+  assert.match(block, /header_down -X-Frame-Options/);
+  assert.match(block, /header_down Content-Security-Policy "frame-ancestors\[\^;\]\*" "frame-ancestors 'self' https:\/\/admin\.example\.com"/);
+});
+
+test('buildMock2SiteBlock: no frameAncestor (or no upstream) leaves headers untouched', () => {
+  // Default: unchanged behavior — no header rewrite at all.
+  assert.doesNotMatch(buildMock2SiteBlock({ fqdn: 'x.example.com', upstream: '10.0.0.5:8080' }), /header_down/);
+  // A malformed frame origin is ignored (defensive; never injected into Caddy).
+  assert.doesNotMatch(
+    buildMock2SiteBlock({ fqdn: 'x.example.com', upstream: '10.0.0.5:8080', frameAncestor: 'javascript:alert(1)' }),
+    /header_down/,
+  );
+  // A placeholder block (no upstream) never carries the framing headers.
+  assert.doesNotMatch(buildMock2SiteBlock({ fqdn: 'x.example.com', frameAncestor: 'https://admin.example.com' }), /header_down/);
+});
+
 test('buildMock2DomainConfig: empty slug set → header-only (valid no-op file)', () => {
   const cfg = buildMock2DomainConfig({ domain: 'dev.example.com', fqdns: [] });
   assert.match(cfg, /# Parent domain: dev\.example\.com/);

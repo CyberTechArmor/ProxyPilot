@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import BuildChat from './BuildChat';
 import ProjectTerminal from './ProjectTerminal';
-import { PreviewPanel, LiveAppBar } from './ProjectPreview';
+import { PreviewPanel } from './ProjectPreview';
 import FlightdeckFileTree from './FlightdeckFileTree';
 import FlightdeckEditor from './FlightdeckEditor';
 import { WORKSPACE_NAME, flightdeckLayoutKey, readJsonPref, writeJsonPref } from '@/lib/flightdeck';
@@ -107,8 +107,13 @@ export default function Flightdeck({
     <FlightdeckEditor projectId={projectId} openRequest={openRequest} canEdit={canEdit} externalNonce={externalNonce}
       onActivePathChange={setActiveFilePath} />
   );
+  // The preview embeds the running app directly. Caddy relaxes the app's
+  // frame-ancestors to allow ONLY the dashboard origin (see mock2/caddy.js), so
+  // the iframe renders instead of "refused to connect" — no stand-in bar needed.
+  // "Open App" and the full-height toggle live in the PreviewPanel toolbar.
   const previewPane = previewSrc
-    ? <div className="h-full flex flex-col"><LiveAppBar url={previewSrc} projectId={projectId} /><div className="flex-1 min-h-0"><PreviewPanel src={previewSrc} title={project?.name} approved reloadKey={externalNonce} /></div></div>
+    ? <PreviewPanel src={previewSrc} title={project?.name} approved reloadKey={externalNonce}
+        fullHeight={previewFull} onToggleFullHeight={() => setPreviewFull((v) => !v)} />
     : <div className="flex items-center justify-center h-full text-sm text-muted-foreground">No preview — the app isn’t serving yet.</div>;
   const chatPane = (
     <BuildChat projectId={projectId} project={project} cycle={cycle} canEdit={canEdit} online={online} active={active}
@@ -163,11 +168,6 @@ export default function Flightdeck({
                 <div className="flex items-center gap-1 px-2 h-8 border-b bg-muted/20 shrink-0">
                   <button onClick={() => setCenterTab('editor')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'editor' ? 'bg-background border' : 'text-muted-foreground'}`}><Code2 className="h-3.5 w-3.5 inline mr-1" />Editor</button>
                   <button onClick={() => setCenterTab('preview')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'preview' ? 'bg-background border' : 'text-muted-foreground'}`}><Eye className="h-3.5 w-3.5 inline mr-1" />Preview</button>
-                  {centerTab === 'preview' ? (
-                    <button onClick={() => setPreviewFull((v) => !v)} title={previewFull ? 'Restore terminal' : 'Full-height preview (over the terminal)'} className="p-1 rounded hover:bg-muted">
-                      {previewFull ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-                    </button>
-                  ) : null}
                   <div className="flex-1" />
                   <button onClick={() => setL({ showLeft: !layout.showLeft })} title="Toggle Explorer" className="p-1 rounded hover:bg-muted"><PanelLeftClose className="h-3.5 w-3.5" /></button>
                   <button onClick={() => setL({ showBottom: !layout.showBottom })} title="Toggle Terminal" className="p-1 rounded hover:bg-muted"><PanelBottom className="h-3.5 w-3.5" /></button>

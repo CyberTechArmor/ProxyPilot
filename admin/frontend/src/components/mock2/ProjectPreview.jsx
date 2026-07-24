@@ -11,9 +11,9 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2 } from 'lucide-react';
+import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2 } from 'lucide-react';
 
-export function PreviewPanel({ src, title, approved, reloadKey = 0 }) {
+export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
   const [reloadNonce, setReloadNonce] = useState(0); // bump to remount (reload) the iframe
   return (
@@ -49,11 +49,22 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0 }) {
               <Smartphone className="h-3.5 w-3.5" /><span className="hidden sm:inline">Mobile</span>
             </button>
           </div>
-          <Button asChild variant="ghost" size="icon" className="h-9 w-9">
-            <a href={src} target="_blank" rel="noreferrer" aria-label="Open preview in a new tab">
-              <ExternalLink className="h-4 w-4" />
+          <Button asChild variant="outline" size="sm" className="h-9 shrink-0">
+            <a href={src} target="_blank" rel="noreferrer" aria-label="Open the app in a new tab">
+              <ExternalLink className="h-4 w-4 mr-1" /> Open App
             </a>
           </Button>
+          {onToggleFullHeight ? (
+            <Button
+              variant="outline" size="sm" className="h-9 shrink-0"
+              onClick={onToggleFullHeight}
+              aria-label={fullHeight ? 'Restore terminal' : 'Expand preview to full height'}
+              title={fullHeight ? 'Restore the terminal below' : 'Full height (use the terminal’s space too)'}
+            >
+              {fullHeight ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              <span className="ml-1 hidden sm:inline">{fullHeight ? 'Restore' : 'Full height'}</span>
+            </Button>
+          ) : null}
         </div>
       </div>
       <div className="flex flex-1 min-h-0 justify-center overflow-auto bg-white">

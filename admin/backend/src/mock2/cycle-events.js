@@ -11,6 +11,9 @@
 // Terminology (risk R7): nothing here is named "agent".
 
 import { getMock2Db } from './db.js';
+import { deriveActivity, deriveActivityItem } from './cycle-activity-logic.js';
+
+export { deriveActivityItem };
 
 const nowIso = () => new Date().toISOString();
 
@@ -68,6 +71,19 @@ export function listProjectCycleEvents(projectId) {
     .prepare(`SELECT * FROM mock2_cycle_events WHERE project_id = ? ORDER BY id ASC`)
     .all(Number(projectId))
     .map(shapeEvent);
+}
+
+// ---- live build activity (the "what's being worked on" stream) ----
+// Derivation is PURE (cycle-activity-logic.js) so it's testable native-free.
+
+// listCycleActivity — the most recent activity rows for a cycle, chronological.
+// Over-fetches (kinds get filtered out) then trims to `limit`.
+export function listCycleActivity(cycleId, { limit = 40 } = {}) {
+  const rows = getMock2Db()
+    .prepare(`SELECT * FROM mock2_cycle_events WHERE cycle_id = ? ORDER BY seq ASC`)
+    .all(Number(cycleId))
+    .map(shapeEvent);
+  return deriveActivity(rows, { limit });
 }
 
 // The Builder's thumbs up/down verdict on a finished build, stored as a normal

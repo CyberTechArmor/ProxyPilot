@@ -38,6 +38,7 @@ export default function Flightdeck({
   const [cycle, setCycle] = useState(null);
   const [job, setJob] = useState(null);
   const [buildQueue, setBuildQueue] = useState([]);
+  const [activity, setActivity] = useState([]);
   const active = !!cycle && ['queued', 'running', 'awaiting_admin', 'paused'].includes(cycle.status);
 
   const load = useCallback(async () => {
@@ -45,6 +46,7 @@ export default function Flightdeck({
     try {
       const r = await api.mock2GetLatestCycle(projectId);
       setCycle(r.cycle || null); setJob(r.job || null); setBuildQueue(r.build_queue || []);
+      setActivity(Array.isArray(r.activity) ? r.activity : []);
     } catch { /* transient */ }
   }, [projectId, online]);
   useEffect(() => { load(); }, [load]);
@@ -74,8 +76,13 @@ export default function Flightdeck({
   const [terminalMax, setTerminalMax] = useState(false);
   // Expand the preview to full height (over the terminal's space too).
   const [previewFull, setPreviewFull] = useState(false);
+  // Dev mode: OFF (default) is the clean, non-technical view — just the live
+  // preview + chat. ON brings in the developer surfaces (file tree, editor,
+  // terminal). Persisted globally so the choice sticks across projects.
+  const [devMode, setDevMode] = useState(() => readJsonPref('mock2.flightdeck.devMode', false));
+  useEffect(() => { writeJsonPref('mock2.flightdeck.devMode', devMode); }, [devMode]);
   // Mobile single-panel switch.
-  const [mobilePanel, setMobilePanel] = useState('editor');
+  const [mobilePanel, setMobilePanel] = useState('preview');
 
   // Persisted layout.
   const [layout, setLayout] = useState(() => ({ ...DEFAULT_LAYOUT, ...readJsonPref(flightdeckLayoutKey(projectId), {}) }));
@@ -124,12 +131,12 @@ export default function Flightdeck({
   // "Open App", the full-height toggle, and Annotate live in the PreviewPanel toolbar.
   const previewPane = previewSrc
     ? <PreviewPanel src={previewSrc} title={project?.name} approved reloadKey={externalNonce}
-        fullHeight={previewFull} onToggleFullHeight={() => setPreviewFull((v) => !v)}
+        fullHeight={previewFull} onToggleFullHeight={devMode ? (() => setPreviewFull((v) => !v)) : null}
         onAnnotate={canEdit && online ? annotatePreview : null} />
     : <div className="flex items-center justify-center h-full text-sm text-muted-foreground">No preview — the app isn’t serving yet.</div>;
   const chatPane = (
     <BuildChat projectId={projectId} project={project} cycle={cycle} canEdit={canEdit} online={online} active={active}
-      job={job} buildQueue={buildQueue} onStarted={load} />
+      job={job} buildQueue={buildQueue} activity={activity} onStarted={load} />
   );
   const terminalPane = online
     ? <ProjectTerminal projectId={projectId} containerName={containerName} defaultOpen fill />
@@ -147,6 +154,17 @@ export default function Flightdeck({
         {routing?.model ? <span className="text-xs text-muted-foreground hidden md:inline">{routing.model}{routing.effort ? ` · ${routing.effort}` : ''}</span> : null}
         <span className="text-xs font-mono px-2 py-0.5 rounded bg-background border" title="Spend this cycle">{costText}</span>
         {active ? <Button size="sm" variant="destructive" className="h-8" onClick={stop}><StopCircle className="h-3.5 w-3.5 mr-1" /> Stop</Button> : null}
+        {/* Dev toggle: green (off) = clean preview+chat view; blue (on) = full IDE
+            (file tree + editor + terminal). */}
+        <button
+          type="button" role="switch" aria-checked={devMode} aria-label="Developer view"
+          onClick={() => setDevMode((v) => !v)}
+          title={devMode ? 'Developer view on — file tree, editor and terminal (click for the clean view)' : 'Clean view — just the preview and chat (click for the developer view)'}
+          className={`relative inline-flex h-7 w-[3.25rem] shrink-0 items-center rounded-full transition-colors ${devMode ? 'bg-blue-600' : 'bg-emerald-600'}`}
+        >
+          <span className={`absolute text-[9px] font-bold uppercase tracking-wide text-white ${devMode ? 'left-1.5' : 'right-1.5'}`}>Dev</span>
+          <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${devMode ? 'translate-x-[1.875rem]' : 'translate-x-1'}`} />
+        </button>
         <Button size="sm" variant="outline" className="h-8" onClick={onSwitchView} title="Switch to the classic build view">Classic view</Button>
         {onShowDetails ? (
           <Button size="sm" variant="outline" className="h-8" onClick={onShowDetails} title="Show project details in the center pane"><Info className="h-3.5 w-3.5 mr-1" />Details</Button>
@@ -155,6 +173,7 @@ export default function Flightdeck({
 
       {/* Desktop layout (lg+) */}
       <div className="hidden lg:flex flex-1 min-h-0">
+        {devMode ? (
         <div className="flex flex-1 min-h-0">
           {/* left */}
           {layout.showLeft && (
@@ -212,26 +231,43 @@ export default function Flightdeck({
             </>
           )}
         </div>
+        ) : (
+        // Clean view — just the live preview + chat. No file tree, editor or
+        // terminal; the preview fills the space (its own toolbar keeps Annotate
+        // and Open App).
+        <div className="flex flex-1 min-h-0">
+          <div className="flex-1 min-w-0 min-h-0 p-2">{previewPane}</div>
+          <div onMouseDown={onDragStart('right')} className="w-1 cursor-col-resize hover:bg-primary/40 shrink-0" />
+          <div style={{ width: layout.right }} className="shrink-0 border-l min-h-0 flex flex-col overflow-hidden">{chatPane}</div>
+        </div>
+        )}
       </div>
 
-      {/* Mobile / narrow: one panel at a time */}
-      <div className="flex flex-col flex-1 min-h-0 lg:hidden">
-        <div className="flex-1 min-h-0 overflow-auto">
-          {mobilePanel === 'files' && filesPane}
-          {mobilePanel === 'editor' && editorPane}
-          {mobilePanel === 'chat' && chatPane}
-          {mobilePanel === 'terminal' && <div className="h-full bg-black">{terminalPane}</div>}
-          {mobilePanel === 'preview' && previewPane}
-        </div>
-        <div className="grid grid-cols-5 border-t shrink-0">
-          {MOBILE_PANELS.map((p) => (
-            <button key={p.key} onClick={() => setMobilePanel(p.key)}
-              className={`flex flex-col items-center gap-0.5 py-2 min-h-[44px] text-[11px] ${mobilePanel === p.key ? 'text-primary' : 'text-muted-foreground'}`}>
-              <p.icon className="h-4 w-4" />{p.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* Mobile / narrow: one panel at a time. Clean view shows only preview +
+          chat; dev view exposes files/editor/terminal too. */}
+      {(() => {
+        const panels = devMode ? MOBILE_PANELS : MOBILE_PANELS.filter((p) => p.key === 'preview' || p.key === 'chat');
+        const cur = panels.some((p) => p.key === mobilePanel) ? mobilePanel : 'preview';
+        return (
+          <div className="flex flex-col flex-1 min-h-0 lg:hidden">
+            <div className="flex-1 min-h-0 overflow-auto">
+              {cur === 'files' && filesPane}
+              {cur === 'editor' && editorPane}
+              {cur === 'chat' && chatPane}
+              {cur === 'terminal' && <div className="h-full bg-black">{terminalPane}</div>}
+              {cur === 'preview' && previewPane}
+            </div>
+            <div className={`grid border-t shrink-0 ${devMode ? 'grid-cols-5' : 'grid-cols-2'}`}>
+              {panels.map((p) => (
+                <button key={p.key} onClick={() => setMobilePanel(p.key)}
+                  className={`flex flex-col items-center gap-0.5 py-2 min-h-[44px] text-[11px] ${cur === p.key ? 'text-primary' : 'text-muted-foreground'}`}>
+                  <p.icon className="h-4 w-4" />{p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -237,7 +237,7 @@ import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
 import { listChangeRecords, verifyProjectChain, insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestoreRequest } from './restore-logic.js';
 import { buildCheckpointScript } from './template.js';
-import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback } from './cycle-events.js';
+import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback, listCycleActivity } from './cycle-events.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages, getMessage, getChat, insertMessage } from './chats.js';
 import {
@@ -2909,11 +2909,19 @@ export function createMock2Router() {
     // the same poll so the chat shows "building now / up next" for free.
     let buildQueue = [];
     try { buildQueue = listBuildQueue(req.mock2Project.id).map(publicQueueShape); } catch { /* pre-migration */ }
+    // Live "what's being worked on" stream — the recent tool calls + narration
+    // for an in-flight cycle (VS Code / Claude-Code style). Only while the build
+    // is active, so a settled cycle's poll stays lean; the full transcript lives
+    // in Build History afterwards.
+    const cycleActive = cycle && ['queued', 'running', 'awaiting_admin', 'paused'].includes(cycle.status);
+    let activity = [];
+    if (cycleActive) { try { activity = listCycleActivity(cycle.id, { limit: 40 }); } catch { /* best-effort */ } }
     res.json({
       cycle: cycle ? { ...publicCycleShape(cycle), feedback: getCycleFeedback(cycle.id) } : null,
       job: cycle ? getCycleJobStatus(cycle.id) : null,
       typical_duration: typical,
       build_queue: buildQueue,
+      activity,
       // Pending one-time authorization requests (Part 4) so the blocked card can show
       // them + an admin Grant/Deny without a separate fetch.
       authorizations: listOpenAuthorizations(req.mock2Project.id).map(publicAuthorizationShape),

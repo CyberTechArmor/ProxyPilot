@@ -32,7 +32,7 @@ function downloadJson(filename, obj) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export default function BuildChat({ projectId, project, cycle = null, canEdit, online, active, job, needsFeedback = false, buildQueue = [], onStarted }) {
+export default function BuildChat({ projectId, project, cycle = null, canEdit, online, active, job, needsFeedback = false, buildQueue = [], activity = [], onStarted }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [instruction, setInstruction] = useState('');
@@ -151,7 +151,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     const kids = [...el.children].filter((k) => !k.hasAttribute('data-scroll-skip'));
     const last = kids[kids.length - 1];
     if (last) el.scrollTop = Math.max(0, last.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 8);
-  }, [data?.messages?.length, active, openQuestionKey, askPartial?.length, newestMsg?.id, newestMsg?.kind]);
+  }, [data?.messages?.length, active, openQuestionKey, askPartial?.length, newestMsg?.id, newestMsg?.kind, activity.length, activity[activity.length - 1]?.seq]);
 
   const openIds = new Set(data?.open_question_ids || []);
 
@@ -537,6 +537,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
           working={active || askActive}
           workingLabel={askActive ? (askJob?.message || 'Answering…') : (job?.message || 'Building…')}
           partialText={askPartial}
+          activity={active ? activity : []}
           onQuickUpdate={canEdit && online && !needsFeedback && !resumeMode ? quickUpdateFromMessage : null}
           quickBusyId={distillingId}
           emptyLabel={online

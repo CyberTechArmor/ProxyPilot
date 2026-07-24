@@ -88,6 +88,14 @@ export default function ProjectDetail() {
     if (v === 'flightdeck') next.delete('view'); else next.set('view', v);
     setSearchParams(next, { replace: true });
   }, [id, searchParams, setSearchParams]);
+  // In Flightdeck mode the tab strip is hidden, so only 'chat' (the workspace)
+  // and 'details' are reachable — coerce a stale 'terminal' selection back. This
+  // hook lives ABOVE the early returns below so hook order stays stable; the
+  // Flightdeck condition is inlined (project may still be loading here).
+  useEffect(() => {
+    const fdActive = !!project?.stage?.design_approved && buildView === 'flightdeck' && project?.lifecycle !== 'archived';
+    if (fdActive && tab === 'terminal') setTab('chat');
+  }, [project, buildView, tab]);
   // Once the Terminal tab has been opened we keep it mounted (forceMount below)
   // so its shell session survives switching to other tabs — the PTY only starts
   // on the first visit, not on page load.
@@ -335,9 +343,6 @@ export default function ProjectDetail() {
   // Chat/Terminal/Details tab strip (the terminal is built in; chat is the
   // right pane) and toggle its own center between the workspace and Details.
   const flightdeckActive = designApproved && buildView === 'flightdeck' && !isArchived;
-  // The tab strip is hidden in Flightdeck, so only 'chat' (the workspace) and
-  // 'details' are reachable — coerce a stale 'terminal' selection back.
-  useEffect(() => { if (flightdeckActive && tab === 'terminal') setTab('chat'); }, [flightdeckActive, tab]);
 
   return (
     <div className="flex flex-col h-full min-h-0 gap-3">

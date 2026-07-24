@@ -1,18 +1,15 @@
 // Flightdeck — the build-phase IDE workspace. ONE place for the workspace name
 // (spec: a single WORKSPACE_NAME constant, no "VS"/"VSCode" strings anywhere)
-// and the CodeMirror language mapping.
+// and the per-project persistence keys.
 //
 // Named "Flightdeck" — on-brand with ProxyPilot: the deck where every instrument
 // lives (chat, files, editor, terminal, preview).
-
-import { javascript } from '@codemirror/lang-javascript';
-import { json } from '@codemirror/lang-json';
-import { html } from '@codemirror/lang-html';
-import { css } from '@codemirror/lang-css';
-import { markdown } from '@codemirror/lang-markdown';
-import { python } from '@codemirror/lang-python';
-import { xml } from '@codemirror/lang-xml';
-import { yaml } from '@codemirror/lang-yaml';
+//
+// IMPORTANT: this module is imported by the eagerly-loaded ProjectDetail page,
+// so it must stay LIGHT — no CodeMirror/editor imports. The CodeMirror language
+// mapping lives in FlightdeckEditor (loaded lazily with the workspace), which
+// keeps the heavy editor packages out of the main bundle and avoids a
+// cross-chunk init-order (TDZ) hazard from CodeMirror's internal circular deps.
 
 export const WORKSPACE_NAME = 'Flightdeck';
 
@@ -20,24 +17,6 @@ export const WORKSPACE_NAME = 'Flightdeck';
 // `mock2:<thing>:<id>` convention.
 export const flightdeckPrefKey = (projectId) => `mock2:flightdeck:${projectId}`;
 export const flightdeckLayoutKey = (projectId) => `mock2:flightdeck-layout:${projectId}`;
-
-// Map the backend's `language` id (flightdeck-logic.languageForPath) to a
-// CodeMirror language extension. Unknown → no extension (plain text).
-export function codemirrorLanguage(language) {
-  switch (language) {
-    case 'javascript':
-    case 'typescript': // lang-javascript handles TS/JSX/TSX with options
-      return javascript({ jsx: true, typescript: language === 'typescript' });
-    case 'json': return json();
-    case 'html': return html();
-    case 'css': return css();
-    case 'markdown': return markdown();
-    case 'python': return python();
-    case 'xml': return xml();
-    case 'yaml': return yaml();
-    default: return null;
-  }
-}
 
 // A read of localStorage that never throws (private-mode / disabled storage).
 export function readPref(key, fallback = null) {

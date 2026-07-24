@@ -1,10 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { oneDark } from '@codemirror/theme-one-dark';
+import { javascript } from '@codemirror/lang-javascript';
+import { json } from '@codemirror/lang-json';
+import { html } from '@codemirror/lang-html';
+import { css } from '@codemirror/lang-css';
+import { markdown } from '@codemirror/lang-markdown';
+import { python } from '@codemirror/lang-python';
+import { xml } from '@codemirror/lang-xml';
+import { yaml } from '@codemirror/lang-yaml';
 import { api } from '@/lib/api';
-import { codemirrorLanguage } from '@/lib/flightdeck';
 import { X, Loader2, Save, FileWarning } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+
+// Map the backend `language` id (flightdeck-logic.languageForPath) to a
+// CodeMirror language extension. Unknown → no extension (plain text). Kept here
+// (not in lib/flightdeck) so the CodeMirror packages load only with this lazy
+// editor, never in the main bundle.
+function codemirrorLanguage(language) {
+  switch (language) {
+    case 'javascript':
+    case 'typescript':
+      return javascript({ jsx: true, typescript: language === 'typescript' });
+    case 'json': return json();
+    case 'html': return html();
+    case 'css': return css();
+    case 'markdown': return markdown();
+    case 'python': return python();
+    case 'xml': return xml();
+    case 'yaml': return yaml();
+    default: return null;
+  }
+}
 
 // Flightdeck editor — tabbed CodeMirror over the container file API. Dirty
 // indicators, Cmd/Ctrl+S save, language by extension, dark theme. Opens files on

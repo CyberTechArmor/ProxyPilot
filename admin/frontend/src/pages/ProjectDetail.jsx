@@ -13,7 +13,7 @@
 // MOBILE_FIRST: single column, stacked rows, 44px primary touch targets, a
 // full-screen-on-<sm delete dialog. Renders clean at 360px.
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
@@ -38,8 +38,12 @@ import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
 import ProjectTerminal from '@/components/mock2/ProjectTerminal';
 import BuildMode from '@/components/mock2/BuildMode';
-import Flightdeck from '@/components/mock2/Flightdeck';
 import { flightdeckPrefKey, readPref, writePref } from '@/lib/flightdeck';
+
+// The Flightdeck IDE pulls in CodeMirror + xterm — heavy, and CodeMirror has
+// internal circular deps that TDZ-crash if bundled into the eager page chunk.
+// Load it on demand (only when a project's build phase renders it).
+const Flightdeck = lazy(() => import('@/components/mock2/Flightdeck'));
 import ConnectVsCode from '@/components/mock2/ConnectVsCode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
 import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectComponentsCard } from '@/components/mock2/ProjectTimeCard';
@@ -412,19 +416,21 @@ export default function ProjectDetail() {
                 // same harness; the design conversation is archived read-only in
                 // the Details tab.
                 buildView === 'flightdeck' ? (
-                  <Flightdeck
-                    projectId={id}
-                    project={project}
-                    canEdit={canEdit}
-                    isAdmin={isAdmin}
-                    previewSrc={previewSrc}
-                    provLog={provStatus?.progress?.log || null}
-                    provMessage={provStatus?.progress?.message || null}
-                    onChanged={load}
-                    onBuilt={handleMockupChanged}
-                    onSwitchView={() => setBuildView('classic')}
-                    onShowDetails={() => setTab('details')}
-                  />
+                  <Suspense fallback={<div className="flex items-center justify-center flex-1 min-h-0 py-16"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>}>
+                    <Flightdeck
+                      projectId={id}
+                      project={project}
+                      canEdit={canEdit}
+                      isAdmin={isAdmin}
+                      previewSrc={previewSrc}
+                      provLog={provStatus?.progress?.log || null}
+                      provMessage={provStatus?.progress?.message || null}
+                      onChanged={load}
+                      onBuilt={handleMockupChanged}
+                      onSwitchView={() => setBuildView('classic')}
+                      onShowDetails={() => setTab('details')}
+                    />
+                  </Suspense>
                 ) : (
                   <div className="space-y-2">
                     <div className="flex justify-end">

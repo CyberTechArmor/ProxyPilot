@@ -184,7 +184,7 @@ export async function adjustDesignPreset({ presetKey, instruction }) {
   if (!ready.ok) return { ok: false, error: ready.reason };
   const system = stepSystemPrompt('design-doc-adjust', DESIGN_DOC_ADJUST_SYSTEM_PROMPT, {});
   const user = `Current design "${preset.name}" (${preset.description || 'no description'}):\n${JSON.stringify(preset.tokens, null, 2)}\n\nAdjustment instruction: ${String(instruction || '').slice(0, 1000)}\n\nReturn the full adjusted token set as strict JSON.`;
-  const tuned = applyLaneTuning({ model: 'claude-opus-4-8', effort: 'high', thinking: null }, getLaneTuning('chat'));
+  const tuned = applyLaneTuning({ model: 'claude-opus-5', effort: 'high', thinking: null }, getLaneTuning('chat'));
   // Transcript turns use `text` (anthropicMessages reads turn.text — a
   // `content` key maps to an EMPTY text block, which the API rejects when the
   // cache breakpoint lands on it).
@@ -547,7 +547,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // maxTokens covers the reply + the generate_mockup tool call AND, on capable
   // models, adaptive thinking (routing turned it on; it shares the budget) —
   // sized up from the pre-thinking 4000 so the tool call can't be squeezed out.
-  const chatTuned = applyLaneTuning({ model: 'claude-opus-4-8', effort: 'high', thinking: null }, getLaneTuning('chat'));
+  const chatTuned = applyLaneTuning({ model: 'claude-opus-5', effort: 'high', thinking: null }, getLaneTuning('chat'));
   const chatRes = await callStepTurn('concept-chat', {
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: chatTuned.model,
     system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript,
@@ -1136,7 +1136,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // approval is a hard gate — ONE automatic retry on a parse failure before we
   // make the Builder redo it.
   const extractCall = () => callStepTurn('inventory-extraction', {
-    connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: 'claude-opus-4-8',
+    connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: 'claude-opus-5',
     system: stepSystemPrompt('inventory-extraction', buildInventoryExtractionPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: buildInventoryExtractionTask({ html, projectName: project.name }) }],
     effort: 'medium',
@@ -1195,7 +1195,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // so this never blocks approval.
   try {
     const tokRes = await callStepTurn('design-token-extraction', {
-      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: 'claude-opus-4-8',
+      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: 'claude-opus-5',
       system: stepSystemPrompt('design-token-extraction', buildDesignTokenExtractionPrompt(), {}), tools: [],
       transcript: [{ role: 'user', text: buildDesignTokenExtractionTask({ html, projectName: project.name }) }],
       effort: 'high',

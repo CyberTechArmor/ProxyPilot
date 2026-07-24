@@ -37,10 +37,10 @@ test('equivalentModel: Anthropic → OpenAI matches the spec tiers', () => {
 });
 
 test('equivalentModel: OpenAI → Anthropic (bidirectional); Sol resolves to the workhorse', () => {
-  assert.equal(equivalentModel('gpt-5.6-sol'), 'claude-opus-4-8');
+  assert.equal(equivalentModel('gpt-5.6-sol'), 'claude-opus-5');
   assert.equal(equivalentModel('gpt-5.6-terra'), 'claude-sonnet-5');
   assert.equal(equivalentModel('gpt-5.6-luna'), 'claude-haiku-4-5');
-  assert.equal(equivalentModel('gpt-5.3-codex'), 'claude-opus-4-8');
+  assert.equal(equivalentModel('gpt-5.3-codex'), 'claude-opus-5');
 });
 
 test('equivalentModel: targetProvider gates the direction', () => {
@@ -58,7 +58,7 @@ test('equivalentModel: cheap-utility and unmapped ids have no equivalent', () =>
 });
 
 test('map constants are consistent and cover the four aligned tiers', () => {
-  assert.equal(Object.keys(ANTHROPIC_TO_OPENAI).length, 4);
+  assert.equal(Object.keys(ANTHROPIC_TO_OPENAI).length, 5); // fable, opus-5, opus-4-8, sonnet-5, haiku
   assert.equal(Object.keys(OPENAI_TO_ANTHROPIC).length, 4);
   assert.deepEqual(OPENAI_CHEAP_UTILITY, ['gpt-5.4-mini', 'gpt-5.4-nano']);
   assert.equal(OPENAI_CODING_ALT, 'gpt-5.3-codex');

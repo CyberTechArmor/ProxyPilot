@@ -74,15 +74,15 @@ export function isValidSlot(slot) {
 // (tiny, judgment-dense, best price/quality). build_runner / remediation / everything
 // else stay on their current models. There is deliberately NO code path that routes
 // build or remediation to Fable 5 by default (see lanesRecommendingFable5 + its guard
-// test). Model ids are the latest Claude family (Opus 4.8 / Haiku 4.5 / Fable 5).
+// test). Model ids are the latest Claude family (Opus 5 / Haiku 4.5 / Fable 5).
 export const RECOMMENDED_MODEL_FOR_SLOT = Object.freeze({
-  concept_chat: 'claude-opus-4-8',
-  mockup: 'claude-opus-4-8',
+  concept_chat: 'claude-opus-5',
+  mockup: 'claude-opus-5',
   audit: 'claude-fable-5',       // ← the one deliberate Fable 5 lane
   classifier: 'claude-haiku-4-5',
-  build_runner: 'claude-opus-4-8',
+  build_runner: 'claude-opus-5',
   summary: 'claude-haiku-4-5',
-  remediation: 'claude-opus-4-8',
+  remediation: 'claude-opus-5',
 });
 
 export function recommendedModelForSlot(slot) {

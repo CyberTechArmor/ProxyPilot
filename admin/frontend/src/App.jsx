@@ -29,6 +29,7 @@ import HarnessGuide from '@/pages/HarnessGuide';
 import Notifications from '@/pages/Notifications';
 import AddDomain from '@/pages/AddDomain';
 import DomainProvisioning from '@/pages/DomainProvisioning';
+import TlsCertificates from '@/pages/TlsCertificates';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
@@ -105,6 +106,7 @@ function App() {
         <Route path="lean-beaf/connections" element={<LbpConnections />} />
         <Route path="lean-beaf/:id" element={<LbpProjectDetail />} />
         <Route path="domains" element={<DomainProvisioning />} />
+        <Route path="tls-certificates" element={<TlsCertificates />} />
         {/* Admin-gated: the page renders inside the dashboard shell and the
             backend requires an admin session (or a provisioning API key for
             scripted clients) on every /api/domains/provision request. */}

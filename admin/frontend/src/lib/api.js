@@ -1810,6 +1810,19 @@ export const api = {
   domainCloudflarePluginInstall: () =>
     request('/domains/admin/cloudflare-plugin/install', { method: 'POST' }),
 
+  // ---- Manual (pasted) TLS certificates (/api/tls-certs) ----
+  // The private key is WRITE-ONLY: it is sent on add/rotate but the server
+  // never returns it (list/detail are metadata + public cert PEM only).
+  tlsCerts: () => request('/tls-certs'),
+  tlsCert: (id) => request(`/tls-certs/${id}`),
+  tlsCertAdd: (data) =>
+    request('/tls-certs', { method: 'POST', body: JSON.stringify(data) }),
+  tlsCertUpdate: (id, data) =>
+    request(`/tls-certs/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  tlsCertDelete: (id) => request(`/tls-certs/${id}`, { method: 'DELETE' }),
+  tlsModeSet: (mode) =>
+    request('/tls-certs/tls-mode', { method: 'PUT', body: JSON.stringify({ mode }) }),
+
   // ---- Lean BEAF Pro (/api/lbp) — team-shared innovation projects ----
 
   lbpUsers: () => request('/lbp/users'),

@@ -31,6 +31,7 @@ import { autoHealVpnListenPort } from './lib/vpn-startup.js';
 import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
 import { hydrate as hydrateCveResearch } from './lib/cve-research-scheduler.js';
+import { hydrate as hydrateCertExpiry } from './lib/cert-expiry-scheduler.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer, setMock2TerminalAuthorizer } from './routes/terminal-ws.js';
 import { decryptSecret } from './lib/secrets.js';
@@ -705,6 +706,13 @@ server.listen(PORT, '0.0.0.0', () => {
       hydrateCveResearch();
     } catch (err) {
       console.error('[cve-research-scheduler] hydrate threw:', err.message || err);
+    }
+    try {
+      // Manual (pasted) TLS cert expiry monitor — a daily check that flags
+      // pasted certs nearing expiry (they do not auto-renew like ACME certs).
+      hydrateCertExpiry();
+    } catch (err) {
+      console.error('[cert-expiry] hydrate threw:', err.message || err);
     }
   });
 });

@@ -111,9 +111,10 @@ export default function Flightdeck({
   // Quick update. Goes straight through the cycle API (skipping split/suggest,
   // like the screenshot annotate path); the poll above then surfaces the new
   // cycle in the chat. Gated to editors on an online project.
-  const annotatePreview = useCallback(async ({ text }) => {
+  const annotatePreview = useCallback(async ({ text, image }) => {
     if (!canEdit || !online) return;
-    await api.mock2StartCycle(projectId, text, [], 'quick', { skipSplit: true, skipSuggest: true });
+    const images = image ? [image] : [];
+    await api.mock2StartCycle(projectId, text, images, 'quick', { skipSplit: true, skipSuggest: true });
     load();
   }, [projectId, canEdit, online, load]);
 

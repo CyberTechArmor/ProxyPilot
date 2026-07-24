@@ -152,3 +152,18 @@ test('installed-components prompt carries the binding wired-auth rules', () => {
   const plain = buildInstalledComponentsSection([{ key: 'x', name: 'X', version: 1, contract: { exports: ['a'] } }]);
   assert.ok(!plain.includes('Auth is WIRED'));
 });
+
+test('scaffold ships the annotate bridge and the app shell references it', () => {
+  const files = buildScaffoldFiles({ name: 'Notes' });
+  const bridge = files.find((f) => f.path === 'public/pp-annotate-bridge.js');
+  assert.ok(bridge, 'public/pp-annotate-bridge.js must be in the scaffold');
+  // The bridge speaks the host protocol and is inert unless framed.
+  assert.match(bridge.content, /__pp:\s*'annotate-bridge'/);
+  assert.match(bridge.content, /annotate-host/);
+  assert.match(bridge.content, /window\.self === window\.top/); // inert when not embedded
+  assert.match(bridge.content, /elementFromPoint/);
+  // The authenticated shell loads the bridge so pins resolve on the live app.
+  const shell = files.find((f) => f.path === 'public/app-shell.html');
+  assert.ok(shell, 'app-shell.html present');
+  assert.match(shell.content, /pp-annotate-bridge\.js/);
+});

@@ -4,6 +4,7 @@
 // Haiku for cheap low-risk stages. Prices are the published base input/output
 // rate per million tokens (used only for the in-menu hint).
 export const MODEL_OPTIONS = [
+  { id: 'claude-opus-5', label: 'Claude Opus 5', tier: 'Highest effort — frontier thinking, coding, agentic', inPerM: 5, outPerM: 25 },
   { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', tier: 'High effort — thinking, coding, agentic', inPerM: 5, outPerM: 25 },
   { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', tier: 'Fast code model — near-Opus coding at Sonnet cost', inPerM: 3, outPerM: 15 },
   { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', tier: 'Balanced — quality at lower cost', inPerM: 3, outPerM: 15 },
@@ -18,14 +19,14 @@ export const SLOT_SUGGESTED_MODEL = {
   mockup: 'claude-sonnet-4-6',
   audit: 'claude-sonnet-4-6',
   classifier: 'claude-haiku-4-6',
-  build_runner: 'claude-opus-4-8',
+  build_runner: 'claude-opus-5',
   summary: 'claude-haiku-4-6',
-  remediation: 'claude-opus-4-8',
+  remediation: 'claude-opus-5',
 };
 
 // The recommended escalation model for routing rules: after a failed/blocked
 // attempt (or a difficulty-5 task) step up to the strongest coding model.
-export const RECOMMENDED_ESCALATE_MODEL = 'claude-opus-4-8';
+export const RECOMMENDED_ESCALATE_MODEL = 'claude-opus-5';
 
 export const modelLabel = (id) => MODEL_OPTIONS.find((m) => m.id === id)?.label || id;
 

@@ -99,7 +99,7 @@ export function anthropicTuning({ model, effort = null, thinking = null } = {}) 
 // model's real ceiling 400s the request.
 export function modelMaxOutputTokens(model) {
   const id = String(model || '');
-  if (/(opus-4-8|sonnet-5)/.test(id)) return 128000;
+  if (/(opus-5|opus-4-8|sonnet-5)/.test(id)) return 128000;
   return 64000;
 }
 

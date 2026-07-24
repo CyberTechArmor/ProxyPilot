@@ -47,7 +47,8 @@ export function costCentsForUsage(
 // (…-20260101) or an alias still resolves. Anthropic has no pricing API, so these
 // are the documented rates; edit here (or set a price row) when they change.
 export const DEFAULT_MODEL_PRICES = Object.freeze([
-  // Anthropic (docs.anthropic.com pricing). Opus 4.5–4.8 share a rate; 4/4.1 are pricier.
+  // Anthropic (docs.anthropic.com pricing). Opus 5 and Opus 4.5–4.8 share a rate; 4/4.1 are pricier.
+  { match: /opus-5\b/, input: 500, output: 2500 },
   { match: /opus-4-(5|6|7|8)\b/, input: 500, output: 2500 },
   { match: /opus-4(-1)?\b/, input: 1500, output: 7500 },
   { match: /sonnet-(5|4-6|4-5|4)\b/, input: 300, output: 1500 },

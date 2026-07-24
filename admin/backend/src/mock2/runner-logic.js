@@ -1044,7 +1044,7 @@ export function resolveClaudeAuth({ provider = null, hasConnectorKey = false, ha
 // running on the server-env ANTHROPIC_API_KEY with a non-Anthropic slot — the
 // slot's model belongs to another provider and can't be sent to the SDK, so
 // fall back to CLAUDE_HARNESS_MODEL (env) or the pinned default.
-export const CLAUDE_HARNESS_FALLBACK_MODEL = 'claude-opus-4-8';
+export const CLAUDE_HARNESS_FALLBACK_MODEL = 'claude-opus-5';
 export function claudeHarnessModel({ provider = null, slotModel = null, env = {} } = {}) {
   if (String(provider || '').trim().toLowerCase() === 'anthropic' && slotModel) return slotModel;
   return String(env.CLAUDE_HARNESS_MODEL || '').trim() || CLAUDE_HARNESS_FALLBACK_MODEL;

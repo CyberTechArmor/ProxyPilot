@@ -50,21 +50,22 @@ export function providerOfModel(model) {
 // straight tier swap never silently downgrades reasoning to a coding specialist.
 export const ANTHROPIC_TO_OPENAI = Object.freeze({
   'claude-fable-5': 'gpt-5.6-sol',
+  'claude-opus-5': 'gpt-5.6-sol',
   'claude-opus-4-8': 'gpt-5.6-sol',
   'claude-sonnet-5': 'gpt-5.6-terra',
   'claude-haiku-4-5': 'gpt-5.6-luna',
 });
 
 // OpenAI (normalized id) → Anthropic equivalent (the real, provider-usable id).
-// Sol has two Anthropic sources; its reverse resolves to Opus 4.8 — the
+// Sol has multiple Anthropic sources; its reverse resolves to Opus 5 — the
 // high-capability workhorse — not Fable 5, so a round-trip lands on the everyday
 // tier rather than the most expensive one. 5.3-Codex (a coding specialist) maps
-// back to Opus 4.8 as its nearest high-capability Claude.
+// back to Opus 5 as its nearest high-capability Claude.
 export const OPENAI_TO_ANTHROPIC = Object.freeze({
-  'gpt-5-6-sol': 'claude-opus-4-8',
+  'gpt-5-6-sol': 'claude-opus-5',
   'gpt-5-6-terra': 'claude-sonnet-5',
   'gpt-5-6-luna': 'claude-haiku-4-5',
-  'gpt-5-3-codex': 'claude-opus-4-8',
+  'gpt-5-3-codex': 'claude-opus-5',
 });
 
 // The cost-down coding alternative for the Opus/Sol tier: cheaper per token with
@@ -102,7 +103,7 @@ export function equivalentModel(model, targetProvider = null) {
 // mini/nano appear with anthropic:null (no equivalent).
 export const MODEL_EQUIVALENCE_TABLE = Object.freeze([
   { tier: 'frontier', anthropic: 'claude-fable-5', openai: 'gpt-5.6-sol', note: 'top capability, hardest long-running coding' },
-  { tier: 'high', anthropic: 'claude-opus-4-8', openai: 'gpt-5.6-sol', note: 'high-capability workhorse (coding cost-down: gpt-5.3-codex)' },
+  { tier: 'high', anthropic: 'claude-opus-5', openai: 'gpt-5.6-sol', note: 'high-capability workhorse (coding cost-down: gpt-5.3-codex)' },
   { tier: 'balanced', anthropic: 'claude-sonnet-5', openai: 'gpt-5.6-terra', note: 'balanced production / agent default' },
   { tier: 'fast', anthropic: 'claude-haiku-4-5', openai: 'gpt-5.6-luna', note: 'fast, low-cost, quick edits / routing' },
   { tier: 'utility', anthropic: null, openai: 'gpt-5.4-mini', note: 'cheap utility, below the Haiku floor' },

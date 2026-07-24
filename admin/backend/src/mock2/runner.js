@@ -290,7 +290,7 @@ export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 
   const ready = buildRunnerReady();
   if (!ready.ok) return null;
   const call = callStepTurn('chat-distill', {
-    connector: ready.connector, apiKey: ready.apiKey, model: 'claude-opus-4-8',
+    connector: ready.connector, apiKey: ready.apiKey, model: 'claude-opus-5',
     system: stepSystemPrompt('chat-distill', buildDistillSystemPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: buildDistillUserTurn({ body, precedingUser }) }],
     timeoutMs: 120000, effort: 'high', thinking: 'off',

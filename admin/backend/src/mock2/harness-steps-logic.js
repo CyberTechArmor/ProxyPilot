@@ -28,7 +28,7 @@ export const HARNESS_STEPS = Object.freeze([
     description: 'Design-partner conversation; expands asks into domain-expert briefs; picks tweak/screen/full scope via the generate_mockup tool.',
     intendedOutcome: 'A brief that is the design’s ceiling; the cheapest scope that truly fits.',
     slotKey: 'concept_chat', laneKey: 'chat', envModelVar: null, envEffortVar: null,
-    defaults: { model: 'claude-opus-4-8', effort: 'high', thinking: 'adaptive', budgetNote: 'uncapped (model max)' }, tunable: true,
+    defaults: { model: 'claude-opus-5', effort: 'high', thinking: 'adaptive', budgetNote: 'uncapped (model max)' }, tunable: true,
   },
   {
     id: 'mockup-render', stage: 'Concept', title: 'Mockup render — full',
@@ -63,21 +63,21 @@ export const HARNESS_STEPS = Object.freeze([
     description: 'Proposes a sanitized design-token JSON for a preset adjustment; strict grammar re-validation means it cannot inject CSS.',
     intendedOutcome: 'A valid proxypilot-design@1 proposal for operator review.',
     slotKey: 'concept_chat', laneKey: 'chat', envModelVar: null, envEffortVar: null,
-    defaults: { model: 'claude-opus-4-8', effort: 'high', thinking: 'adaptive', budgetNote: 'uncapped (model max)' }, tunable: true,
+    defaults: { model: 'claude-opus-5', effort: 'high', thinking: 'adaptive', budgetNote: 'uncapped (model max)' }, tunable: true,
   },
   {
     id: 'inventory-extraction', stage: 'Concept', title: 'Inventory extraction',
     description: 'Mockup HTML → structured inventory (screens, fields, actions incl. mutation coverage, states + default_state, journeys); deterministic CRUD completion and lint follow.',
     intendedOutcome: 'The build contract: complete CRUD, variants folded, defaults explicit.',
     slotKey: 'concept_chat', laneKey: null, envModelVar: null, envEffortVar: null,
-    defaults: { model: 'claude-opus-4-8', effort: 'medium', thinking: 'off', budgetNote: 'uncapped (model max), 1 retry' }, tunable: true,
+    defaults: { model: 'claude-opus-5', effort: 'medium', thinking: 'off', budgetNote: 'uncapped (model max), 1 retry' }, tunable: true,
   },
   {
     id: 'design-token-extraction', stage: 'Concept', title: 'Design-token extraction',
     description: 'Mockup → state/design-tokens.json + rendered design.css; parser never fails (invalid values fall back to defaults).',
     intendedOutcome: 'The approved LOOK carried into the build.',
     slotKey: 'concept_chat', laneKey: null, envModelVar: null, envEffortVar: null,
-    defaults: { model: 'claude-opus-4-8', effort: 'high', thinking: 'off', budgetNote: 'uncapped (model max)' }, tunable: true,
+    defaults: { model: 'claude-opus-5', effort: 'high', thinking: 'off', budgetNote: 'uncapped (model max)' }, tunable: true,
   },
   {
     id: 'rule-audit', stage: 'Define', title: 'Rule audit / interview',
@@ -105,7 +105,7 @@ export const HARNESS_STEPS = Object.freeze([
     description: 'Converts a chat message into one well-formed quick-update instruction (preserve every deliverable, invent nothing).',
     intendedOutcome: 'One tap from conversation to build.',
     slotKey: null, laneKey: null, envModelVar: null, envEffortVar: null,
-    defaults: { model: 'claude-opus-4-8', effort: 'high', thinking: 'off', budgetNote: 'uncapped (model max), 60s race' }, tunable: true,
+    defaults: { model: 'claude-opus-5', effort: 'high', thinking: 'off', budgetNote: 'uncapped (model max), 60s race' }, tunable: true,
   },
   {
     id: 'build-runner', stage: 'Build', title: 'Build runner loop',

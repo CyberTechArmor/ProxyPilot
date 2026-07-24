@@ -44,7 +44,8 @@ const SETTING_KEYS = Object.freeze({
 export const LBP_BRIEF_MODEL_CHOICES = Object.freeze([
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5 — cheap & fast (recommended)' },
   { id: 'claude-sonnet-5', label: 'Sonnet 5 — balanced' },
-  { id: 'claude-opus-4-8', label: 'Opus 4.8 — most capable' },
+  { id: 'claude-opus-5', label: 'Opus 5 — most capable' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8 — most capable (previous)' },
 ]);
 
 // ---- settings (admin-configurable) ----

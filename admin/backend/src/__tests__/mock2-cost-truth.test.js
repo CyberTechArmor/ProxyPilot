@@ -156,10 +156,18 @@ test('projectEstimateAccuracy: rolling est-vs-actual read', () => {
 
 // ---- Part 5.1: tiered routing — Fable 5 in exactly one lane ----
 
+test('Opus 5 is the high-lane default and prices at the high Anthropic tier', () => {
+  // The recommended default moved from Opus 4.8 to Opus 5; both price the same
+  // (high Anthropic tier), so a straight swap never changes cost.
+  assert.deepEqual(priceForModel('claude-opus-5'), priceForModel('claude-opus-4-8'));
+  assert.equal(priceForModel('claude-opus-5').input_cents_per_mtok, 500);
+  assert.equal(priceForModel('claude-opus-5').output_cents_per_mtok, 2500);
+});
+
 test('routing: audit recommends Fable 5; every other lane does NOT (guard)', () => {
   assert.equal(recommendedModelForSlot('audit'), 'claude-fable-5');
-  assert.equal(recommendedModelForSlot('build_runner'), 'claude-opus-4-8');
-  assert.equal(recommendedModelForSlot('remediation'), 'claude-opus-4-8');
+  assert.equal(recommendedModelForSlot('build_runner'), 'claude-opus-5');
+  assert.equal(recommendedModelForSlot('remediation'), 'claude-opus-5');
   // THE guard: exactly one lane routes to Fable 5, and it is audit. A change that
   // defaulted build/remediation onto Fable 5 fails right here.
   assert.deepEqual(lanesRecommendingFable5(), ['audit']);

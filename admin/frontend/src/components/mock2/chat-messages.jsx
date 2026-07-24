@@ -12,7 +12,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Loader2, CheckCircle2, HelpCircle, Zap } from 'lucide-react';
+import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle } from 'lucide-react';
 import ExplainThis from './ExplainThis';
 import Markdown from './Markdown';
 import { chatImageUrl } from '@/lib/chat-images';
@@ -250,10 +250,52 @@ export function StreamingBubble({ text }) {
   );
 }
 
+// Live build activity — the "what's being worked on" stream (VS Code / Claude
+// Code style): the model's narration interleaved with the file operations it
+// runs, each with a file chip and +adds/-dels. Fed from the cycle poll's
+// `activity` (backend derives it from the cycle event log).
+const ACTIVITY_ICON = { Edit: Pencil, MultiEdit: Pencil, Write: FilePlus2, Read: BookOpen, Bash: TerminalSquare, Grep: Search, Glob: Search };
+const ACTIVITY_VERB = { Edit: 'Edited', MultiEdit: 'Edited', Write: 'Wrote', Read: 'Read', Bash: 'Ran', Grep: 'Searched', Glob: 'Searched' };
+
+function ActivityRow({ it }) {
+  const Icon = ACTIVITY_ICON[it.tool] || Circle;
+  const verb = ACTIVITY_VERB[it.tool] || it.tool;
+  return (
+    <div className="flex items-center gap-1.5 text-xs">
+      <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+      <span className="shrink-0 text-muted-foreground">{verb}</span>
+      {it.file ? (
+        <span className="inline-flex min-w-0 items-center rounded border bg-background px-1.5 py-0.5 font-mono text-[11px] truncate" title={it.path || it.file}>{it.file}</span>
+      ) : null}
+      {it.detail ? <span className="truncate text-muted-foreground">{it.detail}</span> : null}
+      {typeof it.adds === 'number' && it.adds > 0 ? <span className="shrink-0 font-mono text-[11px] text-emerald-500">+{it.adds}</span> : null}
+      {typeof it.dels === 'number' && it.dels > 0 ? <span className="shrink-0 font-mono text-[11px] text-red-500">-{it.dels}</span> : null}
+    </div>
+  );
+}
+
+function ActivityStream({ items = [], working = false }) {
+  if (!items.length && !working) return null;
+  return (
+    <div className="space-y-1 rounded-lg border bg-muted/20 p-2">
+      {items.map((it, i) => (
+        it.type === 'message'
+          ? <p key={`m${it.seq ?? i}`} className="whitespace-pre-wrap break-words px-0.5 py-0.5 text-xs text-foreground/80">{it.text}</p>
+          : <ActivityRow key={`t${it.seq ?? i}`} it={it} />
+      ))}
+      {working ? (
+        <div className="flex items-center gap-2 px-0.5 pt-0.5 text-[11px] text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" /> Working…
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ChatMessageList({
   scrollRef, messages = [], openIds, canEdit, answering, onAnswer,
   working = false, workingLabel = 'Working…', emptyLabel, projectId = null,
-  partialText = null, onQuickUpdate = null, quickBusyId = null,
+  partialText = null, onQuickUpdate = null, quickBusyId = null, activity = [],
 }) {
   const open = openIds instanceof Set ? openIds : new Set(openIds || []);
   return (
@@ -279,10 +321,15 @@ export function ChatMessageList({
       )}
       {working && partialText ? <StreamingBubble text={partialText} /> : null}
       {working && !partialText ? (
-        <div data-scroll-skip className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          {workingLabel}
-        </div>
+        activity.length ? (
+          // Rich "what's being worked on" stream (file ops + narration).
+          <ActivityStream items={activity} working />
+        ) : (
+          <div data-scroll-skip className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {workingLabel}
+          </div>
+        )
       ) : null}
     </div>
   );

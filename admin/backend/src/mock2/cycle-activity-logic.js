@@ -19,10 +19,34 @@ export function lineCount(s) {
   return str ? str.split('\n').length : 0;
 }
 
+// Canonical actions — so every harness's tool vocabulary (Claude SDK's
+// Read/Edit/Write/Bash/Grep, the Copilot/ProxyPilot harness's read_file/
+// write_file/list_dir/run_terminal/search_workspace, …) collapses to one small
+// set the UI can give a consistent icon + verb. `match` is lowercased tool names.
+const TOOL_ACTIONS = [
+  ['read', 'Read', ['read', 'read_file', 'view', 'open_file', 'cat', 'cat_file']],
+  ['edit', 'Edited', ['edit', 'multiedit', 'edit_file', 'apply_patch', 'str_replace', 'str_replace_editor', 'patch']],
+  ['write', 'Wrote', ['write', 'write_file', 'save_file']],
+  ['create', 'Created', ['create_file', 'create', 'new_file', 'touch']],
+  ['delete', 'Deleted', ['delete_file', 'delete', 'rm', 'remove_file']],
+  ['search', 'Searched', ['grep', 'glob', 'search', 'search_workspace', 'grep_search', 'file_search', 'ripgrep']],
+  ['run', 'Ran', ['bash', 'run_terminal', 'exec', 'shell', 'run', 'run_gates', 'run_command']],
+  ['list', 'Listed', ['list_dir', 'ls', 'list', 'readdir']],
+  ['check', 'Checked', ['get_diagnostics', 'diagnostics', 'lint', 'typecheck']],
+];
+function classify(tool) {
+  const t = String(tool || '').toLowerCase();
+  for (const [action, verb, names] of TOOL_ACTIONS) if (names.includes(t)) return { action, verb };
+  // Fallback: a readable verb from the raw tool name (snake/camel → Title Case).
+  const verb = t.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^\w/, (c) => c.toUpperCase()) || 'Tool';
+  return { action: 'other', verb };
+}
+
 // deriveActivityItem — one shaped-event → one compact activity row (or null for
 // kinds the live stream doesn't surface: gate/checkpoint/deploy/task/note). PURE;
 // diff counts come from the tool input, and the bulky old/new strings are dropped
-// so the poll payload stays small.
+// so the poll payload stays small. `action` is the canonical kind the UI styles;
+// `tool` keeps the raw name.
 export function deriveActivityItem(ev) {
   if (!ev) return null;
   const base = { seq: ev.seq, at: ev.created_at };
@@ -33,28 +57,30 @@ export function deriveActivityItem(ev) {
   if (ev.kind !== 'tool_call') return null;
   const name = (ev.meta && ev.meta.name) || 'tool';
   const input = (ev.meta && ev.meta.input) || {};
-  const file = input.file_path || input.path || input.notebook_path || null;
+  const { action, verb } = classify(name);
+  const file = input.file_path || input.path || input.notebook_path || input.filename || null;
   let detail = null; let adds = null; let dels = null;
-  switch (name) {
-    case 'Read':
-      if (input.offset != null) {
-        const start = Number(input.offset) || 0;
-        detail = input.limit != null ? `lines ${start}–${start + Number(input.limit)}` : `from line ${start}`;
-      }
-      break;
-    case 'Edit': adds = lineCount(input.new_string); dels = lineCount(input.old_string); break;
-    case 'MultiEdit': {
-      const edits = Array.isArray(input.edits) ? input.edits : [];
-      adds = edits.reduce((n, e) => n + lineCount(e.new_string), 0);
-      dels = edits.reduce((n, e) => n + lineCount(e.old_string), 0);
-      break;
+  if (action === 'read') {
+    if (input.offset != null) {
+      const start = Number(input.offset) || 0;
+      detail = input.limit != null ? `lines ${start}–${start + Number(input.limit)}` : `from line ${start}`;
     }
-    case 'Write': adds = lineCount(input.content); break;
-    case 'Bash': detail = String(input.command || '').replace(/\s+/g, ' ').slice(0, 80); break;
-    case 'Grep': case 'Glob': detail = input.pattern ? `"${String(input.pattern).slice(0, 60)}"` : null; break;
-    default: break;
+  } else if (action === 'edit') {
+    if (Array.isArray(input.edits)) {
+      adds = input.edits.reduce((n, e) => n + lineCount(e.new_string), 0);
+      dels = input.edits.reduce((n, e) => n + lineCount(e.old_string), 0);
+    } else if (input.new_string != null || input.old_string != null) {
+      adds = lineCount(input.new_string); dels = lineCount(input.old_string);
+    }
+  } else if (action === 'write' || action === 'create') {
+    if (input.content != null) adds = lineCount(input.content);
+  } else if (action === 'run') {
+    detail = String(input.command || input.cmd || '').replace(/\s+/g, ' ').slice(0, 80) || null;
+  } else if (action === 'search') {
+    const q = input.query || input.pattern || input.q;
+    detail = q ? `"${String(q).slice(0, 60)}"` : null;
   }
-  return { ...base, type: 'tool', tool: name, file: basenameOf(file), path: file || null, detail, adds, dels };
+  return { ...base, type: 'tool', tool: name, action, verb, file: basenameOf(file), path: file || null, detail, adds, dels };
 }
 
 // Trim a chronological event list to the last `limit` surfaced rows.

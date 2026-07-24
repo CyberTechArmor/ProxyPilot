@@ -12,7 +12,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle } from 'lucide-react';
+import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle, Trash2, FolderOpen, Activity } from 'lucide-react';
 import ExplainThis from './ExplainThis';
 import Markdown from './Markdown';
 import { chatImageUrl } from '@/lib/chat-images';
@@ -252,42 +252,90 @@ export function StreamingBubble({ text }) {
 
 // Live build activity — the "what's being worked on" stream (VS Code / Claude
 // Code style): the model's narration interleaved with the file operations it
-// runs, each with a file chip and +adds/-dels. Fed from the cycle poll's
-// `activity` (backend derives it from the cycle event log).
-const ACTIVITY_ICON = { Edit: Pencil, MultiEdit: Pencil, Write: FilePlus2, Read: BookOpen, Bash: TerminalSquare, Grep: Search, Glob: Search };
-const ACTIVITY_VERB = { Edit: 'Edited', MultiEdit: 'Edited', Write: 'Wrote', Read: 'Read', Bash: 'Ran', Grep: 'Searched', Glob: 'Searched' };
+// runs, rendered as a timeline with a coloured action glyph, a file chip and
+// +adds/-dels. Fed from the cycle poll's `activity` (backend normalises every
+// harness's tool vocabulary to a canonical `action`).
+const ACTION_META = {
+  read: { Icon: BookOpen, cls: 'text-sky-500', ring: 'ring-sky-500/30' },
+  edit: { Icon: Pencil, cls: 'text-amber-500', ring: 'ring-amber-500/30' },
+  write: { Icon: FilePlus2, cls: 'text-emerald-500', ring: 'ring-emerald-500/30' },
+  create: { Icon: FilePlus2, cls: 'text-emerald-500', ring: 'ring-emerald-500/30' },
+  delete: { Icon: Trash2, cls: 'text-red-500', ring: 'ring-red-500/30' },
+  search: { Icon: Search, cls: 'text-violet-500', ring: 'ring-violet-500/30' },
+  run: { Icon: TerminalSquare, cls: 'text-slate-400', ring: 'ring-slate-400/30' },
+  list: { Icon: FolderOpen, cls: 'text-cyan-500', ring: 'ring-cyan-500/30' },
+  check: { Icon: Activity, cls: 'text-teal-500', ring: 'ring-teal-500/30' },
+  other: { Icon: Circle, cls: 'text-muted-foreground', ring: 'ring-border' },
+};
+
+// One timeline cell (the coloured glyph on the rail). The rail is the cell's
+// own absolute vertical line, so consecutive cells join into a continuous
+// thread without any pixel-offset math.
+function Rail({ children }) {
+  return (
+    <span className="relative flex w-5 shrink-0 justify-center">
+      <span className="absolute inset-y-0 w-px bg-border" aria-hidden />
+      {children}
+    </span>
+  );
+}
 
 function ActivityRow({ it }) {
-  const Icon = ACTIVITY_ICON[it.tool] || Circle;
-  const verb = ACTIVITY_VERB[it.tool] || it.tool;
+  const meta = ACTION_META[it.action] || ACTION_META.other;
+  const { Icon } = meta;
   return (
-    <div className="flex items-center gap-1.5 text-xs">
-      <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-      <span className="shrink-0 text-muted-foreground">{verb}</span>
-      {it.file ? (
-        <span className="inline-flex min-w-0 items-center rounded border bg-background px-1.5 py-0.5 font-mono text-[11px] truncate" title={it.path || it.file}>{it.file}</span>
-      ) : null}
-      {it.detail ? <span className="truncate text-muted-foreground">{it.detail}</span> : null}
-      {typeof it.adds === 'number' && it.adds > 0 ? <span className="shrink-0 font-mono text-[11px] text-emerald-500">+{it.adds}</span> : null}
-      {typeof it.dels === 'number' && it.dels > 0 ? <span className="shrink-0 font-mono text-[11px] text-red-500">-{it.dels}</span> : null}
-    </div>
+    <li className="flex gap-2">
+      <Rail>
+        <span className={`relative z-10 mt-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-background ring-1 ${meta.ring}`}>
+          <Icon className={`h-3 w-3 ${meta.cls}`} />
+        </span>
+      </Rail>
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-0.5 pt-1 text-xs">
+        <span className="shrink-0 font-medium text-foreground/70">{it.verb}</span>
+        {it.file ? (
+          <span className="inline-flex min-w-0 max-w-full items-center rounded-md border bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-foreground/90 truncate" title={it.path || it.file}>{it.file}</span>
+        ) : null}
+        {it.detail ? <span className="min-w-0 truncate text-muted-foreground">{it.detail}</span> : null}
+        {typeof it.adds === 'number' && it.adds > 0 ? <span className="shrink-0 font-mono text-[11px] font-medium text-emerald-500">+{it.adds}</span> : null}
+        {typeof it.dels === 'number' && it.dels > 0 ? <span className="shrink-0 font-mono text-[11px] font-medium text-red-500">−{it.dels}</span> : null}
+      </div>
+    </li>
+  );
+}
+
+function ActivityMessage({ text }) {
+  return (
+    <li className="flex gap-2">
+      <Rail />
+      <p className="min-w-0 flex-1 whitespace-pre-wrap break-words py-0.5 text-xs leading-relaxed text-foreground/80">{text}</p>
+    </li>
   );
 }
 
 function ActivityStream({ items = [], working = false }) {
   if (!items.length && !working) return null;
   return (
-    <div className="space-y-1 rounded-lg border bg-muted/20 p-2">
-      {items.map((it, i) => (
-        it.type === 'message'
-          ? <p key={`m${it.seq ?? i}`} className="whitespace-pre-wrap break-words px-0.5 py-0.5 text-xs text-foreground/80">{it.text}</p>
-          : <ActivityRow key={`t${it.seq ?? i}`} it={it} />
-      ))}
-      {working ? (
-        <div className="flex items-center gap-2 px-0.5 pt-0.5 text-[11px] text-muted-foreground">
-          <Loader2 className="h-3 w-3 animate-spin" /> Working…
-        </div>
-      ) : null}
+    <div className="overflow-hidden rounded-xl border bg-gradient-to-b from-muted/40 to-muted/10">
+      <div className="flex items-center gap-1.5 border-b bg-muted/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin text-primary" /> Working
+      </div>
+      <ol className="m-0 list-none space-y-0.5 p-2">
+        {items.map((it, i) => (
+          it.type === 'message'
+            ? <ActivityMessage key={`m${it.seq ?? i}`} text={it.text} />
+            : <ActivityRow key={`t${it.seq ?? i}`} it={it} />
+        ))}
+        {working ? (
+          <li className="flex gap-2">
+            <Rail>
+              <span className="relative z-10 mt-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-background ring-1 ring-primary/40">
+                <Loader2 className="h-3 w-3 animate-spin text-primary" />
+              </span>
+            </Rail>
+            <span className="pt-1 text-xs text-muted-foreground">Working…</span>
+          </li>
+        ) : null}
+      </ol>
     </div>
   );
 }

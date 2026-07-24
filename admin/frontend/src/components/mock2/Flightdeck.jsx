@@ -9,7 +9,7 @@ import { WORKSPACE_NAME, flightdeckLayoutKey, readJsonPref, writeJsonPref } from
 import { Button } from '@/components/ui/button';
 import {
   Files, TerminalSquare, MessagesSquare, Code2, Eye, LayoutPanelLeft,
-  PanelLeftClose, PanelRightClose, StopCircle, Rows3,
+  PanelLeftClose, PanelRightClose, StopCircle, PanelBottom,
 } from 'lucide-react';
 
 // Flightdeck — the build-phase IDE workspace. It does NOT rebuild the agent: the
@@ -146,7 +146,7 @@ export default function Flightdeck({
               <button onClick={() => setCenterTab('preview')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'preview' ? 'bg-background border' : 'text-muted-foreground'}`}><Eye className="h-3.5 w-3.5 inline mr-1" />Preview</button>
               <div className="flex-1" />
               <button onClick={() => setL({ showLeft: !layout.showLeft })} title="Toggle Explorer" className="p-1 rounded hover:bg-muted"><PanelLeftClose className="h-3.5 w-3.5" /></button>
-              <button onClick={() => setL({ showBottom: !layout.showBottom })} title="Toggle Terminal" className="p-1 rounded hover:bg-muted"><Rows3 className="h-3.5 w-3.5" /></button>
+              <button onClick={() => setL({ showBottom: !layout.showBottom })} title="Toggle Terminal" className="p-1 rounded hover:bg-muted"><PanelBottom className="h-3.5 w-3.5" /></button>
               <button onClick={() => setL({ showRight: !layout.showRight })} title="Toggle Chat" className="p-1 rounded hover:bg-muted"><PanelRightClose className="h-3.5 w-3.5" /></button>
             </div>
             <div className="flex-1 min-h-0">{centerTab === 'editor' ? editorPane : previewPane}</div>

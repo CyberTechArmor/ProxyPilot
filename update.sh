@@ -387,6 +387,53 @@ retrofit_smoke_browser() {
     esac
 }
 
+# retrofit_admin_tls_snippet: migrate manual-TLS installs from an inline
+# `tls internal` on the admin site to importing the backend-owned snippet
+# (/etc/caddy/pp-admin-tls.caddy). This lets the backend flip the admin ORIGIN
+# onto a pasted/seeded cert that covers the admin domain — required for
+# Cloudflare "Full (strict)" origin pulls. Idempotent, best-effort: skipped
+# unless the site still has the inline directive and no import yet.
+retrofit_admin_tls_snippet() {
+    local deployed; deployed="$(resolve_env_path)"
+    [ -n "$deployed" ] || return 0
+
+    local tls_mode domain
+    tls_mode="$(grep -E '^[[:space:]]*TLS_MODE=' "$deployed" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]')"
+    [ "$tls_mode" = "manual" ] || return 0
+    domain="$(grep -E '^[[:space:]]*DOMAIN=' "$deployed" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]')"
+    [ -n "$domain" ] || return 0
+
+    local site="/etc/caddy/sites/${domain}"
+    [ -f "$site" ] || return 0
+    # Already migrated (imports the snippet) — nothing to do.
+    grep -qF 'import /etc/caddy/pp-admin-tls.caddy' "$site" && return 0
+    # No inline `tls internal` to migrate (e.g. an ACME-era file) — leave it.
+    grep -qE '^[[:space:]]*tls[[:space:]]+internal[[:space:]]*$' "$site" || return 0
+
+    # Seed the default snippet only if absent, so we never clobber a
+    # backend-written `tls <cert> <key>` directive.
+    if [ ! -f /etc/caddy/pp-admin-tls.caddy ]; then
+        printf '    tls internal\n' > /etc/caddy/pp-admin-tls.caddy
+        chown root:caddy /etc/caddy/pp-admin-tls.caddy 2>/dev/null || true
+        chmod 644 /etc/caddy/pp-admin-tls.caddy 2>/dev/null || true
+    fi
+
+    local tmp; tmp=$(mktemp)
+    awk '
+        !done && $0 ~ /^[[:space:]]*tls[[:space:]]+internal[[:space:]]*$/ {
+            print "    import /etc/caddy/pp-admin-tls.caddy"; done=1; next
+        }
+        { print }
+    ' "$site" > "$tmp" && cat "$tmp" > "$site"
+    rm -f "$tmp"
+    log "${GREEN}Migrated admin site to the managed TLS snippet (pasted certs can now serve the admin origin).${NC}"
+
+    # Best-effort reload so the change takes effect now.
+    if command -v caddy &>/dev/null; then
+        caddy reload --config /etc/caddy/Caddyfile >>"$LOG_FILE" 2>&1 || true
+    fi
+}
+
 # --enable-mock2: opt an upgrading host into the Mock2 dev/build module.
 # Runs after sync_env_keys so the key exists (as false) before we flip it.
 maybe_enable_mock2() {
@@ -805,6 +852,10 @@ sync_mock2_infra
 # dashboard toggle (Admin queue → Browser verification) is the operator's
 # switch from here on and overrides the env either way.
 retrofit_smoke_browser
+# Manual-TLS admin site: migrate an inline `tls internal` to the imported
+# managed snippet so pasted/seeded certs can serve the admin origin (Cloudflare
+# Full-strict). No-op on ACME installs and on already-migrated sites.
+retrofit_admin_tls_snippet
 # Caddy Cloudflare DNS plugin (domain provisioning, DNS-01 method): a caddy
 # package upgrade replaces the binary and silently DROPS add-on packages, so
 # re-install it whenever this host wants it — the marker file is written when

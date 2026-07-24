@@ -12,7 +12,7 @@
 //     path ever reaches the filesystem, so there is no traversal surface.
 //   * getCert()/listCerts() return METADATA ONLY (never the key).
 
-import { getDb, getSetting } from '../db.js';
+import { getDb, getSetting, getAdminDomain } from '../db.js';
 import { encryptSecret, decryptSecret } from './secrets.js';
 import { spawnHostSync } from './host-exec.js';
 import {
@@ -153,6 +153,50 @@ export function resolveTlsForHost(host, { globalMode = null, certs = null } = {}
   const mode = globalMode || currentTlsMode();
   if (mode === 'manual') return { mode: 'internal' };
   return null;
+}
+
+// The admin dashboard's own site file is owned by install.sh, not the service
+// reconciler (the backend deliberately SKIPS the admin domain when regenerating
+// service configs). In manual-TLS mode install.sh has that site `import` this
+// snippet instead of hardcoding `tls internal`, so the backend can flip the
+// admin ORIGIN onto a pasted/seeded cert once one covers the admin domain.
+//
+// Why this matters for the Cloudflare-proxy case: with the domain proxied
+// through Cloudflare, "Full (strict)" origin pulls require the origin to present
+// a cert Cloudflare trusts (a Cloudflare Origin CA cert). `tls internal` only
+// satisfies "Full" (non-strict). Serving the Origin cert here is what makes
+// Full-strict work end to end.
+export const ADMIN_TLS_SNIPPET = process.env.CADDY_ADMIN_TLS_SNIPPET || '/etc/caddy/pp-admin-tls.caddy';
+
+// reconcileAdminTls — rewrite the admin TLS snippet to match the current cert
+// set. No-op unless the snippet file already exists (i.e. a manual-mode install
+// wired the `import`); on an ACME install or a legacy inline `tls internal`
+// admin site there is nothing to import, so we never create an orphan file.
+// Returns { changed, directive } (directive null when skipped). Never throws.
+export function reconcileAdminTls({ adminDomain = null } = {}) {
+  try {
+    const exists = spawnHostSync('sh', ['-c', `test -f '${ADMIN_TLS_SNIPPET}'`], { encoding: 'utf8', timeout: 5000 });
+    if (exists.status !== 0) return { changed: false, directive: null, reason: 'no snippet' };
+
+    const host = adminDomain || getAdminDomain();
+    let directive = '    tls internal\n';
+    if (host) {
+      const decision = resolveTlsForHost(host);
+      if (decision && decision.mode === 'manual' && decision.certFile && decision.keyFile) {
+        directive = `    tls ${decision.certFile} ${decision.keyFile}\n`;
+      }
+    }
+
+    const cur = spawnHostSync('sh', ['-c', `cat '${ADMIN_TLS_SNIPPET}' 2>/dev/null || true`], { encoding: 'utf8', timeout: 5000 });
+    if ((cur.stdout || '') === directive) return { changed: false, directive };
+
+    const w = spawnHostSync('sh', ['-c', `cat > '${ADMIN_TLS_SNIPPET}'; chmod 644 '${ADMIN_TLS_SNIPPET}'; chown root:caddy '${ADMIN_TLS_SNIPPET}' 2>/dev/null || true`], { input: directive, encoding: 'utf8', timeout: 8000 });
+    if (w.error || w.status !== 0) throw new Error('could not write the admin TLS snippet');
+    return { changed: true, directive };
+  } catch (e) {
+    console.warn('[tls] admin TLS snippet reconcile failed:', e?.message);
+    return { changed: false, directive: null, reason: 'error' };
+  }
 }
 
 // The stored global TLS mode ('acme' | 'manual'); defaults to 'acme'.

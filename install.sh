@@ -780,13 +780,24 @@ import /etc/caddy/custom/*.caddy
 GLOBALEOF
 
     # Manual TLS mode (ACME-blocked networks): serve the admin dashboard over
-    # HTTPS with Caddy's internal self-signed cert at first boot instead of
-    # attempting Let's Encrypt (which would hang/fail on a blocked network). The
-    # operator pastes the real cert on the TLS Certificates page after first
-    # login — exactly like the admin password/TOTP are set at first login.
+    # HTTPS without attempting Let's Encrypt (which would hang/fail on a blocked
+    # network). The admin site `import`s a backend-owned TLS snippet rather than
+    # hardcoding `tls internal`, so that once the operator provides a real cert
+    # (staged at install, or pasted later on the TLS Certificates page) that
+    # covers the admin domain, the backend flips this snippet to serve THAT cert
+    # on the admin origin — which is what Cloudflare "Full (strict)" origin
+    # pulls require. Until then the snippet holds `tls internal` (self-signed),
+    # which still works behind Cloudflare "Full" (non-strict).
     local admin_tls_line=""
     if [[ "${TLS_MODE:-acme}" == "manual" ]]; then
-        admin_tls_line=$'\n    tls internal'
+        # Only seed the default when absent — a re-run must NOT clobber a
+        # backend-written `tls <cert> <key>` directive back to self-signed.
+        if [[ ! -f /etc/caddy/pp-admin-tls.caddy ]]; then
+            printf '    tls internal\n' > /etc/caddy/pp-admin-tls.caddy
+            chown root:caddy /etc/caddy/pp-admin-tls.caddy 2>/dev/null || true
+            chmod 644 /etc/caddy/pp-admin-tls.caddy 2>/dev/null || true
+        fi
+        admin_tls_line=$'\n    import /etc/caddy/pp-admin-tls.caddy'
     fi
     cat > "/etc/caddy/sites/${domain}" <<EOF
 # ProxyPilot Admin Dashboard
@@ -871,7 +882,11 @@ OVERRIDE
     # uses Caddy's internal cert (no ACME), so there is nothing to wait for; the
     # operator pastes the real cert after first login.
     if [[ "${TLS_MODE:-acme}" == "manual" ]]; then
-        log_success "Manual TLS mode: serving with Caddy's internal certificate. Paste your certificate on the TLS Certificates page after first login."
+        if [[ "${SEED_TLS_STAGED:-false}" == "true" ]]; then
+            log_success "Manual TLS mode: your certificate is staged and will be imported on first boot. If it covers this domain, the admin origin serves it (Cloudflare Full-strict ready); manage it on the TLS Certificates page. Until import completes, Caddy's internal certificate is served."
+        else
+            log_success "Manual TLS mode: serving with Caddy's internal certificate. Paste your certificate on the TLS Certificates page after first login; if it covers this domain the admin origin will switch to it automatically (needed for Cloudflare Full-strict)."
+        fi
         return 0
     fi
     log_info "Waiting for Caddy to obtain TLS certificate for ${domain}..."
@@ -1248,6 +1263,67 @@ main() {
     fi
     log_info "TLS mode: ${TLS_MODE}"
 
+    # Optional: stage a certificate NOW (manual TLS only). If the operator has
+    # a PEM cert + private key on hand — e.g. a Cloudflare Origin CA cert, or
+    # any RSA/ECDSA cert+key pair — they can import it at install time instead
+    # of pasting it into the UI after first login. The files are staged into
+    # the mounted data dir (`data/seed-tls/`, seen as /data/seed-tls inside the
+    # container) and, on first boot, the backend validates them and imports the
+    # cert into the SAME tls_certificates store the "TLS Certificates" admin
+    # page owns — then deletes the staged private key. It is NOT a separate
+    # mechanism: the seeded cert shows up on, and is managed by, that page.
+    SEED_TLS_STAGED="false"
+    if [[ "$TLS_MODE" == "manual" ]]; then
+        echo ""
+        echo -e "${YELLOW}Manual TLS selected. You can provide a certificate now (e.g. a"
+        echo -e "Cloudflare Origin CA cert), or skip and paste one later on the"
+        echo -e "TLS Certificates page after first login.${NC}"
+        read -rp "Provide a certificate + key now? [y/N]: " _seed_ans
+        if [[ "${_seed_ans:-N}" =~ ^[Yy]$ ]]; then
+            local _cert_path _key_path _chain_path _seed_pass _seed_label _seed_dir
+            _seed_dir="${INSTALL_DIR}/data/seed-tls"
+            while :; do
+                read -rp "  Path to certificate PEM file: " _cert_path
+                _cert_path="${_cert_path/#\~/$HOME}"
+                if [[ -n "$_cert_path" && -s "$_cert_path" ]]; then break; fi
+                log_error "  File not found or empty: ${_cert_path:-<blank>}"
+            done
+            while :; do
+                read -rp "  Path to private key PEM file: " _key_path
+                _key_path="${_key_path/#\~/$HOME}"
+                if [[ -n "$_key_path" && -s "$_key_path" ]]; then break; fi
+                log_error "  File not found or empty: ${_key_path:-<blank>}"
+            done
+            read -rp "  Path to intermediate chain PEM (optional, Enter to skip): " _chain_path
+            _chain_path="${_chain_path/#\~/$HOME}"
+            read -rsp "  Key passphrase (optional, Enter if none): " _seed_pass; echo ""
+            read -rp "  Label for this certificate [Imported at install]: " _seed_label
+            _seed_label="${_seed_label:-Imported at install}"
+
+            mkdir -p "$_seed_dir"
+            chmod 700 "$_seed_dir" 2>/dev/null || true
+            cp "$_cert_path" "$_seed_dir/cert.pem"
+            cp "$_key_path" "$_seed_dir/key.pem"
+            if [[ -n "$_chain_path" && -s "$_chain_path" ]]; then
+                cp "$_chain_path" "$_seed_dir/chain.pem"
+            else
+                rm -f "$_seed_dir/chain.pem" 2>/dev/null || true
+            fi
+            # meta.json carries the label and (optional) passphrase. JSON-escape
+            # backslashes and quotes so odd characters don't corrupt the file.
+            _json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+            printf '{"label":"%s","passphrase":"%s"}\n' \
+                "$(_json_escape "$_seed_label")" "$(_json_escape "$_seed_pass")" \
+                > "$_seed_dir/meta.json"
+            chmod 600 "$_seed_dir/cert.pem" "$_seed_dir/key.pem" "$_seed_dir/meta.json" 2>/dev/null || true
+            [[ -f "$_seed_dir/chain.pem" ]] && chmod 644 "$_seed_dir/chain.pem" 2>/dev/null || true
+            unset _seed_pass
+            SEED_TLS_STAGED="true"
+            log_info "Certificate staged for import on first boot (${_seed_dir})."
+            log_info "The private key will be encrypted at rest and the staged copy deleted after import."
+        fi
+    fi
+
     # Mock2 dev/build module (ADR-001: absence-by-installation). Enabled by
     # default on a fresh install, but the pin file still forces it absent on a
     # production/compliance host. Precedence:
@@ -1290,6 +1366,9 @@ main() {
     echo "  Domain: ${DOMAIN}"
     echo "  ACME Email: ${EMAIL}"
     echo "  Mock2 module: ${MOCK2_ENABLED}"
+    if [[ "${SEED_TLS_STAGED:-false}" == "true" ]]; then
+        echo "  TLS certificate: staged — imported on first boot (TLS Certificates page)"
+    fi
     echo ""
 
     read -rp "Proceed with installation? [Y/n]: " CONFIRM

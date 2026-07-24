@@ -32,6 +32,7 @@ import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
 import { hydrate as hydrateCveResearch } from './lib/cve-research-scheduler.js';
 import { hydrate as hydrateCertExpiry } from './lib/cert-expiry-scheduler.js';
+import { seedTlsCertFromInstall } from './lib/tls-cert-seed.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer, setMock2TerminalAuthorizer } from './routes/terminal-ws.js';
 import { decryptSecret } from './lib/secrets.js';
@@ -713,6 +714,16 @@ server.listen(PORT, '0.0.0.0', () => {
       hydrateCertExpiry();
     } catch (err) {
       console.error('[cert-expiry] hydrate threw:', err.message || err);
+    }
+    try {
+      // Install-time cert seeding: if the operator provided a cert+key at
+      // install (staged into the mounted data dir by install.sh), import it
+      // into the SAME tls_certificates store the TLS Certificates page owns,
+      // then delete the staged plaintext key. Idempotent + never throws.
+      const seeded = await seedTlsCertFromInstall();
+      if (seeded.seeded) console.log(`[tls-seed] install-provided certificate imported (#${seeded.id}).`);
+    } catch (err) {
+      console.error('[tls-seed] seeding threw:', err.message || err);
     }
   });
 });

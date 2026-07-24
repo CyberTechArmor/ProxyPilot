@@ -23,6 +23,7 @@ import {
 import {
   insertCert, updateCert, deleteCertRow, getCertRow, listCertRows, certPublicShape,
   materializeCertFiles, removeCertFiles, servedChainForRow, getCertKeyPem, currentTlsMode,
+  reconcileAdminTls,
 } from '../lib/tls-cert-store.js';
 
 export const tlsCertsRouter = Router();
@@ -82,6 +83,10 @@ async function regenerateManagedSites() {
     try { regenerateDomainCaddyConfig(db, domain); } catch (e) { console.warn('[tls] regenerate failed for', domain, e?.message); }
   }
   try { await reconcileMock2Domains(); } catch (e) { console.warn('[tls] mock2 reconcile failed:', e?.message); }
+  // The admin dashboard's own site is not a service host — flip its imported
+  // TLS snippet onto the pasted cert here so the admin ORIGIN serves it too
+  // (required for Cloudflare "Full (strict)" origin pulls).
+  try { reconcileAdminTls(); } catch (e) { console.warn('[tls] admin TLS reconcile failed:', e?.message); }
 }
 
 // Apply the current cert set to Caddy: regenerate sites → validate → reload.
@@ -100,6 +105,13 @@ async function applyAndReload() {
     return { ok: false, stage: 'reload', error: redactKeyMaterial(err?.stderr || err?.message || 'caddy reload failed') };
   }
   return { ok: true };
+}
+
+// Reusable reconcile: regenerate every managed site so covered hosts pick up
+// their manual cert, then validate + reload Caddy. Exported so the install-time
+// cert seeder applies exactly the same pipeline the API mutations use.
+export async function applyManagedTls() {
+  return applyAndReload();
 }
 
 // Validate a cert+key(+chain) submission into everything the store needs.

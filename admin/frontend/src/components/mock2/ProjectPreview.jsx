@@ -11,11 +11,57 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2 } from 'lucide-react';
+import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2, MapPin, X, Send } from 'lucide-react';
 
-export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null }) {
+const MAX_PREVIEW_PINS = 8;
+
+// Compose the Quick-update text from the dropped preview pins. The preview
+// iframe is cross-origin (a different subdomain), so its pixels can't be
+// captured client-side — instead we send precise % coordinates of the VISIBLE
+// preview plus the URL, so the build can locate each spot.
+function composePreviewAnnotation(src, pins) {
+  const lines = pins
+    .map((p, i) => (p.note.trim()
+      ? `${i + 1}. Pin ${i + 1} (${p.x}% from the left, ${p.y}% from the top of the visible preview): ${p.note.trim()}`
+      : null))
+    .filter(Boolean);
+  return `Annotated the live preview (${src}) — the numbered pins mark the exact spots on the screen currently shown in the preview (coordinates are a percentage of the visible preview area):\n${lines.join('\n')}\nApply exactly these changes at the marked spots; change nothing else.`;
+}
+
+// onAnnotate (optional) — async ({ text }) => void. When provided, the toolbar
+// shows an "Annotate" toggle: turning it on overlays the live iframe with a
+// pin-drop surface, and Send routes the composed instruction to the build as a
+// Quick update. Omitted for the mockup preview (pre-build).
+export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
   const [reloadNonce, setReloadNonce] = useState(0); // bump to remount (reload) the iframe
+  const [annotating, setAnnotating] = useState(false);
+  const [pins, setPins] = useState([]); // { x, y, note } — x/y in % of the visible preview
+  const [sending, setSending] = useState(false);
+  const [sentAt, setSentAt] = useState(0); // brief "sent" confirmation
+
+  const exitAnnotate = () => { setAnnotating(false); setPins([]); };
+  const addPin = (e) => {
+    if (pins.length >= MAX_PREVIEW_PINS) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * 1000) / 10;
+    const y = Math.round(((e.clientY - rect.top) / rect.height) * 1000) / 10;
+    setPins((cur) => [...cur, { x, y, note: '' }]);
+  };
+  const setNote = (i, note) => setPins((cur) => cur.map((p, j) => (j === i ? { ...p, note } : p)));
+  const removePin = (i) => setPins((cur) => cur.filter((_, j) => j !== i));
+  const notedCount = pins.filter((p) => p.note.trim()).length;
+
+  const sendPins = async () => {
+    if (!notedCount || !onAnnotate) return;
+    setSending(true);
+    try {
+      await onAnnotate({ text: composePreviewAnnotation(src, pins) });
+      exitAnnotate();
+      setSentAt(Date.now());
+    } finally { setSending(false); }
+  };
+
   return (
     <div className="flex flex-col h-full min-h-0 rounded-lg border overflow-hidden bg-muted/20">
       <div className="flex items-center justify-between gap-2 border-b bg-background/60 px-3 py-2 shrink-0">
@@ -49,6 +95,16 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
               <Smartphone className="h-3.5 w-3.5" /><span className="hidden sm:inline">Mobile</span>
             </button>
           </div>
+          {onAnnotate ? (
+            <Button
+              variant={annotating ? 'default' : 'outline'} size="sm" className="h-9 shrink-0"
+              onClick={() => (annotating ? exitAnnotate() : setAnnotating(true))}
+              aria-pressed={annotating}
+              title={annotating ? 'Exit annotate mode' : 'Drop pins on the live preview and send them as a Quick update'}
+            >
+              <MapPin className="h-4 w-4" /><span className="ml-1 hidden sm:inline">{annotating ? 'Done' : 'Annotate'}</span>
+            </Button>
+          ) : null}
           <Button asChild variant="outline" size="sm" className="h-9 shrink-0">
             <a href={src} target="_blank" rel="noreferrer" aria-label="Open the app in a new tab">
               <ExternalLink className="h-4 w-4 mr-1" /> Open App
@@ -67,17 +123,78 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
           ) : null}
         </div>
       </div>
-      <div className="flex flex-1 min-h-0 justify-center overflow-auto bg-white">
+      {annotating ? (
+        <p className="flex items-center gap-1.5 border-b bg-primary/10 px-3 py-1.5 text-[11px] text-foreground shrink-0">
+          <MapPin className="h-3.5 w-3.5 text-primary shrink-0" />
+          Tap the preview to drop a pin, then write what should change. Sends as a Quick update referencing this screen.
+        </p>
+      ) : null}
+      <div className="relative flex flex-1 min-h-0 justify-center overflow-auto bg-white">
         <iframe
           key={`${reloadKey}-${reloadNonce}`}
           title={`${title || 'Project'} preview`}
           src={src}
-          className="h-full border-0 bg-white"
+          className={`h-full border-0 bg-white ${annotating ? 'pointer-events-none' : ''}`}
           style={{ width: width === 'mobile' ? 390 : '100%', maxWidth: '100%' }}
           sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-modals"
         />
+        {/* Pin-drop overlay — only in annotate mode, so it doesn't steal the
+            iframe's own clicks otherwise. Captures taps to place pins on top of
+            the live app (the iframe is cross-origin, so pins live in OUR DOM). */}
+        {annotating ? (
+          <div
+            className="absolute inset-0 cursor-crosshair"
+            onClick={addPin}
+            role="button"
+            aria-label="Tap to add an annotation pin on the preview"
+            tabIndex={0}
+          >
+            {pins.map((p, i) => (
+              <span
+                key={i}
+                className="absolute flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white ring-2 ring-white shadow"
+                style={{ left: `${p.x}%`, top: `${p.y}%` }}
+              >
+                {i + 1}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </div>
-      {!approved ? (
+      {annotating ? (
+        <div className="max-h-[45%] shrink-0 space-y-2 overflow-y-auto border-t bg-background/95 p-3">
+          {pins.length ? pins.map((p, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-600 text-[11px] font-bold text-white">{i + 1}</span>
+              <input
+                className="h-10 flex-1 rounded-md border bg-background px-3 text-sm"
+                value={p.note}
+                onChange={(e) => setNote(i, e.target.value)}
+                placeholder="What should change here?"
+                aria-label={`Note for pin ${i + 1}`}
+              />
+              <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 text-red-500" onClick={() => removePin(i)} aria-label={`Remove pin ${i + 1}`}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          )) : (
+            <p className="text-xs text-muted-foreground">No pins yet — tap the preview where something should change.</p>
+          )}
+          <div className="flex gap-2 pt-1">
+            <Button className="min-h-[40px] flex-1" disabled={sending || !notedCount} onClick={sendPins}>
+              {sending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Send className="h-4 w-4 mr-1" />}
+              Send {notedCount || ''} change{notedCount === 1 ? '' : 's'} as Quick update
+            </Button>
+            <Button variant="ghost" className="min-h-[40px]" disabled={sending} onClick={exitAnnotate}>Cancel</Button>
+          </div>
+        </div>
+      ) : null}
+      {!annotating && sentAt ? (
+        <p className="flex items-center gap-1.5 border-t bg-emerald-500/10 px-3 py-1.5 text-[11px] text-emerald-600 shrink-0">
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> Sent as a Quick update — watch the build chat.
+        </p>
+      ) : null}
+      {!approved && !annotating ? (
         <p className="border-t px-3 py-1.5 text-[11px] text-muted-foreground shrink-0">
           Non-functional mockup preview — approve the design in the chat to build the working app.
         </p>

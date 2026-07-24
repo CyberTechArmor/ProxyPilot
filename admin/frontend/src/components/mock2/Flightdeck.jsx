@@ -107,13 +107,24 @@ export default function Flightdeck({
     <FlightdeckEditor projectId={projectId} openRequest={openRequest} canEdit={canEdit} externalNonce={externalNonce}
       onActivePathChange={setActiveFilePath} />
   );
+  // Annotate the live preview: drop pins on the embedded app and send them as a
+  // Quick update. Goes straight through the cycle API (skipping split/suggest,
+  // like the screenshot annotate path); the poll above then surfaces the new
+  // cycle in the chat. Gated to editors on an online project.
+  const annotatePreview = useCallback(async ({ text }) => {
+    if (!canEdit || !online) return;
+    await api.mock2StartCycle(projectId, text, [], 'quick', { skipSplit: true, skipSuggest: true });
+    load();
+  }, [projectId, canEdit, online, load]);
+
   // The preview embeds the running app directly. Caddy relaxes the app's
   // frame-ancestors to allow ONLY the dashboard origin (see mock2/caddy.js), so
   // the iframe renders instead of "refused to connect" — no stand-in bar needed.
-  // "Open App" and the full-height toggle live in the PreviewPanel toolbar.
+  // "Open App", the full-height toggle, and Annotate live in the PreviewPanel toolbar.
   const previewPane = previewSrc
     ? <PreviewPanel src={previewSrc} title={project?.name} approved reloadKey={externalNonce}
-        fullHeight={previewFull} onToggleFullHeight={() => setPreviewFull((v) => !v)} />
+        fullHeight={previewFull} onToggleFullHeight={() => setPreviewFull((v) => !v)}
+        onAnnotate={canEdit && online ? annotatePreview : null} />
     : <div className="flex items-center justify-center h-full text-sm text-muted-foreground">No preview — the app isn’t serving yet.</div>;
   const chatPane = (
     <BuildChat projectId={projectId} project={project} cycle={cycle} canEdit={canEdit} online={online} active={active}

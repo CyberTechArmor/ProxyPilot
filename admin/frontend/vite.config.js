@@ -30,19 +30,10 @@ export default defineConfig({
       // Disable parallel processing to prevent hangs in constrained environments
       maxParallelFileOps: 1,
       output: {
-        // Function form so the ENTIRE CodeMirror/Lezer ecosystem lands in one
-        // 'editor' chunk. The previous object form only listed a few lang
-        // packages, so the shared CodeMirror core + the unlisted langs leaked
-        // into the main chunk — splitting a package family across chunks creates
-        // a circular init order that throws "Cannot access X before
-        // initialization" once more than one module imports it. Grouping the
-        // whole family together removes that hazard.
-        manualChunks(id) {
-          if (!id.includes('node_modules')) return undefined;
-          if (/[\\/]node_modules[\\/](@codemirror|@uiw[\\/]react-codemirror|@lezer|codemirror|crelt|style-mod|w3c-keyname)[\\/]/.test(id)) return 'editor';
-          if (/[\\/]node_modules[\\/](react|react-dom|react-router|react-router-dom|scheduler)[\\/]/.test(id)) return 'vendor';
-          if (/[\\/]node_modules[\\/]@radix-ui[\\/]/.test(id)) return 'ui';
-          return undefined;
+        manualChunks: {
+          vendor: ['react', 'react-dom', 'react-router-dom'],
+          ui: ['@radix-ui/react-dialog', '@radix-ui/react-select', '@radix-ui/react-switch', '@radix-ui/react-tabs'],
+          editor: ['@uiw/react-codemirror', '@codemirror/lang-javascript', '@codemirror/lang-html', '@codemirror/lang-css', '@codemirror/lang-json'],
         },
       },
     },

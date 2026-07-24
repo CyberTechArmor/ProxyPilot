@@ -32,7 +32,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
   Archive, RotateCcw, Play, Lock, Download, GitBranch,
-  Circle, Hammer, Unlock, Clock, Sparkles, TerminalSquare, MessageSquare,
+  Circle, Hammer, Unlock, Clock, Sparkles, TerminalSquare, MessageSquare, LayoutPanelLeft,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
@@ -331,6 +331,13 @@ export default function ProjectDetail() {
     ? (project.preview_url || (designApproved && project.url ? project.url : null))
     : null;
   const terminalAvailable = !isArchived && canEdit && project.lifecycle === 'active';
+  // Flightdeck fills the whole build area: when active we hide the
+  // Chat/Terminal/Details tab strip (the terminal is built in; chat is the
+  // right pane) and toggle its own center between the workspace and Details.
+  const flightdeckActive = designApproved && buildView === 'flightdeck' && !isArchived;
+  // The tab strip is hidden in Flightdeck, so only 'chat' (the workspace) and
+  // 'details' are reachable — coerce a stale 'terminal' selection back.
+  useEffect(() => { if (flightdeckActive && tab === 'terminal') setTab('chat'); }, [flightdeckActive, tab]);
 
   return (
     <div className="flex flex-col h-full min-h-0 gap-3">
@@ -370,11 +377,15 @@ export default function ProjectDetail() {
           action lives at the bottom of the design chat (ConceptStage), and the
           Mockup/Build stage is shown on the project tiles. */}
       <Tabs value={tab} onValueChange={setTab} className="w-full flex-1 min-h-0 flex flex-col">
-        <TabsList className="grid w-full grid-cols-3 h-auto shrink-0">
-          <TabsTrigger value="chat" className="py-2"><MessageSquare className="h-4 w-4 mr-1.5" />Chat</TabsTrigger>
-          <TabsTrigger value="terminal" className="py-2"><TerminalSquare className="h-4 w-4 mr-1.5" />Terminal</TabsTrigger>
-          <TabsTrigger value="details" className="py-2"><Circle className="h-4 w-4 mr-1.5" />Details</TabsTrigger>
-        </TabsList>
+        {/* The tab strip is hidden in Flightdeck mode — it has its own chat and
+            terminal, and a Details toggle in its top bar reclaims this height. */}
+        {!flightdeckActive && (
+          <TabsList className="grid w-full grid-cols-3 h-auto shrink-0">
+            <TabsTrigger value="chat" className="py-2"><MessageSquare className="h-4 w-4 mr-1.5" />Chat</TabsTrigger>
+            <TabsTrigger value="terminal" className="py-2"><TerminalSquare className="h-4 w-4 mr-1.5" />Terminal</TabsTrigger>
+            <TabsTrigger value="details" className="py-2"><Circle className="h-4 w-4 mr-1.5" />Details</TabsTrigger>
+          </TabsList>
+        )}
 
         {/* CHAT — the design-assistant conversation with the live mockup/app
             preview as the centerpiece, sized to fill the viewport. With a preview
@@ -407,6 +418,7 @@ export default function ProjectDetail() {
                     onChanged={load}
                     onBuilt={handleMockupChanged}
                     onSwitchView={() => setBuildView('classic')}
+                    onShowDetails={() => setTab('details')}
                   />
                 ) : (
                   <div className="space-y-2">
@@ -484,6 +496,14 @@ export default function ProjectDetail() {
 
         {/* DETAILS — the live URL, members, and all project administration. */}
         <TabsContent value="details" className="mt-3 space-y-6 flex-1 min-h-0 overflow-y-auto">
+      {/* In Flightdeck mode this Details view replaces the workspace in the
+          center; a slim bar returns to Flightdeck (or drops to the classic view). */}
+      {flightdeckActive ? (
+        <div className="flex items-center justify-end gap-2 sticky top-0 z-10 -mt-1 pb-2 bg-background/95 backdrop-blur">
+          <Button variant="outline" size="sm" className="h-8" onClick={() => setBuildView('classic')}>Classic view</Button>
+          <Button size="sm" className="h-8" onClick={() => setTab('chat')}><LayoutPanelLeft className="h-3.5 w-3.5 mr-1" />Flightdeck</Button>
+        </div>
+      ) : null}
       {/* Live URL + provisioning progress */}
       <Card>
         <CardHeader>

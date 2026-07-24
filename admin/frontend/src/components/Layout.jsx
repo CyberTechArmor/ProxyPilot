@@ -587,10 +587,10 @@ export default function Layout() {
         </div>
       </main>
 
-      {/* Lean BEAF Pro AI assistant — global dock (hidden for pending accounts,
-          which only have Profile access). Persists across route changes because
-          it's mounted here, above the routed Outlet. */}
-      {!isPending && (
+      {/* Lean BEAF Pro AI assistant — shown ONLY on the Lean BEAF Pro pages
+          (its scope), and hidden for pending accounts (Profile-only). Mounted
+          here so it persists across the LBP sub-routes. */}
+      {!isPending && location.pathname.startsWith('/lean-beaf') && (
         <AiAssistant open={assistantOpen} onOpen={() => setAssistant(true)} onClose={() => setAssistant(false)} />
       )}
     </div>

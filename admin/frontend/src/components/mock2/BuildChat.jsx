@@ -15,7 +15,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, MapPin } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, MapPin, History } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
@@ -42,6 +42,13 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   useEffect(() => { if (project?.suggest_mode) setSuggestMode(project.suggest_mode); }, [project?.suggest_mode]);
   const [deployingBase, setDeployingBase] = useState(false);
   const scrollRef = useRef(null);
+  // Auto-scroll cadence (item: land on the last message, but never fight the
+  // user). interactedRef = the user scrolled up to read → pause auto-scroll
+  // until they return to the bottom. lastUserMsgIdRef tracks the newest of
+  // THEIR messages so a send re-arms auto-scroll and jumps to its bottom.
+  const interactedRef = useRef(false);
+  const lastUserMsgIdRef = useRef(null);
+  const [showHistory, setShowHistory] = useState(false);
   const onTyping = useTypingTracker(projectId, canEdit && online);
   const approvedAt = project?.design_approved_at || null;
   // Multi-modal: images pasted/dropped/picked ride the build instruction or the
@@ -71,11 +78,34 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     return () => clearInterval(t);
   }, [shouldPoll, askActive, load]);
 
-  // Land on the work, not the bottom: while rule questions are open, bring the
-  // first still-open one into view (answering one then lands on the next); once
-  // none are open, fall back to keeping the newest message in view. Keyed on the
-  // open-question set so it re-runs as each question is confirmed.
+  // Track the user taking control of the scroll: a wheel/touch gesture pauses
+  // auto-scroll; returning to the bottom re-arms it. A plain 'scroll' event is
+  // NOT treated as intent (our own programmatic scroll fires it too) — only the
+  // near-bottom check re-arms.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return undefined;
+    const took = () => { interactedRef.current = true; };
+    const onScroll = () => {
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      if (nearBottom) interactedRef.current = false;
+    };
+    el.addEventListener('wheel', took, { passive: true });
+    el.addEventListener('touchmove', took, { passive: true });
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      el.removeEventListener('wheel', took);
+      el.removeEventListener('touchmove', took);
+      el.removeEventListener('scroll', onScroll);
+    };
+  }, []);
+
+  // Scroll cadence: (1) open rule questions win — land on the first one. (2) When
+  // the user just SENT a message, re-arm and scroll to the BOTTOM of their
+  // message. (3) Otherwise, unless the user has scrolled up to read, land on the
+  // TOP of the newest message so a long answer reads from its first line.
   const openQuestionKey = (data?.open_question_ids || []).join(',');
+  const newestMsg = messages[messages.length - 1] || null;
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -83,13 +113,20 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       const firstOpen = el.querySelector('[data-open-question]');
       if (firstOpen) { firstOpen.scrollIntoView({ block: 'start' }); return; }
     }
-    // TOP of the newest message, not its end — a long answer should be read
-    // from its first line without scrolling back up. Trailing status rows
-    // ("Building…") are skipped so they never steal the scroll target.
+    // The user sent a new message → follow it to the bottom and re-arm.
+    if (newestMsg && newestMsg.kind === 'user' && newestMsg.id !== lastUserMsgIdRef.current) {
+      lastUserMsgIdRef.current = newestMsg.id;
+      interactedRef.current = false;
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    // New assistant/build content: land on the top of the last message, unless
+    // the user has scrolled up — then leave their view untouched.
+    if (interactedRef.current) return;
     const kids = [...el.children].filter((k) => !k.hasAttribute('data-scroll-skip'));
     const last = kids[kids.length - 1];
     if (last) el.scrollTop = Math.max(0, last.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 8);
-  }, [data?.messages?.length, active, openQuestionKey, askPartial?.length]);
+  }, [data?.messages?.length, active, openQuestionKey, askPartial?.length, newestMsg?.id, newestMsg?.kind]);
 
   const openIds = new Set(data?.open_question_ids || []);
   // Only the post-approval slice of the conversation belongs here (the design
@@ -374,13 +411,51 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     return resumeMode ? sendResume() : startBuild('quick');
   };
 
+  // Build History — every request you've made (your instruction messages),
+  // newest first. Clicking a card jumps the chat to that message.
+  const buildRequests = messages.filter((m) => m.kind === 'user').slice().reverse();
+  const scrollToMessage = (mid) => {
+    const el = scrollRef.current;
+    const target = el?.querySelector(`[id="bcmsg-${mid}"]`);
+    if (target) { interactedRef.current = true; target.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+    setShowHistory(false);
+  };
+
   return (
     <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
       <CardHeader className="pb-2">
-        <CardTitle className="text-base flex items-center gap-2">
-          <Hammer className="h-4 w-4" /> Build chat
-        </CardTitle>
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Hammer className="h-4 w-4" /> Build chat
+          </CardTitle>
+          {buildRequests.length > 0 ? (
+            <Button
+              type="button" variant="outline" size="sm" className="h-8"
+              aria-expanded={showHistory}
+              onClick={() => setShowHistory((v) => !v)}
+            >
+              <History className="h-3.5 w-3.5 mr-1" /> Build History
+              <span className="ml-1 text-[11px] text-muted-foreground">({buildRequests.length})</span>
+            </Button>
+          ) : null}
+        </div>
       </CardHeader>
+      {showHistory ? (
+        <div className="mx-4 mb-2 max-h-56 overflow-y-auto rounded-lg border bg-background/60 divide-y">
+          {buildRequests.map((m) => (
+            <button
+              key={m.id} type="button"
+              onClick={() => scrollToMessage(m.id)}
+              className="w-full text-left px-3 py-2 hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none"
+            >
+              <span className="block text-xs font-medium truncate">{(m.body || '').trim() || '(no text)'}</span>
+              {m.created_at ? (
+                <span className="block text-[10px] text-muted-foreground mt-0.5">{new Date(m.created_at).toLocaleString()}</span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <CardContent className="flex flex-1 min-h-0 flex-col gap-3">
         <ChatMessageList
           scrollRef={scrollRef}

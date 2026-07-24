@@ -268,9 +268,13 @@ export function ChatMessageList({
         <p className="text-sm text-muted-foreground text-center py-6">{emptyLabel}</p>
       ) : (
         messages.map((m) => (
-          m.kind === 'rule_question'
-            ? <RuleQuestion key={m.id} m={m} open={open.has(m.question_id)} canEdit={canEdit} busy={answering} onAnswer={onAnswer} projectId={projectId} />
-            : <ChatBubble key={m.id} m={m} projectId={projectId} onQuickUpdate={onQuickUpdate} quickBusyId={quickBusyId} />
+          // id + kind stamped on each row so Build History can scroll to a
+          // specific request, and the auto-scroll can target the last message.
+          <div key={m.id} id={`bcmsg-${m.id}`} data-msg-kind={m.kind}>
+            {m.kind === 'rule_question'
+              ? <RuleQuestion m={m} open={open.has(m.question_id)} canEdit={canEdit} busy={answering} onAnswer={onAnswer} projectId={projectId} />
+              : <ChatBubble m={m} projectId={projectId} onQuickUpdate={onQuickUpdate} quickBusyId={quickBusyId} />}
+          </div>
         ))
       )}
       {working && partialText ? <StreamingBubble text={partialText} /> : null}

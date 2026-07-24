@@ -802,9 +802,13 @@ export function describeRunnerStep(turn, toolCalls = []) {
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
   const parts = calls.map((c) => {
     if (c?.name === 'write_file') return `writing ${c.input?.path || 'a file'}`;
+    if (c?.name === 'create_file') return `creating ${c.input?.path || 'a file'}`;
     if (c?.name === 'apply_edit') return `editing ${c.input?.path || 'a file'}`;
     if (c?.name === 'read_file') return `reading ${c.input?.path || 'a file'}`;
-    if (c?.name === 'exec_in_container') return `running \`${String(c.input?.command || '').replace(/\s+/g, ' ').trim().slice(0, 60)}\``;
+    if (c?.name === 'search_workspace') return `searching for \`${String(c.input?.query || '').replace(/\s+/g, ' ').trim().slice(0, 40)}\``;
+    if (c?.name === 'list_dir') return `listing ${c.input?.path || 'a directory'}`;
+    if (c?.name === 'get_diagnostics') return 'checking diagnostics';
+    if (c?.name === 'exec_in_container' || c?.name === 'run_terminal') return `running \`${String(c.input?.command || '').replace(/\s+/g, ' ').trim().slice(0, 60)}\``;
     if (c?.name === 'get_component') return `fetching component ${c.input?.key || ''}`.trim();
     if (c?.name === 'materialize_component') return `materializing component ${c.input?.key || ''}`.trim();
     if (c?.name === 'run_gates') return 'running the gate battery';
@@ -942,16 +946,17 @@ export function buildRunnerMode(env = {}) {
 
 // resolveHarness(project, env) — the ONE per-project harness decision. An
 // explicit project choice (mock2_projects.harness, migration 533) always wins:
-// 'claude' selects the Claude Agent SDK runner, 'proxypilot' pins the
-// hand-rolled runner even when the legacy global flag is set. No explicit
-// choice (NULL / unknown value) falls back to the legacy BUILD_RUNNER=sdk
-// reading above — so an install that never touches the toggle behaves exactly
-// as it did before the per-project setting existed, and existing projects
-// default to the ProxyPilot harness.
+// 'copilot' / 'proxypilot' select the two native engines, 'claude' selects the
+// Claude Agent SDK runner even against the default, and 'proxypilot' pins the
+// original hand-rolled runner even when the legacy global flag is set. No
+// explicit choice (NULL / unknown value) resolves to the install-wide default:
+// the legacy BUILD_RUNNER=sdk flag still opts a whole install into the Claude
+// harness, but absent that the default is now the COPILOT harness (the native
+// Copilot-grade port). An install that set BUILD_RUNNER=sdk is unchanged.
 export function resolveHarness(project = {}, env = {}) {
   const choice = normalizeHarness(project?.harness);
   if (choice) return choice;
-  return buildRunnerMode(env) === 'sdk' ? 'claude' : 'proxypilot';
+  return buildRunnerMode(env) === 'sdk' ? 'claude' : 'copilot';
 }
 
 // The built-in Claude Agent SDK tools the build runner is allowed to use. These

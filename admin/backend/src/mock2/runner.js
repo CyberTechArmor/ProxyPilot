@@ -74,6 +74,8 @@ import {
 } from './runner-logic.js';
 import { harnessForProject } from './harness.js';
 import { applyEdits } from './apply-edit-logic.js';
+import { commandAllowed, redactSecrets } from './harness-safety.js';
+import { formatReadRange, formatSearchResults } from './harness-copilot.js';
 import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
 import { listPublishedComponents, getPublishedComponentWithVersion, listProjectComponents } from './components.js';
 import {
@@ -822,7 +824,7 @@ export async function acceptPendingVerification({ project, cycle, initiatedBy, a
 // Exported ONLY for the ProxyPilotHarness adapter (harness.js), which wraps this
 // loop unchanged — nothing else calls it directly; startCycle goes through the
 // harness factory.
-export async function runCycle({ cycle, project, containerName, framework, gateScripts, ready, buildMode = BUILD_MODE_FULL }) {
+export async function runCycle({ cycle, project, containerName, framework, gateScripts, ready, buildMode = BUILD_MODE_FULL, harnessProfile = null }) {
   const cycleMode = normalizeBuildMode(buildMode);
   const mvpBuild = isFastBuildMode(cycleMode); // fast modes share the relaxed acceptance path
   const projectId = Number(project.id);
@@ -882,7 +884,10 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       .map((r) => ({ key: r.key, name: r.name, version: r.pinned_version, contract: parseContractJson(r.contract_json) }));
   } catch (err) { console.warn('[mock2] installed components load failed:', err?.message); }
   const installedKeys = new Set(installedComponents.map((c) => c.key));
-  const system = stepSystemPrompt('build-runner', buildRunnerSystemPrompt({
+  // The harness profile (copilot) swaps the system prompt + tool vocabulary;
+  // no profile → the proxypilot harness behavior, byte-identical to before.
+  const buildSystemPrompt = harnessProfile?.buildSystemPrompt || buildRunnerSystemPrompt;
+  const system = stepSystemPrompt('build-runner', buildSystemPrompt({
     constitution: framework.constitution_md, skills, appDir: APP_DIR,
     webPort: project.web_port || 3000,
     components: componentCatalog.filter((c) => !installedKeys.has(c.key)),
@@ -1071,7 +1076,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     // (MOCK2_RUNNER_WEB_SEARCH=on, Anthropic connectors only) — Anthropic runs
     // the search server-side during the call, so the fence stays sealed.
     const result = await callStepTurn('build-runner', {
-      connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: runnerToolsForCycle({ hasGates: gateScripts.length > 0 }), transcript, maxTokens: RUNNER_MAX_TOKENS || undefined,
+      connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: (harnessProfile?.toolsForCycle || runnerToolsForCycle)({ hasGates: gateScripts.length > 0 }), transcript, maxTokens: RUNNER_MAX_TOKENS || undefined,
       serverTools: webSearchServerTools({ provider: ready.connector.provider, env: process.env, flag: RUNNER_WEB_SEARCH_FLAG, defaultOn: false }),
       effort: ready.effort || null,
       thinking: ready.thinking || null,
@@ -1779,7 +1784,42 @@ async function executeTool({ call, cycle, containerName, holder, gateScripts }) 
     }
     case 'read_file': {
       const r = await readFileInContainer(containerName, String(call.input?.path || ''));
-      return { content: r.ok ? r.content : `error: ${r.error}` };
+      if (!r.ok) return { content: `error: ${r.error}` };
+      // Optional line-range slicing (copilot harness read_file). No range params
+      // → the whole file, byte-identical to the proxypilot harness behavior.
+      return { content: sliceFileForRead(r.content, call.input?.start_line, call.input?.end_line) };
+    }
+    case 'search_workspace': {
+      const r = await searchWorkspaceInContainer(containerName, call.input || {});
+      return { content: r };
+    }
+    case 'list_dir': {
+      const r = await listDirInContainer(containerName, String(call.input?.path || '.'), call.input?.recursive === true);
+      return { content: r };
+    }
+    case 'create_file': {
+      const relPath = String(call.input?.path || '');
+      const rel = safeRel(relPath);
+      if (!rel) return { content: 'error: path must be relative and inside the app dir' };
+      const exists = await containerSh(containerName, `p=$(printf '%s' '${b64(rel)}' | base64 -d); [ -e "${APP_DIR}/$p" ] && echo EXISTS || echo NEW`);
+      if (String(exists.stdout || '').includes('EXISTS')) {
+        return { content: `error: FILE_EXISTS — "${relPath}" already exists. Use apply_edit to modify it.` };
+      }
+      const w = await writeFileInContainer(containerName, relPath, String(call.input?.content ?? ''));
+      touchLock(cycle.project_id, holder);
+      return { content: w.ok ? `created ${relPath}` : `error: ${w.error}` };
+    }
+    case 'run_terminal': {
+      const command = String(call.input?.command || '');
+      const policy = commandAllowed(command);
+      if (!policy.ok) return { content: `DENIED: ${policy.reason}` };
+      const r = await execInContainer(containerName, command);
+      touchLock(cycle.project_id, holder);
+      return { content: redactSecrets(`exit ${r.code}\n${r.stdout || ''}${r.stderr ? `\n[stderr]\n${r.stderr}` : ''}`) };
+    }
+    case 'get_diagnostics': {
+      const r = await getDiagnosticsInContainer(containerName, call.input?.path ? String(call.input.path) : null);
+      return { content: r };
     }
     case 'write_file': {
       const r = await writeFileInContainer(containerName, String(call.input?.path || ''), String(call.input?.content ?? ''));
@@ -1934,6 +1974,63 @@ export async function writeFileInContainer(containerName, path, content) {
   const r = await sh(`incus exec ${containerName} -- sh -c 'eval "$(printf %s ${b64(script)} | base64 -d)"'`, { timeoutMs: 120000, input: b64(content) });
   if (r.code !== 0) return { ok: false, error: (r.stderr || 'write failed').trim().slice(-300) };
   return { ok: true };
+}
+
+// ---- copilot-harness tool executors (fenced-container I/O) ----
+
+// read_file range slicing. Pure formatting lives in harness-copilot; this only
+// forwards the model's optional start/end. No range → whole file, byte-identical
+// to the proxypilot harness read_file.
+function sliceFileForRead(content, startLine, endLine) {
+  const hasRange = startLine != null || endLine != null;
+  if (!hasRange) return content;
+  return formatReadRange(content, startLine, endLine);
+}
+
+// search_workspace: ranked keyword/regex search over the working tree. ripgrep
+// when present (respects .gitignore), else a grep fallback that skips the usual
+// build/vendor dirs. The model-supplied query and glob are base64-decoded INSIDE
+// the script (never interpolated raw) so they can't break out of the command.
+async function searchWorkspaceInContainer(containerName, input = {}) {
+  const query = String(input.query || '');
+  if (!query.trim()) return 'error: query is required';
+  const cap = Math.min(Math.max(Number(input.max_results) || 20, 1), 200);
+  const glob = String(input.path_glob || '');
+  const globArg = glob ? `--glob "$(printf '%s' '${b64(glob)}' | base64 -d)"` : '';
+  const script = [
+    `cd '${APP_DIR}' 2>/dev/null || exit 3`,
+    `q=$(printf '%s' '${b64(query)}' | base64 -d)`,
+    `if command -v rg >/dev/null 2>&1; then`,
+    `  rg --line-number --no-heading --color never -m ${cap} ${globArg} -e "$q" 2>/dev/null`,
+    `else`,
+    `  grep -rIn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist --exclude-dir=build -e "$q" . 2>/dev/null | head -n ${cap}`,
+    `fi`,
+  ].join('\n');
+  const r = await containerSh(containerName, script, { timeoutMs: 30000 });
+  return formatSearchResults(r.stdout || '', { cap });
+}
+
+// list_dir: one level by default, or the whole subtree (bounded) when recursive.
+async function listDirInContainer(containerName, path, recursive) {
+  const rel = safeRel(path === '.' ? '.' : path) ?? (path === '.' ? '.' : null);
+  if (rel == null) return 'error: path must be relative and inside the app dir';
+  const script = recursive
+    ? `p=$(printf '%s' '${b64(rel)}' | base64 -d); cd '${APP_DIR}' 2>/dev/null || exit 3; find "$p" -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null | head -n 500`
+    : `p=$(printf '%s' '${b64(rel)}' | base64 -d); cd '${APP_DIR}' 2>/dev/null || exit 3; ls -1Ap "$p" 2>/dev/null`;
+  const r = await containerSh(containerName, script, { timeoutMs: 30000 });
+  if (r.code !== 0) return `NOT_A_DIRECTORY: ${String(path)}`;
+  return (r.stdout || '').trim() || '(empty)';
+}
+
+// get_diagnostics: a scoped TypeScript typecheck of the working tree (the
+// standard scaffold is TS/Express). "clean" on exit 0, else the tail of the
+// compiler output. The optional path is advisory — tsc typechecks the project.
+async function getDiagnosticsInContainer(containerName, path) {
+  const note = path ? ` (scoped hint: ${String(path).slice(0, 120)})` : '';
+  const r = await execInContainer(containerName, 'npx --no-install tsc --noEmit 2>&1 || npx tsc --noEmit 2>&1');
+  const out = `${r.stdout || ''}${r.stderr ? `\n${r.stderr}` : ''}`.trim();
+  if (r.code === 0) return `clean: no type errors${note}`;
+  return `type errors${note}:\n${out.slice(-8000)}`;
 }
 
 function gateFilename(gate, i) {

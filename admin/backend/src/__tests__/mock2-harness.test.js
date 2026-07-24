@@ -23,51 +23,58 @@ import {
 } from '../mock2/runner-logic.js';
 import { HARNESSES, normalizeHarness, publicProjectShape } from '../mock2/project-logic.js';
 import {
-  harnessForProject, ProxyPilotHarness, ClaudeHarness, claudeHarnessStatus,
+  harnessForProject, ProxyPilotHarness, ClaudeHarness, CopilotHarness, claudeHarnessStatus,
 } from '../mock2/harness.js';
 
 // ---- vocabulary ----
 
-test('HARNESSES / normalizeHarness: the two harnesses, unknowns degrade to null', () => {
-  assert.deepEqual([...HARNESSES], ['proxypilot', 'claude']);
+test('HARNESSES / normalizeHarness: the three harnesses, unknowns degrade to null', () => {
+  assert.deepEqual([...HARNESSES], ['copilot', 'proxypilot', 'claude']);
+  assert.equal(normalizeHarness('copilot'), 'copilot');
   assert.equal(normalizeHarness('proxypilot'), 'proxypilot');
   assert.equal(normalizeHarness('claude'), 'claude');
   assert.equal(normalizeHarness('  Claude  '), 'claude'); // case/space tolerant
   assert.equal(normalizeHarness(null), null);
   assert.equal(normalizeHarness(undefined), null);
   assert.equal(normalizeHarness(''), null);
-  assert.equal(normalizeHarness('copilot'), null); // unknown value never selects a runner
+  assert.equal(normalizeHarness('bogus'), null); // unknown value never selects a runner
 });
 
 // ---- the factory decision ----
 
-test('resolveHarness: existing project (no harness set) defaults to ProxyPilot', () => {
-  assert.equal(resolveHarness({}, {}), 'proxypilot');
-  assert.equal(resolveHarness({ harness: null }, {}), 'proxypilot');
-  assert.equal(resolveHarness({ harness: '' }, {}), 'proxypilot');
-  assert.equal(resolveHarness(undefined, {}), 'proxypilot');
+test('resolveHarness: existing project (no harness set) defaults to Copilot', () => {
+  assert.equal(resolveHarness({}, {}), 'copilot');
+  assert.equal(resolveHarness({ harness: null }, {}), 'copilot');
+  assert.equal(resolveHarness({ harness: '' }, {}), 'copilot');
+  assert.equal(resolveHarness(undefined, {}), 'copilot');
 });
 
 test('resolveHarness: explicit per-project choice wins', () => {
   assert.equal(resolveHarness({ harness: 'claude' }, {}), 'claude');
   assert.equal(resolveHarness({ harness: 'proxypilot' }, {}), 'proxypilot');
+  assert.equal(resolveHarness({ harness: 'copilot' }, {}), 'copilot');
   // ...even against the legacy global flag: a project pinned to ProxyPilot
   // stays on ProxyPilot when BUILD_RUNNER=sdk is set.
   assert.equal(resolveHarness({ harness: 'proxypilot' }, { BUILD_RUNNER: 'sdk' }), 'proxypilot');
   assert.equal(resolveHarness({ harness: 'claude' }, { BUILD_RUNNER: '' }), 'claude');
 });
 
-test('resolveHarness: no explicit choice falls back to the legacy BUILD_RUNNER flag (behavior identical to before)', () => {
+test('resolveHarness: no explicit choice — legacy BUILD_RUNNER=sdk still opts into Claude, else Copilot default', () => {
   assert.equal(resolveHarness({}, { BUILD_RUNNER: 'sdk' }), 'claude');
   assert.equal(resolveHarness({ harness: 'bogus' }, { BUILD_RUNNER: 'sdk' }), 'claude');
-  assert.equal(resolveHarness({}, { BUILD_RUNNER: 'anything-else' }), 'proxypilot');
+  assert.equal(resolveHarness({}, { BUILD_RUNNER: 'anything-else' }), 'copilot');
+  assert.equal(resolveHarness({}, {}), 'copilot');
 });
 
 test('harnessForProject: returns the right implementation per project', () => {
   const def = harnessForProject({ id: 1 }, {});
-  assert.ok(def instanceof ProxyPilotHarness);
-  assert.equal(def.name, 'proxypilot');
+  assert.ok(def instanceof CopilotHarness);
+  assert.equal(def.name, 'copilot');
   assert.equal(typeof def.runTask, 'function');
+
+  const pp = harnessForProject({ id: 1, harness: 'proxypilot' }, {});
+  assert.ok(pp instanceof ProxyPilotHarness);
+  assert.equal(pp.name, 'proxypilot');
 
   const claude = harnessForProject({ id: 1, harness: 'claude' }, {});
   assert.ok(claude instanceof ClaudeHarness);
@@ -81,9 +88,9 @@ test('harnessForProject: returns the right implementation per project', () => {
 
 // ---- the API response shape ----
 
-test('publicProjectShape: harness surfaces with the ProxyPilot default for untouched projects', () => {
+test('publicProjectShape: harness surfaces with the Copilot default for untouched projects', () => {
   const base = { id: 7, name: 'p', lifecycle: 'active' };
-  assert.equal(publicProjectShape(base, {}).harness, 'proxypilot');
+  assert.equal(publicProjectShape(base, {}).harness, 'copilot');
   assert.equal(publicProjectShape(base, {}).harness_choice, null);
   assert.equal(publicProjectShape({ ...base, harness: 'claude' }, {}).harness, 'claude');
   assert.equal(publicProjectShape({ ...base, harness: 'claude' }, {}).harness_choice, 'claude');

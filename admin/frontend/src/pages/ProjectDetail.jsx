@@ -845,10 +845,11 @@ export default function ProjectDetail() {
   );
 }
 
-// Which agent harness drives this project's builds — ProxyPilot's built-in
-// runner, or the Claude Agent SDK (with its `search` and `pull-website`
-// subagents). Exactly one harness per project; the choice persists immediately
-// and applies from the next build cycle. The Claude option stays disabled, with
+// Which agent harness drives this project's builds — Copilot (the default,
+// Copilot-grade editing), ProxyPilot's original built-in runner, or the Claude
+// Agent SDK (with its `search` and `pull-website` subagents). Exactly one
+// harness per project; the choice persists immediately and applies from the
+// next build cycle. The Claude option stays disabled, with
 // the server's reason shown, until an Anthropic API key is configured
 // server-side — the key itself never reaches the browser (the API returns only
 // a configured boolean + source label). Self-contained loader, like the other
@@ -871,13 +872,14 @@ function HarnessCard({ projectId, canEdit }) {
     try {
       const r = await api.mock2SetProjectHarness(projectId, harness);
       setInfo((cur) => ({ ...cur, harness: r.harness, claude: r.claude ?? cur?.claude }));
-      toast({ title: `Build harness: ${harness === 'claude' ? 'Claude' : 'ProxyPilot'}`, description: 'Saved. Applies from the next build cycle.' });
+      const label = harness === 'claude' ? 'Claude' : harness === 'proxypilot' ? 'ProxyPilot' : 'Copilot';
+      toast({ title: `Build harness: ${label}`, description: 'Saved. Applies from the next build cycle.' });
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not switch harness', description: err.message });
     } finally { setBusy(false); }
   };
 
-  const active = info?.harness || 'proxypilot';
+  const active = info?.harness || 'copilot';
   const claudeReady = !!info?.claude?.configured;
   const seg = (value, label, caption, disabled) => (
     <Button
@@ -904,8 +906,9 @@ function HarnessCard({ projectId, canEdit }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Build harness">
-          {seg('proxypilot', 'ProxyPilot', 'Built-in runner (default)', !info || busy || !canEdit)}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="Build harness">
+          {seg('copilot', 'Copilot', 'Copilot-grade editing (default)', !info || busy || !canEdit)}
+          {seg('proxypilot', 'ProxyPilot', 'Original built-in runner', !info || busy || !canEdit)}
           {seg('claude', 'Claude', 'Claude Agent SDK + web search/fetch subagents', !info || busy || !canEdit || !claudeReady)}
         </div>
         {info && !claudeReady ? (

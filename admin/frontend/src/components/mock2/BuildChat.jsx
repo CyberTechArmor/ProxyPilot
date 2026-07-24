@@ -100,6 +100,13 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     };
   }, []);
 
+  // Only the post-approval slice of the conversation belongs here (the design
+  // conversation is archived in Details). Declared BEFORE the scroll effect
+  // below, which reads the newest message — a forward reference here would TDZ.
+  // created_at + design_approved_at are both ISO, so a lexical compare is correct.
+  const messages = (data?.messages || [])
+    .filter((m) => !approvedAt || !m.created_at || m.created_at >= approvedAt);
+
   // Scroll cadence: (1) open rule questions win — land on the first one. (2) When
   // the user just SENT a message, re-arm and scroll to the BOTTOM of their
   // message. (3) Otherwise, unless the user has scrolled up to read, land on the
@@ -129,11 +136,6 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   }, [data?.messages?.length, active, openQuestionKey, askPartial?.length, newestMsg?.id, newestMsg?.kind]);
 
   const openIds = new Set(data?.open_question_ids || []);
-  // Only the post-approval slice of the conversation belongs here (the design
-  // conversation is archived in Details). created_at + design_approved_at are
-  // both ISO from nowIso(), so a lexical compare is correct.
-  const messages = (data?.messages || [])
-    .filter((m) => !approvedAt || !m.created_at || m.created_at >= approvedAt);
 
   const answerQuestion = async (questionId, answer) => {
     if (!questionId || !answer) return;

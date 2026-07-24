@@ -102,19 +102,46 @@ async function capturePreviewImage(iframeEl, pins) {
 // the mockup preview (pre-build).
 export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
-  const [reloadNonce, setReloadNonce] = useState(0); // bump to remount (reload) the iframe
   const [annotating, setAnnotating] = useState(false);
   const [pins, setPins] = useState([]); // { x, y, note, el? } — x/y in % of the visible preview
   const [sending, setSending] = useState(false);
   const [sentAt, setSentAt] = useState(0); // brief "sent" confirmation
   const [attachShot, setAttachShot] = useState(true); // attach a screenshot on send
   const [mode, setMode] = useState('probing'); // 'probing' | 'bridge' | 'overlay'
-  const iframeRef = useRef(null);
   const bridgeSeenRef = useRef(false); // the app announced the bridge at least once
+
+  // Double-buffered preview: two stacked iframes. A reload loads the BACK buffer
+  // while the FRONT stays painted, then we cross-fade — so live rebuilds refresh
+  // WITHOUT the white flash a remount causes.
+  const refA = useRef(null);
+  const refB = useRef(null);
+  const [frontId, setFrontId] = useState(0);
+  const frontIdRef = useRef(0);
+  useEffect(() => { frontIdRef.current = frontId; }, [frontId]);
+  const frontIframe = () => (frontIdRef.current === 0 ? refA.current : refB.current);
+  const [gens, setGens] = useState([0, 1]); // per-buffer remount keys
+  const loadingRef = useRef(null); // the buffer currently loading a reload
+  const lastReloadRef = useRef(reloadKey);
+  const reloadBack = () => {
+    const back = 1 - frontIdRef.current;
+    loadingRef.current = back;
+    setGens((g) => { const n = [...g]; n[back] += 2; return n; }); // remount the hidden buffer
+  };
+  const onBufLoad = (id) => { if (loadingRef.current === id) { loadingRef.current = null; setFrontId(id); } };
+
+  // Auto-reload as the build progresses (reloadKey bumps), but NEVER while
+  // annotating — the app must hold still under the operator's pins.
+  useEffect(() => {
+    if (annotating) return;
+    if (lastReloadRef.current === reloadKey) return;
+    lastReloadRef.current = reloadKey;
+    reloadBack();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadKey, annotating]);
 
   const appOrigin = (() => { try { return new URL(src).origin; } catch { return '*'; } })();
   const postToApp = (type) => {
-    try { iframeRef.current?.contentWindow?.postMessage({ __pp: 'annotate-host', type }, appOrigin); } catch { /* cross-origin race */ }
+    try { frontIframe()?.contentWindow?.postMessage({ __pp: 'annotate-host', type }, appOrigin); } catch { /* cross-origin race */ }
   };
 
   // Bridge handshake + pin stream. We listen whenever annotate is available so
@@ -167,7 +194,7 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
       let image = null;
       if (attachShot) {
         postToApp('disable'); // stop pin capture during the snapshot
-        image = await capturePreviewImage(iframeRef.current, pins.filter((p) => p.note.trim())).catch(() => null);
+        image = await capturePreviewImage(frontIframe(), pins.filter((p) => p.note.trim())).catch(() => null);
       }
       await onAnnotate({ text: composePreviewAnnotation(src, pins, { hasImage: !!image, elementAware }), image });
       exitAnnotate();
@@ -191,7 +218,7 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
           <span className="truncate text-xs font-mono text-muted-foreground">{src}</span>
           <Button
             variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-            onClick={() => setReloadNonce((n) => n + 1)}
+            onClick={reloadBack}
             aria-label="Reload preview" title="Reload preview"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -249,16 +276,32 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
               : <><MapPin className="h-3.5 w-3.5 text-primary shrink-0" /> Tap the preview to drop a pin, then write what should change. (This app has no annotate bridge yet — rebuild to map pins to components.)</>}
         </p>
       ) : null}
-      <div className="relative flex flex-1 min-h-0 justify-center overflow-auto bg-white">
-        <iframe
-          ref={iframeRef}
-          key={`${reloadKey}-${reloadNonce}`}
-          title={`${title || 'Project'} preview`}
-          src={src}
-          className={`h-full border-0 bg-white ${overlayActive ? 'pointer-events-none' : ''}`}
-          style={{ width: width === 'mobile' ? 390 : '100%', maxWidth: '100%' }}
-          sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-modals"
-        />
+      <div className="relative flex-1 min-h-0 overflow-hidden bg-background">
+        {/* Two stacked buffers: the front is painted; a reload loads the back
+            (hidden) then cross-fades in — no white flash. */}
+        {[0, 1].map((id) => {
+          const w = width === 'mobile' ? 390 : '100%';
+          return (
+            <iframe
+              key={`${id}-${gens[id]}`}
+              ref={id === 0 ? refA : refB}
+              title={`${title || 'Project'} preview`}
+              src={src}
+              onLoad={() => onBufLoad(id)}
+              className="absolute inset-y-0 border-0 bg-white"
+              style={{
+                width: w,
+                maxWidth: '100%',
+                left: width === 'mobile' ? '50%' : 0,
+                marginLeft: width === 'mobile' ? -195 : 0,
+                opacity: id === frontId ? 1 : 0,
+                transition: 'opacity 200ms ease',
+                pointerEvents: id === frontId && !overlayActive ? 'auto' : 'none',
+              }}
+              sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-modals"
+            />
+          );
+        })}
         {/* Coordinate overlay — only in fallback (no bridge). In bridge mode the
             iframe stays interactive so the in-app bridge receives the taps. */}
         {overlayActive ? (

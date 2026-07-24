@@ -148,6 +148,10 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     // New assistant/build content: land on the top of the last message, unless
     // the user has scrolled up — then leave their view untouched.
     if (interactedRef.current) return;
+    // While a build is live, the activity stream + narration grow at the bottom;
+    // follow the BOTTOM so the newest line stays in view (VS Code / Claude-Code
+    // feel), instead of pinning to the top of the last message.
+    if (active) { el.scrollTop = el.scrollHeight; return; }
     const kids = [...el.children].filter((k) => !k.hasAttribute('data-scroll-skip'));
     const last = kids[kids.length - 1];
     if (last) el.scrollTop = Math.max(0, last.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 8);

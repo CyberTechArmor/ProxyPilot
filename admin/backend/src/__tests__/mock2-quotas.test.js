@@ -36,6 +36,18 @@ test('defaultModelPrice: known Claude models resolve to their documented rate', 
   assert.deepEqual(defaultModelPrice('claude-opus-4-8-20260101'), { input_cents_per_mtok: 500, output_cents_per_mtok: 2500 });
 });
 
+test('defaultModelPrice: OpenAI frontier + utility models resolve to their documented rate', () => {
+  assert.deepEqual(defaultModelPrice('gpt-5.6-sol'), { input_cents_per_mtok: 500, output_cents_per_mtok: 3000 });
+  assert.deepEqual(defaultModelPrice('gpt-5.6-terra'), { input_cents_per_mtok: 250, output_cents_per_mtok: 1500 });
+  assert.deepEqual(defaultModelPrice('gpt-5.6-luna'), { input_cents_per_mtok: 100, output_cents_per_mtok: 600 });
+  assert.deepEqual(defaultModelPrice('gpt-5.3-codex'), { input_cents_per_mtok: 175, output_cents_per_mtok: 1400 });
+  assert.deepEqual(defaultModelPrice('gpt-5.4-mini'), { input_cents_per_mtok: 75, output_cents_per_mtok: 450 });
+  assert.deepEqual(defaultModelPrice('gpt-5.4-nano'), { input_cents_per_mtok: 20, output_cents_per_mtok: 125 });
+  // A dashed alias and a date suffix still resolve (dots folded to dashes).
+  assert.deepEqual(defaultModelPrice('gpt-5-6-terra'), { input_cents_per_mtok: 250, output_cents_per_mtok: 1500 });
+  assert.deepEqual(defaultModelPrice('gpt-5.6-sol-20260701'), { input_cents_per_mtok: 500, output_cents_per_mtok: 3000 });
+});
+
 test('defaultModelPrice: unknown / self-hosted models have no default (cost stays 0)', () => {
   assert.equal(defaultModelPrice('llama-3-70b'), null);
   assert.equal(defaultModelPrice(''), null);

@@ -5,7 +5,7 @@
 //
 // A harness is an object with:
 //
-//   name: 'proxypilot' | 'claude'
+//   name: 'copilot' | 'proxypilot' | 'claude'
 //   runTask(input): Promise<void>
 //
 // `input` is the runner argument bag startCycle assembles today:
@@ -22,8 +22,11 @@
 // today and needs no harness-specific rendering — that IS the normalized
 // HarnessEvent shape, so a new harness plugs in by emitting the same records.
 //
-// ## The two implementations
+// ## The implementations
 //
+// - CopilotHarness — the DEFAULT. The native JS port of the reference harness
+//   bundle (Copilot-grade editing): the same runner.runCycle engine driven with
+//   the Copilot tool profile (harness-copilot.js). Provider-neutral.
 // - ProxyPilotHarness — an ADAPTER over the existing hand-rolled loop
 //   (runner.js runCycle). It wraps, it does not reimplement: a project on this
 //   harness behaves byte-for-byte as before the abstraction existed.
@@ -50,6 +53,24 @@ export class ProxyPilotHarness {
   }
 }
 
+// CopilotHarness — the native JS port of the reference harness bundle's design
+// (Copilot-grade file editing). It reuses the SAME container/cycle engine as the
+// ProxyPilot harness (runner.runCycle) and only swaps the harness profile: the
+// Copilot tool set (search_workspace / read_file ranges / list_dir / apply_edit /
+// create_file / run_terminal / get_diagnostics) and the read → edit → verify
+// system prompt. Provider-neutral, so it drives Anthropic AND OpenAI models
+// identically. This is the install-wide default (see resolveHarness).
+export class CopilotHarness {
+  name = 'copilot';
+  async runTask(input) {
+    const [{ runCycle }, { COPILOT_PROFILE }] = await Promise.all([
+      import('./runner.js'),
+      import('./harness-copilot.js'),
+    ]);
+    return runCycle({ ...input, harnessProfile: COPILOT_PROFILE });
+  }
+}
+
 export class ClaudeHarness {
   name = 'claude';
   async runTask(input) {
@@ -63,7 +84,10 @@ export class ClaudeHarness {
 // the ProxyPilot harness (resolveHarness owns that ordering, and is where the
 // decision is unit-tested).
 export function harnessForProject(project, env = process.env) {
-  return resolveHarness(project, env) === 'claude' ? new ClaudeHarness() : new ProxyPilotHarness();
+  const choice = resolveHarness(project, env);
+  if (choice === 'claude') return new ClaudeHarness();
+  if (choice === 'proxypilot') return new ProxyPilotHarness();
+  return new CopilotHarness(); // 'copilot' — the install-wide default
 }
 
 // claudeHarnessStatus({ ready, env }) — is the Claude harness usable on this

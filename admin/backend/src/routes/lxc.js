@@ -21,6 +21,8 @@ import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 import { resolveCertDir } from '../lib/caddy-cert.js';
 import { inspectIncusDevice } from '../lib/cert-mount-reconciler.js';
+import { manualTlsDirective } from '../lib/tls-certs.js';
+import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import {
   fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
   cancelSnapshotExport, sweepOrphanTempInstances, importSnapshotFromS3,
@@ -1100,7 +1102,19 @@ lxcRouter.post('/containers', async (req, res) => {
         creation.message = `Configuring reverse proxy for ${services.length} service${services.length > 1 ? 's' : ''}...`;
 
         for (const svc of services) {
-          const tlsDirective = svc.obtainCert ? '' : '\n    tls internal';
+          // A pasted cert covering this host serves it (and disables ACME) via
+          // `tls <cert> <key>`; global manual mode with no covering cert uses
+          // `tls internal`. Otherwise the original obtainCert logic stands.
+          let tlsDirective;
+          let tlsHit = null;
+          try { tlsHit = resolveTlsForHost(svc.domain); } catch { tlsHit = null; }
+          if (tlsHit && tlsHit.mode === 'manual') {
+            tlsDirective = `\n${manualTlsDirective(tlsHit.certFile, tlsHit.keyFile)}`;
+          } else if (tlsHit && tlsHit.mode === 'internal') {
+            tlsDirective = '\n    tls internal';
+          } else {
+            tlsDirective = svc.obtainCert ? '' : '\n    tls internal';
+          }
           const healthMarker = svc.healthPath ? `# proxypilot: healthpath=${svc.healthPath}\n` : '';
           const caddyConfig = `${healthMarker}${svc.domain} {${tlsDirective}\n    reverse_proxy ${ip}:${svc.port}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${svc.domain}.log\n    }\n}\n`;
           const configPath = join(CADDY_SITES_DIR, svc.domain);

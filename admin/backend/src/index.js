@@ -23,6 +23,7 @@ import { backupsRouter } from './routes/backups.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { ldapRouter } from './routes/ldap.js';
 import { domainsRouter } from './routes/domains.js';
+import { tlsCertsRouter } from './routes/tls-certs.js';
 import { createLeanBeafRouter } from './routes/lean-beaf.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
@@ -30,6 +31,7 @@ import { autoHealVpnListenPort } from './lib/vpn-startup.js';
 import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
 import { hydrate as hydrateCveResearch } from './lib/cve-research-scheduler.js';
+import { hydrate as hydrateCertExpiry } from './lib/cert-expiry-scheduler.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer, setMock2TerminalAuthorizer } from './routes/terminal-ws.js';
 import { decryptSecret } from './lib/secrets.js';
@@ -473,6 +475,7 @@ app.use('/api/ldap', authenticateToken, ldapRouter);
 // per-request inside the router), while its /admin/* endpoints apply the
 // cookie-session middleware themselves.
 app.use('/api/domains', domainsRouter);
+app.use('/api/tls-certs', tlsCertsRouter);
 
 // Mock2 — absence-by-installation (ADR-001). The gate is evaluated with
 // no native imports; only when it resolves enabled do we dynamically
@@ -703,6 +706,13 @@ server.listen(PORT, '0.0.0.0', () => {
       hydrateCveResearch();
     } catch (err) {
       console.error('[cve-research-scheduler] hydrate threw:', err.message || err);
+    }
+    try {
+      // Manual (pasted) TLS cert expiry monitor — a daily check that flags
+      // pasted certs nearing expiry (they do not auto-renew like ACME certs).
+      hydrateCertExpiry();
+    } catch (err) {
+      console.error('[cert-expiry] hydrate threw:', err.message || err);
     }
   });
 });

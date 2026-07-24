@@ -779,11 +779,20 @@ import /etc/caddy/sites/*
 import /etc/caddy/custom/*.caddy
 GLOBALEOF
 
+    # Manual TLS mode (ACME-blocked networks): serve the admin dashboard over
+    # HTTPS with Caddy's internal self-signed cert at first boot instead of
+    # attempting Let's Encrypt (which would hang/fail on a blocked network). The
+    # operator pastes the real cert on the TLS Certificates page after first
+    # login — exactly like the admin password/TOTP are set at first login.
+    local admin_tls_line=""
+    if [[ "${TLS_MODE:-acme}" == "manual" ]]; then
+        admin_tls_line=$'\n    tls internal'
+    fi
     cat > "/etc/caddy/sites/${domain}" <<EOF
 # ProxyPilot Admin Dashboard
 # Domain: ${domain}
 
-${domain} {
+${domain} {${admin_tls_line}
     reverse_proxy 127.0.0.1:${port}
 
     header {
@@ -858,7 +867,13 @@ OVERRIDE
         log_success "Caddy is running"
     fi
 
-    # Wait for TLS certificate
+    # Wait for TLS certificate — ACME mode only. In manual mode the admin site
+    # uses Caddy's internal cert (no ACME), so there is nothing to wait for; the
+    # operator pastes the real cert after first login.
+    if [[ "${TLS_MODE:-acme}" == "manual" ]]; then
+        log_success "Manual TLS mode: serving with Caddy's internal certificate. Paste your certificate on the TLS Certificates page after first login."
+        return 0
+    fi
     log_info "Waiting for Caddy to obtain TLS certificate for ${domain}..."
     log_info "(Caddy contacts Let's Encrypt - this typically takes 10-30 seconds)"
     for i in $(seq 1 30); do
@@ -966,6 +981,11 @@ CADDY_SITES_DIR=/etc/caddy/sites
 CADDY_CONFIG_FILE=/etc/caddy/Caddyfile
 CADDY_CUSTOM_DIR=/etc/caddy/custom
 ACME_EMAIL=${ACME_EMAIL}
+
+# Global TLS mode: 'acme' (default — Let's Encrypt) or 'manual' (serve pasted
+# certificates, for ACME-blocked networks). Seeded into app_settings on first
+# boot; the TLS Certificates page toggles it thereafter.
+TLS_MODE=${TLS_MODE:-acme}
 
 # Phase B host-side agent: dual-track flag for Caddy adapt + reload.
 # Leave false until Phase F flips defaults after burn-in.
@@ -1212,6 +1232,21 @@ main() {
         log_error "Email cannot be empty"
         read -rp "Enter email for TLS certificates: " EMAIL
     done
+
+    # TLS mode. 'automatic' (default) issues Let's Encrypt certs via ACME.
+    # 'manual' is for networks that BLOCK ACME endpoints: the admin dashboard
+    # serves with Caddy's internal cert at first boot and the operator pastes a
+    # real certificate on the TLS Certificates page after first login. An
+    # existing .env value wins on re-run (never re-prompt to a different mode).
+    TLS_MODE="$(grep -E '^TLS_MODE=' "${INSTALL_DIR}/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    if [[ -z "$TLS_MODE" ]]; then
+        read -rp "TLS mode — [a]utomatic ACME/Let's Encrypt (default) or [m]anual pasted certificate (for ACME-blocked networks)? [a/m]: " _tls_ans
+        case "${_tls_ans:-a}" in
+            m|M|manual) TLS_MODE="manual" ;;
+            *) TLS_MODE="acme" ;;
+        esac
+    fi
+    log_info "TLS mode: ${TLS_MODE}"
 
     # Mock2 dev/build module (ADR-001: absence-by-installation). Enabled by
     # default on a fresh install, but the pin file still forces it absent on a

@@ -13,6 +13,8 @@ import { decryptSecret } from '../lib/secrets.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
+import { manualTlsDirective } from '../lib/tls-certs.js';
+import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { detectServicePorts } from '../lib/port-detector.js';
 import {
   reconcileServiceL4Forwards,
@@ -5920,7 +5922,15 @@ function parseUploadSizeMB(size) {
 // and target_ip lives on the service). The normalize step below reads from
 // either field convention. See `generateServiceHandlerBody` for the same
 // dual-shape handling at the body-line level.
-function buildDomainCaddyConfig(entriesList, domain) {
+// tlsDecision (optional) comes from the manual-cert resolver (lib/tls-cert-store
+// resolveTlsForHost), resolved by the caller so this builder stays DB-free:
+//   { mode:'manual', certFile, keyFile } → serve the pasted cert (HTTPS even for
+//     a wildcard) and emit `tls <cert> <key>`, which ALSO disables ACME for the
+//     site — the one hard rule.
+//   { mode:'internal' } → global manual mode, host uncovered → `tls internal`
+//     (self-signed), never an ACME attempt.
+//   null → unchanged behavior (Caddy automatic HTTPS / ACME).
+function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null) {
   if (!entriesList || entriesList.length === 0) return null;
 
   // Normalize each entry into a consistent shape. Handles:
@@ -6056,8 +6066,13 @@ function buildDomainCaddyConfig(entriesList, domain) {
   const isWildcardDomain =
     typeof domain === 'string' && domain.startsWith('*.');
   const siteSslEnabled = normalized[0].sslEnabled;
+  // A manual cert (or global manual mode) serves over HTTPS regardless of the
+  // wildcard downgrade — a pasted wildcard cert is exactly how a `*.` domain
+  // gets real TLS without ACME. Otherwise the original address logic stands.
+  const manualTls = tlsDecision && (tlsDecision.mode === 'manual' || tlsDecision.mode === 'internal');
   const siteAddress =
-    !siteSslEnabled || isWildcardDomain ? `http://${domain}` : domain;
+    manualTls ? domain
+      : (!siteSslEnabled || isWildcardDomain ? `http://${domain}` : domain);
 
   // Merged request_body max_size: take the max across every service on the
   // domain so the most-permissive service's upload cap is honored for every
@@ -6100,6 +6115,14 @@ function buildDomainCaddyConfig(entriesList, domain) {
   lines.push(`# Generated: ${new Date().toISOString()}`);
   lines.push(``);
   lines.push(`${siteAddress} {`);
+
+  // Manual-cert / internal TLS directive, emitted first inside the block. `tls
+  // <cert> <key>` both loads the pasted cert AND disables ACME for this site.
+  if (tlsDecision && tlsDecision.mode === 'manual' && tlsDecision.certFile && tlsDecision.keyFile) {
+    lines.push(manualTlsDirective(tlsDecision.certFile, tlsDecision.keyFile));
+  } else if (tlsDecision && tlsDecision.mode === 'internal') {
+    lines.push(`    tls internal`);
+  }
 
   if (maxSizeRendered) {
     lines.push(`    request_body {`);
@@ -6306,7 +6329,12 @@ async function regenerateDomainCaddyConfig(db, domain) {
   // buildDomainCaddyConfig accepts both legacy and Phase 2b shapes (B.2),
   // so the mixed array flows through its normalize step without any
   // per-row branching here.
-  const merged = buildDomainCaddyConfig(allRows, domain);
+  // Resolve the manual-cert / global-mode TLS decision for this host. Fail-safe:
+  // any resolver error falls back to null (unchanged ACME behavior) so a cert
+  // subsystem hiccup can never break service config generation.
+  let tlsDecision = null;
+  try { tlsDecision = resolveTlsForHost(domain); } catch (e) { console.warn('[tls] resolve failed for', domain, e?.message); }
+  const merged = buildDomainCaddyConfig(allRows, domain, tlsDecision);
   if (merged === null) {
     await unlink(configPath).catch(() => {});
     return;

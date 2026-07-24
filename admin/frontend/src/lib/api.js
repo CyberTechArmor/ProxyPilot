@@ -1810,6 +1810,32 @@ export const api = {
   domainCloudflarePluginInstall: () =>
     request('/domains/admin/cloudflare-plugin/install', { method: 'POST' }),
 
+  // ---- Flightdeck IDE file API (/api/mock2/projects/:id/flightdeck) ----
+  mock2FlightdeckTree: (id) => request(`/mock2/projects/${id}/flightdeck/tree`),
+  mock2FlightdeckReadFile: (id, path) =>
+    request(`/mock2/projects/${id}/flightdeck/file?path=${encodeURIComponent(path)}`),
+  mock2FlightdeckSaveFile: (id, path, content) =>
+    request(`/mock2/projects/${id}/flightdeck/file`, { method: 'PUT', body: JSON.stringify({ path, content }) }),
+  mock2FlightdeckCreate: (id, path, type = 'file', content) =>
+    request(`/mock2/projects/${id}/flightdeck/create`, { method: 'POST', body: JSON.stringify({ path, type, content }) }),
+  mock2FlightdeckRename: (id, from, to) =>
+    request(`/mock2/projects/${id}/flightdeck/rename`, { method: 'POST', body: JSON.stringify({ from, to }) }),
+  mock2FlightdeckDelete: (id, path) =>
+    request(`/mock2/projects/${id}/flightdeck/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
+
+  // ---- Manual (pasted) TLS certificates (/api/tls-certs) ----
+  // The private key is WRITE-ONLY: it is sent on add/rotate but the server
+  // never returns it (list/detail are metadata + public cert PEM only).
+  tlsCerts: () => request('/tls-certs'),
+  tlsCert: (id) => request(`/tls-certs/${id}`),
+  tlsCertAdd: (data) =>
+    request('/tls-certs', { method: 'POST', body: JSON.stringify(data) }),
+  tlsCertUpdate: (id, data) =>
+    request(`/tls-certs/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  tlsCertDelete: (id) => request(`/tls-certs/${id}`, { method: 'DELETE' }),
+  tlsModeSet: (mode) =>
+    request('/tls-certs/tls-mode', { method: 'PUT', body: JSON.stringify({ mode }) }),
+
   // ---- Lean BEAF Pro (/api/lbp) — team-shared innovation projects ----
 
   lbpUsers: () => request('/lbp/users'),

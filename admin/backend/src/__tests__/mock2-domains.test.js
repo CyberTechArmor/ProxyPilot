@@ -203,6 +203,33 @@ test('buildMock2DomainConfig: one block per FQDN', () => {
   assert.match(cfg, /# canary/);
 });
 
+test('buildMock2SiteBlock: a manual-cert tlsDecision emits `tls <cert> <key>` (disables ACME for the FQDN)', () => {
+  const block = buildMock2SiteBlock({
+    fqdn: 'p-abc.dev.example.com', upstream: '10.0.0.2:8080',
+    tlsDecision: { mode: 'manual', certFile: '/etc/caddy/pp-manual-certs/cert-1.pem', keyFile: '/etc/caddy/pp-manual-certs/cert-1.key' },
+  });
+  assert.match(block, /\ttls \/etc\/caddy\/pp-manual-certs\/cert-1\.pem \/etc\/caddy\/pp-manual-certs\/cert-1\.key/);
+  assert.match(block, /reverse_proxy 10\.0\.0\.2:8080/);
+});
+
+test('buildMock2SiteBlock: internal mode emits `tls internal`; no decision keeps ACME behavior', () => {
+  assert.match(buildMock2SiteBlock({ fqdn: 'x.dev.example.com', tlsDecision: { mode: 'internal' } }), /\ttls internal/);
+  assert.doesNotMatch(buildMock2SiteBlock({ fqdn: 'x.dev.example.com' }), /\ttls /); // unchanged: no tls directive
+});
+
+test('buildMock2DomainConfig: resolveTls callback applies per-FQDN manual certs', () => {
+  const cfg = buildMock2DomainConfig({
+    domain: 'dev.example.com',
+    fqdns: ['covered.dev.example.com', 'plain.dev.example.com'],
+    resolveTls: (fqdn) => (fqdn === 'covered.dev.example.com'
+      ? { mode: 'manual', certFile: '/c/c.pem', keyFile: '/c/c.key' } : null),
+  });
+  assert.match(cfg, /covered\.dev\.example\.com \{\n\ttls \/c\/c\.pem \/c\/c\.key/);
+  // The uncovered FQDN gets no tls directive (still ACME/HTTP-01).
+  const plainBlock = cfg.slice(cfg.indexOf('plain.dev.example.com'));
+  assert.doesNotMatch(plainBlock, /tls /);
+});
+
 test('buildCertRmTargets: builds per-issuer globs, dedupes, drops unsafe FQDNs', () => {
   const t = buildCertRmTargets(['my-app.dev.example.com', 'my-app.dev.example.com'], '/data');
   assert.deepEqual(t, ['"/data/certificates"/*/"my-app.dev.example.com"']);

@@ -14,7 +14,7 @@
 // full-screen-on-<sm delete dialog. Renders clean at 360px.
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams, Link, Navigate, useNavigate } from 'react-router-dom';
+import { useParams, Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -38,6 +38,8 @@ import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
 import ProjectTerminal from '@/components/mock2/ProjectTerminal';
 import BuildMode from '@/components/mock2/BuildMode';
+import Flightdeck from '@/components/mock2/Flightdeck';
+import { flightdeckPrefKey, readPref, writePref } from '@/lib/flightdeck';
 import ConnectVsCode from '@/components/mock2/ConnectVsCode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
 import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectComponentsCard } from '@/components/mock2/ProjectTimeCard';
@@ -70,6 +72,22 @@ export default function ProjectDetail() {
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
   const [provStatus, setProvStatus] = useState(null); // live provisioning progress + step log
   const [tab, setTab] = useState('chat'); // 'chat' | 'terminal' | 'details'
+  // Build-phase view: Flightdeck (IDE, default) vs the classic build view. The
+  // URL (?view=) wins for deep-links, else the per-project remembered choice,
+  // else Flightdeck. Persisted per project.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [buildView, setBuildViewState] = useState(() => {
+    const q = searchParams.get('view');
+    if (q === 'classic' || q === 'flightdeck') return q;
+    return readPref(flightdeckPrefKey(id), 'flightdeck') === 'classic' ? 'classic' : 'flightdeck';
+  });
+  const setBuildView = useCallback((v) => {
+    setBuildViewState(v);
+    writePref(flightdeckPrefKey(id), v);
+    const next = new URLSearchParams(searchParams);
+    if (v === 'flightdeck') next.delete('view'); else next.set('view', v);
+    setSearchParams(next, { replace: true });
+  }, [id, searchParams, setSearchParams]);
   // Once the Terminal tab has been opened we keep it mounted (forceMount below)
   // so its shell session survives switching to other tabs — the PTY only starts
   // on the first visit, not on page load.
@@ -372,21 +390,45 @@ export default function ProjectDetail() {
             <div className="flex h-full min-h-0 flex-col gap-3">
               <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} />
               {designApproved ? (
-                // Build mode — build information on the left, the build/run/
-                // maintenance chat on the right (the design conversation is
-                // archived read-only in the Details tab).
-                <BuildMode
-                  projectId={id}
-                  project={project}
-                  canEdit={canEdit}
-                  isAdmin={isAdmin}
-                  previewSrc={previewSrc}
-                  previewReloadNonce={previewReloadNonce}
-                  provLog={provStatus?.progress?.log || null}
-                  provMessage={provStatus?.progress?.message || null}
-                  onChanged={load}
-                  onBuilt={handleMockupChanged}
-                />
+                // Build phase — Flightdeck IDE workspace by default (files +
+                // editor + agent chat + terminal + preview, one shared sandbox),
+                // with a toggle back to the classic build view. Both drive the
+                // same harness; the design conversation is archived read-only in
+                // the Details tab.
+                buildView === 'flightdeck' ? (
+                  <Flightdeck
+                    projectId={id}
+                    project={project}
+                    canEdit={canEdit}
+                    isAdmin={isAdmin}
+                    previewSrc={previewSrc}
+                    provLog={provStatus?.progress?.log || null}
+                    provMessage={provStatus?.progress?.message || null}
+                    onChanged={load}
+                    onBuilt={handleMockupChanged}
+                    onSwitchView={() => setBuildView('classic')}
+                  />
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex justify-end">
+                      <Button variant="outline" size="sm" className="min-h-[36px]" onClick={() => setBuildView('flightdeck')}>
+                        Open Flightdeck
+                      </Button>
+                    </div>
+                    <BuildMode
+                      projectId={id}
+                      project={project}
+                      canEdit={canEdit}
+                      isAdmin={isAdmin}
+                      previewSrc={previewSrc}
+                      previewReloadNonce={previewReloadNonce}
+                      provLog={provStatus?.progress?.log || null}
+                      provMessage={provStatus?.progress?.message || null}
+                      onChanged={load}
+                      onBuilt={handleMockupChanged}
+                    />
+                  </div>
+                )
               ) : previewSrc ? (
                 // Design mode — the live mockup preview on the left, the design
                 // conversation on the right.
@@ -845,10 +887,11 @@ export default function ProjectDetail() {
   );
 }
 
-// Which agent harness drives this project's builds — ProxyPilot's built-in
-// runner, or the Claude Agent SDK (with its `search` and `pull-website`
-// subagents). Exactly one harness per project; the choice persists immediately
-// and applies from the next build cycle. The Claude option stays disabled, with
+// Which agent harness drives this project's builds — Copilot (the default,
+// Copilot-grade editing), ProxyPilot's original built-in runner, or the Claude
+// Agent SDK (with its `search` and `pull-website` subagents). Exactly one
+// harness per project; the choice persists immediately and applies from the
+// next build cycle. The Claude option stays disabled, with
 // the server's reason shown, until an Anthropic API key is configured
 // server-side — the key itself never reaches the browser (the API returns only
 // a configured boolean + source label). Self-contained loader, like the other
@@ -871,13 +914,14 @@ function HarnessCard({ projectId, canEdit }) {
     try {
       const r = await api.mock2SetProjectHarness(projectId, harness);
       setInfo((cur) => ({ ...cur, harness: r.harness, claude: r.claude ?? cur?.claude }));
-      toast({ title: `Build harness: ${harness === 'claude' ? 'Claude' : 'ProxyPilot'}`, description: 'Saved. Applies from the next build cycle.' });
+      const label = harness === 'claude' ? 'Claude' : harness === 'proxypilot' ? 'ProxyPilot' : 'Copilot';
+      toast({ title: `Build harness: ${label}`, description: 'Saved. Applies from the next build cycle.' });
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not switch harness', description: err.message });
     } finally { setBusy(false); }
   };
 
-  const active = info?.harness || 'proxypilot';
+  const active = info?.harness || 'copilot';
   const claudeReady = !!info?.claude?.configured;
   const seg = (value, label, caption, disabled) => (
     <Button
@@ -904,8 +948,9 @@ function HarnessCard({ projectId, canEdit }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Build harness">
-          {seg('proxypilot', 'ProxyPilot', 'Built-in runner (default)', !info || busy || !canEdit)}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="Build harness">
+          {seg('copilot', 'Copilot', 'Copilot-grade editing (default)', !info || busy || !canEdit)}
+          {seg('proxypilot', 'ProxyPilot', 'Original built-in runner', !info || busy || !canEdit)}
           {seg('claude', 'Claude', 'Claude Agent SDK + web search/fetch subagents', !info || busy || !canEdit || !claudeReady)}
         </div>
         {info && !claudeReady ? (

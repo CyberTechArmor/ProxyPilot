@@ -54,6 +54,17 @@ export const DEFAULT_MODEL_PRICES = Object.freeze([
   { match: /haiku-(4-5|4-6|4)\b/, input: 100, output: 500 },
   { match: /haiku-3-5\b/, input: 80, output: 400 },
   { match: /(fable|mythos)-5\b/, input: 1000, output: 5000 },
+  // OpenAI (platform.openai.com pricing, verified 2026-07 — re-check before
+  // billing). Dots in the id are matched with `[.-]` so "gpt-5.6-sol" and a
+  // "gpt-5-6-sol" alias both resolve; the tier suffix keeps each match unique,
+  // so ordering among them doesn't matter. gpt-5.4-mini/nano sit BELOW Anthropic's
+  // Haiku floor (the cheap-utility tier with no Claude equivalent).
+  { match: /gpt-5[.-]6-sol\b/, input: 500, output: 3000 },
+  { match: /gpt-5[.-]6-terra\b/, input: 250, output: 1500 },
+  { match: /gpt-5[.-]6-luna\b/, input: 100, output: 600 },
+  { match: /gpt-5[.-]3-codex\b/, input: 175, output: 1400 },
+  { match: /gpt-5[.-]4-mini\b/, input: 75, output: 450 },
+  { match: /gpt-5[.-]4-nano\b/, input: 20, output: 125 },
 ]);
 
 // The fallback price row for a model id, or null if we don't know it (then cost

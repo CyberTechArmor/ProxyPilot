@@ -107,6 +107,7 @@ import { resolveHarness } from './runner-logic.js';
 import { claudeHarnessStatus } from './harness.js';
 import { deployProjectStatus } from './deploy-logic.js';
 import { requireMock2Role } from './authz.js';
+import { registerFlightdeckRoutes } from './flightdeck.js';
 import {
   startProvision,
   startArchive,
@@ -370,7 +371,7 @@ const flagSchema = z.object({
   reason: z.string().trim().max(500).optional(),
 });
 // Per-project agent harness toggle (values mirror project-logic HARNESSES).
-const harnessSchema = z.object({ harness: z.enum(['proxypilot', 'claude']) });
+const harnessSchema = z.object({ harness: z.enum(['copilot', 'proxypilot', 'claude']) });
 const idleDaysSchema = z.object({
   days: z.union([z.number().int(), z.string()]).transform((v) => Number(v))
     .refine((n) => Number.isInteger(n) && n >= 0 && n <= 3650, 'out of range'),
@@ -1186,7 +1187,7 @@ export function createMock2Router() {
     res.json({
       harness: resolveHarness(project, process.env),
       harness_choice: normalizeHarness(project.harness),
-      harnesses: ['proxypilot', 'claude'],
+      harnesses: ['copilot', 'proxypilot', 'claude'],
       claude: claudeHarnessStatus({ ready, env: process.env }),
     });
   });
@@ -1198,7 +1199,7 @@ export function createMock2Router() {
   router.put('/projects/:id/harness', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
     const project = req.mock2Project;
     const parsed = harnessSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: 'harness ("proxypilot" | "claude") is required' });
+    if (!parsed.success) return res.status(400).json({ error: 'harness ("copilot" | "proxypilot" | "claude") is required' });
     let ready = null;
     try { ready = buildRunnerReady(); } catch { ready = null; }
     const claude = claudeHarnessStatus({ ready, env: process.env });
@@ -4544,6 +4545,11 @@ export function createMock2Router() {
       reported_outcome: reportedCycleOutcome(getCycle(cycle.id)),
     });
   });
+
+  // Flightdeck IDE — file-CRUD endpoints (tree/read/save/create/rename/delete)
+  // against the project container. Same auth chain as the rest of the router;
+  // each route adds requireMock2Role (viewer read / editor write).
+  registerFlightdeckRoutes(router, refuseIfArchived);
 
   return router;
 }

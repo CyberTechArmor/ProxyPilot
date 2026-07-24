@@ -698,6 +698,7 @@ function appShellHtml(project) {
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon.svg">
 <script src="/install.js" defer></script>
+<script src="/pp-annotate-bridge.js" defer></script>
 </head>
 <body>
 <header class="app">
@@ -736,6 +737,105 @@ fetch('/api/me', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : 
 </script>
 </body>
 </html>
+`;
+}
+
+// public/pp-annotate-bridge.js — the dev-plane annotation bridge. The ProxyPilot
+// dashboard embeds this app in a cross-origin iframe (its build preview), which
+// means the dashboard CANNOT read this page's DOM to know which element/component
+// an operator tapped. This tiny script closes that gap: when the dashboard turns
+// on "annotate mode", the bridge intercepts taps, resolves the element under the
+// tap to a component/source reference, and posts it back — so a pin becomes
+// "change <SaveButton> (src/components/SaveButton.tsx)", not just an x/y guess.
+//
+// Safety: it is INERT unless (a) the page is framed and (b) the framer sends the
+// handshake — and the app only permits framing by the dashboard origin (Caddy
+// scopes frame-ancestors), so the framer is trusted. It reads element metadata
+// only (tag, text, position, data-* hints); it never exfiltrates page data on
+// its own and touches nothing until annotate mode is explicitly enabled.
+function ppAnnotateBridgeJs() {
+  return `/* ProxyPilot dev-plane annotate bridge — inert unless the dashboard enables it. */
+(function () {
+  if (window.self === window.top) return; // not embedded → do nothing
+  var enabled = false, parentOrigin = null;
+
+  function post(msg) {
+    try { window.parent.postMessage(Object.assign({ __pp: 'annotate-bridge' }, msg), parentOrigin || '*'); } catch (e) {}
+  }
+  function clamp(n) { return Math.round(n * 10) / 10; }
+  function text(el) {
+    var t = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ');
+    return t.slice(0, 80);
+  }
+  function selector(el) {
+    var parts = [], n = el, depth = 0;
+    while (n && n.nodeType === 1 && n.tagName !== 'BODY' && depth < 4) {
+      var s = n.tagName.toLowerCase();
+      if (n.id) { parts.unshift(s + '#' + n.id); break; }
+      if (typeof n.className === 'string' && n.className.trim()) {
+        s += '.' + n.className.trim().split(/\\s+/).slice(0, 2).join('.');
+      }
+      parts.unshift(s); n = n.parentElement; depth++;
+    }
+    return parts.join(' > ');
+  }
+  function reactName(el) {
+    try {
+      var key = Object.keys(el).find(function (k) { return k.indexOf('__reactFiber') === 0 || k.indexOf('__reactInternalInstance') === 0; });
+      if (!key) return null;
+      var f = el[key], hops = 0;
+      while (f && hops < 10) {
+        if (f.type && typeof f.type === 'function' && (f.type.displayName || f.type.name)) return f.type.displayName || f.type.name;
+        f = f.return; hops++;
+      }
+    } catch (e) {}
+    return null;
+  }
+  function describe(el) {
+    if (!el || el.nodeType !== 1) return {};
+    var hint = el.closest ? el.closest('[data-pp-component],[data-component],[data-testid],[data-test]') : null;
+    var comp = hint && (hint.getAttribute('data-pp-component') || hint.getAttribute('data-component') || hint.getAttribute('data-testid') || hint.getAttribute('data-test'));
+    var srcEl = el.closest ? el.closest('[data-pp-source]') : null;
+    var r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+    var vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+    return {
+      tag: el.tagName ? el.tagName.toLowerCase() : '',
+      id: el.id || null,
+      classes: (typeof el.className === 'string' && el.className.trim()) ? el.className.trim().split(/\\s+/).slice(0, 4) : [],
+      component: comp || reactName(el) || null,
+      source: srcEl ? srcEl.getAttribute('data-pp-source') : null,
+      label: (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('name') || el.getAttribute('placeholder'))) || null,
+      text: text(el),
+      selector: selector(el),
+      rect: { x: clamp(r.left / vw * 100), y: clamp(r.top / vh * 100), w: clamp(r.width / vw * 100), h: clamp(r.height / vh * 100) }
+    };
+  }
+  function onClick(e) {
+    if (!enabled) return;
+    e.preventDefault(); e.stopPropagation();
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    var vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+    var pin = describe(el);
+    pin.x = clamp(e.clientX / vw * 100);
+    pin.y = clamp(e.clientY / vh * 100);
+    post({ type: 'pin', pin: pin });
+  }
+  function enable() { if (enabled) return; enabled = true; document.documentElement.style.cursor = 'crosshair'; document.addEventListener('click', onClick, true); post({ type: 'enabled' }); }
+  function disable() { enabled = false; document.documentElement.style.cursor = ''; document.removeEventListener('click', onClick, true); post({ type: 'disabled' }); }
+
+  window.addEventListener('message', function (e) {
+    if (e.source !== window.parent) return;
+    var d = e.data;
+    if (!d || d.__pp !== 'annotate-host') return;
+    parentOrigin = e.origin;
+    if (d.type === 'enable') enable();
+    else if (d.type === 'disable') disable();
+    else if (d.type === 'ping') post({ type: 'ready' });
+  }, false);
+
+  // Announce presence so the dashboard knows the element-aware path is available.
+  post({ type: 'ready' });
+})();
 `;
 }
 
@@ -867,5 +967,9 @@ export function buildScaffoldFiles(project) {
     { path: 'public/icon.svg', content: pwaIconSvg() },
     { path: 'public/sw.js', content: pwaServiceWorkerJs() },
     { path: 'public/install.js', content: pwaInstallJs() },
+    // Dev-plane annotate bridge — lets the dashboard's build preview resolve a
+    // tapped element to a component/source reference (inert unless the dashboard
+    // enables it; the app only permits framing by the dashboard origin).
+    { path: 'public/pp-annotate-bridge.js', content: ppAnnotateBridgeJs() },
   ];
 }

@@ -8,39 +8,146 @@
 //
 // MOBILE_FIRST: full-width, the Desktop/Mobile toggle labels collapse to icons.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2, MapPin, X, Send } from 'lucide-react';
+import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2, MapPin, X, Send, Sparkle } from 'lucide-react';
 
 const MAX_PREVIEW_PINS = 8;
 
-// Compose the Quick-update text from the dropped preview pins. The preview
-// iframe is cross-origin (a different subdomain), so its pixels can't be
-// captured client-side — instead we send precise % coordinates of the VISIBLE
-// preview plus the URL, so the build can locate each spot.
-function composePreviewAnnotation(src, pins) {
-  const lines = pins
-    .map((p, i) => (p.note.trim()
-      ? `${i + 1}. Pin ${i + 1} (${p.x}% from the left, ${p.y}% from the top of the visible preview): ${p.note.trim()}`
-      : null))
-    .filter(Boolean);
-  return `Annotated the live preview (${src}) — the numbered pins mark the exact spots on the screen currently shown in the preview (coordinates are a percentage of the visible preview area):\n${lines.join('\n')}\nApply exactly these changes at the marked spots; change nothing else.`;
+// One-line human description of a bridge-reported element, for the build.
+function describeEl(el) {
+  if (!el) return null;
+  const head = `<${el.tag || 'element'}>${el.text ? ` "${el.text}"` : ''}`;
+  const meta = [];
+  if (el.component) meta.push(`component ${el.component}`);
+  if (el.label) meta.push(`label "${el.label}"`);
+  if (el.id) meta.push(`#${el.id}`);
+  if (el.source) meta.push(`source ${el.source}`);
+  if (!el.component && !el.source && el.selector) meta.push(`selector ${el.selector}`);
+  const loc = el.rect ? ` (around ${el.rect.x}%, ${el.rect.y}%)` : '';
+  return `${head}${meta.length ? ` — ${meta.join(', ')}` : ''}${loc}`;
 }
 
-// onAnnotate (optional) — async ({ text }) => void. When provided, the toolbar
-// shows an "Annotate" toggle: turning it on overlays the live iframe with a
-// pin-drop surface, and Send routes the composed instruction to the build as a
-// Quick update. Omitted for the mockup preview (pre-build).
+// Compose the Quick-update instruction from the dropped pins. When the in-app
+// bridge resolved the tapped element (el), reference it by component/source so
+// the build knows exactly what to change; otherwise fall back to % coordinates
+// of the visible preview.
+function composePreviewAnnotation(src, pins, { hasImage = false, elementAware = false } = {}) {
+  const lines = pins
+    .map((p, i) => {
+      if (!p.note.trim()) return null;
+      const target = p.el ? describeEl(p.el) : `at ${p.x}% from the left, ${p.y}% from the top of the visible preview`;
+      return `${i + 1}. Pin ${i + 1} → ${target}: ${p.note.trim()}`;
+    })
+    .filter(Boolean);
+  const how = elementAware
+    ? 'each pin resolves to the actual element/component that was tapped'
+    : 'pins are a percentage of the visible preview area';
+  const img = hasImage ? ' A screenshot with the numbered pins burned in is attached.' : '';
+  return `Annotated the live preview (${src}) — the numbered pins mark the exact spots on the screen currently shown in the preview (${how}).${img}\n${lines.join('\n')}\nApply exactly these changes at the marked spots; change nothing else.`;
+}
+
+// Capture the visible preview via the browser's tab-snapshot (getDisplayMedia),
+// crop to the iframe, and burn the numbered pins in. The preview iframe is
+// cross-origin, so this is the only way to get a real pixel image of the
+// signed-in view. Returns { media_type, data, name } or null (unsupported /
+// denied / failed — the caller proceeds without an image).
+async function capturePreviewImage(iframeEl, pins) {
+  const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : null;
+  if (!md || !md.getDisplayMedia || !iframeEl) return null;
+  let stream = null;
+  try {
+    stream = await md.getDisplayMedia({ video: { displaySurface: 'browser' }, audio: false, preferCurrentTab: true });
+  } catch { return null; }
+  try {
+    const video = document.createElement('video');
+    video.muted = true; video.srcObject = stream;
+    await video.play().catch(() => {});
+    await new Promise((r) => setTimeout(r, 220)); // let a frame settle
+    const rect = iframeEl.getBoundingClientRect();
+    const scaleX = video.videoWidth / (window.innerWidth || 1);
+    const scaleY = video.videoHeight / (window.innerHeight || 1);
+    if (!video.videoWidth || !rect.width) return null;
+    const sx = Math.max(0, rect.left * scaleX);
+    const sy = Math.max(0, rect.top * scaleY);
+    const sw = Math.min(video.videoWidth - sx, rect.width * scaleX);
+    const sh = Math.min(video.videoHeight - sy, rect.height * scaleY);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(sw));
+    canvas.height = Math.max(1, Math.round(sh));
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    const rad = Math.max(12, Math.round(canvas.width / 34));
+    pins.forEach((p, i) => {
+      const cx = (p.x / 100) * canvas.width;
+      const cy = (p.y / 100) * canvas.height;
+      ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(220, 38, 38, 0.85)'; ctx.fill();
+      ctx.lineWidth = Math.max(2, rad / 7); ctx.strokeStyle = '#fff'; ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(rad * 1.1)}px sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(i + 1), cx, cy);
+    });
+    return { media_type: 'image/png', data: canvas.toDataURL('image/png').split(',')[1], name: 'preview-annotation.png' };
+  } catch { return null; }
+  finally { try { stream.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ } }
+}
+
+// onAnnotate (optional) — async ({ text, image }) => void. When provided, the
+// toolbar shows an "Annotate" toggle: turning it on lets the operator drop pins
+// on the LIVE embedded app. If the app carries the annotate bridge, each tap
+// resolves to the real element/component (element-aware); otherwise it falls
+// back to a coordinate overlay. Send optionally attaches a real screenshot of
+// the signed-in view and routes it to the build as a Quick update. Omitted for
+// the mockup preview (pre-build).
 export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
   const [reloadNonce, setReloadNonce] = useState(0); // bump to remount (reload) the iframe
   const [annotating, setAnnotating] = useState(false);
-  const [pins, setPins] = useState([]); // { x, y, note } — x/y in % of the visible preview
+  const [pins, setPins] = useState([]); // { x, y, note, el? } — x/y in % of the visible preview
   const [sending, setSending] = useState(false);
   const [sentAt, setSentAt] = useState(0); // brief "sent" confirmation
+  const [attachShot, setAttachShot] = useState(true); // attach a screenshot on send
+  const [mode, setMode] = useState('probing'); // 'probing' | 'bridge' | 'overlay'
+  const iframeRef = useRef(null);
+  const bridgeSeenRef = useRef(false); // the app announced the bridge at least once
 
-  const exitAnnotate = () => { setAnnotating(false); setPins([]); };
+  const appOrigin = (() => { try { return new URL(src).origin; } catch { return '*'; } })();
+  const postToApp = (type) => {
+    try { iframeRef.current?.contentWindow?.postMessage({ __pp: 'annotate-host', type }, appOrigin); } catch { /* cross-origin race */ }
+  };
+
+  // Bridge handshake + pin stream. We listen whenever annotate is available so
+  // we know the element-aware path exists; pins only flow while annotating.
+  useEffect(() => {
+    if (!onAnnotate) return undefined;
+    const onMsg = (e) => {
+      if (appOrigin !== '*' && e.origin !== appOrigin) return;
+      const d = e.data;
+      if (!d || d.__pp !== 'annotate-bridge') return;
+      if (d.type === 'ready' || d.type === 'enabled') { bridgeSeenRef.current = true; setMode('bridge'); }
+      else if (d.type === 'pin' && d.pin) {
+        setPins((cur) => (cur.length >= MAX_PREVIEW_PINS ? cur : [...cur, {
+          x: Number(d.pin.x) || 0, y: Number(d.pin.y) || 0, note: '', el: d.pin,
+        }]));
+      }
+    };
+    window.addEventListener('message', onMsg, false);
+    return () => window.removeEventListener('message', onMsg, false);
+  }, [onAnnotate, appOrigin]);
+
+  // Entering/leaving annotate mode drives the bridge and the probe→overlay
+  // fallback (if the app has no bridge, switch to the coordinate overlay).
+  useEffect(() => {
+    if (!annotating) { postToApp('disable'); return undefined; }
+    setMode(bridgeSeenRef.current ? 'bridge' : 'probing');
+    postToApp('ping'); postToApp('enable');
+    const t = setTimeout(() => setMode((m) => (m === 'bridge' ? 'bridge' : 'overlay')), 800);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [annotating]);
+
+  const exitAnnotate = () => { postToApp('disable'); setAnnotating(false); setPins([]); };
   const addPin = (e) => {
     if (pins.length >= MAX_PREVIEW_PINS) return;
     const rect = e.currentTarget.getBoundingClientRect();
@@ -51,16 +158,26 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
   const setNote = (i, note) => setPins((cur) => cur.map((p, j) => (j === i ? { ...p, note } : p)));
   const removePin = (i) => setPins((cur) => cur.filter((_, j) => j !== i));
   const notedCount = pins.filter((p) => p.note.trim()).length;
+  const elementAware = mode === 'bridge';
 
   const sendPins = async () => {
     if (!notedCount || !onAnnotate) return;
     setSending(true);
     try {
-      await onAnnotate({ text: composePreviewAnnotation(src, pins) });
+      let image = null;
+      if (attachShot) {
+        postToApp('disable'); // stop pin capture during the snapshot
+        image = await capturePreviewImage(iframeRef.current, pins.filter((p) => p.note.trim())).catch(() => null);
+      }
+      await onAnnotate({ text: composePreviewAnnotation(src, pins, { hasImage: !!image, elementAware }), image });
       exitAnnotate();
       setSentAt(Date.now());
     } finally { setSending(false); }
   };
+
+  // In bridge mode the iframe must stay interactive so the bridge sees taps; in
+  // overlay mode our overlay captures them, so the iframe is inert underneath.
+  const overlayActive = annotating && mode === 'overlay';
 
   return (
     <div className="flex flex-col h-full min-h-0 rounded-lg border overflow-hidden bg-muted/20">
@@ -125,30 +242,38 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
       </div>
       {annotating ? (
         <p className="flex items-center gap-1.5 border-b bg-primary/10 px-3 py-1.5 text-[11px] text-foreground shrink-0">
-          <MapPin className="h-3.5 w-3.5 text-primary shrink-0" />
-          Tap the preview to drop a pin, then write what should change. Sends as a Quick update referencing this screen.
+          {elementAware
+            ? <><Sparkle className="h-3.5 w-3.5 text-primary shrink-0" /> Element-aware: tap the app and each pin captures the exact component. Write what should change, then send.</>
+            : mode === 'probing'
+              ? <><Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" /> Connecting to the app…</>
+              : <><MapPin className="h-3.5 w-3.5 text-primary shrink-0" /> Tap the preview to drop a pin, then write what should change. (This app has no annotate bridge yet — rebuild to map pins to components.)</>}
         </p>
       ) : null}
       <div className="relative flex flex-1 min-h-0 justify-center overflow-auto bg-white">
         <iframe
+          ref={iframeRef}
           key={`${reloadKey}-${reloadNonce}`}
           title={`${title || 'Project'} preview`}
           src={src}
-          className={`h-full border-0 bg-white ${annotating ? 'pointer-events-none' : ''}`}
+          className={`h-full border-0 bg-white ${overlayActive ? 'pointer-events-none' : ''}`}
           style={{ width: width === 'mobile' ? 390 : '100%', maxWidth: '100%' }}
           sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-modals"
         />
-        {/* Pin-drop overlay — only in annotate mode, so it doesn't steal the
-            iframe's own clicks otherwise. Captures taps to place pins on top of
-            the live app (the iframe is cross-origin, so pins live in OUR DOM). */}
-        {annotating ? (
+        {/* Coordinate overlay — only in fallback (no bridge). In bridge mode the
+            iframe stays interactive so the in-app bridge receives the taps. */}
+        {overlayActive ? (
           <div
             className="absolute inset-0 cursor-crosshair"
             onClick={addPin}
             role="button"
             aria-label="Tap to add an annotation pin on the preview"
             tabIndex={0}
-          >
+          />
+        ) : null}
+        {/* Pin badges — non-interactive, drawn over the app at their coordinates
+            in BOTH modes (bridge pins come from the app; overlay pins from taps). */}
+        {annotating ? (
+          <div className="pointer-events-none absolute inset-0">
             {pins.map((p, i) => (
               <span
                 key={i}
@@ -164,22 +289,34 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
       {annotating ? (
         <div className="max-h-[45%] shrink-0 space-y-2 overflow-y-auto border-t bg-background/95 p-3">
           {pins.length ? pins.map((p, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-600 text-[11px] font-bold text-white">{i + 1}</span>
-              <input
-                className="h-10 flex-1 rounded-md border bg-background px-3 text-sm"
-                value={p.note}
-                onChange={(e) => setNote(i, e.target.value)}
-                placeholder="What should change here?"
-                aria-label={`Note for pin ${i + 1}`}
-              />
-              <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 text-red-500" onClick={() => removePin(i)} aria-label={`Remove pin ${i + 1}`}>
+            <div key={i} className="flex items-start gap-2">
+              <span className="mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-600 text-[11px] font-bold text-white">{i + 1}</span>
+              <div className="flex-1 min-w-0">
+                {p.el ? (
+                  <p className="mb-1 truncate text-[11px] text-muted-foreground" title={describeEl(p.el)}>
+                    {p.el.component ? <span className="font-medium text-foreground">{p.el.component}</span> : `<${p.el.tag}>`}
+                    {p.el.text ? ` · “${p.el.text}”` : ''}{p.el.source ? ` · ${p.el.source}` : ''}
+                  </p>
+                ) : null}
+                <input
+                  className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+                  value={p.note}
+                  onChange={(e) => setNote(i, e.target.value)}
+                  placeholder="What should change here?"
+                  aria-label={`Note for pin ${i + 1}`}
+                />
+              </div>
+              <Button variant="ghost" size="icon" className="mt-0.5 h-9 w-9 shrink-0 text-red-500" onClick={() => removePin(i)} aria-label={`Remove pin ${i + 1}`}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
           )) : (
             <p className="text-xs text-muted-foreground">No pins yet — tap the preview where something should change.</p>
           )}
+          <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <input type="checkbox" checked={attachShot} onChange={(e) => setAttachShot(e.target.checked)} className="h-3.5 w-3.5" />
+            Attach a screenshot of the current view (asks the browser to snapshot this tab).
+          </label>
           <div className="flex gap-2 pt-1">
             <Button className="min-h-[40px] flex-1" disabled={sending || !notedCount} onClick={sendPins}>
               {sending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Send className="h-4 w-4 mr-1" />}

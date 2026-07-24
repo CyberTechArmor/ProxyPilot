@@ -15,7 +15,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, MapPin, History, Download } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
@@ -323,7 +323,6 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // Annotate-on-screenshot: the dialog composes the pin list + burned-in image
   // and this sends it straight as a Quick update (cards skipped — a pin list
   // is already precise scope).
-  const [annotateOpen, setAnnotateOpen] = useState(false);
   // Annotating a composer ATTACHMENT (tap its thumbnail): index into
   // attach.images; the dialog hands back the pinned image + notes.
   const [annotateAttachIdx, setAnnotateAttachIdx] = useState(null);
@@ -714,20 +713,12 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                       operational action — no code changes) and Quick update
                       (the default: one small scoped code change). The audited
                       Full build and the Production check live in the Build
-                      panel on the left. */}
-                  <Button
-                    variant="outline" size="icon"
-                    className="h-11 w-11 sm:h-10 sm:w-10 ml-auto"
-                    disabled={quickDisabled}
-                    onClick={() => setAnnotateOpen(true)}
-                    title="Annotate a live screenshot — tap the exact spots that should change"
-                    aria-label="Annotate the app on a screenshot"
-                  >
-                    <MapPin className="h-4 w-4" />
-                  </Button>
+                      panel on the left. To annotate the running app, use the
+                      "Annotate" button on the Preview — pins there land on the
+                      live signed-in app (and resolve to components). */}
                   <Button
                     variant="outline"
-                    className="h-11 sm:h-10"
+                    className="h-11 sm:h-10 ml-auto"
                     disabled={askDisabled || !instruction.trim()}
                     onClick={startAsk}
                     title="Ask a question or have the AI act on the running app — query or update data (e.g. add a user), run tests, call its APIs. No code changes."
@@ -778,12 +769,14 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
           <p className="text-sm text-muted-foreground shrink-0">Viewers can follow the build; editors run cycles.</p>
         )}
       </CardContent>
-      {/* Tap-to-pin feedback on a live screenshot → a precise Quick update. */}
+      {/* Tap-to-pin feedback on a composer ATTACHMENT → a precise Quick update.
+          Annotating the LIVE app now happens on the Preview ("Annotate"), which
+          pins on the running signed-in app and resolves pins to components. */}
       {canEdit ? (
         <AnnotateApp
           projectId={projectId}
-          open={annotateOpen || annotateAttachIdx != null}
-          onOpenChange={(o) => { if (!o) { setAnnotateOpen(false); setAnnotateAttachIdx(null); } }}
+          open={annotateAttachIdx != null}
+          onOpenChange={(o) => { if (!o) { setAnnotateAttachIdx(null); } }}
           onSend={sendAnnotation}
           attachImage={annotateAttachIdx != null && attach.images[annotateAttachIdx]
             ? { url: attach.images[annotateAttachIdx].previewUrl, name: attach.images[annotateAttachIdx].name, index: annotateAttachIdx }

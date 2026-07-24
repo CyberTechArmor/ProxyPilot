@@ -58,6 +58,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // THEIR messages so a send re-arms auto-scroll and jumps to its bottom.
   const interactedRef = useRef(false);
   const lastUserMsgIdRef = useRef(null);
+  const wasActiveRef = useRef(false);
   const [showHistory, setShowHistory] = useState(false);
   const [requests, setRequests] = useState([]);
   const [downloadingAll, setDownloadingAll] = useState(false);
@@ -117,6 +118,29 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       el.removeEventListener('scroll', onScroll);
     };
   }, []);
+
+  // Follow-the-build: while a cycle streams, stay pinned to the newest content
+  // as it grows. A MutationObserver catches EVERY content change (activity rows,
+  // narration, the streaming answer) — not just React deps — so a fast build is
+  // followed smoothly. It disengages the moment the user scrolls up (interactedRef
+  // via the wheel/touch listener above) and re-engages when they scroll back to
+  // the bottom (the scroll listener clears interactedRef near the bottom).
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !(active || askActive)) return undefined;
+    const follow = () => { if (!interactedRef.current) el.scrollTop = el.scrollHeight; };
+    follow(); // snap on (re)engage
+    const mo = new MutationObserver(follow);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => mo.disconnect();
+  }, [active, askActive]);
+
+  // A new build starting re-engages follow — the operator wants to watch it,
+  // even if they'd scrolled up to read during a previous cycle.
+  useEffect(() => {
+    if (active && !wasActiveRef.current) interactedRef.current = false;
+    wasActiveRef.current = active;
+  }, [active]);
 
   // Only the post-approval slice of the conversation belongs here (the design
   // conversation is archived in Details). Declared BEFORE the scroll effect

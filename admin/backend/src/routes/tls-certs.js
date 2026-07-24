@@ -137,6 +137,30 @@ router.get('/', authenticateToken, requireAdmin, (req, res) => {
   res.json({ tls_mode: currentTlsMode(), certificates: certs });
 });
 
+// Global TLS mode toggle. 'manual' means "ACME is blocked": covered hosts serve
+// their pasted cert; uncovered hosts use Caddy's internal (self-signed) issuer
+// instead of attempting ACME. 'acme' restores automatic issuance for uncovered
+// hosts. Applying re-runs the pipeline.
+//
+// IMPORTANT: this literal path MUST be registered before the parametric
+// `/:id` routes below — otherwise Express matches `PUT /tls-mode` against
+// `PUT /:id` (id="tls-mode"), the cert lookup fails, and the toggle returns
+// a misleading "certificate not found".
+router.put('/tls-mode', authenticateToken, requireAdmin, requireSudo, async (req, res) => {
+  const parsed = tlsModeSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'mode must be "acme" or "manual"' });
+  const prev = currentTlsMode();
+  setSetting('tls_mode', parsed.data.mode);
+  const applied = await applyAndReload();
+  if (!applied.ok) {
+    setSetting('tls_mode', prev);
+    await applyAndReload().catch(() => {});
+    return res.status(400).json({ error: `Caddy rejected the mode change (${applied.stage}) — reverted to "${prev}". ${applied.error}` });
+  }
+  logAudit(req.user?.id ?? null, 'TLS_MODE_SET', 'app_settings', 'tls_mode', { from: prev, to: parsed.data.mode }, req.ip);
+  res.json({ tls_mode: parsed.data.mode, applied: true });
+});
+
 router.get('/:id', authenticateToken, requireAdmin, (req, res) => {
   const row = getCertRow(req.params.id);
   if (!row) return res.status(404).json({ error: 'certificate not found' });
@@ -233,21 +257,3 @@ router.delete('/:id', authenticateToken, requireAdmin, requireSudo, async (req, 
   res.json({ deleted: true, bound_hosts_released: boundHostsFor(covered) });
 });
 
-// Global TLS mode toggle. 'manual' means "ACME is blocked": covered hosts serve
-// their pasted cert; uncovered hosts use Caddy's internal (self-signed) issuer
-// instead of attempting ACME. 'acme' restores automatic issuance for uncovered
-// hosts. Applying re-runs the pipeline.
-router.put('/tls-mode', authenticateToken, requireAdmin, requireSudo, async (req, res) => {
-  const parsed = tlsModeSchema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ error: 'mode must be "acme" or "manual"' });
-  const prev = currentTlsMode();
-  setSetting('tls_mode', parsed.data.mode);
-  const applied = await applyAndReload();
-  if (!applied.ok) {
-    setSetting('tls_mode', prev);
-    await applyAndReload().catch(() => {});
-    return res.status(400).json({ error: `Caddy rejected the mode change (${applied.stage}) — reverted to "${prev}". ${applied.error}` });
-  }
-  logAudit(req.user?.id ?? null, 'TLS_MODE_SET', 'app_settings', 'tls_mode', { from: prev, to: parsed.data.mode }, req.ip);
-  res.json({ tls_mode: parsed.data.mode, applied: true });
-});

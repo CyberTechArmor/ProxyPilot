@@ -9,7 +9,7 @@ import { WORKSPACE_NAME, flightdeckLayoutKey, readJsonPref, writeJsonPref } from
 import { Button } from '@/components/ui/button';
 import {
   Files, TerminalSquare, MessagesSquare, Code2, Eye, LayoutPanelLeft,
-  PanelLeftClose, PanelRightClose, StopCircle, PanelBottom,
+  PanelLeftClose, PanelRightClose, StopCircle, PanelBottom, Maximize2, Minimize2, Info,
 } from 'lucide-react';
 
 // Flightdeck — the build-phase IDE workspace. It does NOT rebuild the agent: the
@@ -28,7 +28,7 @@ const MOBILE_PANELS = [
 ];
 
 export default function Flightdeck({
-  projectId, project, canEdit, isAdmin, previewSrc, provLog, provMessage, onChanged, onBuilt, onSwitchView,
+  projectId, project, canEdit, isAdmin, previewSrc, provLog, provMessage, onChanged, onBuilt, onSwitchView, onShowDetails,
 }) {
   const online = project?.lifecycle === 'active';
   const containerName = project?.container_name || null;
@@ -68,8 +68,10 @@ export default function Flightdeck({
   // Refresh the tree when the agent is working (files may appear/disappear).
   useEffect(() => { if (active) setTreeRefresh((n) => n + 1); }, [active]);
 
-  // Center pane: editor vs preview.
+  // Center pane: editor vs preview. terminalMax expands the terminal to fill the
+  // whole center column (full height) — an option alongside the docked bottom panel.
   const [centerTab, setCenterTab] = useState('editor');
+  const [terminalMax, setTerminalMax] = useState(false);
   // Mobile single-panel switch.
   const [mobilePanel, setMobilePanel] = useState('editor');
 
@@ -127,6 +129,9 @@ export default function Flightdeck({
         <span className="text-xs font-mono px-2 py-0.5 rounded bg-background border" title="Spend this cycle">{costText}</span>
         {active ? <Button size="sm" variant="destructive" className="h-8" onClick={stop}><StopCircle className="h-3.5 w-3.5 mr-1" /> Stop</Button> : null}
         <Button size="sm" variant="outline" className="h-8" onClick={onSwitchView} title="Switch to the classic build view">Classic view</Button>
+        {onShowDetails ? (
+          <Button size="sm" variant="outline" className="h-8" onClick={onShowDetails} title="Show project details in the center pane"><Info className="h-3.5 w-3.5 mr-1" />Details</Button>
+        ) : null}
       </div>
 
       {/* Desktop layout (lg+) */}
@@ -141,19 +146,40 @@ export default function Flightdeck({
           )}
           {/* center + bottom terminal */}
           <div className="flex flex-col flex-1 min-w-0 min-h-0">
-            <div className="flex items-center gap-1 px-2 h-8 border-b bg-muted/20 shrink-0">
-              <button onClick={() => setCenterTab('editor')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'editor' ? 'bg-background border' : 'text-muted-foreground'}`}><Code2 className="h-3.5 w-3.5 inline mr-1" />Editor</button>
-              <button onClick={() => setCenterTab('preview')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'preview' ? 'bg-background border' : 'text-muted-foreground'}`}><Eye className="h-3.5 w-3.5 inline mr-1" />Preview</button>
-              <div className="flex-1" />
-              <button onClick={() => setL({ showLeft: !layout.showLeft })} title="Toggle Explorer" className="p-1 rounded hover:bg-muted"><PanelLeftClose className="h-3.5 w-3.5" /></button>
-              <button onClick={() => setL({ showBottom: !layout.showBottom })} title="Toggle Terminal" className="p-1 rounded hover:bg-muted"><PanelBottom className="h-3.5 w-3.5" /></button>
-              <button onClick={() => setL({ showRight: !layout.showRight })} title="Toggle Chat" className="p-1 rounded hover:bg-muted"><PanelRightClose className="h-3.5 w-3.5" /></button>
-            </div>
-            <div className="flex-1 min-h-0">{centerTab === 'editor' ? editorPane : previewPane}</div>
-            {layout.showBottom && (
+            {terminalMax ? (
+              // Full-height terminal: the terminal fills the whole center column.
               <>
-                <div onMouseDown={onDragStart('bottom')} className="h-1 cursor-row-resize hover:bg-primary/40 shrink-0" />
-                <div style={{ height: layout.bottom }} className="shrink-0 border-t min-h-0 bg-black">{terminalPane}</div>
+                <div className="flex items-center gap-1 px-2 h-8 border-b bg-muted/20 shrink-0 text-xs">
+                  <TerminalSquare className="h-3.5 w-3.5 mr-1" /> Terminal
+                  <div className="flex-1" />
+                  <button onClick={() => setTerminalMax(false)} title="Restore editor" className="p-1 rounded hover:bg-muted"><Minimize2 className="h-3.5 w-3.5" /></button>
+                </div>
+                <div className="flex-1 min-h-0 bg-black">{terminalPane}</div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-1 px-2 h-8 border-b bg-muted/20 shrink-0">
+                  <button onClick={() => setCenterTab('editor')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'editor' ? 'bg-background border' : 'text-muted-foreground'}`}><Code2 className="h-3.5 w-3.5 inline mr-1" />Editor</button>
+                  <button onClick={() => setCenterTab('preview')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'preview' ? 'bg-background border' : 'text-muted-foreground'}`}><Eye className="h-3.5 w-3.5 inline mr-1" />Preview</button>
+                  <div className="flex-1" />
+                  <button onClick={() => setL({ showLeft: !layout.showLeft })} title="Toggle Explorer" className="p-1 rounded hover:bg-muted"><PanelLeftClose className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => setL({ showBottom: !layout.showBottom })} title="Toggle Terminal" className="p-1 rounded hover:bg-muted"><PanelBottom className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => setL({ showRight: !layout.showRight })} title="Toggle Chat" className="p-1 rounded hover:bg-muted"><PanelRightClose className="h-3.5 w-3.5" /></button>
+                </div>
+                <div className="flex-1 min-h-0">{centerTab === 'editor' ? editorPane : previewPane}</div>
+                {layout.showBottom && (
+                  <>
+                    <div onMouseDown={onDragStart('bottom')} className="h-1 cursor-row-resize hover:bg-primary/40 shrink-0" />
+                    <div style={{ height: layout.bottom }} className="shrink-0 border-t min-h-0 bg-black flex flex-col">
+                      <div className="flex items-center px-2 h-6 shrink-0 text-[11px] text-white/60 border-b border-white/10">
+                        <TerminalSquare className="h-3 w-3 mr-1" /> Terminal
+                        <div className="flex-1" />
+                        <button onClick={() => setTerminalMax(true)} title="Full-height terminal" className="p-0.5 rounded hover:bg-white/10 text-white/70"><Maximize2 className="h-3 w-3" /></button>
+                      </div>
+                      <div className="flex-1 min-h-0">{terminalPane}</div>
+                    </div>
+                  </>
+                )}
               </>
             )}
           </div>
@@ -161,7 +187,9 @@ export default function Flightdeck({
           {layout.showRight && (
             <>
               <div onMouseDown={onDragStart('right')} className="w-1 cursor-col-resize hover:bg-primary/40 shrink-0" />
-              <div style={{ width: layout.right }} className="shrink-0 border-l min-h-0 overflow-auto">{chatPane}</div>
+              {/* flex column + overflow-hidden so BuildChat's own message list
+                  scrolls internally (the conversation scrolls, not the panel). */}
+              <div style={{ width: layout.right }} className="shrink-0 border-l min-h-0 flex flex-col overflow-hidden">{chatPane}</div>
             </>
           )}
         </div>

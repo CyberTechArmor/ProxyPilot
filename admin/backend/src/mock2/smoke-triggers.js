@@ -245,3 +245,65 @@ export function pickContainerIp(text) {
     && !t.startsWith('127.')
     && t.split('.').every((o) => Number(o) <= 255)) || null;
 }
+
+// ---- the honest gate: a user-visible change nothing actually confirmed ----
+//
+// Origin (measured, project 34 build #113): the build edited public/admin.js,
+// deployed cleanly, and reported SUCCESS — but no browser check ever confirmed
+// the change, and the operator's browser was serving a stale cached bundle, so
+// the fix was invisible. Three builds were spent before the cause was found.
+//
+// "Succeeded" must mean "we verified it", not "we wrote the file". When a change
+// is user-visible and NOTHING observed it in a browser, the honest terminal is
+// pending_verification with a human check — not finish. This does not fail or
+// block anything: the deploy still happens, the operator just gets told which
+// check is still owed. PURE so the rule is unit-testable.
+
+// browserConfirmed(report) — did a browser actually observe this deploy?
+// Requires a browser connector that RAN and PASSED. `unavailable` (playwright
+// missing) is explicitly not confirmation — that was the silent hole.
+export function browserConfirmed(report = {}) {
+  const b = report?.browser;
+  if (!b) return false;
+  if (b.unavailable) return false;
+  return b.ok === true;
+}
+
+// userVisibleChange(changedFiles, config) — does the diff touch what a person
+// looks at? Reuses the browser trigger globs so "user-visible" means exactly the
+// same thing here as it does when deciding to run the browser connector.
+export function userVisibleChange(changedFiles = [], config = DEFAULT_SMOKE_CONFIG) {
+  const globs = config?.browserGlobs || DEFAULT_SMOKE_CONFIG.browserGlobs;
+  return (changedFiles || []).some((f) => globs.some((g) => matchGlob(f, g)));
+}
+
+// needsOperatorUiVerification({ changedFiles, report, acceptance, config })
+//   → { needed, reason, checklist }
+//
+// checklist entries reuse the existing pending-verification shape so they merge
+// straight into the integration checklist the UI already renders.
+export function needsOperatorUiVerification({
+  changedFiles = [], report = {}, acceptance = [], config = DEFAULT_SMOKE_CONFIG,
+} = {}) {
+  if (!userVisibleChange(changedFiles, config)) return { needed: false, reason: 'no user-visible files changed', checklist: [] };
+  if (browserConfirmed(report)) return { needed: false, reason: 'a browser check confirmed this change', checklist: [] };
+
+  const why = report?.browser?.unavailable
+    ? 'the browser check could not run (playwright unavailable)'
+    : report?.browser
+      ? 'the browser check did not pass'
+      : 'no browser check ran for this change';
+  // One item per human-runnable acceptance check the build declared; if it
+  // declared none, a single generic item still forces a real look.
+  const items = (acceptance || []).map((a) => String(a).trim()).filter(Boolean);
+  const checklist = (items.length ? items : ['Open the app and confirm this change is visible and works.'])
+    .map((text) => ({
+      kind: 'ui_verification',
+      text,
+      why: `${why} — confirm it in a real browser.`,
+      // The stale-cache trap that started this: a hard refresh is the first
+      // thing to try when a shipped change appears missing.
+      hint: 'If it looks unchanged, hard-refresh (or check for the app update prompt) — a cached service worker can serve the previous build.',
+    }));
+  return { needed: true, reason: why, checklist };
+}

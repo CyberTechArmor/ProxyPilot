@@ -238,6 +238,8 @@ import { listChangeRecords, verifyProjectChain, insertChangeRecord, changeRecord
 import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestoreRequest } from './restore-logic.js';
 import { buildCheckpointScript } from './template.js';
 import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback, listCycleActivity } from './cycle-events.js';
+import { listKeyRows, getKeyRow, upsertKey, deleteKey, describeKeySource } from './project-keys.js';
+import { KEY_PROVIDERS, canManageKey, visibleKeyRows, publicKeyShape } from './project-keys-logic.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages, getMessage, getChat, insertMessage } from './chats.js';
 import {
@@ -361,6 +363,17 @@ const createProjectSchema = z.object({
   // is auto-created for this project instead.
   lbp_project_id: z.number().int().positive().optional(),
 });
+// A per-project / per-user provider API key. The secret is bounded but never
+// pattern-matched: providers change key formats, and rejecting a valid key is
+// worse than storing one the provider will reject on first use.
+const projectApiKeySchema = z.object({
+  scope: z.enum(['project', 'user']),
+  provider: z.enum(['anthropic', 'openai', 'gemini', 'ollama', 'openai_compatible']),
+  api_key: z.string().trim().min(8).max(4096),
+  label: z.string().trim().max(80).optional(),
+  base_url: z.string().trim().url().max(500).optional(),
+});
+
 const memberSchema = z.object({
   user_id: z.union([z.number().int(), z.string()]),
   role: z.enum(['editor', 'viewer']),
@@ -1094,6 +1107,81 @@ export function createMock2Router() {
       }
     } catch { /* serve as-is */ }
     res.type('html').send(html);
+  });
+
+  // ---- per-project / per-user provider API keys ----
+  //
+  // Layered OVER the global model connectors: the connector still picks the
+  // provider and model, these only supply the CREDENTIAL. Precedence for a
+  // build is the acting user's personal key → the project key → the global
+  // connector key (project-keys-logic).
+  //
+  // Security (cid-security): the secret is write-only. It is encrypted at rest
+  // with the same helper the global connectors use, never returned by any route
+  // (only a last-4 hint), and never logged.
+
+  // List the keys the caller may SEE: the project key (it bills everyone's work
+  // here) and their own personal key; an admin also sees THAT other members have
+  // one, never its value.
+  router.get('/projects/:id/api-keys', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const userId = req.user.id;
+    const isAdmin = isReqAdmin(req);
+    const rows = visibleKeyRows(listKeyRows(project.id), { userId, isAdmin });
+    res.json({
+      keys: rows.map((r) => publicKeyShape(r, { userId })),
+      providers: KEY_PROVIDERS,
+      // What the NEXT build on this project would actually bill to, per provider.
+      resolved: KEY_PROVIDERS.map((provider) => ({ provider, ...describeKeySource({ projectId: project.id, provider, userId }) })),
+    });
+  });
+
+  // Add or rotate a key. scope 'project' needs editor/admin (it changes what
+  // every member's builds bill to); scope 'user' is the caller's own and any
+  // member may set it.
+  router.post('/projects/:id/api-keys', requireMock2Role('viewer'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const userId = req.user.id;
+    const isAdmin = isReqAdmin(req);
+    const parsed = projectApiKeySchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'scope (project|user), provider, and api_key are required' });
+    }
+    const { scope, provider, api_key: apiKey, label, base_url: baseUrl } = parsed.data;
+    const perm = canManageKey({ scope, targetUserId: userId }, { userId, role: req.mock2Access.role, isAdmin });
+    if (!perm.ok) return res.status(403).json({ error: perm.error });
+
+    let row;
+    try {
+      row = upsertKey({
+        projectId: project.id, scope, userId: scope === 'user' ? userId : null,
+        provider, apiKey, label: label || null, baseUrl: baseUrl || null, createdBy: userId,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not store the key: ${err?.message || 'unknown error'}` });
+    }
+    // Audit the ACT, never the secret — the hint is the only fragment recorded.
+    logAudit(userId, 'MOCK2_PROJECT_API_KEY_SET', 'mock2_project', project.id,
+      { scope, provider, key_hint: row?.key_hint || null, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    res.status(201).json({ key: publicKeyShape(row, { userId }) });
+  });
+
+  // Remove a key. Same rule as adding: a project key needs editor/admin; a
+  // personal key belongs to its owner (an admin may delete, never read, one).
+  router.delete('/projects/:id/api-keys/:keyId', requireMock2Role('viewer'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const userId = req.user.id;
+    const isAdmin = isReqAdmin(req);
+    const row = getKeyRow(req.params.keyId);
+    if (!row || Number(row.project_id) !== Number(project.id)) {
+      return res.status(404).json({ error: 'key not found' });
+    }
+    const perm = canManageKey({ scope: row.scope, targetUserId: row.user_id }, { userId, role: req.mock2Access.role, isAdmin });
+    if (!perm.ok) return res.status(403).json({ error: perm.error });
+    deleteKey(row.id);
+    logAudit(userId, 'MOCK2_PROJECT_API_KEY_DELETED', 'mock2_project', project.id,
+      { scope: row.scope, provider: row.provider, key_hint: row.key_hint || null, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    res.json({ deleted: true });
   });
 
   // Rotate the slug: new slug, 1h grace on the old one, old slug 404s after and

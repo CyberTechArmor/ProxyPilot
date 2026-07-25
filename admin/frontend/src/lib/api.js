@@ -1436,6 +1436,14 @@ export const api = {
   // the project log is the everything-export.
   mock2GetRequestLog: (id, requestId) => request(`/mock2/projects/${id}/requests/${requestId}/log`),
   mock2ListRequests: (id) => request(`/mock2/projects/${id}/requests`),
+
+  // Per-project / per-user provider API keys (layered over the global model
+  // connectors). The secret is write-only: responses carry a last-4 hint only.
+  mock2ProjectApiKeys: (id) => request(`/mock2/projects/${id}/api-keys`),
+  mock2SetProjectApiKey: (id, data) =>
+    request(`/mock2/projects/${id}/api-keys`, { method: 'POST', body: JSON.stringify(data) }),
+  mock2DeleteProjectApiKey: (id, keyId) =>
+    request(`/mock2/projects/${id}/api-keys/${keyId}`, { method: 'DELETE' }),
   mock2GetCycleLog: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}/log`),
   mock2SubmitCycleFeedback: (id, cycleId, body) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/feedback`, { method: 'POST', body: JSON.stringify(body) }),

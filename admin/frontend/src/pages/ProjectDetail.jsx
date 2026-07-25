@@ -48,6 +48,7 @@ const Flightdeck = lazy(() => import('@/components/mock2/Flightdeck'));
 import ConnectVsCode from '@/components/mock2/ConnectVsCode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
 import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectComponentsCard } from '@/components/mock2/ProjectTimeCard';
+import ProjectApiKeys from '@/components/mock2/ProjectApiKeys';
 import { fireConfetti } from '@/lib/confetti';
 
 // Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
@@ -626,6 +627,10 @@ export default function ProjectDetail() {
 
       {/* Build harness — ProxyPilot's runner or the Claude Agent SDK, per project. */}
       <HarnessCard projectId={id} canEdit={canEdit && !isArchived} />
+
+      {/* Per-project / per-user provider API keys — layered over the global
+          connectors (personal key → project key → global). */}
+      <ProjectApiKeys projectId={id} canEdit={canEdit && !isArchived} isAdmin={isAdmin} />
 
       {/* Time tracking — project start + where the time went (live). */}
       <ProjectTimeCard projectId={id} />

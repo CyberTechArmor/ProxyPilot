@@ -105,9 +105,20 @@ export function createApp(): express.Express {
 
   // PWA assets — reachable before the auth/bootstrap gate (the browser
   // fetches the manifest and service worker outside page credentials).
-  for (const asset of ['manifest.webmanifest', 'sw.js', 'install.js', 'icon.svg', 'pp-annotate-bridge.js']) {
+  for (const asset of ['manifest.webmanifest', 'sw.js', 'install.js', 'icon.svg', 'pp-annotate-bridge.js', 'build-id.js']) {
     app.get('/' + asset, (_req, res) => res.sendFile(asset, { root: PUBLIC_DIR }));
   }
+
+  // Build identity — read from disk, never cached, reachable before the gate.
+  // The client's copy comes from /build-id.js (which the service worker caches);
+  // a mismatch between the two means the browser is running a STALE cached
+  // build, which is what the post-deploy check detects.
+  app.get('/__build', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    let id = 'unknown';
+    try { id = fs.readFileSync(path.join(PUBLIC_DIR, 'build-id.txt'), 'utf8').trim() || 'unknown'; } catch { /* pre-stamp */ }
+    res.json({ build_id: id });
+  });
 
   // Auth is wired by the platform and is part of the base app contract:
   // withAuth attaches the caller's identity, bootstrapGate() forces the
@@ -197,7 +208,7 @@ export function createApp(): express.Express {
           '<meta name="viewport" content="width=device-width, initial-scale=1">' +
           '<meta name="robots" content="noindex, nofollow"><title>Application</title>' +
           '<link rel="stylesheet" href="/design.css">' +
-          '<link rel="manifest" href="/manifest.webmanifest"><script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script></head>' +
+          '<link rel="manifest" href="/manifest.webmanifest"><script src="/build-id.js"></script><script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script></head>' +
           '<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:12vh auto;padding:0 1rem">' +
           '<h1>You are signed in.</h1>' +
           '<p>This is the base application shell — authentication, the first-admin bootstrap, ' +
@@ -279,7 +290,7 @@ function adminHtml() {
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon.svg">
-<script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script>
+<script src="/build-id.js"></script><script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script>
 <link rel="stylesheet" href="/base.css">
 <style>
 .note{font-size:12.5px;color:var(--app-muted,#5a6b81);margin:6px 0 0;overflow-wrap:anywhere}
@@ -648,7 +659,7 @@ function profileHtml() {
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon.svg">
-<script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script>
+<script src="/build-id.js"></script><script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script>
 <link rel="stylesheet" href="/base.css">
 <style>
 .kv{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;font-size:14px}
@@ -725,7 +736,7 @@ function loginHtml() {
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon.svg">
-<script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script>
+<script src="/build-id.js"></script><script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script>
   <style>
     :root {
       --bg: var(--app-bg, #0f1115); --card: var(--app-surface, #1a1d24);

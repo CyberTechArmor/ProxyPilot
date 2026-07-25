@@ -1519,13 +1519,54 @@ export const MOCK2_MIGRATIONS = [
     },
   },
   {
+    version: 544,
+    name: 'mock2_project_api_keys',
+    up: (d) => {
+      // Per-project and per-user provider API keys, layered OVER the global
+      // model connectors. Precedence when a build needs provider P:
+      //   1. the acting user's PRIVATE key for (project, user, P)  — only ever
+      //      used for that user's own work, and only they can see it exists
+      //   2. the PROJECT key for (project, P)                       — everyone
+      //      building this project bills to it
+      //   3. the global connector's key                             — unchanged
+      //
+      // scope + user_id are modelled as two columns with a partial-unique index
+      // each, because SQLite treats NULLs as distinct in a composite UNIQUE (so
+      // a plain UNIQUE(project_id,user_id,provider) would allow duplicate
+      // project-scoped rows). The CHECK ties the two together so a 'project' row
+      // can never carry a user and a 'user' row can never omit one.
+      d.exec(`
+        CREATE TABLE mock2_project_api_keys (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          scope TEXT NOT NULL CHECK (scope IN ('project','user')),
+          user_id INTEGER,
+          provider TEXT NOT NULL CHECK (provider IN ('anthropic','openai','gemini','ollama','openai_compatible')),
+          label TEXT,
+          api_key_enc TEXT NOT NULL,
+          key_hint TEXT,
+          base_url TEXT,
+          created_by INTEGER,
+          created_at TEXT,
+          updated_at TEXT,
+          last_used_at TEXT,
+          CHECK ((scope = 'project' AND user_id IS NULL) OR (scope = 'user' AND user_id IS NOT NULL))
+        );
+        CREATE UNIQUE INDEX idx_mock2_pak_project_provider
+          ON mock2_project_api_keys (project_id, provider) WHERE scope = 'project';
+        CREATE UNIQUE INDEX idx_mock2_pak_user_provider
+          ON mock2_project_api_keys (project_id, user_id, provider) WHERE scope = 'user';
+      `);
+    },
+  },
+  {
     // Per-user project pins (favourites) — the Projects list floats a user's
     // pinned projects above the rest. Personal, not shared: the PK is
     // (project_id, user_id), so two operators pin independently. user_id is
     // TEXT because platform user ids are UUIDs (users.id TEXT PRIMARY KEY);
     // the older membership tables declared INTEGER and lean on SQLite's
     // affinity rules — new tables should not repeat that.
-    version: 544,
+    version: 545,
     name: 'mock2_project_pins',
     up: (d) => {
       d.exec(`

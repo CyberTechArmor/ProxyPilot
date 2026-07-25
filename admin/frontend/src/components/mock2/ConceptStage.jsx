@@ -68,7 +68,10 @@ function StageIndicator({ stage }) {
   );
 }
 
-export default function ConceptStage({ projectId, project, canEdit, onApproved, onMockupChanged, archived = false }) {
+// `fill` — render as a panel that takes exactly its parent's height (the phone
+// workspace) instead of sizing to its content. Off everywhere else, so the
+// stacked desktop/tablet layouts keep the growth behaviour they were tuned for.
+export default function ConceptStage({ projectId, project, canEdit, onApproved, onMockupChanged, archived = false, fill = false }) {
   const { toast } = useToast();
   const [data, setData] = useState(null); // { messages, job, audit_job, stage, preview_url, open_question_ids, ... }
   const [message, setMessage] = useState('');
@@ -430,7 +433,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     // Archived (Details tab): the card SIZES TO ITS CONTENT — the conversation
     // box below owns the height and scroll, so nothing spills into the page.
     // Live (Concept tab): the card fills the column and the conversation grows.
-    <Card className={`flex flex-col ${archived ? '' : 'min-h-[26rem] lg:min-h-0 lg:flex-1'}`}>
+    <Card className={`flex flex-col ${archived ? '' : (fill ? 'min-h-0 flex-1' : 'min-h-[26rem] lg:min-h-0 lg:flex-1')}`}>
       <CardContent className="flex flex-1 min-h-0 flex-col gap-3 pt-6">
         {/* Read-only archive header (Details tab, post-approval) + collapse/expand. */}
         {archived ? (
@@ -482,13 +485,15 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
             {hasDesign ? (
               <Button variant="outline" size="sm" className="h-9" onClick={downloadTemplate} disabled={downloading}>
                 {downloading ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Download className="h-3.5 w-3.5 mr-1" />}
-                Download design
+                {/* Short label on a phone: the two full labels wrap onto separate
+                    rows at 360px, spending a third of the screen before the chat. */}
+                Download<span className="hidden sm:inline">&nbsp;design</span>
               </Button>
             ) : null}
             {editable && !approved && online ? (
               <Button variant="outline" size="sm" className="h-9" onClick={() => openImport()} disabled={jobActive || busy}>
                 <FileUp className="h-3.5 w-3.5 mr-1" />
-                Import design
+                Import<span className="hidden sm:inline">&nbsp;design</span>
               </Button>
             ) : null}
           </div>
@@ -523,10 +528,15 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
           className={`space-y-2 overflow-y-auto rounded-lg border bg-background/40 p-3 ${
             archived
               ? (archiveExpanded ? 'h-[40rem]' : 'h-[20rem]')
-              // ONE size: the box fills its column but never grows past ~60vh —
-              // long conversations scroll INSIDE it instead of stretching the
-              // page (user report: the chat kept resizing as replies landed).
-              : 'flex-1 min-h-[16rem] max-h-[60vh]'
+              // Filling a fixed-height panel (the phone workspace): take exactly
+              // what's left after the composer, no floor and no 60vh ceiling —
+              // those would push the composer off a 640px screen.
+              : fill
+                ? 'flex-1 min-h-0'
+                // ONE size: the box fills its column but never grows past ~60vh —
+                // long conversations scroll INSIDE it instead of stretching the
+                // page (user report: the chat kept resizing as replies landed).
+                : 'flex-1 min-h-[16rem] max-h-[60vh]'
           }`}
         >
           {shownMessages.length === 0 ? (
@@ -635,7 +645,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               images={attach.images} busy={attach.busy} disabled={busy}
               onPickFiles={attach.addFiles} onRemove={attach.remove}
             />
-            <div className="flex items-center justify-between gap-2">
+            {/* flex-wrap, not a single row: at 360px the direction toggle +
+                Build MVP + Send are wider than the screen, and without it Send
+                was clipped off the right edge with no way to scroll to it. */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
               {/* Build MVP — lives at the bottom of the design chat: when the
                   mockup looks right, this (after a confirm) locks the design in
                   and starts the MVP build — the speed path to a testable first

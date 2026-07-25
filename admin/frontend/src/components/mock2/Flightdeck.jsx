@@ -6,11 +6,12 @@ import { PreviewPanel } from './ProjectPreview';
 import FlightdeckFileTree from './FlightdeckFileTree';
 import FlightdeckEditor from './FlightdeckEditor';
 import ProjectAssets from './ProjectAssets';
+import MobilePanelBar from './MobilePanelBar';
 import { WORKSPACE_NAME, flightdeckLayoutKey, readJsonPref, writeJsonPref } from '@/lib/flightdeck';
 import { Button } from '@/components/ui/button';
 import {
   Files, TerminalSquare, MessagesSquare, Code2, Eye, LayoutPanelLeft,
-  PanelLeftClose, PanelRightClose, StopCircle, PanelBottom, Maximize2, Minimize2, Info, Menu, Library,
+  PanelLeftClose, PanelRightClose, StopCircle, PanelBottom, Maximize2, Minimize2, Info, Library,
 } from 'lucide-react';
 import { useIsMobile } from '@/hooks/use-media-query';
 
@@ -180,7 +181,10 @@ export default function Flightdeck({
   const filesPane = <FlightdeckFileTree projectId={projectId} canEdit={canEdit} activePath={activeFilePath} onOpen={openFile} refreshKey={treeRefresh} />;
 
   return (
-    <div className="flex flex-col h-[100dvh] md:h-[calc(100vh-8rem)] md:min-h-[32rem] rounded-none border-0 md:rounded-lg md:border overflow-hidden bg-background">
+    // Phone: fill whatever the chromeless page has left rather than claiming a
+    // hard 100dvh — a checkout-lock banner sits above this, and a viewport
+    // height would push the bottom bar off screen and make the page scroll.
+    <div className="flex flex-col flex-1 min-h-0 md:flex-none md:h-[calc(100vh-8rem)] md:min-h-[32rem] rounded-none border-0 md:rounded-lg md:border overflow-hidden bg-background">
       {/* Top bar — md+ only. On a phone every control on it is either gone
           (dev toggle, classic view: desktop concerns) or moved to the bottom
           bar (Details), and the spend readout is one tap away in the chat, so
@@ -310,12 +314,6 @@ export default function Flightdeck({
           ? NARROW_PANELS.filter((p) => PHONE_PANEL_KEYS.includes(p.key))
           : (devMode ? NARROW_PANELS : NARROW_PANELS.filter((p) => PHONE_PANEL_KEYS.includes(p.key)));
         const cur = panels.some((p) => p.key === mobilePanel) ? mobilePanel : 'preview';
-        // Phone: [Nav] [Chat] [Preview] [Details]. Tablet: the panels alone.
-        const extras = isPhone ? (onOpenNav ? 1 : 0) + (onShowDetails ? 1 : 0) : 0;
-        const cols = ['grid-cols-1', 'grid-cols-2', 'grid-cols-3', 'grid-cols-4', 'grid-cols-5', 'grid-cols-6', 'grid-cols-7'][
-          Math.min(panels.length + extras, 7) - 1
-        ];
-        const itemCls = (activeItem) => `flex flex-col items-center justify-center gap-0.5 py-2 min-h-[44px] text-[11px] ${activeItem ? 'text-primary' : 'text-muted-foreground'}`;
         return (
           <div className="flex flex-col flex-1 min-h-0 lg:hidden">
             <div className="flex-1 min-h-0 overflow-auto">
@@ -326,24 +324,13 @@ export default function Flightdeck({
               {cur === 'preview' && previewPane}
               {cur === 'assets' && assetsPane}
             </div>
-            <div className={`grid border-t shrink-0 ${cols}`}>
-              {isPhone && onOpenNav ? (
-                <button type="button" onClick={onOpenNav} aria-label="Open navigation menu" className={itemCls(false)}>
-                  <Menu className="h-4 w-4" />Menu
-                </button>
-              ) : null}
-              {panels.map((p) => (
-                <button key={p.key} type="button" onClick={() => setMobilePanel(p.key)}
-                  className={itemCls(cur === p.key)}>
-                  <p.icon className="h-4 w-4" />{p.label}
-                </button>
-              ))}
-              {isPhone && onShowDetails ? (
-                <button type="button" onClick={onShowDetails} aria-label="Project details" className={itemCls(false)}>
-                  <Info className="h-4 w-4" />Details
-                </button>
-              ) : null}
-            </div>
+            {/* Phone: [Menu] panels [Details] — this bar is the page's only
+                chrome. Tablet: the panels alone; its top bars still exist. */}
+            <MobilePanelBar
+              panels={panels} current={cur} onSelect={setMobilePanel}
+              onOpenNav={isPhone ? onOpenNav : null}
+              onShowDetails={isPhone ? onShowDetails : null}
+            />
           </div>
         );
       })()}

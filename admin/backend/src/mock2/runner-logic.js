@@ -249,6 +249,44 @@ export const RUNNER_TOOLS = Object.freeze([
 
 export const RUNNER_TOOL_NAMES = Object.freeze(RUNNER_TOOLS.map((t) => t.name));
 
+// ---- parallel-safe tool execution (efficiency, never behavior) ----
+
+// Tools that only OBSERVE the working tree — no writes, no shell, no control
+// flow. When the model emits several of these in one turn they can run
+// concurrently: the results are identical either way (nothing they touch can be
+// mutated by a sibling), and the transcript still records them in the model's
+// original order. Names span both harness vocabularies (proxypilot + copilot).
+//
+// Deliberately EXCLUDED, and why:
+//   write_file / create_file / apply_edit / materialize_component — mutate files
+//   exec_in_container / run_terminal                              — arbitrary shell
+//   run_gates                                                     — runs scripts, writes reports
+//   finish / halt / pending_verification / request_authorization  — control flow
+export const READ_ONLY_TOOLS = Object.freeze([
+  'read_file', 'list_dir', 'search_workspace', 'get_diagnostics', 'get_component',
+]);
+const READ_ONLY_SET = new Set(READ_ONLY_TOOLS);
+
+export function isReadOnlyTool(name) {
+  return READ_ONLY_SET.has(String(name || ''));
+}
+
+// groupToolCallsForExecution — split one turn's tool calls into ordered groups.
+// A run of CONSECUTIVE read-only calls becomes one { parallel: true } group the
+// caller may execute with Promise.all; every other call is its own serial group.
+// Order is preserved exactly, so a write never overtakes a read (or vice versa)
+// and the transcript is byte-identical to the serial path. PURE.
+export function groupToolCallsForExecution(calls = []) {
+  const groups = [];
+  for (const call of calls) {
+    const ro = isReadOnlyTool(call?.name);
+    const last = groups[groups.length - 1];
+    if (ro && last && last.parallel) last.calls.push(call);
+    else groups.push({ parallel: ro, calls: [call] });
+  }
+  return groups;
+}
+
 // The tool list for ONE cycle. Fast modes (quick/MVP) run NO gate battery, so
 // the run_gates tool is REMOVED — not stubbed: a present-but-empty battery
 // returns "pending" with no entries, and a discipline-following model loops on
@@ -601,6 +639,21 @@ runs the live check after deploy (pending_verification is then your finish).
    verifiable in-fence first (typecheck, config-schema presence, the contract
    test against the local fixture server); never fabricate a live test and
    never stub the transport to force a plain finish.
+
+# Work efficiently (this changes HOW you work, never WHAT you deliver)
+Every step above still binds — the discipline, the reads before edits, the gates,
+the honest finish. These rules only remove wasted round-trips:
+- BATCH independent tool calls: emit MULTIPLE tool calls in ONE turn whenever they
+  do not depend on each other (read several files at once; run independent
+  commands together). One call per turn spends a full model round-trip on nothing.
+  Anything whose input depends on a previous result still waits for that result.
+- Read narrow: request line ranges rather than whole files, and do not re-read a
+  file or re-run a search whose result you already have in this conversation —
+  EXCEPT after you edit a file, where re-reading before the next edit is required.
+- Do not restate large file contents back in your messages; refer to them.
+- Prefer one apply_edit with enough context over several speculative attempts.
+Quality is never traded for speed: if batching would make you guess, don't batch —
+read first, then act.
 
 # External endpoints are NOT reachable from this fence (read this before you halt)
 This container is network-fenced: it has NO route to external services or LAN

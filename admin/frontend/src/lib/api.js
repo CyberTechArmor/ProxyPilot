@@ -1387,7 +1387,10 @@ export const api = {
         ...(opts.extras?.length ? { extras: opts.extras } : {}),
       }),
     }),
-  mock2GetLatestCycle: (id) => request(`/mock2/projects/${id}/cycle`),
+  // `since` = the highest activity seq the caller already has; the server then
+  // returns only newer activity rows (delta polling while a build streams).
+  mock2GetLatestCycle: (id, since = null) =>
+    request(`/mock2/projects/${id}/cycle${since ? `?since=${encodeURIComponent(since)}` : ''}`),
   mock2GetCycle: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}`),
   mock2ListCycles: (id) => request(`/mock2/projects/${id}/cycles`),
   mock2InterruptCycle: (id, cycleId, action) =>

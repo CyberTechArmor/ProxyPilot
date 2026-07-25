@@ -78,11 +78,16 @@ export function listProjectCycleEvents(projectId) {
 
 // listCycleActivity — the most recent activity rows for a cycle, chronological.
 // Over-fetches (kinds get filtered out) then trims to `limit`.
-export function listCycleActivity(cycleId, { limit = 40 } = {}) {
-  const rows = getMock2Db()
-    .prepare(`SELECT * FROM mock2_cycle_events WHERE cycle_id = ? ORDER BY seq ASC`)
-    .all(Number(cycleId))
-    .map(shapeEvent);
+// `since` (optional) — return only rows NEWER than that seq (delta polling).
+export function listCycleActivity(cycleId, { limit = 40, since = null } = {}) {
+  const hasSince = Number.isFinite(Number(since)) && Number(since) > 0;
+  const rows = hasSince
+    ? getMock2Db()
+      .prepare(`SELECT * FROM mock2_cycle_events WHERE cycle_id = ? AND seq > ? ORDER BY seq ASC`)
+      .all(Number(cycleId), Number(since)).map(shapeEvent)
+    : getMock2Db()
+      .prepare(`SELECT * FROM mock2_cycle_events WHERE cycle_id = ? ORDER BY seq ASC`)
+      .all(Number(cycleId)).map(shapeEvent);
   return deriveActivity(rows, { limit });
 }
 

@@ -42,6 +42,18 @@ export default function Layout() {
 
   // Mobile sidebar drawer state
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const openNav = useCallback(() => setSidebarOpen(true), []);
+
+  // Chromeless mode — a routed page (currently the project studio's Flightdeck)
+  // asking for the PHONE viewport with no dashboard chrome: no mobile top bar,
+  // no content padding, so the workspace gets the full screen. It affects only
+  // the <md styles; md+ keeps its sidebar and padding exactly as before. A page
+  // opts in through the Outlet context and must reset it on unmount.
+  // The requesting page resets it from its own effect cleanup, which React runs
+  // on unmount — deliberately NOT reset here on route change: effects run
+  // child-before-parent, so a reset in this component would fire AFTER the
+  // incoming page asked for chromeless and silently undo it.
+  const [chromeless, setChromeless] = useState(false);
 
   // Global Lean BEAF Pro AI assistant dock (right side, every page). Docked by
   // default ("always there"); the operator can collapse it and the choice
@@ -275,8 +287,12 @@ export default function Layout() {
   return (
     <SnapshotExportProvider>
     <div className="min-h-screen bg-background">
-      {/* Mobile top bar (hidden on md+) */}
-      <header className="fixed top-0 inset-x-0 z-40 flex h-14 items-center gap-2 border-b bg-card px-4 md:hidden">
+      {/* Mobile top bar (hidden on md+, and suppressed entirely by a
+          chromeless page — the drawer is then opened from that page's own UI). */}
+      <header className={cn(
+        "fixed top-0 inset-x-0 z-40 h-14 items-center gap-2 border-b bg-card px-4 md:hidden",
+        chromeless ? "hidden" : "flex",
+      )}>
         <Button
           variant="ghost"
           size="icon"
@@ -570,7 +586,9 @@ export default function Layout() {
           render their terminal short. Stacked-content pages scroll
           inside the inner div via overflow-y-auto. */}
       <main className={cn(
-        "pl-0 pt-14 md:pt-0 h-screen flex flex-col transition-[padding] duration-200 ease-out",
+        "pl-0 md:pt-0 h-screen flex flex-col transition-[padding] duration-200 ease-out",
+        // Clear the fixed mobile top bar — unless a chromeless page removed it.
+        chromeless ? "pt-0" : "pt-14",
         // Collapsed: leave a thin rail (md:pl-14) so the floating expand button
         // doesn't overlap page content; expanded: clear the full sidebar.
         collapsed ? "md:pl-14" : "md:pl-64",
@@ -580,10 +598,16 @@ export default function Layout() {
         assistantOpen && "lg:pr-[360px]"
       )}>
         <SnapshotExportBanner />
-        <div className="p-4 md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto">
+        <div className={cn(
+          "md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto",
+          chromeless ? "p-0" : "p-4",
+        )}>
           {/* Expose the assistant dock's state so routed pages (Lean BEAF Pro)
-              can surface it as a tab on narrow screens. */}
-          <Outlet context={{ assistantOpen, setAssistant, assistantAvailable: !isPending }} />
+              can surface it as a tab on narrow screens, plus the nav drawer +
+              chromeless switch a full-bleed page (the project studio) drives. */}
+          <Outlet context={{
+            assistantOpen, setAssistant, assistantAvailable: !isPending, openNav, setChromeless,
+          }} />
         </div>
       </main>
 

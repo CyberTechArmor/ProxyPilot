@@ -14,7 +14,8 @@
 // full-screen-on-<sm delete dialog. Renders clean at 360px.
 
 import { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react';
-import { useParams, Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import { useParams, Link, Navigate, useNavigate, useSearchParams, useOutletContext } from 'react-router-dom';
+import { useIsMobile } from '@/hooks/use-media-query';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -100,6 +101,22 @@ export default function ProjectDetail() {
     const fdActive = !!project?.stage?.design_approved && buildView === 'flightdeck' && project?.lifecycle !== 'archived';
     if (fdActive && tab === 'terminal') setTab('chat');
   }, [project, buildView, tab]);
+  // On a phone, Flightdeck takes the WHOLE screen: ask the shell to drop its
+  // mobile top bar and content padding, and drive the nav drawer from
+  // Flightdeck's own bottom bar instead. Reset on unmount (and on any state
+  // that ends Flightdeck) so every other page keeps its chrome.
+  const { openNav, setChromeless } = useOutletContext() || {};
+  const isMobile = useIsMobile();
+  const mobileFlightdeck = isMobile
+    && !!project?.stage?.design_approved
+    && buildView === 'flightdeck'
+    && project?.lifecycle !== 'archived'
+    && tab === 'chat';
+  useEffect(() => {
+    if (!setChromeless) return undefined;
+    setChromeless(mobileFlightdeck);
+    return () => setChromeless(false);
+  }, [setChromeless, mobileFlightdeck]);
   // Once the Terminal tab has been opened we keep it mounted (forceMount below)
   // so its shell session survives switching to other tabs — the PTY only starts
   // on the first visit, not on page load.
@@ -350,7 +367,10 @@ export default function ProjectDetail() {
 
   return (
     <div className="flex flex-col h-full min-h-0 gap-3">
-      <div className="flex items-center gap-3 shrink-0">
+      {/* On a phone in Flightdeck the title row goes away with the rest of the
+          chrome — the project name is in the chat header and "Projects" is one
+          tap away in the nav drawer, so this row was pure vertical cost. */}
+      <div className={`${mobileFlightdeck ? 'hidden' : 'flex'} items-center gap-3 shrink-0`}>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
             <h1 className="text-2xl font-bold tracking-tight truncate">{project.name}</h1>
@@ -401,13 +421,13 @@ export default function ProjectDetail() {
             it's the large left pane and the chat sits beside it; with no preview
             yet the chat is centered on its own so it stays the focus. The
             checkout-lock banner rides at the top of this tab. */}
-        <TabsContent value="chat" className="mt-3 flex-1 min-h-0 overflow-hidden">
+        <TabsContent value="chat" className={`${mobileFlightdeck ? 'mt-0' : 'mt-3'} flex-1 min-h-0 overflow-hidden`}>
           {isArchived ? (
             <p className="text-sm text-muted-foreground">
               This project is archived — the chat and preview are read-only history. Rehydrate it to continue building.
             </p>
           ) : (
-            <div className="flex h-full min-h-0 flex-col gap-3">
+            <div className={`flex h-full min-h-0 flex-col ${mobileFlightdeck ? 'gap-0' : 'gap-3'}`}>
               <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} />
               {designApproved ? (
                 // Build phase — Flightdeck IDE workspace by default (files +
@@ -429,6 +449,7 @@ export default function ProjectDetail() {
                       onBuilt={handleMockupChanged}
                       onSwitchView={() => setBuildView('classic')}
                       onShowDetails={() => setTab('details')}
+                      onOpenNav={openNav || null}
                     />
                   </Suspense>
                 ) : (
@@ -511,8 +532,10 @@ export default function ProjectDetail() {
           center; a slim bar returns to Flightdeck (or drops to the classic view). */}
       {flightdeckActive ? (
         <div className="flex items-center justify-end gap-2 sticky top-0 z-10 -mt-1 pb-2 bg-background/95 backdrop-blur">
-          <Button variant="outline" size="sm" className="h-8" onClick={() => setBuildView('classic')}>Classic view</Button>
-          <Button size="sm" className="h-8" onClick={() => setTab('chat')}><LayoutPanelLeft className="h-3.5 w-3.5 mr-1" />Flightdeck</Button>
+          {/* Classic view is a desktop choice — a phone only ever gets the
+              clean Flightdeck, so the switch would be a dead end there. */}
+          <Button variant="outline" size="sm" className="hidden md:inline-flex h-8" onClick={() => setBuildView('classic')}>Classic view</Button>
+          <Button size="sm" className="h-11 md:h-8" onClick={() => setTab('chat')}><LayoutPanelLeft className="h-3.5 w-3.5 mr-1" />Flightdeck</Button>
         </div>
       ) : null}
       {/* Live URL + provisioning progress */}

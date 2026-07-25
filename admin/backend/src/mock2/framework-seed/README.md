@@ -64,3 +64,42 @@ v2 with a changelog that says so.
 Editing any seed file publishes a NEW framework version on the next boot
 (`upgradeFrameworkFromSeed`); projects adopt it through the normal
 drift → update-cycle path, never automatically.
+
+
+## What a new project is provisioned with
+
+Every project starts as a **TypeScript / Express / Drizzle / PostgreSQL** app —
+`mock2/scaffold.js` — with two things wired in automatically before the AI ever
+builds anything:
+
+1. **The auth component** (`proxypilot-auth.component.json`): local + LDAPS
+   sign-in, JWT access tokens with rotating refresh, DB-driven RBAC with
+   per-role permission overrides, and the first-administrator bootstrap.
+2. **The platform module** (`mock2/scaffold-platform.js`):
+   - light/dark theme applied before first paint, and mobile-responsive styles
+     with 44px touch targets;
+   - editable **Privacy** and **Terms** pages that ship with real generic copy,
+     reachable signed-out, with a copyright notice that is always the current
+     year;
+   - **branding**: organisation name, logo, favicon (falling back to the logo),
+     a shared asset library, and an `appContext` blurb each build is expected to
+     keep current;
+   - **API keys** carrying the same permissions people hold, so other
+     applications can use this one through the same endpoints and the same
+     checks;
+   - **read-only SQL**: a SELECT-only PostgreSQL credential over curated views
+     in an `api_read` schema, for the questions that are far cheaper as a join
+     than as N+1 API calls.
+
+The AI builds *on top of* all of this. It adds feature tables beside the
+platform tables and screens behind the auth gate; it does not re-implement any
+of it.
+
+### The other "base app"
+
+`framework-seed/base-app/` is a **reference implementation** of the same
+capabilities in plain CommonJS with no build step. It is deliberately NOT what
+gets installed: the constitution, the gate battery and the build skills all
+require TypeScript/Drizzle/Zod/Vitest, so shipping a different stack would break
+every build that followed. Read it to see a capability end to end; change
+`scaffold-platform.js` to change what projects actually get.

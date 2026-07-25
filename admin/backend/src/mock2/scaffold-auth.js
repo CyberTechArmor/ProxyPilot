@@ -75,6 +75,11 @@ const MOCKUPS_DIR = path.resolve(__dirname, '..', 'state', 'mockups');
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
 const DESIGN_CSS = path.resolve(__dirname, '..', 'state', 'design.css');
 
+import { publicPlatformRoutes, platformRoutes, adminPlatformRoutes } from './platform/routes.js';
+import { withApiKey } from './platform/api-key-auth.js';
+import { ensureSeeded } from './platform/branding.js';
+import { ensureViews } from './platform/readonly.js';
+
 export function createApp(): express.Express {
   const app = express();
   app.use(express.json());
@@ -120,6 +125,17 @@ export function createApp(): express.Express {
     res.json({ build_id: id });
   });
 
+  // Platform PUBLIC surface — branding, legal pages, assets, favicon and the
+  // API index. Mounted BEFORE the auth gate on purpose: the sign-in screen
+  // renders the copyright notice and the Privacy/Terms links before anyone has
+  // a session, and the browser fetches the favicon with no cookies at all.
+  app.use(publicPlatformRoutes);
+
+  // API-key authentication. Tried only when there is no session, so browsers
+  // are unaffected; it lets another APPLICATION call the same endpoints with
+  // the same permission checks people go through.
+  app.use(withApiKey);
+
   // Auth is wired by the platform and is part of the base app contract:
   // withAuth attaches the caller's identity, bootstrapGate() forces the
   // create-administrator flow while zero users exist (503 for APIs, redirect
@@ -137,6 +153,9 @@ export function createApp(): express.Express {
   // admin surface (the on/off switch and the external-accounts roster).
   app.use('/api/auth', externalAuthRoutes);
   app.use('/api/admin/external', requireRole('admin'), adminExternalRoutes);
+  // Platform: identity/legal/assets admin, API keys, read-only SQL, /api/whoami.
+  app.use(platformRoutes);
+  app.use('/api/admin', adminPlatformRoutes);
 
   // Who am I — the signed-in identity (drives the profile page and the app
   // shell's admin-link visibility). The token's claims are the source of
@@ -239,6 +258,8 @@ import { db } from './db/index.js';
 import {
   initAuth, loadAuthConfigFromEnv, wireLdapsFromConfig, type AuthDb,
 } from './auth/index.js';
+import { ensureSeeded } from './platform/branding.js';
+import { ensureViews } from './platform/readonly.js';
 
 // Inject the host db + config once, before any request (the auth module throws
 // a clear "not initialized" error otherwise). The cast is per the component's
@@ -246,6 +267,24 @@ import {
 // are used, never db.query.* — so any NodePgDatabase satisfies it.
 initAuth({ db: db as unknown as AuthDb, config: loadAuthConfigFromEnv() });
 await wireLdapsFromConfig({ probe: true });
+
+// Platform boot, best effort. Seeds the branding row and the two legal pages so
+// a freshly provisioned app never serves a dead link from its sign-in screen,
+// and publishes the read-only SQL views so an operator can SEE what a reporting
+// credential would expose before deciding to issue one. Neither grants anything.
+// A failure here must not stop the app from serving.
+try {
+  await ensureSeeded();
+} catch (err) {
+  // eslint-disable-next-line no-console
+  console.warn('[platform] branding seed skipped:', (err as Error).message);
+}
+try {
+  await ensureViews();
+} catch (err) {
+  // eslint-disable-next-line no-console
+  console.warn('[platform] read-only views not published:', (err as Error).message);
+}
 
 const app = createApp();
 

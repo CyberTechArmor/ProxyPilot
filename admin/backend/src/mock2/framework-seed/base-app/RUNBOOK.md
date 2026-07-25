@@ -18,27 +18,64 @@ Near-zero dependency Node.js implementation (Node built-ins plus `jszip` and
 | `FORCE_SECURE_COOKIES=1` | Set when a TLS-terminating proxy fronts the app over plain HTTP, so session cookies still get `Secure`. Detected automatically when the request itself is HTTPS or carries `X-Forwarded-Proto: https`. |
 | `TRUSTED_PROXY=1` | Set **only** when a trusted proxy sets `X-Forwarded-For`. Off by default: otherwise anyone can spoof the header to rotate identity and walk straight past the IP-keyed rate limits. |
 | `PORT` | Listen port (default 6525). |
-| `APP_DATA_DIR` | Where `db.json` + `secret.key` live. |
+| `DATABASE_URL` | **Required.** PostgreSQL is the system of record. |
+| `APP_DATA_DIR` | Where uploaded bytes, branding assets and `secret.key` live. The dataset itself is in PostgreSQL. |
+| `READONLY_DB_ROLE` | Name of the SELECT-only role issued for reporting consumers (default `app_readonly`). |
 | `SESSION_PRUNE_GRACE_MS` | How long settled (revoked/expired) sessions are retained for reuse detection before pruning. Default 24 h. |
 
-## Scaling ceiling — know this before you build on it
+## Storage — how it actually works
 
-`lib/store.js` serialises the **whole database** on every mutation, on the
-request path. That is deliberate for a base template (no schema migrations, no
-external service, trivially inspectable) and the "swap for SQL by keeping the
-same functions" seam below is real — but it means:
+PostgreSQL is the system of record. `lib/store.js` loads the dataset into memory
+once at boot (`store.init()`, before the server listens) and serves reads from
+there, so every module keeps a **synchronous** `store.get()`. Mutations write
+through to Postgres asynchronously on one serialised chain — the same
+fire-and-forget contract the old JSON file had.
 
-- **Single process only.** In-memory rate limits and the SSE hub are
-  per-process, so a second worker would see neither. Do not scale this out
-  horizontally without replacing the store, the limiter and the hub together.
-- Write cost grows with total data, not with the size of the change.
+`store.save('files')` names the slice that changed so a hot path rewrites one
+table instead of all of them. Calling `store.save()` with no argument rewrites
+everything: always correct, just slower. `audit` is the exception — it is
+append-only via `store.appendAudit()`, because the in-memory list is a trimmed
+recent window while the table is the permanent archive.
 
-For anything with many users, files or audit rows, replace `lib/store.js` first.
+**Still single-process.** The in-memory rate limiter and the SSE hub are
+per-process, and so is the read model: a second worker would not see another
+worker's writes until it restarted. Do not scale horizontally without replacing
+the read model, the limiter and the hub together.
+
+**A failed write does not surface to the caller.** It is logged
+(`[store] persist failed: …`) and the process keeps serving from memory. That
+makes a schema mistake invisible to the API, which is exactly how a wrong column
+type once shipped silently — so the acceptance suite reads the database directly
+(`PERSISTENCE:`) rather than trusting the API's answers.
+
+## Integration — other applications
+
+Everything the UI can do, a machine can do, through the **same endpoints and the
+same permission checks**. There is no separate `/v1` surface to drift.
+
+- `GET /api/meta` — the capability index. Readable without a key, because a
+  consumer needs it before they have one.
+- `GET /api/whoami` — check a credential and list what it may do.
+- **API keys** (`Authorization: Bearer …`, or `X-API-Key` for tooling that
+  cannot set Authorization). A key carries a subset of the *same* RBAC
+  permissions people hold, is intersected with its owner's current rights on
+  every request (deactivate the person, the keys die), and can never be granted
+  a permission its issuer lacks. The token is shown once. Keys cannot change a
+  password or mint another key.
+- **Read-only SQL** for the questions that are far cheaper as a join than as
+  N+1 API calls. Consumers get a SELECT-only role on curated views in the
+  `api_read` schema — never the base tables, which hold password hashes,
+  refresh-token hashes and encrypted bind passwords. Issue/rotate it from
+  Admin → Integration, or by hand with `scripts/provision-readonly.sql`.
+  Rotation is the revocation story: the old password stops working at once.
 
 ## Layout
 - `server.js` — HTTP router, guards, static SPA host, SSE endpoint
 - `lib/crypto.js` — scrypt password hashing, AES-256-GCM secret encryption, tokens
-- `lib/store.js` — atomic JSON persistence (`data/db.json`); swap for SQL by keeping the same functions
+- `lib/db.js` — PostgreSQL pool, schema, and a clear "cannot reach the database" failure
+- `lib/store.js` — the in-memory read model + section-scoped write-through to Postgres
+- `lib/api-keys.js` — machine credentials: mint, verify, revoke; permissions from the RBAC catalog
+- `lib/readonly.js` — the SELECT-only role and the curated `api_read` views
 - `lib/session.js` — access token (HMAC) + rotating refresh, idle + absolute expiry, reuse detection
 - `lib/rbac.js` — DB-driven roles/permissions, default map + overrides, effective authorization
 - `lib/users.js`, `lib/auth.js` — user lifecycle + local→LDAP auth, machine codes, super-admin setup

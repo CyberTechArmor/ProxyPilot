@@ -166,3 +166,80 @@ update it.** Record *what a person can now do* — "Administrators can export th
 audit log as CSV" — not why it was built, who asked for it, or how it was
 implemented. End users read this text on the sign-in screen; rationale and
 internal history do not belong in it.
+
+
+---
+
+## 6. PostgreSQL, the machine API, and read-only SQL
+
+### The store moved to PostgreSQL
+
+The JSON file is gone. `lib/db.js` owns the pool and the schema; `lib/store.js`
+loads the dataset into memory once at boot and writes through to Postgres.
+
+`store.get()` is still **synchronous**, deliberately — that is what let every
+`lib/` module stay byte-identical instead of becoming a whole-application
+rewrite with the acceptance suite as the only safety net. The cost is that the
+dataset must be loaded before the first request, so `server.js` now has an async
+`boot()` and only calls `listen()` once it resolves.
+
+`store.save('files')` names the slice that changed; `store.save()` with no
+argument rewrites everything (always correct, just slower). `audit` is
+append-only through `store.appendAudit()` — the in-memory list is a trimmed
+5000-entry window while the table is the permanent archive, so rewriting the
+section from memory would delete history.
+
+**The failure mode to know about.** A failed write is logged and swallowed; the
+process keeps serving from memory. That means a schema mistake is invisible to
+the API. It is not hypothetical — `password_resets.expires_at` was typed
+`bigint` while `lib/reset.js` stores an ISO string, and every acceptance test
+passed while nothing persisted. The suite now reads the database directly
+(`PERSISTENCE:`) instead of trusting the API's answers. Keep that test.
+
+### API keys — the app is now consumable by other applications
+
+Layered onto the SAME `requireAuth` / `requirePerm` the UI already goes through,
+not a parallel `/v1` surface. Every existing endpoint became machine-callable
+with exactly the permission check it already had, and a route cannot end up open
+to machines but closed to people because there is only one check.
+
+- Keys carry a subset of the **same RBAC permissions people hold** — no second
+  scope vocabulary to drift out of sync.
+- A key can never be granted a permission its issuer lacks, and its permissions
+  are re-intersected with its owner's **current** rights on every request:
+  deactivate the person and their integrations stop.
+- The token is shown once; only a SHA-256 hash is stored. Revoking clears the
+  hash entirely.
+- A key cannot change a password or mint another key (`allowKey: false`), so a
+  machine credential can neither take over its account nor make revocation
+  unwinnable.
+- `GET /api/meta` publishes the capability index without auth — a consumer needs
+  it *before* they have a key. `GET /api/whoami` checks a credential.
+
+### Read-only SQL
+
+For the questions that are far cheaper as a join than as N+1 API calls. Consumers
+get a SELECT-only Postgres role on curated views in the `api_read` schema.
+
+**Views, never base tables** — and that is the whole safety story. `users.data`
+holds `passwordHash`; `sessions` holds `refresh_hash`; `api_keys` holds
+`token_hash`; `app_documents` holds the encrypted LDAP bind and SMTP passwords. A
+blanket `GRANT SELECT ON ALL TABLES` would hand every reporting consumer the
+password hashes. The role is granted on the views only, `REVOKE ALL ON SCHEMA
+public` is explicit, and default privileges are never widened to base tables, so
+adding a table later does not silently expose it.
+
+Issuing rotates: the previous password stops working immediately, which is the
+revocation story. The app needs `CREATEROLE` (never superuser) to manage the
+credential itself; where that is not granted it returns a 409 naming the exact
+statement to run, and `scripts/provision-readonly.sql` is the DBA path.
+
+### What to check when adopting this
+
+1. `DATABASE_URL` is set, and the database exists.
+2. The acceptance suite needs `TEST_DATABASE_URL` pointing at a **throwaway**
+   database — it truncates every table on start.
+3. If you want in-app management of read-only access: `ALTER ROLE <app_role>
+   CREATEROLE;`
+4. Do not run more than one process against this: the read model, the rate
+   limiter and the SSE hub are all per-process.

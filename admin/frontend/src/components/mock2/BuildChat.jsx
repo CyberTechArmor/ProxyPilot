@@ -15,8 +15,9 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye, MonitorSmartphone } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
+import BuildLogViewer from './BuildLogViewer';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
@@ -354,6 +355,9 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // Annotating a composer ATTACHMENT (tap its thumbnail): index into
   // attach.images; the dialog hands back the pinned image + notes.
   const [annotateAttachIdx, setAnnotateAttachIdx] = useState(null);
+  // Build History's eye icon: read the transcript in place. The ROW still jumps
+  // to the build in the chat — the two affordances used to do the same thing.
+  const [logRequest, setLogRequest] = useState(null);
   const applyAnnotation = ({ text, image, images }) => {
     const idx = annotateAttachIdx;
     setAnnotateAttachIdx(null);
@@ -500,6 +504,26 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     } finally { setDownloadingAll(false); }
   };
 
+  // Screen check — the desktop/mobile screenshot pass, run from the chat and
+  // reported INTO the chat. apply:false deliberately: this answers "how does it
+  // actually look right now", it does not queue fixes. (The Build panel's
+  // Polish pass is the same capture with apply:true.) The screenshots it takes
+  // are attached to the findings message, so the critique can be checked
+  // against the pixels instead of taken on trust.
+  const [screenCheckBusy, setScreenCheckBusy] = useState(false);
+  const runScreenCheck = async () => {
+    setScreenCheckBusy(true);
+    try {
+      await api.mock2Polish(projectId, { apply: false });
+      toast({
+        title: 'Screen check running',
+        description: 'Screenshotting the app at mobile and desktop width — the findings and the shots land here in the chat.',
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start the screen check', description: err.message });
+    } finally { setScreenCheckBusy(false); }
+  };
+
   return (
     <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
       <CardHeader className="pb-2">
@@ -507,16 +531,29 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
           <CardTitle className="text-base flex items-center gap-2">
             <Hammer className="h-4 w-4" /> Build chat
           </CardTitle>
+          <div className="flex items-center gap-1.5">
+          {canEdit && online ? (
+            <Button
+              type="button" variant="outline" size="sm" className="h-11 sm:h-8"
+              onClick={runScreenCheck} disabled={screenCheckBusy || active}
+              title="Screenshot the app at mobile and desktop width and review it against the approved design — findings and shots arrive in this chat"
+            >
+              {screenCheckBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" /> : <MonitorSmartphone className="h-3.5 w-3.5 sm:mr-1" />}
+              <span className="hidden sm:inline">Screen check</span>
+            </Button>
+          ) : null}
           {buildRequests.length > 0 ? (
             <Button
-              type="button" variant="outline" size="sm" className="h-8"
+              type="button" variant="outline" size="sm" className="h-11 sm:h-8"
               aria-expanded={showHistory}
               onClick={() => setShowHistory((v) => !v)}
             >
-              <History className="h-3.5 w-3.5 mr-1" /> Build History
+              <History className="h-3.5 w-3.5 sm:mr-1" />
+              <span className="hidden sm:inline">Build History</span>
               <span className="ml-1 text-[11px] text-muted-foreground">({buildRequests.length})</span>
             </Button>
           ) : null}
+          </div>
         </div>
       </CardHeader>
       {showHistory ? (
@@ -547,18 +584,19 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                       <span className="block text-[10px] text-muted-foreground mt-0.5">{new Date(m.created_at).toLocaleString()}</span>
                     ) : null}
                   </button>
-                  {/* View — the same jump the row does, as an explicit icon.
-                      On a phone "tap the row" is invisible next to the download
-                      icon that IS visible, so the two actions now read as a
-                      pair: eye = look at it here, arrow = take it away. */}
-                  <button
-                    type="button" onClick={() => scrollToMessage(m.id)}
-                    className="shrink-0 w-11 md:w-9 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/60"
-                    title="View this build in the chat"
-                    aria-label="View this build in the chat"
-                  >
-                    <Eye className="h-4 w-4" />
-                  </button>
+                  {/* Three distinct actions, which is why all three are visible:
+                      the ROW jumps to this build in the chat, the EYE opens its
+                      transcript/change record here, the ARROW downloads it. */}
+                  {req ? (
+                    <button
+                      type="button" onClick={() => setLogRequest({ id: req.id, title: (m.body || '').trim() || 'Build log' })}
+                      className="shrink-0 w-11 md:w-9 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                      title="Read this build's transcript and change record"
+                      aria-label="Read this build's transcript"
+                    >
+                      <Eye className="h-4 w-4" />
+                    </button>
+                  ) : null}
                   {req ? (
                     <button
                       type="button" onClick={() => downloadBuild(req)}
@@ -823,6 +861,15 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       {/* Tap-to-pin feedback on a composer ATTACHMENT → a precise Quick update.
           Annotating the LIVE app now happens on the Preview ("Annotate"), which
           pins on the running signed-in app and resolves pins to components. */}
+      {logRequest ? (
+        <BuildLogViewer
+          projectId={projectId}
+          requestId={logRequest.id}
+          title={logRequest.title}
+          open={!!logRequest}
+          onOpenChange={(o) => { if (!o) setLogRequest(null); }}
+        />
+      ) : null}
       {canEdit ? (
         <AnnotateApp
           projectId={projectId}

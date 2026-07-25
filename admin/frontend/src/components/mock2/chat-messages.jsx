@@ -16,6 +16,7 @@ import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, Te
 import ExplainThis from './ExplainThis';
 import Markdown from './Markdown';
 import { chatImageUrl } from '@/lib/chat-images';
+import ImageLightbox from './ImageLightbox';
 
 // A rule_question body carries { question, choices } as JSON (M8, ADR-002).
 // Tolerant of a plain-text body (older rows).
@@ -101,26 +102,42 @@ export function RuleQuestion({ m, open, canEdit, busy, onAnswer, projectId = nul
 // open the full image in a new tab. The URL is content-addressed and served
 // immutable, so the browser caches each image once.
 function AttachmentThumbs({ m, projectId, mine }) {
+  const [lightbox, setLightbox] = useState(null);
   if (!projectId || !m.attachments?.length) return null;
+  // Opening in a new tab threw the reader out of the conversation; a 96px
+  // cropped thumbnail of a screenshot is unreadable. Tapping now opens the
+  // lightbox, with every image on the message arrow-able from there — which is
+  // what a desktop+mobile screenshot review needs.
+  const images = m.attachments.map((a) => ({
+    url: chatImageUrl(projectId, a.id),
+    name: a.name || 'attached image',
+    label: a.label || null,
+  }));
   return (
-    <div className={`flex flex-wrap gap-1.5 ${m.body ? 'mb-1.5' : ''}`}>
-      {m.attachments.map((a) => (
-        <a
-          key={a.id}
-          href={chatImageUrl(projectId, a.id)}
-          target="_blank" rel="noreferrer"
-          title={a.name || 'attached image'}
-          className={`block overflow-hidden rounded-lg border ${mine ? 'border-primary-foreground/30' : 'border-border'}`}
-        >
-          <img
-            src={chatImageUrl(projectId, a.id)}
-            alt={a.name || 'attached image'}
-            loading="lazy"
-            className="h-24 max-w-[9rem] object-cover"
-          />
-        </a>
-      ))}
-    </div>
+    <>
+      <div className={`flex flex-wrap gap-1.5 ${m.body ? 'mb-1.5' : ''}`}>
+        {m.attachments.map((a, i) => (
+          <button
+            key={a.id}
+            type="button"
+            onClick={() => setLightbox(i)}
+            title={`${a.name || 'attached image'} — tap to enlarge`}
+            aria-label={`Enlarge ${a.name || 'attached image'}`}
+            className={`block overflow-hidden rounded-lg border ${mine ? 'border-primary-foreground/30' : 'border-border'}`}
+          >
+            <img
+              src={chatImageUrl(projectId, a.id)}
+              alt={a.name || 'attached image'}
+              loading="lazy"
+              className="h-24 max-w-[9rem] object-cover"
+            />
+          </button>
+        ))}
+      </div>
+      {lightbox != null ? (
+        <ImageLightbox images={images} index={lightbox} onClose={() => setLightbox(null)} />
+      ) : null}
+    </>
   );
 }
 
@@ -145,9 +162,14 @@ function QuickUpdateChip({ m, onQuickUpdate, busyId }) {
 
 const LONG_SYSTEM_NOTE_CHARS = 400;
 
-function SystemNote({ body }) {
+// System notes can carry images — the screen check posts its mobile/desktop
+// screenshots with its findings. A note WITH attachments always uses the boxed
+// layout: the centred pill has nowhere to put a thumbnail, and a critique whose
+// evidence is invisible is exactly the thing the operator has to take on trust.
+function SystemNote({ body, m, projectId }) {
   const [expanded, setExpanded] = useState(false);
-  if (body.length <= LONG_SYSTEM_NOTE_CHARS) {
+  const hasShots = !!(projectId && m?.attachments?.length);
+  if (body.length <= LONG_SYSTEM_NOTE_CHARS && !hasShots) {
     return (
       <div className="flex flex-col items-center">
         <p className="text-[11px] text-muted-foreground bg-muted/60 rounded-full px-3 py-1 max-w-[90%] text-center">
@@ -156,20 +178,31 @@ function SystemNote({ body }) {
       </div>
     );
   }
+  const long = body.length > LONG_SYSTEM_NOTE_CHARS;
   return (
     <div className="flex justify-center">
       <div className="w-full max-w-[95%] rounded-md border bg-muted/40 px-3 py-2">
-        <div className={expanded ? '' : 'max-h-32 overflow-hidden relative'}>
+        <div className={long && !expanded ? 'max-h-32 overflow-hidden relative' : ''}>
           <p className="text-xs text-muted-foreground whitespace-pre-wrap break-words">{body}</p>
-          {!expanded && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background/90 to-transparent" />}
+          {long && !expanded && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background/90 to-transparent" />}
         </div>
-        <button
-          type="button"
-          className="mt-1 min-h-[32px] text-[11px] font-medium text-primary underline underline-offset-2"
-          onClick={() => setExpanded((v) => !v)}
-        >
-          {expanded ? 'Show less' : `Show all (${Math.round(body.length / 100) / 10}k chars)`}
-        </button>
+        {long ? (
+          <button
+            type="button"
+            className="mt-1 min-h-[32px] text-[11px] font-medium text-primary underline underline-offset-2"
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {expanded ? 'Show less' : `Show all (${Math.round(body.length / 100) / 10}k chars)`}
+          </button>
+        ) : null}
+        {hasShots ? (
+          <div className="mt-2 border-t border-border/60 pt-2">
+            <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+              {m.attachments.length} screenshot{m.attachments.length === 1 ? '' : 's'} — tap to enlarge
+            </p>
+            <AttachmentThumbs m={m} projectId={projectId} mine={false} />
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -181,7 +214,7 @@ export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBus
     // decision: the chip belongs to genuine Ask answers only). Long notes
     // (a design review's findings) render as a collapsible left-aligned
     // card — a giant centered pill was unreadable (user report).
-    return <SystemNote body={String(m.body || '')} />;
+    return <SystemNote body={String(m.body || '')} m={m} projectId={projectId} />;
   }
   if (m.kind === 'rule_answer') {
     return (

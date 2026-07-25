@@ -18,6 +18,7 @@
 
 import { createHash } from 'node:crypto';
 import { buildScaffoldFiles } from './scaffold.js';
+import { buildPlatformRoutes } from './scaffold-platform.js';
 
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 
@@ -26,7 +27,15 @@ const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 // ships the full admin API — users, roles/permissions, LDAPS, self-signup —
 // and these pages are its deterministic UI, so every base app STARTS with a
 // working admin area; builds add app features, not user management).
+//
+// src/platform/routes.ts is here rather than in the base scaffold because it is
+// the ONLY platform file that imports the auth component. tsconfig compiles
+// everything under src/, so shipping it to a project provisioned WITHOUT auth
+// failed tsc on a missing '../auth/index.js' and took the whole deploy with it.
+// Listing it here also means planAuthWiring manages it: a build that adapts it
+// keeps its adaptation across a re-install, like every other target.
 export const AUTH_WIRING_TARGETS = Object.freeze([
+  'src/platform/routes.ts',
   'src/app.ts', 'src/server.ts',
   'public/admin.html', 'public/admin.js', 'public/profile.html',
   'public/login.html',
@@ -932,6 +941,10 @@ function loginHtml() {
 // The wired file set (path → content). PURE.
 export function buildAuthWiredFiles() {
   return [
+    // The platform HTTP surface. Lives here, not in the base scaffold, because
+    // it is the only platform file that imports the auth component — a
+    // scaffold-only project must still typecheck.
+    ...buildPlatformRoutes(),
     { path: 'src/app.ts', content: wiredAppTs() },
     { path: 'src/server.ts', content: wiredServerTs() },
     { path: 'public/admin.html', content: adminHtml() },

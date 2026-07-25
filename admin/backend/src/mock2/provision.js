@@ -34,6 +34,7 @@ import { updateProject, getProject } from './projects.js';
 import { publishDomain } from './publish.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { buildSeedFiles, buildContainerSetupScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
+import { buildSeedPayload } from './seed-tar.js';
 import {
   bridgeNameForProject,
   bridgeCidrForProject,
@@ -79,14 +80,15 @@ export function containerNameForProject(projectId) {
 // commit in it. Files are base64-encoded (shell-safe) and written into a temp
 // working tree, committed, and pushed into the bare repo, which is then left as
 // the project's permanent origin (ADR-006).
-function buildSeedScript({ repoPath, files, projectName }) {
-  const writes = files.map((f) => {
-    const dir = f.path.includes('/') ? f.path.replace(/\/[^/]*$/, '') : '';
-    const mkdir = dir ? `mkdir -p "$WT/${dir}"` : ':';
-    const chmod = f.mode ? `chmod ${f.mode.toString(8)} "$WT/${f.path}"` : ':';
-    return `${mkdir}\nprintf '%s' '${b64(f.content)}' | base64 -d > "$WT/${f.path}"\n${chmod}`;
-  }).join('\n');
-
+// The seed SCRIPT is small and FIXED; the file payload arrives on stdin as a
+// base64 tarball (see seed-tar.js).
+//
+// It used to inline every file base64-encoded into this script, which is passed
+// as ONE argv entry. Linux caps a single argv entry at MAX_ARG_STRLEN (128 KiB)
+// — not the total, the entry — so once the template grew past ~96 KiB of source
+// every provision died with "bare repo seed failed: spawn failed: spawn E2BIG".
+// Keeping the script fixed-size means the template can grow without limit.
+function buildSeedScript({ repoPath, projectName }) {
   return `set -e
 REPO="${repoPath}"
 mkdir -p "$(dirname "$REPO")"
@@ -99,7 +101,9 @@ rm -rf "$REPO"
 git init --bare -b main "$REPO"
 WT="$(mktemp -d)"
 git init -q -b main "$WT"
-${writes}
+# Payload on STDIN: base64 tarball -> working tree. Reads stdin to EOF before
+# any later command runs, so nothing downstream can steal the remaining bytes.
+base64 -d | tar -xf - -C "$WT"
 git -C "$WT" add -A
 GIT_AUTHOR_NAME="ProxyPilot Mock2" GIT_AUTHOR_EMAIL="mock2@proxypilot.local" \
 GIT_COMMITTER_NAME="ProxyPilot Mock2" GIT_COMMITTER_EMAIL="mock2@proxypilot.local" \
@@ -178,7 +182,10 @@ async function provisionProject(project, { repoPath, containerName }) {
   const projectId = Number(project.id);
   setStatus(projectId, { phase: 'repo', message: 'Creating bare repo and seeding template…' });
   const seedFiles = buildSeedFiles(project, { webPort: DEFAULT_WEB_PORT });
-  const seed = await sh(buildSeedScript({ repoPath, files: seedFiles, projectName: project.name }), { timeoutMs: 60000 });
+  const seed = await sh(
+    buildSeedScript({ repoPath, projectName: project.name }),
+    { timeoutMs: 60000, input: buildSeedPayload(seedFiles) },
+  );
   if (seed.code !== 0) return fail(project, `bare repo seed failed: ${(seed.stderr || seed.stdout || '').trim().slice(-500)}`);
   return bringUpFromRepo(project, { repoPath, containerName, mode: 'provision' });
 }

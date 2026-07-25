@@ -40,10 +40,13 @@ test('RATCHET: no emitted file was truncated by a stray backtick', () => {
 test('every project is provisioned with the platform module', () => {
   const files = scaffold();
   for (const p of ['src/platform/schema.ts', 'src/platform/branding.ts', 'src/platform/api-keys.ts',
-    'src/platform/api-key-auth.ts', 'src/platform/readonly.ts', 'src/platform/routes.ts',
+    'src/platform/api-key-auth.ts', 'src/platform/readonly.ts',
     'migrations/0100_platform.sql', 'public/theme.js', 'public/platform.js']) {
     assert.ok(files.has(p), `the scaffold must emit ${p}`);
   }
+  // routes.ts is the exception: it imports the auth component, so it ships with
+  // the auth wiring (see the scaffold-only regression test below).
+  assert.ok(wired().has('src/platform/routes.ts'));
   // And it is actually MOUNTED — emitting a file nothing imports would be a
   // feature that exists on disk and nowhere else.
   const app = wired().get('src/app.ts');
@@ -121,7 +124,7 @@ test('API keys reuse the app permission catalog and cannot outrank their issuer'
   const rev = k.slice(k.indexOf('export async function revokeKey'));
   assert.match(rev, /tokenHash: null/);
   assert.match(k, /timingSafeEqual/);
-  assert.match(scaffold().get('src/platform/routes.ts'), /DEFAULT_PERMISSIONS/,
+  assert.match(wired().get('src/platform/routes.ts'), /DEFAULT_PERMISSIONS/,
     'keys must draw on the same catalog people hold');
 });
 
@@ -132,7 +135,7 @@ test('a key is limited to its own permissions and cannot escalate itself', () =>
   assert.match(mw, /req\.apiKey\.permissions\.includes\(permission\)/);
   // A machine credential must not take over its account or mint another key.
   assert.match(mw, /export function denyApiKey/);
-  const routes = scaffold().get('src/platform/routes.ts');
+  const routes = wired().get('src/platform/routes.ts');
   assert.match(routes, /post\('\/api-keys', denyApiKey/, 'a key must not be able to mint a key');
   assert.match(routes, /delete\('\/api-keys\/:id', denyApiKey/);
   assert.match(routes, /post\('\/db\/readonly', denyApiKey/);
@@ -158,7 +161,7 @@ test('read-only SQL publishes VIEWS, never the tables holding secrets', () => {
 });
 
 test('the machine API is discoverable before you have a key', () => {
-  const routes = scaffold().get('src/platform/routes.ts');
+  const routes = wired().get('src/platform/routes.ts');
   assert.ok(routes.indexOf("publicPlatformRoutes.get('/api/meta'") > 0, '/api/meta must be on the PUBLIC router');
   assert.match(routes, /publicPlatformRoutes\.get\('\/api\/branding'/);
   assert.match(routes, /publicPlatformRoutes\.get\('\/api\/legal\/:slug'/);
@@ -166,14 +169,14 @@ test('the machine API is discoverable before you have a key', () => {
 });
 
 test('whoami requires a real identity, not merely an attached context', () => {
-  const routes = scaffold().get('src/platform/routes.ts');
+  const routes = wired().get('src/platform/routes.ts');
   // withAuth attaches a context whether or not an identity was asserted, so
   // checking for the object alone answered 200 to a caller with no session.
   assert.match(routes, /!auth \|\| !auth\.authenticated/);
 });
 
 test('uploaded assets are served sandboxed and type-pinned', () => {
-  const routes = scaffold().get('src/platform/routes.ts');
+  const routes = wired().get('src/platform/routes.ts');
   const fn = routes.slice(
     routes.indexOf("publicPlatformRoutes.get('/api/assets/:id'"),
     routes.indexOf("publicPlatformRoutes.get('/favicon.ico'"),
@@ -201,4 +204,87 @@ test('the platform schema is registered on the Drizzle client', () => {
   // runtime with a confusing "relation does not exist".
   assert.match(db, /platformSchema/);
   assert.match(db, /\.\.\.schema, \.\.\.platformSchema/);
+});
+
+/* ------------------------- provisioning regressions ----------------------- */
+
+test('REGRESSION: a scaffold-only project has no dependency on the auth component', () => {
+  // tsconfig compiles EVERYTHING under src/, imported or not. Emitting a file
+  // that imports '../auth/index.js' into a project provisioned without the auth
+  // component fails `tsc`, which fails the deploy. Only routes.ts needs auth, so
+  // only routes.ts ships with the auth wiring.
+  for (const [path, content] of scaffold()) {
+    if (!path.startsWith('src/')) continue;
+    assert.ok(!/from '\.\.\/auth\//.test(content),
+      `${path} imports the auth component but ships in the base scaffold`);
+  }
+  assert.ok(!scaffold().has('src/platform/routes.ts'), 'routes.ts must not ship in the base scaffold');
+  assert.ok(wired().has('src/platform/routes.ts'), 'routes.ts must ship with the auth wiring');
+});
+
+test('REGRESSION: the seed script stays far below the argv limit (E2BIG)', async () => {
+  // Linux caps a SINGLE argv entry at MAX_ARG_STRLEN (128 KiB). The seed used to
+  // inline every template file base64-encoded into the script, so once the
+  // template passed ~96 KiB of source EVERY provision died with
+  // "bare repo seed failed: spawn failed: spawn E2BIG". The script must now be
+  // fixed-size, with the files travelling on stdin.
+  const src = await import('node:fs').then((fs) => fs.readFileSync(
+    new URL('../mock2/provision.js', import.meta.url), 'utf8'));
+
+  // The script must NOT interpolate the file list any more.
+  const fn = src.slice(src.indexOf('function buildSeedScript'), src.indexOf('function setStatus'));
+  assert.ok(!/\$\{writes\}/.test(fn), 'the seed script must not inline file contents');
+  assert.match(fn, /base64 -d \| tar -xf - -C "\$WT"/, 'files must arrive as a tarball on stdin');
+  // buildSeedScript no longer takes files at all — the signature is the guard.
+  assert.match(fn, /function buildSeedScript\(\{ repoPath, projectName \}\)/);
+  // And the call site must actually pass the payload as stdin.
+  assert.match(src, /input: buildSeedPayload\(seedFiles\)/);
+});
+
+test('REGRESSION: the real seed payload would fit even if it doubled', async () => {
+  const { buildSeedTar } = await import('../mock2/seed-tar.js');
+  const { buildSeedFiles } = await import('../mock2/template.js');
+  const files = buildSeedFiles({ id: 1, name: 'probe' }, { webPort: 3000 });
+  const tar = buildSeedTar(files);
+  // This is the number that used to matter. It now travels on stdin, so the
+  // assertion is simply that it is real and complete — the ARGV entry is the
+  // fixed script, checked above.
+  assert.ok(tar.length > 50_000, 'the seed should carry the whole template');
+  // Every file must be in the archive: a silently dropped file would provision
+  // a project missing part of its base app.
+  const text = tar.toString('binary');
+  for (const f of files) assert.ok(text.includes(f.path.split('/').pop()), `missing from tar: ${f.path}`);
+});
+
+test('the seed tar is a valid, reproducible ustar archive', async () => {
+  const { buildSeedTar } = await import('../mock2/seed-tar.js');
+  const files = [
+    { path: 'a.txt', content: 'hello' },
+    { path: 'deep/nested/dir/file.ts', content: 'export const x = 1;\n' },
+    { path: 'run.sh', content: '#!/bin/sh\n', mode: 0o755 },
+  ];
+  const tar = buildSeedTar(files);
+  // 512-byte blocks, two zero blocks at the end.
+  assert.equal(tar.length % 512, 0);
+  assert.ok(tar.subarray(-1024).every((b) => b === 0), 'must end with two zero blocks');
+  // ustar magic in the first header.
+  assert.equal(tar.subarray(257, 262).toString('ascii'), 'ustar');
+  // The mode must survive — serve.py has to stay executable.
+  const runHeader = tar.indexOf(Buffer.from('run.sh\0'));
+  assert.ok(runHeader >= 0);
+  assert.match(tar.subarray(runHeader + 100, runHeader + 107).toString('ascii'), /755/);
+  // Byte-reproducible: a fixed mtime means two builds of the same template
+  // produce the same archive, so a diff between seeds is meaningful.
+  assert.ok(buildSeedTar(files).equals(tar));
+});
+
+test('the seed tar refuses a path it cannot represent', async () => {
+  const { buildSeedTar } = await import('../mock2/seed-tar.js');
+  // ustar splits at 100 + 155. A path that cannot be split must THROW rather
+  // than silently truncate into the wrong filename.
+  const tooLong = `${'x'.repeat(120)}/${'y'.repeat(200)}.ts`;
+  assert.throws(() => buildSeedTar([{ path: tooLong, content: 'x' }]), /too long/);
+  // A long path that CAN be split is fine.
+  const splittable = `${'a/'.repeat(40)}file.ts`;
+  assert.doesNotThrow(() => buildSeedTar([{ path: splittable, content: 'x' }]));
 });

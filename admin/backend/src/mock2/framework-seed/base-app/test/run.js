@@ -40,6 +40,37 @@ function req(method, p, body, cookies) {
     r.end();
   });
 }
+// Raw-binary upload (assets, documents): the body is bytes, not JSON, and the
+// filename rides in a header. Kept separate from req() so req() can keep its
+// "no body means no body" rule — see the keep-alive note in BASE-APP-MIGRATION.
+function rawUpload(p, buf, cookies, extra = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(base + p);
+    const headers = Object.assign({ 'Content-Length': buf.length }, cookies ? { Cookie: cookies } : {}, extra);
+    const r = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST', headers }, (res) => {
+      let body = '';
+      res.on('data', c => body += c);
+      res.on('end', () => { let json = {}; try { json = JSON.parse(body); } catch (_) {} resolve({ status: res.statusCode, data: json }); });
+    });
+    r.on('error', reject);
+    r.end(buf);
+  });
+}
+// Fetches a non-JSON response and keeps the headers + raw bytes, so a test can
+// assert on Content-Type and the security headers rather than just the status.
+function rawGet(p, cookies) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(base + p);
+    const r = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, method: 'GET',
+      headers: cookies ? { Cookie: cookies } : {} }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    r.on('error', reject);
+    r.end();
+  });
+}
 // Same as req(), but lets a test forge request headers (host spoofing,
 // X-Forwarded-For rotation) to prove the server does not trust them.
 function reqWithHeaders(method, p, body, cookies, extra = {}) {
@@ -388,6 +419,138 @@ async function test(name, fn) { try { await fn(); passed++; console.log('  \x1b[
     sessionLib.prune(db);
     assert.ok(!db.sessions.find(s => s.id === 'stale-1'), 'expired/revoked sessions must be pruned');
     assert.ok(db.sessions.length >= before - 1);
+  });
+
+
+  /* ---------------- Branding, legal pages & assets ---------------- */
+
+  await test("legal pages and branding are readable with NO session", async () => {
+    // The sign-in screen renders these before anyone has authenticated, so an
+    // auth guard creeping onto these routes must fail the suite loudly.
+    const b = await req("GET", "/api/branding");
+    assert.strictEqual(b.status, 200);
+    assert.ok(b.data.branding.orgName, "public branding must carry an org name");
+    assert.strictEqual(b.data.branding.legal.length, 2);
+    for (const slug of ["privacy", "terms"]) {
+      const pg = await req("GET", "/api/legal/" + slug);
+      assert.strictEqual(pg.status, 200, slug + " must be public");
+      assert.ok(pg.data.page.body.length > 200, slug + " must ship real default copy");
+      assert.ok(!/\{\{ORG\}\}/.test(pg.data.page.body), "placeholders must be substituted on read");
+    }
+    const missing = await req("GET", "/api/legal/nope");
+    assert.strictEqual(missing.status, 404);
+  });
+
+  await test("copyright notice always carries the CURRENT year", async () => {
+    const brandingLib = require("../lib/branding");
+    const year = new Date().getFullYear();
+    const now = (await req("GET", "/api/branding")).data.branding;
+    assert.ok(now.copyright.includes(String(year)), "notice must name the current year");
+    assert.strictEqual(now.year, year);
+    // A year rolling over must not need a redeploy: the notice is computed on
+    // read, so asking for a future date yields that year, not a stored one.
+    const future = new Date(Date.UTC(year + 3, 5, 1));
+    assert.ok(brandingLib.copyrightNotice(brandingLib.raw(), future).includes(String(year + 3)));
+    // With a start year in the past it becomes a range ending in the current year.
+    brandingLib.updateIdentity({ copyrightStartYear: 2019 }, "test");
+    const ranged = (await req("GET", "/api/branding")).data.branding.copyright;
+    assert.ok(ranged.includes("2019–" + year), "expected a range, got: " + ranged);
+    brandingLib.updateIdentity({ copyrightStartYear: null }, "test");
+  });
+
+  await test("branding edits require the branding.manage permission", async () => {
+    const anon = await req("PUT", "/api/admin/branding", { orgName: "Pwned" });
+    assert.strictEqual(anon.status, 401);
+    // A physician has no administration rights at all.
+    const phys = await req("PUT", "/api/admin/branding", { orgName: "Pwned" }, physCookies);
+    assert.strictEqual(phys.status, 403);
+    const pg = await req("PUT", "/api/admin/branding/pages/privacy", { body: "gone" }, physCookies);
+    assert.strictEqual(pg.status, 403);
+    const assets = await req("GET", "/api/admin/branding/assets", null, physCookies);
+    assert.strictEqual(assets.status, 403);
+    assert.strictEqual((await req("GET", "/api/branding")).data.branding.orgName !== "Pwned", true);
+  });
+
+  await test("admin can edit the legal pages and restore the standard text", async () => {
+    const edited = await req("PUT", "/api/admin/branding/pages/terms",
+      { title: "Terms of Service", body: "## Custom\nOur own terms for {{ORG}}." }, adminCookies);
+    assert.strictEqual(edited.status, 200);
+    const pub = await req("GET", "/api/legal/terms");
+    assert.strictEqual(pub.data.page.title, "Terms of Service");
+    assert.ok(pub.data.page.body.includes("Our own terms for"));
+    assert.ok(!pub.data.page.body.includes("{{ORG}}"), "the org placeholder must be substituted");
+    assert.strictEqual(pub.data.page.isDefault, false);
+    assert.ok(pub.data.page.updatedAt, "an edited page records when it changed");
+
+    const restored = await req("POST", "/api/admin/branding/pages/terms/reset", undefined, adminCookies);
+    assert.strictEqual(restored.status, 200);
+    const back = await req("GET", "/api/legal/terms");
+    assert.strictEqual(back.data.page.title, "Terms & Conditions");
+    assert.strictEqual(back.data.page.isDefault, true);
+  });
+
+  await test("renaming the organisation updates the legal copy and the notice", async () => {
+    const r = await req("PUT", "/api/admin/branding", { orgName: "Northwind Health", legalName: "Northwind Health LLC", rightsMark: "®" }, adminCookies);
+    assert.strictEqual(r.status, 200);
+    const b = (await req("GET", "/api/branding")).data.branding;
+    assert.ok(b.copyright.includes("Northwind Health LLC®"), "got: " + b.copyright);
+    const privacy = await req("GET", "/api/legal/privacy");
+    assert.ok(privacy.data.page.body.includes("Northwind Health LLC"), "default copy must follow the rename");
+    const bad = await req("PUT", "/api/admin/branding", { rightsMark: "(c)" }, adminCookies);
+    assert.strictEqual(bad.status, 400);
+    const blank = await req("PUT", "/api/admin/branding", { orgName: "   " }, adminCookies);
+    assert.strictEqual(blank.status, 400);
+  });
+
+  await test("logo upload serves publicly, favicon falls back to it, delete clears both", async () => {
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+    const up = await rawUpload("/api/admin/branding/assets", png, adminCookies,
+      { "Content-Type": "image/png", "X-Filename": "logo.png", "X-Asset-Kind": "logo" });
+    assert.strictEqual(up.status, 201);
+    const id = up.data.asset.id;
+
+    // Public projection points at it, and the favicon INHERITS the logo.
+    const b = (await req("GET", "/api/branding")).data.branding;
+    assert.strictEqual(b.logoUrl, "/api/branding/assets/" + id);
+    assert.strictEqual(b.faviconUrl, b.logoUrl, "favicon must fall back to the logo");
+
+    // Served with no session, with the fixed type and the anti-XSS headers.
+    const img = await rawGet("/api/branding/assets/" + id);
+    assert.strictEqual(img.status, 200);
+    assert.strictEqual(img.headers["content-type"], "image/png");
+    assert.strictEqual(img.headers["x-content-type-options"], "nosniff");
+    assert.ok(/sandbox/.test(img.headers["content-security-policy"] || ""), "assets must be served sandboxed");
+    assert.strictEqual(img.body.length, png.length);
+    // /favicon.ico resolves without a <link> hint or a session.
+    assert.strictEqual((await rawGet("/favicon.ico")).status, 200);
+
+    // Only allowlisted types are storable.
+    const bad = await rawUpload("/api/admin/branding/assets", Buffer.from("<script>alert(1)</script>"), adminCookies,
+      { "Content-Type": "text/html", "X-Filename": "evil.html" });
+    assert.strictEqual(bad.status, 415);
+
+    // Deleting the logo must clear the pointer, or the favicon fallback would
+    // resolve to a permanent 404.
+    const del = await req("DELETE", "/api/admin/branding/assets/" + id, null, adminCookies);
+    assert.strictEqual(del.status, 200);
+    const after = (await req("GET", "/api/branding")).data.branding;
+    assert.strictEqual(after.logoUrl, null);
+    assert.strictEqual(after.faviconUrl, null);
+    assert.strictEqual((await rawGet("/api/branding/assets/" + id)).status, 404);
+    assert.strictEqual((await rawGet("/favicon.ico")).status, 404);
+  });
+
+  await test("app context is editable and exposed publicly", async () => {
+    const r = await req("PUT", "/api/admin/branding", { appContext: {
+      summary: "Collects and reviews physician credentialing documents.",
+      audience: "Physicians and the credentialing team.",
+      features: [{ title: "Upload documents", detail: "Against a guided checklist." }, { title: "", detail: "dropped" }]
+    } }, adminCookies);
+    assert.strictEqual(r.status, 200);
+    const ctx = (await req("GET", "/api/branding")).data.branding.appContext;
+    assert.strictEqual(ctx.features.length, 1, "capabilities without a title are dropped");
+    assert.strictEqual(ctx.features[0].title, "Upload documents");
+    assert.ok(ctx.updatedAt, "editing stamps when the description last changed");
   });
 
   console.log(`\n${passed} checks passed.${process.exitCode ? ' (with failures)' : ''}\n`);

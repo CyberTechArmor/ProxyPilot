@@ -15,6 +15,7 @@ const PERMISSIONS = [
   { key: 'ldap.manage',    label: 'Manage LDAP / directory settings', group: 'Administration' },
   { key: 'smtp.manage',    label: 'Manage email (SMTP) settings', group: 'Administration' },
   { key: 'catalog.manage', label: 'Manage document catalog (sections & documents)', group: 'Administration' },
+  { key: 'branding.manage', label: 'Manage branding, legal pages & assets', group: 'Administration' },
   { key: 'audit.view',     label: 'View audit log', group: 'Administration' }
 ];
 
@@ -96,7 +97,7 @@ function userCan(user, permKey) {
 // a team member if any of their roles grants one of these capabilities.
 const TEAM_PERMS = [
   'portal.review', 'internal.review', 'users.view', 'users.manage', 'roles.view', 'roles.manage',
-  'perms.manage', 'ldap.manage', 'smtp.manage', 'catalog.manage', 'audit.view'
+  'perms.manage', 'ldap.manage', 'smtp.manage', 'catalog.manage', 'branding.manage', 'audit.view'
 ];
 function isTeamRoles(roleKeys) {
   const perms = effectivePermissions(roleKeys);

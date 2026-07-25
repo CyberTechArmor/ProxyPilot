@@ -20,6 +20,7 @@ const crypto = require('./lib/crypto');
 const files = require('./lib/files');
 const fields = require('./lib/fields');
 const packet = require('./lib/packet');
+const branding = require('./lib/branding');
 const { readBody, sendJson, parseCookies, clientIp, cookie } = require('./lib/util');
 
 const PORT = +(process.env.PORT || 6525);
@@ -29,6 +30,7 @@ const OFFICE_PREVIEW_TTL_MS = 15 * 60 * 1000;
 // One-time seed of roles/permissions.
 rbac.seed();
 catalog.seed();
+branding.seed();
 
 /* ---------------- cookie helpers ---------------- */
 // SECURITY (fix): mark session cookies Secure whenever the request reached us
@@ -227,6 +229,15 @@ const server = http.createServer(async (req, res) => {
   }
   try {
     if (url.startsWith('/api/')) return await api(req, res, url.split('?')[0], method);
+    // The browser asks for /favicon.ico with no cookies and no <link> hint, so
+    // it has to resolve without a session. Falls back to the logo when no
+    // dedicated favicon was uploaded; 404s rather than letting serveStatic's
+    // SPA fallback answer an icon request with a page of HTML.
+    if (url.split('?')[0] === '/favicon.ico') {
+      const id = branding.faviconId(branding.raw());
+      if (!id) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('No favicon'); }
+      return branding.streamAsset(res, id);
+    }
     return serveStatic(req, res, url);
   } catch (e) {
     if (e.message === 'INVALID_JSON') return sendJson(res, 400, { code: 'INVALID_JSON', message: 'Malformed request body.' });
@@ -249,6 +260,23 @@ async function api(req, res, p, method) {
   const ip = clientIp(req);
   const ua = req.headers['user-agent'];
   let m;
+
+  /* ----- public branding + legal -----
+     Deliberately unauthenticated: the sign-in screen renders the copyright
+     notice, the logo and the Privacy / Terms links BEFORE there is a session,
+     and the browser fetches the favicon with no cookies at all. Nothing here is
+     permission-bearing — see branding.publicView(). */
+  if (p === '/api/branding' && method === 'GET')
+    return sendJson(res, 200, { branding: branding.publicView() });
+
+  if ((m = p.match(/^\/api\/legal\/([a-z-]+)$/)) && method === 'GET') {
+    const pg = branding.page(m[1]);
+    if (!pg) return sendJson(res, 404, { code: 'NOT_FOUND', message: 'Page not found.' });
+    return sendJson(res, 200, { page: pg });
+  }
+
+  if ((m = p.match(/^\/api\/branding\/assets\/([A-Za-z0-9-]+)$/)) && method === 'GET')
+    return branding.streamAsset(res, m[1]);
 
   /* ----- setup ----- */
   if (p === '/api/setup/status' && method === 'GET')
@@ -1104,6 +1132,106 @@ async function api(req, res, p, method) {
     if (!ok) return sendJson(res, 404, { code: 'NOT_FOUND', message: 'Document not found.' });
     audit.record({ action: catAdmin.audit + '.item_delete', actorId: ctx.user.id, actorLabel: ctx.user.username, outcome: 'ok', ip, meta: { key: m[1] } });
     return sendJson(res, 200, { code: 'OK', catalog: catalog.publicCatalog(catAdmin.scope) });
+  }
+
+  /* ----- admin: branding, legal pages & assets -----
+     NOTE on ordering: every literal path below is matched before the
+     parameterised /assets/:id patterns. A parametric route registered first
+     swallows its own literal siblings ("assets/reorder" read as an id), which
+     is a 404 that looks like a missing feature rather than a routing bug. */
+  if (p === '/api/admin/branding' && method === 'GET') {
+    const ctx = requirePerm(req, res, 'branding.manage'); if (!ctx) return;
+    return sendJson(res, 200, { branding: branding.adminView() });
+  }
+
+  if (p === '/api/admin/branding' && method === 'PUT') {
+    const ctx = requirePerm(req, res, 'branding.manage'); if (!ctx) return;
+    const body = await readBody(req);
+    try {
+      const view = branding.updateIdentity(body, ctx.user.username);
+      audit.record({ action: 'branding.update', actorId: ctx.user.id, actorLabel: ctx.user.username, outcome: 'ok', ip, meta: { fields: Object.keys(body || {}) } });
+      return sendJson(res, 200, { code: 'OK', branding: view });
+    } catch (e) {
+      if (e.code === 'VALIDATION') return sendJson(res, 400, { code: 'VALIDATION', message: e.detail || 'Invalid branding settings.' });
+      if (e.code === 'NOT_FOUND') return sendJson(res, 404, { code: 'NOT_FOUND', message: e.detail || 'Asset not found.' });
+      throw e;
+    }
+  }
+
+  if ((m = p.match(/^\/api\/admin\/branding\/pages\/([a-z-]+)$/)) && method === 'PUT') {
+    const ctx = requirePerm(req, res, 'branding.manage'); if (!ctx) return;
+    const body = await readBody(req);
+    try {
+      const pg = branding.updatePage(m[1], body, ctx.user.username);
+      audit.record({ action: 'branding.page_update', actorId: ctx.user.id, actorLabel: ctx.user.username, outcome: 'ok', ip, meta: { slug: m[1] } });
+      return sendJson(res, 200, { code: 'OK', page: pg });
+    } catch (e) {
+      if (e.code === 'VALIDATION') return sendJson(res, 400, { code: 'VALIDATION', message: e.detail || 'Invalid page.' });
+      if (e.code === 'NOT_FOUND') return sendJson(res, 404, { code: 'NOT_FOUND', message: 'Page not found.' });
+      throw e;
+    }
+  }
+
+  if ((m = p.match(/^\/api\/admin\/branding\/pages\/([a-z-]+)\/reset$/)) && method === 'POST') {
+    const ctx = requirePerm(req, res, 'branding.manage'); if (!ctx) return;
+    try {
+      const pg = branding.resetPage(m[1]);
+      audit.record({ action: 'branding.page_reset', actorId: ctx.user.id, actorLabel: ctx.user.username, outcome: 'ok', ip, meta: { slug: m[1] } });
+      return sendJson(res, 200, { code: 'OK', page: pg });
+    } catch (e) {
+      if (e.code === 'NOT_FOUND') return sendJson(res, 404, { code: 'NOT_FOUND', message: 'Page not found.' });
+      throw e;
+    }
+  }
+
+  if (p === '/api/admin/branding/assets' && method === 'GET') {
+    const ctx = requirePerm(req, res, 'branding.manage'); if (!ctx) return;
+    return sendJson(res, 200, { assets: branding.adminView().assets });
+  }
+
+  // Raw-binary upload, same shape as /api/files: bytes in the body, original
+  // name in X-Filename. The up-front drain in the server entry point only runs
+  // for JSON routes, so this reads the stream itself.
+  if (p === '/api/admin/branding/assets' && method === 'POST') {
+    const ctx = requirePerm(req, res, 'branding.manage'); if (!ctx) return;
+    try {
+      const asset = await branding.saveAsset(req, {
+        filename: req.headers['x-filename'],
+        mime: req.headers['content-type'],
+        kind: req.headers['x-asset-kind'],
+        alt: req.headers['x-asset-alt'] ? decodeURIComponent(req.headers['x-asset-alt']) : '',
+        key: req.headers['x-asset-key'],
+        actor: ctx.user.username
+      });
+      audit.record({ action: 'branding.asset_upload', actorId: ctx.user.id, actorLabel: ctx.user.username, outcome: 'ok', ip, meta: { id: asset.id, kind: asset.kind, name: asset.name } });
+      return sendJson(res, 201, { code: 'OK', asset, branding: branding.adminView() });
+    } catch (e) {
+      if (e.code === 'UNSUPPORTED_TYPE') return sendJson(res, 415, { code: 'UNSUPPORTED_TYPE', message: 'That file type cannot be used as an asset.' });
+      if (e.code === 'TOO_LARGE') return sendJson(res, 413, { code: 'TOO_LARGE', message: 'That file is too large.' });
+      if (e.code === 'EMPTY') return sendJson(res, 400, { code: 'VALIDATION', message: 'The uploaded file was empty.' });
+      throw e;
+    }
+  }
+
+  if ((m = p.match(/^\/api\/admin\/branding\/assets\/([A-Za-z0-9-]+)$/)) && method === 'PATCH') {
+    const ctx = requirePerm(req, res, 'branding.manage'); if (!ctx) return;
+    const body = await readBody(req);
+    try {
+      const asset = branding.updateAsset(m[1], body);
+      audit.record({ action: 'branding.asset_update', actorId: ctx.user.id, actorLabel: ctx.user.username, outcome: 'ok', ip, meta: { id: m[1] } });
+      return sendJson(res, 200, { code: 'OK', asset, branding: branding.adminView() });
+    } catch (e) {
+      if (e.code === 'NOT_FOUND') return sendJson(res, 404, { code: 'NOT_FOUND', message: 'Asset not found.' });
+      throw e;
+    }
+  }
+
+  if ((m = p.match(/^\/api\/admin\/branding\/assets\/([A-Za-z0-9-]+)$/)) && method === 'DELETE') {
+    const ctx = requirePerm(req, res, 'branding.manage'); if (!ctx) return;
+    const removed = branding.removeAsset(m[1]);
+    if (!removed) return sendJson(res, 404, { code: 'NOT_FOUND', message: 'Asset not found.' });
+    audit.record({ action: 'branding.asset_delete', actorId: ctx.user.id, actorLabel: ctx.user.username, outcome: 'ok', ip, meta: { id: m[1], name: removed.name } });
+    return sendJson(res, 200, { code: 'OK', branding: branding.adminView() });
   }
 
   /* ----- admin: audit ----- */

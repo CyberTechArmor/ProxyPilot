@@ -219,13 +219,27 @@ when nobody has said what it should look like.
    default for a project that specified no design direction at all.
 4. **§1–§8 above** remain the structural contract underneath all three.
 
-**One reconciliation, and it is deliberate.** The brief below describes a
-light-only system ("No dark mode"). ProxyPilot's mockup contract (§1) still
-requires a dark variant and a working theme toggle — that is a platform
-guarantee and a machine check, not a style opinion. So: take the brief's palette
-as the LIGHT reference theme and derive the dark variant from it per §1 (soft
-dark surfaces, never pure black; same hues, muted). Ship the toggle. Nothing
-else in the brief changes.
+**One reconciliation, and it is deliberate.** The brief below was written for a
+light-only system ("No dark mode"). ProxyPilot's mockup contract (§1) requires a
+dark variant and a working theme toggle — that is a platform guarantee and a
+machine check, not a style opinion. So: the brief's palette IS the light theme,
+and the dark variant is derived from it per §1 (soft dark surfaces, never pure
+black; same hues, muted).
+
+**This is already done, and there is a reference implementation.** The base app
+ships both themes — `public/style.css` declares the palette twice (`:root` and
+`[data-theme="dark"]`, `color-scheme` set in each) and `public/theme.js` carries
+the three-state preference. Read those rather than re-deriving the mapping.
+Two rules that are easy to get wrong and are pinned by a test:
+
+- Surfaces use `var(--surface)`, never `var(--white)`. `--white` is literal
+  white in *both* themes on purpose — it is for text and icons on a solid
+  coloured fill. Used as a background it stays white in dark mode.
+- Load the theme script **synchronously, before the stylesheet**. Deferred, it
+  applies after first paint and flashes white at every dark-mode user on every
+  page load.
+
+Nothing else in the brief changes.
 
 Provenance: extracted from the Upload Doc credentialing portal, which is also
 ProxyPilot's base application template — so a project that adopts both gets a

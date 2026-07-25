@@ -4,7 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Upload Doc — Physician Credentialing Portal</title>
-<link rel="stylesheet" href="/style.css?v=48">
+<meta name="theme-color" content="#f5f8fc">
+<!-- Applied BEFORE the stylesheet/paint so a dark-mode user never sees a light
+     flash on load. Must stay synchronous and first. -->
+<script src="/theme.js?v=50"></script>
+<link rel="stylesheet" href="/style.css?v=50">
+<!-- Resolves to the uploaded favicon, or the logo when none was uploaded. -->
+<link rel="icon" href="/favicon.ico">
 </head>
 <body>
   <div id="root"></div>
@@ -13,7 +19,8 @@
   <div id="modalRoot"></div>
   <div id="modalRoot2"></div>
   <div id="globalToasts"></div>
-  <script src="/portal.js?v=48"></script>
-  <script src="/app.js?v=48"></script>
+  <script src="/branding.js?v=50"></script>
+  <script src="/portal.js?v=50"></script>
+  <script src="/app.js?v=50"></script>
 </body>
 </html>

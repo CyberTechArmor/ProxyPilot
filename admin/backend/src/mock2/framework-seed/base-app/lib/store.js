@@ -18,6 +18,7 @@ const DEFAULT_DB = {
   smtpConfig: null,          // {enabled,provider,host,port,secure,username,password(enc),fromEmail,fromName,tlsVerify}
   catalog: null,             // provider documents: {sections:[{id,title,order,items:[...]}]}
   internalCatalog: null,     // employee/team documents; same shape, managed separately
+  branding: null,            // identity, legal pages, app context, asset index (lib/branding.js)
   passwordResets: [],        // [{tokenHash, userId, expiresAt, usedAt}]
   sessions: [],              // refresh session records
   audit: []

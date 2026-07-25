@@ -39,6 +39,8 @@ import {
 import { initialGateReports, allGatesGreen, interruptDecision, shouldStopForBudget } from './cycle-logic.js';
 import { releaseLock, touchLock } from './locks.js';
 import { insertCycleEvent, listRecentDownNotes } from './cycle-events.js';
+import { listAssets } from './project-assets.js';
+import { buildAssetSection } from './project-assets-logic.js';
 import {
   parseFrameworkSkills, buildRunnerClaudeMd, buildRunnerTask, buildFeedbackSection, buildCompletionSummaryBody,
   MAX_TURNS, softPauseReason, SOFT_PAUSE_TOKENS,
@@ -304,12 +306,16 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       // task like on the hand-rolled runner — subordinate sizing notes only.
       let prepassBrief = '';
       let feedbackSection = '';
+      let assetSection = '';
       if (round === 0) {
         try { prepassBrief = formatBriefForTask(parseRoutingJson(getCycle(cycle.id)?.routing_json)?.prepass); } catch { prepassBrief = ''; }
         try { feedbackSection = buildFeedbackSection(listRecentDownNotes(projectId)); } catch { feedbackSection = ''; }
+        // Operator-collected reference material; round 0 only, so gate-feedback
+        // rounds do not re-pay for it.
+        try { assetSection = buildAssetSection(listAssets(projectId)); } catch { assetSection = ''; }
       }
       const prompt = round === 0
-        ? `${buildRunnerTask(cycle.instruction)}${prepassBrief}${feedbackSection}${resumeBlock ? `\n\n${resumeBlock}` : ''}`
+        ? `${buildRunnerTask(cycle.instruction)}${prepassBrief}${feedbackSection}${assetSection}${resumeBlock ? `\n\n${resumeBlock}` : ''}`
         : pendingFeedback || `The verification gate battery is not all green yet. Fix the cause and stop.\n\n${formatGateReports(battery)}`;
       pendingFeedback = null;
       setJob(cycle.id, { phase: 'running', message: round === 0 ? 'SDK runner working…' : `SDK runner addressing gate feedback (round ${round + 1})…` });

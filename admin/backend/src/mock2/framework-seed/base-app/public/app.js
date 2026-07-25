@@ -64,10 +64,23 @@
     else rel = d.toLocaleDateString();
     return `<span title="${esc(d.toLocaleString())}">${esc(rel)}</span>`;
   }
+  /* The wordmark: an uploaded logo replaces the built-in glyph, and the
+     organisation name comes from branding so renaming it does not leave the
+     old name burned into the header. Falls back to the shipped glyph + name
+     when nothing has been uploaded yet. */
+  function brandMark() {
+    const b = window.Branding ? Branding.get() : null;
+    const name = (b && b.orgName) || 'Upload Doc';
+    const glyph = b && b.logoUrl
+      ? `<span class="logo logo-img"><img src="${esc(b.logoUrl)}" alt=""></span>`
+      : `<span class="logo">${ICON.logo}</span>`;
+    return `${glyph} <span class="brand-name">${esc(name)}</span>`;
+  }
+
   function can(p) { return ME && ME.permissions.includes(p); }
   function hasPortal() { return can('portal.view'); }
   function hasInternal() { return can('internal.review'); }
-  function hasAnyAdmin() { return ['users.view', 'roles.view', 'perms.manage', 'ldap.manage', 'smtp.manage', 'catalog.manage', 'audit.view'].some(can); }
+  function hasAnyAdmin() { return ['users.view', 'roles.view', 'perms.manage', 'ldap.manage', 'smtp.manage', 'catalog.manage', 'branding.manage', 'audit.view'].some(can); }
 
   /* ------------------------------- Boot -------------------------------- */
   async function boot() {
@@ -88,10 +101,11 @@
   // Shared split-screen auth layout (mockup style): marketing panel + auth box.
   function authLayout(rightInner) {
     return `
-      <div class="split authsplit">
+      <div class="split authsplit authwrap">
+        ${window.Theme ? Theme.buttonHtml('themeToggleAuth') : ''}
         <div class="left">
           <div class="glow"></div>
-          <div class="brand"><span class="logo">${ICON.logo}</span> Upload&nbsp;Doc</div>
+          <div class="brand">${brandMark()}</div>
           <div class="authhero">
           <h1>Physician credentialing, without the paperwork chase.</h1>
           <p class="lede">One secure portal where physicians submit their credentialing documents, and your team collects, reviews, and follows up — document by document.</p>
@@ -102,9 +116,33 @@
           </div>
           </div>
         </div>
-        <div class="right"><div class="authbox">${rightInner}</div></div>
+        <div class="right"><div class="authbox">${rightInner}</div>${window.Branding ? Branding.footerHtml() : ''}</div>
       </div>`;
   }
+
+  /* Legal pages are reachable from the sign-in screen, so they must render
+     without a session. Clicking a footer link swaps the whole root and
+     remembers how to get back — signed out that is the auth screen the reader
+     was on, signed in it is the app shell. */
+  let legalReturn = null;
+  function showLegal(slug) {
+    legalReturn = legalReturn || (ME ? () => renderShell(currentView) : () => boot());
+    const back = legalReturn;
+    legalReturn = null;
+    window.scrollTo(0, 0);
+    window.Branding.renderPage(root(), slug, back);
+  }
+  // One delegated handler covers every footer, on every screen that renders one
+  // (five auth screens, the app shell, and the legal pages themselves).
+  document.addEventListener('click', (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest('[data-legal]') : null;
+    if (!btn) return;
+    e.preventDefault();
+    const wasSignedIn = !!ME;
+    const view = currentView;
+    legalReturn = wasSignedIn ? () => renderShell(view) : () => boot();
+    showLegal(btn.dataset.legal);
+  });
 
   function renderSetup() {
     stopRealtime();
@@ -142,7 +180,7 @@
   function renderRoleChoice() {
     stopRealtime(); authRole = null;
     root().innerHTML = authLayout(`
-      <h2 style="font-size:22px;margin-bottom:4px">Welcome to Upload Doc</h2>
+      <h2 style="font-size:22px;margin-bottom:4px">Welcome to ${esc(window.Branding ? Branding.get().orgName : 'Upload Doc')}</h2>
       <p class="muted small" style="margin-bottom:20px">To continue, tell us who you are.</p>
       <div class="rolecards">
         <button class="rolecard phys" data-pick="physician">
@@ -408,11 +446,13 @@
     } catch (e) {}
     renderShell(view);
   }
+  let currentView = 'portal';   // remembered so a legal page can come back here
   function renderShell(view) {
     if (view === 'admin' && !hasAnyAdmin()) view = hasPortal() ? 'portal' : (hasInternal() ? 'internal' : 'portal');
     if (view === 'internal' && !hasInternal()) view = hasPortal() ? 'portal' : (hasAnyAdmin() ? 'admin' : 'portal');
     if (view === 'portal' && !hasPortal()) view = hasInternal() ? 'internal' : (hasAnyAdmin() ? 'admin' : 'portal');
     try { localStorage.setItem('updoc.shell.' + ME.id, view); } catch (e) {}
+    currentView = view;
     const roleLabel = can('portal.review') ? 'Credentialing team' : (hasInternal() ? 'Internal credentialing' : 'Physician');
     const initials = (ME.displayName || ME.username || 'U').split(' ').map(x => x[0]).join('').slice(0, 2).toUpperCase();
     const portalBtn = hasPortal() ? `<button class="${view === 'portal' ? 'active' : ''}" data-nav="portal">Portal</button>` : '';
@@ -421,7 +461,7 @@
     root().innerHTML = `
       <div class="appshell">
         <header class="app">
-          <div class="brand"><span class="logo">${ICON.logo}</span> Upload&nbsp;Doc</div>
+          <div class="brand">${brandMark()}</div>
           <nav>
             ${portalBtn}
             ${internalBtn}
@@ -434,11 +474,14 @@
               <div class="small">${esc(roleLabel)} · ${esc(ME.provider)}</div>
             </div>
             <button class="avatar profile-avatar ${can('portal.review') || hasInternal() ? 'team' : ''}" id="profileBtn" type="button" title="Change password">${esc(initials)}</button>
+            ${window.Theme ? Theme.buttonHtml('themeToggleShell') : ''}
             <button class="logout-btn" id="logoutBtn">Log out</button>
           </div>
         </header>
         <div id="appContent"></div>
+        ${window.Branding ? Branding.footerHtml() : ''}
       </div>`;
+    if (window.Theme) Theme.bind(root());
     root().querySelectorAll('[data-nav]').forEach(b => b.onclick = () => renderShell(b.dataset.nav));
     document.getElementById('profileBtn').onclick = changePasswordModal;
     document.getElementById('logoutBtn').onclick = doLogout;
@@ -523,6 +566,7 @@
       ['smtp', 'Email (SMTP)', 'smtp.manage'],
       ['catalog', 'Documents', 'catalog.manage'],
       ['internalCatalog', 'Internal Documents', 'catalog.manage'],
+      ['branding', 'Branding & Content', 'branding.manage'],
       ['audit', 'Audit log', 'audit.view'],
       ['thirdparty', '3rd Party Login', 'audit.view']
     ].filter(t => can(t[2]));
@@ -542,6 +586,7 @@
     if (adminTab === 'smtp') return adminSmtp(body);
     if (adminTab === 'catalog') return adminCatalog(body);
     if (adminTab === 'internalCatalog') return adminCatalog(body, { base: '/api/admin/internal-catalog', title: 'Internal Documents', audience: 'employee' });
+    if (adminTab === 'branding') return adminBranding(body);
     if (adminTab === 'audit') return adminAudit(body);
     if (adminTab === 'thirdparty') return adminThirdParty(body);
   }
@@ -1145,6 +1190,236 @@
   }
 
   /* ------ Audit ------ */
+  /* ------ Branding & Content ------
+     One place for everything the app says about itself: identity + copyright,
+     the logo/favicon, the shared asset library, the two legal pages, and the
+     app-context blurb that each build is expected to keep current. */
+  let brandingSubTab = 'identity';
+  async function adminBranding(body) {
+    body.innerHTML = '<div class="muted">Loading…</div>';
+    const r = await api('GET', '/api/admin/branding');
+    if (r.status !== 200) { body.innerHTML = '<div class="alert err">Could not load branding settings.</div>'; return; }
+    const b = r.data.branding;
+    const subs = [['identity', 'Identity'], ['assets', 'Logo & assets'], ['pages', 'Legal pages'], ['context', 'About this app']];
+    body.innerHTML = `
+      <div class="admin-tabs sub">${subs.map(s => `<button class="${s[0] === brandingSubTab ? 'active' : ''}" data-btab="${s[0]}">${s[1]}</button>`).join('')}</div>
+      <div id="brandingBody"></div>`;
+    body.querySelectorAll('[data-btab]').forEach(x => x.onclick = () => { brandingSubTab = x.dataset.btab; adminBranding(body); });
+    const inner = document.getElementById('brandingBody');
+    if (brandingSubTab === 'identity') return brandingIdentity(inner, b, body);
+    if (brandingSubTab === 'assets') return brandingAssets(inner, b, body);
+    if (brandingSubTab === 'pages') return brandingPages(inner, b, body);
+    return brandingContext(inner, b, body);
+  }
+
+  function brandingIdentity(inner, b, body) {
+    inner.innerHTML = `
+      <div class="card"><div class="card-h"><b>Identity &amp; copyright</b></div><div class="card-b">
+        <div class="grid2">
+          <div class="field"><label for="bOrg">Display name</label>
+            <input id="bOrg" value="${esc(b.orgName)}" maxlength="120">
+            <div class="hint">Shown in the header and on the sign-in screen.</div></div>
+          <div class="field"><label for="bLegal">Legal entity name</label>
+            <input id="bLegal" value="${esc(b.legalName)}" maxlength="160" placeholder="Leave blank to use the display name">
+            <div class="hint">Used in the copyright notice and the legal pages.</div></div>
+          <div class="field"><label for="bMark">Rights mark</label>
+            <select id="bMark">
+              <option value=""${b.rightsMark ? '' : ' selected'}>None</option>
+              <option value="®"${b.rightsMark === '®' ? ' selected' : ''}>® Registered</option>
+              <option value="™"${b.rightsMark === '™' ? ' selected' : ''}>™ Trademark</option>
+            </select></div>
+          <div class="field"><label for="bStart">Copyright start year</label>
+            <input id="bStart" type="number" min="1900" max="${new Date().getFullYear()}" value="${b.copyrightStartYear || ''}" placeholder="Optional">
+            <div class="hint">Set it to show a range. The end year is always the current year.</div></div>
+          <div class="field span2"><label for="bRights">Rights text</label>
+            <input id="bRights" value="${esc(b.rightsText)}" maxlength="160"></div>
+        </div>
+        <div class="preview-strip"><span class="muted small">Footer preview</span><div id="bPreview">${esc(b.copyrightPreview)}</div></div>
+        <div class="row-actions"><button class="btn" id="bSave">Save</button></div>
+      </div></div>`;
+    const repaint = () => {
+      const y = new Date().getFullYear();
+      const start = parseInt(val('bStart'), 10);
+      const years = (Number.isInteger(start) && start >= 1900 && start < y) ? `${start}–${y}` : String(y);
+      const name = val('bLegal') || val('bOrg') || 'Upload Doc';
+      const mark = document.getElementById('bMark').value;
+      const rights = val('bRights');
+      document.getElementById('bPreview').textContent = `© ${years} ${name}${mark}.${rights ? ' ' + rights : ''}`;
+    };
+    ['bOrg', 'bLegal', 'bStart', 'bRights'].forEach(id => { const el = document.getElementById(id); if (el) el.oninput = repaint; });
+    document.getElementById('bMark').onchange = repaint;
+    document.getElementById('bSave').onclick = async () => {
+      const startRaw = val('bStart');
+      const r = await api('PUT', '/api/admin/branding', {
+        orgName: val('bOrg'), legalName: val('bLegal'), rightsText: val('bRights'),
+        rightsMark: document.getElementById('bMark').value,
+        copyrightStartYear: startRaw === '' ? null : Number(startRaw)
+      });
+      if (r.status !== 200) return toast('Could not save', r.data.message || 'Check the values and try again.', 'err');
+      toast('Branding saved', 'The footer and header now use these values.');
+      if (window.Branding) { Branding.invalidate(); await Branding.load(true); }
+      adminBranding(body);
+    };
+  }
+
+  function brandingAssets(inner, b, body) {
+    const cards = b.assets.map(a => `
+      <div class="asset-card">
+        <div class="asset-thumb">${a.image ? `<img src="${esc(a.url)}" alt="${esc(a.alt)}">` : `<span class="asset-file">${esc((a.name.split('.').pop() || 'file').toUpperCase())}</span>`}</div>
+        <div class="asset-meta">
+          <b title="${esc(a.name)}">${esc(a.name)}</b>
+          <span class="small muted">${esc(a.kind)} · ${Math.max(1, Math.round(a.size / 1024))} KB</span>
+          ${a.id === b.logoAssetId ? '<span class="pill ok">Logo</span>' : ''}
+          ${a.id === b.faviconAssetId ? '<span class="pill ok">Favicon</span>' : ''}
+        </div>
+        <div class="asset-actions">
+          <button class="btn ghost xs" data-use-logo="${esc(a.id)}">Use as logo</button>
+          <button class="btn ghost xs" data-use-fav="${esc(a.id)}">Use as favicon</button>
+          <button class="btn ghost xs danger" data-del-asset="${esc(a.id)}">Delete</button>
+        </div>
+      </div>`).join('');
+    inner.innerHTML = `
+      <div class="card"><div class="card-h"><b>Logo &amp; favicon</b></div><div class="card-b">
+        <div class="brandmarks">
+          <div class="brandmark"><span class="small muted">Logo</span>
+            <div class="brandmark-box">${b.logoUrl ? `<img src="${esc(b.logoUrl)}" alt="Current logo">` : '<span class="muted small">None</span>'}</div></div>
+          <div class="brandmark"><span class="small muted">Favicon${b.faviconInherited ? ' (using the logo)' : ''}</span>
+            <div class="brandmark-box small-box">${b.faviconUrl ? `<img src="${esc(b.faviconUrl)}" alt="Current favicon">` : '<span class="muted small">None</span>'}</div></div>
+        </div>
+        <div class="hint">No favicon uploaded? The logo is used automatically.</div>
+      </div></div>
+      <div class="card"><div class="card-h"><b>Asset library</b><span class="small muted">${b.assets.length} item${b.assets.length === 1 ? '' : 's'}</span></div><div class="card-b">
+        <div class="upload-row">
+          <label class="btn" for="bUpload">Upload asset</label>
+          <input id="bUpload" type="file" accept="${esc(b.limits.allowedExtensions.join(','))}" style="display:none">
+          <select id="bUploadKind" aria-label="Upload as">
+            <option value="image">General image</option>
+            <option value="logo">Logo</option>
+            <option value="favicon">Favicon</option>
+            <option value="document">Document</option>
+          </select>
+          <span class="small muted">Max ${Math.round(b.limits.maxAssetBytes / (1024 * 1024))} MB · ${esc(b.limits.allowedExtensions.join(' '))}</span>
+        </div>
+        <div class="asset-grid">${cards || '<div class="muted">No assets yet.</div>'}</div>
+      </div></div>`;
+    document.getElementById('bUpload').onchange = async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const kind = document.getElementById('bUploadKind').value;
+      const res = await fetch('/api/admin/branding/assets', {
+        method: 'POST', credentials: 'same-origin', body: file,
+        headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': file.name, 'X-Asset-Kind': kind }
+      });
+      let d = {}; try { d = await res.json(); } catch (_) {}
+      if (res.status !== 201) return toast('Upload failed', d.message || 'That file could not be stored.', 'err');
+      toast('Asset uploaded', file.name);
+      if (window.Branding) { Branding.invalidate(); await Branding.load(true); }
+      adminBranding(body);
+    };
+    const patch = async (id, patchBody, okMsg) => {
+      const r = await api('PATCH', '/api/admin/branding/assets/' + id, patchBody);
+      if (r.status !== 200) return toast('Could not update', r.data.message || '', 'err');
+      toast(okMsg, '');
+      if (window.Branding) { Branding.invalidate(); await Branding.load(true); }
+      adminBranding(body);
+    };
+    inner.querySelectorAll('[data-use-logo]').forEach(x => x.onclick = () => patch(x.dataset.useLogo, { kind: 'logo' }, 'Logo updated'));
+    inner.querySelectorAll('[data-use-fav]').forEach(x => x.onclick = () => patch(x.dataset.useFav, { kind: 'favicon' }, 'Favicon updated'));
+    inner.querySelectorAll('[data-del-asset]').forEach(x => x.onclick = () => {
+      modal('Delete asset', '<p>This removes the file permanently. Anywhere it is used will fall back to the default.</p>', async (close) => {
+        const r = await api('DELETE', '/api/admin/branding/assets/' + x.dataset.delAsset);
+        if (r.status !== 200) return toast('Could not delete', r.data.message || '', 'err');
+        close(); toast('Asset deleted', '');
+        if (window.Branding) { Branding.invalidate(); await Branding.load(true); }
+        adminBranding(body);
+      }, 'Delete');
+    });
+  }
+
+  function brandingPages(inner, b, body) {
+    inner.innerHTML = b.pages.map(p => `
+      <div class="card"><div class="card-h"><b>${esc(p.title)}</b>
+        <span class="small muted">${p.isDefault ? 'Standard text' : (p.updatedAt ? 'Edited ' + new Date(p.updatedAt).toLocaleDateString() : 'Edited')}</span>
+      </div><div class="card-b">
+        <div class="field"><label for="pt_${esc(p.slug)}">Page title</label>
+          <input id="pt_${esc(p.slug)}" value="${esc(p.title)}" maxlength="160"></div>
+        <div class="field"><label for="pb_${esc(p.slug)}">Content</label>
+          <textarea id="pb_${esc(p.slug)}" rows="16" spellcheck="true">${esc(p.body)}</textarea>
+          <div class="hint">Blank line starts a paragraph · <code>## </code> a heading · <code>- </code> a bullet. <code>{{ORG}}</code> is replaced with the legal entity name.</div></div>
+        <div class="row-actions">
+          <button class="btn" data-save-page="${esc(p.slug)}">Save</button>
+          <button class="btn ghost" data-reset-page="${esc(p.slug)}">Restore standard text</button>
+          <button class="btn ghost" data-view-page="${esc(p.slug)}">Preview</button>
+        </div>
+      </div></div>`).join('');
+    inner.querySelectorAll('[data-save-page]').forEach(x => x.onclick = async () => {
+      const slug = x.dataset.savePage;
+      const r = await api('PUT', '/api/admin/branding/pages/' + slug, { title: val('pt_' + slug), body: document.getElementById('pb_' + slug).value });
+      if (r.status !== 200) return toast('Could not save', r.data.message || '', 'err');
+      toast('Page saved', 'Visitors see the updated text immediately.');
+      if (window.Branding) Branding.invalidate();
+      adminBranding(body);
+    });
+    inner.querySelectorAll('[data-reset-page]').forEach(x => x.onclick = () => {
+      modal('Restore standard text', '<p>This replaces your edits with the text this application ships with. It cannot be undone.</p>', async (close) => {
+        const r = await api('POST', '/api/admin/branding/pages/' + x.dataset.resetPage + '/reset');
+        if (r.status !== 200) return toast('Could not restore', r.data.message || '', 'err');
+        close(); toast('Standard text restored', '');
+        if (window.Branding) Branding.invalidate();
+        adminBranding(body);
+      }, 'Restore');
+    });
+    inner.querySelectorAll('[data-view-page]').forEach(x => x.onclick = () => {
+      const slug = x.dataset.viewPage;
+      modal(val('pt_' + slug) || 'Preview',
+        `<div class="legal-body preview-scroll">${window.Branding ? Branding.renderBody(document.getElementById('pb_' + slug).value) : ''}</div>`,
+        close => close(), 'Close');
+    });
+  }
+
+  function brandingContext(inner, b, body) {
+    const c = b.appContext || { summary: '', audience: '', features: [] };
+    const rows = (f, i) => `
+      <div class="ctx-row" data-ctx-row="${i}">
+        <input class="ctx-title" value="${esc(f.title)}" placeholder="What a person can do" maxlength="160">
+        <input class="ctx-detail" value="${esc(f.detail || '')}" placeholder="One line of detail (optional)" maxlength="600">
+        <button class="btn ghost xs danger" data-ctx-del="${i}" aria-label="Remove">✕</button>
+      </div>`;
+    inner.innerHTML = `
+      <div class="card"><div class="card-h"><b>About this application</b>
+        <span class="small muted">${c.updatedAt ? 'Updated ' + new Date(c.updatedAt).toLocaleDateString() : 'Not set'}</span></div><div class="card-b">
+        <div class="alert info">Describe <b>what the application does</b> and <b>what people can do with it</b> — not why it was built. This text is read by end users.</div>
+        <div class="field"><label for="cSum">Summary</label>
+          <textarea id="cSum" rows="4" maxlength="4000" placeholder="One short paragraph: what this application is for.">${esc(c.summary || '')}</textarea></div>
+        <div class="field"><label for="cAud">Who uses it</label>
+          <input id="cAud" value="${esc(c.audience || '')}" maxlength="1000" placeholder="e.g. Physicians submitting credentials, and the credentialing team reviewing them"></div>
+        <div class="field"><label>Capabilities</label>
+          <div id="ctxRows">${(c.features || []).map(rows).join('') || ''}</div>
+          <button class="btn ghost xs" id="ctxAdd" style="margin-top:8px">Add capability</button></div>
+        <div class="row-actions"><button class="btn" id="cSave">Save</button></div>
+      </div></div>`;
+    const wireDel = () => inner.querySelectorAll('[data-ctx-del]').forEach(x => x.onclick = () => { x.closest('.ctx-row').remove(); });
+    wireDel();
+    document.getElementById('ctxAdd').onclick = () => {
+      const holder = document.getElementById('ctxRows');
+      const d = document.createElement('div');
+      d.innerHTML = rows({ title: '', detail: '' }, holder.children.length);
+      holder.appendChild(d.firstElementChild);
+      wireDel();
+    };
+    document.getElementById('cSave').onclick = async () => {
+      const features = [...inner.querySelectorAll('.ctx-row')].map(r => ({
+        title: r.querySelector('.ctx-title').value.trim(),
+        detail: r.querySelector('.ctx-detail').value.trim()
+      })).filter(f => f.title);
+      const r = await api('PUT', '/api/admin/branding', { appContext: { summary: document.getElementById('cSum').value, audience: val('cAud'), features } });
+      if (r.status !== 200) return toast('Could not save', r.data.message || '', 'err');
+      toast('Saved', 'The description of this application is up to date.');
+      if (window.Branding) { Branding.invalidate(); await Branding.load(true); }
+      adminBranding(body);
+    };
+  }
+
   async function adminAudit(body) {
     body.innerHTML = '<div class="muted">Loading…</div>';
     const r = await api('GET', '/api/admin/audit');

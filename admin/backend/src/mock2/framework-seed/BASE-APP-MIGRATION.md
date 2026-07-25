@@ -88,3 +88,81 @@ Suite is now **25/25**, including the four new `SECURITY:` regressions.
 4. Do the client escapers cover `'`?
 5. Is anything relying on `lib/store.js` at a scale it cannot carry (see the
    RUNBOOK's scaling-ceiling note)?
+
+---
+
+## 5. Added since the re-vendor
+
+### Light / dark theme
+
+`public/theme.js` carries a three-state preference — `system` (default),
+`light`, `dark` — under the `ud-theme` key. It is loaded **synchronously and
+before the stylesheet** in `index.html`: a deferred script applies the theme
+after first paint, which shows a dark-mode user a white flash on every single
+page load. `style.css` declares the palette twice, `:root` and
+`[data-theme="dark"]`, and both set `color-scheme` so native form controls and
+scrollbars follow.
+
+Two rules for anyone extending the stylesheet:
+
+- **Surfaces use `var(--surface)`, never `var(--white)`.** `--white` is literal
+  white in *both* themes on purpose — it is for text and icons sitting on a
+  solid coloured fill. Using it as a background leaves that element white in
+  dark mode. A test pins this.
+- Toggles are wired by **delegation**, not per-render binding. The auth layout
+  renders from five separate call sites; binding in each one means the sixth is
+  silently broken.
+
+### Mobile
+
+Breakpoints at 901 / 900 / 768 / 640 / 400px, single-column grids below 768,
+and a `min-height:44px` floor on controls at phone widths. `prefers-reduced-
+motion` is honoured globally.
+
+One fix worth knowing about: the `@media(max-width:768px)` block used to set
+`.split .left{position:static}`. The decorative `.glow` is absolutely
+positioned inside `.left` and clipped by its `overflow:hidden` — a *static*
+`.left` hands the glow the initial containing block, it escapes the clip, and
+the page scrolled sideways by 120px on every phone. Only the brand needed to go
+static.
+
+### Branding, legal pages and assets — `lib/branding.js`
+
+New `branding.manage` permission (admin by default), a `branding` slice in the
+JSON store, and asset bytes on disk under `data/branding/`.
+
+- **Public, no session:** `GET /api/branding`, `GET /api/legal/:slug`,
+  `GET /api/branding/assets/:id`, and `GET /favicon.ico`. These render on the
+  sign-in screen, so an auth guard on them is a bug — a test asserts they are
+  registered before the gated routes and call neither `requireAuth` nor
+  `requirePerm`.
+- **Admin:** `GET|PUT /api/admin/branding`, `PUT /api/admin/branding/pages/:slug`
+  (+ `/reset` to restore the shipped copy), and CRUD on
+  `/api/admin/branding/assets`.
+- The sign-in screen and the app shell both render a footer: Privacy Policy and
+  Terms & Conditions as real buttons, plus the copyright notice. **The year is
+  computed on read, never stored** — on the server and again on the client, so
+  a tab left open across New Year corrects itself.
+- Privacy and Terms ship with generic, jurisdiction-neutral copy so a fresh app
+  is not serving a dead link. `{{ORG}}` is substituted at read time, so renaming
+  the organisation updates the legal text too.
+- Page bodies are a tiny block syntax (`## ` heading, `- ` bullet, blank-line
+  paragraph) that is **escaped first, then wrapped**. Raw HTML from the store
+  never reaches `innerHTML` — otherwise an admin could turn the unauthenticated
+  privacy page into a script host.
+- **The favicon falls back to the logo** when none was uploaded, and deleting an
+  asset clears both pointers so the fallback can never dangle to a 404.
+- Assets are served with a fixed `Content-Type`, `nosniff`, and
+  `Content-Security-Policy: default-src 'none'; sandbox`. SVG is allowed *only*
+  because of those headers; HTML is not a storable type at all.
+
+### `appContext` — a contract for every build
+
+`branding.appContext` is `{ summary, audience, features: [{title, detail}] }`,
+editable under **Admin console → Branding & Content → About this app**.
+
+**Every build that adds or changes a user- or admin-facing capability should
+update it.** Record *what a person can now do* — "Administrators can export the
+audit log as CSV" — not why it was built, who asked for it, or how it was
+implemented. End users read this text on the sign-in screen; rationale and
+internal history do not belong in it.

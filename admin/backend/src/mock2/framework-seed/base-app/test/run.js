@@ -6,11 +6,20 @@ const JSZip = require('jszip');
 const path = require('path');
 const fs = require('fs');
 
-// Fresh DB per run — in an ISOLATED temp directory so the acceptance suite can
-// NEVER delete or overwrite the production data/ (db.json, secret.key).
+// Fresh state per run. Uploaded bytes still live on disk, in an ISOLATED temp
+// directory so the suite can NEVER touch the production data/ (secret.key, the
+// uploads and branding blobs).
 const os = require('os');
 const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'credportal-test-'));
 process.env.APP_DATA_DIR = DATA;
+// The dataset itself is PostgreSQL. TEST_DATABASE_URL keeps the suite off a
+// real deployment's database — running the acceptance tests truncates every
+// table, so pointing them at production would be catastrophic and silent.
+if (process.env.TEST_DATABASE_URL) process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+if (!process.env.DATABASE_URL) {
+  console.error('\nThese tests need PostgreSQL. Set TEST_DATABASE_URL (or DATABASE_URL) to a\nthrowaway database — the suite truncates every table on start.\n');
+  process.exit(2);
+}
 process.env.ACCESS_TTL_MS = '600000';
 // The base template refuses to build emailed links from request headers; the
 // canonical origin is configured, exactly as a real deployment must.
@@ -18,7 +27,8 @@ process.env.APP_BASE_URL = 'https://portal.test.local';
 delete process.env.APP_MASTER_KEY; // ensure a fresh key is generated in the temp dir
 for (const f of ['db.json', 'secret.key']) { try { fs.unlinkSync(path.join(DATA, f)); } catch (_) {} }
 
-const { server } = require('../server');
+const { server, boot } = require('../server');
+const store = require('../lib/store');
 const ldap = require('../lib/ldap');
 let base;
 
@@ -122,6 +132,10 @@ let passed = 0;
 async function test(name, fn) { try { await fn(); passed++; console.log('  \x1b[32m✓\x1b[0m ' + name); } catch (e) { console.log('  \x1b[31m✗ ' + name + '\x1b[0m\n    ' + e.message); process.exitCode = 1; } }
 
 (async () => {
+  // Start from an empty database, then run the app's own boot (schema + seeds).
+  await store.init();
+  await store.reset();
+  await boot();
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   base = 'http://127.0.0.1:' + server.address().port;
   console.log('\nAuth/RBAC acceptance tests\n');
@@ -553,7 +567,177 @@ async function test(name, fn) { try { await fn(); passed++; console.log('  \x1b[
     assert.ok(ctx.updatedAt, "editing stamps when the description last changed");
   });
 
+
+  /* ---------------- persistence, API keys, read-only SQL ---------------- */
+
+  await test('PERSISTENCE: writes actually reach PostgreSQL, not just memory', async () => {
+    // The whole point of the store rewrite. The app serves from an in-memory
+    // model, so a broken write is INVISIBLE to every other test in this file —
+    // which is exactly how a column-type mistake shipped silently. Read the
+    // database directly and check the rows are really there.
+    const db = require('../lib/db');
+    await store.flush();
+    const u = await db.query('SELECT username, active FROM users WHERE username = $1', ['admin']);
+    assert.strictEqual(u.rowCount, 1, 'the admin must exist as a real row');
+    assert.strictEqual(u.rows[0].active, true);
+
+    const roles = await db.query('SELECT role_key FROM user_roles ur JOIN users u ON u.id = ur.user_id WHERE u.username = $1', ['admin']);
+    assert.ok(roles.rows.some((r) => r.role_key === 'admin'), 'role assignment must be a real row');
+
+    // Password resets store ISO strings; a bigint column here silently failed
+    // every write while the tests still passed.
+    const pr = await db.query('SELECT expires_at FROM password_resets LIMIT 1');
+    if (pr.rowCount) assert.ok(/^\d{4}-\d{2}-\d{2}T/.test(pr.rows[0].expires_at), 'reset expiry must round-trip as an ISO string');
+
+    // Audit is append-only and must NOT be rewritten from the trimmed window.
+    const a = await db.query('SELECT COUNT(*)::int AS n FROM audit');
+    assert.ok(a.rows[0].n > 0, 'audit events must persist');
+  });
+
+  let apiToken = null;
+  await test('an API key is issued once, carries permissions, and authenticates', async () => {
+    const created = await req('POST', '/api/admin/api-keys',
+      { name: 'reporting', permissions: ['users.view', 'audit.view'] }, adminCookies);
+    assert.strictEqual(created.status, 201);
+    assert.ok(created.data.token, 'the token is returned exactly once');
+    assert.match(created.data.token, /^ud_live_[0-9a-f]+\.[A-Za-z0-9_-]+$/);
+    apiToken = created.data.token;
+
+    // Listing NEVER carries the secret again.
+    const listed = await req('GET', '/api/admin/api-keys', null, adminCookies);
+    assert.strictEqual(listed.status, 200);
+    const mine = listed.data.keys.find((k) => k.name === 'reporting');
+    assert.ok(mine, 'the key is listed');
+    const asText = JSON.stringify(listed.data);
+    assert.ok(!asText.includes(apiToken.split('.')[1]), 'the secret must never be readable again');
+    assert.ok(!/tokenHash|token_hash/.test(asText), 'the hash must not be exposed either');
+
+    // It authenticates on a normal endpoint — the SAME endpoint a browser uses.
+    const withKey = await reqWithHeaders('GET', '/api/admin/users', null, null, { Authorization: `Bearer ${apiToken}` });
+    assert.strictEqual(withKey.status, 200, 'a key must work on the existing API');
+    assert.ok(Array.isArray(withKey.data.users));
+
+    // X-API-Key is accepted too (tooling that cannot set Authorization).
+    const alt = await reqWithHeaders('GET', '/api/admin/users', null, null, { 'X-API-Key': apiToken });
+    assert.strictEqual(alt.status, 200);
+  });
+
+  await test('a key is limited to ITS OWN permissions, not its owner\'s', async () => {
+    // The key above was issued by an admin, who can do everything. If the key
+    // inherited that, every key would be an admin key.
+    const denied = await reqWithHeaders('POST', '/api/admin/roles', { key: 'sneak', label: 'Sneak' }, null,
+      { Authorization: `Bearer ${apiToken}` });
+    assert.strictEqual(denied.status, 403, 'roles.manage was not granted to this key');
+    assert.strictEqual(denied.data.code, 'FORBIDDEN');
+    assert.strictEqual(denied.data.required, 'roles.manage');
+  });
+
+  await test('a key cannot be granted permissions its issuer lacks', async () => {
+    // A manager may not manage roles; a key they mint must not be able to either.
+    const esc = await req('POST', '/api/admin/api-keys', { name: 'escalate', permissions: ['roles.manage'] }, mgrCookies);
+    assert.ok(esc.status === 403 || esc.status === 401, `expected a refusal, got ${esc.status}`);
+  });
+
+  await test('a key cannot change a password or mint another key', async () => {
+    // A machine credential must not be able to take over the account it acts
+    // for, nor make revocation unwinnable by issuing more credentials.
+    const pw = await reqWithHeaders('POST', '/api/auth/change-password',
+      { currentPassword: 'x', newPassword: 'Y3sVeryLong!' }, null, { Authorization: `Bearer ${apiToken}` });
+    assert.strictEqual(pw.status, 401, 'password change must refuse a key');
+
+    const mint = await reqWithHeaders('POST', '/api/admin/api-keys',
+      { name: 'child', permissions: ['users.view'] }, null, { Authorization: `Bearer ${apiToken}` });
+    assert.ok(mint.status === 401 || mint.status === 403, `a key must not mint keys, got ${mint.status}`);
+  });
+
+  await test('revoking a key stops it immediately', async () => {
+    const listed = await req('GET', '/api/admin/api-keys', null, adminCookies);
+    const mine = listed.data.keys.find((k) => k.name === 'reporting');
+    const del = await req('DELETE', `/api/admin/api-keys/${mine.id}`, null, adminCookies);
+    assert.strictEqual(del.status, 200);
+    const after = await reqWithHeaders('GET', '/api/admin/users', null, null, { Authorization: `Bearer ${apiToken}` });
+    assert.strictEqual(after.status, 401, 'a revoked key must stop working at once');
+    const bogus = await reqWithHeaders('GET', '/api/admin/users', null, null, { Authorization: 'Bearer ud_live_deadbeef.nope' });
+    assert.strictEqual(bogus.status, 401);
+  });
+
+  await test('whoami and the API index describe the surface', async () => {
+    const meta = await req('GET', '/api/meta');
+    assert.strictEqual(meta.status, 200, 'the index must be readable BEFORE you have a key');
+    assert.ok(meta.data.endpoints.length > 5);
+    assert.ok(meta.data.permissions.some((p) => p.key === 'api.manage'));
+
+    const me = await req('GET', '/api/whoami', null, adminCookies);
+    assert.strictEqual(me.status, 200);
+    assert.strictEqual(me.kind, undefined);
+    assert.strictEqual(me.data.kind, 'session');
+    assert.ok(me.data.permissions.includes('api.manage'));
+  });
+
+  await test('READ-ONLY SQL: the credential can SELECT views and nothing else', async () => {
+    const issued = await req('POST', '/api/admin/db/readonly', {}, adminCookies);
+    assert.strictEqual(issued.status, 201, JSON.stringify(issued.data).slice(0, 200));
+    assert.ok(issued.data.url.startsWith('postgres://'), 'a connection string is returned');
+    assert.ok(/Driver=\{PostgreSQL/.test(issued.data.odbc), 'an ODBC DSN is returned');
+    assert.ok(issued.data.views.users, 'the published views are described');
+
+    const pg = require('pg');
+    const ro = new pg.Client({ connectionString: issued.data.url });
+    await ro.connect();
+    try {
+      // It can read the curated views.
+      const r = await ro.query('SELECT username, active FROM api_read.users ORDER BY username');
+      assert.ok(r.rowCount > 0, 'the read-only role can query the views');
+
+      // It must NOT see credential material. This is the whole safety story:
+      // users.data holds passwordHash, so the view must not expose it.
+      const cols = await ro.query(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema='api_read' AND table_name='users'");
+      const names = cols.rows.map((c) => c.column_name);
+      assert.ok(!names.includes('data'), 'the raw data column must never be published');
+      // Name check, narrowly: must_set_password is a harmless boolean flag, so
+      // match columns that would CARRY a secret rather than merely mention one.
+      const carriers = names.filter((n) => /(password_hash|token|secret|refresh|bind_password|private_key)/i.test(n));
+      assert.deepStrictEqual(carriers, [], `secret-bearing column published: ${carriers.join(', ')}`);
+      // Value check — the real assertion. A hash is what actually leaks, and a
+      // future column could carry one under an innocent name.
+      const sample = await ro.query('SELECT * FROM api_read.users LIMIT 20');
+      for (const row of sample.rows) {
+        for (const [k, v] of Object.entries(row)) {
+          assert.ok(!/^(scrypt|argon2|bcrypt|\$2[aby]\$|pbkdf2)/i.test(String(v ?? '')),
+            `column ${k} exposes a password hash through the read-only view`);
+          assert.ok(!/^[0-9a-f]{64}$/i.test(String(v ?? '')), `column ${k} looks like a raw token hash`);
+        }
+      }
+
+      // Base tables are off limits, even though the views read them.
+      await assert.rejects(() => ro.query('SELECT * FROM public.users LIMIT 1'), /permission denied/i,
+        'the read-only role must not reach the base tables');
+      await assert.rejects(() => ro.query('SELECT refresh_hash FROM public.sessions LIMIT 1'), /permission denied/i);
+
+      // And it is READ-only: every write path must be refused.
+      await assert.rejects(() => ro.query("UPDATE public.users SET active = false"), /permission denied/i);
+      await assert.rejects(() => ro.query("INSERT INTO public.audit (action) VALUES ('nope')"), /permission denied/i);
+      await assert.rejects(() => ro.query('DROP TABLE public.users'), /permission denied|must be owner/i);
+      await assert.rejects(() => ro.query('CREATE TABLE evil (x int)'), /permission denied/i);
+    } finally { await ro.end().catch(() => {}); }
+  });
+
+  await test('READ-ONLY SQL: rotating revokes the previous credential', async () => {
+    const first = await req('POST', '/api/admin/db/readonly', {}, adminCookies);
+    const second = await req('POST', '/api/admin/db/readonly', {}, adminCookies);
+    assert.notStrictEqual(first.data.url, second.data.url, 'rotation issues a new password');
+    const pg = require('pg');
+    const stale = new pg.Client({ connectionString: first.data.url, connectionTimeoutMillis: 4000 });
+    await assert.rejects(() => stale.connect(), /password|authentication/i, 'the old credential must stop working');
+    await stale.end().catch(() => {});
+    const st = await req('GET', '/api/admin/db/readonly', null, adminCookies);
+    assert.strictEqual(st.data.enabled, true);
+  });
+
   console.log(`\n${passed} checks passed.${process.exitCode ? ' (with failures)' : ''}\n`);
+  await store.flush();
+  await require('../lib/db').close();
   server.close();
   setTimeout(() => process.exit(process.exitCode || 0), 100);
 })();

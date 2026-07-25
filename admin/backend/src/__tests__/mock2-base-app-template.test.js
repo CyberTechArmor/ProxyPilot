@@ -23,9 +23,10 @@ test('the base app template ships with the pieces a project needs', () => {
     'base-app/public/portal.js', 'base-app/public/app.js']) {
     assert.ok(existsSync(path.join(SEED, f)), `missing ${f}`);
   }
-  // Near-zero dependency philosophy: only the two the packet download needs.
+  // Near-zero dependency philosophy: the two the packet download needs, plus
+  // the PostgreSQL driver. Anything else arriving here should be argued for.
   const pkg = JSON.parse(read('base-app/package.json'));
-  assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['jszip', 'pdf-lib']);
+  assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['jszip', 'pdf-lib', 'pg']);
 });
 
 test('SECURITY: set-password requires proof of identity (no account takeover)', () => {
@@ -273,4 +274,107 @@ test('app context is a documented build-time contract', () => {
   // The instruction that matters: record WHAT users can do, not why it exists.
   assert.match(b, /not why it was built|not why/i);
   assert.match(b, /summary.*audience.*features/s);
+});
+
+/* ------------------- PostgreSQL, API keys, read-only SQL ------------------ */
+
+test('the base app is backed by PostgreSQL, loaded before it serves', () => {
+  const store = read('base-app/lib/store.js');
+  const server = read('base-app/server.js');
+  const pkg = JSON.parse(read('base-app/package.json'));
+  assert.ok(pkg.dependencies.pg, 'pg must be a dependency');
+  assert.ok(!existsSync(path.join(SEED, 'base-app/data/db.json')), 'the JSON store file must not be vendored');
+
+  // get() stays SYNCHRONOUS — that is what let every lib/ module stay unchanged.
+  assert.match(store, /function get\(\)/);
+  assert.ok(!/async function get\(/.test(store), 'get() must stay synchronous');
+  // …which means the dataset MUST be loaded before the first request. A route
+  // served mid-load would see an empty database, which looks like a wiped install.
+  assert.match(store, /store\.get\(\) before store\.init\(\)/, 'get() before init() must fail loudly, not return empty');
+  assert.match(server, /async function boot\(\)/);
+  assert.match(server, /boot\(\)\s*\n\s*\.then\(\(\) => server\.listen/, 'listen must happen after boot resolves');
+});
+
+test('a failed write is logged, and the suite checks the database directly', () => {
+  const store = read('base-app/lib/store.js');
+  // The app serves from memory, so a broken write is INVISIBLE to the API —
+  // which is how a wrong column type shipped silently. Both halves of the
+  // defence must be present: the log, and a test that reads Postgres itself.
+  assert.match(store, /\[store\] persist failed/);
+  assert.match(read('base-app/test/run.js'), /PERSISTENCE: writes actually reach PostgreSQL/);
+});
+
+test('audit is append-only and never rewritten from the trimmed window', () => {
+  const store = read('base-app/lib/store.js');
+  const audit = read('base-app/lib/audit.js');
+  // audit.js caps the in-memory list at 5000 while the table is the permanent
+  // archive: any "rewrite the section from memory" strategy deletes history.
+  assert.match(audit, /store\.appendAudit\(entry\)/);
+  assert.ok(!/store\.save\(\)/.test(audit), 'audit must not persist by section rewrite');
+  assert.match(store, /function appendAudit/);
+});
+
+test('API keys reuse the RBAC catalog and cannot outrank their issuer', () => {
+  const keys = read('base-app/lib/api-keys.js');
+  // One permission vocabulary for people and machines — a second one would
+  // drift, and a route could end up open to keys but closed to users.
+  assert.match(keys, /rbac\.ALL/);
+  assert.match(keys, /rbac\.effectivePermissions/);
+  // The privilege ceiling. Without it, anyone who may mint a key could mint an
+  // admin one and use it.
+  assert.match(keys, /You cannot grant a key permissions you do not hold/);
+  // Owner liveness is re-checked on EVERY request, so deactivating a person
+  // takes their integrations down with them.
+  const verify = keys.slice(keys.indexOf('function verify'));
+  assert.match(verify, /KEY_OWNER_INACTIVE/);
+  assert.match(verify, /effectivePermissions/);
+  // Only a hash is stored; a database dump must not yield working credentials.
+  assert.match(keys, /tokenHash: sha256\(secret\)/);
+  assert.ok(!/return .*secret.*;\s*\/\/ public/.test(keys));
+});
+
+test('key auth is layered on the SAME checks sessions use', () => {
+  const s = read('base-app/server.js');
+  // Not a parallel /v1 surface: one requirePerm, so a route can never be open
+  // to machines but closed to people.
+  const rp = s.slice(s.indexOf('function requirePerm'), s.indexOf('function canReadFile'));
+  assert.match(rp, /ctx\.key \? \(ctx\.permissions \|\| \[\]\)\.includes\(perm\) : rbac\.userCan/,
+    'a key must be limited to its own permissions, not its owner\'s');
+  // A machine credential must not be able to take over the account it acts for.
+  assert.match(s, /allowKey: false/);
+  const cp = s.indexOf("'/api/auth/change-password'");
+  assert.match(s.slice(cp, cp + 400), /allowKey: false/, 'change-password must refuse a key');
+});
+
+test('read-only SQL publishes VIEWS, never the tables holding secrets', () => {
+  const ro = read('base-app/lib/readonly.js');
+  // The base tables carry passwordHash, refresh_hash, token_hash and encrypted
+  // bind passwords. A blanket GRANT would hand all of it to every consumer.
+  assert.ok(!/GRANT SELECT ON ALL TABLES IN SCHEMA public/.test(ro), 'never grant on public');
+  assert.match(ro, /GRANT SELECT ON ALL TABLES IN SCHEMA \$\{SCHEMA\}/);
+  assert.match(ro, /REVOKE ALL ON SCHEMA public FROM/);
+  // The users view must not select data whole (passwordHash lives in it).
+  const usersView = ro.slice(ro.indexOf('.users AS'), ro.indexOf('.roles AS'));
+  assert.ok(!/SELECT \*/.test(usersView), 'the users view must not select *');
+  assert.ok(!/\bdata\b(?!\s*->>)/.test(usersView.replace(/--.*$/gm, '')), 'the raw data column must not be published');
+  // No write privilege is ever granted.
+  for (const bad of ['GRANT INSERT', 'GRANT UPDATE', 'GRANT DELETE', 'GRANT ALL ON ALL TABLES']) {
+    assert.ok(!ro.includes(bad), `read-only must never ${bad}`);
+  }
+  // The role can never widen itself.
+  assert.match(ro, /NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT/);
+  // A missing CREATEROLE privilege is a configuration answer, not a 500.
+  assert.match(ro, /DB_PRIVILEGE/);
+  assert.ok(existsSync(path.join(SEED, 'base-app/scripts/provision-readonly.sql')),
+    'a DBA path must exist for deployments that will not grant CREATEROLE');
+});
+
+test('the machine API is discoverable before you have a key', () => {
+  const s = read('base-app/server.js');
+  const i = s.indexOf("p === '/api/meta'");
+  assert.ok(i > 0, '/api/meta must exist');
+  // No auth guard: a consumer needs the index in order to ask for the right key.
+  assert.ok(!/requireAuth|requirePerm/.test(s.slice(i, i + 700)), '/api/meta must be public');
+  assert.match(s, /const API_INDEX = \[/);
+  assert.match(s, /GET \/api\/whoami|'\/api\/whoami'/);
 });

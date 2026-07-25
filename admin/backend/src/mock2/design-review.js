@@ -33,6 +33,7 @@ import { insertLedgerEntry } from './quotas.js';
 import { costCentsForUsage } from './quota-logic.js';
 import { effectivePrice } from './connectors.js';
 import { insertMessage } from './chats.js';
+import { saveChatImages } from './chat-images.js';
 import { enqueueBuild, drainBuildQueue } from './build-queue.js';
 import { getDesignReviewSetting } from './settings.js';
 
@@ -353,7 +354,25 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
 
 ${message}`;
   }
-  try { insertMessage({ projectId: project.id, kind: 'system', body: message }); } catch { /* best effort */ }
+  // Attach the screenshots the critique is ABOUT. Findings like "the card grid
+  // does not collapse at mobile width" are unverifiable as prose — the operator
+  // has to see the shot. They are already captured and already sent to the
+  // model; not storing them was the only reason they were invisible in chat.
+  // Each is labelled with its path and width so a desktop/mobile pair reads as
+  // a pair (the chat lightbox arrows between them).
+  let attachments = null;
+  try {
+    attachments = saveChatImages(project.id, capture.shots.map((sh) => ({
+      data: sh.data,
+      media_type: sh.media_type,
+      name: `${sh.path === '/' ? 'home' : String(sh.path).replace(/^\/+/, '').replace(/[^a-z0-9._-]+/gi, '-')}-${sh.width}px.jpg`,
+    })));
+  } catch (e) {
+    // A storage failure must not lose the written critique — post it anyway.
+    console.warn('[mock2] design review: could not store screenshots:', e?.message);
+    attachments = null;
+  }
+  try { insertMessage({ projectId: project.id, kind: 'system', body: message, attachments }); } catch { /* best effort */ }
 
   let queued = null;
   if (apply) {

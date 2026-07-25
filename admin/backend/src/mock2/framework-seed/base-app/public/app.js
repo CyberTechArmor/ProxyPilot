@@ -80,7 +80,7 @@
   function can(p) { return ME && ME.permissions.includes(p); }
   function hasPortal() { return can('portal.view'); }
   function hasInternal() { return can('internal.review'); }
-  function hasAnyAdmin() { return ['users.view', 'roles.view', 'perms.manage', 'ldap.manage', 'smtp.manage', 'catalog.manage', 'branding.manage', 'audit.view'].some(can); }
+  function hasAnyAdmin() { return ['users.view', 'roles.view', 'perms.manage', 'ldap.manage', 'smtp.manage', 'catalog.manage', 'branding.manage', 'api.manage', 'audit.view'].some(can); }
 
   /* ------------------------------- Boot -------------------------------- */
   async function boot() {
@@ -567,6 +567,7 @@
       ['catalog', 'Documents', 'catalog.manage'],
       ['internalCatalog', 'Internal Documents', 'catalog.manage'],
       ['branding', 'Branding & Content', 'branding.manage'],
+      ['integration', 'Integration', 'api.manage'],
       ['audit', 'Audit log', 'audit.view'],
       ['thirdparty', '3rd Party Login', 'audit.view']
     ].filter(t => can(t[2]));
@@ -587,6 +588,7 @@
     if (adminTab === 'catalog') return adminCatalog(body);
     if (adminTab === 'internalCatalog') return adminCatalog(body, { base: '/api/admin/internal-catalog', title: 'Internal Documents', audience: 'employee' });
     if (adminTab === 'branding') return adminBranding(body);
+    if (adminTab === 'integration') return adminIntegration(body);
     if (adminTab === 'audit') return adminAudit(body);
     if (adminTab === 'thirdparty') return adminThirdParty(body);
   }
@@ -1418,6 +1420,124 @@
       if (window.Branding) { Branding.invalidate(); await Branding.load(true); }
       adminBranding(body);
     };
+  }
+
+
+  /* ------ Integration: API keys + read-only database access ------
+     Both hand back a secret exactly ONCE. The UI has to make that unmissable —
+     an operator who closes the dialog without copying has to rotate, and a
+     rotation invalidates whatever was already deployed. */
+  async function adminIntegration(body) {
+    body.innerHTML = '<div class="muted">Loading…</div>';
+    const [k, d] = await Promise.all([api('GET', '/api/admin/api-keys'), api('GET', '/api/admin/db/readonly')]);
+    if (k.status !== 200) { body.innerHTML = '<div class="alert err">Could not load integration settings.</div>'; return; }
+    const keys = k.data.keys || [];
+    const perms = k.data.permissions || [];
+    const dbInfo = d.status === 200 ? d.data : null;
+
+    const rows = keys.map(x => `
+      <tr>
+        <td><b>${esc(x.name)}</b><div class="small muted">${esc(x.prefix)}… · created ${x.createdAt ? new Date(x.createdAt).toLocaleDateString() : '—'}</div></td>
+        <td class="small">${(x.permissions || []).map(p => `<span class="pill">${esc(p)}</span>`).join(' ') || '—'}</td>
+        <td class="small">${x.lastUsedAt ? fmtLastLogin(x.lastUsedAt) : '<span class="muted">Never used</span>'}</td>
+        <td>${x.active ? '<span class="pill ok">Active</span>' : '<span class="pill">Revoked</span>'}</td>
+        <td>${x.active ? `<button class="btn ghost xs danger" data-revoke-key="${esc(x.id)}">Revoke</button>` : ''}</td>
+      </tr>`).join('');
+
+    body.innerHTML = `
+      <div class="card"><div class="card-h"><b>API keys</b><span class="small muted">${keys.filter(x => x.active).length} active</span></div><div class="card-b">
+        <div class="alert info">A key can do exactly what its permissions allow — the same permissions people have. It can never do more than the person who created it, and it stops working the moment that person is deactivated.</div>
+        <div class="card-b" style="padding:0;overflow-x:auto">
+          <table class="roster"><thead><tr><th>Name</th><th>Permissions</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="5" class="muted">No keys yet.</td></tr>'}</tbody></table>
+        </div>
+        <div class="row-actions"><button class="btn" id="newKey">Create a key</button></div>
+      </div></div>
+
+      <div class="card"><div class="card-h"><b>Database access (read-only)</b>
+        <span class="small muted">${dbInfo && dbInfo.enabled ? 'Enabled' : 'Not issued'}</span></div><div class="card-b">
+        <p class="hint">For reporting and analytics, where a SQL join is far cheaper than repeated API calls. The credential can <b>only read</b>, and only a curated set of views — never the underlying tables, which hold password hashes. Anything that changes data must go through the API.</p>
+        ${dbInfo && dbInfo.views ? `<div class="hint">Published views: ${Object.keys(dbInfo.views).map(v => `<code>${esc(v)}</code>`).join(' ')}</div>` : ''}
+        <div class="row-actions">
+          <button class="btn" id="issueDb">${dbInfo && dbInfo.enabled ? 'Rotate the credential' : 'Issue a credential'}</button>
+          ${dbInfo && dbInfo.enabled ? '<button class="btn ghost danger" id="disableDb">Disable access</button>' : ''}
+        </div>
+        ${dbInfo && dbInfo.enabled ? '<p class="hint">Rotating issues a new password and immediately stops the previous one working.</p>' : ''}
+      </div></div>`;
+
+    body.querySelectorAll('[data-revoke-key]').forEach(b => b.onclick = () => {
+      modal('Revoke this key', '<p>Anything using it stops working immediately. This cannot be undone — issue a new key instead.</p>', async close => {
+        const r = await api('DELETE', '/api/admin/api-keys/' + b.dataset.revokeKey);
+        if (r.status !== 200) return toast('Could not revoke', r.data.message || '', 'err');
+        close(); toast('Key revoked', ''); adminIntegration(body);
+      }, 'Revoke');
+    });
+
+    document.getElementById('newKey').onclick = () => {
+      const groups = {};
+      for (const p of perms) { (groups[p.group || 'Other'] = groups[p.group || 'Other'] || []).push(p); }
+      const boxes = Object.entries(groups).map(([g, list]) => `
+        <div class="field"><label>${esc(g)}</label>
+          ${list.map(p => `<label class="permrow"><input type="checkbox" class="kperm" value="${esc(p.key)}"> <span>${esc(p.label)}</span> <code class="small">${esc(p.key)}</code></label>`).join('')}
+        </div>`).join('');
+      modal('Create an API key', `
+        <div class="field"><label for="kName">What is this key for?</label>
+          <input id="kName" placeholder="e.g. Nightly reporting export" maxlength="120"></div>
+        <div class="field"><label for="kExp">Expires (optional)</label><input id="kExp" type="date"></div>
+        <p class="hint">Grant the least it needs. You can only grant permissions you hold yourself.</p>
+        ${boxes}`, async close => {
+        const chosen = [...document.querySelectorAll('.kperm:checked')].map(c => c.value);
+        const expRaw = val('kExp');
+        const r = await api('POST', '/api/admin/api-keys', {
+          name: val('kName'), permissions: chosen,
+          expiresAt: expRaw ? new Date(expRaw + 'T23:59:59').toISOString() : null,
+        });
+        if (r.status !== 201) return toast('Could not create the key', r.data.message || '', 'err');
+        close();
+        showSecretOnce('Copy this API key now', 'It is shown once and cannot be retrieved. If you lose it, revoke the key and create another.', r.data.token);
+        adminIntegration(body);
+      }, 'Create key');
+    };
+
+    const issue = document.getElementById('issueDb');
+    if (issue) issue.onclick = () => {
+      modal('Issue read-only database access', '<p>This creates a database login that can only run SELECT, and only against the published views. Any existing credential stops working.</p>', async close => {
+        const r = await api('POST', '/api/admin/db/readonly', {});
+        if (r.status !== 201) return toast('Could not issue access', r.data.message || '', 'err');
+        close();
+        showSecretOnce('Copy this connection string now', 'The password is shown once and cannot be retrieved. Rotating issues a new one and stops this one working.', r.data.url, r.data.odbc);
+        adminIntegration(body);
+      }, 'Issue');
+    };
+    const dis = document.getElementById('disableDb');
+    if (dis) dis.onclick = () => {
+      modal('Disable database access', '<p>Any tool using the read-only credential stops working immediately.</p>', async close => {
+        const r = await api('DELETE', '/api/admin/db/readonly');
+        if (r.status !== 200) return toast('Could not disable', r.data.message || '', 'err');
+        close(); toast('Database access disabled', ''); adminIntegration(body);
+      }, 'Disable');
+    };
+  }
+
+  // A secret shown exactly once. Copy-to-clipboard, and no way to dismiss by
+  // accident — the operator has to acknowledge they have it.
+  function showSecretOnce(title, warning, value, alt) {
+    modal(title, `
+      <div class="alert err">${esc(warning)}</div>
+      <div class="field"><label for="secretOut">Value</label>
+        <textarea id="secretOut" rows="3" readonly onclick="this.select()">${esc(value)}</textarea></div>
+      ${alt ? `<div class="field"><label for="secretAlt">ODBC connection string</label>
+        <textarea id="secretAlt" rows="3" readonly onclick="this.select()">${esc(alt)}</textarea></div>` : ''}
+      <div class="row-actions"><button class="btn subtle" id="copySecret" type="button">Copy</button></div>`,
+    close => close(), 'I have copied it');
+    setTimeout(() => {
+      const btn = document.getElementById('copySecret');
+      if (!btn) return;
+      btn.onclick = async () => {
+        try { await navigator.clipboard.writeText(value); toast('Copied', ''); }
+        catch { document.getElementById('secretOut').select(); toast('Select and copy', 'Clipboard access was blocked by the browser.', 'err'); }
+      };
+    }, 0);
   }
 
   async function adminAudit(body) {

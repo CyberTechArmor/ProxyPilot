@@ -21,8 +21,11 @@ function record(event) {
     meta: event.meta || null
   };
   db.audit.push(entry);
+  // The in-memory list is a recent WINDOW for list(); the audit table is the
+  // permanent archive. Trimming here must never delete history, so the row is
+  // appended directly rather than by rewriting the section from memory.
   if (db.audit.length > 5000) db.audit.splice(0, db.audit.length - 5000);
-  store.save();
+  store.appendAudit(entry);
   return entry;
 }
 

@@ -757,3 +757,15 @@
   .legal-links{flex-direction:column;gap:0}
   .legal-sep{display:none}
 }
+
+/* ---------- Integration panel (API keys, database access) ---------- */
+.permrow{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13px;min-height:44px}
+.permrow input[type=checkbox]{width:18px;height:18px;flex-shrink:0;accent-color:var(--blue-600)}
+.permrow span{flex:1;min-width:0}
+.permrow code{color:var(--slate);font-size:11px}
+.pill{background:var(--gray-100);color:var(--slate)}
+textarea[readonly]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
+@media(max-width:768px){
+  .permrow code{display:none}
+  table.roster{min-width:520px}
+}

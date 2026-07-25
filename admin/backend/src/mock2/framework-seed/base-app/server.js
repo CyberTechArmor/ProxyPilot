@@ -21,16 +21,80 @@ const files = require('./lib/files');
 const fields = require('./lib/fields');
 const packet = require('./lib/packet');
 const branding = require('./lib/branding');
+const apiKeys = require('./lib/api-keys');
+const readonly = require('./lib/readonly');
 const { readBody, sendJson, parseCookies, clientIp, cookie } = require('./lib/util');
 
 const PORT = +(process.env.PORT || 6525);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const OFFICE_PREVIEW_TTL_MS = 15 * 60 * 1000;
 
-// One-time seed of roles/permissions.
-rbac.seed();
-catalog.seed();
-branding.seed();
+// Boot: connect to PostgreSQL, create the schema, load the dataset, then seed.
+//
+// This MUST complete before the server listens. store.get() is synchronous by
+// design (see lib/store.js) and every route assumes it returns real data — a
+// request served mid-load would see an empty database, which looks exactly like
+// a wiped install.
+async function boot() {
+  await store.init();
+  rbac.seed();
+  catalog.seed();
+  branding.seed();
+  await store.flush();   // the seeds are writes; land them before serving
+  // Publish the read-only views at boot, not on first use: an operator should
+  // be able to SEE what a reporting credential would expose before deciding to
+  // issue one, and a consumer's queries should not depend on whether anyone has
+  // pressed a button yet. Idempotent (CREATE OR REPLACE), and it grants nothing.
+  try { await readonly.ensureViews(); } catch (e) {
+    console.warn(`[boot] read-only views not published: ${e.message}`);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   API_INDEX — the machine-readable capability list served at /api/meta.
+
+   Hand-maintained on purpose. A reflected route table would list every path
+   including the ones a machine must NOT use (session establishment, password
+   changes), and would describe shape without describing INTENT. This says what
+   a consumer can do and which permission each action needs, which is the thing
+   they actually need in order to ask for the right key.
+   --------------------------------------------------------------------------- */
+const API_INDEX = [
+  { method: 'GET',    path: '/api/whoami',                 permission: null,              summary: 'Check a credential and list what it may do' },
+  { method: 'GET',    path: '/api/meta',                   permission: null,              summary: 'This document' },
+
+  { method: 'GET',    path: '/api/admin/users',            permission: 'users.view',      summary: 'List accounts (active and deleted)' },
+  { method: 'POST',   path: '/api/admin/users',            permission: 'users.manage',    summary: 'Create an account' },
+  { method: 'PATCH',  path: '/api/admin/users/:id/active', permission: 'users.manage',    summary: 'Activate or deactivate an account' },
+  { method: 'PATCH',  path: '/api/admin/users/:id/roles',  permission: 'users.manage',    summary: 'Set an account\'s roles' },
+
+  { method: 'GET',    path: '/api/admin/roles',            permission: 'roles.view',      summary: 'List roles' },
+  { method: 'POST',   path: '/api/admin/roles',            permission: 'roles.manage',    summary: 'Create a role' },
+  { method: 'GET',    path: '/api/admin/permissions',      permission: 'roles.view',      summary: 'The permission catalog and the effective matrix' },
+  { method: 'PUT',    path: '/api/admin/overrides',        permission: 'perms.manage',    summary: 'Override a role/permission pair' },
+
+  { method: 'GET',    path: '/api/catalog',                permission: 'portal.view',     summary: 'The document checklist' },
+  { method: 'GET',    path: '/api/my/files',               permission: 'portal.view',     summary: 'Documents belonging to the calling identity' },
+  { method: 'POST',   path: '/api/files',                  permission: 'portal.submit',   summary: 'Upload a document (raw bytes; X-Filename)' },
+  { method: 'GET',    path: '/api/files/:id',              permission: 'portal.view',     summary: 'Download a document' },
+  { method: 'PATCH',  path: '/api/files/:id/review',       permission: 'portal.review',   summary: 'Set a document\'s review outcome' },
+
+  { method: 'GET',    path: '/api/admin/catalog',          permission: 'catalog.manage',  summary: 'The provider document catalog' },
+  { method: 'GET',    path: '/api/admin/internal-catalog', permission: 'catalog.manage',  summary: 'The employee document catalog' },
+
+  { method: 'GET',    path: '/api/branding',               permission: null,              summary: 'Public identity, logo, legal page index' },
+  { method: 'GET',    path: '/api/legal/:slug',            permission: null,              summary: 'A legal page (privacy, terms)' },
+  { method: 'GET',    path: '/api/admin/branding',         permission: 'branding.manage', summary: 'Editable branding, legal copy, assets' },
+  { method: 'PUT',    path: '/api/admin/branding',         permission: 'branding.manage', summary: 'Update identity / app context' },
+
+  { method: 'GET',    path: '/api/admin/audit',            permission: 'audit.view',      summary: 'The audit log' },
+
+  { method: 'GET',    path: '/api/admin/api-keys',         permission: 'api.manage',      summary: 'List issued API keys' },
+  { method: 'POST',   path: '/api/admin/api-keys',         permission: 'api.manage',      summary: 'Issue a key (session only; the token is shown once)' },
+  { method: 'DELETE', path: '/api/admin/api-keys/:id',     permission: 'api.manage',      summary: 'Revoke a key (session only)' },
+  { method: 'GET',    path: '/api/admin/db/readonly',      permission: 'api.manage',      summary: 'Read-only SQL status and the published views' },
+  { method: 'POST',   path: '/api/admin/db/readonly',      permission: 'api.manage',      summary: 'Issue/rotate the read-only credential (session only)' },
+];
 
 /* ---------------- cookie helpers ---------------- */
 // SECURITY (fix): mark session cookies Secure whenever the request reached us
@@ -121,17 +185,64 @@ function authContext(req) {
   return { user, sid: payload.sid };
 }
 
-function requireAuth(req, res) {
+/* ---------------------------------------------------------------------------
+   API-KEY AUTHENTICATION.
+
+   Layered onto the SAME two chokepoints every route already goes through
+   (requireAuth / requirePerm) rather than bolted on as a parallel "/api/v1"
+   surface. That is the whole design: every existing endpoint becomes callable
+   by another application, with exactly the permission check it already had. A
+   route cannot end up open to machines but closed to people, or vice versa,
+   because there is only one check.
+
+   A key is tried only when there is no session, so a browser is unaffected.
+   --------------------------------------------------------------------------- */
+function apiKeyContext(req) {
+  const token = apiKeys.tokenFromRequest(req);
+  if (!token) return null;
+  const v = apiKeys.verify(token);
+  if (!v.ok) return { error: v.code };
+  apiKeys.touch(v.key);
+  // `permissions` is the key's own list re-intersected with its owner's current
+  // rights (see api-keys.verify) — deactivating a person disables their keys.
+  return { user: v.user, key: v.key, permissions: v.permissions };
+}
+
+// allowKey=false for anything that manages a HUMAN session or credential:
+// changing a password, minting a session, setting up an account. A machine
+// credential must never be able to take over the account it acts for.
+function requireAuth(req, res, { allowKey = true } = {}) {
   const ctx = authContext(req);
   if (ctx.user && !ctx.error) return ctx;
+
+  if (allowKey) {
+    const k = apiKeyContext(req);
+    if (k && !k.error) return k;
+    if (k && k.error) {
+      audit.record({ action: 'apikey.rejected', reason: k.error, ip: clientIp(req), userAgent: req.headers['user-agent'], outcome: 'denied' });
+      sendJson(res, 401, { code: k.error, message: 'That API key is not valid.' });
+      return null;
+    }
+  }
+
   if (ctx.error === 'ACCOUNT_DEACTIVATED') { sendJson(res, 403, { code: 'ACCOUNT_DEACTIVATED', message: 'This account has been deactivated.' }); return null; }
   sendJson(res, 401, { code: 'UNAUTHENTICATED', message: 'Authentication required.' }); return null;
 }
-function requirePerm(req, res, perm) {
-  const ctx = requireAuth(req, res);
+
+function requirePerm(req, res, perm, opts) {
+  const ctx = requireAuth(req, res, opts);
   if (!ctx) return null;
-  if (!rbac.userCan(ctx.user, perm)) {
-    audit.record({ action: 'authorization.denied', actorId: ctx.user.id, actorLabel: ctx.user.username, reason: perm, ip: clientIp(req), userAgent: req.headers['user-agent'], outcome: 'denied' });
+  // A KEY is limited by its own permission list, NOT by everything its owner
+  // can do — otherwise every key would silently carry admin rights the moment
+  // an admin issued it.
+  const allowed = ctx.key ? (ctx.permissions || []).includes(perm) : rbac.userCan(ctx.user, perm);
+  if (!allowed) {
+    audit.record({
+      action: 'authorization.denied',
+      actorId: ctx.user ? ctx.user.id : null,
+      actorLabel: ctx.key ? `api-key:${ctx.key.name}` : ctx.user.username,
+      reason: perm, ip: clientIp(req), userAgent: req.headers['user-agent'], outcome: 'denied',
+    });
     sendJson(res, 403, { code: 'FORBIDDEN', message: 'You do not have permission to perform this action.', required: perm });
     return null;
   }
@@ -369,7 +480,9 @@ async function api(req, res, p, method) {
   }
 
   if (p === '/api/auth/change-password' && method === 'POST') {
-    const ctx = requireAuth(req, res); if (!ctx) return;
+    // Human-only: a machine credential must not be able to take over the
+    // account it acts for by changing its password.
+    const ctx = requireAuth(req, res, { allowKey: false }); if (!ctx) return;
     const body = await readBody(req);
     const currentPassword = String(body.currentPassword || '');
     const newPassword = String(body.newPassword || body.password || '');
@@ -1234,6 +1347,112 @@ async function api(req, res, p, method) {
     return sendJson(res, 200, { code: 'OK', branding: branding.adminView() });
   }
 
+  /* ----- integration: API keys and read-only database access -----
+     Both are gated on api.manage and both hand back their secret EXACTLY once.
+     ORDER: literal paths before the parametric /:id. */
+
+  // The API index: what a machine caller can do, and with which permission.
+  // Discoverable without a key, because a consumer needs it BEFORE they have
+  // one; it lists capabilities, never data.
+  if (p === '/api/meta' && method === 'GET') {
+    return sendJson(res, 200, {
+      name: branding.publicView().orgName,
+      auth: {
+        header: 'Authorization: Bearer <key>',
+        alternative: 'X-API-Key: <key>',
+        note: 'A key carries a subset of the same permissions people hold. Every endpoint enforces the same check for keys and sessions.',
+      },
+      permissions: rbac.PERMISSIONS,
+      endpoints: API_INDEX,
+      readonlySql: '/api/admin/db/readonly (api.manage) issues a SELECT-only PostgreSQL credential for reporting.',
+    });
+  }
+
+  // Who am I — the standard "is this credential live and what can it do".
+  if (p === '/api/whoami' && method === 'GET') {
+    const ctx = requireAuth(req, res); if (!ctx) return;
+    return sendJson(res, 200, {
+      kind: ctx.key ? 'api_key' : 'session',
+      key: ctx.key ? { id: ctx.key.id, name: ctx.key.name, prefix: ctx.key.prefix } : null,
+      user: ctx.user ? auth.buildIdentity(ctx.user) : null,
+      permissions: ctx.key ? ctx.permissions : rbac.effectivePermissions(ctx.user.roles),
+    });
+  }
+
+  if (p === '/api/admin/api-keys' && method === 'GET') {
+    const ctx = requirePerm(req, res, 'api.manage'); if (!ctx) return;
+    return sendJson(res, 200, { keys: apiKeys.list(), permissions: rbac.PERMISSIONS, max: apiKeys.MAX_KEYS });
+  }
+
+  if (p === '/api/admin/api-keys' && method === 'POST') {
+    // Issuing a credential is a human act: a key must not be able to mint
+    // another key, which would make revocation unwinnable.
+    const ctx = requirePerm(req, res, 'api.manage', { allowKey: false }); if (!ctx) return;
+    const body = await readBody(req);
+    try {
+      const out = apiKeys.create({ name: body.name, permissions: body.permissions, expiresAt: body.expiresAt, issuer: ctx.user });
+      audit.record({ action: 'apikey.create', actorId: ctx.user.id, actorLabel: ctx.user.username, targetId: out.key.id, targetLabel: out.key.name, outcome: 'ok', ip, userAgent: ua, meta: { permissions: out.key.permissions } });
+      // `token` appears here and nowhere else, ever.
+      return sendJson(res, 201, { code: 'OK', key: out.key, token: out.token,
+        warning: 'Copy this key now — it cannot be shown again.' });
+    } catch (e) {
+      if (e.code === 'FORBIDDEN') return sendJson(res, 403, { code: 'FORBIDDEN', message: e.detail });
+      if (e.code === 'TOO_MANY') return sendJson(res, 409, { code: 'TOO_MANY', message: e.detail });
+      if (e.code === 'VALIDATION') return sendJson(res, 400, { code: 'VALIDATION', message: e.detail });
+      throw e;
+    }
+  }
+
+  if ((m = p.match(/^\/api\/admin\/api-keys\/([A-Za-z0-9-]+)$/)) && method === 'DELETE') {
+    const ctx = requirePerm(req, res, 'api.manage', { allowKey: false }); if (!ctx) return;
+    const gone = apiKeys.revoke(m[1]);
+    if (!gone) return sendJson(res, 404, { code: 'NOT_FOUND', message: 'Key not found.' });
+    audit.record({ action: 'apikey.revoke', actorId: ctx.user.id, actorLabel: ctx.user.username, targetId: gone.id, targetLabel: gone.name, outcome: 'ok', ip, userAgent: ua });
+    return sendJson(res, 200, { code: 'OK', key: gone });
+  }
+
+  // Read-only SQL. GET reports status and the published surface (safe to show
+  // anyone with api.manage); POST issues/rotates the credential.
+  if (p === '/api/admin/db/readonly' && method === 'GET') {
+    const ctx = requirePerm(req, res, 'api.manage'); if (!ctx) return;
+    try {
+      const st = await readonly.status();
+      return sendJson(res, 200, { ...st, views: await readonly.describe() });
+    } catch (e) {
+      return sendJson(res, 500, { code: 'DB_ERROR', message: `Could not read the database role: ${e.message}` });
+    }
+  }
+
+  if (p === '/api/admin/db/readonly' && method === 'POST') {
+    const ctx = requirePerm(req, res, 'api.manage', { allowKey: false }); if (!ctx) return;
+    try {
+      const out = await readonly.enable({});
+      audit.record({ action: 'db.readonly_issue', actorId: ctx.user.id, actorLabel: ctx.user.username, outcome: 'ok', ip, userAgent: ua, meta: { role: out.role } });
+      return sendJson(res, 201, {
+        code: 'OK', role: out.role, schema: out.schema,
+        url: out.url, odbc: readonly.odbcDsn({ role: out.role, password: out.password }),
+        views: await readonly.describe(),
+        warning: 'Copy this connection string now — the password cannot be shown again. Issuing again rotates it, which also revokes the previous one.',
+      });
+    } catch (e) {
+      // A missing database privilege is a configuration answer, not a server
+      // fault — 409 with the fix, so the operator knows what to do.
+      if (e.code === 'DB_PRIVILEGE') return sendJson(res, 409, { code: 'DB_PRIVILEGE', message: e.message });
+      return sendJson(res, 500, { code: 'DB_ERROR', message: `Could not issue the read-only credential: ${e.message}` });
+    }
+  }
+
+  if (p === '/api/admin/db/readonly' && method === 'DELETE') {
+    const ctx = requirePerm(req, res, 'api.manage', { allowKey: false }); if (!ctx) return;
+    try {
+      const out = await readonly.disable();
+      audit.record({ action: 'db.readonly_disable', actorId: ctx.user.id, actorLabel: ctx.user.username, outcome: 'ok', ip, userAgent: ua });
+      return sendJson(res, 200, { code: 'OK', ...out });
+    } catch (e) {
+      return sendJson(res, 500, { code: 'DB_ERROR', message: `Could not disable the read-only credential: ${e.message}` });
+    }
+  }
+
   /* ----- admin: audit ----- */
   if (p === '/api/admin/audit' && method === 'GET') {
     const ctx = requirePerm(req, res, 'audit.view'); if (!ctx) return;
@@ -1244,6 +1463,13 @@ async function api(req, res, p, method) {
 }
 
 if (require.main === module) {
-  server.listen(PORT, '0.0.0.0', () => console.log(`Credentialing portal listening on http://0.0.0.0:${PORT}`));
+  boot()
+    .then(() => server.listen(PORT, '0.0.0.0', () => console.log(`Credentialing portal listening on http://0.0.0.0:${PORT}`)))
+    .catch((e) => {
+      // A database that cannot be reached is a deployment fact, not a crash to
+      // debug in application code — print the actionable message and stop.
+      console.error(`[boot] ${e.message}`);
+      process.exit(1);
+    });
 }
-module.exports = { server, api };
+module.exports = { server, api, boot };

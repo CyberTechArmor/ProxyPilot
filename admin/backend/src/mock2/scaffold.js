@@ -822,18 +822,89 @@ function ppAnnotateBridgeJs() {
       rect: { x: clamp(r.left / vw * 100), y: clamp(r.top / vh * 100), w: clamp(r.width / vw * 100), h: clamp(r.height / vh * 100) }
     };
   }
+  // A tap is a press that barely moves. Without this a scroll gesture ends in a
+  // click and drops a pin the operator never asked for — and on a phone,
+  // scrolling is the ONLY way to reach anything below the fold.
+  var down = null;
+  var SLOP = 10, MAX_MS = 800;
+  function onDown(e) { if (enabled) down = { x: e.clientX, y: e.clientY, t: Date.now() }; }
+  function onUp() { /* click fires next; onClick reads and clears \`down\` */ }
+  function movedTooFar(e) {
+    if (!down) return true;
+    if (Date.now() - down.t > MAX_MS) return true;
+    return Math.abs(e.clientX - down.x) > SLOP || Math.abs(e.clientY - down.y) > SLOP;
+  }
   function onClick(e) {
     if (!enabled) return;
+    var drag = movedTooFar(e);
+    down = null;
+    if (drag) return;               // a scroll/drag — let the page keep it
     e.preventDefault(); e.stopPropagation();
     var el = document.elementFromPoint(e.clientX, e.clientY);
     var vw = window.innerWidth || 1, vh = window.innerHeight || 1;
     var pin = describe(el);
+    // Viewport-relative, for drawing the pin on the embedded frame.
     pin.x = clamp(e.clientX / vw * 100);
     pin.y = clamp(e.clientY / vh * 100);
+    // DOCUMENT-relative, for describing WHERE on the page it is. Once the
+    // operator scrolls, the viewport percentage above is no longer "x% down the
+    // page" — reporting it as such sends the build to the wrong place.
+    var sx = window.pageXOffset || 0, sy = window.pageYOffset || 0;
+    var dw = Math.max(document.documentElement.scrollWidth || vw, vw);
+    var dh = Math.max(document.documentElement.scrollHeight || vh, vh);
+    pin.pageX = clamp((e.clientX + sx) / dw * 100);
+    pin.pageY = clamp((e.clientY + sy) / dh * 100);
+    pin.scrolled = sy > 4;
+    // WHICH SCREEN this pin belongs to. Without it the dashboard cannot tell
+    // pins dropped on /settings from pins dropped on / — it drew every badge
+    // over whatever page happened to be showing, and the sent instructions
+    // named a single screen for all of them.
+    pin.page = location.pathname + location.search;
+    pin.title = (document.title || '').slice(0, 80);
     post({ type: 'pin', pin: pin });
   }
-  function enable() { if (enabled) return; enabled = true; document.documentElement.style.cursor = 'crosshair'; document.addEventListener('click', onClick, true); post({ type: 'enabled' }); }
-  function disable() { enabled = false; document.documentElement.style.cursor = ''; document.removeEventListener('click', onClick, true); post({ type: 'disabled' }); }
+  // Tell the host which screen is showing, so it can draw only this screen's
+  // pins. Covers SPA routing (pushState/replaceState/popstate) as well as full
+  // document loads — a client-rendered app never fires 'load' on navigation.
+  var lastPage = null;
+  function announcePage() {
+    var page = location.pathname + location.search;
+    if (page === lastPage) return;
+    lastPage = page;
+    post({ type: 'page', page: page, title: (document.title || '').slice(0, 80) });
+  }
+  function watchNavigation() {
+    ['pushState', 'replaceState'].forEach(function (fn) {
+      var orig = history[fn];
+      if (!orig || orig.__ppWrapped) return;
+      var wrapped = function () { var r = orig.apply(this, arguments); announcePage(); return r; };
+      wrapped.__ppWrapped = true;
+      history[fn] = wrapped;
+    });
+    window.addEventListener('popstate', announcePage);
+    window.addEventListener('hashchange', announcePage);
+    setInterval(announcePage, 700); // catches routers that bypass history
+  }
+
+  function enable() {
+    if (enabled) return;
+    enabled = true;
+    announcePage();
+    document.documentElement.style.cursor = 'crosshair';
+    document.addEventListener('pointerdown', onDown, true);
+    document.addEventListener('pointerup', onUp, true);
+    document.addEventListener('click', onClick, true);
+    post({ type: 'enabled' });
+  }
+  function disable() {
+    enabled = false;
+    down = null;
+    document.documentElement.style.cursor = '';
+    document.removeEventListener('pointerdown', onDown, true);
+    document.removeEventListener('pointerup', onUp, true);
+    document.removeEventListener('click', onClick, true);
+    post({ type: 'disabled' });
+  }
 
   window.addEventListener('message', function (e) {
     if (e.source !== window.parent) return;
@@ -844,6 +915,10 @@ function ppAnnotateBridgeJs() {
     else if (d.type === 'disable') disable();
     else if (d.type === 'ping') post({ type: 'ready' });
   }, false);
+
+  // Watch navigation from the start (cheap, and independent of annotate mode)
+  // so the very first 'page' the host hears about is the one actually showing.
+  watchNavigation();
 
   // Announce presence so the dashboard knows the element-aware path is available.
   post({ type: 'ready' });

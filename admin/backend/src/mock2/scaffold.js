@@ -1,6 +1,7 @@
 // Mock2 runtime scaffold — the real TypeScript / Express / Drizzle / pg / Zod
 // project the container is seeded from (R8, ADR-003). This is what
-// `project_template_ref` = `builtin:mock2-ts-express-drizzle-v1` names, and it
+// `project_template_ref` = `builtin:mock2-ts-express-drizzle-v1` names (the ref
+// names the STACK; MOCK2_SCAFFOLD_VERSION tracks the content revision), and it
 // matches the framework constitution (framework-seed/constitution.md §2–3): one
 // stack (TypeScript strict, Express, Drizzle ORM, PostgreSQL, Zod, Vitest), a
 // feature-module layout under src/, a numbered migrations/ dir, and the run
@@ -22,8 +23,13 @@
 // native modules. Terminology (risk R7): nothing here is named "agent".
 
 // Bumped when the scaffold content changes so a rehydrate/diff can tell which
-// scaffold a project was born from.
-export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v1';
+// scaffold a project was born from. v2 added the PLATFORM module
+// (scaffold-platform.js): identity, legal pages, shared assets, API keys and
+// read-only SQL — the capabilities every real application needs regardless of
+// what it is for.
+import { buildPlatformFiles, PLATFORM_CSS } from './scaffold-platform.js';
+
+export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v2';
 
 // The canonical dependency set every scaffolded app is born with. Exported so
 // the repair pass (component-install ensureScaffoldDeps) can restore entries a
@@ -151,6 +157,10 @@ function dbIndexTs() {
 import pg from 'pg';
 import { config } from '../config.js';
 import * as schema from './schema.js';
+// Platform tables (identity, legal pages, assets, API keys) are part of the
+// base app every project is provisioned with — registered here so they are
+// queryable through the same Drizzle client as the app's own tables.
+import * as platformSchema from '../platform/schema.js';
 
 export const pool = new pg.Pool({ connectionString: config.DATABASE_URL });
 // A pg Pool emits 'error' when an IDLE backend connection drops (Postgres
@@ -161,8 +171,8 @@ pool.on('error', (err) => {
   // eslint-disable-next-line no-console
   console.error('[db] idle pool client error (kept serving):', err.message);
 });
-export const db = drizzle(pool, { schema });
-export { schema };
+export const db = drizzle(pool, { schema: { ...schema, ...platformSchema } });
+export { schema, platformSchema };
 `;
 }
 
@@ -1198,7 +1208,7 @@ export function buildScaffoldFiles(project) {
     { path: 'scripts/migrate.mjs', content: migrateMjs(), mode: 0o755 },
     // The shared app shell (generalized from the operator's portal base) —
     // screens reuse these classes; the chosen design preset restyles them.
-    { path: 'public/base.css', content: baseCss() },
+    { path: 'public/base.css', content: baseCss() + PLATFORM_CSS },
     { path: 'public/assets.svg', content: assetsSvg() },
     { path: 'public/app-shell.html', content: appShellHtml(project) },
     // PWA: the app is installable from day one (manifest + service worker +
@@ -1216,5 +1226,8 @@ export function buildScaffoldFiles(project) {
     // tapped element to a component/source reference (inert unless the dashboard
     // enables it; the app only permits framing by the dashboard origin).
     { path: 'public/pp-annotate-bridge.js', content: ppAnnotateBridgeJs() },
+    // The platform module — identity, legal pages, assets, machine API and
+    // read-only SQL. Part of the base app every project is provisioned with.
+    ...buildPlatformFiles(),
   ];
 }

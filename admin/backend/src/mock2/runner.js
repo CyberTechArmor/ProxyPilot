@@ -25,6 +25,7 @@ import { containerNameForProject } from './provision.js';
 import { buildCheckpointScript } from './template.js';
 import { buildDbSnapshotScript } from './restore-logic.js';
 import { getSlot, getConnector, decryptConnectorKey, effectivePrice } from './connectors.js';
+import { resolveProjectKey } from './project-keys.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
@@ -92,6 +93,7 @@ import { deployProject, readRunContract, readDeclaredEgress, stampDeployedCommit
 import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
 import { reconcileMock2Firewall } from './firewall.js';
 import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smoke.js';
+import { needsOperatorUiVerification, smokeConfigFromEnv } from './smoke-triggers.js';
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
   acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord, codeChangedFiles,
@@ -170,7 +172,12 @@ function safeRaise(item) {
 // decrypts orchestrator-side (a cloud provider needs a key; a local ollama may
 // not). This is the "environment variable AND presence of credentials" gate:
 // even on an enabled host, a cycle cannot start work until a usable model exists.
-export function buildRunnerReady() {
+// projectId/userId (optional) layer the per-project and per-user API keys over
+// the global connector: the connector still chooses the provider/model, but a
+// project key — or the acting user's own private key — supplies the CREDENTIAL
+// (see project-keys-logic for the precedence). Omitting them keeps the previous
+// behavior exactly, so every existing caller is unchanged.
+export function buildRunnerReady({ projectId = null, userId = null } = {}) {
   const slot = getSlot('build_runner');
   if (!slot) return { ok: false, reason: 'No build_runner model slot is assigned. Assign one under Model connectors.' };
   const connector = getConnector(slot.connector_id);
@@ -178,11 +185,21 @@ export function buildRunnerReady() {
   if (!connector.enabled) return { ok: false, reason: 'The build_runner connector is disabled.' };
   const capErr = slotAssignmentError(parseCapabilities(connector.capabilities), 'build_runner');
   if (capErr) return { ok: false, reason: capErr };
-  const apiKey = decryptConnectorKey(connector);
+  const globalKey = decryptConnectorKey(connector);
+  const resolved = resolveProjectKey({ projectId, provider: connector.provider, userId, globalKey });
+  const apiKey = resolved.apiKey;
   if (isCloudProvider(connector.provider) && !apiKey) {
     return { ok: false, reason: 'The build_runner connector has no decryptable API key.' };
   }
-  return { ok: true, connector, model: slot.model, apiKey };
+  // A project/user key may carry its own base URL (a gateway or proxy for that
+  // account); otherwise the connector's stands.
+  const effectiveConnector = resolved.baseUrl && resolved.source !== 'global'
+    ? { ...connector, base_url: resolved.baseUrl }
+    : connector;
+  return {
+    ok: true, connector: effectiveConnector, model: slot.model, apiKey,
+    keySource: resolved.source, keySourceLabel: resolved.label, keyId: resolved.keyId,
+  };
 }
 
 
@@ -335,7 +352,10 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   const quickBuild = modeStr === BUILD_MODE_QUICK;
   const fastBuild = mvpBuild || quickBuild;
 
-  let ready = buildRunnerReady();
+  // Layer this project's (and this user's) API key over the global connector.
+  // initiatedBy is the person whose work this is, so a personal key is only ever
+  // spent on their own builds.
+  let ready = buildRunnerReady({ projectId, userId: initiatedBy });
   if (!ready.ok) return { status: 'error', error: ready.reason };
 
   // Model ROUTING (migration 525): pick model + effort from the knowledge base
@@ -1636,6 +1656,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // diff/metadata warrants them. A backend-only change invokes zero connectors.
       // Every run/skip + reason is logged. With the connectors off and http not
       // enforced (defaults), ok is always true → the success path is unchanged.
+      let uiVerification = { needed: false, checklist: [] };
       if (!deployed.skipped) {
         const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, requiredIds: decision.finishAcceptanceIds || [], logEvent, env: process.env });
         if (!smoke.ok) {
@@ -1646,6 +1667,27 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'smoke_failed' });
           return scheduleJobCleanup(cycle.id);
         }
+        // THE HONEST GATE. The smoke gate passing is not the same as "someone
+        // saw it work": a user-visible change that no browser check observed is
+        // an UNVERIFIED claim, and reporting it as a plain success is how a
+        // build can say "done" for something the operator cannot even see (the
+        // stale-cache incident). Route it to pending_verification with the
+        // human check instead — the deploy still happens, nothing is blocked.
+        try {
+          uiVerification = needsOperatorUiVerification({
+            changedFiles: changedThisCycle,
+            report: smoke.report,
+            acceptance: decision.finishAcceptance || [],
+            config: smokeConfigFromEnv(process.env),
+          });
+          if (uiVerification.needed) {
+            logEvent('note', {
+              role: 'system',
+              content: `Honest completion — ${uiVerification.reason}; this change is user-visible, so it completes as pending verification with ${uiVerification.checklist.length} check(s) for you to confirm.`,
+              meta: { ui_verification: true, reason: uiVerification.reason },
+            });
+          }
+        } catch (e) { console.warn('[mock2] ui-verification gate skipped:', e?.message); }
       }
       // B.5/PATCH2 B.1 lifecycle branch. The integration gate passed (real code),
       // so a build with outstanding LIVE external checks the fence cannot run is a
@@ -1658,7 +1700,10 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // verify) and the cycle lands in pending-operator-verification with the live
       // checklist — NEVER as a needs-attention flag. If the builder declared
       // pending but nothing is actually outstanding, it is simply a success.
-      const pendingChecklist = integrationDecision?.checklist || [];
+      // The live-external checklist, plus any user-visible change nothing
+      // observed in a browser (the honest gate above). Both are "a human still
+      // has to confirm this", so they share one calm pending-verification path.
+      const pendingChecklist = [...(integrationDecision?.checklist || []), ...(uiVerification.checklist || [])];
       const wantsPending = decision.pendingVerification === true;
       if (pendingChecklist.length) {
         openVerificationChecklist({ projectId, cycleId: cycle.id, checklist: pendingChecklist });

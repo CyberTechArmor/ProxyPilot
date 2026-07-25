@@ -168,6 +168,9 @@ export function deleteProject(id) {
   const db = getMock2Db();
   const tx = db.transaction(() => {
     db.prepare(`DELETE FROM mock2_project_members WHERE project_id = ?`).run(id);
+    // Encrypted provider keys must never outlive the project they belonged to.
+    // Guarded: the table is absent until migration 544 has run.
+    try { db.prepare(`DELETE FROM mock2_project_api_keys WHERE project_id = ?`).run(id); } catch { /* pre-migration */ }
     return db.prepare(`DELETE FROM mock2_projects WHERE id = ?`).run(id).changes > 0;
   });
   return tx();

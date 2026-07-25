@@ -43,3 +43,24 @@ version through the admin editor** — the registry is append-only and content r
 are immutable (ADR-003); a revision is a new monotonic version, never an in-place
 edit of the v1 row. To ship this content to an already-seeded host, publish it as
 v2 with a changelog that says so.
+
+## Base application template + default design brief
+
+- `base-app/` — **ProxyPilot's standard base application** (the "Upload Doc"
+  portal: auth + LDAP + RBAC + lifecycle + SSE + JSON store, near-zero
+  dependencies). A generated project starts from this tree so the plumbing costs
+  nothing per project. Its own docs are `base-app/RUNBOOK.md`; read the
+  **Required configuration** table there before deploying (`APP_BASE_URL` is
+  mandatory in production).
+- `design-brief.md` — the **default** design reference, with
+  `design-brief-appendix.md` as its detailed component inventory. Default, never
+  forced: any design direction a project supplies wins entirely and the brief
+  only fills gaps. It reaches the generation AI as `§9` of `design-system.md`,
+  which is what the concept/mockup prompts inject.
+- `BASE-APP-MIGRATION.md` — what changed vs the previous base template
+  (security fixes, the keep-alive robustness fix, new features), so an existing
+  project can be diffed against it.
+
+Editing any seed file publishes a NEW framework version on the next boot
+(`upgradeFrameworkFromSeed`); projects adopt it through the normal
+drift → update-cycle path, never automatically.

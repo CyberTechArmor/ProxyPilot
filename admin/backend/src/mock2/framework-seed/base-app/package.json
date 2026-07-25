@@ -1,0 +1,19 @@
+{
+  "name": "credentialing-portal",
+  "version": "1.0.0",
+  "description": "Physician credentialing portal with Auth + LDAP + RBAC + lifecycle",
+  "private": true,
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "pdf-lib": "^1.17.1"
+  }
+}

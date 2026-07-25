@@ -168,6 +168,7 @@ export function deleteProject(id) {
   const db = getMock2Db();
   const tx = db.transaction(() => {
     db.prepare(`DELETE FROM mock2_project_members WHERE project_id = ?`).run(id);
+    db.prepare(`DELETE FROM mock2_project_pins WHERE project_id = ?`).run(id);
     return db.prepare(`DELETE FROM mock2_projects WHERE id = ?`).run(id).changes > 0;
   });
   return tx();
@@ -303,4 +304,77 @@ export function lookupUser(userId) {
 export function isUserSuperadmin(userId) {
   const u = getDb().prepare(`SELECT is_superadmin FROM users WHERE id = ?`).get(userId);
   return u?.is_superadmin === 1;
+}
+
+// ---- list-page rollups (ONE query each, never per-project) ----
+//
+// The Projects list renders team, age and spend on every card. Deriving those
+// through the per-project shaper would be N+1 on a page that already runs a
+// handful of COUNTs per row, so each of these returns a Map keyed by project
+// id and the route zips them onto the shaped rows.
+
+// Every project's membership in one pass, usernames resolved from the MAIN DB
+// (cross-DB, so it is two queries, not a join). Map<project_id, member[]>.
+export function membersByProject() {
+  const rows = getMock2Db()
+    .prepare(`SELECT project_id, user_id, role FROM mock2_project_members ORDER BY role, user_id`)
+    .all();
+  const names = new Map();
+  const ids = [...new Set(rows.map((r) => String(r.user_id)))];
+  if (ids.length > 0) {
+    // Chunked so a large install can never blow SQLite's variable limit.
+    for (let i = 0; i < ids.length; i += 400) {
+      const chunk = ids.slice(i, i + 400);
+      const q = `SELECT id, username FROM users WHERE id IN (${chunk.map(() => '?').join(',')})`;
+      for (const u of getDb().prepare(q).all(...chunk)) names.set(String(u.id), u.username);
+    }
+  }
+  const out = new Map();
+  for (const r of rows) {
+    const list = out.get(r.project_id) || [];
+    list.push({ user_id: r.user_id, username: names.get(String(r.user_id)) || null, role: r.role });
+    out.set(r.project_id, list);
+  }
+  return out;
+}
+
+// Lifetime AI spend per project, straight off the quota ledger (the same
+// column the per-user attribution rollup sums). Map<project_id, cents>.
+export function spendCentsByProject() {
+  const rows = getMock2Db()
+    .prepare(`
+      SELECT project_id, COALESCE(SUM(cost_cents), 0) AS cents
+        FROM mock2_quota_ledger
+       WHERE project_id IS NOT NULL
+       GROUP BY project_id
+    `)
+    .all();
+  return new Map(rows.map((r) => [r.project_id, Number(r.cents) || 0]));
+}
+
+// ---- per-user pins (favourites, migration 544) ----
+
+export function listPinnedProjectIds(userId) {
+  return new Set(
+    getMock2Db()
+      .prepare(`SELECT project_id FROM mock2_project_pins WHERE user_id = ?`)
+      .all(String(userId))
+      .map((r) => r.project_id),
+  );
+}
+
+// Pin/unpin for ONE user. Idempotent in both directions; returns the new state.
+export function setProjectPin(projectId, userId, pinned) {
+  const db = getMock2Db();
+  if (pinned) {
+    db.prepare(`
+      INSERT INTO mock2_project_pins (project_id, user_id, created_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(project_id, user_id) DO NOTHING
+    `).run(projectId, String(userId), nowIso());
+  } else {
+    db.prepare(`DELETE FROM mock2_project_pins WHERE project_id = ? AND user_id = ?`)
+      .run(projectId, String(userId));
+  }
+  return !!pinned;
 }

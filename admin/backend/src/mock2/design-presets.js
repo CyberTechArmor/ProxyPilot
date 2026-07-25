@@ -16,6 +16,12 @@ import { renderDesignTokensCss } from './concept-logic.js';
 // 'ai' — the sentinel for "no preset": the mockup model chooses the look.
 export const DESIGN_PRESET_AI = 'ai';
 
+// The base look every new project starts on. Project creation no longer asks —
+// the choice moved into the design chat, where the "On theme / New look" toggle
+// decides per turn whether the AI stays on this built-in base or explores a
+// fresh look. A caller can still pin a preset (or 'ai') explicitly on create.
+export const DEFAULT_DESIGN_PRESET = 'portal-blue';
+
 // Every token value below stays within the sanitizers' grammar (safeHex /
 // safeSize / safeFont / safeShadow), so a preset can never inject CSS the
 // extractor path wouldn't accept.

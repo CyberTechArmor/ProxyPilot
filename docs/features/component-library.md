@@ -155,7 +155,7 @@ component's verification-email hook.
 `docs/features/examples/ldaps-auth.component.json` is a smaller, importable
 example — the canonical LDAPS auth module (search-then-bind, bounded connection
 pool, RFC 4515 escaping, group extraction) in `proxypilot-component@1` format.
-Import it via **Projects → Components → Import** (upload the .component.json
+Import it via **Projects → Settings → Components → Import** (upload the .component.json
 file or paste the JSON), or:
 
 ```bash

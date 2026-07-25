@@ -1,7 +1,7 @@
 # Authoring a component (`proxypilot-component@1`)
 
 The complete schema and requirements for producing a component upload file —
-one JSON document that Projects → Components → Import accepts (file upload or
+one JSON document that Projects → Settings → Components → Import accepts (file upload or
 paste), and that `POST /api/mock2/components/import` accepts as `{ doc,
 change_reason? }`. Every rule below is enforced by
 `admin/backend/src/mock2/component-logic.js` (`parseComponentImport`), so a

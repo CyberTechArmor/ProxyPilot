@@ -5,8 +5,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DESIGN_PRESETS, DESIGN_PRESET_AI, getDesignPreset, normalizeDesignPresetKey,
-  publicDesignPresets, buildDesignPresetSeedFiles, applyDesignPreset,
+  DESIGN_PRESETS, DESIGN_PRESET_AI, DEFAULT_DESIGN_PRESET, getDesignPreset,
+  normalizeDesignPresetKey, publicDesignPresets, buildDesignPresetSeedFiles, applyDesignPreset,
 } from '../mock2/design-presets.js';
 import { parseDesignTokens, renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH } from '../mock2/concept-logic.js';
 import { buildSeedFiles } from '../mock2/template.js';
@@ -25,6 +25,23 @@ test('every preset survives the extractor sanitizers unchanged', () => {
   }
   // Keys are unique.
   assert.equal(new Set(DESIGN_PRESETS.map((p) => p.key)).size, DESIGN_PRESETS.length);
+});
+
+// Project creation no longer shows a picker: an omitted preset means "the
+// built-in base look". That only holds if the default names a REAL built-in
+// preset that seeds files — an 'ai'-shaped or stale default would silently
+// hand every new project an unstyled base app.
+test('DEFAULT_DESIGN_PRESET is a real built-in preset that seeds a styled base app', () => {
+  assert.notEqual(DEFAULT_DESIGN_PRESET, DESIGN_PRESET_AI);
+  const preset = getDesignPreset(DEFAULT_DESIGN_PRESET);
+  assert.ok(preset, `${DEFAULT_DESIGN_PRESET} resolves to a preset`);
+  assert.ok(
+    DESIGN_PRESETS.some((p) => p.key === DEFAULT_DESIGN_PRESET),
+    'the default is built-in, not a deletable custom upload',
+  );
+  assert.equal(normalizeDesignPresetKey(DEFAULT_DESIGN_PRESET), DEFAULT_DESIGN_PRESET);
+  const files = buildDesignPresetSeedFiles(DEFAULT_DESIGN_PRESET);
+  assert.deepEqual(files.map((f) => f.path), [DESIGN_TOKENS_PATH, DESIGN_CSS_PATH]);
 });
 
 test('normalizeDesignPresetKey: valid keys pass, everything else is the ai sentinel', () => {

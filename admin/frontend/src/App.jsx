@@ -13,6 +13,7 @@ import CVEs from '@/pages/CVEs';
 import Troubleshooting from '@/pages/Troubleshooting';
 import Housekeeping from '@/pages/Housekeeping';
 import Projects from '@/pages/Projects';
+import ProjectSettings from '@/pages/ProjectSettings';
 import LeanBeafPro from '@/pages/LeanBeafPro';
 import LbpProjectDetail from '@/pages/LbpProjectDetail';
 import LbpBriefs from '@/pages/LbpBriefs';
@@ -115,6 +116,9 @@ function App() {
             production-pinned host GET /api/mock2/status 404s and it bounces
             home, so the route staying registered leaks nothing. */}
         <Route path="projects" element={<Projects />} />
+        {/* Everything that is not a project lives under Settings (the gear in
+            the Projects header); the list itself stays the default view. */}
+        <Route path="projects/settings" element={<ProjectSettings />} />
         <Route path="projects/domains" element={<ParentDomains />} />
         <Route path="projects/connectors" element={<ModelConnectors />} />
         <Route path="projects/quotas" element={<Quotas />} />

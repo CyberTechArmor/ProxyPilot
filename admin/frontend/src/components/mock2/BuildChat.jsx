@@ -15,7 +15,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
@@ -537,14 +537,26 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                       <span className="block text-[10px] text-muted-foreground mt-0.5">{new Date(m.created_at).toLocaleString()}</span>
                     ) : null}
                   </button>
+                  {/* View — the same jump the row does, as an explicit icon.
+                      On a phone "tap the row" is invisible next to the download
+                      icon that IS visible, so the two actions now read as a
+                      pair: eye = look at it here, arrow = take it away. */}
+                  <button
+                    type="button" onClick={() => scrollToMessage(m.id)}
+                    className="shrink-0 w-11 md:w-9 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                    title="View this build in the chat"
+                    aria-label="View this build in the chat"
+                  >
+                    <Eye className="h-4 w-4" />
+                  </button>
                   {req ? (
                     <button
                       type="button" onClick={() => downloadBuild(req)}
-                      className="shrink-0 px-3 flex items-center text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                      className="shrink-0 w-11 md:w-9 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/60"
                       title="Download this build's full context (task, cycles, change records, events)"
                       aria-label="Download this build's context"
                     >
-                      <Download className="h-3.5 w-3.5" />
+                      <Download className="h-4 w-4" />
                     </button>
                   ) : null}
                 </div>

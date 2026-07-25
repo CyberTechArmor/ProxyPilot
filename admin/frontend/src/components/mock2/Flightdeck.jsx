@@ -9,8 +9,9 @@ import { WORKSPACE_NAME, flightdeckLayoutKey, readJsonPref, writeJsonPref } from
 import { Button } from '@/components/ui/button';
 import {
   Files, TerminalSquare, MessagesSquare, Code2, Eye, LayoutPanelLeft,
-  PanelLeftClose, PanelRightClose, StopCircle, PanelBottom, Maximize2, Minimize2, Info,
+  PanelLeftClose, PanelRightClose, StopCircle, PanelBottom, Maximize2, Minimize2, Info, Menu,
 } from 'lucide-react';
+import { useIsMobile } from '@/hooks/use-media-query';
 
 // Flightdeck — the build-phase IDE workspace. It does NOT rebuild the agent: the
 // right-hand chat is the existing harness front-end (BuildChat → startCycle/Ask),
@@ -19,16 +20,21 @@ import {
 // One shared workspace, assembled from existing instruments.
 
 const DEFAULT_LAYOUT = { left: 240, right: 380, bottom: 240, showLeft: true, showRight: true, showBottom: true };
-const MOBILE_PANELS = [
+const NARROW_PANELS = [
   { key: 'files', label: 'Files', icon: Files },
   { key: 'editor', label: 'Editor', icon: Code2 },
   { key: 'chat', label: 'Chat', icon: MessagesSquare },
   { key: 'terminal', label: 'Terminal', icon: TerminalSquare },
   { key: 'preview', label: 'Preview', icon: Eye },
 ];
+// A phone gets the clean view and nothing else: a file tree, a CodeMirror
+// editor and a PTY are not usable at 360px, and offering them cost a five-way
+// bottom bar plus the dev toggle. Tablets (md–lg) keep the full panel set.
+const PHONE_PANEL_KEYS = ['chat', 'preview'];
 
 export default function Flightdeck({
-  projectId, project, canEdit, isAdmin, previewSrc, provLog, provMessage, onChanged, onBuilt, onSwitchView, onShowDetails,
+  projectId, project, canEdit, isAdmin, previewSrc, provLog, provMessage, onChanged, onBuilt,
+  onSwitchView, onShowDetails, onOpenNav,
 }) {
   const online = project?.lifecycle === 'active';
   const containerName = project?.container_name || null;
@@ -99,8 +105,12 @@ export default function Flightdeck({
   // terminal). Persisted globally so the choice sticks across projects.
   const [devMode, setDevMode] = useState(() => readJsonPref('mock2.flightdeck.devMode', false));
   useEffect(() => { writeJsonPref('mock2.flightdeck.devMode', devMode); }, [devMode]);
-  // Mobile single-panel switch.
+  // Narrow-screen single-panel switch.
   const [mobilePanel, setMobilePanel] = useState('preview');
+  // Phone (<md). Not a Tailwind prefix because it changes WHICH panels exist —
+  // hiding the editor/terminal with `hidden` would still mount CodeMirror and
+  // open a PTY behind them.
+  const isPhone = useIsMobile();
 
   // Persisted layout.
   const [layout, setLayout] = useState(() => ({ ...DEFAULT_LAYOUT, ...readJsonPref(flightdeckLayoutKey(projectId), {}) }));
@@ -162,9 +172,12 @@ export default function Flightdeck({
   const filesPane = <FlightdeckFileTree projectId={projectId} canEdit={canEdit} activePath={activeFilePath} onOpen={openFile} refreshKey={treeRefresh} />;
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)] min-h-[32rem] border rounded-lg overflow-hidden bg-background">
-      {/* Top bar */}
-      <div className="flex items-center gap-2 px-3 h-11 border-b bg-muted/40 shrink-0 text-sm">
+    <div className="flex flex-col h-[100dvh] md:h-[calc(100vh-8rem)] md:min-h-[32rem] rounded-none border-0 md:rounded-lg md:border overflow-hidden bg-background">
+      {/* Top bar — md+ only. On a phone every control on it is either gone
+          (dev toggle, classic view: desktop concerns) or moved to the bottom
+          bar (Details), and the spend readout is one tap away in the chat, so
+          the whole 44px strip is given back to the workspace. */}
+      <div className="hidden md:flex items-center gap-2 px-3 h-11 border-b bg-muted/40 shrink-0 text-sm">
         <LayoutPanelLeft className="h-4 w-4 text-muted-foreground" />
         <span className="font-semibold">{WORKSPACE_NAME}</span>
         <span className="text-muted-foreground truncate hidden sm:inline">· {project?.name} · Build</span>
@@ -189,7 +202,11 @@ export default function Flightdeck({
         ) : null}
       </div>
 
-      {/* Desktop layout (lg+) */}
+      {/* Desktop layout (lg+). Skipped OUTRIGHT on a phone: `hidden lg:flex`
+          only hides it visually — its children still mount, which on a phone
+          with the dev toggle remembered means a CodeMirror instance and a live
+          PTY behind a display:none box. */}
+      {!isPhone && (
       <div className="hidden lg:flex flex-1 min-h-0">
         {devMode ? (
         <div className="flex flex-1 min-h-0">
@@ -260,12 +277,25 @@ export default function Flightdeck({
         </div>
         )}
       </div>
+      )}
 
-      {/* Mobile / narrow: one panel at a time. Clean view shows only preview +
-          chat; dev view exposes files/editor/terminal too. */}
+      {/* Narrow (<lg): one panel at a time.
+          - Phone (<md): the clean view only — Chat + Preview — and the bottom
+            bar becomes the page's ONLY chrome, so it also carries the nav
+            drawer and Details, the two things the removed top bars owned.
+          - Tablet (md–lg): unchanged; the dev toggle still exposes
+            files/editor/terminal and the top bar keeps Details. */}
       {(() => {
-        const panels = devMode ? MOBILE_PANELS : MOBILE_PANELS.filter((p) => p.key === 'preview' || p.key === 'chat');
+        const panels = isPhone
+          ? NARROW_PANELS.filter((p) => PHONE_PANEL_KEYS.includes(p.key))
+          : (devMode ? NARROW_PANELS : NARROW_PANELS.filter((p) => PHONE_PANEL_KEYS.includes(p.key)));
         const cur = panels.some((p) => p.key === mobilePanel) ? mobilePanel : 'preview';
+        // Phone: [Nav] [Chat] [Preview] [Details]. Tablet: the panels alone.
+        const extras = isPhone ? (onOpenNav ? 1 : 0) + (onShowDetails ? 1 : 0) : 0;
+        const cols = ['grid-cols-1', 'grid-cols-2', 'grid-cols-3', 'grid-cols-4', 'grid-cols-5', 'grid-cols-6', 'grid-cols-7'][
+          Math.min(panels.length + extras, 7) - 1
+        ];
+        const itemCls = (activeItem) => `flex flex-col items-center justify-center gap-0.5 py-2 min-h-[44px] text-[11px] ${activeItem ? 'text-primary' : 'text-muted-foreground'}`;
         return (
           <div className="flex flex-col flex-1 min-h-0 lg:hidden">
             <div className="flex-1 min-h-0 overflow-auto">
@@ -275,13 +305,23 @@ export default function Flightdeck({
               {cur === 'terminal' && <div className="h-full bg-black">{terminalPane}</div>}
               {cur === 'preview' && previewPane}
             </div>
-            <div className={`grid border-t shrink-0 ${devMode ? 'grid-cols-5' : 'grid-cols-2'}`}>
+            <div className={`grid border-t shrink-0 ${cols}`}>
+              {isPhone && onOpenNav ? (
+                <button type="button" onClick={onOpenNav} aria-label="Open navigation menu" className={itemCls(false)}>
+                  <Menu className="h-4 w-4" />Menu
+                </button>
+              ) : null}
               {panels.map((p) => (
-                <button key={p.key} onClick={() => setMobilePanel(p.key)}
-                  className={`flex flex-col items-center gap-0.5 py-2 min-h-[44px] text-[11px] ${cur === p.key ? 'text-primary' : 'text-muted-foreground'}`}>
+                <button key={p.key} type="button" onClick={() => setMobilePanel(p.key)}
+                  className={itemCls(cur === p.key)}>
                   <p.icon className="h-4 w-4" />{p.label}
                 </button>
               ))}
+              {isPhone && onShowDetails ? (
+                <button type="button" onClick={onShowDetails} aria-label="Project details" className={itemCls(false)}>
+                  <Info className="h-4 w-4" />Details
+                </button>
+              ) : null}
             </div>
           </div>
         );

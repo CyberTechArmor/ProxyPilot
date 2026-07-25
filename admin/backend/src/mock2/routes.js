@@ -100,6 +100,10 @@ import {
   listProjectSlugs,
   purgeProjectSlugHistory,
   addTypingSeconds,
+  membersByProject,
+  spendCentsByProject,
+  listPinnedProjectIds,
+  setProjectPin,
 } from './projects.js';
 import { computeTimeSummary, computeUsageSummary } from './time-logic.js';
 import { publicProjectShape, isProjectReadOnly, normalizeHarness } from './project-logic.js';
@@ -128,7 +132,10 @@ import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './ha
 import { HARNESS_STEPS, DETERMINISTIC_STEPS, STEP_TUNING_EFFORTS, resolveStepDisplay } from './harness-steps-logic.js';
 import { getHarnessStepTuning, setHarnessStepOverride, harnessStepSpend7d, getHarnessStepPrompts, setHarnessStepPrompt } from './harness-steps.js';
 import { STEP_PROMPT_SPECS, STEP_PROMPT_MAX_LENGTH, promptOwnerStepId, renderDefaultStepPrompt } from './harness-prompts-logic.js';
-import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, parseDesignDoc } from './design-presets.js';
+import {
+  normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, DEFAULT_DESIGN_PRESET,
+  parseDesignDoc,
+} from './design-presets.js';
 import { saveCustomDesignPreset, deleteCustomDesignPreset } from './design-presets-store.js';
 import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue, reconcileScreenPlan, backfillScreenItems, listScreenItems, listScreenItemHistory, setScreenItemStatus, startItemsBuild } from './screen-plan.js';
 import { publicScreenShape, screenPlanCounts, SCREEN_DECISIONS, PRODUCTION_CHECK_INSTRUCTION } from './screen-plan-logic.js';
@@ -865,7 +872,29 @@ export function createMock2Router() {
     const admin = isReqAdmin(req);
     let rows = listProjects();
     if (!admin) rows = rows.filter((p) => getMembership(p.id, req.user.id));
-    res.json({ projects: rows.map((p) => shapeProject(p, { isAdmin: admin })) });
+    // Card-level context the list page renders on every tile: who is on the
+    // team, what the project has cost, and whether THIS user pinned it. All
+    // three come from one query each (never per project) and are zipped on
+    // after shaping, so the shaper stays the shared detail/tile derivation.
+    const members = membersByProject();
+    const spend = spendCentsByProject();
+    const pinned = listPinnedProjectIds(mock2ActorId(req) ?? req.user.id);
+    res.json({
+      projects: rows.map((p) => ({
+        ...shapeProject(p, { isAdmin: admin }),
+        members: members.get(p.id) || [],
+        cost_cents: spend.get(p.id) || 0,
+        pinned: pinned.has(p.id),
+      })),
+    });
+  });
+
+  // Pin/unpin a project for the requesting user (personal favourite, not a
+  // shared flag). Viewer-level: seeing a project is enough to bookmark it.
+  router.put('/projects/:id/pin', requireMock2Role('viewer'), (req, res) => {
+    const userId = mock2ActorId(req) ?? req.user.id;
+    const pinned = setProjectPin(req.mock2Project.id, userId, !!req.body?.pinned);
+    res.json({ pinned });
   });
 
   // One user's memberships across ALL projects — the dashboard's Access
@@ -915,9 +944,14 @@ export function createMock2Router() {
       return res.status(500).json({ error: `Could not create project: ${err?.message || 'unknown error'}` });
     }
 
-    // Persist the chosen design preset BEFORE provisioning starts — the seed
-    // files (template.js) read it off the project row to style the base app.
-    const presetKey = normalizeDesignPresetKey(parsed.data.design_preset);
+    // Persist the design preset BEFORE provisioning starts — the seed files
+    // (template.js) read it off the project row to style the base app. Create
+    // no longer offers a picker: an omitted preset means "the built-in base
+    // look" (DEFAULT_DESIGN_PRESET), and the design chat's On theme / New look
+    // toggle takes it from there. An explicit key (including 'ai') still wins.
+    const presetKey = parsed.data.design_preset === undefined
+      ? DEFAULT_DESIGN_PRESET
+      : normalizeDesignPresetKey(parsed.data.design_preset);
     if (presetKey !== DESIGN_PRESET_AI) {
       project = updateProject(project.id, { design_preset: presetKey });
     }

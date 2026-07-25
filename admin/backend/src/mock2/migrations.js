@@ -1559,4 +1559,26 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Per-user project pins (favourites) — the Projects list floats a user's
+    // pinned projects above the rest. Personal, not shared: the PK is
+    // (project_id, user_id), so two operators pin independently. user_id is
+    // TEXT because platform user ids are UUIDs (users.id TEXT PRIMARY KEY);
+    // the older membership tables declared INTEGER and lean on SQLite's
+    // affinity rules — new tables should not repeat that.
+    version: 545,
+    name: 'mock2_project_pins',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_project_pins (
+          project_id INTEGER NOT NULL,
+          user_id TEXT NOT NULL,
+          created_at TEXT,
+          PRIMARY KEY (project_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_project_pins_user
+          ON mock2_project_pins (user_id);
+      `);
+    },
+  },
 ];

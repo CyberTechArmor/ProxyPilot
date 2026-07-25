@@ -7,14 +7,24 @@
 // container + bare repo + slug route asynchronously (202 → poll), so a freshly
 // created tile shows `provisioning` and flips to `online` on its own.
 //
+// The page is now the project list and nothing else: the parent-domains card
+// and the seven admin tiles moved behind the gear (Projects → Settings), and
+// create asks for a name and a domain only — no description, no design picker
+// (the base look is the built-in default; the design chat's On theme / New look
+// toggle decides how far the AI strays from it).
+//
+// The list itself carries search, sort, per-user pins, and a grid/list toggle;
+// each card shows team, age, spend, and last activity so the grid is scannable
+// without opening anything.
+//
 // Reachable only when the backend reports Mock2 enabled (GET /api/mock2/status
 // → 200); a direct visit on a disabled/pinned host bounces home (ADR-001).
 //
-// MOBILE_FIRST: single-column tiles that grow to two columns at sm, a create
-// dialog that is full-screen on <sm, 44px primary touch targets. Renders clean
-// at 360px with no horizontal scroll.
+// MOBILE_FIRST: single-column cards that grow to two at sm and three at xl, a
+// toolbar that stacks on <sm, a create dialog that is full-screen on <sm, 44px
+// primary touch targets. Renders clean at 360px with no horizontal scroll.
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { Navigate, Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
@@ -30,8 +40,8 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import {
-  FolderGit2, Loader2, Globe, Plus, ExternalLink, Cpu, Wallet, BookText, Inbox, Blocks,
-  Sparkles, Hammer, Palette, Workflow,
+  FolderGit2, Loader2, Plus, ExternalLink, Sparkles, Hammer, Settings, Search, Star,
+  LayoutGrid, List, Users, CalendarDays, Wallet, X,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 
@@ -46,6 +56,77 @@ function previewSlug(name) {
     .replace(/^-+|-+$/g, '')
     .slice(0, 50)
     .replace(/-+$/g, '');
+}
+
+// ---- card metrics ----
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Whole days between an ISO timestamp and now; null when the stamp is missing
+// or unparseable (a card renders "—" rather than "NaN days").
+function daysSince(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, Math.floor((Date.now() - t) / DAY_MS));
+}
+
+// "12 days" / "1 day" / "today" — the age readout under a card's title.
+function ageLabel(iso) {
+  const d = daysSince(iso);
+  if (d === null) return '—';
+  if (d === 0) return 'today';
+  return `${d} day${d === 1 ? '' : 's'}`;
+}
+
+// Coarse relative time for last activity. Deliberately low-resolution: the
+// card is a scanning surface, the detail page has the exact timestamps.
+function agoLabel(iso) {
+  if (!iso) return 'no activity yet';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return 'no activity yet';
+  const mins = Math.max(0, Math.floor((Date.now() - t) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return `${Math.floor(days / 30)}mo ago`;
+}
+
+// Lifetime AI spend, in cents off the quota ledger. Sub-cent spend still reads
+// as $0.00 rather than "free" — the ledger row exists, it just rounds down.
+function costLabel(cents) {
+  const c = Number(cents) || 0;
+  if (c >= 100000) return `$${Math.round(c / 100000)}k`;
+  return `$${(c / 100).toFixed(2)}`;
+}
+
+// ---- sorting ----
+
+const SORTS = {
+  activity: { label: 'Most recent', cmp: (a, b) => stamp(b.last_activity_at) - stamp(a.last_activity_at) },
+  newest: { label: 'Newest first', cmp: (a, b) => stamp(b.created_at) - stamp(a.created_at) },
+  oldest: { label: 'Oldest first', cmp: (a, b) => stamp(a.created_at) - stamp(b.created_at) },
+  name: { label: 'Name (A–Z)', cmp: (a, b) => String(a.name || '').localeCompare(String(b.name || '')) },
+  cost: { label: 'Highest cost', cmp: (a, b) => (Number(b.cost_cents) || 0) - (Number(a.cost_cents) || 0) },
+};
+
+const stamp = (iso) => {
+  const t = iso ? Date.parse(iso) : NaN;
+  return Number.isNaN(t) ? 0 : t;
+};
+
+// Search matches the things an operator actually remembers: the project name,
+// its URL/slug, and who is on it.
+function matchesQuery(p, q) {
+  if (!q) return true;
+  const hay = [
+    p.name, p.slug, p.url, p.custom_domain, p.parent_domain,
+    ...(p.members || []).map((m) => m.username),
+  ].filter(Boolean).join(' ').toLowerCase();
+  return hay.includes(q);
 }
 
 export default function Projects() {
@@ -63,9 +144,16 @@ export default function Projects() {
   const [domains, setDomains] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', description: '', parent_domain_id: '', design_preset: 'portal-blue' });
+  const [form, setForm] = useState({ name: '', parent_domain_id: '' });
   const [creating, setCreating] = useState(false);
-  const [presets, setPresets] = useState([]);
+
+  // View preferences are per-browser, not per-account — they are a display
+  // habit, not project state, so localStorage is the right home for them.
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState(() => localStorage.getItem('pp_projects_sort') || 'activity');
+  const [view, setView] = useState(() => localStorage.getItem('pp_projects_view') || 'grid');
+  useEffect(() => { localStorage.setItem('pp_projects_sort', sort); }, [sort]);
+  useEffect(() => { localStorage.setItem('pp_projects_view', view); }, [view]);
 
   const load = useCallback(async () => {
     try {
@@ -75,7 +163,6 @@ export default function Projects() {
       ]);
       setProjects(pRes.projects || []);
       setDomains((dRes.domains || []).filter((d) => d.selectable));
-      api.mock2DesignPresets().then((r) => setPresets(r.presets || [])).catch(() => {});
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('load projects failed:', err);
     } finally {
@@ -109,12 +196,10 @@ export default function Projects() {
     try {
       const res = await api.mock2CreateProject({
         name: form.name.trim(),
-        description: form.description.trim() || undefined,
         parent_domain_id: Number(form.parent_domain_id),
-        design_preset: form.design_preset === 'ai' ? undefined : form.design_preset,
       });
       setCreateOpen(false);
-      setForm({ name: '', description: '', parent_domain_id: '', design_preset: 'portal-blue' });
+      setForm({ name: '', parent_domain_id: '' });
       toast({ title: 'Project creating', description: 'Provisioning the container and repo — this takes a minute.' });
       if (res.project?.id) navigate(`/projects/${res.project.id}`);
       else load();
@@ -124,6 +209,45 @@ export default function Projects() {
       setCreating(false);
     }
   };
+
+  // Pin/unpin is optimistic: the star flips immediately and reverts (with a
+  // toast) if the server refuses — a favourite is not worth a spinner.
+  const togglePin = async (project) => {
+    const next = !project.pinned;
+    setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, pinned: next } : p)));
+    try {
+      await api.mock2PinProject(project.id, next);
+    } catch (err) {
+      setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, pinned: !next } : p)));
+      toast({ variant: 'destructive', title: 'Could not update the pin', description: err.message });
+    }
+  };
+
+  const q = query.trim().toLowerCase();
+  const cmp = (SORTS[sort] || SORTS.activity).cmp;
+
+  const { pinned, active, archived, matched } = useMemo(() => {
+    const hits = projects.filter((p) => matchesQuery(p, q));
+    const live = hits.filter((p) => p.lifecycle !== 'archived');
+    return {
+      matched: hits.length,
+      pinned: live.filter((p) => p.pinned).sort(cmp),
+      active: live.filter((p) => !p.pinned).sort(cmp),
+      archived: hits.filter((p) => p.lifecycle === 'archived').sort(cmp),
+    };
+  }, [projects, q, cmp]);
+
+  // Header stats — computed off the FULL list, not the filtered one: they
+  // describe the module, not the current search.
+  const stats = useMemo(() => {
+    const live = projects.filter((p) => p.lifecycle !== 'archived');
+    return {
+      total: live.length,
+      serving: live.filter((p) => p.deploy_state === 'serving').length,
+      designing: live.filter((p) => !p.stage?.design_approved).length,
+      cents: projects.reduce((sum, p) => sum + (Number(p.cost_cents) || 0), 0),
+    };
+  }, [projects]);
 
   if (!canDevelop) return <Navigate to="/" replace />;
   if (gate === 'disabled') return <Navigate to="/" replace />;
@@ -136,8 +260,6 @@ export default function Projects() {
   }
 
   const canCreate = domains.length > 0;
-  const activeProjects = projects.filter((p) => p.lifecycle !== 'archived');
-  const archivedProjects = projects.filter((p) => p.lifecycle === 'archived');
 
   return (
     <div className="space-y-6">
@@ -147,83 +269,88 @@ export default function Projects() {
           <h1 className="text-2xl font-bold tracking-tight truncate">Projects</h1>
           <p className="text-sm text-muted-foreground">Mock2 dev/build module</p>
         </div>
+        {isAdmin ? (
+          <Button asChild variant="outline" size="icon" className="h-11 w-11 sm:h-10 sm:w-10 shrink-0" title="Project settings">
+            <Link to="/projects/settings" aria-label="Project settings"><Settings className="h-5 w-5" /></Link>
+          </Button>
+        ) : null}
         <Button
           className="h-11 sm:h-10 shrink-0"
           onClick={() => setCreateOpen(true)}
           disabled={!canCreate}
           title={canCreate ? undefined : 'Register and enable a parent domain first'}
         >
-          <Plus className="h-4 w-4 mr-1" />New project
+          <Plus className="h-4 w-4 mr-1" />
+          <span className="hidden sm:inline">New project</span>
+          <span className="sm:hidden">New</span>
         </Button>
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="min-w-0">
-              <CardTitle className="flex items-center gap-2">
-                <Globe className="h-5 w-5 shrink-0 text-primary" />
-                Parent domains
-              </CardTitle>
-              <CardDescription>
-                Register dev domains and issue per-slug TLS so projects get live HTTPS URLs.
-              </CardDescription>
-            </div>
-            <Button asChild variant="outline" className="h-11 sm:h-10 shrink-0">
-              <Link to="/projects/domains">Manage domains</Link>
-            </Button>
-          </div>
-        </CardHeader>
-      </Card>
-
-      {/* M5 admin tooling: model/git connectors, quotas, framework registry.
-          Admin-only, reachable only on an enabled host (each page self-guards). */}
-      {isAdmin && (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
-            <Link to="/projects/connectors">
-              <Cpu className="h-5 w-5 shrink-0 text-primary" />
-              <span className="flex flex-col items-start text-left"><span className="font-medium">Connectors</span><span className="text-xs text-muted-foreground">Models · slots · git</span></span>
-            </Link>
-          </Button>
-          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
-            <Link to="/projects/quotas">
-              <Wallet className="h-5 w-5 shrink-0 text-primary" />
-              <span className="flex flex-col items-start text-left"><span className="font-medium">Quotas</span><span className="text-xs text-muted-foreground">Budgets · caps · buffer</span></span>
-            </Link>
-          </Button>
-          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
-            <Link to="/projects/framework">
-              <BookText className="h-5 w-5 shrink-0 text-primary" />
-              <span className="flex flex-col items-start text-left"><span className="font-medium">Framework</span><span className="text-xs text-muted-foreground">Versions · edit · revert</span></span>
-            </Link>
-          </Button>
-          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
-            <Link to="/projects/queue">
-              <Inbox className="h-5 w-5 shrink-0 text-primary" />
-              <span className="flex flex-col items-start text-left"><span className="font-medium">Admin queue</span><span className="text-xs text-muted-foreground">Deviations · drift · flags</span></span>
-            </Link>
-          </Button>
-          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
-            <Link to="/projects/components">
-              <Blocks className="h-5 w-5 shrink-0 text-primary" />
-              <span className="flex flex-col items-start text-left"><span className="font-medium">Components</span><span className="text-xs text-muted-foreground">Reusable blocks · versions · submissions</span></span>
-            </Link>
-          </Button>
-          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
-            <Link to="/projects/design">
-              <Palette className="h-5 w-5 shrink-0 text-primary" />
-              <span className="flex flex-col items-start text-left"><span className="font-medium">Design specs</span><span className="text-xs text-muted-foreground">Presets · tokens · how styles bind</span></span>
-            </Link>
-          </Button>
-          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
-            <Link to="/projects/harness">
-              <Workflow className="h-5 w-5 shrink-0 text-primary" />
-              <span className="flex flex-col items-start text-left"><span className="font-medium">Harness</span><span className="text-xs text-muted-foreground">Per-step model · effort · thinking · guide</span></span>
-            </Link>
-          </Button>
+      {/* At-a-glance module totals. Four across from sm — narrow enough that
+          they read as a strip rather than competing with the project cards. */}
+      {projects.length > 0 ? (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatTile label="Projects" value={String(stats.total)} />
+          <StatTile label="Live" value={String(stats.serving)} />
+          <StatTile label="In design" value={String(stats.designing)} />
+          <StatTile label="Total spend" value={costLabel(stats.cents)} />
         </div>
-      )}
+      ) : null}
+
+      {/* Toolbar: search, sort, view. Stacks on <sm; the search box takes the
+          remaining width from sm so long project names stay findable. */}
+      {projects.length > 0 ? (
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search projects, URLs, people…"
+              aria-label="Search projects"
+              className="h-11 pl-9 pr-9 sm:h-10"
+            />
+            {query ? (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                aria-label="Clear search"
+                className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2">
+            <Select value={sort} onValueChange={setSort}>
+              <SelectTrigger className="h-11 w-full min-w-0 sm:h-10 sm:w-44" aria-label="Sort projects">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {Object.entries(SORTS).map(([key, s]) => (
+                  <SelectItem key={key} value={key}>{s.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="flex shrink-0 rounded-md border p-0.5" role="radiogroup" aria-label="View">
+              <button
+                type="button" role="radio" aria-checked={view === 'grid'} aria-label="Grid view"
+                onClick={() => setView('grid')}
+                className={`flex h-10 w-10 items-center justify-center rounded ${view === 'grid' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+              >
+                <LayoutGrid className="h-4 w-4" />
+              </button>
+              <button
+                type="button" role="radio" aria-checked={view === 'list'} aria-label="List view"
+                onClick={() => setView('list')}
+                className={`flex h-10 w-10 items-center justify-center rounded ${view === 'list' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+              >
+                <List className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="flex items-center justify-center py-12">
@@ -239,26 +366,46 @@ export default function Projects() {
                 : 'Register and enable a parent domain first, then create a project on it.'}
             </CardDescription>
           </CardHeader>
+          {!canCreate && isAdmin ? (
+            <CardContent>
+              <Button asChild variant="outline" className="h-11 sm:h-10">
+                <Link to="/projects/domains">Manage domains</Link>
+              </Button>
+            </CardContent>
+          ) : null}
+        </Card>
+      ) : matched === 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">No matches</CardTitle>
+            <CardDescription>Nothing matches “{query.trim()}”. Try a different name, URL, or person.</CardDescription>
+          </CardHeader>
         </Card>
       ) : (
-        <>
-          {activeProjects.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {activeProjects.map((p) => <ProjectTile key={p.id} p={p} />)}
-            </div>
-          ) : null}
-
-          {archivedProjects.length > 0 ? (
-            <div className="space-y-3">
-              <h2 className="text-sm font-medium text-muted-foreground">
-                Archived ({archivedProjects.length})
-              </h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {archivedProjects.map((p) => <ProjectTile key={p.id} p={p} archived />)}
-              </div>
-            </div>
-          ) : null}
-        </>
+        <div className="space-y-6">
+          <Section
+            title="Pinned"
+            count={pinned.length}
+            items={pinned}
+            view={view}
+            onTogglePin={togglePin}
+          />
+          <Section
+            title={pinned.length > 0 ? 'All projects' : null}
+            count={active.length}
+            items={active}
+            view={view}
+            onTogglePin={togglePin}
+          />
+          <Section
+            title="Archived"
+            count={archived.length}
+            items={archived}
+            view={view}
+            archived
+            onTogglePin={togglePin}
+          />
+        </div>
       )}
 
       <Dialog open={createOpen} onOpenChange={(o) => { if (!creating) setCreateOpen(o); }}>
@@ -278,6 +425,7 @@ export default function Projects() {
               <Label htmlFor="proj-name">Name</Label>
               <Input
                 id="proj-name"
+                className="h-11 sm:h-10"
                 placeholder="My prototype"
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
@@ -299,15 +447,6 @@ export default function Projects() {
               ) : null}
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="proj-desc">Description <span className="text-muted-foreground">(optional)</span></Label>
-              <Input
-                id="proj-desc"
-                placeholder="What is this?"
-                value={form.description}
-                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-1.5">
               <Label htmlFor="proj-domain">Parent domain</Label>
               <Select
                 value={form.parent_domain_id}
@@ -324,42 +463,10 @@ export default function Projects() {
               </Select>
               <p className="text-xs text-muted-foreground">Only verified &amp; enabled domains appear here.</p>
             </div>
-            {presets.length > 0 && (
-              <div className="space-y-1.5">
-                <Label>Base design</Label>
-                <div className="grid grid-cols-1 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setForm((f) => ({ ...f, design_preset: 'ai' }))}
-                    className={`min-h-[44px] rounded-md border p-2.5 text-left text-sm ${form.design_preset === 'ai' ? 'border-primary bg-primary/10' : 'text-muted-foreground'}`}
-                  >
-                    <span className="font-medium text-foreground">Let the AI design it</span>
-                    <span className="block text-xs text-muted-foreground">No preset — the mockup model picks the look during the design chat.</span>
-                  </button>
-                  {presets.map((p) => (
-                    <button
-                      key={p.key}
-                      type="button"
-                      onClick={() => setForm((f) => ({ ...f, design_preset: p.key }))}
-                      className={`min-h-[44px] rounded-md border p-2.5 text-left text-sm ${form.design_preset === p.key ? 'border-primary bg-primary/10' : ''}`}
-                    >
-                      <span className="flex items-center gap-2">
-                        <span className="flex shrink-0 gap-1" aria-hidden="true">
-                          {[p.tokens.colors.background, p.tokens.colors.surface, p.tokens.colors.primary, p.tokens.colors.accent, p.tokens.colors.text].map((c, i) => (
-                            <span key={i} className="h-4 w-4 rounded-full border" style={{ backgroundColor: c }} />
-                          ))}
-                        </span>
-                        <span className="font-medium">{p.name}</span>
-                      </span>
-                      <span className="block pt-1 text-xs text-muted-foreground">{p.description}</span>
-                    </button>
-                  ))}
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  The base app and every mockup start styled with the chosen look; you can still refine it in the design chat.
-                </p>
-              </div>
-            )}
+            <p className="text-xs text-muted-foreground">
+              The project starts on the built-in base design. In the design chat you can keep
+              that look or let the AI explore a new one per message.
+            </p>
             <DialogFooter className="flex-col sm:flex-row gap-2">
               <Button type="button" variant="outline" onClick={() => setCreateOpen(false)} disabled={creating} className="h-11 sm:h-10">
                 Cancel
@@ -372,6 +479,44 @@ export default function Projects() {
           </form>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+// One labelled number in the header strip.
+function StatTile({ label, value }) {
+  return (
+    <div className="rounded-lg border bg-card px-3 py-2.5 min-w-0">
+      <div className="text-xs text-muted-foreground truncate">{label}</div>
+      <div className="text-lg font-semibold tabular-nums truncate">{value}</div>
+    </div>
+  );
+}
+
+// A titled block of projects in whichever view is active. Renders nothing when
+// empty so an unpinned install shows one plain grid with no headings at all.
+function Section({ title, count, items, view, archived = false, onTogglePin }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="space-y-3">
+      {title ? (
+        <h2 className="text-sm font-medium text-muted-foreground">
+          {title} ({count})
+        </h2>
+      ) : null}
+      {view === 'list' ? (
+        <div className="divide-y rounded-lg border">
+          {items.map((p) => (
+            <ProjectRow key={p.id} p={p} archived={archived || p.lifecycle === 'archived'} onTogglePin={onTogglePin} />
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {items.map((p) => (
+            <ProjectTile key={p.id} p={p} archived={archived || p.lifecycle === 'archived'} onTogglePin={onTogglePin} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -397,25 +542,71 @@ function stageChip(p) {
   );
 }
 
-// One project tile — used by both the active grid and the archived section. An
-// archived tile is dimmed and shows a rehydrate hint instead of a live URL (its
-// slug is retained but currently 404s).
-function ProjectTile({ p, archived = false }) {
+// The star that pins a project for THIS user. 44px tap target, filled when set.
+function PinButton({ p, onTogglePin }) {
   return (
-    <Card className={`min-w-0${archived ? ' opacity-75' : ''}`}>
+    <button
+      type="button"
+      onClick={() => onTogglePin(p)}
+      aria-pressed={!!p.pinned}
+      aria-label={p.pinned ? `Unpin ${p.name}` : `Pin ${p.name}`}
+      title={p.pinned ? 'Unpin' : 'Pin to the top'}
+      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-md sm:h-9 sm:w-9 ${p.pinned ? 'text-amber-500' : 'text-muted-foreground hover:text-foreground'}`}
+    >
+      <Star className={`h-4 w-4 ${p.pinned ? 'fill-current' : ''}`} />
+    </button>
+  );
+}
+
+// Team, age and spend — the three numbers that make a card worth scanning.
+// Wraps rather than overflows; every value degrades to "—" when unknown.
+function ProjectMeta({ p }) {
+  const members = p.members || [];
+  const names = members.map((m) => m.username).filter(Boolean);
+  const teamTitle = names.length > 0 ? names.join(', ') : 'No members yet';
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+      <span className="inline-flex items-center gap-1 min-w-0" title={teamTitle}>
+        <Users className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">
+          {members.length === 0
+            ? 'No members'
+            : `${members.length} member${members.length === 1 ? '' : 's'}${names.length > 0 ? ` · ${names.slice(0, 2).join(', ')}${names.length > 2 ? ` +${names.length - 2}` : ''}` : ''}`}
+        </span>
+      </span>
+      <span className="inline-flex items-center gap-1" title={p.created_at ? `Started ${new Date(p.created_at).toLocaleString()}` : undefined}>
+        <CalendarDays className="h-3.5 w-3.5 shrink-0" />
+        {ageLabel(p.created_at)}
+      </span>
+      <span className="inline-flex items-center gap-1" title="Lifetime AI spend on this project">
+        <Wallet className="h-3.5 w-3.5 shrink-0" />
+        {costLabel(p.cost_cents)}
+      </span>
+    </div>
+  );
+}
+
+// One project card — used by both the active grid and the archived section. An
+// archived card is dimmed and shows a rehydrate hint instead of a live URL (its
+// slug is retained but currently 404s).
+function ProjectTile({ p, archived = false, onTogglePin }) {
+  return (
+    <Card className={`flex h-full flex-col min-w-0${archived ? ' opacity-75' : ''}`}>
       <CardHeader className="pb-3">
-        <div className="flex items-start justify-between gap-2 min-w-0">
-          <CardTitle className="truncate text-base">{p.name}</CardTitle>
-          <span className="flex flex-wrap items-center justify-end gap-1 shrink-0">
-            {!archived ? stageChip(p) : null}
-            {statusChip(p.status, p.flagged)}
-          </span>
+        <div className="flex items-start gap-2 min-w-0">
+          <div className="min-w-0 flex-1">
+            <CardTitle className="truncate text-base">
+              <Link to={`/projects/${p.id}`} className="hover:underline">{p.name}</Link>
+            </CardTitle>
+            <span className="mt-1.5 flex flex-wrap items-center gap-1">
+              {!archived ? stageChip(p) : null}
+              {statusChip(p.status, p.flagged)}
+            </span>
+          </div>
+          <PinButton p={p} onTogglePin={onTogglePin} />
         </div>
-        {p.description ? (
-          <CardDescription className="line-clamp-2">{p.description}</CardDescription>
-        ) : null}
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="flex flex-1 flex-col gap-3">
         {archived ? (
           <span className="text-sm text-muted-foreground">Archived — open to rehydrate the same URL.</span>
         ) : p.url ? (
@@ -431,12 +622,55 @@ function ProjectTile({ p, archived = false }) {
         ) : (
           <span className="text-sm text-muted-foreground">URL pending…</span>
         )}
-        <div>
-          <Button asChild variant="outline" size="sm" className="h-9">
+        <ProjectMeta p={p} />
+        <div className="mt-auto flex items-center justify-between gap-2 pt-1">
+          <span className="truncate text-xs text-muted-foreground">{agoLabel(p.last_activity_at)}</span>
+          <Button asChild variant="outline" size="sm" className="h-9 shrink-0">
             <Link to={`/projects/${p.id}`}>Open</Link>
           </Button>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+// The same project as a dense row — the list view, for installs with enough
+// projects that a grid becomes a scroll. Stacks on <sm like every other row.
+function ProjectRow({ p, archived = false, onTogglePin }) {
+  return (
+    <div className={`flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between${archived ? ' opacity-75' : ''}`}>
+      <div className="flex min-w-0 flex-1 items-start gap-2">
+        <PinButton p={p} onTogglePin={onTogglePin} />
+        <div className="min-w-0 flex-1 space-y-1">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <Link to={`/projects/${p.id}`} className="truncate font-medium hover:underline">{p.name}</Link>
+            {!archived ? stageChip(p) : null}
+            {statusChip(p.status, p.flagged)}
+          </div>
+          {archived ? (
+            <span className="block text-xs text-muted-foreground">Archived — open to rehydrate the same URL.</span>
+          ) : p.url ? (
+            <a
+              href={p.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-primary hover:underline break-all"
+            >
+              {p.url.replace(/^https:\/\//, '')}
+              <ExternalLink className="h-3 w-3 shrink-0" />
+            </a>
+          ) : (
+            <span className="block text-xs text-muted-foreground">URL pending…</span>
+          )}
+          <ProjectMeta p={p} />
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-3">
+        <span className="hidden text-xs text-muted-foreground md:inline">{agoLabel(p.last_activity_at)}</span>
+        <Button asChild variant="outline" size="sm" className="h-9">
+          <Link to={`/projects/${p.id}`}>Open</Link>
+        </Button>
+      </div>
+    </div>
   );
 }

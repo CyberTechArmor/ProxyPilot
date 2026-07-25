@@ -1161,6 +1161,10 @@ export const api = {
       body: JSON.stringify({ name, description, parent_domain_id, design_preset, lbp_project_id }),
     }),
   mock2ProjectProvisionStatus: (id) => request(`/mock2/projects/${id}/provision-status`),
+  // Pin/unpin a project for the current user — a personal favourite that floats
+  // the card to the top of the Projects list, not a shared flag.
+  mock2PinProject: (id, pinned) =>
+    request(`/mock2/projects/${id}/pin`, { method: 'PUT', body: JSON.stringify({ pinned }) }),
   mock2RotateProjectSlug: (id) => request(`/mock2/projects/${id}/rotate-slug`, { method: 'POST' }),
   mock2SetProjectMember: (id, { user_id, role }) =>
     request(`/mock2/projects/${id}/members`, { method: 'POST', body: JSON.stringify({ user_id, role }) }),

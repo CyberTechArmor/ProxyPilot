@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2, MapPin, X, Send, Sparkle } from 'lucide-react';
+import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2, MapPin, X, Send, Sparkle, MousePointer2 } from 'lucide-react';
 
 const MAX_PREVIEW_PINS = 8;
 
@@ -33,19 +33,32 @@ function describeEl(el) {
 // bridge resolved the tapped element (el), reference it by component/source so
 // the build knows exactly what to change; otherwise fall back to % coordinates
 // of the visible preview.
+// Pins are grouped by the SCREEN they were dropped on. Reviewing an app means
+// walking it — dashboard, then settings, then a detail page — and a flat list
+// that says "the screen currently shown in the preview" is actively wrong the
+// moment a second screen is involved: it points every fix at one page.
 function composePreviewAnnotation(src, pins, { hasImage = false, elementAware = false } = {}) {
-  const lines = pins
-    .map((p, i) => {
-      if (!p.note.trim()) return null;
+  const noted = pins.filter((p) => p.note.trim());
+  if (!noted.length) return '';
+  const order = [];
+  for (const p of noted) { const k = p.page || '/'; if (!order.includes(k)) order.push(k); }
+  const numberOf = (p) => noted.indexOf(p) + 1;
+  const blocks = order.map((page) => {
+    const mine = noted.filter((p) => (p.page || '/') === page);
+    const lines = mine.map((p) => {
       const target = p.el ? describeEl(p.el) : `at ${p.x}% from the left, ${p.y}% from the top of the visible preview`;
-      return `${i + 1}. Pin ${i + 1} → ${target}: ${p.note.trim()}`;
-    })
-    .filter(Boolean);
+      const down = p.el?.scrolled && p.el?.pageY != null ? ` (${p.el.pageY}% down the full page — the operator had scrolled)` : '';
+      return `${numberOf(p)}. Pin ${numberOf(p)} → ${target}${down}: ${p.note.trim()}`;
+    });
+    const title = mine.find((p) => p.el?.title)?.el?.title;
+    return `On ${page}${title ? ` (${title})` : ''}:\n${lines.join('\n')}`;
+  });
   const how = elementAware
     ? 'each pin resolves to the actual element/component that was tapped'
     : 'pins are a percentage of the visible preview area';
   const img = hasImage ? ' A screenshot with the numbered pins burned in is attached.' : '';
-  return `Annotated the live preview (${src}) — the numbered pins mark the exact spots on the screen currently shown in the preview (${how}).${img}\n${lines.join('\n')}\nApply exactly these changes at the marked spots; change nothing else.`;
+  const scope = order.length > 1 ? `${order.length} screens of the live app` : `the live preview (${src})`;
+  return `Annotated ${scope} — the numbered pins mark the exact spots (${how}).${img}\n\n${blocks.join('\n\n')}\n\nApply exactly these changes at the marked spots; change nothing else.`;
 }
 
 // Capture the visible preview via the browser's tab-snapshot (getDisplayMedia),
@@ -103,6 +116,12 @@ async function capturePreviewImage(iframeEl, pins) {
 export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
   const [annotating, setAnnotating] = useState(false);
+  // Overlay (no-bridge) annotate only: lift the tap catcher so the app scrolls.
+  const [scrollMode, setScrollMode] = useState(false);
+  // Which screen the embedded app is showing, reported by the annotate bridge.
+  // A ref too, because the message handler closes over it.
+  const [currentPage, setCurrentPage] = useState('/');
+  const currentPageRef = useRef('/');
   const [pins, setPins] = useState([]); // { x, y, note, el? } — x/y in % of the visible preview
   const [sending, setSending] = useState(false);
   const [sentAt, setSentAt] = useState(0); // brief "sent" confirmation
@@ -139,6 +158,8 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey, annotating]);
 
+  useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
+
   const appOrigin = (() => { try { return new URL(src).origin; } catch { return '*'; } })();
   const postToApp = (type) => {
     try { frontIframe()?.contentWindow?.postMessage({ __pp: 'annotate-host', type }, appOrigin); } catch { /* cross-origin race */ }
@@ -153,9 +174,14 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
       const d = e.data;
       if (!d || d.__pp !== 'annotate-bridge') return;
       if (d.type === 'ready' || d.type === 'enabled') { bridgeSeenRef.current = true; setMode('bridge'); }
-      else if (d.type === 'pin' && d.pin) {
+      else if (d.type === 'page') {
+        // The app navigated. Pins stay — they belong to the screen they were
+        // dropped on — but only the current screen's badges are drawn.
+        setCurrentPage(d.page || '/');
+      } else if (d.type === 'pin' && d.pin) {
         setPins((cur) => (cur.length >= MAX_PREVIEW_PINS ? cur : [...cur, {
           x: Number(d.pin.x) || 0, y: Number(d.pin.y) || 0, note: '', el: d.pin,
+          page: d.pin.page || currentPageRef.current || '/',
         }]));
       }
     };
@@ -174,13 +200,25 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [annotating]);
 
-  const exitAnnotate = () => { postToApp('disable'); setAnnotating(false); setPins([]); };
-  const addPin = (e) => {
+  const exitAnnotate = () => { postToApp('disable'); setAnnotating(false); setPins([]); setScrollMode(false); };
+  // Overlay mode covers the app with a transparent tap catcher, which also
+  // swallows every scroll gesture — on a phone that strands the operator at the
+  // top of the page with no way to reach what they wanted to pin. Two escapes:
+  // a Scroll toggle that lifts the overlay entirely, and a movement threshold
+  // so a drag that does land on the overlay never leaves a stray pin.
+  const overlayPress = useRef(null);
+  const onOverlayDown = (e) => { overlayPress.current = { x: e.clientX, y: e.clientY, t: Date.now() }; };
+  const onOverlayUp = (e) => {
+    const p = overlayPress.current;
+    overlayPress.current = null;
+    if (!p) return;
+    if (Math.abs(e.clientX - p.x) > 10 || Math.abs(e.clientY - p.y) > 10) return;
+    if (Date.now() - p.t > 800) return;
     if (pins.length >= MAX_PREVIEW_PINS) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = Math.round(((e.clientX - rect.left) / rect.width) * 1000) / 10;
     const y = Math.round(((e.clientY - rect.top) / rect.height) * 1000) / 10;
-    setPins((cur) => [...cur, { x, y, note: '' }]);
+    setPins((cur) => [...cur, { x, y, note: '', page: currentPageRef.current || '/' }]);
   };
   const setNote = (i, note) => setPins((cur) => cur.map((p, j) => (j === i ? { ...p, note } : p)));
   const removePin = (i) => setPins((cur) => cur.filter((_, j) => j !== i));
@@ -268,12 +306,27 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
         </div>
       </div>
       {annotating ? (
-        <p className="flex items-center gap-1.5 border-b bg-primary/10 px-3 py-1.5 text-[11px] text-foreground shrink-0">
+        <p className="flex flex-wrap items-center gap-1.5 border-b bg-primary/10 px-3 py-1.5 text-[11px] text-foreground shrink-0">
           {elementAware
-            ? <><Sparkle className="h-3.5 w-3.5 text-primary shrink-0" /> Element-aware: tap the app and each pin captures the exact component. Write what should change, then send.</>
+            ? <><Sparkle className="h-3.5 w-3.5 text-primary shrink-0" /> Element-aware: tap the app and each pin captures the exact component. Scroll the app freely — only a tap pins.</>
             : mode === 'probing'
               ? <><Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" /> Connecting to the app…</>
               : <><MapPin className="h-3.5 w-3.5 text-primary shrink-0" /> Tap the preview to drop a pin, then write what should change. (This app has no annotate bridge yet — rebuild to map pins to components.)</>}
+          {/* Overlay mode only. The tap catcher sits over the app and eats
+              scrolling with it, so reaching anything below the fold needs an
+              explicit way to hand the gestures back to the app. Bridge mode
+              never needs this — the app itself stays interactive. */}
+          {overlayActive || (annotating && !elementAware && mode !== 'probing') ? (
+            <button
+              type="button"
+              onClick={() => setScrollMode((v) => !v)}
+              aria-pressed={scrollMode}
+              className={`ml-auto inline-flex min-h-[32px] items-center gap-1 rounded-md border px-2 ${scrollMode ? 'border-primary bg-primary text-primary-foreground' : 'bg-background'}`}
+              title={scrollMode ? 'Back to dropping pins' : 'Scroll the app to reach what you want to pin'}
+            >
+              {scrollMode ? <><MapPin className="h-3.5 w-3.5" /> Pin</> : <><MousePointer2 className="h-3.5 w-3.5" /> Scroll</>}
+            </button>
+          ) : null}
         </p>
       ) : null}
       <div className="relative flex-1 min-h-0 overflow-hidden bg-background">
@@ -301,7 +354,7 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
                 marginLeft: width === 'mobile' ? -195 : 0,
                 opacity: id === frontId ? 1 : 0,
                 transition: 'opacity 200ms ease',
-                pointerEvents: id === frontId && !overlayActive ? 'auto' : 'none',
+                pointerEvents: id === frontId && (!overlayActive || scrollMode) ? 'auto' : 'none',
               }}
               sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-modals"
             />
@@ -309,10 +362,13 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
         })}
         {/* Coordinate overlay — only in fallback (no bridge). In bridge mode the
             iframe stays interactive so the in-app bridge receives the taps. */}
-        {overlayActive ? (
+        {overlayActive && !scrollMode ? (
           <div
             className="absolute inset-0 cursor-crosshair"
-            onClick={addPin}
+            style={{ touchAction: 'none' }}
+            onPointerDown={onOverlayDown}
+            onPointerUp={onOverlayUp}
+            onPointerCancel={() => { overlayPress.current = null; }}
             role="button"
             aria-label="Tap to add an annotation pin on the preview"
             tabIndex={0}
@@ -322,7 +378,7 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
             in BOTH modes (bridge pins come from the app; overlay pins from taps). */}
         {annotating ? (
           <div className="pointer-events-none absolute inset-0">
-            {pins.map((p, i) => (
+            {pins.map((p, i) => (p.page && p.page !== currentPage ? null : (
               <span
                 key={i}
                 className="absolute flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white ring-2 ring-white shadow"
@@ -330,7 +386,7 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
               >
                 {i + 1}
               </span>
-            ))}
+            )))}
           </div>
         ) : null}
       </div>

@@ -354,20 +354,30 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // Annotating a composer ATTACHMENT (tap its thumbnail): index into
   // attach.images; the dialog hands back the pinned image + notes.
   const [annotateAttachIdx, setAnnotateAttachIdx] = useState(null);
-  const applyAnnotation = ({ text, image }) => {
+  const applyAnnotation = ({ text, image, images }) => {
     const idx = annotateAttachIdx;
     setAnnotateAttachIdx(null);
     if (idx == null) return;
+    const list = images?.length ? images : (image ? [image] : []);
     try {
-      const bytes = Uint8Array.from(atob(image.data), (c) => c.charCodeAt(0));
-      const file = new File([bytes], image.name || 'annotated.png', { type: image.media_type || 'image/png' });
-      if (typeof attach.replaceAt === 'function') attach.replaceAt(idx, file);
-      else { attach.remove(idx); attach.addFiles([file]); }
+      const files = list.map((im) => {
+        const bytes = Uint8Array.from(atob(im.data), (c) => c.charCodeAt(0));
+        return new File([bytes], im.name || 'annotated.png', { type: im.media_type || 'image/png' });
+      });
+      if (!files.length) return;
+      // The first annotated image REPLACES the attachment it came from; any
+      // further screens are additions, not replacements.
+      if (typeof attach.replaceAt === 'function') attach.replaceAt(idx, files[0]);
+      else { attach.remove(idx); attach.addFiles([files[0]]); }
+      if (files.length > 1) attach.addFiles(files.slice(1));
     } catch { /* keep the original attachment on a decode failure */ }
     setInstruction((cur) => (cur && cur.trim() ? `${cur}\n${text}` : text));
   };
-  const sendAnnotation = async ({ text, image }) => {
-    await startBuild('quick', { skipSplit: true, skipSuggest: true, textOverride: text, extraImages: [image] });
+  // One annotated image per pinned screen — a multi-page annotation must not
+  // arrive with only the first screen's picture attached to its instructions.
+  const sendAnnotation = async ({ text, image, images }) => {
+    const list = images?.length ? images : (image ? [image] : []);
+    await startBuild('quick', { skipSplit: true, skipSuggest: true, textOverride: text, extraImages: list });
   };
 
   const saveSuggestMode = async (m) => {

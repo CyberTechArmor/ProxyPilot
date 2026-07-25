@@ -9,7 +9,8 @@
 // are audit-logged; delete additionally requires a fresh sudo grant.
 
 import dns from 'dns/promises';
-import { Router } from 'express';
+import fs from 'node:fs';
+import { Router, raw as expressRaw } from 'express';
 import { z } from 'zod';
 import { requireSudo, requireAdminOrPermission } from '../middleware/auth.js';
 
@@ -247,6 +248,8 @@ import { buildCheckpointScript } from './template.js';
 import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback, listCycleActivity } from './cycle-events.js';
 import { listKeyRows, getKeyRow, upsertKey, deleteKey, describeKeySource } from './project-keys.js';
 import { KEY_PROVIDERS, canManageKey, visibleKeyRows, publicKeyShape } from './project-keys-logic.js';
+import { listAssets, getAsset, assetFilePath, addImage, addContent, updateAsset, removeAsset } from './project-assets.js';
+import { ASSET_TAGS, MAX_ASSET_BYTES, summarize } from './project-assets-logic.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages, getMessage, getChat, insertMessage } from './chats.js';
 import {
@@ -1215,6 +1218,95 @@ export function createMock2Router() {
     deleteKey(row.id);
     logAudit(userId, 'MOCK2_PROJECT_API_KEY_DELETED', 'mock2_project', project.id,
       { scope: row.scope, provider: row.provider, key_hint: row.key_hint || null, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    res.json({ deleted: true });
+  });
+
+  // ---- project asset library ----
+  //
+  // Images and content blocks an operator collects for a project — logos,
+  // screenshots, reference shots, copy, brand notes. Surfaced in Flightdeck as
+  // a chat-shaped feed, and handed to the build harness as context so a build
+  // can be told "use this logo" instead of having it described in prose.
+  //
+  // ORDER: every literal path below is registered before the parametric
+  // '/assets/:assetId', so ".../assets/context" is not read as an asset id.
+
+  router.get('/projects/:id/assets', requireMock2Role('viewer'), (req, res) => {
+    const assets = listAssets(req.mock2Project.id);
+    res.json({ assets, tags: ASSET_TAGS, summary: summarize(assets), limits: { maxBytes: MAX_ASSET_BYTES } });
+  });
+
+  // Add a content block (copy, brand voice, "about this app"). JSON body.
+  router.post('/projects/:id/assets/content', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const { name, body, tag } = req.body || {};
+    const out = addContent({ projectId: project.id, name, body, tag, createdBy: req.user.id });
+    if (!out.ok) return res.status(out.code === 'NOT_FOUND' ? 404 : 400).json({ error: out.message, code: out.code });
+    logAudit(req.user.id, 'MOCK2_PROJECT_ASSET_ADDED', 'mock2_project', project.id,
+      { kind: 'content', tag: out.asset.tag, name: out.asset.name }, req.ip);
+    res.status(201).json({ asset: out.asset });
+  });
+
+  // Upload an image. Raw bytes in the body (X-Filename carries the name), the
+  // same shape the base app uses — multipart would need a parser dependency for
+  // a single-file upload.
+  router.post('/projects/:id/assets/image',
+    requireMock2Role('editor'), refuseIfArchived,
+    expressRaw({ type: () => true, limit: MAX_ASSET_BYTES }),
+    (req, res) => {
+      const project = req.mock2Project;
+      const buffer = Buffer.isBuffer(req.body) ? req.body : null;
+      if (!buffer || !buffer.length) return res.status(400).json({ error: 'No image data received.', code: 'EMPTY' });
+      const out = addImage({
+        projectId: project.id,
+        name: req.get('X-Filename') || 'image.png',
+        buffer,
+        tag: req.get('X-Asset-Tag') || null,
+        body: req.get('X-Asset-Caption') ? decodeURIComponent(req.get('X-Asset-Caption')) : '',
+        width: Number(req.get('X-Asset-Width')) || null,
+        height: Number(req.get('X-Asset-Height')) || null,
+        createdBy: req.user.id,
+      });
+      if (!out.ok) {
+        const status = out.code === 'TOO_LARGE' ? 413 : (out.code === 'UNSUPPORTED_TYPE' ? 415 : 400);
+        return res.status(status).json({ error: out.message, code: out.code });
+      }
+      logAudit(req.user.id, 'MOCK2_PROJECT_ASSET_ADDED', 'mock2_project', project.id,
+        { kind: 'image', tag: out.asset.tag, name: out.asset.name, size: out.asset.size }, req.ip);
+      res.status(201).json({ asset: out.asset });
+    });
+
+  // Serve an image's bytes. Viewer-gated like every other project read — these
+  // are operator working files, not public site furniture.
+  router.get('/projects/:id/assets/:assetId/raw', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const asset = getAsset(project.id, req.params.assetId);
+    if (!asset || asset.kind !== 'image') return res.status(404).json({ error: 'asset not found' });
+    const full = assetFilePath(project.id, req.params.assetId);
+    if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'asset file missing' });
+    res.setHeader('Content-Type', asset.mime || 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // An uploaded SVG is script-bearing; sandbox + no-sniff make it inert when
+    // it is rendered in an <img> and when it is navigated to directly.
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    fs.createReadStream(full).pipe(res);
+  });
+
+  router.patch('/projects/:id/assets/:assetId', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const { name, body, tag, pinned } = req.body || {};
+    const out = updateAsset({ projectId: project.id, id: req.params.assetId, name, body, tag, pinned });
+    if (!out.ok) return res.status(out.code === 'NOT_FOUND' ? 404 : 400).json({ error: out.message, code: out.code });
+    res.json({ asset: out.asset });
+  });
+
+  router.delete('/projects/:id/assets/:assetId', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const out = removeAsset(project.id, req.params.assetId);
+    if (!out.ok) return res.status(404).json({ error: out.message });
+    logAudit(req.user.id, 'MOCK2_PROJECT_ASSET_DELETED', 'mock2_project', project.id,
+      { kind: out.asset.kind, name: out.asset.name }, req.ip);
     res.json({ deleted: true });
   });
 

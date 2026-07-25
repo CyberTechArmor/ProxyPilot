@@ -54,6 +54,8 @@ import {
   buildDistillSystemPrompt, buildDistillUserTurn, cleanDistilledInstruction,
 } from './prepass-logic.js';
 import { insertCycleEvent, listRecentDownNotes } from './cycle-events.js';
+import { listAssets } from './project-assets.js';
+import { buildAssetSection } from './project-assets-logic.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
 } from './authorizations.js';
@@ -933,6 +935,11 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // flagged mistake is corrected once, not re-flagged build after build.
   let feedbackSection = '';
   try { feedbackSection = buildFeedbackSection(listRecentDownNotes(projectId)); } catch { /* optional */ }
+  // Reference material the operator collected for this project (logos, copy,
+  // brand notes, screenshots). Subordinate to the instruction, and empty when
+  // the library is — a project with no assets pays nothing for this.
+  let assetSection = '';
+  try { assetSection = buildAssetSection(listAssets(projectId)); } catch { /* optional */ }
   // MVP-path floor (project-32 ratchet): the fast path skips the rule
   // interview, and exactly the rules an interview would set (editability,
   // status mutability, deletion policy) are what shipped missing. Fast
@@ -940,7 +947,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // the inventory/instruction still outrank it where they explicitly
   // deviate. Full builds are unchanged (their interview owns the rules).
   const rulesFloor = mvpBuild ? crudRulesFloorSection() : '';
-  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${rulesFloor}${feedbackSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
+  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${rulesFloor}${feedbackSection}${assetSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
   if (taskImages.length) logEvent('attachments', { role: 'user', content: `${taskImages.length} image attachment(s) included with the task`, meta: { count: taskImages.length } });
   // Stub-registry context (B.6): EVERY cycle receives a concise global list of
   // unresolved production simulations, so a later instruction-scoped cycle can no

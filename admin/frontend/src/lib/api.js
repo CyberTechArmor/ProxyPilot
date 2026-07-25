@@ -1444,6 +1444,40 @@ export const api = {
     request(`/mock2/projects/${id}/api-keys`, { method: 'POST', body: JSON.stringify(data) }),
   mock2DeleteProjectApiKey: (id, keyId) =>
     request(`/mock2/projects/${id}/api-keys/${keyId}`, { method: 'DELETE' }),
+  // ---- Project asset library (Flightdeck → Assets) ----
+  // Images and content blocks the operator collects for a project. The build
+  // harness receives these as reference context on every cycle.
+  mock2ProjectAssets: (id) => request(`/mock2/projects/${id}/assets`),
+  mock2AddProjectContent: (id, data) =>
+    request(`/mock2/projects/${id}/assets/content`, { method: 'POST', body: JSON.stringify(data) }),
+  mock2UpdateProjectAsset: (id, assetId, data) =>
+    request(`/mock2/projects/${id}/assets/${assetId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  mock2DeleteProjectAsset: (id, assetId) =>
+    request(`/mock2/projects/${id}/assets/${assetId}`, { method: 'DELETE' }),
+  mock2ProjectAssetRawUrl: (id, assetId) => `/api/mock2/projects/${id}/assets/${assetId}/raw`,
+  // Raw-bytes upload: request() always JSON-stringifies, so this goes direct.
+  // Metadata rides in headers because the body IS the file.
+  mock2UploadProjectImage: async (id, file, { tag, caption, width, height } = {}) => {
+    const csrf = readCookie('pp_csrf');
+    const headers = {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-Filename': file.name || 'image.png',
+      ...(csrf ? { 'X-CSRF-Token': csrf } : {}),
+      ...(tag ? { 'X-Asset-Tag': tag } : {}),
+      // A caption may contain any character; the header must stay ASCII-safe.
+      ...(caption ? { 'X-Asset-Caption': encodeURIComponent(caption) } : {}),
+      ...(width ? { 'X-Asset-Width': String(width) } : {}),
+      ...(height ? { 'X-Asset-Height': String(height) } : {}),
+    };
+    const response = await fetch(`${API_BASE}/mock2/projects/${id}/assets/image`, {
+      method: 'POST', credentials: 'include', headers, body: file,
+    });
+    let data = {};
+    try { data = await response.json(); } catch { /* non-JSON error body */ }
+    if (!response.ok) throw new ApiError(data.error || 'Upload failed', response.status, data);
+    return data;
+  },
+
   mock2GetCycleLog: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}/log`),
   mock2SubmitCycleFeedback: (id, cycleId, body) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/feedback`, { method: 'POST', body: JSON.stringify(body) }),

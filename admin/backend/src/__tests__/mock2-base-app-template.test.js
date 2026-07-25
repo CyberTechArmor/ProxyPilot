@@ -115,10 +115,17 @@ test('the default design brief reaches the AI with its precedence intact', () =>
   // Its actual content, not just a pointer.
   assert.match(ds, /--blue-600:#1466b8/);
 
-  // The one deliberate reconciliation: the brief is light-only, but the mockup
-  // contract requires a dark variant + toggle (a machine check). The injected
-  // text must resolve that rather than leave the AI to fail the gate.
-  assert.match(ds, /derive the dark variant/);
+  // The one deliberate reconciliation: the brief was written light-only, but the
+  // mockup contract requires a dark variant + toggle (a machine check). The
+  // injected text must resolve that rather than leave the AI to fail the gate,
+  // and must point at the base app's implementation instead of asking every
+  // build to re-derive the mapping.
+  assert.match(ds, /dark variant/);
+  assert.match(ds, /\[data-theme="dark"\]/, 'the brief must name the mechanism, not just the requirement');
+  // The two rules that are easy to get wrong; both are pinned by their own
+  // tests below, and the brief is where a build actually reads them.
+  assert.match(ds, /var\(--surface\)/);
+  assert.match(ds, /before the stylesheet/);
 });
 
 test('the dark-variant machine check still binds (the brief must not have relaxed it)', () => {

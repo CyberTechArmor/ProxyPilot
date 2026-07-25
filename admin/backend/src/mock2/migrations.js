@@ -1581,4 +1581,48 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Project asset library — images and content blocks an operator collects
+    // for a project (logos, screenshots, reference shots, copy, brand notes).
+    // Managed from Flightdeck's Assets panel and handed to the build harness as
+    // context, so a build can be told "use this logo" instead of describing it.
+    //
+    // Bytes live on disk under the project's asset directory, not in SQLite:
+    // a 5 MB screenshot in a row makes every SELECT * on this table expensive,
+    // and the WAL grows without bound. `stored_as` is the on-disk name.
+    //
+    // kind: 'image' | 'content'. A content row carries `body` and no file; an
+    // image row carries a file and an optional caption in `body`. One table
+    // because the panel is a single chronological feed — splitting them would
+    // mean merging two ordered queries on every render.
+    version: 546,
+    name: 'mock2_project_assets',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_project_assets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'image',
+          name TEXT,
+          body TEXT,
+          mime TEXT,
+          size INTEGER,
+          width INTEGER,
+          height INTEGER,
+          stored_as TEXT,
+          tag TEXT,
+          pinned INTEGER NOT NULL DEFAULT 0,
+          created_by TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          CHECK (kind IN ('image', 'content')),
+          CHECK ((kind = 'image' AND stored_as IS NOT NULL) OR (kind = 'content' AND body IS NOT NULL))
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_project_assets_project
+          ON mock2_project_assets (project_id, id);
+        CREATE INDEX IF NOT EXISTS idx_mock2_project_assets_pinned
+          ON mock2_project_assets (project_id, pinned) WHERE pinned = 1;
+      `);
+    },
+  },
 ];

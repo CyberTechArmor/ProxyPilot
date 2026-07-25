@@ -5,11 +5,12 @@ import ProjectTerminal from './ProjectTerminal';
 import { PreviewPanel } from './ProjectPreview';
 import FlightdeckFileTree from './FlightdeckFileTree';
 import FlightdeckEditor from './FlightdeckEditor';
+import ProjectAssets from './ProjectAssets';
 import { WORKSPACE_NAME, flightdeckLayoutKey, readJsonPref, writeJsonPref } from '@/lib/flightdeck';
 import { Button } from '@/components/ui/button';
 import {
   Files, TerminalSquare, MessagesSquare, Code2, Eye, LayoutPanelLeft,
-  PanelLeftClose, PanelRightClose, StopCircle, PanelBottom, Maximize2, Minimize2, Info, Menu,
+  PanelLeftClose, PanelRightClose, StopCircle, PanelBottom, Maximize2, Minimize2, Info, Menu, Library,
 } from 'lucide-react';
 import { useIsMobile } from '@/hooks/use-media-query';
 
@@ -26,11 +27,14 @@ const NARROW_PANELS = [
   { key: 'chat', label: 'Chat', icon: MessagesSquare },
   { key: 'terminal', label: 'Terminal', icon: TerminalSquare },
   { key: 'preview', label: 'Preview', icon: Eye },
+  { key: 'assets', label: 'Assets', icon: Library },
 ];
 // A phone gets the clean view and nothing else: a file tree, a CodeMirror
 // editor and a PTY are not usable at 360px, and offering them cost a five-way
 // bottom bar plus the dev toggle. Tablets (md–lg) keep the full panel set.
-const PHONE_PANEL_KEYS = ['chat', 'preview'];
+// Assets rides in the clean view (phone AND desktop non-dev): collecting a logo
+// or writing the copy a build should follow is not a developer activity.
+const PHONE_PANEL_KEYS = ['chat', 'preview', 'assets'];
 
 export default function Flightdeck({
   projectId, project, canEdit, isAdmin, previewSrc, provLog, provMessage, onChanged, onBuilt,
@@ -97,6 +101,8 @@ export default function Flightdeck({
   // Center pane: editor vs preview. terminalMax expands the terminal to fill the
   // whole center column (full height) — an option alongside the docked bottom panel.
   const [centerTab, setCenterTab] = useState('editor');
+  // Clean (non-dev) desktop view: preview or the asset library.
+  const [cleanTab, setCleanTab] = useState('preview');
   const [terminalMax, setTerminalMax] = useState(false);
   // Expand the preview to full height (over the terminal's space too).
   const [previewFull, setPreviewFull] = useState(false);
@@ -169,6 +175,7 @@ export default function Flightdeck({
   const terminalPane = online
     ? <ProjectTerminal projectId={projectId} containerName={containerName} defaultOpen fill />
     : <div className="flex items-center justify-center h-full text-sm text-muted-foreground">Start the project to open a terminal.</div>;
+  const assetsPane = <ProjectAssets projectId={projectId} canEdit={canEdit} />;
   const filesPane = <FlightdeckFileTree projectId={projectId} canEdit={canEdit} activePath={activeFilePath} onOpen={openFile} refreshKey={treeRefresh} />;
 
   return (
@@ -234,12 +241,15 @@ export default function Flightdeck({
                 <div className="flex items-center gap-1 px-2 h-8 border-b bg-muted/20 shrink-0">
                   <button onClick={() => setCenterTab('editor')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'editor' ? 'bg-background border' : 'text-muted-foreground'}`}><Code2 className="h-3.5 w-3.5 inline mr-1" />Editor</button>
                   <button onClick={() => setCenterTab('preview')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'preview' ? 'bg-background border' : 'text-muted-foreground'}`}><Eye className="h-3.5 w-3.5 inline mr-1" />Preview</button>
+                  <button onClick={() => setCenterTab('assets')} className={`px-2 py-0.5 text-xs rounded ${centerTab === 'assets' ? 'bg-background border' : 'text-muted-foreground'}`}><Library className="h-3.5 w-3.5 inline mr-1" />Assets</button>
                   <div className="flex-1" />
                   <button onClick={() => setL({ showLeft: !layout.showLeft })} title="Toggle Explorer" className="p-1 rounded hover:bg-muted"><PanelLeftClose className="h-3.5 w-3.5" /></button>
                   <button onClick={() => setL({ showBottom: !layout.showBottom })} title="Toggle Terminal" className="p-1 rounded hover:bg-muted"><PanelBottom className="h-3.5 w-3.5" /></button>
                   <button onClick={() => setL({ showRight: !layout.showRight })} title="Toggle Chat" className="p-1 rounded hover:bg-muted"><PanelRightClose className="h-3.5 w-3.5" /></button>
                 </div>
-                <div className="flex-1 min-h-0">{centerTab === 'editor' ? editorPane : previewPane}</div>
+                <div className="flex-1 min-h-0">
+                  {centerTab === 'editor' ? editorPane : centerTab === 'assets' ? assetsPane : previewPane}
+                </div>
                 {layout.showBottom && !(centerTab === 'preview' && previewFull) && (
                   <>
                     <div onMouseDown={onDragStart('bottom')} className="h-1 cursor-row-resize hover:bg-primary/40 shrink-0" />
@@ -271,7 +281,16 @@ export default function Flightdeck({
         // terminal; the preview fills the space (its own toolbar keeps Annotate
         // and Open App).
         <div className="flex flex-1 min-h-0">
-          <div className="flex-1 min-w-0 min-h-0 p-2">{previewPane}</div>
+          <div className="flex-1 min-w-0 min-h-0 flex flex-col">
+            {/* Preview / Assets. Collecting a logo or writing the copy a build
+                should follow is not a developer activity, so Assets belongs in
+                the clean view too — not only behind the dev toggle. */}
+            <div className="flex items-center gap-1 px-2 h-8 shrink-0">
+              <button onClick={() => setCleanTab('preview')} className={`px-2 py-0.5 text-xs rounded ${cleanTab === 'preview' ? 'bg-background border' : 'text-muted-foreground'}`}><Eye className="h-3.5 w-3.5 inline mr-1" />Preview</button>
+              <button onClick={() => setCleanTab('assets')} className={`px-2 py-0.5 text-xs rounded ${cleanTab === 'assets' ? 'bg-background border' : 'text-muted-foreground'}`}><Library className="h-3.5 w-3.5 inline mr-1" />Assets</button>
+            </div>
+            <div className="flex-1 min-h-0 px-2 pb-2">{cleanTab === 'assets' ? assetsPane : previewPane}</div>
+          </div>
           <div onMouseDown={onDragStart('right')} className="w-1 cursor-col-resize hover:bg-primary/40 shrink-0" />
           <div style={{ width: layout.right }} className="shrink-0 border-l min-h-0 flex flex-col overflow-hidden">{chatPane}</div>
         </div>
@@ -304,6 +323,7 @@ export default function Flightdeck({
               {cur === 'chat' && chatPane}
               {cur === 'terminal' && <div className="h-full bg-black">{terminalPane}</div>}
               {cur === 'preview' && previewPane}
+              {cur === 'assets' && assetsPane}
             </div>
             <div className={`grid border-t shrink-0 ${cols}`}>
               {isPhone && onOpenNav ? (

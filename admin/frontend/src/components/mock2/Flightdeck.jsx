@@ -41,12 +41,30 @@ export default function Flightdeck({
   const [activity, setActivity] = useState([]);
   const active = !!cycle && ['queued', 'running', 'awaiting_admin', 'paused'].includes(cycle.status);
 
+  // Activity is delta-polled: we send the highest seq we hold and append what
+  // comes back, so a 3s poll ships only new rows instead of the last 40 each
+  // time. A cycle change (new build) resets the watermark and the list.
+  const activitySinceRef = useRef(null);
+  const activityCycleRef = useRef(null);
   const load = useCallback(async () => {
     if (!online) return;
     try {
-      const r = await api.mock2GetLatestCycle(projectId);
+      const r = await api.mock2GetLatestCycle(projectId, activitySinceRef.current);
       setCycle(r.cycle || null); setJob(r.job || null); setBuildQueue(r.build_queue || []);
-      setActivity(Array.isArray(r.activity) ? r.activity : []);
+      const cycleId = r.cycle?.id ?? null;
+      const fresh = Array.isArray(r.activity) ? r.activity : [];
+      if (activityCycleRef.current !== cycleId) {
+        // New (or no) cycle — start its stream clean.
+        activityCycleRef.current = cycleId;
+        activitySinceRef.current = null;
+        setActivity(fresh);
+      } else if (fresh.length) {
+        setActivity((cur) => {
+          const seen = new Set(cur.map((a) => a.seq));
+          return [...cur, ...fresh.filter((a) => !seen.has(a.seq))].slice(-200);
+        });
+      }
+      if (r.activity_since != null) activitySinceRef.current = r.activity_since;
     } catch { /* transient */ }
   }, [projectId, online]);
   useEffect(() => { load(); }, [load]);

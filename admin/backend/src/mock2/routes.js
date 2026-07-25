@@ -2915,13 +2915,27 @@ export function createMock2Router() {
     // in Build History afterwards.
     const cycleActive = cycle && ['queued', 'running', 'awaiting_admin', 'paused'].includes(cycle.status);
     let activity = [];
-    if (cycleActive) { try { activity = listCycleActivity(cycle.id, { limit: 40 }); } catch { /* best-effort */ } }
+    // Delta polling: the client sends the highest seq it already has (?since=),
+    // so a 3s poll ships only what's new instead of re-sending the last 40 rows
+    // every time. No `since` (first poll, or an older client) returns the tail
+    // as before. `activity_since` tells the client the watermark to send next.
+    const sinceRaw = Number(req.query?.since);
+    const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : null;
+    let activityWatermark = since;
+    if (cycleActive) {
+      try {
+        activity = listCycleActivity(cycle.id, { limit: 40, since });
+        const lastSeq = activity.length ? activity[activity.length - 1].seq : null;
+        if (lastSeq != null) activityWatermark = lastSeq;
+      } catch { /* best-effort */ }
+    }
     res.json({
       cycle: cycle ? { ...publicCycleShape(cycle), feedback: getCycleFeedback(cycle.id) } : null,
       job: cycle ? getCycleJobStatus(cycle.id) : null,
       typical_duration: typical,
       build_queue: buildQueue,
       activity,
+      activity_since: activityWatermark,
       // Pending one-time authorization requests (Part 4) so the blocked card can show
       // them + an admin Grant/Deny without a separate fetch.
       authorizations: listOpenAuthorizations(req.mock2Project.id).map(publicAuthorizationShape),

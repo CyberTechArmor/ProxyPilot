@@ -67,6 +67,7 @@ import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
   RUNNER_TOOLS, runnerToolsForCycle, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
+  groupToolCallsForExecution,
   buildRunnerSystemPrompt, buildRunnerTask, buildFeedbackSection, classifyTurn, describeRunnerStep, STALL_NUDGE, formatAcceptanceBlock,
   buildCompletionSummaryBody,
   softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS,
@@ -1742,14 +1743,26 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     }
 
     // 6) Execute the requested tools; feed results back.
+    //    Consecutive READ-ONLY calls (read_file/list_dir/search_workspace/…) run
+    //    CONCURRENTLY — they only observe the tree, so results are identical to
+    //    running them one at a time, but a batch of reads costs one container
+    //    round-trip's latency instead of N. Everything that writes, shells out,
+    //    runs gates, or ends the cycle stays strictly serial and in order, and
+    //    results are appended in the model's original order either way.
     let ranGates = false;
-    for (const call of decision.toolCalls) {
-      const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
-      lastGateReports = out.gateReports || lastGateReports;
-      if (out.gateReports) redTestObserved = redTestObserved || batteryHasRedTestGate(out.gateReports);
-      if (call.name === 'run_gates') ranGates = true;
-      transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
-      logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
+    for (const group of groupToolCallsForExecution(decision.toolCalls)) {
+      const outs = group.parallel && group.calls.length > 1
+        ? await Promise.all(group.calls.map((call) => executeTool({ call, cycle, containerName, holder, gateScripts })))
+        : [await executeTool({ call: group.calls[0], cycle, containerName, holder, gateScripts })];
+      for (let i = 0; i < group.calls.length; i++) {
+        const call = group.calls[i];
+        const out = outs[i];
+        lastGateReports = out.gateReports || lastGateReports;
+        if (out.gateReports) redTestObserved = redTestObserved || batteryHasRedTestGate(out.gateReports);
+        if (call.name === 'run_gates') ranGates = true;
+        transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
+        logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
+      }
     }
     // Cost-truth Part 5.2 trigger (a): count CONSECUTIVE red gate batteries so a halt
     // after "the same gate failing twice" can auto-fire a consult (flag-gated).

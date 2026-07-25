@@ -395,7 +395,24 @@ async function callOpenAiCompatible({ provider, apiKey, baseUrl, model, system, 
   });
   return {
     ok: true, text: msg.content || '', toolCalls, stopReason: j.choices?.[0]?.finish_reason || null,
-    usage: { inputTokens: j.usage?.prompt_tokens || 0, outputTokens: j.usage?.completion_tokens || 0 },
+    // OpenAI caches long prompt prefixes AUTOMATICALLY (no cache_control to send)
+    // and reports the hit in prompt_tokens_details.cached_tokens. prompt_tokens
+    // is the TOTAL, cached included — so bill the cached part at the cache-read
+    // rate and only the remainder at full input rate, exactly like the Anthropic
+    // path. Ignoring it (the old behavior) billed cache hits at 1× and reported
+    // zero cache reads, overstating OpenAI cost in the ledger and quota ceilings.
+    // There is no cache-write class here: OpenAI does not charge one.
+    usage: (() => {
+      const prompt = j.usage?.prompt_tokens || 0;
+      const cached = j.usage?.prompt_tokens_details?.cached_tokens || 0;
+      const cacheRead = Math.min(Math.max(cached, 0), prompt);
+      return {
+        inputTokens: prompt - cacheRead,
+        outputTokens: j.usage?.completion_tokens || 0,
+        cacheReadInputTokens: cacheRead,
+        cacheCreationInputTokens: 0,
+      };
+    })(),
   };
 }
 

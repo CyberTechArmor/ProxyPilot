@@ -19,11 +19,15 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
+import { createHash } from 'node:crypto';
 import { sh, b64 } from './host.js';
+import { scaffoldPwaFiles } from './scaffold.js';
 import {
   parseRunContract, deployPlan, deployStepLabel, buildDevServiceUnit,
   execStartForStartCommand, deployFailureMessage, DEPLOY_STEP_TIMEOUTS_MS,
   freeWebPortScript, portHoldersReportScript,
+  newBuildId, sanitizeBuildId, buildIdStampScript, buildStampReportScript, interpretBuildStamp,
+  LEGACY_SW_JS,
 } from './deploy-logic.js';
 import { parseDeclaredEgress } from './egress-logic.js';
 import { updateProject } from './projects.js';
@@ -165,6 +169,23 @@ async function deployProjectUnqueued({
     }
   }
 
+  // 1b) Stamp this deploy's BUILD ID into the PWA plumbing, after the build (so
+  //     the built output is stamped too) and before the restart.
+  //
+  //     This is the fix for the "I deployed but the browser still runs the old
+  //     code" class of failure: a service worker only updates when sw.js's BYTES
+  //     change, and it only drops old cached assets when the cache NAME changes.
+  //     With a hardcoded cache name neither ever happened, so a client could
+  //     serve pre-deploy JS indefinitely while the server served the new build —
+  //     three builds were burned chasing exactly that ghost. Stamping a fresh id
+  //     per deploy changes both, and writes the id where the post-deploy check
+  //     can compare what the CLIENT ran against what the SERVER has.
+  //
+  //     Best-effort by design: a project without these files (an older scaffold)
+  //     is simply left alone — never a deploy failure.
+  await retrofitPwaBuildPlumbing(containerName, appDir).catch(() => {});
+  await stampBuildId(containerName, appDir).catch(() => {});
+
   // 2) Rewrite the systemd unit's ExecStart to the manifest `start` command,
   //    reload, and restart. WantedBy=multi-user.target already persists, so a
   //    later container restart brings the built app back (idempotency point 5).
@@ -229,12 +250,68 @@ async function deployProjectUnqueued({
     return { ok: false, step: 'health', error: deployFailureMessage('health', detail) };
   }
 
-  return { ok: true, step: 'serving' };
+  // The app answers — but does what it serves actually REACH a browser? Read
+  // back the stamped build ids. A stale-risk verdict is reported alongside a
+  // successful deploy (it is a client-cache warning, not a serving failure), so
+  // the operator learns immediately instead of after several "please fix" rounds.
+  const buildStamp = await verifyBuildStamp(containerName, appDir);
+
+  return { ok: true, step: 'serving', buildStamp };
 }
 
 // Record the commit the app is now SERVING (best-effort). Every successful
 // deploy path calls this; the runner's verified-no-op deploy skip compares it
 // to HEAD so committed-but-undeployed work always deploys.
+// stampBuildId — write this deploy's build id into the PWA plumbing (sw.js,
+// build-id.js, build-id.txt) inside the container. The script itself is pure
+// (deploy-logic.buildIdStampScript) so its idempotency is unit-tested.
+export async function stampBuildId(containerName, appDir = '/srv/app', buildId = newBuildId()) {
+  const id = sanitizeBuildId(buildId);
+  const r = await containerSh(containerName, buildIdStampScript(appDir, id), { timeoutMs: 20000 });
+  return { ok: /MOCK2_BUILD_ID:/.test(r.stdout || ''), buildId: id };
+}
+
+// retrofitPwaBuildPlumbing — bring a project built BEFORE this instrumentation
+// up to date, on its next deploy, without ever clobbering a customization.
+//
+// Two rules, matching the auth wiring's keep-existing semantics:
+//   * build-id.js / build-id.txt are ADDITIVE — written only when absent.
+//   * public/sw.js is replaced ONLY when it is byte-identical to the known
+//     legacy worker (the hardcoded-cache version that can never update). A
+//     worker a build has customized is left alone; verifyBuildStamp then
+//     reports the residual stale risk rather than silently overwriting work.
+export async function retrofitPwaBuildPlumbing(containerName, appDir = '/srv/app') {
+  const legacyHash = createHash('sha256').update(LEGACY_SW_JS, 'utf8').digest('hex');
+  const { swJs: CURRENT_SW_JS, buildIdJs: BUILD_ID_JS } = scaffoldPwaFiles();
+  const script = `cd '${appDir}' 2>/dev/null || exit 0
+[ -d public ] || exit 0
+[ -f public/build-id.js ] || printf '%s' '${b64(BUILD_ID_JS)}' | base64 -d > public/build-id.js
+[ -f public/build-id.txt ] || printf '%s\n' '${BUILD_ID_PLACEHOLDER}' > public/build-id.txt
+if [ -f public/sw.js ]; then
+  cur=$(sha256sum public/sw.js 2>/dev/null | cut -d' ' -f1)
+  if [ "$cur" = '${legacyHash}' ]; then
+    printf '%s' '${b64(CURRENT_SW_JS)}' | base64 -d > public/sw.js
+    echo MOCK2_SW_RETROFIT
+  fi
+fi
+echo MOCK2_RETROFIT_DONE`;
+  const r = await containerSh(containerName, script, { timeoutMs: 20000 });
+  return { ok: /MOCK2_RETROFIT_DONE/.test(r.stdout || ''), swReplaced: /MOCK2_SW_RETROFIT/.test(r.stdout || '') };
+}
+
+// verifyBuildStamp — read back the stamped ids and judge whether a deploy can
+// actually reach a browser. Never throws and never fails a deploy: it reports,
+// so the cycle can surface "clients may be serving a stale cache" instead of
+// the operator discovering it three builds later.
+export async function verifyBuildStamp(containerName, appDir = '/srv/app') {
+  try {
+    const r = await containerSh(containerName, buildStampReportScript(appDir), { timeoutMs: 15000 });
+    return interpretBuildStamp(r.stdout || '');
+  } catch (err) {
+    return { ok: true, instrumented: false, stale_risk: false, detail: `build-stamp check skipped: ${err?.message || err}` };
+  }
+}
+
 export async function stampDeployedCommit(projectId, containerName, appDir) {
   try {
     const r = await containerSh(containerName, `git -C '${appDir}' rev-parse HEAD 2>/dev/null\n`, { timeoutMs: 30000 });

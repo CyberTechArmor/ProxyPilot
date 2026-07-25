@@ -294,3 +294,118 @@ export function deployFailureMessage(step, detail = '') {
   const trimmed = d.length > 1600 ? `${d.slice(0, 900)}\n… (trimmed) …\n${d.slice(-600)}` : d;
   return `${base}${egressHint}${d ? `: ${trimmed}` : '.'}`;
 }
+
+// ---- build identity (PWA cache correctness) ----
+//
+// A deploy stamps a unique BUILD ID into public/sw.js, public/build-id.js and
+// public/build-id.txt. This is what makes a deploy actually reach the browser:
+// a service worker only updates when sw.js's BYTES change, and it only drops
+// stale assets when the cache NAME changes. A hardcoded cache name did neither,
+// so a client could keep running pre-deploy JS while the server served the new
+// build. Pure so both halves are unit-testable without a container.
+
+export const BUILD_ID_PLACEHOLDER = '__MOCK2_BUILD_ID__';
+// A stamped id: 14-digit UTC timestamp + a short base36 suffix.
+export const BUILD_ID_RE = /^[0-9]{14}-[a-z0-9]{1,4}$/;
+
+// newBuildId — unique per deploy, sortable, and safe inside a JS string literal
+// and a CacheStorage key (digits, dash, lowercase base36 only).
+export function newBuildId(now = new Date(), rand = Math.random()) {
+  const ts = now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 14); // YYYYMMDDhhmmss
+  const suffix = Math.floor(Math.abs(rand) * 1e6).toString(36).slice(0, 4) || '0';
+  return `${ts}-${suffix}`;
+}
+
+// sanitizeBuildId — never let anything but [A-Za-z0-9-] reach a sed expression
+// or a cache name.
+export function sanitizeBuildId(id) {
+  return String(id ?? '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40) || 'unknown';
+}
+
+// buildIdStampScript — the in-container script that re-stamps the id. The sed
+// alternation matches the ORIGINAL placeholder *or* an already-stamped id, so a
+// re-deploy re-stamps correctly instead of only working the first time. Every
+// file is optional: a project from an older scaffold is left untouched rather
+// than failing the deploy.
+// buildStampReportScript — read back what the deploy actually stamped, so the
+// post-deploy check can prove the client-facing plumbing is correct instead of
+// assuming it. Emits three KEY=value lines (missing files report `-`).
+export function buildStampReportScript(appDir) {
+  return `cd '${appDir}' 2>/dev/null || exit 0
+printf 'TXT=%s\\n' "$(cat public/build-id.txt 2>/dev/null | tr -d '\\n' || echo -)"
+printf 'JS=%s\\n' "$(sed -n \"s/.*__APP_BUILD_ID *= *'\\\\([^']*\\\\)'.*/\\\\1/p\" public/build-id.js 2>/dev/null | head -1 || echo -)"
+printf 'SW=%s\\n' "$(sed -n \"s/.*BUILD_ID *= *'\\\\([^']*\\\\)'.*/\\\\1/p\" public/sw.js 2>/dev/null | head -1 || echo -)"`;
+}
+
+// interpretBuildStamp — turn that report into a verdict. PURE.
+//   ok:            all three agree on a real (stamped) id → a deploy reaches clients
+//   instrumented:  the project HAS the build-id plumbing at all
+//   stale_risk:    the plumbing is present but not consistently stamped, which is
+//                  the precondition for "my fix never reached the browser"
+export function interpretBuildStamp(stdout = '') {
+  const get = (k) => {
+    const m = String(stdout).match(new RegExp(`^${k}=(.*)$`, 'm'));
+    const v = m ? m[1].trim() : '';
+    return v && v !== '-' ? v : null;
+  };
+  const txt = get('TXT'); const js = get('JS'); const sw = get('SW');
+  const instrumented = !!(txt || js || sw);
+  if (!instrumented) {
+    return { ok: true, instrumented: false, stale_risk: false, txt, js, sw, detail: 'no build-id plumbing (pre-instrumentation project) — PWA cache staleness cannot be detected here' };
+  }
+  const unstamped = [txt, js, sw].filter((v) => v === BUILD_ID_PLACEHOLDER);
+  if (unstamped.length) {
+    return { ok: false, instrumented: true, stale_risk: true, txt, js, sw, detail: 'build id was never stamped (placeholder still present) — the service worker will not update and clients can serve pre-deploy assets' };
+  }
+  if (!(txt && js && sw)) {
+    return { ok: false, instrumented: true, stale_risk: true, txt, js, sw, detail: `build-id plumbing incomplete (txt=${txt || '-'} js=${js || '-'} sw=${sw || '-'})` };
+  }
+  if (!(txt === js && js === sw)) {
+    return { ok: false, instrumented: true, stale_risk: true, txt, js, sw, detail: `build ids disagree (txt=${txt} js=${js} sw=${sw}) — clients may run a different build than the server serves` };
+  }
+  return { ok: true, instrumented: true, stale_risk: false, txt, js, sw, detail: `build ${txt} stamped consistently (sw + client + server)` };
+}
+
+export function buildIdStampScript(appDir, buildId) {
+  const id = sanitizeBuildId(buildId);
+  const sub = `s/${BUILD_ID_PLACEHOLDER}\\|[0-9]\\{14\\}-[a-z0-9]\\{1,4\\}/${id}/g`;
+  return `cd '${appDir}' 2>/dev/null || exit 0
+[ -f public/sw.js ] && sed -i '${sub}' public/sw.js || true
+[ -f public/build-id.js ] && sed -i '${sub}' public/build-id.js || true
+[ -d public ] && printf '%s\\n' '${id}' > public/build-id.txt || true
+echo "MOCK2_BUILD_ID:${id}"`;
+}
+
+// The pre-instrumentation service worker, verbatim. A project whose public/sw.js
+// still hashes to this is running the KNOWN-BROKEN version (hardcoded cache name
+// => the worker never updates and stale assets are never purged), so it is safe
+// to replace during the retrofit. Anything else — a worker a build customized —
+// is left untouched and reported instead, matching the auth wiring's
+// keep-existing rule.
+export const LEGACY_SW_JS = `// Conservative PWA service worker: network-first, cache fallback.
+// Caches ONLY same-origin navigations, styles, scripts, and images — never
+// /api responses, so live data is always live. Bump CACHE to invalidate.
+const CACHE = 'app-shell-v1';
+self.addEventListener('install', () => { self.skipWaiting(); });
+self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  let url;
+  try { url = new URL(req.url); } catch { return; }
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
+  const cacheable = req.mode === 'navigate' ||
+    ['style', 'script', 'image', 'manifest'].includes(req.destination);
+  if (!cacheable) return;
+  e.respondWith(
+    fetch(req).then((res) => {
+      if (res && res.ok) {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+      }
+      return res;
+    }).catch(() => caches.match(req).then((hit) => hit || Response.error()))
+  );
+});
+`;

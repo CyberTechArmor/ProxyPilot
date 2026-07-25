@@ -1616,8 +1616,19 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             : deployed.skipped
               ? 'No run contract — placeholder still serving (nothing to deploy).'
               : 'Deployed — app serving on its live URL.',
-        meta: { ok: true, skipped: !!deployed.skipped, noop: !!deployed.noop, held: !!deployed.held },
+        meta: { ok: true, skipped: !!deployed.skipped, noop: !!deployed.noop, held: !!deployed.held, build_stamp: deployed.buildStamp || null },
       });
+      // Client-cache staleness warning: the app serves, but its PWA build-id
+      // plumbing says a browser could still be running pre-deploy assets. This
+      // is the "I fixed it and nothing changed" trap — surface it on the build
+      // that caused it rather than leaving it to be rediscovered by hand.
+      if (deployed.buildStamp && deployed.buildStamp.stale_risk) {
+        logEvent('note', {
+          role: 'system',
+          content: `Client-cache warning — ${deployed.buildStamp.detail}. Users may keep running the previous build until their service worker updates.`,
+          meta: { stale_risk: true, build_stamp: deployed.buildStamp },
+        });
+      }
 
       // e2e/journey SMOKE GATE — runs against the now-deployed app. The cheap
       // HTTP/API layer always runs; the browser + read-only DB connectors are a
@@ -2255,6 +2266,12 @@ async function escalateAwaitingAdmin({ cycle, project, containerName, holder, re
     detail: `${project.name}: cycle ${cycle.id} exhausted ${MAX_CYCLE_RETRIES} retries — ${reason}. Handoff: ${JSON.stringify(handoff)}`,
   });
   setJob(cycle.id, { phase: 'awaiting_admin', message: `Retries exhausted — handed off to an admin. ${reason}` });
+  // Notify: this cycle is now WAITING ON A HUMAN and will sit there until one
+  // acts. Every other terminal state already notifies; without this the operator
+  // only discovers the handoff by opening the project, which is how a build ends
+  // up idle for hours (measured: waiting on a human dominated elapsed time, not
+  // model work). The bell row is deduped per project+cycle+outcome.
+  void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'blocked' });
 }
 
 // haltCycle — the NON-SUCCESS terminal (harness safety). A cycle that cannot

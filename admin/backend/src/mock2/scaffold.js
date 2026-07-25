@@ -248,6 +248,7 @@ describe('health', () => {
 // serve.py did, so the preview keeps working after the app owns the web port.
 function appTs() {
   return `import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { securityHeaders } from './middleware/security.js';
@@ -280,6 +281,16 @@ export function createApp(): express.Express {
     res.removeHeader('X-Frame-Options');
     next();
   }, express.static(MOCKUPS_DIR, { index: 'current.html' }));
+
+  // Build identity — ALWAYS from disk, never cached. The client's copy comes
+  // from /build-id.js (which the service worker DOES cache); comparing the two
+  // is how a stale-cache client is detected after a deploy.
+  app.get('/__build', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    let id = 'unknown';
+    try { id = fs.readFileSync(path.join(PUBLIC_DIR, 'build-id.txt'), 'utf8').trim() || 'unknown'; } catch { /* pre-stamp */ }
+    res.json({ build_id: id });
+  });
 
   app.use('/api', healthRoutes);
 
@@ -697,6 +708,7 @@ function appShellHtml(project) {
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon.svg">
+<script src="/build-id.js"></script>
 <script src="/install.js" defer></script>
 <script src="/pp-annotate-bridge.js" defer></script>
 </head>
@@ -871,13 +883,49 @@ function pwaIconSvg() {
 </svg>\n`;
 }
 
+// The token the DEPLOY replaces with this deploy's unique build id (see
+// deploy.js stampBuildId). It appears in sw.js, build-id.js and build-id.txt.
+export const BUILD_ID_PLACEHOLDER = '__MOCK2_BUILD_ID__';
+
 function pwaServiceWorkerJs() {
-  return `// Conservative PWA service worker: network-first, cache fallback.
-// Caches ONLY same-origin navigations, styles, scripts, and images — never
-// /api responses, so live data is always live. Bump CACHE to invalidate.
-const CACHE = 'app-shell-v1';
-self.addEventListener('install', () => { self.skipWaiting(); });
-self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
+  return `// PWA service worker: network-first, cache fallback, VERSIONED PER DEPLOY.
+//
+// Why the version matters (this bit is load-bearing): a service worker only
+// updates when the BYTES of this file change. With a hardcoded cache name the
+// file never changed, so the browser never installed a new worker and the old
+// cache was never purged — a client could keep serving pre-deploy JS forever
+// while the server happily served the new build ("I fixed it but nothing
+// changed"). The deploy stamps a fresh BUILD_ID into this file on every deploy,
+// which (a) changes the bytes so the browser picks up the new worker and
+// (b) names a fresh cache so stale entries are dropped in activate.
+//
+// Caches ONLY same-origin navigations, styles, scripts and images — never /api
+// (live data stays live) and never /__build (the staleness probe must always
+// hit the network).
+const BUILD_ID = '${BUILD_ID_PLACEHOLDER}';
+const CACHE = 'app-shell-' + BUILD_ID;
+
+// Do NOT skipWaiting here: the new worker waits until the page tells it to take
+// over (see the update prompt in install.js), so a deploy never yanks the app
+// out from under someone mid-edit.
+self.addEventListener('install', () => {});
+
+self.addEventListener('activate', (e) => {
+  e.waitUntil((async () => {
+    // Purge every cache from a previous build — this is what makes a deploy
+    // actually reach the user instead of being shadowed by an old entry.
+    const names = await caches.keys();
+    await Promise.all(names.filter((n) => n !== CACHE).map((n) => caches.delete(n)));
+    await self.clients.claim();
+  })());
+});
+
+// The page asks the waiting worker to take over immediately (user accepted the
+// update, or the app chose to auto-apply).
+self.addEventListener('message', (e) => {
+  if (e && e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
@@ -885,6 +933,7 @@ self.addEventListener('fetch', (e) => {
   try { url = new URL(req.url); } catch { return; }
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return;
+  if (url.pathname === '/__build') return; // staleness probe — never cached
   const cacheable = req.mode === 'navigate' ||
     ['style', 'script', 'image', 'manifest'].includes(req.destination);
   if (!cacheable) return;
@@ -901,13 +950,122 @@ self.addEventListener('fetch', (e) => {
 `;
 }
 
+// public/build-id.js — the build id as the CLIENT sees it. This file is a
+// script, so the service worker caches it: if a stale worker is serving old
+// assets, window.__APP_BUILD_ID is the OLD id while GET /__build (never cached)
+// returns the live one. That mismatch is exactly the "my fix didn't reach the
+// browser" failure, and it is what the post-deploy check compares.
+function buildIdJs() {
+  return `window.__APP_BUILD_ID = '${BUILD_ID_PLACEHOLDER}';\n`;
+}
+
 function pwaInstallJs() {
-  return `// PWA bootstrap: register the service worker and surface the browser's
-// install prompt as a small in-app button (44px target, token-styled).
+  return `// PWA bootstrap: register the service worker, surface app updates, and
+// surface the browser's install prompt as a small in-app button (44px target).
 (() => {
+  // ---- update handling -------------------------------------------------
+  // A deploy ships a new service worker, which INSTALLS then WAITS (sw.js does
+  // not skipWaiting). Without this block the user keeps running the old assets
+  // until they happen to close every tab — the "I fixed it but nothing changed"
+  // trap. Here we detect the waiting worker, offer a non-blocking "Update now",
+  // and reload exactly once when the new worker takes control.
+  let reloading = false;
+  const BANNER_ID = 'pwa-update-banner';
+
+  const showUpdateBanner = (reg) => {
+    if (document.getElementById(BANNER_ID)) return;
+    const bar = document.createElement('div');
+    bar.id = BANNER_ID;
+    bar.setAttribute('role', 'status');
+    bar.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:10000;' +
+      'display:flex;align-items:center;gap:12px;max-width:calc(100vw - 32px);' +
+      'padding:10px 12px 10px 16px;border-radius:12px;font:inherit;font-size:14px;' +
+      'background:var(--app-surface,#101826);color:var(--app-text,#e8eef8);' +
+      'border:1px solid rgba(255,255,255,.14);box-shadow:0 6px 24px rgba(0,0,0,.35)';
+    const msg = document.createElement('span');
+    msg.textContent = 'A new version is available.';
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.textContent = 'Update now';
+    go.style.cssText = 'min-height:44px;padding:0 14px;border-radius:8px;border:0;cursor:pointer;' +
+      'background:var(--app-primary,#1466b8);color:var(--app-primary-text,#fff);font:inherit';
+    const later = document.createElement('button');
+    later.type = 'button';
+    later.setAttribute('aria-label', 'Dismiss');
+    later.textContent = 'Later';
+    later.style.cssText = 'min-height:44px;padding:0 10px;border-radius:8px;border:0;cursor:pointer;' +
+      'background:transparent;color:inherit;opacity:.7;font:inherit';
+    go.addEventListener('click', () => {
+      const w = reg.waiting;
+      if (w) w.postMessage({ type: 'SKIP_WAITING' });
+      go.disabled = true;
+      go.textContent = 'Updating…';
+    });
+    later.addEventListener('click', () => bar.remove());
+    bar.appendChild(msg); bar.appendChild(go); bar.appendChild(later);
+    document.body.appendChild(bar);
+  };
+
   if ('serviceWorker' in navigator) {
+    // The new worker took over — reload ONCE so the page runs the new assets.
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloading) return;
+      reloading = true;
+      window.location.reload();
+    });
+
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      navigator.serviceWorker.register('/sw.js').then((reg) => {
+        if (!reg) return;
+        // Already waiting when the page loaded (updated in a previous session).
+        if (reg.waiting && navigator.serviceWorker.controller) showUpdateBanner(reg);
+        reg.addEventListener('updatefound', () => {
+          const sw = reg.installing;
+          if (!sw) return;
+          sw.addEventListener('statechange', () => {
+            // 'installed' + an existing controller ⇒ this is an UPDATE, not the
+            // first install (first install has no controller and needs no prompt).
+            if (sw.state === 'installed' && navigator.serviceWorker.controller) showUpdateBanner(reg);
+          });
+        });
+        // Poll for a new worker so a long-lived tab (a PWA left open for days)
+        // still learns about a deploy without a manual refresh.
+        setInterval(() => { reg.update().catch(() => {}); }, 60000);
+        document.addEventListener('visibilitychange', () => {
+          if (!document.hidden) reg.update().catch(() => {});
+        });
+
+        // ---- self-heal: detect that WE are running stale assets ----------
+        // /__build is never service-worker cached, so it always reports what the
+        // SERVER has. window.__APP_BUILD_ID comes from /build-id.js, which the
+        // worker DOES cache. If they disagree, this page is running pre-deploy
+        // code — the exact failure where a fix ships but the browser keeps
+        // executing the old bundle. Recover automatically: pull the new worker,
+        // let it take over, and reload ONCE (a sessionStorage guard makes a
+        // reload loop impossible if something is misconfigured).
+        const GUARD = 'pwa-stale-recovered';
+        fetch('/__build', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((info) => {
+            const server = info && info.build_id;
+            const client = window.__APP_BUILD_ID;
+            if (!server || !client || server === client) return;
+            if (server === '${BUILD_ID_PLACEHOLDER}' || client === '${BUILD_ID_PLACEHOLDER}') return; // never stamped
+            if (sessionStorage.getItem(GUARD) === server) return; // already tried for this build
+            sessionStorage.setItem(GUARD, server);
+            reg.update().catch(() => {});
+            if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+            else if (navigator.serviceWorker.controller) {
+              // No new worker to wait for, but our assets are stale: drop the
+              // caches this worker owns and reload with a clean slate.
+              caches.keys()
+                .then((ks) => Promise.all(ks.map((k) => caches.delete(k))))
+                .catch(() => {})
+                .then(() => { if (!reloading) { reloading = true; window.location.reload(); } });
+            }
+          })
+          .catch(() => {});
+      }).catch(() => {});
     });
   }
   let deferred = null;
@@ -935,6 +1093,13 @@ function pwaInstallJs() {
   window.addEventListener('appinstalled', removeBtn);
 })();
 `;
+}
+
+// scaffoldPwaFiles — the current PWA/build-identity file contents, so the
+// deploy's retrofit can bring an older project's plumbing up to date without
+// duplicating these strings. Pure.
+export function scaffoldPwaFiles() {
+  return { swJs: pwaServiceWorkerJs(), buildIdJs: buildIdJs(), installJs: pwaInstallJs() };
 }
 
 export function buildScaffoldFiles(project) {
@@ -967,6 +1132,11 @@ export function buildScaffoldFiles(project) {
     { path: 'public/icon.svg', content: pwaIconSvg() },
     { path: 'public/sw.js', content: pwaServiceWorkerJs() },
     { path: 'public/install.js', content: pwaInstallJs() },
+    // Build identity: build-id.js is what the CLIENT executed (service-worker
+    // cacheable); build-id.txt is what the SERVER has on disk (served live at
+    // /__build). The deploy stamps both — a mismatch means a stale client cache.
+    { path: 'public/build-id.js', content: buildIdJs() },
+    { path: 'public/build-id.txt', content: `${BUILD_ID_PLACEHOLDER}\n` },
     // Dev-plane annotate bridge — lets the dashboard's build preview resolve a
     // tapped element to a component/source reference (inert unless the dashboard
     // enables it; the app only permits framing by the dashboard origin).

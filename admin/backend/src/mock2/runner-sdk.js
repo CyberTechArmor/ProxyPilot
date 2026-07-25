@@ -489,7 +489,12 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'deploy_failed' });
       return scheduleJobCleanup(cycle.id);
     }
-    logEvent('deploy', { role: 'system', content: deployed.skipped ? 'No run contract — placeholder still serving (nothing to deploy).' : 'Deployed — app serving on its live URL.', meta: { ok: true, skipped: !!deployed.skipped } });
+    logEvent('deploy', { role: 'system', content: deployed.skipped ? 'No run contract — placeholder still serving (nothing to deploy).' : 'Deployed — app serving on its live URL.', meta: { ok: true, skipped: !!deployed.skipped, build_stamp: deployed.buildStamp || null } });
+    // See runner.js — a serving app whose build-id plumbing is unstamped can
+    // still leave clients on pre-deploy assets; say so on this build.
+    if (deployed.buildStamp && deployed.buildStamp.stale_risk) {
+      logEvent('note', { role: 'system', content: `Client-cache warning — ${deployed.buildStamp.detail}. Users may keep running the previous build until their service worker updates.`, meta: { stale_risk: true, build_stamp: deployed.buildStamp } });
+    }
 
     // e2e/journey SMOKE GATE — identical to the hand-rolled runner (harness parity):
     // cheap HTTP always; browser + read-only DB connectors only on a relevance hit

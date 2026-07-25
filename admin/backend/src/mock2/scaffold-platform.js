@@ -1429,7 +1429,17 @@ body{background:var(--bg);color:var(--ink)}
 `;
 }
 
-// buildPlatformFiles — every platform file, ready to merge into the scaffold.
+// buildPlatformRoutes — the HTTP surface. Split out because it is the ONLY
+// platform file that imports the auth component (for the permission catalog and
+// the admin guard), so it ships with the auth wiring rather than the base
+// scaffold. Emitting it unconditionally made a project provisioned WITHOUT the
+// auth component fail `tsc` on a missing '../auth/index.js' — tsconfig compiles
+// everything under src/, whether or not anything imports it.
+export function buildPlatformRoutes() {
+  return [{ path: 'src/platform/routes.ts', content: platformRoutesTs() }];
+}
+
+// buildPlatformFiles — the auth-independent half, always emitted.
 export function buildPlatformFiles() {
   return [
     { path: 'src/platform/schema.ts', content: platformSchemaTs() },
@@ -1437,7 +1447,6 @@ export function buildPlatformFiles() {
     { path: 'src/platform/api-keys.ts', content: apiKeysTs() },
     { path: 'src/platform/api-key-auth.ts', content: apiKeyAuthTs() },
     { path: 'src/platform/readonly.ts', content: readonlyTs() },
-    { path: 'src/platform/routes.ts', content: platformRoutesTs() },
     { path: 'migrations/0100_platform.sql', content: platformMigrationSql() },
     { path: 'public/theme.js', content: themeJs() },
     { path: 'public/platform.js', content: platformClientJs() },

@@ -93,7 +93,13 @@ for f in public/*.html; do
   fi
 done
 
-APP=/tmp/pp-app.css
+# A private scratch dir: fixed /tmp names collide when two gate runs overlap
+# (harmless in a per-project container, but it made the test suite flake and it
+# is one shared host away from being a real corruption).
+WORK=$(mktemp -d 2>/dev/null || echo /tmp/pp-$$)
+mkdir -p "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+APP="$WORK/app.css"
 : > "$APP"
 for f in public/*.css; do
   [ -f "$f" ] || continue
@@ -103,13 +109,13 @@ done
 APPBYTES=$(wc -c < "$APP" | tr -d ' ')
 
 # Declared variables on each side, and the approved ones the app actually reads.
-grep -o -- '--[A-Za-z0-9_-]*[[:space:]]*:' "$DESIGN" | sed 's/[[:space:]]*:$//' | sort -u > /tmp/pp-approved
-grep -o -- '--[A-Za-z0-9_-]*[[:space:]]*:' "$APP"    | sed 's/[[:space:]]*:$//' | sort -u > /tmp/pp-appdef
-grep -o -- 'var([[:space:]]*--[A-Za-z0-9_-]*' "$APP" | sed 's/.*--/--/'         | sort -u > /tmp/pp-appuse
+grep -o -- '--[A-Za-z0-9_-]*[[:space:]]*:' "$DESIGN" | sed 's/[[:space:]]*:$//' | sort -u > "$WORK/approved"
+grep -o -- '--[A-Za-z0-9_-]*[[:space:]]*:' "$APP"    | sed 's/[[:space:]]*:$//' | sort -u > "$WORK/appdef"
+grep -o -- 'var([[:space:]]*--[A-Za-z0-9_-]*' "$APP" | sed 's/.*--/--/'         | sort -u > "$WORK/appuse"
 
-APPROVED=$(wc -l < /tmp/pp-approved | tr -d ' ')
-USED=$(comm -12 /tmp/pp-appuse /tmp/pp-approved | wc -l | tr -d ' ')
-OWN=$(comm -23 /tmp/pp-appdef /tmp/pp-approved | wc -l | tr -d ' ')
+APPROVED=$(wc -l < "$WORK/approved" | tr -d ' ')
+USED=$(comm -12 "$WORK/appuse" "$WORK/approved" | wc -l | tr -d ' ')
+OWN=$(comm -23 "$WORK/appdef" "$WORK/approved" | wc -l | tr -d ' ')
 
 echo "design-adherence: \${APPROVED} approved variable(s); the app uses \${USED} of them, declares \${OWN} of its own, in \${APPBYTES} bytes of its own CSS."
 
@@ -274,7 +280,10 @@ export const MOBILE_OVERFLOW_GATE_NAME = 'mobile-overflow';
 export const MOBILE_OVERFLOW_GATE_SCRIPT = `# Baseline gate (ProxyPilot): nothing may force a phone to scroll sideways.
 set -u
 FAIL=0
-CSS=/tmp/pp-mobile.css
+WORK=$(mktemp -d 2>/dev/null || echo /tmp/pp-$$)
+mkdir -p "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+CSS="$WORK/mobile.css"
 : > "$CSS"
 for f in public/*.css; do
   [ -f "$f" ] || continue

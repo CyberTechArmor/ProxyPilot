@@ -111,6 +111,48 @@ check_sysstat() {
 }
 
 # Generate secure random password
+# VAPID key pair for Web Push (RFC 8292). See scripts/generate-vapid.mjs for
+# what these are and are not.
+#
+# TWO RULES this function exists to enforce:
+#   * NEVER regenerate a pair that already works. The public key is baked into
+#     every browser subscription; a new pair silently invalidates all of them
+#     and every device has to re-subscribe.
+#   * NEVER carry over half a pair. A public key that does not match its
+#     private key is the worst failure mode here — the push service answers 401
+#     and nothing in the UI explains why — so a lone survivor is discarded and
+#     the pair regenerated together.
+#
+# Sets vapid_public_key / vapid_private_key.
+generate_vapid_pair() {
+    local existing_pub="${1:-}" existing_priv="${2:-}"
+    local script="${SCRIPT_DIR:-.}/scripts/generate-vapid.mjs"
+
+    if [ -n "$existing_pub" ] && [ -n "$existing_priv" ]; then
+        vapid_public_key="$existing_pub"
+        vapid_private_key="$existing_priv"
+        return 0
+    fi
+    if [ -n "$existing_pub" ] || [ -n "$existing_priv" ]; then
+        log_warning "Only half of the VAPID key pair was present — regenerating both."
+        log_warning "Any existing push subscriptions will need to re-subscribe."
+    fi
+    if [ ! -f "$script" ] || ! command -v node &>/dev/null; then
+        log_warning "Could not generate VAPID keys (node or scripts/generate-vapid.mjs missing)."
+        log_warning "Web Push will stay off until VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY are set."
+        vapid_public_key=""
+        vapid_private_key=""
+        return 0
+    fi
+    # ONE invocation. Calling the generator twice yields two unrelated pairs —
+    # a public key that does not match its private key, which makes every push
+    # 401 with nothing in the UI to explain it.
+    local pair
+    pair=$(node "$script") || { log_warning "VAPID key generation failed."; vapid_public_key=""; vapid_private_key=""; return 0; }
+    vapid_public_key=$(printf '%s\n' "$pair" | grep '^VAPID_PUBLIC_KEY=' | cut -d= -f2-)
+    vapid_private_key=$(printf '%s\n' "$pair" | grep '^VAPID_PRIVATE_KEY=' | cut -d= -f2-)
+}
+
 generate_password() {
     local length=${1:-32}
     openssl rand -base64 48 | tr -dc 'a-zA-Z0-9!@#$%^&*' | head -c "$length"
@@ -947,6 +989,9 @@ create_env_file() {
         jwt_secret=$(grep -E '^JWT_SECRET=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
         session_secret=$(grep -E '^SESSION_SECRET=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
         totp_encryption_key=$(grep -E '^TOTP_ENCRYPTION_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
+        vapid_public_key=$(grep -E '^VAPID_PUBLIC_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
+        vapid_private_key=$(grep -E '^VAPID_PRIVATE_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
+        vapid_subject=$(grep -E '^VAPID_SUBJECT=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
     fi
 
     [ -z "$jwt_secret" ]     && jwt_secret=$(generate_password 64)
@@ -961,6 +1006,12 @@ create_env_file() {
             totp_encryption_key=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
         fi
     fi
+
+    # Reuses the stored pair when both halves are present; mints one otherwise.
+    generate_vapid_pair "${vapid_public_key:-}" "${vapid_private_key:-}"
+    # The push services use this to contact the operator before they start
+    # rejecting traffic. Derived from the install domain so it is real.
+    [ -z "${vapid_subject:-}" ] && vapid_subject="mailto:admin@${domain}"
 
     log_info "Creating environment configuration..."
 
@@ -981,6 +1032,17 @@ SESSION_SECRET=${session_secret}
 # means existing TOTP secrets cannot be decrypted — every user will need
 # to re-enroll their authenticator. Back this up alongside your DB.
 TOTP_ENCRYPTION_KEY=${totp_encryption_key}
+
+# Web Push (VAPID, RFC 8292). The PUBLIC key is handed to browsers when they
+# subscribe and is baked into every subscription; the PRIVATE key signs each
+# push so the push service knows the request is from this server. They are a
+# PAIR — replacing either one invalidates every existing subscription and every
+# device must re-subscribe. Back them up with the database.
+# VAPID_SUBJECT is how a push service contacts you before it starts rejecting
+# traffic; it must be a mailto: or https: URL.
+VAPID_PUBLIC_KEY=${vapid_public_key}
+VAPID_PRIVATE_KEY=${vapid_private_key}
+VAPID_SUBJECT=${vapid_subject}
 
 # Admin User (hashed on first run)
 ADMIN_USERNAME=${admin_user}

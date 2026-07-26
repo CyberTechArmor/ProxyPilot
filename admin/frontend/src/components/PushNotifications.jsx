@@ -42,6 +42,20 @@ export default function PushNotifications() {
       ]);
       setConfig(cfg);
       setSubscribed(!!sub);
+
+      // SELF-HEAL. "On for this device" was read from the BROWSER alone, so it
+      // could say yes while the server had no matching row — which is exactly
+      // what produced "1 device subscribed" next to "this browser is not
+      // subscribed". The two sides can drift for ordinary reasons: the push
+      // service rotates an endpoint, a database is restored, the subscribe POST
+      // fails after the browser has already committed.
+      //
+      // Re-registering is an idempotent upsert keyed on the endpoint, so doing
+      // it on every load costs one cheap request and makes the disagreement
+      // unrepresentable rather than merely unlikely.
+      if (sub && cfg?.configured) {
+        try { await api.pushSubscribe(sub.toJSON()); } catch { /* the buttons still work */ }
+      }
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('push config load failed:', err);
     } finally {
@@ -87,12 +101,17 @@ export default function PushNotifications() {
       toast({ title: 'Test sent', description: 'It should appear on this device within a few seconds.' });
     } catch (err) {
       // A push service 410 means this browser's endpoint died; say what to do.
-      const resubscribe = /resubscribe|expired/i.test(err.message || '');
+      // The server says so explicitly now; the regex is the fallback for an
+      // older backend.
+      // ApiError spreads the response's own fields onto itself (see api.js),
+      // so the server's flag lands here directly.
+      const resubscribe = err?.resubscribe === true
+        || /resubscribe|expired|off and on|no push subscription/i.test(err.message || '');
       toast({
         variant: 'destructive',
         title: 'The test did not go through',
         description: resubscribe
-          ? 'This device\'s subscription had expired — turn notifications off and on again.'
+          ? 'This device\'s subscription is no longer valid — turn notifications off, then on again.'
           : err.message,
       });
       await load();

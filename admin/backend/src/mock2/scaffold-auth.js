@@ -18,7 +18,7 @@
 
 import { createHash } from 'node:crypto';
 import { buildScaffoldFiles } from './scaffold.js';
-import { buildPlatformRoutes } from './scaffold-platform.js';
+import { buildPlatformRoutes, platformAdminMarkup } from './scaffold-platform.js';
 
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 
@@ -235,6 +235,7 @@ export function createApp(): express.Express {
         '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
           '<meta name="viewport" content="width=device-width, initial-scale=1">' +
           '<meta name="robots" content="noindex, nofollow"><title>Application</title>' +
+          '<script src="/theme.js"></script><script src="/platform.js" defer></script>' +
           '<link rel="stylesheet" href="/design.css">' +
           '<link rel="manifest" href="/manifest.webmanifest"><script src="/build-id.js"></script><script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script></head>' +
           '<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:12vh auto;padding:0 1rem">' +
@@ -333,13 +334,15 @@ function adminHtml() {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>Admin console</title>
-<link rel="stylesheet" href="/design.css">
+<script src="/theme.js"></script>
+<script src="/platform.js" defer></script>
 <meta name="theme-color" content="#0d1524">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon.svg">
 <script src="/build-id.js"></script><script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script>
 <link rel="stylesheet" href="/base.css">
+<link rel="stylesheet" href="/design.css">
 <style>
 .note{font-size:12.5px;color:var(--app-muted,#5a6b81);margin:6px 0 0;overflow-wrap:anywhere}
 .note.err{color:var(--app-danger,#d24545)}
@@ -434,8 +437,10 @@ table.list input[type=checkbox]{width:18px;height:18px}
       <p class="note" id="ext-note"></p>
     </div>
   </div>
+${platformAdminMarkup()}
 </main>
 <script src="/admin.js"></script>
+<script src="/platform-admin.js"></script>
 </body>
 </html>
 `;
@@ -702,13 +707,15 @@ function profileHtml() {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>Profile</title>
-<link rel="stylesheet" href="/design.css">
+<script src="/theme.js"></script>
+<script src="/platform.js" defer></script>
 <meta name="theme-color" content="#0d1524">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon.svg">
 <script src="/build-id.js"></script><script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script>
 <link rel="stylesheet" href="/base.css">
+<link rel="stylesheet" href="/design.css">
 <style>
 .kv{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;font-size:14px}
 .kv dt{color:var(--app-muted,#5a6b81)}
@@ -779,7 +786,8 @@ function loginHtml() {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <title>Sign in</title>
-  <link rel="stylesheet" href="/design.css">
+  <script src="/theme.js"></script>
+  <script src="/platform.js" defer></script>
 <meta name="theme-color" content="#0d1524">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
@@ -787,15 +795,15 @@ function loginHtml() {
 <script src="/build-id.js"></script><script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script>
   <style>
     :root {
-      --bg: var(--app-bg, #0f1115); --card: var(--app-surface, #1a1d24);
-      --fg: var(--app-text, #e6e8ec); --muted: var(--app-muted, #9aa1ad);
-      --accent: var(--app-primary, #4f7cff); --accent-2: var(--app-accent, #7c5cff);
-      --border: var(--app-border, #2a2e38); --err: var(--app-danger, #ff6b6b);
-      --radius: var(--app-radius-lg, 12px);
+      --lg-bg: var(--app-bg, #0f1115); --lg-card: var(--app-surface, #1a1d24);
+      --lg-fg: var(--app-text, #e6e8ec); --lg-muted: var(--app-muted, #9aa1ad);
+      --lg-accent: var(--app-primary, #4f7cff); --lg-accent-2: var(--app-accent, #7c5cff);
+      --lg-border: var(--app-border, #2a2e38); --lg-err: var(--app-danger, #ff6b6b);
+      --lg-radius: var(--app-radius-lg, 12px);
     }
     * { box-sizing: border-box; }
     body {
-      margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg);
+      margin: 0; min-height: 100vh; background: var(--lg-bg); color: var(--lg-fg);
       font: 15px/1.5 var(--app-font, system-ui, -apple-system, Segoe UI, Roboto, sans-serif);
     }
     .split { display: grid; grid-template-columns: 1fr; min-height: 100vh; }
@@ -805,8 +813,8 @@ function loginHtml() {
     .banner {
       position: relative; overflow: hidden; display: flex; flex-direction: column;
       justify-content: center; padding: 40px 32px; min-height: 160px; color: #fff;
-      background: var(--accent);
-      background: linear-gradient(135deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 55%, var(--accent-2)) 55%, var(--accent-2) 100%);
+      background: var(--lg-accent);
+      background: linear-gradient(135deg, var(--lg-accent) 0%, color-mix(in srgb, var(--lg-accent) 55%, var(--lg-accent-2)) 55%, var(--lg-accent-2) 100%);
     }
     @media (min-width: 900px) { .banner { padding: 64px; } }
     .banner::before, .banner::after {
@@ -825,27 +833,27 @@ function loginHtml() {
     .pane { display: flex; align-items: center; justify-content: center; padding: 28px 20px; }
     .login-wrap { width: 100%; max-width: 380px; }
     .login-card {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 28px;
+      background: var(--lg-card); border: 1px solid var(--lg-border);
+      border-radius: var(--lg-radius); padding: 28px;
     }
     .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; margin-bottom: 18px; }
-    .logo { color: var(--accent); font-size: 20px; }
+    .logo { color: var(--lg-accent); font-size: 20px; }
     h2 { margin: 0 0 6px; font-size: 20px; }
-    .muted { color: var(--muted); margin: 0 0 18px; font-size: 14px; }
+    .muted { color: var(--lg-muted); margin: 0 0 18px; font-size: 14px; }
     .field { display: block; margin-bottom: 16px; }
-    .field > span { display: block; margin-bottom: 6px; font-size: 13px; color: var(--muted); }
+    .field > span { display: block; margin-bottom: 6px; font-size: 13px; color: var(--lg-muted); }
     input {
       width: 100%; padding: 10px 12px; border-radius: 8px; min-height: 44px;
-      border: 1px solid var(--border); background: color-mix(in srgb, var(--card) 70%, var(--bg)); color: var(--fg); font: inherit;
+      border: 1px solid var(--lg-border); background: color-mix(in srgb, var(--lg-card) 70%, var(--lg-bg)); color: var(--lg-fg); font: inherit;
     }
-    input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    input:focus { outline: 2px solid var(--lg-accent); outline-offset: 1px; }
     .field small { display: block; margin-top: 6px; }
     .btn {
       width: 100%; padding: 11px 14px; border: 0; border-radius: 8px; min-height: 44px;
-      background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+      background: var(--lg-accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer;
     }
     .btn:hover { filter: brightness(1.05); }
-    .form-msg { color: var(--err); min-height: 1.2em; margin: 12px 0 0; font-size: 14px; }
+    .form-msg { color: var(--lg-err); min-height: 1.2em; margin: 12px 0 0; font-size: 14px; }
     [hidden] { display: none !important; }
   </style>
 </head>

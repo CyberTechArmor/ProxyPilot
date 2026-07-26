@@ -96,6 +96,9 @@ function placeholderIndexHtml(project) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <title>${name} — ProxyPilot dev preview</title>
+  <!-- The placeholder is a real page a Builder sees while the project comes up,
+       so it respects the theme like every other page. -->
+  <script src="/theme.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 12vh auto; padding: 0 1rem; color: #334155; }
     h1 { font-size: 1.4rem; }

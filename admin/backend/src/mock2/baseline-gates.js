@@ -57,6 +57,42 @@ if [ ! -f "$DESIGN" ]; then
   exit 0
 fi
 
+# ---- THE SHELL ----
+# These run BEFORE the app-CSS analysis below, because they are about
+# design.css and the pages themselves. Behind the "no app CSS yet" early exit
+# they never ran on a fresh project, which is exactly when they matter most.
+SHELLFAIL=0
+
+# The shell (base.css) and the platform CSS style the header, nav, buttons,
+# cards, theme toggle, legal footer and sign-in page from the --app-* family.
+# design.css must DRIVE that family, either directly (a preset-derived design)
+# or through the generated ==bridge== block (a mockup-derived one). If it does
+# not, the approved palette reaches only the screens the build wrote and the
+# whole frame around them stays on hardcoded defaults — a two-palette app.
+for v in --app-bg --app-text --app-surface --app-primary; do
+  if ! grep -q -- "$v[[:space:]]*:" state/design.css; then
+    echo "FAIL: state/design.css does not define $v, so the app SHELL ignores the approved design."
+    echo "      The header, nav, buttons, theme toggle, legal footer and sign-in page would render in"
+    echo "      hardcoded defaults. Re-approve the design to regenerate the bridge; do not hand-edit design.css."
+    SHELLFAIL=1
+  fi
+done
+
+# design.css must LOAD LAST, or base.css re-declares names the design defines
+# and the platform silently overrides the approved values.
+for f in public/*.html; do
+  [ -f "$f" ] || continue
+  grep -q 'base.css' "$f" || continue
+  grep -q 'design.css' "$f" || continue
+  DPOS=$(grep -n 'design.css' "$f" | head -1 | cut -d: -f1)
+  BPOS=$(grep -n 'base.css' "$f" | head -1 | cut -d: -f1)
+  if [ "$DPOS" -lt "$BPOS" ]; then
+    echo "FAIL: $f links design.css BEFORE base.css, so the platform defaults win over the approved design."
+    echo "      Link base.css first and design.css last."
+    SHELLFAIL=1
+  fi
+done
+
 APP=/tmp/pp-app.css
 : > "$APP"
 for f in public/*.css; do
@@ -79,16 +115,20 @@ echo "design-adherence: \${APPROVED} approved variable(s); the app uses \${USED}
 
 # Too little approved design to judge against (a preset-only project).
 if [ "$APPROVED" -lt 8 ]; then
-  echo "design-adherence: fewer than 8 approved variables — not enough of a design system to enforce. Passed."
+  echo "design-adherence: fewer than 8 approved variables — not enough of a design system to enforce."
+  if [ "$SHELLFAIL" -ne 0 ]; then exit 1; fi
+  echo "design-adherence: the shell is driven by the approved design. Passed."
   exit 0
 fi
 # The app has not written stylesheets of its own yet.
 if [ "$APPBYTES" -lt 2000 ]; then
-  echo "design-adherence: the app has not written substantial CSS of its own. Passed."
+  echo "design-adherence: the app has not written substantial CSS of its own."
+  if [ "$SHELLFAIL" -ne 0 ]; then exit 1; fi
+  echo "design-adherence: the shell is driven by the approved design. Passed."
   exit 0
 fi
 
-FAIL=0
+FAIL=$SHELLFAIL
 if [ "$USED" -eq 0 ]; then
   echo "FAIL: the app's stylesheets reference NONE of the \${APPROVED} approved design variables."
   echo "      state/design.css is loaded and ignored. Restyle the screens on var(--...) from state/design.css"
@@ -108,7 +148,7 @@ if grep -q 'data-theme' "$DESIGN" && [ "$OWN" -ge 8 ] && ! grep -q 'data-theme' 
 fi
 
 if [ "$FAIL" -ne 0 ]; then exit 1; fi
-echo "design-adherence: the app builds on the approved design. Passed."
+echo "design-adherence: the app builds on the approved design, and the shell is bridged onto it. Passed."
 exit 0
 `;
 
@@ -139,7 +179,8 @@ fi
 MISSING=""
 for f in src/platform/schema.ts src/platform/branding.ts src/platform/api-keys.ts \\
          src/platform/api-key-auth.ts src/platform/readonly.ts \\
-         migrations/0100_platform.sql public/theme.js public/platform.js; do
+         migrations/0100_platform.sql public/theme.js public/platform.js \\
+         public/platform-admin.js; do
   [ -f "$f" ] || MISSING="$MISSING $f"
 done
 if [ -n "$MISSING" ]; then
@@ -194,6 +235,16 @@ if [ -n "$DUP" ]; then
   echo "$DUP" | sed 's/^/        /'
   echo "      Extend src/platform instead — a parallel table means the admin screens edit one copy and the app reads the other."
   FAIL=1
+fi
+
+# The admin console carries the platform's own settings cards; if it stops
+# loading their script they render as dead inputs that silently discard edits.
+if [ -f public/admin.html ] && grep -q 'pf-save' public/admin.html; then
+  if ! grep -q 'platform-admin.js' public/admin.html; then
+    echo "FAIL: public/admin.html has the platform settings cards but does not load /platform-admin.js —"
+    echo "      branding, legal pages, assets, API keys and read-only SQL would all be dead inputs."
+    FAIL=1
+  fi
 fi
 
 # Every full HTML page must load theme.js, or the theme toggle does nothing on

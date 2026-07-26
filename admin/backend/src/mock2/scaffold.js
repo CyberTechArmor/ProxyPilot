@@ -29,7 +29,7 @@
 // what it is for.
 import { buildPlatformFiles, PLATFORM_CSS } from './scaffold-platform.js';
 
-export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v2';
+export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v3';
 
 // The canonical dependency set every scaffolded app is born with. Exported so
 // the repair pass (component-install ensureScaffoldDeps) can restore entries a
@@ -310,7 +310,8 @@ export function createApp(): express.Express {
       .send(
         '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
           '<meta name="viewport" content="width=device-width, initial-scale=1">' +
-          '<meta name="robots" content="noindex, nofollow"><title>Application</title></head>' +
+          '<meta name="robots" content="noindex, nofollow"><title>Application</title>' +
+          '<script src="/theme.js"></script><script src="/platform.js" defer></script></head>' +
           '<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:12vh auto;padding:0 1rem;color:#334155">' +
           '<h1>The application is running.</h1>' +
           '<p>This is the generated Node/Express app, served by its own runtime over the declared web port. ' +
@@ -712,8 +713,10 @@ function appShellHtml(project) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>${name}</title>
-<link rel="stylesheet" href="/design.css">
+<script src="/theme.js"></script>
+<script src="/platform.js" defer></script>
 <link rel="stylesheet" href="/base.css">
+<link rel="stylesheet" href="/design.css">
 <meta name="theme-color" content="#0d1524">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">

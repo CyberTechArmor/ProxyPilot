@@ -30,6 +30,7 @@ import path from 'node:path';
 import {
   BASELINE_GATES, BASELINE_GATE_NAMES, baselineGatesForProfile, tierRank, asAdvisory,
   PLATFORM_INTACT_GATE_SCRIPT, MOBILE_OVERFLOW_GATE_SCRIPT, NO_DEAD_CONTROLS_GATE_SCRIPT,
+  DESIGN_ADHERENCE_GATE_SCRIPT,
 } from '../mock2/baseline-gates.js';
 import {
   buildGateBattery, gateTier, gatesForProfile, gateProfileForMode, parseGateScripts,
@@ -41,9 +42,15 @@ import {
   upgradeSummary, PLATFORM_OWNED_ALWAYS, isPlatformOwnedPath, PLATFORM_VERSION_PATH,
 } from '../mock2/base-app-upgrade-logic.js';
 import { detectPolishIntent } from '../mock2/ask-logic.js';
-import { previewErrorCard, PREVIEW_ERRORS, escapePreviewHtml } from '../mock2/concept-logic.js';
-import { buildPlatformFiles, buildPlatformRoutes, PLATFORM_MODULE_VERSION } from '../mock2/scaffold-platform.js';
-import { MOCK2_SCAFFOLD_VERSION } from '../mock2/scaffold.js';
+import {
+  previewErrorCard, PREVIEW_ERRORS, escapePreviewHtml, renderDesignCssFromMockup,
+  buildTokenBridgeCss, TOKEN_BRIDGE, TOKEN_BRIDGE_TARGETS, buildMockupSystemPrompt,
+} from '../mock2/concept-logic.js';
+import { buildPlatformFiles, buildPlatformRoutes, PLATFORM_MODULE_VERSION, PLATFORM_CSS } from '../mock2/scaffold-platform.js';
+import { MOCK2_SCAFFOLD_VERSION, baseCss } from '../mock2/scaffold.js';
+import { buildSeedFiles } from '../mock2/template.js';
+import { buildAuthWiredFiles } from '../mock2/scaffold-auth.js';
+import { MOCKUP_BASE_CSS } from '../mock2/mockup-template.js';
 
 // ---- running a gate the way the container does ----
 
@@ -137,15 +144,22 @@ test('advisory placement reports the failure and still exits 0', () => {
 
 // ---- the gates themselves, run for real ----
 
+// A REAL project tree — the exact files provisioning writes, plus the auth
+// wiring the base-app deploy pre-installs, plus the design.css that design
+// approval produces.
+//
+// This used to hand-write its own app-shell.html, and that fixture LIED: the
+// fabricated page carried a <script src="/theme.js"> that no real scaffold page
+// had, so the suite reported green while the shipped base app had a theme
+// toggle that applied to nothing. Fixtures for "does the real thing work" must
+// be the real thing.
 const GOOD_PLATFORM = () => {
   const files = {};
-  for (const f of [...buildPlatformFiles(), ...buildPlatformRoutes()]) files[f.path] = f.content;
-  files['src/app.ts'] = 'import { publicPlatformRoutes, platformRoutes, adminPlatformRoutes } from "./platform/routes.js";\n'
-    + 'import { withApiKey } from "./platform/api-key-auth.js";\n';
-  files['src/server.ts'] = 'import { ensureSeeded } from "./platform/branding.js";\n'
-    + 'import { ensureViews } from "./platform/readonly.js";\nawait ensureSeeded(); await ensureViews();\n';
-  files['public/app-shell.html'] = '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">'
-    + '<script src="/theme.js"></script></head><body><button id="go">Go</button></body></html>';
+  for (const f of buildSeedFiles({ id: 1, name: 'Demo' }, {})) files[f.path] = f.content;
+  for (const f of buildAuthWiredFiles()) files[f.path] = f.content;
+  const design = renderDesignCssFromMockup(`<html><head><style>${MOCKUP_BASE_CSS}</style></head></html>`).css;
+  files['state/design.css'] = design;
+  files['public/design.css'] = design;
   return files;
 };
 
@@ -399,4 +413,128 @@ test('a container error string is escaped into the card, never interpolated raw'
   assert.ok(!html.includes('<script>alert(1)</script>'));
   assert.ok(html.includes('&lt;script&gt;'));
   assert.equal(escapePreviewHtml(`<a href="x">&'`), '&lt;a href=&quot;x&quot;&gt;&amp;&#39;');
+});
+
+// ---- the shell must take the approved design, not a second palette ----
+
+test('the token bridge covers EVERY variable the shell reads', () => {
+  // Measured before this existed: the shell read 24 variables and an approved
+  // design defined THREE. Fourteen --app-* names were declared nowhere at all,
+  // every use falling back to a hardcoded hex — so the approved palette reached
+  // the screens the build wrote and stopped at the edge of them.
+  const design = renderDesignCssFromMockup(`<html><head><style>${MOCKUP_BASE_CSS}</style></head></html>`).css;
+  const shell = baseCss() + PLATFORM_CSS;
+  const declared = new Set([...design.matchAll(/(?:^|[;{\s])(--[a-z0-9-]+)\s*:/gi)].map((m) => m[1].toLowerCase()));
+  const read = new Set([...shell.matchAll(/var\(\s*(--[a-z0-9-]+)/gi)].map((m) => m[1].toLowerCase()));
+  const missing = [...read].filter((v) => !declared.has(v));
+  assert.deepEqual(missing, [], 'every shell variable resolves from the approved design');
+  assert.ok(read.size >= 20, `the shell really does read that many (${read.size})`);
+});
+
+test('the bridge is :root-only — a dark copy would be dead weight that can drift', () => {
+  const css = buildTokenBridgeCss(':root{--bg:#fff;--surface-1:#fff;--text-1:#000;--accent:#08f}');
+  assert.match(css, /==bridge==/);
+  assert.ok(!/\[data-theme=[^\]]*\]\s*\{/.test(css), 'no dark RULE — custom properties re-substitute, so one block follows both themes');
+  assert.equal((css.match(/:root\s*\{/g) || []).length, 1, 'exactly one block');
+  assert.match(css, /--app-bg:\s*var\(--bg,/, 'mapped WITH the shell default as the fallback');
+});
+
+test('a sparse mockup narrows the bridge, it never blanks the shell', () => {
+  const css = buildTokenBridgeCss(':root{--accent:#08f}');
+  assert.match(css, /--app-primary:\s*var\(--accent,/);
+  assert.ok(!css.includes('--app-text:'), 'no mapping for a token the design never defined');
+  assert.equal(buildTokenBridgeCss(':root{--nothing-we-map:1}'), '', 'nothing to bridge → no block');
+});
+
+test('no page redefines a bridged name from an --app-* one (that is a var() cycle)', () => {
+  // The sign-in page did exactly this (--bg: var(--app-bg)) while the bridge
+  // defines --app-bg: var(--bg). CSS treats the cycle as invalid at
+  // computed-value time and BOTH properties drop out — the page loses its
+  // colours entirely.
+  const sources = new Set(TOKEN_BRIDGE.map(([, src]) => src));
+  const targets = new Set(TOKEN_BRIDGE_TARGETS);
+  const pages = [...buildSeedFiles({ id: 1, name: 'T' }, {}), ...buildAuthWiredFiles()];
+  const cycles = [];
+  for (const f of pages) {
+    for (const m of String(f.content || '').matchAll(/(--[a-z0-9-]+)\s*:\s*var\(\s*(--[a-z0-9-]+)/gi)) {
+      if (sources.has(m[1].toLowerCase()) && targets.has(m[2].toLowerCase())) cycles.push(`${f.path}: ${m[1]} <- ${m[2]}`);
+    }
+  }
+  assert.deepEqual(cycles, []);
+});
+
+test('design.css loads LAST on every page that links both', () => {
+  // base.css re-declares five names the design also defines. Loaded second, the
+  // platform silently overrode the approved values.
+  let checked = 0;
+  for (const f of [...buildSeedFiles({ id: 1, name: 'T' }, {}), ...buildAuthWiredFiles()]) {
+    const c = String(f.content || '');
+    const links = (c.match(/href="\/design\.css"/g) || []).length;
+    if (!links) continue;
+    assert.equal(links, 1, `${f.path} links design.css exactly once`);
+    const d = c.indexOf('href="/design.css"');
+    const b = c.indexOf('href="/base.css"');
+    if (b < 0) continue;
+    checked += 1;
+    assert.ok(b < d, `${f.path} must link base.css before design.css`);
+  }
+  assert.ok(checked > 0, 'at least one page links both');
+});
+
+// ---- the base app is reachable, not just present ----
+
+test('every generated page loads theme.js and platform.js', () => {
+  // Shipped and loaded by NOTHING: the theme toggle applied to no page and the
+  // branding/legal footer never rendered. The unit fixture missed it by
+  // hand-writing a page that was correct.
+  for (const f of [...buildSeedFiles({ id: 1, name: 'T' }, {}), ...buildAuthWiredFiles()]) {
+    const c = String(f.content || '');
+    if (!/<head[\s>]/.test(c) || f.path.endsWith('.js')) continue;
+    assert.ok(c.includes('/theme.js'), `${f.path} loads theme.js, or its theme toggle does nothing`);
+  }
+});
+
+test('the generated app has an ADMIN UI for the platform, not just endpoints', () => {
+  const admin = buildAuthWiredFiles().find((f) => f.path === 'public/admin.html');
+  assert.ok(admin, 'the admin console exists');
+  for (const heading of ['Branding', 'Privacy policy', 'Images', 'API keys', 'Read-only database']) {
+    assert.ok(admin.content.includes(heading), `the console surfaces ${heading}`);
+  }
+  assert.ok(admin.content.includes('/platform-admin.js'), 'and loads the script that drives it');
+  const js = buildPlatformFiles().find((f) => f.path === 'public/platform-admin.js');
+  assert.ok(js, 'the driver is platform-owned, so it rides the upgrade path');
+  assert.ok(isPlatformOwnedPath('public/platform-admin.js'));
+  // Every admin control must have something to talk to.
+  for (const route of ['/branding', '/branding/pages/', '/branding/assets', '/api-keys', '/db/readonly']) {
+    assert.ok(js.content.includes(route), `it calls ${route}`);
+  }
+});
+
+test('the mockup is told the base app already exists', () => {
+  // Without this the mockup depicts only the idea, the inventory carries only
+  // those screens, and the built app has admin features with no way in.
+  const p = buildMockupSystemPrompt({}).toLowerCase();
+  for (const k of ['sign-in', 'admin', 'privacy', 'terms', 'api keys', 'asset library', 'read-only', 'footer']) {
+    assert.ok(p.includes(k), `the mockup prompt names ${k}`);
+  }
+});
+
+test('GATE design-adherence: an unbridged shell or a backwards load order is a failure', () => {
+  const files = GOOD_PLATFORM();
+  assert.equal(runScript(DESIGN_ADHERENCE_GATE_SCRIPT, files).code, 0, 'the real tree is green');
+
+  // The check is SEMANTIC, not a marker grep: a mockup-derived design.css
+  // drives the shell through the generated bridge, a preset-derived one
+  // declares --app-* directly. Either satisfies it; neither does not.
+  const noBridge = GOOD_PLATFORM();
+  noBridge['state/design.css'] = noBridge['state/design.css'].replace(/==bridge==[\s\S]*?==\/bridge==/, '');
+  const r1 = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, noBridge);
+  assert.equal(r1.code, 1, r1.out);
+  assert.match(r1.out, /the app SHELL ignores the approved design/);
+
+  const backwards = GOOD_PLATFORM();
+  backwards['public/x.html'] = '<html><head>\n<link href="/design.css">\n<link href="/base.css">\n</head></html>';
+  const r2 = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, backwards);
+  assert.equal(r2.code, 1);
+  assert.match(r2.out, /links design\.css BEFORE base\.css/);
 });

@@ -215,7 +215,12 @@ function runGate(files) {
   }
 }
 
-const GATE_DESIGN = ':root{'
+// A design.css must ALSO drive the app shell's --app-* family, or the header,
+// nav, buttons, theme toggle, legal footer and sign-in page ignore the approved
+// design. Every real design.css does — the preset path declares them directly,
+// the mockup path through the generated bridge — so the fixture does too.
+const SHELL_VARS = '--app-bg:#101;--app-text:#102;--app-surface:#103;--app-primary:#104;';
+const GATE_DESIGN = ':root{' + SHELL_VARS
   + Array.from({ length: 20 }, (_, i) => `--app-t${i}:#10${i}`).join(';')
   + '}[data-theme="dark"]{'
   + Array.from({ length: 20 }, (_, i) => `--app-t${i}:#90${i}`).join(';')
@@ -226,7 +231,7 @@ test('GATE: fails the build that re-invented the design system', () => {
     + Array.from({ length: 400 }, (_, i) => `.c${i}{color:var(--own-1);padding:8px}`).join('\n');
   const r = runGate({ 'state/design.css': GATE_DESIGN, 'public/app.css': appCss });
   assert.equal(r.code, 1, 'red');
-  assert.match(r.out, /reference NONE of the 20 approved design variables/);
+  assert.match(r.out, /reference NONE of the \d+ approved design variables/);
   assert.match(r.out, /theme toggle changes nothing/);
 });
 
@@ -258,7 +263,7 @@ test('GATE: never blocks what it cannot judge — no design, no app CSS, or a th
   assert.equal(fresh.code, 0, fresh.out);
   assert.match(fresh.out, /has not written substantial CSS/);
   // A preset-only project has too thin a system to enforce.
-  const thin = runGate({ 'state/design.css': ':root{--app-bg:#fff;--app-fg:#000;--app-accent:#08f}', 'public/app.css': bulk });
+  const thin = runGate({ 'state/design.css': `:root{${SHELL_VARS}}`, 'public/app.css': bulk });
   assert.equal(thin.code, 0);
   assert.match(thin.out, /fewer than 8 approved variables/);
 });

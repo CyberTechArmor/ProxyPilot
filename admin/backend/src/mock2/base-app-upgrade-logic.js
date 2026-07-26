@@ -58,6 +58,7 @@ export const PLATFORM_OWNED_ALWAYS = Object.freeze([
   'migrations/0100_platform.sql',
   'public/theme.js',
   'public/platform.js',
+  'public/platform-admin.js',
   'public/base.css',
 ]);
 

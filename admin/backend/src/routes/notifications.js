@@ -16,7 +16,7 @@ import { testChannel } from '../lib/notification-dispatch.js';
 import { CHANNEL_KINDS } from '../lib/notification-logic.js';
 import { pushStatus, sendPushTo, buildPushPayload } from '../lib/web-push.js';
 import {
-  saveSubscription, deleteSubscription, listSubscriptions,
+  saveSubscription, deleteSubscription, listSubscriptions, getSubscriptionByEndpoint,
   publicSubscriptionShape, markDelivered, markFailed,
 } from '../lib/push-subscriptions.js';
 import { validatePushKeys } from '../lib/web-push-logic.js';
@@ -181,9 +181,20 @@ notificationsRouter.post('/push/unsubscribe', requireAdmin, (req, res) => {
 // waiting for a build to fail.
 notificationsRouter.post('/push/test', requireAdmin, async (req, res) => {
   const endpoint = req.body?.endpoint;
-  const subs = listSubscriptions({ userId: req.user?.id ?? null });
-  const target = endpoint ? subs.find((s) => s.endpoint === String(endpoint)) : subs[0];
-  if (!target) return res.status(404).json({ error: 'this browser is not subscribed' });
+  // Look up by ENDPOINT — the unique key and the real identity of a
+  // subscription. This used to filter by user_id, which reported "this browser
+  // is not subscribed" while the card next to it said "1 device subscribed":
+  // the row existed but carried a different user_id.
+  let target = endpoint ? getSubscriptionByEndpoint(String(endpoint)) : null;
+  // No endpoint supplied (an older client): fall back to this user's, then to
+  // any — a test send is diagnostic, so reaching SOMETHING beats a 404.
+  if (!target) target = listSubscriptions({ userId: req.user?.id ?? null })[0] || listSubscriptions()[0] || null;
+  if (!target) {
+    return res.status(404).json({
+      error: 'The server has no push subscription for this browser. Turn notifications off and on again.',
+      resubscribe: true,
+    });
+  }
 
   const r = await sendPushTo(target, buildPushPayload({
     title: 'ProxyPilot notifications are working',

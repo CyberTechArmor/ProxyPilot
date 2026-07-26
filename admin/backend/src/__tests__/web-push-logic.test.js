@@ -448,3 +448,49 @@ test('validatePushKeys rejects a bad subscription at SUBSCRIBE time', async () =
   assert.match(validatePushKeys({ p256dh: 'AAAA', auth: Buffer.alloc(16).toString('base64url') }).error, /65-byte/);
   assert.match(validatePushKeys({ p256dh: ua.getPublicKey().toString('base64url'), auth: 'AA' }).error, /16-byte/);
 });
+
+// ---- the reported bug: "1 device subscribed" vs "this browser is not subscribed" ----
+
+test('a subscription is identified by its ENDPOINT, not by whoever is logged in', () => {
+  // THE BUG. The test-send route looked the subscription up with
+  // listSubscriptions({ userId }) — so a row whose user_id did not match the
+  // current session was invisible, and the operator saw the card say
+  // "1 device subscribed in total" directly above "this browser is not
+  // subscribed". The row was right there.
+  //
+  // A row can legitimately carry a different (or null) user_id: subscribed
+  // under another account, re-registered by the service worker's
+  // pushsubscriptionchange handler (which has no session user), or restored
+  // from a backup. The endpoint is the UNIQUE key and the real identity.
+  const store = readFileSync(new URL('../lib/push-subscriptions.js', import.meta.url), 'utf8');
+  assert.match(store, /export function getSubscriptionByEndpoint/);
+  assert.match(store, /WHERE endpoint = \?/);
+
+  const routes = readFileSync(new URL('../routes/notifications.js', import.meta.url), 'utf8');
+  const testRoute = routes.slice(routes.indexOf("post('/push/test'"), routes.indexOf("post('/push/test'") + 900);
+  assert.match(testRoute, /getSubscriptionByEndpoint/, 'the test send looks up by endpoint');
+  // And when it genuinely finds nothing, it says what to DO rather than
+  // asserting something the UI beside it contradicts.
+  assert.match(testRoute, /resubscribe: true/);
+  assert.match(testRoute, /Turn notifications off and on again/);
+});
+
+test('the UI re-registers on load, so browser and server cannot disagree', () => {
+  // The card read "On for this device" from the BROWSER alone. Re-posting the
+  // subscription on every load is an idempotent upsert keyed on the endpoint,
+  // which makes the disagreement unrepresentable instead of merely unlikely.
+  const card = readFileSync(new URL('../../../frontend/src/components/PushNotifications.jsx', import.meta.url), 'utf8');
+  assert.match(card, /SELF-HEAL/);
+  assert.match(card, /api\.pushSubscribe\(sub\.toJSON\(\)\)/);
+  // ApiError spreads response fields onto itself, so the flag is read directly.
+  assert.match(card, /err\?\.resubscribe === true/);
+});
+
+test('the subscribe route upserts on endpoint rather than accumulating rows', () => {
+  // Without ON CONFLICT the same browser re-subscribing would add a second row
+  // and every notification would arrive twice.
+  const store = readFileSync(new URL('../lib/push-subscriptions.js', import.meta.url), 'utf8');
+  assert.match(store, /ON CONFLICT\(endpoint\) DO UPDATE/);
+  const db = readFileSync(new URL('../db.js', import.meta.url), 'utf8');
+  assert.match(db, /endpoint\s+TEXT NOT NULL UNIQUE/);
+});

@@ -56,6 +56,16 @@ export function listSubscriptions({ userId = null } = {}) {
     : db.prepare('SELECT * FROM push_subscriptions WHERE user_id = ? ORDER BY id').all(Number(userId));
 }
 
+// THE identity of a subscription is its ENDPOINT, not whoever happened to be
+// logged in when it was created. Looking one up by user_id was a design error:
+// the row can carry a different (or null) user_id for several ordinary reasons
+// — subscribed under another account, re-registered by the service worker's
+// pushsubscriptionchange handler, restored from a backup — and the browser then
+// gets told it is "not subscribed" while the row sits right there.
+export function getSubscriptionByEndpoint(endpoint) {
+  return getDb().prepare('SELECT * FROM push_subscriptions WHERE endpoint = ?').get(String(endpoint)) || null;
+}
+
 export function countSubscriptions() {
   return getDb().prepare('SELECT COUNT(*) AS n FROM push_subscriptions').get()?.n ?? 0;
 }

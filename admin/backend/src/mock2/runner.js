@@ -35,7 +35,7 @@ import {
   listCyclesForProject,
 } from './cycles.js';
 import {
-  parseGateScripts, initialGateReports, gateBatteryVerdict, allGatesGreen,
+  parseGateScripts, withBaselineGates, initialGateReports, gateBatteryVerdict, allGatesGreen,
   interruptDecision, estimateCycleTokens, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
   noopStartRefusal,
   normalizeBuildMode, filterGatesForBuildMode, isFastBuildMode, BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK,
@@ -505,15 +505,20 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   const waivedGates = (resumeContext?.waivers || [])
     .map((w) => (typeof w?.rule === 'string' && w.rule.startsWith('gate:') ? w.rule.slice(5) : null))
     .filter(Boolean);
-  const gateScripts = filterGatesForBuildMode(parseGateScripts(framework.gates_json), modeStr)
+  const frameworkGates = filterGatesForBuildMode(parseGateScripts(framework.gates_json), modeStr)
     .filter((g) => !waivedGates.includes(g.name));
-  // A FULL build with zero gates is almost certainly a broken framework
-  // version (empty/unparseable gates_json) — fast modes drop the battery on
-  // purpose, but the full Build / Production check existing to run it is the
-  // whole point. Say so loudly instead of running a silently-empty battery
-  // (this is what made a full build's run_gates return "pending" with no gate
-  // names — the model then honestly refused to finish).
-  if (!gateScripts.length && modeStr === BUILD_MODE_FULL) {
+  // Baseline gates are backend-owned and ride every FULL battery (see
+  // withBaselineGates) — an operator's gates.json cannot silently drop them.
+  // A waiver still removes one, because a waiver is a deliberate admin act.
+  const gateScripts = (modeStr === BUILD_MODE_FULL ? withBaselineGates(frameworkGates) : frameworkGates)
+    .filter((g) => !waivedGates.includes(g.name));
+  // A FULL build with zero FRAMEWORK gates is almost certainly a broken
+  // framework version (empty/unparseable gates_json) — fast modes drop the
+  // battery on purpose, but the full Build / Production check existing to run
+  // it is the whole point. Say so loudly instead of running a battery that is
+  // only the baseline (this is what made a full build's run_gates return
+  // "pending" with no gate names — the model then honestly refused to finish).
+  if (!frameworkGates.length && modeStr === BUILD_MODE_FULL) {
     try {
       insertMessage({
         projectId, kind: 'system', cycleId: cycle.id,

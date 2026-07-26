@@ -183,6 +183,108 @@ export function filterGatesForBuildMode(gates = [], mode = BUILD_MODE_FULL) {
   return [];
 }
 
+// ---- baseline gate: design adherence ----
+//
+// WHY A BASELINE GATE. The framework's gates_json is operator-owned, so nothing
+// there is guaranteed. This one is owned by the backend and appended to every
+// FULL build, because the failure it catches was invisible and expensive: a
+// build read the approved mockup, then wrote its own ~18KB stylesheet with its
+// own 32 variables and referenced NONE of the approved ones. Every gate passed,
+// the deploy was healthy, and the shipped app simply did not look like the
+// design that had been signed off.
+//
+// It is deliberately blunt. It does not judge taste, spacing or hierarchy — the
+// design review does that. It only fires on the two unambiguous signatures of
+// "the approved design was ignored":
+//   * the app's own CSS references ZERO approved variables, and
+//   * the app declares a dozen-plus variables of its own while using almost
+//     none of the approved set (a parallel palette that will drift).
+// Plus the one case where ignoring the design breaks a shipped FEATURE: the
+// approved design has a dark theme, the app's own tokens have no dark variant,
+// so the theme toggle flips an attribute nothing responds to.
+//
+// A red gate does not kill the build — the runner feeds the verdict back and
+// the model fixes it (the no-progress breaker stops a loop). No approved
+// design.css, or no app CSS yet, exits 0: there is nothing to adhere to.
+export const DESIGN_ADHERENCE_GATE_NAME = 'design-adherence';
+
+export const DESIGN_ADHERENCE_GATE_SCRIPT = `# Baseline gate (ProxyPilot): the approved design must actually be consumed.
+set -u
+DESIGN=state/design.css
+if [ ! -f "$DESIGN" ]; then
+  echo "design-adherence: no state/design.css — nothing approved to adhere to. Skipped."
+  exit 0
+fi
+
+APP=/tmp/pp-app.css
+: > "$APP"
+for f in public/*.css; do
+  [ -f "$f" ] || continue
+  case "$f" in */base.css|*/design.css|*/platform.css) continue ;; esac
+  cat "$f" >> "$APP"
+done
+APPBYTES=$(wc -c < "$APP" | tr -d ' ')
+
+# Declared variables on each side, and the approved ones the app actually reads.
+grep -o -- '--[A-Za-z0-9_-]*[[:space:]]*:' "$DESIGN" | sed 's/[[:space:]]*:$//' | sort -u > /tmp/pp-approved
+grep -o -- '--[A-Za-z0-9_-]*[[:space:]]*:' "$APP"    | sed 's/[[:space:]]*:$//' | sort -u > /tmp/pp-appdef
+grep -o -- 'var([[:space:]]*--[A-Za-z0-9_-]*' "$APP" | sed 's/.*--/--/'         | sort -u > /tmp/pp-appuse
+
+APPROVED=$(wc -l < /tmp/pp-approved | tr -d ' ')
+USED=$(comm -12 /tmp/pp-appuse /tmp/pp-approved | wc -l | tr -d ' ')
+OWN=$(comm -23 /tmp/pp-appdef /tmp/pp-approved | wc -l | tr -d ' ')
+
+echo "design-adherence: \${APPROVED} approved variable(s); the app uses \${USED} of them, declares \${OWN} of its own, in \${APPBYTES} bytes of its own CSS."
+
+# Too little approved design to judge against (a preset-only project).
+if [ "$APPROVED" -lt 8 ]; then
+  echo "design-adherence: fewer than 8 approved variables — not enough of a design system to enforce. Passed."
+  exit 0
+fi
+# The app has not written stylesheets of its own yet.
+if [ "$APPBYTES" -lt 2000 ]; then
+  echo "design-adherence: the app has not written substantial CSS of its own. Passed."
+  exit 0
+fi
+
+FAIL=0
+if [ "$USED" -eq 0 ]; then
+  echo "FAIL: the app's stylesheets reference NONE of the \${APPROVED} approved design variables."
+  echo "      state/design.css is loaded and ignored. Restyle the screens on var(--...) from state/design.css"
+  echo "      instead of a parallel palette; state/mockups/current.html is the visual contract."
+  FAIL=1
+elif [ "$OWN" -ge 12 ] && [ $((USED * 4)) -lt "$APPROVED" ]; then
+  echo "FAIL: the app declares \${OWN} design variables of its own while using only \${USED} of \${APPROVED} approved ones."
+  echo "      That is a second palette; the two will drift. Delete the parallel tokens and consume state/design.css."
+  FAIL=1
+fi
+
+# A dropped dark theme is a broken shipped feature, not a style opinion.
+if grep -q 'data-theme' "$DESIGN" && [ "$OWN" -ge 8 ] && ! grep -q 'data-theme' "$APP"; then
+  echo "FAIL: the approved design defines a dark theme; the app's own \${OWN} variables have no dark variant,"
+  echo "      so the theme toggle changes nothing for them. Add the [data-theme=\\"dark\\"] values or use the approved ones."
+  FAIL=1
+fi
+
+if [ "$FAIL" -ne 0 ]; then exit 1; fi
+echo "design-adherence: the app builds on the approved design. Passed."
+exit 0
+`;
+
+// Append the backend-owned baseline gates to a framework's battery. Skipped
+// when the framework already defines a gate of the same name (an operator who
+// wrote their own stricter version keeps it — theirs wins, ours doesn't stack).
+export function withBaselineGates(gates = []) {
+  const list = Array.isArray(gates) ? [...gates] : [];
+  if (list.some((g) => g && g.name === DESIGN_ADHERENCE_GATE_NAME)) return list;
+  list.push({
+    name: DESIGN_ADHERENCE_GATE_NAME,
+    script: DESIGN_ADHERENCE_GATE_SCRIPT,
+    order: (list.reduce((m, g) => Math.max(m, Number(g?.order) || 0), 0)) + 1,
+  });
+  return list;
+}
+
 // The initial gates_json the runner stamps on a cycle from the pinned gate
 // scripts — every gate 'pending' before the battery runs.
 export function initialGateReports(gateScripts = []) {

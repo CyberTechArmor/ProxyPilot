@@ -436,7 +436,14 @@ export async function onRequestClosed(requestRow) {
           const [{ maybeAutoDesignReview }, { getProject }] = await Promise.all([
             import('./design-review.js'), import('./projects.js'),
           ]);
-          void maybeAutoDesignReview(getProject(pid));
+          // Logged on BOTH sides of the fire-and-forget: without this line a
+          // review that never started and a review that started and failed
+          // looked identical in the server log (they were both nothing).
+          console.log(`[mock2] auto design review starting for project ${pid} (request ${requestRow.id})`);
+          maybeAutoDesignReview(getProject(pid))
+            .catch((e) => console.warn('[mock2] auto design review threw:', e?.message));
+        } else {
+          console.log(`[mock2] auto design review deferred for project ${pid}: build queue still busy`);
         }
       } catch (e) { console.warn('[mock2] auto design review hook failed:', e?.message); }
     }

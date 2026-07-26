@@ -25,6 +25,7 @@ import { resolveBrowserTarget } from './smoke.js';
 import { parseUiChecks, UI_CHECKS_PATH } from './ui-check-logic.js';
 import {
   buildReviewPrompt, parseReviewReply, rogueCssColors, reviewChatMessage, composePolishInstruction,
+  checkDesignAdherence,
 } from './design-review-logic.js';
 import { MOCKUP_CURRENT } from './concept-logic.js';
 import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
@@ -310,13 +311,22 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   const mockupHtml = await readContainerFile(containerName, MOCKUP_CURRENT);
   const tokensJson = await readContainerFile(containerName, 'state/design-tokens.json');
 
-  // Deterministic extra: rogue colors in the app's own stylesheets (never
-  // base.css/design.css — those ARE the system).
+  // Deterministic extras over the app's OWN stylesheets (never base.css/
+  // design.css — those ARE the system):
+  //   rogue     — colors written outside the token set.
+  //   adherence — does the build actually consume the approved design, or has
+  //               it declared a parallel one? This is the check that would have
+  //               caught a build referencing zero approved variables while
+  //               hand-writing 18KB of its own CSS.
   let rogue = [];
+  let adherence = null;
   try {
     const cssList = await containerSh(containerName,
       `for f in ${APP_DIR}/public/*.css; do case "$f" in *base.css|*design.css) ;; *) cat "$f" 2>/dev/null;; esac; done`);
-    if (tokensJson) rogue = rogueCssColors(cssList.stdout || '', tokensJson);
+    const appCss = cssList.stdout || '';
+    if (tokensJson) rogue = rogueCssColors(appCss, tokensJson);
+    const designCss = await readContainerFile(containerName, 'state/design.css');
+    adherence = checkDesignAdherence({ designCss, appCss });
   } catch { /* advisory */ }
 
   const model = String(process.env.MOCK2_REVIEW_MODEL || '').trim() || ready.model;
@@ -345,7 +355,7 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   } catch (e) { console.warn('[mock2] design-review ledger write failed:', e?.message); }
 
   const review = parseReviewReply(res.text) || { summary: '', findings: [] };
-  let message = reviewChatMessage({ review, axe: capture.axe, rogue, trigger, screenshotCount: capture.shots.length });
+  let message = reviewChatMessage({ review, axe: capture.axe, rogue, adherence, trigger, screenshotCount: capture.shots.length });
   // Honesty: with no fixture logins the capture only ever sees the sign-in
   // gate — say so up front, or the findings read as "the entire app is
   // missing" (user report). A Full build creates the fixture logins.
@@ -376,32 +386,70 @@ ${message}`;
 
   let queued = null;
   if (apply) {
-    const instruction = composePolishInstruction({ review, axe: capture.axe, rogue });
+    const instruction = composePolishInstruction({ review, axe: capture.axe, rogue, adherence });
     if (instruction) {
       queued = enqueueBuild({ projectId: project.id, instruction, buildMode: 'quick', label: 'Polish pass fixes', initiatedBy });
       drainBuildQueue(project.id).catch((e) => console.warn('[mock2] polish drain failed:', e?.message));
     }
   }
-  return { ok: true, findings: review.findings, summary: review.summary, axe: capture.axe, rogue, message, queued };
+  return { ok: true, findings: review.findings, summary: review.summary, axe: capture.axe, rogue, adherence, message, queued };
 }
 
 // The after-build hook (fire-and-forget from the request-close chain): honors
 // the dashboard toggle, posts findings to the chat, never blocks or fails the
 // close. In-process re-entrancy guard so back-to-back closes don't stack
 // browser sessions.
+//
+// VISIBILITY (this used to be the bug). Every path out of here was silent: a
+// review that could not capture a screenshot, or ran with no build connector
+// ready, or threw, produced NOTHING — no chat message, no marker, nothing an
+// operator could see. A build then shipped with zero design feedback and
+// looked, from the outside, exactly like a build that was reviewed and found
+// clean. Now the only silent outcomes are the two that mean "nothing to say":
+// the toggle is off, and a review already in flight for this project.
 const autoReviewRunning = new Set();
+
+// Skip/failure reasons worth telling the operator about, in the words they
+// need to act on. Anything unmapped falls through with the raw detail.
+function autoReviewNote(reason, detail) {
+  const base = 'Design review (after build) did not run';
+  if (reason === 'inactive') return `${base} — the project is not online, so its screens could not be opened.`;
+  if (reason === 'no_runner') return `${base} — no build model connector is ready. Connect one to get design feedback on each build.`;
+  if (reason === 'no_shots') return `${base} — the app could not be screenshotted${detail ? ` (${detail})` : ''}. The build itself is unaffected.`;
+  return `${base}${detail ? ` — ${detail}` : '.'}`;
+}
+
 export async function maybeAutoDesignReview(project) {
+  const note = (body) => {
+    try { if (project?.id) insertMessage({ projectId: project.id, kind: 'system', body }); } catch { /* best effort */ }
+  };
   try {
-    if (getDesignReviewSetting() !== 'on') return;
-    if (!project || project.lifecycle !== 'active') return;
-    if (autoReviewRunning.has(project.id)) return;
+    if (getDesignReviewSetting() !== 'on') return { ok: false, skipped: 'setting_off' };
+    if (!project?.id) return { ok: false, skipped: 'no_project' };
+    if (project.lifecycle !== 'active') {
+      console.warn(`[mock2] auto design review skipped for project ${project.id}: lifecycle ${project.lifecycle}`);
+      note(autoReviewNote('inactive'));
+      return { ok: false, skipped: 'inactive' };
+    }
+    // Already running: the in-flight pass will post. Genuinely nothing to say.
+    if (autoReviewRunning.has(project.id)) return { ok: false, skipped: 'already_running' };
     autoReviewRunning.add(project.id);
     try {
-      await runDesignReview({ project, trigger: 'auto', apply: false });
+      const res = await runDesignReview({ project, trigger: 'auto', apply: false });
+      if (!res?.ok) {
+        const detail = res?.error || 'unknown';
+        console.warn(`[mock2] auto design review produced nothing for project ${project.id}: ${detail}`);
+        const reason = /no build model connector/i.test(detail) ? 'no_runner'
+          : /screenshot/i.test(detail) ? 'no_shots' : null;
+        note(autoReviewNote(reason, reason === 'no_shots' ? null : detail));
+      }
+      return res;
     } finally {
       autoReviewRunning.delete(project.id);
     }
   } catch (e) {
     console.warn('[mock2] auto design review failed:', e?.message);
+    note(autoReviewNote(null, e?.message || 'unexpected error'));
+    return { ok: false, error: e?.message || 'unexpected error' };
   }
 }

@@ -1,0 +1,254 @@
+// Design adherence — the four fixes for "the build ignored the approved design".
+//
+// The failure these cover, from a real build (project 36): the mockup carried
+// ~35 CSS variables across three surface levels plus a full dark theme, the
+// approved design.css handed to the build carried 20 flattened values and no
+// dark theme, and the app that shipped referenced ZERO of them while declaring
+// 32 of its own and hand-writing ~18KB of CSS. Every gate passed. The design
+// review posted nothing. Nobody could see any of it in the downloaded log,
+// because every tool result stopped at 8,000 chars.
+//
+// Native-free (risk R9): the pure layers only — no container, no DB, no browser.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import {
+  extractMockupStyles, splitMockupCss, renderDesignCssFromMockup,
+} from '../mock2/concept-logic.js';
+import {
+  definedCssVars, usedCssVars, checkDesignAdherence,
+  reviewChatMessage, composePolishInstruction,
+} from '../mock2/design-review-logic.js';
+import {
+  DESIGN_ADHERENCE_GATE_NAME, DESIGN_ADHERENCE_GATE_SCRIPT, withBaselineGates,
+  filterGatesForBuildMode, BUILD_MODE_FULL, BUILD_MODE_QUICK,
+} from '../mock2/cycle-logic.js';
+import { eventContentBudget, clipEventContent, EVENT_CONTENT_BUDGETS } from '../mock2/cycle-events-logic.js';
+
+// A mockup shaped like the one that shipped a lackluster build: a fenced token
+// block with three surface levels + a dark theme, then real component CSS.
+const TOKENS_BLOCK = `/* ==tokens== */
+:root{
+  --surface:#fff; --surface-2:#f6f7f9; --surface-3:#eceef2;
+  --text:#0b1220; --text-2:#4b5563; --text-3:#8b94a3;
+  --hairline:#e4e7ec; --accent:#0d9488; --accent-tint:#e6fffb; --warn:#b45309;
+  --stage-mvp-bg:#eef6ff; --stage-full-bg:#f3f0ff;
+  --stage-mvp-fg:#1d4ed8; --stage-full-fg:#6d28d9; --stage-idea-bg:#fff7ed; --stage-idea-fg:#b45309;
+  --font-sans:Inter,system-ui,sans-serif; --font-mono:ui-monospace,monospace;
+  --radius-sm:6px; --radius:10px; --radius-lg:16px; --radius-pill:999px;
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-6:24px;
+  --shadow-1:0 1px 2px rgba(0,0,0,.06); --shadow-2:0 8px 24px rgba(0,0,0,.10);
+}
+[data-theme="dark"]{
+  --surface:#0b1220; --surface-2:#111a2b; --surface-3:#18233a;
+  --text:#e8edf5; --text-2:#a3adbe; --text-3:#6b7686;
+  --hairline:#1e2a40; --accent:#2dd4bf; --accent-tint:#062e2b; --warn:#f59e0b;
+  --stage-mvp-bg:#0d2035; --stage-full-bg:#1a1330;
+}
+/* ==/tokens== */`;
+
+const COMPONENT_CSS = `
+.rail{background:var(--surface-2);border-right:1px solid var(--hairline)}
+.note-card{background:var(--surface);color:var(--text)}
+@media (max-width: 768px){ .rail{display:none} }
+`;
+
+const MOCKUP = `<!doctype html><html><head><style>${TOKENS_BLOCK}\n${COMPONENT_CSS}</style></head><body></body></html>`;
+
+// ---- fix 1: carry the mockup's real design into design.css ----
+
+test('extractMockupStyles + splitMockupCss separate the fenced tokens from the components', () => {
+  const css = extractMockupStyles(MOCKUP);
+  assert.ok(css.includes('--surface-3'), 'style block extracted');
+  const { tokens, components } = splitMockupCss(css);
+  assert.ok(tokens.includes('--stage-mvp-bg'), 'tokens carry the stage colors');
+  assert.ok(tokens.includes('[data-theme="dark"]'), 'tokens carry the dark theme');
+  assert.ok(!components.includes('--surface-3:'), 'the fence is removed from the component half');
+  assert.ok(components.includes('.note-card'), 'components survive');
+});
+
+test('renderDesignCssFromMockup carries the WHOLE approved design, dark theme included', () => {
+  const d = renderDesignCssFromMockup(MOCKUP);
+  assert.equal(d.source, 'mockup');
+  assert.equal(d.hasDark, true, 'the dark theme is carried — the shipped theme toggle depends on it');
+  // The old path rendered a fixed 20-value schema; the point of this fix is
+  // that a richer design is no longer flattened down to it.
+  assert.ok(d.tokenCount >= 24, `carries the mockup's own token count, got ${d.tokenCount}`);
+  for (const v of ['--surface-2', '--surface-3', '--text-2', '--hairline', '--stage-mvp-bg']) {
+    assert.ok(d.css.includes(v), `carries ${v}`);
+  }
+  assert.ok(d.css.includes('.note-card'), 'carries the component CSS');
+  assert.ok(d.css.includes('@media'), 'carries the responsive rules');
+});
+
+test('renderDesignCssFromMockup falls back to the token schema when there is no fence', () => {
+  const d = renderDesignCssFromMockup('<html><head><style>.x{color:red}</style></head></html>');
+  assert.equal(d.source, 'tokens');
+  assert.ok(d.css.length > 0, 'a project without a fenced mockup still gets a design.css');
+});
+
+// ---- fix 2: the adherence check + the gate ----
+
+test('definedCssVars / usedCssVars tell declaration apart from consumption', () => {
+  const defined = definedCssVars(':root{--a:1;--b:2}.x{color:var(--c)}');
+  assert.deepEqual([...defined].sort(), ['--a', '--b']);
+  const used = usedCssVars('.x{color:var(--c);background:var( --d )}');
+  assert.deepEqual([...used].sort(), ['--c', '--d']);
+});
+
+test('checkDesignAdherence flags the project-36 shape: zero approved vars used, own palette, dark dropped', () => {
+  const designCss = renderDesignCssFromMockup(MOCKUP).css;
+  const appCss = `:root{${Array.from({ length: 32 }, (_, i) => `--own-${i}:#000`).join(';')}}\n`
+    + Array.from({ length: 200 }, (_, i) => `.c${i}{color:var(--own-1)}`).join('\n');
+  const r = checkDesignAdherence({ designCss, appCss });
+  const codes = r.findings.map((f) => f.code);
+  assert.ok(codes.includes('DESIGN_TOKENS_UNUSED'), 'names the ignored design');
+  assert.ok(codes.includes('PARALLEL_TOKEN_SYSTEM'), 'names the second palette');
+  assert.ok(codes.includes('DARK_THEME_DROPPED'), 'names the toggle that now does nothing');
+  assert.equal(r.ok, false);
+});
+
+test('checkDesignAdherence passes an app built ON the approved design, and skips when nothing is approved', () => {
+  const designCss = renderDesignCssFromMockup(MOCKUP).css;
+  const appCss = '.a{color:var(--text);background:var(--surface-2);border-color:var(--hairline)}'
+    + '.b{background:var(--surface-3);color:var(--text-2)}'
+    + '.c{color:var(--accent);background:var(--accent-tint)}'
+    + '.d{color:var(--warn);background:var(--stage-mvp-bg)}'
+    + '.e{background:var(--stage-full-bg);color:var(--text-3)}'
+    + '.f{background:var(--surface)}[data-theme="dark"] .a{opacity:.9}';
+  assert.equal(checkDesignAdherence({ designCss, appCss }).ok, true);
+  // No approved design (an older project) is not a defect.
+  const none = checkDesignAdherence({ designCss: '', appCss });
+  assert.equal(none.ok, true);
+  assert.equal(none.findings.length, 0);
+});
+
+test('adherence findings reach the operator: the chat message and the polish instruction', () => {
+  const adherence = checkDesignAdherence({
+    designCss: renderDesignCssFromMockup(MOCKUP).css,
+    appCss: `:root{${Array.from({ length: 32 }, (_, i) => `--own-${i}:#000`).join(';')}}.c{color:var(--own-1)}`,
+  });
+  const msg = reviewChatMessage({ review: { summary: 's', findings: [] }, adherence, trigger: 'auto', screenshotCount: 4 });
+  assert.match(msg, /Design adherence/);
+  assert.match(msg, /DESIGN_TOKENS_UNUSED/);
+  const instr = composePolishInstruction({ review: { findings: [] }, adherence });
+  assert.ok(instr, 'adherence alone is enough to compose a polish pass');
+  assert.match(instr, /design system:/);
+});
+
+test('withBaselineGates rides every full battery, never stacks, and yields to an operator gate of the same name', () => {
+  const framework = [{ name: 'tsc', script: 'npx tsc', order: 0 }];
+  const withBase = withBaselineGates(framework);
+  assert.equal(withBase.length, 2);
+  assert.equal(withBase[1].name, DESIGN_ADHERENCE_GATE_NAME);
+  assert.deepEqual(withBaselineGates(withBase).map((g) => g.name), withBase.map((g) => g.name), 'idempotent');
+  // An operator who wrote their own stricter version keeps theirs.
+  const own = [{ name: DESIGN_ADHERENCE_GATE_NAME, script: 'my-own-check', order: 0 }];
+  assert.equal(withBaselineGates(own)[0].script, 'my-own-check');
+  assert.equal(withBaselineGates(own).length, 1);
+  // Fast modes still drop the battery entirely — a one-line edit is never gated.
+  assert.equal(filterGatesForBuildMode(framework, BUILD_MODE_QUICK).length, 0);
+  assert.equal(filterGatesForBuildMode(framework, BUILD_MODE_FULL).length, 1);
+});
+
+// The gate is a shell script that runs in the container; run it for real.
+function runGate(files) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'pp-gate-'));
+  try {
+    for (const [rel, content] of Object.entries(files)) {
+      mkdirSync(path.join(dir, path.dirname(rel)), { recursive: true });
+      writeFileSync(path.join(dir, rel), content);
+    }
+    const script = path.join(dir, 'gate.sh');
+    writeFileSync(script, DESIGN_ADHERENCE_GATE_SCRIPT);
+    try {
+      const out = execFileSync('sh', [script], { cwd: dir, encoding: 'utf8' });
+      return { code: 0, out };
+    } catch (e) {
+      return { code: e.status ?? 1, out: `${e.stdout || ''}${e.stderr || ''}` };
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const GATE_DESIGN = ':root{'
+  + Array.from({ length: 20 }, (_, i) => `--app-t${i}:#10${i}`).join(';')
+  + '}[data-theme="dark"]{'
+  + Array.from({ length: 20 }, (_, i) => `--app-t${i}:#90${i}`).join(';')
+  + '}';
+
+test('GATE: fails the build that re-invented the design system', () => {
+  const appCss = `:root{${Array.from({ length: 32 }, (_, i) => `--own-${i}:#ab${i}`).join(';')}}\n`
+    + Array.from({ length: 400 }, (_, i) => `.c${i}{color:var(--own-1);padding:8px}`).join('\n');
+  const r = runGate({ 'state/design.css': GATE_DESIGN, 'public/app.css': appCss });
+  assert.equal(r.code, 1, 'red');
+  assert.match(r.out, /reference NONE of the 20 approved design variables/);
+  assert.match(r.out, /theme toggle changes nothing/);
+});
+
+test('GATE: fails a parallel palette even when a few approved vars are used', () => {
+  const appCss = `:root{${Array.from({ length: 15 }, (_, i) => `--mine-${i}:#cd${i}`).join(';')}}\n`
+    + Array.from({ length: 300 }, (_, i) => `.c${i}{color:var(--mine-1)}`).join('\n')
+    + '\n.a{color:var(--app-t1)}.b{color:var(--app-t2)}.c{color:var(--app-t3)}\n'
+    + '[data-theme="dark"] .a{opacity:.9}';
+  const r = runGate({ 'state/design.css': GATE_DESIGN, 'public/app.css': appCss });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /declares 15 design variables of its own/);
+});
+
+test('GATE: passes an app built on the approved design', () => {
+  const appCss = Array.from({ length: 400 }, (_, i) => `.c${i}{color:var(--app-t${i % 20});background:var(--app-t3)}`).join('\n')
+    + '\n[data-theme="dark"] .c1{opacity:.9}';
+  const r = runGate({ 'state/design.css': GATE_DESIGN, 'public/app.css': appCss });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /builds on the approved design/);
+});
+
+test('GATE: never blocks what it cannot judge — no design, no app CSS, or a thin preset', () => {
+  const bulk = Array.from({ length: 400 }, (_, i) => `.c${i}{color:#333;padding:8px}`).join('\n');
+  // Nothing approved.
+  assert.equal(runGate({ 'public/app.css': bulk }).code, 0);
+  // A fresh scaffold: design.css exists, the build has written no CSS of its
+  // own, and the scaffold's own copies are excluded from the app side.
+  const fresh = runGate({ 'state/design.css': GATE_DESIGN, 'public/design.css': GATE_DESIGN, 'public/base.css': ':root{--x:1}' });
+  assert.equal(fresh.code, 0, fresh.out);
+  assert.match(fresh.out, /has not written substantial CSS/);
+  // A preset-only project has too thin a system to enforce.
+  const thin = runGate({ 'state/design.css': ':root{--app-bg:#fff;--app-fg:#000;--app-accent:#08f}', 'public/app.css': bulk });
+  assert.equal(thin.code, 0);
+  assert.match(thin.out, /fewer than 8 approved variables/);
+});
+
+// ---- fix 4: the downloaded build log stops clipping the evidence ----
+
+test('cycle-event budgets: a tool result keeps enough to be evidence, and truncation keeps the tail', () => {
+  assert.ok(EVENT_CONTENT_BUDGETS.tool_result >= 64_000, 'a tool result is the evidence');
+  assert.ok(eventContentBudget('tool_result') > eventContentBudget('unknown_kind'), 'kind-aware');
+  const body = `${'H'.repeat(200_000)}ERROR: the actual failure`;
+  const clipped = clipEventContent(body, 'tool_result');
+  assert.ok(clipped.length < body.length, 'still bounded');
+  assert.ok(clipped.startsWith('HHHH'), 'the head survives');
+  assert.ok(clipped.endsWith('ERROR: the actual failure'), 'the TAIL survives — that is where the error is');
+  assert.match(clipped, /truncated \d+ chars/, 'says what went missing');
+  // Under budget is returned untouched.
+  assert.equal(clipEventContent('short', 'tool_result'), 'short');
+});
+
+test('cycle-event budgets: MOCK2_MAX_EVENT_CHARS overrides but cannot exceed the ceiling', () => {
+  const prev = process.env.MOCK2_MAX_EVENT_CHARS;
+  try {
+    process.env.MOCK2_MAX_EVENT_CHARS = '1000';
+    assert.equal(eventContentBudget('tool_result'), 1000);
+    process.env.MOCK2_MAX_EVENT_CHARS = '99999999';
+    assert.equal(eventContentBudget('tool_result'), 64_000);
+  } finally {
+    if (prev === undefined) delete process.env.MOCK2_MAX_EVENT_CHARS;
+    else process.env.MOCK2_MAX_EVENT_CHARS = prev;
+  }
+});

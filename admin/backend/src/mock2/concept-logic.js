@@ -1160,6 +1160,99 @@ input, select, textarea { background: var(--app-bg); color: var(--app-text); bor
 `;
 }
 
+/* ---------------------------------------------------------------------------
+   CARRYING THE MOCKUP'S DESIGN INTO THE APP.
+
+   The mockup IS the design. It ships ~35 tokens (three surface levels, three
+   text levels, hairline, accent-tint, the full lifecycle-stage palette) AND a
+   complete `[data-theme="dark"]` derivation AND the component CSS that makes
+   the layout read — cards, rails, checklists, popovers.
+
+   The previous handoff asked a model to re-derive TWENTY flat values from that
+   HTML and rebuilt a generic stylesheet from them. Everything else was dropped
+   at approval: surface-2/3, text-2, hairline, warn, teal, every stage colour,
+   the entire dark theme, and all of the component CSS. The build then had to
+   re-invent the look by re-reading the mockup and hand-writing a fresh
+   stylesheet — which is why builds came out sharing the palette but not the
+   design. (Measured on project 36: 48,665 chars of mockup in, 1,909 chars of
+   design.css out, and the built app referenced none of it.)
+
+   The mockup already fences its tokens with ==tokens== markers precisely so
+   they can be found mechanically (mockup-template.js writes them; the mockup
+   checks parse them). So take the CSS verbatim — it is deterministic, free, and
+   lossless, where the model call was none of the three.
+   --------------------------------------------------------------------------- */
+
+// Every <style> block in the mockup, concatenated in document order.
+export function extractMockupStyles(html) {
+  const out = [];
+  const re = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+  let m;
+  while ((m = re.exec(String(html || '')))) out.push(m[1]);
+  return out.join('\n\n');
+}
+
+// Split the stylesheet into its fenced token block and everything else.
+// `tokens` is '' when the mockup predates the markers — the caller then falls
+// back to the generated stylesheet rather than shipping a design with no
+// palette at all.
+export function splitMockupCss(css) {
+  const text = String(css || '');
+  const fence = /\/\*\s*==tokens==[\s\S]*?==\/tokens==\s*\*\//g;
+  const tokens = (text.match(fence) || []).join('\n\n');
+  const components = text.replace(fence, '').trim();
+  return { tokens: tokens.trim(), components };
+}
+
+// How much of the mockup's own CSS may ride into the app. A mockup is a single
+// self-contained file; this is a sanity bound, not a design limit.
+export const MAX_DESIGN_CSS_CHARS = 200_000;
+
+/* renderDesignCssFromMockup — the app's stylesheet, built from the mockup.
+ *
+ * Returns { css, source, tokenCount, hasDark }. `source` is 'mockup' when the
+ * real CSS was carried and 'tokens' when it fell back to the generated palette,
+ * so the caller can say which happened instead of silently degrading.
+ */
+export function renderDesignCssFromMockup(html, tokens = DEFAULT_TOKENS) {
+  const styles = extractMockupStyles(html);
+  const { tokens: fenced, components } = splitMockupCss(styles);
+
+  // No fenced tokens → an old or hand-written mockup. Keep the previous
+  // behaviour rather than shipping an app with no palette.
+  if (!fenced) {
+    return { css: renderDesignTokensCss(tokens), source: 'tokens', tokenCount: 0, hasDark: false };
+  }
+
+  const header = `/* Generated from the approved mockup on design approval.
+   This is the mockup's OWN stylesheet — its tokens (light + dark) and the
+   component styles the approved design uses — carried over verbatim so the
+   built app reproduces the design rather than re-deriving it.
+
+   Build on these classes and variables. Do NOT invent a parallel token set:
+   a second palette is how an app ends up merely sharing the mockup's colours.
+*/`;
+
+  // The app also links the platform's base.css, which defines its own --app-*
+  // family. Keeping the mockup's variables under their original names means the
+  // component CSS below resolves exactly as it did in the mockup.
+  let css = `${header}\n${fenced}\n\n${components}`.trim();
+  if (css.length > MAX_DESIGN_CSS_CHARS) {
+    css = `${css.slice(0, MAX_DESIGN_CSS_CHARS)}\n/* … design CSS truncated at ${MAX_DESIGN_CSS_CHARS} chars */`;
+  }
+  return {
+    css,
+    source: 'mockup',
+    // UNIQUE declared names, counted wherever they appear (a mockup may put
+    // several on one line). A per-line count under-reported by 3-4x, which
+    // made the "did the whole design carry over" log line lie.
+    tokenCount: new Set(
+      [...fenced.matchAll(/(?:^|[;{\s])(--[a-z0-9-]+)\s*:/gi)].map((m) => m[1].toLowerCase()),
+    ).size,
+    hasDark: /\[data-theme=["']?dark["']?\]/.test(fenced),
+  };
+}
+
 // ---- chat → model transcript ----
 
 // classifyConceptTurn — what a concept_chat turn asked for. Given the assistant

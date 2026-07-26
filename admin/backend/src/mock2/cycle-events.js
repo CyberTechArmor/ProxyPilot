@@ -17,15 +17,13 @@ export { deriveActivityItem };
 
 const nowIso = () => new Date().toISOString();
 
-// How much of a tool result / AI message we persist. Bounds row size while
-// keeping enough to evaluate what happened (a huge exec dump is truncated).
-export const MAX_EVENT_CONTENT_CHARS = 8000;
-
-function clip(text) {
-  const s = String(text ?? '');
-  if (s.length <= MAX_EVENT_CONTENT_CHARS) return s;
-  return `${s.slice(0, MAX_EVENT_CONTENT_CHARS)}\n…[truncated ${s.length - MAX_EVENT_CONTENT_CHARS} chars]`;
-}
+// Content budgets + truncation live in cycle-events-logic.js (pure, testable
+// without better-sqlite3); re-exported here so callers keep one import.
+export {
+  MAX_EVENT_CONTENT_CHARS, MAX_EVENT_CONTENT_CHARS_CEILING,
+  EVENT_CONTENT_BUDGETS, eventContentBudget, clipEventContent,
+} from './cycle-events-logic.js';
+import { clipEventContent } from './cycle-events-logic.js';
 
 // Append one event to a cycle's log. seq is derived per-cycle inside the insert
 // so concurrent appends can't collide. kind ∈ task | ai_message | tool_call |
@@ -40,7 +38,7 @@ export function insertCycleEvent({ projectId, cycleId, kind, role = null, conten
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       Number(projectId), Number(cycleId), seq, String(kind), role,
-      content == null ? null : clip(content),
+      content == null ? null : clipEventContent(content, kind),
       meta == null ? null : JSON.stringify(meta),
       nowIso(),
     );
@@ -106,7 +104,7 @@ export function recordCycleFeedback({ projectId, cycleId, rating, note = null, u
      VALUES (?, ?, ?, 'feedback', 'user', ?, ?, ?)`,
   ).run(
     Number(projectId), Number(cycleId), seq,
-    note == null ? null : clip(note),
+    note == null ? null : clipEventContent(note, 'feedback'),
     JSON.stringify({ rating, user_id: userId }),
     nowIso(),
   );

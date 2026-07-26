@@ -1,7 +1,14 @@
-// ScreenPlan — the per-screen apply panel (post-approval, left column). One row
-// per inventory screen: approve/defer each, apply the kept ones, and watch them
-// build one at a time in the background. The Production check action lives in
-// the BuildStatus panel above (with Full build), not here.
+// ScreenPlan — what the app is made of and what is actually built
+// (post-approval, left column). One row per inventory screen with its feature
+// checklist: built / pending / deferred, and an editor can correct a status.
+//
+// It is a STATUS VIEW, not a build launcher. It used to carry two more build
+// buttons ("Build N screens in the background", "Build selected features") on
+// top of MVP, Quick update, Full build, Production check and Polish — six
+// doors onto what were really two lanes. Building is now asked for in the
+// chat: describe the screen or feature and send it as a Quick update, or run
+// a Full build. This panel answers "what is done", which is the question it
+// was actually good at.
 //
 // MOBILE_FIRST: single-column rows, 44px touch targets, no fixed widths.
 
@@ -28,10 +35,8 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
   const [screens, setScreens] = useState(null); // null while loading
   const [counts, setCounts] = useState(null);
   const [items, setItems] = useState([]); // feature checklist rows
-  const [selected, setSelected] = useState(() => new Set()); // item ids picked to build next
   const [expandedScreens, setExpandedScreens] = useState({}); // screen id -> manual expand/collapse override
   const [openItems, setOpenItems] = useState(() => new Set()); // item ids with version history open
-  const [itemsBusy, setItemsBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const timer = useRef(null);
 
@@ -67,21 +72,6 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
     } finally { setBusy(false); }
   };
 
-  const applyAll = async () => {
-    setBusy(true);
-    try {
-      const r = await api.mock2ApplyScreens(projectId);
-      toast({
-        title: `Building ${r.queued} screen${r.queued === 1 ? '' : 's'} in the background`,
-        description: 'One at a time — the chat reports each screen as it goes live. Keep working meanwhile.',
-      });
-      await load();
-      if (onChanged) onChanged();
-    } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not apply screens', description: err.message });
-    } finally { setBusy(false); }
-  };
-
   // ---- feature checklist (per-screen is/isn't-done items) ----
   const itemsFor = (screenId) => (items || []).filter((i) => i.screen_id === screenId);
   // Collapse rule: all items done -> collapsed; any pending -> expanded; a
@@ -100,31 +90,10 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
     return next;
   });
   const pendingItems = (items || []).filter((i) => i.status === 'pending' && !i.building);
-  const toggleSelect = (id) => setSelected((cur) => {
-    const next = new Set(cur);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
   const markItem = async (item, status) => {
     try { await api.mock2SetScreenItem(projectId, item.id, status); await load(); }
     catch (err) { toast({ variant: 'destructive', title: 'Could not update the item', description: err.message }); }
   };
-  const buildItems = async (ids) => {
-    setItemsBusy(true);
-    try {
-      const r = await api.mock2BuildScreenItems(projectId, ids);
-      toast({
-        title: `Building ${r.started} feature${r.started === 1 ? '' : 's'}`,
-        description: 'One scoped build — each item flips to built when it succeeds (or back to selectable if it fails).',
-      });
-      setSelected(new Set());
-      await load();
-      if (onChanged) onChanged();
-    } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not start the feature build', description: err.message });
-    } finally { setItemsBusy(false); }
-  };
-
   if (screens == null) {
     return (
       <Card>
@@ -153,8 +122,8 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
         </div>
         <CardDescription>
           From the approved design — screens plus the feature checklist under each. A built screen can still
-          have unfinished features: tick the ones to finish next and press &quot;Build selected&quot; (or finish
-          all remaining). Unfinished features show a &quot;Not built yet&quot; badge inside the running app.
+          have unfinished features; those show a &quot;Not built yet&quot; badge inside the running app.
+          To build one, describe it in the chat.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -206,17 +175,10 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
                       <div key={it.id} className="min-w-0">
                         <div className="flex items-center gap-1.5">
                           <div className={`flex min-h-[40px] flex-1 min-w-0 items-center gap-2 rounded px-1 text-xs ${it.status === 'built' ? 'text-muted-foreground' : ''}`}>
-                            {canEdit ? (
-                              <input
-                                type="checkbox" className="h-4 w-4 shrink-0 accent-primary"
-                                disabled={it.status === 'built' || it.building}
-                                checked={selected.has(it.id)}
-                                onChange={() => toggleSelect(it.id)}
-                                aria-label={`Select "${it.name}" to build next`}
-                              />
-                            ) : (
-                              <span className={`h-2 w-2 shrink-0 rounded-full ${it.status === 'built' ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
-                            )}
+                            <span
+                              className={`h-2 w-2 shrink-0 rounded-full ${it.status === 'built' ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`}
+                              title={it.status === 'built' ? 'Built' : 'Not built yet'}
+                            />
                             <button
                               type="button"
                               className={`min-w-0 break-words text-left hover:underline decoration-dotted ${it.status === 'built' ? 'line-through decoration-muted-foreground/50' : ''}`}
@@ -261,42 +223,13 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
             );
           })}
         </ul>
-        {canEdit ? (
-          <div className="space-y-2 pt-1">
-            {applicable ? (
-              <Button
-                className="min-h-[44px] w-full"
-                disabled={busy || !online}
-                onClick={applyAll}
-              >
-                {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Hammer className="mr-1 h-4 w-4" />}
-                Build {applicable} screen{applicable === 1 ? '' : 's'} in the background
-              </Button>
-            ) : null}
-            {pendingItems.length ? (
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <Button
-                  variant={selected.size ? 'default' : 'outline'}
-                  className="min-h-[44px] flex-1"
-                  disabled={itemsBusy || !online || !selected.size}
-                  onClick={() => buildItems([...selected])}
-                  title="One scoped build over exactly the ticked features"
-                >
-                  {itemsBusy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Hammer className="mr-1 h-4 w-4" />}
-                  Build selected{selected.size ? ` (${selected.size})` : ''}
-                </Button>
-                <Button
-                  variant="outline"
-                  className="min-h-[44px] flex-1"
-                  disabled={itemsBusy || !online}
-                  onClick={() => buildItems(null)}
-                  title="One build that finishes every pending feature on the checklist"
-                >
-                  Finish all remaining ({pendingItems.length})
-                </Button>
-              </div>
-            ) : null}
-          </div>
+        {canEdit && (applicable || pendingItems.length) ? (
+          <p className="pt-1 text-xs text-muted-foreground">
+            {applicable ? `${applicable} screen${applicable === 1 ? '' : 's'} not built yet` : ''}
+            {applicable && pendingItems.length ? ' · ' : ''}
+            {pendingItems.length ? `${pendingItems.length} feature${pendingItems.length === 1 ? '' : 's'} pending` : ''}
+            {' — '}describe what you want next in the chat and send it as a Quick update, or run a Full build.
+          </p>
         ) : null}
       </CardContent>
     </Card>

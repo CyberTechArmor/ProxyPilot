@@ -45,7 +45,7 @@ import { formatComponentForModel, parseContractJson, buildInstalledComponentsSec
 import {
   ASK_TOOLS, ASK_MAX_TURNS, estimateAskTokens,
   buildAskSystemPrompt, buildAskTask, askCommandAllowed, webSearchServerTools,
-  buildAskContextBlock, ASK_CONTEXT_MAX_MESSAGES,
+  buildAskContextBlock, ASK_CONTEXT_MAX_MESSAGES, detectPolishIntent,
 } from './ask-logic.js';
 
 const nowIso = () => new Date().toISOString();
@@ -93,6 +93,36 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
     return { status: 'error', error: `The project must be online to ask (it is "${project.lifecycle}").` };
   }
   if (askJobActive(projectId)) return { status: 'error', error: 'An ask is already running for this project — wait for its answer.' };
+
+  // POLISH INTENT. "polish this" / "review the design" is a question about the
+  // LIVE app, and the ask lane cannot answer it: it has read+exec tools, not a
+  // browser. Left to the model it would describe the CSS it can read and call
+  // that a design review. Route it to the real design review instead — which
+  // screenshots the deployed app at both widths, measures design adherence,
+  // and posts the findings with the shots attached. "…and fix them" also
+  // queues the fixes as a quick build.
+  //
+  // This is where the Polish pass BUTTON went (it was a fourth build-looking
+  // action for something that is not a build).
+  const polish = detectPolishIntent(question);
+  if (polish) {
+    const { runDesignReview } = await import('./design-review.js');
+    getOrCreateChat(projectId);
+    insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: String(question).trim() });
+    insertMessage({
+      projectId, kind: 'system',
+      body: polish.apply
+        ? 'Running the design review — screenshotting the live app at mobile and desktop width, checking it against the approved design, and queueing the fixes as a Quick update. The findings and the screenshots land here.'
+        : 'Running the design review — screenshotting the live app at mobile and desktop width and checking it against the approved design. The findings and the screenshots land here.',
+    });
+    void runDesignReview({ project, trigger: 'manual', apply: polish.apply, initiatedBy: user.id })
+      .then((r) => {
+        if (!r?.ok) insertMessage({ projectId, kind: 'system', body: `The design review could not run: ${r?.error || 'unknown error'}` });
+      })
+      .catch((e) => console.warn('[mock2] ask-triggered design review failed:', e?.message));
+    return { status: 'started', polish: true, apply: polish.apply };
+  }
+
   const ready = buildRunnerReady();
   if (!ready.ok) return { status: 'error', error: ready.reason };
 

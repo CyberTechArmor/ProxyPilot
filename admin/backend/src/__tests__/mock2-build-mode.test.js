@@ -32,10 +32,18 @@ test('normalizeBuildMode: mvp/quick in any casing, everything else full', () => 
 
 // ---- quick mode: gates + routing ----
 
-test('quick mode: runs NO gate battery (the deploy pipeline is the backstop)', () => {
+// CHANGED DELIBERATELY. quick used to run NO gates. That, plus mvp also
+// running none, meant the whole default path out of design approval — an MVP
+// build then quick updates — shipped an app without a single gate executing.
+// quick now runs only what costs seconds and cannot be pre-existing debt.
+test('quick mode: runs the cheap gates only — never the slow or debt-prone ones', () => {
   const gates = ['typecheck', 'constitution-lint', 'security-scan', 'test', 'component-reuse', 'rule-coverage', 'ui-interaction', 'acceptance']
     .map((name, i) => ({ name, script: '#', order: i }));
-  assert.deepEqual(filterGatesForBuildMode(gates, 'quick'), []);
+  const names = filterGatesForBuildMode(gates, 'quick').map((g) => g.name);
+  assert.deepEqual(names, ['typecheck'], 'typecheck is seconds; everything else waits for mvp/full');
+  for (const slow of ['security-scan', 'rule-coverage', 'acceptance', 'test']) {
+    assert.ok(!names.includes(slow), `${slow} must not block a one-line edit`);
+  }
 });
 
 test('quickRoutingDecision: fast model at MEDIUM effort (cost default — a quick update is one small change), env-overridable', () => {
@@ -60,12 +68,19 @@ const battery = [
   { name: 'component-reuse', script: '#', order: 8 },
 ];
 
-test('filterGatesForBuildMode: full mode returns the battery untouched (same reference)', () => {
-  assert.equal(filterGatesForBuildMode(battery, 'full'), battery);
+test('filterGatesForBuildMode: full mode keeps every operator gate', () => {
+  assert.deepEqual(filterGatesForBuildMode(battery, 'full').map((g) => g.name), battery.map((g) => g.name));
 });
 
-test('filterGatesForBuildMode: mvp runs NO gate battery', () => {
-  assert.deepEqual(filterGatesForBuildMode(battery, 'mvp'), []);
+// CHANGED DELIBERATELY (see above): mvp is now "does the app look and act
+// right" — the visual/behavioural gates run, the slow correctness half does not.
+test('filterGatesForBuildMode: mvp runs the look-and-act gates, not the slow ones', () => {
+  const names = filterGatesForBuildMode(battery, 'mvp').map((g) => g.name);
+  assert.ok(names.includes('typecheck'), 'typecheck rides every profile');
+  assert.ok(names.includes('ui-interaction'), 'does it ACT right');
+  for (const slow of ['security-scan', 'rule-coverage', 'acceptance', 'test', 'component-reuse']) {
+    assert.ok(!names.includes(slow), `${slow} belongs to the full build, not the MVP`);
+  }
 });
 
 test('filterGatesForBuildMode: tolerant of empty/absent batteries', () => {

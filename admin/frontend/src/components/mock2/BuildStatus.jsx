@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import {
   Hammer, RefreshCw, Loader2, Square, RotateCcw, ShieldAlert, ShieldCheck, Clock, GitBranch,
-  CheckCircle2, Ban, PauseCircle, Play, ThumbsUp, ThumbsDown, Wrench, Package, Wand2,
+  CheckCircle2, Ban, PauseCircle, Play, ThumbsUp, ThumbsDown, Wrench, Package,
 } from 'lucide-react';
 import BuildTaskList from './BuildTaskList';
 import ChangeHistory from './ChangeHistory';
@@ -170,30 +170,24 @@ export default function BuildStatus({
     } finally { setFullBusy(false); }
   };
 
-  // Polish pass: screenshot the deployed app, vision-critique it against the
-  // approved mockup + tokens (with axe-core and token-drift checks riding
-  // along), post findings to the chat, and queue the fixes as a quick build.
-  const [polishBusy, setPolishBusy] = useState(false);
-  const polishPass = async () => {
-    setPolishBusy(true);
-    try {
-      await api.mock2Polish(projectId, { apply: true });
-      toast({ title: 'Polish pass running', description: 'Screenshotting the app and reviewing it against the design — findings land in the chat, and the fixes queue as a quick build.' });
-      if (onRefresh) onRefresh();
-    } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not start the polish pass', description: err.message });
-    } finally { setPolishBusy(false); }
-  };
+  // Polish moved into Ask ("polish this", "review the design") — it critiques
+  // the live app and offers the fixes as a Quick update, which is a question
+  // with a follow-up, not a build lane of its own. It is also automatic after
+  // every succeeded build (design-review.js), so the button was mostly a
+  // "run it again now".
 
+  // The full build with no instruction: verify the app exactly as it stands.
+  // Reached from the Full build dialog when the textarea is empty; this WAS
+  // the separate "Production check" button.
   const productionCheck = async () => {
     setCheckBusy(true);
     try {
       const r = await api.mock2ProductionCheck(projectId);
-      if (r.refused) toast({ variant: 'destructive', title: 'Production check refused', description: r.reason || 'Quota exceeded.' });
-      else toast({ title: 'Production check started', description: 'Full readiness pass: rule interview, per-rule tests, acceptance checks, and every gate. No new features.' });
+      if (r.refused) toast({ variant: 'destructive', title: 'Check refused', description: r.reason || 'Quota exceeded.' });
+      else toast({ title: 'Checking the app as-is', description: 'Full readiness pass: rule interview, per-rule tests, acceptance checks, and every gate. No new features.' });
       if (onRefresh) onRefresh();
     } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not start the production check', description: err.message });
+      toast({ variant: 'destructive', title: 'Could not start the check', description: err.message });
     } finally { setCheckBusy(false); }
   };
   // The running build clock: tick once a second while the cycle is live so the
@@ -1038,46 +1032,33 @@ export default function BuildStatus({
           online ? <p className="text-sm text-muted-foreground">No builds yet. Describe a change in the build chat to start one.</p> : null
         )}
 
-        {/* Production readiness — the audited lanes (the chat only offers
-            Ask / Quick update). Full build runs one change through the whole
-            gate battery; the production check validates the app as-is. */}
+        {/* THE FULL BUILD — the only audited lane, and the only build action
+            here. There used to be three buttons in this box (Full build,
+            Production check, Polish pass) on top of MVP and Quick update
+            elsewhere: five names over what were really two lanes. Production
+            check WAS a full build with a canned instruction, so it is now the
+            "check it, add nothing" option inside this one dialog, and Polish
+            moved into Ask ("polish this" / "review the design"), where it
+            belongs — it critiques, it does not build. */}
         {canEdit && online && !active ? (
           <div className="rounded-md border p-3 space-y-2">
             <p className="text-xs font-medium flex items-center gap-1">
-              <ShieldCheck className="h-3.5 w-3.5" /> Production readiness
+              <ShieldCheck className="h-3.5 w-3.5" /> Full build
             </p>
             <p className="text-xs text-muted-foreground">
-              Quick updates skip the gates to keep iteration fast. When the app (or a feature) is worth
-              keeping, run it through the audited lane.
+              Quick updates run the fast gates so iteration stays quick. When the app is worth keeping,
+              run the whole battery — rule questions, per-rule tests, security, acceptance. Build a change,
+              or check the app exactly as it is.
             </p>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Button
-                variant="outline" className="min-h-[44px] flex-1"
-                disabled={fullBusy}
-                onClick={() => setFullOpen(true)}
-                title="Build one change through the audited lane: rule questions, per-rule tests, the whole gate battery"
-              >
-                <Hammer className="h-4 w-4 mr-1" /> Full build
-              </Button>
-              <Button
-                variant="outline" className="min-h-[44px] flex-1"
-                disabled={checkBusy}
-                onClick={productionCheck}
-                title="Full-gate readiness pass over the app as it is — rule interview, per-rule tests, acceptance checks. No new features."
-              >
-                {checkBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ShieldCheck className="h-4 w-4 mr-1" />}
-                Production check
-              </Button>
-              <Button
-                variant="outline" className="min-h-[44px] flex-1"
-                disabled={polishBusy}
-                onClick={polishPass}
-                title="Screenshot the live app, critique it against the approved design (plus accessibility + token-drift checks), and queue the visual fixes as a quick build. No new features."
-              >
-                {polishBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Wand2 className="h-4 w-4 mr-1" />}
-                Polish pass
-              </Button>
-            </div>
+            <Button
+              variant="outline" className="min-h-[44px] w-full"
+              disabled={fullBusy || checkBusy}
+              onClick={() => setFullOpen(true)}
+              title="The audited lane: rule questions, per-rule tests, and the whole gate battery. Build a change or verify the app as-is."
+            >
+              {fullBusy || checkBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Hammer className="h-4 w-4 mr-1" />}
+              Full build
+            </Button>
           </div>
         ) : null}
         </>
@@ -1092,22 +1073,32 @@ export default function BuildStatus({
           <DialogHeader>
             <DialogTitle>Full build (audited)</DialogTitle>
             <DialogDescription>
-              Describe the change to build through the audited lane — rule questions, per-rule tests,
-              and the whole gate battery. Slower than a Quick update; this is the production-grade pass.
+              The whole battery — rule questions, per-rule tests, security, acceptance. Slower than a
+              Quick update; this is the production-grade pass. Describe a change, or leave it empty to
+              check the app exactly as it is and add nothing.
             </DialogDescription>
           </DialogHeader>
           <textarea
             className="flex min-h-[96px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            placeholder="e.g. “Harden the check-in flow: validation, error states, and tests for every rule”"
+            placeholder="e.g. “Harden the check-in flow: validation, error states, and tests for every rule” — or leave empty to verify the app as-is"
             value={fullText}
-            disabled={fullBusy}
+            disabled={fullBusy || checkBusy}
             onChange={(e) => setFullText(e.target.value)}
           />
+          <p className="text-xs text-muted-foreground">
+            {fullText.trim()
+              ? 'Builds this change through every gate.'
+              : 'Nothing to build — this will verify the app as it stands: every gate, every rule, no new features. (This was the “Production check”.)'}
+          </p>
           <DialogFooter className="gap-2">
-            <Button variant="ghost" className="min-h-[44px]" disabled={fullBusy} onClick={() => setFullOpen(false)}>Cancel</Button>
-            <Button className="min-h-[44px]" disabled={fullBusy || !fullText.trim()} onClick={startFullBuild}>
-              {fullBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Hammer className="h-4 w-4 mr-1" />}
-              Start full build
+            <Button variant="ghost" className="min-h-[44px]" disabled={fullBusy || checkBusy} onClick={() => setFullOpen(false)}>Cancel</Button>
+            <Button
+              className="min-h-[44px]"
+              disabled={fullBusy || checkBusy}
+              onClick={() => { if (fullText.trim()) startFullBuild(); else { setFullOpen(false); productionCheck(); } }}
+            >
+              {fullBusy || checkBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Hammer className="h-4 w-4 mr-1" />}
+              {fullText.trim() ? 'Start full build' : 'Check the app as-is'}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -539,7 +539,7 @@ describe('integration contract (fixture-backed)', () => {
 // every portal-specific screen). Colorful values ride the design tokens
 // (var(--app-*, fallback)) so the chosen preset — or an approved mockup's
 // extracted tokens — restyles the whole shell without touching this file.
-function baseCss() {
+export function baseCss() {
   return `/* Shared app shell (generalized from the base portal project). Screens reuse
    these classes; colors/radii come from /design.css tokens with safe fallbacks. */
 *{box-sizing:border-box}

@@ -35,10 +35,10 @@ import {
   listCyclesForProject,
 } from './cycles.js';
 import {
-  parseGateScripts, withBaselineGates, initialGateReports, gateBatteryVerdict, allGatesGreen,
+  parseGateScripts, buildGateBattery, gatesForProfile, initialGateReports, gateBatteryVerdict, allGatesGreen,
   interruptDecision, estimateCycleTokens, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
   noopStartRefusal,
-  normalizeBuildMode, filterGatesForBuildMode, isFastBuildMode, BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK,
+  normalizeBuildMode, isFastBuildMode, BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK,
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
@@ -336,6 +336,17 @@ export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 
 export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null, task = null, buildMode = null }) {
   const projectId = Number(project.id);
   if (!resumeContext) { try { expireStaleAuthorizations(projectId); } catch { /* best effort */ } }
+  // Refresh the base app BEFORE the build reads the tree, so the cycle works
+  // against the current platform module rather than whatever shipped the day
+  // the project was provisioned. Platform-owned files only, never app code —
+  // and silent when there is nothing to do. A resume skips it: the tree must
+  // not change underneath a cycle that is continuing.
+  if (!resumeContext) {
+    try {
+      const { maybeUpgradeBaseApp } = await import('./base-app-upgrade.js');
+      await maybeUpgradeBaseApp(projectId, { reason: 'pre-build' });
+    } catch (e) { console.warn('[mock2] pre-build base-app upgrade skipped:', e?.message); }
+  }
   // Cost-truth: attach this cycle to its umbrella request as a SEGMENT. When the caller
   // doesn't pass one (the audit→build handoff), derive the project's latest open request
   // (opened by startBuild). Additive + nullable — a null request_id is legacy/harmless.
@@ -505,17 +516,22 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   const waivedGates = (resumeContext?.waivers || [])
     .map((w) => (typeof w?.rule === 'string' && w.rule.startsWith('gate:') ? w.rule.slice(5) : null))
     .filter(Boolean);
-  const frameworkGates = filterGatesForBuildMode(parseGateScripts(framework.gates_json), modeStr)
-    .filter((g) => !waivedGates.includes(g.name));
-  // Baseline gates are backend-owned and ride every FULL battery (see
-  // withBaselineGates) — an operator's gates.json cannot silently drop them.
-  // A waiver still removes one, because a waiver is a deliberate admin act.
-  const gateScripts = (modeStr === BUILD_MODE_FULL ? withBaselineGates(frameworkGates) : frameworkGates)
-    .filter((g) => !waivedGates.includes(g.name));
+  // ONE decision for the whole battery: operator gates filtered to this mode's
+  // profile, plus the backend-owned baseline gates for that profile. Every
+  // mode now runs SOME gates — the old code gave mvp and quick a battery of
+  // zero, which is how an app shipped without a single check ever executing.
+  // A waiver still removes a gate, because a waiver is a deliberate admin act.
+  const parsedGates = parseGateScripts(framework.gates_json);
+  const battery = buildGateBattery(parsedGates, modeStr);
+  const gateProfile = battery.profile;
+  const gateScripts = battery.gates.filter((g) => !waivedGates.includes(g.name));
+  const frameworkGates = gatesForProfile(parsedGates, gateProfile);
+  console.log(`[mock2] cycle ${cycle.id} gate profile '${gateProfile}': `
+    + gateScripts.map((g) => `${g.name}${g.advisory ? '(advisory)' : ''}`).join(', '));
   // A FULL build with zero FRAMEWORK gates is almost certainly a broken
-  // framework version (empty/unparseable gates_json) — fast modes drop the
-  // battery on purpose, but the full Build / Production check existing to run
-  // it is the whole point. Say so loudly instead of running a battery that is
+  // framework version (empty/unparseable gates_json) — the baseline gates
+  // still run, but the full Build / Production check exists to run the
+  // operator's battery. Say so loudly instead of running a battery that is
   // only the baseline (this is what made a full build's run_gates return
   // "pending" with no gate names — the model then honestly refused to finish).
   if (!frameworkGates.length && modeStr === BUILD_MODE_FULL) {

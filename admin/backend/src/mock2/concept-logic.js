@@ -1029,6 +1029,58 @@ export function lintInventory(inventory) {
 export const DESIGN_TOKENS_PATH = 'state/design-tokens.json';
 export const DESIGN_CSS_PATH = 'state/design.css';
 
+// ---- the mockup preview's failure states ----
+//
+// Every one of these renders INSIDE an iframe. The route used to answer with
+// JSON, so a failure put a raw {"error":...} blob in the preview pane: the
+// frame looked broken with no explanation, and the operator's report was
+// simply "the mockup preview didn't work". The iframe cannot read the response
+// status (it is served to an opaque sandboxed origin), so the ANSWER ITSELF
+// has to be the message.
+//
+// Pure so the markup is testable without the DB.
+
+export function escapePreviewHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+// A self-contained, theme-dark, phone-safe card. No fixed widths, a viewport
+// meta, and text that wraps — it is rendered in a pane that is often 390px.
+export function previewErrorCard({ title, detail }) {
+  return '<!doctype html><html><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + `<title>${escapePreviewHtml(title)}</title>`
+    + '<style>html,body{height:100%;margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,'
+    + '"Segoe UI",Roboto,sans-serif;background:#0d1524;color:#dbe6f5}'
+    + 'main{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;'
+    + 'gap:10px;text-align:center;padding:24px;box-sizing:border-box}'
+    + 'h1{margin:0;font-size:16px;font-weight:600}'
+    + 'p{margin:0;max-width:44ch;color:#8fa5c4;overflow-wrap:break-word}</style></head><body><main>'
+    + `<h1>${escapePreviewHtml(title)}</h1><p>${escapePreviewHtml(detail)}</p></main></body></html>`;
+}
+
+// The three ways the preview can have nothing to show, in the operator's terms.
+export const PREVIEW_ERRORS = Object.freeze({
+  offline: {
+    status: 409,
+    title: 'The project is not running',
+    detail: 'Wake the project to view its mockup — the design is stored in the project container.',
+  },
+  none: {
+    status: 404,
+    title: 'No mockup yet',
+    detail: 'Describe the app in the chat and one will be generated here.',
+  },
+  unreadable: {
+    status: 404,
+    title: 'The mockup could not be read',
+    detail: 'The project records a mockup but its file is not readable in the container. '
+      + 'Send another message in the design chat to re-render it.',
+  },
+});
+
 export function buildDesignTokenExtractionPrompt() {
   return `You extract the DESIGN TOKENS from an approved product mockup so the built app
 can reproduce its exact look — colors, typography, spacing, corner radius,

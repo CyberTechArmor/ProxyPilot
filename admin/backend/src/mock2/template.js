@@ -17,7 +17,9 @@
 // Terminology (risk R7): the dev server here is a plain static server; nothing
 // is named "agent".
 
-import { buildScaffoldFiles } from './scaffold.js';
+import { buildScaffoldFiles, MOCK2_SCAFFOLD_VERSION } from './scaffold.js';
+import { PLATFORM_MODULE_VERSION } from './scaffold-platform.js';
+import { PLATFORM_VERSION_PATH, renderPlatformVersionFile } from './base-app-upgrade-logic.js';
 import { buildDesignPresetSeedFiles } from './design-presets.js';
 import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from './deploy-logic.js';
 
@@ -241,6 +243,17 @@ link + install script in every page head.
 export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
   return [
     { path: 'mock2.yaml', content: defaultManifest({ webPort }) },
+    {
+      // What version of the BASE APP this project was seeded with. Read by the
+      // base-app upgrade path: without it a project is frozen at whatever the
+      // scaffold looked like on the day it was provisioned, and every later
+      // improvement to the platform module reaches new projects only.
+      path: PLATFORM_VERSION_PATH,
+      content: renderPlatformVersionFile({
+        scaffoldVersion: MOCK2_SCAFFOLD_VERSION,
+        platformVersion: PLATFORM_MODULE_VERSION,
+      }),
+    },
     // The real runtime scaffold (package.json, tsconfig, src/, migrations/, …).
     ...buildScaffoldFiles(project),
     // Pre-build placeholder dev server (Concept stage) — kept as the idle/fallback

@@ -326,15 +326,17 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     }
   };
 
+  // 'all' is the only strategy now: one MVP build implements the approved
+  // design. The screen-by-screen option queued a separate background build per
+  // screen — a second way to start builds, on top of MVP / Quick / Full, and
+  // the slowest path to a first version.
   const approve = async (build = 'all') => {
     setBusy(true);
     try {
       await api.mock2ApproveDesign(projectId, build);
       toast({
         title: 'Building…',
-        description: build === 'screens'
-          ? 'Locking in your design — screens will build one at a time in the background; watch the chat.'
-          : 'Locking in your design and unlocking the build — watch the chat for progress.',
+        description: 'Locking in your design and building the MVP — watch the chat for progress.',
       });
       await load();
     } catch (err) {
@@ -837,35 +839,32 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
             <DialogTitle>Ready to build?</DialogTitle>
             <DialogDescription>
               This locks in your current design{project?.name ? <> for <span className="font-medium">{project.name}</span></> : null}.
-              The base app (sign-in, first-admin setup, and your chosen look) is already wired — choose how the
-              screens get built. <span className="font-medium">Both options run as fast MVP builds</span> (no rule
-              interview, no gate battery — validate features first). You can keep making changes afterwards, and a{' '}
-              <span className="font-medium">Production check</span> later runs the full rule/test/acceptance battery
-              on what proved worth keeping.
+              The base app (sign-in, first-admin setup, theme, branding, legal pages and your chosen look) is
+              already wired; the MVP build implements the whole design on top of it in one pass.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <button
-              type="button"
-              onClick={() => doBuild('screens')}
-              className="w-full min-h-[44px] rounded-md border border-primary bg-primary/10 p-3 text-left"
-            >
-              <span className="flex items-center gap-2 text-sm font-medium"><Rocket className="h-4 w-4" /> Screen by screen (recommended)</span>
-              <span className="block pt-1 text-xs text-muted-foreground">
-                Each screen builds as its own small scoped pass, one at a time in the background — you can watch
-                them land, defer the ones you don&apos;t need, and keep working meanwhile.
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => doBuild('all')}
-              className="w-full min-h-[44px] rounded-md border p-3 text-left"
-            >
-              <span className="text-sm font-medium">Everything at once</span>
-              <span className="block pt-1 text-xs text-muted-foreground">
-                One MVP build implements the whole design in a single pass — fastest to a complete first version.
-              </span>
-            </button>
+            <div className="rounded-md border p-3 text-xs text-muted-foreground space-y-1.5">
+              <p className="text-sm font-medium text-foreground flex items-center gap-2">
+                <Rocket className="h-4 w-4" /> What the MVP build does
+              </p>
+              <p>
+                Reproduces the approved mockup as a working app: every screen, field and action, on the base
+                app&apos;s shell and design tokens.
+              </p>
+              <p>
+                It runs the <span className="font-medium">look-and-act</span> gates — the design actually matches
+                the mockup, nothing scrolls sideways on a phone, no button does nothing, and the base app&apos;s
+                own features survive. It skips the slow half: security scan, per-rule tests and acceptance.
+              </p>
+              <p>
+                Keep changing it afterwards with <span className="font-medium">Quick updates</span>. When it is
+                worth keeping, a <span className="font-medium">Full build</span> runs the whole battery.
+              </p>
+            </div>
+            <Button type="button" className="w-full min-h-[44px]" onClick={() => doBuild('all')}>
+              <Rocket className="h-4 w-4 mr-1" /> Lock the design and build the MVP
+            </Button>
           </div>
           <DialogFooter className="flex-col sm:flex-row gap-2">
             <Button variant="outline" onClick={() => setConfirmBuild(false)} className="h-11 sm:h-10">Not yet</Button>

@@ -166,3 +166,36 @@ test('the bottom bar clears the iPhone home indicator', () => {
   assert.match(read('index.html'), /viewport-fit=cover/);
   assert.match(read('src/components/mock2/MobilePanelBar.jsx'), /pb-safe/);
 });
+
+// ---- mobile studio: three reported defects ----
+
+test('the nav drawer can actually scroll to every item', () => {
+  // THE BUG: the nav was `flex-1` with no min-h-0 and no overflow. A flex-1
+  // child has min-height:auto, so it refuses to shrink below its content — the
+  // list overflowed the drawer and everything past "Users" was unreachable.
+  // No scrollbar, no scroll, no way down.
+  const layout = read('src/components/Layout.jsx');
+  const nav = layout.match(/<nav className="([^"]+)"/);
+  assert.ok(nav, 'the drawer has a nav');
+  for (const cls of ['flex-1', 'min-h-0', 'overflow-y-auto']) {
+    assert.ok(nav[1].includes(cls), `the nav needs ${cls} to scroll (has: ${nav[1]})`);
+  }
+});
+
+test('the drawer ends at the VISIBLE bottom, not the large viewport', () => {
+  // `inset-y-0` on a FIXED element resolves against the initial containing
+  // block, which on mobile is the large viewport — so the drawer extended under
+  // the URL bar and its own footer was unreachable even once the nav scrolled.
+  const layout = read('src/components/Layout.jsx');
+  const aside = layout.slice(layout.indexOf('<aside'), layout.indexOf('<aside') + 600);
+  assert.match(aside, /h-viewport/);
+  assert.ok(!/"[^"\n]*\binset-y-0\b[^"\n]*"/.test(aside), 'no inset-y-0 on the fixed drawer');
+});
+
+test('the checkout bar is off the phone studio but still reachable in Details', () => {
+  // It took a third of the screen from the conversation, which is the whole
+  // reason to open ProxyPilot on a phone. Hidden there, shown in Details.
+  const page = read('src/pages/ProjectDetail.jsx');
+  assert.match(page, /hidden sm:block">\s*\n\s*<LockBanner/, 'hidden on a phone in the studio');
+  assert.match(page, /sm:hidden">\s*\n\s*<LockBanner/, 'and present in Details, where a phone can reach it');
+});

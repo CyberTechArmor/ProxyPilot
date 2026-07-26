@@ -84,6 +84,8 @@ export function getDb() {
 //                                 cancel_requested for live progress
 //   207 Backups — restore_runs.backup_id ON DELETE CASCADE
 //   300 Notifications — durable backend-posted notifications
+//   302 Notifications — push_subscriptions (Web Push / VAPID; one row per
+//               browser that opted in, keyed by its endpoint URL)
 //   400 Cert mounts — service_cert_mounts (TLS cert bind-mount intent
 //                     into sibling LXCs; consumed by lib/cert-mount-reconciler)
 //   500 Mock2 (M0) — users.is_superadmin (the ONLY main-schema touch Mock2
@@ -1350,6 +1352,37 @@ export function initDatabase() {
       ON notifications(source, source_id)`);
     d.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe
       ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL`);
+  });
+
+  // Web Push subscriptions (RFC 8291/8292). One row per BROWSER that opted in,
+  // not per user — the same person on a phone and a laptop is two rows, and
+  // each has its own encryption keys.
+  //
+  // p256dh + auth are the keys the BROWSER generated for this subscription;
+  // they encrypt the payload so the push service relays bytes it cannot read.
+  // They are useless without the endpoint and cannot be used to reach anything
+  // else, so they are stored as-is rather than encrypted at rest — unlike an
+  // SMTP password, there is no other system they unlock.
+  //
+  // endpoint is UNIQUE: re-subscribing the same browser must update the row,
+  // never accumulate duplicates that each deliver the same notification.
+  runMigration(db, 302, 'push_subscriptions', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id       INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        endpoint      TEXT NOT NULL UNIQUE,
+        p256dh        TEXT NOT NULL,
+        auth          TEXT NOT NULL,
+        user_agent    TEXT,
+        created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_used_at  TEXT,
+        last_error    TEXT,
+        fail_count    INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
+      ON push_subscriptions(user_id)`);
   });
 
   // Notification channels — the admin-configurable "standard connections" that

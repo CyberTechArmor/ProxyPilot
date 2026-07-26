@@ -1111,6 +1111,35 @@ export function createMock2Router() {
   // a crash-looping deploy, the bootstrap gate (which 302s html navigations to
   // /login while zero users exist), or the app's own frame policy each turned
   // the design review into "refused to connect".
+  // A CHEAP status probe for the preview panel.
+  //
+  // The panel cannot see inside its own iframe: the mockup is served to an
+  // opaque sandboxed origin, so contentDocument is unreadable and `load` fires
+  // for a browser error page exactly as it does for a real one. When the frame
+  // failed, all the operator got was Chrome's broken-page icon and no reason —
+  // which is what "the mockup preview doesn't work" looked like from outside.
+  //
+  // This answers the same three questions the preview route does, as tiny JSON,
+  // so the panel can render the reason instead of a grey square. Deliberately
+  // does NOT read the mockup body — it must stay cheap enough to call on every
+  // reload.
+  router.get('/projects/:id/mockup-preview/status', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    const answer = (e, extra) => res.json({
+      ok: false, reason: e.title, detail: extra ? `${e.detail} (${extra})` : e.detail,
+    });
+    if (project.lifecycle !== 'active') return answer(PREVIEW_ERRORS.offline);
+    if (!project.current_mockup_id && !project.mockup_archived_id) return answer(PREVIEW_ERRORS.none);
+    const r = await readFileInContainer(project.container_name, 'state/mockups/current.html');
+    if (!r.ok) return answer(PREVIEW_ERRORS.unreadable, r.error || 'unknown error');
+    // A file that exists but holds nothing renders as a blank frame, which is
+    // indistinguishable from a broken one to the person looking at it.
+    if (!String(r.content || '').trim()) {
+      return answer({ title: 'The mockup file is empty', detail: 'The render did not finish. Send another message in the design chat to re-render it.' });
+    }
+    return res.json({ ok: true, bytes: Buffer.byteLength(r.content) });
+  });
+
   router.get('/projects/:id/mockup-preview', requireMock2Role('viewer'), async (req, res) => {
     const project = req.mock2Project;
     // EVERY failure here renders INSIDE an iframe. Answering with JSON put a

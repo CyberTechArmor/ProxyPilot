@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2, MapPin, X, Send, Sparkle, MousePointer2 } from 'lucide-react';
+import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2, MapPin, X, Send, Sparkle, MousePointer2, FileWarning } from 'lucide-react';
 
 const MAX_PREVIEW_PINS = 8;
 
@@ -113,7 +113,7 @@ async function capturePreviewImage(iframeEl, pins) {
 // back to a coordinate overlay. Send optionally attaches a real screenshot of
 // the signed-in view and routes it to the build as a Quick update. Omitted for
 // the mockup preview (pre-build).
-export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null }) {
+export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null, projectId = null }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
   const [annotating, setAnnotating] = useState(false);
   // Overlay (no-bridge) annotate only: lift the tap catcher so the app scrolls.
@@ -126,6 +126,15 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
   const [sending, setSending] = useState(false);
   const [sentAt, setSentAt] = useState(0); // brief "sent" confirmation
   const [attachShot, setAttachShot] = useState(true); // attach a screenshot on send
+  // WHY the frame is empty, when it is.
+  //
+  // The panel cannot inspect its own iframe: the mockup is served to an opaque
+  // sandboxed origin, so contentDocument is unreadable, and `load` fires for a
+  // browser error page exactly as it does for a real document. So a failure
+  // rendered as Chrome's broken-page icon and nothing else — no reason, no
+  // retry, no way to tell "still rendering" from "the container is gone".
+  // The server answers that question directly.
+  const [problem, setProblem] = useState(null); // { reason, detail } | null
   const [mode, setMode] = useState('probing'); // 'probing' | 'bridge' | 'overlay'
   const bridgeSeenRef = useRef(false); // the app announced the bridge at least once
 
@@ -159,6 +168,24 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
   }, [reloadKey, annotating]);
 
   useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
+
+  // Ask the server whether there is anything to show, on mount and whenever the
+  // preview reloads. Only for the MOCKUP preview (projectId given); the built
+  // app's own URL is not ours to introspect.
+  useEffect(() => {
+    if (!projectId || !src) { setProblem(null); return undefined; }
+    let cancelled = false;
+    api.mock2MockupPreviewStatus(projectId)
+      .then((r) => { if (!cancelled) setProblem(r?.ok ? null : { reason: r?.reason, detail: r?.detail }); })
+      .catch((err) => {
+        if (cancelled) return;
+        // The probe itself failing is also an answer worth showing — a 403 here
+        // means the session lapsed, which would otherwise look like a broken
+        // mockup.
+        setProblem({ reason: 'The preview could not be checked', detail: err?.message || 'The server did not answer.' });
+      });
+    return () => { cancelled = true; };
+  }, [projectId, src, reloadKey]);
 
   const appOrigin = (() => { try { return new URL(src).origin; } catch { return '*'; } })();
   const postToApp = (type) => {
@@ -330,6 +357,22 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
         </p>
       ) : null}
       <div className="relative flex-1 min-h-0 overflow-hidden bg-background">
+        {/* When the server says there is nothing to render, say WHY — over the
+            frame, so the broken-page icon underneath is never what the operator
+            is left looking at. Retry re-probes and reloads in one press. */}
+        {problem ? (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-background p-6 text-center">
+            <FileWarning className="h-8 w-8 text-muted-foreground" />
+            <p className="text-sm font-medium">{problem.reason || 'The preview is not available'}</p>
+            <p className="max-w-[44ch] text-xs text-muted-foreground">{problem.detail}</p>
+            <Button
+              variant="outline" size="sm" className="mt-1 min-h-[44px]"
+              onClick={() => { setProblem(null); reloadBack(); }}
+            >
+              <RefreshCw className="mr-1 h-4 w-4" /> Try again
+            </Button>
+          </div>
+        ) : null}
         {/* Two stacked buffers: the front is painted; a reload loads the back
             (hidden) then cross-fades in — no white flash. */}
         {[0, 1].map((id) => {

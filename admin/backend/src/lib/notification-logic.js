@@ -137,6 +137,10 @@ export function buildCycleNotification({ project = {}, cycle = {}, outcome }) {
       subject: title,
       text: `${line}${short ? `\n\nChange: ${short}` : ''}${url ? `\n\n${url}` : ''}`,
       sms: `ProxyPilot: build finished for ${name}. ${deployed ? 'Live now.' : 'Checkpointed.'}`,
+      // Where a tapped push notification lands: the project's page INSIDE
+      // ProxyPilot, not the deployed app — an operator reacting to a failed
+      // build wants the build, not the site that failed to deploy.
+      link: project.id ? `/projects/${project.id}` : '/',
     };
   }
 
@@ -151,6 +155,10 @@ export function buildCycleNotification({ project = {}, cycle = {}, outcome }) {
       subject: title,
       text: `${line}${short ? `\n\nChange: ${short}` : ''}`,
       sms: `ProxyPilot: build paused for ${name} — resume to continue.`,
+      // Where a tapped push notification lands: the project's page INSIDE
+      // ProxyPilot, not the deployed app — an operator reacting to a failed
+      // build wants the build, not the site that failed to deploy.
+      link: project.id ? `/projects/${project.id}` : '/',
     };
   }
 
@@ -165,6 +173,10 @@ export function buildCycleNotification({ project = {}, cycle = {}, outcome }) {
       subject: title,
       text: `${line}${short ? `\n\nChange: ${short}` : ''}`,
       sms: `ProxyPilot: build blocked for ${name} — needs attention.`,
+      // Where a tapped push notification lands: the project's page INSIDE
+      // ProxyPilot, not the deployed app — an operator reacting to a failed
+      // build wants the build, not the site that failed to deploy.
+      link: project.id ? `/projects/${project.id}` : '/',
     };
   }
 
@@ -184,5 +196,6 @@ export function buildCycleNotification({ project = {}, cycle = {}, outcome }) {
     subject: title,
     text: `${line}${short ? `\n\nChange: ${short}` : ''}`,
     sms: `ProxyPilot: ${failedDeploy ? 'deploy' : 'build'} failed for ${name}.`,
+    link: project.id ? `/projects/${project.id}` : '/',
   };
 }

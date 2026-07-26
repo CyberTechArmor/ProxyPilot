@@ -14,6 +14,12 @@ import {
 } from '../lib/notification-channels.js';
 import { testChannel } from '../lib/notification-dispatch.js';
 import { CHANNEL_KINDS } from '../lib/notification-logic.js';
+import { pushStatus, sendPushTo, buildPushPayload } from '../lib/web-push.js';
+import {
+  saveSubscription, deleteSubscription, listSubscriptions,
+  publicSubscriptionShape, markDelivered, markFailed,
+} from '../lib/push-subscriptions.js';
+import { validatePushKeys } from '../lib/web-push-logic.js';
 
 export const notificationsRouter = Router();
 
@@ -113,4 +119,83 @@ notificationsRouter.post('/channels/:kind/test', requireAdmin, async (req, res) 
   if (!kind) return undefined;
   const r = await testChannel(kind);
   return res.json({ ok: !!r.ok, error: r.ok ? null : (r.error || 'test failed'), channel: getChannelPublic(kind) });
+});
+
+// ---- Web Push (VAPID) ----
+//
+// Push is per-BROWSER, not per-install: there is no shared account to
+// configure, so unlike SMTP/SMS these routes are about the caller's OWN device.
+// They are still admin-gated because everything on this router is — ProxyPilot
+// notifications are operator information (a failed backup, a drifted port), and
+// there is no non-admin audience for them.
+
+// The public key a browser needs to subscribe. Safe to hand out — that is its
+// entire purpose (it is baked into every subscription and travels to the push
+// service). `configured:false` carries the reason so a misconfiguration is
+// diagnosable from the UI instead of presenting as silence.
+notificationsRouter.get('/push/config', requireAdmin, async (_req, res) => {
+  res.json(await pushStatus());
+});
+
+// Record this browser's subscription. The three fields come straight from
+// PushSubscription.toJSON(); the endpoint is the identity, so re-subscribing
+// updates in place rather than adding a duplicate that double-delivers.
+notificationsRouter.post('/push/subscribe', requireAdmin, (req, res) => {
+  const { endpoint, keys } = req.body || {};
+  const p256dh = keys?.p256dh;
+  const auth = keys?.auth;
+  if (!endpoint || !p256dh || !auth) {
+    return res.status(400).json({ error: 'endpoint and keys.p256dh / keys.auth are required' });
+  }
+  let url;
+  try { url = new URL(String(endpoint)); } catch { return res.status(400).json({ error: 'endpoint must be a URL' }); }
+  if (url.protocol !== 'https:') {
+    return res.status(400).json({ error: 'push endpoints are always https' });
+  }
+  // Validate the key shapes HERE rather than discovering them at send time —
+  // a malformed subscription otherwise sits in the table failing forever.
+  const check = validatePushKeys({ p256dh, auth });
+  if (!check.ok) return res.status(400).json({ error: check.error });
+
+  const row = saveSubscription({
+    userId: req.user?.id ?? null,
+    endpoint: String(endpoint),
+    p256dh: String(p256dh),
+    auth: String(auth),
+    userAgent: String(req.get('user-agent') || '').slice(0, 300),
+  });
+  return res.json({ ok: true, subscription: publicSubscriptionShape(row) });
+});
+
+// Forget this browser. Idempotent: unsubscribing twice is not an error, and the
+// browser may already have discarded its side.
+notificationsRouter.post('/push/unsubscribe', requireAdmin, (req, res) => {
+  const endpoint = req.body?.endpoint;
+  if (!endpoint) return res.status(400).json({ error: 'endpoint is required' });
+  const removed = deleteSubscription(String(endpoint));
+  return res.json({ ok: true, removed });
+});
+
+// Push a test notification to this browser only, so an operator can confirm the
+// whole chain — keys, subscription, service worker, OS permission — without
+// waiting for a build to fail.
+notificationsRouter.post('/push/test', requireAdmin, async (req, res) => {
+  const endpoint = req.body?.endpoint;
+  const subs = listSubscriptions({ userId: req.user?.id ?? null });
+  const target = endpoint ? subs.find((s) => s.endpoint === String(endpoint)) : subs[0];
+  if (!target) return res.status(404).json({ error: 'this browser is not subscribed' });
+
+  const r = await sendPushTo(target, buildPushPayload({
+    title: 'ProxyPilot notifications are working',
+    body: 'This is a test. Build results and alerts will arrive like this.',
+    url: '/notifications',
+    level: 'info',
+    tag: 'pp-test',
+  }));
+  if (r.ok) { markDelivered(target.endpoint); return res.json({ ok: true }); }
+  // A dead subscription discovered by a TEST is still dead — clean it up so the
+  // operator can simply subscribe again.
+  if (r.drop) deleteSubscription(target.endpoint);
+  else markFailed(target.endpoint, r.reason);
+  return res.status(502).json({ ok: false, error: r.reason || 'push failed', resubscribe: !!r.drop });
 });

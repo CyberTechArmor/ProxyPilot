@@ -155,6 +155,40 @@ export function buildAskTask(question) {
   return String(question || '').trim().slice(0, ASK_MAX_QUESTION_CHARS);
 }
 
+// ---- the polish intent ----
+//
+// "Polish pass" used to be a button next to Full build — a fourth name for what
+// is really a QUESTION about the live app ("does this look right?") with an
+// optional follow-up. It belongs in Ask.
+//
+// It is matched here rather than left to the model because the model cannot do
+// it: the critique needs a browser, screenshots of the deployed app, and the
+// design-adherence measurement. Ask's tool loop has none of those. Without this
+// the lane would confidently describe the CSS it can read and call that a design
+// review, which is worse than saying "I ran the real one".
+//
+// Deliberately narrow. It matches a request to review/critique the LOOK, not
+// any sentence containing "design" — "how does the design token system work" is
+// a genuine question for the tool loop.
+// "polish" alone is unambiguous — nobody types it about anything else here.
+const POLISH_ALONE = /\bpolish\b/i;
+const POLISH_VERB = /\b(critique|review|check|look at|assess|audit)\b/i;
+const POLISH_OBJECT = /\b(design|visuals?|styling|ui|ux|looks?|appearance|screens?|layout)\b/i;
+// An interrogative OPENING is a question for the tool loop ("how does the
+// design system work"). The same word mid-sentence is not ("check how the UI
+// looks"), which is why this is anchored rather than a bare word match.
+const POLISH_EXPLAIN = /^\s*(how|why|what|where|when|which|who|explain|describe|tell me)\b/i;
+
+export function detectPolishIntent(question) {
+  const q = String(question || '').trim();
+  if (!q || q.length > 240) return null; // a long brief is a build instruction, not a "take a look"
+  if (POLISH_EXPLAIN.test(q)) return null;
+  if (!POLISH_ALONE.test(q) && !(POLISH_VERB.test(q) && POLISH_OBJECT.test(q))) return null;
+  // "and fix them" / "apply the fixes" asks for the follow-up build too.
+  const apply = /\b(fix|apply|correct|repair|clean up|tidy)\b/i.test(q);
+  return { intent: 'polish', apply };
+}
+
 // ---- conversation context ----
 // Every ask used to start a BLANK transcript, so "write the prompt for all of
 // that" had no referent and the model honestly answered "there's no prior

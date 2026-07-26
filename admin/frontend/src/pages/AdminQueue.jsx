@@ -324,7 +324,7 @@ export default function AdminQueue() {
       toast({
         title: 'Design review updated',
         description: setting === 'off'
-          ? 'No automatic critique after builds — the manual Polish pass still works per project.'
+          ? 'No automatic critique after builds — asking &quot;review the design&quot; in a project chat still works.'
           : 'After each successful build, the app is screenshotted and critiqued against its design; findings land in the build chat.',
       });
     } catch (err) {
@@ -642,7 +642,7 @@ export default function AdminQueue() {
       </Card>
 
       {/* Design review — after-build screenshot + vision critique (findings
-          only; never a gate). The per-project Polish pass ignores this toggle. */}
+          only; never a gate). Asking "review the design" in a project chat ignores this toggle. */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Design review</CardTitle>
@@ -664,7 +664,7 @@ export default function AdminQueue() {
                 <SelectTrigger id="design-review-setting" className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="on">On (recommended) — critique every successful build</SelectItem>
-                  <SelectItem value="off">Off — review only via the manual Polish pass</SelectItem>
+                  <SelectItem value="off">Off — review only when asked for in a project chat</SelectItem>
                 </SelectContent>
               </Select>
             </div>

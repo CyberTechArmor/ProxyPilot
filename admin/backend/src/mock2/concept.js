@@ -703,9 +703,23 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     if (!currentHtml) {
       try {
         const placeholder = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{height:100%;margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0d1524;color:#dbe6f5}main{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px}.dot{width:34px;height:34px;border-radius:50%;border:3px solid #2c4a76;border-top-color:#6ea8ff;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(1turn)}}p{margin:0;font-size:14px;color:#8fa5c4}</style></head><body><main><div class="dot"></div><h1 style="margin:0;font-size:18px">Designing your mockup…</h1><p>Screens appear here as they render — this preview refreshes on its own.</p></main></body></html>';
-        await writeWorkingFile(containerName, MOCKUP_CURRENT, placeholder);
+        const w = await writeWorkingFile(containerName, MOCKUP_CURRENT, placeholder);
+        if (!w.ok) throw new Error(w.error || 'write failed');
         updateProject(projectId, { current_mockup_id: mockupIdForCycle(cycle.id) });
-      } catch { /* preview-only nicety */ }
+      } catch (e) {
+        // NOT preview-only. Without this write there is no mockup pointer, so
+        // the preview pane stays empty for the whole render with nothing
+        // anywhere saying why — which is what "the mockup preview didn't work"
+        // looked like. The render continues (the final save may still land),
+        // but the failure is now visible instead of swallowed.
+        console.warn(`[mock2] mockup placeholder write failed for project ${projectId}:`, e?.message);
+        try {
+          insertMessage({
+            projectId, kind: 'system', cycleId: cycle.id,
+            body: `The live preview could not be started (${e?.message || 'write failed'}) — the design is still rendering and will appear when it finishes. If the preview stays empty, the project container may not be writable.`,
+          });
+        } catch { /* best effort */ }
+      }
     }
     // Escalation ladder for a failed tweak: corrective RETRY (same edit
     // contract, the exact miss fed back) → SCREEN re-render when the failed

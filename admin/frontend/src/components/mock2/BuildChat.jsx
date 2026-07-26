@@ -506,10 +506,11 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
 
   // Screen check — the desktop/mobile screenshot pass, run from the chat and
   // reported INTO the chat. apply:false deliberately: this answers "how does it
-  // actually look right now", it does not queue fixes. (The Build panel's
-  // Polish pass is the same capture with apply:true.) The screenshots it takes
-  // are attached to the findings message, so the critique can be checked
-  // against the pixels instead of taken on trust.
+  // actually look right now", it does not queue fixes. To get the fixes too,
+  // ask "polish the design and fix the issues" — Ask routes that to the same
+  // review with apply:true. The screenshots it takes are attached to the
+  // findings message, so the critique can be checked against the pixels
+  // instead of taken on trust.
   const [screenCheckBusy, setScreenCheckBusy] = useState(false);
   const runScreenCheck = async () => {
     setScreenCheckBusy(true);
@@ -798,13 +799,14 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                 </Button>
               ) : (
                 <>
-                  {/* One drafted message, two ways to send it: Ask (question or
-                      operational action — no code changes) and Quick update
-                      (the default: one small scoped code change). The audited
-                      Full build and the Production check live in the Build
-                      panel on the left. To annotate the running app, use the
-                      "Annotate" button on the Preview — pins there land on the
-                      live signed-in app (and resolve to components). */}
+                  {/* One drafted message, two ways to send it: Ask (question,
+                      operational action, or "polish this" / "review the design"
+                      — no code changes) and Quick update (the default: one
+                      small scoped code change). The audited Full build is the
+                      only other lane and lives in the Build panel on the left.
+                      To annotate the running app, use the "Annotate" button on
+                      the Preview — pins there land on the live signed-in app
+                      (and resolve to components). */}
                   <Button
                     variant="outline"
                     className="h-11 sm:h-10 ml-auto"

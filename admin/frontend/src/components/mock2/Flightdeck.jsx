@@ -184,7 +184,7 @@ export default function Flightdeck({
     // Phone: fill whatever the chromeless page has left rather than claiming a
     // hard 100dvh — a checkout-lock banner sits above this, and a viewport
     // height would push the bottom bar off screen and make the page scroll.
-    <div className="flex flex-col flex-1 min-h-0 md:flex-none md:h-[calc(100vh-8rem)] md:min-h-[32rem] rounded-none border-0 md:rounded-lg md:border overflow-hidden bg-background">
+    <div className="flex flex-col flex-1 min-h-0 md:flex-none md:h-[calc(100dvh-8rem)] md:min-h-[32rem] rounded-none border-0 md:rounded-lg md:border overflow-hidden bg-background">
       {/* Top bar — md+ only. On a phone every control on it is either gone
           (dev toggle, classic view: desktop concerns) or moved to the bottom
           bar (Details), and the spend readout is one tap away in the chat, so

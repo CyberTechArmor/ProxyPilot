@@ -378,6 +378,62 @@ export function parseFrameworkSkills(skillsJson) {
   return out;
 }
 
+// ---- the base app's platform module (binding) ----
+//
+// WHY THIS EXISTS. The scaffold ships a platform module — theme switching,
+// branding, legal pages, an asset library, machine API keys, read-only SQL
+// views — and NOTHING in the build prompt mentioned it. A build therefore
+// could not use what it did not know about, and had no reason to preserve it:
+// a shipped app came back with none of the base app's features, having
+// re-derived its own settings storage on top of the one already there.
+//
+// This section is the contract. It is shared by BOTH prompt builders (the API
+// harness's system prompt and the SDK harness's CLAUDE.md) so the two can
+// never drift apart — the duplicated shell paragraph below them is exactly the
+// kind of drift this avoids.
+export const PLATFORM_SECTION = `
+## The platform module (binding — already built, do not rebuild)
+\`src/platform/\` is the base app's own feature set. It is LOAD-BEARING: it is
+wired into \`src/app.ts\` and \`src/server.ts\`, its tables ship in
+\`migrations/0100_platform.sql\`, and the ProxyPilot platform keeps it updated.
+NEVER delete it, re-implement it, or create a parallel settings/branding/
+api-key table. Read the files before you touch anything adjacent to them.
+
+What it already gives the app, for free:
+- **Theme** — light / dark / follow-the-system, applied synchronously in
+  \`<head>\` by \`public/theme.js\` before first paint (a deferred apply flashes
+  white at dark-mode users). Every page you add MUST include that script tag
+  and style from the token palette, or the toggle does nothing on your screen.
+- **Branding** — app name, logo, favicon (falls back to the logo), and the
+  "what this app is for" context, editable by an admin. Served unauthenticated
+  at \`GET /api/branding\`; \`GET /favicon.ico\` resolves the uploaded icon.
+- **Legal pages** — privacy policy and terms, admin-editable, rendered from
+  \`GET /api/legal/:slug\` with a footer that carries ®/™ and the CURRENT year.
+  They render with no session because they appear on the sign-in screen.
+- **Asset library** — uploaded images/content at \`GET /api/assets/:id\`,
+  managed by an admin. Use it for anything the app displays; do not add a
+  second upload path.
+- **Machine API keys** — \`src/platform/api-key-auth.ts\` exposes
+  \`withApiKey\`, so any route can be called by another application with a
+  scoped key instead of a session. Admin CRUD lives under the admin routes.
+- **Read-only SQL** — \`src/platform/readonly.ts\` maintains curated views in
+  the \`api_read\` schema for reporting clients. When you add a table worth
+  reporting on, register a view there rather than handing out table access.
+- **Discovery** — \`GET /api/meta\` describes the app's own API surface.
+- **Client helpers** — \`public/platform.js\` renders branding and the legal
+  footer with no session; \`public/theme.js\` owns the toggle.
+
+How to EXTEND it (the only supported way):
+- A new setting → add it to the platform's settings section, not a new table.
+- A new page in the shell → add the nav entry to the shell header AND the
+  theme.js + platform.js head lines, so it themes and shows the footer.
+- A new reportable table → register a view in \`readonly.ts\`.
+- A new machine-callable route → mount it behind \`withApiKey\`.
+
+The \`platform-intact\` gate checks this: it reds the build if the module lost
+its exports or the app grew a second branding/settings/api-key store.
+`;
+
 // buildRunnerSystemPrompt — assemble the model's system prompt server-side from
 // the PINNED framework content (ADR-003 / brief §10.1: the framework is injected
 // fresh from a pinned version, never travels through chat, cannot be talked out
@@ -488,6 +544,7 @@ When the approved mockup exists at \`state/mockups/current.html\`, it is the
 visual CONTRACT beyond the tokens: read it and reproduce its layout, navigation
 structure (e.g. a mobile bottom tab bar), and component arrangement for the
 screens you build — the app should look and navigate like the mockup.
+${PLATFORM_SECTION}
 FEATURE-COMPLETENESS HONESTY (binding): anything from the inventory/instruction
 you do NOT implement in this cycle must be VISIBLY marked in the UI — a
 disabled control with a small "Not built yet" badge — never a dead button, a
@@ -1190,6 +1247,7 @@ When the approved mockup exists at \`state/mockups/current.html\`, it is the
 visual CONTRACT beyond the tokens: read it and reproduce its layout, navigation
 structure (e.g. a mobile bottom tab bar), and component arrangement for the
 screens you build — the app should look and navigate like the mockup.
+${PLATFORM_SECTION}
 FEATURE-COMPLETENESS HONESTY (binding): anything from the inventory/instruction
 you do NOT implement in this cycle must be VISIBLY marked in the UI — a
 disabled control with a small "Not built yet" badge — never a dead button, a

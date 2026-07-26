@@ -357,7 +357,7 @@ export default function Login() {
 
   if (setupLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
+      <div className="min-h-viewport flex items-center justify-center bg-background">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
       </div>
     );
@@ -367,7 +367,7 @@ export default function Login() {
   // One-time sign-in link: choose a password, then the normal flow signs in.
   if (linkMode) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="min-h-viewport flex items-center justify-center bg-background p-4">
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
             <div className="flex justify-center mb-4">
@@ -445,7 +445,7 @@ export default function Login() {
 
   if (setupMode && !setupTotpStep) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="min-h-viewport flex items-center justify-center bg-background p-4">
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
             <div className="flex justify-center mb-4">
@@ -545,7 +545,7 @@ export default function Login() {
   if (setupTotpStep && totpSetup) {
     const secret = totpSetup.secret || totpSetup.totpSecret;
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="min-h-viewport flex items-center justify-center bg-background p-4">
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
             <div className="flex justify-center mb-4">
@@ -640,7 +640,7 @@ export default function Login() {
 
   // ========== NORMAL LOGIN FLOW ==========
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
+    <div className="min-h-viewport flex items-center justify-center bg-background p-4">
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <div className="flex justify-center mb-4">

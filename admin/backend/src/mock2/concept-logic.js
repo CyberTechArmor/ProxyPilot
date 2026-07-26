@@ -408,6 +408,28 @@ Hard requirements:
 - Mobile-first: every screen renders cleanly in a single column at 360–375px; any
   multi-column layout collapses to one column on small viewports. Tappable controls
   are at least 44×44px.
+
+# The app you are designing ALREADY EXISTS in part
+Every project is built on a base app that is already running before you draw
+anything. Design AROUND it, not over it — a mockup that ignores it produces an
+inventory that ignores it, and the built app then has features an operator has
+no way to reach.
+
+Already built, do NOT redesign from scratch and do NOT leave out:
+- Sign-in, with a first-administrator setup flow. Show a sign-in screen only if
+  the idea needs a distinctive one; otherwise assume it and start after login.
+- A light/dark theme toggle. The design system already requires one — that
+  control IS the base app's.
+- An ADMIN area. Include it as a real screen with the settings the base app
+  provides, so it appears in the navigation: application name and logo,
+  privacy policy and terms (editable text), an image/asset library, API keys
+  for other applications to call this one, and read-only database access for
+  reporting.
+- A footer on public screens carrying the privacy and terms links.
+
+Include navigation entries for these alongside the screens your idea needs.
+They are a small part of the design — a settings screen and a footer — but
+leaving them out is what makes a finished app feel half-wired.
 - Interactivity is fine (tabs, toggles, showing/hiding, fake navigation between
   in-page screens) but it must be self-contained and non-persistent.
 - REALISTIC SAMPLE CONTENT: populate every screen with plausible, domain-true
@@ -1029,6 +1051,58 @@ export function lintInventory(inventory) {
 export const DESIGN_TOKENS_PATH = 'state/design-tokens.json';
 export const DESIGN_CSS_PATH = 'state/design.css';
 
+// ---- the mockup preview's failure states ----
+//
+// Every one of these renders INSIDE an iframe. The route used to answer with
+// JSON, so a failure put a raw {"error":...} blob in the preview pane: the
+// frame looked broken with no explanation, and the operator's report was
+// simply "the mockup preview didn't work". The iframe cannot read the response
+// status (it is served to an opaque sandboxed origin), so the ANSWER ITSELF
+// has to be the message.
+//
+// Pure so the markup is testable without the DB.
+
+export function escapePreviewHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+// A self-contained, theme-dark, phone-safe card. No fixed widths, a viewport
+// meta, and text that wraps — it is rendered in a pane that is often 390px.
+export function previewErrorCard({ title, detail }) {
+  return '<!doctype html><html><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + `<title>${escapePreviewHtml(title)}</title>`
+    + '<style>html,body{height:100%;margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,'
+    + '"Segoe UI",Roboto,sans-serif;background:#0d1524;color:#dbe6f5}'
+    + 'main{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;'
+    + 'gap:10px;text-align:center;padding:24px;box-sizing:border-box}'
+    + 'h1{margin:0;font-size:16px;font-weight:600}'
+    + 'p{margin:0;max-width:44ch;color:#8fa5c4;overflow-wrap:break-word}</style></head><body><main>'
+    + `<h1>${escapePreviewHtml(title)}</h1><p>${escapePreviewHtml(detail)}</p></main></body></html>`;
+}
+
+// The three ways the preview can have nothing to show, in the operator's terms.
+export const PREVIEW_ERRORS = Object.freeze({
+  offline: {
+    status: 409,
+    title: 'The project is not running',
+    detail: 'Wake the project to view its mockup — the design is stored in the project container.',
+  },
+  none: {
+    status: 404,
+    title: 'No mockup yet',
+    detail: 'Describe the app in the chat and one will be generated here.',
+  },
+  unreadable: {
+    status: 404,
+    title: 'The mockup could not be read',
+    detail: 'The project records a mockup but its file is not readable in the container. '
+      + 'Send another message in the design chat to re-render it.',
+  },
+});
+
 export function buildDesignTokenExtractionPrompt() {
   return `You extract the DESIGN TOKENS from an approved product mockup so the built app
 can reproduce its exact look — colors, typography, spacing, corner radius,
@@ -1208,6 +1282,91 @@ export function splitMockupCss(css) {
 // self-contained file; this is a sanity bound, not a design limit.
 export const MAX_DESIGN_CSS_CHARS = 200_000;
 
+// ---- the token bridge ----
+//
+// WHY THIS EXISTS. The mockup and the base app speak different variable
+// languages. A mockup emits `--surface-1`, `--text-1`, `--accent-on`,
+// `--hairline`. The scaffold's shell (base.css) reads `--app-surface`,
+// `--app-text`, `--app-primary`, `--app-border`, and the platform's own CSS
+// (theme toggle, legal footer) reads `--surface`, `--ink`, `--line`. Measured:
+// the shell uses 24 variables and an approved design defined THREE of them —
+// and 14 `--app-*` names were declared nowhere at all, every use falling back
+// to a hardcoded hex (`var(--app-text,#12263f)`).
+//
+// So the approved design reached the screens the build wrote and stopped at
+// the edge of them. The app came out in two palettes: your design inside, a
+// fixed blue-grey header, nav, buttons, sign-in page and footer around it.
+//
+// The bridge re-expresses the shell's names in terms of the approved ones.
+//
+// It is :root-only ON PURPOSE. Custom properties substitute at use time, so
+// `--app-bg: var(--bg)` re-resolves the moment `[data-theme="dark"]` changes
+// `--bg` on the same element — one block follows both themes. A second dark
+// block would be dead weight that can drift.
+//
+// Each mapping is emitted ONLY when the design actually defines its source
+// token, and always with the shell's own default as the var() fallback: a
+// sparse mockup narrows the bridge, it never blanks the shell.
+export const TOKEN_BRIDGE = Object.freeze([
+  // base.css — the app shell.
+  ['--app-bg', '--bg', '#f5f8fc'],
+  ['--app-surface', '--surface-1', '#ffffff'],
+  ['--app-text', '--text-1', '#12263f'],
+  ['--app-muted', '--text-2', '#5a6b81'],
+  ['--app-border', '--hairline', '#d8e2ee'],
+  ['--app-primary', '--accent', '#1466b8'],
+  ['--app-primary-text', '--accent-on', '#ffffff'],
+  ['--app-accent', '--accent', '#1466b8'],
+  ['--app-danger', '--danger', '#b42318'],
+  ['--app-success', '--ok', '#067647'],
+  ['--app-shadow-card', '--shadow-1', '0 1px 2px rgba(16,24,40,.06)'],
+  // PLATFORM_CSS — theme switching, legal pages, the footer.
+  ['--surface', '--surface-1', '#ffffff'],
+  ['--ink', '--text-1', '#12263f'],
+  ['--slate', '--text-2', '#5a6b81'],
+  ['--line', '--hairline', '#d8e2ee'],
+  ['--accent-ink', '--accent-on', '#ffffff'],
+  ['--accent-soft', '--surface-2', '#eef3f9'],
+  ['--shadow', '--shadow-1', '0 1px 2px rgba(16,24,40,.06)'],
+]);
+
+// The mapped shell names, so a check can assert the bridge is present.
+export const TOKEN_BRIDGE_TARGETS = Object.freeze(TOKEN_BRIDGE.map(([target]) => target));
+
+export function buildTokenBridgeCss(tokenBlockCss, tokens = null) {
+  const defined = new Set(
+    [...String(tokenBlockCss || '').matchAll(/(?:^|[;{\s])(--[a-z0-9-]+)\s*:/gi)].map((m) => m[1].toLowerCase()),
+  );
+  const rows = TOKEN_BRIDGE
+    .filter(([, source]) => defined.has(source))
+    .map(([target, source, fallback]) => `  ${target}: var(${source}, ${fallback});`);
+  // Typography and geometry are not colours, so they are absent from the
+  // mockup's colour fence — they come from the extracted token JSON. Without
+  // these three the shell keeps a system font and its own corner radii while
+  // every screen around it uses the design's, which reads as two apps.
+  if (tokens) {
+    const font = tokens?.typography?.fontFamily;
+    const md = tokens?.radius?.md;
+    const lg = tokens?.radius?.lg;
+    if (font) rows.push(`  --app-font: ${font};`);
+    if (md) rows.push(`  --app-radius-md: ${md};`);
+    if (lg) rows.push(`  --app-radius-lg: ${lg};`);
+  }
+  if (!rows.length) return '';
+  return `/* ==bridge== The app shell reads a different variable family than the
+   mockup writes. These re-express the shell's names in terms of the approved
+   design, so the header, nav, buttons, cards, theme toggle, legal footer and
+   sign-in page take the SAME palette as the screens — not a second one.
+
+   :root only: custom properties substitute at use time, so these follow
+   [data-theme="dark"] automatically. Do not add a dark copy.
+   Do not delete: without it the shell reverts to hardcoded defaults. */
+:root {
+${rows.join('\n')}
+}
+/* ==/bridge== */`;
+}
+
 /* renderDesignCssFromMockup — the app's stylesheet, built from the mockup.
  *
  * Returns { css, source, tokenCount, hasDark }. `source` is 'mockup' when the
@@ -1233,10 +1392,12 @@ export function renderDesignCssFromMockup(html, tokens = DEFAULT_TOKENS) {
    a second palette is how an app ends up merely sharing the mockup's colours.
 */`;
 
-  // The app also links the platform's base.css, which defines its own --app-*
-  // family. Keeping the mockup's variables under their original names means the
-  // component CSS below resolves exactly as it did in the mockup.
-  let css = `${header}\n${fenced}\n\n${components}`.trim();
+  // The app also links the platform's base.css, which styles the shell from a
+  // DIFFERENT variable family. Without the bridge below, the mockup's palette
+  // reaches only the screens the build writes, and the header, nav, buttons,
+  // cards, theme toggle, legal footer and sign-in page keep their hardcoded
+  // defaults — a two-palette app by construction.
+  let css = `${header}\n${fenced}\n\n${buildTokenBridgeCss(fenced, tokens)}\n\n${components}`.trim();
   if (css.length > MAX_DESIGN_CSS_CHARS) {
     css = `${css.slice(0, MAX_DESIGN_CSS_CHARS)}\n/* … design CSS truncated at ${MAX_DESIGN_CSS_CHARS} chars */`;
   }

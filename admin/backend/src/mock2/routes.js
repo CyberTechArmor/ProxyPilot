@@ -256,7 +256,7 @@ import {
   startConceptTurn, startDesignApproval, skipDesign, getConceptJobStatus, conceptReady,
   exportDesignTemplate, importDesignTemplate, adjustDesignPreset,
 } from './concept.js';
-import { publicChatMessageShape } from './concept-logic.js';
+import { publicChatMessageShape, previewErrorCard, PREVIEW_ERRORS } from './concept-logic.js';
 import { parseDesignTemplate, MAX_IMPORT_NOTES_CHARS } from './design-template-logic.js';
 // ---- Integration truthfulness (AUDIT.md; B.4/B.5/B.6) ----
 import {
@@ -1113,14 +1113,22 @@ export function createMock2Router() {
   // the design review into "refused to connect".
   router.get('/projects/:id/mockup-preview', requireMock2Role('viewer'), async (req, res) => {
     const project = req.mock2Project;
-    if (project.lifecycle !== 'active') {
-      return res.status(409).json({ error: 'The project container is not running — wake the project to view the mockup.' });
-    }
-    if (!project.current_mockup_id && !project.mockup_archived_id) {
-      return res.status(404).json({ error: 'No mockup yet — describe the app in the chat to generate one.' });
-    }
+    // EVERY failure here renders INSIDE an iframe. Answering with JSON put a
+    // raw {"error":...} blob in the preview pane — the frame looked broken
+    // with no explanation, which is exactly what "the mockup preview didn't
+    // work" looked like from the outside. Answer in HTML the operator can
+    // read, always, and keep the status code honest for programmatic callers.
+    const card = ({ status, title, detail }, extra = '') => {
+      res.status(status);
+      res.setHeader('Content-Security-Policy', "sandbox; frame-ancestors 'self'");
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.type('html').send(previewErrorCard({ title, detail: extra ? `${detail} (${extra})` : detail }));
+    };
+    if (project.lifecycle !== 'active') return card(PREVIEW_ERRORS.offline);
+    if (!project.current_mockup_id && !project.mockup_archived_id) return card(PREVIEW_ERRORS.none);
     const r = await readFileInContainer(project.container_name, 'state/mockups/current.html');
-    if (!r.ok) return res.status(404).json({ error: `Mockup file not readable: ${r.error || 'unknown error'}` });
+    if (!r.ok) return card(PREVIEW_ERRORS.unreadable, r.error || 'unknown error');
     // Override the app-wide helmet CSP for THIS document only: it must be
     // frameable by the dashboard ('self'), and it must NOT run with the admin
     // origin's authority — `sandbox` without allow-same-origin gives the
@@ -3828,10 +3836,14 @@ export function createMock2Router() {
   // it couldn't).
   router.post('/projects/:id/design/approve', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const project = req.mock2Project;
-    // How to build after approval: 'all' (one initial build — the default),
-    // 'screens' (queue every screen as a scoped background build), 'none'.
+    // How to build after approval: 'all' (one MVP build — the default) or
+    // 'none'. 'screens' (queue every screen as its own background build) was
+    // removed with the rest of the extra build doors: it was a third way to
+    // start builds and the slowest path to a first version. A stored/older
+    // client still sending it gets 'all', which is what it wanted anyway.
     const strat = z.object({ build: z.enum(['all', 'screens', 'none']).optional() }).safeParse(req.body || {});
-    const buildStrategy = (strat.success && strat.data.build) || 'all';
+    const raw = (strat.success && strat.data.build) || 'all';
+    const buildStrategy = raw === 'screens' ? 'all' : raw;
     let result;
     try {
       result = await startDesignApproval({
@@ -3920,6 +3932,37 @@ export function createMock2Router() {
     // its own visible chat message either way.
     void deployBaseApp(project, { reason: 'manual-retry' });
     return res.status(202).json({ ok: true });
+  });
+
+  // ---- base-app version + upgrade ----
+  //
+  // The base app is continuously improved. Without this a project is frozen at
+  // whatever the scaffold looked like the day it was provisioned: every later
+  // platform feature (theme, branding, legal pages, assets, machine API keys,
+  // read-only SQL) reached NEW projects only. The upgrade rewrites
+  // platform-owned files and nothing else — never application code.
+  router.get('/projects/:id/base-app/version', requireMock2Role('viewer'), async (req, res) => {
+    const { baseAppUpgradeStatus } = await import('./base-app-upgrade.js');
+    res.json(await baseAppUpgradeStatus(req.mock2Project));
+  });
+
+  router.post('/projects/:id/base-app/upgrade', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') return res.status(409).json({ error: 'Bring the project online first.' });
+    const active = listCyclesForProject(project.id, { limit: 20 })
+      .some((c) => ['queued', 'estimating', 'running'].includes(c.status));
+    if (active) return res.status(409).json({ error: 'A build is running — wait for it to finish first.' });
+    const { upgradeBaseApp } = await import('./base-app-upgrade.js');
+    let out;
+    try {
+      out = await upgradeBaseApp(project, { initiatedBy: req.user.id, reason: 'manual' });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not update the base app: ${err?.message || 'unknown error'}` });
+    }
+    if (!out.ok) return res.status(409).json({ error: out.error });
+    logAudit(req.user.id, 'MOCK2_BASE_APP_UPGRADE', 'mock2_project', project.id,
+      { changed: out.changed, files: out.written?.length || 0 }, req.ip);
+    res.json({ ok: true, changed: out.changed, message: out.message, paths: out.plan?.paths || [] });
   });
 
   // ============================================================

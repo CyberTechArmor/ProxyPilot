@@ -25,8 +25,10 @@ import {
   reviewChatMessage, composePolishInstruction,
 } from '../mock2/design-review-logic.js';
 import {
-  DESIGN_ADHERENCE_GATE_NAME, DESIGN_ADHERENCE_GATE_SCRIPT, withBaselineGates,
-  filterGatesForBuildMode, BUILD_MODE_FULL, BUILD_MODE_QUICK,
+  DESIGN_ADHERENCE_GATE_NAME, DESIGN_ADHERENCE_GATE_SCRIPT,
+} from '../mock2/baseline-gates.js';
+import {
+  withBaselineGates, buildGateBattery, BUILD_MODE_FULL, BUILD_MODE_QUICK, BUILD_MODE_MVP,
 } from '../mock2/cycle-logic.js';
 import { eventContentBudget, clipEventContent, EVENT_CONTENT_BUDGETS } from '../mock2/cycle-events-logic.js';
 
@@ -141,19 +143,55 @@ test('adherence findings reach the operator: the chat message and the polish ins
   assert.match(instr, /design system:/);
 });
 
-test('withBaselineGates rides every full battery, never stacks, and yields to an operator gate of the same name', () => {
+test('withBaselineGates rides every battery, never stacks, and yields to an operator gate of the same name', () => {
   const framework = [{ name: 'tsc', script: 'npx tsc', order: 0 }];
-  const withBase = withBaselineGates(framework);
-  assert.equal(withBase.length, 2);
-  assert.equal(withBase[1].name, DESIGN_ADHERENCE_GATE_NAME);
-  assert.deepEqual(withBaselineGates(withBase).map((g) => g.name), withBase.map((g) => g.name), 'idempotent');
+  const withBase = withBaselineGates(framework, 'full');
+  assert.ok(withBase.map((g) => g.name).includes(DESIGN_ADHERENCE_GATE_NAME));
+  assert.deepEqual(
+    withBaselineGates(withBase, 'full').map((g) => g.name), withBase.map((g) => g.name), 'idempotent',
+  );
   // An operator who wrote their own stricter version keeps theirs.
   const own = [{ name: DESIGN_ADHERENCE_GATE_NAME, script: 'my-own-check', order: 0 }];
-  assert.equal(withBaselineGates(own)[0].script, 'my-own-check');
-  assert.equal(withBaselineGates(own).length, 1);
-  // Fast modes still drop the battery entirely — a one-line edit is never gated.
-  assert.equal(filterGatesForBuildMode(framework, BUILD_MODE_QUICK).length, 0);
-  assert.equal(filterGatesForBuildMode(framework, BUILD_MODE_FULL).length, 1);
+  const merged = withBaselineGates(own, 'full');
+  assert.equal(merged.find((g) => g.name === DESIGN_ADHERENCE_GATE_NAME).script, 'my-own-check');
+  assert.equal(merged.filter((g) => g.name === DESIGN_ADHERENCE_GATE_NAME).length, 1);
+});
+
+test('every build mode now runs SOME gates — the zero-gate default path is gone', () => {
+  const framework = [
+    { name: 'tsc', script: '#', order: 0 },
+    { name: 'security-scan', script: '#', order: 1 },
+    { name: 'slow-custom-thing', script: '#', order: 2 },
+  ];
+  const byMode = {};
+  for (const mode of [BUILD_MODE_QUICK, BUILD_MODE_MVP, BUILD_MODE_FULL]) {
+    const b = buildGateBattery(framework, mode);
+    byMode[mode] = b;
+    assert.ok(b.gates.length > 0, `${mode} runs at least one gate`);
+    assert.ok(b.gates.some((g) => g.name === 'platform-intact'), `${mode} protects the base app`);
+  }
+  // design-adherence is ADVISORY on quick so an app's pre-existing design debt
+  // cannot wedge a one-line edit, and BLOCKING from the MVP build up.
+  const adh = (m) => byMode[m].gates.find((g) => g.name === DESIGN_ADHERENCE_GATE_NAME);
+  assert.equal(adh(BUILD_MODE_QUICK).advisory, true);
+  assert.equal(adh(BUILD_MODE_MVP).advisory, false);
+  assert.equal(adh(BUILD_MODE_FULL).advisory, false);
+  // An UNTAGGED operator gate is full-only: a four-minute custom check must
+  // never land in the MVP lane because someone forgot a field.
+  const names = (m) => byMode[m].gates.map((g) => g.name);
+  assert.ok(!names(BUILD_MODE_MVP).includes('slow-custom-thing'));
+  assert.ok(names(BUILD_MODE_FULL).includes('slow-custom-thing'));
+  // The visual gates are the MVP's whole point.
+  assert.ok(names(BUILD_MODE_MVP).includes('mobile-overflow'));
+  assert.ok(names(BUILD_MODE_MVP).includes('no-dead-controls'));
+  assert.ok(!names(BUILD_MODE_QUICK).includes('mobile-overflow'));
+});
+
+test('an advisory gate reports its failure but exits 0', () => {
+  const b = buildGateBattery([], BUILD_MODE_QUICK);
+  const adh = b.gates.find((g) => g.name === DESIGN_ADHERENCE_GATE_NAME);
+  assert.match(adh.script, /ADVISORY placement/);
+  assert.match(adh.script, /exit 0\n$/);
 });
 
 // The gate is a shell script that runs in the container; run it for real.
@@ -177,7 +215,12 @@ function runGate(files) {
   }
 }
 
-const GATE_DESIGN = ':root{'
+// A design.css must ALSO drive the app shell's --app-* family, or the header,
+// nav, buttons, theme toggle, legal footer and sign-in page ignore the approved
+// design. Every real design.css does — the preset path declares them directly,
+// the mockup path through the generated bridge — so the fixture does too.
+const SHELL_VARS = '--app-bg:#101;--app-text:#102;--app-surface:#103;--app-primary:#104;';
+const GATE_DESIGN = ':root{' + SHELL_VARS
   + Array.from({ length: 20 }, (_, i) => `--app-t${i}:#10${i}`).join(';')
   + '}[data-theme="dark"]{'
   + Array.from({ length: 20 }, (_, i) => `--app-t${i}:#90${i}`).join(';')
@@ -188,7 +231,7 @@ test('GATE: fails the build that re-invented the design system', () => {
     + Array.from({ length: 400 }, (_, i) => `.c${i}{color:var(--own-1);padding:8px}`).join('\n');
   const r = runGate({ 'state/design.css': GATE_DESIGN, 'public/app.css': appCss });
   assert.equal(r.code, 1, 'red');
-  assert.match(r.out, /reference NONE of the 20 approved design variables/);
+  assert.match(r.out, /reference NONE of the \d+ approved design variables/);
   assert.match(r.out, /theme toggle changes nothing/);
 });
 
@@ -220,7 +263,7 @@ test('GATE: never blocks what it cannot judge — no design, no app CSS, or a th
   assert.equal(fresh.code, 0, fresh.out);
   assert.match(fresh.out, /has not written substantial CSS/);
   // A preset-only project has too thin a system to enforce.
-  const thin = runGate({ 'state/design.css': ':root{--app-bg:#fff;--app-fg:#000;--app-accent:#08f}', 'public/app.css': bulk });
+  const thin = runGate({ 'state/design.css': `:root{${SHELL_VARS}}`, 'public/app.css': bulk });
   assert.equal(thin.code, 0);
   assert.match(thin.out, /fewer than 8 approved variables/);
 });

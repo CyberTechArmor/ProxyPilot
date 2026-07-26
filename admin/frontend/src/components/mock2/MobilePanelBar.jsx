@@ -31,7 +31,9 @@ export default function MobilePanelBar({
   const count = panels.length + (onOpenNav ? 1 : 0) + (onShowDetails ? 1 : 0);
   const cols = COLS[Math.min(count, COLS.length) - 1];
   return (
-    <div className={`grid border-t shrink-0 ${cols}`}>
+    // pb-safe keeps the row clear of the iPhone home indicator; it resolves to
+    // 0 on Android and on non-notched devices.
+    <div className={`grid border-t shrink-0 pb-safe bg-background ${cols}`}>
       {onOpenNav ? (
         <button type="button" onClick={onOpenNav} aria-label="Open navigation menu" className={itemCls(false)}>
           <Menu className="h-4 w-4" />Menu

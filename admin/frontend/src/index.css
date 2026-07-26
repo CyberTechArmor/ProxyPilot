@@ -116,3 +116,36 @@
 .cm-content {
   font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace !important;
 }
+
+/* ===================== Viewport height, honestly =====================
+   `h-screen` is 100vh, and on BOTH Android Chrome/Edge and iOS Safari 100vh is
+   the LARGE viewport — the height the page would have if the browser's URL bar
+   were hidden. It does not shrink while the bar is showing. The studio pins its
+   layout to that height and puts a bottom bar at the end of it, so with the URL
+   bar visible the bar sat ~110px below the fold: on the design and build pages
+   the composer was clipped mid-sentence and the Menu/Chat/Preview row was gone
+   entirely. Scrolling once auto-hid the URL bar and everything "fixed itself",
+   which is what made it look intermittent.
+
+   100dvh is the DYNAMIC viewport — it tracks the visible area as chrome shows
+   and hides. The 100vh line above it is the fallback for iOS Safari < 15.4 and
+   older Android WebViews, which ignore the dvh line and keep the old behaviour
+   rather than collapsing to nothing.
+
+   Tailwind 3.3 has no h-dvh (added in 3.4), so this is a plain utility. */
+.h-viewport {
+  height: 100vh;
+  height: 100dvh;
+}
+.min-h-viewport {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* The bottom bar is the last thing on screen, so on a notched iPhone it lands
+   under the home indicator. env() needs viewport-fit=cover in the viewport meta
+   to be non-zero; on Android and on a non-notched device it resolves to 0 and
+   this is a no-op. */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}

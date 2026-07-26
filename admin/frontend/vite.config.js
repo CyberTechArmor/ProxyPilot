@@ -1,9 +1,36 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react-swc'
 import path from 'path'
+import { readFileSync } from 'fs'
+
+// The service worker is EMITTED, not shipped as a static file, so it carries
+// this build's id in its bytes.
+//
+// That matters for the "never stuck on an old cache" requirement. A browser
+// only installs a new worker when sw.js differs BYTE-WISE from the installed
+// one. A hand-written static sw.js never changes, so a deploy would leave the
+// old worker — and its old caches — in charge indefinitely. Stamping the build
+// id guarantees a byte difference on every build.
+//
+// The runtime strategy is the other half and is the one that actually protects
+// you: navigations are network-FIRST, so even an old worker serves fresh HTML,
+// and fresh HTML names the new content-hashed assets.
+function serviceWorkerPlugin() {
+  const buildId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return {
+    name: 'proxypilot-service-worker',
+    apply: 'build',
+    generateBundle() {
+      const src = readFileSync(path.resolve(__dirname, 'src/sw-template.js'), 'utf8')
+        .replace(/__BUILD_ID__/g, buildId);
+      this.emitFile({ type: 'asset', fileName: 'sw.js', source: src });
+    },
+  };
+}
+
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), serviceWorkerPlugin()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

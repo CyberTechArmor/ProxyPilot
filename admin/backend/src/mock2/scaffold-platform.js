@@ -23,7 +23,7 @@
 // PURE (stub-first, risk R9): returns [{ path, content }]. No I/O, no native
 // modules. Terminology (risk R7): nothing here is named "agent".
 
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v1';
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v2';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
@@ -1435,6 +1435,324 @@ body{background:var(--bg);color:var(--ink)}
 // scaffold. Emitting it unconditionally made a project provisioned WITHOUT the
 // auth component fail `tsc` on a missing '../auth/index.js' — tsconfig compiles
 // everything under src/, whether or not anything imports it.
+// public/platform-admin.html fragment — the ADMIN UI for the platform's own
+// features. Everything below existed only as API endpoints: an operator could
+// not change the app's name, edit the privacy policy, upload a logo, issue an
+// API key or turn on read-only SQL from inside the app they were handed.
+//
+// Injected into the admin console by scaffold-auth (adminHtml), driven by
+// platform-admin.js. Both are platform-owned, so they ride the upgrade path.
+function platformAdminMarkup() {
+  return `
+  <div class="card sect">
+    <div class="card-h"><h3>Branding</h3></div>
+    <div class="card-b">
+      <p class="note">The application's name and marks. These appear on the sign-in screen,
+      in the footer and in the browser tab.</p>
+      <div class="field"><label for="pf-org">Application name</label>
+        <input id="pf-org" type="text" maxlength="120" autocomplete="off"></div>
+      <div class="field"><label for="pf-legal">Legal entity name</label>
+        <input id="pf-legal" type="text" maxlength="160" autocomplete="off"></div>
+      <div class="field"><label for="pf-mark">Rights mark</label>
+        <select id="pf-mark"><option value="">none</option><option value="(R)">registered</option><option value="TM">trademark</option></select></div>
+      <div class="field"><label for="pf-year">Copyright start year</label>
+        <input id="pf-year" type="number" min="1900" max="2200" inputmode="numeric"></div>
+      <div class="field"><label for="pf-context">What this application is for</label>
+        <textarea id="pf-context" rows="3" maxlength="2000"></textarea>
+        <span class="hint">Shown to people who are new to it, and kept current as features are added.</span></div>
+      <p><button class="btn" id="pf-save">Save branding</button></p>
+      <p class="note" id="pf-note"></p>
+    </div>
+  </div>
+
+  <div class="card sect">
+    <div class="card-h"><h3>Privacy policy &amp; terms</h3></div>
+    <div class="card-b">
+      <p class="note">Linked from the sign-in screen and the footer. Edit the text for this application;
+      reset restores the generic starting version.</p>
+      <div class="tabs" id="pf-legal-tabs">
+        <button class="btn subtle sm" data-slug="privacy" aria-pressed="true">Privacy policy</button>
+        <button class="btn subtle sm" data-slug="terms" aria-pressed="false">Terms &amp; conditions</button>
+      </div>
+      <div class="field"><label for="pf-page-title">Title</label>
+        <input id="pf-page-title" type="text" maxlength="160"></div>
+      <div class="field"><label for="pf-page-body">Body</label>
+        <textarea id="pf-page-body" rows="12"></textarea></div>
+      <p><button class="btn" id="pf-page-save">Save page</button>
+         <button class="btn subtle" id="pf-page-reset">Reset to default</button></p>
+      <p class="note" id="pf-page-note"></p>
+    </div>
+  </div>
+
+  <div class="card sect">
+    <div class="card-h"><h3>Images &amp; assets</h3><span class="badge b-info" id="pf-assets-count"></span></div>
+    <div class="card-b">
+      <p class="note">The logo, the favicon (falls back to the logo) and any image the application shows.</p>
+      <div class="field"><label for="pf-upload">Add an image</label>
+        <input id="pf-upload" type="file" accept="image/*"></div>
+      <div class="field"><label for="pf-upload-kind">Use it as</label>
+        <select id="pf-upload-kind"><option value="image">an image</option><option value="logo">the logo</option><option value="favicon">the favicon</option></select></div>
+      <div class="table-scroll">
+        <table class="list">
+          <thead><tr><th>Preview</th><th>Name</th><th>Kind</th><th>Size</th><th></th></tr></thead>
+          <tbody id="pf-assets-body"></tbody>
+        </table>
+      </div>
+      <p class="note" id="pf-assets-note"></p>
+    </div>
+  </div>
+
+  <div class="card sect">
+    <div class="card-h"><h3>API keys</h3><span class="badge b-info" id="pf-keys-count"></span></div>
+    <div class="card-b">
+      <p class="note">Let another application call this one. A key is shown ONCE, when it is created —
+      it is stored only as a hash, so it cannot be shown again.</p>
+      <div class="field"><label for="pf-key-name">Name the key</label>
+        <input id="pf-key-name" type="text" maxlength="120" placeholder="e.g. Reporting service"></div>
+      <p><button class="btn" id="pf-key-create">Create key</button></p>
+      <p class="note" id="pf-key-token" hidden></p>
+      <div class="table-scroll">
+        <table class="list">
+          <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+          <tbody id="pf-keys-body"></tbody>
+        </table>
+      </div>
+      <p class="note" id="pf-keys-note"></p>
+    </div>
+  </div>
+
+  <div class="card sect">
+    <div class="card-h"><h3>Read-only database access</h3></div>
+    <div class="card-b">
+      <p class="note">A reporting tool can read curated views directly over SQL when that is faster than
+      the API. READ ONLY: it can never write, and it sees only the views listed below — actions still go
+      through the API.</p>
+      <div class="switch"><input type="checkbox" id="pf-ro-enabled"><label for="pf-ro-enabled">Allow read-only SQL access</label></div>
+      <p class="note" id="pf-ro-status"></p>
+      <div class="field"><label for="pf-ro-url">Connection string</label>
+        <input id="pf-ro-url" type="text" readonly></div>
+      <p class="note" id="pf-ro-views"></p>
+    </div>
+  </div>`;
+}
+
+// public/platform-admin.js — drives the platform admin cards against
+// /api/admin/*. Vanilla JS, no build step, same shape as admin.js: every
+// fetch rides the httpOnly session cookie.
+function platformAdminJs() {
+  return `'use strict';
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  if (!$('pf-save')) return; // the platform cards are not on this page
+
+  function note(el, msg, bad) {
+    var n = $(el); if (!n) return;
+    n.textContent = msg || '';
+    n.className = 'note' + (bad ? ' err' : '');
+  }
+  async function api(path, opts) {
+    var r = await fetch('/api/admin' + path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
+    var body = null;
+    try { body = await r.json(); } catch (e) { body = null; }
+    if (!r.ok) throw new Error((body && body.message) || ('Request failed (' + r.status + ')'));
+    return body;
+  }
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return Math.round(n / 1024) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+  }
+  function fmtDate(s) { return s ? String(s).slice(0, 16).replace('T', ' ') : '—'; }
+
+  // ---- branding + legal + assets all come from GET /branding ----
+  var pages = {}, currentSlug = 'privacy';
+
+  async function loadBranding() {
+    var d = await api('/branding');
+    var b = d.branding || d;
+    $('pf-org').value = b.orgName || '';
+    $('pf-legal').value = b.legalName || '';
+    $('pf-mark').value = b.rightsMark || '';
+    $('pf-year').value = b.copyrightStartYear || '';
+    var ctx = b.appContext || {};
+    $('pf-context').value = typeof ctx === 'string' ? ctx : (ctx.summary || '');
+    pages = {};
+    (d.pages || []).forEach(function (p) { pages[p.slug] = p; });
+    showPage(currentSlug);
+    renderAssets(d.assets || []);
+  }
+
+  $('pf-save').addEventListener('click', async function () {
+    note('pf-note', 'Saving…');
+    try {
+      await api('/branding', { method: 'PUT', body: JSON.stringify({
+        orgName: $('pf-org').value.trim(),
+        legalName: $('pf-legal').value.trim(),
+        rightsMark: $('pf-mark').value,
+        copyrightStartYear: Number($('pf-year').value) || undefined,
+        appContext: { summary: $('pf-context').value.trim() },
+      }) });
+      note('pf-note', 'Saved. The sign-in screen and footer update on next load.');
+    } catch (e) { note('pf-note', e.message, true); }
+  });
+
+  // ---- legal pages ----
+  function showPage(slug) {
+    currentSlug = slug;
+    var p = pages[slug] || { title: '', body: '' };
+    $('pf-page-title').value = p.title || '';
+    $('pf-page-body').value = p.body || '';
+    var btns = $('pf-legal-tabs').querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].setAttribute('aria-pressed', btns[i].getAttribute('data-slug') === slug ? 'true' : 'false');
+    }
+    note('pf-page-note', '');
+  }
+  $('pf-legal-tabs').addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-slug]');
+    if (b) showPage(b.getAttribute('data-slug'));
+  });
+  $('pf-page-save').addEventListener('click', async function () {
+    note('pf-page-note', 'Saving…');
+    try {
+      await api('/branding/pages/' + currentSlug, { method: 'PUT', body: JSON.stringify({
+        title: $('pf-page-title').value.trim(), body: $('pf-page-body').value,
+      }) });
+      await loadBranding();
+      note('pf-page-note', 'Saved.');
+    } catch (e) { note('pf-page-note', e.message, true); }
+  });
+  $('pf-page-reset').addEventListener('click', async function () {
+    if (!window.confirm('Replace this page with the generic starting text?')) return;
+    try {
+      await api('/branding/pages/' + currentSlug + '/reset', { method: 'POST' });
+      await loadBranding();
+      note('pf-page-note', 'Reset to the default text.');
+    } catch (e) { note('pf-page-note', e.message, true); }
+  });
+
+  // ---- assets ----
+  function renderAssets(list) {
+    var body = $('pf-assets-body');
+    body.textContent = '';
+    $('pf-assets-count').textContent = list.length + (list.length === 1 ? ' asset' : ' assets');
+    list.forEach(function (a) {
+      var tr = document.createElement('tr');
+      var img = document.createElement('img');
+      img.src = '/api/assets/' + a.id;
+      img.alt = a.alt || a.name;
+      img.style.cssText = 'max-width:44px;max-height:44px;border-radius:6px';
+      var tdImg = document.createElement('td'); tdImg.appendChild(img);
+      tr.appendChild(tdImg);
+      [a.name, a.kind, fmtBytes(a.size)].forEach(function (v) {
+        var td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
+      });
+      var td = document.createElement('td');
+      var del = document.createElement('button');
+      del.className = 'btn subtle sm'; del.textContent = 'Remove';
+      del.addEventListener('click', async function () {
+        if (!window.confirm('Remove "' + a.name + '"?')) return;
+        try { await api('/branding/assets/' + a.id, { method: 'DELETE' }); await loadBranding(); }
+        catch (e) { note('pf-assets-note', e.message, true); }
+      });
+      td.appendChild(del); tr.appendChild(td);
+      body.appendChild(tr);
+    });
+  }
+  $('pf-upload').addEventListener('change', function () {
+    var file = this.files && this.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = async function () {
+      note('pf-assets-note', 'Uploading…');
+      try {
+        await api('/branding/assets', { method: 'POST', body: JSON.stringify({
+          name: file.name, mime: file.type || 'application/octet-stream',
+          data: String(reader.result).split(',')[1] || '',
+          kind: $('pf-upload-kind').value,
+        }) });
+        $('pf-upload').value = '';
+        await loadBranding();
+        note('pf-assets-note', 'Uploaded.');
+      } catch (e) { note('pf-assets-note', e.message, true); }
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // ---- API keys ----
+  async function loadKeys() {
+    try {
+      var d = await api('/api-keys');
+      var list = d.keys || d || [];
+      var body = $('pf-keys-body');
+      body.textContent = '';
+      $('pf-keys-count').textContent = list.length + (list.length === 1 ? ' key' : ' keys');
+      list.forEach(function (k) {
+        var tr = document.createElement('tr');
+        [k.name, fmtDate(k.createdAt), fmtDate(k.lastUsedAt)].forEach(function (v) {
+          var td = document.createElement('td'); td.textContent = v || '—'; tr.appendChild(td);
+        });
+        var td = document.createElement('td');
+        if (!k.revokedAt) {
+          var b = document.createElement('button');
+          b.className = 'btn subtle sm'; b.textContent = 'Revoke';
+          b.addEventListener('click', async function () {
+            if (!window.confirm('Revoke "' + k.name + '"? Anything using it stops working immediately.')) return;
+            try { await api('/api-keys/' + k.id, { method: 'DELETE' }); await loadKeys(); }
+            catch (e) { note('pf-keys-note', e.message, true); }
+          });
+          td.appendChild(b);
+        } else {
+          td.textContent = 'revoked';
+        }
+        tr.appendChild(td);
+        body.appendChild(tr);
+      });
+    } catch (e) { note('pf-keys-note', e.message, true); }
+  }
+  $('pf-key-create').addEventListener('click', async function () {
+    var name = $('pf-key-name').value.trim();
+    if (!name) { note('pf-keys-note', 'Give the key a name first.', true); return; }
+    try {
+      var d = await api('/api-keys', { method: 'POST', body: JSON.stringify({ name: name }) });
+      var t = $('pf-key-token');
+      t.hidden = false;
+      t.textContent = 'Copy this now — it is not shown again: ' + (d.token || d.key || '');
+      $('pf-key-name').value = '';
+      await loadKeys();
+    } catch (e) { note('pf-keys-note', e.message, true); }
+  });
+
+  // ---- read-only SQL ----
+  async function loadReadonly() {
+    try {
+      var d = await api('/db/readonly');
+      $('pf-ro-enabled').checked = !!d.enabled;
+      $('pf-ro-url').value = d.connectionUrl || d.url || '';
+      note('pf-ro-status', d.enabled ? 'Enabled.' : 'Not enabled.');
+      var views = d.views || [];
+      $('pf-ro-views').textContent = views.length
+        ? 'Readable views: ' + views.map(function (v) { return v.name || v; }).join(', ')
+        : 'No views are exposed yet.';
+    } catch (e) { note('pf-ro-status', e.message, true); }
+  }
+  $('pf-ro-enabled').addEventListener('change', async function () {
+    var on = this.checked;
+    note('pf-ro-status', on ? 'Enabling…' : 'Disabling…');
+    try {
+      await api('/db/readonly', { method: on ? 'POST' : 'DELETE' });
+      await loadReadonly();
+    } catch (e) { this.checked = !on; note('pf-ro-status', e.message, true); }
+  });
+
+  loadBranding().catch(function (e) { note('pf-note', e.message, true); });
+  loadKeys();
+  loadReadonly();
+})();
+`;
+}
+
 export function buildPlatformRoutes() {
   return [{ path: 'src/platform/routes.ts', content: platformRoutesTs() }];
 }
@@ -1450,7 +1768,12 @@ export function buildPlatformFiles() {
     { path: 'migrations/0100_platform.sql', content: platformMigrationSql() },
     { path: 'public/theme.js', content: themeJs() },
     { path: 'public/platform.js', content: platformClientJs() },
+    { path: 'public/platform-admin.js', content: platformAdminJs() },
   ];
 }
+
+// The admin markup is injected into the console page by scaffold-auth rather
+// than shipped as its own file, so it lands inside the existing layout.
+export { platformAdminMarkup };
 
 export const PLATFORM_CSS = platformCss();

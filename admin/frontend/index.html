@@ -3,7 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><text y=%2250%22 font-size=%2248%22>🚀</text></svg>" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover is what makes env(safe-area-inset-*) non-zero on a
+         notched iPhone; without it the bottom bar sits under the home indicator.
+         Combined with the .h-viewport (100dvh) utility, the studio fits the
+         VISIBLE area rather than the large viewport. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b1524" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- iOS ignores the manifest's icons entirely and uses this. It must be a
+         PNG; an SVG here silently yields a blank home-screen tile. -->
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ProxyPilot" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>ProxyPilot Admin</title>
     <script>
       // Pre-paint theme: apply the stored theme class before React mounts so

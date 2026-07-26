@@ -286,7 +286,7 @@ export default function Layout() {
 
   return (
     <SnapshotExportProvider>
-    <div className="min-h-screen bg-background">
+    <div className="min-h-viewport bg-background">
       {/* Mobile top bar (hidden on md+, and suppressed entirely by a
           chromeless page — the drawer is then opened from that page's own UI). */}
       <header className={cn(
@@ -578,15 +578,21 @@ export default function Layout() {
         </div>
       </aside>
 
-      {/* Main content. Anchored to viewport height (h-screen) rather
-          than min-h-screen so flex-1 children inside Outlet (HostShell
-          terminal, LxcContainers terminal tab) get a definite parent
-          height to compute against. With min-h-screen the flex chain
-          falls back to content-sized heights and pages like Host Shell
-          render their terminal short. Stacked-content pages scroll
-          inside the inner div via overflow-y-auto. */}
+      {/* Main content. Anchored to a DEFINITE viewport height rather than a
+          min-height so flex-1 children inside Outlet (HostShell terminal,
+          LxcContainers terminal tab, the project studio) get a real parent
+          height to compute against — with a min-height the flex chain falls
+          back to content-sized and those pages render short. Stacked-content
+          pages scroll inside the inner div via overflow-y-auto.
+
+          h-viewport, not Tailwind's h-screen: h-screen is 100vh, and on both
+          Android Chrome/Edge and iOS Safari 100vh is the LARGE viewport — the
+          height the page would have with the URL bar hidden. It does not
+          shrink while the bar is showing, so the studio's bottom bar sat below
+          the fold until a scroll auto-hid the bar. h-viewport is 100dvh with a
+          100vh fallback (see index.css). */}
       <main className={cn(
-        "pl-0 md:pt-0 h-screen flex flex-col transition-[padding] duration-200 ease-out",
+        "pl-0 md:pt-0 h-viewport flex flex-col transition-[padding] duration-200 ease-out",
         // Clear the fixed mobile top bar — unless a chromeless page removed it.
         chromeless ? "pt-0" : "pt-14",
         // Collapsed: leave a thin rail (md:pl-14) so the floating expand button

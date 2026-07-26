@@ -27,6 +27,7 @@ import { tlsCertsRouter } from './routes/tls-certs.js';
 import { createLeanBeafRouter } from './routes/lean-beaf.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
+import { cacheControlFor, NO_CACHE } from './lib/static-cache-logic.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
 import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
@@ -570,12 +571,38 @@ app.use('/api', (req, res) => {
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {
   console.log('Serving static files from:', FRONTEND_PATH);
-  app.use(express.static(FRONTEND_PATH));
+
+  // CACHING, which is the whole reason a deploy can leave someone on the old
+  // app. Three classes of file, three different rules:
+  //
+  //   /assets/*  content-hashed by the build, so the NAME is the version. Safe
+  //              to cache for a year, immutable. This is what makes repeat
+  //              loads instant without risking staleness.
+  //   sw.js      must be revalidated EVERY time. A cached service worker is a
+  //              cached cache: the browser would keep serving the old build's
+  //              worker (up to 24h by spec) and never notice a deploy.
+  //   index.html must be revalidated every time. It names the hashed assets,
+  //              so a stale index.html pins the whole app to the old build no
+  //              matter how fresh everything else is.
+  //
+  // no-cache does NOT mean "do not store" — it means "revalidate before use",
+  // so a 304 is still cheap when nothing changed.
+  app.use(express.static(FRONTEND_PATH, {
+    etag: true,
+    lastModified: true,
+    setHeaders: (res, filePath) => {
+      const cc = cacheControlFor(filePath);
+      if (cc) res.setHeader('Cache-Control', cc);
+    },
+  }));
 
   // Handle SPA routing - serve index.html for all non-API routes
   app.get('*', (req, res) => {
     const indexPath = join(FRONTEND_PATH, 'index.html');
     if (existsSync(indexPath)) {
+      // Same rule as above: this response IS the app's version pointer, so it
+      // must never be served from a cache without asking us first.
+      res.setHeader('Cache-Control', NO_CACHE);
       res.sendFile(indexPath);
     } else {
       console.error('index.html not found at:', indexPath);

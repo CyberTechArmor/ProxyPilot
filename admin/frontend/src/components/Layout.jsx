@@ -344,7 +344,11 @@ export default function Layout() {
       {/* Sidebar */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-50 w-64 bg-card border-r transform transition-transform duration-200 ease-out",
+          // h-viewport (100dvh), not inset-y-0: for a FIXED element inset-y-0
+          // resolves against the initial containing block, which on mobile is
+          // the LARGE viewport — the drawer then extends under the browser's
+          // URL bar and its footer is unreachable.
+          "fixed top-0 left-0 z-50 w-64 h-viewport bg-card border-r transform transition-transform duration-200 ease-out",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
           collapsed ? "md:-translate-x-full" : "md:translate-x-0"
         )}
@@ -375,7 +379,12 @@ export default function Layout() {
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 px-4 py-4 space-y-1">
+          {/* min-h-0 is load-bearing: without it a flex-1 child keeps its
+              content height (min-height:auto) instead of shrinking, so the list
+              overflowed the drawer and the items past the fold could not be
+              reached at all — no scroll, no scrollbar. overflow-y-auto then
+              gives it its own scroller. */}
+          <nav className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-4 space-y-1">
             {filteredNavigation.map((item) => {
               const isActive = location.pathname === item.href;
               return (

@@ -434,7 +434,14 @@ export default function ProjectDetail() {
             </p>
           ) : (
             <div className={`flex h-full min-h-0 flex-col ${mobileStudio ? 'gap-0' : 'gap-3'}`}>
-              <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} />
+              {/* Not on a phone: the studio is chromeless there and this bar
+                  took a third of the screen away from the conversation, which
+                  is the whole reason to open ProxyPilot on a phone. It moves to
+                  Details (one tap on the bottom bar), where it is still one
+                  gesture away when someone actually needs to release a lock. */}
+              <div className="hidden sm:block">
+                <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} />
+              </div>
               {designApproved ? (
                 // Build phase — Flightdeck IDE workspace by default (files +
                 // editor + agent chat + terminal + preview, one shared sandbox),
@@ -502,7 +509,7 @@ export default function ProjectDetail() {
                 // conversation on the right.
                 <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto lg:flex-row lg:overflow-hidden">
                   <div className="min-w-0 h-[55vh] lg:h-auto lg:flex-[1.55] lg:min-h-0">
-                    <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce} />
+                    <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce} projectId={designApproved ? null : id} />
                   </div>
                   <div className="min-w-0 flex flex-col gap-4 lg:flex-1 lg:min-h-0">
                     <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
@@ -552,6 +559,12 @@ export default function ProjectDetail() {
 
         {/* DETAILS — the live URL, members, and all project administration. */}
         <TabsContent value="details" className="mt-3 space-y-6 flex-1 min-h-0 overflow-y-auto">
+      {/* The checkout state lives here on a phone (it is hidden from the studio
+          view above); harmless duplication on desktop is avoided by showing it
+          only where the studio does not. */}
+      <div className="sm:hidden">
+        <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} />
+      </div>
       {/* In Flightdeck mode this Details view replaces the workspace in the
           center; a slim bar returns to Flightdeck (or drops to the classic view). */}
       {flightdeckActive ? (
@@ -1192,6 +1205,7 @@ function MockupWorkspace({
         ) : previewSrc ? (
           <PreviewPanel
             src={previewSrc} title={project.name} approved={false} reloadKey={previewReloadNonce}
+            projectId={projectId}
           />
         ) : (
           // No mockup yet — the placeholder is content-sized, so center it

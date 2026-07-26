@@ -1830,6 +1830,10 @@ export const api = {
   // Web Push (VAPID). Unlike SMTP/SMS there is nothing to configure — the
   // server holds the key pair and each BROWSER opts itself in, so these are
   // about the caller's own device.
+  // Why the mockup preview is (or is not) showing anything — the panel cannot
+  // inspect its own sandboxed iframe, so it asks the server instead.
+  mock2MockupPreviewStatus: (id) => request(`/mock2/projects/${id}/mockup-preview/status`),
+
   pushConfig: () => request('/notifications/push/config'),
   pushSubscribe: (subscription) =>
     request('/notifications/push/subscribe', { method: 'POST', body: JSON.stringify(subscription) }),

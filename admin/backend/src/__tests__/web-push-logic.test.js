@@ -287,3 +287,164 @@ test('update.sh handles VAPID as a pair, outside the per-key loop', () => {
   // And skipped entirely when a working pair is already deployed.
   assert.match(update, /vapid_needed=0\s+# both already there/);
 });
+
+// ---- the real send path, against a live HTTP server ----
+//
+// sendPushTo is the function that actually ships. These run it against a stub
+// push service and DECRYPT what arrives exactly as a browser would — the only
+// check that proves the whole server-side chain, not just its pieces.
+
+import { createServer } from 'node:http';
+import { createDecipheriv } from 'node:crypto';
+import { sendPushTo, buildPushPayload, pushConfigured, vapidConfig } from '../lib/web-push.js';
+import { hkdf as hkdf2 } from '../lib/web-push-logic.js';
+
+// Stand up a push service that answers with `status` and records the request.
+function stubPushService(status = 201) {
+  return new Promise((resolve) => {
+    const captured = [];
+    const srv = createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        captured.push({ headers: req.headers, body: Buffer.concat(chunks) });
+        res.writeHead(status).end();
+      });
+    });
+    srv.listen(0, '127.0.0.1', () => resolve({
+      url: `http://127.0.0.1:${srv.address().port}/push/abc`,
+      captured,
+      close: () => new Promise((r) => srv.close(r)),
+    }));
+  });
+}
+
+// Decrypt an aes128gcm push body the way a browser does.
+function browserDecrypt(body, uaEcdh, authSecret) {
+  const salt = body.subarray(0, 16);
+  const idlen = body[20];
+  const asPublic = body.subarray(21, 21 + idlen);
+  const ct = body.subarray(21 + idlen);
+  const shared = uaEcdh.computeSecret(asPublic);
+  const keyInfo = Buffer.concat([Buffer.from('WebPush: info\0', 'utf8'), uaEcdh.getPublicKey(), asPublic]);
+  const ikm = hkdf2(authSecret, shared, keyInfo, 32);
+  const cek = hkdf2(salt, ikm, Buffer.from('Content-Encoding: aes128gcm\0', 'utf8'), 16);
+  const nonce = hkdf2(salt, ikm, Buffer.from('Content-Encoding: nonce\0', 'utf8'), 12);
+  const d = createDecipheriv('aes-128-gcm', cek, nonce);
+  d.setAuthTag(ct.subarray(ct.length - 16));
+  const plain = Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]);
+  return plain.subarray(0, plain.length - 1).toString('utf8'); // drop the 0x02 delimiter
+}
+
+function withVapid(fn) {
+  const keys = generateVapidKeys();
+  const prev = { ...process.env };
+  process.env.VAPID_PUBLIC_KEY = keys.publicKey;
+  process.env.VAPID_PRIVATE_KEY = keys.privateKey;
+  process.env.VAPID_SUBJECT = 'mailto:ops@example.com';
+  return Promise.resolve(fn(keys)).finally(() => {
+    process.env.VAPID_PUBLIC_KEY = prev.VAPID_PUBLIC_KEY ?? '';
+    process.env.VAPID_PRIVATE_KEY = prev.VAPID_PRIVATE_KEY ?? '';
+    process.env.VAPID_SUBJECT = prev.VAPID_SUBJECT ?? '';
+  });
+}
+
+test('END TO END: a real push round-trips and the browser can decrypt it', async () => {
+  await withVapid(async (keys) => {
+    const ua = createECDH('prime256v1'); ua.generateKeys();
+    const authSecret = Buffer.alloc(16, 9);
+    const svc = await stubPushService(201);
+    try {
+      assert.equal(pushConfigured(), true);
+      const payload = buildPushPayload({
+        title: 'Build failed', body: 'Notes · deploy_failed', url: '/projects/42', level: 'error',
+      });
+      const r = await sendPushTo({
+        endpoint: svc.url,
+        p256dh: ua.getPublicKey().toString('base64url'),
+        auth: authSecret.toString('base64url'),
+      }, payload);
+      assert.equal(r.ok, true, r.reason);
+
+      const [req] = svc.captured;
+      assert.equal(req.headers['content-encoding'], 'aes128gcm');
+      assert.match(req.headers.authorization, new RegExp(`k=${keys.publicKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
+      assert.ok(Number(req.headers.ttl) > 0);
+      // The payload the service worker will receive, recovered from the wire.
+      assert.deepEqual(JSON.parse(browserDecrypt(req.body, ua, authSecret)), payload);
+    } finally { await svc.close(); }
+  });
+});
+
+test('END TO END: a 410 tells the caller to DROP the subscription', async () => {
+  await withVapid(async () => {
+    const ua = createECDH('prime256v1'); ua.generateKeys();
+    const svc = await stubPushService(410);
+    try {
+      const r = await sendPushTo({
+        endpoint: svc.url,
+        p256dh: ua.getPublicKey().toString('base64url'),
+        auth: Buffer.alloc(16).toString('base64url'),
+      }, { title: 'x' });
+      assert.equal(r.ok, false);
+      assert.equal(r.drop, true, 'the browser is gone — the row must not be retried forever');
+    } finally { await svc.close(); }
+  });
+});
+
+test('END TO END: a 429 is retried, not dropped', async () => {
+  await withVapid(async () => {
+    const ua = createECDH('prime256v1'); ua.generateKeys();
+    const svc = await stubPushService(429);
+    try {
+      const r = await sendPushTo({
+        endpoint: svc.url,
+        p256dh: ua.getPublicKey().toString('base64url'),
+        auth: Buffer.alloc(16).toString('base64url'),
+      }, { title: 'x' });
+      assert.equal(r.drop, false, 'a busy service says nothing about the browser');
+      assert.equal(r.retry, true);
+    } finally { await svc.close(); }
+  });
+});
+
+test('a malformed subscription is dropped at build time, not retried forever', async () => {
+  await withVapid(async () => {
+    const r = await sendPushTo({ endpoint: 'https://push.example/x', p256dh: 'AAAA', auth: 'AAAA' }, { title: 'x' });
+    assert.equal(r.ok, false);
+    assert.equal(r.drop, true);
+  });
+});
+
+test('with no VAPID keys, sending reports the reason instead of throwing', async () => {
+  const prev = process.env.VAPID_PUBLIC_KEY;
+  process.env.VAPID_PUBLIC_KEY = '';
+  try {
+    assert.equal(pushConfigured(), false);
+    const r = await sendPushTo({ endpoint: 'https://push.example/x', p256dh: 'x', auth: 'y' }, { title: 'x' });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /not configured/);
+  } finally { process.env.VAPID_PUBLIC_KEY = prev ?? ''; }
+});
+
+test('buildPushPayload clips to what fits, and tags so alerts replace rather than stack', () => {
+  const p = buildPushPayload({ title: 'x'.repeat(400), body: 'y'.repeat(900), level: 'error' });
+  assert.ok(p.title.length <= 120);
+  assert.ok(p.body.length <= 300);
+  assert.equal(p.tag, 'pp-error');
+  assert.equal(buildPushPayload({ title: 't', tag: 'build:42' }).tag, 'build:42');
+  assert.equal(buildPushPayload({ title: 't' }).url, '/');
+});
+
+test('validatePushKeys rejects a bad subscription at SUBSCRIBE time', async () => {
+  const { validatePushKeys } = await import('../lib/web-push-logic.js');
+  const ua = createECDH('prime256v1'); ua.generateKeys();
+  assert.equal(validatePushKeys({
+    p256dh: ua.getPublicKey().toString('base64url'),
+    auth: Buffer.alloc(16).toString('base64url'),
+  }).ok, true);
+  // Stored unchecked, these would fail on every notification forever and the
+  // failure would surface long after the subscribe that caused it.
+  assert.match(validatePushKeys({ p256dh: 'AAAA', auth: Buffer.alloc(16).toString('base64url') }).error, /65-byte/);
+  assert.match(validatePushKeys({ p256dh: ua.getPublicKey().toString('base64url'), auth: 'AA' }).error, /16-byte/);
+});

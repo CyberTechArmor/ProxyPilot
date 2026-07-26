@@ -10,6 +10,7 @@
 import { postNotification } from './notifications.js';
 import { enabledChannels, resolveChannel, recordChannelTest } from './notification-channels.js';
 import { renderSmsBody, buildCycleNotification } from './notification-logic.js';
+import { sendPushToAll, pushConfigured } from './web-push.js';
 
 // Send one email through an SMTP channel. `channel` is a resolved channel
 // (config + decrypted secret). nodemailer is imported lazily so the module loads
@@ -79,6 +80,25 @@ async function sendVia(channel, message) {
 // records each verdict so the admin UI reflects real delivery health.
 export async function dispatchToChannels(message) {
   const results = [];
+  // Web Push is not a configured "channel" like SMTP/SMS — there is no shared
+  // account to set up. It is per-BROWSER: whoever opted in gets it, and it is
+  // on as soon as the VAPID keys exist. Sent first because it is the one that
+  // actually reaches a phone in a pocket, and it costs nothing per message.
+  if (pushConfigured()) {
+    try {
+      const r = await sendPushToAll({
+        title: message.title,
+        body: message.body,
+        url: message.link || '/',
+        level: message.level || 'info',
+        tag: message.dedupe_key || null,
+      });
+      results.push({ kind: 'push', ok: r.sent > 0 || (r.sent === 0 && r.failed === 0), ...r });
+    } catch (err) {
+      console.warn('[notify] push delivery failed:', err?.message);
+      results.push({ kind: 'push', ok: false, error: err?.message });
+    }
+  }
   for (const channel of enabledChannels()) {
     // eslint-disable-next-line no-await-in-loop
     const r = await sendVia(channel, message);

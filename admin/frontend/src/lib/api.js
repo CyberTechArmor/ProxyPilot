@@ -1827,6 +1827,17 @@ export const api = {
   notificationChannelTest: (kind) =>
     request(`/notifications/channels/${encodeURIComponent(kind)}/test`, { method: 'POST' }),
 
+  // Web Push (VAPID). Unlike SMTP/SMS there is nothing to configure — the
+  // server holds the key pair and each BROWSER opts itself in, so these are
+  // about the caller's own device.
+  pushConfig: () => request('/notifications/push/config'),
+  pushSubscribe: (subscription) =>
+    request('/notifications/push/subscribe', { method: 'POST', body: JSON.stringify(subscription) }),
+  pushUnsubscribe: (endpoint) =>
+    request('/notifications/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
+  pushTest: (endpoint) =>
+    request('/notifications/push/test', { method: 'POST', body: JSON.stringify({ endpoint: endpoint || null }) }),
+
   // Domain provisioning — admin-gated. The Add Domain page and the Domains
   // management page both ride the admin cookie session through this
   // client; provisioning API keys exist for scripted/API clients hitting

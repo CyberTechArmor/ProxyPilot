@@ -122,3 +122,87 @@ self.addEventListener('fetch', (event) => {
   // is safe and makes repeat loads instant.
   if (isAsset(url)) { event.respondWith(cacheFirst(request)); }
 });
+
+/* ---- Web Push ----
+ *
+ * The payload arrives already decrypted: the browser did that with the keys it
+ * generated for this subscription, which is why the push service could relay it
+ * without ever reading it.
+ *
+ * showNotification MUST be called on every push. A handler that ends without
+ * one makes Chrome display its own "This site has been updated in the
+ * background" notice and, if it keeps happening, revoke the site's push
+ * permission outright. So the failure path below still shows something.
+ */
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch { data = {}; }
+
+  const title = data.title || 'ProxyPilot';
+  const options = {
+    body: data.body || '',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    // A tag REPLACES a previous notification with the same tag rather than
+    // stacking — three failures on one project read as one live line, not a
+    // pile the operator dismisses one by one.
+    tag: data.tag || 'proxypilot',
+    renotify: true,
+    // Errors should survive being missed; routine successes should not nag.
+    requireInteraction: data.level === 'error',
+    timestamp: Date.now(),
+    data: { url: data.url || '/' },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil((async () => {
+    const url = new URL(target, self.location.origin).href;
+    // Prefer an EXISTING window: an operator with ProxyPilot already open does
+    // not want a second copy, they want the one they have to navigate.
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of windows) {
+      if (new URL(client.url).origin !== self.location.origin) continue;
+      await client.focus();
+      if ('navigate' in client) { try { await client.navigate(url); } catch { /* focus is enough */ } }
+      return;
+    }
+    await self.clients.openWindow(url);
+  })());
+});
+
+/* The push service can retire an endpoint on its own (key rotation, quota).
+ * The browser then fires this, and with no handler the subscription is silently
+ * dead — the classic "push worked for a month and then stopped". Re-subscribe
+ * with the same VAPID key and tell the server the new endpoint. */
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil((async () => {
+    try {
+      const old = event.oldSubscription || await self.registration.pushManager.getSubscription();
+      const key = (event.newSubscription && event.newSubscription.options.applicationServerKey)
+        || (old && old.options.applicationServerKey);
+      if (!key) return;
+      const fresh = event.newSubscription
+        || await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      await fetch('/api/notifications/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify(fresh.toJSON()),
+      });
+      if (old && old.endpoint && old.endpoint !== fresh.endpoint) {
+        await fetch('/api/notifications/push/unsubscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ endpoint: old.endpoint }),
+        });
+      }
+    } catch (err) {
+      console.warn('[sw] could not renew the push subscription:', err);
+    }
+  })());
+});

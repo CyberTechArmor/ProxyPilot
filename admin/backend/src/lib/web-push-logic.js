@@ -239,3 +239,26 @@ export function validateVapidConfig({ publicKey, privateKey, subject } = {}) {
   }
   return { ok: true };
 }
+
+// validatePushKeys — check a browser-supplied subscription BEFORE storing it.
+//
+// Done at subscribe time rather than at send time on purpose: a malformed row
+// otherwise sits in the table failing on every notification forever, and the
+// failure surfaces as "push doesn't work" long after the subscribe that caused
+// it. The shapes are fixed by the spec — an uncompressed P-256 point and a
+// 16-byte secret — so this is cheap and total.
+export function validatePushKeys({ p256dh, auth } = {}) {
+  let pub;
+  let secret;
+  try {
+    pub = fromB64url(p256dh);
+    secret = fromB64url(auth);
+  } catch {
+    return { ok: false, error: 'p256dh and auth must be base64url' };
+  }
+  if (pub.length !== 65 || pub[0] !== 0x04) {
+    return { ok: false, error: 'p256dh must be a 65-byte uncompressed P-256 point' };
+  }
+  if (secret.length !== 16) return { ok: false, error: 'auth must be a 16-byte secret' };
+  return { ok: true };
+}

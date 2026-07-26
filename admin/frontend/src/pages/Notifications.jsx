@@ -16,6 +16,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import PushNotifications from '@/components/PushNotifications';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -185,8 +186,8 @@ export default function Notifications() {
       <div>
         <h1 className="flex items-center gap-2 text-2xl font-semibold"><Bell className="h-6 w-6" /> Notifications</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          How you get told when a build finishes. The in-app bell always fires; add an email or SMS connection to be
-          notified out of band.
+          How you get told when a build finishes. The in-app bell always fires. Push notifications reach this device
+          even with ProxyPilot closed; email and SMS are install-wide connections.
         </p>
       </div>
 
@@ -194,7 +195,10 @@ export default function Notifications() {
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center gap-2"><Monitor className="h-4 w-4" /> Browser notifications</CardTitle>
-          <CardDescription>An OS notification on this device when a build finishes — even on another tab. Set per browser.</CardDescription>
+          <CardDescription>
+            An OS notification while ProxyPilot is OPEN in a tab — including a background tab. Set per browser.
+            For notifications when it is closed, use Push notifications below.
+          </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap items-center gap-3">
           {!notifySupported() ? (
@@ -208,6 +212,9 @@ export default function Notifications() {
           )}
         </CardContent>
       </Card>
+
+      {/* Web Push (per-device, and the only one that works with the app shut) */}
+      <PushNotifications />
 
       {/* SMTP */}
       <ChannelCard

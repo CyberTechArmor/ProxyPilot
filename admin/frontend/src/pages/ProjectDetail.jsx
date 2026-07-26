@@ -33,7 +33,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
   Archive, RotateCcw, Play, Lock, Download, GitBranch,
-  Circle, Hammer, Unlock, Clock, Sparkles, TerminalSquare, MessageSquare, LayoutPanelLeft,
+  Circle, Hammer, Unlock, Clock, Sparkles, TerminalSquare, MessageSquare, LayoutPanelLeft, Eye,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
@@ -49,6 +49,7 @@ import ConnectVsCode from '@/components/mock2/ConnectVsCode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
 import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectComponentsCard } from '@/components/mock2/ProjectTimeCard';
 import ProjectApiKeys from '@/components/mock2/ProjectApiKeys';
+import MobilePanelBar from '@/components/mock2/MobilePanelBar';
 import { fireConfetti } from '@/lib/confetti';
 
 // Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
@@ -102,22 +103,24 @@ export default function ProjectDetail() {
     const fdActive = !!project?.stage?.design_approved && buildView === 'flightdeck' && project?.lifecycle !== 'archived';
     if (fdActive && tab === 'terminal') setTab('chat');
   }, [project, buildView, tab]);
-  // On a phone, Flightdeck takes the WHOLE screen: ask the shell to drop its
-  // mobile top bar and content padding, and drive the nav drawer from
-  // Flightdeck's own bottom bar instead. Reset on unmount (and on any state
-  // that ends Flightdeck) so every other page keeps its chrome.
+  // On a phone the studio takes the WHOLE screen — BOTH stages, mockup and
+  // build: ask the shell to drop its mobile top bar and content padding, and
+  // drive the nav drawer from the workspace's own bottom bar instead. Reset on
+  // unmount (and on any state that leaves the studio) so every other page keeps
+  // its chrome. The classic build view is excluded — it is a stacked, scrolling
+  // page, not a panelled workspace.
   const { openNav, setChromeless } = useOutletContext() || {};
   const isMobile = useIsMobile();
-  const mobileFlightdeck = isMobile
-    && !!project?.stage?.design_approved
-    && buildView === 'flightdeck'
-    && project?.lifecycle !== 'archived'
-    && tab === 'chat';
+  const mobileStudio = isMobile
+    && !!project
+    && project.lifecycle !== 'archived'
+    && tab === 'chat'
+    && (project.stage?.design_approved ? buildView === 'flightdeck' : true);
   useEffect(() => {
     if (!setChromeless) return undefined;
-    setChromeless(mobileFlightdeck);
+    setChromeless(mobileStudio);
     return () => setChromeless(false);
-  }, [setChromeless, mobileFlightdeck]);
+  }, [setChromeless, mobileStudio]);
   // Once the Terminal tab has been opened we keep it mounted (forceMount below)
   // so its shell session survives switching to other tabs — the PTY only starts
   // on the first visit, not on page load.
@@ -371,7 +374,7 @@ export default function ProjectDetail() {
       {/* On a phone in Flightdeck the title row goes away with the rest of the
           chrome — the project name is in the chat header and "Projects" is one
           tap away in the nav drawer, so this row was pure vertical cost. */}
-      <div className={`${mobileFlightdeck ? 'hidden' : 'flex'} items-center gap-3 shrink-0`}>
+      <div className={`${mobileStudio ? 'hidden' : 'flex'} items-center gap-3 shrink-0`}>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
             <h1 className="text-2xl font-bold tracking-tight truncate">{project.name}</h1>
@@ -408,8 +411,10 @@ export default function ProjectDetail() {
           Mockup/Build stage is shown on the project tiles. */}
       <Tabs value={tab} onValueChange={setTab} className="w-full flex-1 min-h-0 flex flex-col">
         {/* The tab strip is hidden in Flightdeck mode — it has its own chat and
-            terminal, and a Details toggle in its top bar reclaims this height. */}
-        {!flightdeckActive && (
+            terminal, and a Details toggle in its top bar reclaims this height.
+            Same on a phone in the mockup stage: the workspace's bottom bar
+            carries Details, so this row would be a duplicate control. */}
+        {!flightdeckActive && !mobileStudio && (
           <TabsList className="grid w-full grid-cols-3 h-auto shrink-0">
             <TabsTrigger value="chat" className="py-2"><MessageSquare className="h-4 w-4 mr-1.5" />Chat</TabsTrigger>
             <TabsTrigger value="terminal" className="py-2"><TerminalSquare className="h-4 w-4 mr-1.5" />Terminal</TabsTrigger>
@@ -422,13 +427,13 @@ export default function ProjectDetail() {
             it's the large left pane and the chat sits beside it; with no preview
             yet the chat is centered on its own so it stays the focus. The
             checkout-lock banner rides at the top of this tab. */}
-        <TabsContent value="chat" className={`${mobileFlightdeck ? 'mt-0' : 'mt-3'} flex-1 min-h-0 overflow-hidden`}>
+        <TabsContent value="chat" className={`${mobileStudio ? 'mt-0' : 'mt-3'} flex-1 min-h-0 overflow-hidden`}>
           {isArchived ? (
             <p className="text-sm text-muted-foreground">
               This project is archived — the chat and preview are read-only history. Rehydrate it to continue building.
             </p>
           ) : (
-            <div className={`flex h-full min-h-0 flex-col ${mobileFlightdeck ? 'gap-0' : 'gap-3'}`}>
+            <div className={`flex h-full min-h-0 flex-col ${mobileStudio ? 'gap-0' : 'gap-3'}`}>
               <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} />
               {designApproved ? (
                 // Build phase — Flightdeck IDE workspace by default (files +
@@ -474,6 +479,24 @@ export default function ProjectDetail() {
                     />
                   </div>
                 )
+              ) : mobileStudio ? (
+                // Design mode on a phone — the same panelled workspace
+                // Flightdeck uses in the build phase, so the two stages feel
+                // like one app: full screen, one panel at a time, the shared
+                // bottom bar as the only chrome.
+                <MockupWorkspace
+                  projectId={id}
+                  project={project}
+                  canEdit={canEdit}
+                  previewSrc={previewSrc}
+                  previewReloadNonce={previewReloadNonce}
+                  provLog={provStatus?.progress?.log || null}
+                  provMessage={provStatus?.progress?.message || null}
+                  onApproved={load}
+                  onMockupChanged={handleMockupChanged}
+                  onOpenNav={openNav || null}
+                  onShowDetails={() => setTab('details')}
+                />
               ) : previewSrc ? (
                 // Design mode — the live mockup preview on the left, the design
                 // conversation on the right.
@@ -1121,6 +1144,68 @@ function RepoRemoteCard({ projectId, isAdmin, slug }) {
         ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+// MockupWorkspace — the design (pre-approval) stage on a phone.
+//
+// Desktop shows the mockup preview and the design conversation side by side;
+// stacking those on a phone put the chat under a half-height preview under a
+// lock banner under two page headers, so the conversation you actually type
+// into got a sliver of the screen. This is the same shape Flightdeck uses in
+// the build phase — one full-height panel at a time under the shared bottom
+// bar — so moving from design to build doesn't change how the app is driven.
+//
+// MOBILE_FIRST: phone-only by construction (the caller renders it under
+// mobileStudio); every bar item is a ≥44px target and nothing scrolls sideways.
+const MOCKUP_PANELS = [
+  { key: 'chat', label: 'Chat', icon: MessageSquare },
+  { key: 'preview', label: 'Preview', icon: Eye },
+];
+
+function MockupWorkspace({
+  projectId, project, canEdit, previewSrc, previewReloadNonce, provLog, provMessage,
+  onApproved, onMockupChanged, onOpenNav, onShowDetails,
+}) {
+  // Start where the work is: the chat until a mockup exists, the mockup once
+  // one does.
+  const [panel, setPanel] = useState(previewSrc ? 'preview' : 'chat');
+  // The FIRST mockup appearing is the moment worth interrupting for — the user
+  // asked for a screen and it just rendered. Later re-renders reuse the same
+  // URL and don't yank the panel out from under someone mid-sentence.
+  const hadPreview = useRef(!!previewSrc);
+  useEffect(() => {
+    if (previewSrc && !hadPreview.current) { hadPreview.current = true; setPanel('preview'); }
+  }, [previewSrc]);
+
+  return (
+    <div className="flex flex-1 min-h-0 flex-col">
+      {/* A flex column, not a scroll box: each panel owns the exact height and
+          scrolls INSIDE itself, so the chat composer and the preview toolbar
+          stay on screen instead of sliding under the bottom bar. */}
+      <div className="flex flex-1 min-h-0 flex-col">
+        {panel === 'chat' ? (
+          <ConceptStage
+            projectId={projectId} project={project} canEdit={canEdit} fill
+            onApproved={onApproved} onMockupChanged={onMockupChanged}
+          />
+        ) : previewSrc ? (
+          <PreviewPanel
+            src={previewSrc} title={project.name} approved={false} reloadKey={previewReloadNonce}
+          />
+        ) : (
+          // No mockup yet — the placeholder is content-sized, so center it
+          // rather than leaving it stranded at the top of an empty screen.
+          <div className="flex h-full items-center justify-center p-4">
+            <PreviewPlaceholder project={project} provLog={provLog} provMessage={provMessage} />
+          </div>
+        )}
+      </div>
+      <MobilePanelBar
+        panels={MOCKUP_PANELS} current={panel} onSelect={setPanel}
+        onOpenNav={onOpenNav} onShowDetails={onShowDetails}
+      />
+    </div>
   );
 }
 

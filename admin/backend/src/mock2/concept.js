@@ -51,7 +51,7 @@ import {
   estimateConceptTurnTokens, estimateInventoryTokens,
   mockupIdForCycle, mockupFileName, MOCKUP_CURRENT, INVENTORY_PATH,
   buildDesignTokenExtractionPrompt, buildDesignTokenExtractionTask, parseDesignTokens,
-  renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH, mockupRenderModel,
+  renderDesignTokensCss, renderDesignCssFromMockup, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH, mockupRenderModel,
   DESIGN_DOC_ADJUST_SYSTEM_PROMPT,
   stitchContinuation, buildContinuationInstruction,
   buildMockupEditSystemPrompt, parseMockupEdits, applyMockupEdits,
@@ -1207,7 +1207,16 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
     if (tokRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: tokRes.modelUsed || ready.chat.model, usage: tokRes.usage, step: 'design-token-extraction' });
     const { tokens } = parseDesignTokens(tokRes.ok ? tokRes.text : '');
     await writeWorkingFile(containerName, DESIGN_TOKENS_PATH, JSON.stringify(tokens, null, 2));
-    await writeWorkingFile(containerName, DESIGN_CSS_PATH, renderDesignTokensCss(tokens));
+    // design.css carries the MOCKUP'S OWN stylesheet — its fenced token block
+    // (light + dark + stage palette) and its component CSS — verbatim. The
+    // token JSON above stays for callers that want the flat summary, but it is
+    // no longer what the app's look is rebuilt from: re-deriving twenty values
+    // and regenerating a generic stylesheet is what made builds share the
+    // palette without reproducing the design.
+    const design = renderDesignCssFromMockup(html, tokens);
+    await writeWorkingFile(containerName, DESIGN_CSS_PATH, design.css);
+    console.log(`[mock2] design.css from ${design.source}: ${design.css.length} chars, `
+      + `${design.tokenCount} tokens, dark theme ${design.hasDark ? 'carried' : 'ABSENT'}`);
   } catch (e) {
     console.warn('[mock2] design-token extraction failed (build falls back to framework defaults):', e?.message);
   }

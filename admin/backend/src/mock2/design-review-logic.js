@@ -131,10 +131,111 @@ export function rogueCssColors(cssText, tokensJson) {
   return [...counts.entries()].map(([color, count]) => ({ color, count }));
 }
 
+/* ---------------------------------------------------------------------------
+   DESIGN ADHERENCE — did the build USE the approved design, or re-invent it?
+
+   On project 36 the app linked design.css and then referenced none of it: it
+   declared 32 tokens of its own and hand-wrote 17,837 chars of CSS. The result
+   shared the palette and reproduced nothing else, and no check noticed, because
+   every existing check asks "is this app well made" rather than "is this the
+   approved design".
+
+   Deterministic, and cheap: compare the variables the app USES against the ones
+   the approved stylesheet DEFINES.
+   --------------------------------------------------------------------------- */
+
+// Custom properties DEFINED by a stylesheet (`--x: value`).
+export function definedCssVars(cssText) {
+  const out = new Set();
+  for (const m of String(cssText || '').matchAll(/(^|[;{\s])(--[a-z0-9-]+)\s*:/gi)) out.add(m[2].toLowerCase());
+  return out;
+}
+
+// Custom properties USED by a stylesheet (`var(--x)`).
+export function usedCssVars(cssText) {
+  const out = new Set();
+  for (const m of String(cssText || '').matchAll(/var\(\s*(--[a-z0-9-]+)/gi)) out.add(m[1].toLowerCase());
+  return out;
+}
+
+/* checkDesignAdherence({ designCss, appCss })
+ *
+ * designCss — state/design.css, the approved design carried from the mockup.
+ * appCss    — every stylesheet/style block the BUILD wrote.
+ *
+ * Returns { ok, findings: [{ code, severity, detail }], stats }.
+ * Advisory by default — the caller decides whether a finding blocks — but the
+ * codes are stable so a gate can key on them.
+ */
+export function checkDesignAdherence({ designCss = '', appCss = '' } = {}) {
+  const approved = definedCssVars(designCss);
+  const appDefines = definedCssVars(appCss);
+  const appUses = usedCssVars(appCss);
+  const findings = [];
+
+  // Nothing approved to adhere to — an old project, not a defect.
+  if (!approved.size) {
+    return { ok: true, findings: [], stats: { approved: 0, used: 0, ownTokens: 0, coverage: 1 } };
+  }
+
+  const usedApproved = [...appUses].filter((v) => approved.has(v));
+  // A token the app declares itself AND that the approved design already
+  // defines is a redefinition; one it declares that the design does NOT define
+  // is a parallel system. Both are how "shares the colours" happens.
+  const ownTokens = [...appDefines].filter((v) => !approved.has(v));
+  const coverage = approved.size ? usedApproved.length / approved.size : 1;
+
+  if (appCss.trim() && usedApproved.length === 0) {
+    findings.push({
+      code: 'DESIGN_TOKENS_UNUSED',
+      severity: 'high',
+      detail: `The app's stylesheets reference NONE of the ${approved.size} approved design variables. `
+        + 'The approved design is loaded and ignored — rebuild the screens on it instead of a parallel set.',
+    });
+  } else if (coverage < 0.25 && approved.size >= 8) {
+    findings.push({
+      code: 'DESIGN_TOKENS_BARELY_USED',
+      severity: 'medium',
+      detail: `The app uses only ${usedApproved.length} of ${approved.size} approved design variables `
+        + `(${Math.round(coverage * 100)}%). Most of the approved design is not being reproduced.`,
+    });
+  }
+
+  if (ownTokens.length >= 12) {
+    findings.push({
+      code: 'PARALLEL_TOKEN_SYSTEM',
+      severity: 'high',
+      detail: `The app declares ${ownTokens.length} design variables of its own `
+        + `(${ownTokens.slice(0, 6).join(', ')}${ownTokens.length > 6 ? ', …' : ''}) on top of the approved set. `
+        + 'Two palettes drift apart; build on the approved variables.',
+    });
+  }
+
+  // The mockup ships a dark theme. If the approved design has one and the app
+  // does not, the theme toggle flips an attribute nothing responds to — which
+  // is a visibly broken feature, not a style opinion.
+  const designDark = /\[data-theme=["']?dark["']?\]/.test(designCss);
+  const appDark = /\[data-theme=["']?dark["']?\]/.test(appCss);
+  if (designDark && !appDark && appDefines.size > 0) {
+    findings.push({
+      code: 'DARK_THEME_DROPPED',
+      severity: 'high',
+      detail: 'The approved design defines a dark theme; the app defines its own tokens with no dark variant, '
+        + 'so the theme toggle changes nothing for those values.',
+    });
+  }
+
+  return {
+    ok: findings.every((f) => f.severity !== 'high'),
+    findings,
+    stats: { approved: approved.size, used: usedApproved.length, ownTokens: ownTokens.length, coverage },
+  };
+}
+
 // ---- output composition ----
 
 // The chat message a review posts (manual Polish pass or the after-build pass).
-export function reviewChatMessage({ review, axe = [], rogue = [], trigger = 'manual', screenshotCount = 0 }) {
+export function reviewChatMessage({ review, axe = [], rogue = [], adherence = null, trigger = 'manual', screenshotCount = 0 }) {
   const lines = [];
   const label = trigger === 'auto' ? 'Design review (after build)' : 'Design review (Polish pass)';
   const n = review?.findings?.length || 0;
@@ -150,12 +251,19 @@ export function reviewChatMessage({ review, axe = [], rogue = [], trigger = 'man
   if (rogue.length) {
     lines.push(`Token drift: ${rogue.length} color(s) used outside the design tokens (advisory, not a gate): ${rogue.slice(0, 6).map((r) => `${r.color}×${r.count}`).join(', ')}.`);
   }
+  // Adherence is the measurable half of "does the app look like the mockup":
+  // the critique above is taste, this is arithmetic over the stylesheets.
+  if (adherence?.findings?.length) {
+    const { approved = 0, used = 0, ownTokens = 0 } = adherence.stats || {};
+    lines.push(`Design adherence: the app uses ${used}/${approved} approved design variable(s) and declares ${ownTokens} of its own.`);
+    for (const f of adherence.findings) lines.push(`• [${f.severity}] ${f.code}: ${f.detail}`);
+  }
   return lines.join('\n');
 }
 
 // The quick-build instruction "Apply the fixes" composes. Binding, scoped to
 // polish — it must never grow features.
-export function composePolishInstruction({ review, axe = [], rogue = [] }) {
+export function composePolishInstruction({ review, axe = [], rogue = [], adherence = null }) {
   const items = [];
   for (const f of review?.findings || []) {
     items.push(`${f.screen}: ${f.issue}${f.fix ? ` — ${f.fix}` : ''}`);
@@ -165,6 +273,11 @@ export function composePolishInstruction({ review, axe = [], rogue = [] }) {
   }
   if (rogue.length) {
     items.push(`replace hardcoded colors that bypass the design tokens (${rogue.slice(0, 6).map((r) => r.color).join(', ')}) with the matching var(--app-*) tokens`);
+  }
+  // Adherence findings first in the operator's mind but last in the list: they
+  // are the largest edits, so they read better after the specific screen fixes.
+  for (const f of adherence?.findings || []) {
+    items.push(`design system: ${f.detail}`);
   }
   if (!items.length) return null;
   return 'Design polish pass — apply EXACTLY these visual fixes, no new features, no behavior changes:\n'

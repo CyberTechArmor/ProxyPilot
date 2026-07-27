@@ -526,15 +526,20 @@ test('the runner prompt hands over the ui-checks format and the post-deploy cont
   assert.match(prompt, /It does not mean you booted the app/);
 });
 
-test('the runner prompt names the root-mount trap that made an app unreachable', () => {
-  // A build mounted an ordinary feature router at the root, above the sign-in
-  // route, with router.use(requireAuth) inside it. Every request answered 401,
-  // nobody could sign in, and it took three resumed cycles to not find.
+test('the runner prompt says the build\'s routers go LAST, not merely below /login', () => {
+  // Two failures on the same project, one after the other. First a router
+  // mounted above the sign-in route: every page and stylesheet 401'd. Then the
+  // half-fix — the sign-in page moved up, the router left above the platform's
+  // auth API — so /api/auth/bootstrap/status 401'd, login.js read that as "a
+  // user already exists", and the create-the-first-administrator link vanished.
   const prompt = buildRunnerSystemPrompt({ constitution: 'C', skills: [], buildMode: 'mvp' });
-  assert.match(prompt, /router mounted with NO path prefix/i);
-  assert.match(prompt, /app\.use\('\/api', notesRoutes\)/, 'the recommended shape, spelled out');
-  assert.match(prompt, /BELOW the .*app\.get\('\/login'/s, 'and the alternative');
-  assert.match(prompt, /signin-reachable/, 'and the gate that will catch it');
-  // Naming the escape hatch it must NOT take.
-  assert.match(prompt, /Do not work around it by moving the sign-in route/);
+  assert.match(prompt, /YOUR ROUTERS GO LAST/);
+  assert.match(prompt, /BELOW every platform\s*mount/i);
+  // The prefix was the ORIGINAL advice, and it is what produced the half-fix.
+  assert.match(prompt, /A PATH PREFIX DOES NOT SAVE YOU/);
+  assert.match(prompt, /bootstrap\/status/, 'it must name the endpoint whose 401 hides the signup form');
+  assert.match(prompt, /HIDES the\s*create-the-first-administrator link/s);
+  assert.match(prompt, /signin-reachable/, 'and the gate that catches it');
+  // Naming the escape hatches it must NOT take.
+  assert.match(prompt, /move YOURS down/);
 });

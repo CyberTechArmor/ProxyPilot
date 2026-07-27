@@ -55,6 +55,26 @@ export const READINESS_CHECKS = Object.freeze([
     why: 'the sign-in page does not render, so nobody can get into the app',
   },
   {
+    key: 'SIGNUP',
+    path: '/api/auth/bootstrap/status',
+    describe: 'the first-administrator door answers',
+    // The sign-in page RENDERING is not the same as the sign-in flow WORKING.
+    //
+    // A build mounted its feature router above the platform's auth API. /login
+    // was 200 and beautifully styled — and this endpoint answered 401, which
+    // login.js reads as "a user already exists": it showed the sign-in form and
+    // hid the create-the-first-administrator link. On an app with no accounts
+    // that is a locked door with no handle, and the operator's report was "it
+    // broke the first user signup to super admin".
+    //
+    // 404 passes: not every app is gated, and a project without the auth
+    // component has no such endpoint. 401/403 is the failure — the endpoint the
+    // bootstrap gate explicitly allows through cannot itself be behind a guard.
+    ok: (n) => n === 200 || n === 404,
+    required: true,
+    why: 'the first-administrator check is unreachable, so the sign-in screen hides the create-account form and nobody can open the app',
+  },
+  {
     key: 'STATIC',
     path: '/base.css',
     describe: 'the stylesheet is served',

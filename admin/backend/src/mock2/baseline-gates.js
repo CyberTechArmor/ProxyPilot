@@ -702,11 +702,33 @@ export const SIGNIN_REACHABLE_GATE_NAME = 'signin-reachable';
 // shell ${VAR} would be read as an interpolation. Every expansion here is
 // written without braces for that reason — the first version used ${b%%:*} and
 // the module stopped parsing.
-export const SIGNIN_REACHABLE_GATE_SCRIPT = `# Baseline gate (ProxyPilot): the sign-in page must not be shadowed.
+//
+// THE BOUNDARY IS EVERY PLATFORM MOUNT, NOT THE SIGN-IN ROUTE.
+//
+// The first version of this gate checked only what sat above `app.get('/login')`,
+// and a build cleared it by moving the sign-in page up while leaving its router
+// above the platform's auth API:
+//
+//     app.get('/login', ...);        // moved up — the page renders
+//     app.use(express.static(...));  // moved up — the assets load
+//     app.use(notesRoutes);          // still here
+//     app.use('/api', authRoutes);   // never reached
+//
+// The app LOOKED fixed. `/login` was 200 and styled. But
+// `/api/auth/bootstrap/status` answered 401, and login.js reads a non-ok status
+// as "a user already exists": it showed the sign-in form and hid the
+// create-the-first-administrator link, with no message. On an app with no
+// accounts that is a locked door with no handle — the operator's report was
+// "it broke the first user signup to super admin".
+//
+// A path prefix does not save you either, which is the other half of the
+// lesson: `app.use('/api', yours)` above `app.use('/api', authRoutes)` shadows
+// `/api/auth/*` exactly the same way.
+//
+// So the rule is the simple one: THE BUILD'S ROUTERS GO LAST.
+export const SIGNIN_REACHABLE_GATE_SCRIPT = `# Baseline gate (ProxyPilot): the platform's own routes must not be shadowed.
 set -u
 
-# Where is the sign-in page served? Found rather than assumed — a project may
-# have moved it out of src/app.ts.
 APPFILE=""
 for f in src/app.ts src/server.ts src/index.ts src/app.js src/server.js; do
   [ -f "$f" ] || continue
@@ -717,43 +739,63 @@ if [ -z "$APPFILE" ]; then
   exit 0
 fi
 
-LOGINLINE=$(grep -nE "app\\.get\\( *['\\"]/login['\\"]" "$APPFILE" | head -1 | cut -d: -f1)
+# The platform's own mounts and plumbing, by the identifiers it uses. A line
+# naming any of these is the platform's, wherever it sits.
+#
+# The plumbing half matters as much as the routers: express.json(),
+# securityHeaders and the /_preview mount all sit above the auth gate by
+# design, and the first version of this list flagged all three on a freshly
+# scaffolded app. A gate that reds the scaffold gets switched off.
+#
+# The express pattern keeps its dot on purpose: it matches express.json,
+# express.static and express.urlencoded, and does NOT match a build's own
+# router called expressNotes.
+PLAT='withAuth|withApiKey|bootstrapGate|publicPlatformRoutes|platformRoutes|adminPlatformRoutes|authRoutes|adminAuthRoutes|externalAuthRoutes|adminExternalRoutes|healthRoutes|requireRole|express\\.|securityHeaders|cookieParser|bodyParser|helmet|cors|compression|morgan|pinoHttp|rateLimit|requestId|/_preview'
 
-# Root-mounted middleware ABOVE it: app.use(x) with no leading path string.
-# The platform's own belong there and are named here; anything else is the
-# build's, and the build's belongs BELOW the sign-in route or behind a path.
-SAFE='withAuth|withApiKey|bootstrapGate|publicPlatformRoutes|platformRoutes|healthRoutes|express|cookieParser|cookies|helmet|cors|compression|morgan|pinoHttp|rateLimit|requestId|securityHeaders|bodyParser|json|urlencoded|static'
+# THE PLATFORM'S PAGE ROUTES count as platform mounts too. /admin, /profile and
+# / all redirect an anonymous visitor to the sign-in page; a router that 401s
+# above them turns "you are not signed in, here is the door" into a JSON error
+# at the root, which is what a first-time visitor lands on.
+PAGES="app\\.get\\( *['\\"](/login|/admin|/profile|/)['\\"]"
+
+# THE BOUNDARY: the last platform mount or page route in the file. Everything
+# the build adds belongs after it — see the ADD YOUR ROUTES marker the scaffold
+# ships at exactly this position.
+BOUNDARY=$(grep -nE "^[[:space:]]*app\\.(use|get)\\(" "$APPFILE" \\
+  | grep -E "$PLAT|$PAGES" | tail -1 | cut -d: -f1)
+[ -n "$BOUNDARY" ] || BOUNDARY=$(grep -nE "app\\.get\\( *['\\"]/login['\\"]" "$APPFILE" | head -1 | cut -d: -f1)
 
 BADFILE=$(mktemp 2>/dev/null || echo /tmp/pp-signin-$$)
 trap 'rm -f "$BADFILE"' EXIT
 : > "$BADFILE"
 
-head -n $((LOGINLINE - 1)) "$APPFILE" | grep -nE "^[[:space:]]*app\\.use\\([A-Za-z_]" | while IFS= read -r hit; do
+# Any app.use(...) above the boundary that is NOT one of the platform's.
+# Path-prefixed mounts count: the shadowing is the same.
+head -n $((BOUNDARY - 1)) "$APPFILE" | grep -nE "^[[:space:]]*app\\.use\\(" | while IFS= read -r hit; do
+  echo "$hit" | grep -qE "$PLAT" && continue
   LN=$(echo "$hit" | cut -d: -f1)
-  NAME=$(echo "$hit" | sed -E "s/^[0-9]+:[[:space:]]*app\\.use\\(([A-Za-z_][A-Za-z0-9_.]*).*/\\1/")
-  # A path-prefixed mount — app.use('/api', r) — never matches the pattern
-  # above, because it starts with a quote. Only bare identifiers reach here.
-  echo "$NAME" | grep -qE "^($SAFE)([.(]|$)" && continue
-  echo "line $LN — app.use($NAME)" >> "$BADFILE"
+  CALL=$(echo "$hit" | sed -E 's/^[0-9]+:[[:space:]]*//' | cut -c1-70)
+  echo "line $LN — $CALL" >> "$BADFILE"
 done
 
 if [ -s "$BADFILE" ]; then
-  echo "FAIL: $APPFILE mounts a router at the ROOT above the sign-in route (line $LOGINLINE):"
+  echo "FAIL: $APPFILE mounts the build's routes ABOVE the platform's own (which end at line $BOUNDARY):"
   sed 's/^/      /' "$BADFILE"
   echo ""
-  echo "      A router mounted with no path prefix runs its router-level middleware for EVERY"
-  echo "      request, not just the paths declared inside it. If it calls router.use(requireAuth)"
-  echo "      it answers 401 to /login and to every stylesheet, and NOBODY CAN SIGN IN — the app"
-  echo "      deploys, passes its health check, and serves a JSON error body at the live URL."
+  echo "      A router runs its router-level middleware for every request that reaches it and"
+  echo "      matches its mount path. Above the platform's routes, a router.use(requireAuth)"
+  echo "      answers 401 to /api/auth/bootstrap/status — and login.js reads that as \\"a user"
+  echo "      already exists\\", so it shows the sign-in form and HIDES the create-the-first-"
+  echo "      administrator link. On an app with no accounts, nobody can get in and nothing"
+  echo "      says why. The same router above /login makes every page and stylesheet 401."
   echo ""
-  echo "      Fix it either way:"
-  echo "        - move the app.use(...) line BELOW the app.get('/login', ...) route, or"
-  echo "        - give it a path prefix, app.use('/api', notesRoutes), and drop the /api"
-  echo "          segment from the paths declared inside the router."
+  echo "      Move your app.use(...) lines BELOW line $BOUNDARY — after every platform mount."
+  echo "      A path prefix does not help on its own: app.use('/api', yours) above"
+  echo "      app.use('/api', authRoutes) shadows /api/auth/* just the same. Last is what matters."
   exit 1
 fi
 
-echo "signin-reachable: nothing of the build's is mounted above the sign-in route in $APPFILE. Passed."
+echo "signin-reachable: the build's routes are mounted after the platform's in $APPFILE. Passed."
 exit 0
 `;
 

@@ -247,6 +247,7 @@ export function createApp(): express.Express {
     res.sendFile('profile.html', { root: PUBLIC_DIR });
   });
 
+
   // The authenticated app shell (public/app-shell.html — the base-style page
   // the build extends with screens); unauthenticated visitors always land on
   // /login. Inline fallback if a build removed the shell file.
@@ -282,6 +283,27 @@ export function createApp(): express.Express {
           '</body></html>',
       );
   });
+
+  // ==== ADD YOUR ROUTES BELOW THIS LINE ====
+  //
+  // Everything above is the platform's, and your routers must come after ALL of
+  // it. A router runs its router-level middleware for every request that
+  // reaches it and matches its mount path, whatever the paths declared inside
+  // it — so a router with router.use(requireAuth) mounted above this line
+  // answers 401 to the platform's own endpoints.
+  //
+  // Both halves of that have shipped. Above the sign-in route it answered 401
+  // to /login and to every stylesheet, and the live URL served a JSON error
+  // body. Above app.use('/api', authRoutes) it answered 401 to
+  // /api/auth/bootstrap/status — which login.js reads as "a user already
+  // exists", so the sign-in screen rendered perfectly and hid the
+  // create-the-first-administrator link, and nobody could ever open the app.
+  //
+  // A path prefix is good practice but not a substitute: app.use('/api', yours)
+  // above app.use('/api', authRoutes) shadows /api/auth/* just the same.
+  // POSITION is what matters. The signin-reachable gate enforces it.
+  //
+  //   app.use('/api', notesRoutes);   <- here
 
   return app;
 }

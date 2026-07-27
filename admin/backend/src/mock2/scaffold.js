@@ -1258,6 +1258,6 @@ export function buildScaffoldFiles(project) {
     { path: 'public/pp-annotate-bridge.js', content: ppAnnotateBridgeJs() },
     // The platform module — identity, legal pages, assets, machine API and
     // read-only SQL. Part of the base app every project is provisioned with.
-    ...buildPlatformFiles(),
+    ...buildPlatformFiles(project),
   ];
 }

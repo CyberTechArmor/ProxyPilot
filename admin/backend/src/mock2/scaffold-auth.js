@@ -818,6 +818,17 @@ function loginHtml() {
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon.svg">
 <script src="/build-id.js"></script><script src="/install.js" defer></script><script src="/pp-annotate-bridge.js" defer></script>
+  <!-- The approved design. This page's own comment has always said its colors
+       ride the design tokens — and for a long while nothing linked the
+       stylesheet that defines them, so the sign-in screen shipped in the dark
+       fallbacks below while every other screen used the approved palette, and
+       each build paid to hand-patch the link back in. /design.css is served
+       before the auth gate (empty until a design is approved), and the token
+       bridge inside it is also what defines --surface / --ink / --line for the
+       legal footer and the Privacy / Terms pages on this screen.
+       This page deliberately does NOT link base.css: it is self-contained, and
+       platform.js injects the chrome CSS the footer needs. -->
+  <link rel="stylesheet" href="/design.css">
   <style>
     :root {
       --lg-bg: var(--app-bg, #0f1115); --lg-card: var(--app-surface, #1a1d24);

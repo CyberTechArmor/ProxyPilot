@@ -34,7 +34,7 @@ import {
 import { readRunContract } from './deploy.js';
 import {
   UI_CHECKS_PATH, parseUiChecks, checksForChangedFiles, uiCheckLogLines, uiCheckFailSummary,
-  withBaselineChecks, isBaselineCheck,
+  withPlatformLogin, withBaselineChecks, isBaselineCheck,
 } from './ui-check-logic.js';
 import { runUiChecks, launchOptions, loadChromium } from './ui-checks.js';
 import { ACCEPTANCE_PATH, parseAcceptance } from './acceptance-logic.js';

@@ -368,8 +368,30 @@ test('no viewer fixture means no viewer checks — never a check that cannot sig
   // pass; the platform declines to ask rather than ask uselessly.
   const withoutViewer = buildBaselineChecks({ reviewerRole: 'platform', viewerRole: null });
   assert.ok(withoutViewer.length > 0);
-  assert.ok(withoutViewer.every((c) => c.role === 'platform'));
-  assert.equal(buildBaselineChecks({}).length, 0);
+  assert.ok(withoutViewer.filter((c) => c.role).every((c) => c.role === 'platform'));
+  // The signed-out check needs no fixture at all, so it survives having none.
+  // It used to be true that every baseline was a signed-in one, which is why
+  // the signed-out screen — the only one a visitor sees — was never checked.
+  assert.deepEqual(buildBaselineChecks({}).map((c) => c.role), [null]);
+});
+
+test('the baseline opens a legal page on the signed-out sign-in screen', () => {
+  // The sign-in screen does not link base.css, so the platform's own chrome
+  // rendered there unstyled — the Privacy / Terms links as raw browser buttons,
+  // and the pages they opened as unstyled text. Asserting the footer SLOT
+  // exists never caught it: the slot was there the whole time. Only opening a
+  // page does.
+  const signin = buildBaselineChecks({ reviewerRole: 'platform' }).find((c) => c.id.endsWith('signin-legal'));
+  assert.ok(signin, 'a signed-out sign-in-screen check must exist');
+  assert.equal(signin.role, null, 'it must run signed OUT — that is the state under test');
+  assert.equal(signin.page, '/login');
+  assert.deepEqual(signin.paths, ['**/*']);
+  assert.ok(signin.steps.some((s) => s.click === '[data-legal="privacy"]'), 'it must actually open a legal page');
+  assert.ok(signin.steps.some((s) => s.expect_visible === '.legal-overlay .legal-inner h1'));
+  // Back closes the overlay and leaves the screen underneath standing.
+  assert.ok(signin.steps.some((s) => s.click === '.legal-overlay .legal-back'));
+  assert.ok(signin.steps.some((s) => s.expect_absent === '.legal-overlay'));
+  assert.deepEqual(signin.steps.at(-1), { expect_visible: '[data-legal-footer] .legal-link' });
 });
 
 test('the baseline is added to whatever the model wrote, and signs itself in', () => {

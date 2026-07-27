@@ -209,3 +209,47 @@ test('pickContainerIp: incus list -c4 csv shapes parse (interface note stripped 
   assert.equal(pickContainerIp('10.163.220.42  eth0  10.99.0.7  docker0 '), '10.163.220.42');
   assert.equal(pickContainerIp('  '), null);
 });
+
+/* ------------------------------------------------------------------------- *
+ * The HTTP smoke layer's verdict.
+ *
+ * Project 43 deployed with a feature router mounted above the sign-in route:
+ * every path answered 401, the live URL served a JSON error body, and this
+ * layer reported ok — because it asked for `/` and accepted anything under
+ * 500, and on a gated app a 401 at `/` is normal. The question `/` cannot
+ * answer is whether anyone can get IN.
+ * ------------------------------------------------------------------------- */
+
+test('httpSmoke: a 401 on the sign-in page is a failure, however healthy / looks', async () => {
+  const { httpSmokeChecks } = await import('../mock2/smoke-triggers.js');
+  const out = (shell, login, spoof = '401') =>
+    `SHELL:${shell}\nLOGIN:${login}\nSPOOF /api/admin:${spoof}\nSPOOF_WORST:${spoof === '401' ? '000' : spoof}\n`;
+
+  // Project 43, exactly: every path 401, and the old layer called it ok.
+  const dead = httpSmokeChecks(out('401', '401'));
+  assert.equal(dead.ok, false);
+  const signin = dead.checks.find((c) => c.name === 'sign-in page reachable');
+  assert.equal(signin.ok, false);
+  assert.match(signin.detail, /nobody can sign in/);
+  assert.match(signin.detail, /behind the auth gate/, 'it must name the cause, not just the code');
+  assert.match(signin.detail, /signin-reachable/, 'and point at the gate that catches it pre-deploy');
+  // `/` on a gated app really is a 401 — that check is unchanged and still passes.
+  assert.equal(dead.checks.find((c) => c.name === 'shell-serves').ok, true);
+
+  // A healthy gated app: / redirects or 401s, /login renders.
+  assert.equal(httpSmokeChecks(out('401', '200')).ok, true);
+  assert.equal(httpSmokeChecks(out('302', '200')).ok, true);
+  // A sign-in flow that redirects is normal.
+  assert.equal(httpSmokeChecks(out('200', '302')).ok, true);
+  // An app with no sign-in page at all is not a broken app.
+  assert.equal(httpSmokeChecks(out('200', '404')).ok, true);
+  // Dead or unreachable is still dead.
+  assert.equal(httpSmokeChecks(out('200', '500')).ok, false);
+  assert.equal(httpSmokeChecks(out('200', '000')).ok, false);
+  assert.equal(httpSmokeChecks(out('000', '200')).ok, false);
+
+  // The negative-auth assertion is untouched.
+  const spoofed = httpSmokeChecks(out('200', '200', '200'));
+  assert.equal(spoofed.ok, false);
+  assert.equal(spoofed.checks.find((c) => c.name.startsWith('negative-auth')).ok, false);
+});

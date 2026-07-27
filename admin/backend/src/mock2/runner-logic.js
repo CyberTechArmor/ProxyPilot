@@ -794,6 +794,31 @@ runs the live check after deploy (pending_verification is then your finish).
    test against the local fixture server); never fabricate a live test and
    never stub the transport to force a plain finish.
 
+# MOUNTING YOUR ROUTES: the one way to make the app unreachable
+A router mounted with NO path prefix runs its router-level middleware for every
+request the app receives, whatever paths are declared inside it:
+
+    const router = Router();
+    router.use(requireAuth);            // reasonable — for its own routes
+    router.get('/api/notes', ...);      // full paths, so mount at the root?
+    app.use(notesRoutes);               // <- now guards EVERY request
+
+That app deploys, passes its health check, and answers 401 to \`/login\` and to
+every stylesheet. Nobody can sign in; the live URL serves a JSON error body. It
+happened, it cost three resumed cycles to not find, and it typechecks.
+
+So, when you add routes to \`src/app.ts\`:
+- PREFER a path prefix — \`app.use('/api', notesRoutes)\` — and declare the paths
+  inside the router relative to it (\`router.get('/notes')\`, not
+  \`router.get('/api/notes')\`).
+- If you genuinely need a root mount, put it BELOW the \`app.get('/login', …)\`
+  route, never above it.
+- Guarding per route (\`router.get('/notes', requireAuth, handler)\`) is always
+  safe. \`router.use(requireAuth)\` is only safe on a path-prefixed router.
+
+The \`signin-reachable\` gate fails the build for this before it deploys, and
+names the line. Do not work around it by moving the sign-in route.
+
 # What ProxyPilot runs FOR you after you finish — do not rebuild it
 The moment you call finish and the gates are green, the platform checkpoints,
 deploys, and then runs all of this itself, against the REAL deployed app:

@@ -31,7 +31,7 @@ import { join, dirname } from 'node:path';
 import {
   BASELINE_GATES, BASELINE_GATE_NAMES, baselineGatesForProfile, tierRank, asAdvisory,
   PLATFORM_INTACT_GATE_SCRIPT, MOBILE_OVERFLOW_GATE_SCRIPT, NO_DEAD_CONTROLS_GATE_SCRIPT,
-  DESIGN_ADHERENCE_GATE_SCRIPT,
+  DESIGN_ADHERENCE_GATE_SCRIPT, SIGNIN_REACHABLE_GATE_SCRIPT, SIGNIN_REACHABLE_GATE_NAME,
 } from '../mock2/baseline-gates.js';
 import {
   buildGateBattery, gateTier, gatesForProfile, gateProfileForMode, parseGateScripts,
@@ -952,4 +952,95 @@ test('design-adherence: PARTIAL is reported as a pass, and a no-design skip as a
   const nodesign = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, { 'public/app.css': '.x{color:red}' });
   assert.equal(nodesign.code, 0);
   assert.equal(gateStatusFromOutput(nodesign.code, nodesign.out), 'skipped');
+});
+
+/* ------------------------------------------------------------------------- *
+ * signin-reachable: a router mounted above the sign-in route kills the app.
+ *
+ * Project 43 deployed, answered its health check, and nobody could sign in.
+ * The build had added `app.use(notesRoutes)` above the /login route, and that
+ * router did `router.use(requireAuth)` — which, on a root mount, guards every
+ * request the app receives. /login and every stylesheet answered 401 and the
+ * live URL served a JSON error body. It typechecks, it is internally
+ * consistent, and three resumed cycles never found it.
+ * ------------------------------------------------------------------------- */
+
+test('signin-reachable: the project-43 shape fails, and says which line and why', () => {
+  const app = [
+    "  app.use(publicPlatformRoutes);",
+    "  app.use(withApiKey);",
+    "  app.use(withAuth);",
+    "  app.use(bootstrapGate());",
+    "  app.use('/api', authRoutes);",
+    "  app.use(platformRoutes);",
+    "  app.use('/api/admin', adminPlatformRoutes);",
+    "  app.use(notesRoutes);",
+    "  app.get('/login', (_req, res) => res.sendFile('login.html', { root: PUBLIC_DIR }));",
+    "  app.use(express.static(PUBLIC_DIR, { index: false }));",
+  ].join('\n');
+  const r = runScript(SIGNIN_REACHABLE_GATE_SCRIPT, { 'src/app.ts': app });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /app\.use\(notesRoutes\)/, 'it must name the offending mount');
+  assert.match(r.out, /line 8/, 'and its line');
+  assert.match(r.out, /NOBODY CAN SIGN IN/);
+  // Both remedies, because either is correct and the build should not guess.
+  assert.match(r.out, /move the app\.use\(\.\.\.\) line BELOW/);
+  assert.match(r.out, /give it a path prefix/);
+  // The platform's own root mounts are expected above the sign-in route and
+  // must never be reported — a gate that cries wolf on the scaffold is a gate
+  // that gets switched off.
+  for (const safe of ['publicPlatformRoutes', 'withApiKey', 'withAuth', 'bootstrapGate', 'platformRoutes']) {
+    assert.doesNotMatch(r.out, new RegExp(`app\\.use\\(${safe}`), `${safe} is the platform's own`);
+  }
+});
+
+test('signin-reachable: both correct shapes pass, and a moved sign-in page stands it down', () => {
+  const head = [
+    "  app.use(withAuth);",
+    "  app.use(bootstrapGate());",
+    "  app.get('/login', (_req, res) => res.sendFile('login.html', { root: PUBLIC_DIR }));",
+    "  app.use(express.static(PUBLIC_DIR, { index: false }));",
+    "  app.use('/api', authRoutes);",
+  ].join('\n');
+
+  // Root-mounted BELOW the sign-in route.
+  assert.equal(runScript(SIGNIN_REACHABLE_GATE_SCRIPT, { 'src/app.ts': `${head}\n  app.use(notesRoutes);\n` }).code, 0);
+  // Mounted behind a path prefix, anywhere.
+  assert.equal(runScript(SIGNIN_REACHABLE_GATE_SCRIPT, {
+    'src/app.ts': "  app.use('/api', notesRoutes);\n" + head,
+  }).code, 0);
+  // An app with no sign-in route at all (not every project is gated): the gate
+  // has nothing to protect and says so rather than inventing a verdict.
+  const none = runScript(SIGNIN_REACHABLE_GATE_SCRIPT, { 'src/app.ts': '  app.use(notesRoutes);\n' });
+  assert.equal(none.code, 0);
+  assert.match(none.out, /skipped/);
+});
+
+test('signin-reachable: the REAL generated app.ts passes, and would catch a regression in it', () => {
+  // The load-bearing half. A gate that reds a freshly scaffolded app gets
+  // switched off instead of the app getting fixed.
+  const appTs = buildAuthWiredFiles().find((f) => f.path === 'src/app.ts').content;
+  const clean = runScript(SIGNIN_REACHABLE_GATE_SCRIPT, { 'src/app.ts': appTs });
+  assert.equal(clean.code, 0, `the real scaffold must pass: ${clean.out}`);
+
+  // And the scaffold's ORDER is what makes that true: the sign-in route and the
+  // static mount are registered above every router, so nothing a build adds in
+  // the usual place can shadow them.
+  const loginAt = appTs.indexOf("app.get('/login'");
+  const staticAt = appTs.indexOf('express.static(PUBLIC_DIR');
+  assert.ok(loginAt > 0 && staticAt > loginAt, 'the sign-in route comes before the static mount');
+  for (const after of ["app.use(platformRoutes)", "app.use('/api/admin', adminPlatformRoutes)"]) {
+    assert.ok(appTs.indexOf(after) > loginAt,
+      `${after} must be registered AFTER the sign-in route — that ordering is the fix`);
+  }
+  // withAuth/bootstrapGate stay ABOVE it: the page is served through the gate,
+  // which is what makes the create-administrator flow work on a fresh install.
+  assert.ok(appTs.indexOf('app.use(withAuth)') < loginAt);
+  assert.ok(appTs.indexOf('app.use(bootstrapGate())') < loginAt);
+
+  // Inject the regression into the real file and the gate catches it there too.
+  const broken = appTs.replace("  app.get('/login'", '  app.use(notesRoutes);\n  app.get(\'/login\'');
+  const r = runScript(SIGNIN_REACHABLE_GATE_SCRIPT, { 'src/app.ts': broken });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /app\.use\(notesRoutes\)/);
 });

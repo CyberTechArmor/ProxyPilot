@@ -166,6 +166,32 @@ export function createApp(): express.Express {
   app.use(withAuth);
   app.use(bootstrapGate());
 
+  // THE SIGN-IN PAGE AND THE STATIC ASSETS COME FIRST, before any router.
+  //
+  // They used to sit at the bottom of this file, under the API routes — which
+  // is where a build adds its own \`app.use(featureRoutes)\`. A router mounted at
+  // the ROOT with no path prefix runs its router-level middleware for EVERY
+  // request, whatever path the routes inside it declare. So a perfectly
+  // ordinary feature router:
+  //
+  //     const router = Router();
+  //     router.use(requireAuth);              // sensible, for its own routes
+  //     router.get('/api/notes', ...);        // full paths, so mount at root
+  //     app.use(notesRoutes);                 // <- swallows everything
+  //
+  // answered 401 to \`GET /login\` and to every stylesheet, because requireAuth
+  // ran before this line was ever reached. Project 43 shipped exactly that:
+  // the app deployed, the health check passed, and NOBODY COULD SIGN IN — the
+  // live URL returned a JSON error body. Three resumed cycles chased console
+  // errors without finding it.
+  //
+  // Registered here, the sign-in page and the assets cannot be shadowed by
+  // anything a build adds below. (Static is safe this high because it only
+  // answers when a real file exists under public/, and index:false stops a
+  // stray public/index.html shadowing the app shell.)
+  app.get('/login', (_req, res) => res.sendFile('login.html', { root: PUBLIC_DIR }));
+  app.use(express.static(PUBLIC_DIR, { index: false }));
+
   app.use('/api', authRoutes);
   app.use('/api', adminAuthRoutes);
   // External self-signup (public endpoints re-check the admin toggle) + its
@@ -195,13 +221,8 @@ export function createApp(): express.Express {
     res.json({ user, role: auth.role, tenantId: auth.tenantId, provider: auth.provider ?? user?.provider ?? 'local' });
   });
 
-  // The sign-in page (shows the create-administrator form while uninitialized).
-  app.get('/login', (_req, res) => res.sendFile('login.html', { root: PUBLIC_DIR }));
-
-  // Static assets — CSS / JS / images the app ships under public/ are served at
-  // the root (so <link href="/styles.css"> resolves). index:false so a stray
-  // public/index.html never shadows the app's own routes.
-  app.use(express.static(PUBLIC_DIR, { index: false }));
+  // The sign-in page and the static assets are registered ABOVE, before any
+  // router — see the comment there. Do not re-register them here.
 
   // The platform admin console (users, roles & permissions, LDAPS directory,
   // self-signup) and the profile page — served with the app from day one.

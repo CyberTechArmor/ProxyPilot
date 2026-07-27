@@ -525,3 +525,16 @@ test('the runner prompt hands over the ui-checks format and the post-deploy cont
   // And the bar it replaces, stated so "verify" cannot be read as "boot it".
   assert.match(prompt, /It does not mean you booted the app/);
 });
+
+test('the runner prompt names the root-mount trap that made an app unreachable', () => {
+  // A build mounted an ordinary feature router at the root, above the sign-in
+  // route, with router.use(requireAuth) inside it. Every request answered 401,
+  // nobody could sign in, and it took three resumed cycles to not find.
+  const prompt = buildRunnerSystemPrompt({ constitution: 'C', skills: [], buildMode: 'mvp' });
+  assert.match(prompt, /router mounted with NO path prefix/i);
+  assert.match(prompt, /app\.use\('\/api', notesRoutes\)/, 'the recommended shape, spelled out');
+  assert.match(prompt, /BELOW the .*app\.get\('\/login'/s, 'and the alternative');
+  assert.match(prompt, /signin-reachable/, 'and the gate that will catch it');
+  // Naming the escape hatch it must NOT take.
+  assert.match(prompt, /Do not work around it by moving the sign-in route/);
+});

@@ -239,6 +239,61 @@ export function smokeGateOk({ http, report = {}, config = DEFAULT_SMOKE_CONFIG }
 // cannot see the app on its own 127.0.0.1 (the app listens inside the project's
 // container — req-76 burned a cycle on exactly that ERR_CONNECTION_REFUSED), so
 // the target must be the container's bridge address.
+// ---- the HTTP smoke layer's verdict (pure, so it can be tested) ----
+//
+// smoke.js runs the curl script in the container; this reads its output. It
+// lives here rather than there because smoke.js cannot be imported outside a
+// real install (it pulls in the native DB chain), and this classification is
+// exactly the kind of thing that regresses in silence.
+//
+// THE SIGN-IN CHECK EARNS ITS PLACE. The layer used to ask for `/` and accept
+// anything under 500. On an auth-gated app a 401 at `/` is normal, so that
+// question cannot distinguish a working app from one nobody can get into.
+// Project 43 deployed with a feature router mounted above the sign-in route:
+// every path answered 401, the live URL served a JSON error body, and this
+// layer reported ok.
+export function httpSmokeChecks(out) {
+  const text = String(out || '');
+  const grab = (key) => (text.match(new RegExp(`${key}:(\\d+)`)) || [])[1] || '000';
+  const shell = grab('SHELL');
+  const login = grab('LOGIN');
+  const spoofWorst = grab('SPOOF_WORST');
+
+  const shellOk = shell !== '000' && Number(shell) < 500;
+
+  // 404 is fine — not every app has a sign-in page; an ungated tool does not.
+  // 401/403 is NOT: it means the sign-in page is itself behind the auth gate,
+  // which is unreachable by construction. 5xx or a refused connection is a
+  // dead app. A redirect is a normal sign-in flow.
+  const loginCode = Number(login);
+  const loginOk = login !== '000'
+    && (loginCode === 200 || loginCode === 404 || (loginCode >= 300 && loginCode < 400));
+  const loginDetail = loginOk
+    ? `GET /login → ${login}`
+    : `GET /login → ${login} — nobody can sign in. ${
+      loginCode === 401 || loginCode === 403
+        ? 'The sign-in page is itself behind the auth gate: something mounted above it in src/app.ts is guarding every request (see the signin-reachable gate).'
+        : 'The app is not serving it.'}`;
+
+  // If no conventional admin path answered at all we cannot assert the negative
+  // case — report not-applicable rather than a false pass.
+  const spoofTested = /SPOOF \S+:(2|4)\d\d/.test(text);
+  const spoofOk = spoofWorst[0] !== '2';
+
+  const checks = [
+    { name: 'shell-serves', ok: shellOk, detail: `GET / → ${shell}` },
+    { name: 'sign-in page reachable', ok: loginOk, detail: loginDetail },
+    {
+      name: 'negative-auth (spoofed x-user-role rejected)',
+      ok: spoofOk,
+      detail: spoofTested
+        ? `worst spoofed-header response: ${spoofWorst}`
+        : 'no conventional admin path answered — assertion not applicable',
+    },
+  ];
+  return { ok: checks.every((c) => c.ok), checks };
+}
+
 export function pickContainerIp(text) {
   const tokens = String(text || '').split(/\s+/).filter(Boolean);
   return tokens.find((t) => /^(\d{1,3})(\.\d{1,3}){3}$/.test(t)

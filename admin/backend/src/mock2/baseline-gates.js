@@ -673,6 +673,90 @@ export const E2E_GATE_NAME = 'e2e';
 
 // ---- the registry ----
 
+// ---- signin-reachable ----
+//
+// The sign-in page must survive whatever the build mounted.
+//
+// Project 43 deployed, answered its health check, and NOBODY COULD SIGN IN:
+// the live URL served a JSON error body and `GET /login` answered 401. The
+// build had added an ordinary feature router —
+//
+//     const router = Router();
+//     router.use(requireAuth);          // sensible, for its own routes
+//     router.get('/api/notes', ...);    // full paths, so mounted at the root
+//     app.use(notesRoutes);
+//
+// — at the root, ABOVE the line that serves the sign-in page. A router mounted
+// with no path prefix runs its router-level middleware for EVERY request, not
+// only the paths declared inside it, so requireAuth answered 401 to /login and
+// to every stylesheet before the sign-in route was ever reached.
+//
+// Nothing caught it. It typechecks, it is internally consistent, and the app
+// starts. Three resumed cycles and $9.81 went into chasing the console errors
+// it produced downstream. The scaffold now registers /login above every router
+// so a NEW project cannot be shadowed — this gate is for the projects whose
+// app.ts already carries the old order, and for anything a build reorders.
+export const SIGNIN_REACHABLE_GATE_NAME = 'signin-reachable';
+
+// NOTE ON ESCAPES: this script is emitted from a JS template literal, so a
+// shell ${VAR} would be read as an interpolation. Every expansion here is
+// written without braces for that reason — the first version used ${b%%:*} and
+// the module stopped parsing.
+export const SIGNIN_REACHABLE_GATE_SCRIPT = `# Baseline gate (ProxyPilot): the sign-in page must not be shadowed.
+set -u
+
+# Where is the sign-in page served? Found rather than assumed — a project may
+# have moved it out of src/app.ts.
+APPFILE=""
+for f in src/app.ts src/server.ts src/index.ts src/app.js src/server.js; do
+  [ -f "$f" ] || continue
+  if grep -qE "app\\.get\\( *['\\"]/login['\\"]" "$f"; then APPFILE="$f"; break; fi
+done
+if [ -z "$APPFILE" ]; then
+  echo "signin-reachable: no /login route found in the usual entry files; skipped."
+  exit 0
+fi
+
+LOGINLINE=$(grep -nE "app\\.get\\( *['\\"]/login['\\"]" "$APPFILE" | head -1 | cut -d: -f1)
+
+# Root-mounted middleware ABOVE it: app.use(x) with no leading path string.
+# The platform's own belong there and are named here; anything else is the
+# build's, and the build's belongs BELOW the sign-in route or behind a path.
+SAFE='withAuth|withApiKey|bootstrapGate|publicPlatformRoutes|platformRoutes|healthRoutes|express|cookieParser|cookies|helmet|cors|compression|morgan|pinoHttp|rateLimit|requestId|securityHeaders|bodyParser|json|urlencoded|static'
+
+BADFILE=$(mktemp 2>/dev/null || echo /tmp/pp-signin-$$)
+trap 'rm -f "$BADFILE"' EXIT
+: > "$BADFILE"
+
+head -n $((LOGINLINE - 1)) "$APPFILE" | grep -nE "^[[:space:]]*app\\.use\\([A-Za-z_]" | while IFS= read -r hit; do
+  LN=$(echo "$hit" | cut -d: -f1)
+  NAME=$(echo "$hit" | sed -E "s/^[0-9]+:[[:space:]]*app\\.use\\(([A-Za-z_][A-Za-z0-9_.]*).*/\\1/")
+  # A path-prefixed mount — app.use('/api', r) — never matches the pattern
+  # above, because it starts with a quote. Only bare identifiers reach here.
+  echo "$NAME" | grep -qE "^($SAFE)([.(]|$)" && continue
+  echo "line $LN — app.use($NAME)" >> "$BADFILE"
+done
+
+if [ -s "$BADFILE" ]; then
+  echo "FAIL: $APPFILE mounts a router at the ROOT above the sign-in route (line $LOGINLINE):"
+  sed 's/^/      /' "$BADFILE"
+  echo ""
+  echo "      A router mounted with no path prefix runs its router-level middleware for EVERY"
+  echo "      request, not just the paths declared inside it. If it calls router.use(requireAuth)"
+  echo "      it answers 401 to /login and to every stylesheet, and NOBODY CAN SIGN IN — the app"
+  echo "      deploys, passes its health check, and serves a JSON error body at the live URL."
+  echo ""
+  echo "      Fix it either way:"
+  echo "        - move the app.use(...) line BELOW the app.get('/login', ...) route, or"
+  echo "        - give it a path prefix, app.use('/api', notesRoutes), and drop the /api"
+  echo "          segment from the paths declared inside the router."
+  exit 1
+fi
+
+echo "signin-reachable: nothing of the build's is mounted above the sign-in route in $APPFILE. Passed."
+exit 0
+`;
+
 export const BASELINE_GATES = Object.freeze([
   {
     name: DESIGN_ADHERENCE_GATE_NAME,
@@ -693,6 +777,9 @@ export const BASELINE_GATES = Object.freeze([
     tier: 'quick',
     advisoryIn: [],
   },
+  // 'quick' and never advisory: a shadowed sign-in page is a dead app, the
+  // check is deterministic, and the fix is moving one line.
+  { name: SIGNIN_REACHABLE_GATE_NAME, script: SIGNIN_REACHABLE_GATE_SCRIPT, tier: 'quick', advisoryIn: [] },
   { name: MOBILE_OVERFLOW_GATE_NAME, script: MOBILE_OVERFLOW_GATE_SCRIPT, tier: 'mvp', advisoryIn: [] },
   // 'mvp' because it is squarely "does the app look and act right", and the
   // fix is small and local — exactly the kind of thing an MVP build should be

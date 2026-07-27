@@ -345,7 +345,11 @@ function ActivityMessage({ text }) {
   );
 }
 
-function ActivityStream({ items = [], working = false }) {
+// Exported: the DESIGN chat uses the same presentation. Two chats narrating the
+// same kind of work in two different ways is two things to learn, and the one
+// with the poorer version reads as the poorer product — the design stage had a
+// single muted line where the build stage had a timeline.
+export function ActivityStream({ items = [], working = false }) {
   if (!items.length && !working) return null;
   return (
     <div className="overflow-hidden rounded-xl border bg-gradient-to-b from-muted/40 to-muted/10">

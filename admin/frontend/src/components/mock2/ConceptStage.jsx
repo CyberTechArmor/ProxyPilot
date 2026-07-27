@@ -90,13 +90,12 @@ export default function ConceptStage({
   const scrollRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && !archived && project?.lifecycle === 'active');
   const wasApproved = useRef(!!project?.design_approved_at);
-  // The "bring your logo" invitation: shown once per project until it is either
-  // answered (something is in the library) or dismissed. Remembered per project
-  // so it does not reappear on every visit.
-  const assetPromptKey = `pp.assetPrompt.dismissed.${projectId}`;
-  const [assetPromptOff, setAssetPromptOff] = useState(() => {
-    try { return localStorage.getItem(assetPromptKey) === '1'; } catch { return false; }
-  });
+  // The "bring your logo" question, asked as a modal BEFORE the chat can be
+  // used. Deliberately NOT persisted: the operator asked for it on every page
+  // load while the conversation is still empty, because the moment it matters is
+  // the moment before the first mockup is described — and that moment comes back
+  // every time someone opens a project they have not started yet.
+  const [assetPromptOff, setAssetPromptOff] = useState(false);
   const [assetCount, setAssetCount] = useState(null);   // null = not yet known
   const lastMockupId = useRef(project?.current_mockup_id || null);
 
@@ -128,10 +127,7 @@ export default function ConceptStage({
   }, [projectId]);
   useEffect(() => { if (!archived) refreshAssetCount(); }, [archived, refreshAssetCount]);
 
-  const dismissAssetPrompt = useCallback(() => {
-    setAssetPromptOff(true);
-    try { localStorage.setItem(assetPromptKey, '1'); } catch { /* private mode — session only */ }
-  }, [assetPromptKey]);
+  const dismissAssetPrompt = useCallback(() => setAssetPromptOff(true), []);
 
   // Poll while a background turn/approval job is running, while the M8 audit is
   // in flight, or while any rule question is open (so answers + the "starting the
@@ -208,11 +204,13 @@ export default function ConceptStage({
   const provisioning = project?.lifecycle === 'provisioning';
   const previewUrl = data?.preview_url || project?.preview_url || null;
   const hasMockup = !!(data?.current_mockup_id || project?.current_mockup_id);
-  // Ask only while the answer can still change the FIRST mockup, and only once
-  // we actually know the library is empty (assetCount stays null until the
-  // request lands, so the card never flashes in and out).
-  const showAssetPrompt = editable && !approved && !hasMockup
-    && !assetPromptOff && assetCount === 0;
+  // Ask while the answer can still change the FIRST mockup: an editable, online,
+  // unapproved project whose conversation has not started. assetCount stays null
+  // until the request lands, so the modal never flashes in before we can tell the
+  // operator what they already have.
+  const showAssetPrompt = editable && !approved && online && !hasMockup
+    && !assetPromptOff && assetCount !== null
+    && (data?.messages || []).length === 0;
   // A design exists to export pre-approval (live mockup) AND post-approval
   // (the archived mockup is kept — the template reads it from the repo).
   const hasDesign = hasMockup || !!project?.design_approved_at || !!project?.mockup_archive_url;
@@ -594,44 +592,6 @@ export default function ConceptStage({
             </div>
           ) : null}
 
-          {/* BRING YOUR OWN — the most useful moment to hand over a logo or the
-              real wording is BEFORE the first mockup, because the mockup is what
-              gets made from them. Asked once, dismissible, and never asked of a
-              project that already has assets. */}
-          {showAssetPrompt ? (
-            <div data-scroll-skip className="rounded-lg border border-primary/30 bg-primary/5 p-3">
-              <div className="flex items-start gap-2">
-                <ImagePlus className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium">
-                    Do you want to load logos, assets, or context before your app build request?
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Anything you add is used by the design — the mockup is shown your logo and design references,
-                    and given your wording and brand notes to build from. You can add them later too.
-                  </p>
-                  <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-                    {onOpenAssets ? (
-                      <Button
-                        size="sm" className="h-11 w-full sm:h-9 sm:w-auto"
-                        onClick={() => { onOpenAssets(); dismissAssetPrompt(); }}
-                      >
-                        <Library className="mr-1 h-3.5 w-3.5" />
-                        Add assets
-                      </Button>
-                    ) : null}
-                    <Button
-                      variant="ghost" size="sm" className="h-11 w-full sm:h-9 sm:w-auto"
-                      onClick={dismissAssetPrompt}
-                    >
-                      {onOpenAssets ? 'No thanks' : 'Got it'}
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : null}
-
           {shownMessages.length === 0 ? (
             <div className="text-center py-6 space-y-3">
               <p className="text-sm text-muted-foreground">
@@ -825,6 +785,60 @@ export default function ConceptStage({
       {/* Import-design dialog — a downloaded template file OR another project's
           design (design/mockup only, never code), plus optional changes/context
           for the build. Full-screen on <sm (MOBILE_FIRST). */}
+      {/* BRING YOUR OWN — asked as a MODAL, before the chat can be used.
+          The moment a logo, the real wording or a design reference is worth
+          having is the moment BEFORE the first mockup is described, because the
+          mockup is what gets made from them; an inline card next to the composer
+          was read past. Deliberately not persisted — it returns on every page
+          load while the conversation is still empty, and stops the moment there
+          is a first message.
+
+          Blocking on purpose: no outside-click and no Escape, so it is answered
+          rather than dismissed by accident. Both answers are one tap.
+          MOBILE_FIRST: full-screen under sm, 44px targets, stacked actions — it
+          renders in a portal, so it appears over the phone workspace exactly as
+          it does on desktop. */}
+      <Dialog open={showAssetPrompt} onOpenChange={(o) => { if (!o) dismissAssetPrompt(); }}>
+        <DialogContent
+          className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-md sm:h-auto sm:rounded-lg"
+          onInteractOutside={(e) => e.preventDefault()}
+          onEscapeKeyDown={(e) => e.preventDefault()}
+        >
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ImagePlus className="h-5 w-5 shrink-0 text-primary" />
+              <span className="min-w-0">Do you want to load logos, assets, or context before your app build request?</span>
+            </DialogTitle>
+            <DialogDescription>
+              Anything you add is used by the design — the mockup is shown your logo and design
+              references, and is given your wording and brand notes to build from. You can add
+              them later too, but they shape the design best before the first mockup.
+            </DialogDescription>
+          </DialogHeader>
+          {assetCount > 0 ? (
+            <p className="rounded-md border bg-muted/30 p-2.5 text-xs text-muted-foreground">
+              This project already has {assetCount} item{assetCount === 1 ? '' : 's'} in its library — they
+              will be used. You can add more, or carry on.
+            </p>
+          ) : null}
+          <DialogFooter className="flex-col gap-2 sm:flex-row">
+            <Button
+              variant="outline" className="h-11 w-full sm:h-9 sm:w-auto"
+              onClick={dismissAssetPrompt}
+            >
+              Not now — start describing
+            </Button>
+            <Button
+              className="h-11 w-full sm:h-9 sm:w-auto"
+              onClick={() => { dismissAssetPrompt(); if (onOpenAssets) onOpenAssets(); }}
+            >
+              <Library className="mr-1 h-4 w-4" />
+              {assetCount > 0 ? 'Add more' : 'Add assets'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={importOpen} onOpenChange={(o) => { if (!importBusy) setImportOpen(o); }}>
         <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>

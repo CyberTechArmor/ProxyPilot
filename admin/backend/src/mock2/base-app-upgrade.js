@@ -198,6 +198,21 @@ export async function maybeUpgradeBaseApp(projectId, { reason = 'auto' } = {}) {
     } catch (e) {
       console.warn(`[mock2] e2e browser check for project ${id} skipped:`, e?.message);
     }
+    // The project's own logo as the app's favicon, home-screen icon and
+    // manifest icon. Here rather than in the scaffold because the logo usually
+    // arrives AFTER the app was first provisioned — the operator uploads it
+    // during the design stage — and because a rename should move the
+    // home-screen label too. Idempotent (the page links are fenced) and
+    // best-effort: no usable logo keeps the scaffold's mark and is not an
+    // error.
+    try {
+      const { applyProjectIcons } = await import('./project-icons.js');
+      const icons = await applyProjectIcons(project);
+      if (icons.state === 'applied') console.log(`[mock2] project ${id} icons: ${icons.reason}`);
+      else if (!icons.ok) console.warn(`[mock2] project ${id} icons: ${icons.reason}`);
+    } catch (e) {
+      console.warn(`[mock2] project ${id} icon apply skipped:`, e?.message);
+    }
     return res;
   } catch (e) {
     console.warn(`[mock2] base-app auto-upgrade for project ${id} threw:`, e?.message);

@@ -353,9 +353,27 @@ test('the post-build review chain lives in one place', async () => {
   assert.match(src, /export async function afterBuildReview/);
   // All three steps, in order: serving, an account to look with, the critique.
   const i = src.indexOf('export async function afterBuildReview');
-  const body = src.slice(i, i + 3000);
-  assert.ok(body.indexOf('ensureServing') < body.indexOf('ensureReviewAccount'), 'serving check must come first');
-  assert.ok(body.indexOf('ensureReviewAccount') < body.indexOf('maybeAutoDesignReview'), 'the account must exist before the capture');
+  // To the end of the function, not a fixed window: a slice sized to today's
+  // body silently stops covering the last step the moment one is added, which
+  // is how this assertion nearly went quiet when readiness joined the chain.
+  const end = src.indexOf('\nexport ', i + 1);
+  const body = src.slice(i, end === -1 ? src.length : end);
+  // FOUR steps, in order:
+  //   serving      — is anything listening (and deploy if not)
+  //   account      — someone to look with
+  //   readiness    — does the app actually WORK, including behind the gate
+  //   critique     — the design review itself
+  const order = ['ensureServing', 'ensureReviewAccount', 'verifyAppReady', 'maybeAutoDesignReview'];
+  for (let n = 1; n < order.length; n++) {
+    const prev = body.indexOf(order[n - 1]);
+    const cur = body.indexOf(order[n]);
+    assert.ok(prev !== -1, `${order[n - 1]} must be in the chain`);
+    assert.ok(cur !== -1, `${order[n]} must be in the chain`);
+    assert.ok(prev < cur, `${order[n - 1]} must come before ${order[n]}`);
+  }
+  // Readiness needs the fixture credentials, or it cannot ask the one question
+  // the login redirect was hiding.
+  assert.match(body, /verifyAppReady\(getProject\(id\), \{ authed: readyLogin \}\)/);
   // The queue guard lives here, so both callers behave identically.
   assert.match(body, /listBuildQueue/);
 });

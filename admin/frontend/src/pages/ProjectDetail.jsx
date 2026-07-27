@@ -146,6 +146,7 @@ export default function ProjectDetail() {
   // workspace's own default is" — it only becomes controlled once something
   // (an auto-switch, a tap) actually chooses.
   const [studioPanel, setStudioPanel] = useState(null);
+  const assetsRef = useRef(null);   // the stacked design layout's asset library
   const archivedDefaulted = useRef(false);
   const prevLifecycle = useRef(null);      // last-seen lifecycle, to detect the provisioning→active transition
   const confettiFired = useRef(false);     // guard the one-time online confetti within this mount
@@ -572,11 +573,16 @@ export default function ProjectDetail() {
                       onApproved={load} onMockupChanged={handleMockupChanged}
                       provLog={provStatus?.progress?.log || null}
                       provMessage={provStatus?.progress?.message || null}
+                      // This layout already has the library on screen below, so
+                      // "Add assets" scrolls to it rather than switching panes.
+                      onOpenAssets={() => assetsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
                     />
                     {/* Before the first mockup exists is the MOST useful moment
                         to hand over a logo or a reference shot — it is what the
                         mockup gets made from. */}
-                    <ProjectAssets projectId={id} canEdit={canEdit} />
+                    <div ref={assetsRef}>
+                      <ProjectAssets projectId={id} canEdit={canEdit} />
+                    </div>
                   </div>
                 </div>
               )}
@@ -614,7 +620,8 @@ export default function ProjectDetail() {
         {/* A flex column, not a scroll box: the phone's bottom bar rides
             below the scrolling detail, so tapping Details never strands
             someone on a page with no way back to Preview or Assets. */}
-        <TabsContent value="details" className={`${studioBarOnDetails ? 'mt-0' : 'mt-3'} flex-1 min-h-0 flex flex-col`}>
+        <TabsContent value="details" className={`${studioBarOnDetails ? 'mt-0' : 'mt-3'} flex-1 min-h-0 overflow-hidden`}>
+        <div className="flex h-full min-h-0 flex-col">
         <div className="space-y-6 flex-1 min-h-0 overflow-y-auto">
       {/* The checkout state lives here on a phone (it is hidden from the studio
           view above); harmless duplication on desktop is avoided by showing it
@@ -1011,6 +1018,7 @@ export default function ProjectDetail() {
             detailsActive
           />
         ) : null}
+        </div>
         </TabsContent>
       </Tabs>
 

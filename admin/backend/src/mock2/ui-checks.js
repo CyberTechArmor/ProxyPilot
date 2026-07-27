@@ -94,6 +94,20 @@ async function runStep(page, step) {
           ? { ok: true, detail: `${s.selector} disabled` }
           : { ok: false, detail: `${s.selector} is enabled — expected a disabled control for this role` };
       }
+      case 'expect_absent': {
+        // Absent OR present-but-hidden both pass: what is asserted is that the
+        // user is not OFFERED the thing (the base app hides #admin-link with
+        // the `hidden` attribute rather than omitting it), not which mechanism
+        // withheld it. A shorter timeout than the others on purpose — this is
+        // waiting for something NOT to appear, so the full step timeout is dead
+        // wall-clock on every passing run.
+        try {
+          await loc.waitFor({ state: 'hidden', timeout: 2000 });
+          return { ok: true, detail: `${s.selector} is not offered` };
+        } catch {
+          return { ok: false, detail: `${s.selector} IS visible — this role must not be offered it` };
+        }
+      }
       case 'expect_text': {
         await loc.waitFor({ state: 'visible', timeout: STEP_TIMEOUT_MS });
         const text = (await loc.textContent()) || '';

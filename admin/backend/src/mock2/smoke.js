@@ -34,6 +34,7 @@ import {
 import { readRunContract } from './deploy.js';
 import {
   UI_CHECKS_PATH, parseUiChecks, checksForChangedFiles, uiCheckLogLines, uiCheckFailSummary,
+  withBaselineChecks, isBaselineCheck,
 } from './ui-check-logic.js';
 import { runUiChecks, launchOptions, loadChromium } from './ui-checks.js';
 import { ACCEPTANCE_PATH, parseAcceptance } from './acceptance-logic.js';
@@ -149,7 +150,7 @@ async function readUiChecksFile(containerName, appDir) {
 // (visible-form count on the root page) when the project has no spec or no
 // check matches this diff. A spec that exists but does not parse FAILS the
 // connector — a broken test manifest must never read as a pass. Never throws.
-async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles, requiredIds = [], reviewLogin = null }) {
+async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles, requiredIds = [], reviewLogin = null, viewerLogin = null }) {
   // 1) Project interaction checks, when declared. The run set is the UNION of
   //    the diff-matched checks and the ACCEPTANCE-REQUIRED ids (cycle-94: the
   //    task's live acceptance — e.g. "Test connection turns all three checks
@@ -169,9 +170,13 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
     if (!file.exists && required.length) {
       return { ok: false, specInvalid: true, detail: `acceptance requires live ui check(s) [${required.join(', ')}] but ${UI_CHECKS_PATH} does not exist` };
     }
-    if (file.exists) {
-      const parsed = parseUiChecks(file.text);
-      if (!parsed.ok) return { ok: false, specInvalid: true, detail: `ui-checks spec invalid: ${parsed.error}` };
+    // A spec the model never wrote, or one it wrote badly, must not mean NO
+    // rendered-DOM checking at all — that is precisely the cycle where
+    // something is most likely wrong. The platform's own baseline runs on an
+    // empty spec too.
+    const parsed = file.exists ? parseUiChecks(file.text) : { ok: true, spec: { login: null, checks: [] } };
+    if (file.exists && !parsed.ok) return { ok: false, specInvalid: true, detail: `ui-checks spec invalid: ${parsed.error}` };
+    {
       const missing = required.filter((id) => !parsed.spec.checks.some((c) => c.id === id));
       if (missing.length) {
         return { ok: false, specInvalid: true, detail: `acceptance ui check(s) not defined in ${UI_CHECKS_PATH}: ${missing.join(', ')}` };
@@ -180,6 +185,11 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
       // anonymous, get bounced to /login, and time out on elements that only
       // exist behind the gate (project 40: three checks, three timeouts).
       parsed.spec = withPlatformLogin(parsed.spec, reviewLogin);
+      // The PLATFORM's own checks, on top of whatever the model wrote. They
+      // assert base-app guarantees the platform ships and therefore knows are
+      // there — including the one question a single admin fixture could never
+      // ask: is the admin route actually denied to a viewer, or only hidden?
+      parsed.spec = withBaselineChecks(parsed.spec, { reviewLogin, viewerLogin });
       const matched = checksForChangedFiles(parsed.spec, changedFiles);
       const byId = new Map(matched.map((c) => [c.id, c]));
       for (const id of required) {
@@ -190,12 +200,17 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
         const run = await runUiChecks({ baseUrl: url, spec: parsed.spec, checks: toRun });
         if (run.unavailable) return { ok: false, unavailable: true, detail: run.detail };
         const acceptanceFailed = run.results.filter((r) => required.includes(r.id) && !r.ok);
+        // A baseline failure is a statement about the BASE APP, not about the
+        // change the operator just asked for. Naming it separately stops an
+        // hour being spent reading a build diff for a defect that is not in it.
+        const baselineFailed = run.results.filter((r) => isBaselineCheck(r) && !r.ok);
+        const baselineRan = run.results.filter(isBaselineCheck).length;
         return {
           ok: run.ok,
           detail: run.ok
-            ? `${run.results.length} interaction check(s) passed${required.length ? ` (incl. ${required.length} acceptance check(s))` : ''}`
-            : `${acceptanceFailed.length ? 'ACCEPTANCE check failed — ' : 'interaction checks failed — '}${uiCheckFailSummary(run.results) || run.detail || 'see results'}`,
-          uiChecks: run.results.map((r) => ({ ...r, acceptance: required.includes(r.id) })),
+            ? `${run.results.length} interaction check(s) passed${baselineRan ? ` (incl. ${baselineRan} platform baseline)` : ''}${required.length ? ` (incl. ${required.length} acceptance check(s))` : ''}`
+            : `${acceptanceFailed.length ? 'ACCEPTANCE check failed — ' : baselineFailed.length && baselineFailed.length === run.results.filter((r) => !r.ok).length ? 'BASE APP check failed (not your change) — ' : 'interaction checks failed — '}${uiCheckFailSummary(run.results) || run.detail || 'see results'}`,
+          uiChecks: run.results.map((r) => ({ ...r, acceptance: required.includes(r.id), baseline: isBaselineCheck(r) })),
           logLines: uiCheckLogLines(run.results),
         };
       }
@@ -315,6 +330,7 @@ function shSingleQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 export async function runSmokeGate({
   containerName, appDir = '/srv/app', webPort = 3000, url = null,
   changedFiles = [], changeMeta = {}, escalations = [], requiredIds = [], env = process.env,
+  reviewLogin = null, viewerLogin = null,
 }) {
   // The dashboard's browser toggle (settings.smokeEnv) overlays the env var —
   // an operator flips the connector from the UI without touching .env.
@@ -356,7 +372,7 @@ export async function runSmokeGate({
 
   if (resolved.browser.disposition === 'ran') {
     const target = url || await resolveBrowserTarget(containerName, webPort);
-    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles, requiredIds: acceptanceUi, reviewLogin })), reason: resolved.browser.reason };
+    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles, requiredIds: acceptanceUi, reviewLogin, viewerLogin })), reason: resolved.browser.reason };
   }
   if (resolved.db.disposition === 'ran') {
     report.db = { ...(await driveDbConnector({ containerName, appDir })), reason: resolved.db.reason };
@@ -400,11 +416,11 @@ export function smokeFailSummary(report) {
 export async function smokeAfterDeploy({
   containerName, appDir = '/srv/app', webPort = 3000, url = null,
   commitSha = null, summary = '', instruction = '', escalations = [],
-  requiredIds = [], logEvent = null, env = process.env, reviewLogin = null,
+  requiredIds = [], logEvent = null, env = process.env, reviewLogin = null, viewerLogin = null,
 }) {
   const changedFiles = await changedFilesForCommit(containerName, appDir, commitSha);
   const changeMeta = { summary: summary || '', ruleUnderTest: instruction || '' };
-  const result = await runSmokeGate({ containerName, appDir, webPort, url, changedFiles, changeMeta, escalations, requiredIds, env, reviewLogin });
+  const result = await runSmokeGate({ containerName, appDir, webPort, url, changedFiles, changeMeta, escalations, requiredIds, env, reviewLogin, viewerLogin });
   if (typeof logEvent === 'function') {
     try {
       logEvent('smoke', {

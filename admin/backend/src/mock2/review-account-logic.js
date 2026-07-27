@@ -27,6 +27,21 @@ import crypto from 'node:crypto';
 // bootstrap, so it is a named constant on both sides.
 export const FIXTURE_EMAIL_DOMAIN = '@fixture.invalid';
 export const REVIEW_EMAIL = `design-review${FIXTURE_EMAIL_DOMAIN}`;
+// The SECOND fixture: a deliberately UNPRIVILEGED account.
+//
+// With one admin fixture, "can a viewer reach the admin screens?" is
+// structurally uncheckable — there is no viewer to ask. That question is the
+// most common real defect in a generated app (a route guarded in the UI and not
+// on the server), and every build so far shipped without it ever being asked.
+// Same reserved domain, so it is equally invisible to the first-admin bootstrap.
+export const REVIEW_VIEWER_EMAIL = `design-review-viewer${FIXTURE_EMAIL_DOMAIN}`;
+
+// What role each fixture wants, most preferred first. The seeder picks the
+// first one this project's roles table actually has — a build is free to name
+// its roles whatever it likes, and a fixture pinned to a role that does not
+// exist is a row that can never sign in anywhere useful.
+export const REVIEW_ROLE_PREFERENCE = Object.freeze(['admin', 'administrator', 'owner']);
+export const VIEWER_ROLE_PREFERENCE = Object.freeze(['viewer', 'external', 'readonly', 'read_only', 'user']);
 
 // The component's Zod schema requires >= 12 characters (public/login.html says
 // minlength=12). 32 base64url chars clears that and is not worth guessing.
@@ -61,39 +76,56 @@ const SEED_NODE_SRC = [
   'import crypto from "node:crypto";',
   'import pg from "pg";',
   '',
-  'const c = JSON.parse(fs.readFileSync(process.env.CRED, "utf8"));',
+  'const accounts = JSON.parse(fs.readFileSync(process.env.CRED, "utf8"));',
   '',
   '// Exactly the format src/auth/crypto.ts verifies:',
   '//   scrypt$N$r$p$saltB64$hashB64',
   '// Any drift here produces a row that exists and can never sign in.',
   'const N = 16384, R = 8, P = 1, KEYLEN = 32;',
-  'const salt = crypto.randomBytes(16);',
-  'const hash = crypto.scryptSync(c.password, salt, KEYLEN, { N, r: R, p: P });',
-  'const stored = ["scrypt", N, R, P, salt.toString("base64"), hash.toString("base64")].join("$");',
+  'function hashFor(password) {',
+  '  const salt = crypto.randomBytes(16);',
+  '  const hash = crypto.scryptSync(password, salt, KEYLEN, { N, r: R, p: P });',
+  '  return ["scrypt", N, R, P, salt.toString("base64"), hash.toString("base64")].join("$");',
+  '}',
   '',
   'const url = process.env.DATABASE_URL || "postgres://app:app@127.0.0.1:5432/app";',
   'const client = new pg.Client({ connectionString: url });',
-  'await client.connect();',
+  '// connect() INSIDE the try: a database that is not up threw here, outside',
+  '// any handler, and the process died with a stack trace instead of the one',
+  '// labelled line the parser reads — so the caller was told "the seeder',
+  '// produced no result" when the real answer was "the database is down".',
   'try {',
-  '  // Use whatever role this project actually seeded; admin when it exists, so',
-  '  // the reviewer can reach the admin screens too. It stays a FIXTURE account',
-  '  // either way: the @fixture.invalid domain is excluded from "a real user',
-  '  // exists", so the operator first-admin flow is untouched.',
+  '  await client.connect();',
+  '  // Use whatever roles this project actually seeded. Each fixture names the',
+  '  // roles it would like, most preferred first; anything else would pin the',
+  '  // fixtures to role names a build never has to use. The reviewer stays a',
+  '  // FIXTURE account either way: the @fixture.invalid domain is excluded from',
+  '  // "a real user exists", so the operator first-admin flow is untouched.',
   '  const roles = await client.query("SELECT key FROM roles");',
   '  const keys = roles.rows.map((r) => r.key);',
-  '  const role = keys.includes("admin") ? "admin" : (keys[0] || "admin");',
-  '',
-  '  const existing = await client.query("SELECT id FROM users WHERE lower(email) = lower($1)", [c.email]);',
-  '  if (existing.rowCount) {',
-  '    await client.query(',
-  '      "UPDATE users SET password_hash = $2, password_setup_required = false, is_active = true, role = $3 WHERE id = $1",',
-  '      [existing.rows[0].id, stored, role]);',
-  '  } else {',
-  '    await client.query(',
-  '      "INSERT INTO users (email, password_hash, password_setup_required, role, is_active) VALUES ($1, $2, false, $3, true)",',
-  '      [c.email.toLowerCase(), stored, role]);',
+  '  let primary = null;',
+  '  for (const a of accounts) {',
+  '    // The LEAST privileged fallback, not the first role in the table: a',
+  '    // viewer fixture that silently became an admin would make every',
+  '    // permission check pass and prove nothing.',
+  '    const role = a.prefer.find((p) => keys.includes(p))',
+  '      || (a.fallback === "least" ? keys[keys.length - 1] : keys[0])',
+  '      || a.prefer[0];',
+  '    const stored = hashFor(a.password);',
+  '    const existing = await client.query("SELECT id FROM users WHERE lower(email) = lower($1)", [a.email]);',
+  '    if (existing.rowCount) {',
+  '      await client.query(',
+  '        "UPDATE users SET password_hash = $2, password_setup_required = false, is_active = true, role = $3 WHERE id = $1",',
+  '        [existing.rows[0].id, stored, role]);',
+  '    } else {',
+  '      await client.query(',
+  '        "INSERT INTO users (email, password_hash, password_setup_required, role, is_active) VALUES ($1, $2, false, $3, true)",',
+  '        [a.email.toLowerCase(), stored, role]);',
+  '    }',
+  '    console.log("SEED:acct:" + a.key + ":" + role);',
+  '    if (!primary) primary = role;',
   '  }',
-  '  console.log("SEED:ok:" + role);',
+  '  console.log("SEED:ok:" + primary);',
   '} catch (e) {',
   '  console.log("SEED:error:" + String(e && e.message).slice(0, 200));',
   '} finally {',
@@ -101,8 +133,19 @@ const SEED_NODE_SRC = [
   '}',
 ].join('\n');
 
-export function seedFixtureUserScript({ email, password, appDir = '/srv/app' }) {
-  const payload = JSON.stringify({ email: String(email), password: String(password) });
+// accounts: [{ key, email, password, prefer, fallback }] — or the legacy single
+// { email, password } pair, which still means "the admin reviewer".
+export function seedFixtureUserScript({ email, password, accounts = null, appDir = '/srv/app' } = {}) {
+  const list = accounts?.length ? accounts : [{
+    key: 'reviewer', email, password, prefer: REVIEW_ROLE_PREFERENCE, fallback: 'first',
+  }];
+  const payload = JSON.stringify(list.map((a) => ({
+    key: String(a.key || 'reviewer'),
+    email: String(a.email),
+    password: String(a.password),
+    prefer: [...(a.prefer || REVIEW_ROLE_PREFERENCE)],
+    fallback: a.fallback === 'least' ? 'least' : 'first',
+  })));
   return [
     'set -u',
     `cd '${appDir}' 2>/dev/null || exit 0`,
@@ -135,16 +178,36 @@ export function seedFixtureUserScript({ email, password, appDir = '/srv/app' }) 
   ].join('\n');
 }
 
-// Parse the seeder's one labelled line.
+// The pair every project gets: an admin reviewer that can reach the admin
+// screens, and a viewer that must NOT be able to.
+export function reviewFixtureAccounts({ email, password, viewerEmail, viewerPassword }) {
+  return [
+    { key: 'reviewer', email, password, prefer: REVIEW_ROLE_PREFERENCE, fallback: 'first' },
+    // fallback 'least': a viewer fixture that quietly became an admin because
+    // this project has no role called "viewer" would make every permission
+    // check pass and prove nothing at all.
+    { key: 'viewer', email: viewerEmail, password: viewerPassword, prefer: VIEWER_ROLE_PREFERENCE, fallback: 'least' },
+  ];
+}
+
+// Parse the seeder's labelled lines.
 export function parseSeedResult(stdout) {
-  const m = String(stdout || '').match(/SEED:([a-z-]+)(?::(.*))?/);
-  if (!m) return { ok: false, state: 'failed', reason: 'the seeder produced no result' };
+  const text = String(stdout || '');
+  // One line per account seeded, so a partial run still reports what landed.
+  const accounts = {};
+  for (const m of text.matchAll(/SEED:acct:([a-z0-9_-]+):([^\s]+)/gi)) accounts[m[1]] = m[2];
+  const m = text.match(/SEED:(ok|no-auth|no-pg|error)(?::(.*))?/);
+  if (!m) return { ok: false, state: 'failed', reason: 'the seeder produced no result', accounts };
   const [, state, extra] = m;
-  if (state === 'ok') return { ok: true, state: 'seeded', role: (extra || '').trim() || 'admin' };
-  if (state === 'no-auth') return { ok: true, state: 'no-auth', reason: 'this app has no auth component' };
-  if (state === 'no-pg') return { ok: false, state: 'failed', reason: 'the app has no pg driver installed yet' };
-  if (state === 'error') return { ok: false, state: 'failed', reason: (extra || '').trim() };
-  return { ok: false, state: 'failed', reason: `the seeder reported "${state}"` };
+  if (state === 'ok') {
+    return { ok: true, state: 'seeded', role: (extra || '').trim() || 'admin', accounts };
+  }
+  if (state === 'no-auth') return { ok: true, state: 'no-auth', reason: 'this app has no auth component', accounts };
+  if (state === 'no-pg') return { ok: false, state: 'failed', reason: 'the app has no pg driver installed yet', accounts };
+  // A run that died partway still reports the accounts that DID land — "some of
+  // it worked" is the state a retry needs to know about.
+  if (state === 'error') return { ok: false, state: 'failed', reason: (extra || '').trim(), accounts };
+  return { ok: false, state: 'failed', reason: `the seeder reported "${state}"`, accounts };
 }
 
 // The in-container script. Runs three steps and prints one labelled line each,

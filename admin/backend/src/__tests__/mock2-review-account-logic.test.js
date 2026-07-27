@@ -6,9 +6,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  REVIEW_EMAIL, FIXTURE_EMAIL_DOMAIN, generateReviewPassword,
+  REVIEW_EMAIL, REVIEW_VIEWER_EMAIL, FIXTURE_EMAIL_DOMAIN, generateReviewPassword,
   reviewAccountScript, parseReviewAccountResult, hasReviewLogin,
-  seedFixtureUserScript, parseSeedResult,
+  seedFixtureUserScript, parseSeedResult, reviewFixtureAccounts,
+  REVIEW_ROLE_PREFERENCE, VIEWER_ROLE_PREFERENCE,
 } from '../mock2/review-account-logic.js';
 
 test('the review account lives on the reserved fixture domain', () => {
@@ -146,10 +147,75 @@ test('the seeder is idempotent and never blocks the operator bootstrap', () => {
 });
 
 test('parseSeedResult reads every outcome', () => {
-  assert.deepEqual(parseSeedResult('SEED:ok:admin'), { ok: true, state: 'seeded', role: 'admin' });
+  assert.deepEqual(parseSeedResult('SEED:ok:admin'), { ok: true, state: 'seeded', role: 'admin', accounts: {} });
   assert.equal(parseSeedResult('SEED:no-auth').state, 'no-auth');
   assert.equal(parseSeedResult('SEED:no-auth').ok, true);
   assert.equal(parseSeedResult('SEED:no-pg').ok, false);
   assert.match(parseSeedResult('SEED:error:relation "users" does not exist').reason, /relation "users"/);
   assert.equal(parseSeedResult('').ok, false);
+});
+
+/* ---------------- the second, UNPRIVILEGED fixture -------------------------- */
+//
+// With one admin fixture, "can a viewer reach the admin screens?" is
+// structurally uncheckable — there is no viewer to ask. That is the most common
+// real defect in a generated app (a route guarded in the UI and not on the
+// server), and every build so far shipped without the question ever being put.
+
+test('both fixtures live on the reserved domain, so neither consumes the bootstrap', () => {
+  assert.ok(REVIEW_VIEWER_EMAIL.endsWith(FIXTURE_EMAIL_DOMAIN));
+  assert.notEqual(REVIEW_VIEWER_EMAIL, REVIEW_EMAIL);
+});
+
+test('the viewer fixture asks for an unprivileged role and NEVER falls back to a privileged one', () => {
+  const [reviewer, viewer] = reviewFixtureAccounts({
+    email: REVIEW_EMAIL, password: 'x'.repeat(20),
+    viewerEmail: REVIEW_VIEWER_EMAIL, viewerPassword: 'y'.repeat(20),
+  });
+  assert.equal(reviewer.key, 'reviewer');
+  assert.deepEqual(reviewer.prefer, [...REVIEW_ROLE_PREFERENCE]);
+  assert.equal(viewer.key, 'viewer');
+  assert.deepEqual(viewer.prefer, [...VIEWER_ROLE_PREFERENCE]);
+  // The whole point. A viewer that quietly became an admin because this project
+  // has no role literally called "viewer" would make every permission check
+  // pass and prove nothing — so its fallback is the LEAST privileged role the
+  // project has, not the first one in the table.
+  assert.equal(viewer.fallback, 'least');
+  assert.equal(reviewer.fallback, 'first');
+  assert.ok(!VIEWER_ROLE_PREFERENCE.includes('admin'));
+});
+
+test('the seeder writes every account in one pass and labels each one', () => {
+  const script = seedFixtureUserScript({
+    accounts: reviewFixtureAccounts({
+      email: REVIEW_EMAIL, password: 'x'.repeat(20),
+      viewerEmail: REVIEW_VIEWER_EMAIL, viewerPassword: 'y'.repeat(20),
+    }),
+  });
+  // One connection, one pass — two exec round-trips into a container is two
+  // chances for a busy container to time out half-provisioned.
+  assert.equal(script.split('node "$WORK/seed.mjs"').length - 1, 1);
+  assert.match(script, /SEED:acct:/);
+  assert.match(script, /design-review@fixture\.invalid/);
+  assert.match(script, /design-review-viewer@fixture\.invalid/);
+  // The least-privileged fallback must be in the emitted program, not just in
+  // the JS that built it.
+  assert.match(script, /a\.fallback === "least" \? keys\[keys\.length - 1\] : keys\[0\]/);
+});
+
+test('parseSeedResult reports the role each fixture actually got', () => {
+  const r = parseSeedResult('SEED:acct:reviewer:admin\nSEED:acct:viewer:viewer\nSEED:ok:admin\n');
+  assert.equal(r.ok, true);
+  assert.equal(r.role, 'admin');
+  assert.deepEqual(r.accounts, { reviewer: 'admin', viewer: 'viewer' });
+  // A run that died after the first account still reports the first honestly.
+  const partial = parseSeedResult('SEED:acct:reviewer:admin\nSEED:error:boom\n');
+  assert.equal(partial.ok, false);
+  assert.deepEqual(partial.accounts, { reviewer: 'admin' });
+});
+
+test('the legacy single-pair call still means "the admin reviewer"', () => {
+  const script = seedFixtureUserScript({ email: REVIEW_EMAIL, password: 'x'.repeat(20) });
+  assert.match(script, /design-review@fixture\.invalid/);
+  assert.doesNotMatch(script, /design-review-viewer/);
 });

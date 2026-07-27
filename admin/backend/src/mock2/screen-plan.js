@@ -430,46 +430,16 @@ export async function onRequestClosed(requestRow) {
     // (settings design_review) turns it off. Fire-and-forget.
     if (requestRow.status === 'succeeded') {
       try {
-        const { listBuildQueue } = await import('./build-queue.js');
-        const pending = listBuildQueue(pid).some((q) => q.status === 'queued' || q.status === 'started');
-        if (!pending) {
-          const [{ maybeAutoDesignReview }, { getProject }] = await Promise.all([
-            import('./design-review.js'), import('./projects.js'),
-          ]);
-          // Logged on BOTH sides of the fire-and-forget: without this line a
-          // review that never started and a review that started and failed
-          // looked identical in the server log (they were both nothing).
-          // BEFORE the review: is the app even answering? A build can finish,
-          // pass every gate and checkpoint cleanly while leaving nothing
-          // serving — a held deploy, a crashed unit, a port taken. That is
-          // what produced a design review whose four screenshots were all
-          // ERR_CONNECTION_REFUSED, and an operator who had to notice and
-          // press Deploy by hand. Probe, and deploy if it is not up.
-          try {
-            const { ensureServing } = await import('./deploy.js');
-            const project = getProject(pid);
-            const serving = await ensureServing(project, { reason: 'build close' });
-            if (serving.redeployed) {
-              insertMessage({
-                projectId: pid, kind: 'system',
-                body: serving.serving
-                  ? 'The app was not answering after the build, so it was deployed automatically — it is live now.'
-                  : `The app is not answering after the build and the automatic deploy did not fix it: ${serving.error || 'unknown'}. Press Deploy to retry, or open the build log.`,
-              });
-            }
-          } catch (e) { console.warn('[mock2] post-build serving check failed:', e?.message); }
-          // And is there an account to look at the app WITH? Provisioning here
-          // (not only inside the review) means the annotate-a-screenshot dialog
-          // can reach real screens too, on a project whose review never ran.
-          try {
-            const { ensureReviewAccount } = await import('./review-account.js');
-            await ensureReviewAccount(getProject(pid));
-          } catch (e) { console.warn('[mock2] post-build review-account check failed:', e?.message); }
-          console.log(`[mock2] auto design review starting for project ${pid} (request ${requestRow.id})`);
-          maybeAutoDesignReview(getProject(pid))
+        {
+          const { afterBuildReview } = await import('./design-review.js');
+          // The whole post-build chain — serving check, reviewer account,
+          // then the critique — lives in design-review.afterBuildReview so the
+          // OTHER terminal path (pending verification, which never closes its
+          // request) runs exactly the same thing. Logged on both sides of the
+          // fire-and-forget: without it a review that never started and one
+          // that started and failed look identical in the log.
+          afterBuildReview(pid, { reason: `request ${requestRow.id} closed` })
             .catch((e) => console.warn('[mock2] auto design review threw:', e?.message));
-        } else {
-          console.log(`[mock2] auto design review deferred for project ${pid}: build queue still busy`);
         }
       } catch (e) { console.warn('[mock2] auto design review hook failed:', e?.message); }
     }

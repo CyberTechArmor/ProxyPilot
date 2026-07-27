@@ -438,11 +438,15 @@ for f in public/*.html; do
   case "$f" in */login.html|*/admin.html|*/profile.html) continue ;; esac
   awk 'BEGIN{p=0} index($0,"<style"){p=1} p{print} index($0,"</style>"){p=0}' "$f" >> "$CSS"
 done
-if [ ! -s "$CSS" ]; then
-  echo "mobile-overflow: no app styling to check. Skipped."
-  exit 0
-fi
+# NOTE the ordering below: the HTML checks (viewport meta, fixed inline widths)
+# run WHETHER OR NOT there is CSS. The early exit used to sit here and skip the
+# whole gate, so a build that shipped screens with no stylesheet — project 39's
+# shape — was never asked whether its pages even declare a viewport. Only the
+# CSS-specific checks may be skipped for want of CSS.
+HAS_CSS=1
+[ -s "$CSS" ] || HAS_CSS=0
 
+if [ "$HAS_CSS" -eq 1 ]; then
 # A fixed pixel width wider than the narrowest phone we support (390px) cannot
 # fit, whatever the container does. min-width is worse: it cannot even shrink.
 WIDE=$(grep -nE '(^|[;{[:space:]])(min-)?width[[:space:]]*:[[:space:]]*[0-9]{3,}px' "$CSS" \\
@@ -466,7 +470,11 @@ if [ -n "$COLS" ]; then
   fi
 fi
 
-# The viewport meta is what makes any of the above matter.
+fi
+
+# ---- HTML checks: these run WHATEVER the stylesheet situation is ------------
+# The viewport meta is what makes any of the above matter, and a fixed width
+# typed into a style attribute overflows exactly like one in a stylesheet.
 for f in public/*.html; do
   [ -f "$f" ] || continue
   grep -qi '<head' "$f" || continue
@@ -474,9 +482,20 @@ for f in public/*.html; do
     echo "FAIL: $f has no viewport meta — a phone renders it at desktop width and zooms out."
     FAIL=1
   fi
+  INLINE=$(grep -noE 'style="[^"]*(min-)?width[[:space:]]*:[[:space:]]*[0-9]{3,}px' "$f" \
+           | awk -F'[^0-9]*' '{ for (i = 2; i <= NF; i++) if ($i + 0 > 430) { print; break } }' | head -5)
+  if [ -n "$INLINE" ]; then
+    echo "FAIL: $f has inline fixed widths wider than a 390px phone:"
+    echo "$INLINE" | sed 's/^/        /'
+    FAIL=1
+  fi
 done
 
 if [ "$FAIL" -ne 0 ]; then exit 1; fi
+if [ "$HAS_CSS" -eq 0 ]; then
+  echo "mobile-overflow: no app stylesheets; the pages declare a viewport and no inline fixed widths. Passed."
+  exit 0
+fi
 echo "mobile-overflow: no fixed widths, uncollapsible grids, or missing viewport. Passed."
 exit 0
 `;

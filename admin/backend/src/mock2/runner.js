@@ -850,6 +850,11 @@ export async function acceptPendingVerification({ project, cycle, initiatedBy, a
         commit: null,
       });
       void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'pending_verification' });
+      // This path DEPLOYED too (deployStage above), so it gets the same
+      // post-build chain as every other terminal that put something live.
+      void import('./design-review.js')
+        .then((m) => m.afterBuildReview(projectId, { reason: 'accepted as pending verification' }))
+        .catch((e) => console.warn('[mock2] post-build review (accept-pending) failed:', e?.message));
     } catch (err) {
       finishCycle(cycle.id, { status: 'failed', error: `accept-pending crashed: ${err?.message || err}` });
       setJob(cycle.id, { phase: 'failed', message: `accept-pending crashed: ${err?.message || err}` });
@@ -1818,6 +1823,20 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           });
         } catch (e) { console.warn('[mock2] completion summary message failed:', e?.message); }
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'pending_verification' });
+        // REVIEW IT ANYWAY.
+        //
+        // A pending-verification build has DEPLOYED — it is waiting on a human
+        // to confirm live checks, not on anything technical. But it never
+        // closes its request, and the whole post-build chain (serving check,
+        // reviewer account, design review) used to hang off a request closing
+        // as 'succeeded'. So the builds most in need of a second pair of eyes
+        // were exactly the ones that got none: project 39 shipped an app that
+        // looked nothing like its mockup and was never reviewed. Worse, the
+        // smoke-spec backstop routes MORE builds down this path by design.
+        // Fire-and-forget, same chain, same in-flight guard.
+        void import('./design-review.js')
+          .then((m) => m.afterBuildReview(projectId, { reason: 'pending verification' }))
+          .catch((e) => console.warn('[mock2] post-build review (pending) failed:', e?.message));
         return scheduleJobCleanup(cycle.id);
       }
       // The builder declared pending but no live check is actually outstanding —

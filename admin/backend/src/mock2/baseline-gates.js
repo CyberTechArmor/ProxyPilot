@@ -202,9 +202,32 @@ grep -o -E 'class="[^"]*"' "$HTML" 2>/dev/null | sed 's/class="//; s/"$//' | tr 
 DCLASS=$(wc -l < "$WORK/dclass" | tr -d ' ')
 UCLASS=$(comm -12 "$WORK/dclass" "$WORK/hclass" 2>/dev/null | wc -l | tr -d ' ')
 
+# INVENTED VOCABULARY — elements the build designed that the mockup did not.
+#
+# This used to be invisible, and invisible meant punished: the only class
+# number the gate had was ADOPTION (how much of the approved vocabulary appears
+# in the markup), so a build that thought of a better element scored the same
+# as one that ignored the design, and a build that traced the mockup scored
+# best of all. The mockup is approved at the moment the operator has seen the
+# least; a design system that cannot grow past it is a design system that
+# freezes there.
+#
+# So count what the app's OWN stylesheet defines that the approved design does
+# not, and judge it on the question that actually matters — is it built FROM
+# the design system, or beside it. A new element made of approved variables is
+# the system growing. A new element with the colours typed in is drift, and
+# that is what the hardcoded-colour rules below are for.
+grep -o -E '[.][A-Za-z][A-Za-z0-9_-]{2,}' "$APP" 2>/dev/null | sed 's/^[.]//' | sort -u > "$WORK/aclass" || : > "$WORK/aclass"
+NEWCLS=$(comm -23 "$WORK/aclass" "$WORK/dclass" 2>/dev/null | wc -l | tr -d ' ')
+# Token-clean: the app's own CSS reaches for the approved palette and almost
+# never types a colour in. Four is not zero on purpose — a shadow, an overlay
+# scrim and a focus ring are legitimately literal.
+TOKENCLEAN=0
+[ "$HARD" -le 4 ] && [ $((USED * 4)) -ge "$APPROVED" ] && TOKENCLEAN=1
+
 echo "design-adherence: \${APPROVED} approved variable(s); the app uses \${USED} of them, declares \${OWN} of its own, in \${APPBYTES} bytes of its own CSS."
 echo "design-adherence: \${HARD} distinct hardcoded colour(s) written outside the approved variables."
-echo "design-adherence: the approved design defines \${DCLASS} component class(es); the built screens use \${UCLASS}."
+echo "design-adherence: the approved design defines \${DCLASS} component class(es); the built screens use \${UCLASS}, and the build defines \${NEWCLS} of its own."
 
 # Too little approved design to judge against (a preset-only project).
 if [ "$APPROVED" -lt 8 ]; then
@@ -264,11 +287,21 @@ elif [ "$SHIPPED" -eq 1 ] && [ "$VAR_OK" -eq 0 ] && [ "$CLS_OK" -ne 1 ]; then
   echo "      pattern, cards, controls — using the component classes in state/design.css, and style anything"
   echo "      new on var(--...) from the same file. Plain elements on the base shell will not look like it."
   FAIL=1
-elif [ "$HARD" -ge 20 ] && [ $((USED * 2)) -lt "$APPROVED" ] && [ "$CLS_OK" -ne 1 ]; then
+elif [ "$HARD" -ge 20 ] && [ $((USED * 2)) -lt "$APPROVED" ] && { [ "$CLS_OK" -ne 1 ] || [ "$NEWCLS" -ge 6 ]; }; then
   # Enough approved design consumed to be credible, but the colours are still
   # typed in — which is why a built app drifts and why dark mode looks wrong.
+  #
+  # The "it consumes the design through its components" waiver does NOT cover a
+  # build that defined six or more elements of its own: a build inventing its
+  # own vocabulary cannot also claim it is living inside the mockup's, and
+  # inventing with the colours typed in is exactly the drift this gate exists
+  # to catch. Invent freely; invent out of the design system.
   echo "FAIL: the app writes \${HARD} distinct hardcoded colours while using only \${USED} of \${APPROVED} approved variables."
   echo "      Hardcoded colours do not follow the theme. Replace them with var(--...) from state/design.css."
+  if [ "$NEWCLS" -ge 6 ]; then
+    echo "      \${NEWCLS} of the classes styled here are the build's own. New elements are welcome — build them"
+    echo "      out of the approved variables and they become part of the design instead of a second palette."
+  fi
   FAIL=1
 fi
 
@@ -319,15 +352,38 @@ CLS_HALF=0
 [ "$DCLASS" -lt 6 ] && CLS_HALF=-1
 VAR_HALF=0
 [ $((USED * 2)) -ge "$APPROVED" ] && VAR_HALF=1
+
 if [ "$CLS_HALF" -ne 1 ] && [ "$VAR_HALF" -ne 1 ]; then
-  echo "design-adherence: PARTIAL — over the bar, so this does not block, but under half the"
-  echo "      approved design is in the built screens. The screens this build wrote may look"
-  echo "      right while the rest of the app does not. state/mockups/current.html is the"
-  echo "      visual contract; state/design.css carries its component CSS by name."
-  if [ "$CLS_HALF" -eq -1 ]; then
-    echo "design-adherence: PARTIAL — \${USED} of \${APPROVED} approved variables (no component vocabulary published)."
+  # PARTIAL has TWO voices, because "under half the approved vocabulary" has two
+  # causes and they are not the same news.
+  #
+  # The adoption ratio answers "how much of the mockup's vocabulary is in the
+  # markup". Read as the only class number — which it was — it says a build that
+  # invented a better element did WORSE than one that traced, on a product whose
+  # premise is that the app gets better than its first sketch. The mockup is
+  # approved at the moment the operator has seen the least; a design system that
+  # cannot grow past it freezes there.
+  #
+  # So the shortfall is still reported either way (nothing is hidden, and the
+  # numbers still ride the last line), but a build whose own elements are made
+  # entirely of approved variables is told what it actually did: extended the
+  # system. A build whose own elements have the colours typed in is told the
+  # other thing.
+  if [ "$NEWCLS" -ge 3 ] && [ "$TOKENCLEAN" -eq 1 ]; then
+    echo "design-adherence: PARTIAL — under half the approved vocabulary is in the built screens, but the"
+    echo "      \${NEWCLS} element(s) this build defined are made entirely from the approved variables"
+    echo "      (\${HARD} hardcoded colour(s)). That is the design system growing, not drifting — promote the"
+    echo "      ones worth keeping so later builds inherit them, and check the screens you did NOT touch."
   else
-    echo "design-adherence: PARTIAL — \${UCLASS} of \${DCLASS} approved component classes, \${USED} of \${APPROVED} approved variables."
+    echo "design-adherence: PARTIAL — over the bar, so this does not block, but under half the"
+    echo "      approved design is in the built screens. The screens this build wrote may look"
+    echo "      right while the rest of the app does not. state/mockups/current.html is the"
+    echo "      visual contract; state/design.css carries its component CSS by name."
+  fi
+  if [ "$CLS_HALF" -eq -1 ]; then
+    echo "design-adherence: PARTIAL — \${USED} of \${APPROVED} approved variables (no component vocabulary published), \${NEWCLS} of the build's own."
+  else
+    echo "design-adherence: PARTIAL — \${UCLASS} of \${DCLASS} approved component classes, \${USED} of \${APPROVED} approved variables, \${NEWCLS} of the build's own."
   fi
   exit 0
 fi

@@ -97,6 +97,34 @@ export function hydrateMockupAssetImages(projectId, assets, opts = {}) {
   return { images, used };
 }
 
+// findAssetByBytes — is this exact image already in the library?
+//
+// Content identity, not filename: an operator pasting the same reference
+// screenshot into the design chat on three turns means it three times, and
+// three copies of one picture would push the render's image budget onto
+// duplicates of the same thing.
+//
+// Size is the pre-filter (a column, free) and sha256 is the answer, so a
+// library of twenty images hashes at most the handful that are the same length.
+export function findAssetByBytes(projectId, buffer) {
+  if (!buffer?.length) return null;
+  const want = crypto.createHash('sha256').update(buffer).digest('hex');
+  let rows = [];
+  try {
+    rows = getMock2Db()
+      .prepare("SELECT * FROM mock2_project_assets WHERE project_id = ? AND kind = 'image' AND size = ?")
+      .all(Number(projectId), buffer.length);
+  } catch { return null; }
+  for (const r of rows) {
+    try {
+      const file = assetFilePath(projectId, r.id);
+      if (!file) continue;
+      if (crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') === want) return toAsset(r);
+    } catch { /* a row whose bytes are gone is not a match */ }
+  }
+  return null;
+}
+
 /* ------------------------------- writes --------------------------------- */
 
 // addImage — validate, write the bytes, then insert. Bytes first so a failed

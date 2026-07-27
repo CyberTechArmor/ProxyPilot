@@ -37,6 +37,11 @@ import { insertMessage } from './chats.js';
 import { saveChatImages } from './chat-images.js';
 import { enqueueBuild, drainBuildQueue } from './build-queue.js';
 import { getDesignReviewSetting } from './settings.js';
+import { densityFindings, colorOnlyFindings, signalsPromptBlock, signalsChatLines } from './design-signals-logic.js';
+import {
+  DESIGN_FINDINGS_PATH, parseFindingsLedger, renderFindingsLedger, mergeFindings, ledgerDelta,
+} from './design-findings-logic.js';
+import { listNewElements, promotionInviteMessage } from './design-promote.js';
 import { ensureReviewAccount, getReviewLogin, REVIEW_EMAIL } from './review-account.js';
 
 const APP_DIR = '/srv/app';
@@ -142,6 +147,116 @@ async function readContainerFile(containerName, relPath, { timeoutMs = 60000 } =
   return r.code === 0 ? (r.stdout || '') : '';
 }
 
+// Written with the payload on STDIN rather than inlined: a ledger is small, but
+// so was every other file that later grew past the argv limit.
+async function writeContainerFile(containerName, relPath, content, { timeoutMs = 30000 } = {}) {
+  const script = `d="${APP_DIR}/${relPath}"; mkdir -p "$(dirname "$d")"; base64 -d > "$d"`;
+  const r = await sh(
+    `printf '%s' '${b64(content)}' | base64 -d | incus exec ${containerName} -- sh -c "$(printf '%s' '${b64(script)}' | base64 -d)"`,
+    { timeoutMs },
+  );
+  return r.code === 0;
+}
+
+// measureSignals(page) — DENSITY and REDUNDANT STATUS CODING, in the page.
+//
+// Two properties that separate a considered interface from a generated one and
+// that the review was previously being asked to eyeball from a JPEG. See
+// design-signals-logic.js for what the numbers mean; this only counts.
+//
+//   facts    — visible leaf text nodes and controls inside the FIRST viewport.
+//              Above-the-fold on purpose: what someone sees before deciding
+//              whether this screen is worth their time.
+//   colorOnly — elements carrying a saturated status colour with no word, no
+//              glyph and no accessible name beside it. Colour as the only
+//              channel fails the colourblind reader, the printed copy and the
+//              person searching the page for "overdue".
+//
+// Runs entirely in the page and returns plain numbers, so nothing here can
+// throw into the capture loop with anything but a rejected promise.
+async function measureSignals(page) {
+  return page.evaluate(() => {
+    const vh = window.innerHeight;
+    const vw = window.innerWidth;
+    const visible = (el, r) => r.width > 0 && r.height > 0 && r.top < vh && r.bottom > 0 && r.left < vw && r.right > 0;
+
+    let facts = 0;
+    let controls = 0;
+    const CONTROL = 'a[href],button,input,select,textarea,[role="button"],[role="link"],[role="tab"],[role="checkbox"],[role="switch"]';
+    for (const el of document.querySelectorAll('body *')) {
+      const r = el.getBoundingClientRect();
+      if (!visible(el, r)) continue;
+      const style = getComputedStyle(el);
+      if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) continue;
+      if (el.matches(CONTROL)) { controls++; facts++; continue; }
+      // A LEAF with its own text is one fact. Counting containers too would
+      // score a deeply-nested empty layout as dense.
+      if (el.children.length === 0 && (el.textContent || '').trim().length > 0) facts++;
+    }
+
+    // ---- status colour without a second channel ----
+    const rgb = (v) => {
+      const m = String(v || '').match(/rgba?\(([^)]+)\)/);
+      if (!m) return null;
+      const p = m[1].split(',').map((x) => parseFloat(x));
+      if (p.length >= 4 && p[3] === 0) return null;    // transparent is not a signal
+      return { r: p[0] / 255, g: p[1] / 255, b: p[2] / 255 };
+    };
+    // Saturated, mid-lightness, and in a hue people read as a status. Neutrals,
+    // near-black text and the page's own accent-tinted surfaces are excluded by
+    // the saturation and lightness bounds rather than by a palette list, so this
+    // does not need to know the app's design.
+    const isStatusColor = (c) => {
+      if (!c) return false;
+      const max = Math.max(c.r, c.g, c.b);
+      const min = Math.min(c.r, c.g, c.b);
+      const l = (max + min) / 2;
+      if (l < 0.18 || l > 0.78) return false;
+      const d = max - min;
+      if (d < 0.22) return false;                       // grey
+      const s = d / (1 - Math.abs(2 * l - 1));
+      if (s < 0.35) return false;
+      let h = 0;
+      if (max === c.r) h = 60 * (((c.g - c.b) / d) % 6);
+      else if (max === c.g) h = 60 * ((c.b - c.r) / d + 2);
+      else h = 60 * ((c.r - c.g) / d + 4);
+      if (h < 0) h += 360;
+      // red/orange/amber (0–65) and green (95–165). Blues and purples are
+      // brand accents far more often than they are statuses.
+      return (h <= 65) || (h >= 95 && h <= 165);
+    };
+
+    let statusTotal = 0;
+    let colorOnly = 0;
+    const examples = [];
+    for (const el of document.querySelectorAll('body *')) {
+      const r = el.getBoundingClientRect();
+      if (!visible(el, r)) continue;
+      if (r.width > 240 || r.height > 120) continue;    // a page-wide banner is not a status chip
+      const style = getComputedStyle(el);
+      const coloured = isStatusColor(rgb(style.backgroundColor)) || isStatusColor(rgb(style.color))
+        || isStatusColor(rgb(style.borderTopColor));
+      if (!coloured) continue;
+      statusTotal++;
+      const text = (el.textContent || '').trim();
+      const named = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt');
+      // A glyph counts as the second channel: an svg, an icon-font span, or a
+      // literal symbol/emoji (arrows, dingbats, and the emoji planes).
+      const glyph = el.querySelector('svg,img,use,[class*="icon"]')
+        || /[←-➿⬀-⯿]/u.test(text)
+        || /[\u{1F300}-\u{1FAFF}]/u.test(text);
+      if (!text && !named && !glyph) {
+        colorOnly++;
+        if (examples.length < 4) {
+          const cls = String(el.className || '').trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.');
+          examples.push(`${el.tagName.toLowerCase()}${cls ? `.${cls}` : ''}`);
+        }
+      }
+    }
+    return { facts, controls, statusTotal, colorOnly, examples };
+  });
+}
+
 // axe-core source, loaded lazily from node_modules; null when not installed
 // (older install that hasn't re-run npm install) — the review runs without it.
 let axeSourceCache;
@@ -181,6 +296,8 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
   const shots = [];
   const axeViolations = [];
   const overflowFindings = [];
+  const densityMeasurements = [];
+  const signalMeasurements = [];
   let authed = false;
   try {
     browser = await chromium.launch(launchOptions());
@@ -217,6 +334,16 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
           });
           if (of) overflowFindings.push({ page: path, width: MOBILE.width, over_px: of.over, elements: of.elements });
         } catch { /* advisory */ }
+        // Density + redundant status coding, measured rather than eyeballed
+        // from a JPEG. See design-signals-logic.js for what they mean and why
+        // they are advisory. Both are read at the width currently set.
+        try {
+          const s = await measureSignals(page);
+          if (s) {
+            densityMeasurements.push({ path, width: MOBILE.width, facts: s.facts, controls: s.controls });
+            signalMeasurements.push({ path, width: MOBILE.width, total: s.statusTotal, colorOnly: s.colorOnly, examples: s.examples });
+          }
+        } catch { /* advisory */ }
         if (axeSource) {
           try {
             await page.addScriptTag({ content: axeSource });
@@ -235,14 +362,21 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
           await page.waitForTimeout(250);
           const deskShot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false });
           shots.push({ path, width: DESKTOP.width, media_type: 'image/jpeg', data: deskShot.toString('base64') });
+          // Density is a different question at each width — a screen can be
+          // right on a phone and be three cards adrift on a laptop, which is
+          // the shape a mobile-first build produces by default.
+          try {
+            const s = await measureSignals(page);
+            if (s) densityMeasurements.push({ path, width: DESKTOP.width, facts: s.facts, controls: s.controls });
+          } catch { /* advisory */ }
         }
       } catch (err) {
         console.warn(`[mock2] design-review screenshot failed for ${path}:`, err?.message);
       }
     }
-    return { shots, axe: axeViolations, overflows: overflowFindings, detail: null, authenticated: authed };
+    return { shots, axe: axeViolations, overflows: overflowFindings, density: densityMeasurements, signals: signalMeasurements, detail: null, authenticated: authed };
   } catch (err) {
-    return { shots, axe: axeViolations, overflows: overflowFindings, detail: `browser error: ${err?.message || err}`, authenticated: authed };
+    return { shots, axe: axeViolations, overflows: overflowFindings, density: densityMeasurements, signals: signalMeasurements, detail: `browser error: ${err?.message || err}`, authenticated: authed };
   } finally {
     try { if (browser) await browser.close(); } catch { /* ignore */ }
   }
@@ -404,12 +538,22 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
     adherence = checkDesignAdherence({ designCss, appCss, appHtml });
   } catch { /* advisory */ }
 
+  // Density and status-coding: measured in the capture above, judged here.
+  // Advisory by construction — a focused create form SHOULD be sparse, and a
+  // colour-only dot beside a label can be fine — so they are handed to the
+  // critique as evidence and reported to the operator, never gated on.
+  const signals = {
+    density: densityFindings(capture.density || []),
+    colorOnly: colorOnlyFindings(capture.signals || []),
+  };
+
   const model = String(process.env.MOCK2_REVIEW_MODEL || '').trim() || ready.model;
   const userText = [
     `Screens shot (in order, mobile ${MOBILE.width}px first; the first two paths also have a ${DESKTOP.width}px desktop shot): ${capture.shots.map((s) => `${s.path}@${s.width}`).join(', ')}.`,
     (capture.overflows || []).length
       ? `DETERMINISTIC FINDING — horizontal overflow at ${MOBILE.width}px (a defect; include a fix in your findings): ${capture.overflows.map((o) => `${o.page} overflows by ${o.over_px}px (${o.elements.join(', ') || 'container'})`).join('; ')}.`
       : 'No horizontal overflow detected at mobile width.',
+    signalsPromptBlock(signals),
     tokensJson ? `Design tokens:\n${tokensJson.slice(0, 4000)}` : 'No design tokens file.',
     mockupHtml ? `Approved mockup HTML (the visual contract):\n${mockupHtml.slice(0, 120000)}` : 'No approved mockup — judge craft and consistency on their own.',
   ].join('\n\n');
@@ -430,7 +574,50 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   } catch (e) { console.warn('[mock2] design-review ledger write failed:', e?.message); }
 
   const review = parseReviewReply(res.text) || { summary: '', findings: [] };
+
+  // Persist the critique as project state before it becomes a chat message.
+  //
+  // This is the whole difference between a review and a diary. Until now every
+  // finding lived exactly as long as the message it was posted in: the auto
+  // review runs with apply=false, so the next build started from the same
+  // mockup knowing nothing about what the last look at the running app found.
+  // The ledger merges by finding rather than by review, so a defect raised
+  // three times reads as one defect the app keeps shipping, and one that stops
+  // appearing resolves itself.
+  //
+  // Best-effort throughout: a project whose container cannot be written to
+  // still gets its critique posted. Losing the ledger must never lose the
+  // review.
+  let ledgerNote = '';
+  try {
+    const before = parseFindingsLedger(await readContainerFile(containerName, DESIGN_FINDINGS_PATH, { timeoutMs: 15000 }));
+    const after = mergeFindings(before, review.findings, { cycleId: null });
+    if (await writeContainerFile(containerName, DESIGN_FINDINGS_PATH, renderFindingsLedger(after))) {
+      ledgerNote = ledgerDelta(before, after);
+    }
+  } catch (e) {
+    console.warn('[mock2] design findings ledger update failed:', e?.message);
+  }
+
   let message = reviewChatMessage({ review, axe: capture.axe, rogue, adherence, trigger, screenshotCount: capture.shots.length });
+  // Measured, not eyeballed: how much a screen puts in front of someone before
+  // they scroll, and whether any status is carried by colour alone.
+  const signalLines = signalsChatLines(signals);
+  if (signalLines.length) message = `${message}\n${signalLines.join('\n')}`;
+  // The loop, made visible. Without this line the operator reads the same
+  // findings after each build with no way to tell whether anything moved.
+  if (ledgerNote) message = `${message}\n\n${ledgerNote}`;
+
+  // What this build DESIGNED, offered while the operator is already looking at
+  // the screens it appears on. Without a promotion path the approved vocabulary
+  // is frozen at the mockup, so a good new element is measured as drift forever
+  // and there is no mechanism by which it could become anything else.
+  try {
+    const invite = promotionInviteMessage((await listNewElements(project)).candidates);
+    if (invite) message = `${message}\n\n${invite}`;
+  } catch (e) {
+    console.warn('[mock2] new-element invite failed:', e?.message);
+  }
   // Honesty: a capture that never got past the gate only ever sees the sign-in
   // page — say so up front, or the findings read as "the entire app is
   // missing" (user report). This should now be rare: the platform provisions
@@ -471,7 +658,7 @@ ${message}`;
       drainBuildQueue(project.id).catch((e) => console.warn('[mock2] polish drain failed:', e?.message));
     }
   }
-  return { ok: true, findings: review.findings, summary: review.summary, axe: capture.axe, rogue, adherence, message, queued };
+  return { ok: true, findings: review.findings, summary: review.summary, axe: capture.axe, rogue, adherence, signals, message, queued };
 }
 
 // The after-build hook (fire-and-forget from the request-close chain): honors

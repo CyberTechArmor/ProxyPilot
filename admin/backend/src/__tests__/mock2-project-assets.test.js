@@ -11,7 +11,11 @@ import {
   toAsset, sortAssets, summarize, buildAssetContext, buildAssetSection,
   selectMockupImages, buildMockupAssetSection, MOCKUP_IMAGE_TAG_RANK,
   assetsFingerprint, diffAssetFingerprint, buildAssetChangeSection,
+  planReferencePins, referencePinNote, MAX_CHAT_REFERENCES_PER_TURN,
 } from '../mock2/project-assets-logic.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 test('only image types are storable, and the MIME comes from the extension', () => {
   // The declared Content-Type is never trusted — a .exe renamed to .png would
@@ -304,4 +308,54 @@ test('every build computes the delta, and only a SHIPPED build records it', asyn
     const afterFail = src.slice(failIdx, failIdx + 400);
     assert.doesNotMatch(afterFail, /recordAssetsSeen\(\)/, 'a failed build must not consume the change');
   }
+});
+
+/* ---- a reference pasted into the design chat must outlive that turn ---- */
+
+test('a design-chat image becomes a pinned project reference', () => {
+  // Images attached to a design turn reached that turn's mockup render and no
+  // other, while the LIBRARY is read by every render. So the strongest input
+  // the product has — "here is what I want it to look like" — had the shortest
+  // memory in it, and the next iteration forgot what the operator pasted.
+  const plan = planReferencePins([{ id: 'aaa.png', name: 'coverage-dashboard.png' }, { id: 'bbb.jpg' }]);
+  assert.equal(plan.length, 2);
+  assert.equal(plan[0].name, 'coverage-dashboard.png', 'the operator’s filename is kept');
+  assert.match(plan[1].name, /design-reference-2\.jpg/, 'and an unnamed paste gets a name that says what it is');
+  for (const p of plan) assert.equal(p.tag, 'reference', 'the tag the mockup render ranks second-highest');
+});
+
+test('pasting the same screenshot three times does not spend the render on three copies', () => {
+  // selectMockupImages caps how many images a render sees. Duplicates of one
+  // picture would crowd out the others — the operator would have pasted MORE
+  // and been shown LESS.
+  const plan = planReferencePins(
+    [{ id: 'same.png' }, { id: 'new.png' }],
+    { alreadyPresent: new Set(['same.png']) },
+  );
+  assert.deepEqual(plan.map((p) => p.id), ['new.png']);
+  assert.equal(planReferencePins([{ id: 'same.png' }], { alreadyPresent: new Set(['same.png']) }).length, 0);
+  // And one turn cannot flood the library, which is a standing input to every
+  // future render rather than a scratchpad.
+  const many = Array.from({ length: 20 }, (_, i) => ({ id: `x${i}.png` }));
+  assert.equal(planReferencePins(many).length, MAX_CHAT_REFERENCES_PER_TURN);
+});
+
+test('the operator is told their reference was kept — once', () => {
+  assert.match(referencePinNote([1, 2]), /Kept 2 reference images/);
+  assert.match(referencePinNote([1]), /pinned/);
+  assert.match(referencePinNote([1]), /Remove it from Assets/, 'and how to undo it');
+  // Re-pasting the same picture pins nothing, so it announces nothing.
+  assert.equal(referencePinNote([]), '');
+});
+
+test('the pin actually happens on a design turn (and only on a design turn)', () => {
+  // The pure planner above is worth nothing if nothing calls it.
+  const src = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mock2', 'concept.js'),
+    'utf8',
+  );
+  assert.match(src, /function pinChatReferences/);
+  assert.match(src, /turnMode === 'design' && attachments\.length/,
+    'a PLAN turn’s attachment is not a design reference');
+  assert.match(src, /findAssetByBytes/, 'deduplicated by content, not by filename');
 });

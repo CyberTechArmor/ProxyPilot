@@ -44,6 +44,12 @@ export const DESIGN_PRESETS = Object.freeze([
       radius: { sm: '8px', md: '9px', lg: '12px' },
       spacing: { unit: '8px' },
       shadow: { card: '0 1px 2px rgba(16,42,72,0.06), 0 8px 24px rgba(16,42,72,0.07)' },
+      motion: {
+        durationFast: '120ms', durationBase: '200ms', durationSlow: '320ms',
+        easingStandard: 'cubic-bezier(0.2,0,0,1)',
+        easingEntrance: 'cubic-bezier(0,0,0,1)',
+        easingExit: 'cubic-bezier(0.3,0,1,1)',
+      },
     },
   },
   {
@@ -60,6 +66,12 @@ export const DESIGN_PRESETS = Object.freeze([
       radius: { sm: '6px', md: '10px', lg: '16px' },
       spacing: { unit: '8px' },
       shadow: { card: '0 1px 3px rgba(0,0,0,0.1)' },
+      motion: {
+        durationFast: '120ms', durationBase: '200ms', durationSlow: '320ms',
+        easingStandard: 'cubic-bezier(0.2,0,0,1)',
+        easingEntrance: 'cubic-bezier(0,0,0,1)',
+        easingExit: 'cubic-bezier(0.3,0,1,1)',
+      },
     },
   },
   {
@@ -76,6 +88,12 @@ export const DESIGN_PRESETS = Object.freeze([
       radius: { sm: '4px', md: '8px', lg: '12px' },
       spacing: { unit: '8px' },
       shadow: { card: '0 1px 2px rgba(0,0,0,0.6)' },
+      motion: {
+        durationFast: '90ms', durationBase: '150ms', durationSlow: '240ms',
+        easingStandard: 'cubic-bezier(0.2,0,0,1)',
+        easingEntrance: 'cubic-bezier(0,0,0,1)',
+        easingExit: 'cubic-bezier(0.3,0,1,1)',
+      },
     },
   },
   {
@@ -92,6 +110,12 @@ export const DESIGN_PRESETS = Object.freeze([
       radius: { sm: '4px', md: '8px', lg: '14px' },
       spacing: { unit: '8px' },
       shadow: { card: '0 1px 3px rgba(41,37,36,0.12)' },
+      motion: {
+        durationFast: '140ms', durationBase: '260ms', durationSlow: '400ms',
+        easingStandard: 'cubic-bezier(0.2,0,0,1)',
+        easingEntrance: 'cubic-bezier(0,0,0,1)',
+        easingExit: 'cubic-bezier(0.3,0,1,1)',
+      },
     },
   },
   {
@@ -108,6 +132,12 @@ export const DESIGN_PRESETS = Object.freeze([
       radius: { sm: '6px', md: '10px', lg: '16px' },
       spacing: { unit: '8px' },
       shadow: { card: '0 1px 3px rgba(26,46,34,0.10)' },
+      motion: {
+        durationFast: '120ms', durationBase: '220ms', durationSlow: '340ms',
+        easingStandard: 'cubic-bezier(0.2,0,0,1)',
+        easingEntrance: 'cubic-bezier(0,0,0,1)',
+        easingExit: 'cubic-bezier(0.3,0,1,1)',
+      },
     },
   },
   {
@@ -124,6 +154,12 @@ export const DESIGN_PRESETS = Object.freeze([
       radius: { sm: '3px', md: '6px', lg: '10px' },
       spacing: { unit: '8px' },
       shadow: { card: '0 1px 2px rgba(0,0,0,0.08)' },
+      motion: {
+        durationFast: '90ms', durationBase: '140ms', durationSlow: '220ms',
+        easingStandard: 'cubic-bezier(0.2,0,0,1)',
+        easingEntrance: 'cubic-bezier(0,0,0,1)',
+        easingExit: 'cubic-bezier(0.3,0,1,1)',
+      },
     },
   },
   {
@@ -143,6 +179,12 @@ export const DESIGN_PRESETS = Object.freeze([
       radius: { sm: '6px', md: '8px', lg: '12px' },
       spacing: { unit: '8px' },
       shadow: { card: '0 1px 2px rgba(0,0,0,0.35), 0 8px 24px rgba(0,0,0,0.25)' },
+      motion: {
+        durationFast: '90ms', durationBase: '150ms', durationSlow: '240ms',
+        easingStandard: 'cubic-bezier(0.2,0,0,1)',
+        easingEntrance: 'cubic-bezier(0,0,0,1)',
+        easingExit: 'cubic-bezier(0.3,0,1,1)',
+      },
     },
   },
 ]);
@@ -195,8 +237,18 @@ const SIZE_RE = /^\d{1,3}(?:\.\d{1,2})?(?:px|rem|em)$/;
 const FONT_RE = /^[\w\s"',.\-()]{1,200}$/;
 const SHADOW_RE = /^[\w\s.,()#%\-]{1,200}$/;
 const KEY_RE = /^[a-z0-9][a-z0-9-]{1,40}$/;
+// Motion. Bounded at 1s in the grammar itself: a design document is an upload,
+// and "everything on this screen takes four seconds" is a look nobody chose.
+const DUR_RE = /^(?:\d{1,3}|1000)ms$|^0?\.\d{1,3}s$|^1s$/;
+// `.3` (no leading zero) is valid CSS and is what the mockup template emits.
+const EASE_RE = /^(?:linear|ease|ease-in|ease-out|ease-in-out|cubic-bezier\(\s*-?(?:\d(?:\.\d{1,4})?|\.\d{1,4})\s*(?:,\s*-?(?:\d(?:\.\d{1,4})?|\.\d{1,4})\s*){3}\))$/;
 
 const COLOR_KEYS = ['background', 'surface', 'text', 'muted', 'border', 'primary', 'primaryText', 'accent', 'danger', 'success'];
+
+// A preset's component block is a design system, not an application: big enough
+// for the cards, rows, chips and layout primitives that make a look, small
+// enough that nobody can ship an app through the preset registry.
+export const MAX_COMPONENTS_CSS = 60_000;
 
 // parseDesignDoc(doc) → { ok, data: {key,name,description,tokens} } | { ok:false, error }.
 // Missing optional token fields fall back to sane values; colors are REQUIRED.
@@ -237,8 +289,38 @@ export function parseDesignDoc(doc) {
     },
     spacing: { unit: str(t.spacing?.unit, SIZE_RE, '8px') },
     shadow: { card: str(t.shadow?.card, SHADOW_RE, '0 1px 2px rgba(0,0,0,0.08)') },
+    // Optional, like everything but colour: a design document written before
+    // motion existed still parses, and gets the platform's timings.
+    motion: {
+      durationFast: str(t.motion?.durationFast, DUR_RE, '120ms'),
+      durationBase: str(t.motion?.durationBase, DUR_RE, '200ms'),
+      durationSlow: str(t.motion?.durationSlow, DUR_RE, '320ms'),
+      easingStandard: str(t.motion?.easingStandard, EASE_RE, 'cubic-bezier(0.2,0,0,1)'),
+      easingEntrance: str(t.motion?.easingEntrance, EASE_RE, 'cubic-bezier(0,0,0,1)'),
+      easingExit: str(t.motion?.easingExit, EASE_RE, 'cubic-bezier(0.3,0,1,1)'),
+    },
   };
-  return { ok: true, data: { key, name, description, tokens } };
+  // The component block, when the document carries one. Sanitised rather than
+  // trusted: an uploaded stylesheet is operator input that ends up served to
+  // every user of every app seeded from it, so the two things that turn CSS
+  // into a network request — @import and a remote url() — are refused outright
+  // rather than stripped, because silently altering someone's stylesheet is how
+  // they end up debugging a look they did not write.
+  const rawComponents = String(doc.components_css || doc.componentsCss || '').trim();
+  if (rawComponents.length > MAX_COMPONENTS_CSS) {
+    return { ok: false, error: `components_css is ${rawComponents.length} characters — the limit is ${MAX_COMPONENTS_CSS}` };
+  }
+  if (/@import\b/i.test(rawComponents)) {
+    return { ok: false, error: 'components_css must not use @import — inline the rules instead' };
+  }
+  if (/url\(\s*['"]?\s*(https?:)?\/\//i.test(rawComponents)) {
+    return { ok: false, error: 'components_css must not reference remote URLs — a design must render offline' };
+  }
+  if (/<\/?script/i.test(rawComponents)) {
+    return { ok: false, error: 'components_css contains markup, not CSS' };
+  }
+
+  return { ok: true, data: { key, name, description, tokens, componentsCss: rawComponents } };
 }
 
 // The document shape, for the upload help and the AI-adjust prompt.
@@ -249,6 +331,7 @@ export function designDocTemplate() {
     name: 'My Brand',
     description: 'Short human description of the look.',
     tokens: DESIGN_PRESETS[0].tokens,
+    components_css: '/* Optional: the components that make this look — cards, rows, chips.\n   Written on var(--app-*) from the tokens above so re-valuing the design\n   re-values everything built on it. */\n.card { background: var(--app-surface); border-radius: var(--app-radius-lg); }',
   };
 }
 
@@ -258,9 +341,17 @@ export function designDocTemplate() {
 export function buildDesignPresetSeedFiles(key) {
   const preset = getDesignPreset(key);
   if (!preset) return [];
+  // A preset's COMPONENT block, when it has one. Tokens alone are a palette;
+  // what makes a look a look is the components — the card, the row, the chip —
+  // and a preset that could not carry them meant every project re-derived the
+  // same house style from scratch. Appended after the rendered tokens so it can
+  // build on them, and sanitised at save time (see parseDesignDoc).
+  const css = preset.componentsCss
+    ? `${renderDesignTokensCss(preset.tokens)}\n/* ==preset-components== ${preset.key} */\n${preset.componentsCss}\n`
+    : renderDesignTokensCss(preset.tokens);
   return [
     { path: 'state/design-tokens.json', content: `${JSON.stringify(preset.tokens, null, 2)}\n` },
-    { path: 'state/design.css', content: renderDesignTokensCss(preset.tokens) },
+    { path: 'state/design.css', content: css },
   ];
 }
 

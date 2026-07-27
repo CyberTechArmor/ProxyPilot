@@ -135,7 +135,7 @@ import { getHarnessStepTuning, setHarnessStepOverride, harnessStepSpend7d, getHa
 import { STEP_PROMPT_SPECS, STEP_PROMPT_MAX_LENGTH, promptOwnerStepId, renderDefaultStepPrompt } from './harness-prompts-logic.js';
 import {
   normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, DEFAULT_DESIGN_PRESET,
-  parseDesignDoc,
+  parseDesignDoc, getDesignPreset,
 } from './design-presets.js';
 import { saveCustomDesignPreset, deleteCustomDesignPreset } from './design-presets-store.js';
 import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue, reconcileScreenPlan, backfillScreenItems, listScreenItems, listScreenItemHistory, setScreenItemStatus, startItemsBuild } from './screen-plan.js';
@@ -957,6 +957,17 @@ export function createMock2Router() {
       : normalizeDesignPresetKey(parsed.data.design_preset);
     if (presetKey !== DESIGN_PRESET_AI) {
       project = updateProject(project.id, { design_preset: presetKey });
+      // A preset's REFERENCE IMAGES seed the new project's library, pinned, so
+      // the very first mockup render already sees what the look was built
+      // from. Without this a saved preset carried a palette and left the
+      // pictures behind — which is most of what made the look.
+      try {
+        const preset = getDesignPreset(presetKey);
+        if (preset?.references?.length) {
+          const { applyPresetReferences } = await import('./design-preset-refs.js');
+          applyPresetReferences(project.id, preset, { createdBy: req.user.id });
+        }
+      } catch (e) { console.warn('[mock2] preset reference seeding failed:', e?.message); }
     }
 
     logAudit(req.user.id, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, { name, slug: project.slug, domain: parent.domain, design_preset: presetKey }, req.ip);
@@ -1009,6 +1020,33 @@ export function createMock2Router() {
       { key: parsed.data.key, created: saved.created }, req.ip);
     res.status(saved.created ? 201 : 200).json({
       preset: publicDesignPresets().find((x) => x.key === parsed.data.key) || null, created: saved.created,
+    });
+  });
+
+  // SAVE THIS PROJECT'S LOOK AS A PRESET.
+  //
+  // The other half of "a preset carries more than tokens": the look an operator
+  // spent a whole project arriving at — its approved tokens, the components
+  // that carry them (including anything promoted from a build), and the
+  // reference images they collected — becomes the starting point for the next
+  // project. Without this the second app began where the first one did,
+  // whatever was learned in between.
+  router.post('/projects/:id/save-as-preset', requireMock2Role('editor'), async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') return res.status(409).json({ error: 'The project is not online.' });
+    const { captureProjectDesignPreset } = await import('./design-preset-capture.js');
+    const captured = await captureProjectDesignPreset(project, {
+      key: req.body?.key, name: req.body?.name, description: req.body?.description,
+    });
+    if (!captured.ok) return res.status(409).json({ error: captured.error });
+    const saved = saveCustomDesignPreset({ ...captured.preset, createdBy: req.user.id, overwrite: !!req.body?.overwrite });
+    if (!saved.ok) return res.status(409).json({ error: saved.error });
+    logAudit(req.user.id, 'MOCK2_DESIGN_PRESET_FROM_PROJECT', 'mock2_project', project.id,
+      { key: captured.preset.key, references: captured.preset.references.length, componentChars: captured.preset.componentsCss.length }, req.ip);
+    res.status(saved.created ? 201 : 200).json({
+      preset: publicDesignPresets().find((x) => x.key === captured.preset.key) || null,
+      created: saved.created,
+      references: captured.preset.references.length,
     });
   });
 
@@ -2967,6 +3005,35 @@ export function createMock2Router() {
       .catch((e) => console.warn('[mock2] polish run failed:', e?.message));
     logAudit(req.user.id, 'MOCK2_POLISH_RUN', 'mock2_project', project.id, { apply }, req.ip);
     res.status(202).json({ started: true, apply });
+  });
+
+  // NEW ELEMENTS — the approved design's growth path.
+  //
+  // state/design.css is generated from the mockup, which is approved when the
+  // operator has seen the least. Everything downstream judges the app against
+  // it, so an element invented in build six could never become part of the
+  // design however good it was. These two routes are the mechanism: what the
+  // build defined that the design does not have, and the operator's accept.
+  router.get('/projects/:id/design-elements', requireMock2Role('viewer'), async (req, res) => {
+    const { listNewElements } = await import('./design-promote.js');
+    res.json(await listNewElements(req.mock2Project));
+  });
+
+  router.post('/projects/:id/design-elements/promote', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const names = Array.isArray(req.body?.names) ? req.body.names : [];
+    const { promoteElements } = await import('./design-promote.js');
+    const result = await promoteElements(req.mock2Project, names);
+    if (!result.ok) return res.status(409).json(result);
+    logAudit(req.user.id, 'MOCK2_DESIGN_PROMOTE', 'mock2_project', req.mock2Project.id, { promoted: result.promoted }, req.ip);
+    // The design changed, so the next review has a new contract to compare to.
+    try {
+      insertMessage({
+        projectId: req.mock2Project.id,
+        kind: 'system',
+        body: `Promoted into the approved design: ${result.promoted.map((n) => `\`.${n}\``).join(', ')}. Later builds inherit ${result.promoted.length === 1 ? 'it' : 'them'}, and the adherence check now counts ${result.promoted.length === 1 ? 'it' : 'them'} as part of the design.`,
+      });
+    } catch { /* best effort */ }
+    res.json(result);
   });
 
   // A live screenshot of the deployed app (PNG) — feeds the annotate-on-

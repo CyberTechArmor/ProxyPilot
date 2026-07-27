@@ -1538,6 +1538,12 @@ export const api = {
   // with a 400 the global handler reports as "Internal server error".
   mock2CreateFirstAdmin: (id, body) => request(`/mock2/projects/${id}/app-access/first-admin`, { method: 'POST', body: JSON.stringify(body) }),
   mock2FreeFirstAdminSlot: (id) => request(`/mock2/projects/${id}/app-access/free-slot`, { method: 'POST', body: JSON.stringify({}) }),
+  // New elements — what a build designed that the approved design does not have,
+  // and the operator's accept. Promotion is how the design system grows past
+  // the mockup it was frozen at.
+  mock2DesignElements: (id) => request(`/mock2/projects/${id}/design-elements`),
+  mock2PromoteDesignElements: (id, names) =>
+    request(`/mock2/projects/${id}/design-elements/promote`, { method: 'POST', body: JSON.stringify({ names }) }),
   // Quick connect (VS Code / git over smart HTTP): clone URL + connect tokens.
   mock2GetConnect: (id) => request(`/mock2/projects/${id}/connect`),
   // Split-request groups + the build queue (background back-to-back builds).

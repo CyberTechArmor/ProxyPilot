@@ -40,6 +40,17 @@ they get it.
 - **Spacing:** an 8px rhythm (4/8/12/16/24/32).
 - **Shape:** radii 10–12px; hairline dividers (`--hairline`) instead of hard
   borders; soft, low shadows (`--shadow-1`).
+- **Motion:** three durations (`--dur-fast` 120ms · `--dur-base` 200ms ·
+  `--dur-slow` 320ms) and three easings (`--ease-standard` for a state change
+  in place, `--ease-entrance` decelerating, `--ease-exit` accelerating).
+  **Select motion, do not write it:** use the shipped classes — `.enter` and
+  `.enter-fade` for something arriving, `.stagger` (set `--i` per row) for a
+  list arriving in order, `.press` for a control acknowledging a press,
+  `.pulse-once` for drawing the eye ONCE to something that just changed.
+  Hand-rolled `@keyframes` with their own timing are how an app ends up
+  moving at a different speed on every screen. Nothing loops, nothing exceeds
+  1s, nothing animates a value while someone is reading it, and everything
+  degrades under `prefers-reduced-motion` (the classes already do).
 
 ## §3 Token tables (the only source of color)
 

@@ -228,6 +228,23 @@ test('the migration matches the Drizzle schema', () => {
   assert.ok(!/token_hash\s+text NOT NULL/.test(sql), 'token_hash must be nullable for revoked keys');
 });
 
+test('REGRESSION: a scaffold-only project boots its platform module', () => {
+  // platform-intact requires src/server.ts to call ensureSeeded and ensureViews.
+  // The AUTH-WIRED server.ts did; the plain scaffold's did not — so a project
+  // provisioned without the auth component failed that gate on its first build
+  // for doing nothing wrong, and its branding row and read-only views never
+  // initialised. Found by running the real battery over a real scaffold-only
+  // project rather than over a fixture written to pass.
+  const server = scaffold().get('src/server.ts');
+  for (const sym of ['ensureSeeded', 'ensureViews']) {
+    assert.match(server, new RegExp(`await ${sym}\\(\\)`), `src/server.ts must call ${sym}()`);
+  }
+  // Best-effort: a database that is not ready yet must not stop the app serving.
+  assert.equal((server.match(/catch \(err\)/g) || []).length >= 2, true, 'both calls are guarded');
+  // And the auth-wired copy still does it too — one fix, both entry points.
+  assert.match(wired().get('src/server.ts'), /await ensureSeeded\(\)/);
+});
+
 test('the platform schema is registered on the Drizzle client', () => {
   const db = scaffold().get('src/db/index.ts');
   // Emitting tables nothing registers would make every platform query fail at

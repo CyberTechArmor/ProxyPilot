@@ -1765,6 +1765,25 @@ ${legalChromeCss()}
   button,[role=button],input,select,textarea{min-height:44px}
 }
 
+/* MOTION UTILITIES.
+   The design system's fourth axis, in the shell so every app has it whether or
+   not its approved design defined the tokens (each var carries the platform
+   default as its fallback). A screen writes class="enter"; it does not write
+   its own keyframes with its own timing, which is what makes the whole app
+   move at one speed instead of each screen at the speed of the build that
+   wrote it. Names and shapes match mockup-template.js's motion block, so what
+   a mockup demonstrated is what the app can select. */
+@keyframes pp-enter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes pp-fade{from{opacity:0}to{opacity:1}}
+@keyframes pp-pulse{50%{opacity:.55}}
+.enter{animation:pp-enter var(--app-dur-base,200ms) var(--app-ease-entrance,cubic-bezier(0,0,0,1)) both}
+.enter-fade{animation:pp-fade var(--app-dur-base,200ms) var(--app-ease-entrance,cubic-bezier(0,0,0,1)) both}
+.stagger>*{animation:pp-enter var(--app-dur-base,200ms) var(--app-ease-entrance,cubic-bezier(0,0,0,1)) both;animation-delay:calc(min(var(--i,0),7) * 40ms)}
+.press{transition:transform var(--app-dur-fast,120ms) var(--app-ease-standard,cubic-bezier(.2,0,0,1)),background-color var(--app-dur-fast,120ms) var(--app-ease-standard,cubic-bezier(.2,0,0,1))}
+.press:active{transform:scale(.97)}
+/* Once. A thing that pulses forever is a thing you stop seeing. */
+.pulse-once{animation:pp-pulse var(--app-dur-slow,320ms) var(--app-ease-standard,cubic-bezier(.2,0,0,1)) 1}
+
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{
     animation-duration:.01ms !important;animation-iteration-count:1 !important;

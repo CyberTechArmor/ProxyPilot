@@ -615,6 +615,11 @@ TypeScript source, keep it type-clean, and keep the run contract in \`mock2.yaml
 accurate. Your only egress is a filtering proxy; do not attempt to reach anything else.
 
 # Design fidelity (binding — reproduce the approved look)
+\`state/design-findings.json\` is the ledger of what the automated review found
+the last time it looked at the RUNNING app. The platform owns that file — read
+it, never write it. Anything still \`open\` there is a defect the app is
+currently shipping, and the ones with a high \`timesSeen\` are the ones builds
+keep walking past.
 The approved design's visual language is captured in \`state/design-tokens.json\`
 (colors, typography, corner radius, spacing, shadow) with a ready stylesheet
 rendered from it at \`state/design.css\`. Read both. The app MUST reproduce that
@@ -628,11 +633,20 @@ manifest.webmanifest\`, \`sw.js\`, \`install.js\`, and \`icon.svg\` plus the
 manifest link and install.js script in every page head must SURVIVE your
 changes; give any new page the same head lines. Never cache /api responses in
 the service worker.
+MOTION is part of the design system, not decoration you add: the tokens carry
+\`--app-dur-fast|base|slow\` and \`--app-ease-standard|entrance|exit\`, and the
+shell ships the classes that consume them — \`.enter\` / \`.enter-fade\` for
+something arriving, \`.stagger\` (set \`--i\` per row) for a list arriving in
+order, \`.press\` for a control acknowledging a press, \`.pulse-once\` for
+drawing the eye ONCE to something that just changed. SELECT motion with those
+classes; do not hand-write \`@keyframes\` with your own timings, which is how an
+app ends up moving at a different speed on every screen. Nothing loops, nothing
+animates a value while someone is reading it.
 The scaffold ships a shared app shell: \`public/base.css\` (header/nav, .card,
 .btn, .badge, .stat, .field, table.list, plus the component kit: .modal/.drawer,
 .toast, .tabs, .menu, .pager, .skel skeletons, .empty empty-states, .switch,
-.num tabular numerals, .bars mini charts, field .err/.hint validation — all
-token-driven) and \`public/assets.svg\` (inline SVG symbols for empty states:
+.num tabular numerals, .bars mini charts, field .err/.hint validation, and the
+motion utilities above — all token-driven) and \`public/assets.svg\` (inline SVG symbols for empty states:
 empty-box, search, alert, check, inbox — use \`<svg><use href="/assets.svg#empty-box"/></svg>\`) and
 \`public/app-shell.html\` (the authenticated home served at /). BUILD SCREENS ON
 THIS SHELL: link /design.css + /base.css, reuse its classes, and add nav entries
@@ -1384,6 +1398,11 @@ TypeScript source, keep it type-clean, and keep the run contract in \`mock2.yaml
 accurate.
 
 ## Design fidelity (binding — reproduce the approved look)
+\`state/design-findings.json\` is the ledger of what the automated review found
+the last time it looked at the RUNNING app. The platform owns that file — read
+it, never write it. Anything still \`open\` there is a defect the app is
+currently shipping, and the ones with a high \`timesSeen\` are the ones builds
+keep walking past.
 The approved design's visual language is captured in \`state/design-tokens.json\`
 (colors, typography, corner radius, spacing, shadow) with a ready stylesheet
 rendered from it at \`state/design.css\`. Read both. The app MUST reproduce that
@@ -1397,11 +1416,20 @@ manifest.webmanifest\`, \`sw.js\`, \`install.js\`, and \`icon.svg\` plus the
 manifest link and install.js script in every page head must SURVIVE your
 changes; give any new page the same head lines. Never cache /api responses in
 the service worker.
+MOTION is part of the design system, not decoration you add: the tokens carry
+\`--app-dur-fast|base|slow\` and \`--app-ease-standard|entrance|exit\`, and the
+shell ships the classes that consume them — \`.enter\` / \`.enter-fade\` for
+something arriving, \`.stagger\` (set \`--i\` per row) for a list arriving in
+order, \`.press\` for a control acknowledging a press, \`.pulse-once\` for
+drawing the eye ONCE to something that just changed. SELECT motion with those
+classes; do not hand-write \`@keyframes\` with your own timings, which is how an
+app ends up moving at a different speed on every screen. Nothing loops, nothing
+animates a value while someone is reading it.
 The scaffold ships a shared app shell: \`public/base.css\` (header/nav, .card,
 .btn, .badge, .stat, .field, table.list, plus the component kit: .modal/.drawer,
 .toast, .tabs, .menu, .pager, .skel skeletons, .empty empty-states, .switch,
-.num tabular numerals, .bars mini charts, field .err/.hint validation — all
-token-driven) and \`public/assets.svg\` (inline SVG symbols for empty states:
+.num tabular numerals, .bars mini charts, field .err/.hint validation, and the
+motion utilities above — all token-driven) and \`public/assets.svg\` (inline SVG symbols for empty states:
 empty-box, search, alert, check, inbox — use \`<svg><use href="/assets.svg#empty-box"/></svg>\`) and
 \`public/app-shell.html\` (the authenticated home served at /). BUILD SCREENS ON
 THIS SHELL: link /design.css + /base.css, reuse its classes, and add nav entries

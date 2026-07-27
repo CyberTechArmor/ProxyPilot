@@ -26,7 +26,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { sh } from './host.js';
-import { updateProject } from './projects.js';
+import { getProject, updateProject } from './projects.js';
 import { effectivePrice } from './connectors.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { costCentsForUsage } from './quota-logic.js';
@@ -41,6 +41,7 @@ import { releaseLock, touchLock } from './locks.js';
 import { insertCycleEvent, listRecentDownNotes } from './cycle-events.js';
 import { listAssets } from './project-assets.js';
 import { buildAssetSection } from './project-assets-logic.js';
+import { buildDesignFindingsBrief, markDesignFindingsBriefed } from './design-findings.js';
 import {
   parseFrameworkSkills, buildRunnerClaudeMd, buildRunnerTask, buildFeedbackSection, buildCompletionSummaryBody,
   MAX_TURNS, softPauseReason, SOFT_PAUSE_TOKENS,
@@ -307,15 +308,27 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       let prepassBrief = '';
       let feedbackSection = '';
       let assetSection = '';
+      let findingsSection = '';
       if (round === 0) {
         try { prepassBrief = formatBriefForTask(parseRoutingJson(getCycle(cycle.id)?.routing_json)?.prepass); } catch { prepassBrief = ''; }
         try { feedbackSection = buildFeedbackSection(listRecentDownNotes(projectId)); } catch { feedbackSection = ''; }
         // Operator-collected reference material; round 0 only, so gate-feedback
         // rounds do not re-pay for it.
         try { assetSection = buildAssetSection(listAssets(projectId)); } catch { assetSection = ''; }
+        // Open design findings from the last review of the running app. Round 0
+        // only, for the same reason — and marked as briefed here, so the count
+        // measures builds that were told, not rounds that were retried.
+        try {
+          const brief = await buildDesignFindingsBrief(getProject(projectId));
+          findingsSection = brief.section;
+          if (brief.keys.length) {
+            markDesignFindingsBriefed(getProject(projectId), brief.keys)
+              .catch((e) => console.warn('[mock2] design findings marking failed:', e?.message));
+          }
+        } catch { findingsSection = ''; }
       }
       const prompt = round === 0
-        ? `${buildRunnerTask(cycle.instruction)}${prepassBrief}${feedbackSection}${assetSection}${resumeBlock ? `\n\n${resumeBlock}` : ''}`
+        ? `${buildRunnerTask(cycle.instruction)}${prepassBrief}${feedbackSection}${findingsSection}${assetSection}${resumeBlock ? `\n\n${resumeBlock}` : ''}`
         : pendingFeedback || `The verification gate battery is not all green yet. Fix the cause and stop.\n\n${formatGateReports(battery)}`;
       pendingFeedback = null;
       setJob(cycle.id, { phase: 'running', message: round === 0 ? 'SDK runner working…' : `SDK runner addressing gate feedback (round ${round + 1})…` });

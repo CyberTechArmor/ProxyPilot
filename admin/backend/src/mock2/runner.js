@@ -54,7 +54,7 @@ import {
 } from './prepass-logic.js';
 import { insertCycleEvent, listRecentDownNotes } from './cycle-events.js';
 import { listAssets } from './project-assets.js';
-import { buildAssetSection } from './project-assets-logic.js';
+import { buildAssetSection, diffAssetFingerprint, buildAssetChangeSection } from './project-assets-logic.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
 } from './authorizations.js';
@@ -964,7 +964,37 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // brand notes, screenshots). Subordinate to the instruction, and empty when
   // the library is — a project with no assets pays nothing for this.
   let assetSection = '';
-  try { assetSection = buildAssetSection(listAssets(projectId)); } catch { /* optional */ }
+  // WHAT CHANGED since the last build, checked deterministically on every one.
+  //
+  // The library was already read on every turn, so a logo uploaded after the
+  // app was built did reach the next build's context — buried in a pile of
+  // standing reference material with nothing marking it as new, and therefore
+  // nothing telling the build to go back and apply it. The operator had to
+  // notice and ask. The fingerprint of what the LAST build saw is stored on the
+  // project, so the delta is arithmetic rather than a judgement call.
+  let assetChangeSection = '';
+  let assetsFp = null;
+  try {
+    const assets = listAssets(projectId);
+    assetSection = buildAssetSection(assets);
+    const diff = diffAssetFingerprint(getProject(projectId)?.assets_fingerprint, assets);
+    assetChangeSection = buildAssetChangeSection(diff);
+    assetsFp = diff.fingerprint;
+    if (diff.changed) {
+      logEvent('assets', {
+        content: `assets changed since the last build: ${diff.added.length} added, ${diff.updated.length} changed, ${diff.removed.length} removed`,
+        meta: { added: diff.added.length, updated: diff.updated.length, removed: diff.removed.length },
+      });
+    }
+  } catch { /* optional */ }
+  // Record what THIS build was told about the library — but only once it has
+  // actually shipped. Recording it up front would mean a build that failed
+  // before applying a new logo had "seen" it, and the next build would be told
+  // nothing had changed. The change must survive a failure.
+  const recordAssetsSeen = () => {
+    if (!assetsFp) return;
+    try { updateProject(projectId, { assets_fingerprint: assetsFp }); } catch { /* best effort */ }
+  };
   // MVP-path floor (project-32 ratchet): the fast path skips the rule
   // interview, and exactly the rules an interview would set (editability,
   // status mutability, deletion policy) are what shipped missing. Fast
@@ -972,7 +1002,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // the inventory/instruction still outrank it where they explicitly
   // deviate. Full builds are unchanged (their interview owns the rules).
   const rulesFloor = mvpBuild ? crudRulesFloorSection() : '';
-  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${rulesFloor}${feedbackSection}${assetSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
+  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${rulesFloor}${feedbackSection}${assetSection}${assetChangeSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
   if (taskImages.length) logEvent('attachments', { role: 'user', content: `${taskImages.length} image attachment(s) included with the task`, meta: { count: taskImages.length } });
   // Stub-registry context (B.6): EVERY cycle receives a concise global list of
   // unresolved production simulations, so a later instruction-scoped cycle can no
@@ -1852,6 +1882,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         void import('./design-review.js')
           .then((m) => m.afterBuildReview(projectId, { reason: 'pending verification' }))
           .catch((e) => console.warn('[mock2] post-build review (pending) failed:', e?.message));
+        recordAssetsSeen();
         return scheduleJobCleanup(cycle.id);
       }
       // The builder declared pending but no live check is actually outstanding —
@@ -1860,6 +1891,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         logEvent('note', { role: 'system', content: 'pending_verification requested, but no live external checks are outstanding — recording as succeeded.' });
       }
       finishCycle(cycle.id, { status: 'succeeded' });
+      recordAssetsSeen();
       try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
       // The review summary in the build chat: what was done and which files —
       // so the requester can review without opening the change history.

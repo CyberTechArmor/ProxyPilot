@@ -1649,4 +1649,25 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // ASSET LIBRARY FINGERPRINT — what the last build was told about the
+    // operator's logos, wording and brand notes.
+    //
+    // The library was already read on every build turn, so an asset added
+    // afterwards did reach the NEXT build's context — but nothing anywhere
+    // knew it was NEW. A logo uploaded after the app was built produced a
+    // build that had the logo in its reference material and no reason to go
+    // back and apply it, because nothing said "this changed". The operator had
+    // to notice, and to ask.
+    //
+    // Storing what the last build saw makes the delta computable, so the next
+    // build can be told plainly what arrived and act on it.
+    //
+    // Additive: one nullable column.
+    version: 548,
+    name: 'mock2_project_assets_fingerprint',
+    up: (d) => {
+      d.exec('ALTER TABLE mock2_projects ADD COLUMN assets_fingerprint TEXT;');
+    },
+  },
 ];

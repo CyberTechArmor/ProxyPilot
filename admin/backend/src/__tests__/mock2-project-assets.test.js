@@ -10,6 +10,7 @@ import {
   extFor, sanitizeName, normalizeTag, validateImageUpload, validateContent,
   toAsset, sortAssets, summarize, buildAssetContext, buildAssetSection,
   selectMockupImages, buildMockupAssetSection, MOCKUP_IMAGE_TAG_RANK,
+  assetsFingerprint, diffAssetFingerprint, buildAssetChangeSection,
 } from '../mock2/project-assets-logic.js';
 
 test('only image types are storable, and the MIME comes from the extension', () => {
@@ -188,4 +189,119 @@ test('the mockup asset block tells the render to USE the assets, and names the p
   assert.match(section, /Attached to this turn as images.*logo\.svg \(logo\)/s);
   // Nothing to say costs nothing.
   assert.equal(buildMockupAssetSection([]), '');
+});
+
+/* ---------------- what changed since the last build ------------------------ */
+//
+// The library was already read on every build turn, so a logo uploaded after
+// the app was built DID reach the next build's context — buried in a pile of
+// standing reference material, with nothing marking it as new and therefore
+// nothing telling the build to go back and apply it. The operator had to
+// notice, and to ask.
+
+const LOGO = { id: 1, kind: 'image', name: 'logo.png', tag: 'logo', size: 4096 };
+const VOICE = { id: 2, kind: 'content', name: 'Voice', tag: 'brand', body: 'Calm, plain words.' };
+
+test('the fingerprint ignores order and notices content', () => {
+  assert.equal(assetsFingerprint([LOGO, VOICE]), assetsFingerprint([VOICE, LOGO]));
+  // A REPLACED image keeps its id, name and tag — only the bytes differ. A
+  // fingerprint blind to that would call a rebranded logo "unchanged".
+  assert.notEqual(assetsFingerprint([LOGO]), assetsFingerprint([{ ...LOGO, size: 9999 }]));
+  // An edited note likewise.
+  assert.notEqual(assetsFingerprint([VOICE]), assetsFingerprint([{ ...VOICE, body: 'Loud.' }]));
+  // Retagging changes what the asset MEANS to a build, so it counts.
+  assert.notEqual(assetsFingerprint([LOGO]), assetsFingerprint([{ ...LOGO, tag: 'favicon' }]));
+  assert.equal(assetsFingerprint([]), '');
+});
+
+test('a filename cannot forge a field boundary', () => {
+  // Separators are control characters precisely so a name containing a comma, a
+  // pipe or a newline cannot make two different libraries fingerprint the same.
+  const sneaky = { id: 1, kind: 'image', name: 'a|b,c\nd', tag: 'logo', size: 1 };
+  assert.notEqual(assetsFingerprint([sneaky]), assetsFingerprint([{ ...sneaky, name: 'a', size: 2 }]));
+});
+
+test('the FIRST build is not told everything is new', () => {
+  // On a project's first build every asset is new by definition; announcing
+  // that would make the instruction shout about material it was already given
+  // in full, in the same turn.
+  const d = diffAssetFingerprint(null, [LOGO, VOICE]);
+  assert.equal(d.firstRun, true);
+  assert.equal(d.changed, false);
+  assert.equal(buildAssetChangeSection(d), '');
+  // …but the fingerprint is still produced, so the SECOND build has a baseline.
+  assert.equal(d.fingerprint, assetsFingerprint([LOGO, VOICE]));
+});
+
+test('an unchanged library costs a build nothing', () => {
+  const fp = assetsFingerprint([LOGO, VOICE]);
+  const d = diffAssetFingerprint(fp, [VOICE, LOGO]);
+  assert.equal(d.changed, false);
+  assert.equal(buildAssetChangeSection(d), '');
+});
+
+test('added, changed and removed are each reported as themselves', () => {
+  const before = assetsFingerprint([LOGO, VOICE]);
+  const after = [{ ...LOGO, size: 9999 }, { id: 3, kind: 'image', name: 'shot.png', tag: 'screenshot', size: 10 }];
+  const d = diffAssetFingerprint(before, after);
+  assert.equal(d.changed, true);
+  assert.deepEqual(d.added.map((a) => a.name), ['shot.png']);
+  assert.deepEqual(d.updated.map((a) => a.name), ['logo.png']);
+  assert.deepEqual(d.removed, [2]);                      // Voice was deleted
+});
+
+test('the change block tells the build to APPLY it, not merely to know it', () => {
+  const d = diffAssetFingerprint(assetsFingerprint([VOICE]), [VOICE, LOGO]);
+  const block = buildAssetChangeSection(d);
+  // buildAssetSection's framing is "reference material… use it when relevant".
+  // That is right for a standing library and wrong for something that arrived
+  // after the app was built and has never been acted on.
+  assert.match(block, /CHANGED THIS PROJECT'S ASSETS SINCE THE LAST BUILD/);
+  assert.match(block, /Apply the change as part of this build/);
+  assert.match(block, /ADDED since the last build: logo\.png \(Logo\)/);
+  // And it must not let the change be dropped in silence.
+  assert.match(block, /say so in your summary rather than silently dropping it/);
+});
+
+/* ------------- the wiring: checked on EVERY build, recorded only on ship ---- */
+//
+// Source-level, like the other runner assertions: the wiring is native
+// (containers, model calls) and cannot be imported in the sandbox, but WHERE it
+// is called from is exactly the thing that would regress.
+
+test('every build computes the delta, and only a SHIPPED build records it', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../mock2/runner.js', import.meta.url), 'utf8');
+
+  // Computed on the main build path, next to the standing asset section — not
+  // behind a flag, a mode, or a setting.
+  assert.match(src, /diffAssetFingerprint\(getProject\(projectId\)\?\.assets_fingerprint, assets\)/);
+  assert.match(src, /assetChangeSection = buildAssetChangeSection\(diff\)/);
+  // And actually reaches the model.
+  assert.match(src, /\$\{assetSection\}\$\{assetChangeSection\}/);
+
+  // THE PROPERTY THAT MATTERS: recorded only where the build shipped. Recording
+  // it when the delta is computed would mean a build that FAILED before
+  // applying a new logo had "seen" it, and the next build would be told nothing
+  // had changed — the change would be lost in silence, which is worse than
+  // never having detected it.
+  const decl = src.indexOf('const recordAssetsSeen');
+  assert.ok(decl !== -1, 'recordAssetsSeen must exist');
+  const calls = [...src.matchAll(/recordAssetsSeen\(\)/g)].map((m) => m.index).filter((i) => i !== decl);
+  assert.ok(calls.length >= 2, `expected a call at each shipped terminal, found ${calls.length}`);
+  // Each call must sit with a terminal that shipped: a finishCycle('succeeded')
+  // or the pending-verification handoff, both of which deployed.
+  for (const at of calls) {
+    const around = src.slice(Math.max(0, at - 600), at + 200);
+    assert.ok(
+      /finishCycle\(cycle\.id, \{ status: 'succeeded' \}\)/.test(around) || /afterBuildReview\(projectId/.test(around),
+      'recordAssetsSeen must only be called from a terminal that shipped',
+    );
+  }
+  // It must NOT be called on a failure path.
+  const failIdx = src.indexOf("finishCycle(cycle.id, { status: 'failed'");
+  if (failIdx !== -1) {
+    const afterFail = src.slice(failIdx, failIdx + 400);
+    assert.doesNotMatch(afterFail, /recordAssetsSeen\(\)/, 'a failed build must not consume the change');
+  }
 });

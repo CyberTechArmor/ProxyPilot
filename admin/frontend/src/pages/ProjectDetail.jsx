@@ -563,11 +563,18 @@ export default function ProjectDetail() {
               ) : (
                 <div className="min-h-0 flex-1 overflow-y-auto">
                   <div className="mx-auto w-full max-w-3xl space-y-4">
-                    <PreviewPlaceholder
-                      project={project}
-                      provLog={provStatus?.progress?.log || null}
-                      provMessage={provStatus?.progress?.message || null}
-                    />
+                    {/* While provisioning, the CHAT carries the step list — this
+                        placeholder would print the same spinner and the same
+                        four steps directly above it. Once the project is up it
+                        earns its place again: it is what explains where the
+                        preview will appear. */}
+                    {isProvisioning ? null : (
+                      <PreviewPlaceholder
+                        project={project}
+                        provLog={provStatus?.progress?.log || null}
+                        provMessage={provStatus?.progress?.message || null}
+                      />
+                    )}
                     <ConceptStage
                       projectId={id} project={project} canEdit={canEdit}
                       onApproved={load} onMockupChanged={handleMockupChanged}

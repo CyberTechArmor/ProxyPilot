@@ -47,7 +47,34 @@ if (process.env.EXPECT_MODAL === '1') {
     if (spill) fails.push('modal causes horizontal scroll');
   }
 }
-if (modalUp) {
+// The whole "yes" path: the question opens the LIBRARY over the chat, and
+// "Add to chat" hands back to the composer. Pointing at a panel behind the
+// modal makes the operator go find it — on a phone that panel is a different
+// screen entirely.
+if (modalUp && process.env.EXPECT_MODAL === '1') {
+  await modal.getByRole('button', { name: /Add assets|Add more/i }).click();
+  await page.waitForTimeout(800);
+  const lib = page.getByRole('dialog');
+  const libText = await lib.innerText().catch(() => '');
+  if (!/Logos, assets and context/i.test(libText)) fails.push('the library did not open over the chat');
+  const addToChat = lib.getByRole('button', { name: /Add to chat/i });
+  if (!(await addToChat.isVisible().catch(() => false))) fails.push('no "Add to chat" way out of the library');
+  else {
+    const h = Math.round((await addToChat.boundingBox())?.height || 0);
+    if (h < 44) fails.push(`"Add to chat" under 44px: ${h}`);
+    if (await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)) {
+      fails.push('the library modal scrolls sideways');
+    }
+    await addToChat.click();
+    await page.waitForTimeout(800);
+    if (await page.getByRole('dialog').isVisible().catch(() => false)) fails.push('"Add to chat" did not close the library');
+    // The cursor must land where the prompt goes — that is the whole reason to
+    // come back from the library.
+    const focused = await page.evaluate(() => document.activeElement?.tagName || '');
+    if (focused !== 'TEXTAREA') fails.push(`focus went to ${focused || 'nothing'}, not the composer`);
+  }
+  console.log('assets library flow: opened, added, handed back to the composer');
+} else if (modalUp) {
   await modal.getByRole('button', { name: /Not now/i }).click();
   await page.waitForTimeout(600);
 }

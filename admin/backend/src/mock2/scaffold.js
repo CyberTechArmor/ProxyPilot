@@ -29,7 +29,7 @@
 // what it is for.
 import { buildPlatformFiles, PLATFORM_CSS } from './scaffold-platform.js';
 
-export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v3';
+export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v4';
 
 // The canonical dependency set every scaffolded app is born with. Exported so
 // the repair pass (component-install ensureScaffoldDeps) can restore entries a

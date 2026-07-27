@@ -30,11 +30,66 @@ export const TASK_KINDS = Object.freeze(['bugfix', 'feature', 'chore']);
 
 // Classify the task from its instruction. Deliberately eager on 'bugfix': a
 // missed bug-fix classification silently skips reproduce-first, while an
-// over-eager one merely asks a feature cycle for a red test it can also
-// satisfy with a new failing spec test.
+// over-eager one merely asks a feature cycle for a red test.
+//
+// "MERELY" WAS WRONG, and it cost a whole build. The anomaly tripwire fires on
+// a bugfix that shows no red test and HOLDS the deploy — so an over-eager
+// classification does not just ask for a test, it stops the app from shipping.
+//
+// And the over-eager case was ProxyPilot's own doing: INITIAL_BUILD_INSTRUCTION
+// contains "Any inventory feature you CANNOT finish this cycle must be visibly
+// marked…", `cannot` matched, and the platform classified its own first build
+// as a bug fix. The build succeeded, the gates went green, the deploy was held,
+// the app never served, the design review screenshotted ERR_CONNECTION_REFUSED,
+// and the operator had to press Deploy by hand.
+//
+// Two changes. The bug words must appear in an ASK, not anywhere in a long
+// canned brief: the negative forms now need a following verb-ish word ("cannot
+// save", "doesn't work") rather than matching a bare "cannot". And an
+// instruction that ANNOUNCES itself as a build of the whole app is a feature by
+// construction, whatever prose follows.
+
+// A canned, platform-authored instruction. These describe building or
+// verifying an app, never fixing a reported defect.
+const PLATFORM_FEATURE_INSTRUCTION_RE =
+  /^(initial build|build the working application|production check|design polish pass|screen build|feature build)/i;
+
+// The unambiguous defect vocabulary — a single word is enough.
+const DEFECT_WORDS_RE =
+  /\b(bug|defect|broken|breaks|regression|crash(es|ed|ing)?|traceback|stack\s*trace)\b/i;
+// Verbs that only read as a defect when they are about something specific:
+// "fix the header", "the save button fails". A bare "failure mode" in a brief
+// is not a bug report.
+const DEFECT_PHRASE_RE = new RegExp(
+  [
+    // "Fix …" as the OPENING of an instruction is a defect report whatever
+    // follows ("Fix three issues in the ADP screen"). Mid-sentence it needs an
+    // object, so a brief saying "fix only what a gate flags" does not match.
+    String.raw`^\s*fix(es|ed|ing)?\b`,
+    String.raw`\bfix(es|ed|ing)?\s+(the|a|an|this|that|our|its|it)\b`,
+    // "…connection fails ("private key does not match…")" — a bare `fails`
+    // followed by punctuation is a report, not prose.
+    String.raw`\bfails?\s*[("'“]`,
+    String.raw`\bfails?\s+(to|when|with|on|if)\b`,
+    String.raw`\b(failing|failed)\s+\w+`,
+    String.raw`\bdoes\s*n[o']?t\s+(work|save|load|open|render|show|appear|update|submit|match|connect|respond|display)\b`,
+    // The contraction needs its own alternative: `can\s*n[o']t` cannot match
+    // "can't" (the n is already consumed by "can"), which is why the ORIGINAL
+    // pattern only ever caught the "cannot" spelling.
+    String.raw`\b(can\s*not|can['’]t|cannot)\s+(be\s+)?(save|load|open|log|sign|see|reach|delete|edit|submit|create|find|add|access|view|get|start|run)\w*\b`,
+    String.raw`\b(is|are|was|were)\s+(wrong|incorrect|broken)\b`,
+    String.raw`\bthrows?\s+(an?\s+)?error\b`,
+    String.raw`\berror\s+(when|on|after|while)\b`,
+  ].join('|'),
+  'i',
+);
+
 export function classifyTaskKind(instruction) {
-  const s = String(instruction || '').toLowerCase();
-  if (/\b(fix|bug|defect|broken|breaks|fails?|failing|failure|regression|error|crash|does\s*n[o']t\s+work|not\s+work(ing)?|can\s*n[o']t\b|cannot\b|wrong(ly)?|incorrect)\b/.test(s)) return 'bugfix';
+  const s = String(instruction || '').trim();
+  if (!s) return 'feature';
+  // The platform's own briefs are never bug reports, however they are worded.
+  if (PLATFORM_FEATURE_INSTRUCTION_RE.test(s)) return 'feature';
+  if (DEFECT_WORDS_RE.test(s) || DEFECT_PHRASE_RE.test(s)) return 'bugfix';
   return 'feature';
 }
 

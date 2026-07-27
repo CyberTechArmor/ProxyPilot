@@ -32,8 +32,7 @@ import { canStartCycle, costCentsForUsage } from './quota-logic.js';
 import { getCurrentFrameworkVersion } from './framework.js';
 import {
   insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
-  listCyclesForProject,
-} from './cycles.js';
+  listCyclesForProject, projectHasBeenDeployed } from './cycles.js';
 import {
   parseGateScripts, buildGateBattery, gatesForProfile, initialGateReports, gateBatteryVerdict, allGatesGreen,
   interruptDecision, estimateCycleTokens, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
@@ -1635,7 +1634,25 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       let anomalyHold = null;
       try {
         const preAnomaly = anomalySignals({ kind: accState.kind, usedTokens: usedTokensThisRun, estTokens: cycle.est_tokens, changedFiles: changedThisCycle, redTestObserved });
-        if (preAnomaly.flag && !noOpCycle) anomalyHold = preAnomaly;
+        // NEVER hold a project's FIRST deploy. Holding assumes "the previous
+        // deploy keeps serving" — but before the first one there is no previous
+        // deploy, so the hold leaves the project with NOTHING serving. That is
+        // exactly what happened: the initial build was misclassified as a bug
+        // fix (the word "cannot" in ProxyPilot's own brief), the tripwire held
+        // the deploy, and the app was unreachable until the operator pressed
+        // Deploy by hand. The flag is still raised for review either way.
+        let everDeployed = true;
+        try { everDeployed = projectHasBeenDeployed(projectId); } catch { everDeployed = true; }
+        if (preAnomaly.flag && !noOpCycle) {
+          if (everDeployed) anomalyHold = preAnomaly;
+          else {
+            logEvent('note', {
+              role: 'system',
+              content: `Anomaly tripwire raised (${preAnomaly.reasons.join('; ')}) but NOT holding: this is the project's first deploy, and holding it would leave nothing serving.`,
+              meta: { anomaly: preAnomaly.reasons, held: false, reason: 'first_deploy' },
+            });
+          }
+        }
       } catch { /* tripwire must not break the finish path */ }
       if (anomalyHold) {
         const detail = `${project.name}: cycle ${cycle.id} looks under-verified — ${anomalyHold.reasons.join('; ')}. Deploy is HELD: review the change record, then press Deploy to release it.`;

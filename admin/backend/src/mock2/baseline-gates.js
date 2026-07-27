@@ -388,6 +388,68 @@ echo "no-dead-controls: every control is reachable, submits, or is honestly disa
 exit 0
 `;
 
+// ---- no-native-dialogs ----
+//
+// A build shipped `prompt("New to-do")`. The browser's own dialog appeared,
+// titled with the raw hostname — "n2.dev.fractionate.ai says" — over an app
+// that had just been styled to a signed-off design. It reads as unfinished,
+// and it is: the shell already ships .modal and .drawer, and the build prompt
+// already says to reuse those classes. Nothing enforced it.
+//
+// alert / confirm / prompt are also BLOCKING and unstyleable, they cannot be
+// themed, and on mobile they look nothing like the app around them.
+export const NO_NATIVE_DIALOGS_GATE_NAME = 'no-native-dialogs';
+
+export const NO_NATIVE_DIALOGS_GATE_SCRIPT = `# Baseline gate (ProxyPilot): no browser alert/confirm/prompt in a built app.
+#
+# NO BACKSLASHES IN THE PATTERNS, on purpose. This script is a JS template
+# literal that becomes a shell script that feeds grep -E: an escape has to
+# survive three layers, and the first version of this gate lost hers — every
+# grep died with "Unmatched ( or \\(" and the gate PASSED EVERYTHING. A false
+# negative is worse than no gate. [(] and [.] are ERE character classes that
+# mean exactly the same thing and cannot be mangled.
+set -u
+FAIL=0
+FILES=$(find public src -type f 2>/dev/null \
+        | grep -E '[.](js|ts|html)$' \
+        | grep -v -E '/(theme|platform|platform-admin|sw|install|build-id|pp-annotate-bridge)[.]js$' \
+        | head -200)
+if [ -z "$FILES" ]; then
+  echo "no-native-dialogs: no app scripts to check. Skipped."
+  exit 0
+fi
+
+for f in $FILES; do
+  [ -f "$f" ] || continue
+  # A CALL, not a mention: the name followed by an opening paren. The leading
+  # class stops it matching a property (obj.confirm(), this.alert()) while
+  # still catching a bare call and the window.-prefixed form.
+  # Comment lines are excluded — a doc block that MENTIONS prompt() is not a
+  # call, and the platform's own dialog helpers describe what they replace.
+  HITS=$(grep -nE '(^|[^.[:alnum:]_$]|window[.])(alert|confirm|prompt)[[:space:]]*[(]' "$f" \
+         | grep -v -E '^[0-9]+:[[:space:]]*([*]|//|#)' \
+         | grep -v -E 'pp[.](alert|confirm|prompt)' \
+         | head -5)
+  if [ -n "$HITS" ]; then
+    echo "FAIL: $f uses a browser dialog:"
+    echo "$HITS" | cut -c1-140 | sed 's/^/        /'
+    FAIL=1
+  fi
+done
+
+if [ "$FAIL" -ne 0 ]; then
+  echo ""
+  echo "      alert() / confirm() / prompt() show the BROWSER's box, titled with the raw"
+  echo "      hostname, ignoring the app's design entirely — and they block the page."
+  echo "      base.css already ships .modal and .drawer. For a value, render a real form"
+  echo "      field in a .modal; for a confirmation, a .modal with two buttons; for a"
+  echo "      message, a .toast."
+  exit 1
+fi
+echo "no-native-dialogs: no browser dialogs. Passed."
+exit 0
+`;
+
 // ---- the registry ----
 
 export const BASELINE_GATES = Object.freeze([
@@ -411,6 +473,10 @@ export const BASELINE_GATES = Object.freeze([
     advisoryIn: [],
   },
   { name: MOBILE_OVERFLOW_GATE_NAME, script: MOBILE_OVERFLOW_GATE_SCRIPT, tier: 'mvp', advisoryIn: [] },
+  // 'mvp' because it is squarely "does the app look and act right", and the
+  // fix is small and local — exactly the kind of thing an MVP build should be
+  // made to do rather than leave for a later pass.
+  { name: NO_NATIVE_DIALOGS_GATE_NAME, script: NO_NATIVE_DIALOGS_GATE_SCRIPT, tier: 'mvp', advisoryIn: [] },
   { name: NO_DEAD_CONTROLS_GATE_NAME, script: NO_DEAD_CONTROLS_GATE_SCRIPT, tier: 'mvp', advisoryIn: [] },
 ]);
 

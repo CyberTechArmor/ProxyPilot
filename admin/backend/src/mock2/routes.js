@@ -2926,6 +2926,7 @@ export function createMock2Router() {
         webPort: project.web_port || 3000,
         path: String(req.query.path || '/'),
         width: Number(req.query.w) || 390,
+        projectId: project.id,
       }),
       new Promise((resolve) => setTimeout(
         () => resolve({ ok: false, error: 'the screenshot machinery did not answer within 100s — check the backend log for the "[mock2] screenshot" stage trail, and restart the backend if it repeats' }),
@@ -3087,6 +3088,7 @@ export function createMock2Router() {
         width: Number(req.body?.w) || 390,
         onStage: (stage) => { job.stage = stage; },
         operatorLogin: login && login.email && login.password ? login : null,
+        projectId: project.id,
       });
       if (shot.ok) { job.state = 'done'; job.buffer = shot.buffer; job.signedOut = !!shot.signedOut; }
       else { job.state = 'error'; job.error = shot.error || 'screenshot failed'; }
@@ -3939,6 +3941,69 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_DESIGN_SKIP', 'mock2_project', req.mock2Project.id,
       { acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.json({ ok: true });
+  });
+
+  // ---- "Is it live?" / Deploy ------------------------------------------------
+  //
+  // Operator report: "the app did not work until redeployed". The build closed
+  // clean, the gates were green, and nothing was serving. The post-build
+  // ensureServing hook now catches that automatically, but the operator still
+  // needs a way to ASK — and a way to fix it — without hunting for the right
+  // cycle in Build history (the cycle-bound /retry-deploy is useless when the
+  // last cycle is old, or when there is no cycle at all).
+  //
+  // GET is the cheap truth (one curl inside the container). POST probes and
+  // deploys only when it has to, which makes double-tapping it harmless.
+  router.get('/projects/:id/serving', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') return res.json({ serving: false, reason: 'the project is not online' });
+    const { probeServing } = await import('./deploy.js');
+    res.set('Cache-Control', 'no-store');
+    res.json(await probeServing(project));
+  });
+
+  router.post('/projects/:id/deploy', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') return res.status(409).json({ error: 'Bring the project online first.' });
+    const busy = listCyclesForProject(project.id, { limit: 20 })
+      .some((c) => ['queued', 'estimating', 'running'].includes(c.status));
+    if (busy) return res.status(409).json({ error: 'A build is running — it deploys when it finishes.' });
+    if (isBaseAppDeploying(project.id)) {
+      return res.status(409).json({ error: 'The base app is already deploying — watch the chat for the result.' });
+    }
+    // `force` is the operator saying "I don't care what the probe says" — the
+    // app answers but is serving something stale. Without it this is a
+    // check-then-fix, so the common case costs one curl.
+    const force = req.body?.force === true;
+    const { ensureServing, probeServing, deployProject } = await import('./deploy.js');
+    logAudit(req.user.id, 'MOCK2_DEPLOY', 'mock2_project', project.id,
+      { force, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    try {
+      if (!force) {
+        const out = await ensureServing(project, { reason: 'operator' });
+        return res.json({
+          ok: out.serving, serving: out.serving, redeployed: out.redeployed, error: out.error || null,
+          message: out.serving
+            ? (out.redeployed ? 'The app was not answering, so it was deployed — it is live now.' : 'The app is already live.')
+            : `The deploy did not bring the app up: ${out.error || 'unknown'}.`,
+        });
+      }
+      const deployed = await deployProject({
+        containerName: project.container_name,
+        webPort: project.web_port || 3000,
+        projectId: project.id,
+      });
+      const after = await probeServing(project);
+      return res.json({
+        ok: !!deployed?.ok && after.serving, serving: after.serving, redeployed: true,
+        error: deployed?.ok ? (after.serving ? null : after.reason) : (deployed?.error || `deploy failed at ${deployed?.step || 'unknown'}`),
+        message: deployed?.ok && after.serving
+          ? 'Deployed — the app is live.'
+          : `The deploy did not bring the app up: ${deployed?.error || after.reason || 'unknown'}.`,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not deploy: ${err?.message || 'unknown error'}` });
+    }
   });
 
   // Retry the base-app deploy (provision-time deploy that failed — e.g. a

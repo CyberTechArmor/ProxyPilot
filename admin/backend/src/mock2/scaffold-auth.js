@@ -519,16 +519,16 @@ function adminJs() {
       .catch(function (err) { box.checked = !box.checked; note('perm-note', err.message, true); });
   });
 
-  document.getElementById('perm-table').addEventListener('click', function (ev) {
+  document.getElementById('perm-table').addEventListener('click', async function (ev) {
     var btn = ev.target;
     if (btn.classList.contains('rename-role')) {
-      var label = window.prompt('New label for role "' + btn.dataset.role + '":');
+      var label = await pp.prompt('New label for role "' + btn.dataset.role + '":');
       if (!label) return;
       api('/api/admin/permissions/roles/' + encodeURIComponent(btn.dataset.role), { method: 'PATCH', body: { label: label } })
         .then(function () { return loadPermissions().then(loadUsers); })
         .catch(function (err) { note('perm-note', err.message, true); });
     } else if (btn.classList.contains('del-role')) {
-      if (!window.confirm('Delete role "' + btn.dataset.role + '"? Users holding it must be moved first.')) return;
+      if (!await pp.confirm('Delete role "' + btn.dataset.role + '"? Users holding it must be moved first.')) return;
       api('/api/admin/permissions/roles/' + encodeURIComponent(btn.dataset.role), { method: 'DELETE' })
         .then(function () { return loadPermissions().then(loadUsers); })
         .catch(function (err) { note('perm-note', err.message, true); });
@@ -602,7 +602,7 @@ function adminJs() {
           : Promise.reject(new Error('no clipboard'));
         return copy
           .then(function () { note('users-note', 'One-time sign-in link copied — send it to the user (chat, email, or SMS). They set a password and are signed in; valid 7 days or until used.'); })
-          .catch(function () { window.prompt('One-time sign-in link — copy and send it to the user:', url); note('users-note', 'Sign-in link generated.'); });
+          .catch(async function () { await pp.prompt('One-time sign-in link — copy and send it to the user:', url); note('users-note', 'Sign-in link generated.'); });
       })
       .catch(function (err) { note('users-note', err.message, true); });
   });

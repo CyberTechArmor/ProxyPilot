@@ -23,7 +23,7 @@
 // PURE (stub-first, risk R9): returns [{ path, content }]. No I/O, no native
 // modules. Terminology (risk R7): nothing here is named "agent".
 
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v2';
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v3';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
@@ -1219,6 +1219,100 @@ function themeJs() {
 /* ---------------------------------------------------------------------------
    Branding client — the sign-in footer and the legal pages.
    --------------------------------------------------------------------------- */
+function platformDialogsJs() {
+  return `
+/* ---- Styled replacements for alert / confirm / prompt ----
+ *
+ * The browser's own dialogs are titled with the raw hostname
+ * ("n2.example.com says"), ignore the app's design completely, and block the
+ * page. A shipped build used prompt() for "New to-do" and it read as
+ * unfinished — fairly, since the shell had just been styled to an approved
+ * design. The no-native-dialogs gate now fails a build that uses them, so the
+ * platform has to provide the alternative rather than just forbid the easy way.
+ *
+ * These use base.css's own .modal/.modal-backdrop, so they inherit the
+ * approved palette for free. All three return a Promise.
+ *
+ *   await pp.alert('Saved')
+ *   if (await pp.confirm('Delete this note?')) …
+ *   const name = await pp.prompt('Name this list')   // null when cancelled
+ */
+(function () {
+  var pp = window.pp || (window.pp = {});
+
+  function dialog(opts) {
+    return new Promise(function (resolve) {
+      var backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      var box = document.createElement('div');
+      box.className = 'modal';
+      box.setAttribute('role', 'dialog');
+      box.setAttribute('aria-modal', 'true');
+
+      var msg = document.createElement('p');
+      msg.textContent = opts.message || '';
+      msg.style.cssText = 'margin:0 0 14px;font-weight:600';
+      box.appendChild(msg);
+
+      var input = null;
+      if (opts.kind === 'prompt') {
+        input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'input';
+        input.value = opts.value || '';
+        input.style.cssText = 'width:100%;margin-bottom:14px';
+        box.appendChild(input);
+      }
+
+      var row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap';
+      function close(value) {
+        document.removeEventListener('keydown', onKey);
+        backdrop.remove();
+        resolve(value);
+      }
+      if (opts.kind !== 'alert') {
+        var cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'btn subtle';
+        cancel.textContent = opts.cancelText || 'Cancel';
+        cancel.style.minHeight = '44px';
+        cancel.addEventListener('click', function () { close(opts.kind === 'prompt' ? null : false); });
+        row.appendChild(cancel);
+      }
+      var ok = document.createElement('button');
+      ok.type = 'button';
+      ok.className = 'btn';
+      ok.textContent = opts.okText || 'OK';
+      ok.style.minHeight = '44px';
+      ok.addEventListener('click', function () {
+        close(opts.kind === 'prompt' ? (input.value || '') : true);
+      });
+      row.appendChild(ok);
+      box.appendChild(row);
+
+      function onKey(e) {
+        if (e.key === 'Escape') close(opts.kind === 'prompt' ? null : false);
+        if (e.key === 'Enter' && opts.kind === 'prompt') ok.click();
+      }
+      document.addEventListener('keydown', onKey);
+      backdrop.addEventListener('click', function (e) {
+        if (e.target === backdrop) close(opts.kind === 'prompt' ? null : false);
+      });
+
+      backdrop.appendChild(box);
+      document.body.appendChild(backdrop);
+      (input || ok).focus();
+    });
+  }
+
+  pp.alert = function (message, okText) { return dialog({ kind: 'alert', message: message, okText: okText }); };
+  pp.confirm = function (message, okText) { return dialog({ kind: 'confirm', message: message, okText: okText || 'Confirm' }); };
+  pp.prompt = function (message, value, okText) { return dialog({ kind: 'prompt', message: message, value: value, okText: okText || 'Save' }); };
+})();
+`;
+}
+
 function platformClientJs() {
   return `'use strict';
 /* Branding + legal pages (client).
@@ -1624,7 +1718,7 @@ function platformAdminJs() {
     } catch (e) { note('pf-page-note', e.message, true); }
   });
   $('pf-page-reset').addEventListener('click', async function () {
-    if (!window.confirm('Replace this page with the generic starting text?')) return;
+    if (!await pp.confirm('Replace this page with the generic starting text?')) return;
     try {
       await api('/branding/pages/' + currentSlug + '/reset', { method: 'POST' });
       await loadBranding();
@@ -1652,7 +1746,7 @@ function platformAdminJs() {
       var del = document.createElement('button');
       del.className = 'btn subtle sm'; del.textContent = 'Remove';
       del.addEventListener('click', async function () {
-        if (!window.confirm('Remove "' + a.name + '"?')) return;
+        if (!await pp.confirm('Remove "' + a.name + '"?')) return;
         try { await api('/branding/assets/' + a.id, { method: 'DELETE' }); await loadBranding(); }
         catch (e) { note('pf-assets-note', e.message, true); }
       });
@@ -1698,7 +1792,7 @@ function platformAdminJs() {
           var b = document.createElement('button');
           b.className = 'btn subtle sm'; b.textContent = 'Revoke';
           b.addEventListener('click', async function () {
-            if (!window.confirm('Revoke "' + k.name + '"? Anything using it stops working immediately.')) return;
+            if (!await pp.confirm('Revoke "' + k.name + '"? Anything using it stops working immediately.')) return;
             try { await api('/api-keys/' + k.id, { method: 'DELETE' }); await loadKeys(); }
             catch (e) { note('pf-keys-note', e.message, true); }
           });
@@ -1767,7 +1861,7 @@ export function buildPlatformFiles() {
     { path: 'src/platform/readonly.ts', content: readonlyTs() },
     { path: 'migrations/0100_platform.sql', content: platformMigrationSql() },
     { path: 'public/theme.js', content: themeJs() },
-    { path: 'public/platform.js', content: platformClientJs() },
+    { path: 'public/platform.js', content: platformClientJs() + platformDialogsJs() },
     { path: 'public/platform-admin.js', content: platformAdminJs() },
   ];
 }

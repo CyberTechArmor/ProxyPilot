@@ -56,6 +56,7 @@ import {
 import { insertCycleEvent, listRecentDownNotes } from './cycle-events.js';
 import { listAssets } from './project-assets.js';
 import { buildAssetSection, diffAssetFingerprint, buildAssetChangeSection } from './project-assets-logic.js';
+import { buildDesignFindingsBrief, markDesignFindingsBriefed } from './design-findings.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
 } from './authorizations.js';
@@ -961,6 +962,17 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // flagged mistake is corrected once, not re-flagged build after build.
   let feedbackSection = '';
   try { feedbackSection = buildFeedbackSection(listRecentDownNotes(projectId)); } catch { /* optional */ }
+  // What the last look at the RUNNING app found and nobody has fixed. Until
+  // this rode the task turn, the design review's critique lived exactly as long
+  // as the chat message it was posted in — the next build started from the same
+  // mockup with no idea the app had been looked at.
+  let designFindingsSectionText = '';
+  let designFindingKeys = [];
+  try {
+    const brief = await buildDesignFindingsBrief(getProject(projectId));
+    designFindingsSectionText = brief.section;
+    designFindingKeys = brief.keys;
+  } catch { /* optional */ }
   // Reference material the operator collected for this project (logos, copy,
   // brand notes, screenshots). Subordinate to the instruction, and empty when
   // the library is — a project with no assets pays nothing for this.
@@ -1003,7 +1015,14 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // the inventory/instruction still outrank it where they explicitly
   // deviate. Full builds are unchanged (their interview owns the rules).
   const rulesFloor = mvpBuild ? crudRulesFloorSection() : '';
-  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${rulesFloor}${feedbackSection}${assetSection}${assetChangeSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
+  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${rulesFloor}${feedbackSection}${designFindingsSectionText}${assetSection}${assetChangeSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
+  // Counted here rather than at read time: the count means "builds that were
+  // told and shipped anyway", and a run that died before its first turn was
+  // never told anything.
+  if (designFindingKeys.length) {
+    markDesignFindingsBriefed(getProject(projectId), designFindingKeys)
+      .catch((e) => console.warn('[mock2] design findings marking failed:', e?.message));
+  }
   if (taskImages.length) logEvent('attachments', { role: 'user', content: `${taskImages.length} image attachment(s) included with the task`, meta: { count: taskImages.length } });
   // Stub-registry context (B.6): EVERY cycle receives a concise global list of
   // unresolved production simulations, so a later instruction-scoped cycle can no

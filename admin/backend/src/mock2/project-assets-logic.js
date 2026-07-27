@@ -358,3 +358,55 @@ export function buildAssetChangeSection(diff) {
     + 'section is only about what is NEW, because that is the part nothing has acted on yet. If a '
     + 'change genuinely affects no screen, say so in your summary rather than silently dropping it.';
 }
+
+/* ---------------------------------------------------------------------------
+   PINNING A REFERENCE THE OPERATOR PASTED INTO THE DESIGN CHAT.
+
+   Images attached to a design-chat turn already reach that turn's mockup
+   render — and only that turn's. The library, by contrast, is fed to EVERY
+   render (selectMockupImages above), so the same three screenshots pasted into
+   the chat once are gone by the next iteration while three uploaded to the
+   library are seen forever. Nothing bridged the two, so the highest-leverage
+   input the product has — "here is what I want it to look like" — was the one
+   with the shortest memory.
+
+   An image pasted into the DESIGN chat is a design reference by construction:
+   that is what the design chat is for. So it is mirrored into the library,
+   tagged `reference`, pinned (the operator saying "this one matters" — which
+   is precisely what pasting it was), and deduplicated by content so pasting the
+   same picture on three turns does not spend the render's image budget on three
+   copies of it.
+
+   Pure: decides WHICH attachments to mirror and what to call them. The caller
+   reads the bytes and writes the rows.
+   -------------------------------------------------------------------------- */
+
+// How many chat references one turn may add. A design conversation can carry a
+// lot of screenshots; the library is a standing input to every future render,
+// not a scratchpad, and the render only ever looks at the top few anyway.
+export const MAX_CHAT_REFERENCES_PER_TURN = 4;
+
+// planReferencePins(attachments, { alreadyPresent }) → the ones to add.
+// `alreadyPresent` is the caller's content-identity answer per attachment id
+// (a Set of ids the library already has), so this stays free of I/O.
+export function planReferencePins(attachments = [], { alreadyPresent = new Set() } = {}) {
+  return (Array.isArray(attachments) ? attachments : [])
+    .filter((a) => a && a.id && !alreadyPresent.has(a.id))
+    .slice(0, MAX_CHAT_REFERENCES_PER_TURN)
+    .map((a, i) => ({
+      id: a.id,
+      // A name that says where it came from: an operator opening the library a
+      // week later should not have to guess what "IMG_4821.jpg" was for.
+      name: a.name || `design-reference-${i + 1}.${String(a.id).split('.').pop() || 'jpg'}`,
+      tag: 'reference',
+      body: 'Pasted into the design chat as a visual reference.',
+    }));
+}
+
+// The one line posted when references were pinned. Silent when none were —
+// re-pasting the same screenshot should not announce itself every turn.
+export function referencePinNote(pinned = []) {
+  const n = (Array.isArray(pinned) ? pinned : []).length;
+  if (!n) return '';
+  return `Kept ${n} reference image${n === 1 ? '' : 's'} in this project's library, pinned — every later mockup render will see ${n === 1 ? 'it' : 'them'}, not just this turn. Remove ${n === 1 ? 'it' : 'them'} from Assets if that is not what you wanted.`;
+}

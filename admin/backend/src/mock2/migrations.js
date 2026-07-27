@@ -1670,4 +1670,26 @@ export const MOCK2_MIGRATIONS = [
       d.exec('ALTER TABLE mock2_projects ADD COLUMN assets_fingerprint TEXT;');
     },
   },
+  {
+    // A design preset carried TOKENS and nothing else, so "our house style"
+    // could not be saved: the components that make a look a look, how fast the
+    // interface moves, and the reference images the operator collected all had
+    // to be re-derived on every project. The second app started from the same
+    // defaults as the first however much was learned building it.
+    //
+    // components_css  — the component block a preset contributes to design.css.
+    // references_json — reference images kept WITH the preset (bytes on disk
+    //                   under the asset root, like every other image here);
+    //                   copied into a new project's library at creation, where
+    //                   the mockup render already reads them.
+    //
+    // Additive: two nullable columns. Motion needs no column — it is part of
+    // tokens_json, which is schemaless by design.
+    version: 549,
+    name: 'mock2_design_presets_components_and_references',
+    up: (d) => {
+      d.exec('ALTER TABLE mock2_design_presets ADD COLUMN components_css TEXT;');
+      d.exec('ALTER TABLE mock2_design_presets ADD COLUMN references_json TEXT;');
+    },
+  },
 ];

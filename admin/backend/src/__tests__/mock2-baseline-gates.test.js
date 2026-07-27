@@ -429,7 +429,12 @@ test('the token bridge covers EVERY variable the shell reads', () => {
   const shell = baseCss() + PLATFORM_CSS;
   const declared = new Set([...design.matchAll(/(?:^|[;{\s])(--[a-z0-9-]+)\s*:/gi)].map((m) => m[1].toLowerCase()));
   const read = new Set([...shell.matchAll(/var\(\s*(--[a-z0-9-]+)/gi)].map((m) => m[1].toLowerCase()));
-  const missing = [...read].filter((v) => !declared.has(v));
+  // --i is a PER-ELEMENT input, not a design token: .stagger reads it off each
+  // row (style="--i:3") to order that row's entrance. It is declared by the
+  // markup, never by the design, so requiring the design to declare it would
+  // be asking the palette to know how many rows a list has.
+  const PER_ELEMENT = new Set(['--i']);
+  const missing = [...read].filter((v) => !declared.has(v) && !PER_ELEMENT.has(v));
   assert.deepEqual(missing, [], 'every shell variable resolves from the approved design');
   assert.ok(read.size >= 20, `the shell really does read that many (${read.size})`);
 });
@@ -940,6 +945,62 @@ test('design-adherence: full adoption passes clean; partial adoption passes and 
   // Still red when it is actually red: nothing adopted either way.
   const none = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({ adoptClasses: 0, useVars: 0 }));
   assert.equal(none.code, 1, 'no adoption at all is still a failure, not a partial');
+});
+
+test('design-adherence: inventing an element is growth when it is built from the design system', () => {
+  // The gate used to have exactly ONE class number — how much of the mockup's
+  // vocabulary appears in the markup — so a build that thought of a better
+  // element scored the same as one that ignored the design, and a build that
+  // traced the mockup scored best of all. The mockup is approved at the moment
+  // the operator has seen the least; a system that cannot grow past it freezes
+  // there.
+  const withOwn = (n, hardcoded) => {
+    const own = Array.from({ length: n }, (_, i) => (hardcoded
+      ? `.mine${i}{color:#${(0xcc3300 + i * 13).toString(16)};background:#${(0x223344 + i * 17).toString(16)}}`
+      // The SAME approved variables the fixture already uses, so this tests the
+      // vocabulary rule and not an accidental jump in variable adoption.
+      : `.mine${i}{color:var(--tok0${i % 8});border:1px solid var(--tok0${(i + 1) % 8})}`)).join('\n');
+    const f = designFixture({ classes: 20, adoptClasses: 8, vars: 20, useVars: 8 });
+    return { ...f, 'public/app.css': `${f['public/app.css']}\n${own}` };
+  };
+
+  // Token-clean invention: still under half the approved vocabulary (so the
+  // honesty report stands), but named as growth rather than as a shortfall.
+  const growth = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, withOwn(6, false));
+  assert.equal(growth.code, 0, `growth must never block:\n${growth.out}`);
+  assert.match(growth.out, /the design system growing, not drifting/);
+  assert.match(growth.out, /promote the/i, 'and point at how it becomes permanent');
+  assert.doesNotMatch(growth.out, /may look\s+right while the rest of the app does not/,
+    'a build that extended the system must not be read the drift message');
+
+  // The same shape with the colours typed in is the other story entirely.
+  const drift = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, withOwn(14, true));
+  assert.doesNotMatch(drift.out, /growing, not drifting/, 'hardcoded invention is not growth');
+
+  // The count is reported either way — nothing is hidden, and it survives the
+  // cycle report, which keeps a gate's LAST THREE LINES.
+  for (const r of [growth, drift]) {
+    assert.match(r.out, /the build defines \d+ of its own/);
+  }
+  assert.match(growth.out.trim().split('\n').slice(-3).join('\n'), /of the build's own/);
+});
+
+test("design-adherence: inventing elements forfeits the \"I use their components\" waiver", () => {
+  // The waiver is real and earned: an app consuming the design through its
+  // COMPONENTS may write almost no CSS and be entirely faithful. But a build
+  // that defined a dozen elements of its own is not living inside the mockup's
+  // vocabulary, and letting it claim so is how the colours get typed in while
+  // the gate stays green.
+  const base = designFixture({ classes: 20, adoptClasses: 20, vars: 40, useVars: 8 });
+  const invented = Array.from({ length: 12 }, (_, i) => `.own-thing${i}{color:#${(0xdd4400 + i * 19).toString(16)};background:rgb(${i},${i + 9},${i + 3})}`).join('\n');
+  const hard = Array.from({ length: 24 }, (_, i) => `.h${i}{border-color:#${(0xab1200 + i * 23).toString(16)}}`).join('\n');
+  const r = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, {
+    ...base,
+    'public/app.css': `${base['public/app.css']}\n${invented}\n${hard}`,
+  });
+  assert.equal(r.code, 1, `hardcoded colours across invented elements must fail:\n${r.out}`);
+  assert.match(r.out, /hardcoded colours/);
+  assert.match(r.out, /New elements are welcome/, 'and the message must say how to do it right');
 });
 
 test('design-adherence: PARTIAL is reported as a pass, and a no-design skip as a skip', async () => {

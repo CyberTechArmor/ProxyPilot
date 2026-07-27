@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
   DESIGN_PRESETS, DESIGN_PRESET_AI, DEFAULT_DESIGN_PRESET, getDesignPreset,
   normalizeDesignPresetKey, publicDesignPresets, buildDesignPresetSeedFiles, applyDesignPreset,
+  parseDesignDoc, DESIGN_DOC_FORMAT, setCustomPresets,
 } from '../mock2/design-presets.js';
 import { parseDesignTokens, renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH } from '../mock2/concept-logic.js';
 import { buildSeedFiles } from '../mock2/template.js';
@@ -96,4 +97,59 @@ test('publicDesignPresets: picker shape with tokens for swatches', () => {
     assert.ok(p.key && p.name && p.description);
     assert.ok(p.tokens?.colors?.primary);
   }
+});
+
+/* ---- a preset is a LOOK, not a palette (components, motion, references) ---- */
+
+test('a preset carries the components that make the look, not only its colours', () => {
+  // Tokens alone are a palette. What makes a look a look is the components —
+  // the card, the row, the chip — and a preset that could not carry them meant
+  // every project re-derived the same house style from scratch, however much
+  // was learned building the last one.
+  const doc = {
+    format: DESIGN_DOC_FORMAT, name: 'House', key: 'house',
+    tokens: { colors: DESIGN_PRESETS[0].tokens.colors },
+    components_css: '.house-card { background: var(--app-surface); border-radius: var(--app-radius-lg); }',
+  };
+  const parsed = parseDesignDoc(doc);
+  assert.equal(parsed.ok, true, parsed.error);
+  assert.match(parsed.data.componentsCss, /house-card/);
+
+  // And the block reaches a project seeded from it — otherwise it is stored
+  // and never applied, which is worse than not storing it.
+  setCustomPresets([{ ...parsed.data }]);
+  try {
+    const seeded = buildDesignPresetSeedFiles('house').find((f) => f.path === DESIGN_CSS_PATH);
+    assert.match(seeded.content, /house-card/, 'the component block must reach state/design.css');
+    assert.match(seeded.content, /--app-surface:/, 'and it still carries the rendered tokens');
+    assert.ok(seeded.content.indexOf('--app-surface:') < seeded.content.indexOf('house-card'),
+      'components come AFTER the tokens they are written on');
+  } finally { setCustomPresets([]); }
+});
+
+test('an uploaded component block cannot phone home or ship an app', () => {
+  // A preset's CSS is served to every user of every app seeded from it. The two
+  // things that turn a stylesheet into a network request are refused outright
+  // rather than stripped: silently altering someone's stylesheet is how they
+  // end up debugging a look they did not write.
+  const base = { format: DESIGN_DOC_FORMAT, name: 'Xy', key: 'xy', tokens: { colors: DESIGN_PRESETS[0].tokens.colors } };
+  assert.match(parseDesignDoc({ ...base, components_css: '@import url("//evil/x.css");' }).error, /@import/);
+  assert.match(parseDesignDoc({ ...base, components_css: '.a{background:url(https://evil/x.png)}' }).error, /remote URL/);
+  assert.match(parseDesignDoc({ ...base, components_css: '.a{}<script>x</script>' }).error, /markup, not CSS/);
+  assert.match(parseDesignDoc({ ...base, components_css: '.a{}'.repeat(40_000) }).error, /the limit is/);
+  // A local asset reference is fine — that is an ordinary design.
+  assert.equal(parseDesignDoc({ ...base, components_css: '.a{background:url(/assets/x.png)}' }).ok, true);
+});
+
+test('a preset with no component block is still a valid preset', () => {
+  // Every design document written before this existed must keep working.
+  const r = parseDesignDoc({ format: DESIGN_DOC_FORMAT, name: 'Plain', key: 'plain', tokens: { colors: DESIGN_PRESETS[0].tokens.colors } });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.data.componentsCss, '');
+  setCustomPresets([{ ...r.data }]);
+  try {
+    const seeded = buildDesignPresetSeedFiles('plain').find((f) => f.path === DESIGN_CSS_PATH);
+    assert.ok(seeded.content.length > 100);
+    assert.doesNotMatch(seeded.content, /==preset-components==/);
+  } finally { setCustomPresets([]); }
 });

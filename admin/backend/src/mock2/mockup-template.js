@@ -48,6 +48,65 @@ export const MOCKUP_TOKENS = Object.freeze({
   }),
 });
 
+// MOTION — the fourth axis of the design system, after colour, type and space.
+//
+// It did not exist here, which meant a mockup had no approved way to move and a
+// build that animated anyway was inventing vocabulary the adherence gate then
+// counted against it. Three durations and three easings is the whole language:
+// enough to make a panel arrive rather than appear, and small enough that every
+// screen in an app moves at the same speed.
+//
+// Theme-independent on purpose — motion does not have a light and a dark value.
+export const MOCKUP_MOTION = Object.freeze({
+  // Fast is for a control acknowledging a press; base for anything entering or
+  // leaving; slow only for something crossing the whole viewport.
+  'dur-fast': '120ms',
+  'dur-base': '200ms',
+  'dur-slow': '320ms',
+  // Standard for a state change in place. Entrance decelerates (arrives and
+  // settles); exit accelerates (leaves without asking to be watched).
+  'ease-standard': 'cubic-bezier(.2,0,0,1)',
+  'ease-entrance': 'cubic-bezier(0,0,0,1)',
+  'ease-exit': 'cubic-bezier(.3,0,1,1)',
+});
+
+// The motion variables + the utility classes that consume them. Kept OUTSIDE
+// the ==tokens== fence because that fence is defined as the only place hex may
+// appear and there are no colours here — the rogue-hex check strips it, so
+// anything inside it is unexamined.
+//
+// The classes exist so movement is something a mockup SELECTS rather than
+// hand-rolls: a screen writes class="enter", not its own keyframes with its own
+// timing. That is what makes an app move at one speed.
+export function mockupMotionCss(motion = MOCKUP_MOTION) {
+  const vars = Object.entries(motion).map(([k, v]) => `  --${k}: ${v};`).join('\n');
+  return `/* ==motion== */
+:root {
+${vars}
+}
+@keyframes pp-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes pp-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pp-pulse { 50% { opacity: .55; } }
+/* Something arriving: a panel, a row appended to a list, a toast. */
+.enter { animation: pp-enter var(--dur-base) var(--ease-entrance) both; }
+.enter-fade { animation: pp-fade var(--dur-base) var(--ease-entrance) both; }
+/* A list arriving in order rather than all at once. Set --i per row (the 8th
+   row and beyond share a delay — a stagger you can count is a stagger too long). */
+.stagger > * { animation: pp-enter var(--dur-base) var(--ease-entrance) both; animation-delay: calc(min(var(--i, 0), 7) * 40ms); }
+/* A control acknowledging the press. Nothing here moves layout. */
+.press { transition: transform var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard); }
+.press:active { transform: scale(.97); }
+/* Drawing the eye ONCE to something that just changed. Never a loop — a thing
+   that pulses forever is a thing you stop seeing. */
+.pulse-once { animation: pp-pulse var(--dur-slow) var(--ease-standard) 1; }
+@media (prefers-reduced-motion: reduce) {
+  .enter, .enter-fade, .stagger > *, .pulse-once { animation: none; }
+  .press { transition: none; }
+  .press:active { transform: none; }
+}
+/* ==/motion== */`;
+}
+
 // The two token blocks, generated from MOCKUP_TOKENS so markdown/prompt/checks
 // share one source. The ==tokens== markers let the verification checks find
 // the ONLY region where hex literals are allowed.
@@ -71,6 +130,7 @@ ${stageVars('dark')}
 // The base stylesheet a mockup includes VERBATIM as the start of its <style>.
 // Everything below the token blocks routes through var(--…) — zero hex.
 export const MOCKUP_BASE_CSS = `${mockupTokenCss()}
+${mockupMotionCss()}
 html { background: var(--bg); }
 body {
   margin: 0; background: var(--bg); color: var(--text-1);

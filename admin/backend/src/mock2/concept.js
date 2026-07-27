@@ -38,12 +38,12 @@ import {
   insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
 } from './cycles.js';
 import { acquireLock, releaseLock, touchLock } from './locks.js';
-import { listAssets, hydrateMockupAssetImages } from './project-assets.js';
-import { buildMockupAssetSection, summarize as summarizeAssets } from './project-assets-logic.js';
+import { listAssets, hydrateMockupAssetImages, addImage, updateAsset, findAssetByBytes } from './project-assets.js';
+import { buildMockupAssetSection, summarize as summarizeAssets, planReferencePins, referencePinNote } from './project-assets-logic.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import { insertMessage, listMessages, getOrCreateChat } from './chats.js';
-import { saveChatImages, hydrateAttachments, hydrateChatMessagesForModel } from './chat-images.js';
+import { saveChatImages, readChatImage, hydrateAttachments, hydrateChatMessagesForModel } from './chat-images.js';
 import {
   CONCEPT_CHAT_TOOLS, buildConceptChatSystemPrompt, buildMockupSystemPrompt, buildMockupTask,
   buildInventoryExtractionPrompt, buildInventoryExtractionTask,
@@ -432,6 +432,40 @@ export async function importDesignTemplate({ project, template, notes = '', sour
   return { ok: true, mockupId, record };
 }
 
+// pinChatReferences — mirror a design turn's attachments into the project's
+// asset library, tagged `reference` and pinned.
+//
+// Content-deduplicated, so the operator who pastes the same screenshot on three
+// turns gets one library entry rather than three copies competing for the
+// render's image budget. Best-effort throughout: a failed pin must never fail
+// the turn the operator actually asked for.
+function pinChatReferences(projectId, attachments, userId) {
+  const existing = new Set();
+  const buffers = new Map();
+  for (const a of attachments) {
+    const img = readChatImage(projectId, a.id);
+    if (!img?.buffer?.length) continue;
+    buffers.set(a.id, img.buffer);
+    if (findAssetByBytes(projectId, img.buffer)) existing.add(a.id);
+  }
+  const pinned = [];
+  for (const plan of planReferencePins(attachments, { alreadyPresent: existing })) {
+    const buffer = buffers.get(plan.id);
+    if (!buffer) continue;
+    const added = addImage({
+      projectId, name: plan.name, buffer, tag: plan.tag, body: plan.body, createdBy: userId,
+    });
+    if (!added.ok) continue;
+    // Pinned separately: addImage inserts unpinned, and "the operator handed me
+    // this picture" is exactly what the pin flag means.
+    updateAsset({ projectId, id: added.asset.id, pinned: true });
+    pinned.push(added.asset);
+  }
+  const note = referencePinNote(pinned);
+  if (note) insertMessage({ projectId, kind: 'system', body: note });
+  return pinned;
+}
+
 // ---- a concept chat turn ----
 
 // startConceptTurn — the Builder sent a chat message. Synchronous setup (lock,
@@ -469,6 +503,16 @@ export async function startConceptTurn({ project, message, user, actingAsAdmin =
   let attachments = [];
   try { attachments = saveChatImages(projectId, images); } catch (e) { console.warn('[mock2] chat image save failed:', e?.message); }
   const userMessage = insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: message, attachments });
+
+  // KEEP the references. An image attached to a design turn reached only THAT
+  // turn's render, while the asset library is read by every render — so the
+  // strongest input the product has ("here is what I want it to look like") had
+  // the shortest memory in it, and an operator who pasted three screenshots
+  // watched the next iteration forget them. Pasting a picture into the design
+  // chat IS pinning a reference; this makes the product agree.
+  if (turnMode === 'design' && attachments.length) {
+    try { pinChatReferences(projectId, attachments, user.id); } catch (e) { console.warn('[mock2] reference pin failed:', e?.message); }
+  }
 
   // Quota check (R5 — a concept turn spends on chat + mockup). refused_quota is a
   // real terminal cycle status.

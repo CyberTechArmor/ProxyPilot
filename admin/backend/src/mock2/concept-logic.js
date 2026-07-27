@@ -546,6 +546,11 @@ RE-VALUE the custom properties inside the ==tokens== blocks (same property
 names, new values, BOTH themes, kept AA ≥ 4.5:1 — adjust lightness within-hue
 if needed, especially --text-3 and stage-badge text on dark surfaces). Never
 bypass var(--…) and never hard-code a hex color outside the ==tokens== blocks.
+The ==motion== block is the same contract for movement: SELECT motion with the
+shipped classes (.enter, .enter-fade, .stagger with --i per row, .press,
+.pulse-once) rather than writing your own @keyframes or timings, and re-value
+--dur-*/--ease-* if the look calls for a different pace. A screen that moves at
+its own speed is how an app ends up feeling like five apps.
 
 ${MOCKUP_BASE_CSS}
 
@@ -1139,13 +1144,24 @@ Output ONLY a JSON object (no markdown, no code fences, no commentary) with this
   "typography": { "fontFamily": "a CSS font stack", "headingFamily": "a CSS font stack", "baseSize": "16px" },
   "radius": { "sm": "6px", "md": "10px", "lg": "16px" },
   "spacing": { "unit": "8px" },
-  "shadow": { "card": "a CSS box-shadow value" }
+  "shadow": { "card": "a CSS box-shadow value" },
+  "motion": {
+    "durationFast": "120ms", "durationBase": "200ms", "durationSlow": "320ms",
+    "easingStandard": "cubic-bezier(0.2,0,0,1)",
+    "easingEntrance": "cubic-bezier(0,0,0,1)",
+    "easingExit": "cubic-bezier(0.3,0,1,1)"
+  }
 }
 
 Rules:
 - Every color is a #RRGGBB hex. Read the ACTUAL values from the mockup's CSS; if a
   value isn't present, pick the closest sensible token consistent with the rest.
 - Sizes are a number + a CSS unit (px/rem). Font families are valid CSS font stacks.
+- Motion: read the mockup's --dur-* / --ease-* values if it defines them. Durations
+  are a number + ms/s and must be under 1s — an interface is not a title sequence.
+  Easings are a CSS keyword or a cubic-bezier(). Fast = a control acknowledging a
+  press, base = anything entering or leaving, slow = something crossing the
+  viewport. If the mockup shows no motion, return the values above unchanged.
 - Return the JSON object only.`;
 }
 
@@ -1160,6 +1176,26 @@ function safeHex(v, fallback) { const s = String(v || '').trim(); return HEX.tes
 function safeSize(v, fallback) { const s = String(v || '').trim(); return /^-?\d{1,4}(\.\d{1,3})?(px|rem|em|%)$/.test(s) ? s : fallback; }
 function safeFont(v, fallback) { const s = String(v || '').trim(); return /^[a-zA-Z0-9 ,"'\-]{1,120}$/.test(s) ? s : fallback; }
 function safeShadow(v, fallback) { const s = String(v || '').trim(); return /^[a-zA-Z0-9 ,.()#%\-]{1,120}$/.test(s) ? s : fallback; }
+// Motion. A duration is a number + ms/s and is CLAMPED as well as validated:
+// a 4-second entrance is valid CSS and a broken interface.
+function safeDuration(v, fallback) {
+  const s = String(v || '').trim();
+  const m = s.match(/^(\d{1,5}(?:\.\d{1,3})?)(ms|s)$/);
+  if (!m) return fallback;
+  const ms = Number(m[1]) * (m[2] === 's' ? 1000 : 1);
+  if (!Number.isFinite(ms) || ms < 0 || ms > 1000) return fallback;
+  return s;
+}
+// `.3` with no leading zero is valid CSS and is exactly what the mockup
+// template emits, so a grammar that demands the zero rejects the platform's own
+// easings and silently replaces an approved design's motion with the defaults.
+const BEZIER_N = '-?(?:\\d(?:\\.\\d{1,4})?|\\.\\d{1,4})';
+const BEZIER_RE = new RegExp(`^cubic-bezier\\(\\s*${BEZIER_N}\\s*(?:,\\s*${BEZIER_N}\\s*){3}\\)$`);
+function safeEasing(v, fallback) {
+  const s = String(v || '').trim();
+  if (/^(linear|ease|ease-in|ease-out|ease-in-out)$/.test(s)) return s;
+  return BEZIER_RE.test(s) ? s : fallback;
+}
 
 const DEFAULT_TOKENS = Object.freeze({
   colors: {
@@ -1171,6 +1207,16 @@ const DEFAULT_TOKENS = Object.freeze({
   radius: { sm: '6px', md: '10px', lg: '16px' },
   spacing: { unit: '8px' },
   shadow: { card: '0 1px 3px rgba(0,0,0,0.1)' },
+  // Motion is a token like colour: approved at design time, measured by the
+  // adherence gate, free at build time. Before this existed the design system
+  // had no way to say how the app moves, so every build either invented its own
+  // timings or shipped an interface where nothing acknowledges anything.
+  motion: {
+    durationFast: '120ms', durationBase: '200ms', durationSlow: '320ms',
+    easingStandard: 'cubic-bezier(0.2,0,0,1)',
+    easingEntrance: 'cubic-bezier(0,0,0,1)',
+    easingExit: 'cubic-bezier(0.3,0,1,1)',
+  },
 });
 
 // parseDesignTokens — parse + sanitise the extractor's output. Tolerant of fences
@@ -1189,6 +1235,7 @@ export function parseDesignTokens(text) {
   const r = (doc && typeof doc === 'object' && doc.radius) || {};
   const sp = (doc && typeof doc === 'object' && doc.spacing) || {};
   const sh = (doc && typeof doc === 'object' && doc.shadow) || {};
+  const mo = (doc && typeof doc === 'object' && doc.motion) || {};
   const tokens = {
     colors: {
       background: safeHex(c.background, d.colors.background),
@@ -1211,6 +1258,14 @@ export function parseDesignTokens(text) {
     radius: { sm: safeSize(r.sm, d.radius.sm), md: safeSize(r.md, d.radius.md), lg: safeSize(r.lg, d.radius.lg) },
     spacing: { unit: safeSize(sp.unit, d.spacing.unit) },
     shadow: { card: safeShadow(sh.card, d.shadow.card) },
+    motion: {
+      durationFast: safeDuration(mo.durationFast, d.motion.durationFast),
+      durationBase: safeDuration(mo.durationBase, d.motion.durationBase),
+      durationSlow: safeDuration(mo.durationSlow, d.motion.durationSlow),
+      easingStandard: safeEasing(mo.easingStandard, d.motion.easingStandard),
+      easingEntrance: safeEasing(mo.easingEntrance, d.motion.easingEntrance),
+      easingExit: safeEasing(mo.easingExit, d.motion.easingExit),
+    },
   };
   return { ok: !!doc, tokens, error: doc ? null : 'design tokens were not valid JSON — using defaults' };
 }
@@ -1220,6 +1275,7 @@ export function parseDesignTokens(text) {
 // app matches the approved mockup. Pure + safe (values pre-sanitised).
 export function renderDesignTokensCss(tokens = DEFAULT_TOKENS) {
   const c = tokens.colors; const t = tokens.typography; const r = tokens.radius; const sh = tokens.shadow;
+  const mo = tokens.motion || DEFAULT_TOKENS.motion;
   return `/* Generated from the approved mockup on design approval. The built app MUST
    reproduce this look — these are the design tokens the mockup used. */
 :root {
@@ -1241,6 +1297,12 @@ export function renderDesignTokensCss(tokens = DEFAULT_TOKENS) {
   --app-radius-md: ${r.md};
   --app-radius-lg: ${r.lg};
   --app-shadow-card: ${sh.card};
+  --app-dur-fast: ${mo.durationFast};
+  --app-dur-base: ${mo.durationBase};
+  --app-dur-slow: ${mo.durationSlow};
+  --app-ease-standard: ${mo.easingStandard};
+  --app-ease-entrance: ${mo.easingEntrance};
+  --app-ease-exit: ${mo.easingExit};
 }
 body { background: var(--app-bg); color: var(--app-text); font-family: var(--app-font); font-size: var(--app-base-size); }
 h1, h2, h3, h4 { font-family: var(--app-heading-font); color: var(--app-text); }
@@ -1286,13 +1348,21 @@ export function extractMockupStyles(html) {
   return out.join('\n\n');
 }
 
-// Split the stylesheet into its fenced token block and everything else.
+// Split the stylesheet into its fenced token blocks and everything else.
 // `tokens` is '' when the mockup predates the markers — the caller then falls
 // back to the generated stylesheet rather than shipping a design with no
 // palette at all.
+//
+// BOTH fences count as tokens: ==tokens== (colour, which is also the only place
+// hex may appear) and ==motion== (durations, easings and the utility classes
+// that consume them). They are separate fences because only one of them is
+// about colour, and they are one `tokens` value here because the bridge builds
+// itself from what the token half DEFINES — leaving motion on the components
+// side meant the shell's motion variables resolved from nothing and every
+// approved design's pace stopped at the edge of the screens the build wrote.
 export function splitMockupCss(css) {
   const text = String(css || '');
-  const fence = /\/\*\s*==tokens==[\s\S]*?==\/tokens==\s*\*\//g;
+  const fence = /\/\*\s*==tokens==[\s\S]*?==\/tokens==\s*\*\/|\/\*\s*==motion==\s*\*\/[\s\S]*?\/\*\s*==\/motion==\s*\*\//g;
   const tokens = (text.match(fence) || []).join('\n\n');
   const components = text.replace(fence, '').trim();
   return { tokens: tokens.trim(), components };
@@ -1348,6 +1418,16 @@ export const TOKEN_BRIDGE = Object.freeze([
   ['--accent-ink', '--accent-on', '#ffffff'],
   ['--accent-soft', '--surface-2', '#eef3f9'],
   ['--shadow', '--shadow-1', '0 1px 2px rgba(16,24,40,.06)'],
+  // Motion. Same reasoning as colour: the shell's utility classes read
+  // --app-dur-*/--app-ease-*, a mockup emits --dur-*/--ease-*, and without
+  // these rows a design that slowed its motion down would apply to the screens
+  // the build wrote and stop at the edge of them.
+  ['--app-dur-fast', '--dur-fast', '120ms'],
+  ['--app-dur-base', '--dur-base', '200ms'],
+  ['--app-dur-slow', '--dur-slow', '320ms'],
+  ['--app-ease-standard', '--ease-standard', 'cubic-bezier(.2,0,0,1)'],
+  ['--app-ease-entrance', '--ease-entrance', 'cubic-bezier(0,0,0,1)'],
+  ['--app-ease-exit', '--ease-exit', 'cubic-bezier(.3,0,1,1)'],
 ]);
 
 // The mapped shell names, so a check can assert the bridge is present.
@@ -1579,4 +1659,4 @@ export function estimateInventoryTokens() {
 
 // The design-doc AI-adjust system prompt (used by adjustDesignPreset in
 // concept.js; exported so the Harness page can show/edit it).
-export const DESIGN_DOC_ADJUST_SYSTEM_PROMPT = 'You adjust UI design-token sets for web applications. Reply with STRICT JSON only — no prose, no markdown fences: {"name": string, "description": string, "tokens": {"colors": {"background","surface","text","muted","border","primary","primaryText","accent","danger","success" — hex colors only}, "typography": {"fontFamily","headingFamily","baseSize"}, "radius": {"sm","md","lg"}, "spacing": {"unit"}, "shadow": {"card"}}}. Keep every value in the same format as the input. Change ONLY what the instruction asks, plus whatever minimal changes keep text readable (AA contrast for text on background/surface and primaryText on primary). Return the FULL token set.';
+export const DESIGN_DOC_ADJUST_SYSTEM_PROMPT = 'You adjust UI design-token sets for web applications. Reply with STRICT JSON only — no prose, no markdown fences: {"name": string, "description": string, "tokens": {"colors": {"background","surface","text","muted","border","primary","primaryText","accent","danger","success" — hex colors only}, "typography": {"fontFamily","headingFamily","baseSize"}, "radius": {"sm","md","lg"}, "spacing": {"unit"}, "shadow": {"card"}, "motion": {"durationFast","durationBase","durationSlow" — a number + ms/s, under 1s; "easingStandard","easingEntrance","easingExit" — a CSS easing keyword or cubic-bezier()}}}. Keep every value in the same format as the input. Change ONLY what the instruction asks, plus whatever minimal changes keep text readable (AA contrast for text on background/surface and primaryText on primary). Return the FULL token set.';

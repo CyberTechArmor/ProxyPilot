@@ -346,6 +346,32 @@ export function createApp(): express.Express {
 function serverTs() {
   return `import { createApp } from './app.js';
 import { config } from './config.js';
+import { ensureSeeded } from './platform/branding.js';
+import { ensureViews } from './platform/readonly.js';
+
+// Platform boot, best effort. Seeds the branding row and the two legal pages so
+// a freshly provisioned app never serves a dead link from its sign-in screen,
+// and publishes the read-only SQL views so an operator can SEE what a reporting
+// credential would expose before deciding to issue one. Neither grants anything.
+// A failure here must not stop the app from serving.
+//
+// This lives in the SCAFFOLD copy as well as the auth-wired one: a project
+// provisioned without the auth component still has the platform module, still
+// needs its branding row, and was failing platform-intact on its first build
+// for not calling either of these — a gate red on a project that had done
+// nothing wrong. (Found by running the battery over a scaffold-only project.)
+try {
+  await ensureSeeded();
+} catch (err) {
+  // eslint-disable-next-line no-console
+  console.warn('[platform] branding seed skipped:', (err as Error).message);
+}
+try {
+  await ensureViews();
+} catch (err) {
+  // eslint-disable-next-line no-console
+  console.warn('[platform] read-only views not published:', (err as Error).message);
+}
 
 const app = createApp();
 

@@ -46,7 +46,13 @@ import {
   ASK_TOOLS, ASK_MAX_TURNS, estimateAskTokens,
   buildAskSystemPrompt, buildAskTask, askCommandAllowed, webSearchServerTools,
   buildAskContextBlock, ASK_CONTEXT_MAX_MESSAGES, detectPolishIntent,
+  DESIGN_HELP_CONTEXT_MAX_MESSAGES, DESIGN_HELP_CONTEXT_MAX_CHARS,
 } from './ask-logic.js';
+import {
+  detectDesignHelpIntent, isDesignHelpContinuation, designHelpProgress, designHelpTurn,
+  buildDesignHelpSystemPrompt, buildDesignHelpTask, designHelpOpening, designHelpMarker,
+  DESIGN_HELP_TOTAL, DESIGN_HELP_MARKER_RE,
+} from './design-help-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -94,6 +100,39 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   }
   if (askJobActive(projectId)) return { status: 'error', error: 'An ask is already running for this project — wait for its answer.' };
 
+  // DESIGN HELP. "Design help" (or the button, which sends the same phrase) is
+  // not a question about the codebase — it is a request to be ASKED the
+  // questions that turn "make it look professional" into a brief. Like the
+  // polish intent below it is matched here rather than left to the model,
+  // because the ask lane would otherwise answer it as an engineering question
+  // and explain the design token system to someone who wanted to be interviewed.
+  //
+  // The interview runs across several asks with no state of its own: each turn
+  // ends with a marker, and the NEXT ask sees it in the chat and knows it is
+  // receiving an answer rather than a new question.
+  //
+  // Checked BEFORE the polish intent below, and not merely for tidiness: an
+  // interview ANSWER can easily contain the words that trigger a design review
+  // ("check the layout at 390"), and being pulled into a screenshot run
+  // mid-interview would strand the operator with no way back to question 5.
+  let designHelp = null;
+  {
+    let priorMessages = [];
+    try { priorMessages = listMessages(projectId).slice(-ASK_CONTEXT_MAX_MESSAGES); } catch { priorMessages = []; }
+    if (isDesignHelpContinuation(priorMessages)) {
+      designHelp = designHelpTurn(designHelpProgress(priorMessages));
+    } else if (detectDesignHelpIntent(question)) {
+      // The FIRST turn is written, not generated: there is nothing to react to,
+      // and paying a model call for a fixed greeting makes a feature feel slow
+      // for no reason. It also guarantees the marker exists, so the interview
+      // can never fail to start.
+      getOrCreateChat(projectId);
+      insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: String(question).trim() });
+      insertMessage({ projectId, kind: 'assistant', body: designHelpOpening({ projectName: project.name }) });
+      return { status: 'started', designHelp: true, step: 1, total: DESIGN_HELP_TOTAL };
+    }
+  }
+
   // POLISH INTENT. "polish this" / "review the design" is a question about the
   // LIVE app, and the ask lane cannot answer it: it has read+exec tools, not a
   // browser. Left to the model it would describe the CSS it can read and call
@@ -104,7 +143,7 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   //
   // This is where the Polish pass BUTTON went (it was a fourth build-looking
   // action for something that is not a build).
-  const polish = detectPolishIntent(question);
+  const polish = designHelp ? null : detectPolishIntent(question);
   if (polish) {
     const { runDesignReview } = await import('./design-review.js');
     getOrCreateChat(projectId);
@@ -150,14 +189,18 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   getOrCreateChat(projectId);
   // Snapshot the recent conversation BEFORE inserting this question — the ask
   // transcript is otherwise blank and "that/it" references dangle.
+  // An interview needs MORE of the chat than an ordinary ask: it is written
+  // from every answer given, and the ordinary 12-message bound would reach the
+  // brief having forgotten the first and most important one.
+  const contextLimit = designHelp ? DESIGN_HELP_CONTEXT_MAX_MESSAGES : ASK_CONTEXT_MAX_MESSAGES;
   let contextMessages = [];
-  try { contextMessages = listMessages(projectId).slice(-ASK_CONTEXT_MAX_MESSAGES); } catch { contextMessages = []; }
+  try { contextMessages = listMessages(projectId).slice(-contextLimit); } catch { contextMessages = []; }
   let attachments = [];
   try { attachments = saveChatImages(projectId, images); } catch (e) { console.warn('[mock2] ask image save failed:', e?.message); }
   insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: q, attachments });
   setJob(projectId, { phase: 'running', message: 'Looking into it…', startedAt: Date.now(), turns: 0 });
 
-  runAsk({ project, projectId, holder, ready, question: q, attachments, contextMessages, user })
+  runAsk({ project, projectId, holder, ready, question: q, attachments, contextMessages, user, designHelp })
     .catch((err) => {
       console.error(`[mock2] ask crashed for project ${projectId}:`, err?.message || err);
       try { insertMessage({ projectId, kind: 'system', body: `The ask failed: ${err?.message || err}` }); } catch { /* ignore */ }
@@ -171,7 +214,7 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   return { status: 'started' };
 }
 
-async function runAsk({ project, projectId, holder, ready, question, attachments = [], contextMessages = [], user = null }) {
+async function runAsk({ project, projectId, holder, ready, question, attachments = [], contextMessages = [], user = null, designHelp = null }) {
   const containerName = project.container_name || containerNameForProject(projectId);
 
   // The installed-components section rides along so questions about auth /
@@ -185,17 +228,33 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   } catch { installedSection = ''; }
 
   const serverTools = webSearchServerTools({ provider: ready.connector.provider, env: process.env, defaultOn: true });
-  const system = stepSystemPrompt('ask', buildAskSystemPrompt({
-    projectName: project.name, webPort: project.web_port || 3000,
-    webSearch: serverTools.length > 0, installedComponentsSection: installedSection,
-  }), { PROJECT_NAME: project.name, WEB_PORT: project.web_port || 3000, COMPONENTS: installedSection });
+  // A DESIGN-HELP turn is a conversation, not a tool loop: the answers are in
+  // the operator's head, not in the container, and giving the interview a shell
+  // would only tempt it into reading code instead of asking its question. So it
+  // runs the same call machinery with a different prompt and NO tools — which
+  // also makes it a single fast turn rather than an exploration.
+  const system = designHelp
+    ? buildDesignHelpSystemPrompt({ projectName: project.name, step: designHelp.step, writeBrief: designHelp.writeBrief })
+    : stepSystemPrompt('ask', buildAskSystemPrompt({
+      projectName: project.name, webPort: project.web_port || 3000,
+      webSearch: serverTools.length > 0, installedComponentsSection: installedSection,
+    }), { PROJECT_NAME: project.name, WEB_PORT: project.web_port || 3000, COMPONENTS: installedSection });
   // The question's image attachments ride the first turn (an ask is a fresh
   // transcript, so this is the only place they're paid for).
   const askImages = hydrateAttachments(projectId, attachments);
-  const contextBlock = buildAskContextBlock(contextMessages);
-  const firstTurn = contextBlock
-    ? `${contextBlock}\n\n# The user's message NOW (answer this)\n${question}`
-    : question;
+  const contextBlock = designHelp
+    ? buildAskContextBlock(contextMessages, {
+      maxMessages: DESIGN_HELP_CONTEXT_MAX_MESSAGES, maxChars: DESIGN_HELP_CONTEXT_MAX_CHARS,
+    })
+    : buildAskContextBlock(contextMessages);
+  // The interview needs the conversation so far — that is where the earlier
+  // answers live — plus an explicit statement of which question this answers,
+  // because the recap is a summary rather than the true transcript.
+  const firstTurn = designHelp
+    ? `${contextBlock ? `${contextBlock}\n\n` : ''}${buildDesignHelpTask(question, { step: designHelp.writeBrief ? DESIGN_HELP_TOTAL : designHelp.step - 1 })}`
+    : (contextBlock
+      ? `${contextBlock}\n\n# The user's message NOW (answer this)\n${question}`
+      : question);
   const transcript = [{ role: 'user', text: firstTurn, ...(askImages.length ? { images: askImages } : {}) }];
 
   // Streaming (where the provider supports it — Anthropic): visible text
@@ -224,13 +283,27 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   let finalText = '';
   let totalCents = 0;
   let totalTokens = 0;
-  for (let turn = 0; turn < ASK_MAX_TURNS; turn += 1) {
-    setJob(projectId, { phase: 'running', message: turn === 0 ? 'Looking into it…' : `Working… (step ${turn + 1})`, turns: turn + 1 });
+  // One turn for the interview, the tool loop for everything else.
+  const maxTurns = designHelp ? 1 : ASK_MAX_TURNS;
+  for (let turn = 0; turn < maxTurns; turn += 1) {
+    setJob(projectId, {
+      phase: 'running',
+      message: designHelp
+        ? (designHelp.writeBrief ? 'Writing the brief…' : `Design help — question ${designHelp.step} of ${DESIGN_HELP_TOTAL}…`)
+        : (turn === 0 ? 'Looking into it…' : `Working… (step ${turn + 1})`),
+      turns: turn + 1,
+    });
     turnStreamed = false;
     const askTuned = applyLaneTuning({ model: ready.model, effort: 'high', thinking: null }, getLaneTuning('ask'));
     const res = await callStepTurn('ask', {
       connector: ready.connector, apiKey: ready.apiKey, model: askTuned.model,
-      system, tools: ASK_TOOLS, serverTools, transcript,
+      system,
+      // No tools and no web search on an interview turn: the answers are the
+      // operator's, and a shell would only tempt it into reading code instead
+      // of asking its question.
+      tools: designHelp ? [] : ASK_TOOLS,
+      serverTools: designHelp ? [] : serverTools,
+      transcript,
       effort: askTuned.effort, thinking: askTuned.thinking,
       onDelta,
     });
@@ -255,7 +328,17 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   }
 
   if (!finalText) {
-    finalText = 'I ran out of steps before finishing — try a narrower question, or run the task as a build.';
+    finalText = designHelp
+      ? 'That turn came back empty — say "design help" to pick the interview up again.'
+      : 'I ran out of steps before finishing — try a narrower question, or run the task as a build.';
+  }
+  // The marker is the interview's ONLY state. A model that drops it strands the
+  // operator mid-interview with no way back in except starting over, so it is
+  // repaired here rather than trusted — the prompt asks for it, this guarantees
+  // it. Not appended on the brief turn: the interview is over there, and a
+  // marker would make the next ordinary question look like question 9.
+  if (designHelp && !designHelp.writeBrief && !DESIGN_HELP_MARKER_RE.test(finalText)) {
+    finalText = `${finalText.trimEnd()}\n\n${designHelpMarker(designHelp.step, DESIGN_HELP_TOTAL)}`;
   }
   // The answer carries what it cost (migration 527) — the whole tool loop's
   // spend, shown on the bubble and rolled into Details → Questions.

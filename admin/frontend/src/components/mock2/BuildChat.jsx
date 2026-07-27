@@ -16,7 +16,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
-  Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye,
+  Loader2, Zap, Hammer, HelpCircle, Wand2, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye,
   MonitorSmartphone, RotateCcw, GitCompare,
 } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
@@ -429,6 +429,27 @@ export default function BuildChat({
       await load();
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not ask', description: err.message });
+    } finally { setBusy(false); }
+  };
+
+  // Design help: the interview that turns "make it look professional" into a
+  // brief a build can execute. It goes through Ask — one drafted message, one
+  // lane — by sending the trigger phrase the backend matches, so the button and
+  // someone typing "design help" are the same code path and cannot drift.
+  //
+  // Available with an EMPTY composer, unlike the other two: this is the action
+  // for someone who does not yet know what to type. Anything already drafted
+  // rides along as context rather than being thrown away.
+  const startDesignHelp = async () => {
+    const draft = instruction.trim();
+    setBusy(true);
+    try {
+      await api.mock2Ask(projectId, draft ? `Design help — ${draft}` : 'Design help', toWireImages(attach.images));
+      setInstruction('');
+      attach.clear();
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start design help', description: err.message });
     } finally { setBusy(false); }
   };
 
@@ -872,7 +893,11 @@ export default function BuildChat({
             {/* The action row exists only when it has something in it: an empty
                 flex row still costs the parent's vertical gap, and on a phone
                 that is a line of chat. */}
-            {(active && cycle?.id) || resumeMode || hasDraft ? (
+            {/* `online` is in this condition for Design help: it is the one
+                action that needs no draft, and a button that only appears once
+                you have typed something is no use to the person who does not
+                know what to type. */}
+            {(active && cycle?.id) || resumeMode || hasDraft || online ? (
             <div className="flex flex-wrap items-center justify-between gap-2">
               {/* Interrupt — visible while a build is running: stops it at the
                   next safe step (checkpointed, resumable from the Build panel). */}
@@ -907,11 +932,24 @@ export default function BuildChat({
                       To annotate the running app, use the "Annotate" button on
                       the Preview — pins there land on the live signed-in app
                       (and resolve to components). */}
+                  {/* Design help is the third action here, and the only one
+                      that needs no draft: it goes through Ask (same lane, same
+                      lock) and interviews you toward a brief instead of asking
+                      you to arrive with one. */}
+                  <Button
+                    variant="ghost"
+                    className="h-11 sm:h-10 ml-auto"
+                    disabled={askDisabled}
+                    onClick={startDesignHelp}
+                    title={'Eight questions that turn "make it look professional" into a brief a build can execute — the screen\'s job, the hardest real row, which numbers are tappable, how many rows fit, what each status says. Answer or skip each one; it writes the brief at the end.'}
+                  >
+                    <Wand2 className="h-4 w-4 mr-1" /> Design help
+                  </Button>
                   {hasDraft ? (
                     <>
                       <Button
                         variant="outline"
-                        className="h-11 sm:h-10 ml-auto"
+                        className="h-11 sm:h-10"
                         disabled={askDisabled}
                         onClick={startAsk}
                         title="Ask a question or have the AI act on the running app — query or update data (e.g. add a user), run tests, call its APIs. No code changes."

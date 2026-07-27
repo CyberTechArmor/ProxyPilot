@@ -197,16 +197,28 @@ export function detectPolishIntent(question) {
 // message and bounded overall, oldest dropped first.
 export const ASK_CONTEXT_MAX_MESSAGES = 12;
 export const ASK_CONTEXT_MAX_CHARS = 9000;
+// The interview's own bounds: eight questions and eight answers is 16 messages
+// before anything else in the chat, and the brief is written from all of them.
+export const DESIGN_HELP_CONTEXT_MAX_MESSAGES = 40;
+export const DESIGN_HELP_CONTEXT_MAX_CHARS = 24000;
 const ASK_CONTEXT_PER_MESSAGE_CHARS = 1800;
 
-export function buildAskContextBlock(messages = []) {
+// Bounds are arguments, because one caller genuinely needs more of the chat: a
+// design-help interview IS the conversation, and its final turn writes a brief
+// from every answer given. At the ordinary 12-message bound, an eight-question
+// interview (16 messages) would reach the brief having forgotten what the
+// operator said about the screen's purpose — the first and most important
+// answer, dropped for being the oldest.
+export function buildAskContextBlock(messages = [], {
+  maxMessages = ASK_CONTEXT_MAX_MESSAGES, maxChars = ASK_CONTEXT_MAX_CHARS,
+} = {}) {
   const rows = (Array.isArray(messages) ? messages : [])
     .filter((m) => m && ['user', 'assistant', 'system'].includes(m.kind) && String(m.body || '').trim())
-    .slice(-ASK_CONTEXT_MAX_MESSAGES);
+    .slice(-maxMessages);
   if (!rows.length) return '';
   // Walk newest → oldest so the budget keeps the most recent exchange.
   const kept = [];
-  let budget = ASK_CONTEXT_MAX_CHARS;
+  let budget = maxChars;
   for (let i = rows.length - 1; i >= 0; i--) {
     const m = rows[i];
     const who = m.kind === 'user' ? 'User' : m.kind === 'assistant' ? 'Assistant (you)' : 'System';

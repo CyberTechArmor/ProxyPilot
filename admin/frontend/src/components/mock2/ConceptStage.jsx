@@ -31,6 +31,7 @@ import {
   ChevronDown, ChevronUp, Rocket, X, Clock3, Library, ImagePlus,
 } from 'lucide-react';
 import { SetupProgress } from './ProjectPreview';
+import ProjectAssets from './ProjectAssets';
 import { ChatBubble, RuleQuestion, StreamingBubble } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
@@ -88,6 +89,7 @@ export default function ConceptStage({
   // renders with thinking on + high effort, so it is slower but deeper.
   const [designDirection, setDesignDirection] = useState('theme'); // 'plan' | 'design' — directs the turn
   const scrollRef = useRef(null);
+  const composerRef = useRef(null);   // focused when the assets modal hands back
   const onTyping = useTypingTracker(projectId, canEdit && !archived && project?.lifecycle === 'active');
   const wasApproved = useRef(!!project?.design_approved_at);
   // The "bring your logo" question, asked as a modal BEFORE the chat can be
@@ -97,6 +99,11 @@ export default function ConceptStage({
   // every time someone opens a project they have not started yet.
   const [assetPromptOff, setAssetPromptOff] = useState(false);
   const [assetCount, setAssetCount] = useState(null);   // null = not yet known
+  // The asset LIBRARY, opened over the chat. Saying yes to the question should
+  // put the operator straight into the thing they said yes to, rather than
+  // pointing at a panel behind them.
+  const [assetsOpen, setAssetsOpen] = useState(false);
+  const [assetsAdded, setAssetsAdded] = useState(0);   // shown once, above the composer
   const lastMockupId = useRef(project?.current_mockup_id || null);
 
   const load = useCallback(async () => {
@@ -128,6 +135,11 @@ export default function ConceptStage({
   useEffect(() => { if (!archived) refreshAssetCount(); }, [archived, refreshAssetCount]);
 
   const dismissAssetPrompt = useCallback(() => setAssetPromptOff(true), []);
+  // Stable identity: ProjectAssets calls this from its load(), and an inline
+  // arrow here would change every render and re-run that load forever.
+  const onAssetsSummary = useCallback((sum) => {
+    setAssetCount(sum?.total ?? 0);
+  }, []);
 
   // Poll while a background turn/approval job is running, while the M8 audit is
   // in flight, or while any rule question is open (so answers + the "starting the
@@ -204,13 +216,32 @@ export default function ConceptStage({
   const provisioning = project?.lifecycle === 'provisioning';
   const previewUrl = data?.preview_url || project?.preview_url || null;
   const hasMockup = !!(data?.current_mockup_id || project?.current_mockup_id);
-  // Ask while the answer can still change the FIRST mockup: an editable, online,
-  // unapproved project whose conversation has not started. assetCount stays null
-  // until the request lands, so the modal never flashes in before we can tell the
-  // operator what they already have.
-  const showAssetPrompt = editable && !approved && online && !hasMockup
-    && !assetPromptOff && assetCount !== null
-    && (data?.messages || []).length === 0;
+  // Ask at PAGE LAUNCH, while the answer can still change the first mockup: an
+  // editable, unapproved project whose conversation has not started.
+  //
+  // Deliberately NOT gated on the project being online. Provisioning takes
+  // minutes, the asset library is ProxyPilot-side (nothing is uploaded INTO the
+  // container), and waiting for a container is exactly the dead time in which
+  // finding your logo is free. assetCount stays null until the request lands, so
+  // the modal never flashes in before we can say what is already there.
+  //
+  // "The conversation has not started" means the operator has not SUBMITTED a
+  // prompt — a USER message. System messages do not count: a provisioning note
+  // or a queued-action note is the platform talking, not the operator, and
+  // gating on the raw message list made the modal appear the moment the asset
+  // count landed and then vanish half a second later when the chat loaded and
+  // turned out to contain one. (Reported on mobile, where provisioning notes
+  // are the norm; the same bug was on desktop and simply had nothing to trip
+  // it.)
+  //
+  // Both `data` and `assetCount` must have loaded before it shows at all —
+  // otherwise it appears on the initial null state and then re-decides, which
+  // is the flash itself.
+  const conversationStarted = shownMessages.some((m) => m?.kind === 'user');
+  const showAssetPrompt = editable && !approved && !hasMockup
+    && !assetPromptOff && !assetsOpen
+    && assetCount !== null && data !== null
+    && !conversationStarted;
   // A design exists to export pre-approval (live mockup) AND post-approval
   // (the archived mockup is kept — the template reads it from the repo).
   const hasDesign = hasMockup || !!project?.design_approved_at || !!project?.mockup_archive_url;
@@ -668,7 +699,17 @@ export default function ConceptStage({
                 </Button>
               </div>
             ) : null}
+            {/* What "Add to chat" leaves behind: a one-line confirmation that
+                the assets are in, right where the prompt is about to be typed.
+                It clears the moment they start typing. */}
+            {assetsAdded > 0 && !message ? (
+              <p className="flex items-center gap-1.5 text-xs text-primary">
+                <Library className="h-3.5 w-3.5" />
+                {assetsAdded} asset{assetsAdded === 1 ? '' : 's'} ready — now describe what you want built and the design will use {assetsAdded === 1 ? 'it' : 'them'}.
+              </p>
+            ) : null}
             <textarea
+              ref={composerRef}
               className={`flex min-h-[56px] w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
                 shownMessages.length === 0 && !message
                   ? 'border-primary/70 ring-2 ring-primary/30 shadow-primary/20 shadow-lg'
@@ -785,6 +826,53 @@ export default function ConceptStage({
       {/* Import-design dialog — a downloaded template file OR another project's
           design (design/mockup only, never code), plus optional changes/context
           for the build. Full-screen on <sm (MOBILE_FIRST). */}
+      {/* THE LIBRARY ITSELF, over the chat. Saying yes to the question above
+          should put the operator into the thing they said yes to — pointing at
+          a panel behind the modal makes them find it, and on a phone that panel
+          is a different screen entirely.
+
+          "Add to chat" is the way out: it closes, confirms what is now in the
+          library, and puts the cursor in the composer, so the next thing they
+          do is write the prompt those assets are for. Closing any other way is
+          the same thing minus the confirmation — nothing is lost either way,
+          because uploads save as they happen.
+
+          MOBILE_FIRST: full-screen under sm, the library scrolls INSIDE the
+          dialog, and the footer action stays reachable. */}
+      <Dialog open={assetsOpen} onOpenChange={setAssetsOpen}>
+        <DialogContent className="flex max-w-full h-full flex-col gap-3 rounded-none sm:h-[85vh] sm:max-w-3xl sm:rounded-lg">
+          <DialogHeader className="shrink-0">
+            <DialogTitle className="flex items-center gap-2">
+              <Library className="h-5 w-5 shrink-0 text-primary" />
+              Logos, assets and context
+            </DialogTitle>
+            <DialogDescription>
+              Drop in a logo, a screenshot of what you are replacing, or the wording a screen should carry.
+              The mockup is shown your images and given your notes to build from — and every build after it
+              is too.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <ProjectAssets projectId={projectId} canEdit={editable} onSummary={onAssetsSummary} />
+          </div>
+          <DialogFooter className="shrink-0 flex-col gap-2 sm:flex-row">
+            <Button
+              className="h-11 w-full sm:h-9 sm:w-auto"
+              onClick={() => {
+                setAssetsOpen(false);
+                setAssetsAdded(assetCount || 0);
+                // Land the cursor where the prompt goes: the whole point of
+                // coming back is to write the request these assets are for.
+                setTimeout(() => composerRef.current?.focus(), 50);
+              }}
+            >
+              <Send className="mr-1 h-4 w-4" />
+              Add to chat
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* BRING YOUR OWN — asked as a MODAL, before the chat can be used.
           The moment a logo, the real wording or a design reference is worth
           having is the moment BEFORE the first mockup is described, because the
@@ -830,7 +918,7 @@ export default function ConceptStage({
             </Button>
             <Button
               className="h-11 w-full sm:h-9 sm:w-auto"
-              onClick={() => { dismissAssetPrompt(); if (onOpenAssets) onOpenAssets(); }}
+              onClick={() => { dismissAssetPrompt(); setAssetsOpen(true); }}
             >
               <Library className="mr-1 h-4 w-4" />
               {assetCount > 0 ? 'Add more' : 'Add assets'}

@@ -52,7 +52,10 @@ function fmtWhen(iso) {
   return d.toLocaleDateString();
 }
 
-export default function ProjectAssets({ projectId, canEdit = false }) {
+// onSummary — called with { total, images, content, … } after every load, so a
+// container (the assets modal) can show a live count without asking the API a
+// second time and getting a different answer.
+export default function ProjectAssets({ projectId, canEdit = false, onSummary = null }) {
   const [assets, setAssets] = useState([]);
   const [tags, setTags] = useState(FALLBACK_TAGS);
   const [summary, setSummary] = useState(null);
@@ -76,13 +79,14 @@ export default function ProjectAssets({ projectId, canEdit = false }) {
       setAssets(r.assets || []);
       if (Array.isArray(r.tags) && r.tags.length) setTags(r.tags);
       setSummary(r.summary || null);
+      if (onSummary) onSummary(r.summary || { total: (r.assets || []).length });
       setError('');
     } catch (e) {
       setError(e?.message || 'Could not load the asset library.');
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, onSummary]);
 
   useEffect(() => { load(); }, [load]);
 

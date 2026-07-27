@@ -255,3 +255,106 @@ export function buildMockupAssetSection(assets = [], { attachedImages = [] } = {
   }
   return `\n\n${parts.join('\n\n')}`;
 }
+
+
+/* --------------------------------------------------------------------------
+   ASSET CHANGE DETECTION — what arrived since the last build.
+
+   The library was already read on every build turn, so an asset added later
+   did reach the NEXT build's context. What was missing is that nothing knew it
+   was NEW. A logo uploaded after the app was built landed in a pile of
+   reference material with no reason to go back and apply it — the build had no
+   way to tell "the logo you have been using all along" from "the logo that
+   arrived five minutes ago". The operator had to notice, and to ask.
+
+   So: fingerprint what each build saw, diff it against what the next build
+   sees, and say plainly what changed. Deterministic — no model is ever asked
+   whether the library looks different.
+   -------------------------------------------------------------------------- */
+
+// Field and row separators: control characters, so a filename or a note
+// containing a comma, a pipe or a newline cannot forge a field boundary and
+// make two different libraries fingerprint the same.
+const FP_FIELD = '\u001f';
+const FP_ROW = '\u001e';
+
+// One line per asset, stable across reorderings and sensitive to everything
+// that would change what a build should DO: identity, kind, tag, name, and the
+// CONTENT (byte size for an image, body length for a note). A timestamp alone
+// would miss a same-second edit and churn on a no-op re-save.
+export function assetsFingerprint(assets = []) {
+  return sortAssets(assets || []).map((a) => [
+    a.id,
+    a.kind,
+    a.tag || '-',
+    a.name || '',
+    a.kind === 'image' ? (a.size || 0) : String(a.body || '').length,
+    a.pinned ? 'p' : '-',
+  ].join(FP_FIELD)).join(FP_ROW);
+}
+
+// What changed between a stored fingerprint and the library now, as ASSETS
+// rather than diff lines — the caller has to describe them to a build, not
+// render a patch.
+//
+// firstRun (nothing stored yet) is deliberately NOT "everything is new": on a
+// project's first build every asset is new by definition, and announcing that
+// would make the first build's instruction shout about material it was already
+// given in full.
+export function diffAssetFingerprint(previous, assets = []) {
+  const current = assetsFingerprint(assets);
+  const none = { added: [], updated: [], removed: [], fingerprint: current };
+  if (previous === undefined || previous === null || previous === '') {
+    return { ...none, changed: false, firstRun: true };
+  }
+  if (previous === current) return { ...none, changed: false, firstRun: false };
+
+  const before = new Map();
+  for (const row of String(previous).split(FP_ROW).filter(Boolean)) {
+    before.set(Number(row.split(FP_FIELD)[0]), row);
+  }
+  const live = new Map((assets || []).map((a) => [a.id, a]));
+
+  const added = [];
+  const updated = [];
+  for (const a of sortAssets(assets || [])) {
+    const row = assetsFingerprint([a]);
+    if (!before.has(a.id)) added.push(a);
+    else if (before.get(a.id) !== row) updated.push(a);
+  }
+  const removed = [...before.keys()].filter((id) => !live.has(id));
+  return {
+    changed: added.length > 0 || updated.length > 0 || removed.length > 0,
+    firstRun: false,
+    added,
+    updated,
+    removed,
+    fingerprint: current,
+  };
+}
+
+// The block a build turn is given when the library changed since the last one.
+//
+// Deliberately stronger than buildAssetSection: that describes standing
+// reference material ("use it when relevant"), this says "this arrived after
+// the app was last built — go and apply it". Empty when nothing changed, so a
+// build with a stable library pays nothing for this.
+export function buildAssetChangeSection(diff) {
+  if (!diff?.changed) return '';
+  const label = (a) => {
+    const tag = ASSET_TAGS.find((t) => t.key === a.tag);
+    return `${a.name || 'Untitled'}${tag ? ` (${tag.label})` : ''}`;
+  };
+  const lines = [];
+  if (diff.added.length) lines.push(`ADDED since the last build: ${diff.added.map(label).join(', ')}`);
+  if (diff.updated.length) lines.push(`CHANGED since the last build: ${diff.updated.map(label).join(', ')}`);
+  if (diff.removed.length) lines.push(`REMOVED since the last build: ${diff.removed.length} item(s)`);
+
+  return `\n\nTHE OPERATOR CHANGED THIS PROJECT'S ASSETS SINCE THE LAST BUILD.\n${lines.join('\n')}\n\n`
+    + 'Apply the change as part of this build, in addition to whatever else was asked for. A new or '
+    + 'changed LOGO belongs on the screens that show branding. New or changed COPY, wording or brand '
+    + 'notes replace the placeholder text they describe. A new design REFERENCE is something the '
+    + 'screens it covers should now match. The full library is listed elsewhere in this turn; this '
+    + 'section is only about what is NEW, because that is the part nothing has acted on yet. If a '
+    + 'change genuinely affects no screen, say so in your summary rather than silently dropping it.';
+}

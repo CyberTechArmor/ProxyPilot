@@ -40,7 +40,15 @@ function api(pathname) {
     return J({ assets: [], tags: [], summary: { total: 0, images: 0, content: 0 }, limits: { maxBytes: 8388608 } });
   }
   if (/\/mock2\/projects\/\d+\/chat/.test(pathname)) {
-    return J({ messages: [], job: null, audit_job: null, stage: project.stage, open_question_ids: [], current_mockup_id: project.current_mockup_id });
+    // MESSAGES=system reproduces the reported flash: a project whose only
+    // message is the platform's own (a provisioning note, a queued action).
+    // The operator has submitted nothing, so the assets question must stay up.
+    const messages = process.env.MESSAGES === 'system'
+      ? [{ id: 1, kind: 'system', body: 'Runs the moment provisioning finishes.', created_at: '2026-07-01T00:00:00Z' }]
+      : process.env.MESSAGES === 'user'
+        ? [{ id: 1, kind: 'user', body: 'a clinic check-in app', created_at: '2026-07-01T00:00:00Z' }]
+        : [];
+    return J({ messages, job: null, audit_job: null, stage: project.stage, open_question_ids: [], current_mockup_id: project.current_mockup_id });
   }
   if (/\/mock2\/projects\/\d+\/provision/.test(pathname)) return J({ progress: null, job: null });
   if (/\/mock2\/projects\/\d+\/lock/.test(pathname)) return J({ lock: { held: false } });

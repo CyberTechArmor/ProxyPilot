@@ -14,7 +14,7 @@
 // MOBILE_FIRST: single column, wraps, no fixed widths; renders clean at 360px.
 
 import { useEffect, useState } from 'react';
-import { CheckCircle2, XCircle, Loader2, Circle, Clock, PauseCircle, ChevronDown, ChevronRight } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, Circle, Clock, MinusCircle, PauseCircle, ChevronDown, ChevronRight } from 'lucide-react';
 import { deriveBuildTasks } from '@/lib/build-tasks';
 
 function StateIcon({ state, className = 'h-4 w-4' }) {
@@ -22,6 +22,11 @@ function StateIcon({ state, className = 'h-4 w-4' }) {
   if (state === 'failed') return <XCircle className={`${className} text-red-500`} />;
   if (state === 'active') return <Loader2 className={`${className} animate-spin text-cyan-500`} />;
   if (state === 'blocked') return <Clock className={`${className} text-violet-500`} />;
+  // A gate that exited 0 saying it did not run (no browser installed, no
+  // design approved yet). Distinct from the green tick on purpose: a battery
+  // that reads all-green for a member that executed nothing is what let
+  // project 42 ship behind "8/8".
+  if (state === 'skipped') return <MinusCircle className={`${className} text-amber-500`} />;
   return <Circle className={`${className} text-muted-foreground/40`} />;
 }
 

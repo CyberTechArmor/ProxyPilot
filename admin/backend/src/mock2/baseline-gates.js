@@ -291,6 +291,47 @@ if grep -q 'data-theme' "$DESIGN" && [ "$OWN" -ge 8 ] && ! grep -q 'data-theme' 
 fi
 
 if [ "$FAIL" -ne 0 ]; then exit 1; fi
+
+# PARTIAL ADOPTION — credible, but not what "passed" is read to mean.
+#
+# The failing bars above are deliberately generous: a QUARTER of the approved
+# variables, or a quarter of the approved component classes, clears them. The
+# consequence is that a build sitting just over that line reports exactly the
+# same single word — "Passed." — as one that reproduced the design. Project 42
+# used 51 of 128 approved component classes on a build whose whole instruction
+# was "reproduce the mockup faithfully", and 8/8 green is what the operator
+# read before trusting the deploy.
+#
+# This does NOT move the failing bar; nothing here can red a build that the
+# rules above passed. It reports.
+#
+# It fires only when NEITHER route reaches half, which is the same shape as the
+# FAIL rules and for the same reason: a build consuming the design through its
+# COMPONENTS may reference almost no variables and be entirely faithful, so a
+# variable count on its own is not evidence of anything. Flagging that would be
+# noise, and a gate people learn to ignore is worse than no gate.
+#
+# The numbers go on the LAST line on purpose: the cycle report shows each gate's
+# final three lines, which is how project 42's variable count never reached
+# anyone.
+CLS_HALF=0
+[ "$DCLASS" -ge 6 ] && [ $((UCLASS * 2)) -ge "$DCLASS" ] && CLS_HALF=1
+[ "$DCLASS" -lt 6 ] && CLS_HALF=-1
+VAR_HALF=0
+[ $((USED * 2)) -ge "$APPROVED" ] && VAR_HALF=1
+if [ "$CLS_HALF" -ne 1 ] && [ "$VAR_HALF" -ne 1 ]; then
+  echo "design-adherence: PARTIAL — over the bar, so this does not block, but under half the"
+  echo "      approved design is in the built screens. The screens this build wrote may look"
+  echo "      right while the rest of the app does not. state/mockups/current.html is the"
+  echo "      visual contract; state/design.css carries its component CSS by name."
+  if [ "$CLS_HALF" -eq -1 ]; then
+    echo "design-adherence: PARTIAL — \${USED} of \${APPROVED} approved variables (no component vocabulary published)."
+  else
+    echo "design-adherence: PARTIAL — \${UCLASS} of \${DCLASS} approved component classes, \${USED} of \${APPROVED} approved variables."
+  fi
+  exit 0
+fi
+
 echo "design-adherence: the app builds on the approved design, and the shell is bridged onto it. Passed."
 exit 0
 `;

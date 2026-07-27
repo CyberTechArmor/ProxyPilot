@@ -46,6 +46,44 @@ test('actionParityReport: label found anywhere in UI source = surfaced; nowhere 
   assert.equal(actionParityReport(actions, new Set(actions.map((a) => a.label.toLowerCase()))).ok, true);
 });
 
+test('actionParityReport: a shipped action under a different label is drift, not a silent drop', () => {
+  // Project 42. The inventory said "Delete asset". The platform admin console
+  // already shipped that control — a confirm-guarded DELETE /branding/assets/:id
+  // — under another name. Exact-label matching called it silently missing, the
+  // gate rejected the finish, and the build spent seven searches discovering
+  // the feature was already there before renaming a control to satisfy a grep.
+  const actions = [
+    { label: 'Delete asset', screen: 'Admin' },
+    { label: 'Create widget', screen: 'List' },
+  ];
+  const r = actionParityReport(actions, new Set(), new Set(['delete asset']));
+  // Drift does NOT reject the finish — the action is in the app.
+  assert.equal(r.ok, false, 'the genuinely absent one still fails');
+  assert.deepEqual(r.drifted.map((a) => a.label), ['Delete asset']);
+  assert.deepEqual(r.missing.map((a) => a.label), ['Create widget']);
+
+  // Drift alone is a clean pass with a report, never a rejection.
+  const drift = actionParityReport([actions[0]], new Set(), new Set(['delete asset']));
+  assert.equal(drift.ok, true);
+  assert.equal(drift.drifted.length, 1);
+  assert.equal(drift.present.length, 0);
+
+  // An exact label still outranks a word hit — it is present, not drifted.
+  const exact = actionParityReport([actions[0]], new Set(['delete asset']), new Set(['delete asset']));
+  assert.equal(exact.present.length, 1);
+  assert.equal(exact.drifted.length, 0);
+});
+
+test('actionLabelWords: the words a control implementing the action would have to mention', async () => {
+  const { actionLabelWords } = await import('../mock2/acceptance-logic.js');
+  assert.deepEqual(actionLabelWords('Delete asset'), ['delete', 'asset']);
+  // Noise words carry no signal and would match any line in the codebase.
+  assert.deepEqual(actionLabelWords('Add a task to the list'), ['add', 'task', 'list']);
+  assert.deepEqual(actionLabelWords('New note'), ['note'], '"new" is in every UI');
+  // Every word survives as [a-z0-9]+, so the grep built from them is shell-safe.
+  for (const w of actionLabelWords("Mark as done — Bob's row (2)")) assert.match(w, /^[a-z0-9]+$/);
+});
+
 test('summary over-claim precision (ratchet 9): the project-32 rejection now passes', async () => {
   const { extractSummaryPathClaims, summaryOverclaims } = await import('../mock2/acceptance-logic.js');
   // The EXACT summary shape the orchestrator rejected despite an accurate diff.

@@ -40,6 +40,9 @@ import { fmtUsage } from './ProjectTimeCard';
 
 const GATE_TONE = {
   passed: 'text-green-600', failed: 'text-red-500', running: 'text-cyan-500', pending: 'text-muted-foreground',
+  // Exited 0 saying it did not run. Amber, never green: a battery that reads
+  // all-green for a gate that executed nothing is what "8/8" hid.
+  skipped: 'text-amber-500',
 };
 
 // Event kind → a compact label + tone for the transcript view.

@@ -503,6 +503,32 @@ This is NOT the same thing as \`state/ui-checks.json\`. Those are the platform's
 post-deploy smoke checks against the LIVE app, per role, executed by ProxyPilot
 after your build ships. Your Playwright specs run before the deploy, against a
 server the suite starts. Write both — they catch different failures.
+
+\`state/ui-checks.json\` is one file, and this is the whole of it. Copy it and
+edit it rather than deriving the format — it is valid JSON exactly as written:
+{
+  "users": [{ "role": "admin", "email": "admin@fixture.invalid", "password": "<12+ chars>" }],
+  "checks": [{
+    "id": "notes-list-loads",
+    "name": "The notes list renders and search filters it",
+    "paths": ["public/app.html", "public/n7.js"],
+    "login": "admin@fixture.invalid",
+    "page": "/",
+    "steps": [
+      { "expect_visible": "#note-grid" },
+      { "fill": "#search", "value": "groceries", "expect_value": true },
+      { "expect_text": "#note-grid", "contains": "Groceries" },
+      { "click": "#new-note" },
+      { "expect_enabled": "#save" }
+    ]
+  }]
+}
+\`paths\` are globs saying which files a check covers, and EVERY user-facing file
+you touch needs at least one check matching it — that is what the
+\`ui-interaction\` gate enforces. \`login\` names a user from \`users\`; omit it to
+run the check SIGNED OUT. One assertion per step; the full step vocabulary is
+expect_visible / expect_enabled / expect_disabled / expect_absent /
+expect_text (+contains) / fill (+value) / click.
 `;
 
 // buildRunnerSystemPrompt — assemble the model's system prompt server-side from
@@ -767,6 +793,34 @@ runs the live check after deploy (pending_verification is then your finish).
    verifiable in-fence first (typecheck, config-schema presence, the contract
    test against the local fixture server); never fabricate a live test and
    never stub the transport to force a plain finish.
+
+# What ProxyPilot runs FOR you after you finish — do not rebuild it
+The moment you call finish and the gates are green, the platform checkpoints,
+deploys, and then runs all of this itself, against the REAL deployed app:
+- A readiness probe: \`/api/health\` must be 200, the sign-in page must render,
+  the stylesheet must be served, and ONE SIGNED-IN request must come back with
+  the app — using a platform fixture account it provisions and holds.
+- The migration chain, dry-run end to end on a scratch database, with the app
+  booted against it. Your app's own database is never touched.
+- The browser connector, executing \`state/ui-checks.json\` per role against the
+  live app, plus the platform's own baseline checks. Any console error fails.
+
+So do NOT build a second copy of that. Specifically: do not create scratch
+databases, do not boot the server by hand, do not mint your own auth tokens to
+exercise your own API, and do not write throwaway curl/psql round-trips to
+prove the app works end to end. One build spent 34 of its 73 turns and 41% of
+its cost on exactly that — a whole hand-rolled integration harness for
+something that was going to run anyway five minutes later, and the turns were
+the most expensive in the run because they were the fattest end of the context.
+
+"Verified" in your finish means YOU READ THE SOURCE this cycle and can name the
+file. It does not mean you booted the app. If a cross-layer assumption cannot
+be settled by reading — a signature, a cookie name, a claim shape — read the
+file that defines it and cite it. That is the bar, and it is the whole bar.
+
+What IS worth running locally, because nothing downstream repeats it: the
+typecheck/build, your own Playwright specs under \`e2e/\`, and any unit test you
+wrote this cycle.
 
 # Work efficiently (this changes HOW you work, never WHAT you deliver)
 Every step above still binds — the discipline, the reads before edits, the gates,

@@ -108,14 +108,46 @@ export function estimateCycleTokens({
 
 // ---- gate battery verdict ----
 
-// A gate report row shape: { name, status:'pending'|'running'|'passed'|'failed',
-// started_at, report }. gateBatteryVerdict rolls the whole battery up for the
-// "gates going green" view and the checkpoint gate: 'green' iff every gate
-// passed, 'red' if any failed, else 'pending'.
+// gateStatusFromOutput — a gate that exits 0 but SAYS it did not run is
+// 'skipped', not 'passed'.
+//
+// Project 42 shipped behind eight green gates, one of which read
+// `e2e: no browser installed; skipped. Run: npm run e2e:install`. Exiting 0 is
+// correct there — a missing browser binary is an environment problem and must
+// never red a build — but calling it "passed" makes a battery report 8/8 for a
+// member that executed nothing, and 8/8 is what an operator reads before
+// trusting a deploy.
+//
+// Deterministic, and it leans on a property every gate in the battery already
+// has: a gate that really ran prints an explicit verdict on its way out —
+// `name: OK - …` or `… Passed.`. A gate that bailed says "skipped" and prints
+// no verdict. Requiring BOTH (a skip line AND no verdict line) is what keeps a
+// gate that legitimately skips one sub-check and then passes from being
+// mislabelled.
+export function gateStatusFromOutput(exit, output) {
+  if (Number(exit) !== 0) return 'failed';
+  const lines = String(output || '').split('\n');
+  const saidSkipped = lines.some((l) => /\bskipped\b/i.test(l));
+  const saidVerdict = lines.some((l) => /(^|[\s:])(OK\b|Passed\b)/.test(l));
+  return saidSkipped && !saidVerdict ? 'skipped' : 'passed';
+}
+
+// A gate report row shape:
+//   { name, status:'pending'|'running'|'passed'|'skipped'|'failed', started_at, report }
+// gateBatteryVerdict rolls the whole battery up for the "gates going green"
+// view and the checkpoint gate: 'green' iff every gate has RESOLVED without
+// failing, 'red' if any failed, else 'pending'.
+//
+// 'skipped' resolves green ON PURPOSE. It is the same exit-0 the gate has
+// always returned — the status only makes the report honest, and treating it
+// as unresolved would block the checkpoint on an environment problem the build
+// cannot fix. What changes is that the operator can now SEE it.
+const GATE_RESOLVED_OK = new Set(['passed', 'skipped']);
+
 export function gateBatteryVerdict(gates = []) {
   if (!Array.isArray(gates) || gates.length === 0) return 'pending';
   if (gates.some((g) => g && g.status === 'failed')) return 'red';
-  if (gates.every((g) => g && g.status === 'passed')) return 'green';
+  if (gates.every((g) => g && GATE_RESOLVED_OK.has(g.status))) return 'green';
   return 'pending';
 }
 

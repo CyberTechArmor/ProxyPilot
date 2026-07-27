@@ -302,3 +302,54 @@ function runThemeCycle(themeJs, deviceIsDark, clicks) {
   for (let i = 0; i < clicks - 1; i++) { sandbox.Theme.cycle(); out.push(attr); }
   return out;
 }
+
+/* ------------------- what project 38 reported, as regressions ---------------- */
+
+test('every shell page carries a theme control and a legal footer slot', () => {
+  // Project 38: "no theme change light/dark". theme.js was loaded on every
+  // screen, applied the stored theme, and offered NO WAY TO CHANGE IT — three
+  // of the four generated pages rendered no .theme-toggle at all.
+  const pages = [...buildScaffoldFiles({ id: 1, name: 'Demo' }), ...buildAuthWiredFiles()]
+    .filter((f) => f.path.endsWith('.html'));
+  assert.ok(pages.length >= 4, 'expected the shell, admin, profile and sign-in pages');
+  for (const p of pages) {
+    assert.match(p.content, /class="theme-toggle/, `${p.path} renders no theme control`);
+    assert.match(p.content, /data-legal-footer/, `${p.path} has no legal footer slot`);
+  }
+});
+
+test('theme.js mounts a control on a page that has none', () => {
+  // The auto-mount is how an EXISTING project gets the control from a base-app
+  // upgrade, without rewriting pages a build may have restyled.
+  const js = buildPlatformFiles().find((f) => f.path === 'public/theme.js').content;
+  assert.match(js, /function ensureToggle/);
+  assert.match(js, /document\.querySelector\('\.theme-toggle'\)/, 'must not add a second control');
+  assert.match(js, /querySelector\('header nav'\)/);
+});
+
+test('the switch row is a row, not a 44px box with the label crammed inside', () => {
+  // Project 38's admin screenshot: label text wrapping one word per line and
+  // overlapping its neighbours. The CSS styled an <i> track with the label
+  // OUTSIDE; every actual consumer writes the label INSIDE with no <i>.
+  const css = buildScaffoldFiles({ id: 1, name: 'Demo' }).find((f) => f.path === 'public/base.css').content;
+  const rule = css.split('\n').find((l) => l.startsWith('.switch{'));
+  assert.ok(rule, 'no .switch rule');
+  assert.match(rule, /display:flex/);
+  assert.doesNotMatch(rule, /width:44px/, 'the ROW must not be 44px wide — that is the track');
+  // The track is the input itself; min-height too, or .field input's 44px wins.
+  assert.match(css, /\.switch>input\[type=checkbox\]\{[^}]*width:44px/);
+  assert.match(css, /\.switch>input\[type=checkbox\]\{[^}]*min-height:26px/);
+  // The label wraps instead of forcing the row wider than the viewport.
+  assert.match(css, /\.switch>label\{[^}]*min-width:0/);
+  assert.match(css, /\.switch>label\{[^}]*overflow-wrap:anywhere/);
+
+  // And every consumer really does use the shape this CSS is written for.
+  const markup = [...buildAuthWiredFiles(), ...buildPlatformFiles()]
+    .map((f) => f.content).join('\n');
+  const rows = markup.match(/class="switch">[\s\S]{0,120}/g) || [];
+  assert.ok(rows.length >= 3, 'expected several switch rows to check');
+  for (const r of rows) {
+    assert.match(r, /<input type="checkbox"/, `switch row without an input: ${r.slice(0, 80)}`);
+    assert.match(r, /<label for=/, `switch row without a label: ${r.slice(0, 80)}`);
+  }
+});

@@ -22,10 +22,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { join, dirname } from 'node:path';
 
 import {
   BASELINE_GATES, BASELINE_GATE_NAMES, baselineGatesForProfile, tierRank, asAdvisory,
@@ -42,6 +43,7 @@ import {
   upgradeSummary, PLATFORM_OWNED_ALWAYS, isPlatformOwnedPath, PLATFORM_VERSION_PATH,
 } from '../mock2/base-app-upgrade-logic.js';
 import { detectPolishIntent } from '../mock2/ask-logic.js';
+import { buildScaffoldFiles } from '../mock2/scaffold.js';
 import {
   previewErrorCard, PREVIEW_ERRORS, escapePreviewHtml, renderDesignCssFromMockup,
   buildTokenBridgeCss, TOKEN_BRIDGE, TOKEN_BRIDGE_TARGETS, buildMockupSystemPrompt,
@@ -537,4 +539,108 @@ test('GATE design-adherence: an unbridged shell or a backwards load order is a f
   const r2 = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, backwards);
   assert.equal(r2.code, 1);
   assert.match(r2.out, /links design\.css BEFORE base\.css/);
+});
+
+/* ------------------- the escaping class that keeps biting -------------------- */
+
+test('no gate script contains a mangled escape', () => {
+  // TWICE now a gate has shipped a broken regex because a backslash was eaten
+  // travelling through a JS template literal: no-native-dialogs emitted
+  // `grep: Unmatched ( or \(` and passed everything, and the design gate's
+  // colour counter emitted a literal BACKSPACE where \b was meant and counted
+  // zero colours in a file full of them. Both were silent — the gate ran, said
+  // "passed", and checked nothing.
+  //
+  // Control characters are the fingerprint: \b, \f, \v and friends only reach
+  // a shell script by accident.
+  for (const gate of BASELINE_GATES) {
+    // eslint-disable-next-line no-control-regex
+    const control = gate.script.match(/[\x00-\x08\x0b\x0c\x0e-\x1f]/);
+    assert.equal(control, null,
+      `${gate.name}: emitted a control character (0x${control?.[0].charCodeAt(0).toString(16)}) — a backslash escape was eaten by the template literal`);
+  }
+});
+
+test('every gate script is valid sh', () => {
+  for (const gate of BASELINE_GATES) {
+    const f = join(mkdtempSync(join(tmpdir(), 'pp-gate-syn-')), 'g.sh');
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, gate.script);
+    const r = spawnSync('sh', ['-n', f], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${gate.name} is not valid sh: ${r.stderr}`);
+  }
+});
+
+/* --------------------- design adherence: what "off" means -------------------- */
+
+// Project 38 used 9 of 55 approved variables, declared only 6 of its own, and
+// wrote 15.8KB of CSS with the colours typed straight in. Every existing rule
+// needed >= 8 or >= 12 OWN VARIABLES, so all of them missed it — the gate said
+// "passed" and the operator said "the theme is still off from the mockup".
+function adherenceFixture({ appCss }) {
+  const dir = mkdtempSync(join(tmpdir(), 'pp-adh-'));
+  const approved = Array.from({ length: 55 }, (_, i) => `  --d${i}: #${(0x111111 * (i + 1)).toString(16).slice(-6)};`).join('\n');
+  const bridge = [
+    '--app-bg', '--app-surface', '--app-text', '--app-muted', '--app-border', '--app-primary',
+    '--app-primary-text', '--app-accent', '--app-danger', '--app-success', '--app-shadow-card',
+  ].map((v, i) => `  ${v}: var(--d${i}, #101010);`).join('\n');
+  for (const f of buildScaffoldFiles({ id: 1, name: 'Demo' })) {
+    mkdirSync(join(dir, dirname(f.path)), { recursive: true });
+    writeFileSync(join(dir, f.path), f.content);
+  }
+  mkdirSync(join(dir, 'state'), { recursive: true });
+  writeFileSync(join(dir, 'state/design.css'), `:root{\n${approved}\n${bridge}\n}\n[data-theme="dark"]{ --d0:#000; }\n`);
+  writeFileSync(join(dir, 'public/app.css'), appCss);
+  writeFileSync(join(dir, 'gate.sh'), DESIGN_ADHERENCE_GATE_SCRIPT);
+  const r = spawnSync('sh', [join(dir, 'gate.sh')], { cwd: dir, encoding: 'utf8' });
+  rmSync(dir, { recursive: true, force: true });
+  return { status: r.status, out: r.stdout || '' };
+}
+
+const filler = (n) => Array.from({ length: n }, (_, i) => `.f${i}{margin:${i}px;padding:${i}px;display:flex;gap:${i}px}`).join('\n');
+
+test('design-adherence: an app that reproduces little of the approved design fails', () => {
+  const appCss = [
+    ':root{ --own1:#123456; --own2:#234567; --own3:#345678; --own4:#456789; --own5:#56789a; --own6:#6789ab; }',
+    ...Array.from({ length: 9 }, (_, i) => `.u${i}{color:var(--d${i})}`),
+    ...Array.from({ length: 30 }, (_, i) => `.h${i}{color:#${(0xaa1100 + i * 7).toString(16)};background:rgba(${i},${i},${i},.5)}`),
+    filler(200),
+  ].join('\n');
+  const r = adherenceFixture({ appCss });
+  assert.equal(r.status, 1, `expected a failure:\n${r.out}`);
+  assert.match(r.out, /reproduces only 9 of \d+ approved design variables/);
+});
+
+test('design-adherence: hardcoded colours fail even at decent coverage', () => {
+  const appCss = [
+    ...Array.from({ length: 20 }, (_, i) => `.m${i}{color:var(--d${i})}`),
+    ...Array.from({ length: 25 }, (_, i) => `.k${i}{background:#${(0xbb2200 + i * 11).toString(16)}}`),
+    filler(200),
+  ].join('\n');
+  const r = adherenceFixture({ appCss });
+  assert.equal(r.status, 1, `expected a failure:\n${r.out}`);
+  assert.match(r.out, /25 distinct hardcoded colours/);
+  assert.match(r.out, /do not follow the theme/);
+});
+
+test('design-adherence: a faithful app still passes', () => {
+  const appCss = [
+    ...Array.from({ length: 40 }, (_, i) => `.g${i}{color:var(--d${i});background:var(--d${(i + 1) % 55})}`),
+    filler(200),
+  ].join('\n');
+  const r = adherenceFixture({ appCss });
+  assert.equal(r.status, 0, `expected a pass:\n${r.out}`);
+  assert.match(r.out, /0 distinct hardcoded colour/);
+});
+
+test('design-adherence: var() fallbacks are not counted as hardcoded colours', () => {
+  // The token bridge is BUILT from var(--x, #fallback); counting those would
+  // fail every correctly-bridged app.
+  const appCss = [
+    ...Array.from({ length: 40 }, (_, i) => `.g${i}{color:var(--d${i}, #ff0000);background:var(--d${(i + 1) % 55}, rgb(1,2,3))}`),
+    filler(200),
+  ].join('\n');
+  const r = adherenceFixture({ appCss });
+  assert.match(r.out, /0 distinct hardcoded colour/);
+  assert.equal(r.status, 0, r.out);
 });

@@ -119,7 +119,29 @@ APPROVED=$(wc -l < "$WORK/approved" | tr -d ' ')
 USED=$(comm -12 "$WORK/appuse" "$WORK/approved" | wc -l | tr -d ' ')
 OWN=$(comm -23 "$WORK/appdef" "$WORK/approved" | wc -l | tr -d ' ')
 
+# HARDCODED COLOURS — the direct measure of "the theme is off".
+#
+# Counting the app's own VARIABLES misses the shape that actually happens: a
+# build declares only a handful of tokens and then writes thousands of bytes of
+# CSS with the colours typed straight in. Project 38 used 9 of 55 approved
+# variables and declared just 6 of its own — under every existing threshold —
+# while writing 15.8KB of its own CSS, and the operator's report was "the theme
+# is still off from the mockup".
+#
+# var(--x, #fallback) fallbacks are legitimate (the token bridge is built from
+# them), so literals inside a var() are stripped before counting.
+# NO BACKSLASHES in this pipeline. It is emitted from a JS template literal,
+# where a backslash-b becomes a literal backspace character and an escaped
+# paren collapses into a capture group — which is exactly how the first version
+# of this counted zero colours in a file full of them. Bracket expressions
+# express the same thing with nothing to escape. (Writing that explanation with
+# the escapes in it reintroduced the bug in a COMMENT, which is how the
+# no-mangled-escape test earned its place.)
+sed 's/var([^)]*)//g' "$APP" | grep -o -E '#[0-9a-fA-F]{3,8}|rgba?[(][^)]*[)]|hsla?[(][^)]*[)]' | sort -u > "$WORK/hard" || true
+HARD=$(wc -l < "$WORK/hard" | tr -d ' ')
+
 echo "design-adherence: \${APPROVED} approved variable(s); the app uses \${USED} of them, declares \${OWN} of its own, in \${APPBYTES} bytes of its own CSS."
+echo "design-adherence: \${HARD} distinct hardcoded colour(s) written outside the approved variables."
 
 # Too little approved design to judge against (a preset-only project).
 if [ "$APPROVED" -lt 8 ]; then
@@ -145,6 +167,20 @@ if [ "$USED" -eq 0 ]; then
 elif [ "$OWN" -ge 12 ] && [ $((USED * 4)) -lt "$APPROVED" ]; then
   echo "FAIL: the app declares \${OWN} design variables of its own while using only \${USED} of \${APPROVED} approved ones."
   echo "      That is a second palette; the two will drift. Delete the parallel tokens and consume state/design.css."
+  FAIL=1
+elif [ $((USED * 4)) -lt "$APPROVED" ]; then
+  # Low coverage with real CSS behind it, however few variables were declared.
+  # This is the rule the old thresholds missed: what matters is how much of the
+  # approved design is REPRODUCED, not how the app spells its own values.
+  echo "FAIL: the app reproduces only \${USED} of \${APPROVED} approved design variables while writing \${APPBYTES} bytes of its own CSS."
+  echo "      Most of the approved design is not being used, so the app will not look like the mockup."
+  echo "      Restyle the screens on var(--...) from state/design.css; state/mockups/current.html is the visual contract."
+  FAIL=1
+elif [ "$HARD" -ge 20 ] && [ $((USED * 2)) -lt "$APPROVED" ]; then
+  # Enough approved variables to be credible, but the colours are still typed in.
+  echo "FAIL: the app writes \${HARD} distinct hardcoded colours while using only \${USED} of \${APPROVED} approved variables."
+  echo "      Hardcoded colours do not follow the theme — they are why a built app drifts from its mockup"
+  echo "      and why the dark theme looks wrong. Replace them with var(--...) from state/design.css."
   FAIL=1
 fi
 

@@ -15,11 +15,15 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye, MonitorSmartphone } from 'lucide-react';
+import {
+  Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye,
+  MonitorSmartphone, RotateCcw, GitCompare,
+} from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
 import BuildLogViewer from './BuildLogViewer';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
+import ChangeHistory from './ChangeHistory';
 import { toWireImages } from '@/lib/chat-images';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
@@ -540,6 +544,37 @@ export default function BuildChat({
   // review with apply:true. The screenshots it takes are attached to the
   // findings message, so the critique can be checked against the pixels
   // instead of taken on trust.
+  // Change history — the change records for this project, opened from the chat
+  // rather than only from the classic Build panel. On a phone the chat IS the
+  // build surface, so "what did the last build actually change" has to be
+  // reachable from here.
+  const [showChanges, setShowChanges] = useState(false);
+
+  // Continue build — soft-retry a build that stopped. It resumes from the last
+  // checkpoint / the working tree still in the container, so nothing is lost.
+  // Same rule as the classic Build panel: any non-successful TERMINAL cycle,
+  // excluding a soft pause (its own Resume block) and a failed deploy (its own
+  // Retry deploy). Flightdeck on a phone had no way to reach this at all —
+  // a build that stopped could only be continued from the desktop view.
+  const FAILED_TERMINAL = ['failed', 'abandoned', 'refused_quota', 'interrupted'];
+  const canContinue = !!cycle && canEdit && online && !active
+    && cycle.deploy_status !== 'deploy_failed'
+    && cycle.status !== 'paused'
+    && (FAILED_TERMINAL.includes(cycle.status) || (cycle.status === 'awaiting_admin' && cycle.error));
+  const [continuing, setContinuing] = useState(false);
+  const continueBuild = async () => {
+    if (!cycle) return;
+    setContinuing(true);
+    try {
+      await api.mock2RetryCycle(projectId, cycle.id);
+      toast({ title: 'Continuing the build', description: 'It resumes from the last checkpoint — nothing so far is lost.' });
+      if (onStarted) onStarted();
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not continue the build', description: err.message });
+    } finally { setContinuing(false); }
+  };
+
   const [screenCheckBusy, setScreenCheckBusy] = useState(false);
   const runScreenCheck = async () => {
     setScreenCheckBusy(true);
@@ -562,6 +597,19 @@ export default function BuildChat({
             <Hammer className="h-4 w-4" /> Build chat
           </CardTitle>
           <div className="flex items-center gap-1.5">
+          {/* Continue build — first, because when it is showing it is the only
+              thing the operator wants. Primary styling: a stopped build is the
+              one state where the next action is unambiguous. */}
+          {canContinue ? (
+            <Button
+              type="button" size="sm" className="h-11 sm:h-8"
+              onClick={continueBuild} disabled={continuing}
+              title="Continue the stopped build from its last checkpoint — nothing done so far is lost"
+            >
+              {continuing ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" /> : <RotateCcw className="h-3.5 w-3.5 sm:mr-1" />}
+              <span className="hidden sm:inline">Continue build</span>
+            </Button>
+          ) : null}
           {canEdit && online ? (
             <Button
               type="button" variant="outline" size="sm" className="h-11 sm:h-8"
@@ -572,6 +620,18 @@ export default function BuildChat({
               <span className="hidden sm:inline">Screen check</span>
             </Button>
           ) : null}
+          {/* Change history — what the builds actually changed, and the restore
+              points. Next to Screen check because they answer the two halves of
+              "what happened": how it looks, and what moved. */}
+          <Button
+            type="button" variant="outline" size="sm" className="h-11 sm:h-8"
+            aria-expanded={showChanges}
+            onClick={() => setShowChanges((v) => !v)}
+            title="The change records for this project — what each build changed, with restore points"
+          >
+            <GitCompare className="h-3.5 w-3.5 sm:mr-1" />
+            <span className="hidden sm:inline">Changes</span>
+          </Button>
           {buildRequests.length > 0 ? (
             <Button
               type="button" variant="outline" size="sm" className="h-11 sm:h-8"
@@ -586,6 +646,11 @@ export default function BuildChat({
           </div>
         </div>
       </CardHeader>
+      {showChanges ? (
+        <div className="mx-4 mb-2 max-h-[60vh] overflow-y-auto rounded-lg border bg-background/60 p-2">
+          <ChangeHistory projectId={projectId} canRestore={canEdit && online && !active} />
+        </div>
+      ) : null}
       {showHistory ? (
         <div className="mx-4 mb-2 rounded-lg border bg-background/60">
           <div className="flex items-center justify-between px-3 py-1.5 border-b">

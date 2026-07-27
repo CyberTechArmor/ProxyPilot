@@ -1704,7 +1704,34 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       let uiVerification = { needed: false, checklist: [] };
       if (!deployed.skipped) {
         const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, requiredIds: decision.finishAcceptanceIds || [], logEvent, env: process.env });
-        if (!smoke.ok) {
+        // A malformed TEST FILE is not a broken app. Project 38 deployed
+        // successfully, served correctly, and the cycle went red because
+        // state/ui-checks.json used a different (equally valid, more
+        // conventional) step spelling — throwing away a working deploy and
+        // making the operator press "Continue build". The parser now accepts
+        // both spellings; this is the backstop for the next spelling nobody
+        // anticipated. The app stays live, the problem is stated loudly, and
+        // the build completes as PENDING VERIFICATION — never as a silent pass.
+        if (!smoke.ok && smoke.specInvalid) {
+          const detail = smokeFailSummary(smoke.report);
+          logEvent('note', {
+            role: 'system',
+            content: `The app deployed and is serving, but its browser checks could not run: ${detail}. `
+              + 'That is a defect in state/ui-checks.json, not in the app — the deploy is kept and this build '
+              + 'completes as pending verification. Fix the check file in the next update.',
+            meta: { smoke_spec_invalid: true },
+          });
+          try {
+            insertMessage({
+              projectId,
+              kind: 'system',
+              body: `**The app is live, but its automated browser checks did not run.**\n\n${detail}\n\n`
+                + 'This is a problem with `state/ui-checks.json` (the check file), not with the app — so the deploy '
+                + 'was kept rather than thrown away. Please confirm the change by hand, and ask for the check file '
+                + 'to be fixed in the next update.',
+            });
+          } catch { /* best effort */ }
+        } else if (!smoke.ok) {
           const detail = smokeFailSummary(smoke.report);
           finishCycle(cycle.id, { status: 'failed', error: `Smoke gate failed after deploy — ${detail}` });
           releaseLock(projectId, holder);
@@ -1725,6 +1752,20 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             acceptance: decision.finishAcceptance || [],
             config: smokeConfigFromEnv(process.env),
           });
+          // A check file that could not be parsed means NOTHING was observed in
+          // a browser, whatever the diff touched. That is the definition of an
+          // unverified user-visible change, so it always routes to pending
+          // verification rather than reporting a plain success.
+          if (smoke.specInvalid) {
+            uiVerification = {
+              needed: true,
+              reason: 'the browser checks could not run — state/ui-checks.json did not parse',
+              checklist: [
+                ...(uiVerification.checklist || []),
+                'Open the app and confirm this change by hand — no browser check observed it.',
+              ],
+            };
+          }
           if (uiVerification.needed) {
             logEvent('note', {
               role: 'system',

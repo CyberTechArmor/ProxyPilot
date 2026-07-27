@@ -8,6 +8,10 @@
 // tablet the top bars are still there, so callers pass onOpenNav/onShowDetails
 // as null and the bar is panels alone.
 //
+// It also rides on the DETAILS page (detailsActive), because Details is one of
+// the bar's own destinations: leaving the bar behind when you tap it stranded
+// the operator on a page with no way back to Preview or Assets.
+//
 // MOBILE_FIRST: every item is a ≥44px tap target and the row is an even grid,
 // so it stays thumb-reachable at 360px however many panels a stage has.
 
@@ -26,7 +30,7 @@ const itemCls = (active) =>
   }`;
 
 export default function MobilePanelBar({
-  panels, current, onSelect, onOpenNav = null, onShowDetails = null,
+  panels, current, onSelect, onOpenNav = null, onShowDetails = null, detailsActive = false,
 }) {
   const count = panels.length + (onOpenNav ? 1 : 0) + (onShowDetails ? 1 : 0);
   const cols = COLS[Math.min(count, COLS.length) - 1];
@@ -49,7 +53,10 @@ export default function MobilePanelBar({
         </button>
       ))}
       {onShowDetails ? (
-        <button type="button" onClick={onShowDetails} aria-label="Project details" className={itemCls(false)}>
+        <button
+          type="button" onClick={onShowDetails} aria-label="Project details"
+          aria-pressed={detailsActive} className={itemCls(detailsActive)}
+        >
           <Info className="h-4 w-4" />Details
         </button>
       ) : null}

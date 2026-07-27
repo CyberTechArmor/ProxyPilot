@@ -545,3 +545,35 @@ test('screen plan folds variants before planning (already-approved inventories p
   const items = screenItemsFromInventory(inv);
   assert.ok(items.every((i) => i.screen !== 'List (Dark)' && i.screen !== 'List (Light)'));
 });
+
+/* -------- the design partner knows what the Builder already supplied -------- */
+
+test('the concept prompt states what is in the asset library, and what is not', async () => {
+  const { buildConceptChatSystemPrompt } = await import('../mock2/concept-logic.js');
+  const empty = buildConceptChatSystemPrompt({ assets: { total: 0, images: 0, content: 0 } });
+  // An empty library must invite the logo ONCE and then get out of the way — a
+  // mockup with sensible placeholders beats a question the Builder has to answer
+  // before seeing anything.
+  assert.match(empty, /ASSET LIBRARY: empty/);
+  assert.match(empty, /Do not block on it/);
+
+  const stocked = buildConceptChatSystemPrompt({ assets: { total: 3, images: 2, content: 1 } });
+  assert.match(stocked, /2 images/);
+  assert.match(stocked, /1 written note/);
+  // The failure this prevents: asking the Builder to upload a logo they already
+  // uploaded, because the design partner could not see the library.
+  assert.match(stocked, /Never ask the Builder for something already in the library/);
+});
+
+test('the mockup task carries the assets, after the brief and before the output rule', async () => {
+  const { buildMockupTask } = await import('../mock2/concept-logic.js');
+  const section = '\n\nUse the supplied logo.';
+  const task = buildMockupTask({ brief: 'a check-in screen', assetSection: section });
+  assert.match(task, /Use the supplied logo\./);
+  // Order is the point: material to build WITH, not a second brief that
+  // displaces this turn's, and never after the "output HTML only" instruction.
+  assert.ok(task.indexOf('a check-in screen') < task.indexOf('Use the supplied logo'));
+  assert.ok(task.indexOf('Use the supplied logo') < task.indexOf('Output the full updated HTML'));
+  // No library, no tokens.
+  assert.doesNotMatch(buildMockupTask({ brief: 'x' }), /Use the supplied logo/);
+});

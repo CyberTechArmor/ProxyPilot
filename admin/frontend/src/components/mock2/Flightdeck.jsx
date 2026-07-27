@@ -40,7 +40,7 @@ const PHONE_PANEL_KEYS = ['chat', 'preview', 'assets'];
 
 export default function Flightdeck({
   projectId, project, canEdit, isAdmin, previewSrc, provLog, provMessage, onChanged, onBuilt,
-  onSwitchView, onShowDetails, onOpenNav,
+  onSwitchView, onShowDetails, onOpenNav, panel: panelProp, onPanel,
 }) {
   const online = project?.lifecycle === 'active';
   const containerName = project?.container_name || null;
@@ -114,7 +114,14 @@ export default function Flightdeck({
   const [devMode, setDevMode] = useState(() => readJsonPref('mock2.flightdeck.devMode', false));
   useEffect(() => { writeJsonPref('mock2.flightdeck.devMode', devMode); }, [devMode]);
   // Narrow-screen single-panel switch.
-  const [mobilePanel, setMobilePanel] = useState('preview');
+  // Mirrored to the parent (onPanel) rather than owned here, so the Details
+  // page can carry the same bottom bar and return to the panel it names.
+  const [ownMobilePanel, setOwnMobilePanel] = useState('preview');
+  const mobilePanel = panelProp || ownMobilePanel;
+  const setMobilePanel = useCallback((key) => {
+    setOwnMobilePanel(key);
+    if (onPanel) onPanel(key);
+  }, [onPanel]);
   // Phone (<md). Not a Tailwind prefix because it changes WHICH panels exist —
   // hiding the editor/terminal with `hidden` would still mount CodeMirror and
   // open a PTY behind them.

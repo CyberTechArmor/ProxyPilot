@@ -14,7 +14,7 @@ import crypto from 'node:crypto';
 import { getMock2Db } from './db.js';
 import {
   toAsset, sortAssets, sanitizeName, normalizeTag,
-  validateImageUpload, validateContent, ASSET_MIMES,
+  validateImageUpload, validateContent, ASSET_MIMES, extFor, selectMockupImages,
 } from './project-assets-logic.js';
 
 const nowIso = () => new Date().toISOString();
@@ -60,6 +60,41 @@ export function assetFilePath(projectId, id) {
   const dir = projectDir(projectId);
   const full = path.join(dir, path.basename(String(row.stored_as)));
   return full.startsWith(dir) ? full : null;
+}
+
+// readAssetImage — an image asset as a model-ready block, or null.
+//
+// Same shape hydrateAttachments produces for chat images ({ media_type, data }),
+// so a caller can concatenate the two lists and hand them straight to a turn.
+// The mime comes from the stored row (which derived it from the EXTENSION at
+// upload, never the client's declared type), so a mislabelled upload cannot be
+// presented to the model as something it is not.
+export function readAssetImage(projectId, id) {
+  try {
+    const row = getAssetRow(projectId, id);
+    if (!row || row.kind !== 'image') return null;
+    const file = assetFilePath(projectId, id);
+    if (!file) return null;
+    const buffer = fs.readFileSync(file);
+    if (!buffer?.length) return null;
+    return { media_type: row.mime || ASSET_MIMES[extFor(row.name)] || 'image/png', data: buffer.toString('base64') };
+  } catch { return null; }
+}
+
+// hydrateMockupAssetImages — the ranked selection above, read off disk.
+// Returns { images, used } so the caller can NAME the pictures it attached;
+// an image block the model cannot identify is just a picture.
+export function hydrateMockupAssetImages(projectId, assets, opts = {}) {
+  const picked = selectMockupImages(assets, opts);
+  const images = [];
+  const used = [];
+  for (const a of picked) {
+    const img = readAssetImage(projectId, a.id);
+    if (!img) continue;              // row without bytes — skip, never throw
+    images.push(img);
+    used.push({ name: a.name, tag: a.tag });
+  }
+  return { images, used };
 }
 
 /* ------------------------------- writes --------------------------------- */

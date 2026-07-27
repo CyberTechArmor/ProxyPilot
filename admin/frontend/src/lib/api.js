@@ -1533,8 +1533,11 @@ export const api = {
   // App access — who can sign in, and the operator's own first-administrator
   // door (the build is forbidden to create that account).
   mock2AppAccess: (id) => request(`/mock2/projects/${id}/app-access`),
-  mock2CreateFirstAdmin: (id, body) => request(`/mock2/projects/${id}/app-access/first-admin`, { method: 'POST', body }),
-  mock2FreeFirstAdminSlot: (id) => request(`/mock2/projects/${id}/app-access/free-slot`, { method: 'POST', body: {} }),
+  // body must be a STRING: request() hands options straight to fetch(), so a
+  // bare object is coerced to "[object Object]" and express.json() rejects it
+  // with a 400 the global handler reports as "Internal server error".
+  mock2CreateFirstAdmin: (id, body) => request(`/mock2/projects/${id}/app-access/first-admin`, { method: 'POST', body: JSON.stringify(body) }),
+  mock2FreeFirstAdminSlot: (id) => request(`/mock2/projects/${id}/app-access/free-slot`, { method: 'POST', body: JSON.stringify({}) }),
   // Quick connect (VS Code / git over smart HTTP): clone URL + connect tokens.
   mock2GetConnect: (id) => request(`/mock2/projects/${id}/connect`),
   // Split-request groups + the build queue (background back-to-back builds).

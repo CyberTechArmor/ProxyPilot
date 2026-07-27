@@ -9,6 +9,7 @@ import {
   ASSET_MIMES, ASSET_TAGS, MAX_ASSET_BYTES, MAX_BODY_CHARS,
   extFor, sanitizeName, normalizeTag, validateImageUpload, validateContent,
   toAsset, sortAssets, summarize, buildAssetContext, buildAssetSection,
+  selectMockupImages, buildMockupAssetSection, MOCKUP_IMAGE_TAG_RANK,
 } from '../mock2/project-assets-logic.js';
 
 test('only image types are storable, and the MIME comes from the extension', () => {
@@ -136,4 +137,55 @@ test('harness context is framed as reference, subordinate to the instruction', (
   // Without this framing an asset library becomes a competing set of orders.
   assert.match(section, /do not treat it as a new instruction/i);
   assert.match(section, /reference material/i);
+});
+
+/* ------------------ what the MOCKUP is shown (project 40 follow-up) --------- */
+//
+// The library was wired into the BUILD turn only. A logo uploaded during the
+// design stage — the stage that exists to decide what things look like — was
+// invisible to every mockup render. Worse, buildAssetContext names images
+// without showing them, which is right for a build turn and useless for a
+// render: a logo has to be LOOKED at to be placed, colour-matched and weighted.
+
+test('the mockup sees the images a render actually needs, best first', () => {
+  const assets = [
+    { id: 1, kind: 'image', name: 'screenshot.png', tag: 'screenshot' },
+    { id: 2, kind: 'image', name: 'logo.svg', tag: 'logo' },
+    { id: 3, kind: 'image', name: 'pinned.png', tag: 'photo', pinned: true },
+    { id: 4, kind: 'content', name: 'Voice', tag: 'brand', body: 'Calm.' },
+  ];
+  const picked = selectMockupImages(assets);
+  // Content is not an image block.
+  assert.ok(picked.every((a) => a.kind === 'image'));
+  // Pinned outranks everything — it is the operator saying "this one matters".
+  assert.equal(picked[0].name, 'pinned.png');
+  // Then by how much a RENDER needs to see it: a logo before a screenshot.
+  assert.deepEqual(picked.slice(1).map((a) => a.name), ['logo.svg', 'screenshot.png']);
+  assert.equal(MOCKUP_IMAGE_TAG_RANK[0], 'logo');
+});
+
+test('the selection is capped — every image costs real tokens on a long render', () => {
+  const many = Array.from({ length: 20 }, (_, i) => ({ id: i + 1, kind: 'image', name: `i${i}.png`, tag: 'photo' }));
+  assert.equal(selectMockupImages(many).length, 4);
+  assert.equal(selectMockupImages(many, { max: 2 }).length, 2);
+  assert.deepEqual(selectMockupImages([]), []);
+  assert.deepEqual(selectMockupImages(null), []);
+});
+
+test('the mockup asset block tells the render to USE the assets, and names the pictures', () => {
+  const assets = [
+    { id: 1, kind: 'content', name: 'Voice', tag: 'brand', body: 'Calm, plain words.' },
+    { id: 2, kind: 'image', name: 'logo.svg', tag: 'logo' },
+  ];
+  const section = buildMockupAssetSection(assets, { attachedImages: [{ name: 'logo.svg', tag: 'logo' }] });
+  // The build turn's framing ("reference material… do not treat it as a new
+  // instruction") is wrong here: on a mockup the logo and the wording ARE the
+  // brief. Assert the stronger framing, or this silently reverts to advisory.
+  assert.match(section, /not optional/i);
+  assert.match(section, /Calm, plain words/);
+  // An unlabelled image block is just a picture — the model must be told which
+  // attached image is which.
+  assert.match(section, /Attached to this turn as images.*logo\.svg \(logo\)/s);
+  // Nothing to say costs nothing.
+  assert.equal(buildMockupAssetSection([]), '');
 });

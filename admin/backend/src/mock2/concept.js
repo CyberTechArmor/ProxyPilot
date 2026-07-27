@@ -38,6 +38,8 @@ import {
   insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
 } from './cycles.js';
 import { acquireLock, releaseLock, touchLock } from './locks.js';
+import { listAssets, hydrateMockupAssetImages } from './project-assets.js';
+import { buildMockupAssetSection, summarize as summarizeAssets } from './project-assets-logic.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import { insertMessage, listMessages, getOrCreateChat } from './chats.js';
@@ -516,6 +518,15 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // Multi-modal: hydrate image attachments into the transcript (the most
   // recent few as real image blocks; older ones as stable placeholders).
   const transcript = buildConceptTranscript(hydrateChatMessagesForModel(projectId, listMessages(projectId)));
+  // The asset library the operator collected for THIS project. Read once and
+  // used twice: the design partner is told what is on hand (so it can say
+  // "I'll use the logo you uploaded" instead of inventing a wordmark), and the
+  // RENDER is given the pictures themselves. It was previously wired into the
+  // build turn only — so a logo uploaded during the design stage, which is the
+  // stage that exists to decide what things look like, was invisible to every
+  // mockup.
+  let projectAssets = [];
+  try { projectAssets = listAssets(projectId); } catch { projectAssets = []; }
   const hasMockup = !!project.current_mockup_id;
   // The locked design system, plus the binding palette of the base preset the
   // Builder chose at creation (no preset → unchanged, the model picks the look).
@@ -527,7 +538,10 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     ? applyExploreDesign(framework.design_system_md)
     : applyDesignPreset(framework.design_system_md, project.design_preset);
   const system = stepSystemPrompt('concept-chat',
-    buildConceptChatSystemPrompt({ designSystem: boundDesignSystem, projectName: project.name, hasMockup, mode }),
+    buildConceptChatSystemPrompt({
+      designSystem: boundDesignSystem, projectName: project.name, hasMockup, mode,
+      assets: summarizeAssets(projectAssets),
+    }),
     { DESIGN_SYSTEM: boundDesignSystem, PROJECT_NAME: project.name });
 
   // Stream the reply where the provider supports it (Anthropic): visible text
@@ -593,10 +607,15 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // explicit token spec: geometry obeyed, color ignored — operator review).
     const restyleBrief = /\b(themes?|palettes?|design tokens?|tokens?|color scheme|light mode|dark mode|rebrand|restyl\w+)\b/i.test(String(decision.brief || ''))
       || /#[0-9a-fA-F]{3,8}\b/.test(String(decision.brief || ''));
+    // The pictures the render must LOOK at (a logo described in words is
+    // useless — it has to be placed, colour-matched and weighted), plus the
+    // text context naming them so an image block is not just a picture.
+    const assetPics = hydrateMockupAssetImages(projectId, projectAssets, { max: 4 });
     const mockupTask = buildMockupTask({
       brief: decision.brief, currentHtml, projectName: project.name,
       conversation: conversationRecap(listMessages(projectId)),
       restyle: restyleBrief,
+      assetSection: buildMockupAssetSection(projectAssets, { attachedImages: assetPics.used }),
     });
     // A full mockup is a LONG single generation (several minutes). Give it a
     // proportionate window and narrate progress via the heartbeat. The token
@@ -607,7 +626,9 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // The mockup model doesn't see the chat transcript — but it SHOULD see the
     // images the Builder just attached (design references / screenshots are
     // exactly what a render needs). This turn's attachments ride the task.
-    const mockupImages = hydrateAttachments(projectId, userAttachments);
+    // This turn's attachments FIRST (the operator just handed them over, so
+    // they are the most immediate intent), then the library's.
+    const mockupImages = [...hydrateAttachments(projectId, userAttachments), ...assetPics.images];
     // STREAM the render (Anthropic guidance for long output / large max_tokens /
     // image input): a big non-streaming render — worsened by attached images and
     // adaptive thinking pushing time-to-first-byte past Node's ~5-min undici

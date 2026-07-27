@@ -91,8 +91,18 @@ export const CONCEPT_CHAT_TOOL_NAMES = Object.freeze(CONCEPT_CHAT_TOOLS.map((t) 
 // exactly as the runner injects constitution_md. The model is a friendly guide
 // for a possibly non-technical Builder; it converses and requests mockups, and
 // it cannot build the real app.
-export function buildConceptChatSystemPrompt({ designSystem = '', projectName = 'this project', hasMockup = false, mode = 'design' } = {}) {
+export function buildConceptChatSystemPrompt({ designSystem = '', projectName = 'this project', hasMockup = false, mode = 'design', assets = null } = {}) {
   const planMode = mode === 'plan';
+  // What the operator has already handed over. The render is given the actual
+  // logo and wording (concept.js attaches them); the design partner needs to
+  // KNOW they exist so it uses them in the brief and stops asking for things it
+  // already has — and so "should I upload a logo first?" gets a true answer.
+  const assetBlock = assets && assets.total
+    ? `\n\nASSET LIBRARY: the Builder has supplied ${assets.total} item${assets.total === 1 ? '' : 's'} for this project`
+      + `${assets.images ? ` (${assets.images} image${assets.images === 1 ? '' : 's'} — logos, references, screenshots)` : ''}`
+      + `${assets.content ? `${assets.images ? ' and' : ' ('}${assets.content} written note${assets.content === 1 ? '' : 's'} — copy, brand and voice)` : ''}.`
+      + ` The render is shown the images and the notes, so BRIEF IT TO USE THEM: name the logo, quote the supplied wording rather than inventing placeholder copy, and follow the design references. Never ask the Builder for something already in the library.`
+    : '\n\nASSET LIBRARY: empty. If the app would be better with the Builder\'s real logo, brand colours, or actual wording, say so once — they can add them from the Assets panel and you will be shown them on the next render. Do not block on it; a mockup with sensible placeholders is more useful than a question.';
   // PLAN mode: the orchestrator gives the model no tools, so it cannot generate a
   // mockup — its job is to think through the idea in conversation. DESIGN mode:
   // it may call generate_mockup. The prompt states the current mode so the model
@@ -159,7 +169,7 @@ domain expert on the Builder's behalf:
 non-technical — turn an app idea into a clear, interactive mockup. This is Stage 1
 of four (Concept → Define → Build → Run); you are ONLY doing Concept.
 
-${modeBlock}
+${modeBlock}${assetBlock}
 
 What you CANNOT do (this is structural, not a preference):
 - You cannot write code, files, backend logic, or rules. You cannot build or run
@@ -676,7 +686,7 @@ export function stripInheritedStyles(html) {
 // a short recap of the conversation so the render reflects the whole idea.
 // restyle: the brief respecifies the visual language — the forwarded HTML's
 // <style> content is stripped so the incumbent palette cannot ride along.
-export function buildMockupTask({ brief = '', currentHtml = null, projectName = 'the app', conversation = '', restyle = false } = {}) {
+export function buildMockupTask({ brief = '', currentHtml = null, projectName = 'the app', conversation = '', restyle = false, assetSection = '' } = {}) {
   const parts = [`Project: ${projectName}`];
   if (conversation) parts.push(`Conversation so far (for context):\n${conversation}`);
   parts.push(`Design brief for this mockup:\n${String(brief || '').trim() || '(no brief — infer from the conversation)'}`);
@@ -687,6 +697,10 @@ export function buildMockupTask({ brief = '', currentHtml = null, projectName = 
   } else {
     parts.push('There is no existing mockup — create the first version.');
   }
+  // The operator's own logo, wording and references. Placed AFTER the brief and
+  // the current document, and BEFORE the output instruction, so it reads as
+  // material to build with rather than a new brief that displaces this turn's.
+  if (assetSection) parts.push(String(assetSection).trim());
   parts.push('Output the full updated HTML document only.');
   return parts.join('\n\n');
 }

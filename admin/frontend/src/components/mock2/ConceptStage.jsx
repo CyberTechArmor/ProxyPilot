@@ -28,8 +28,9 @@ import {
 } from '@/components/ui/select';
 import {
   Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList, Download, FileUp, FolderGit2,
-  ChevronDown, ChevronUp, Rocket, X, Clock3,
+  ChevronDown, ChevronUp, Rocket, X, Clock3, Library, ImagePlus,
 } from 'lucide-react';
+import { SetupProgress } from './ProjectPreview';
 import { ChatBubble, RuleQuestion, StreamingBubble } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
@@ -71,7 +72,10 @@ function StageIndicator({ stage }) {
 // `fill` — render as a panel that takes exactly its parent's height (the phone
 // workspace) instead of sizing to its content. Off everywhere else, so the
 // stacked desktop/tablet layouts keep the growth behaviour they were tuned for.
-export default function ConceptStage({ projectId, project, canEdit, onApproved, onMockupChanged, archived = false, fill = false }) {
+export default function ConceptStage({
+  projectId, project, canEdit, onApproved, onMockupChanged, archived = false, fill = false,
+  provLog = null, provMessage = null, onOpenAssets = null,
+}) {
   const { toast } = useToast();
   const [data, setData] = useState(null); // { messages, job, audit_job, stage, preview_url, open_question_ids, ... }
   const [message, setMessage] = useState('');
@@ -86,6 +90,14 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   const scrollRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && !archived && project?.lifecycle === 'active');
   const wasApproved = useRef(!!project?.design_approved_at);
+  // The "bring your logo" invitation: shown once per project until it is either
+  // answered (something is in the library) or dismissed. Remembered per project
+  // so it does not reappear on every visit.
+  const assetPromptKey = `pp.assetPrompt.dismissed.${projectId}`;
+  const [assetPromptOff, setAssetPromptOff] = useState(() => {
+    try { return localStorage.getItem(assetPromptKey) === '1'; } catch { return false; }
+  });
+  const [assetCount, setAssetCount] = useState(null);   // null = not yet known
   const lastMockupId = useRef(project?.current_mockup_id || null);
 
   const load = useCallback(async () => {
@@ -104,6 +116,22 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   }, [projectId, onApproved]);
 
   useEffect(() => { load(); }, [load]);
+
+  // How many assets this project has. Asked once per mount (and again after the
+  // Assets panel is opened) purely to decide whether the invitation still has a
+  // point — a project that already has a logo should not be asked for one.
+  const refreshAssetCount = useCallback(async () => {
+    try {
+      const r = await api.mock2ProjectAssets(projectId);
+      setAssetCount(r?.summary?.total ?? (r?.assets?.length || 0));
+    } catch { setAssetCount(0); }   // never let this block the chat
+  }, [projectId]);
+  useEffect(() => { if (!archived) refreshAssetCount(); }, [archived, refreshAssetCount]);
+
+  const dismissAssetPrompt = useCallback(() => {
+    setAssetPromptOff(true);
+    try { localStorage.setItem(assetPromptKey, '1'); } catch { /* private mode — session only */ }
+  }, [assetPromptKey]);
 
   // Poll while a background turn/approval job is running, while the M8 audit is
   // in flight, or while any rule question is open (so answers + the "starting the
@@ -177,8 +205,14 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   const stage = data?.stage || project?.stage;
   const approved = !!stage?.design_approved;
   const online = project?.lifecycle === 'active';
+  const provisioning = project?.lifecycle === 'provisioning';
   const previewUrl = data?.preview_url || project?.preview_url || null;
   const hasMockup = !!(data?.current_mockup_id || project?.current_mockup_id);
+  // Ask only while the answer can still change the FIRST mockup, and only once
+  // we actually know the library is empty (assetCount stays null until the
+  // request lands, so the card never flashes in and out).
+  const showAssetPrompt = editable && !approved && !hasMockup
+    && !assetPromptOff && assetCount === 0;
   // A design exists to export pre-approval (live mockup) AND post-approval
   // (the archived mockup is kept — the template reads it from the repo).
   const hasDesign = hasMockup || !!project?.design_approved_at || !!project?.mockup_archive_url;
@@ -541,6 +575,63 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
                 : 'flex-1 min-h-[16rem] max-h-[60vh]'
           }`}
         >
+          {/* SETUP STEPS — the same live provisioning list the Preview panel
+              shows, in the CHAT. Someone waiting for their project to come up is
+              sitting in the conversation (it is where they were told to start),
+              and on a phone Preview is a different panel entirely — so the
+              progress was on a screen they were not looking at. */}
+          {!archived && provisioning ? (
+            <div data-scroll-skip className="rounded-lg border bg-muted/20 p-3">
+              <p className="flex items-center gap-2 text-sm font-medium">
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-500" />
+                <span className="min-w-0 break-words">{provMessage || 'Setting up your project…'}</span>
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                The container, repository, and URL are being provisioned. You can type below while it finishes —
+                anything you send runs the moment it is ready.
+              </p>
+              {Array.isArray(provLog) && provLog.length ? <SetupProgress log={provLog} /> : null}
+            </div>
+          ) : null}
+
+          {/* BRING YOUR OWN — the most useful moment to hand over a logo or the
+              real wording is BEFORE the first mockup, because the mockup is what
+              gets made from them. Asked once, dismissible, and never asked of a
+              project that already has assets. */}
+          {showAssetPrompt ? (
+            <div data-scroll-skip className="rounded-lg border border-primary/30 bg-primary/5 p-3">
+              <div className="flex items-start gap-2">
+                <ImagePlus className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium">
+                    Do you want to load logos, assets, or context before your app build request?
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Anything you add is used by the design — the mockup is shown your logo and design references,
+                    and given your wording and brand notes to build from. You can add them later too.
+                  </p>
+                  <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                    {onOpenAssets ? (
+                      <Button
+                        size="sm" className="h-11 w-full sm:h-9 sm:w-auto"
+                        onClick={() => { onOpenAssets(); dismissAssetPrompt(); }}
+                      >
+                        <Library className="mr-1 h-3.5 w-3.5" />
+                        Add assets
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="ghost" size="sm" className="h-11 w-full sm:h-9 sm:w-auto"
+                      onClick={dismissAssetPrompt}
+                    >
+                      {onOpenAssets ? 'No thanks' : 'Got it'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           {shownMessages.length === 0 ? (
             <div className="text-center py-6 space-y-3">
               <p className="text-sm text-muted-foreground">

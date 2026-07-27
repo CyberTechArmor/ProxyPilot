@@ -117,16 +117,21 @@ export default function ProjectDetail() {
   // page, not a panelled workspace.
   const { openNav, setChromeless } = useOutletContext() || {};
   const isMobile = useIsMobile();
-  const mobileStudio = isMobile
+  // Is this project driven as a phone STUDIO at all (panelled workspace + its
+  // own bottom bar), regardless of which tab is showing? Details is one of the
+  // bar's destinations, so it must be chromeless for the same reason the
+  // workspace is: otherwise tapping Details stacks the shell's top bar and the
+  // tab strip on top of a bar that already offers both.
+  const phoneStudio = isMobile
     && !!project
     && project.lifecycle !== 'archived'
-    && tab === 'chat'
     && (project.stage?.design_approved ? buildView === 'flightdeck' : true);
+  const mobileStudio = phoneStudio && tab === 'chat';
   useEffect(() => {
     if (!setChromeless) return undefined;
-    setChromeless(mobileStudio);
+    setChromeless(phoneStudio && (tab === 'chat' || tab === 'details'));
     return () => setChromeless(false);
-  }, [setChromeless, mobileStudio]);
+  }, [setChromeless, phoneStudio, tab]);
   // Once the Terminal tab has been opened we keep it mounted (forceMount below)
   // so its shell session survives switching to other tabs — the PTY only starts
   // on the first visit, not on page load.
@@ -135,6 +140,12 @@ export default function ProjectDetail() {
   // Design stage's left column: the mockup, or the asset library it should
   // be made from. 'preview' by default — assets are opt-in context.
   const [designPane, setDesignPane] = useState('preview');
+  // The phone workspaces' current panel, lifted out of MockupWorkspace and
+  // Flightdeck so the Details page can carry the SAME bottom bar and hand the
+  // operator straight back to the panel they pick. null means "whatever the
+  // workspace's own default is" — it only becomes controlled once something
+  // (an auto-switch, a tap) actually chooses.
+  const [studioPanel, setStudioPanel] = useState(null);
   const archivedDefaulted = useRef(false);
   const prevLifecycle = useRef(null);      // last-seen lifecycle, to detect the provisioning→active transition
   const confettiFired = useRef(false);     // guard the one-time online confetti within this mount
@@ -377,6 +388,14 @@ export default function ProjectDetail() {
   // Chat/Terminal/Details tab strip (the terminal is built in; chat is the
   // right pane) and toggle its own center between the workspace and Details.
   const flightdeckActive = designApproved && buildView === 'flightdeck' && !isArchived;
+  // The bottom bar the phone workspaces use, carried onto the Details page.
+  // Same panel set as whichever stage the project is in, so tapping Details and
+  // tapping back is one gesture each way rather than a dead end. Nothing on a
+  // tablet or desktop (they still have their top bars) and nothing on an
+  // archived project (it has no workspace to return to).
+  const studioBarOnDetails = phoneStudio && tab === 'details'
+    ? { panels: flightdeckActive ? FLIGHTDECK_PHONE_PANELS : MOCKUP_PANELS }
+    : null;
 
   return (
     <div className="flex flex-col h-full min-h-0 gap-3">
@@ -423,7 +442,7 @@ export default function ProjectDetail() {
             terminal, and a Details toggle in its top bar reclaims this height.
             Same on a phone in the mockup stage: the workspace's bottom bar
             carries Details, so this row would be a duplicate control. */}
-        {!flightdeckActive && !mobileStudio && (
+        {!flightdeckActive && !mobileStudio && !studioBarOnDetails && (
           <TabsList className="grid w-full grid-cols-3 h-auto shrink-0">
             <TabsTrigger value="chat" className="py-2"><MessageSquare className="h-4 w-4 mr-1.5" />Chat</TabsTrigger>
             <TabsTrigger value="terminal" className="py-2"><TerminalSquare className="h-4 w-4 mr-1.5" />Terminal</TabsTrigger>
@@ -471,6 +490,7 @@ export default function ProjectDetail() {
                       onBuilt={handleMockupChanged}
                       onSwitchView={() => setBuildView('classic')}
                       onShowDetails={() => setTab('details')}
+                      panel={studioPanel} onPanel={setStudioPanel}
                       onOpenNav={openNav || null}
                     />
                   </Suspense>
@@ -512,6 +532,7 @@ export default function ProjectDetail() {
                   onMockupChanged={handleMockupChanged}
                   onOpenNav={openNav || null}
                   onShowDetails={() => setTab('details')}
+                  panel={studioPanel} onPanel={setStudioPanel}
                 />
               ) : previewSrc ? (
                 // Design mode — the live mockup preview on the left, the design
@@ -529,7 +550,13 @@ export default function ProjectDetail() {
                     />
                   </div>
                   <div className="min-w-0 flex flex-col gap-4 lg:flex-1 lg:min-h-0">
-                    <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
+                    <ConceptStage
+                      projectId={id} project={project} canEdit={canEdit}
+                      onApproved={load} onMockupChanged={handleMockupChanged}
+                      provLog={provStatus?.progress?.log || null}
+                      provMessage={provStatus?.progress?.message || null}
+                      onOpenAssets={() => setDesignPane('assets')}
+                    />
                   </div>
                 </div>
               ) : (
@@ -540,7 +567,12 @@ export default function ProjectDetail() {
                       provLog={provStatus?.progress?.log || null}
                       provMessage={provStatus?.progress?.message || null}
                     />
-                    <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
+                    <ConceptStage
+                      projectId={id} project={project} canEdit={canEdit}
+                      onApproved={load} onMockupChanged={handleMockupChanged}
+                      provLog={provStatus?.progress?.log || null}
+                      provMessage={provStatus?.progress?.message || null}
+                    />
                     {/* Before the first mockup exists is the MOST useful moment
                         to hand over a logo or a reference shot — it is what the
                         mockup gets made from. */}
@@ -579,7 +611,11 @@ export default function ProjectDetail() {
         </TabsContent>
 
         {/* DETAILS — the live URL, members, and all project administration. */}
-        <TabsContent value="details" className="mt-3 space-y-6 flex-1 min-h-0 overflow-y-auto">
+        {/* A flex column, not a scroll box: the phone's bottom bar rides
+            below the scrolling detail, so tapping Details never strands
+            someone on a page with no way back to Preview or Assets. */}
+        <TabsContent value="details" className={`${studioBarOnDetails ? 'mt-0' : 'mt-3'} flex-1 min-h-0 flex flex-col`}>
+        <div className="space-y-6 flex-1 min-h-0 overflow-y-auto">
       {/* The checkout state lives here on a phone (it is hidden from the studio
           view above); harmless duplication on desktop is avoided by showing it
           only where the studio does not. */}
@@ -964,6 +1000,17 @@ export default function ProjectDetail() {
           </CardContent>
         </Card>
       ) : null}
+        </div>
+        {studioBarOnDetails ? (
+          <MobilePanelBar
+            panels={studioBarOnDetails.panels}
+            current={null}
+            onSelect={(key) => { setStudioPanel(key); setTab('chat'); }}
+            onOpenNav={openNav || null}
+            onShowDetails={() => undefined}
+            detailsActive
+          />
+        ) : null}
         </TabsContent>
       </Tabs>
 
@@ -1222,6 +1269,16 @@ function DesignLeftPane({ tab, onTab, projectId, canEdit, preview }) {
   );
 }
 
+// The build stage's phone panels — the same three keys Flightdeck offers on a
+// phone (PHONE_PANEL_KEYS there). Duplicated rather than imported because this
+// is the DETAILS page's copy of the bar; Flightdeck is lazy-loaded and must not
+// be pulled in just to draw five buttons.
+const FLIGHTDECK_PHONE_PANELS = [
+  { key: 'chat', label: 'Chat', icon: MessageSquare },
+  { key: 'preview', label: 'Preview', icon: Eye },
+  { key: 'assets', label: 'Assets', icon: Library },
+];
+
 const MOCKUP_PANELS = [
   { key: 'chat', label: 'Chat', icon: MessageSquare },
   { key: 'preview', label: 'Preview', icon: Eye },
@@ -1232,11 +1289,18 @@ const MOCKUP_PANELS = [
 
 function MockupWorkspace({
   projectId, project, canEdit, previewSrc, previewReloadNonce, provLog, provMessage,
-  onApproved, onMockupChanged, onOpenNav, onShowDetails,
+  onApproved, onMockupChanged, onOpenNav, onShowDetails, panel: panelProp, onPanel,
 }) {
   // Start where the work is: the chat until a mockup exists, the mockup once
-  // one does.
-  const [panel, setPanel] = useState(previewSrc ? 'preview' : 'chat');
+  // one does. The panel is MIRRORED to the parent (onPanel) rather than owned
+  // here, so the Details page's copy of the bottom bar shows the same state and
+  // can return to it.
+  const [ownPanel, setOwnPanel] = useState(previewSrc ? 'preview' : 'chat');
+  const panel = panelProp || ownPanel;
+  const setPanel = useCallback((key) => {
+    setOwnPanel(key);
+    if (onPanel) onPanel(key);
+  }, [onPanel]);
   // The FIRST mockup appearing is the moment worth interrupting for — the user
   // asked for a screen and it just rendered. Later re-renders reuse the same
   // URL and don't yank the panel out from under someone mid-sentence.
@@ -1255,6 +1319,8 @@ function MockupWorkspace({
           <ConceptStage
             projectId={projectId} project={project} canEdit={canEdit} fill
             onApproved={onApproved} onMockupChanged={onMockupChanged}
+            provLog={provLog} provMessage={provMessage}
+            onOpenAssets={() => setPanel('assets')}
           />
         ) : panel === 'assets' ? (
           <div className="min-h-0 flex-1 overflow-y-auto p-2">

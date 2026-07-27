@@ -186,3 +186,72 @@ test('firstAdminInviteMessage: told at the END of the build, and only while the 
   assert.equal(firstAdminInviteMessage({ state: parseAccessState(out({ status: 401, body: {} })) }), null);
   assert.equal(firstAdminInviteMessage({ state: null }), null);
 });
+
+/* -------------------------------------------------------------------------- *
+ * THE CONTRADICTION, and the way out.
+ *
+ * n9.dev.fractionate.ai answered {"canCreateSuperadmin":false} while its whole
+ * users table was one row: design-review@fixture.invalid, which the platform
+ * seeds itself before every smoke run. The auth component's usersExist()
+ * excludes that domain — but only in versions that have the exclusion, and the
+ * component seeder only ever replaced a stored version that could not WIRE, so
+ * an install whose stored copy predated the fix kept it forever.
+ *
+ * The operator's report was the shape of that exactly: the create-super-admin
+ * form appears when the app deploys and is gone by the time the build finishes,
+ * because the platform seeds its fixture in between.
+ * -------------------------------------------------------------------------- */
+
+test('a door closed by nothing but the platform\'s own fixture is named, not repeated back', () => {
+  const s = parseAccessState(out({
+    body: { canCreateSuperadmin: false },
+    users: [`design-review${FIXTURE_EMAIL_DOMAIN}|admin|t|builtin`],
+  }));
+  assert.equal(s.fixtureFilled, true);
+  const summary = accessSummary(s);
+  // "An account already exists" would be the platform repeating its own bug
+  // back at the person it happened to.
+  assert.doesNotMatch(summary, /^An account already exists/);
+  assert.match(summary, /only account is the platform's own/);
+  assert.match(summary, /design-review@fixture\.invalid/, 'name the account');
+  assert.match(summary, /before that fixture stopped counting/, 'and why it happened');
+  assert.match(summary, /Free the slot below/, 'and the way out');
+});
+
+test('fixtureFilled is only ever claimed when the roster was actually read', () => {
+  // A real account closing the door is not this.
+  assert.equal(parseAccessState(out({
+    body: { canCreateSuperadmin: false },
+    users: ['thomas@fractionate.ai|admin|t|builtin', `design-review${FIXTURE_EMAIL_DOMAIN}|admin|t|builtin`],
+  })).fixtureFilled, false);
+  // A door that is OPEN is not this.
+  assert.equal(parseAccessState(out({ body: { canCreateSuperadmin: true } })).fixtureFilled, false);
+  // And "we could not look" is never it — claiming the fixture took the slot on
+  // a roster we could not read would offer a destructive action on a guess.
+  assert.equal(parseAccessState(out({ body: { canCreateSuperadmin: false }, roster: 'unavailable' })).fixtureFilled, false);
+  assert.equal(parseAccessState(out({ body: { canCreateSuperadmin: false }, users: [] })).fixtureFilled, false);
+});
+
+test('freeFirstAdminSlotScript: scoped to the reserved domain, and the SQL survives the shell', async () => {
+  const { freeFirstAdminSlotScript, parseFreeSlotResult } = await import('../mock2/app-access-logic.js');
+  const script = freeFirstAdminSlotScript();
+  // The scope is IN the WHERE clause — there is no row list that could widen it.
+  assert.match(script, /DELETE FROM users WHERE lower\(email\) LIKE '%@fixture\.invalid' RETURNING/);
+  assert.doesNotMatch(script, /DROP|TRUNCATE|DELETE FROM users;/i);
+  // Through a FILE, not a nested -c argument: the SQL's own quotes terminate
+  // the outer ones and psql receives `LIKE %@fixture.invalid` unquoted. That
+  // version parsed fine under `sh -n`, which is why this asserts the shape.
+  assert.match(script, /psql -tA -d app -f \$SQLF/);
+  assert.match(script, /<<'PP_FREE_SLOT_EOF'/);
+  assert.match(script, /trap 'rm -f "\$SQLF"' EXIT INT TERM/);
+  // Only fixture rows are reported, whatever comes back.
+  assert.match(script, /\*@fixture\.invalid\) echo "REMOVED:\$r"/);
+
+  assert.deepEqual(parseFreeSlotResult('REMOVED:a@fixture.invalid\nFREED:ok'),
+    { ok: true, removed: ['a@fixture.invalid'], error: null });
+  assert.deepEqual(parseFreeSlotResult('FREED:ok'), { ok: true, removed: [], error: null });
+  const failed = parseFreeSlotResult('FREED:error');
+  assert.equal(failed.ok, false);
+  assert.match(failed.error, /could not be reached/);
+  assert.equal(parseFreeSlotResult('').ok, false, 'no output is a failure, never a silent success');
+});

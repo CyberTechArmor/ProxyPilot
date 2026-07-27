@@ -159,6 +159,10 @@ export function parseAccessState(out) {
     accounts,
     realCount: real.length,
     fixtureCount: accounts.length - real.length,
+    // The app says closed, and the roster we can see holds nothing but the
+    // platform's own fixtures. Only assertable when the roster was actually
+    // READ — "we could not look" must never be reported as this.
+    fixtureFilled: canCreate === false && rosterKnown && accounts.length > 0 && real.length === 0,
   };
 }
 
@@ -179,9 +183,24 @@ export function accessSummary(state) {
   }
   if (state.canCreateSuperadmin === false) {
     const names = state.accounts.filter((a) => !a.fixture).map((a) => a.email);
-    return names.length
-      ? `An administrator already exists: ${names.slice(0, 3).join(', ')}${names.length > 3 ? `, +${names.length - 3} more` : ''}. Sign in with that account.`
-      : 'An account already exists, so the first-administrator form is closed.';
+    if (names.length) {
+      return `An administrator already exists: ${names.slice(0, 3).join(', ')}`
+        + `${names.length > 3 ? `, +${names.length - 3} more` : ''}. Sign in with that account.`;
+    }
+    // THE CONTRADICTION. The app says the door is closed and the roster shows
+    // nobody but the platform's own fixtures. That is not "an account exists" —
+    // it is this app running an auth component from before usersExist() learned
+    // to exclude @fixture.invalid, so the review account the platform seeds
+    // before its smoke checks consumed the operator's first-admin slot,
+    // mid-build. Saying "an account already exists" here repeats the platform's
+    // own bug back at the person it happened to.
+    if (state.fixtureFilled) {
+      return 'The app says its first-administrator form is closed, but the only account is the platform\'s own '
+        + `test fixture (${state.accounts.map((a) => a.email).join(', ')}). This app is running an auth component `
+        + 'from before that fixture stopped counting as a real user, so the platform\'s own check took your slot. '
+        + 'Free the slot below and create your account — nothing else is lost.';
+    }
+    return 'An account already exists, so the first-administrator form is closed.';
   }
   return 'The app\'s account state could not be read.';
 }
@@ -243,6 +262,54 @@ export function parseFirstAdminResult(out) {
   }
   if (status === 0) return { ok: false, status, error: 'The app did not answer. It may still be starting, or the deploy may have failed.' };
   return { ok: false, status, error: appMessage || `The app refused with HTTP ${status}.` };
+}
+
+/* -------------------------------------------------------------------------- *
+ * Freeing the slot the platform's own fixture took.
+ *
+ * ONLY the reserved @fixture.invalid domain, and only ever those rows. The
+ * accounts were put there by the platform (review-account.js) for its smoke
+ * checks; on an app whose auth component predates the exclusion they also
+ * consume the operator's first-admin bootstrap. Removing them is undoing the
+ * platform's own side effect, not touching the operator's data — and the next
+ * build simply re-seeds what it needs.
+ * -------------------------------------------------------------------------- */
+
+export function freeFirstAdminSlotScript() {
+  // The SQL goes in through a FILE, not a nested -c argument.
+  //
+  // `su - postgres -c 'psql -c "… LIKE \'%@fixture.invalid\' …"'` looks fine and
+  // parses as shell, but the SQL's own quotes terminate the outer ones: psql
+  // receives `LIKE %@fixture.invalid` with the literal unquoted, and errors.
+  // `sh -n` cannot see that. A file has one level of quoting and none of the
+  // ambiguity.
+  //
+  // Domain-scoped in the WHERE clause itself — there is no row list to widen,
+  // so this can never delete anything but the reserved fixture domain.
+  return [
+    'set -u',
+    'SQLF=$(mktemp)',
+    "trap 'rm -f \"$SQLF\"' EXIT INT TERM",
+    "cat > \"$SQLF\" <<'PP_FREE_SLOT_EOF'",
+    "DELETE FROM users WHERE lower(email) LIKE '%@fixture.invalid' RETURNING lower(email);",
+    'PP_FREE_SLOT_EOF',
+    'chmod 0644 "$SQLF"',
+    'DELETED=$(su - postgres -c "psql -tA -d app -f $SQLF" 2>/dev/null)',
+    'RC=$?',
+    'if [ "$RC" -ne 0 ]; then echo "FREED:error"; exit 0; fi',
+    "if [ -n \"$DELETED\" ]; then printf '%s\\n' \"$DELETED\" | while IFS= read -r r; do case \"$r\" in *@fixture.invalid) echo \"REMOVED:$r\";; esac; done; fi",
+    'echo "FREED:ok"',
+    '',
+  ].join('\n');
+}
+
+export function parseFreeSlotResult(out) {
+  const text = String(out || '');
+  if (!/FREED:ok/.test(text)) {
+    return { ok: false, removed: [], error: 'The app\'s database could not be reached, so nothing was changed.' };
+  }
+  const removed = [...text.matchAll(/^REMOVED:(.*)$/gm)].map((m) => m[1].trim()).filter(Boolean);
+  return { ok: true, removed, error: null };
 }
 
 // The chat invitation, posted once the app is live and still has no account.

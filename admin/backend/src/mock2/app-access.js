@@ -15,7 +15,7 @@ import { sh, b64 } from './host.js';
 import { DEFAULT_WEB_PORT } from './template.js';
 import {
   accessStateScript, parseAccessState, firstAdminScript, parseFirstAdminResult,
-  validateFirstAdmin,
+  validateFirstAdmin, freeFirstAdminSlotScript, parseFreeSlotResult,
 } from './app-access-logic.js';
 
 function containerSh(containerName, script, { timeoutMs = 45000 } = {}) {
@@ -72,6 +72,27 @@ export async function createFirstAdmin(project, { email, password } = {}) {
     // (they go in through a file, see firstAdminScript).
     console.warn(`[mock2] first-admin create failed for project ${project.id}:`, e?.message);
     return { ok: false, error: 'The request to the app could not be sent. Check that the project is online.' };
+  }
+}
+
+// freeFirstAdminSlot(project) — remove the platform's OWN fixture accounts.
+//
+// Only ever the reserved @fixture.invalid domain. On an app running an auth
+// component from before usersExist() learned to exclude that domain, the
+// review account the platform seeds before its smoke checks also consumes the
+// operator's first-admin bootstrap — so the door closes mid-build and the
+// operator is locked out of their own app. Removing those rows undoes the
+// platform's own side effect; the next build re-seeds whatever it needs.
+export async function freeFirstAdminSlot(project) {
+  if (!project?.container_name || project.lifecycle !== 'active') {
+    return { ok: false, removed: [], error: 'The project is not online — start it, then try again.' };
+  }
+  try {
+    const r = await containerSh(project.container_name, freeFirstAdminSlotScript());
+    return parseFreeSlotResult(r.stdout || '');
+  } catch (e) {
+    console.warn(`[mock2] free first-admin slot failed for project ${project.id}:`, e?.message);
+    return { ok: false, removed: [], error: 'The request could not be sent. Check that the project is online.' };
   }
 }
 

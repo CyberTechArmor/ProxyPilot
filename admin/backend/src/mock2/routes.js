@@ -1215,6 +1215,25 @@ export function createMock2Router() {
     res.json({ ...state, summary: accessSummary(state) });
   });
 
+  // Remove the platform's OWN fixture accounts, when they are what closed the
+  // operator's first-admin door. Editor-only and domain-scoped in the SQL — it
+  // undoes a platform side effect, it does not touch the operator's data.
+  router.post('/projects/:id/app-access/free-slot', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const { freeFirstAdminSlot, readAppAccess, accessSummary } = await import('./app-access.js');
+    const result = await freeFirstAdminSlot(req.mock2Project);
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    const state = await readAppAccess(req.mock2Project);
+    try {
+      insertMessage({
+        projectId: req.mock2Project.id,
+        kind: 'system',
+        body: `Removed ${result.removed.length} platform test account${result.removed.length === 1 ? '' : 's'} `
+          + `(${result.removed.join(', ') || 'none found'}). The first-administrator form is open again — create your account in **App access**.`,
+      });
+    } catch { /* best effort */ }
+    res.json({ ok: true, removed: result.removed, ...state, summary: accessSummary(state) });
+  });
+
   router.post('/projects/:id/app-access/first-admin', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const { createFirstAdmin, readAppAccess, accessSummary } = await import('./app-access.js');
     const { email, password } = req.body || {};

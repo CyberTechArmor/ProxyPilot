@@ -23,6 +23,14 @@ have actually regressed:
 - tapping a panel returns from Details,
 - no horizontal page scroll.
 
-Run it in BOTH stages — `STAGE=design` (mockup workspace) and `STAGE=build`
+`design-chat-activity-check.mjs` drives a LIVE design turn (`JOB=live`) whose
+narration advances and whose streamed reply grows, and asserts the design chat
+narrates and follows the way the build chat does: an accumulating timeline
+rather than one line each phase overwrites, following the newest content,
+pausing when the reader scrolls up, and resuming when they come back. Start a
+FRESH harness for it — the narration counter is per process, so a reused one
+begins past the phases it looks for.
+
+Run the phone-studio check in BOTH stages — `STAGE=design` (mockup workspace) and `STAGE=build`
 (Flightdeck). The Details-bar bug existed in one and not the other, which is
 exactly the kind of gap a single-stage check misses.

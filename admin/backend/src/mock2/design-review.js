@@ -383,7 +383,14 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
     const appCss = cssList.stdout || '';
     if (tokensJson) rogue = rogueCssColors(appCss, tokensJson);
     const designCss = await readContainerFile(containerName, 'state/design.css');
-    adherence = checkDesignAdherence({ designCss, appCss });
+    // The MARKUP too. Reading only stylesheets is how a build that shipped 328
+    // lines of HTML and no CSS measured as "nothing to judge" — in the gate and
+    // here alike. The platform's own pages are excluded; they are not the
+    // build's work.
+    const htmlList = await containerSh(containerName,
+      `for f in ${APP_DIR}/public/*.html; do case "$f" in *login.html|*admin.html|*profile.html) ;; *) cat "$f" 2>/dev/null;; esac; done`);
+    const appHtml = htmlList.stdout || '';
+    adherence = checkDesignAdherence({ designCss, appCss, appHtml });
   } catch { /* advisory */ }
 
   const model = String(process.env.MOCK2_REVIEW_MODEL || '').trim() || ready.model;
@@ -478,6 +485,64 @@ function autoReviewNote(reason, detail) {
   if (reason === 'no_runner') return `${base} — no build model connector is ready. Connect one to get design feedback on each build.`;
   if (reason === 'no_shots') return `${base} — the app could not be screenshotted${detail ? ` (${detail})` : ''}. The build itself is unaffected.`;
   return `${base}${detail ? ` — ${detail}` : '.'}`;
+}
+
+// afterBuildReview — the WHOLE post-build "look at what shipped" chain, in one
+// place because it has to fire from more than one terminal path.
+//
+// It used to live inline in screen-plan's onRequestClosed, which only runs when
+// a REQUEST closes as 'succeeded'. A build that ends in pending_verification
+// never closes its request — it waits for the operator's checklist — so it was
+// never served-checked, never given a reviewer account, and never reviewed.
+// That is how an app that looked nothing like its mockup shipped with no
+// review at all; and the smoke-spec backstop (a malformed check file keeps the
+// deploy and completes as pending verification) routes MORE builds down that
+// path, so leaving the trigger where it was would have made this worse.
+//
+// Three steps, in order, each best-effort:
+//   1. is the app actually serving? deploy it if not,
+//   2. is there an account to look at it WITH?
+//   3. screenshot it and critique it against the approved mockup.
+//
+// Idempotent enough to be called twice: maybeAutoDesignReview holds a per-
+// project in-flight guard, and steps 1 and 2 are no-ops when already true.
+export async function afterBuildReview(projectId, { reason = 'build close' } = {}) {
+  const id = Number(projectId);
+  if (!Number.isFinite(id)) return { ok: false, skipped: 'no_project' };
+  const { getProject } = await import('./projects.js');
+
+  // Not mid-stream: a project with another build queued is about to change
+  // again, and critiquing a half-finished state wastes a model call and
+  // confuses the chat. The guard lives HERE rather than at one call site, so
+  // both terminal paths behave the same way.
+  try {
+    const { listBuildQueue } = await import('./build-queue.js');
+    if (listBuildQueue(id).some((q) => q.status === 'queued' || q.status === 'started')) {
+      console.log(`[mock2] auto design review deferred for project ${id}: build queue still busy`);
+      return { ok: false, skipped: 'queue_busy' };
+    }
+  } catch { /* a queue read failure must not skip the review */ }
+
+  try {
+    const { ensureServing } = await import('./deploy.js');
+    const serving = await ensureServing(getProject(id), { reason });
+    if (serving.redeployed) {
+      insertMessage({
+        projectId: id, kind: 'system',
+        body: serving.serving
+          ? 'The app was not answering after the build, so it was deployed automatically — it is live now.'
+          : `The app is not answering after the build and the automatic deploy did not fix it: ${serving.error || 'unknown'}. Press Deploy to retry, or open the build log.`,
+      });
+    }
+  } catch (e) { console.warn('[mock2] post-build serving check failed:', e?.message); }
+
+  try {
+    const { ensureReviewAccount } = await import('./review-account.js');
+    await ensureReviewAccount(getProject(id));
+  } catch (e) { console.warn('[mock2] post-build review-account check failed:', e?.message); }
+
+  console.log(`[mock2] auto design review starting for project ${id} (${reason})`);
+  return maybeAutoDesignReview(getProject(id));
 }
 
 export async function maybeAutoDesignReview(project) {

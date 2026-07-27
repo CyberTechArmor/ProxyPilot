@@ -167,15 +167,51 @@ export function usedCssVars(cssText) {
  * Advisory by default — the caller decides whether a finding blocks — but the
  * codes are stable so a gate can key on them.
  */
-export function checkDesignAdherence({ designCss = '', appCss = '' } = {}) {
+// The class selectors a stylesheet DEFINES, and the classes a page USES.
+// state/design.css carries the approved mockup's component CSS verbatim, so its
+// class names are the mockup's own vocabulary — cards, lists, nav bars, chips.
+// Whether the built markup speaks that vocabulary is the closest deterministic
+// answer to "does this look like the mockup", and no amount of variable
+// counting reaches it.
+export function definedCssClasses(css) {
+  const out = new Set();
+  for (const m of String(css || '').matchAll(/\.([A-Za-z][A-Za-z0-9_-]{2,})/g)) out.add(m[1]);
+  return out;
+}
+
+export function usedHtmlClasses(html) {
+  const out = new Set();
+  for (const m of String(html || '').matchAll(/class\s*=\s*"([^"]*)"/gi)) {
+    for (const c of m[1].split(/\s+/)) if (c) out.add(c);
+  }
+  return out;
+}
+
+export function checkDesignAdherence({ designCss = '', appCss = '', appHtml = '' } = {}) {
   const approved = definedCssVars(designCss);
   const appDefines = definedCssVars(appCss);
-  const appUses = usedCssVars(appCss);
+  // The markup counts as app styling too: inline style attributes and <style>
+  // blocks reference variables, and a build that styles its screens in the HTML
+  // was measuring as "no CSS at all" (project 39's shape).
+  const appUses = new Set([...usedCssVars(appCss), ...usedCssVars(appHtml)]);
   const findings = [];
+
+  // Component vocabulary — the structural half.
+  const designClasses = definedCssClasses(designCss);
+  const htmlClasses = usedHtmlClasses(appHtml);
+  const usedClasses = [...designClasses].filter((c) => htmlClasses.has(c));
+  const componentCoverage = designClasses.size ? usedClasses.length / designClasses.size : null;
 
   // Nothing approved to adhere to — an old project, not a defect.
   if (!approved.size) {
-    return { ok: true, findings: [], stats: { approved: 0, used: 0, ownTokens: 0, coverage: 1 } };
+    return {
+      ok: true,
+      findings: [],
+      stats: {
+        approved: 0, used: 0, ownTokens: 0, coverage: 1,
+        designClasses: designClasses.size, usedClasses: usedClasses.length, componentCoverage,
+      },
+    };
   }
 
   const usedApproved = [...appUses].filter((v) => approved.has(v));
@@ -185,6 +221,28 @@ export function checkDesignAdherence({ designCss = '', appCss = '' } = {}) {
   const ownTokens = [...appDefines].filter((v) => !approved.has(v));
   const coverage = approved.size ? usedApproved.length / approved.size : 1;
 
+  // A build that shipped SCREENS with no styling of its own and none of the
+  // approved components has not reproduced the mockup — the exact shape that
+  // shipped an app looking nothing like its contract while every check passed.
+  if (String(appHtml || '').trim().length >= 2000
+      && String(appCss || '').trim().length < 500
+      && (componentCoverage === null || componentCoverage < 0.25)) {
+    findings.push({
+      code: 'SCREENS_UNSTYLED',
+      severity: 'high',
+      detail: `The built screens carry ${String(appHtml).trim().length} bytes of markup with ${String(appCss).trim().length} bytes of styling `
+        + `and ${usedClasses.length} of ${designClasses.size} approved component classes. `
+        + 'Plain elements on the base shell cannot look like the approved mockup.',
+    });
+  } else if (designClasses.size >= 6 && componentCoverage !== null && componentCoverage < 0.25 && String(appHtml || '').trim().length >= 2000) {
+    findings.push({
+      code: 'COMPONENTS_UNUSED',
+      severity: 'high',
+      detail: `The built screens use ${usedClasses.length} of the approved design's ${designClasses.size} component classes `
+        + `(${Math.round(componentCoverage * 100)}%). The mockup's layout, navigation pattern and components are not being reproduced.`,
+    });
+  }
+
   if (appCss.trim() && usedApproved.length === 0) {
     findings.push({
       code: 'DESIGN_TOKENS_UNUSED',
@@ -192,7 +250,13 @@ export function checkDesignAdherence({ designCss = '', appCss = '' } = {}) {
       detail: `The app's stylesheets reference NONE of the ${approved.size} approved design variables. `
         + 'The approved design is loaded and ignored — rebuild the screens on it instead of a parallel set.',
     });
-  } else if (coverage < 0.25 && approved.size >= 8) {
+  } else if (coverage < 0.25 && approved.size >= 8 && !(componentCoverage !== null && componentCoverage >= 0.25)) {
+    // Not when the app consumes the design through its COMPONENTS instead: an
+    // app that puts the mockup's class names on its elements references few
+    // variables directly BY DESIGN, and telling it the design is unused would
+    // push it into re-declaring a palette it was handed. (Caught by running the
+    // review's own logic over a faithful fixture: it read 12/12 components and
+    // still complained about 4/34 variables.)
     findings.push({
       code: 'DESIGN_TOKENS_BARELY_USED',
       severity: 'medium',
@@ -228,7 +292,10 @@ export function checkDesignAdherence({ designCss = '', appCss = '' } = {}) {
   return {
     ok: findings.every((f) => f.severity !== 'high'),
     findings,
-    stats: { approved: approved.size, used: usedApproved.length, ownTokens: ownTokens.length, coverage },
+    stats: {
+      approved: approved.size, used: usedApproved.length, ownTokens: ownTokens.length, coverage,
+      designClasses: designClasses.size, usedClasses: usedClasses.length, componentCoverage,
+    },
   };
 }
 
@@ -240,6 +307,25 @@ export function reviewChatMessage({ review, axe = [], rogue = [], adherence = nu
   const label = trigger === 'auto' ? 'Design review (after build)' : 'Design review (Polish pass)';
   const n = review?.findings?.length || 0;
   lines.push(`${label} — ${screenshotCount} screenshot(s) reviewed. ${review?.summary || (n ? `${n} finding(s).` : 'No findings — the app matches its design well.')}`);
+
+  // DRIFT FIRST.
+  //
+  // "Does the shipped app still look like the approved mockup" is the question
+  // this review exists to answer, and it used to be a footnote below the
+  // accessibility list — printed only when there were findings, so an app that
+  // had drifted badly could read as clean. It is now the second line, always,
+  // with the arithmetic behind it: the critique above is taste, this is
+  // measurement over the shipped files.
+  if (adherence?.stats) {
+    const { approved = 0, used = 0, ownTokens = 0, designClasses = 0, usedClasses = 0 } = adherence.stats;
+    if (approved > 0) {
+      const drifted = (adherence.findings || []).some((f) => f.severity === 'high');
+      const parts = [`${used}/${approved} approved design variable(s)`];
+      if (designClasses > 0) parts.push(`${usedClasses}/${designClasses} approved component class(es)`);
+      if (ownTokens > 0) parts.push(`${ownTokens} variable(s) of its own`);
+      lines.push(`${drifted ? '**Visual drift** — the shipped app has moved away from the approved design.' : 'Design adherence:'} The app uses ${parts.join(', ')}.`);
+    }
+  }
   for (const f of review?.findings || []) {
     lines.push(`• [${f.severity}] ${f.screen}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`);
   }
@@ -251,13 +337,8 @@ export function reviewChatMessage({ review, axe = [], rogue = [], adherence = nu
   if (rogue.length) {
     lines.push(`Token drift: ${rogue.length} color(s) used outside the design tokens (advisory, not a gate): ${rogue.slice(0, 6).map((r) => `${r.color}×${r.count}`).join(', ')}.`);
   }
-  // Adherence is the measurable half of "does the app look like the mockup":
-  // the critique above is taste, this is arithmetic over the stylesheets.
-  if (adherence?.findings?.length) {
-    const { approved = 0, used = 0, ownTokens = 0 } = adherence.stats || {};
-    lines.push(`Design adherence: the app uses ${used}/${approved} approved design variable(s) and declares ${ownTokens} of its own.`);
-    for (const f of adherence.findings) lines.push(`• [${f.severity}] ${f.code}: ${f.detail}`);
-  }
+  // The adherence findings themselves — the numbers already led the message.
+  for (const f of adherence?.findings || []) lines.push(`• [${f.severity}] ${f.code}: ${f.detail}`);
   return lines.join('\n');
 }
 

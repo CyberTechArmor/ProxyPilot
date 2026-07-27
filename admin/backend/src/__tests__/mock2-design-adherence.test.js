@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -136,7 +137,13 @@ test('adherence findings reach the operator: the chat message and the polish ins
     appCss: `:root{${Array.from({ length: 32 }, (_, i) => `--own-${i}:#000`).join(';')}}.c{color:var(--own-1)}`,
   });
   const msg = reviewChatMessage({ review: { summary: 's', findings: [] }, adherence, trigger: 'auto', screenshotCount: 4 });
-  assert.match(msg, /Design adherence/);
+  // Drift is the HEADLINE, not a footnote under the accessibility list: it is
+  // the question this review exists to answer, and an app that had drifted
+  // badly used to be able to read as clean.
+  assert.match(msg, /\*\*Visual drift\*\*/);
+  const lines = msg.split('\n');
+  assert.match(lines[1], /Visual drift/, 'drift must be the second line, right under the summary');
+  assert.match(msg, /approved design variable/);
   assert.match(msg, /DESIGN_TOKENS_UNUSED/);
   const instr = composePolishInstruction({ review: { findings: [] }, adherence });
   assert.ok(instr, 'adherence alone is enough to compose a polish pass');
@@ -261,7 +268,7 @@ test('GATE: never blocks what it cannot judge — no design, no app CSS, or a th
   // own, and the scaffold's own copies are excluded from the app side.
   const fresh = runGate({ 'state/design.css': GATE_DESIGN, 'public/design.css': GATE_DESIGN, 'public/base.css': ':root{--x:1}' });
   assert.equal(fresh.code, 0, fresh.out);
-  assert.match(fresh.out, /has not written substantial CSS/);
+  assert.match(fresh.out, /has not written screens or CSS/);
   // A preset-only project has too thin a system to enforce.
   const thin = runGate({ 'state/design.css': `:root{${SHELL_VARS}}`, 'public/app.css': bulk });
   assert.equal(thin.code, 0);
@@ -294,4 +301,80 @@ test('cycle-event budgets: MOCK2_MAX_EVENT_CHARS overrides but cannot exceed the
     if (prev === undefined) delete process.env.MOCK2_MAX_EVENT_CHARS;
     else process.env.MOCK2_MAX_EVENT_CHARS = prev;
   }
+});
+
+test('a clean app reports adherence without crying drift', () => {
+  const designCss = renderDesignCssFromMockup(MOCKUP).css;
+  const vars = [...designCss.matchAll(/(--[a-z0-9-]+)\s*:/gi)].map((m) => m[1]);
+  const appCss = vars.map((v, i) => `.a${i}{color:var(${v})}`).join('\n');
+  const adherence = checkDesignAdherence({ designCss, appCss });
+  const msg = reviewChatMessage({ review: { summary: 'looks right', findings: [] }, adherence, trigger: 'auto', screenshotCount: 4 });
+  assert.doesNotMatch(msg, /Visual drift/);
+  assert.match(msg, /Design adherence:/);
+});
+
+test('the review sees the MARKUP, not only the stylesheets (project 39)', () => {
+  // 328 lines of HTML and no CSS measured as "nothing to judge" in the review
+  // exactly as it did in the gate. Screens with no styling and none of the
+  // approved components is a HIGH finding, not silence.
+  const designCss = renderDesignCssFromMockup(MOCKUP).css;
+  const appHtml = `<html><body>${Array.from({ length: 120 }, (_, i) => `<div class="row"><span>Field ${i}</span><button>Go</button></div>`).join('')}</body></html>`;
+  const adherence = checkDesignAdherence({ designCss, appCss: '', appHtml });
+  assert.equal(adherence.ok, false, 'unstyled screens must not pass');
+  assert.ok(adherence.findings.some((f) => f.code === 'SCREENS_UNSTYLED' || f.code === 'COMPONENTS_UNUSED'),
+    `expected a structural finding, got: ${adherence.findings.map((f) => f.code).join(', ')}`);
+  assert.ok(adherence.stats.designClasses >= 0);
+});
+
+test('markup that speaks the approved component vocabulary is not flagged', () => {
+  const designCss = `${renderDesignCssFromMockup(MOCKUP).css}\n.mk-card{color:red}\n.mk-list{color:red}\n.mk-bar{color:red}\n.mk-chip{color:red}\n.mk-fab{color:red}\n.mk-empty{color:red}\n`;
+  const appHtml = `<html><body><div class="mk-bar"></div><ul class="mk-list">${
+    Array.from({ length: 60 }, (_, i) => `<li class="mk-card"><span class="mk-chip">${i}</span></li>`).join('')
+  }</ul><div class="mk-empty"></div><button class="mk-fab">+</button></body></html>`;
+  const adherence = checkDesignAdherence({ designCss, appCss: '', appHtml });
+  assert.ok(!adherence.findings.some((f) => f.code === 'SCREENS_UNSTYLED' || f.code === 'COMPONENTS_UNUSED'),
+    `should not flag faithful markup: ${adherence.findings.map((f) => f.code).join(', ')}`);
+});
+
+/* ------------------- the trigger, which is what was broken ------------------ */
+//
+// Project 39's build DEPLOYED, ended in pending_verification, and was never
+// reviewed — because the whole post-build chain hung off a REQUEST closing as
+// 'succeeded', and a pending-verification build never closes its request. The
+// smoke-spec backstop routes MORE builds down that path by design, so the
+// trigger had to move rather than the symptom being patched.
+//
+// Source-level assertions: the wiring is native (containers, browsers, model
+// calls) and cannot be imported in the sandbox, but WHERE it is called from is
+// exactly the thing that regressed and it is plainly readable.
+
+test('the post-build review chain lives in one place', async () => {
+  const src = await readFile(new URL('../mock2/design-review.js', import.meta.url), 'utf8');
+  assert.match(src, /export async function afterBuildReview/);
+  // All three steps, in order: serving, an account to look with, the critique.
+  const i = src.indexOf('export async function afterBuildReview');
+  const body = src.slice(i, i + 3000);
+  assert.ok(body.indexOf('ensureServing') < body.indexOf('ensureReviewAccount'), 'serving check must come first');
+  assert.ok(body.indexOf('ensureReviewAccount') < body.indexOf('maybeAutoDesignReview'), 'the account must exist before the capture');
+  // The queue guard lives here, so both callers behave identically.
+  assert.match(body, /listBuildQueue/);
+});
+
+test('every terminal path that deployed fires the review', async () => {
+  const runner = await readFile(new URL('../mock2/runner.js', import.meta.url), 'utf8');
+  const screenPlan = await readFile(new URL('../mock2/screen-plan.js', import.meta.url), 'utf8');
+
+  // 1. A request closing as succeeded (the path that always worked).
+  assert.match(screenPlan, /afterBuildReview\(pid/);
+
+  // 2. EVERY pending-verification terminal — there are more than one, and the
+  //    second (the operator's accept-as-pending flow) deploys as well. Checking
+  //    only the first is how one of them stayed unreviewed.
+  const terminals = [...runner.matchAll(/outcome: 'pending_verification'/g)].map((m) => m.index);
+  assert.ok(terminals.length >= 2, `expected several pending-verification terminals, found ${terminals.length}`);
+  terminals.forEach((at, i) => {
+    const after = runner.slice(at, at + 1200);
+    assert.match(after, /afterBuildReview/,
+      `pending-verification terminal #${i + 1} deployed and must still be reviewed`);
+  });
 });

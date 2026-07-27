@@ -101,6 +101,18 @@ done
 WORK=$(mktemp -d 2>/dev/null || echo /tmp/pp-$$)
 mkdir -p "$WORK"
 trap 'rm -rf "$WORK"' EXIT
+# The app's OWN styling, wherever it lives.
+#
+# This used to be public/*.css and nothing else — so a build that wrote 328
+# lines of HTML and NO stylesheet measured as "the app has not written
+# substantial CSS of its own" and took the free pass below. Project 39 did
+# exactly that: the shipped screens looked nothing like the mockup, the gate
+# said "passed", and it cost less than the build before it. Whatever else this
+# gate does, it must never be cheaper to skip the design than to follow it.
+#
+# Inline <style> blocks count as app CSS. The MARKUP is collected too: the real
+# question is whether the built screens use the approved design's components,
+# and that is answered by the class names in the HTML, not by a stylesheet.
 APP="$WORK/app.css"
 : > "$APP"
 for f in public/*.css; do
@@ -108,12 +120,40 @@ for f in public/*.css; do
   case "$f" in */base.css|*/design.css|*/platform.css) continue ;; esac
   cat "$f" >> "$APP"
 done
+
+HTML="$WORK/app.html"
+: > "$HTML"
+for f in public/*.html; do
+  [ -f "$f" ] || continue
+  # The platform's own pages are not the build's work.
+  case "$f" in */login.html|*/admin.html|*/profile.html) continue ;; esac
+  # app-shell.html is the scaffold's placeholder UNTIL a build replaces it. Its
+  # marker sentence is the test: while it is still there the page is platform
+  # content and must not count as "the build shipped screens", or a project that
+  # has built nothing yet would be judged for the placeholder's markup.
+  case "$f" in
+    */app-shell.html)
+      grep -q 'This is the base application shell' "$f" && continue
+      ;;
+  esac
+  cat "$f" >> "$HTML"
+done
+# <style> blocks in the markup are app CSS by another name.
+# index() rather than a /regex/ literal: a regex literal here needs an escaped
+# slash, and an escaped slash does not survive the JS template literal this
+# script is emitted from — which is how the first version of this silently
+# appended nothing at all.
+if [ -s "$HTML" ]; then
+  awk 'BEGIN{p=0} index($0,"<style"){p=1} p{print} index($0,"</style>"){p=0}' "$HTML" >> "$APP"
+fi
 APPBYTES=$(wc -c < "$APP" | tr -d ' ')
+HTMLBYTES=$(wc -c < "$HTML" | tr -d ' ')
 
 # Declared variables on each side, and the approved ones the app actually reads.
 grep -o -- '--[A-Za-z0-9_-]*[[:space:]]*:' "$DESIGN" | sed 's/[[:space:]]*:$//' | sort -u > "$WORK/approved"
 grep -o -- '--[A-Za-z0-9_-]*[[:space:]]*:' "$APP"    | sed 's/[[:space:]]*:$//' | sort -u > "$WORK/appdef"
-grep -o -- 'var([[:space:]]*--[A-Za-z0-9_-]*' "$APP" | sed 's/.*--/--/'         | sort -u > "$WORK/appuse"
+cat "$APP" "$HTML" > "$WORK/appall" 2>/dev/null || cp "$APP" "$WORK/appall"
+grep -o -- 'var([[:space:]]*--[A-Za-z0-9_-]*' "$WORK/appall" | sed 's/.*--/--/'  | sort -u > "$WORK/appuse"
 
 APPROVED=$(wc -l < "$WORK/approved" | tr -d ' ')
 USED=$(comm -12 "$WORK/appuse" "$WORK/approved" | wc -l | tr -d ' ')
@@ -140,8 +180,24 @@ OWN=$(comm -23 "$WORK/appdef" "$WORK/approved" | wc -l | tr -d ' ')
 sed 's/var([^)]*)//g' "$APP" | grep -o -E '#[0-9a-fA-F]{3,8}|rgba?[(][^)]*[)]|hsla?[(][^)]*[)]' | sort -u > "$WORK/hard" || true
 HARD=$(wc -l < "$WORK/hard" | tr -d ' ')
 
+# COMPONENT ADOPTION — the closest deterministic answer to "does the built app
+# look like the mockup".
+#
+# state/design.css carries the approved mockup's own component CSS verbatim
+# (renderDesignCssFromMockup lifts it, not just the token block). So the mockup's
+# components have NAMES, and whether the built screens use them is a question the
+# markup answers directly. Variables alone cannot: an app can reference the right
+# colours and still lay the screen out nothing like the contract.
+grep -o -E '[.][A-Za-z][A-Za-z0-9_-]{2,}' "$DESIGN" | sed 's/^[.]//' | sort -u > "$WORK/dclass"
+# Every class the built markup actually puts on an element.
+grep -o -E 'class="[^"]*"' "$HTML" 2>/dev/null | sed 's/class="//; s/"$//' | tr ' ' '\n' \
+  | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | sort -u > "$WORK/hclass"
+DCLASS=$(wc -l < "$WORK/dclass" | tr -d ' ')
+UCLASS=$(comm -12 "$WORK/dclass" "$WORK/hclass" 2>/dev/null | wc -l | tr -d ' ')
+
 echo "design-adherence: \${APPROVED} approved variable(s); the app uses \${USED} of them, declares \${OWN} of its own, in \${APPBYTES} bytes of its own CSS."
 echo "design-adherence: \${HARD} distinct hardcoded colour(s) written outside the approved variables."
+echo "design-adherence: the approved design defines \${DCLASS} component class(es); the built screens use \${UCLASS}."
 
 # Too little approved design to judge against (a preset-only project).
 if [ "$APPROVED" -lt 8 ]; then
@@ -150,37 +206,73 @@ if [ "$APPROVED" -lt 8 ]; then
   echo "design-adherence: the shell is driven by the approved design. Passed."
   exit 0
 fi
-# The app has not written stylesheets of its own yet.
-if [ "$APPBYTES" -lt 2000 ]; then
-  echo "design-adherence: the app has not written substantial CSS of its own."
+# Nothing built yet — no styling AND no screens. That is an early cycle, not a
+# defect. But a build that shipped MARKUP and no styling is not exempt: that is
+# precisely the shape that ships an app which looks nothing like its mockup.
+if [ "$APPBYTES" -lt 2000 ] && [ "$HTMLBYTES" -lt 2000 ]; then
+  echo "design-adherence: the app has not written screens or CSS of its own yet."
   if [ "$SHELLFAIL" -ne 0 ]; then exit 1; fi
   echo "design-adherence: the shell is driven by the approved design. Passed."
   exit 0
 fi
 
 FAIL=$SHELLFAIL
-if [ "$USED" -eq 0 ]; then
+
+# ADOPTION — via either route the approved design offers.
+#
+# A build can consume the design two ways, and both are legitimate:
+#   VARIABLES — it writes its own CSS on var(--...) from state/design.css.
+#   COMPONENTS — it puts the mockup's own class names on its elements and lets
+#                design.css (which carries the mockup's component CSS verbatim)
+#                style them. An app doing this correctly may write almost no CSS
+#                and reference almost no variables, and that is FAITHFUL.
+# So neither signal alone can condemn a build; only both being weak can.
+VAR_OK=0
+[ $((USED * 4)) -ge "$APPROVED" ] && VAR_OK=1
+CLS_OK=0
+[ "$DCLASS" -ge 6 ] && [ $((UCLASS * 4)) -ge "$DCLASS" ] && CLS_OK=1
+# No component vocabulary was published at all — then variables are the only
+# route, and the app cannot be marked down for not taking a road that is absent.
+[ "$DCLASS" -lt 6 ] && CLS_OK=-1
+
+SHIPPED=0
+[ "$APPBYTES" -ge 2000 ] || [ "$HTMLBYTES" -ge 2000 ] && SHIPPED=1
+
+# Ordered sharpest-diagnosis-first: a build should be told the most specific
+# true thing about what it did, not the most general one that also applies.
+if [ "$USED" -eq 0 ] && [ "$APPBYTES" -ge 2000 ] && [ "$CLS_OK" -ne 1 ]; then
   echo "FAIL: the app's stylesheets reference NONE of the \${APPROVED} approved design variables."
   echo "      state/design.css is loaded and ignored. Restyle the screens on var(--...) from state/design.css"
   echo "      instead of a parallel palette; state/mockups/current.html is the visual contract."
   FAIL=1
-elif [ "$OWN" -ge 12 ] && [ $((USED * 4)) -lt "$APPROVED" ]; then
+elif [ "$OWN" -ge 12 ] && [ "$VAR_OK" -eq 0 ] && [ "$CLS_OK" -ne 1 ]; then
   echo "FAIL: the app declares \${OWN} design variables of its own while using only \${USED} of \${APPROVED} approved ones."
   echo "      That is a second palette; the two will drift. Delete the parallel tokens and consume state/design.css."
   FAIL=1
-elif [ $((USED * 4)) -lt "$APPROVED" ]; then
-  # Low coverage with real CSS behind it, however few variables were declared.
-  # This is the rule the old thresholds missed: what matters is how much of the
-  # approved design is REPRODUCED, not how the app spells its own values.
-  echo "FAIL: the app reproduces only \${USED} of \${APPROVED} approved design variables while writing \${APPBYTES} bytes of its own CSS."
-  echo "      Most of the approved design is not being used, so the app will not look like the mockup."
-  echo "      Restyle the screens on var(--...) from state/design.css; state/mockups/current.html is the visual contract."
+elif [ "$SHIPPED" -eq 1 ] && [ "$VAR_OK" -eq 0 ] && [ "$CLS_OK" -ne 1 ]; then
+  echo "FAIL: the built app does not reproduce the approved design."
+  echo "      It uses \${USED} of \${APPROVED} approved variables, and \${UCLASS} of \${DCLASS} approved component classes,"
+  echo "      across \${HTMLBYTES} bytes of screens and \${APPBYTES} bytes of its own CSS."
+  echo "      state/mockups/current.html is the visual contract. Reproduce its markup — layout, navigation"
+  echo "      pattern, cards, controls — using the component classes in state/design.css, and style anything"
+  echo "      new on var(--...) from the same file. Plain elements on the base shell will not look like it."
   FAIL=1
-elif [ "$HARD" -ge 20 ] && [ $((USED * 2)) -lt "$APPROVED" ]; then
-  # Enough approved variables to be credible, but the colours are still typed in.
+elif [ "$HARD" -ge 20 ] && [ $((USED * 2)) -lt "$APPROVED" ] && [ "$CLS_OK" -ne 1 ]; then
+  # Enough approved design consumed to be credible, but the colours are still
+  # typed in — which is why a built app drifts and why dark mode looks wrong.
   echo "FAIL: the app writes \${HARD} distinct hardcoded colours while using only \${USED} of \${APPROVED} approved variables."
-  echo "      Hardcoded colours do not follow the theme — they are why a built app drifts from its mockup"
-  echo "      and why the dark theme looks wrong. Replace them with var(--...) from state/design.css."
+  echo "      Hardcoded colours do not follow the theme. Replace them with var(--...) from state/design.css."
+  FAIL=1
+fi
+
+# Screens with no styling ANYWHERE — not their own CSS, and not the approved
+# components. This is project 39's shape exactly: 328 lines of markup, zero
+# stylesheet, and an app that looked nothing like its mockup while the gate said
+# "the app has not written substantial CSS of its own. Passed."
+if [ "$HTMLBYTES" -ge 4000 ] && [ "$APPBYTES" -lt 500 ] && [ "$CLS_OK" -ne 1 ]; then
+  echo "FAIL: the app ships \${HTMLBYTES} bytes of screens with \${APPBYTES} bytes of styling."
+  echo "      Unstyled markup on the base shell cannot look like state/mockups/current.html."
+  echo "      Either use the approved component classes or write the screens' CSS on var(--...)."
   FAIL=1
 fi
 
@@ -338,11 +430,23 @@ for f in public/*.css; do
   case "$f" in */base.css|*/platform.css) continue ;; esac
   cat "$f" >> "$CSS"
 done
-if [ ! -s "$CSS" ]; then
-  echo "mobile-overflow: no app stylesheets to check. Skipped."
-  exit 0
-fi
+# Inline <style> blocks are stylesheets too. Reading only public/*.css meant a
+# build that styled its screens in the markup — or did not style them at all —
+# skipped this gate entirely (project 39: "no app stylesheets to check").
+for f in public/*.html; do
+  [ -f "$f" ] || continue
+  case "$f" in */login.html|*/admin.html|*/profile.html) continue ;; esac
+  awk 'BEGIN{p=0} index($0,"<style"){p=1} p{print} index($0,"</style>"){p=0}' "$f" >> "$CSS"
+done
+# NOTE the ordering below: the HTML checks (viewport meta, fixed inline widths)
+# run WHETHER OR NOT there is CSS. The early exit used to sit here and skip the
+# whole gate, so a build that shipped screens with no stylesheet — project 39's
+# shape — was never asked whether its pages even declare a viewport. Only the
+# CSS-specific checks may be skipped for want of CSS.
+HAS_CSS=1
+[ -s "$CSS" ] || HAS_CSS=0
 
+if [ "$HAS_CSS" -eq 1 ]; then
 # A fixed pixel width wider than the narrowest phone we support (390px) cannot
 # fit, whatever the container does. min-width is worse: it cannot even shrink.
 WIDE=$(grep -nE '(^|[;{[:space:]])(min-)?width[[:space:]]*:[[:space:]]*[0-9]{3,}px' "$CSS" \\
@@ -366,7 +470,11 @@ if [ -n "$COLS" ]; then
   fi
 fi
 
-# The viewport meta is what makes any of the above matter.
+fi
+
+# ---- HTML checks: these run WHATEVER the stylesheet situation is ------------
+# The viewport meta is what makes any of the above matter, and a fixed width
+# typed into a style attribute overflows exactly like one in a stylesheet.
 for f in public/*.html; do
   [ -f "$f" ] || continue
   grep -qi '<head' "$f" || continue
@@ -374,9 +482,20 @@ for f in public/*.html; do
     echo "FAIL: $f has no viewport meta — a phone renders it at desktop width and zooms out."
     FAIL=1
   fi
+  INLINE=$(grep -noE 'style="[^"]*(min-)?width[[:space:]]*:[[:space:]]*[0-9]{3,}px' "$f" \
+           | awk -F'[^0-9]*' '{ for (i = 2; i <= NF; i++) if ($i + 0 > 430) { print; break } }' | head -5)
+  if [ -n "$INLINE" ]; then
+    echo "FAIL: $f has inline fixed widths wider than a 390px phone:"
+    echo "$INLINE" | sed 's/^/        /'
+    FAIL=1
+  fi
 done
 
 if [ "$FAIL" -ne 0 ]; then exit 1; fi
+if [ "$HAS_CSS" -eq 0 ]; then
+  echo "mobile-overflow: no app stylesheets; the pages declare a viewport and no inline fixed widths. Passed."
+  exit 0
+fi
 echo "mobile-overflow: no fixed widths, uncollapsible grids, or missing viewport. Passed."
 exit 0
 `;

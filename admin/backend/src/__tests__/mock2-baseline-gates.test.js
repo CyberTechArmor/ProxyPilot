@@ -44,6 +44,7 @@ import {
 } from '../mock2/base-app-upgrade-logic.js';
 import { detectPolishIntent } from '../mock2/ask-logic.js';
 import { buildScaffoldFiles } from '../mock2/scaffold.js';
+import { checkDesignAdherence, reviewChatMessage } from '../mock2/design-review-logic.js';
 import {
   previewErrorCard, PREVIEW_ERRORS, escapePreviewHtml, renderDesignCssFromMockup,
   buildTokenBridgeCss, TOKEN_BRIDGE, TOKEN_BRIDGE_TARGETS, buildMockupSystemPrompt,
@@ -561,6 +562,35 @@ test('no gate script contains a mangled escape', () => {
   }
 });
 
+test('no gate script makes its tools complain — the check the control-char scan missed', () => {
+  // The control-character scan catches an eaten backslash-b. It does NOT catch
+  // an eaten backslash-slash: an escaped slash inside an awk regex literal
+  // collapsed into a syntax error, and the gate silently appended nothing for a
+  // whole release. A mangled regex almost always makes grep/awk/sed print a
+  // diagnostic — so RUN every gate against a real scaffold and require stderr
+  // to stay clean. Passing or failing is not the point here; complaining is.
+  const dir = mkdtempSync(join(tmpdir(), 'pp-gate-run-'));
+  try {
+    for (const f of buildScaffoldFiles({ id: 1, name: 'Demo' })) {
+      mkdirSync(join(dir, dirname(f.path)), { recursive: true });
+      writeFileSync(join(dir, f.path), f.content);
+    }
+    mkdirSync(join(dir, 'state'), { recursive: true });
+    writeFileSync(join(dir, 'state/design.css'), ':root{--bg:#fff;--text-1:#000;--app-bg:var(--bg);}\n.card{color:var(--text-1)}\n');
+    writeFileSync(join(dir, 'public/app.css'), '.x{color:var(--bg)}\n');
+    writeFileSync(join(dir, 'public/screen.html'), '<html><head><style>.y{color:var(--bg)}</style></head><body><div class="card">hi</div></body></html>');
+    for (const gate of BASELINE_GATES) {
+      const f = join(dir, 'gate.sh');
+      writeFileSync(f, gate.script);
+      const r = spawnSync('sh', [f], { cwd: dir, encoding: 'utf8', env: { ...process.env, HOME: dir } });
+      const noise = (r.stderr || '').trim();
+      assert.equal(noise, '', `${gate.name} wrote to stderr — a tool is complaining, which usually means a mangled regex:\n${noise}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('every gate script is valid sh', () => {
   for (const gate of BASELINE_GATES) {
     const f = join(mkdtempSync(join(tmpdir(), 'pp-gate-syn-')), 'g.sh');
@@ -608,7 +638,8 @@ test('design-adherence: an app that reproduces little of the approved design fai
   ].join('\n');
   const r = adherenceFixture({ appCss });
   assert.equal(r.status, 1, `expected a failure:\n${r.out}`);
-  assert.match(r.out, /reproduces only 9 of \d+ approved design variables/);
+  assert.match(r.out, /does not reproduce the approved design/);
+  assert.match(r.out, /uses 9 of \d+ approved variables/);
 });
 
 test('design-adherence: hardcoded colours fail even at decent coverage', () => {
@@ -643,4 +674,194 @@ test('design-adherence: var() fallbacks are not counted as hardcoded colours', (
   const r = adherenceFixture({ appCss });
   assert.match(r.out, /0 distinct hardcoded colour/);
   assert.equal(r.status, 0, r.out);
+});
+
+/* ------------- project 39: screens with no styling at all -------------------- */
+//
+// The shipped app looked nothing like its mockup and the gate said "passed".
+// The build wrote 328 lines of HTML, 493 of JS and ZERO CSS — and the gate read
+// only public/*.css, so it measured "the app has not written substantial CSS of
+// its own" and took the free pass. It also cost LESS than the build before it,
+// which is the part that matters: it must never be cheaper to skip the design
+// than to follow it.
+
+function adherenceRun({ html = null, css = null, components = 12 }) {
+  const dir = mkdtempSync(join(tmpdir(), 'pp-p39-'));
+  const approved = Array.from({ length: 55 }, (_, i) => `  --d${i}: #${(0x111111 * (i + 1)).toString(16).slice(-6)};`).join('\n');
+  const bridge = [
+    '--app-bg', '--app-surface', '--app-text', '--app-muted', '--app-border', '--app-primary',
+    '--app-primary-text', '--app-accent', '--app-danger', '--app-success', '--app-shadow-card',
+  ].map((v, i) => `  ${v}: var(--d${i}, #101010);`).join('\n');
+  // design.css carries the MOCKUP'S COMPONENT CSS verbatim, not just tokens.
+  const comp = ['n4-shell', 'n4-topbar', 'n4-tabbar', 'n4-note-card', 'n4-list', 'n4-fab',
+    'n4-chip', 'n4-editor', 'n4-todo-row', 'n4-modal', 'n4-empty', 'n4-search']
+    .slice(0, components)
+    .map((c) => `.${c}{color:var(--d1);background:var(--d2)}`).join('\n');
+  for (const f of buildScaffoldFiles({ id: 1, name: 'Demo' })) {
+    mkdirSync(join(dir, dirname(f.path)), { recursive: true });
+    writeFileSync(join(dir, f.path), f.content);
+  }
+  mkdirSync(join(dir, 'state'), { recursive: true });
+  writeFileSync(join(dir, 'state/design.css'), `:root{\n${approved}\n${bridge}\n}\n[data-theme="dark"]{--d0:#000}\n${comp}\n`);
+  if (html) writeFileSync(join(dir, 'public/notes.html'), html);
+  if (css) writeFileSync(join(dir, 'public/notes.css'), css);
+  writeFileSync(join(dir, 'gate.sh'), DESIGN_ADHERENCE_GATE_SCRIPT);
+  const r = spawnSync('sh', [join(dir, 'gate.sh')], { cwd: dir, encoding: 'utf8' });
+  rmSync(dir, { recursive: true, force: true });
+  return { status: r.status, out: r.stdout || '' };
+}
+
+const genericScreens = `<!doctype html><html><body><h1>Test</h1><button>Delete note</button>
+${Array.from({ length: 90 }, (_, i) => `<div class="row"><span class="label">Field ${i}</span><input><button class="btn">Go ${i}</button></div>`).join('\n')}
+</body></html>`;
+
+test('design-adherence: screens with no styling and none of the approved components fail', () => {
+  const r = adherenceRun({ html: genericScreens });
+  assert.equal(r.status, 1, `expected a failure:\n${r.out}`);
+  assert.match(r.out, /does not reproduce the approved design/);
+  assert.match(r.out, /bytes of screens/);
+});
+
+test('design-adherence: markup that uses the approved components passes with no CSS of its own', () => {
+  // This is FAITHFUL, not a loophole: design.css styles those classes, so an
+  // app can reproduce the mockup while writing almost no CSS and referencing
+  // almost no variables directly. A rule that condemned it would push builds
+  // into re-declaring a palette they were given.
+  const html = `<!doctype html><html><body><div class="n4-shell"><header class="n4-topbar">N4</header>
+<div class="n4-search"></div><ul class="n4-list">${Array.from({ length: 40 }, (_, i) => `<li class="n4-note-card"><span class="n4-chip">t</span>Note ${i}</li>`).join('')}</ul>
+<div class="n4-editor"></div><div class="n4-todo-row"></div><div class="n4-modal"></div>
+<div class="n4-empty"></div><button class="n4-fab">+</button><nav class="n4-tabbar"></nav></div></body></html>`;
+  const r = adherenceRun({ html });
+  assert.equal(r.status, 0, `expected a pass:\n${r.out}`);
+  assert.match(r.out, /the built screens use 12/);
+});
+
+test('design-adherence: a project that has built nothing is still exempt', () => {
+  // The scaffold's own app-shell.html placeholder must not count as "the build
+  // shipped screens", or a project on cycle one would be judged for markup the
+  // platform wrote.
+  const r = adherenceRun({});
+  assert.equal(r.status, 0, `expected a pass:\n${r.out}`);
+  assert.match(r.out, /has not written screens or CSS of its own yet/);
+});
+
+test('design-adherence: inline <style> in the markup counts as the app\'s CSS', () => {
+  // Styling the screens inside the HTML is legitimate; not seeing it was not.
+  const html = `<!doctype html><html><head><style>
+${Array.from({ length: 40 }, (_, i) => `.s${i}{color:var(--d${i});padding:${i}px}`).join('\n')}
+</style></head><body>${genericScreens}</body></html>`;
+  const r = adherenceRun({ html });
+  assert.equal(r.status, 0, `expected a pass:\n${r.out}`);
+  assert.doesNotMatch(r.out, /0 bytes of its own CSS/);
+});
+
+test('mobile-overflow: a fixed width inside an inline <style> is still caught', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pp-mo-'));
+  try {
+    mkdirSync(join(dir, 'public'), { recursive: true });
+    writeFileSync(join(dir, 'public/notes.html'), '<html><head><style>.wide{width:980px}</style></head><body>x</body></html>');
+    writeFileSync(join(dir, 'gate.sh'), MOBILE_OVERFLOW_GATE_SCRIPT);
+    const r = spawnSync('sh', [join(dir, 'gate.sh')], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 1, `expected a failure:\n${r.stdout}`);
+    assert.match(r.stdout, /fixed widths wider than a 390px phone/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------- the whole battery, end to end -------------------- */
+//
+// One realistic mockup → design.css → two apps built from it, each run through
+// EVERY baseline gate. This is the test that catches a gate going blind: the
+// per-gate tests each assert their own rule, and none of them would notice that
+// project 39's app sailed through all six.
+
+const E2E_TOKENS = `/* ==tokens== */
+:root{--bg:#0d1524;--surface-1:#131d2f;--surface-2:#1a2740;--text-1:#e8eef7;--text-2:#9fb0c8;
+--hairline:#243349;--accent:#4c9aff;--accent-on:#00121f;--danger:#ff6b6b;--ok:#3ddc97;
+--shadow-1:0 1px 2px rgba(0,0,0,.4);--radius-md:10px;--radius-lg:16px}
+[data-theme="dark"]{--bg:#080e18;--surface-1:#0f1726}
+/* ==/tokens== */`;
+const E2E_COMPONENTS = ['shell', 'topbar', 'search', 'list', 'note-card', 'chip', 'editor', 'todo-row', 'fab', 'tabbar', 'empty', 'modal']
+  .map((c) => `.n4-${c}{background:var(--surface-1);color:var(--text-1);border-radius:var(--radius-md)}`).join('\n')
+  + '\n@media (min-width:768px){.n4-list{grid-template-columns:1fr 1fr}}\n';
+const E2E_MOCKUP = `<!doctype html><html><head><style>${E2E_TOKENS}\n${E2E_COMPONENTS}</style></head><body></body></html>`;
+
+const E2E_HEAD = '<meta name="viewport" content="width=device-width, initial-scale=1">'
+  + '<script src="/theme.js"></script><script src="/platform.js" defer></script>'
+  + '<link rel="stylesheet" href="/base.css"><link rel="stylesheet" href="/design.css">';
+
+function runWholeBattery({ html, css }) {
+  const dir = mkdtempSync(join(tmpdir(), 'pp-batt-'));
+  try {
+    for (const f of [...buildScaffoldFiles({ id: 1, name: 'N4' }), ...buildAuthWiredFiles()]) {
+      mkdirSync(join(dir, dirname(f.path)), { recursive: true });
+      writeFileSync(join(dir, f.path), f.content);
+    }
+    const rendered = renderDesignCssFromMockup(E2E_MOCKUP);
+    mkdirSync(join(dir, 'state/mockups'), { recursive: true });
+    writeFileSync(join(dir, 'state/design.css'), `${rendered.css}\n${buildTokenBridgeCss(rendered.css, null)}\n`);
+    writeFileSync(join(dir, 'state/mockups/current.html'), E2E_MOCKUP);
+    if (html) writeFileSync(join(dir, 'public/notes.html'), html);
+    if (css) writeFileSync(join(dir, 'public/notes.css'), css);
+    writeFileSync(join(dir, 'public/notes.js'), 'document.addEventListener("DOMContentLoaded",()=>{});\n');
+    spawnSync('sh', ['-c', 'git init -q . && git add -A && git -c user.email=a@b -c user.name=a commit -qm base'], { cwd: dir });
+
+    const results = {};
+    for (const gate of BASELINE_GATES) {
+      const f = join(dir, '_gate.sh');
+      writeFileSync(f, gate.script);
+      const r = spawnSync('sh', [f], { cwd: dir, encoding: 'utf8', env: { ...process.env, HOME: dir } });
+      results[gate.name] = { status: r.status, out: r.stdout || '', err: (r.stderr || '').trim() };
+    }
+    return results;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('END TO END: the battery reds project 39\'s app and passes the same app built on the design', () => {
+  const drifted = `<!doctype html><html><head>${E2E_HEAD}</head><body>
+<h1>Test</h1><button id="delete-note">Delete note</button>
+${Array.from({ length: 80 }, (_, i) => `<div><span>Note ${i}</span><button class="open-note">Open</button></div>`).join('\n')}
+</body></html>`;
+  const a = runWholeBattery({ html: drifted });
+  assert.equal(a['design-adherence'].status, 1, `project 39's shape must red design-adherence:\n${a['design-adherence'].out}`);
+  assert.match(a['design-adherence'].out, /does not reproduce the approved design/);
+
+  const faithful = `<!doctype html><html><head>${E2E_HEAD}</head><body>
+<div class="n4-shell"><header class="n4-topbar"><span class="n4-search"></span></header>
+<ul class="n4-list">${Array.from({ length: 40 }, (_, i) => `<li class="n4-note-card"><span class="n4-chip">tag</span>Note ${i}</li>`).join('')}</ul>
+<div class="n4-editor"></div><div class="n4-todo-row"></div><div class="n4-empty"></div>
+<div class="n4-modal"></div><button class="n4-fab" id="new-note">+</button><nav class="n4-tabbar"></nav></div>
+</body></html>`;
+  const faithfulCss = '.n4-note-card .title{color:var(--text-1)}\n.n4-editor textarea{background:var(--surface-2);width:100%}\n';
+  const b = runWholeBattery({ html: faithful, css: faithfulCss });
+  for (const [name, r] of Object.entries(b)) {
+    assert.equal(r.status, 0, `${name} must pass an app built on the approved design:\n${r.out}`);
+    assert.equal(r.err, '', `${name} wrote to stderr: ${r.err}`);
+  }
+});
+
+test('END TO END: the review calls the drift, and stays quiet when there is none', () => {
+  const rendered = renderDesignCssFromMockup(E2E_MOCKUP);
+  const designCss = `${rendered.css}\n${buildTokenBridgeCss(rendered.css, null)}\n`;
+
+  const driftedHtml = `<html><body>${Array.from({ length: 120 }, (_, i) => `<div><span>Note ${i}</span></div>`).join('')}</body></html>`;
+  const drifted = checkDesignAdherence({ designCss, appCss: '', appHtml: driftedHtml });
+  const driftMsg = reviewChatMessage({ review: { summary: '', findings: [] }, adherence: drifted, trigger: 'auto', screenshotCount: 6 });
+  assert.match(driftMsg, /\*\*Visual drift\*\*/);
+  assert.ok(drifted.findings.some((f) => f.severity === 'high'));
+
+  const faithfulHtml = `<html><body><div class="n4-shell"><header class="n4-topbar"></header>
+<ul class="n4-list">${Array.from({ length: 40 }, (_, i) => `<li class="n4-note-card"><span class="n4-chip">t</span>${i}</li>`).join('')}</ul>
+<div class="n4-editor"></div><div class="n4-todo-row"></div><div class="n4-empty"></div><div class="n4-modal"></div>
+<div class="n4-search"></div><button class="n4-fab">+</button><nav class="n4-tabbar"></nav></div></body></html>`;
+  const clean = checkDesignAdherence({ designCss, appCss: '.n4-note-card .t{color:var(--text-1)}', appHtml: faithfulHtml });
+  const cleanMsg = reviewChatMessage({ review: { summary: '', findings: [] }, adherence: clean, trigger: 'auto', screenshotCount: 6 });
+  assert.doesNotMatch(cleanMsg, /Visual drift/);
+  // And no false "the design is barely used" when the app consumes it through
+  // its COMPONENTS — the shape that would push a build into re-declaring a
+  // palette it was already handed.
+  assert.deepEqual(clean.findings, [], `a faithful app should have nothing to say: ${JSON.stringify(clean.findings)}`);
 });

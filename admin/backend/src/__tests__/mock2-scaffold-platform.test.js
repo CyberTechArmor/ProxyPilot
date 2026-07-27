@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { buildScaffoldFiles } from '../mock2/scaffold.js';
 import { buildAuthWiredFiles } from '../mock2/scaffold-auth.js';
+import { seedOrgName, PLACEHOLDER_ORG_NAME } from '../mock2/scaffold-platform.js';
 
 const scaffold = () => new Map(buildScaffoldFiles({ id: 1, name: 'probe' }).map((f) => [f.path, f.content]));
 const wired = () => new Map(buildAuthWiredFiles().map((f) => [f.path, f.content]));
@@ -99,6 +100,35 @@ test('legal pages ship real copy and substitute the org at READ time', () => {
   assert.match(fn, /getFullYear\(\)/);
   // The client recomputes too, so a tab open across New Year corrects itself.
   assert.match(scaffold().get('public/platform.js'), /new Date\(\)\.getFullYear\(\)/);
+});
+
+test('a new app is named after its project, not "Application"', () => {
+  // The operator names the project at provision and the platform then dropped
+  // it: an app called "N8" served "© 2026 Application" in its footer and on its
+  // sign-in screen — the first thing anyone saw of it.
+  const b = scaffold().get('src/platform/branding.ts');
+  assert.match(b, /const SEED_ORG_NAME = "probe";/);
+  assert.match(b, /orgName: SEED_ORG_NAME/, 'the seeded row must take the project name');
+  // seedOrgName is the only shared definition of the fallback, so an unnamed
+  // project still gets a legal notice rather than "© 2026 undefined".
+  assert.equal(seedOrgName({ name: '  Northwind Health  ' }), 'Northwind Health');
+  assert.equal(seedOrgName({ name: '   ' }), PLACEHOLDER_ORG_NAME);
+  assert.equal(seedOrgName(null), PLACEHOLDER_ORG_NAME);
+  assert.equal(seedOrgName({ name: 'x'.repeat(200) }).length, 120, 'must respect the column bound');
+});
+
+test('an app already carrying the placeholder adopts the project name; a named one is left alone', () => {
+  // The fix has to reach apps that already exist — their branding row was
+  // written before the name was carried through, so seeding the INSERT is not
+  // enough. Equally, an operator who has named the organisation must never see
+  // it reverted on a redeploy.
+  const b = scaffold().get('src/platform/branding.ts');
+  const fn = b.slice(b.indexOf('export async function ensureSeeded'), b.indexOf('export async function getBranding'));
+  assert.match(fn, /db\.update\(branding\)/, 'ensureSeeded must be able to heal an existing row');
+  assert.match(fn, /rows\[0\]\.orgName === PLACEHOLDER_ORG_NAME/,
+    'the placeholder must be the ONLY value treated as "never named"');
+  assert.match(fn, /SEED_ORG_NAME !== PLACEHOLDER_ORG_NAME/,
+    'an unnamed project must not rewrite the row with the same placeholder');
 });
 
 test('legal page bodies are escaped before rendering (no stored XSS)', () => {

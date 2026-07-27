@@ -37,10 +37,14 @@ function containerShWithStdin(containerName, script, b64Payload, { timeoutMs = 6
 // The files the CURRENT scaffold would emit for the platform half. base.css is
 // included because it carries PLATFORM_CSS (the theme/legal/footer styles) and
 // the build is bound never to restyle the shell — it is platform-owned.
-export function currentPlatformFiles() {
+// `project` feeds the branding seed only (src/platform/branding.ts bakes the
+// app's own name). Passing it matters on an upgrade: an app provisioned before
+// v8 carries the "Application" placeholder in its branding row, and the file
+// written here is what adopts the project name on the next boot.
+export function currentPlatformFiles(project = null) {
   const pwa = scaffoldPwaFiles();
   return [
-    ...buildPlatformFiles(),
+    ...buildPlatformFiles(project),
     ...buildPlatformRoutes(),
     { path: 'public/base.css', content: baseCss() + PLATFORM_CSS },
     // sw.js and install.js are platform plumbing too: the push handlers and the
@@ -84,7 +88,7 @@ export async function baseAppUpgradeStatus(project) {
       installed,
       currentScaffoldVersion: current.scaffold,
       currentPlatformVersion: current.platform,
-      candidates: currentPlatformFiles(),
+      candidates: currentPlatformFiles(project),
       present,
     });
     return {
@@ -118,7 +122,7 @@ export async function upgradeBaseApp(project, { initiatedBy = null, reason = 'ma
     installed,
     currentScaffoldVersion: current.scaffold,
     currentPlatformVersion: current.platform,
-    candidates: currentPlatformFiles(),
+    candidates: currentPlatformFiles(project),
     present,
   });
   if (!plan.needed) return { ok: true, changed: false, plan, message: upgradeSummary(plan) };

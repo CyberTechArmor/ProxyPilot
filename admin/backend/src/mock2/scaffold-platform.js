@@ -23,13 +23,18 @@
 // PURE (stub-first, risk R9): returns [{ path, content }]. No I/O, no native
 // modules. Terminology (risk R7): nothing here is named "agent".
 
+// v8: the branding row is seeded from the PROJECT NAME instead of the literal
+// "Application", and an existing row still holding that placeholder adopts it
+// on the next boot — an app called N8 stopped shipping "© 2026 Application" in
+// its footer and on its sign-in screen.
+//
 // v7: platform.js carries its own chrome CSS and opens legal pages as an
 // overlay, so the sign-in screen's footer and the Privacy / Terms pages are
 // styled on a page that never linked base.css — and reading a legal page no
 // longer destroys the host page's event listeners. Existing projects need the
 // upgrade: public/login.html is NOT platform-owned (a build may restyle it),
 // so the fix has to reach them through platform.js.
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v7';
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v8';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
@@ -127,10 +132,34 @@ export const auditLog = pgTable('platform_audit', {
 /* ---------------------------------------------------------------------------
    Branding + legal service.
    --------------------------------------------------------------------------- */
-function brandingTs() {
+// The literal the branding row ships with when nothing better is known. It is
+// also the SENTINEL for "the operator has never named this" — ensureSeeded()
+// heals a row still holding it, and only that row (see brandingTs below).
+export const PLACEHOLDER_ORG_NAME = 'Application';
+
+// seedOrgName(project) — the organisation name a freshly provisioned app starts
+// with. The project already HAS a name, chosen by the operator; shipping
+// "© 2026 Application" in the footer of an app called "N8" is the platform
+// telling the operator something it was told at provision and then dropped.
+// Same 120-char bound as the branding column and the same fallback as the PWA
+// manifest, so the three identities agree.
+export function seedOrgName(project) {
+  const name = String(project?.name ?? '').trim().slice(0, 120).trim();
+  return name || PLACEHOLDER_ORG_NAME;
+}
+
+function brandingTs(project) {
+  const seedOrg = seedOrgName(project);
   return `import { eq } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { branding, legalPages, assets } from './schema.js';
+
+// The name this app was provisioned under. Baked in at scaffold time — the
+// operator can rename the organisation at any point in Admin → Branding, and
+// this value is never applied again once they have (see ensureSeeded).
+const SEED_ORG_NAME = ${JSON.stringify(seedOrg)};
+// What the column defaults to. Also means "never named" — nothing else does.
+const PLACEHOLDER_ORG_NAME = ${JSON.stringify(PLACEHOLDER_ORG_NAME)};
 
 /* CONTRACT — appContext.
  *
@@ -233,7 +262,17 @@ const EMPTY_CONTEXT: AppContext = { summary: '', audience: '', features: [], upd
 
 export async function ensureSeeded(): Promise<void> {
   const rows = await db.select().from(branding).where(eq(branding.id, 1));
-  if (!rows.length) await db.insert(branding).values({ id: 1 }).onConflictDoNothing();
+  if (!rows.length) {
+    await db.insert(branding).values({ id: 1, orgName: SEED_ORG_NAME }).onConflictDoNothing();
+  } else if (SEED_ORG_NAME !== PLACEHOLDER_ORG_NAME && rows[0].orgName === PLACEHOLDER_ORG_NAME) {
+    // An app provisioned before the name was carried through still says
+    // "Application" in its footer and on its sign-in screen. Adopt the project
+    // name. The placeholder is the only value treated as "never named", so a
+    // real choice is never overwritten — an operator who deliberately renames
+    // the organisation TO "Application" is the one case this would undo on the
+    // next boot, and the fix is to name it after the project instead.
+    await db.update(branding).set({ orgName: SEED_ORG_NAME }).where(eq(branding.id, 1));
+  }
   for (const slug of LEGAL_SLUGS) {
     const existing = await db.select().from(legalPages).where(eq(legalPages.slug, slug));
     if (!existing.length) {
@@ -246,7 +285,7 @@ export async function ensureSeeded(): Promise<void> {
 
 export async function getBranding() {
   const rows = await db.select().from(branding).where(eq(branding.id, 1));
-  return rows[0] ?? { id: 1, orgName: 'Application', legalName: '', rightsMark: '', rightsText: 'All rights reserved.', copyrightStartYear: null, logoAssetId: null, faviconAssetId: null, appContext: EMPTY_CONTEXT };
+  return rows[0] ?? { id: 1, orgName: SEED_ORG_NAME, legalName: '', rightsMark: '', rightsText: 'All rights reserved.', copyrightStartYear: null, logoAssetId: null, faviconAssetId: null, appContext: EMPTY_CONTEXT };
 }
 
 export function orgLabel(b: { legalName?: string | null; orgName?: string | null }): string {
@@ -2064,10 +2103,13 @@ export function buildPlatformRoutes() {
 }
 
 // buildPlatformFiles — the auth-independent half, always emitted.
-export function buildPlatformFiles() {
+//
+// `project` is optional and only feeds the branding seed (the app's own name).
+// Every other file here is identical across projects.
+export function buildPlatformFiles(project = null) {
   return [
     { path: 'src/platform/schema.ts', content: platformSchemaTs() },
-    { path: 'src/platform/branding.ts', content: brandingTs() },
+    { path: 'src/platform/branding.ts', content: brandingTs(project) },
     { path: 'src/platform/api-keys.ts', content: apiKeysTs() },
     { path: 'src/platform/api-key-auth.ts', content: apiKeyAuthTs() },
     { path: 'src/platform/readonly.ts', content: readonlyTs() },

@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import vm from 'node:vm';
 
 import {
   validateComponentContract, parseContractJson, normalizeCapability,
@@ -329,4 +330,64 @@ test('proxypilot-auth example imports cleanly with a bootstrap-bearing contract'
   assert.ok(r.data.files.some((f) => f.path === 'scripts/bootstrap-superadmin.mjs'), 'bootstrap CLI shipped');
   assert.ok(c.requires_when.capabilities_any.includes('users'), 'suggested whenever the app has users');
   assert.equal(c.connections[0].id, 'ldaps-directory');
+});
+
+// ---- the SEEDED auth component: the permission map every app inherits ----
+
+// The document component-seed.js installs (docs/features/examples/ holds an
+// older export used above; this is the one that reaches a project).
+function loadSeededAuth() {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const p = path.join(here, '..', 'mock2', 'framework-seed', 'proxypilot-auth.component.json');
+  return JSON.parse(readFileSync(p, 'utf8'));
+}
+
+// permissions.ts is TypeScript, and what matters about it is its BEHAVIOUR, not
+// the shape of its source. Erase the (few, deliberate) annotations and run it,
+// so the assertions below are about what an app would actually decide. A strip
+// that stops working fails loudly here rather than silently weakening the test.
+function loadPermissionsModule() {
+  const src = loadSeededAuth().files.find((f) => f.path === 'src/auth/permissions.ts').content;
+  const js = src
+    .replace(/^import[^\n]*\n/gm, '')
+    .replace(/^export type [^\n]*\n/gm, '')
+    .replace(/: Record<string, readonly Role\[\]>/g, '')
+    .replace(/: (string|Role|boolean \| undefined|boolean)(?=[,)\s])/g, '')
+    .replace(/\bexport /g, '');
+  const ctx = { ROLE_ADMIN: 'admin', exported: {} };
+  vm.createContext(ctx);
+  new vm.Script(`${js}\nexported.DEFAULT_PERMISSIONS = DEFAULT_PERMISSIONS;\nexported.defaultAllows = defaultAllows;\nexported.effectiveAllows = effectiveAllows;`)
+    .runInContext(ctx);
+  return ctx.exported;
+}
+
+test('the seeded permission map carries no keys from the app it was extracted from', () => {
+  const { DEFAULT_PERMISSIONS } = loadPermissionsModule();
+  // Every app provisioned with auth inherited 'staff.view' and 'adp.sync' in
+  // its Admin → Permissions screen — surfaces from the ADP project that the app
+  // in front of the operator does not have.
+  for (const leaked of ['staff.view', 'adp.sync']) {
+    assert.ok(!(leaked in DEFAULT_PERMISSIONS), `${leaked} belongs to the ADP app, not to every app`);
+  }
+  // What remains is what this component's OWN admin screens check.
+  assert.deepEqual(Object.keys(DEFAULT_PERMISSIONS).sort(),
+    ['admin.connections', 'admin.dashboard', 'admin.settings', 'admin.users']);
+});
+
+test('an undeclared permission denies everyone EXCEPT the administrator', () => {
+  const { defaultAllows, effectiveAllows } = loadPermissionsModule();
+  // A build that adds a permissioned surface and forgets to declare its key
+  // used to lock the administrator out of the app's own feature — and out of
+  // the fix, because PUT /admin/permissions only accepts declared keys.
+  assert.equal(defaultAllows('invoices.void', 'admin'), true);
+  for (const role of ['manager', 'viewer', 'external']) {
+    assert.equal(defaultAllows('invoices.void', role), false, `${role} must not gain an undeclared permission`);
+  }
+  // Declared keys still decide for themselves — admin is not special-cased past
+  // the map, it is the fallback WHEN there is no map entry.
+  assert.equal(defaultAllows('admin.dashboard', 'manager'), true);
+  assert.equal(defaultAllows('admin.settings', 'manager'), false);
+  // And an explicit override still wins, so the fallback is not a ceiling.
+  assert.equal(effectiveAllows('invoices.void', 'admin', false), false);
+  assert.equal(effectiveAllows('invoices.void', 'viewer', true), true);
 });

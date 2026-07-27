@@ -1194,6 +1194,45 @@ export function createMock2Router() {
   // with the same helper the global connectors use, never returned by any route
   // (only a last-4 hint), and never logged.
 
+  /* ---- APP ACCESS: the operator's first administrator ------------------- *
+   *
+   * The first account in a built app belongs to the operator, and the build is
+   * forbidden to create it. Project 44's build refused twice, correctly, at
+   * $1.94 — and the operator's only way to exercise the rule was to watch the
+   * sign-in page mid-build and race to it: "there is limited time from seeing
+   * the create super admin first user, then when the app finishes I'm unable to
+   * log in".
+   *
+   * A rule you can only satisfy inside a window nobody controls is a rule that
+   * pushes people to ask the build to break it. So the door is here, on the
+   * operator's schedule, going through the app's OWN bootstrap endpoint — the
+   * platform never writes a user row and never sees a password it keeps.
+   * ----------------------------------------------------------------------- */
+
+  router.get('/projects/:id/app-access', requireMock2Role('viewer'), async (req, res) => {
+    const { readAppAccess, accessSummary } = await import('./app-access.js');
+    const state = await readAppAccess(req.mock2Project);
+    res.json({ ...state, summary: accessSummary(state) });
+  });
+
+  router.post('/projects/:id/app-access/first-admin', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const { createFirstAdmin, readAppAccess, accessSummary } = await import('./app-access.js');
+    const { email, password } = req.body || {};
+    const result = await createFirstAdmin(req.mock2Project, { email, password });
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    const state = await readAppAccess(req.mock2Project);
+    // The EMAIL is recorded; the password is not, here or anywhere below it.
+    try {
+      insertMessage({
+        projectId: req.mock2Project.id,
+        kind: 'system',
+        body: `Administrator account created for **${result.email}**. Sign in at the app's URL with the password you chose — `
+          + 'the platform did not store it and cannot show it to you again.',
+      });
+    } catch { /* best effort */ }
+    res.json({ ok: true, email: result.email, ...state, summary: accessSummary(state) });
+  });
+
   // List the keys the caller may SEE: the project key (it bills everyone's work
   // here) and their own personal key; an admin also sees THAT other members have
   // one, never its value.

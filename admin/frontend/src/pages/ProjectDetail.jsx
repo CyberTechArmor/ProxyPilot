@@ -55,6 +55,7 @@ import ConnectVsCode from '@/components/mock2/ConnectVsCode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
 import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectComponentsCard } from '@/components/mock2/ProjectTimeCard';
 import ProjectApiKeys from '@/components/mock2/ProjectApiKeys';
+import ProjectAppAccess from '@/components/mock2/ProjectAppAccess';
 import MobilePanelBar from '@/components/mock2/MobilePanelBar';
 import { fireConfetti } from '@/lib/confetti';
 
@@ -737,6 +738,7 @@ export default function ProjectDetail() {
 
       {/* Per-project / per-user provider API keys — layered over the global
           connectors (personal key → project key → global). */}
+      <ProjectAppAccess projectId={id} canEdit={canEdit && !isArchived} />
       <ProjectApiKeys projectId={id} canEdit={canEdit && !isArchived} isAdmin={isAdmin} />
 
       {/* Time tracking — project start + where the time went (live). */}

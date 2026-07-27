@@ -446,6 +446,14 @@ How to EXTEND it (the only supported way):
   \`src/platform/push.ts\`.
 - A confirmation or a message → \`await pp.confirm(…)\` / \`pp.alert(…)\`.
 
+NEVER show a raw validation or server error to a user. \`Expected number,
+received nan\` is a message for you, not for someone adding a to-do — and it
+means the CLIENT sent nonsense the server correctly rejected, so the bug is
+usually the field that produced NaN, not the message. Validate in the browser
+before you send (an empty number input reads as NaN, not 0), and when a request
+does fail, say what the person can do about it: "Give the task a name", not the
+schema's complaint.
+
 The \`platform-intact\` gate checks this: it reds the build if the module lost
 its exports or the app grew a second branding/settings/api-key store.
 
@@ -462,6 +470,11 @@ buttons, empty states). Read it before you write a screen.
 - \`state/mockups/current.html\` is the visual contract — its layout, its
   navigation pattern (including a mobile bottom tab bar if it has one), its
   component arrangement, screen by screen.
+- That INCLUDES the sign-in screen. \`public/login.html\` is yours to restyle
+  onto the approved design (keep its ids, its forms and its \`theme.js\` /
+  \`platform.js\` tags — the auth flow and the first-administrator state depend
+  on them). It is the first screen anyone sees; leaving it on the base app's
+  default is the most visible way an app looks unfinished.
 
 The \`design-adherence\` gate measures this, and it measures your MARKUP as well
 as your CSS: shipping screens with neither their own styling nor the approved

@@ -127,15 +127,153 @@ async function runStep(page, step) {
   }
 }
 
+// Options every automation browser context uses.
+//
+// Service workers are BLOCKED. install.js reloads the page when a freshly
+// installed worker takes control, and every context here is brand new — so
+// that reload lands in the middle of whatever the check was doing: an
+// in-flight goto aborts, a filled form is wiped before submit, an evaluate's
+// execution context is destroyed. It produced exactly the intermittent
+// "signed in? no" and "check crashed" results that made builds look flaky.
+// The PWA's own behaviour is covered by the app's e2e suite, where a reload is
+// the thing under test rather than noise on top of everything else.
+const AUTOMATION_CONTEXT = Object.freeze({ serviceWorkers: 'block' });
+
+// The first VISIBLE match, not simply the first match.
+//
+// The platform sign-in page carries THREE forms — #form-bootstrap (create the
+// first administrator), #form-login, #form-setup — and shows exactly one,
+// chosen at runtime from /api/auth/bootstrap/status. `locator(sel).first()`
+// therefore resolves to a hidden control on most projects: on a fresh app it
+// picks the create-administrator fields, so "signing in" POSTed to
+// /auth/bootstrap/superadmin and the browser never left the gate. That is the
+// mechanism behind "the ai can never see past the login screen" — the seeded
+// account was fine, the selector was aimed at the wrong form.
+export function firstVisible(page, selector) {
+  return page.locator(selector).locator('visible=true').first();
+}
+
+// Navigate, tolerating the service worker's one-shot reload.
+//
+// install.js reloads the page when a newly installed worker takes control,
+// which aborts an in-flight goto with ERR_ABORTED. On a fresh browser context
+// — which is what every check and every screenshot uses — that is the FIRST
+// navigation, so the abort is not an edge case. Retry the abort; a navigation
+// that keeps failing still throws, so a genuinely dead page fails honestly.
+export async function gotoStable(page, url, { waitUntil = 'domcontentloaded' } = {}) {
+  let last;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await page.goto(url, { waitUntil, timeout: NAV_TIMEOUT_MS });
+      return;
+    } catch (err) {
+      last = err;
+      if (!/ERR_ABORTED|context was destroyed|Target closed|frame was detached/i.test(String(err?.message || err))) throw err;
+      await page.waitForTimeout(400).catch(() => undefined);
+    }
+  }
+  throw last;
+}
+
+// Sign in through the API rather than the form, from inside the page so the
+// httpOnly session cookies land in the browser context that will do the
+// screenshotting. No selectors, no guessing which form is showing, no
+// dependence on the build model having left the markup alone.
+//
+// Only the platform auth component serves /api/auth/login; anything else
+// answers 404 and the caller falls back to driving the form. Returns true only
+// on a real success — never throws.
+// The service worker reloads the page out from under this on a FRESH browser
+// context: install.js reloads once on `controllerchange`, which is precisely
+// when a first-ever visit installs the worker — and every capture context is
+// brand new. A reload mid-evaluate destroys the execution context, the fetch
+// result is lost, and the sign-in looks like it failed when the cookies were
+// in fact set. Settling first makes it rare; retrying makes it not matter.
+export async function apiSignIn(page, baseUrl, creds) {
+  if (!creds?.email || !creds?.password) return false;
+  const payload = { email: String(creds.email), password: String(creds.password) };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      // Must be ON the origin first: fetch() needs a same-origin document for
+      // the Set-Cookie to be stored against it.
+      await gotoStable(page, new URL('/login', baseUrl).toString());
+      // Let the service worker install and do its one reload before we run
+      // anything that a navigation would kill.
+      await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => undefined);
+      const ok = await page.evaluate(async ({ email, password }) => {
+        try {
+          const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ email, password }),
+          });
+          return res.ok;
+        } catch { return false; }
+      }, payload);
+      if (ok) return true;
+      // A clean `false` is a real rejection (bad password, no such endpoint) —
+      // only a destroyed context is worth retrying, and that arrives as a throw.
+      return false;
+    } catch {
+      await page.waitForTimeout(400).catch(() => undefined);
+    }
+  }
+  return false;
+}
+
+// Open the sign-in door before typing into it.
+//
+// firstVisible() picks the form that is SHOWING — but on an app whose operator
+// has not created their administrator yet, the form showing is "create the
+// first administrator", and it is the correct one to show. The sign-in form is
+// one click away behind #to-login. Without this, filling the visible fields
+// POSTs to /auth/bootstrap/superadmin and the reviewer never gets in.
+//
+// A no-op on any page without that control, so a build that restyled or
+// replaced the sign-in page is unaffected.
+export async function revealSignInForm(page) {
+  try {
+    const link = page.locator('#to-login');
+    if (await link.isVisible({ timeout: 1000 })) {
+      await link.click({ timeout: 2000 });
+      await page.waitForTimeout(200);
+    }
+  } catch { /* not the platform sign-in page; carry on with what is visible */ }
+}
+
+// Wait for a submitted sign-in to actually land.
+//
+// The scaffold's submit handler is an XHR followed by location.assign('/') —
+// so at the moment of the click there is no navigation and no in-flight
+// request yet, and waitForLoadState('networkidle') RETURNS IMMEDIATELY on the
+// already-idle page. The caller then asks "am I signed in?" while the login
+// POST is still in flight, sees the sign-in page, and reports a failed login
+// on a successful one. Wait for the URL to leave /login instead.
+export async function waitForSignInToLand(page, timeout = 8000) {
+  await page.waitForURL((u) => !/\/login(?:[/?#]|$)/.test(String(u)), { timeout }).catch(() => undefined);
+  await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => undefined);
+}
+
 // Log in as a role using the spec's login block + seeded test-fixture users.
 // Exported for the design-review pass (authenticated screenshots).
+//
+// The API path is tried first when the block is the platform's own (see
+// withPlatformLogin): it cannot be defeated by a restyled login page. A
+// spec-declared block still drives the real form — that IS the thing under
+// test — but against the visible controls.
 export async function loginAs(page, baseUrl, login, role) {
   const user = login.users[role];
-  await page.goto(new URL(login.path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-  await page.locator(login.user_field).first().fill(user.username, { timeout: STEP_TIMEOUT_MS });
-  await page.locator(login.pass_field).first().fill(user.password, { timeout: STEP_TIMEOUT_MS });
-  await page.locator(login.submit).first().click({ timeout: STEP_TIMEOUT_MS });
-  await page.waitForLoadState('networkidle', { timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
+  if (login.via === 'api' && await apiSignIn(page, baseUrl, { email: user.username, password: user.password })) return;
+  await gotoStable(page, new URL(login.path, baseUrl).toString());
+  // Settle BEFORE typing: the service worker's one-shot reload would otherwise
+  // wipe the fields between fill() and click().
+  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => undefined);
+  await revealSignInForm(page);
+  await firstVisible(page, login.user_field).fill(user.username, { timeout: STEP_TIMEOUT_MS });
+  await firstVisible(page, login.pass_field).fill(user.password, { timeout: STEP_TIMEOUT_MS });
+  await firstVisible(page, login.submit).click({ timeout: STEP_TIMEOUT_MS });
+  await waitForSignInToLand(page);
 }
 
 // runUiChecks({ baseUrl, spec, checks }) → { ok, unavailable?, results, detail }.
@@ -155,7 +293,7 @@ export async function runUiChecks({ baseUrl, spec, checks }) {
       const result = { id: chk.id, name: chk.name, role: chk.role, page: chk.page, ok: false, steps: [], consoleErrors: [] };
       let context = null;
       try {
-        context = await browser.newContext();
+        context = await browser.newContext(AUTOMATION_CONTEXT);
         const page = await context.newPage();
         // ANY console error fails the check — a JS exception, a console.error
         // from page code, or a failed script/CSS/API load. The one exception is
@@ -172,7 +310,7 @@ export async function runUiChecks({ baseUrl, spec, checks }) {
         page.on('pageerror', (err) => { result.consoleErrors.push(String(err?.message || err).slice(0, 300)); });
 
         if (chk.role) await loginAs(page, baseUrl, spec.login, chk.role);
-        await page.goto(new URL(chk.page, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+        await gotoStable(page, new URL(chk.page, baseUrl).toString());
         await page.waitForLoadState('networkidle', { timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
 
         for (const step of chk.steps) {

@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  UI_CHECKS_PATH, STEP_KINDS, parseUiChecks, checksForChangedFiles, stepShape,
+  UI_CHECKS_PATH, STEP_KINDS, parseUiChecks, checksForChangedFiles, stepShape, withPlatformLogin,
   uiCheckLogLines, uiCheckFailSummary,
 } from '../mock2/ui-check-logic.js';
 import {
@@ -259,4 +259,56 @@ test('an unknown action is named, not swallowed', () => {
     checks: [{ id: 'c', page: '/', paths: ['a'], login: 'a@fixture.invalid', steps: [{ action: 'hover', selector: '#a' }] }],
   });
   assert.match(parseUiChecks(spec).error, /unknown action "hover"/);
+});
+
+/* -------------- signing the checks in when the spec did not say how --------- */
+//
+// Project 40's smoke run: `ui-check notes-list-loads [anonymous /]: FAIL —
+// expect_visible #search: Timeout`, three times over. The spec declared no
+// login block, so every check ran signed OUT, was bounced to /login by the auth
+// gate, and timed out on elements that only exist behind it. Three checks that
+// could never have passed, and a red build on top of a working app.
+
+test('a spec with no login block runs as the platform reviewer', () => {
+  const spec = parseUiChecks(JSON.stringify({
+    checks: [
+      { id: 'a', page: '/', paths: ['public/*.html'], steps: [{ expect_visible: '#search' }] },
+      { id: 'b', page: '/notes', paths: ['public/*.js'], steps: [{ click: '#new' }] },
+    ],
+  })).spec;
+  assert.equal(spec.login, null, 'the fixture starts with no login block');
+
+  const signed = withPlatformLogin(spec, { email: 'design-review@fixture.invalid', password: 'x'.repeat(20) });
+  assert.ok(signed.login, 'a login block is synthesised');
+  assert.equal(signed.login.path, '/login');
+  assert.equal(signed.login.users.platform.username, 'design-review@fixture.invalid');
+  for (const c of signed.checks) assert.equal(c.role, 'platform', `${c.id} still runs anonymous`);
+  // The PLATFORM's own account signs in through the API, not the sign-in page.
+  // Driving the form means guessing which of its three states is showing, and
+  // a build is free to restyle every control on it; neither is under test when
+  // all we need is a session.
+  assert.equal(signed.login.via, 'api');
+});
+
+test('a spec that DOES declare a login is left exactly alone', () => {
+  // A check with no role there is an explicit choice to test the signed-out
+  // state; overriding it would silently change what the build asked for.
+  const spec = parseUiChecks(JSON.stringify({
+    users: [{ role: 'admin', email: 'a@fixture.invalid', password: 'x'.repeat(12) }],
+    checks: [
+      { id: 'signed-in', page: '/', paths: ['a'], login: 'a@fixture.invalid', steps: [{ click: '#x' }] },
+      { id: 'signed-out', page: '/login', paths: ['b'], steps: [{ expect_visible: '#email' }] },
+    ],
+  })).spec;
+  const after = withPlatformLogin(spec, { email: 'design-review@fixture.invalid', password: 'x'.repeat(20) });
+  assert.deepEqual(after, spec);
+  assert.equal(after.checks.find((c) => c.id === 'signed-out').role, null);
+});
+
+test('with no reviewer account there is nothing to sign in as, and nothing changes', () => {
+  const spec = parseUiChecks(JSON.stringify({
+    checks: [{ id: 'a', page: '/', paths: ['x'], steps: [{ click: '#x' }] }],
+  })).spec;
+  assert.deepEqual(withPlatformLogin(spec, null), spec);
+  assert.deepEqual(withPlatformLogin(spec, { email: 'a@b.c' }), spec);
 });

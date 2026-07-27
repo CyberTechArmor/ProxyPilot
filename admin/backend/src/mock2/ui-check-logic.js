@@ -243,6 +243,37 @@ export function parseUiChecks(text) {
   return { ok: true, spec: { login, checks } };
 }
 
+// withPlatformLogin — sign the checks in when the spec did not say how.
+//
+// Project 40's smoke run reported `ui-check notes-list-loads [anonymous /]:
+// FAIL — expect_visible #search: Timeout`, three times over. The spec declared
+// no login block at all, so every check ran signed OUT, was bounced to the
+// sign-in page by the auth gate, and timed out looking for elements that only
+// exist behind it. Three green-looking checks that could never have passed, and
+// a red build on top.
+//
+// The platform keeps a working fixture account for exactly this (review-
+// account.js). When the spec is silent about signing in, use it: a check
+// written against `/` on an auth-gated app plainly means "as a signed-in user".
+//
+// DELIBERATELY NOT when the spec HAS a login block: a check with no role there
+// is an explicit choice to test the signed-out state, and overriding it would
+// silently change what the build asked for.
+export function withPlatformLogin(spec, reviewLogin) {
+  if (!spec || spec.login || !reviewLogin?.email || !reviewLogin?.password) return spec;
+  const role = 'platform';
+  return {
+    ...spec,
+    // `via: 'api'` — this block is the PLATFORM's account, not a fixture the
+    // build declared, so signing it in is plumbing rather than something under
+    // test. Going through /api/auth/login skips the sign-in page entirely,
+    // which matters because that page shows one of three forms depending on
+    // bootstrap state and a restyled build can move every control on it.
+    login: { ...DEFAULT_LOGIN_FORM, via: 'api', users: { [role]: { username: reviewLogin.email, password: reviewLogin.password } } },
+    checks: (spec.checks || []).map((c) => (c.role ? c : { ...c, role })),
+  };
+}
+
 // The checks a diff warrants: every check whose path globs match ANY changed
 // file. This is what both enforcement points share — the coverage gate asks
 // "does at least one check match?", the connector asks "which checks run?".

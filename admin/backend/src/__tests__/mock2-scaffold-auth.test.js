@@ -167,3 +167,42 @@ test('scaffold ships the annotate bridge and the app shell references it', () =>
   assert.ok(shell, 'app-shell.html present');
   assert.match(shell.content, /pp-annotate-bridge\.js/);
 });
+
+/* --------------- both first-run doors on the sign-in page ------------------ */
+//
+// Project 40: the design review screenshot the sign-in page four times and all
+// three smoke checks ran anonymous. The seeded reviewer account was fine — the
+// PAGE was the problem. It carries three forms and shows exactly one, and on an
+// app whose operator has not created their administrator yet the one showing is
+// "create the first administrator". So an account that already exists (the
+// platform's fixture reviewer, an LDAP user, a second admin) had no door at all,
+// and automation aiming at the visible fields typed into the bootstrap form.
+
+test('the sign-in page offers a way to sign in even when it is offering to create the first admin', () => {
+  const login = buildAuthWiredFiles().find((f) => f.path === 'public/login.html');
+  assert.ok(login, 'login.html present');
+  // The link out of the bootstrap form, and the way back.
+  assert.match(login.content, /id="to-login"/);
+  assert.match(login.content, /id="to-bootstrap"/);
+  // type="button", NOT submit: a submit here would post the bootstrap form and
+  // is also what the reviewer's generic `button[type=submit]` selector clicks.
+  assert.match(login.content, /<button type="button" class="linklike" id="to-login">/);
+  assert.match(login.content, /<button type="button" class="linklike" id="to-bootstrap">/);
+  // The way back is hidden until we know the bootstrap is still open.
+  assert.match(login.content, /id="alt-bootstrap" hidden/);
+  // Touch target (MOBILE_FIRST.md): these are real controls, not decoration.
+  assert.match(login.content, /\.linklike \{[^}]*min-height: 44px/s);
+});
+
+test('a container on the previous login page generation is upgradable, not stranded', () => {
+  // The scaffold only overwrites a file whose hash it recognises as pristine.
+  // Changing login.html without registering the OUTGOING hash would leave every
+  // existing project on the page that has only one door — the exact bug — while
+  // the tests here passed.
+  const src = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mock2', 'scaffold-auth.js'),
+    'utf8',
+  );
+  assert.match(src, /133cc0441980b296ef88ccb9104f37226f6d176b4adaa1d2000965fd28556b8c/,
+    'the pre-both-doors login.html hash must be registered as upgradable');
+});

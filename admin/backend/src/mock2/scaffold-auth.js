@@ -880,6 +880,16 @@ function loginHtml() {
     .btn:hover { filter: brightness(1.05); }
     .form-msg { color: var(--lg-err); min-height: 1.2em; margin: 12px 0 0; font-size: 14px; }
     [hidden] { display: none !important; }
+    /* Switch between "create the first administrator" and "sign in". Without
+       these the two flows are mutually unreachable: a fresh app shows ONLY the
+       bootstrap form, so an account that already exists (a seeded fixture user,
+       an LDAP account) has no door at all. */
+    .login-alt { margin: 14px 0 0; text-align: center; font-size: 14px; }
+    .linklike {
+      background: none; border: 0; padding: 8px; min-height: 44px;
+      color: var(--lg-accent); font: inherit; text-decoration: underline; cursor: pointer;
+    }
+    .linklike:hover { opacity: .8; }
     .login-chrome { display: flex; justify-content: flex-end; margin-top: 16px; }
     .login-chrome .theme-toggle { min-height: 44px; min-width: 44px; }
   </style>
@@ -925,6 +935,9 @@ function loginHtml() {
         </label>
         <button class="btn login-btn" type="submit">Create administrator</button>
         <p class="form-msg" id="bootstrap-msg" role="alert"></p>
+        <p class="login-alt">
+          <button type="button" class="linklike" id="to-login">Already have an account? Sign in</button>
+        </p>
       </form>
 
       <!-- Normal sign-in. -->
@@ -941,6 +954,9 @@ function loginHtml() {
         </label>
         <button class="btn login-btn" type="submit">Sign in</button>
         <p class="form-msg" id="login-msg" role="alert"></p>
+        <p class="login-alt" id="alt-bootstrap" hidden>
+          <button type="button" class="linklike" id="to-bootstrap">Create the first administrator</button>
+        </p>
       </form>
 
       <!-- First-time password setup (server returned PASSWORD_SETUP_REQUIRED). -->
@@ -1025,6 +1041,11 @@ const WIRED_HISTORY = new Map([
     // The component-shipped centered-card sign-in page (installer-written, no
     // human edits) — safe to upgrade to the wired split-layout page below.
     '7ca8c72fafbcbd8ef3995ce4da1e480bbf7fc5d1f2deae52c6a463f8ea542a33',
+    // v2: the split-layout page before it offered BOTH first-run doors. A
+    // container stuck on this generation shows only "create the first
+    // administrator", so a seeded fixture user — the account the design review
+    // and the smoke checks sign in with — is unreachable from the page.
+    '133cc0441980b296ef88ccb9104f37226f6d176b4adaa1d2000965fd28556b8c',
   ]],
   ['public/admin.js', [
     '4123ff0a11d3adf2bdb1b245bcc496f1f04ef165faed35a4fbffdb967346d4f8', // v1: pre sign-in-link button

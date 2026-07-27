@@ -149,7 +149,7 @@ async function readUiChecksFile(containerName, appDir) {
 // (visible-form count on the root page) when the project has no spec or no
 // check matches this diff. A spec that exists but does not parse FAILS the
 // connector — a broken test manifest must never read as a pass. Never throws.
-async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles, requiredIds = [] }) {
+async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles, requiredIds = [], reviewLogin = null }) {
   // 1) Project interaction checks, when declared. The run set is the UNION of
   //    the diff-matched checks and the ACCEPTANCE-REQUIRED ids (cycle-94: the
   //    task's live acceptance — e.g. "Test connection turns all three checks
@@ -176,6 +176,10 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
       if (missing.length) {
         return { ok: false, specInvalid: true, detail: `acceptance ui check(s) not defined in ${UI_CHECKS_PATH}: ${missing.join(', ')}` };
       }
+      // Sign the checks in when the spec did not say how — otherwise they run
+      // anonymous, get bounced to /login, and time out on elements that only
+      // exist behind the gate (project 40: three checks, three timeouts).
+      parsed.spec = withPlatformLogin(parsed.spec, reviewLogin);
       const matched = checksForChangedFiles(parsed.spec, changedFiles);
       const byId = new Map(matched.map((c) => [c.id, c]));
       for (const id of required) {
@@ -352,7 +356,7 @@ export async function runSmokeGate({
 
   if (resolved.browser.disposition === 'ran') {
     const target = url || await resolveBrowserTarget(containerName, webPort);
-    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles, requiredIds: acceptanceUi })), reason: resolved.browser.reason };
+    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles, requiredIds: acceptanceUi, reviewLogin })), reason: resolved.browser.reason };
   }
   if (resolved.db.disposition === 'ran') {
     report.db = { ...(await driveDbConnector({ containerName, appDir })), reason: resolved.db.reason };
@@ -396,11 +400,11 @@ export function smokeFailSummary(report) {
 export async function smokeAfterDeploy({
   containerName, appDir = '/srv/app', webPort = 3000, url = null,
   commitSha = null, summary = '', instruction = '', escalations = [],
-  requiredIds = [], logEvent = null, env = process.env,
+  requiredIds = [], logEvent = null, env = process.env, reviewLogin = null,
 }) {
   const changedFiles = await changedFilesForCommit(containerName, appDir, commitSha);
   const changeMeta = { summary: summary || '', ruleUnderTest: instruction || '' };
-  const result = await runSmokeGate({ containerName, appDir, webPort, url, changedFiles, changeMeta, escalations, requiredIds, env });
+  const result = await runSmokeGate({ containerName, appDir, webPort, url, changedFiles, changeMeta, escalations, requiredIds, env, reviewLogin });
   if (typeof logEvent === 'function') {
     try {
       logEvent('smoke', {

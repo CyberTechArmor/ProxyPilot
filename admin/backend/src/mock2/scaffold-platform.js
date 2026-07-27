@@ -23,11 +23,15 @@
 // PURE (stub-first, risk R9): returns [{ path, content }]. No I/O, no native
 // modules. Terminology (risk R7): nothing here is named "agent".
 
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v3';
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v4';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
    --------------------------------------------------------------------------- */
+import {
+  pushSchemaTs, pushMigrationSql, pushTs, pushClientJs, pushAdminMarkup, PUSH_CSS,
+} from './scaffold-push.js';
+
 function platformSchemaTs() {
   return `import { pgTable, text, boolean, integer, bigint, jsonb, serial, timestamp, uniqueIndex, index } from 'drizzle-orm/pg-core';
 
@@ -111,7 +115,7 @@ export const auditLog = pgTable('platform_audit', {
 }, (t) => ({
   createdIdx: index('platform_audit_created_idx').on(t.createdAt),
 }));
-`;
+` + pushSchemaTs();
 }
 
 /* ---------------------------------------------------------------------------
@@ -737,6 +741,7 @@ import { status as roStatus, enableReadonly, disableReadonly, describe as roDesc
 import { denyApiKey } from './api-key-auth.js';
 import { DEFAULT_PERMISSIONS } from '../auth/permissions.js';
 import { requireRole, getAuth } from '../auth/index.js';
+import { pushPublicRoutes, pushRoutes } from './push.js';
 
 const ALLOWED_ASSET_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml', 'image/x-icon']);
 const MAX_ASSET_BYTES = 2 * 1024 * 1024;
@@ -760,6 +765,10 @@ async function record(action: string, actor: string | null, meta: unknown = null
 // notice, the logo and the Privacy/Terms links before anyone has a session, and
 // the browser fetches the favicon with no cookies at all.
 export const publicPlatformRoutes = Router();
+// Web Push config rides the PUBLIC router: the browser needs the VAPID public
+// key before it can subscribe, and the sign-in page is allowed to know whether
+// notifications exist at all. Nothing here is a secret.
+publicPlatformRoutes.use(pushPublicRoutes);
 
 publicPlatformRoutes.get('/api/branding', async (_req: Request, res: Response) => {
   res.json({ branding: await publicView() });
@@ -825,6 +834,8 @@ publicPlatformRoutes.get('/api/meta', async (_req: Request, res: Response) => {
 
 /* ------------------------------ AUTHENTICATED ---------------------------- */
 export const platformRoutes = Router();
+// Subscribing ties a device to this install, so it sits behind the auth gate.
+platformRoutes.use(pushRoutes);
 
 platformRoutes.get('/api/whoami', (req: Request, res: Response) => {
   if (req.apiKey) {
@@ -1124,7 +1135,7 @@ CREATE TABLE IF NOT EXISTS platform_audit (
 CREATE INDEX IF NOT EXISTS platform_audit_created_idx ON platform_audit (created_at DESC);
 
 INSERT INTO branding (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
-`;
+` + pushMigrationSql();
 }
 
 /* ---------------------------------------------------------------------------
@@ -1249,9 +1260,15 @@ function platformDialogsJs() {
       box.setAttribute('role', 'dialog');
       box.setAttribute('aria-modal', 'true');
 
+      if (opts.title) {
+        var h = document.createElement('h3');
+        h.textContent = opts.title;
+        h.style.cssText = 'margin:0 0 8px;font-size:1.05rem';
+        box.appendChild(h);
+      }
       var msg = document.createElement('p');
       msg.textContent = opts.message || '';
-      msg.style.cssText = 'margin:0 0 14px;font-weight:600';
+      msg.style.cssText = opts.title ? 'margin:0 0 14px' : 'margin:0 0 14px;font-weight:600';
       box.appendChild(msg);
 
       var input = null;
@@ -1306,9 +1323,18 @@ function platformDialogsJs() {
     });
   }
 
-  pp.alert = function (message, okText) { return dialog({ kind: 'alert', message: message, okText: okText }); };
-  pp.confirm = function (message, okText) { return dialog({ kind: 'confirm', message: message, okText: okText || 'Confirm' }); };
-  pp.prompt = function (message, value, okText) { return dialog({ kind: 'prompt', message: message, value: value, okText: okText || 'Save' }); };
+  // The second argument may be a plain string (the OK label — the original,
+  // still-supported form) or { okText, cancelText, title }. An install
+  // invitation needs "Install" / "Not now", which one label cannot express.
+  function opts(arg, defaultOk) {
+    if (arg && typeof arg === 'object') {
+      return { okText: arg.okText || defaultOk, cancelText: arg.cancelText, title: arg.title };
+    }
+    return { okText: arg || defaultOk };
+  }
+  pp.alert = function (message, o) { return dialog(Object.assign({ kind: 'alert', message: message }, opts(o, 'OK'))); };
+  pp.confirm = function (message, o) { return dialog(Object.assign({ kind: 'confirm', message: message }, opts(o, 'Confirm'))); };
+  pp.prompt = function (message, value, o) { return dialog(Object.assign({ kind: 'prompt', message: message, value: value }, opts(o, 'Save'))); };
 })();
 `;
 }
@@ -1627,7 +1653,8 @@ function platformAdminMarkup() {
         <input id="pf-ro-url" type="text" readonly></div>
       <p class="note" id="pf-ro-views"></p>
     </div>
-  </div>`;
+  </div>
+` + pushAdminMarkup();
 }
 
 // public/platform-admin.js — drives the platform admin cards against
@@ -1859,6 +1886,10 @@ export function buildPlatformFiles() {
     { path: 'src/platform/api-keys.ts', content: apiKeysTs() },
     { path: 'src/platform/api-key-auth.ts', content: apiKeyAuthTs() },
     { path: 'src/platform/readonly.ts', content: readonlyTs() },
+    // Web Push + the app-install invitation: platform-owned because three RFCs
+    // of silent-failure crypto is not something a build should be re-deriving.
+    { path: 'src/platform/push.ts', content: pushTs() },
+    { path: 'public/push.js', content: pushClientJs() },
     { path: 'migrations/0100_platform.sql', content: platformMigrationSql() },
     { path: 'public/theme.js', content: themeJs() },
     { path: 'public/platform.js', content: platformClientJs() + platformDialogsJs() },
@@ -1870,4 +1901,4 @@ export function buildPlatformFiles() {
 // than shipped as its own file, so it lands inside the existing layout.
 export { platformAdminMarkup };
 
-export const PLATFORM_CSS = platformCss();
+export const PLATFORM_CSS = platformCss() + PUSH_CSS;

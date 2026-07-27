@@ -55,11 +55,20 @@ export const PLATFORM_OWNED_ALWAYS = Object.freeze([
   'src/platform/api-keys.ts',
   'src/platform/api-key-auth.ts',
   'src/platform/readonly.ts',
+  // Web Push + the install invitation (v4). Platform-owned: three RFCs of
+  // silent-failure crypto is not something a build should carry.
+  'src/platform/push.ts',
   'migrations/0100_platform.sql',
   'public/theme.js',
   'public/platform.js',
   'public/platform-admin.js',
+  'public/push.js',
   'public/base.css',
+  // The PWA plumbing: sw.js gained the push/notificationclick handlers and
+  // install.js became a one-time modal instead of a permanent floating pill,
+  // so an existing project needs both rewritten to get the feature.
+  'public/sw.js',
+  'public/install.js',
 ]);
 
 export const PLATFORM_OWNED_IF_PRESENT = Object.freeze([

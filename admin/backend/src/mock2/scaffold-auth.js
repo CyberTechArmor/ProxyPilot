@@ -441,6 +441,9 @@ ${platformAdminMarkup()}
 </main>
 <script src="/admin.js"></script>
 <script src="/platform-admin.js"></script>
+<!-- Notifications + install: the per-device panel, always reachable here even
+     when the one-time install invitation was dismissed. -->
+<script src="/push.js" defer></script>
 </body>
 </html>
 `;

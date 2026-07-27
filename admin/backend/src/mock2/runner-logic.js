@@ -420,8 +420,21 @@ What it already gives the app, for free:
   the \`api_read\` schema for reporting clients. When you add a table worth
   reporting on, register a view there rather than handing out table access.
 - **Discovery** — \`GET /api/meta\` describes the app's own API surface.
+- **Notifications (Web Push)** — \`src/platform/push.ts\` already does the
+  whole thing: VAPID keys minted on first use, per-device subscriptions keyed
+  on the endpoint, aes128gcm payload encryption, dead-subscription cleanup, and
+  the \`/api/push/*\` routes. To notify someone from YOUR feature, call
+  \`notifyUser(userId, { title, body, url }, origin)\` or \`notifyAll(...)\`.
+  Do NOT write your own push code — every mistake in those RFCs is silent (the
+  push service accepts the request and the browser drops the message).
+- **App install** — \`public/install.js\` invites the user to install the app
+  ONCE, as a styled modal, and \`public/push.js\` keeps the offer permanently
+  available in the Notifications panel. Never add your own install button.
 - **Client helpers** — \`public/platform.js\` renders branding and the legal
-  footer with no session; \`public/theme.js\` owns the toggle.
+  footer with no session; \`public/theme.js\` owns the toggle; it also exposes
+  \`pp.alert\` / \`pp.confirm\` / \`pp.prompt\` — styled modals you MUST use
+  instead of \`window.alert\` / \`confirm\` / \`prompt\` (a browser dialog in a
+  polished app reads as unfinished, and the \`no-native-dialogs\` gate reds it).
 
 How to EXTEND it (the only supported way):
 - A new setting → add it to the platform's settings section, not a new table.
@@ -429,6 +442,9 @@ How to EXTEND it (the only supported way):
   theme.js + platform.js head lines, so it themes and shows the footer.
 - A new reportable table → register a view in \`readonly.ts\`.
 - A new machine-callable route → mount it behind \`withApiKey\`.
+- Something worth telling a user about → \`notifyUser\` / \`notifyAll\` from
+  \`src/platform/push.ts\`.
+- A confirmation or a message → \`await pp.confirm(…)\` / \`pp.alert(…)\`.
 
 The \`platform-intact\` gate checks this: it reds the build if the module lost
 its exports or the app grew a second branding/settings/api-key store.

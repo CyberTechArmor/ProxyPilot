@@ -178,7 +178,7 @@ export default function Flightdeck({
     );
   const chatPane = (
     <BuildChat projectId={projectId} project={project} cycle={cycle} canEdit={canEdit} online={online} active={active}
-      job={job} buildQueue={buildQueue} activity={activity} onStarted={load} />
+      job={job} buildQueue={buildQueue} activity={activity} onStarted={load} fill />
   );
   const terminalPane = online
     ? <ProjectTerminal projectId={projectId} containerName={containerName} defaultOpen fill />
@@ -330,7 +330,7 @@ export default function Flightdeck({
                 <DeployButton projectId={projectId} online={online} canEdit={canEdit} onDeployed={load} />
               </div>
             ) : null}
-            <div className="flex-1 min-h-0 overflow-auto">
+            <div className={`flex-1 min-h-0 ${cur === 'chat' ? 'overflow-hidden' : 'overflow-auto'}`}>
               {cur === 'files' && filesPane}
               {cur === 'editor' && editorPane}
               {cur === 'chat' && chatPane}

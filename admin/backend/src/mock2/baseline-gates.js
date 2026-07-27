@@ -189,6 +189,16 @@ for f in src/platform/schema.ts src/platform/branding.ts src/platform/api-keys.t
          public/platform-admin.js; do
   [ -f "$f" ] || MISSING="$MISSING $f"
 done
+# push.ts / push.js arrived with platform v4, so a project seeded earlier does
+# not have them yet and must not fail for it. The rule here is therefore
+# narrower and exactly right: fail only if the build DELETED a file this
+# project already had at HEAD.
+if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+  for f in src/platform/push.ts public/push.js; do
+    if git cat-file -e "HEAD:$f" 2>/dev/null && [ ! -f "$f" ]; then MISSING="$MISSING $f"; fi
+  done
+fi
+
 if [ -n "$MISSING" ]; then
   echo "FAIL: the platform module lost files:$MISSING"
   echo "      Those are the base app's own features (theme, branding, legal pages, assets, API keys, read-only SQL)."
@@ -412,7 +422,7 @@ set -u
 FAIL=0
 FILES=$(find public src -type f 2>/dev/null \
         | grep -E '[.](js|ts|html)$' \
-        | grep -v -E '/(theme|platform|platform-admin|sw|install|build-id|pp-annotate-bridge)[.]js$' \
+        | grep -v -E '/(theme|platform|platform-admin|push|sw|install|build-id|pp-annotate-bridge)[.]js$' \
         | head -200)
 if [ -z "$FILES" ]; then
   echo "no-native-dialogs: no app scripts to check. Skipped."

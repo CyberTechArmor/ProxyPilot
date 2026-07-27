@@ -416,8 +416,14 @@ inventory that ignores it, and the built app then has features an operator has
 no way to reach.
 
 Already built, do NOT redesign from scratch and do NOT leave out:
-- Sign-in, with a first-administrator setup flow. Show a sign-in screen only if
-  the idea needs a distinctive one; otherwise assume it and start after login.
+- Sign-in, with a first-administrator setup flow. DESIGN THE SIGN-IN SCREEN —
+  it is not optional. It is the first screen every user of this app will ever
+  see, the only screen guaranteed to exist, and the one the design review
+  photographs. Left undesigned it falls back to the base app's generic default,
+  so the first impression of the finished product is a page nobody chose. Give
+  it the same palette, type and component language as the rest, and include the
+  first-administrator state (the create-administrator form) as well as the
+  ordinary sign-in form.
 - A light/dark theme toggle. The design system already requires one — that
   control IS the base app's.
 - An ADMIN area. Include it as a real screen with the settings the base app

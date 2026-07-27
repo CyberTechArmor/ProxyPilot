@@ -34,6 +34,119 @@ export function generateReviewPassword() {
   return crypto.randomBytes(24).toString('base64url');
 }
 
+// seedFixtureUserScript — create the reviewer DIRECTLY in the app's database.
+//
+// WHY NOT THE BOOTSTRAP ENDPOINT (which is what the first version used):
+// POST /api/auth/bootstrap/superadmin is guarded by "no real user exists yet".
+// Once the OPERATOR has created their own administrator — which is the first
+// thing anyone does — that guard is closed forever, so the reviewer could never
+// be created on any project a human had actually signed into. Project 40's
+// review shot the sign-in page four times and its smoke checks all ran
+// `[anonymous /]` and timed out at the auth gate, for exactly this reason.
+//
+// The platform has root in the container, so it seeds the row itself. The
+// account lives on the reserved @fixture.invalid domain, which the auth
+// component already excludes from "a real user exists" — so it does NOT count
+// as the super-admin and the operator's first-admin flow keeps working exactly
+// as before. Role `admin` so the reviewer can reach the admin screens too.
+//
+// Idempotent: an existing fixture row has its password reset to the one we
+// hold, which also repairs a project whose stored credentials were lost.
+// The seeder program itself, written to a file by the script above.
+//
+// Plain ESM, pg only — the same driver scripts/migrate.mjs uses, so it needs no
+// build step and no extra dependency.
+const SEED_NODE_SRC = [
+  'import fs from "node:fs";',
+  'import crypto from "node:crypto";',
+  'import pg from "pg";',
+  '',
+  'const c = JSON.parse(fs.readFileSync(process.env.CRED, "utf8"));',
+  '',
+  '// Exactly the format src/auth/crypto.ts verifies:',
+  '//   scrypt$N$r$p$saltB64$hashB64',
+  '// Any drift here produces a row that exists and can never sign in.',
+  'const N = 16384, R = 8, P = 1, KEYLEN = 32;',
+  'const salt = crypto.randomBytes(16);',
+  'const hash = crypto.scryptSync(c.password, salt, KEYLEN, { N, r: R, p: P });',
+  'const stored = ["scrypt", N, R, P, salt.toString("base64"), hash.toString("base64")].join("$");',
+  '',
+  'const url = process.env.DATABASE_URL || "postgres://app:app@127.0.0.1:5432/app";',
+  'const client = new pg.Client({ connectionString: url });',
+  'await client.connect();',
+  'try {',
+  '  // Use whatever role this project actually seeded; admin when it exists, so',
+  '  // the reviewer can reach the admin screens too. It stays a FIXTURE account',
+  '  // either way: the @fixture.invalid domain is excluded from "a real user',
+  '  // exists", so the operator first-admin flow is untouched.',
+  '  const roles = await client.query("SELECT key FROM roles");',
+  '  const keys = roles.rows.map((r) => r.key);',
+  '  const role = keys.includes("admin") ? "admin" : (keys[0] || "admin");',
+  '',
+  '  const existing = await client.query("SELECT id FROM users WHERE lower(email) = lower($1)", [c.email]);',
+  '  if (existing.rowCount) {',
+  '    await client.query(',
+  '      "UPDATE users SET password_hash = $2, password_setup_required = false, is_active = true, role = $3 WHERE id = $1",',
+  '      [existing.rows[0].id, stored, role]);',
+  '  } else {',
+  '    await client.query(',
+  '      "INSERT INTO users (email, password_hash, password_setup_required, role, is_active) VALUES ($1, $2, false, $3, true)",',
+  '      [c.email.toLowerCase(), stored, role]);',
+  '  }',
+  '  console.log("SEED:ok:" + role);',
+  '} catch (e) {',
+  '  console.log("SEED:error:" + String(e && e.message).slice(0, 200));',
+  '} finally {',
+  '  await client.end().catch(() => {});',
+  '}',
+].join('\n');
+
+export function seedFixtureUserScript({ email, password, appDir = '/srv/app' }) {
+  const payload = JSON.stringify({ email: String(email), password: String(password) });
+  return [
+    'set -u',
+    `cd '${appDir}' 2>/dev/null || exit 0`,
+    // No auth component → no users table → nothing to seed. Not an error.
+    '[ -f src/auth/schema.ts ] || { echo "SEED:no-auth"; exit 0; }',
+    '[ -d node_modules/pg ] || { echo "SEED:no-pg"; exit 0; }',
+    // The scratch dir lives INSIDE the app, not in /tmp: the seeder imports
+    // `pg`, and Node resolves node_modules by walking up from the FILE — from
+    // /tmp it finds nothing and dies with a module-not-found that `tail -3`
+    // then hides. (Found by running it against a real database.)
+    'WORK=$(mktemp -d "$PWD/.pp-seed-XXXXXX")',
+    `trap 'rm -rf "$WORK"' EXIT INT TERM`,
+    'umask 077',
+    // Credentials to a 0600 FILE, never onto a command line: `ps` inside the
+    // container is readable by the app, and the build model runs code there.
+    `cat > "$WORK/cred.json" <<'PP_SEED_EOF'`,
+    payload,
+    'PP_SEED_EOF',
+    // The seeder to a FILE too, rather than `node -e "..."`. A quoted program
+    // on the command line has to survive JS template literal → base64 → sh →
+    // node, and every one of those layers has eaten a character at least once
+    // in this codebase. A heredoc has nothing to escape.
+    `cat > "$WORK/seed.mjs" <<'PP_SEED_JS_EOF'`,
+    SEED_NODE_SRC,
+    'PP_SEED_JS_EOF',
+    // Keep stderr: a swallowed diagnostic is how the first version of this
+    // reported nothing at all when it could not import its driver.
+    'CRED="$WORK/cred.json" node "$WORK/seed.mjs" 2>&1 | tail -8',
+    '',
+  ].join('\n');
+}
+
+// Parse the seeder's one labelled line.
+export function parseSeedResult(stdout) {
+  const m = String(stdout || '').match(/SEED:([a-z-]+)(?::(.*))?/);
+  if (!m) return { ok: false, state: 'failed', reason: 'the seeder produced no result' };
+  const [, state, extra] = m;
+  if (state === 'ok') return { ok: true, state: 'seeded', role: (extra || '').trim() || 'admin' };
+  if (state === 'no-auth') return { ok: true, state: 'no-auth', reason: 'this app has no auth component' };
+  if (state === 'no-pg') return { ok: false, state: 'failed', reason: 'the app has no pg driver installed yet' };
+  if (state === 'error') return { ok: false, state: 'failed', reason: (extra || '').trim() };
+  return { ok: false, state: 'failed', reason: `the seeder reported "${state}"` };
+}
+
 // The in-container script. Runs three steps and prints one labelled line each,
 // so a partial run still parses:
 //

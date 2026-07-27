@@ -20,7 +20,7 @@
 
 import { createRequire } from 'node:module';
 import { sh, b64 } from './host.js';
-import { loadChromium, launchOptions, loginAs } from './ui-checks.js';
+import { loadChromium, launchOptions, loginAs, apiSignIn, firstVisible, gotoStable, revealSignInForm, waitForSignInToLand } from './ui-checks.js';
 import { resolveBrowserTarget } from './smoke.js';
 import { parseUiChecks, UI_CHECKS_PATH } from './ui-check-logic.js';
 import {
@@ -69,11 +69,22 @@ async function tryOperatorLogin(page, baseUrl, creds) {
   try {
     await Promise.race([
       (async () => {
-        await page.goto(new URL('/login', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-        await page.locator('input[type="email"], input[name="email"], input[name="username"]').first().fill(String(creds.email), { timeout: 5000 });
-        await page.locator('input[type="password"]').first().fill(String(creds.password), { timeout: 5000 });
-        await page.locator('button[type="submit"], input[type="submit"]').first().click({ timeout: 5000 });
-        await page.waitForLoadState('networkidle', { timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
+        // The API door first — it does not care which of the sign-in page's
+        // three forms happens to be showing, or how the build restyled them.
+        if (await apiSignIn(page, baseUrl, creds)) return;
+        // Fall back to the form, aimed at the VISIBLE controls. `.first()` here
+        // used to fill #bootstrap-email/#bootstrap-password (hidden on most
+        // projects) and POST to /auth/bootstrap/superadmin, which is why every
+        // review screenshot was of the gate.
+        await gotoStable(page, new URL('/login', baseUrl).toString());
+        // Settle first, then open the sign-in door: a fresh app SHOWS the
+        // create-administrator form, and it is one click behind #to-login.
+        await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => undefined);
+        await revealSignInForm(page);
+        await firstVisible(page, 'input[type="email"], input[name="email"], input[name="username"]').fill(String(creds.email), { timeout: 5000 });
+        await firstVisible(page, 'input[type="password"]').fill(String(creds.password), { timeout: 5000 });
+        await firstVisible(page, 'button[type="submit"], input[type="submit"]').click({ timeout: 5000 });
+        await waitForSignInToLand(page);
       })(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('operator login timed out')), LOGIN_TIMEOUT_MS)),
     ]);
@@ -173,7 +184,7 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
   let authed = false;
   try {
     browser = await chromium.launch(launchOptions());
-    const context = await browser.newContext({ viewport: MOBILE, deviceScaleFactor: 1 });
+    const context = await browser.newContext({ ...AUTOMATION_CONTEXT, viewport: MOBILE, deviceScaleFactor: 1 });
     const page = await context.newPage();
     // Authenticated pages need a session. Fixture users first (right role),
     // then the platform's own review account — see establishSession.
@@ -278,7 +289,7 @@ export async function captureOneScreenshot({
     const spec = parsed.ok ? parsed.spec : null;
     const w = Math.min(1600, Math.max(320, Number(width) || 390));
     mark('opening a page');
-    const context = await browser.newContext({ viewport: { width: w, height: Math.round(w * 2) }, deviceScaleFactor: 1 });
+    const context = await browser.newContext({ ...AUTOMATION_CONTEXT, viewport: { width: w, height: Math.round(w * 2) }, deviceScaleFactor: 1 });
     const page = await context.newPage();
     if (operatorLogin) {
       mark('signing in with the provided account');

@@ -20,6 +20,7 @@ import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 import { DEFAULT_WEB_PORT } from './template.js';
 import {
   REVIEW_EMAIL, generateReviewPassword, reviewAccountScript, parseReviewAccountResult,
+  seedFixtureUserScript, parseSeedResult,
 } from './review-account-logic.js';
 
 function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
@@ -53,26 +54,13 @@ export async function ensureReviewAccount(project, { timeoutMs = 60000 } = {}) {
   }
   const port = project.web_port || DEFAULT_WEB_PORT;
 
-  // Reuse the stored password when there is one, so a re-run can actually
-  // verify the existing account rather than always failing sign-in and then
-  // failing creation (the row already exists) — which would look like a
-  // permanent failure on every build after the first.
+  // Reuse the stored password when there is one, so a re-run can verify the
+  // existing account rather than reseeding it on every build.
   const existing = getReviewLogin(project.id);
   const email = existing?.email || REVIEW_EMAIL;
   const password = existing?.password || generateReviewPassword();
 
-  let out;
-  try {
-    out = await containerSh(containerName, reviewAccountScript({ email, password, port }), { timeoutMs });
-  } catch (e) {
-    return { ok: false, state: 'failed', reason: e?.message || 'exec failed', login: existing };
-  }
-  const result = parseReviewAccountResult(out?.stdout || '');
-
-  if (result.state === 'created' || result.state === 'existing') {
-    // Persist on 'created'; on 'existing' persist too, because an install that
-    // lost the row (restore, manual DB edit) can still re-learn the pair it
-    // just proved works.
+  const persist = () => {
     try {
       updateProject(project.id, {
         review_login_email: email,
@@ -81,11 +69,64 @@ export async function ensureReviewAccount(project, { timeoutMs = 60000 } = {}) {
     } catch (e) {
       console.warn(`[mock2] could not store the review login for project ${project.id}:`, e?.message);
     }
-    return { ...result, login: { email, password } };
+  };
+
+  // 1) Cheapest question first: does it already sign in?
+  let probe;
+  try {
+    probe = parseReviewAccountResult(
+      (await containerSh(containerName, reviewAccountScript({ email, password, port }), { timeoutMs }))?.stdout || '',
+    );
+  } catch (e) {
+    return { ok: false, state: 'failed', reason: e?.message || 'exec failed', login: existing };
   }
-  // 'taken' / 'no-auth' / 'failed' — keep whatever we already had (a real admin
-  // owning the bootstrap does not invalidate a review account created earlier).
-  return { ...result, login: existing };
+  if (probe.state === 'no-auth') return { ...probe, login: null };
+  if (probe.state === 'existing' || probe.state === 'created') { persist(); return { ...probe, login: { email, password } }; }
+
+  // 2) It did not. SEED THE ROW DIRECTLY.
+  //
+  // The HTTP bootstrap endpoint above can only ever fire on a project nobody
+  // has signed into: it is guarded by "no real user exists yet", and the first
+  // thing an operator does is create their administrator. So on every project
+  // that matters, step 1 fails and this is the path that actually works. The
+  // platform has root in the container; the row lands on the reserved
+  // @fixture.invalid domain, which the auth component excludes from "a real
+  // user exists", so the operator's first-admin flow is untouched.
+  let seeded;
+  try {
+    seeded = parseSeedResult(
+      (await containerSh(containerName, seedFixtureUserScript({ email, password }), { timeoutMs }))?.stdout || '',
+    );
+  } catch (e) {
+    return { ok: false, state: 'failed', reason: e?.message || 'seed exec failed', login: existing };
+  }
+  if (seeded.state === 'no-auth') return { ok: true, state: 'no-auth', reason: seeded.reason, login: null };
+  if (!seeded.ok) {
+    console.warn(`[mock2] review account seed failed for project ${project.id}: ${seeded.reason}`);
+    return { ok: false, state: 'failed', reason: seeded.reason, login: existing };
+  }
+
+  // 3) Prove it. A row that exists and cannot sign in is the failure mode worth
+  //    catching here rather than in a screenshot of the login page.
+  let after;
+  try {
+    after = parseReviewAccountResult(
+      (await containerSh(containerName, reviewAccountScript({ email, password, port }), { timeoutMs }))?.stdout || '',
+    );
+  } catch {
+    after = { state: 'failed', reason: 'could not re-check the sign-in' };
+  }
+  if (after.state === 'existing') {
+    persist();
+    return { ok: true, state: 'seeded', role: seeded.role, reason: 'the reviewer account was created', login: { email, password } };
+  }
+  persist();  // keep the credentials: the row exists, so a later probe may pass
+  return {
+    ok: false,
+    state: 'failed',
+    reason: `the reviewer row was written (role ${seeded.role}) but signing in still returned ${after.code ?? '?'}`,
+    login: { email, password },
+  };
 }
 
 export { REVIEW_EMAIL };

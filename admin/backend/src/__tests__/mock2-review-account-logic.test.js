@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import {
   REVIEW_EMAIL, FIXTURE_EMAIL_DOMAIN, generateReviewPassword,
   reviewAccountScript, parseReviewAccountResult, hasReviewLogin,
+  seedFixtureUserScript, parseSeedResult,
 } from '../mock2/review-account-logic.js';
 
 test('the review account lives on the reserved fixture domain', () => {
@@ -96,4 +97,59 @@ test('hasReviewLogin needs both halves', () => {
   assert.equal(hasReviewLogin({ email: 'a@fixture.invalid' }), false);
   assert.equal(hasReviewLogin({ password: 'x' }), false);
   assert.equal(hasReviewLogin({ email: 'a@fixture.invalid', password: 'x' }), true);
+});
+
+/* ---------------- seeding the fixture reviewer directly --------------------- */
+//
+// Project 40: the design review shot the sign-in page four times, and all three
+// smoke checks ran `[anonymous /]` and timed out at the auth gate. The reviewer
+// account could not be created, because POST /api/auth/bootstrap/superadmin is
+// guarded by "no real user exists yet" — and the operator had already created
+// their administrator, which is the first thing anyone does. On every project a
+// human has actually signed into, the HTTP path can never fire.
+
+test('the seeder writes the row itself, with nothing to escape', () => {
+  const script = seedFixtureUserScript({ email: REVIEW_EMAIL, password: 'a-long-enough-password' });
+  // Credentials AND the program both go to files via heredocs. `node -e "..."`
+  // would have to survive JS template literal → base64 → sh → node, and every
+  // one of those layers has eaten a character in this codebase already.
+  assert.match(script, /cat > "\$WORK\/cred\.json" <<'PP_SEED_EOF'/);
+  assert.match(script, /cat > "\$WORK\/seed\.mjs" <<'PP_SEED_JS_EOF'/);
+  assert.doesNotMatch(script, /node --input-type=module -e/);
+  // The scratch dir must live inside the app: node resolves node_modules by
+  // walking up from the FILE, and from /tmp it finds no pg driver.
+  assert.match(script, /mktemp -d "\$PWD\/\.pp-seed-XXXXXX"/);
+  assert.match(script, /trap 'rm -rf "\$WORK"' EXIT/);
+  // No auth component → nothing to seed, and that is not an error.
+  assert.match(script, /SEED:no-auth/);
+});
+
+test('the seeded hash is the exact format the auth component verifies', () => {
+  const script = seedFixtureUserScript({ email: REVIEW_EMAIL, password: 'x'.repeat(20) });
+  // scrypt$N$r$p$saltB64$hashB64 with the component's own parameters. Drift
+  // here produces a row that exists and can never sign in — the worst shape,
+  // because everything looks provisioned.
+  assert.match(script, /const N = 16384, R = 8, P = 1, KEYLEN = 32;/);
+  assert.match(script, /\["scrypt", N, R, P, salt\.toString\("base64"\), hash\.toString\("base64"\)\]\.join\("\$"\)/);
+});
+
+test('the seeder is idempotent and never blocks the operator bootstrap', () => {
+  const script = seedFixtureUserScript({ email: REVIEW_EMAIL, password: 'x'.repeat(20) });
+  // An existing row is UPDATED (repairs a project whose stored password was
+  // lost) rather than duplicated.
+  assert.match(script, /SELECT id FROM users WHERE lower\(email\) = lower\(\$1\)/);
+  assert.match(script, /UPDATE users SET password_hash/);
+  assert.match(script, /INSERT INTO users/);
+  // And the account is on the reserved domain, which the auth component
+  // excludes from "a real user exists".
+  assert.ok(REVIEW_EMAIL.endsWith('@fixture.invalid'));
+});
+
+test('parseSeedResult reads every outcome', () => {
+  assert.deepEqual(parseSeedResult('SEED:ok:admin'), { ok: true, state: 'seeded', role: 'admin' });
+  assert.equal(parseSeedResult('SEED:no-auth').state, 'no-auth');
+  assert.equal(parseSeedResult('SEED:no-auth').ok, true);
+  assert.equal(parseSeedResult('SEED:no-pg').ok, false);
+  assert.match(parseSeedResult('SEED:error:relation "users" does not exist').reason, /relation "users"/);
+  assert.equal(parseSeedResult('').ok, false);
 });

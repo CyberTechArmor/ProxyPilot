@@ -1708,7 +1708,16 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // enforced (defaults), ok is always true → the success path is unchanged.
       let uiVerification = { needed: false, checklist: [] };
       if (!deployed.skipped) {
-        const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, requiredIds: decision.finishAcceptanceIds || [], logEvent, env: process.env });
+        // Make sure there is an account for the checks to run AS, before they
+        // run. Without it they go anonymous, get bounced to /login, and time
+        // out on elements that only exist behind the gate — three checks, three
+        // timeouts, one red build (project 40).
+        let reviewLogin = null;
+        try {
+          const { ensureReviewAccount } = await import('./review-account.js');
+          reviewLogin = (await ensureReviewAccount(project))?.login || null;
+        } catch (e) { console.warn('[mock2] pre-smoke review account failed:', e?.message); }
+        const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, requiredIds: decision.finishAcceptanceIds || [], logEvent, env: process.env, reviewLogin });
         // A malformed TEST FILE is not a broken app. Project 38 deployed
         // successfully, served correctly, and the cycle went red because
         // state/ui-checks.json used a different (equally valid, more

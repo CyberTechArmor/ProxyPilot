@@ -31,6 +31,12 @@ export const STEP_KINDS = Object.freeze([
   'expect_enabled',   // selector → element is visible and enabled
   'expect_disabled',  // selector → element is visible but disabled
   'expect_visible',   // selector → element is visible
+  // The only way to say "this must NOT be offered". Without it the most common
+  // real defect in a generated app — a route or control guarded in the UI for
+  // one role and not for another — was not expressible at all, so nothing ever
+  // checked it. Absent OR hidden both satisfy it: what matters is that the user
+  // is not offered the thing, not which mechanism withheld it.
+  'expect_absent',    // selector → element is absent, or present but not visible
   'expect_text',      // { expect_text: selector, contains: 'substr' }
   'fill',             // { fill: selector, value: '...', expect_value: true } → type, optionally assert it persisted
   'click',            // selector → click (used for e.g. the "Replace" write-only-secret flow)
@@ -272,6 +278,121 @@ export function withPlatformLogin(spec, reviewLogin) {
     login: { ...DEFAULT_LOGIN_FORM, via: 'api', users: { [role]: { username: reviewLogin.email, password: reviewLogin.password } } },
     checks: (spec.checks || []).map((c) => (c.role ? c : { ...c, role })),
   };
+}
+
+/* -------------------- the PLATFORM's own baseline checks -------------------- */
+//
+// state/ui-checks.json is written by the build MODEL, and two builds in a row
+// shipped one that passed the coverage gate and then failed the strict parser
+// after deploy — so on those cycles NOTHING exercised the rendered app. A spec
+// the platform derives itself has no such failure mode: it is built from what
+// the platform SHIPS and therefore knows is there.
+//
+// These are appended to whatever the model wrote, never written to the file, so
+// they cannot be edited away and do not satisfy the model's coverage gate. They
+// assert only base-app guarantees — every one of them has been a real defect:
+//
+//   - the shell renders at all, signed in (project 40: every check ran
+//     anonymous, was bounced to /login, and timed out)
+//   - the theme control and the legal footer are actually mounted on a screen
+//     (learnings 44/48: both modules loaded, neither rendered anything)
+//   - a VIEWER is not offered the admin route, and cannot reach the admin page
+//     by typing the URL — "guarded in the UI, not on the server" is the most
+//     common real defect in a generated app, and until there was a second
+//     fixture there was no way to ask
+//
+// Console errors fail every check automatically (runUiChecks), which is most of
+// the value on the plain page loads.
+export const BASELINE_CHECK_PREFIX = 'platform-baseline-';
+
+export function buildBaselineChecks({ reviewerRole = null, viewerRole = null } = {}) {
+  const checks = [];
+  const id = (name) => `${BASELINE_CHECK_PREFIX}${name}`;
+  // paths ['**/*'] so these run on EVERY cycle: a baseline that only fires when
+  // a particular file changed is a baseline that is usually not checked.
+  const base = { paths: ['**/*'] };
+
+  if (reviewerRole) {
+    checks.push({
+      ...base,
+      id: id('app-shell'),
+      name: 'The signed-in app shell renders, with its theme control and legal footer',
+      role: reviewerRole,
+      page: '/',
+      steps: [
+        { expect_visible: 'header' },
+        { expect_visible: '.theme-toggle' },
+        { expect_visible: '[data-legal-footer]' },
+      ],
+    });
+    checks.push({
+      ...base,
+      id: id('admin-reachable'),
+      name: 'An administrator can reach the admin screens',
+      role: reviewerRole,
+      page: '/admin',
+      steps: [{ expect_visible: 'header' }, { expect_visible: '#add-role' }],
+    });
+  }
+
+  if (viewerRole) {
+    checks.push({
+      ...base,
+      id: id('viewer-not-offered-admin'),
+      name: 'A viewer is not offered the admin route',
+      role: viewerRole,
+      page: '/',
+      steps: [{ expect_visible: 'header' }, { expect_absent: '#admin-link' }],
+    });
+    checks.push({
+      ...base,
+      id: id('viewer-denied-admin'),
+      name: 'A viewer typing the admin URL does not get the admin screens',
+      role: viewerRole,
+      page: '/admin',
+      // The UI hiding the link is not the guard. This types the URL, which is
+      // what an actual attacker does, and fails if the page renders its
+      // controls anyway — the exact shape of "guarded in the UI, not on the
+      // server".
+      steps: [{ expect_absent: '#add-role' }],
+    });
+  }
+  return checks;
+}
+
+// withBaselineChecks — add the platform's checks to a spec, and make sure the
+// spec can sign in as each role they need.
+//
+// Never overrides a model-written check of the same id (the model's own spec
+// wins on its own ground), and never runs a role the platform could not
+// actually provision: no viewer fixture, no viewer checks. A check that cannot
+// sign in would fail for a reason that has nothing to do with the app.
+export function withBaselineChecks(spec, { reviewLogin = null, viewerLogin = null } = {}) {
+  if (!spec || !reviewLogin?.email || !reviewLogin?.password) return spec;
+  const reviewerRole = 'platform';
+  const viewerRole = viewerLogin?.email && viewerLogin?.password ? 'platform_viewer' : null;
+
+  const users = { ...(spec.login?.users || {}), [reviewerRole]: { username: reviewLogin.email, password: reviewLogin.password } };
+  if (viewerRole) users[viewerRole] = { username: viewerLogin.email, password: viewerLogin.password };
+
+  const existing = new Set((spec.checks || []).map((c) => c.id));
+  const added = buildBaselineChecks({ reviewerRole, viewerRole }).filter((c) => !existing.has(c.id));
+  if (!added.length) return spec;
+
+  return {
+    ...spec,
+    // `via: 'api'` — these sign in as PLATFORM accounts, which is plumbing
+    // rather than something under test (see withPlatformLogin).
+    login: { ...DEFAULT_LOGIN_FORM, ...(spec.login || {}), via: 'api', users },
+    checks: [...(spec.checks || []), ...added],
+  };
+}
+
+// Is this one of the platform's own checks? Used to report them separately —
+// a baseline failure is a statement about the BASE APP, not about the change
+// the operator just asked for, and reading it as the latter wastes their time.
+export function isBaselineCheck(check) {
+  return String(check?.id || '').startsWith(BASELINE_CHECK_PREFIX);
 }
 
 // The checks a diff warrants: every check whose path globs match ANY changed

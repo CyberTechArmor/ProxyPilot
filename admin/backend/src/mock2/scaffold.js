@@ -566,6 +566,13 @@ a{color:var(--app-primary,#1466b8);text-decoration:none;cursor:pointer}
 button{font-family:inherit;cursor:pointer}
 h1,h2,h3{margin:0;font-weight:700;letter-spacing:-.01em}
 .hidden{display:none !important}
+/* The hidden ATTRIBUTE, not just the class. The browser's own rule for it sets
+   display:none at the lowest possible precedence, so ANY author rule that sets
+   display beats it -- and .btn/.badge/.card all set display. The base app marks
+   the Admin nav link hidden and unhides it only for administrators; without
+   this line that link, and every other element carrying the attribute, rendered
+   for EVERY role. Found by the platform's own viewer fixture on its first run. */
+[hidden]{display:none !important}
 .muted{color:var(--app-muted,#5a6b81)}
 .small{font-size:12.5px}
 

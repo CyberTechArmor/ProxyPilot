@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
   UI_CHECKS_PATH, STEP_KINDS, parseUiChecks, checksForChangedFiles, stepShape, withPlatformLogin,
   uiCheckLogLines, uiCheckFailSummary,
+  buildBaselineChecks, withBaselineChecks, isBaselineCheck, BASELINE_CHECK_PREFIX,
 } from '../mock2/ui-check-logic.js';
 import {
   RUNNER_TOOLS, classifyTurn, formatAcceptanceBlock, buildRunnerSystemPrompt,
@@ -311,4 +312,95 @@ test('with no reviewer account there is nothing to sign in as, and nothing chang
   })).spec;
   assert.deepEqual(withPlatformLogin(spec, null), spec);
   assert.deepEqual(withPlatformLogin(spec, { email: 'a@b.c' }), spec);
+});
+
+/* --------------- the PLATFORM's own baseline checks ------------------------ */
+//
+// state/ui-checks.json is written by the build MODEL, and two builds in a row
+// shipped one that passed the coverage gate and then failed the strict parser
+// after deploy — so on those cycles NOTHING exercised the rendered app. These
+// are derived from what the platform SHIPS, so they cannot be written wrong.
+
+const REVIEWER = { email: 'design-review@fixture.invalid', password: 'x'.repeat(20) };
+const VIEWER = { email: 'design-review-viewer@fixture.invalid', password: 'x'.repeat(20) };
+
+test('"must not be offered" is expressible at all', () => {
+  // Until expect_absent existed, the most common real defect in a generated app
+  // — a route guarded in the UI for one role and not another — could not be
+  // written as a check, so nothing ever checked it.
+  assert.ok(STEP_KINDS.includes('expect_absent'));
+  const parsed = parseUiChecks(JSON.stringify({
+    users: [{ role: 'viewer', email: 'v@fixture.invalid', password: 'x'.repeat(12) }],
+    checks: [{
+      id: 'viewer-no-admin', page: '/', paths: ['public/**'], login: 'v@fixture.invalid',
+      steps: [{ action: 'expect_absent', selector: '#admin-link' }],
+    }],
+  }));
+  assert.ok(parsed.ok, parsed.error);
+  // The conventional {action, selector} spelling must work for it too, or the
+  // model writes it the way it writes everything else and the spec is rejected.
+  assert.deepEqual(parsed.spec.checks[0].steps[0], { expect_absent: '#admin-link' });
+  assert.equal(stepShape(parsed.spec.checks[0].steps[0]).kind, 'expect_absent');
+});
+
+test('the baseline asks the question a single admin fixture never could', () => {
+  const checks = buildBaselineChecks({ reviewerRole: 'platform', viewerRole: 'platform_viewer' });
+  const ids = checks.map((c) => c.id);
+  assert.ok(ids.every((i) => i.startsWith(BASELINE_CHECK_PREFIX)));
+  // The viewer must be denied the admin page by the SERVER, not merely have the
+  // link hidden — so there is a check that types the URL.
+  const denied = checks.find((c) => c.id.endsWith('viewer-denied-admin'));
+  assert.ok(denied, 'a viewer-denied-admin check must exist');
+  assert.equal(denied.page, '/admin');
+  assert.equal(denied.role, 'platform_viewer');
+  assert.deepEqual(denied.steps, [{ expect_absent: '#add-role' }]);
+  // And a separate one for the nav, because hiding the link is a real (weaker)
+  // requirement of its own.
+  const notOffered = checks.find((c) => c.id.endsWith('viewer-not-offered-admin'));
+  assert.deepEqual(notOffered.steps.at(-1), { expect_absent: '#admin-link' });
+  // Baselines run on EVERY cycle: one that only fires when a given file changed
+  // is one that is usually not checked.
+  for (const c of checks) assert.deepEqual(c.paths, ['**/*']);
+});
+
+test('no viewer fixture means no viewer checks — never a check that cannot sign in', () => {
+  // A viewer that fell back to an admin role would make every permission check
+  // pass; the platform declines to ask rather than ask uselessly.
+  const withoutViewer = buildBaselineChecks({ reviewerRole: 'platform', viewerRole: null });
+  assert.ok(withoutViewer.length > 0);
+  assert.ok(withoutViewer.every((c) => c.role === 'platform'));
+  assert.equal(buildBaselineChecks({}).length, 0);
+});
+
+test('the baseline is added to whatever the model wrote, and signs itself in', () => {
+  const spec = parseUiChecks(JSON.stringify({
+    users: [{ role: 'admin', email: 'a@fixture.invalid', password: 'x'.repeat(12) }],
+    checks: [{ id: 'mine', page: '/', paths: ['a'], login: 'a@fixture.invalid', steps: [{ click: '#x' }] }],
+  })).spec;
+  const out = withBaselineChecks(spec, { reviewLogin: REVIEWER, viewerLogin: VIEWER });
+  // The model's own check survives untouched.
+  assert.ok(out.checks.some((c) => c.id === 'mine'));
+  assert.ok(out.checks.filter(isBaselineCheck).length >= 4);
+  // Both fixture roles are signed in, without disturbing the model's users.
+  assert.equal(out.login.users.platform.username, REVIEWER.email);
+  assert.equal(out.login.users.platform_viewer.username, VIEWER.email);
+  assert.ok(out.login.users.admin, 'the spec\'s own users must survive');
+  assert.equal(out.login.via, 'api');
+});
+
+test('an empty spec still gets the baseline — that is the cycle it matters most on', () => {
+  // Project 39/40 shape: the model wrote no usable spec, so nothing at all
+  // exercised the rendered app on exactly the build most likely to be broken.
+  const out = withBaselineChecks({ login: null, checks: [] }, { reviewLogin: REVIEWER, viewerLogin: VIEWER });
+  assert.ok(out.checks.length >= 4);
+  assert.ok(out.checks.every(isBaselineCheck));
+  // And with no reviewer there is nothing to sign in as, so nothing is added.
+  assert.deepEqual(withBaselineChecks({ login: null, checks: [] }, {}).checks, []);
+});
+
+test('a model check with a baseline id wins on its own ground', () => {
+  const mine = { id: `${BASELINE_CHECK_PREFIX}app-shell`, page: '/', paths: ['a'], role: null, steps: [{ click: '#x' }] };
+  const out = withBaselineChecks({ login: null, checks: [mine] }, { reviewLogin: REVIEWER });
+  assert.equal(out.checks.filter((c) => c.id === mine.id).length, 1);
+  assert.deepEqual(out.checks.find((c) => c.id === mine.id).steps, [{ click: '#x' }]);
 });

@@ -19,8 +19,8 @@ import { getProject, updateProject } from './projects.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 import { DEFAULT_WEB_PORT } from './template.js';
 import {
-  REVIEW_EMAIL, generateReviewPassword, reviewAccountScript, parseReviewAccountResult,
-  seedFixtureUserScript, parseSeedResult,
+  REVIEW_EMAIL, REVIEW_VIEWER_EMAIL, generateReviewPassword, reviewAccountScript,
+  parseReviewAccountResult, seedFixtureUserScript, parseSeedResult, reviewFixtureAccounts,
 } from './review-account-logic.js';
 
 function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
@@ -40,6 +40,14 @@ export function getReviewLogin(projectId) {
   } catch {
     return null;
   }
+}
+
+// The UNPRIVILEGED fixture. Same stored password as the reviewer (one secret,
+// one decrypt) on a different address — the accounts differ by ROLE, which is
+// the only thing they exist to differ by.
+export function getViewerLogin(projectId) {
+  const review = getReviewLogin(projectId);
+  return review ? { email: REVIEW_VIEWER_EMAIL, password: review.password } : null;
 }
 
 // Provision (or confirm) the review account inside a deployed project.
@@ -92,10 +100,18 @@ export async function ensureReviewAccount(project, { timeoutMs = 60000 } = {}) {
   // platform has root in the container; the row lands on the reserved
   // @fixture.invalid domain, which the auth component excludes from "a real
   // user exists", so the operator's first-admin flow is untouched.
+  //
+  // BOTH fixtures land in one pass: the admin reviewer, and a viewer that must
+  // NOT be able to reach the admin screens. With only the admin there is no way
+  // to ask that question at all, and a route guarded in the UI but not on the
+  // server is the most common real defect in a generated app.
   let seeded;
   try {
+    const accounts = reviewFixtureAccounts({
+      email, password, viewerEmail: REVIEW_VIEWER_EMAIL, viewerPassword: password,
+    });
     seeded = parseSeedResult(
-      (await containerSh(containerName, seedFixtureUserScript({ email, password }), { timeoutMs }))?.stdout || '',
+      (await containerSh(containerName, seedFixtureUserScript({ accounts }), { timeoutMs }))?.stdout || '',
     );
   } catch (e) {
     return { ok: false, state: 'failed', reason: e?.message || 'seed exec failed', login: existing };
@@ -118,7 +134,16 @@ export async function ensureReviewAccount(project, { timeoutMs = 60000 } = {}) {
   }
   if (after.state === 'existing') {
     persist();
-    return { ok: true, state: 'seeded', role: seeded.role, reason: 'the reviewer account was created', login: { email, password } };
+    return {
+      ok: true, state: 'seeded', role: seeded.role, roles: seeded.accounts,
+      reason: 'the reviewer account was created',
+      login: { email, password },
+      // Only offer the viewer when it actually got an unprivileged role. A
+      // viewer that fell back to admin would make every permission check pass.
+      viewerLogin: seeded.accounts?.viewer && seeded.accounts.viewer !== seeded.accounts.reviewer
+        ? { email: REVIEW_VIEWER_EMAIL, password, role: seeded.accounts.viewer }
+        : null,
+    };
   }
   persist();  // keep the credentials: the row exists, so a later probe may pass
   return {
@@ -129,4 +154,4 @@ export async function ensureReviewAccount(project, { timeoutMs = 60000 } = {}) {
   };
 }
 
-export { REVIEW_EMAIL };
+export { REVIEW_EMAIL, REVIEW_VIEWER_EMAIL };

@@ -183,6 +183,21 @@ export async function maybeUpgradeBaseApp(projectId, { reason = 'auto' } = {}) {
     if (!project || project.lifecycle !== 'active') return { ok: false, skipped: 'not_online' };
     const res = await upgradeBaseApp(project, { reason });
     if (!res.ok) console.warn(`[mock2] base-app auto-upgrade for project ${id} failed: ${res.error}`);
+    // The e2e browser, BEFORE the gate battery.
+    //
+    // The install lives in the deploy, and gates run BEFORE the deploy — so on
+    // a project whose base app was deployed before this feature existed the
+    // browser never arrives, and the e2e gate skips forever. Project 39's build
+    // wrote 84 lines of real Playwright specs and not one of them ran.
+    // This hook is the one that fires before every build, which is exactly
+    // where the browser needs to already be. Best-effort and idempotent: it
+    // returns immediately once the browser cache is populated.
+    try {
+      const { ensureE2eBrowser } = await import('./deploy.js');
+      await ensureE2eBrowser(project);
+    } catch (e) {
+      console.warn(`[mock2] e2e browser check for project ${id} skipped:`, e?.message);
+    }
     return res;
   } catch (e) {
     console.warn(`[mock2] base-app auto-upgrade for project ${id} threw:`, e?.message);

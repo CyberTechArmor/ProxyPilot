@@ -449,6 +449,25 @@ How to EXTEND it (the only supported way):
 The \`platform-intact\` gate checks this: it reds the build if the module lost
 its exports or the app grew a second branding/settings/api-key store.
 
+## The approved design (binding)
+\`state/design.css\` carries TWO things: the approved token block, and the
+mockup's own COMPONENT CSS lifted verbatim (its cards, lists, nav bars, chips,
+buttons, empty states). Read it before you write a screen.
+
+- Put the class names design.css defines on your elements. That is how the
+  built app inherits the mockup's look without you re-deriving it.
+- Style anything genuinely new on \`var(--...)\` from the same file. Never type
+  a colour in: hardcoded colours do not follow the theme, and they are why a
+  built app drifts from its mockup and why dark mode looks wrong.
+- \`state/mockups/current.html\` is the visual contract — its layout, its
+  navigation pattern (including a mobile bottom tab bar if it has one), its
+  component arrangement, screen by screen.
+
+The \`design-adherence\` gate measures this, and it measures your MARKUP as well
+as your CSS: shipping screens with neither their own styling nor the approved
+component classes reds the build. "The app has no stylesheet" is not a way to
+pass it.
+
 ## Browser tests (binding)
 The project owns a real Playwright suite. \`playwright.config.ts\` starts the app
 itself (build → migrate a scratch database → serve), so \`npm run test:e2e\`

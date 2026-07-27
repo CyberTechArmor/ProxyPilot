@@ -261,7 +261,7 @@ test('GATE: never blocks what it cannot judge — no design, no app CSS, or a th
   // own, and the scaffold's own copies are excluded from the app side.
   const fresh = runGate({ 'state/design.css': GATE_DESIGN, 'public/design.css': GATE_DESIGN, 'public/base.css': ':root{--x:1}' });
   assert.equal(fresh.code, 0, fresh.out);
-  assert.match(fresh.out, /has not written substantial CSS/);
+  assert.match(fresh.out, /has not written screens or CSS/);
   // A preset-only project has too thin a system to enforce.
   const thin = runGate({ 'state/design.css': `:root{${SHELL_VARS}}`, 'public/app.css': bulk });
   assert.equal(thin.code, 0);

@@ -561,6 +561,35 @@ test('no gate script contains a mangled escape', () => {
   }
 });
 
+test('no gate script makes its tools complain — the check the control-char scan missed', () => {
+  // The control-character scan catches an eaten backslash-b. It does NOT catch
+  // an eaten backslash-slash: an escaped slash inside an awk regex literal
+  // collapsed into a syntax error, and the gate silently appended nothing for a
+  // whole release. A mangled regex almost always makes grep/awk/sed print a
+  // diagnostic — so RUN every gate against a real scaffold and require stderr
+  // to stay clean. Passing or failing is not the point here; complaining is.
+  const dir = mkdtempSync(join(tmpdir(), 'pp-gate-run-'));
+  try {
+    for (const f of buildScaffoldFiles({ id: 1, name: 'Demo' })) {
+      mkdirSync(join(dir, dirname(f.path)), { recursive: true });
+      writeFileSync(join(dir, f.path), f.content);
+    }
+    mkdirSync(join(dir, 'state'), { recursive: true });
+    writeFileSync(join(dir, 'state/design.css'), ':root{--bg:#fff;--text-1:#000;--app-bg:var(--bg);}\n.card{color:var(--text-1)}\n');
+    writeFileSync(join(dir, 'public/app.css'), '.x{color:var(--bg)}\n');
+    writeFileSync(join(dir, 'public/screen.html'), '<html><head><style>.y{color:var(--bg)}</style></head><body><div class="card">hi</div></body></html>');
+    for (const gate of BASELINE_GATES) {
+      const f = join(dir, 'gate.sh');
+      writeFileSync(f, gate.script);
+      const r = spawnSync('sh', [f], { cwd: dir, encoding: 'utf8', env: { ...process.env, HOME: dir } });
+      const noise = (r.stderr || '').trim();
+      assert.equal(noise, '', `${gate.name} wrote to stderr — a tool is complaining, which usually means a mangled regex:\n${noise}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('every gate script is valid sh', () => {
   for (const gate of BASELINE_GATES) {
     const f = join(mkdtempSync(join(tmpdir(), 'pp-gate-syn-')), 'g.sh');
@@ -608,7 +637,8 @@ test('design-adherence: an app that reproduces little of the approved design fai
   ].join('\n');
   const r = adherenceFixture({ appCss });
   assert.equal(r.status, 1, `expected a failure:\n${r.out}`);
-  assert.match(r.out, /reproduces only 9 of \d+ approved design variables/);
+  assert.match(r.out, /does not reproduce the approved design/);
+  assert.match(r.out, /uses 9 of \d+ approved variables/);
 });
 
 test('design-adherence: hardcoded colours fail even at decent coverage', () => {
@@ -643,4 +673,97 @@ test('design-adherence: var() fallbacks are not counted as hardcoded colours', (
   const r = adherenceFixture({ appCss });
   assert.match(r.out, /0 distinct hardcoded colour/);
   assert.equal(r.status, 0, r.out);
+});
+
+/* ------------- project 39: screens with no styling at all -------------------- */
+//
+// The shipped app looked nothing like its mockup and the gate said "passed".
+// The build wrote 328 lines of HTML, 493 of JS and ZERO CSS — and the gate read
+// only public/*.css, so it measured "the app has not written substantial CSS of
+// its own" and took the free pass. It also cost LESS than the build before it,
+// which is the part that matters: it must never be cheaper to skip the design
+// than to follow it.
+
+function adherenceRun({ html = null, css = null, components = 12 }) {
+  const dir = mkdtempSync(join(tmpdir(), 'pp-p39-'));
+  const approved = Array.from({ length: 55 }, (_, i) => `  --d${i}: #${(0x111111 * (i + 1)).toString(16).slice(-6)};`).join('\n');
+  const bridge = [
+    '--app-bg', '--app-surface', '--app-text', '--app-muted', '--app-border', '--app-primary',
+    '--app-primary-text', '--app-accent', '--app-danger', '--app-success', '--app-shadow-card',
+  ].map((v, i) => `  ${v}: var(--d${i}, #101010);`).join('\n');
+  // design.css carries the MOCKUP'S COMPONENT CSS verbatim, not just tokens.
+  const comp = ['n4-shell', 'n4-topbar', 'n4-tabbar', 'n4-note-card', 'n4-list', 'n4-fab',
+    'n4-chip', 'n4-editor', 'n4-todo-row', 'n4-modal', 'n4-empty', 'n4-search']
+    .slice(0, components)
+    .map((c) => `.${c}{color:var(--d1);background:var(--d2)}`).join('\n');
+  for (const f of buildScaffoldFiles({ id: 1, name: 'Demo' })) {
+    mkdirSync(join(dir, dirname(f.path)), { recursive: true });
+    writeFileSync(join(dir, f.path), f.content);
+  }
+  mkdirSync(join(dir, 'state'), { recursive: true });
+  writeFileSync(join(dir, 'state/design.css'), `:root{\n${approved}\n${bridge}\n}\n[data-theme="dark"]{--d0:#000}\n${comp}\n`);
+  if (html) writeFileSync(join(dir, 'public/notes.html'), html);
+  if (css) writeFileSync(join(dir, 'public/notes.css'), css);
+  writeFileSync(join(dir, 'gate.sh'), DESIGN_ADHERENCE_GATE_SCRIPT);
+  const r = spawnSync('sh', [join(dir, 'gate.sh')], { cwd: dir, encoding: 'utf8' });
+  rmSync(dir, { recursive: true, force: true });
+  return { status: r.status, out: r.stdout || '' };
+}
+
+const genericScreens = `<!doctype html><html><body><h1>Test</h1><button>Delete note</button>
+${Array.from({ length: 90 }, (_, i) => `<div class="row"><span class="label">Field ${i}</span><input><button class="btn">Go ${i}</button></div>`).join('\n')}
+</body></html>`;
+
+test('design-adherence: screens with no styling and none of the approved components fail', () => {
+  const r = adherenceRun({ html: genericScreens });
+  assert.equal(r.status, 1, `expected a failure:\n${r.out}`);
+  assert.match(r.out, /does not reproduce the approved design/);
+  assert.match(r.out, /bytes of screens/);
+});
+
+test('design-adherence: markup that uses the approved components passes with no CSS of its own', () => {
+  // This is FAITHFUL, not a loophole: design.css styles those classes, so an
+  // app can reproduce the mockup while writing almost no CSS and referencing
+  // almost no variables directly. A rule that condemned it would push builds
+  // into re-declaring a palette they were given.
+  const html = `<!doctype html><html><body><div class="n4-shell"><header class="n4-topbar">N4</header>
+<div class="n4-search"></div><ul class="n4-list">${Array.from({ length: 40 }, (_, i) => `<li class="n4-note-card"><span class="n4-chip">t</span>Note ${i}</li>`).join('')}</ul>
+<div class="n4-editor"></div><div class="n4-todo-row"></div><div class="n4-modal"></div>
+<div class="n4-empty"></div><button class="n4-fab">+</button><nav class="n4-tabbar"></nav></div></body></html>`;
+  const r = adherenceRun({ html });
+  assert.equal(r.status, 0, `expected a pass:\n${r.out}`);
+  assert.match(r.out, /the built screens use 12/);
+});
+
+test('design-adherence: a project that has built nothing is still exempt', () => {
+  // The scaffold's own app-shell.html placeholder must not count as "the build
+  // shipped screens", or a project on cycle one would be judged for markup the
+  // platform wrote.
+  const r = adherenceRun({});
+  assert.equal(r.status, 0, `expected a pass:\n${r.out}`);
+  assert.match(r.out, /has not written screens or CSS of its own yet/);
+});
+
+test('design-adherence: inline <style> in the markup counts as the app\'s CSS', () => {
+  // Styling the screens inside the HTML is legitimate; not seeing it was not.
+  const html = `<!doctype html><html><head><style>
+${Array.from({ length: 40 }, (_, i) => `.s${i}{color:var(--d${i});padding:${i}px}`).join('\n')}
+</style></head><body>${genericScreens}</body></html>`;
+  const r = adherenceRun({ html });
+  assert.equal(r.status, 0, `expected a pass:\n${r.out}`);
+  assert.doesNotMatch(r.out, /0 bytes of its own CSS/);
+});
+
+test('mobile-overflow: a fixed width inside an inline <style> is still caught', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pp-mo-'));
+  try {
+    mkdirSync(join(dir, 'public'), { recursive: true });
+    writeFileSync(join(dir, 'public/notes.html'), '<html><head><style>.wide{width:980px}</style></head><body>x</body></html>');
+    writeFileSync(join(dir, 'gate.sh'), MOBILE_OVERFLOW_GATE_SCRIPT);
+    const r = spawnSync('sh', [join(dir, 'gate.sh')], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 1, `expected a failure:\n${r.stdout}`);
+    assert.match(r.stdout, /fixed widths wider than a 390px phone/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -350,6 +350,12 @@ export async function stampDeployedCommit(projectId, containerName, appDir) {
 // installE2eBrowser — the one-time Chromium download for the project's own
 // Playwright suite. Idempotent (the script returns immediately when the browser
 // cache is populated) and never throws into the deploy.
+export async function ensureE2eBrowser(project) {
+  const containerName = project?.container_name;
+  if (!containerName || project.lifecycle !== 'active') return;
+  await installE2eBrowser(containerName, '/srv/app', null);
+}
+
 async function installE2eBrowser(containerName, appDir, onStep) {
   const probe = await runInApp(
     containerName, appDir,

@@ -20,6 +20,8 @@
 //
 // Each script runs with cwd = the app dir, under `sh`, and exits 0/1.
 
+import { e2eGateScript } from './scaffold-e2e.js';
+
 export const GATE_TIERS = Object.freeze(['quick', 'mvp', 'full']);
 
 export function tierRank(tier) {
@@ -460,6 +462,12 @@ echo "no-native-dialogs: no browser dialogs. Passed."
 exit 0
 `;
 
+// ---- e2e (the project's own Playwright suite) ----
+//
+// Lives in scaffold-e2e.js next to the config and specs it runs, so the gate
+// and the thing it runs can never drift apart.
+export const E2E_GATE_NAME = 'e2e';
+
 // ---- the registry ----
 
 export const BASELINE_GATES = Object.freeze([
@@ -488,6 +496,13 @@ export const BASELINE_GATES = Object.freeze([
   // made to do rather than leave for a later pass.
   { name: NO_NATIVE_DIALOGS_GATE_NAME, script: NO_NATIVE_DIALOGS_GATE_SCRIPT, tier: 'mvp', advisoryIn: [] },
   { name: NO_DEAD_CONTROLS_GATE_NAME, script: NO_DEAD_CONTROLS_GATE_SCRIPT, tier: 'mvp', advisoryIn: [] },
+  // The project's OWN browser suite, run against a server it starts itself.
+  // 'mvp' because it is the only gate that exercises the rendered DOM before a
+  // deploy — which is precisely "does the website look and act right", the
+  // thing MVP is for. It skips green when the tooling or the browser binary is
+  // absent (an environment problem must never red a build), but never when a
+  // test fails.
+  { name: E2E_GATE_NAME, script: e2eGateScript(), tier: 'mvp', advisoryIn: [] },
 ]);
 
 export const BASELINE_GATE_NAMES = Object.freeze(BASELINE_GATES.map((g) => g.name));

@@ -29,8 +29,11 @@
 // what it is for.
 import { buildPlatformFiles, PLATFORM_CSS } from './scaffold-platform.js';
 import { pushServiceWorkerJs, pwaInstallJs as pushInstallJs } from './scaffold-push.js';
+import {
+  playwrightConfigTs, e2eServerMjs, platformSpecTs, E2E_SCRIPTS, E2E_DEV_DEPENDENCIES,
+} from './scaffold-e2e.js';
 
-export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v5';
+export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v6';
 
 // The canonical dependency set every scaffolded app is born with. Exported so
 // the repair pass (component-install ensureScaffoldDeps) can restore entries a
@@ -48,6 +51,10 @@ export const SCAFFOLD_DEPENDENCIES = {
     typescript: '^5.5.4',
     tsx: '^4.16.2',
     vitest: '^2.0.5',
+    // Browser tests. The base app ships a real Playwright suite, not just a
+    // runner — see scaffold-e2e.js for why this is not the same thing as
+    // state/ui-checks.json.
+    ...E2E_DEV_DEPENDENCIES,
     '@types/express': '^4.17.21',
     '@types/node': '^20.14.0',
     '@types/pg': '^8.11.6',
@@ -71,6 +78,7 @@ function packageJson(project) {
         start: 'node dist/server.js',
         migrate: 'node scripts/migrate.mjs',
         test: 'vitest run',
+        ...E2E_SCRIPTS,
       },
       dependencies: { ...SCAFFOLD_DEPENDENCIES.dependencies },
       devDependencies: { ...SCAFFOLD_DEPENDENCIES.devDependencies },
@@ -112,7 +120,14 @@ function vitestConfig() {
   return `import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
-  test: { environment: 'node' },
+  test: {
+    environment: 'node',
+    // e2e/ belongs to Playwright. Vitest's default include picks up any
+    // *.spec.ts, so without this exclusion \`npm test\` would try to run the
+    // browser specs in a node environment and fail with a confusing error
+    // about \`test.describe\` — for a suite that is not broken.
+    exclude: ['node_modules/**', 'dist/**', 'e2e/**'],
+  },
 });
 `;
 }
@@ -1190,6 +1205,12 @@ export function buildScaffoldFiles(project) {
     { path: 'tests/contract/example.contract.test.ts', content: contractExampleTestTs() },
     { path: 'migrations/0001_init.sql', content: initMigrationSql() },
     { path: 'scripts/migrate.mjs', content: migrateMjs(), mode: 0o755 },
+    // Browser tests, self-contained: the config's webServer builds and starts
+    // the app against a scratch database, so `npx playwright test` works in the
+    // gate battery, the project terminal, and on a laptop.
+    { path: 'playwright.config.ts', content: playwrightConfigTs() },
+    { path: 'scripts/e2e-server.mjs', content: e2eServerMjs(), mode: 0o755 },
+    { path: 'e2e/platform.spec.ts', content: platformSpecTs() },
     // The shared app shell (generalized from the operator's portal base) —
     // screens reuse these classes; the chosen design preset restyles them.
     { path: 'public/base.css', content: baseCss() + PLATFORM_CSS },

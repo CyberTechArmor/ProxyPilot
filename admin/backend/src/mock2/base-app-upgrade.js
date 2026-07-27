@@ -12,11 +12,13 @@
 import { sh, b64 } from './host.js';
 import { buildPlatformFiles, buildPlatformRoutes, PLATFORM_MODULE_VERSION, PLATFORM_CSS } from './scaffold-platform.js';
 import { MOCK2_SCAFFOLD_VERSION, baseCss, scaffoldPwaFiles } from './scaffold.js';
+import { playwrightConfigTs, e2eServerMjs, platformSpecTs, E2E_SCRIPTS, E2E_DEV_DEPENDENCIES } from './scaffold-e2e.js';
 import { insertMessage } from './chats.js';
 import { getProject } from './projects.js';
 import {
   PLATFORM_VERSION_PATH, renderPlatformVersionFile, parsePlatformVersionFile,
   planBaseAppUpgrade, upgradeSummary, PLATFORM_OWNED_ALWAYS, PLATFORM_OWNED_IF_PRESENT,
+  mergeE2ePackageJson,
 } from './base-app-upgrade-logic.js';
 
 const APP_DIR = '/srv/app';
@@ -45,6 +47,11 @@ export function currentPlatformFiles() {
     // one-time install modal reach an EXISTING project only through this.
     { path: 'public/sw.js', content: pwa.swJs },
     { path: 'public/install.js', content: pwa.installJs },
+    // Browser tests: an existing project gets the runner, the self-starting
+    // server and the platform spec. Its OWN specs under e2e/ are never touched.
+    { path: 'playwright.config.ts', content: playwrightConfigTs() },
+    { path: 'scripts/e2e-server.mjs', content: e2eServerMjs() },
+    { path: 'e2e/platform.spec.ts', content: platformSpecTs() },
   ];
 }
 
@@ -127,6 +134,24 @@ export async function upgradeBaseApp(project, { initiatedBy = null, reason = 'ma
     }
     written.push(f.path);
   }
+  // The one additive touch to an application-owned file: without the
+  // devDependency and the scripts, the Playwright config we just wrote cannot
+  // be run. Declines silently on an unparseable package.json rather than
+  // rewriting something we did not understand.
+  try {
+    const pkgSource = await readContainerFile(containerName, 'package.json');
+    if (pkgSource) {
+      const merged = mergeE2ePackageJson(pkgSource, { scripts: E2E_SCRIPTS, devDependencies: E2E_DEV_DEPENDENCIES });
+      if (merged.changed) {
+        const pScript = `d="${APP_DIR}/package.json"; base64 -d > "$d"`;
+        const pr = await containerShWithStdin(containerName, pScript, b64(merged.content), { timeoutMs: 30000 });
+        if (pr.code === 0) written.push('package.json');
+      }
+    }
+  } catch (e) {
+    console.warn(`[mock2] could not add the e2e scripts to package.json for project ${project.id}:`, e?.message);
+  }
+
   const marker = renderPlatformVersionFile({
     scaffoldVersion: current.scaffold, platformVersion: current.platform, at: new Date().toISOString(),
   });

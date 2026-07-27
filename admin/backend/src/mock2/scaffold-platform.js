@@ -23,7 +23,7 @@
 // PURE (stub-first, risk R9): returns [{ path, content }]. No I/O, no native
 // modules. Terminology (risk R7): nothing here is named "agent".
 
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v4';
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v5';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
@@ -1200,9 +1200,21 @@ function themeJs() {
     get: stored,
     resolved: function () { return effective(stored()); },
     set: function (pref) { try { localStorage.setItem(KEY, pref); } catch (e) {} apply(pref); refresh(); },
+    // Cycle from what you are LOOKING AT, not from a fixed list.
+    //
+    // The fixed order was system → light → dark, so on a device set to light
+    // (most of them) the FIRST click moved system → light and changed nothing
+    // visible: the icon updated, the page did not, and it took two clicks to
+    // see anything. Starting from the effective theme makes every click flip
+    // the screen while keeping all three preferences reachable:
+    //   device light: system → dark → light → system
+    //   device dark:  system → light → dark → system
     cycle: function () {
-      var order = ['system', 'light', 'dark'];
-      Theme.set(order[(order.indexOf(stored()) + 1) % order.length]);
+      var pref = stored();
+      var deviceIsDark = effective('system') === 'dark';
+      var flipped = deviceIsDark ? 'light' : 'dark';
+      if (pref === 'system') { Theme.set(flipped); return; }
+      Theme.set(pref === flipped ? (deviceIsDark ? 'dark' : 'light') : 'system');
     },
     buttonHtml: function (id) {
       var pref = stored();
@@ -1447,6 +1459,26 @@ function platformClientJs() {
       });
   }
 
+  // AUTO-MOUNT the legal footer.
+  //
+  // This module's whole reason for working without a session is that the
+  // copyright notice and the Privacy/Terms links belong on the SIGN-IN screen.
+  // It exposed footerHtml() and left mounting to each page — and no page did
+  // it, so on every generated app the sign-in screen carried neither. Found by
+  // running the app's own Playwright suite against a real server.
+  //
+  // One mechanism, not two: every \`[data-legal-footer]\` element gets the
+  // footer, on DOMContentLoaded and again once branding has actually loaded
+  // (the first render uses the fallback so the screen is never legally bare
+  // while a fetch is in flight).
+  function mountFooters() {
+    var slots = document.querySelectorAll('[data-legal-footer]');
+    for (var i = 0; i < slots.length; i++) slots[i].innerHTML = footerHtml();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mountFooters);
+  else mountFooters();
+  load().then(mountFooters).catch(function () {});
+
   // One delegated handler covers every footer on every screen.
   document.addEventListener('click', function (e) {
     var btn = e.target && e.target.closest ? e.target.closest('[data-legal]') : null;
@@ -1458,7 +1490,7 @@ function platformClientJs() {
   });
 
   window.Branding = {
-    load: load, get: get, copyright: copyright, footerHtml: footerHtml,
+    load: load, get: get, copyright: copyright, footerHtml: footerHtml, mountFooters: mountFooters,
     renderPage: renderPage, renderBody: renderBody,
     invalidate: function () { cache = null; pageCache = {}; },
   };

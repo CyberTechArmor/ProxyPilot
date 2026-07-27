@@ -69,11 +69,55 @@ export const PLATFORM_OWNED_ALWAYS = Object.freeze([
   // so an existing project needs both rewritten to get the feature.
   'public/sw.js',
   'public/install.js',
+  // The browser-test plumbing (v5). The CONFIG and the server script are
+  // platform-owned; so is platform.spec.ts, which asserts the base app's own
+  // guarantees and says so in its header — a build that edits it to make a
+  // change pass is doing the wrong thing, and its own specs go in other files
+  // under e2e/, which this never touches.
+  'playwright.config.ts',
+  'scripts/e2e-server.mjs',
+  'e2e/platform.spec.ts',
 ]);
 
 export const PLATFORM_OWNED_IF_PRESENT = Object.freeze([
   'src/platform/routes.ts',
 ]);
+
+// mergeE2ePackageJson — the ONE application-owned file the upgrade may touch,
+// and only additively.
+//
+// An existing project that receives playwright.config.ts still has a
+// package.json with no @playwright/test and no test:e2e script, so the runner
+// it just received cannot run — the gate would skip forever with "npm install"
+// as advice that does not help. This adds the missing devDependency and the
+// missing scripts and NOTHING else: an existing entry always wins (the project
+// may have pinned a version or wired its own script), and a package.json that
+// already has them comes back unchanged so the upgrade reports no diff.
+//
+// Pure and total: returns { changed, content } and never throws on malformed
+// JSON — it declines instead, because rewriting a file we could not parse is
+// how an upgrade destroys a project.
+export function mergeE2ePackageJson(source, { scripts = {}, devDependencies = {} } = {}) {
+  let pkg;
+  try { pkg = JSON.parse(String(source || '')); } catch { return { changed: false, content: null, reason: 'package.json is not valid JSON' }; }
+  if (!pkg || typeof pkg !== 'object') return { changed: false, content: null, reason: 'package.json is not an object' };
+
+  let changed = false;
+  const nextScripts = { ...(pkg.scripts || {}) };
+  for (const [k, v] of Object.entries(scripts)) {
+    if (nextScripts[k] === undefined) { nextScripts[k] = v; changed = true; }
+  }
+  const nextDev = { ...(pkg.devDependencies || {}) };
+  for (const [k, v] of Object.entries(devDependencies)) {
+    if (nextDev[k] === undefined) { nextDev[k] = v; changed = true; }
+  }
+  if (!changed) return { changed: false, content: null, reason: 'already present' };
+
+  // Preserve key order: rebuilding the object from scratch would reorder the
+  // whole file and turn a two-line addition into an unreviewable diff.
+  const out = { ...pkg, scripts: nextScripts, devDependencies: nextDev };
+  return { changed: true, content: `${JSON.stringify(out, null, 2)}\n` };
+}
 
 export function isPlatformOwnedPath(p) {
   return PLATFORM_OWNED_ALWAYS.includes(p) || PLATFORM_OWNED_IF_PRESENT.includes(p);

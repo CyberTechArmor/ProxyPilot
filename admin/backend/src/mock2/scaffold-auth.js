@@ -134,6 +134,17 @@ export function createApp(): express.Express {
     res.json({ build_id: id });
   });
 
+  // Liveness — BEFORE the auth and bootstrap gates.
+  //
+  // Behind bootstrapGate() this answered 503 BOOTSTRAP_REQUIRED until a human
+  // created the first administrator, which conflates two different questions:
+  // "is this process serving?" (what a load balancer, an uptime monitor and an
+  // orchestrator ask) and "has someone finished setting it up?". A freshly
+  // deployed app would be marked unhealthy and, depending on the platform,
+  // restarted or pulled from rotation before anyone could ever sign in. Found
+  // by running the app's own Playwright suite against a fresh database.
+  app.use('/api', healthRoutes);
+
   // Platform PUBLIC surface — branding, legal pages, assets, favicon and the
   // API index. Mounted BEFORE the auth gate on purpose: the sign-in screen
   // renders the copyright notice and the Privacy/Terms links before anyone has
@@ -155,7 +166,6 @@ export function createApp(): express.Express {
   app.use(withAuth);
   app.use(bootstrapGate());
 
-  app.use('/api', healthRoutes);
   app.use('/api', authRoutes);
   app.use('/api', adminAuthRoutes);
   // External self-signup (public endpoints re-check the admin toggle) + its
@@ -858,6 +868,8 @@ function loginHtml() {
     .btn:hover { filter: brightness(1.05); }
     .form-msg { color: var(--lg-err); min-height: 1.2em; margin: 12px 0 0; font-size: 14px; }
     [hidden] { display: none !important; }
+    .login-chrome { display: flex; justify-content: flex-end; margin-top: 16px; }
+    .login-chrome .theme-toggle { min-height: 44px; min-width: 44px; }
   </style>
 </head>
 <body>
@@ -939,6 +951,16 @@ function loginHtml() {
         <p class="form-msg" id="setup-msg" role="alert"></p>
       </form>
     </section>
+    <!-- The theme control and the legal footer BELONG here.
+         platform.js works with no session precisely so the copyright notice
+         and the Privacy/Terms links can render on this screen, and theme.js
+         drives any .theme-toggle — but this page mounted neither, so on every
+         generated app the sign-in screen had no theme control and no legal
+         footer. Found by running the app's own Playwright suite. -->
+    <div class="login-chrome">
+      <button type="button" class="theme-toggle btn subtle" aria-label="Change theme"></button>
+    </div>
+    <div data-legal-footer></div>
   </div>
   </main>
 </div>

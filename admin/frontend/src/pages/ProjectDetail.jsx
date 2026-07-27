@@ -34,9 +34,15 @@ import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
   Archive, RotateCcw, Play, Lock, Download, GitBranch,
   Circle, Hammer, Unlock, Clock, Sparkles, TerminalSquare, MessageSquare, LayoutPanelLeft, Eye,
+  Library,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
+// The asset library belongs to the DESIGN stage too, not only the build phase:
+// a logo, a screenshot of the thing being replaced, or the copy a screen should
+// carry is exactly the context the mockup should be made from — and it has to
+// be collectable BEFORE the mockup exists, or it arrives too late to shape it.
+import ProjectAssets from '@/components/mock2/ProjectAssets';
 import ProjectTerminal from '@/components/mock2/ProjectTerminal';
 import BuildMode from '@/components/mock2/BuildMode';
 import { flightdeckPrefKey, readPref, writePref } from '@/lib/flightdeck';
@@ -126,6 +132,9 @@ export default function ProjectDetail() {
   // on the first visit, not on page load.
   const [terminalVisited, setTerminalVisited] = useState(false);
   const [previewReloadNonce, setPreviewReloadNonce] = useState(0); // bump to remount the preview iframe
+  // Design stage's left column: the mockup, or the asset library it should
+  // be made from. 'preview' by default — assets are opt-in context.
+  const [designPane, setDesignPane] = useState('preview');
   const archivedDefaulted = useRef(false);
   const prevLifecycle = useRef(null);      // last-seen lifecycle, to detect the provisioning→active transition
   const confettiFired = useRef(false);     // guard the one-time online confetti within this mount
@@ -508,8 +517,16 @@ export default function ProjectDetail() {
                 // Design mode — the live mockup preview on the left, the design
                 // conversation on the right.
                 <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto lg:flex-row lg:overflow-hidden">
-                  <div className="min-w-0 h-[55vh] lg:h-auto lg:flex-[1.55] lg:min-h-0">
-                    <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce} projectId={designApproved ? null : id} />
+                  {/* Preview / Assets — the same strip Flightdeck's clean view
+                      uses. Collecting a logo or the copy a screen should carry
+                      is design work, so it belongs beside the mockup rather
+                      than only in the build phase. */}
+                  <div className="min-w-0 h-[55vh] lg:h-auto lg:flex-[1.55] lg:min-h-0 flex flex-col">
+                    <DesignLeftPane
+                      tab={designPane} onTab={setDesignPane}
+                      projectId={id} canEdit={canEdit}
+                      preview={<PreviewPanel src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce} projectId={designApproved ? null : id} />}
+                    />
                   </div>
                   <div className="min-w-0 flex flex-col gap-4 lg:flex-1 lg:min-h-0">
                     <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
@@ -524,6 +541,10 @@ export default function ProjectDetail() {
                       provMessage={provStatus?.progress?.message || null}
                     />
                     <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
+                    {/* Before the first mockup exists is the MOST useful moment
+                        to hand over a logo or a reference shot — it is what the
+                        mockup gets made from. */}
+                    <ProjectAssets projectId={id} canEdit={canEdit} />
                   </div>
                 </div>
               )}
@@ -1171,9 +1192,42 @@ function RepoRemoteCard({ projectId, isAdmin, slug }) {
 //
 // MOBILE_FIRST: phone-only by construction (the caller renders it under
 // mobileStudio); every bar item is a ≥44px target and nothing scrolls sideways.
+// DesignLeftPane — Preview | Assets, the design stage's left column.
+//
+// Deliberately the same two-button strip as Flightdeck's clean view rather than
+// a new pattern: the design and build stages are one workflow, and an operator
+// who learned where assets live in one should find them in the same place in
+// the other. MOBILE_FIRST: 44px targets, wraps, no fixed widths.
+function DesignLeftPane({ tab, onTab, projectId, canEdit, preview }) {
+  return (
+    <>
+      <div className="flex items-center gap-1 px-1 pb-2 shrink-0">
+        <button
+          type="button" onClick={() => onTab('preview')}
+          className={`min-h-[44px] rounded px-3 py-1 text-xs ${tab === 'preview' ? 'bg-background border' : 'text-muted-foreground'}`}
+        >
+          <Eye className="mr-1 inline h-3.5 w-3.5" />Preview
+        </button>
+        <button
+          type="button" onClick={() => onTab('assets')}
+          className={`min-h-[44px] rounded px-3 py-1 text-xs ${tab === 'assets' ? 'bg-background border' : 'text-muted-foreground'}`}
+        >
+          <Library className="mr-1 inline h-3.5 w-3.5" />Assets
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {tab === 'assets' ? <ProjectAssets projectId={projectId} canEdit={canEdit} /> : preview}
+      </div>
+    </>
+  );
+}
+
 const MOCKUP_PANELS = [
   { key: 'chat', label: 'Chat', icon: MessageSquare },
   { key: 'preview', label: 'Preview', icon: Eye },
+  // Same three panels the build phase offers, so the two stages feel like one
+  // app — and so assets can be gathered before the first mockup render.
+  { key: 'assets', label: 'Assets', icon: Library },
 ];
 
 function MockupWorkspace({
@@ -1202,6 +1256,10 @@ function MockupWorkspace({
             projectId={projectId} project={project} canEdit={canEdit} fill
             onApproved={onApproved} onMockupChanged={onMockupChanged}
           />
+        ) : panel === 'assets' ? (
+          <div className="min-h-0 flex-1 overflow-y-auto p-2">
+            <ProjectAssets projectId={projectId} canEdit={canEdit} />
+          </div>
         ) : previewSrc ? (
           <PreviewPanel
             src={previewSrc} title={project.name} approved={false} reloadKey={previewReloadNonce}

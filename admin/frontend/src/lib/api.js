@@ -1534,6 +1534,7 @@ export const api = {
   // door (the build is forbidden to create that account).
   mock2AppAccess: (id) => request(`/mock2/projects/${id}/app-access`),
   mock2CreateFirstAdmin: (id, body) => request(`/mock2/projects/${id}/app-access/first-admin`, { method: 'POST', body }),
+  mock2FreeFirstAdminSlot: (id) => request(`/mock2/projects/${id}/app-access/free-slot`, { method: 'POST', body: {} }),
   // Quick connect (VS Code / git over smart HTTP): clone URL + connect tokens.
   mock2GetConnect: (id) => request(`/mock2/projects/${id}/connect`),
   // Split-request groups + the build queue (background back-to-back builds).

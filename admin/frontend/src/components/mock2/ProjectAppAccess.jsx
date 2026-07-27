@@ -63,8 +63,29 @@ export default function ProjectAppAccess({ projectId, canEdit = false }) {
     }
   };
 
+  const freeSlot = async () => {
+    setError('');
+    setBusy(true);
+    try {
+      const res = await api.mock2FreeFirstAdminSlot(projectId);
+      setState(res);
+      toast({
+        title: 'First-admin slot freed',
+        description: `Removed ${res.removed?.length || 0} platform test account(s). Create your administrator below.`,
+      });
+    } catch (err) {
+      setError(String(err?.message || err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const offline = state?.offline;
   const open = state?.canAttempt === true;
+  // The app says its door is closed and the only accounts are the platform's
+  // own fixtures — this app runs an auth component from before those stopped
+  // counting as real users, so the platform's check took the operator's slot.
+  const fixtureFilled = state?.fixtureFilled === true;
   const unreachable = state?.unreachable && !offline;
   const real = (state?.accounts || []).filter((a) => !a.fixture);
   const fixtures = (state?.accounts || []).filter((a) => a.fixture);
@@ -111,6 +132,20 @@ export default function ProjectAppAccess({ projectId, canEdit = false }) {
                 {fixtures.map((a) => a.email).join(', ')}) — used by the automated checks, on the reserved
                 {' '}<code>@fixture.invalid</code> domain. They do not count as users and never take your first-admin slot.
               </p>
+            ) : null}
+
+            {fixtureFilled && canEdit ? (
+              <div className="space-y-3 border-t pt-4">
+                <p className="text-muted-foreground">
+                  Removing them undoes the platform's own side effect — the next build re-seeds whatever the
+                  automated checks need, and nothing of yours is touched.
+                </p>
+                {error ? <p className="text-sm text-red-500">{error}</p> : null}
+                <Button onClick={freeSlot} disabled={busy} className="min-h-[44px] w-full sm:w-auto">
+                  {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  Free the first-admin slot
+                </Button>
+              </div>
             ) : null}
 
             {open && canEdit ? (

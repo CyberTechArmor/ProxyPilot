@@ -547,10 +547,29 @@ export async function afterBuildReview(projectId, { reason = 'build close' } = {
     }
   } catch (e) { console.warn('[mock2] post-build serving check failed:', e?.message); }
 
+  let readyLogin = null;
   try {
     const { ensureReviewAccount } = await import('./review-account.js');
-    await ensureReviewAccount(getProject(id));
+    readyLogin = (await ensureReviewAccount(getProject(id)))?.login || null;
   } catch (e) { console.warn('[mock2] post-build review-account check failed:', e?.message); }
+
+  // Is the app actually WORKING, or merely listening?
+  //
+  // ensureServing above asks for `/` and accepts anything below 500 — which on
+  // a gated app is the redirect to /login, and a dead database, a failed
+  // migration and a 500ing app all produce exactly that. This asks the app's
+  // own health endpoint, checks the sign-in page RENDERS, and — with the
+  // fixture credentials — makes one SIGNED-IN request, which is the question
+  // the redirect was hiding. A failure here is reported and never blocks: the
+  // deploy already happened, and the operator needs to know, not be stopped.
+  try {
+    const { verifyAppReady } = await import('./readiness.js');
+    const { readinessChatMessage, readinessLogLines } = await import('./readiness-logic.js');
+    const ready = await verifyAppReady(getProject(id), { authed: readyLogin });
+    for (const line of readinessLogLines(ready)) console.log(`[mock2] project ${id} ${line}`);
+    const message = readinessChatMessage(ready);
+    if (message) insertMessage({ projectId: id, kind: 'system', body: message });
+  } catch (e) { console.warn('[mock2] post-build readiness check failed:', e?.message); }
 
   console.log(`[mock2] auto design review starting for project ${id} (${reason})`);
   return maybeAutoDesignReview(getProject(id));

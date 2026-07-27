@@ -448,6 +448,29 @@ How to EXTEND it (the only supported way):
 
 The \`platform-intact\` gate checks this: it reds the build if the module lost
 its exports or the app grew a second branding/settings/api-key store.
+
+## Browser tests (binding)
+The project owns a real Playwright suite. \`playwright.config.ts\` starts the app
+itself (build → migrate a scratch database → serve), so \`npm run test:e2e\`
+works with nothing deployed. Two projects run: \`desktop\` (1280px) and
+\`mobile\` (Pixel 5) — the mobile one is where the defects have actually been.
+
+- \`e2e/platform.spec.ts\` asserts the BASE APP's guarantees (sign-in renders,
+  the theme toggle persists, no horizontal scroll on a phone, no console
+  errors). Never edit it to make your change pass; if it goes red, your change
+  broke something the app is supposed to do.
+- Put YOUR specs in other files under \`e2e/\` — one per screen or flow. Test
+  what a user DOES: fill the form, submit it, expect the row to appear, reload,
+  expect it to still be there. A spec that only asserts an element exists is
+  worth very little.
+- The \`e2e\` gate runs the suite from the MVP profile up, BEFORE the deploy.
+  It skips green when the browser binary is not installed (an environment
+  problem, never your code) but NEVER when a test fails.
+
+This is NOT the same thing as \`state/ui-checks.json\`. Those are the platform's
+post-deploy smoke checks against the LIVE app, per role, executed by ProxyPilot
+after your build ships. Your Playwright specs run before the deploy, against a
+server the suite starts. Write both — they catch different failures.
 `;
 
 // buildRunnerSystemPrompt — assemble the model's system prompt server-side from

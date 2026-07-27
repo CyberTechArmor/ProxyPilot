@@ -33,6 +33,7 @@ import { parseDeclaredEgress } from './egress-logic.js';
 // The declared default port; a project row normally carries its own.
 import { DEFAULT_WEB_PORT } from './template.js';
 import { updateProject } from './projects.js';
+import { installBrowserScript } from './scaffold-e2e.js';
 
 const UNIT_PATH = '/etc/systemd/system/mock2-dev.service';
 
@@ -170,6 +171,19 @@ async function deployProjectUnqueued({
       await runInApp(containerName, appDir, `hash=$(${MANIFEST_HASH_CMD}); printf '%s' "$hash" > '${INSTALL_STAMP_PATH}'`, 15000).catch(() => {});
     }
   }
+
+  // 1a) The Playwright browser, once per container.
+  //
+  //     The project ships a real browser suite (scaffold-e2e.js) and Playwright
+  //     needs a Chromium (~170MB) to run it. Installed HERE rather than at
+  //     provision so an EXISTING project picks it up on its next deploy too,
+  //     and guarded by an "is it already there" check so it costs one `ls` on
+  //     every deploy after the first.
+  //
+  //     Strictly best-effort: no egress, a slow CDN or a full disk must never
+  //     fail a deploy over a test tool. When it does not land, the e2e gate
+  //     skips with the exact command to run.
+  await installE2eBrowser(containerName, appDir, onStep).catch(() => {});
 
   // 1b) Stamp this deploy's BUILD ID into the PWA plumbing, after the build (so
   //     the built output is stamped too) and before the restart.
@@ -332,6 +346,26 @@ export async function stampDeployedCommit(projectId, containerName, appDir) {
 //
 // Nothing in the pipeline asked the simplest possible question afterwards:
 // does the URL answer? This asks it, and fixes it when the answer is no.
+
+// installE2eBrowser — the one-time Chromium download for the project's own
+// Playwright suite. Idempotent (the script returns immediately when the browser
+// cache is populated) and never throws into the deploy.
+async function installE2eBrowser(containerName, appDir, onStep) {
+  const probe = await runInApp(
+    containerName, appDir,
+    '[ -f playwright.config.ts ] || [ -f playwright.config.js ] || exit 1\n'
+    + '[ -n "$(ls -A "$HOME/.cache/ms-playwright" 2>/dev/null)" ] && exit 1\n'
+    + 'exit 0',
+    20000,
+  ).catch(() => ({ code: 1 }));
+  // Non-zero means "no suite" or "already installed" — either way, nothing to do.
+  if (probe.code !== 0) return;
+  if (onStep) onStep('e2e-browser', 'Installing the test browser (one time)…');
+  const r = await runInApp(containerName, appDir, installBrowserScript(appDir), 600000).catch(() => null);
+  if (!r || r.code !== 0) {
+    console.warn(`[mock2] e2e browser install did not complete for ${containerName} — the e2e gate will skip until it does`);
+  }
+}
 
 // probeServing — one cheap request from INSIDE the container. Same accept rule
 // as the deploy health check: anything under 500 means the app is up and its

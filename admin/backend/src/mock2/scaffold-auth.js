@@ -891,7 +891,61 @@ function loginHtml() {
     }
     .linklike:hover { opacity: .8; }
     .login-chrome { display: flex; justify-content: flex-end; margin-top: 16px; }
-    .login-chrome .theme-toggle { min-height: 44px; min-width: 44px; }
+    /* width:auto — .btn above sets width:100%, so without this the theme
+       control rendered as a full-width primary-blue BAR under the card. */
+    .login-chrome .theme-toggle {
+      width: auto; min-height: 44px; min-width: 44px; padding: 0 12px;
+      background: color-mix(in srgb, var(--lg-card) 70%, var(--lg-bg));
+      color: var(--lg-fg); border: 1px solid var(--lg-border); border-radius: 8px;
+      font: inherit; cursor: pointer;
+    }
+    .login-chrome .theme-toggle:hover { border-color: var(--lg-accent); }
+
+    /* THE LEGAL FOOTER AND THE PAGES BEHIND IT.
+       platform.js mounts the footer into [data-legal-footer] on every screen,
+       and clicking a link replaces the page with .legal-page markup. Both sets
+       of rules live in base.css — which this page does NOT link, because it is
+       a self-contained split layout with its own tokens. So on the sign-in
+       screen the footer rendered as raw browser buttons and Privacy/Terms
+       opened as unstyled black-on-white HTML: the one screen every visitor
+       sees, and the only one they can reach those pages from.
+       Mirrors the platform rules onto this page's own --lg-* tokens. */
+    .legal-footer { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 22px 16px 18px; text-align: center; }
+    .legal-links { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 2px; }
+    .legal-link {
+      background: none; border: none; color: var(--lg-accent); font: inherit;
+      font-size: 12.5px; font-weight: 600; padding: 8px 10px; border-radius: 7px;
+      min-height: 44px; cursor: pointer;
+    }
+    .legal-link:hover { background: color-mix(in srgb, var(--lg-accent) 12%, transparent); text-decoration: underline; }
+    .legal-sep { color: var(--lg-muted); font-size: 12px; }
+    .legal-copy { font-size: 12px; color: var(--lg-muted); line-height: 1.5; max-width: 520px; }
+
+    .legal-page { min-height: 100vh; background: var(--lg-bg); padding: 32px 20px 64px; }
+    .legal-inner {
+      max-width: 760px; margin: 0 auto; background: var(--lg-card);
+      border: 1px solid var(--lg-border); border-radius: var(--lg-radius); padding: 34px 38px 40px;
+    }
+    .legal-inner h1 { font-size: 27px; line-height: 1.2; margin: 0; }
+    .legal-meta { font-size: 12.5px; color: var(--lg-muted); margin: 8px 0 22px; padding-bottom: 18px; border-bottom: 1px solid var(--lg-border); }
+    .legal-body { font-size: 14.5px; line-height: 1.68; }
+    .legal-body h2 { font-size: 16.5px; margin: 26px 0 9px; }
+    .legal-body h2:first-child { margin-top: 0; }
+    .legal-body p { margin: 0 0 13px; }
+    .legal-body ul { margin: 0 0 14px; padding-left: 20px; }
+    .legal-body li { margin-bottom: 7px; }
+    .legal-foot { margin-top: 30px; padding-top: 18px; border-top: 1px solid var(--lg-border); font-size: 12px; color: var(--lg-muted); }
+    /* The way back out of a legal page — .btn would make it a full-width bar. */
+    .legal-inner .btn { width: auto; padding: 9px 14px; }
+    @media (max-width: 768px) {
+      .legal-page { padding: 0; }
+      .legal-inner { border: none; border-radius: 0; min-height: 100vh; padding: 22px 18px 48px; }
+      .legal-inner h1 { font-size: 23px; }
+    }
+    @media (max-width: 400px) {
+      .legal-links { flex-direction: column; gap: 0; }
+      .legal-sep { display: none; }
+    }
   </style>
 </head>
 <body>
@@ -1046,6 +1100,12 @@ const WIRED_HISTORY = new Map([
     // administrator", so a seeded fixture user — the account the design review
     // and the smoke checks sign in with — is unreachable from the page.
     '133cc0441980b296ef88ccb9104f37226f6d176b4adaa1d2000965fd28556b8c',
+    // v3: before the sign-in page carried the LEGAL CSS. platform.js mounts the
+    // footer here and clicking a link replaces the page with .legal-page markup
+    // — and those rules live in base.css, which this page does not link. So the
+    // footer rendered as raw browser buttons and Privacy/Terms opened as
+    // unstyled black-on-white HTML, on the one screen every visitor sees.
+    'e83b2ebfb86d345cd92bf045d7966598cacd3a4c3b0888e816df3f87300971e4',
   ]],
   ['public/admin.js', [
     '4123ff0a11d3adf2bdb1b245bcc496f1f04ef165faed35a4fbffdb967346d4f8', // v1: pre sign-in-link button

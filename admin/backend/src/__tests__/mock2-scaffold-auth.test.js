@@ -205,4 +205,30 @@ test('a container on the previous login page generation is upgradable, not stran
   );
   assert.match(src, /133cc0441980b296ef88ccb9104f37226f6d176b4adaa1d2000965fd28556b8c/,
     'the pre-both-doors login.html hash must be registered as upgradable');
+  assert.match(src, /e83b2ebfb86d345cd92bf045d7966598cacd3a4c3b0888e816df3f87300971e4/,
+    'the pre-legal-CSS login.html hash must be registered as upgradable');
+});
+
+test('the sign-in page styles the legal footer AND the pages behind it', () => {
+  // platform.js mounts the footer into [data-legal-footer] on every screen, and
+  // clicking a link REPLACES the page with .legal-page markup. Both sets of
+  // rules live in base.css — which this page deliberately does not link, being a
+  // self-contained split layout with its own tokens. The result was a footer of
+  // raw browser buttons and a Privacy page of unstyled black-on-white HTML, on
+  // the one screen every visitor sees and the only one those pages open from.
+  const login = buildAuthWiredFiles().find((f) => f.path === 'public/login.html').content;
+  assert.doesNotMatch(login, /href="\/base\.css"/, 'this page is self-contained by design');
+  for (const rule of ['.legal-footer', '.legal-links', '.legal-link', '.legal-copy',
+    '.legal-page', '.legal-inner', '.legal-meta', '.legal-body', '.legal-foot']) {
+    assert.ok(login.includes(`${rule} {`) || login.includes(`${rule}{`), `missing ${rule}`);
+  }
+  // Against the page's OWN tokens — a rule referencing --bg/--surface here would
+  // resolve to nothing and render invisible text.
+  assert.doesNotMatch(login.slice(login.indexOf('.legal-footer')), /var\(--(?:bg|surface|line|slate|shadow)\)/);
+  // The theme control and the legal back button must not inherit .btn's
+  // width:100% — that is what turned the toggle into a full-width blue bar.
+  assert.match(login, /\.theme-toggle \{[^}]*width: auto/s);
+  assert.match(login, /\.legal-inner \.btn \{[^}]*width: auto/s);
+  // Touch targets (MOBILE_FIRST): the links are real controls.
+  assert.match(login, /\.legal-link \{[^}]*min-height: 44px/s);
 });

@@ -23,7 +23,13 @@
 // PURE (stub-first, risk R9): returns [{ path, content }]. No I/O, no native
 // modules. Terminology (risk R7): nothing here is named "agent".
 
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v6';
+// v7: platform.js carries its own chrome CSS and opens legal pages as an
+// overlay, so the sign-in screen's footer and the Privacy / Terms pages are
+// styled on a page that never linked base.css — and reading a legal page no
+// longer destroys the host page's event listeners. Existing projects need the
+// upgrade: public/login.html is NOT platform-owned (a build may restyle it),
+// so the fix has to reach them through platform.js.
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v7';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
@@ -1466,23 +1472,52 @@ function platformClientJs() {
       .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })])
       .then(function (r) {
         var b = r[0], pg = r[1] && r[1].page;
+        // .legal-back, not .btn: this markup is mounted onto whatever page the
+        // footer happens to be on, and that page's .btn is anything from a
+        // full-width gradient to nothing at all.
+        var back = '<button type="button" class="legal-back" id="legalBack">← Back</button>';
         if (!pg) {
-          container.innerHTML = '<div class="legal-page"><div class="legal-inner">' +
-            '<button type="button" class="btn ghost" id="legalBack">← Back</button>' +
+          container.innerHTML = '<div class="legal-page"><div class="legal-inner">' + back +
             '<p class="legal-meta">That page could not be loaded.</p></div></div>';
         } else {
           var revised = pg.updatedAt ? 'Last updated ' + new Date(pg.updatedAt).toLocaleDateString() : 'Standard terms — not yet customised';
-          container.innerHTML = '<div class="legal-page"><div class="legal-inner">' +
-            '<button type="button" class="btn ghost" id="legalBack">← Back</button>' +
+          container.innerHTML = '<div class="legal-page"><div class="legal-inner">' + back +
             '<h1>' + esc(pg.title) + '</h1>' +
             '<p class="legal-meta">' + esc(b.legalName || b.orgName) + ' · ' + esc(revised) + '</p>' +
             '<div class="legal-body">' + renderBody(pg.body) + '</div>' +
             '<div class="legal-foot">' + esc(copyright()) + '</div></div></div>';
         }
-        var back = container.querySelector('#legalBack');
-        if (back && onBack) back.onclick = onBack;
+        var btn = container.querySelector('#legalBack');
+        if (btn && onBack) btn.onclick = onBack;
+        if (btn) { try { btn.focus(); } catch (e) {} }
       });
   }
+
+  // THE STYLING TRAVELS WITH THE MARKUP.
+  //
+  // This module mounts the footer and the legal pages itself, onto pages that
+  // may or may not link base.css — and the sign-in screen, the one screen
+  // every app has and the only one a signed-out visitor sees, does NOT link
+  // it. So the footer arrived there as raw browser <button> chrome, the theme
+  // control inherited that page's full-width .btn rule, and Privacy / Terms
+  // opened as unstyled text. Shipping the rules in a stylesheet the page might
+  // not have is the same mistake as exposing footerHtml() and trusting pages
+  // to mount it (learning 44).
+  //
+  // Appended LAST in <head> on purpose: it must outrank a restyled page's own
+  // generic button rules for the platform's chrome. It only ever declares
+  // platform-owned class names, so it cannot touch the approved design.
+  var CHROME_CSS = ${JSON.stringify(legalChromeCss())};
+  function ensureChromeCss() {
+    if (document.getElementById('pp-legal-chrome-css')) return;
+    var head = document.head || document.getElementsByTagName('head')[0];
+    if (!head) return;
+    var el = document.createElement('style');
+    el.id = 'pp-legal-chrome-css';
+    el.textContent = CHROME_CSS;
+    head.appendChild(el);
+  }
+  ensureChromeCss();
 
   // AUTO-MOUNT the legal footer.
   //
@@ -1497,6 +1532,7 @@ function platformClientJs() {
   // (the first render uses the fallback so the screen is never legally bare
   // while a fetch is in flight).
   function mountFooters() {
+    ensureChromeCss();
     var slots = document.querySelectorAll('[data-legal-footer]');
     for (var i = 0; i < slots.length; i++) slots[i].innerHTML = footerHtml();
   }
@@ -1504,23 +1540,151 @@ function platformClientJs() {
   else mountFooters();
   load().then(mountFooters).catch(function () {});
 
+  // A legal page opens as an OVERLAY, not as a swap of document.body.
+  //
+  // It used to read \`var restore = host.innerHTML\` and write it back on
+  // "Back". Re-inserting markup re-creates every element WITHOUT its event
+  // listeners, and a <script src> re-inserted through innerHTML never
+  // executes — so on the sign-in screen, reading the privacy policy and
+  // pressing Back left a form whose submit handler no longer existed. Nothing
+  // told the user; the button simply stopped working.
+  var openOverlay = null, restoreFocus = null;
+
+  function closeLegal() {
+    if (!openOverlay) return;
+    if (openOverlay.parentNode) openOverlay.parentNode.removeChild(openOverlay);
+    openOverlay = null;
+    document.documentElement.classList.remove('legal-open');
+    if (document.body) document.body.classList.remove('legal-open');
+    if (restoreFocus && restoreFocus.focus) { try { restoreFocus.focus(); } catch (e) {} }
+    restoreFocus = null;
+  }
+
+  function openLegal(slug) {
+    closeLegal();
+    ensureChromeCss();
+    restoreFocus = document.activeElement;
+    var host = document.getElementById('legalHost');
+    openOverlay = document.createElement('div');
+    openOverlay.className = 'legal-overlay';
+    openOverlay.setAttribute('role', 'dialog');
+    openOverlay.setAttribute('aria-modal', 'true');
+    openOverlay.setAttribute('aria-label', slug === 'terms' ? 'Terms & Conditions' : 'Privacy Policy');
+    (host || document.body).appendChild(openOverlay);
+    document.documentElement.classList.add('legal-open');
+    if (document.body) document.body.classList.add('legal-open');
+    return renderPage(openOverlay, slug, closeLegal);
+  }
+
   // One delegated handler covers every footer on every screen.
   document.addEventListener('click', function (e) {
     var btn = e.target && e.target.closest ? e.target.closest('[data-legal]') : null;
     if (!btn) return;
     e.preventDefault();
-    var host = document.getElementById('legalHost') || document.body;
-    var restore = host.innerHTML;
-    renderPage(host, btn.getAttribute('data-legal'), function () { host.innerHTML = restore; });
+    openLegal(btn.getAttribute('data-legal'));
+  });
+  document.addEventListener('keydown', function (e) {
+    if (openOverlay && (e.key === 'Escape' || e.keyCode === 27)) { e.preventDefault(); closeLegal(); }
   });
 
   window.Branding = {
     load: load, get: get, copyright: copyright, footerHtml: footerHtml, mountFooters: mountFooters,
     renderPage: renderPage, renderBody: renderBody,
+    openLegal: openLegal, closeLegal: closeLegal, ensureChromeCss: ensureChromeCss,
     invalidate: function () { cache = null; pageCache = {}; },
   };
   load();
 })();
+`;
+}
+
+/* ---------------------------------------------------------------------------
+   LEGAL CHROME CSS — the theme control, the legal footer and the legal pages.
+
+   SPLIT OUT ON PURPOSE, and shipped TWICE: appended to public/base.css (below)
+   AND injected into <head> by platform.js, which is the module that mounts this
+   markup in the first place.
+
+   Why: the sign-in screen does not link base.css. It never has — it is a
+   self-contained page with its own inline <style>, and a build is free to
+   restyle it (project 42's did). So platform.js mounted the footer onto a page
+   where none of these classes existed: the Privacy / Terms links rendered as
+   raw browser <button> chrome, the theme control inherited the page's own
+   full-width .btn rule, and opening a legal page produced an unstyled wall of
+   text. The markup was mounted from JS and the styling was expected to arrive
+   by a stylesheet the page did not have.
+
+   The module that mounts UI now carries the CSS for it, so the two cannot
+   arrive separately — the same lesson as the mount itself (learning 44).
+
+   Every platform variable is read through a two-level fallback,
+   var(--surface, var(--app-surface, #fff)), so these rules render correctly on
+   a page with base.css, on a page with only the design's token bridge, and on
+   a page with neither.
+
+   ONLY platform-owned class names live here (.theme-toggle, .legal-*). Nothing
+   generic: this block is injected LAST, so a bare `button {}` rule in it would
+   silently outrank the approved design on every screen.
+   --------------------------------------------------------------------------- */
+function legalChromeCss() {
+  return `
+.theme-toggle{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:38px;height:38px;border:1px solid var(--line,var(--app-border,#e2e8f1));border-radius:9px;
+  background:var(--surface,var(--app-surface,#ffffff));color:var(--ink,var(--app-text,#12263f));cursor:pointer;padding:0;flex-shrink:0;
+}
+.theme-toggle:hover{background:var(--surface-2,var(--app-bg,#f7fafd))}
+.theme-toggle:focus-visible{outline:2px solid var(--accent,var(--app-primary,#1466b8));outline-offset:1px}
+
+/* Sign-in / shell footer: the notice reads as text, the pages are real buttons
+   so they are keyboard- and touch-reachable. */
+.legal-footer{display:flex;flex-direction:column;align-items:center;gap:6px;padding:22px 16px 18px;text-align:center}
+.legal-links{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:2px}
+.legal-link{background:none;border:none;color:var(--accent-ink,var(--app-primary,#0b5cad));font:inherit;font-size:12.5px;font-weight:600;padding:8px 10px;border-radius:7px;cursor:pointer;width:auto;min-width:0;text-decoration:none;box-shadow:none}
+.legal-link:hover{background:var(--accent-soft,rgba(20,102,184,.09));text-decoration:underline}
+.legal-sep{color:var(--slate,var(--app-muted,#5a6b81));font-size:12px}
+.legal-copy{font-size:12px;color:var(--slate,var(--app-muted,#5a6b81));line-height:1.5;max-width:520px}
+
+/* The legal page opens as an OVERLAY above the screen you were on.
+   It used to be swapped into document.body via innerHTML and swapped back on
+   "Back" — which re-created every element without its event listeners and did
+   not re-run the page's own <script>, so pressing Back on the sign-in screen
+   left a form that could no longer be submitted. An overlay leaves the page
+   underneath untouched. */
+.legal-overlay{position:fixed;inset:0;z-index:2147483000;overflow-y:auto;-webkit-overflow-scrolling:touch;background:var(--bg,var(--app-bg,#f5f8fc));color:var(--ink,var(--app-text,#12263f));text-align:left}
+html.legal-open,body.legal-open{overflow:hidden}
+.legal-page{min-height:100vh;background:var(--bg,var(--app-bg,#f5f8fc));padding:32px 20px 64px}
+.legal-inner{max-width:760px;margin:0 auto;background:var(--surface,var(--app-surface,#ffffff));border:1px solid var(--line,var(--app-border,#e2e8f1));border-radius:12px;box-shadow:var(--shadow,var(--app-shadow-card,0 1px 2px rgba(16,42,72,.06)));padding:34px 38px 40px;color:var(--ink,var(--app-text,#12263f))}
+.legal-inner h1{font-size:27px;line-height:1.2;margin:14px 0 0}
+.legal-meta{font-size:12.5px;color:var(--slate,var(--app-muted,#5a6b81));margin:8px 0 22px;padding-bottom:18px;border-bottom:1px solid var(--line,var(--app-border,#e2e8f1))}
+.legal-body{font-size:14.5px;line-height:1.68}
+.legal-body h2{font-size:16.5px;margin:26px 0 9px}
+.legal-body h2:first-child{margin-top:0}
+.legal-body p{margin:0 0 13px}
+.legal-body ul{margin:0 0 14px;padding-left:20px}
+.legal-body li{margin-bottom:7px}
+.legal-foot{margin-top:30px;padding-top:18px;border-top:1px solid var(--line,var(--app-border,#e2e8f1));font-size:12px;color:var(--slate,var(--app-muted,#5a6b81))}
+/* The Back control is styled here too. It is rendered by this module onto a
+   page whose .btn may be anything (or nothing), so it cannot borrow one. */
+.legal-back{display:inline-flex;align-items:center;gap:6px;min-height:44px;padding:8px 14px;width:auto;
+  border:1px solid var(--line,var(--app-border,#e2e8f1));border-radius:9px;
+  background:var(--surface,var(--app-surface,#ffffff));color:var(--ink,var(--app-text,#12263f));
+  font:inherit;font-size:14px;font-weight:600;cursor:pointer}
+.legal-back:hover{background:var(--surface-2,var(--app-bg,#f7fafd))}
+.legal-back:focus-visible{outline:2px solid var(--accent,var(--app-primary,#1466b8));outline-offset:1px}
+
+/* Mobile. Every interactive control clears a 44px touch target. */
+@media(max-width:768px){
+  .theme-toggle{width:44px;height:44px}
+  .legal-link{min-height:44px;display:inline-flex;align-items:center}
+  .legal-page{padding:0}
+  .legal-inner{border:none;border-radius:0;box-shadow:none;min-height:100vh;padding:22px 18px 48px}
+  .legal-inner h1{font-size:23px}
+}
+@media(max-width:400px){
+  .legal-links{flex-direction:column;gap:0}
+  .legal-sep{display:none}
+}
 `;
 }
 
@@ -1554,48 +1718,12 @@ function platformCss() {
 }
 
 body{background:var(--bg);color:var(--ink)}
-
-.theme-toggle{
-  display:inline-flex;align-items:center;justify-content:center;
-  width:38px;height:38px;border:1px solid var(--line);border-radius:9px;
-  background:var(--surface);color:var(--ink);cursor:pointer;padding:0;flex-shrink:0;
-}
-.theme-toggle:hover{background:var(--surface-2)}
-.theme-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-
-/* Sign-in / shell footer: the notice reads as text, the pages are real buttons
-   so they are keyboard- and touch-reachable. */
-.legal-footer{display:flex;flex-direction:column;align-items:center;gap:6px;padding:22px 16px 18px;text-align:center}
-.legal-links{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:2px}
-.legal-link{background:none;border:none;color:var(--accent-ink);font:inherit;font-size:12.5px;font-weight:600;padding:8px 10px;border-radius:7px;cursor:pointer}
-.legal-link:hover{background:var(--accent-soft);text-decoration:underline}
-.legal-sep{color:var(--slate);font-size:12px}
-.legal-copy{font-size:12px;color:var(--slate);line-height:1.5;max-width:520px}
-
-.legal-page{min-height:100vh;background:var(--bg);padding:32px 20px 64px}
-.legal-inner{max-width:760px;margin:0 auto;background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:34px 38px 40px}
-.legal-inner h1{font-size:27px;line-height:1.2}
-.legal-meta{font-size:12.5px;color:var(--slate);margin:8px 0 22px;padding-bottom:18px;border-bottom:1px solid var(--line)}
-.legal-body{font-size:14.5px;line-height:1.68}
-.legal-body h2{font-size:16.5px;margin:26px 0 9px}
-.legal-body h2:first-child{margin-top:0}
-.legal-body p{margin:0 0 13px}
-.legal-body ul{margin:0 0 14px;padding-left:20px}
-.legal-body li{margin-bottom:7px}
-.legal-foot{margin-top:30px;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:var(--slate)}
-
-/* Mobile. Every interactive control clears a 44px touch target. */
+${legalChromeCss()}
+/* Mobile touch targets for the SHELL's own controls. Deliberately not part of
+   legalChromeCss(): that block is injected last on every page, and a blanket
+   min-height on every button there would outrank the approved design. */
 @media(max-width:768px){
-  .theme-toggle{width:44px;height:44px}
-  .legal-link{min-height:44px;display:inline-flex;align-items:center}
-  .legal-page{padding:0}
-  .legal-inner{border:none;border-radius:0;box-shadow:none;min-height:100vh;padding:22px 18px 48px}
-  .legal-inner h1{font-size:23px}
   button,[role=button],input,select,textarea{min-height:44px}
-}
-@media(max-width:400px){
-  .legal-links{flex-direction:column;gap:0}
-  .legal-sep{display:none}
 }
 
 @media(prefers-reduced-motion:reduce){
@@ -1959,3 +2087,9 @@ export function buildPlatformFiles() {
 export { platformAdminMarkup };
 
 export const PLATFORM_CSS = platformCss() + PUSH_CSS;
+
+// The theme control + legal footer + legal page rules on their own. base.css
+// carries them (above) AND platform.js injects them, so a page that does not
+// link base.css — the sign-in screen — still renders them. Exported so a test
+// can assert the two copies are the same block rather than two that drift.
+export const LEGAL_CHROME_CSS = legalChromeCss();

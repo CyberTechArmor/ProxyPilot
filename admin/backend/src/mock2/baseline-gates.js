@@ -82,12 +82,19 @@ done
 
 # design.css must LOAD LAST, or base.css re-declares names the design defines
 # and the platform silently overrides the approved values.
+#
+# Matched on the LINK, not on the filename appearing anywhere in the file. The
+# plain grep read HTML comments as stylesheet links: login.html links only
+# design.css and says so in a comment that names base.css, and the gate failed
+# it for a load order it does not have. A gate about <link> order must look at
+# <link> tags.
+LINKRE='<link[^>]*href=["'"'"']*[^"'"'"'>]*'
 for f in public/*.html; do
   [ -f "$f" ] || continue
-  grep -q 'base.css' "$f" || continue
-  grep -q 'design.css' "$f" || continue
-  DPOS=$(grep -n 'design.css' "$f" | head -1 | cut -d: -f1)
-  BPOS=$(grep -n 'base.css' "$f" | head -1 | cut -d: -f1)
+  grep -Eq "\${LINKRE}base\.css" "$f" || continue
+  grep -Eq "\${LINKRE}design\.css" "$f" || continue
+  DPOS=$(grep -En "\${LINKRE}design\.css" "$f" | head -1 | cut -d: -f1)
+  BPOS=$(grep -En "\${LINKRE}base\.css" "$f" | head -1 | cut -d: -f1)
   if [ "$DPOS" -lt "$BPOS" ]; then
     echo "FAIL: $f links design.css BEFORE base.css, so the platform defaults win over the approved design."
     echo "      Link base.css first and design.css last."

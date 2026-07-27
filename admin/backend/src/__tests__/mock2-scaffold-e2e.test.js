@@ -22,7 +22,7 @@ import {
 } from '../mock2/scaffold-e2e.js';
 import { buildScaffoldFiles } from '../mock2/scaffold.js';
 import { buildAuthWiredFiles } from '../mock2/scaffold-auth.js';
-import { buildPlatformFiles } from '../mock2/scaffold-platform.js';
+import { buildPlatformFiles, LEGAL_CHROME_CSS, PLATFORM_CSS } from '../mock2/scaffold-platform.js';
 import { BASELINE_GATES, E2E_GATE_NAME, baselineGatesForProfile } from '../mock2/baseline-gates.js';
 import { mergeE2ePackageJson, PLATFORM_OWNED_ALWAYS } from '../mock2/base-app-upgrade-logic.js';
 
@@ -249,6 +249,22 @@ test('the sign-in page mounts the legal footer and a theme control', () => {
   assert.match(login, /min-height: 44px/, 'the theme control must be a 44px touch target');
 });
 
+test('the sign-in page links the approved design', () => {
+  // Its own header comment has always said its colours ride the design tokens.
+  // Nothing linked the stylesheet that defines them, so the screen shipped in
+  // the dark fallbacks below while every other page used the approved palette,
+  // and a build had to hand-patch the link in — one it could equally forget.
+  //
+  // /design.css also carries the ==bridge== block that defines --surface,
+  // --ink, --line and --shadow, which is what the legal footer and the legal
+  // pages read. Without the link they resolve to nothing on this page.
+  const login = buildAuthWiredFiles().find((f) => f.path === 'public/login.html').content;
+  assert.match(login, /<link rel="stylesheet" href="\/design\.css">/);
+  // And still NOT base.css: this page is self-contained by design, which is
+  // exactly why platform.js has to carry its own chrome CSS (below).
+  assert.doesNotMatch(login, /<link[^>]+href="\/base\.css"/);
+});
+
 test('platform.js mounts the footer itself rather than exposing it and hoping', () => {
   const js = buildPlatformFiles().find((f) => f.path === 'public/platform.js').content;
   assert.match(js, /function mountFooters/);
@@ -256,6 +272,59 @@ test('platform.js mounts the footer itself rather than exposing it and hoping', 
   // Twice: once immediately (the fallback keeps the screen legally complete
   // while the fetch is in flight) and again once branding has landed.
   assert.match(js, /load\(\)\.then\(mountFooters\)/);
+});
+
+test('platform.js carries the CSS for the UI it mounts', () => {
+  // The mount was fixed and the STYLING was not: platform.js mounted the
+  // footer onto the sign-in screen, which does not link base.css, so the
+  // Privacy / Terms links rendered as raw browser <button> chrome and the
+  // pages they opened were unstyled text. A module that mounts UI onto a page
+  // it does not control cannot assume that page has its stylesheet.
+  const js = buildPlatformFiles().find((f) => f.path === 'public/platform.js').content;
+  assert.match(js, /function ensureChromeCss/);
+  assert.match(js, /id = 'pp-legal-chrome-css'/);
+  assert.match(js, /head\.appendChild\(el\)/, 'appended LAST so it outranks a restyled page');
+  // Injected before the markup that needs it, on both entry paths.
+  assert.ok(js.indexOf('ensureChromeCss();') < js.indexOf('function mountFooters'));
+  assert.match(js, /function mountFooters\(\)\s*\{\s*ensureChromeCss\(\);/);
+
+  // The injected block is the SAME text base.css carries — one source, so the
+  // two copies cannot drift into a page that looks right until you sign in.
+  assert.ok(js.includes(JSON.stringify(LEGAL_CHROME_CSS).slice(1, -1)),
+    'platform.js must embed LEGAL_CHROME_CSS verbatim');
+  assert.ok(PLATFORM_CSS.includes(LEGAL_CHROME_CSS),
+    'base.css must carry the same block');
+
+  // Only platform-owned class names. This is injected last on EVERY page, so a
+  // bare element selector here would quietly outrank the approved design.
+  const selectors = LEGAL_CHROME_CSS
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((l) => /\{/.test(l) && !/^\s*(@media|\})/.test(l))
+    .flatMap((l) => l.split('{')[0].split(',').map((s) => s.trim()))
+    .filter(Boolean);
+  assert.ok(selectors.length > 10, 'selector extraction looks wrong');
+  for (const sel of selectors) {
+    assert.match(sel, /^(html|body)?\.(legal-|theme-toggle)/,
+      `${sel} is not a platform-owned class — it would outrank the approved design`);
+  }
+});
+
+test('a legal page opens over the screen instead of replacing it', () => {
+  // It used to capture document.body.innerHTML and write it back on "Back".
+  // Re-inserting markup re-creates every element WITHOUT its event listeners,
+  // and a <script src> re-inserted through innerHTML never runs — so reading
+  // the privacy policy from the sign-in screen left a form that could not be
+  // submitted, with nothing to show for it.
+  const js = buildPlatformFiles().find((f) => f.path === 'public/platform.js').content;
+  assert.doesNotMatch(js, /innerHTML\s*=\s*restore/, 'the innerHTML swap must be gone');
+  assert.match(js, /function openLegal/);
+  assert.match(js, /function closeLegal/);
+  assert.match(js, /className = 'legal-overlay'/);
+  assert.match(js, /appendChild\(openOverlay\)/);
+  assert.match(js, /aria-modal/, 'it is a dialog over the page, so say so');
+  assert.match(js, /e\.key === 'Escape'/, 'Escape must close it');
+  assert.match(LEGAL_CHROME_CSS, /\.legal-overlay\{position:fixed/);
 });
 
 test('the first click on the theme toggle always changes what you see', () => {

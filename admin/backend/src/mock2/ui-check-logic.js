@@ -312,6 +312,43 @@ export function buildBaselineChecks({ reviewerRole = null, viewerRole = null } =
   // a particular file changed is a baseline that is usually not checked.
   const base = { paths: ['**/*'] };
 
+  // SIGNED OUT, on /login. The only screen a visitor sees before they have an
+  // account, and the only page that does not link base.css — so it is where the
+  // platform's own chrome is least likely to be exercised and most likely to be
+  // wrong. It was: the footer mounted with no styling at all (raw browser
+  // <button> chrome for Privacy / Terms), and the legal pages it opened were
+  // unstyled text.
+  //
+  // The CLICK is the point. The signed-in baseline already asserted that
+  // `[data-legal-footer]` exists, and that stayed true the whole time — nothing
+  // ever OPENED a legal page, so nothing could notice what opening one did.
+  //
+  // What this can and cannot prove, plainly: it proves the links are reachable
+  // signed out, that a legal page renders its title and body, and that Back
+  // closes it. It does not read computed styles — the step vocabulary has no
+  // way to — so the styling itself is locked by unit tests over the generated
+  // CSS, not here.
+  checks.push({
+    ...base,
+    id: id('signin-legal'),
+    name: 'Signed out, the sign-in screen offers the legal pages and they open',
+    role: null,
+    page: '/login',
+    steps: [
+      { expect_visible: '[data-legal-footer] .legal-link' },
+      { expect_visible: '.theme-toggle' },
+      { click: '[data-legal="privacy"]' },
+      { expect_visible: '.legal-overlay .legal-inner h1' },
+      { expect_visible: '.legal-overlay .legal-body' },
+      { click: '.legal-overlay .legal-back' },
+      { expect_absent: '.legal-overlay' },
+      // Back leaves the sign-in screen standing. It used to be restored from a
+      // captured innerHTML, which brought the markup back without its event
+      // listeners and never re-ran /login.js.
+      { expect_visible: '[data-legal-footer] .legal-link' },
+    ],
+  });
+
   if (reviewerRole) {
     checks.push({
       ...base,

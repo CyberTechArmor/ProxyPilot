@@ -794,30 +794,43 @@ runs the live check after deploy (pending_verification is then your finish).
    test against the local fixture server); never fabricate a live test and
    never stub the transport to force a plain finish.
 
-# MOUNTING YOUR ROUTES: the one way to make the app unreachable
-A router mounted with NO path prefix runs its router-level middleware for every
-request the app receives, whatever paths are declared inside it:
+# MOUNTING YOUR ROUTES: YOUR ROUTERS GO LAST
+In \`src/app.ts\`, every \`app.use(...)\` of your own goes BELOW every platform
+mount — below the auth routes, the platform routes, the sign-in route and the
+static mount. Last. That is the whole rule, and it is not a style preference.
+
+A router runs its router-level middleware for every request that reaches it and
+matches its mount path, whatever the paths declared inside it:
 
     const router = Router();
     router.use(requireAuth);            // reasonable — for its own routes
-    router.get('/api/notes', ...);      // full paths, so mount at the root?
-    app.use(notesRoutes);               // <- now guards EVERY request
+    router.get('/api/notes', ...);
+    app.use(notesRoutes);               // <- now guards EVERYTHING below it
 
-That app deploys, passes its health check, and answers 401 to \`/login\` and to
-every stylesheet. Nobody can sign in; the live URL serves a JSON error body. It
-happened, it cost three resumed cycles to not find, and it typechecks.
+Mounted above the sign-in route, that answers 401 to \`/login\` and to every
+stylesheet: the live URL serves a JSON error body and the app looks dead.
 
-So, when you add routes to \`src/app.ts\`:
-- PREFER a path prefix — \`app.use('/api', notesRoutes)\` — and declare the paths
-  inside the router relative to it (\`router.get('/notes')\`, not
-  \`router.get('/api/notes')\`).
-- If you genuinely need a root mount, put it BELOW the \`app.get('/login', …)\`
-  route, never above it.
-- Guarding per route (\`router.get('/notes', requireAuth, handler)\`) is always
-  safe. \`router.use(requireAuth)\` is only safe on a path-prefixed router.
+Mounted above \`app.use('/api', authRoutes)\`, it answers 401 to
+\`/api/auth/bootstrap/status\` — and login.js reads a non-ok status there as "a
+user already exists", so it shows the sign-in form and HIDES the
+create-the-first-administrator link. The app LOOKS fine and nobody can ever
+create the first account. Both of these happened, on the same project, one
+after the other.
 
-The \`signin-reachable\` gate fails the build for this before it deploys, and
-names the line. Do not work around it by moving the sign-in route.
+A PATH PREFIX DOES NOT SAVE YOU. \`app.use('/api', notesRoutes)\` above
+\`app.use('/api', authRoutes)\` shadows \`/api/auth/*\` exactly the same way — the
+prefix matches, the router's guard runs, and the platform's auth API is never
+reached. Position is what matters, not the prefix.
+
+So:
+- Put your \`app.use(...)\` lines at the END of the route wiring, after the
+  platform's. A path prefix on top of that is good practice, not a substitute.
+- \`router.use(requireAuth)\` is fine once the router is mounted last. Guarding
+  per route (\`router.get('/notes', requireAuth, handler)\`) is safe anywhere.
+
+The \`signin-reachable\` gate fails the build for this before it deploys and
+names the line and the boundary. Do not work around it by moving the sign-in
+route or the platform's mounts — move YOURS down.
 
 # What ProxyPilot runs FOR you after you finish — do not rebuild it
 The moment you call finish and the gates are green, the platform checkpoints,

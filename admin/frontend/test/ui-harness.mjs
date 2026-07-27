@@ -28,6 +28,7 @@ const project = {
 };
 
 const J = (body) => ({ body: JSON.stringify(body), type: 'application/json' });
+let jobTick = 0;   // advanced on each chat poll when JOB=live
 
 function api(pathname) {
   const USER = {
@@ -48,7 +49,26 @@ function api(pathname) {
       : process.env.MESSAGES === 'user'
         ? [{ id: 1, kind: 'user', body: 'a clinic check-in app', created_at: '2026-07-01T00:00:00Z' }]
         : [];
-    return J({ messages, job: null, audit_job: null, stage: project.stage, open_question_ids: [], current_mockup_id: project.current_mockup_id });
+    // JOB=live drives a running design turn whose narration ADVANCES between
+    // polls and whose streamed reply GROWS — the two things the chat has to
+    // follow. Without it a check can only see a static page.
+    let job = null;
+    if (process.env.JOB === 'live') {
+      jobTick += 1;
+      const phases = [
+        'Thinking…',
+        'Writing…',
+        `Designing the mockup… (${jobTick}k characters — the preview fills in live)`,
+        `Designing the mockup… (${jobTick * 3}k characters — the preview fills in live)`,
+        'Wiring the interactive bits (navigation, dialogs, sample data)',
+      ];
+      job = {
+        phase: 'designing', kind: 'turn', cycleId: 1,
+        message: phases[Math.min(jobTick - 1, phases.length - 1)],
+        partial: 'Here is what I am building for you. '.repeat(Math.min(jobTick * 3, 60)),
+      };
+    }
+    return J({ messages, job, audit_job: null, stage: project.stage, open_question_ids: [], current_mockup_id: project.current_mockup_id });
   }
   if (/\/mock2\/projects\/\d+\/provision/.test(pathname)) return J({ progress: null, job: null });
   if (/\/mock2\/projects\/\d+\/lock/.test(pathname)) return J({ lock: { held: false } });

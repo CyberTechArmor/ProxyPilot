@@ -32,7 +32,7 @@ import {
 } from 'lucide-react';
 import { SetupProgress } from './ProjectPreview';
 import ProjectAssets from './ProjectAssets';
-import { ChatBubble, RuleQuestion, StreamingBubble } from './chat-messages';
+import { ChatBubble, RuleQuestion, StreamingBubble, ActivityStream } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
@@ -73,6 +73,16 @@ function StageIndicator({ stage }) {
 // `fill` — render as a panel that takes exactly its parent's height (the phone
 // workspace) instead of sizing to its content. Off everywhere else, so the
 // stacked desktop/tablet layouts keep the growth behaviour they were tuned for.
+// Two narration lines are "the same step" when they share their opening clause
+// — the part before the first em-dash, bracket or ellipsis. That is where the
+// phase name lives ("Designing the mockup…"), and everything after it is the
+// detail that keeps changing ("(29k characters)", "(18s — …)"). Without this the
+// timeline printed a new row every second and a half of a five-minute render.
+function sameNarration(a, b) {
+  const head = (t) => String(t || '').split(/[—(…]/)[0].trim().toLowerCase();
+  return head(a) === head(b);
+}
+
 export default function ConceptStage({
   projectId, project, canEdit, onApproved, onMockupChanged, archived = false, fill = false,
   provLog = null, provMessage = null, onOpenAssets = null,
@@ -90,6 +100,20 @@ export default function ConceptStage({
   const [designDirection, setDesignDirection] = useState('theme'); // 'plan' | 'design' — directs the turn
   const scrollRef = useRef(null);
   const composerRef = useRef(null);   // focused when the assets modal hands back
+  // Auto-scroll cadence, the same one the build chat uses: follow the newest
+  // content while something is running, and never fight the reader.
+  // interactedRef — the user scrolled up to read, so following pauses until
+  // they come back to the bottom. lastUserMsgIdRef — their own send re-arms it.
+  const interactedRef = useRef(false);
+  const lastUserMsgIdRef = useRef(null);
+  const wasActiveRef = useRef(false);
+  // WHAT IT IS DOING, accumulated rather than replaced. The design stage showed
+  // one muted line that each new phase overwrote, so the only thing on screen
+  // during a two-to-five minute render was whatever it happened to be doing at
+  // that instant — with no sense of progress and nothing to read. The build
+  // chat keeps a timeline; this keeps the same one.
+  const [designActivity, setDesignActivity] = useState([]);
+  const activityCycleRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && !archived && project?.lifecycle === 'active');
   const wasApproved = useRef(!!project?.design_approved_at);
   // The "bring your logo" question, asked as a modal BEFORE the chat can be
@@ -164,6 +188,43 @@ export default function ConceptStage({
   // The streamed reply (Anthropic connectors): partial text on the turn job —
   // rendered as a live assistant bubble; poll faster while it's arriving.
   const jobPartial = jobActive ? (data?.job?.partial || null) : null;
+
+  // Accumulate the job's narration into a timeline. Each distinct message is a
+  // line; a repeat of the line already at the bottom is ignored, so the
+  // character-count updates during a render ("Designing the mockup… (29k
+  // characters)") refresh in place instead of printing thirty near-identical
+  // rows. A new cycle starts a fresh timeline.
+  const jobMessage = data?.job?.message || null;
+  const jobCycleId = data?.job?.cycleId ?? data?.job?.cycle_id ?? null;
+  useEffect(() => {
+    if (!jobActive) return;
+    if (activityCycleRef.current !== jobCycleId) {
+      activityCycleRef.current = jobCycleId;
+      setDesignActivity(jobMessage ? [{ type: 'message', text: jobMessage, seq: 0 }] : []);
+      return;
+    }
+    if (!jobMessage) return;
+    setDesignActivity((prev) => {
+      const last = prev[prev.length - 1];
+      // Same phase, refreshed detail (a growing character count) → replace the
+      // line rather than stack it.
+      if (last && sameNarration(last.text, jobMessage)) {
+        if (last.text === jobMessage) return prev;
+        return [...prev.slice(0, -1), { ...last, text: jobMessage }];
+      }
+      return [...prev, { type: 'message', text: jobMessage, seq: prev.length }];
+    });
+  }, [jobActive, jobMessage, jobCycleId]);
+
+  // Clear the timeline once the work is done — the durable reply is the record
+  // from then on, and leaving the narration up under it reads as still running.
+  useEffect(() => {
+    if (!jobActive && designActivity.length) {
+      const t = setTimeout(() => setDesignActivity([]), 400);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  }, [jobActive, designActivity.length]);
   const shouldPoll = !archived && (jobActive || auditActive || openQuestionCount > 0 || projectOpenQuestions > 0);
   useEffect(() => {
     if (!shouldPoll) return undefined;
@@ -196,19 +257,79 @@ export default function ConceptStage({
     }
   };
 
-  // Land on the TOP of the newest message, not its end — a long reply read
-  // from the bottom means scrolling back up to find its start (user report).
-  // While a reply streams this keeps its first line pinned in view.
+  // The build chat's auto-scroll, ported wholesale — the design stage had a
+  // one-shot "land on the newest message" and nothing that FOLLOWED growing
+  // content, so a streaming reply and a growing timeline scrolled out from
+  // under the reader.
+  //
+  // 1) Taking control. A wheel or touch gesture means the reader is reading;
+  //    following pauses until they come back to the bottom. A plain 'scroll'
+  //    event is NOT intent — our own programmatic scroll fires one too — so
+  //    only the near-bottom check re-arms.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return undefined;
+    const took = () => { interactedRef.current = true; };
+    const onScroll = () => {
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) interactedRef.current = false;
+    };
+    el.addEventListener('wheel', took, { passive: true });
+    el.addEventListener('touchmove', took, { passive: true });
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      el.removeEventListener('wheel', took);
+      el.removeEventListener('touchmove', took);
+      el.removeEventListener('scroll', onScroll);
+    };
+  }, []);
+
+  // 2) Follow-the-work. While a turn runs, stay pinned to the newest content as
+  //    it grows. A MutationObserver catches EVERY change — the streamed reply
+  //    growing by a word, a new timeline row — not just the React deps, which is
+  //    what makes it feel smooth rather than jumpy.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !(jobActive || auditActive)) return undefined;
+    const follow = () => { if (!interactedRef.current) el.scrollTop = el.scrollHeight; };
+    follow();
+    const mo = new MutationObserver(follow);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => mo.disconnect();
+  }, [jobActive, auditActive]);
+
+  // 3) A new turn starting re-engages following: the operator asked for it and
+  //    wants to watch it, even if they had scrolled up during the last one.
+  useEffect(() => {
+    const active = jobActive || auditActive;
+    if (active && !wasActiveRef.current) interactedRef.current = false;
+    wasActiveRef.current = active;
+  }, [jobActive, auditActive]);
+
+  // 4) Where to land when content arrives. Their own send goes to the bottom.
+  //    While work runs, the bottom (the timeline grows there). Otherwise the TOP
+  //    of the newest message, so a long reply reads from its first line instead
+  //    of making them scroll back up to find the start.
+  const newestMsg = shownMessages[shownMessages.length - 1] || null;
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // Skip trailing status rows ("Thinking…") — the target is the newest real
-    // message (or the streaming bubble), read from its first line.
+    if (newestMsg && newestMsg.kind === 'user' && newestMsg.id !== lastUserMsgIdRef.current) {
+      lastUserMsgIdRef.current = newestMsg.id;
+      interactedRef.current = false;
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    if (interactedRef.current) return;
+    if (jobActive || auditActive) { el.scrollTop = el.scrollHeight; return; }
     const kids = [...el.children].filter((k) => !k.hasAttribute('data-scroll-skip'));
     const last = kids[kids.length - 1];
     if (!last) return;
     el.scrollTop = Math.max(0, last.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 8);
-  }, [data?.messages?.length, data?.job?.phase, data?.job?.partial?.length]);
+  }, [
+    data?.messages?.length, jobActive, auditActive,
+    data?.job?.phase, data?.job?.partial?.length,
+    newestMsg?.id, newestMsg?.kind, designActivity.length,
+  ]);
 
   const stage = data?.stage || project?.stage;
   const approved = !!stage?.design_approved;
@@ -664,11 +785,19 @@ export default function ConceptStage({
               during a mockup render the heartbeat narration ("rendering the
               design…") still matters even while the reply text is visible. */}
           {!archived && jobPartial ? <StreamingBubble text={jobPartial} /> : null}
+          {/* WHAT IT IS DOING — the same timeline the build chat shows, rather
+              than one muted line that each phase overwrote. A mockup render runs
+              for two to five minutes; a single line that changes every so often
+              gives no sense of progress and nothing to read while waiting. */}
           {!archived && (jobActive || auditActive) ? (
-            <div data-scroll-skip className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              {data?.job?.message || auditJob?.message || 'Working…'}
-            </div>
+            designActivity.length ? (
+              <ActivityStream items={designActivity} working />
+            ) : (
+              <div data-scroll-skip className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {data?.job?.message || auditJob?.message || 'Working…'}
+              </div>
+            )
           ) : null}
         </div>
 

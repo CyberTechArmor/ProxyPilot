@@ -35,6 +35,7 @@ import {
   listCyclesForProject, projectHasBeenDeployed } from './cycles.js';
 import {
   parseGateScripts, buildGateBattery, gatesForProfile, initialGateReports, gateBatteryVerdict, allGatesGreen,
+  gateStatusFromOutput,
   interruptDecision, estimateCycleTokens, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
   noopStartRefusal,
   normalizeBuildMode, isFastBuildMode, BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK,
@@ -98,7 +99,7 @@ import { needsOperatorUiVerification, smokeConfigFromEnv } from './smoke-trigger
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
   acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord, codeChangedFiles,
-  mutationActions, actionParityReport,
+  mutationActions, actionParityReport, actionLabelWords,
 } from './acceptance-logic.js';
 import {
   evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
@@ -1413,12 +1414,54 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           const inventory = invRead.ok ? JSON.parse(invRead.content) : null;
           const actions = inventory && !inventory.skipped ? mutationActions(inventory) : [];
           if (actions.length) {
+            // Two greps per label, and the second one is why this is not a
+            // label-matching gate any more.
+            //
+            //   FOUND — the contract's exact label is in the source.
+            //   WORDS — it is not, but every significant word of it lands on
+            //           ONE line of UI source, so a control for that action
+            //           exists under a different name.
+            //
+            // Project 42's inventory said "Delete asset"; the platform admin
+            // console already shipped exactly that control, labelled otherwise,
+            // wired to DELETE /branding/assets/:id. On the exact match alone
+            // the gate called it silently missing, rejected the finish, and the
+            // build spent seven searches finding out the feature was already
+            // there — then renamed the control to satisfy the grep. Rejecting a
+            // finish over a name is how a gate teaches a build to edit labels
+            // for the detector.
+            const wordGrep = (a) => {
+              const words = actionLabelWords(a.label).filter((w) => /^[a-z0-9]+$/.test(w)).slice(0, 6);
+              if (!words.length) return null;
+              if (words.length === 1) return `grep -rqi -- '${words[0]}' src public app views 2>/dev/null`;
+              return `grep -rhi -- '${words[0]}' src public app views 2>/dev/null`
+                + words.slice(1, -1).map((w) => ` | grep -i -- '${w}'`).join('')
+                + ` | grep -qi -- '${words[words.length - 1]}'`;
+            };
             const script = ['cd "' + APP_DIR + '"']
-              .concat(actions.map((a) => `l=$(printf '%s' '${b64(a.label)}' | base64 -d); if grep -rqiF -- "$l" src public app views 2>/dev/null; then printf 'FOUND\\t%s\\n' "$l"; fi`))
+              .concat(actions.map((a) => {
+                const wg = wordGrep(a);
+                return `l=$(printf '%s' '${b64(a.label)}' | base64 -d)\n`
+                  + `if grep -rqiF -- "$l" src public app views 2>/dev/null; then printf 'FOUND\\t%s\\n' "$l"\n`
+                  + (wg ? `elif ${wg}; then printf 'WORDS\\t%s\\n' "$l"\n` : '')
+                  + 'fi';
+              }))
               .join('\n');
             const gr = await containerSh(containerName, script, { timeoutMs: 60000 });
-            const found = new Set(String(gr.stdout || '').split('\n').filter((x) => x.startsWith('FOUND\t')).map((x) => x.slice(6).trim().toLowerCase()));
-            const parity = actionParityReport(actions, found);
+            const tagged = (tag) => new Set(String(gr.stdout || '').split('\n')
+              .filter((x) => x.startsWith(`${tag}\t`)).map((x) => x.slice(tag.length + 1).trim().toLowerCase()));
+            const found = tagged('FOUND');
+            const wordHits = tagged('WORDS');
+            const parity = actionParityReport(actions, found, wordHits);
+            if (parity.drifted?.length) {
+              // Reported, never blocking: the action shipped, its NAME drifted
+              // from the approved contract. Worth an operator's attention and
+              // not worth a build round-trip.
+              logEvent('note', {
+                role: 'system',
+                content: `Action parity: ${parity.drifted.length} action(s) present under a different label than the contract: ${parity.drifted.slice(0, 8).map((a) => `"${a.label}"`).join(', ')}`,
+              });
+            }
             if (!parity.ok && !parityRejected) {
               parityRejected = true;
               const list = parity.missing.slice(0, 10).map((a) => `"${a.label}" (${a.screen})`).join(', ');
@@ -2289,7 +2332,10 @@ export async function runGateBattery(cycleId, containerName, gateScripts) {
     const out = r.stdout || '';
     const m = out.match(/__MOCK2_GATE_EXIT__:(\d+)\s*$/);
     const exit = m ? Number(m[1]) : (r.code === 0 ? 0 : 1);
-    reports[i].status = exit === 0 ? 'passed' : 'failed';
+    // A gate that exits 0 while saying it did not run is 'skipped'. Reporting
+    // it as 'passed' is how a battery reads 8/8 green with a member that
+    // executed nothing (project 42: e2e, no browser installed).
+    reports[i].status = gateStatusFromOutput(exit, out);
     reports[i].report = out.replace(/__MOCK2_GATE_EXIT__:\d+\s*$/, '').trim().slice(-MAX_TOOL_RESULT_CHARS);
     updateCycle(cycleId, { gates_json: JSON.stringify(reports) });
   }

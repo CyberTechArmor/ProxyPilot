@@ -25,6 +25,10 @@ function gateState(status) {
   if (status === 'passed') return 'done';
   if (status === 'failed') return 'failed';
   if (status === 'running') return 'active';
+  // A gate that exited 0 saying it did not run. It resolved, so it must not
+  // sit on 'pending' forever in the progress tree — but it is not 'done'
+  // either, which is the whole point of having the status.
+  if (status === 'skipped') return 'skipped';
   return 'pending';
 }
 

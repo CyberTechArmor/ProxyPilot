@@ -865,3 +865,91 @@ test('END TO END: the review calls the drift, and stays quiet when there is none
   // palette it was already handed.
   assert.deepEqual(clean.findings, [], `a faithful app should have nothing to say: ${JSON.stringify(clean.findings)}`);
 });
+
+/* ------------------------------------------------------------------------- *
+ * Gate honesty: a pass that did less than a pass must say so.
+ * ------------------------------------------------------------------------- */
+
+// A design with N approved component classes and M approved variables, and an
+// app that adopts a controllable fraction of each. Built rather than fixtured
+// because the thresholds are ratios, and a fixture pins the wrong thing.
+function designFixture({ classes = 20, adoptClasses = 20, vars = 20, useVars = 20 }) {
+  // Class names 4+ chars: the gate's extractor is /[.][A-Za-z][A-Za-z0-9_-]{2,}/,
+  // and two-character names silently matched nothing — which made the first
+  // version of this test measure a design with no components in it.
+  const cls = Array.from({ length: classes }, (_, i) => `card${String(i).padStart(2, '0')}`);
+  const vs = Array.from({ length: vars }, (_, i) => `--tok${String(i).padStart(2, '0')}`);
+  // The four --app-* names the shell check requires are approved variables too,
+  // so the ratio the gate sees counts them.
+  const design = `:root{--app-bg:#fff;--app-text:#000;--app-surface:#fff;--app-primary:#06c;`
+    + `${vs.map((v) => `${v}:#123456;`).join('')}}\n`
+    + cls.map((c) => `.${c}{color:var(--app-text)}`).join('\n');
+  const appCss = `${vs.slice(0, useVars).map((v, i) => `.own${i}{color:var(${v})}`).join('\n')}\n`
+    + `${'/* padding to clear the 2000-byte "has it built anything" floor */\n'.repeat(40)}`;
+  const html = `<html><body>${cls.slice(0, adoptClasses).map((c) => `<div class="${c}">x</div>`).join('')}`
+    + `${'<p>screen content padding to clear the byte floor</p>'.repeat(50)}</body></html>`;
+  return { 'state/design.css': design, 'public/app.css': appCss, 'public/screen.html': html };
+}
+
+// What the gate itself measured, so the assertions test the RULE rather than a
+// fixture's arithmetic.
+function adherenceCounts(out) {
+  const v = out.match(/(\d+) approved variable\(s\); the app uses (\d+)/);
+  const c = out.match(/defines (\d+) component class\(es\); the built screens use (\d+)/);
+  return { approved: +v[1], used: +v[2], dclass: +c[1], uclass: +c[2] };
+}
+
+test('design-adherence: full adoption passes clean; partial adoption passes and SAYS it is partial', () => {
+  // Project 42 used 51 of 128 approved component classes on a build whose whole
+  // instruction was "reproduce the mockup faithfully", and reported the same
+  // single word — "Passed." — as a build that used all of them. 8/8 green is
+  // what the operator read before trusting the deploy.
+  const full = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({}));
+  assert.equal(full.code, 0);
+  const fc = adherenceCounts(full.out);
+  assert.equal(fc.uclass, fc.dclass, 'the fixture must actually adopt every class');
+  assert.match(full.out, /the app builds on the approved design.*Passed\./);
+  assert.doesNotMatch(full.out, /PARTIAL/);
+
+  // STRONG ON ONE ROUTE IS A CLEAN PASS. A build that wears every approved
+  // component class and references few variables is faithful — the gate says so
+  // itself — and flagging it would be noise. The first version of this rule did
+  // exactly that on a fixture that adopted 6 of 6 classes.
+  const componentsOnly = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({ useVars: 2 }));
+  assert.equal(componentsOnly.code, 0);
+  assert.doesNotMatch(componentsOnly.out, /PARTIAL/, 'full component adoption is faithful, not partial');
+  const varsOnly = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({ adoptClasses: 6 }));
+  assert.equal(varsOnly.code, 0);
+  assert.doesNotMatch(varsOnly.out, /PARTIAL/, 'full variable adoption is faithful, not partial');
+
+  // NEITHER route at half — over the failing bar, under half on both.
+  const partial = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({ classes: 20, adoptClasses: 8, vars: 20, useVars: 8 }));
+  assert.equal(partial.code, 0, 'a partial pass must not red the build — that would fail honest work over taste');
+  const pc = adherenceCounts(partial.out);
+  assert.ok(pc.uclass * 4 >= pc.dclass && pc.used * 4 >= pc.approved, 'the fixture must clear the failing bars');
+  assert.ok(pc.uclass * 2 < pc.dclass && pc.used * 2 < pc.approved, 'and sit under half on both routes');
+  assert.match(partial.out, /PARTIAL/);
+  assert.doesNotMatch(partial.out, /and the shell is bridged onto it\. Passed\./);
+
+  // The numbers must survive the cycle report, which keeps each gate's LAST
+  // THREE LINES — which is how project 42's variable count reached nobody.
+  const tail = partial.out.trim().split('\n').slice(-3).join('\n');
+  assert.match(tail, new RegExp(`${pc.uclass} of ${pc.dclass} approved component classes`));
+  assert.match(tail, new RegExp(`${pc.used} of ${pc.approved} approved variables`));
+
+  // Still red when it is actually red: nothing adopted either way.
+  const none = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({ adoptClasses: 0, useVars: 0 }));
+  assert.equal(none.code, 1, 'no adoption at all is still a failure, not a partial');
+});
+
+test('design-adherence: PARTIAL is reported as a pass, and a no-design skip as a skip', async () => {
+  const { gateStatusFromOutput } = await import('../mock2/cycle-logic.js');
+  const partial = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({ classes: 20, adoptClasses: 8, vars: 20, useVars: 8 }));
+  assert.equal(gateStatusFromOutput(partial.code, partial.out), 'passed',
+    'PARTIAL passed — the battery status must not turn it into a skip');
+  // No approved design at all: the gate exits 0 having done nothing, and the
+  // battery must say so rather than count it toward "all green".
+  const nodesign = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, { 'public/app.css': '.x{color:red}' });
+  assert.equal(nodesign.code, 0);
+  assert.equal(gateStatusFromOutput(nodesign.code, nodesign.out), 'skipped');
+});

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import {
   isActiveStatus, isTerminalStatus, isValidInterrupt, interruptDecision,
-  estimateCycleTokens, gateBatteryVerdict, allGatesGreen, parseGateScripts,
+  estimateCycleTokens, gateBatteryVerdict, allGatesGreen, parseGateScripts, gateStatusFromOutput,
   initialGateReports, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
   publicCycleShape,
 } from '../mock2/cycle-logic.js';
@@ -75,6 +75,30 @@ test('gateBatteryVerdict / allGatesGreen', () => {
   assert.equal(gateBatteryVerdict([{ status: 'passed' }, { status: 'passed' }]), 'green');
   assert.equal(allGatesGreen([{ status: 'passed' }]), true);
   assert.equal(allGatesGreen([{ status: 'passed' }, { status: 'failed' }]), false);
+  // A skipped gate RESOLVES green — it is the same exit 0 it always returned,
+  // and blocking a checkpoint on a missing browser binary would be a
+  // regression. The status exists so the report can stop calling it "passed".
+  assert.equal(gateBatteryVerdict([{ status: 'passed' }, { status: 'skipped' }]), 'green');
+  assert.equal(allGatesGreen([{ status: 'skipped' }, { status: 'passed' }]), true);
+  assert.equal(gateBatteryVerdict([{ status: 'skipped' }, { status: 'failed' }]), 'red');
+  assert.equal(gateBatteryVerdict([{ status: 'skipped' }, { status: 'running' }]), 'pending');
+});
+
+test('gateStatusFromOutput: a gate that exits 0 saying it did not run is skipped, not passed', () => {
+  // The exact line project 42 shipped behind, inside eight green gates.
+  assert.equal(gateStatusFromOutput(0, 'e2e: no browser installed; skipped. Run: npm run e2e:install'), 'skipped');
+  assert.equal(gateStatusFromOutput(0, 'ui-interaction: no user-facing paths in this change; skipped.'), 'skipped');
+  assert.equal(gateStatusFromOutput(0, 'design-adherence: no state/design.css - nothing approved to adhere to. Skipped.'), 'skipped');
+  // A gate that really ran prints a verdict, and that is what separates the two.
+  assert.equal(gateStatusFromOutput(0, 'ui-interaction: OK - 7 file(s) covered by 6 check(s).'), 'passed');
+  assert.equal(gateStatusFromOutput(0, 'platform-intact: the platform module is present. Passed.'), 'passed');
+  // A gate that skips ONE sub-check and then passes is passed, not skipped —
+  // which is why both halves of the rule are load-bearing.
+  assert.equal(gateStatusFromOutput(0, 'test: 3 suites skipped\ntest: 41 passed. Passed.'), 'passed');
+  // Nothing about a non-zero exit changes.
+  assert.equal(gateStatusFromOutput(1, 'e2e: FAIL - 2 specs failed'), 'failed');
+  assert.equal(gateStatusFromOutput(1, 'anything; skipped.'), 'failed');
+  assert.equal(gateStatusFromOutput(0, ''), 'passed');
 });
 
 test('parseGateScripts: sorts by order, drops malformed, tolerates bad json', () => {

@@ -426,3 +426,102 @@ test('a model check with a baseline id wins on its own ground', () => {
   assert.equal(out.checks.filter((c) => c.id === mine.id).length, 1);
   assert.deepEqual(out.checks.find((c) => c.id === mine.id).steps, [{ click: '#x' }]);
 });
+
+/* ------------------------------------------------------------------------- *
+ * The format is the PLATFORM's. It must hand it over, not make each build
+ * derive it.
+ *
+ * Project 42's ui-interaction gate failed on a missing state/ui-checks.json,
+ * and the build's next move was to read `/srv/gates/01-ui-interaction.sh` and
+ * grep the filesystem for the schema — because the failure said "add
+ * interaction checks covering the touched screens" and stopped. Five turns at
+ * the fattest end of the context, for a file shape the platform owns.
+ *
+ * The loop this closes: what the gate PRINTS must be valid JSON, must satisfy
+ * the gate itself, and must survive the strict post-deploy parser. Two builds
+ * in a row (38, 42) shipped a spec that cleared the gate and then failed that
+ * parser after deploy, so "the gate accepts it" is not enough on its own.
+ * ------------------------------------------------------------------------- */
+
+test('the ui-interaction gate hands over a template that is valid JSON, passes itself, and parses', async () => {
+  const { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+  const { execFileSync, spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const path = (await import('node:path')).default;
+  const { fileURLToPath } = await import('node:url');
+
+  if (spawnSync('git', ['--version']).status !== 0) return; // the gate stands down without git anyway
+
+  const seed = JSON.parse(readFileSync(fileURLToPath(new URL('../mock2/framework-seed/gates.json', import.meta.url)), 'utf8'));
+  const gate = seed.find((g) => g.name === 'ui-interaction');
+  assert.ok(gate, 'the seed battery must still carry ui-interaction');
+
+  const dir = mkdtempSync(path.join(tmpdir(), 'pp-uicheck-'));
+  const sh = (args, opts = {}) => spawnSync(args[0], args.slice(1), { cwd: dir, encoding: 'utf8', ...opts });
+  const runGate = () => {
+    try { return { code: 0, out: execFileSync('sh', ['.gate.sh'], { cwd: dir, encoding: 'utf8' }) }; }
+    catch (e) { return { code: e.status ?? 1, out: `${e.stdout || ''}${e.stderr || ''}` }; }
+  };
+  try {
+    writeFileSync(path.join(dir, '.gate.sh'), gate.script);
+    mkdirSync(path.join(dir, 'public'), { recursive: true });
+    mkdirSync(path.join(dir, 'state'), { recursive: true });
+    sh(['git', 'init', '-q']);
+    writeFileSync(path.join(dir, 'public', 'app.html'), '<p>before</p>\n');
+    sh(['git', 'add', '-A']);
+    sh(['git', '-c', 'user.email=t@fixture.invalid', '-c', 'user.name=t', 'commit', '-qm', 'init']);
+    // A user-facing change with no spec — the exact state project 42 was in.
+    writeFileSync(path.join(dir, 'public', 'app.html'), '<p>after</p>\n');
+
+    const failed = runGate();
+    assert.equal(failed.code, 1, 'a user-facing change with no spec must still fail');
+    assert.match(failed.out, /state\/ui-checks\.json is missing or invalid/);
+
+    // The template it printed, taken exactly as a build would take it.
+    const lines = failed.out.split('\n');
+    const first = lines.findIndex((l) => l.trim() === '{');
+    const last = lines.length - 1 - [...lines].reverse().findIndex((l) => l.trim() === '}');
+    assert.ok(first > -1 && last > first, 'the failure must print a complete JSON object, not prose about one');
+    const template = lines.slice(first, last + 1).join('\n');
+
+    let parsed;
+    assert.doesNotThrow(() => { parsed = JSON.parse(template); },
+      'the printed template must be valid JSON — a // comment in it is a trap, not documentation');
+    assert.ok(Array.isArray(parsed.checks) && parsed.checks.length, 'it must show a real check');
+    assert.ok(parsed.checks[0].steps.length >= 3, 'and enough steps to show the vocabulary');
+
+    // It satisfies the gate that printed it.
+    writeFileSync(path.join(dir, 'state', 'ui-checks.json'), template);
+    const passed = runGate();
+    assert.equal(passed.code, 0, `the gate must accept its own template, got: ${passed.out}`);
+    assert.match(passed.out, /ui-interaction: OK/);
+
+    // And the STRICT post-deploy parser, which is the one that reds a build
+    // after a successful deploy.
+    const strict = parseUiChecks(template);
+    assert.equal(strict.ok, true, `the post-deploy parser must accept it: ${strict.error}`);
+    assert.equal(strict.spec.checks.length, parsed.checks.length);
+    assert.ok(strict.spec.checks[0].steps.length >= 3);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the runner prompt hands over the ui-checks format and the post-deploy contract', () => {
+  const prompt = buildRunnerSystemPrompt({ constitution: 'C', skills: [], buildMode: 'mvp' });
+
+  // The same template, in the prompt, so a build never has to reach the gate
+  // failure to learn the shape.
+  assert.match(prompt, /"checks":\s*\[\{/);
+  assert.match(prompt, /"expect_text":\s*"#note-grid",\s*"contains"/);
+  assert.match(prompt, /omit it to\s+run the check SIGNED OUT/);
+
+  // What the platform runs after finish — the section that exists because one
+  // build spent 34 of 73 turns and 41% of its cost rebuilding it by hand.
+  assert.match(prompt, /What ProxyPilot runs FOR you after you finish/);
+  for (const dontRebuild of ['scratch database', 'boot the server', 'mint your own auth tokens']) {
+    assert.ok(prompt.includes(dontRebuild), `the prompt must name "${dontRebuild}" as something not to hand-roll`);
+  }
+  // And the bar it replaces, stated so "verify" cannot be read as "boot it".
+  assert.match(prompt, /It does not mean you booted the app/);
+});

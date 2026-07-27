@@ -390,15 +390,49 @@ export function mutationActions(inventory) {
   return out;
 }
 
-// Classify against the labels actually found in UI source (case-insensitive
-// set from the orchestrator's container grep). A label present in the UI is
-// surfaced either way — working control or a visible "Not built yet" badge;
-// a label present NOWHERE is silently missing, which fails the gate.
-export function actionParityReport(actions = [], foundLabelsLower = new Set()) {
+// The significant words of an action label — what a control implementing it
+// would have to mention somewhere, whatever it calls itself. Short words carry
+// no signal, so they are dropped ("Add to list" → ['add', 'list']).
+const PARITY_STOPWORDS = new Set(['the', 'a', 'an', 'to', 'of', 'for', 'from', 'this', 'that', 'and', 'or', 'new']);
+
+export function actionLabelWords(label) {
+  return String(label || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length >= 3 && !PARITY_STOPWORDS.has(w));
+}
+
+// Classify against what was actually found in UI source. Three outcomes, not
+// two:
+//
+//   present  — the contract's exact label is in the source. Working control or
+//              a visible "Not built yet" badge; either way it is surfaced.
+//   drifted  — the label is NOT there, but every significant word of it appears
+//              together on one line of UI source. The action exists under a
+//              different name.
+//   missing  — nothing. This is the silent drop the gate exists to catch.
+//
+// WHY `drifted` earns its own bucket. Project 42's inventory said "Delete
+// asset" and the platform admin console already shipped that control, labelled
+// differently, wired to DELETE /branding/assets/:id. Exact-label matching
+// called it silently missing, so the gate rejected the finish and the build
+// spent seven searches and a round-trip discovering that the feature was there
+// all along — then renamed a control to satisfy the grep. That is the gate
+// teaching a build to edit labels for the detector, which is precisely what the
+// runner is told never to do.
+//
+// Only `missing` rejects a finish. `drifted` is reported, because a real
+// mismatch between the approved contract and the shipped label is worth
+// knowing about — it is just not evidence the action was dropped.
+export function actionParityReport(actions = [], foundLabelsLower = new Set(), wordHitLabelsLower = new Set()) {
   const present = [];
+  const drifted = [];
   const missing = [];
   for (const a of actions) {
-    (foundLabelsLower.has(a.label.toLowerCase()) ? present : missing).push(a);
+    const key = a.label.toLowerCase();
+    if (foundLabelsLower.has(key)) present.push(a);
+    else if (wordHitLabelsLower.has(key)) drifted.push(a);
+    else missing.push(a);
   }
-  return { ok: missing.length === 0, present, missing };
+  return { ok: missing.length === 0, present, drifted, missing };
 }

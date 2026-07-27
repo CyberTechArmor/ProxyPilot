@@ -571,6 +571,27 @@ export async function afterBuildReview(projectId, { reason = 'build close' } = {
     if (message) insertMessage({ projectId: id, kind: 'system', body: message });
   } catch (e) { console.warn('[mock2] post-build readiness check failed:', e?.message); }
 
+  // THE APP IS LIVE AND HAS NO ADMINISTRATOR — say so, HERE, at the end.
+  //
+  // The first account belongs to the operator and the build may not create it.
+  // The only thing that ever announced that was the sign-in page itself, which
+  // an operator sees mid-build if they happen to look: "there is limited time
+  // from seeing the create super admin first user, then when the app finishes
+  // I'm unable to log in". Nothing was expiring — but nothing told them at the
+  // moment they could act, either, so it read as a window they had missed.
+  //
+  // Posted once per build close, only while the door is genuinely open, and
+  // only when the app answered — an unreachable app is the readiness check's
+  // story to tell, not this one's.
+  try {
+    const { readAppAccess } = await import('./app-access.js');
+    const { firstAdminInviteMessage } = await import('./app-access-logic.js');
+    const project = getProject(id);
+    const state = await readAppAccess(project);
+    const invite = firstAdminInviteMessage({ project, state });
+    if (invite) insertMessage({ projectId: id, kind: 'system', body: invite });
+  } catch (e) { console.warn('[mock2] first-admin invite check failed:', e?.message); }
+
   console.log(`[mock2] auto design review starting for project ${id} (${reason})`);
   return maybeAutoDesignReview(getProject(id));
 }

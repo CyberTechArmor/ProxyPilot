@@ -1530,6 +1530,10 @@ export const api = {
     request(`/mock2/projects/${id}/base-app/deploy`, { method: 'POST' }),
   // Live probe for the "Open app" button: is the REAL app answering its port?
   mock2AppLive: (id) => request(`/mock2/projects/${id}/app-live`),
+  // App access — who can sign in, and the operator's own first-administrator
+  // door (the build is forbidden to create that account).
+  mock2AppAccess: (id) => request(`/mock2/projects/${id}/app-access`),
+  mock2CreateFirstAdmin: (id, body) => request(`/mock2/projects/${id}/app-access/first-admin`, { method: 'POST', body }),
   // Quick connect (VS Code / git over smart HTTP): clone URL + connect tokens.
   mock2GetConnect: (id) => request(`/mock2/projects/${id}/connect`),
   // Split-request groups + the build queue (background back-to-back builds).

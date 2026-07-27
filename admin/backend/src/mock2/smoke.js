@@ -29,7 +29,7 @@
 import { sh, b64 } from './host.js';
 import {
   smokeConfigFromEnv, evaluateSmokeTriggers, applyEscalations,
-  resolveSmokeConnectors, smokeLogLines, smokeGateOk, pickContainerIp,
+  resolveSmokeConnectors, smokeLogLines, smokeGateOk, pickContainerIp, httpSmokeChecks,
 } from './smoke-triggers.js';
 import { readRunContract } from './deploy.js';
 import {
@@ -73,6 +73,14 @@ async function httpSmoke(containerName, webPort) {
     // 1) the shell must serve (not 5xx / not refused)
     + `shell=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "${base}/" 2>/dev/null || echo 000)\n`
     + `echo "SHELL:$shell"\n`
+    // 1b) THE SIGN-IN PAGE. The one page a gated app must serve to somebody with
+    //     no session, and the question `/` cannot answer: on an auth-gated app a
+    //     401 or a redirect at `/` is normal, so the shell probe alone cannot
+    //     tell a working app from one nobody can get into. Project 43 deployed
+    //     with a feature router shadowing /login — every path answered 401, the
+    //     live URL served a JSON error body, and this layer reported ok.
+    + `login=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "${base}/login" 2>/dev/null || echo 000)\n`
+    + `echo "LOGIN:$login"\n`
     // 2) negative security assertion: a raw spoofed identity header, no token/cookie,
     //    must NOT be honored on an admin path (constitution §4). We can't know every
     //    app's admin route, so probe a few conventional ones; a 2xx to ANY of them
@@ -85,19 +93,9 @@ async function httpSmoke(containerName, webPort) {
     + `done\n`
     + `echo "SPOOF_WORST:$worst"\n`;
   const r = await containerSh(containerName, script, { timeoutMs: 40000 });
-  const out = r.stdout || '';
-  const shell = (out.match(/SHELL:(\d+)/) || [])[1] || '000';
-  const spoofWorst = (out.match(/SPOOF_WORST:(\d+)/) || [])[1] || '000';
-  const shellOk = shell !== '000' && Number(shell) < 500;
-  // If no conventional admin path exists (all 000/404), we can't assert the negative
-  // case — report it as not-applicable rather than a false pass.
-  const spoofTested = /SPOOF \S+:(2|4)\d\d/.test(out);
-  const spoofOk = spoofWorst[0] !== '2';
-  const checks = [
-    { name: 'shell-serves', ok: shellOk, detail: `GET / → ${shell}` },
-    { name: 'negative-auth (spoofed x-user-role rejected)', ok: spoofOk, detail: spoofTested ? `worst spoofed-header response: ${spoofWorst}` : 'no conventional admin path answered — assertion not applicable' },
-  ];
-  return { ok: checks.every((c) => c.ok), checks };
+  // The verdict is pure and lives in smoke-triggers.js, where a test can reach
+  // it — this module cannot be imported outside a real install.
+  return httpSmokeChecks(r.stdout || '');
 }
 
 // ---- browser connector (lazy Playwright; started only on a hit) ----

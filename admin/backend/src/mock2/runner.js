@@ -1826,9 +1826,43 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           } catch { /* best effort */ }
         } else if (!smoke.ok) {
           const detail = smokeFailSummary(smoke.report);
-          finishCycle(cycle.id, { status: 'failed', error: `Smoke gate failed after deploy — ${detail}` });
+          // ASK THE APP WHETHER IT IS EVEN REACHABLE, before reporting a wall of
+          // failed checks.
+          //
+          // The readiness probe — health 200, the sign-in page RENDERS, the
+          // stylesheet is served, one signed-in request comes back — hung off
+          // afterBuildReview, which fires only when a request closes SUCCEEDED
+          // or lands in pending verification. So on a FAILED build, the one
+          // check that answers "can anyone get in at all" never ran. That is
+          // exactly backwards: a failed build is when the app is most likely to
+          // be dead.
+          //
+          // Project 43: a feature router mounted above the sign-in route made
+          // every path answer 401. What the operator saw was "3 console
+          // error(s)" and "Timeout 5000ms exceeded", three resumed cycles and
+          // $9.81 — never "nobody can get into the app", which is what this
+          // says in one line. Best-effort and never blocking; the cycle fails
+          // either way, this only decides what it fails SAYING.
+          let readyLine = '';
+          try {
+            const { verifyAppReady } = await import('./readiness.js');
+            const { readinessChatMessage } = await import('./readiness-logic.js');
+            const ready = await verifyAppReady(project, { authed: reviewLogin });
+            if (ready && !ready.ready) {
+              readyLine = ready.summary || (ready.failures || []).join('; ');
+              const msg = readinessChatMessage(ready);
+              if (msg) { try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: msg }); } catch { /* best effort */ } }
+              logEvent('note', { role: 'system', content: `Readiness after the failed smoke gate: ${readyLine}`, meta: { readiness_failed: true } });
+            }
+          } catch (e) { console.warn('[mock2] post-smoke readiness check failed:', e?.message); }
+          // The readiness line goes FIRST when it fired: it is the cause, and
+          // the check failures below it are the symptoms.
+          const error = readyLine
+            ? `The deployed app is not reachable — ${readyLine}. Downstream: ${detail}`
+            : `Smoke gate failed after deploy — ${detail}`;
+          finishCycle(cycle.id, { status: 'failed', error });
           releaseLock(projectId, holder);
-          setJob(cycle.id, { phase: 'smoke_failed', message: `Smoke gate failed — ${detail}`, commit: record?.commit_sha || null });
+          setJob(cycle.id, { phase: 'smoke_failed', message: error, commit: record?.commit_sha || null });
           void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'smoke_failed' });
           return scheduleJobCleanup(cycle.id);
         }

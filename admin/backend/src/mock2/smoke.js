@@ -158,15 +158,23 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
   if (containerName) {
     const file = await readUiChecksFile(containerName, appDir);
     const required = Array.isArray(requiredIds) ? requiredIds.filter(Boolean) : [];
+    // specInvalid marks a problem with the TEST FILE, not with the app.
+    //
+    // Project 38: the app deployed, served, and worked — and the whole build
+    // went red because state/ui-checks.json used a different (equally valid,
+    // more conventional) step spelling. A malformed test artefact is a real
+    // defect and says so loudly, but it is not evidence the app is broken, and
+    // failing the cycle over it threw away a working deploy and made the
+    // operator press "Continue build". The caller decides what to do with it.
     if (!file.exists && required.length) {
-      return { ok: false, detail: `acceptance requires live ui check(s) [${required.join(', ')}] but ${UI_CHECKS_PATH} does not exist` };
+      return { ok: false, specInvalid: true, detail: `acceptance requires live ui check(s) [${required.join(', ')}] but ${UI_CHECKS_PATH} does not exist` };
     }
     if (file.exists) {
       const parsed = parseUiChecks(file.text);
-      if (!parsed.ok) return { ok: false, detail: `ui-checks spec invalid: ${parsed.error}` };
+      if (!parsed.ok) return { ok: false, specInvalid: true, detail: `ui-checks spec invalid: ${parsed.error}` };
       const missing = required.filter((id) => !parsed.spec.checks.some((c) => c.id === id));
       if (missing.length) {
-        return { ok: false, detail: `acceptance ui check(s) not defined in ${UI_CHECKS_PATH}: ${missing.join(', ')}` };
+        return { ok: false, specInvalid: true, detail: `acceptance ui check(s) not defined in ${UI_CHECKS_PATH}: ${missing.join(', ')}` };
       }
       const matched = checksForChangedFiles(parsed.spec, changedFiles);
       const byId = new Map(matched.map((c) => [c.id, c]));
@@ -358,12 +366,18 @@ export async function runSmokeGate({
   //    missing / no DSN) is a warranted-but-unrunnable non-pass, under requireTriggered.
   const ok = smokeGateOk({ http, report, config });
 
+  // Did the gate fail because the app is broken, or because the TEST FILE is?
+  // Surfaced separately so the runner can keep a working deploy while still
+  // saying loudly that the checks could not run (see the specInvalid note
+  // above). Only meaningful when the gate did not pass.
+  const specInvalid = !ok && report.browser?.specInvalid === true && http.ok !== false;
+
   const logLines = [
     ...smokeLogLines(resolved),
     ...(report.browser?.logLines || []),
     ...report.rejected.map((r) => `escalation rejected — ${r.why}`),
   ];
-  return { ok, report, logLines };
+  return { ok, specInvalid, report, logLines };
 }
 
 // A one-line summary of WHY the smoke gate failed, for the cycle error + status.

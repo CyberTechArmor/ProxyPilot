@@ -372,6 +372,7 @@ table.list input[type=checkbox]{width:18px;height:18px}
   <span class="brand"><span class="logo">◆</span> Admin console</span>
   <nav><a class="btn subtle sm" href="/">← App</a> <a class="btn subtle sm" href="/profile">Profile</a></nav>
   <span class="headspace"></span>
+  <button type="button" class="theme-toggle btn subtle sm" aria-label="Change theme"></button>
   <button class="btn subtle sm" id="logout">Sign out</button>
 </header>
 <main class="wrap">
@@ -448,6 +449,11 @@ table.list input[type=checkbox]{width:18px;height:18px}
     </div>
   </div>
 ${platformAdminMarkup()}
+<!-- The legal footer. platform.js mounts every [data-legal-footer]
+     itself (see scaffold-platform.js); a page that omits this slot
+     silently ships without the copyright notice and the Privacy /
+     Terms links, which is what every generated app used to do. -->
+<div data-legal-footer></div>
 </main>
 <script src="/admin.js"></script>
 <script src="/platform-admin.js"></script>
@@ -741,6 +747,7 @@ function profileHtml() {
   <span class="brand"><span class="logo">◆</span> Profile</span>
   <nav><a class="btn subtle sm" href="/">← App</a> <a class="btn subtle sm" id="admin-link" href="/admin" hidden>Admin console</a></nav>
   <span class="headspace"></span>
+  <button type="button" class="theme-toggle btn subtle sm" aria-label="Change theme"></button>
   <button class="btn subtle sm" id="logout">Sign out</button>
 </header>
 <main class="wrap">
@@ -757,6 +764,11 @@ function profileHtml() {
       sign-in is configured). Contact an administrator to change yours.</p>
     </div>
   </div>
+<!-- The legal footer. platform.js mounts every [data-legal-footer]
+     itself (see scaffold-platform.js); a page that omits this slot
+     silently ships without the copyright notice and the Privacy /
+     Terms links, which is what every generated app used to do. -->
+<div data-legal-footer></div>
 </main>
 <script>
 (function () {

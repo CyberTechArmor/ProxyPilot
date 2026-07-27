@@ -36,11 +36,75 @@ export const STEP_KINDS = Object.freeze([
   'click',            // selector → click (used for e.g. the "Replace" write-only-secret flow)
 ]);
 
+// The base app's sign-in form, which the PLATFORM ships and therefore knows.
+// Used when a spec supplies a user roster without spelling the form out.
+export const DEFAULT_LOGIN_FORM = Object.freeze({
+  path: '/login',
+  user_field: 'input[type="email"], input[name="email"], input[name="username"]',
+  pass_field: 'input[type="password"]',
+  submit: 'button[type="submit"], input[type="submit"]',
+});
+
 const MAX_CHECKS = 60;
 const MAX_STEPS = 30;
 const MAX_STR = 500;
 
 function isShortString(v) { return typeof v === 'string' && v.trim().length > 0 && v.length <= MAX_STR; }
+
+// normalizeStep — accept BOTH spellings of a step.
+//
+// The canonical form keys the step on the assertion:
+//     { expect_visible: '#nav-new' }
+//     { fill: '#title', value: 'Groceries' }
+//     { expect_text: 'h1', contains: 'Notes' }
+//
+// Models overwhelmingly reach for the conventional form instead:
+//     { action: 'expect_visible', selector: '#nav-new' }
+//     { action: 'fill', selector: '#title', text: 'Groceries' }
+//     { action: 'expect_value', selector: '#title', text: 'Groceries' }
+//
+// Project 38 wrote the second form for every step of every check, and the
+// build FAILED after a successful deploy over it — the app was live and
+// working, and the cycle went red because a test file used the other spelling.
+// Both forms express exactly the same thing, so the parser accepts both and
+// normalizes to the canonical one. `expect_value` is folded onto the preceding
+// fill, which is where the canonical form carries it (fill's `expect_value`
+// flag) — the ui-interaction gate's own advice says "fill + expect_value", so
+// rejecting it was the harness contradicting itself.
+//
+// Returns { step } (normalized, canonical) or { fold: 'expect_value', ... } for
+// a step that merges into the previous one, or { error }.
+export function normalizeStep(raw, i) {
+  if (!raw || typeof raw !== 'object') return { error: `step ${i + 1} must be an object` };
+
+  // Already canonical?
+  const present = STEP_KINDS.filter((k) => raw[k] !== undefined);
+  if (present.length === 1) return { step: raw };
+  if (present.length > 1) {
+    return { error: `step ${i + 1} has more than one of: ${STEP_KINDS.join(', ')} — one assertion per step` };
+  }
+
+  // Conventional { action, selector, ... }.
+  const action = typeof raw.action === 'string' ? raw.action.trim() : null;
+  const selector = isShortString(raw.selector) ? raw.selector : null;
+  if (!action) {
+    return { error: `step ${i + 1} must have exactly one of: ${STEP_KINDS.join(', ')} (or {"action": …, "selector": …})` };
+  }
+  if (!selector) return { error: `step ${i + 1} ("${action}") needs a selector string` };
+
+  // expect_value asserts the PREVIOUS fill persisted. In the canonical form
+  // that is fill's own flag, so it folds rather than becoming a step.
+  if (action === 'expect_value') return { fold: 'expect_value', selector, value: raw.text ?? raw.value };
+
+  if (!STEP_KINDS.includes(action)) {
+    return { error: `step ${i + 1}: unknown action "${action}" — one of: ${STEP_KINDS.join(', ')}, expect_value` };
+  }
+  const out = { [action]: selector };
+  // `text` is what a model writes; `value`/`contains` are the canonical names.
+  if (action === 'fill') out.value = raw.value ?? raw.text;
+  if (action === 'expect_text') out.contains = raw.contains ?? raw.text;
+  return { step: out };
+}
 
 function validateStep(step, i) {
   if (!step || typeof step !== 'object') return `step ${i + 1} must be an object`;
@@ -51,6 +115,32 @@ function validateStep(step, i) {
   if (kind === 'fill' && !isShortString(step.value)) return `step ${i + 1} (fill) needs a value string`;
   if (kind === 'expect_text' && !isShortString(step.contains)) return `step ${i + 1} (expect_text) needs a contains string`;
   return null;
+}
+
+// Normalize a whole step list, folding expect_value onto its fill.
+function normalizeSteps(rawSteps) {
+  const out = [];
+  for (let i = 0; i < rawSteps.length; i++) {
+    const r = normalizeStep(rawSteps[i], i);
+    if (r.error) return { error: r.error };
+    if (r.fold === 'expect_value') {
+      const prev = out[out.length - 1];
+      if (!prev || prev.fill === undefined) {
+        return { error: `step ${i + 1} (expect_value) must follow a fill of the same control` };
+      }
+      // Only meaningful for the control that was just filled.
+      if (prev.fill !== r.selector) {
+        return { error: `step ${i + 1} (expect_value) targets "${r.selector}" but the previous fill targeted "${prev.fill}"` };
+      }
+      prev.expect_value = true;
+      continue;
+    }
+    const err = validateStep(r.step, out.length);
+    if (err) return { error: err };
+    out.push(r.step);
+  }
+  if (!out.length) return { error: 'needs at least one assertion step' };
+  return { steps: out };
 }
 
 // parseUiChecks — parse + validate a state/ui-checks.json document. Returns
@@ -64,7 +154,30 @@ export function parseUiChecks(text) {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return { ok: false, error: 'ui-checks.json must be a JSON object' };
 
   // login block (optional overall, required when any check declares a role).
+  //
+  // TWO ACCEPTED SHAPES, for the same reason as the steps above. The canonical
+  // one spells out the sign-in form:
+  //     "login": { "path": "/login", "user_field": "#email", "pass_field": "#password",
+  //                "submit": "button[type=submit]",
+  //                "users": { "admin": { "username": "…", "password": "…" } } }
+  // Models write the roster and assume the platform knows its own sign-in page:
+  //     "users": [ { "role": "admin", "email": "…", "password": "…" } ]
+  // The second is a fair assumption — the base app's sign-in page IS shipped by
+  // the platform and its fields are standard — so the selectors are filled in
+  // rather than demanded. Project 38 wrote the roster form and the parse failed.
   let login = null;
+  if (doc.login == null && Array.isArray(doc.users) && doc.users.length) {
+    const users = {};
+    for (const u of doc.users) {
+      const role = isShortString(u?.role) ? u.role : null;
+      const name = isShortString(u?.username) ? u.username : (isShortString(u?.email) ? u.email : null);
+      if (!role || !name || !isShortString(u?.password)) {
+        return { ok: false, error: 'users[] entries need role + email/username + password (seeded test-fixture users)' };
+      }
+      users[role] = { username: name, password: u.password };
+    }
+    login = { ...DEFAULT_LOGIN_FORM, users };
+  }
   if (doc.login != null) {
     const l = doc.login;
     if (!l || typeof l !== 'object') return { ok: false, error: 'login must be an object' };
@@ -97,25 +210,34 @@ export function parseUiChecks(text) {
       return { ok: false, error: `check "${chk.id}" needs paths (the diff globs that trigger it)` };
     }
     if (!isShortString(chk.page)) return { ok: false, error: `check "${chk.id}" needs a page path` };
-    if (chk.role != null) {
-      if (!isShortString(chk.role)) return { ok: false, error: `check "${chk.id}" role must be a string` };
-      if (!login) return { ok: false, error: `check "${chk.id}" declares role "${chk.role}" but no login block exists` };
-      if (!login.users[chk.role]) return { ok: false, error: `check "${chk.id}" role "${chk.role}" has no login.users entry` };
+    // A check names its actor as `role`. Models often name the USER instead
+    // ("login": "ui-admin@fixture.invalid"), which identifies the same actor —
+    // resolve it back to the role rather than rejecting the spec.
+    let role = chk.role ?? null;
+    if (role == null && isShortString(chk.login) && login) {
+      const match = Object.entries(login.users).find(([, u]) => u.username === chk.login);
+      if (!match) {
+        return { ok: false, error: `check "${chk.id}" logs in as "${chk.login}", which is not one of the declared users` };
+      }
+      [role] = match;
     }
-    const steps = Array.isArray(chk.steps) ? chk.steps : null;
-    if (!steps || !steps.length) return { ok: false, error: `check "${chk.id}" needs steps` };
-    if (steps.length > MAX_STEPS) return { ok: false, error: `check "${chk.id}" has too many steps (max ${MAX_STEPS})` };
-    for (let i = 0; i < steps.length; i++) {
-      const err = validateStep(steps[i], i);
-      if (err) return { ok: false, error: `check "${chk.id}": ${err}` };
+    if (role != null) {
+      if (!isShortString(role)) return { ok: false, error: `check "${chk.id}" role must be a string` };
+      if (!login) return { ok: false, error: `check "${chk.id}" declares role "${role}" but no login block exists` };
+      if (!login.users[role]) return { ok: false, error: `check "${chk.id}" role "${role}" has no login.users entry` };
     }
+    const rawSteps = Array.isArray(chk.steps) ? chk.steps : null;
+    if (!rawSteps || !rawSteps.length) return { ok: false, error: `check "${chk.id}" needs steps` };
+    if (rawSteps.length > MAX_STEPS) return { ok: false, error: `check "${chk.id}" has too many steps (max ${MAX_STEPS})` };
+    const norm = normalizeSteps(rawSteps);
+    if (norm.error) return { ok: false, error: `check "${chk.id}": ${norm.error}` };
     checks.push({
       id: chk.id,
       name: isShortString(chk.name) ? chk.name : chk.id,
       paths: chk.paths,
-      role: chk.role || null,
+      role: role || null,
       page: chk.page,
-      steps,
+      steps: norm.steps,
     });
   }
   return { ok: true, spec: { login, checks } };

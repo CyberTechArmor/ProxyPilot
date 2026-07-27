@@ -23,7 +23,7 @@
 // PURE (stub-first, risk R9): returns [{ path, content }]. No I/O, no native
 // modules. Terminology (risk R7): nothing here is named "agent".
 
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v5';
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v6';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
@@ -1232,6 +1232,31 @@ function themeJs() {
     e.preventDefault();
     Theme.cycle();
   });
+  // AUTO-MOUNT, so the control exists even on a page that forgot to render one.
+  //
+  // The generated pages now ship a .theme-toggle explicitly, but for a long
+  // while none of them did: theme.js was loaded on every screen, applied the
+  // stored theme, and offered NO WAY TO CHANGE IT. The operator's report was
+  // simply "no theme change light/dark". Auto-mounting into the page's header
+  // means an EXISTING project picks the control up from a base-app upgrade
+  // (theme.js is platform-owned) without rewriting pages a build may have
+  // restyled — and a build that renders its own header gets one for free.
+  //
+  // Only ever ONE, and never on top of a control the page already has.
+  function ensureToggle() {
+    if (document.querySelector('.theme-toggle')) { refresh(); return; }
+    var host = document.querySelector('header nav') || document.querySelector('header');
+    if (!host) return;
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'theme-toggle btn subtle sm';
+    btn.setAttribute('data-theme-auto', '1');
+    host.appendChild(btn);
+    refresh();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ensureToggle);
+  else ensureToggle();
+
   document.addEventListener('DOMContentLoaded', refresh);
 
   window.Theme = Theme;

@@ -33,7 +33,7 @@ import {
   playwrightConfigTs, e2eServerMjs, platformSpecTs, E2E_SCRIPTS, E2E_DEV_DEPENDENCIES,
 } from './scaffold-e2e.js';
 
-export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v6';
+export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v7';
 
 // The canonical dependency set every scaffolded app is born with. Exported so
 // the repair pass (component-install ensureScaffoldDeps) can restore entries a
@@ -683,12 +683,24 @@ code,kbd,.mono{overflow-wrap:anywhere}
 .empty p{font-size:13.5px;margin:0 0 14px}
 
 /* Toggle switch (checkbox-based) */
-.switch{position:relative;display:inline-block;width:44px;height:26px;flex:none}
-.switch input{opacity:0;width:0;height:0}
-.switch i{position:absolute;inset:0;background:var(--app-border,#cdd8e6);border-radius:26px;transition:.15s}
-.switch i::before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;border-radius:50%;background:#fff;transition:.15s;box-shadow:0 1px 3px rgba(0,0,0,.25)}
-.switch input:checked+i{background:var(--app-primary,#1466b8)}
-.switch input:checked+i::before{transform:translateX(18px)}
+/* Toggle switch — a ROW: the track, then its label.
+   This used to be a 44px-wide inline-block styling a separate <i> track, with
+   the input visually hidden. Every actual consumer writes
+   <div class="switch"><input type="checkbox" id><label for>…</label></div>
+   — no <i> at all — so the input was invisible and the label was crammed into
+   44px, wrapping to one word per line and overflowing onto whatever was next
+   to it. That is the overlapping text an operator photographed on the LDAP
+   settings screen. The track is now the input itself, and the label is a
+   flexible column that wraps normally. */
+.switch{display:flex;align-items:center;gap:.625rem;flex-wrap:wrap;min-height:44px;width:auto;margin:.25rem 0}
+.switch>input[type=checkbox]{appearance:none;-webkit-appearance:none;position:relative;flex:none;margin:0;width:44px;height:26px;min-height:26px;border-radius:26px;background:var(--app-border,#cdd8e6);cursor:pointer;transition:.15s}
+.switch>input[type=checkbox]::before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;border-radius:50%;background:#fff;transition:.15s;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.switch>input[type=checkbox]:checked{background:var(--app-primary,#1466b8)}
+.switch>input[type=checkbox]:checked::before{transform:translateX(18px)}
+.switch>input[type=checkbox]:focus-visible{outline:2px solid var(--app-primary,#1466b8);outline-offset:2px}
+/* min-width:0 so a long label wraps instead of forcing the row wider than the
+   viewport; the flex-basis lets it drop under the track on a narrow screen. */
+.switch>label{flex:1 1 14rem;min-width:0;cursor:pointer;line-height:1.35;overflow-wrap:anywhere}
 
 /* Numeric alignment (money, hours, counts — use on td/spans) */
 .num{font-variant-numeric:tabular-nums;text-align:right}
@@ -749,6 +761,7 @@ function appShellHtml(project) {
   <a class="btn subtle sm" id="admin-link" href="/admin" hidden>Admin</a>
   <a class="btn subtle sm" href="/profile">Profile</a>
   <span class="whoami"><span class="avatar" id="avatar">·</span></span>
+  <button type="button" class="theme-toggle btn subtle sm" aria-label="Change theme"></button>
   <button class="btn subtle sm" id="logout">Sign out</button>
 </header>
 <main class="wrap">
@@ -762,6 +775,11 @@ function appShellHtml(project) {
       <a href="/admin">admin console</a>; your own account is on the <a href="/profile">profile page</a>.</p>
     </div>
   </div>
+<!-- The legal footer. platform.js mounts every [data-legal-footer]
+     itself (see scaffold-platform.js); a page that omits this slot
+     silently ships without the copyright notice and the Privacy /
+     Terms links, which is what every generated app used to do. -->
+<div data-legal-footer></div>
 </main>
 <script>
 document.getElementById('logout').addEventListener('click', async () => {

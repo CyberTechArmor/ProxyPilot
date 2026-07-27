@@ -72,10 +72,15 @@ test('parseUiChecks: rejects malformed specs with ONE clear error', () => {
   const noUser = JSON.parse(JSON.stringify(VALID_SPEC));
   delete noUser.login.users.viewer;
   assert.match(parseUiChecks(JSON.stringify(noUser)).error, /viewer/);
-  // a step with zero/two kinds
+  // a step asserting two things at once — one assertion per step, so a failure
+  // names which one broke
   const badStep = JSON.parse(JSON.stringify(VALID_SPEC));
   badStep.checks[0].steps[0] = { expect_enabled: '#a', expect_disabled: '#a' };
-  assert.match(parseUiChecks(JSON.stringify(badStep)).error, /exactly one/);
+  assert.match(parseUiChecks(JSON.stringify(badStep)).error, /more than one/);
+  // a step asserting nothing at all
+  const emptyStep = JSON.parse(JSON.stringify(VALID_SPEC));
+  emptyStep.checks[0].steps[0] = { note: 'hello' };
+  assert.match(parseUiChecks(JSON.stringify(emptyStep)).error, /exactly one/);
   // fill without value
   const noVal = JSON.parse(JSON.stringify(VALID_SPEC));
   noVal.checks[0].steps[1] = { fill: '#a' };
@@ -167,4 +172,91 @@ test('buildRunnerSystemPrompt: instructs acceptance checks + verified-vs-assumed
   assert.match(p, /acceptance check/i);
   assert.match(p, /verified/i);
   assert.match(p, /assumed/i);
+});
+
+// The EXACT state/ui-checks.json project 38 wrote. The app deployed, served and
+// worked; the build went red because every step used the conventional
+// {action, selector, text} spelling instead of the canonical {expect_visible: …}
+// one, and the login roster was a users[] array instead of a login block. Both
+// forms say the same thing, so both parse.
+test('project 38: the conventional step + roster spelling parses', () => {
+  const spec = {
+    schema_version: 1,
+    users: [{ role: 'admin', email: 'ui-admin@fixture.invalid', password: 'Correct-Horse-9!' }],
+    checks: [
+      {
+        id: 'notes-list-loads',
+        description: 'Signed-in user lands on the Notes shelf with the New note action available.',
+        page: '/',
+        paths: ['public/app-shell.html', 'public/notes.css'],
+        login: 'ui-admin@fixture.invalid',
+        steps: [
+          { action: 'expect_visible', selector: '#nav-new' },
+          { action: 'expect_enabled', selector: '#nav-new' },
+          { action: 'expect_text', selector: 'h1.n3-title', text: 'Notes' },
+        ],
+      },
+      {
+        id: 'note-create-and-edit',
+        page: '/',
+        paths: ['public/notes.js'],
+        login: 'ui-admin@fixture.invalid',
+        steps: [
+          { action: 'click', selector: '#nav-new' },
+          { action: 'fill', selector: '#note-title-input', text: 'Groceries' },
+          { action: 'expect_value', selector: '#note-title-input', text: 'Groceries' },
+        ],
+      },
+    ],
+  };
+  const r = parseUiChecks(JSON.stringify(spec));
+  assert.equal(r.ok, true, r.error);
+
+  // The roster becomes a login block using the base app's own sign-in form,
+  // which the PLATFORM ships and therefore knows.
+  assert.equal(r.spec.login.path, '/login');
+  assert.match(r.spec.login.pass_field, /password/);
+  assert.deepEqual(r.spec.login.users.admin, { username: 'ui-admin@fixture.invalid', password: 'Correct-Horse-9!' });
+
+  // Per-check "login: <email>" resolves back to the role.
+  assert.equal(r.spec.checks[0].role, 'admin');
+
+  // Steps normalize to the canonical form the executor consumes.
+  assert.deepEqual(r.spec.checks[0].steps, [
+    { expect_visible: '#nav-new' },
+    { expect_enabled: '#nav-new' },
+    { expect_text: 'h1.n3-title', contains: 'Notes' },
+  ]);
+  // expect_value folds onto the fill it verifies — the canonical form's own flag.
+  assert.deepEqual(r.spec.checks[1].steps, [
+    { click: '#nav-new' },
+    { fill: '#note-title-input', value: 'Groceries', expect_value: true },
+  ]);
+  // And the normalized steps drive the executor unchanged.
+  assert.deepEqual(stepShape(r.spec.checks[1].steps[1]), {
+    kind: 'fill', selector: '#note-title-input', value: 'Groceries', expectValue: true,
+  });
+});
+
+test('expect_value must follow the fill it verifies', () => {
+  const mk = (steps) => JSON.stringify({
+    users: [{ role: 'admin', email: 'a@fixture.invalid', password: 'x'.repeat(12) }],
+    checks: [{ id: 'c', page: '/', paths: ['a'], login: 'a@fixture.invalid', steps }],
+  });
+  // No preceding fill at all.
+  assert.match(parseUiChecks(mk([{ action: 'expect_value', selector: '#a', text: 'v' }])).error, /must follow a fill/);
+  // A fill of a DIFFERENT control — silently asserting the wrong field is worse
+  // than refusing.
+  assert.match(parseUiChecks(mk([
+    { action: 'fill', selector: '#a', text: 'v' },
+    { action: 'expect_value', selector: '#b', text: 'v' },
+  ])).error, /previous fill targeted/);
+});
+
+test('an unknown action is named, not swallowed', () => {
+  const spec = JSON.stringify({
+    users: [{ role: 'admin', email: 'a@fixture.invalid', password: 'x'.repeat(12) }],
+    checks: [{ id: 'c', page: '/', paths: ['a'], login: 'a@fixture.invalid', steps: [{ action: 'hover', selector: '#a' }] }],
+  });
+  assert.match(parseUiChecks(spec).error, /unknown action "hover"/);
 });

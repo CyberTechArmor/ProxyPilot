@@ -33,7 +33,16 @@ function downloadJson(filename, obj) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export default function BuildChat({ projectId, project, cycle = null, canEdit, online, active, job, needsFeedback = false, buildQueue = [], activity = [], onStarted }) {
+export default function BuildChat({
+  projectId, project, cycle = null, canEdit, online, active, job, needsFeedback = false,
+  buildQueue = [], activity = [], onStarted,
+  // `fill` — the chat OWNS its box and scrolls internally (Flightdeck's
+  // single-panel phone layout). Without it the card claims an intrinsic
+  // 26rem, which on a 360x640 phone pushes the composer off screen and
+  // makes the whole page scroll (operator report: "please fit everything
+  // in screen").
+  fill = false,
+}) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [instruction, setInstruction] = useState('');
@@ -465,6 +474,26 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       toast({ variant: 'destructive', title: 'Could not resume', description: err.message });
     } finally { setBusy(false); }
   };
+  // The composer's two jobs are in tension on a phone: reading the conversation
+  // wants every pixel, writing a change wants a real writing surface. So the box
+  // GROWS with what is in it — one line at rest, up to a third of the viewport
+  // while you type — instead of permanently reserving the tall version.
+  const textareaRef = useRef(null);
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    const cap = Math.max(120, Math.round((window.visualViewport?.height || window.innerHeight || 800) * 0.35));
+    el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
+  }, [instruction]);
+
+  // Is there anything to send? Text, an attached/pasted image, or an annotated
+  // screenshot (pins arrive as an attachment). The send buttons are HIDDEN
+  // until one of these is true rather than sitting there disabled — on a phone
+  // that row is the difference between three visible chat messages and five,
+  // and a permanently greyed-out button teaches nothing.
+  const hasDraft = instruction.trim().length > 0 || attach.images.length > 0;
+
   // Ctrl+Enter = the default action (Resume when blocked, else Quick update),
   // respecting the same gate as the buttons.
   const submitComposer = () => {
@@ -526,7 +555,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   };
 
   return (
-    <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
+    <Card className={`flex flex-col overflow-hidden ${fill ? 'h-full min-h-0 flex-1' : 'min-h-[26rem] lg:min-h-0 lg:flex-1'}`}>
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between gap-2">
           <CardTitle className="text-base flex items-center gap-2">
@@ -747,7 +776,9 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
               <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next update — Ask still works meanwhile.</p>
             ) : null}
             <textarea
-              className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+              ref={textareaRef}
+              rows={1}
+              className="flex min-h-[44px] w-full resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
               placeholder={online
                 ? (askActive ? 'Answering — draft your next message; send when this finishes…'
                   : resumeMode ? 'The build is blocked — add context or an instruction for the resume (optional), then Resume…'
@@ -773,6 +804,10 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                 onAnnotate={(i) => setAnnotateAttachIdx(i)}
               />
             ) : null}
+            {/* The action row exists only when it has something in it: an empty
+                flex row still costs the parent's vertical gap, and on a phone
+                that is a line of chat. */}
+            {(active && cycle?.id) || resumeMode || hasDraft ? (
             <div className="flex flex-wrap items-center justify-between gap-2">
               {/* Interrupt — visible while a build is running: stops it at the
                   next safe step (checkpointed, resumable from the Build panel). */}
@@ -807,27 +842,32 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                       To annotate the running app, use the "Annotate" button on
                       the Preview — pins there land on the live signed-in app
                       (and resolve to components). */}
-                  <Button
-                    variant="outline"
-                    className="h-11 sm:h-10 ml-auto"
-                    disabled={askDisabled || !instruction.trim()}
-                    onClick={startAsk}
-                    title="Ask a question or have the AI act on the running app — query or update data (e.g. add a user), run tests, call its APIs. No code changes."
-                  >
-                    <HelpCircle className="h-4 w-4 mr-1" /> Ask
-                  </Button>
-                  <Button
-                    className="h-11 sm:h-10"
-                    disabled={quickDisabled || !instruction.trim()}
-                    onClick={() => startBuild('quick')}
-                    title="One small scoped code change — no gate battery, straight to deploy (Ctrl+Enter)"
-                  >
-                    {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Zap className="h-4 w-4 mr-1" />}
-                    {active ? 'Queue update' : 'Quick update'}
-                  </Button>
+                  {hasDraft ? (
+                    <>
+                      <Button
+                        variant="outline"
+                        className="h-11 sm:h-10 ml-auto"
+                        disabled={askDisabled}
+                        onClick={startAsk}
+                        title="Ask a question or have the AI act on the running app — query or update data (e.g. add a user), run tests, call its APIs. No code changes."
+                      >
+                        <HelpCircle className="h-4 w-4 mr-1" /> Ask
+                      </Button>
+                      <Button
+                        className="h-11 sm:h-10"
+                        disabled={quickDisabled}
+                        onClick={() => startBuild('quick')}
+                        title="One small scoped code change — no gate battery, straight to deploy (Ctrl+Enter)"
+                      >
+                        {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Zap className="h-4 w-4 mr-1" />}
+                        {active ? 'Queue update' : 'Quick update'}
+                      </Button>
+                    </>
+                  ) : null}
                 </>
               )}
             </div>
+            ) : null}
             {/* The build queue — "building now / up next", each queued entry
                 cancellable. Submissions while a build runs land here and run
                 back-to-back automatically. */}

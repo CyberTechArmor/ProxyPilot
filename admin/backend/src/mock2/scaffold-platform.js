@@ -23,11 +23,15 @@
 // PURE (stub-first, risk R9): returns [{ path, content }]. No I/O, no native
 // modules. Terminology (risk R7): nothing here is named "agent".
 
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v2';
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v4';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
    --------------------------------------------------------------------------- */
+import {
+  pushSchemaTs, pushMigrationSql, pushTs, pushClientJs, pushAdminMarkup, PUSH_CSS,
+} from './scaffold-push.js';
+
 function platformSchemaTs() {
   return `import { pgTable, text, boolean, integer, bigint, jsonb, serial, timestamp, uniqueIndex, index } from 'drizzle-orm/pg-core';
 
@@ -111,7 +115,7 @@ export const auditLog = pgTable('platform_audit', {
 }, (t) => ({
   createdIdx: index('platform_audit_created_idx').on(t.createdAt),
 }));
-`;
+` + pushSchemaTs();
 }
 
 /* ---------------------------------------------------------------------------
@@ -737,6 +741,7 @@ import { status as roStatus, enableReadonly, disableReadonly, describe as roDesc
 import { denyApiKey } from './api-key-auth.js';
 import { DEFAULT_PERMISSIONS } from '../auth/permissions.js';
 import { requireRole, getAuth } from '../auth/index.js';
+import { pushPublicRoutes, pushRoutes } from './push.js';
 
 const ALLOWED_ASSET_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml', 'image/x-icon']);
 const MAX_ASSET_BYTES = 2 * 1024 * 1024;
@@ -760,6 +765,10 @@ async function record(action: string, actor: string | null, meta: unknown = null
 // notice, the logo and the Privacy/Terms links before anyone has a session, and
 // the browser fetches the favicon with no cookies at all.
 export const publicPlatformRoutes = Router();
+// Web Push config rides the PUBLIC router: the browser needs the VAPID public
+// key before it can subscribe, and the sign-in page is allowed to know whether
+// notifications exist at all. Nothing here is a secret.
+publicPlatformRoutes.use(pushPublicRoutes);
 
 publicPlatformRoutes.get('/api/branding', async (_req: Request, res: Response) => {
   res.json({ branding: await publicView() });
@@ -825,6 +834,8 @@ publicPlatformRoutes.get('/api/meta', async (_req: Request, res: Response) => {
 
 /* ------------------------------ AUTHENTICATED ---------------------------- */
 export const platformRoutes = Router();
+// Subscribing ties a device to this install, so it sits behind the auth gate.
+platformRoutes.use(pushRoutes);
 
 platformRoutes.get('/api/whoami', (req: Request, res: Response) => {
   if (req.apiKey) {
@@ -1124,7 +1135,7 @@ CREATE TABLE IF NOT EXISTS platform_audit (
 CREATE INDEX IF NOT EXISTS platform_audit_created_idx ON platform_audit (created_at DESC);
 
 INSERT INTO branding (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
-`;
+` + pushMigrationSql();
 }
 
 /* ---------------------------------------------------------------------------
@@ -1219,6 +1230,115 @@ function themeJs() {
 /* ---------------------------------------------------------------------------
    Branding client — the sign-in footer and the legal pages.
    --------------------------------------------------------------------------- */
+function platformDialogsJs() {
+  return `
+/* ---- Styled replacements for alert / confirm / prompt ----
+ *
+ * The browser's own dialogs are titled with the raw hostname
+ * ("n2.example.com says"), ignore the app's design completely, and block the
+ * page. A shipped build used prompt() for "New to-do" and it read as
+ * unfinished — fairly, since the shell had just been styled to an approved
+ * design. The no-native-dialogs gate now fails a build that uses them, so the
+ * platform has to provide the alternative rather than just forbid the easy way.
+ *
+ * These use base.css's own .modal/.modal-backdrop, so they inherit the
+ * approved palette for free. All three return a Promise.
+ *
+ *   await pp.alert('Saved')
+ *   if (await pp.confirm('Delete this note?')) …
+ *   const name = await pp.prompt('Name this list')   // null when cancelled
+ */
+(function () {
+  var pp = window.pp || (window.pp = {});
+
+  function dialog(opts) {
+    return new Promise(function (resolve) {
+      var backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      var box = document.createElement('div');
+      box.className = 'modal';
+      box.setAttribute('role', 'dialog');
+      box.setAttribute('aria-modal', 'true');
+
+      if (opts.title) {
+        var h = document.createElement('h3');
+        h.textContent = opts.title;
+        h.style.cssText = 'margin:0 0 8px;font-size:1.05rem';
+        box.appendChild(h);
+      }
+      var msg = document.createElement('p');
+      msg.textContent = opts.message || '';
+      msg.style.cssText = opts.title ? 'margin:0 0 14px' : 'margin:0 0 14px;font-weight:600';
+      box.appendChild(msg);
+
+      var input = null;
+      if (opts.kind === 'prompt') {
+        input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'input';
+        input.value = opts.value || '';
+        input.style.cssText = 'width:100%;margin-bottom:14px';
+        box.appendChild(input);
+      }
+
+      var row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap';
+      function close(value) {
+        document.removeEventListener('keydown', onKey);
+        backdrop.remove();
+        resolve(value);
+      }
+      if (opts.kind !== 'alert') {
+        var cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'btn subtle';
+        cancel.textContent = opts.cancelText || 'Cancel';
+        cancel.style.minHeight = '44px';
+        cancel.addEventListener('click', function () { close(opts.kind === 'prompt' ? null : false); });
+        row.appendChild(cancel);
+      }
+      var ok = document.createElement('button');
+      ok.type = 'button';
+      ok.className = 'btn';
+      ok.textContent = opts.okText || 'OK';
+      ok.style.minHeight = '44px';
+      ok.addEventListener('click', function () {
+        close(opts.kind === 'prompt' ? (input.value || '') : true);
+      });
+      row.appendChild(ok);
+      box.appendChild(row);
+
+      function onKey(e) {
+        if (e.key === 'Escape') close(opts.kind === 'prompt' ? null : false);
+        if (e.key === 'Enter' && opts.kind === 'prompt') ok.click();
+      }
+      document.addEventListener('keydown', onKey);
+      backdrop.addEventListener('click', function (e) {
+        if (e.target === backdrop) close(opts.kind === 'prompt' ? null : false);
+      });
+
+      backdrop.appendChild(box);
+      document.body.appendChild(backdrop);
+      (input || ok).focus();
+    });
+  }
+
+  // The second argument may be a plain string (the OK label — the original,
+  // still-supported form) or { okText, cancelText, title }. An install
+  // invitation needs "Install" / "Not now", which one label cannot express.
+  function opts(arg, defaultOk) {
+    if (arg && typeof arg === 'object') {
+      return { okText: arg.okText || defaultOk, cancelText: arg.cancelText, title: arg.title };
+    }
+    return { okText: arg || defaultOk };
+  }
+  pp.alert = function (message, o) { return dialog(Object.assign({ kind: 'alert', message: message }, opts(o, 'OK'))); };
+  pp.confirm = function (message, o) { return dialog(Object.assign({ kind: 'confirm', message: message }, opts(o, 'Confirm'))); };
+  pp.prompt = function (message, value, o) { return dialog(Object.assign({ kind: 'prompt', message: message, value: value }, opts(o, 'Save'))); };
+})();
+`;
+}
+
 function platformClientJs() {
   return `'use strict';
 /* Branding + legal pages (client).
@@ -1533,7 +1653,8 @@ function platformAdminMarkup() {
         <input id="pf-ro-url" type="text" readonly></div>
       <p class="note" id="pf-ro-views"></p>
     </div>
-  </div>`;
+  </div>
+` + pushAdminMarkup();
 }
 
 // public/platform-admin.js — drives the platform admin cards against
@@ -1624,7 +1745,7 @@ function platformAdminJs() {
     } catch (e) { note('pf-page-note', e.message, true); }
   });
   $('pf-page-reset').addEventListener('click', async function () {
-    if (!window.confirm('Replace this page with the generic starting text?')) return;
+    if (!await pp.confirm('Replace this page with the generic starting text?')) return;
     try {
       await api('/branding/pages/' + currentSlug + '/reset', { method: 'POST' });
       await loadBranding();
@@ -1652,7 +1773,7 @@ function platformAdminJs() {
       var del = document.createElement('button');
       del.className = 'btn subtle sm'; del.textContent = 'Remove';
       del.addEventListener('click', async function () {
-        if (!window.confirm('Remove "' + a.name + '"?')) return;
+        if (!await pp.confirm('Remove "' + a.name + '"?')) return;
         try { await api('/branding/assets/' + a.id, { method: 'DELETE' }); await loadBranding(); }
         catch (e) { note('pf-assets-note', e.message, true); }
       });
@@ -1698,7 +1819,7 @@ function platformAdminJs() {
           var b = document.createElement('button');
           b.className = 'btn subtle sm'; b.textContent = 'Revoke';
           b.addEventListener('click', async function () {
-            if (!window.confirm('Revoke "' + k.name + '"? Anything using it stops working immediately.')) return;
+            if (!await pp.confirm('Revoke "' + k.name + '"? Anything using it stops working immediately.')) return;
             try { await api('/api-keys/' + k.id, { method: 'DELETE' }); await loadKeys(); }
             catch (e) { note('pf-keys-note', e.message, true); }
           });
@@ -1765,9 +1886,13 @@ export function buildPlatformFiles() {
     { path: 'src/platform/api-keys.ts', content: apiKeysTs() },
     { path: 'src/platform/api-key-auth.ts', content: apiKeyAuthTs() },
     { path: 'src/platform/readonly.ts', content: readonlyTs() },
+    // Web Push + the app-install invitation: platform-owned because three RFCs
+    // of silent-failure crypto is not something a build should be re-deriving.
+    { path: 'src/platform/push.ts', content: pushTs() },
+    { path: 'public/push.js', content: pushClientJs() },
     { path: 'migrations/0100_platform.sql', content: platformMigrationSql() },
     { path: 'public/theme.js', content: themeJs() },
-    { path: 'public/platform.js', content: platformClientJs() },
+    { path: 'public/platform.js', content: platformClientJs() + platformDialogsJs() },
     { path: 'public/platform-admin.js', content: platformAdminJs() },
   ];
 }
@@ -1776,4 +1901,4 @@ export function buildPlatformFiles() {
 // than shipped as its own file, so it lands inside the existing layout.
 export { platformAdminMarkup };
 
-export const PLATFORM_CSS = platformCss();
+export const PLATFORM_CSS = platformCss() + PUSH_CSS;

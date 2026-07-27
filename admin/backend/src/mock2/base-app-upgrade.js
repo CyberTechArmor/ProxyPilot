@@ -11,7 +11,7 @@
 
 import { sh, b64 } from './host.js';
 import { buildPlatformFiles, buildPlatformRoutes, PLATFORM_MODULE_VERSION, PLATFORM_CSS } from './scaffold-platform.js';
-import { MOCK2_SCAFFOLD_VERSION, baseCss } from './scaffold.js';
+import { MOCK2_SCAFFOLD_VERSION, baseCss, scaffoldPwaFiles } from './scaffold.js';
 import { insertMessage } from './chats.js';
 import { getProject } from './projects.js';
 import {
@@ -36,10 +36,15 @@ function containerShWithStdin(containerName, script, b64Payload, { timeoutMs = 6
 // included because it carries PLATFORM_CSS (the theme/legal/footer styles) and
 // the build is bound never to restyle the shell — it is platform-owned.
 export function currentPlatformFiles() {
+  const pwa = scaffoldPwaFiles();
   return [
     ...buildPlatformFiles(),
     ...buildPlatformRoutes(),
     { path: 'public/base.css', content: baseCss() + PLATFORM_CSS },
+    // sw.js and install.js are platform plumbing too: the push handlers and the
+    // one-time install modal reach an EXISTING project only through this.
+    { path: 'public/sw.js', content: pwa.swJs },
+    { path: 'public/install.js', content: pwa.installJs },
   ];
 }
 

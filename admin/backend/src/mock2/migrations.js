@@ -1625,4 +1625,28 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Platform-owned DESIGN REVIEW account (operator report: "it seems like the
+    // ai can never see past the login screen"). The review used to sign in with
+    // whatever fixture users the build MODEL had written into
+    // state/ui-checks.json; when it had written none, every screenshot was of
+    // the sign-in gate and the critique could never compare the app to the
+    // approved mockup.
+    //
+    // The platform now provisions its own admin on the auth component's
+    // reserved `@fixture.invalid` domain — a domain that component already
+    // excludes from "a real user exists", so this does NOT consume the
+    // operator's first-admin bootstrap. The password is encrypted at rest with
+    // the same TOTP_ENCRYPTION_KEY as every other secret in this install.
+    //
+    // Additive: two nullable columns.
+    version: 547,
+    name: 'mock2_project_review_login',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN review_login_email TEXT;
+        ALTER TABLE mock2_projects ADD COLUMN review_login_password_enc TEXT;
+      `);
+    },
+  },
 ];

@@ -141,6 +141,9 @@ const WRITABLE = new Set([
   // Per-project agent harness choice (migration 533): 'proxypilot' | 'claude' |
   // NULL. Validated at the route (normalizeHarness) before it reaches here.
   'harness',
+  // Migration 547: the platform-owned design-review sign-in (fixture domain).
+  // Never surfaced by the API — see toProjectResponse, which does not read it.
+  'review_login_email', 'review_login_password_enc',
 ]);
 export function updateProject(id, patch = {}) {
   const cols = Object.keys(patch).filter((k) => WRITABLE.has(k));

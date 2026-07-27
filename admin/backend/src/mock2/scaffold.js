@@ -28,8 +28,9 @@
 // read-only SQL — the capabilities every real application needs regardless of
 // what it is for.
 import { buildPlatformFiles, PLATFORM_CSS } from './scaffold-platform.js';
+import { pushServiceWorkerJs, pwaInstallJs as pushInstallJs } from './scaffold-push.js';
 
-export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v3';
+export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v5';
 
 // The canonical dependency set every scaffolded app is born with. Exported so
 // the repair pass (component-install ensureScaffoldDeps) can restore entries a
@@ -1035,7 +1036,7 @@ self.addEventListener('fetch', (e) => {
     }).catch(() => caches.match(req).then((hit) => hit || Response.error()))
   );
 });
-`;
+` + pushServiceWorkerJs();
 }
 
 // public/build-id.js — the build id as the CLIENT sees it. This file is a
@@ -1048,8 +1049,11 @@ function buildIdJs() {
 }
 
 function pwaInstallJs() {
-  return `// PWA bootstrap: register the service worker, surface app updates, and
-// surface the browser's install prompt as a small in-app button (44px target).
+  return `// PWA bootstrap: register the service worker and surface app updates.
+// The INSTALL half is appended from scaffold-push.js — it is a one-time modal
+// invitation plus a permanent entry under Notifications, not the floating pill
+// that used to sit on every screen (operator: "the install app shouldn't
+// always be present").
 (() => {
   // ---- update handling -------------------------------------------------
   // A deploy ships a new service worker, which INSTALLS then WAITS (sw.js does
@@ -1156,31 +1160,8 @@ function pwaInstallJs() {
       }).catch(() => {});
     });
   }
-  let deferred = null;
-  const BTN_ID = 'pwa-install-btn';
-  const removeBtn = () => { const b = document.getElementById(BTN_ID); if (b) b.remove(); };
-  window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    deferred = e;
-    if (document.getElementById(BTN_ID)) return;
-    const btn = document.createElement('button');
-    btn.id = BTN_ID;
-    btn.type = 'button';
-    btn.textContent = 'Install app';
-    btn.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;' +
-      'min-height:44px;padding:10px 16px;border-radius:999px;border:0;cursor:pointer;' +
-      'background:var(--app-primary,#1466b8);color:var(--app-primary-text,#fff);' +
-      'font:inherit;box-shadow:0 2px 10px rgba(0,0,0,.3)';
-    btn.addEventListener('click', async () => {
-      if (!deferred) return removeBtn();
-      deferred.prompt();
-      try { await deferred.userChoice; } finally { deferred = null; removeBtn(); }
-    });
-    document.body.appendChild(btn);
-  });
-  window.addEventListener('appinstalled', removeBtn);
 })();
-`;
+` + pushInstallJs();
 }
 
 // scaffoldPwaFiles — the current PWA/build-identity file contents, so the

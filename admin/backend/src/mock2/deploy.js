@@ -30,6 +30,8 @@ import {
   LEGACY_SW_JS,
 } from './deploy-logic.js';
 import { parseDeclaredEgress } from './egress-logic.js';
+// The declared default port; a project row normally carries its own.
+import { DEFAULT_WEB_PORT } from './template.js';
 import { updateProject } from './projects.js';
 
 const UNIT_PATH = '/etc/systemd/system/mock2-dev.service';
@@ -318,4 +320,63 @@ export async function stampDeployedCommit(projectId, containerName, appDir) {
     const sha = String(r.stdout || '').trim().split('\n').pop().trim();
     if (/^[0-9a-f]{40}$/.test(sha)) updateProject(projectId, { deployed_commit: sha });
   } catch { /* the stamp is advisory; a miss only costs one redundant deploy */ }
+}
+
+// ---- "is it actually serving?" ----------------------------------------
+//
+// WHY THIS EXISTS. A build can finish, pass every gate, checkpoint cleanly —
+// and leave nothing answering on the project's URL. It happened: the anomaly
+// tripwire HELD the deploy of a project's very first build, so the app was
+// never started, and the only signal was the design review screenshotting
+// ERR_CONNECTION_REFUSED. The operator had to notice and press Deploy.
+//
+// Nothing in the pipeline asked the simplest possible question afterwards:
+// does the URL answer? This asks it, and fixes it when the answer is no.
+
+// probeServing — one cheap request from INSIDE the container. Same accept rule
+// as the deploy health check: anything under 500 means the app is up and its
+// own routing is its business; a 5xx or a refused connection is not serving.
+export async function probeServing(project, { timeoutMs = 15000 } = {}) {
+  const containerName = project?.container_name;
+  const port = project?.web_port || DEFAULT_WEB_PORT;
+  if (!containerName || project.lifecycle !== 'active') {
+    return { serving: false, reason: 'the project is not online' };
+  }
+  try {
+    const r = await containerSh(
+      containerName,
+      `code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${port}/" 2>/dev/null)\n`
+      + `echo "CODE:\${code:-000}"\n`,
+      { timeoutMs },
+    );
+    const code = (String(r.stdout || '').match(/CODE:(\d+)/) || [])[1] || '000';
+    const n = Number(code);
+    return { serving: n > 0 && n < 500, code: n, reason: n === 0 ? 'connection refused' : `http ${n}` };
+  } catch (e) {
+    return { serving: false, reason: e?.message || 'probe failed' };
+  }
+}
+
+// ensureServing — probe, and deploy if the app is not answering.
+//
+// Idempotent and cheap in the happy path (one curl). Best-effort: it never
+// throws into the caller, because the caller is usually a build closing out.
+// Returns { serving, redeployed, error }.
+export async function ensureServing(project, { reason = 'post-build' } = {}) {
+  const first = await probeServing(project);
+  if (first.serving) return { serving: true, redeployed: false };
+
+  console.warn(`[mock2] project ${project?.id} is not serving after ${reason} (${first.reason}) — deploying`);
+  try {
+    const out = await deployProject({
+      containerName: project.container_name,
+      webPort: project.web_port || DEFAULT_WEB_PORT,
+      projectId: project.id,
+    });
+    if (!out?.ok) return { serving: false, redeployed: true, error: out?.error || `deploy failed at ${out?.step || 'unknown'}` };
+    const after = await probeServing(project);
+    return { serving: after.serving, redeployed: true, error: after.serving ? null : after.reason };
+  } catch (e) {
+    return { serving: false, redeployed: false, error: e?.message || 'deploy threw' };
+  }
 }

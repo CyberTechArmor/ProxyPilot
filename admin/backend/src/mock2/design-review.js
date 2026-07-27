@@ -37,6 +37,7 @@ import { insertMessage } from './chats.js';
 import { saveChatImages } from './chat-images.js';
 import { enqueueBuild, drainBuildQueue } from './build-queue.js';
 import { getDesignReviewSetting } from './settings.js';
+import { ensureReviewAccount, getReviewLogin, REVIEW_EMAIL } from './review-account.js';
 
 const APP_DIR = '/srv/app';
 const MOBILE = { width: 390, height: 780 };
@@ -90,6 +91,37 @@ async function tryLogin(page, baseUrl, spec) {
   } catch { /* unauth shots still useful */ }
 }
 
+// Did the login actually take? Navigating to '/' is the only honest test: the
+// auth gate 302s page navigations to /login, and a sign-in form is a sign-in
+// form whatever the route is called. Cheap enough to run twice.
+async function isSignedIn(page, baseUrl) {
+  try {
+    await gotoSettled(page, new URL('/', baseUrl).toString());
+    if (/\/login(?:[/?#]|$)/.test(page.url())) return false;
+    return (await page.locator('input[type="password"]').count()) === 0;
+  } catch {
+    return false;
+  }
+}
+
+// Get INTO the app, by whichever door opens.
+//
+// 1. The project's own ui-checks fixture users, when the build wrote them —
+//    they carry the right ROLE for the screens under review.
+// 2. The platform's review account (review-account.js) — always available on
+//    an app with the auth component, because the platform creates it rather
+//    than hoping the model did. This is what stopped every review from being a
+//    critique of the sign-in page.
+//
+// Returns true when the capture is authenticated.
+async function establishSession(page, baseUrl, spec, reviewLogin) {
+  await tryLogin(page, baseUrl, spec);
+  if (await isSignedIn(page, baseUrl)) return true;
+  if (!reviewLogin?.email || !reviewLogin?.password) return false;
+  await tryOperatorLogin(page, baseUrl, reviewLogin);
+  return isSignedIn(page, baseUrl);
+}
+
 function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
   return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
 }
@@ -124,7 +156,7 @@ function pathsToShoot(spec) {
 
 // Screenshot the deployed app. Returns { shots, axe, detail } — shots are
 // JPEG base64 (cheaper tokens than PNG at review fidelity). Never throws.
-export async function captureAppScreens({ containerName, webPort = 3000, paths = null, withAxe = true }) {
+export async function captureAppScreens({ containerName, webPort = 3000, paths = null, withAxe = true, reviewLogin = null }) {
   const chromium = await loadChromium();
   if (!chromium) return { shots: [], axe: [], overflows: [], detail: 'playwright-core is not installed (rerun update.sh / npm install)' };
   const baseUrl = await resolveBrowserTarget(containerName, webPort);
@@ -138,13 +170,14 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
   const shots = [];
   const axeViolations = [];
   const overflowFindings = [];
+  let authed = false;
   try {
     browser = await chromium.launch(launchOptions());
     const context = await browser.newContext({ viewport: MOBILE, deviceScaleFactor: 1 });
     const page = await context.newPage();
-    // Authenticated pages need a session — log in with the spec's first fixture
-    // role when one exists; without a spec the login/bootstrap pages still shoot.
-    await tryLogin(page, baseUrl, spec);
+    // Authenticated pages need a session. Fixture users first (right role),
+    // then the platform's own review account — see establishSession.
+    authed = await establishSession(page, baseUrl, spec, reviewLogin);
     for (let i = 0; i < targets.length; i++) {
       const path = targets[i];
       try {
@@ -196,9 +229,9 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
         console.warn(`[mock2] design-review screenshot failed for ${path}:`, err?.message);
       }
     }
-    return { shots, axe: axeViolations, overflows: overflowFindings, detail: null, hasLogin: !!(spec?.login && Object.keys(spec.login.users || {}).length) };
+    return { shots, axe: axeViolations, overflows: overflowFindings, detail: null, authenticated: authed };
   } catch (err) {
-    return { shots, axe: axeViolations, overflows: overflowFindings, detail: `browser error: ${err?.message || err}`, hasLogin: !!(spec?.login && Object.keys(spec.login.users || {}).length) };
+    return { shots, axe: axeViolations, overflows: overflowFindings, detail: `browser error: ${err?.message || err}`, authenticated: authed };
   } finally {
     try { if (browser) await browser.close(); } catch { /* ignore */ }
   }
@@ -212,7 +245,10 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
 // then NAMES the stage so a stuck install can be diagnosed from the dialog.
 const CAPTURE_DEADLINE_MS = 90000;
 
-export async function captureOneScreenshot({ containerName, webPort = 3000, path = '/', width = 390, onStage = null, operatorLogin = null }) {
+export async function captureOneScreenshot({
+  containerName, webPort = 3000, path = '/', width = 390, onStage = null, operatorLogin = null,
+  projectId = null,
+}) {
   let browser = null;
   let stage = 'starting';
   const t0 = Date.now();
@@ -248,8 +284,14 @@ export async function captureOneScreenshot({ containerName, webPort = 3000, path
       mark('signing in with the provided account');
       await tryOperatorLogin(page, baseUrl, operatorLogin);
     } else {
-      mark('signing in with the fixture login');
-      await tryLogin(page, baseUrl, spec);
+      // Same ladder as the review: fixture users, then the platform's own
+      // reviewer account. Annotating the app's real screens beats annotating
+      // the sign-in page, and the operator should not have to hand over their
+      // password to get one.
+      mark('signing in');
+      let reviewLogin = null;
+      try { reviewLogin = projectId ? getReviewLogin(projectId) : null; } catch { reviewLogin = null; }
+      await establishSession(page, baseUrl, spec, reviewLogin);
     }
     // Paths are operator-clicked UI values, but sanitize anyway: same-origin only.
     const safePath = String(path || '/').startsWith('/') ? String(path) : '/';
@@ -302,7 +344,22 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   const ready = buildRunnerReady();
   if (!ready.ok) return { ok: false, error: ready.reason || 'No build model connector is ready.' };
 
-  const capture = await captureAppScreens({ containerName, webPort: project.web_port || 3000 });
+  // Make sure there is an account to sign in WITH before opening the browser.
+  // This is the fix for "the ai can never see past the login screen": the
+  // platform provisions its own fixture-domain admin instead of depending on
+  // the build model having written fixture users.
+  let reviewLogin = null;
+  try {
+    const acct = await ensureReviewAccount(project);
+    reviewLogin = acct.login;
+    if (!acct.ok && acct.state !== 'no-auth') {
+      console.warn(`[mock2] design review: no review account for project ${project.id} (${acct.state}: ${acct.reason})`);
+    }
+  } catch (e) {
+    console.warn('[mock2] design review: review-account provisioning failed:', e?.message);
+  }
+
+  const capture = await captureAppScreens({ containerName, webPort: project.web_port || 3000, reviewLogin });
   if (!capture.shots.length) {
     return { ok: false, error: capture.detail || 'Could not capture any screenshots of the app.' };
   }
@@ -356,11 +413,15 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
 
   const review = parseReviewReply(res.text) || { summary: '', findings: [] };
   let message = reviewChatMessage({ review, axe: capture.axe, rogue, adherence, trigger, screenshotCount: capture.shots.length });
-  // Honesty: with no fixture logins the capture only ever sees the sign-in
-  // gate — say so up front, or the findings read as "the entire app is
-  // missing" (user report). A Full build creates the fixture logins.
-  if (!capture.hasLogin) {
-    message = `Heads-up: no fixture logins exist yet (a Full build creates them), so this review could only see the SIGN-IN page — the findings below describe the sign-in gate, not the app's screens.
+  // Honesty: a capture that never got past the gate only ever sees the sign-in
+  // page — say so up front, or the findings read as "the entire app is
+  // missing" (user report). This should now be rare: the platform provisions
+  // its own review account above, so the remaining causes are a real narrow
+  // set (a custom sign-in form the generic selectors miss, an app with no auth
+  // component whose '/' still gates) — and the banner names them so the
+  // operator can act instead of guessing.
+  if (!capture.authenticated) {
+    message = `Heads-up: this review could not get past the SIGN-IN page, so the findings below describe the sign-in gate, not the app's screens. The platform keeps its own reviewer account (\`${REVIEW_EMAIL}\`) for this; when it cannot sign in, the usual cause is a sign-in form whose email/password inputs are not standard \`input[type="email"]\` / \`input[type="password"]\` fields inside a form with a submit button.
 
 ${message}`;
   }

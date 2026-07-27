@@ -7,6 +7,7 @@ import FlightdeckFileTree from './FlightdeckFileTree';
 import FlightdeckEditor from './FlightdeckEditor';
 import ProjectAssets from './ProjectAssets';
 import MobilePanelBar from './MobilePanelBar';
+import DeployButton from './DeployButton';
 import { WORKSPACE_NAME, flightdeckLayoutKey, readJsonPref, writeJsonPref } from '@/lib/flightdeck';
 import { Button } from '@/components/ui/button';
 import {
@@ -169,10 +170,15 @@ export default function Flightdeck({
     ? <PreviewPanel src={previewSrc} title={project?.name} approved reloadKey={externalNonce}
         fullHeight={previewFull} onToggleFullHeight={devMode ? (() => setPreviewFull((v) => !v)) : null}
         onAnnotate={canEdit && online ? annotatePreview : null} />
-    : <div className="flex items-center justify-center h-full text-sm text-muted-foreground">No preview — the app isn’t serving yet.</div>;
+    : (
+      <div className="flex flex-col items-center justify-center gap-3 h-full p-4 text-center">
+        <p className="text-sm text-muted-foreground">No preview — the app isn’t serving yet.</p>
+        <DeployButton projectId={projectId} online={online} canEdit={canEdit} variant="full" onDeployed={load} />
+      </div>
+    );
   const chatPane = (
     <BuildChat projectId={projectId} project={project} cycle={cycle} canEdit={canEdit} online={online} active={active}
-      job={job} buildQueue={buildQueue} activity={activity} onStarted={load} />
+      job={job} buildQueue={buildQueue} activity={activity} onStarted={load} fill />
   );
   const terminalPane = online
     ? <ProjectTerminal projectId={projectId} containerName={containerName} defaultOpen fill />
@@ -197,6 +203,9 @@ export default function Flightdeck({
         {routing?.model ? <span className="text-xs text-muted-foreground hidden md:inline">{routing.model}{routing.effort ? ` · ${routing.effort}` : ''}</span> : null}
         <span className="text-xs font-mono px-2 py-0.5 rounded bg-background border" title="Spend this cycle">{costText}</span>
         {active ? <Button size="sm" variant="destructive" className="h-8" onClick={stop}><StopCircle className="h-3.5 w-3.5 mr-1" /> Stop</Button> : null}
+        {/* Is the app actually live — and the one-tap fix when it is not
+            (operator report: "the app did not work until redeployed"). */}
+        <DeployButton projectId={projectId} online={online} canEdit={canEdit} onDeployed={load} />
         {/* Dev toggle: green (off) = clean preview+chat view; blue (on) = full IDE
             (file tree + editor + terminal). */}
         <button
@@ -316,7 +325,12 @@ export default function Flightdeck({
         const cur = panels.some((p) => p.key === mobilePanel) ? mobilePanel : 'preview';
         return (
           <div className="flex flex-col flex-1 min-h-0 lg:hidden">
-            <div className="flex-1 min-h-0 overflow-auto">
+            {cur === 'preview' ? (
+              <div className="flex items-center justify-end gap-2 px-2 py-1 border-b shrink-0">
+                <DeployButton projectId={projectId} online={online} canEdit={canEdit} onDeployed={load} />
+              </div>
+            ) : null}
+            <div className={`flex-1 min-h-0 ${cur === 'chat' ? 'overflow-hidden' : 'overflow-auto'}`}>
               {cur === 'files' && filesPane}
               {cur === 'editor' && editorPane}
               {cur === 'chat' && chatPane}

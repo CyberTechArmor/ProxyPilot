@@ -1420,6 +1420,14 @@ export const api = {
   // cycle's terminal status is restored afterwards.
   mock2RetryDeploy: (id, cycleId) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/retry-deploy`, { method: 'POST' }),
+  // Is the app actually answering right now? One curl inside the container —
+  // cheap enough to poll, and the only honest answer to "why is my app down".
+  mock2Serving: (id) => request(`/mock2/projects/${id}/serving`),
+  // Deploy. Not cycle-bound (unlike mock2RetryDeploy), so it works when the
+  // last build is old or there is no build at all. Checks first and only
+  // deploys when it has to; force:true deploys regardless.
+  mock2Deploy: (id, { force = false } = {}) =>
+    request(`/mock2/projects/${id}/deploy`, { method: 'POST', body: JSON.stringify({ force }) }),
   mock2StopAllCycles: () => request('/mock2/cycles/stop-all', { method: 'POST' }),
   mock2GetLock: (id) => request(`/mock2/projects/${id}/lock`),
   mock2RequestTakeover: (id) => request(`/mock2/projects/${id}/lock/takeover`, { method: 'POST' }),

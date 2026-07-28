@@ -58,10 +58,13 @@ export async function markDesignFindingsBriefed(project, keys = []) {
   if (!keys.length || !project?.container_name || project.lifecycle !== 'active') return false;
   try {
     const next = markBriefed(await readLedger(project.container_name), keys);
+    // ENCODED payload on stdin — the script inside decodes it. A host-side
+    // `base64 -d` in this pipeline decodes twice and writes garbage; see
+    // base-app-upgrade.js's containerShWithStdin for the four bytes that cost.
     const script = `d="${APP_DIR}/${DESIGN_FINDINGS_PATH}"; mkdir -p "$(dirname "$d")"; base64 -d > "$d"`;
     const r = await sh(
-      `printf '%s' '${b64(renderFindingsLedger(next))}' | base64 -d | incus exec ${project.container_name} -- sh -c "$(printf '%s' '${b64(script)}' | base64 -d)"`,
-      { timeoutMs: 20000 },
+      `incus exec ${project.container_name} -- sh -c "$(printf '%s' '${b64(script)}' | base64 -d)"`,
+      { timeoutMs: 20000, input: b64(renderFindingsLedger(next)) },
     );
     return r.code === 0;
   } catch (e) {

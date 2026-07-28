@@ -94,10 +94,12 @@ export async function promoteElements(project, names = []) {
       return { ok: false, error: 'Those elements are no longer in the app’s stylesheets — reload the list.' };
     }
     const { css, promoted, skipped } = promoteInto(designCss, chosen);
+    // ENCODED payload on stdin — decoding on the host too would write four
+    // bytes of garbage over the approved design. See base-app-upgrade.js.
     const script = `d="${APP_DIR}/${DESIGN_CSS_PATH}"; mkdir -p "$(dirname "$d")"; base64 -d > "$d"`;
     const r = await sh(
-      `printf '%s' '${b64(css)}' | base64 -d | incus exec ${project.container_name} -- sh -c "$(printf '%s' '${b64(script)}' | base64 -d)"`,
-      { timeoutMs: 30000 },
+      `incus exec ${project.container_name} -- sh -c "$(printf '%s' '${b64(script)}' | base64 -d)"`,
+      { timeoutMs: 30000, input: b64(css) },
     );
     if (r.code !== 0) {
       return { ok: false, error: `The approved design could not be written: ${(r.stderr || r.stdout || '').trim().slice(-200)}` };

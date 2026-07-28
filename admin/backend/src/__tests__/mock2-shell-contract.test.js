@@ -38,7 +38,13 @@ test('AN APP THAT SAYS NOTHING IS CHECKED EXACTLY AS BEFORE', () => {
     { expect_visible: '[data-legal-footer]' },
   ]);
   assert.deepEqual(shellShellSteps(null), shellShellSteps());
-  assert.deepEqual(shellAdminSteps(), [{ expect_visible: 'header' }, { expect_visible: '#add-role' }]);
+  // THE ADMIN ROUTE IS THE ONE DELIBERATE EXCEPTION, and it is a fix rather
+  // than a drift: it no longer asserts a header at all. `header` matched the
+  // platform console by coincidence — both it and the default app shell have a
+  // bare <header> — which is exactly why applying the app's OWN selector there
+  // stayed invisible until a build declared `header.topbar` and lost three
+  // cycles to it. See the admin-route test below.
+  assert.deepEqual(shellAdminSteps(), [{ expect_visible: '#add-role' }]);
 });
 
 test('A SIDEBAR IS A LAYOUT, NOT A FAILURE', () => {
@@ -99,9 +105,31 @@ test('malformed JSON is the default, not a crash', () => {
   }
 });
 
-test('the admin route follows the same layout', () => {
-  assert.deepEqual(selectors(shellAdminSteps(parse({ nav: 'hidden' }))), ['#add-role']);
-  assert.deepEqual(selectors(shellAdminSteps(parse({ nav: 'side', navSelector: 'aside' }))), ['aside', '#add-role']);
+test('THE ADMIN ROUTE IS NOT THE APP\'S SHELL', () => {
+  // /admin is the PLATFORM's console, reached by a link. The contract at
+  // state/shell.json describes the app's OWN screens, and applying its
+  // navSelector here demanded the app's chrome on a page the app is
+  // explicitly encouraged not to rebuild.
+  //
+  // Project 47 lost three cycles and $10.28 to it: the build declared
+  // `header.topbar` for its own screens, reasoned correctly that the console
+  // "already exists at /admin … so I correctly link rather than rebuild", and
+  // then failed platform-baseline-admin-reachable on `header.topbar`.
+  //
+  // Invisible until an app declared something specific, because the default
+  // (`header`) happens to match the platform console too — so this asserts the
+  // property for EVERY layout, not just the one that broke.
+  for (const shell of [
+    parse({ nav: 'top', navSelector: 'header.topbar' }),
+    parse({ nav: 'side', navSelector: 'aside.app-nav' }),
+    parse({ nav: 'hidden' }),
+    parse({}),
+    null,
+  ]) {
+    assert.deepEqual(selectors(shellAdminSteps(shell)), ['#add-role'],
+      'the console proves itself by its own content, never by the app\'s chrome');
+  }
+  assert.deepEqual(selectors(shellAdminSteps(parse({ nav: 'top' }), '#other')), ['#other']);
 });
 
 /* --------------------- it reaches the checks that ran --------------------- */

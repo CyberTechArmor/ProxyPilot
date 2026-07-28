@@ -34,7 +34,7 @@ import {
 import { readRunContract } from './deploy.js';
 import {
   UI_CHECKS_PATH, parseUiChecks, checksForChangedFiles, uiCheckLogLines, uiCheckFailSummary,
-  withPlatformLogin, withBaselineChecks, isBaselineCheck,
+  withPlatformLogin, withBaselineChecks, isBaselineCheck, baselineOnlyFailure,
 } from './ui-check-logic.js';
 import { runUiChecks, launchOptions, loadChromium } from './ui-checks.js';
 import { ACCEPTANCE_PATH, parseAcceptance } from './acceptance-logic.js';
@@ -273,6 +273,9 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
         return {
           ok: gateOk,
           notYetPossible: first.blocked > 0,
+          // Every failure is a platform baseline → an identical retry gets an
+          // identical report. Carried out so the runner can say so.
+          baselineOnly: gateOk ? null : baselineOnlyFailure(results),
           detail: run.ok
             ? `${results.length} interaction check(s) passed${baselineRan ? ` (incl. ${baselineRan} platform baseline)` : ''}${required.length ? ` (incl. ${required.length} acceptance check(s))` : ''}`
             : first.blocked
@@ -474,13 +477,14 @@ export async function runSmokeGate({
   // "everything was verified". Green with an asterisk is the honest answer —
   // silent green would be worse than the red it replaces.
   const notYetPossible = report.browser?.notYetPossible === true;
+  const baselineOnly = !ok ? (report.browser?.baselineOnly || null) : null;
 
   const logLines = [
     ...smokeLogLines(resolved),
     ...(report.browser?.logLines || []),
     ...report.rejected.map((r) => `escalation rejected — ${r.why}`),
   ];
-  return { ok, specInvalid, notYetPossible, report, logLines };
+  return { ok, specInvalid, notYetPossible, baselineOnly, report, logLines };
 }
 
 // A one-line summary of WHY the smoke gate failed, for the cycle error + status.

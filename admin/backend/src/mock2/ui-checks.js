@@ -16,6 +16,7 @@
 
 import { existsSync } from 'node:fs';
 import { stepShape } from './ui-check-logic.js';
+import { selectorPrefixes, diagnoseSelector, diagnosisDetail } from './selector-diagnosis-logic.js';
 
 const NAV_TIMEOUT_MS = 15000;
 const STEP_TIMEOUT_MS = 5000;
@@ -75,8 +76,32 @@ async function runStep(page, step) {
   try {
     switch (s.kind) {
       case 'expect_visible': {
-        await loc.waitFor({ state: 'visible', timeout: STEP_TIMEOUT_MS });
-        return { ok: true, detail: `${s.selector} visible` };
+        try {
+          await loc.waitFor({ state: 'visible', timeout: STEP_TIMEOUT_MS });
+          return { ok: true, detail: `${s.selector} visible` };
+        } catch (err) {
+          // "Timeout 5000ms exceeded" is not a diagnosis. A compound selector
+          // carries its own bisection: report the deepest prefix that IS on
+          // the page, so `[data-legal-footer] .legal-link` says whether the
+          // slot is missing or merely empty. Project 47 spent three cycles and
+          // $10.28 on that distinction.
+          //
+          // Failure path ONLY — a passing run pays nothing — and wrapped so a
+          // diagnosis that throws still yields the original error.
+          let extra = '';
+          try {
+            // Probe each prefix ONCE, then let the pure layer read the result.
+            const present = new Set();
+            for (const p of selectorPrefixes(s.selector).slice(0, -1)) {
+              // eslint-disable-next-line no-await-in-loop
+              if (await page.locator(p).first().count() === 0) break;
+              present.add(p);
+            }
+            extra = diagnosisDetail(s.selector, diagnoseSelector(s.selector, (p) => present.has(p)));
+          } catch { /* the original error is still worth reporting */ }
+          const base = String(err?.message || err).split('\n')[0].slice(0, 200);
+          return { ok: false, detail: extra ? `${s.selector}: ${base} — ${extra}` : `${s.selector}: ${base}` };
+        }
       }
       case 'expect_enabled': {
         await loc.waitFor({ state: 'visible', timeout: STEP_TIMEOUT_MS });

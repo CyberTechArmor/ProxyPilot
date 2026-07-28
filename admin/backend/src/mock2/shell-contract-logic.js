@@ -91,14 +91,35 @@ export function shellShellSteps(shell = DEFAULT_SHELL) {
   return steps;
 }
 
-// The admin route's steps. Same reasoning: the guarantee is that an
-// administrator can GET THERE and use it, not that a <header> is on the page.
-export function shellAdminSteps(shell = DEFAULT_SHELL, target = '#add-role') {
-  const s = { ...DEFAULT_SHELL, ...(shell || {}) };
-  const steps = [];
-  if (s.nav !== 'hidden' && s.navSelector) steps.push({ expect_visible: s.navSelector });
-  steps.push({ expect_visible: target });
-  return steps;
+// The admin route's steps. The guarantee is that an administrator can GET
+// THERE and use it, not that a <header> is on the page — and this function
+// used to say exactly that in a comment and then assert the header anyway.
+//
+// /admin IS NOT THE APP'S SHELL. The contract at state/shell.json describes
+// the app's OWN screens; the admin console is the platform's surface, reached
+// by a link. Applying the app's navSelector to it demanded the app's chrome on
+// a page the app is explicitly allowed — encouraged — not to rebuild.
+//
+// Project 47 lost three cycles and $10.28 to this. The build replaced the base
+// header with per-screen topbars, correctly declared
+// `{"nav":"top","navSelector":"header.topbar"}`, and reasoned its way to the
+// right decision about the console:
+//
+//     "That entire surface already exists at /admin (platform console). My
+//      topbar's settings icon links to /admin. So I correctly link rather
+//      than rebuild."
+//
+// It then failed `platform-baseline-admin-reachable` on `header.topbar` for
+// doing so. With the default selector (`header`) this never showed, because
+// the app's shell and the platform's console happen to share a bare <header>
+// — the bug was invisible until an app declared something specific, which is
+// the entire feature.
+//
+// So the app's layout declaration is deliberately NOT consulted here. What is
+// asserted is the target: an element inside the console proves the console
+// rendered, which is the whole of the guarantee.
+export function shellAdminSteps(_shell = DEFAULT_SHELL, target = '#add-role') {
+  return [{ expect_visible: target }];
 }
 
 // The block that goes into a build's instructions.

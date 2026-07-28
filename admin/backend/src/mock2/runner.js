@@ -1979,9 +1979,39 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           } catch (e) { console.warn('[mock2] post-smoke readiness check failed:', e?.message); }
           // The readiness line goes FIRST when it fired: it is the cause, and
           // the check failures below it are the symptoms.
+          // EVERY failure is a platform baseline → an identical retry gets an
+          // identical report, and the operator is the one who presses Continue.
+          // Project 47 ran three cycles and $10.28 before anyone could tell
+          // that was the situation: cycles 2 and 3 both changed no product
+          // code, and one of the two failures was not fixable from inside the
+          // app at all. Best-effort — this only decides what the cycle fails
+          // SAYING.
+          let baselineLine = '';
+          try {
+            if (smoke.baselineOnly) {
+              const { baselineBlockedMessage } = await import('./ui-check-logic.js');
+              // "No product code changed" is what makes a retry provably
+              // futile rather than merely unpromising; state/ and the build-id
+              // stamps are not product code.
+              const product = (changedThisCycle || []).filter((f) => !/^state\//.test(f)
+                && !/^public\/(build-id\.(js|txt)|sw\.js)$/.test(f));
+              const msg = baselineBlockedMessage(smoke.baselineOnly, { emptyDiff: product.length === 0 });
+              if (msg) {
+                insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: msg });
+                baselineLine = product.length === 0
+                  ? 'Only platform baseline checks failed, and this build changed no product code — running it again will report the same thing. '
+                  : 'Only platform baseline checks failed (not your change). ';
+              }
+              logEvent('note', {
+                role: 'system',
+                content: `Baseline-only smoke failure: ${smoke.baselineOnly.ids.join(', ')} (product files changed: ${product.length})`,
+                meta: { baseline_only: true, ids: smoke.baselineOnly.ids },
+              });
+            }
+          } catch (e) { console.warn('[mock2] baseline-only report failed:', e?.message); }
           const error = readyLine
             ? `The deployed app is not reachable — ${readyLine}. Downstream: ${detail}`
-            : `Smoke gate failed after deploy — ${detail}`;
+            : `${baselineLine}Smoke gate failed after deploy — ${detail}`;
           finishCycle(cycle.id, { status: 'failed', error });
           releaseLock(projectId, holder);
           setJob(cycle.id, { phase: 'smoke_failed', message: error, commit: record?.commit_sha || null });

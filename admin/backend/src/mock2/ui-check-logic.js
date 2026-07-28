@@ -445,6 +445,56 @@ export function isBaselineCheck(check) {
   return String(check?.id || '').startsWith(BASELINE_CHECK_PREFIX);
 }
 
+// EVERY failure is the platform's own check — so another identical cycle will
+// produce this same report.
+//
+// Project 47 ran three cycles and $10.28 on exactly this. Cycles 2 and 3 both
+// concluded "no product-code change was needed", shipped an empty diff, and
+// failed on the same two baselines. The build was not being lazy: it had
+// finished the app, its own checks passed, and one of the two failures
+// (`header.topbar` asserted on the platform's /admin console) was genuinely
+// not fixable from inside the app. Nothing in the report said so, so the
+// obvious next move was always "run it again".
+//
+// Reported rather than auto-halted: the operator presses Continue, so the
+// operator is who has to be told.
+export function baselineOnlyFailure(results = []) {
+  const failed = (results || []).filter((r) => r && r.ok === false && !r.notPossible);
+  if (!failed.length) return null;
+  if (!failed.every(isBaselineCheck)) return null;
+  return { failed, ids: failed.map((r) => r.id) };
+}
+
+// The message an operator reads. Carries each failure's DETAIL verbatim,
+// because that detail now contains the selector bisection — "the slot is
+// present and empty" is the whole difference between a one-line fix and
+// another $2 cycle.
+export function baselineBlockedMessage({ failed = [] } = {}, { emptyDiff = false } = {}) {
+  if (!failed.length) return '';
+  const lines = [
+    `Only the platform's own baseline check(s) failed — ${failed.length} of them, and nothing your change touched.`,
+    '',
+  ];
+  for (const r of failed.slice(0, 6)) lines.push(`- ${r.id}: ${r.detail || 'failed'}`);
+  lines.push('');
+  if (emptyDiff) {
+    lines.push(
+      'This build changed no product code, so running it again will produce this same report.',
+      'The base app or the platform contract has to change, not the build.',
+    );
+  } else {
+    lines.push('Running the same build again will not clear these on its own.');
+  }
+  lines.push(
+    '',
+    'Baseline checks assert the guarantees every generated app must keep — a reachable admin route,',
+    'the theme control, and the legal footer. A failure here is usually one of: markup the app rewrote',
+    'and dropped a required slot from, a platform script that stopped running on a page, or a shell',
+    'declaration in state/shell.json that no longer matches the app.',
+  );
+  return lines.join('\n');
+}
+
 // The checks a diff warrants: every check whose path globs match ANY changed
 // file. This is what both enforcement points share — the coverage gate asks
 // "does at least one check match?", the connector asks "which checks run?".

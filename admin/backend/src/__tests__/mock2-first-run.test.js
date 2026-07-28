@@ -169,7 +169,15 @@ test('RATCHET: the pass is reported as qualified, not as clean', () => {
   // the red it replaces, so the flag must ride out with the result.
   const src = readFileSync(new URL('../mock2/smoke.js', import.meta.url), 'utf8');
   assert.match(src, /const notYetPossible = report\.browser\?\.notYetPossible === true/);
-  assert.match(src, /return \{ ok, specInvalid, notYetPossible, report, logLines \}/);
+  // The property is "it rides out with the result", not "the tuple has exactly
+  // these five members" — pinning the literal made this fail the moment a
+  // sibling disposition (baselineOnly) was added, which is a test breaking for
+  // a change it does not care about.
+  const ret = src.match(/return \{ ok, specInvalid,[^}]*\};/);
+  assert.ok(ret, 'runSmokeGate must return its dispositions');
+  assert.match(ret[0], /\bnotYetPossible\b/);
+  assert.match(ret[0], /\breport\b/);
+  assert.match(ret[0], /\blogLines\b/);
 });
 
 test('RATCHET: an excused check is not counted as an acceptance failure', () => {

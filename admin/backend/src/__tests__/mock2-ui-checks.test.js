@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   UI_CHECKS_PATH, STEP_KINDS, parseUiChecks, checksForChangedFiles, stepShape, withPlatformLogin,
@@ -542,4 +543,70 @@ test('the runner prompt says the build\'s routers go LAST, not merely below /log
   assert.match(prompt, /signin-reachable/, 'and the gate that catches it');
   // Naming the escape hatches it must NOT take.
   assert.match(prompt, /move YOURS down/);
+});
+
+/* ------------------- BASELINE-ONLY FAILURE (project 47) ------------------- */
+//
+// Three cycles, $10.28, identical each time. Cycles 2 and 3 both concluded "no
+// product-code change was needed", shipped an empty diff, and failed on the
+// same two platform baselines. The build was not being lazy — it had finished
+// the app, its own checks passed, and one of the two failures (`header.topbar`
+// asserted against the platform's /admin console) was not fixable from inside
+// the app at all. Nothing in the report said so, so "run it again" was always
+// the obvious next move.
+
+test('baseline-only is only claimed when EVERY failure is a baseline', async () => {
+  const { baselineOnlyFailure } = await import('../mock2/ui-check-logic.js');
+  const base = (id) => ({ id: `platform-baseline-${id}`, ok: false, detail: 'x' });
+  const mine = (id) => ({ id, ok: false, detail: 'x' });
+
+  assert.equal(baselineOnlyFailure([base('a'), base('b')]).ids.length, 2);
+  assert.equal(baselineOnlyFailure([base('a'), mine('notes-todo-add')]), null,
+    'one failure of the app\'s own means the build has something to fix');
+  assert.equal(baselineOnlyFailure([{ id: 'x', ok: true }]), null, 'nothing failed');
+  assert.equal(baselineOnlyFailure([]), null);
+});
+
+test('a not-yet-possible check is not counted as a failure here', async () => {
+  // Otherwise the two features collide: a first-run app would report
+  // "baseline-only failure" for checks that did not run at all.
+  const { baselineOnlyFailure } = await import('../mock2/ui-check-logic.js');
+  const r = baselineOnlyFailure([
+    { id: 'platform-baseline-a', ok: false, detail: 'real' },
+    { id: 'signin', ok: false, notPossible: true, detail: 'no admin yet' },
+  ]);
+  assert.deepEqual(r.ids, ['platform-baseline-a']);
+});
+
+test('THE MESSAGE SAYS A RETRY IS FUTILE, and carries the diagnosis', async () => {
+  const { baselineBlockedMessage } = await import('../mock2/ui-check-logic.js');
+  const failed = [{
+    id: 'platform-baseline-signin-legal',
+    ok: false,
+    detail: '[data-legal-footer] .legal-link: Timeout — "[data-legal-footer]" IS present',
+  }];
+  const empty = baselineBlockedMessage({ failed }, { emptyDiff: true });
+  assert.match(empty, /running it again will produce this same report/i);
+  assert.match(empty, /base app or the platform contract has to change/);
+  // The detail is what makes it a one-line fix rather than another $2 cycle.
+  assert.match(empty, /"\[data-legal-footer\]" IS present/);
+
+  const withDiff = baselineBlockedMessage({ failed }, { emptyDiff: false });
+  assert.ok(!/same report/i.test(withDiff), 'a build that DID change code gets the weaker claim');
+  assert.match(withDiff, /will not clear these on its own/);
+  assert.equal(baselineBlockedMessage({ failed: [] }), '');
+});
+
+test('RATCHET: the runner reports it, and build-id stamps are not product code', () => {
+  // Cycles 2 and 3 touched only public/sw.js + build-id + state/. Counting
+  // those as product changes would make the futility claim never fire on the
+  // exact shape that motivated it.
+  const src = readFileSync(new URL('../mock2/runner.js', import.meta.url), 'utf8');
+  assert.match(src, /smoke\.baselineOnly/);
+  assert.match(src, /baselineBlockedMessage/);
+  assert.match(src, /build-id\\\.\(js\|txt\)\|sw\\\.js/, 'the stamps must not count as product code');
+  assert.match(src, /\^state\\\//, 'nor state/');
+  const block = src.slice(src.indexOf('let baselineLine'));
+  assert.match(block.slice(0, 1600), /catch \(e\) \{ console\.warn\('\[mock2\] baseline-only report failed/,
+    'this only decides what the cycle fails SAYING — it must never throw');
 });

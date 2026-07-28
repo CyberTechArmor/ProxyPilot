@@ -20,7 +20,10 @@
 
 import { createRequire } from 'node:module';
 import { sh, b64 } from './host.js';
-import { loadChromium, launchOptions, loginAs, apiSignIn, firstVisible, gotoStable, revealSignInForm, waitForSignInToLand } from './ui-checks.js';
+import {
+  loadChromium, launchOptions, loginAs, apiSignIn, firstVisible, gotoStable,
+  revealSignInForm, waitForSignInToLand, AUTOMATION_CONTEXT,
+} from './ui-checks.js';
 import { resolveBrowserTarget } from './smoke.js';
 import { parseUiChecks, UI_CHECKS_PATH } from './ui-check-logic.js';
 import {

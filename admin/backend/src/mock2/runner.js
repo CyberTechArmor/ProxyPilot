@@ -122,6 +122,7 @@ import { UI_CHECKS_PATH, parseUiChecks } from './ui-check-logic.js';
 import {
   removalCoverage, removalRejectionMessage, removalWarningMessage, removalCoverageNote,
 } from './removal-claims-logic.js';
+import { recordFeature, takeFeatureLedger } from './feature-activation.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
 // BUILD_RUNNER=sdk — docs/agent-sdk-migration.md) orients in the same container
@@ -1453,6 +1454,15 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         });
         const note = removalCoverageNote(verdict);
         if (note) logEvent('note', { role: 'system', content: note });
+        // The ledger row, INCLUDING the quiet case. "No removal was claimed" is
+        // the answer an operator cannot get any other way — a feature that
+        // declines to act writes nothing, and silence reads identically to
+        // never having run.
+        recordFeature(projectId, 'removal_claims',
+          verdict.claims.length ? 'fired' : 'skipped',
+          verdict.claims.length
+            ? `${verdict.claims.length} claim(s); ${verdict.ok ? 'each asserted by a check that could fail' : `${verdict.uncovered.length} unverified, ${verdict.badRefs.length} unfalsifiable`}`
+            : 'the summary claimed no user-visible removal');
         if (!verdict.ok && !removalRejected) {
           removalRejected = true;
           transcript.push({
@@ -1491,7 +1501,10 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             decision.finishAcceptanceIds = [...new Set([...(decision.finishAcceptanceIds || []), ...ids])];
           }
         }
-      } catch (e) { console.warn('[mock2] removal-claim check failed open:', e?.message); }
+      } catch (e) {
+        console.warn('[mock2] removal-claim check failed open:', e?.message);
+        recordFeature(projectId, 'removal_claims', 'failed', e?.message || 'threw');
+      }
       // ACTION PARITY (ratchet 3): on the inventory-implementation build,
       // every mutation action in the contract must be SURFACED in the app's
       // UI source — working control or a visible "Not built yet" badge both
@@ -1887,6 +1900,25 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           viewerLogin = acct?.viewerLogin || null;
         } catch (e) { console.warn('[mock2] pre-smoke review account failed:', e?.message); }
         const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, requiredIds: decision.finishAcceptanceIds || [], logEvent, env: process.env, reviewLogin, viewerLogin, projectId: project.id });
+        // The smoke-side ledger rows, then the ledger itself. This is the last
+        // stage that reports anything, so it is where the note gets written —
+        // and it is written on the failure paths below too, because a build
+        // that went red is exactly when "which platform features even ran"
+        // stops being trivia. Instrumentation, so it can never throw.
+        try {
+          const sa = smoke.report?.browser?.screenAccounts;
+          recordFeature(project.id, 'screen_accounts', sa ? 'fired' : 'skipped',
+            sa || 'the spec declared no fixture users');
+          recordFeature(project.id, 'first_run', smoke.notYetPossible ? 'fired' : 'skipped',
+            smoke.notYetPossible
+              ? 'no first administrator — session checks could not run'
+              : 'the app has a first administrator (or nothing failed to explain)');
+          const ledger = takeFeatureLedger(project.id);
+          if (ledger.note) {
+            logEvent('note', { role: 'system', content: ledger.note, meta: { feature_activation: ledger.summary } });
+            insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: ledger.note });
+          }
+        } catch (e) { console.warn('[mock2] feature ledger failed:', e?.message); }
         // A malformed TEST FILE is not a broken app. Project 38 deployed
         // successfully, served correctly, and the cycle went red because
         // state/ui-checks.json used a different (equally valid, more

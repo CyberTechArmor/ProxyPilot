@@ -247,8 +247,14 @@ test('RATCHET: it rejects at most ONCE', () => {
   assert.match(src, /!verdict\.ok && !removalRejected/);
   const block = src.slice(src.indexOf('const claimed = decision.finishRemovals'), src.indexOf('ACTION PARITY'));
   assert.match(block, /insertMessage/, 'the second pass must tell the OPERATOR, not just the log');
-  assert.match(block, /catch \(e\) \{ console\.warn\('\[mock2\] removal-claim check failed open/,
+  // Matched across lines on purpose: the property is "it catches and swallows",
+  // not "it is formatted on one line". The single-line version broke the first
+  // time a statement was added to the catch, which is a test failing for the
+  // shape of code it does not care about.
+  const caught = block.slice(block.indexOf('} catch (e) {'));
+  assert.match(caught, /removal-claim check failed open/,
     'a detector that can break a finish by throwing is worse than no detector');
+  assert.ok(!/\bthrow\b/.test(caught), 'and it must not rethrow');
 });
 
 test('RATCHET: a declared check is FORCED to run against the deployed app', () => {

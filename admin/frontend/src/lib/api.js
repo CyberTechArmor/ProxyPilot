@@ -1538,6 +1538,10 @@ export const api = {
   // App access — who can sign in, and the operator's own first-administrator
   // door (the build is forbidden to create that account).
   mock2AppAccess: (id) => request(`/mock2/projects/${id}/app-access`),
+  // The rules this app is built against — confirmed (state/rules.md) and the
+  // baseline floor every build gets. Read-only; sign-off #2 finally has a
+  // read side.
+  mock2Rules: (id) => request(`/mock2/projects/${id}/rules`),
   // body must be a STRING: request() hands options straight to fetch(), so a
   // bare object is coerced to "[object Object]" and express.json() rejects it
   // with a 400 the global handler reports as "Internal server error".

@@ -153,6 +153,13 @@ function containerSh(containerName, script, { timeoutMs = 120000 } = {}) {
   return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
 }
 
+// Exported so the rules panel can read the artefact this module writes.
+// Sharing the reader rather than adding a second one keeps APP_DIR and the
+// not-found convention in one place.
+export async function readProjectFile(containerName, relPath) {
+  return readWorkingFile(containerName, relPath);
+}
+
 async function readWorkingFile(containerName, relPath) {
   const r = await containerSh(containerName, `cat "${APP_DIR}/${relPath}" 2>/dev/null`);
   if (r.code !== 0) return { ok: false, error: 'not found' };

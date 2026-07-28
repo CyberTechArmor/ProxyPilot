@@ -38,6 +38,9 @@ import {
 } from './ui-check-logic.js';
 import { runUiChecks, launchOptions, loadChromium } from './ui-checks.js';
 import { ACCEPTANCE_PATH, parseAcceptance } from './acceptance-logic.js';
+import {
+  firstRunProbeScript, parseFirstRun, firstRunVerdict, firstRunDetail, firstRunLogLines,
+} from './first-run-logic.js';
 import { smokeEnv } from './settings.js';
 
 // Run a script inside the container (same base64-streamed pivot as the runner).
@@ -148,7 +151,7 @@ async function readUiChecksFile(containerName, appDir) {
 // (visible-form count on the root page) when the project has no spec or no
 // check matches this diff. A spec that exists but does not parse FAILS the
 // connector — a broken test manifest must never read as a pass. Never throws.
-async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles, requiredIds = [], reviewLogin = null, viewerLogin = null, projectId = null }) {
+async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles, requiredIds = [], reviewLogin = null, viewerLogin = null, projectId = null, webPort = null }) {
   // 1) Project interaction checks, when declared. The run set is the UNION of
   //    the diff-matched checks and the ACCEPTANCE-REQUIRED ids (cycle-94: the
   //    task's live acceptance — e.g. "Test connection turns all three checks
@@ -233,24 +236,56 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
       if (toRun.length) {
         const run = await runUiChecks({ baseUrl: url, spec: parsed.spec, checks: toRun });
         if (run.unavailable) return { ok: false, unavailable: true, detail: run.detail };
-        const acceptanceFailed = run.results.filter((r) => required.includes(r.id) && !r.ok);
+
+        // NOT YET POSSIBLE ≠ FAILED. Until a real first administrator exists,
+        // /login renders the create-administrator form and hides the sign-in
+        // form, so every check that signs in times out on an element that is
+        // legitimately absent. Project 46 build 129 read "5 of 7 failed" on a
+        // build that had done nothing wrong.
+        //
+        // Probed LAZILY — only when something already failed, so a green run
+        // never pays for it — and it can only ever speak when the app itself
+        // answers 200 with canCreateSuperadmin: true. Any other answer leaves
+        // the report exactly as it was: a probe that fails must not turn a red
+        // build green.
+        let first = { blocked: 0, remaining: 0, results: run.results, notPossible: [], stillFailed: [] };
+        if (!run.ok && webPort) {
+          try {
+            const probe = parseFirstRun((await containerSh(containerName, firstRunProbeScript({ port: webPort }), { timeoutMs: 20000 }))?.stdout || '');
+            if (probe.known && probe.firstRun) {
+              first = firstRunVerdict({ results: run.results, checks: toRun, firstRun: true });
+            }
+          } catch (e) {
+            console.warn('[mock2] first-run probe failed (report unchanged):', e?.message);
+          }
+        }
+        const results = first.results;
+        // The gate stays RED while anything genuinely failed. First-run
+        // explains part of a report, never all of it by fiat.
+        const gateOk = run.ok || (first.blocked > 0 && first.remaining === 0);
+
+        const acceptanceFailed = results.filter((r) => required.includes(r.id) && !r.ok && !r.notPossible);
         // A baseline failure is a statement about the BASE APP, not about the
         // change the operator just asked for. Naming it separately stops an
         // hour being spent reading a build diff for a defect that is not in it.
-        const baselineFailed = run.results.filter((r) => isBaselineCheck(r) && !r.ok);
-        const baselineRan = run.results.filter(isBaselineCheck).length;
+        const baselineFailed = results.filter((r) => isBaselineCheck(r) && !r.ok && !r.notPossible);
+        const baselineRan = results.filter(isBaselineCheck).length;
         return {
-          ok: run.ok,
+          ok: gateOk,
+          notYetPossible: first.blocked > 0,
           detail: run.ok
-            ? `${run.results.length} interaction check(s) passed${baselineRan ? ` (incl. ${baselineRan} platform baseline)` : ''}${required.length ? ` (incl. ${required.length} acceptance check(s))` : ''}`
-            : `${acceptanceFailed.length ? 'ACCEPTANCE check failed — ' : baselineFailed.length && baselineFailed.length === run.results.filter((r) => !r.ok).length ? 'BASE APP check failed (not your change) — ' : 'interaction checks failed — '}${uiCheckFailSummary(run.results) || run.detail || 'see results'}`,
-          uiChecks: run.results.map((r) => ({ ...r, acceptance: required.includes(r.id), baseline: isBaselineCheck(r) })),
+            ? `${results.length} interaction check(s) passed${baselineRan ? ` (incl. ${baselineRan} platform baseline)` : ''}${required.length ? ` (incl. ${required.length} acceptance check(s))` : ''}`
+            : first.blocked
+              ? firstRunDetail({ blocked: first.blocked, total: results.length, stillFailed: first.stillFailed })
+              : `${acceptanceFailed.length ? 'ACCEPTANCE check failed — ' : baselineFailed.length && baselineFailed.length === results.filter((r) => !r.ok).length ? 'BASE APP check failed (not your change) — ' : 'interaction checks failed — '}${uiCheckFailSummary(results) || run.detail || 'see results'}`,
+          uiChecks: results.map((r) => ({ ...r, acceptance: required.includes(r.id), baseline: isBaselineCheck(r) })),
           // The screen-accounts line goes FIRST: when a login check fails, the
           // next question is always "did that user exist?", and the answer
           // should be on the line above rather than inferred from a timeout.
           logLines: [
             ...(screenAccounts?.note ? [`ui-check ${screenAccounts.note}`] : []),
-            ...uiCheckLogLines(run.results),
+            ...firstRunLogLines(first),
+            ...uiCheckLogLines(results),
           ],
           screenAccounts: screenAccounts?.note || null,
         };
@@ -413,7 +448,7 @@ export async function runSmokeGate({
 
   if (resolved.browser.disposition === 'ran') {
     const target = url || await resolveBrowserTarget(containerName, webPort);
-    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles, requiredIds: acceptanceUi, reviewLogin, viewerLogin, projectId })), reason: resolved.browser.reason };
+    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles, requiredIds: acceptanceUi, reviewLogin, viewerLogin, projectId, webPort })), reason: resolved.browser.reason };
   }
   if (resolved.db.disposition === 'ran') {
     report.db = { ...(await driveDbConnector({ containerName, appDir })), reason: resolved.db.reason };
@@ -433,12 +468,19 @@ export async function runSmokeGate({
   // above). Only meaningful when the gate did not pass.
   const specInvalid = !ok && report.browser?.specInvalid === true && http.ok !== false;
 
+  // A third disposition, and it is deliberately NOT tied to `!ok`: when the
+  // only thing wrong was that no first administrator exists, the gate PASSES
+  // (nothing failed) and this is the flag that stops that pass being read as
+  // "everything was verified". Green with an asterisk is the honest answer —
+  // silent green would be worse than the red it replaces.
+  const notYetPossible = report.browser?.notYetPossible === true;
+
   const logLines = [
     ...smokeLogLines(resolved),
     ...(report.browser?.logLines || []),
     ...report.rejected.map((r) => `escalation rejected — ${r.why}`),
   ];
-  return { ok, specInvalid, report, logLines };
+  return { ok, specInvalid, notYetPossible, report, logLines };
 }
 
 // A one-line summary of WHY the smoke gate failed, for the cycle error + status.

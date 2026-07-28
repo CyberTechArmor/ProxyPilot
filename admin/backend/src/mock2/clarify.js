@@ -29,6 +29,7 @@ import { effectivePrice } from './connectors.js';
 import {
   buildClarifyPrompt, buildClarifyTask, parseClarifyReply, shouldClarify,
 } from './clarify-logic.js';
+import { recordFeature } from './feature-activation.js';
 
 // One or two shots, not six. The phone width only: a request vague enough to
 // reach here is almost never about the laptop layout specifically, and the
@@ -78,9 +79,17 @@ export async function clarifyRequest({
     verdict = shouldClarify(instruction, { prepass, mode, previousUserMessage, previousFailed, hasImages });
   } catch (e) {
     console.warn('[mock2] clarify: verdict failed:', e?.message);
+    recordFeature(project?.id, 'clarifier', 'failed', e?.message || 'verdict threw');
     return null;
   }
-  if (!verdict.clarify) return null;
+  if (!verdict.clarify) {
+    // The row that matters most for this feature. Staying quiet is the DESIGNED
+    // behaviour on a clear or continuation request, and it is indistinguishable
+    // from the clarifier being switched off, broken, or never wired — which is
+    // the state it was in for its entire life until someone looked.
+    recordFeature(project?.id, 'clarifier', 'skipped', verdict.reason || 'the request was already specific enough');
+    return null;
+  }
 
   const ready = buildRunnerReady();
   if (!ready.ok) return null;
@@ -136,6 +145,8 @@ export async function clarifyRequest({
   // Fewer than two usable options is not a choice, and one option presented as
   // a card is the clarifier deciding for them with extra steps.
   if (!parsed) return null;
+  recordFeature(project?.id, 'clarifier', 'fired',
+    `asked about ${verdict.pages.length ? verdict.pages.join(', ') : 'an unnamed page'} (${shots.length} shot(s), ${parsed.options?.length || 0} option(s))`);
   return { ...parsed, pages: verdict.pages, looked: shots.length, reason: verdict.reason };
 }
 

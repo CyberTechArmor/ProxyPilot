@@ -57,6 +57,7 @@ import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectCompon
 import ProjectApiKeys from '@/components/mock2/ProjectApiKeys';
 import ProjectAppAccess from '@/components/mock2/ProjectAppAccess';
 import ProjectDesignElements from '@/components/mock2/ProjectDesignElements';
+import ProjectRules from '@/components/mock2/ProjectRules';
 import ProjectSetup from '@/components/mock2/ProjectSetup';
 import MobilePanelBar from '@/components/mock2/MobilePanelBar';
 import { fireConfetti } from '@/lib/confetti';
@@ -762,6 +763,11 @@ export default function ProjectDetail() {
           not have. Promotion is the only way the design vocabulary grows past
           the one mockup it was frozen at. */}
       <ProjectDesignElements projectId={id} canEdit={canEdit && !isArchived} />
+
+      {/* The rules every build honours — confirmed (sign-off #2) and the
+          baseline floor. Read-only: this is the read side state/rules.md
+          never had, not a second place to edit it. */}
+      <ProjectRules projectId={id} />
       <ProjectApiKeys projectId={id} canEdit={canEdit && !isArchived} isAdmin={isAdmin} />
 
       {/* Time tracking — project start + where the time went (live). */}

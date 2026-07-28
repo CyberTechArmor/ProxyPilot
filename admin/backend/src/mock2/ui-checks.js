@@ -151,7 +151,13 @@ async function runStep(page, step) {
 // "signed in? no" and "check crashed" results that made builds look flaky.
 // The PWA's own behaviour is covered by the app's e2e suite, where a reload is
 // the thing under test rather than noise on top of everything else.
-const AUTOMATION_CONTEXT = Object.freeze({ serviceWorkers: 'block' });
+//
+// EXPORTED because design-review.js opens its own contexts and needs the same
+// options. It was not, and design-review.js used the bare name anyway — so
+// every capture threw `AUTOMATION_CONTEXT is not defined` at its first
+// newContext and the design review has not run since. One definition, because
+// two copies of "why service workers are blocked" is how they diverge.
+export const AUTOMATION_CONTEXT = Object.freeze({ serviceWorkers: 'block' });
 
 // The first VISIBLE match, not simply the first match.
 //

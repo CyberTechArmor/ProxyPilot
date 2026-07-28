@@ -28,6 +28,7 @@ import { api } from '@/lib/api';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { ANNOTATION_CLOSING } from '@/lib/annotation';
 import { Loader2, RefreshCw, MapPin, X, Send, ImagePlus, Trash2 } from 'lucide-react';
 
 const MAX_PINS = 12;          // across every page, not per page
@@ -306,7 +307,7 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend, att
       // (the operator finishes the message and picks Ask / Quick update).
       if (onApply && attachImage) {
         onApply({
-          text: `Annotated the attached image — the numbered red pins mark the exact spots:\n${blocks.join('\n\n')}`,
+          text: `Annotated the attached image — the numbered red pins mark where the operator was pointing:\n${blocks.join('\n\n')}`,
           image: images[0],
           images,
         });
@@ -315,7 +316,7 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend, att
         return;
       }
       const plural = images.length > 1;
-      const text = `Annotated screenshot${plural ? 's' : ''} of ${plural ? `${images.length} screens` : (shots.find((s) => pins.some((p) => p.shotKey === s.key && p.note.trim()))?.path || 'the app')} attached — the numbered red pins mark the exact spots.\n\n${blocks.join('\n\n')}\n\nApply exactly these changes at the marked spots; change nothing else.`;
+      const text = `Annotated screenshot${plural ? 's' : ''} of ${plural ? `${images.length} screens` : (shots.find((s) => pins.some((p) => p.shotKey === s.key && p.note.trim()))?.path || 'the app')} attached — the numbered red pins mark where the operator was pointing.\n\n${blocks.join('\n\n')}\n\n${ANNOTATION_CLOSING}`;
       await onSend({ text, image: images[0], images });
       setPins([]);
       onOpenChange(false);

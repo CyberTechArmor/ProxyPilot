@@ -11,6 +11,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
+import { ANNOTATION_CLOSING } from '@/lib/annotation';
 import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2, MapPin, X, Send, Sparkle, MousePointer2, FileWarning } from 'lucide-react';
 
 const MAX_PREVIEW_PINS = 8;
@@ -58,7 +59,7 @@ function composePreviewAnnotation(src, pins, { hasImage = false, elementAware = 
     : 'pins are a percentage of the visible preview area';
   const img = hasImage ? ' A screenshot with the numbered pins burned in is attached.' : '';
   const scope = order.length > 1 ? `${order.length} screens of the live app` : `the live preview (${src})`;
-  return `Annotated ${scope} — the numbered pins mark the exact spots (${how}).${img}\n\n${blocks.join('\n\n')}\n\nApply exactly these changes at the marked spots; change nothing else.`;
+  return `Annotated ${scope} — the numbered pins mark where the operator was pointing (${how}).${img}\n\n${blocks.join('\n\n')}\n\n${ANNOTATION_CLOSING}`;
 }
 
 // Capture the visible preview via the browser's tab-snapshot (getDisplayMedia),

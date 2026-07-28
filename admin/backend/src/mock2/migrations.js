@@ -1712,4 +1712,21 @@ export const MOCK2_MIGRATIONS = [
       d.exec('ALTER TABLE mock2_projects ADD COLUMN setup_intake_json TEXT;');
     },
   },
+  {
+    // Whether a request with no checkable outcome gets the clarifier card
+    // before it becomes a build. 'ask' (default) offers 2-3 pressable rewrites
+    // and always keeps "Build it anyway"; 'off' builds exactly what was typed.
+    //
+    // Deliberately NOT an 'auto' mode, unlike suggest_mode: auto-rewriting
+    // somebody's request into what a model guessed they meant is the one thing
+    // this feature must never do.
+    version: 551,
+    name: 'mock2_projects_clarify_mode',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN clarify_mode TEXT NOT NULL DEFAULT 'ask'
+          CHECK (clarify_mode IN ('off', 'ask'));
+      `);
+    },
+  },
 ];

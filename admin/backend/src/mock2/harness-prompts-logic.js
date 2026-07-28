@@ -29,6 +29,8 @@ import { buildPrepassPrompt, buildDistillSystemPrompt } from './prepass-logic.js
 import { buildChecklistPostPassPrompt } from './screen-plan-logic.js';
 import { buildReviewPrompt } from './design-review-logic.js';
 import { buildDesignOptionsPrompt } from './design-options-logic.js';
+import { buildClarifyPrompt } from './clarify-logic.js';
+import { buildDemoContentPrompt } from './demo-content-logic.js';
 import { EXPLAIN_SYSTEM_PROMPT, EXPLAIN_FOLLOWUP_SYSTEM_PROMPT } from './explain-logic.js';
 import { CONSULT_SYSTEM_PROMPT } from './consult-logic.js';
 import { buildAskSystemPrompt } from './ask-logic.js';
@@ -75,6 +77,8 @@ export const STEP_PROMPT_SPECS = Object.freeze({
   'checklist-postpass': { placeholders: [], render: () => buildChecklistPostPassPrompt() },
   'design-review': { placeholders: [], render: () => buildReviewPrompt() },
   'design-options': { placeholders: [], render: () => buildDesignOptionsPrompt() },
+  clarify: { placeholders: [], render: () => buildClarifyPrompt() },
+  'demo-content': { placeholders: [], render: () => buildDemoContentPrompt() },
   ask: {
     placeholders: ['PROJECT_NAME', 'WEB_PORT', 'COMPONENTS'],
     note: 'The web-search availability line and installed-components section are injected per project; keep {{COMPONENTS}} where they should land.',

@@ -63,6 +63,7 @@ export default function BuildChat({
   // pre-pass surfaced beyond the literal request — tick to include as binding
   // additions. { instruction, items: [{ text, include }] }.
   const [suggestPlan, setSuggestPlan] = useState(null);
+  const [clarifyPlan, setClarifyPlan] = useState(null);
   // 'off' | 'ask' | 'auto' — the project's suggestion handling, editable here.
   const [suggestMode, setSuggestMode] = useState(project?.suggest_mode || 'ask');
   useEffect(() => { if (project?.suggest_mode) setSuggestMode(project.suggest_mode); }, [project?.suggest_mode]);
@@ -315,6 +316,14 @@ export default function BuildChat({
         setSuggestPlan(null);
         return;
       }
+      if (res.clarify_proposal) {
+        // Nothing started. The request had no outcome anyone could check, so
+        // the choice comes back before the money is spent.
+        setClarifyPlan({ ...res.clarify_proposal, mode: buildMode });
+        setSplitPlan(null);
+        setSuggestPlan(null);
+        return;
+      }
       if (res.suggest_proposal) {
         // Domain expectations beyond the literal ask (suggest_mode 'ask') —
         // show the additions card; nothing has started yet.
@@ -400,6 +409,30 @@ export default function BuildChat({
     await startBuild('quick', { skipSuggest: true, extras: extras.length ? extras : null });
   };
   const buildAsAsked = async () => { setSuggestPlan(null); await startBuild('quick', { skipSuggest: true }); };
+
+  // ---- clarifier card ----
+  //
+  // Pressing an option sends THAT option's instruction, not the original: the
+  // whole point is that the original had no outcome anyone could check.
+  // "Build it anyway" sends the original untouched and carries the declined
+  // options along as labelled guesses.
+  const takeClarifyOption = async (opt) => {
+    if (!clarifyPlan) return;
+    const mode = clarifyPlan.mode || 'quick';
+    setClarifyPlan(null);
+    setInstruction(opt.instruction);
+    await startBuild(mode, { skipClarify: true, textOverride: opt.instruction });
+  };
+  const buildAnyway = async () => {
+    if (!clarifyPlan) return;
+    const plan = clarifyPlan;
+    setClarifyPlan(null);
+    await startBuild(plan.mode || 'quick', {
+      skipClarify: true,
+      textOverride: plan.instruction,
+      clarifyGuesses: (plan.options || []).map((o) => ({ label: o.label, instruction: o.instruction })),
+    });
+  };
   // "Build this as a Quick update" on a chat bubble: the backend distills the
   // message into a well-formed prompt, the composer shows it, and it runs
   // through the NORMAL quick lane — split/suggestion cards and the queue all
@@ -920,6 +953,55 @@ export default function BuildChat({
             {/* Suggestions card (suggest_mode 'ask') — domain expectations the
                 pre-pass surfaced beyond the literal request. Ticked items become
                 binding additions; untick to leave them out entirely. */}
+            {clarifyPlan ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+                <p className="flex items-center gap-1.5 text-xs font-medium">
+                  <HelpCircle className="h-3.5 w-3.5" /> Nothing built yet — which of these did you mean?
+                </p>
+                {clarifyPlan.diagnosis ? (
+                  <p className="text-[11px] text-muted-foreground break-words">{clarifyPlan.diagnosis}</p>
+                ) : null}
+                {clarifyPlan.question ? (
+                  <p className="text-xs font-medium break-words">{clarifyPlan.question}</p>
+                ) : null}
+                {/* PRESSED, not answered. The interview this replaces was
+                    removed for asking eight questions; every option here is a
+                    complete request that runs on one tap. */}
+                {(clarifyPlan.options || []).map((o, i) => (
+                  <button
+                    key={i} type="button" disabled={busy}
+                    onClick={() => takeClarifyOption(o)}
+                    className="w-full rounded border bg-background/60 p-2 text-left hover:border-primary/50 disabled:opacity-50"
+                  >
+                    <span className="block text-xs font-medium">{o.label}</span>
+                    <span className="mt-0.5 block break-words text-[11px] text-muted-foreground">{o.instruction}</span>
+                    {o.checkable ? (
+                      <span className="mt-1 block break-words text-[11px] text-primary">
+                        You could then check: {o.checkable}
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  {/* First-class, never fine print: the operator may simply be
+                      right, and a helper that makes overruling it feel like a
+                      mistake is a gate. */}
+                  <Button variant="outline" className="min-h-[44px] flex-1" disabled={busy} onClick={buildAnyway}>
+                    Build it anyway
+                  </Button>
+                  <Button variant="ghost" className="min-h-[44px]" disabled={busy} onClick={() => setClarifyPlan(null)}>
+                    Cancel
+                  </Button>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  {clarifyPlan.looked
+                    ? `Read from ${clarifyPlan.looked} screenshot(s) of ${(clarifyPlan.pages || []).join(', ')}.`
+                    : 'Read from your words alone — name a screen (like /admin) and it will look at it.'}
+                  {' '}This only ever asks once per request.
+                </p>
+              </div>
+            ) : null}
+
             {suggestPlan ? (
               <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
                 <p className="flex items-center gap-1.5 text-xs font-medium">

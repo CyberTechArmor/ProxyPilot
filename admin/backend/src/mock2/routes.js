@@ -214,6 +214,7 @@ import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendin
 import { mintConnectToken, listConnectTokens, getConnectToken, revokeConnectToken } from './connect.js';
 import { enqueueBuild, listBuildQueue, cancelQueuedBuild, drainBuildQueue, publicQueueShape } from './build-queue.js';
 import { buildGroupInstruction, composeWithAdditions, normalizeSuggestMode, SUGGEST_MODES } from './prepass-logic.js';
+import { composeWithGuesses, CLARIFY_MODES } from './clarify-logic.js';
 import { probeSplitProposal, distillChatPrompt } from './runner.js';
 import { queuePendingDesign, clearPendingDesign, publicPendingDesignShape } from './pending-design.js';
 import { cloneUrlFor, cloneUrlWithCreds, vscodeCloneLink, shapeConnectToken } from './connect-logic.js';
@@ -484,6 +485,17 @@ const cycleStartSchema = z.object({
   // The additions the user ticked on the suggestions card; folded into the
   // instruction as binding deliverables.
   extras: z.array(z.string().trim().min(1).max(300)).max(6).optional(),
+  // True after the clarifier card was answered — by pressing one of its
+  // options, or by pressing "Build it anyway". It never fires twice on the
+  // same request: pushing back a second time is how a helper becomes a gate.
+  skip_clarify: z.boolean().optional(),
+  // The options the clarifier OFFERED and the operator did NOT pick, sent back
+  // with "Build it anyway" so the build gets them as labelled guesses rather
+  // than losing them. Never scope — see composeWithGuesses.
+  clarify_guesses: z.array(z.object({
+    label: z.string().trim().min(1).max(60),
+    instruction: z.string().trim().min(1).max(2000),
+  })).max(3).optional(),
 });
 const buildGroupsSchema = z.object({
   instruction: z.string().trim().min(1).max(8000),
@@ -1312,6 +1324,28 @@ export function createMock2Router() {
       ...state,
       summary: accessSummary(state),
     });
+  });
+
+  // Fill the app with realistic demo content, through its OWN API and signed in
+  // as the screen-capture account only. Never the operator's account and never
+  // a real user's: an empty app can only be critiqued for its chrome, which is
+  // every design-review finding so far, but the content belongs to the fixture.
+  router.post('/projects/:id/app-access/demo-content', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const { seedDemoContent } = await import('./demo-content.js');
+    const result = await seedDemoContent(req.mock2Project, {
+      force: req.body?.force === true,
+      initiatedBy: req.user.id,
+    });
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    if (result.alreadySeeded) {
+      return res.json({ ok: true, alreadySeeded: true, created: 0 });
+    }
+    try {
+      insertMessage({ projectId: req.mock2Project.id, kind: 'system', body: result.note });
+    } catch { /* best effort */ }
+    logAudit(req.user.id, 'MOCK2_DEMO_CONTENT_SEEDED', 'mock2_project', req.mock2Project.id,
+      { created: result.created, failed: result.failed, account: result.account }, req.ip);
+    res.json({ ok: true, created: result.created, failed: result.failed, account: result.account });
   });
 
   router.post('/projects/:id/app-access/first-admin', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
@@ -2926,9 +2960,55 @@ export function createMock2Router() {
     // ignores them. skip_split / skip_suggest (the cards' resends) bypass
     // their own card so neither re-appears in a loop. Fail-open throughout.
     const suggestMode = normalizeSuggestMode(project.suggest_mode);
-    if (mode === 'quick' && !parsed.data.skip_split && !(parsed.data.images || []).length) {
+    const hasImages = !!(parsed.data.images || []).length;
+
+    // ONE cheap probe, now for BOTH lanes. It was quick-only because only the
+    // quick lane needed sizing; the clarifier needs its verdict on full builds
+    // too, and a Haiku call is noise next to a full build's audit.
+    let probe = null;
+    if (!parsed.data.skip_split || !parsed.data.skip_clarify) {
+      try { probe = await probeSplitProposal(instruction); } catch { probe = null; }
+    }
+
+    // THE CLARIFIER RUNS FIRST. Splitting a request nobody can check yet, or
+    // suggesting additions to it, is decomposing a question before it has been
+    // asked — and both of those cards would then be the second interruption in
+    // a row.
+    if (!parsed.data.skip_clarify) {
       try {
-        const probe = await probeSplitProposal(instruction);
+        const { clarifyRequest } = await import('./clarify.js');
+        const { normalizeClarifyMode } = await import('./clarify-logic.js');
+        // The previous turn, because a short request right after one is a
+        // CONTINUATION and must never be challenged ("Please fix" meant
+        // something exact on the project that came out best).
+        const prior = listMessages(project.id).filter((m) => m.kind === 'user');
+        const priorCycle = latestCycle(project.id);
+        const card = await clarifyRequest({
+          project,
+          instruction,
+          mode: normalizeClarifyMode(project.clarify_mode),
+          previousUserMessage: prior.length ? String(prior[prior.length - 1].body || '') : '',
+          previousFailed: !!priorCycle && ['failed', 'abandoned', 'interrupted'].includes(priorCycle.status),
+          hasImages,
+          prepass: probe,
+          initiatedBy: req.user.id,
+        });
+        if (card) {
+          logAudit(req.user.id, 'MOCK2_CLARIFY_OFFERED', 'mock2_project', project.id,
+            { reason: card.reason, pages: card.pages, looked: card.looked, options: card.options.length }, req.ip);
+          return res.json({ clarify_proposal: { instruction, ...card } });
+        }
+      } catch { /* fail-open — a clarifier that can fail a build is a gate */ }
+    }
+    // "Build it anyway": the request is sent exactly as written, and the
+    // options they declined ride along as labelled guesses. Free information;
+    // throwing it away helps nobody.
+    if (parsed.data.skip_clarify && (parsed.data.clarify_guesses || []).length) {
+      instruction = composeWithGuesses(instruction, { options: parsed.data.clarify_guesses });
+    }
+
+    if (mode === 'quick' && !parsed.data.skip_split && !hasImages) {
+      try {
         if (probe?.scope === 'feature_scale' && probe.split?.parts?.length >= 2) {
           return res.json({ split_proposal: { instruction, parts: probe.split.parts } });
         }
@@ -3331,6 +3411,20 @@ export function createMock2Router() {
     }
     const updated = updateProject(req.mock2Project.id, { suggest_mode: mode });
     logAudit(req.user.id, 'MOCK2_SUGGEST_MODE_SET', 'mock2_project', req.mock2Project.id, { mode }, req.ip);
+    res.json({ project: shapeProject(updated, { isAdmin: isReqAdmin(req) }) });
+  });
+
+  // Whether a request with no checkable outcome gets the clarifier card first.
+  // 'ask' (default) | 'off'. No 'auto' on purpose: silently rewriting somebody's
+  // request into what a model guessed they meant is the one thing this must
+  // never do.
+  router.put('/projects/:id/clarify-mode', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const mode = String(req.body?.mode || '');
+    if (!CLARIFY_MODES.includes(mode)) {
+      return res.status(400).json({ error: `mode must be one of: ${CLARIFY_MODES.join(', ')}` });
+    }
+    const updated = updateProject(req.mock2Project.id, { clarify_mode: mode });
+    logAudit(req.user.id, 'MOCK2_CLARIFY_MODE_SET', 'mock2_project', req.mock2Project.id, { mode }, req.ip);
     res.json({ project: shapeProject(updated, { isAdmin: isReqAdmin(req) }) });
   });
 

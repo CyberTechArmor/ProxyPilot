@@ -107,9 +107,46 @@ export default function BuildChat({
   // A screen check / design options run is none of the three states above — it
   // is a browser driving the app for a minute or two with no cycle and no ask
   // job. So the chat stopped polling and the findings only appeared when the
-  // operator refreshed the page by hand, which is exactly what was reported.
-  const screenJob = data?.screen_job || null;
+  // operator refreshed the page by hand.
+  //
+  // THE FIRST FIX WAS CIRCULAR and did not work: it read the job off the CHAT
+  // payload, which only refreshes when the poll below is already running, which
+  // only happens when the job is visible. A check that starts after mount is
+  // never seen, so the operator refreshes — the same report, twice.
+  //
+  // So the job is watched on its OWN heartbeat, independent of the chat poll.
+  // It is a cheap read of an in-memory record, it works no matter who started
+  // the run (this button, the auto-review after a build, another tab), and
+  // seeing an active job is what turns the fast chat poll on.
+  const [screenJob, setScreenJob] = useState(null);
   const screenActive = !!screenJob && !['done', 'failed'].includes(screenJob.phase);
+  useEffect(() => {
+    let stopped = false;
+    let timer = null;
+    const tick = async () => {
+      let job = null;
+      try { job = (await api.mock2ScreenJob(projectId))?.job || null; } catch { job = null; }
+      if (stopped) return;
+      setScreenJob(job);
+      // Quick while something is happening, slow otherwise: an idle project
+      // must not pay a two-second poll it will never use.
+      const busyNow = !!job && !['done', 'failed'].includes(job.phase);
+      timer = setTimeout(tick, busyNow ? 2000 : 6000);
+    };
+    tick();
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [projectId]);
+
+  // When a run FINISHES, load once more: the findings message is inserted just
+  // before the job is closed, so the poll that sees 'done' is the one that must
+  // fetch it. Without this the messages arrive on the next heartbeat at best,
+  // and not at all once polling stops.
+  const prevScreenActive = useRef(false);
+  useEffect(() => {
+    if (prevScreenActive.current && !screenActive) load();
+    prevScreenActive.current = screenActive;
+  }, [screenActive, load]);
+
   const shouldPoll = active || askActive || screenActive || openQuestionCount > 0 || projectOpenQuestions > 0;
   useEffect(() => {
     if (!shouldPoll) return undefined;
@@ -355,14 +392,24 @@ export default function BuildChat({
   // through the NORMAL quick lane — split/suggestion cards and the queue all
   // apply to the composed prompt exactly as if the user typed it.
   const [distillingId, setDistillingId] = useState(null);
-  const quickUpdateFromMessage = async (m) => {
+  // `extra` is the "Update and input" half: whatever the operator knows that
+  // the message does not. It is appended AFTER the distilled instruction and
+  // labelled, so the build reads it as an additional constraint rather than as
+  // more of the same — and so a note that contradicts the findings wins, which
+  // is the only reason to type one.
+  const quickUpdateFromMessage = async (m, extra = '') => {
     if (busy || distillingId) return;
     setDistillingId(m.id);
     try {
       const r = await api.mock2DistillPrompt(projectId, m.id);
-      setInstruction(r.instruction);
-      toast({ title: 'Prompt composed from the chat', description: 'Sending it as a Quick update…' });
-      await startBuild('quick', { textOverride: r.instruction });
+      const note = String(extra || '').trim();
+      const text = note ? `${r.instruction}\n\nAlso, from the operator (this wins where it disagrees with the above):\n${note}` : r.instruction;
+      setInstruction(text);
+      toast({
+        title: 'Prompt composed from the chat',
+        description: note ? 'Sending it with your note as a Quick update…' : 'Sending it as a Quick update…',
+      });
+      await startBuild('quick', { textOverride: text });
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not turn the message into a prompt', description: err.message });
     } finally { setDistillingId(null); }

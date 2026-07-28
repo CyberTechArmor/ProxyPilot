@@ -1546,6 +1546,9 @@ export const api = {
   // app for a minute or two. Polled by the preview so the surface that IS a
   // picture of the app says when something is looking at it.
   mock2ScreenJob: (id) => request(`/mock2/projects/${id}/screen-job`),
+  // The frame the capture is looking at right now. A URL, not a fetch: it goes
+  // straight into an <img>, and `seq` is what makes the browser refetch.
+  mock2ScreenFrameUrl: (id, seq) => `${API_BASE}/mock2/projects/${id}/screen-job/frame?seq=${seq}`,
   // Guided setup — the first-run path. The read is derived server-side from
   // real data (accounts, assets, mockup, approval), so it is safe to poll and
   // impossible to desync from what the project actually has.

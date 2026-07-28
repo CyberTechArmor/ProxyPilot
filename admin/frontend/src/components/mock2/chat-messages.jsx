@@ -12,7 +12,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle, Trash2, FolderOpen, Activity, Copy, Download } from 'lucide-react';
+import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle, Trash2, FolderOpen, Activity, Copy, Download, Send } from 'lucide-react';
 import ExplainThis from './ExplainThis';
 import Markdown from './Markdown';
 import { chatImageUrl } from '@/lib/chat-images';
@@ -212,11 +212,90 @@ function NoteActions({ body, name = 'note' }) {
   );
 }
 
+// A findings note is the ONE system message that is a to-do list.
+//
+// Every other note here is status ("the base app deployed", "3 screen accounts
+// created") — nothing to do with it but read it. The design review is the
+// opposite: seven numbered defects, each with a fix already written, and until
+// now the only way to act on any of them was to read them, decide which
+// mattered, and re-type the instruction into the composer by hand.
+//
+// Keyed on the prefix the review composes, which a backend ratchet holds in
+// place (mock2-design-review-actions.test.js) — the two files cannot drift
+// without a test going red.
+export function isFindingsNote(body) {
+  return /^Design review \(/.test(String(body || '').trimStart());
+}
+
+// FindingsActions — turn the note into a build, with or without a word first.
+//
+// "offer a quick update from that specific chat / and an 'Update and Input'
+// where they specify anything else."
+//
+// Fix these:      the findings as written, distilled into an instruction.
+// Fix + add note: the same, plus whatever the operator knows that the review
+//                 does not — which screen matters, what to leave alone, a
+//                 constraint no screenshot can show.
+function FindingsActions({ m, onQuickUpdate, busyId }) {
+  const [noting, setNoting] = useState(false);
+  const [extra, setExtra] = useState('');
+  if (!onQuickUpdate) return null;
+  const thisBusy = busyId === m.id;
+  const anyBusy = busyId != null;
+  return (
+    <div className="mt-2 space-y-2 border-t border-border/60 pt-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          className="inline-flex h-9 items-center gap-1 rounded-md border border-primary/40 px-2.5 text-[11px] font-medium text-primary hover:bg-primary/10 disabled:opacity-50"
+          disabled={anyBusy}
+          onClick={() => onQuickUpdate(m)}
+          title="Turn these findings into a well-formed prompt and run it as a Quick update"
+        >
+          {thisBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+          {thisBusy ? 'Composing the prompt…' : 'Fix these'}
+        </button>
+        <button
+          type="button"
+          className="inline-flex h-9 items-center gap-1 rounded-md border px-2.5 text-[11px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-50"
+          disabled={anyBusy}
+          aria-expanded={noting}
+          onClick={() => setNoting((v) => !v)}
+          title="Run these findings as a Quick update, plus anything else you want to say"
+        >
+          <Pencil className="h-3 w-3" /> {noting ? 'Cancel' : 'Fix + add a note'}
+        </button>
+      </div>
+      {noting ? (
+        <div className="space-y-1.5">
+          <textarea
+            value={extra}
+            onChange={(e) => setExtra(e.target.value)}
+            rows={3}
+            autoFocus
+            placeholder="Anything else — which findings matter most, what to leave alone, a constraint the screenshots cannot show…"
+            className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-xs"
+          />
+          <button
+            type="button"
+            className="inline-flex h-9 w-full items-center justify-center gap-1 rounded-md border border-primary/40 px-2.5 text-[11px] font-medium text-primary hover:bg-primary/10 disabled:opacity-50 sm:w-auto"
+            disabled={anyBusy || !extra.trim()}
+            onClick={() => { onQuickUpdate(m, extra.trim()); setNoting(false); setExtra(''); }}
+          >
+            {thisBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
+            Send the findings and this note
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // System notes can carry images — the screen check posts its mobile/desktop
 // screenshots with its findings. A note WITH attachments always uses the boxed
 // layout: the centred pill has nowhere to put a thumbnail, and a critique whose
 // evidence is invisible is exactly the thing the operator has to take on trust.
-function SystemNote({ body, m, projectId }) {
+function SystemNote({ body, m, projectId, onQuickUpdate = null, quickBusyId = null }) {
   const [expanded, setExpanded] = useState(false);
   const hasShots = !!(projectId && m?.attachments?.length);
   if (body.length <= LONG_SYSTEM_NOTE_CHARS && !hasShots) {
@@ -259,6 +338,11 @@ function SystemNote({ body, m, projectId }) {
             <AttachmentThumbs m={m} projectId={projectId} mine={false} />
           </div>
         ) : null}
+        {/* LAST, under the evidence: the buttons are the answer to "so what do
+            I do about it", and that question comes after reading and looking. */}
+        {isFindingsNote(body) ? (
+          <FindingsActions m={m} onQuickUpdate={onQuickUpdate} busyId={quickBusyId} />
+        ) : null}
       </div>
     </div>
   );
@@ -270,7 +354,7 @@ export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBus
     // decision: the chip belongs to genuine Ask answers only). Long notes
     // (a design review's findings) render as a collapsible left-aligned
     // card — a giant centered pill was unreadable (user report).
-    return <SystemNote body={String(m.body || '')} m={m} projectId={projectId} />;
+    return <SystemNote body={String(m.body || '')} m={m} projectId={projectId} onQuickUpdate={onQuickUpdate} quickBusyId={quickBusyId} />;
   }
   if (m.kind === 'rule_answer') {
     return (

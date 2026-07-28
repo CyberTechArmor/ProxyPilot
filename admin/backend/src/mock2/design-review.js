@@ -46,7 +46,7 @@ import {
 } from './design-findings-logic.js';
 import { listNewElements, promotionInviteMessage } from './design-promote.js';
 import { ensureReviewAccount, getReviewLogin, REVIEW_EMAIL } from './review-account.js';
-import { startScreenJob, updateScreenJob, finishScreenJob } from './screen-job.js';
+import { startScreenJob, updateScreenJob, finishScreenJob, setScreenFrame } from './screen-job.js';
 
 const APP_DIR = '/srv/app';
 const MOBILE = { width: 390, height: 780 };
@@ -288,7 +288,12 @@ function pathsToShoot(spec) {
 
 // Screenshot the deployed app. Returns { shots, axe, detail } — shots are
 // JPEG base64 (cheaper tokens than PNG at review fidelity). Never throws.
-export async function captureAppScreens({ containerName, webPort = 3000, paths = null, withAxe = true, reviewLogin = null }) {
+// onShot(shot) — called as each screenshot lands, so a caller can show the
+// operator what the browser is looking at RIGHT NOW rather than a spinner and a
+// two-minute wait. Best-effort and never allowed to break the capture: a
+// viewfinder that throws would cost the review it was decorating.
+export async function captureAppScreens({ containerName, webPort = 3000, paths = null, withAxe = true, reviewLogin = null, onShot = null }) {
+  const report = (shot) => { try { onShot?.(shot); } catch { /* a viewfinder must never fail a capture */ } };
   const chromium = await loadChromium();
   if (!chromium) return { shots: [], axe: [], overflows: [], detail: 'playwright-core is not installed (rerun update.sh / npm install)' };
   const baseUrl = await resolveBrowserTarget(containerName, webPort);
@@ -318,7 +323,9 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
         await page.setViewportSize(MOBILE);
         await gotoSettled(page, new URL(path, baseUrl).toString());
         const mobileShot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false });
-        shots.push({ path, width: MOBILE.width, media_type: 'image/jpeg', data: mobileShot.toString('base64') });
+        const mobileEntry = { path, width: MOBILE.width, media_type: 'image/jpeg', data: mobileShot.toString('base64') };
+        shots.push(mobileEntry);
+        report(mobileEntry);
         // Deterministic overflow check (operator-reported: scrolling strip in
         // the header, admin text overflow): any page that scrolls horizontally
         // at mobile width is a defect — record the offenders for the critique
@@ -367,7 +374,9 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
           await page.setViewportSize(DESKTOP);
           await page.waitForTimeout(250);
           const deskShot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false });
-          shots.push({ path, width: DESKTOP.width, media_type: 'image/jpeg', data: deskShot.toString('base64') });
+          const deskEntry = { path, width: DESKTOP.width, media_type: 'image/jpeg', data: deskShot.toString('base64') };
+          shots.push(deskEntry);
+          report(deskEntry);
           // Density is a different question at each width — a screen can be
           // right on a phone and be three cards adrift on a laptop, which is
           // the shape a mobile-first build produces by default.
@@ -516,7 +525,15 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   }
 
   updateScreenJob(project.id, { phase: 'capturing', message: 'Screenshotting the app at phone and laptop width…' });
-  const capture = await captureAppScreens({ containerName, webPort: project.web_port || 3000, reviewLogin });
+  const capture = await captureAppScreens({
+    containerName, webPort: project.web_port || 3000, reviewLogin,
+    // Each frame goes straight to the preview, so the operator watches the app
+    // being driven instead of a spinner.
+    onShot: (shot) => {
+      setScreenFrame(project.id, { data: shot.data, mediaType: shot.media_type, path: shot.path, width: shot.width });
+      updateScreenJob(project.id, { message: `Looking at \`${shot.path}\` at ${shot.width}px…` });
+    },
+  });
   if (!capture.shots.length) {
     finishScreenJob(project.id, { ok: false, message: capture.detail || 'Could not screenshot the app.' });
     return { ok: false, error: capture.detail || 'Could not capture any screenshots of the app.' };

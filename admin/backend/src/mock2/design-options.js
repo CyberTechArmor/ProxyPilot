@@ -27,7 +27,7 @@ import { costCentsForUsage } from './quota-logic.js';
 import { effectivePrice } from './connectors.js';
 import { densityFindings, colorOnlyFindings } from './design-signals-logic.js';
 import { MOCKUP_CURRENT, DESIGN_CSS_PATH } from './concept-logic.js';
-import { startScreenJob, updateScreenJob, finishScreenJob } from './screen-job.js';
+import { startScreenJob, updateScreenJob, finishScreenJob, setScreenFrame } from './screen-job.js';
 import {
   buildDesignOptionsPrompt, buildDesignOptionsTask, parseDesignOptions,
   diagnosisMessage, optionMessage, optionsFailureMessage, optionsStartedMessage,
@@ -99,6 +99,10 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
       paths: [page],
       withAxe: false,
       reviewLogin,
+      onShot: (shot) => {
+        setScreenFrame(projectId, { data: shot.data, mediaType: shot.media_type, path: shot.path, width: shot.width });
+        updateScreenJob(projectId, { message: `Looking at \`${shot.path}\` at ${shot.width}px…` });
+      },
     });
   } catch (e) {
     capture = { shots: [], detail: e?.message };

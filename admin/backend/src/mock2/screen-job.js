@@ -38,7 +38,18 @@ export const SCREEN_JOB_KINDS = Object.freeze({
   options: 'Design options',
 });
 
+// The job as JSON. The FRAME BYTES are deliberately not in here: this is polled
+// every couple of seconds, and a 200KB JPEG in a status payload would be paid
+// for on every tick whether or not the picture had changed. `frameSeq` says
+// when there is a new one; the frame endpoint serves it.
 export function getScreenJob(projectId) {
+  const j = readJob(projectId);
+  if (!j) return null;
+  const { frame, ...rest } = j;
+  return rest;
+}
+
+function readJob(projectId) {
   const j = jobs.get(Number(projectId));
   if (!j) return null;
   const age = Date.now() - j.updatedAt;
@@ -48,6 +59,43 @@ export function getScreenJob(projectId) {
     return null;
   }
   return j;
+}
+
+// SHOW WHAT THE BROWSER IS SEEING.
+//
+// "I want to see the screen changes reflected in the preview area (I want to
+// see it being driven)". The capture runs headless in the BACKEND process, so
+// there is nothing to watch — the preview iframe is the operator's own session
+// and knows nothing about it.
+//
+// Driving the preview iframe along the same route list would only be a
+// re-enactment: a second browser, a different session, different data. The
+// honest thing is to show the ACTUAL frame that was just captured, because that
+// is literally what the review is about to be written from.
+//
+// Only the LATEST frame is kept — this is a viewfinder, not a filmstrip, and
+// the shots are already on their way to the chat where they persist.
+export function setScreenFrame(projectId, { data, mediaType = 'image/jpeg', path = '/', width = 0 } = {}) {
+  const cur = jobs.get(Number(projectId));
+  if (!cur || !data) return null;
+  const next = {
+    ...cur,
+    frame: { data, mediaType },
+    frameSeq: (cur.frameSeq || 0) + 1,
+    framePath: path,
+    frameWidth: width,
+    shots: (cur.shots || 0) + 1,
+    updatedAt: Date.now(),
+  };
+  jobs.set(Number(projectId), next);
+  return next;
+}
+
+// The bytes, for the frame endpoint. Null when there is nothing to show.
+export function getScreenFrame(projectId) {
+  const j = readJob(projectId);
+  if (!j?.frame?.data) return null;
+  return { buffer: Buffer.from(j.frame.data, 'base64'), mediaType: j.frame.mediaType, seq: j.frameSeq || 0 };
 }
 
 // startScreenJob(projectId, kind) → the record. Overwrites any previous one:

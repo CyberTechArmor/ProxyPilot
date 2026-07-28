@@ -27,6 +27,7 @@ import { costCentsForUsage } from './quota-logic.js';
 import { effectivePrice } from './connectors.js';
 import { densityFindings, colorOnlyFindings } from './design-signals-logic.js';
 import { MOCKUP_CURRENT, DESIGN_CSS_PATH } from './concept-logic.js';
+import { startScreenJob, updateScreenJob, finishScreenJob } from './screen-job.js';
 import {
   buildDesignOptionsPrompt, buildDesignOptionsTask, parseDesignOptions,
   diagnosisMessage, optionMessage, optionsFailureMessage, optionsStartedMessage,
@@ -73,18 +74,23 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
 
   getOrCreateChat(projectId);
   insertMessage({ projectId, kind: 'system', body: optionsStartedMessage(page) });
+  // Same progress record the screen check uses. Both drive a browser for a
+  // minute or two, and both used to show nothing at all while they did.
+  startScreenJob(projectId, 'options');
 
   // Sign in the same way the review does, so the capture is of the APP and not
   // of its sign-in page. Best effort — an unauthenticated shot is still worth
   // looking at when the complaint IS about the sign-in screen.
   let reviewLogin = null;
   try {
+    updateScreenJob(projectId, { phase: 'signing-in', message: 'Signing in as the screen account…' });
     const acct = await ensureReviewAccount(project, { timeoutMs: 60000 });
     reviewLogin = acct?.login || getReviewLogin(projectId);
   } catch { reviewLogin = getReviewLogin(projectId); }
 
   let capture;
   try {
+    updateScreenJob(projectId, { phase: 'capturing', message: `Screenshotting \`${page}\` at phone and laptop width…` });
     capture = await captureAppScreens({
       containerName,
       webPort: project.web_port || 3000,
@@ -99,8 +105,13 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
   }
   if (!capture.shots?.length) {
     insertMessage({ projectId, kind: 'system', body: optionsFailureMessage('no-shots') });
+    finishScreenJob(projectId, { ok: false, message: 'Design options could not screenshot the app.' });
     return { ok: false, error: capture.detail || 'no screenshots' };
   }
+  updateScreenJob(projectId, {
+    phase: 'reading', shots: capture.shots.length,
+    message: `Working out two or three ways to fix \`${page}\` from ${capture.shots.length} screenshot(s)…`,
+  });
 
   // The approved design, so an option can name the app's own classes rather
   // than inventing a vocabulary the adherence gate will then mark as drift.
@@ -154,11 +165,13 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
 
   if (!res.ok) {
     insertMessage({ projectId, kind: 'system', body: optionsFailureMessage(res.error || 'the model call failed') });
+    finishScreenJob(projectId, { ok: false, message: 'Design options could not finish — nothing was changed.' });
     return { ok: false, error: res.error };
   }
   const parsed = parseDesignOptions(res.text);
   if (!parsed) {
     insertMessage({ projectId, kind: 'system', body: optionsFailureMessage('unparseable') });
+    finishScreenJob(projectId, { ok: false, message: 'Design options could not finish — nothing was changed.' });
     return { ok: false, error: 'unparseable options' };
   }
 
@@ -184,6 +197,10 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
     insertMessage({ projectId, kind: 'assistant', body: optionMessage(o, i, parsed.options.length) });
   });
 
+  finishScreenJob(projectId, {
+    ok: true,
+    message: `${parsed.options.length} design option(s) are in the chat — press Build this on the one you want.`,
+  });
   return { ok: true, options: parsed.options, diagnosis: parsed.diagnosis };
 }
 

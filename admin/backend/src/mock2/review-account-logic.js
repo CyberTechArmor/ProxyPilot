@@ -26,6 +26,49 @@ import crypto from 'node:crypto';
 // Changing it silently would let the review account consume the operator's
 // bootstrap, so it is a named constant on both sides.
 export const FIXTURE_EMAIL_DOMAIN = '@fixture.invalid';
+
+// WHY NOT `{role}@{project}.com`, WHICH IS WHAT WAS ASKED FOR.
+//
+// The auth component's guard is `email NOT LIKE '%@fixture.invalid'`, an exact
+// suffix match, and it is the only thing standing between a platform test
+// account and the operator's first-administrator slot. `admin@n8.com` does not
+// match it, so it would count as a real user and consume that slot — which is
+// precisely the failure that locked an operator out of their own app once
+// already (LEARNINGS 93/94). `.com` is also a live TLD: `n8.com` belongs to
+// somebody. `.invalid` is reserved by RFC 2606 and can never resolve.
+//
+// `admin@n8.fixture.invalid` reads closer to the request and fails the same
+// way — it ends with `.fixture.invalid`, not `@fixture.invalid`. Making it work
+// means widening the guard inside a versioned platform component, and every
+// project still running the older component would treat those accounts as real
+// users. That is the same regression, shipped again.
+//
+// So the ROLE and the PROJECT move into the local part, where they are just as
+// readable and cost nothing: `admin-n8@fixture.invalid`,
+// `viewer-n8@fixture.invalid`. Exact same reserved suffix, works on every
+// project regardless of component version.
+export function fixtureSlug(project) {
+  const raw = String(project?.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const slug = raw.slice(0, 24).replace(/-+$/, '');
+  // A project named "!!!" has no slug, and an address of `admin-@fixture...`
+  // is both ugly and ambiguous between two such projects.
+  return slug || `p${Number(project?.id) || 0}`;
+}
+
+// The canonical address for one role on one project.
+export function fixtureEmail(role, project) {
+  const r = String(role || 'user').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'user';
+  return `${r}-${fixtureSlug(project)}${FIXTURE_EMAIL_DOMAIN}`;
+}
+
+export const REVIEW_ROLE_KEY = 'admin';
+export const VIEWER_ROLE_KEY = 'viewer';
+export const reviewEmailFor = (project) => fixtureEmail(REVIEW_ROLE_KEY, project);
+export const viewerEmailFor = (project) => fixtureEmail(VIEWER_ROLE_KEY, project);
+
+// The pre-project-scoped addresses. Still referenced because projects created
+// before the rename carry them in `review_login_email`, and because the
+// free-slot cleanup and every test want a name for "the old shape".
 export const REVIEW_EMAIL = `design-review${FIXTURE_EMAIL_DOMAIN}`;
 // The SECOND fixture: a deliberately UNPRIVILEGED account.
 //
@@ -192,43 +235,75 @@ export function seedFixtureUserScript({ email, password, accounts = null, appDir
 // at $9.65. In both, the platform's own baseline checks passed in the same run —
 // which is the tell, because those use accounts the platform creates.
 //
-// Only the reserved fixture domain is minted. A spec naming a real address is
-// asking for a real person's account, and the platform must never create that:
-// it is the operator's, it would count as "a real user exists", and it would
-// take the first-admin slot. Those are skipped and reported.
+// WHAT IS TAKEN FROM THE SPEC, AND WHAT IS NOT.
 //
-// The declared ROLE becomes the role preference, so a check that asked for a
-// viewer gets a viewer — `fallback: 'least'` for anything that is not clearly
-// an admin role, because a viewer fixture that quietly became an admin makes
-// every permission check pass and proves nothing.
-export function screenAccountsFromSpec(spec) {
+// The ROLES are the spec's — they are the thing the build actually decided
+// ("these checks run as an admin, those as a viewer"), and honouring them is
+// the whole point. The IDENTITY is the platform's: the address is canonical for
+// the role and project, and the password is the project's own generated secret.
+//
+// Both substitutions fix a real defect rather than a preference:
+//
+//   - the model invents the password, and it invents it badly. A live project
+//     was seeded with `n8-admin-password-123` because that is what the build
+//     wrote into its spec. The platform holds a 32-character secret per project
+//     already; there is no reason for a weaker one to exist.
+//   - the model invents the address, so a spec naming a REAL address used to be
+//     skipped, and every check that declared it silently stopped running.
+//     Substituting is strictly better than skipping: the check runs, and no
+//     account on a real domain is ever created — which is the property that
+//     matters, since such an account would count as "a real user exists" and
+//     take the operator's first-admin slot.
+//
+// `withScreenLogins` below puts the substituted credentials back into the spec
+// the checks actually execute, so nothing has to be rewritten on disk.
+//
+// `fallback: 'least'` for anything that is not clearly an admin role: a viewer
+// fixture that quietly became an admin makes every permission check pass and
+// proves nothing.
+export function screenAccountsFromSpec(spec, { project = null, password = '' } = {}) {
   const users = spec?.login?.users;
-  if (!users || typeof users !== 'object') return { accounts: [], skipped: [] };
+  if (!users || typeof users !== 'object') return { accounts: [], renamed: [] };
   const accounts = [];
-  const skipped = [];
+  const renamed = [];
   for (const [role, u] of Object.entries(users)) {
-    const email = String(u?.username || u?.email || '').trim();
-    const password = String(u?.password || '');
-    if (!email || !password) continue;
-    if (!email.toLowerCase().endsWith(FIXTURE_EMAIL_DOMAIN)) {
-      skipped.push(email);
-      continue;
-    }
+    const declared = String(u?.username || u?.email || '').trim();
+    const email = fixtureEmail(role, project);
+    if (declared && declared.toLowerCase() !== email.toLowerCase()) renamed.push({ role, from: declared, to: email });
     const isAdminRole = REVIEW_ROLE_PREFERENCE.includes(String(role).toLowerCase());
     accounts.push({
       key: `spec-${String(role).toLowerCase().replace(/[^a-z0-9_-]/g, '') || 'user'}`,
+      role: String(role),
       email,
-      password,
+      password: String(password || ''),
       prefer: isAdminRole ? [...REVIEW_ROLE_PREFERENCE] : [String(role).toLowerCase(), ...VIEWER_ROLE_PREFERENCE],
       fallback: isAdminRole ? 'first' : 'least',
     });
   }
-  return { accounts, skipped };
+  return { accounts, renamed };
+}
+
+// Put the credentials that actually EXIST into the spec the checks run.
+//
+// Without this the substitution above would be worse than useless: the platform
+// would create `admin-n8@fixture.invalid` and the checks would go on signing in
+// as whatever the model invented. Nothing is written to disk — `ui-checks.json`
+// keeps what the build wrote, and the diff stays clean.
+export function withScreenLogins(spec, accounts = []) {
+  if (!spec?.login?.users || !accounts.length) return spec;
+  const byRole = new Map(accounts.filter((a) => a.role).map((a) => [String(a.role), a]));
+  if (!byRole.size) return spec;
+  const users = {};
+  for (const [role, u] of Object.entries(spec.login.users)) {
+    const a = byRole.get(String(role));
+    users[role] = a ? { ...u, username: a.email, password: a.password } : u;
+  }
+  return { ...spec, login: { ...spec.login, users } };
 }
 
 // The line the smoke logs so an operator can see what was minted rather than
 // wondering why a check that failed yesterday passes today.
-export function screenAccountsNote({ accounts = [], skipped = [], seeded = null } = {}) {
+export function screenAccountsNote({ accounts = [], renamed = [], seeded = null } = {}) {
   const parts = [];
   if (accounts.length) {
     // Three outcomes, said differently on purpose: "ready" means the checks can
@@ -241,8 +316,10 @@ export function screenAccountsNote({ accounts = [], skipped = [], seeded = null 
         : `could not be created (${seeded?.reason || 'unknown reason'})`;
     parts.push(`screen accounts: ${accounts.length} declared fixture user(s) ${state} (${accounts.map((a) => a.email).join(', ')})`);
   }
-  if (skipped.length) {
-    parts.push(`skipped ${skipped.length} non-fixture address(es) in the spec — the platform never creates a real-domain account (${skipped.join(', ')})`);
+  if (renamed.length) {
+    // Said out loud, because a check that declares one address and signs in as
+    // another is otherwise the most confusing thing in the log.
+    parts.push(`the spec's own credentials were replaced with the platform's (${renamed.map((r) => `${r.from} → ${r.to}`).join(', ')}) — the address is canonical per role and the password is generated, never the one written into the spec`);
   }
   if (!parts.length) return '';
   return parts.join('; ');

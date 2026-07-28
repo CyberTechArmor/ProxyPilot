@@ -246,10 +246,12 @@ export default function ProjectAppAccess({ projectId, canEdit = false }) {
               <div className="space-y-3 border-t pt-4">
                 <p className="text-sm font-medium flex items-center gap-2"><Eye className="h-4 w-4" /> Screen accounts</p>
                 <p className="text-muted-foreground">
-                  Test accounts on the reserved <code>@fixture.invalid</code> domain: an administrator, a
-                  lowest-privilege viewer, and any user this project's own checks declare. They let the design review,
-                  the screen checks and you sign in and actually see the app. They never count as users and never take
-                  your first-admin slot.
+                  One account per role, named <code>{'{role}'}-{'{project}'}@fixture.invalid</code>: an administrator, a
+                  lowest-privilege viewer, and any role this project's own checks declare. They let the design review,
+                  the screen checks and you sign in and actually see the app. The passwords are generated, 32
+                  characters, and shared by every fixture on this project.
+                  {' '}<code>@fixture.invalid</code> is the reserved domain the app excludes from &ldquo;a real user
+                  exists&rdquo;, so these never count as users and never take your first-admin slot.
                 </p>
                 {screenError ? <p className="text-sm text-red-500">{screenError}</p> : null}
                 <Button
@@ -280,10 +282,11 @@ export default function ProjectAppAccess({ projectId, canEdit = false }) {
                 ) : null}
 
                 {state?.note ? <p className="text-xs text-amber-500">{state.note}</p> : null}
-                {state?.skipped?.length ? (
+                {state?.renamed?.length ? (
                   <p className="text-xs text-muted-foreground">
-                    Skipped {state.skipped.join(', ')} — the platform never creates an account on a real domain. That
-                    address would be a real person's, and it would take your first-admin slot.
+                    The spec's own credentials were replaced with the platform's
+                    ({state.renamed.map((r) => `${r.from} → ${r.to}`).join(', ')}). The address is canonical for the
+                    role and project, and the password is generated — never the one a build wrote into its own spec.
                   </p>
                 ) : null}
               </div>

@@ -114,7 +114,61 @@ async function capturePreviewImage(iframeEl, pins) {
 // back to a coordinate overlay. Send optionally attaches a real screenshot of
 // the signed-in view and routes it to the build as a Quick update. Omitted for
 // the mockup preview (pre-build).
-export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null, projectId = null }) {
+// ScreenWorkBanner — "something is looking at your app right now".
+//
+// The screen check and Design options both drive a real browser for a minute or
+// two: sign in, screenshot at two widths, measure, ask a model. Both were
+// silent while they did it. A toast said "running" and then nothing, so a slow
+// capture and a dead one looked identical — and the findings only appeared if
+// the operator refreshed the page by hand.
+//
+// It belongs HERE, over the preview, because that is the surface which is a
+// picture of the app: the thing being looked at is the thing on screen.
+//
+// Polls only while there is something to say. The record is in-memory on the
+// backend and expires on read, so an interrupted run stops reporting on its own
+// rather than leaving a spinner over a preview forever.
+export function ScreenWorkBanner({ projectId }) {
+  const [job, setJob] = useState(null);
+  useEffect(() => {
+    if (!projectId) return undefined;
+    let stopped = false;
+    let timer = null;
+    const tick = async () => {
+      try {
+        const r = await api.mock2ScreenJob(projectId);
+        if (!stopped) setJob(r?.job || null);
+      } catch { if (!stopped) setJob(null); }
+      // Slow when idle, quick while working: an idle project must not pay for a
+      // 2-second poll it will never use.
+      if (!stopped) timer = setTimeout(tick, 4000);
+    };
+    tick();
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [projectId]);
+
+  if (!job) return null;
+  const done = job.phase === 'done' || job.phase === 'failed';
+  const failed = job.phase === 'failed';
+  return (
+    <div
+      className={`flex items-start gap-2 border-b px-3 py-2 text-xs ${
+        failed ? 'bg-destructive/10 text-destructive' : done ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-primary/10 text-primary'
+      }`}
+      role="status" aria-live="polite"
+    >
+      {done
+        ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        : <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />}
+      <span className="min-w-0 flex-1 break-words">
+        <span className="font-medium">{job.label}</span>
+        {' — '}{job.message}
+      </span>
+    </div>
+  );
+}
+
+export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null, projectId = null, watchProjectId = null }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
   const [annotating, setAnnotating] = useState(false);
   // Overlay (no-bridge) annotate only: lift the tap catcher so the app scrolls.
@@ -357,6 +411,9 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
           ) : null}
         </p>
       ) : null}
+      {/* Above the frame, not over it: a capture must not hide the thing it
+          is capturing, and the operator may well want to watch. */}
+      <ScreenWorkBanner projectId={watchProjectId} />
       <div className="relative flex-1 min-h-0 overflow-hidden bg-background">
         {/* When the server says there is nothing to render, say WHY — over the
             frame, so the broken-page icon underneath is never what the operator
@@ -555,6 +612,9 @@ export function LiveAppBar({ url, projectId, probeKey = '' }) {
           )
         ) : null}
       </div>
+      {/* Build mode cannot iframe the built app, so this bar IS the preview —
+          and it is where "a browser is looking at your app right now" belongs. */}
+      <ScreenWorkBanner projectId={projectId} />
       <p className="px-3 py-2.5 text-[11px] text-muted-foreground">
         {ready
           ? 'The running app opens in a new tab — it sets a frame policy that blocks being embedded here.'

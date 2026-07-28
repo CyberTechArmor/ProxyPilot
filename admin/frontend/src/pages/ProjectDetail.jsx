@@ -566,7 +566,7 @@ export default function ProjectDetail() {
                     <DesignLeftPane
                       tab={designPane} onTab={setDesignPane}
                       projectId={id} canEdit={canEdit}
-                      preview={<PreviewPanel src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce} projectId={designApproved ? null : id} />}
+                      preview={<PreviewPanel src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce} projectId={designApproved ? null : id} watchProjectId={id} />}
                     />
                   </div>
                   <div className="min-w-0 flex flex-col gap-4 lg:flex-1 lg:min-h-0">
@@ -1369,7 +1369,7 @@ function MockupWorkspace({
         ) : previewSrc ? (
           <PreviewPanel
             src={previewSrc} title={project.name} approved={false} reloadKey={previewReloadNonce}
-            projectId={projectId}
+            projectId={projectId} watchProjectId={projectId}
           />
         ) : (
           // No mockup yet — the placeholder is content-sized, so center it

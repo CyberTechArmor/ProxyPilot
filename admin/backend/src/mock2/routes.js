@@ -199,6 +199,7 @@ import {
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
 import { startAsk, getAskJobStatus } from './ask.js';
+import { getScreenJob } from './screen-job.js';
 // ---- Multi-modal chat images (migration 526) ----
 import { validateChatImages, MAX_CHAT_IMAGES, isChatImageId } from './chat-image-logic.js';
 import { readChatImage } from './chat-images.js';
@@ -1296,15 +1297,16 @@ export function createMock2Router() {
         body: `Created ${result.accounts.length} screen account${result.accounts.length === 1 ? '' : 's'} `
           + `(${result.accounts.map((a) => a.email).join(', ')}). The checks and the design review can sign in now — `
           + 'the passwords are in **App access**.'
-          + (result.skipped?.length
-            ? `\n\nSkipped ${result.skipped.join(', ')} — the platform never creates an account on a real domain.`
+          + (result.renamed?.length
+            ? `\n\nThe spec's own credentials were replaced with the platform's (${result.renamed.map((r) => `${r.from} → ${r.to}`).join(', ')}) — `
+              + 'the address is canonical per role and the password is generated, never the one a build wrote into its spec.'
             : ''),
       });
     } catch { /* best effort */ }
     res.json({
       ok: true,
       screenAccounts: result.accounts,
-      skipped: result.skipped || [],
+      renamed: result.renamed || [],
       signedIn: result.signedIn,
       note: result.note,
       ...state,
@@ -3929,6 +3931,10 @@ export function createMock2Router() {
       job: getConceptJobStatus(project.id),
       audit_job: getAuditJobStatus(project.id),
       ask_job: getAskJobStatus(project.id),
+      // The screen check / design options progress. On the chat payload so the
+      // chat knows to keep polling — it used to stop, and the findings only
+      // appeared when the operator refreshed the page by hand.
+      screen_job: getScreenJob(project.id),
       stage: shaped.stage,
       current_mockup_id: shaped.current_mockup_id,
       preview_url: shaped.preview_url,
@@ -3972,6 +3978,13 @@ export function createMock2Router() {
 
   router.get('/projects/:id/ask/status', requireMock2Role('viewer'), (req, res) => {
     res.json({ job: getAskJobStatus(req.mock2Project.id) });
+  });
+
+  // The screen-work progress on its own, so the PREVIEW can watch a capture
+  // without pulling the whole chat every two seconds. Same record as the one on
+  // the chat payload; in-memory, so this is a cheap read.
+  router.get('/projects/:id/screen-job', requireMock2Role('viewer'), (req, res) => {
+    res.json({ job: getScreenJob(req.mock2Project.id) });
   });
 
   // Chat image bytes (migration 526). Content-addressed id ("<sha256>.<ext>"),

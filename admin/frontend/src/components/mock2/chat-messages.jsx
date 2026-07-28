@@ -12,7 +12,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle, Trash2, FolderOpen, Activity } from 'lucide-react';
+import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle, Trash2, FolderOpen, Activity, Copy, Download } from 'lucide-react';
 import ExplainThis from './ExplainThis';
 import Markdown from './Markdown';
 import { chatImageUrl } from '@/lib/chat-images';
@@ -162,6 +162,56 @@ function QuickUpdateChip({ m, onQuickUpdate, busyId }) {
 
 const LONG_SYSTEM_NOTE_CHARS = 400;
 
+// TAKE IT WITH YOU. A screen check posts five kilobytes of findings — every one
+// an instruction somebody has to act on, in a scrolling pane, on a phone.
+// Builds have had a download since the beginning; the review that says what is
+// WRONG with the app had no way out of the chat at all: "there is no way for me
+// to download like the builds, in order to get feedback from it".
+//
+// Plain text, not JSON: the thing being carried is prose meant to be read and
+// pasted somewhere else. Copy first because it is what most people want, and
+// the download is the fallback for when it is too long to hold.
+function NoteActions({ body, name = 'note' }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(body);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* the text is selectable — nothing is lost */ }
+  };
+  const download = () => {
+    const url = URL.createObjectURL(new Blob([body], { type: 'text/plain;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${name}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoking synchronously cancels the download in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  };
+  return (
+    <span className="ml-auto flex shrink-0 items-center gap-1">
+      <button
+        type="button" onClick={copy}
+        className="inline-flex min-h-[32px] items-center gap-1 rounded px-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+        title="Copy this note"
+      >
+        {copied ? <CheckCircle2 className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+      <button
+        type="button" onClick={download}
+        className="inline-flex min-h-[32px] items-center gap-1 rounded px-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+        title="Download this note as a text file"
+      >
+        <Download className="h-3 w-3" /> Save
+      </button>
+    </span>
+  );
+}
+
 // System notes can carry images — the screen check posts its mobile/desktop
 // screenshots with its findings. A note WITH attachments always uses the boxed
 // layout: the centred pill has nowhere to put a thumbnail, and a critique whose
@@ -186,15 +236,21 @@ function SystemNote({ body, m, projectId }) {
           <p className="text-xs text-muted-foreground whitespace-pre-wrap break-words">{body}</p>
           {long && !expanded && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background/90 to-transparent" />}
         </div>
-        {long ? (
-          <button
-            type="button"
-            className="mt-1 min-h-[32px] text-[11px] font-medium text-primary underline underline-offset-2"
-            onClick={() => setExpanded((v) => !v)}
-          >
-            {expanded ? 'Show less' : `Show all (${Math.round(body.length / 100) / 10}k chars)`}
-          </button>
-        ) : null}
+        {/* The expander and the take-it-with-you actions share a row: a long
+            note is exactly the one somebody wants out of the chat, and putting
+            Save next to "Show all" means they never have to expand it first. */}
+        <div className="mt-1 flex flex-wrap items-center gap-1">
+          {long ? (
+            <button
+              type="button"
+              className="min-h-[32px] text-[11px] font-medium text-primary underline underline-offset-2"
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? 'Show less' : `Show all (${Math.round(body.length / 100) / 10}k chars)`}
+            </button>
+          ) : null}
+          <NoteActions body={body} name={`note-${m?.id || 'chat'}`} />
+        </div>
         {hasShots ? (
           <div className="mt-2 border-t border-border/60 pt-2">
             <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">

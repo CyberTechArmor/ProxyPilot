@@ -104,7 +104,13 @@ export default function BuildChat({
   const askPartial = askActive ? (askJob?.partial || null) : null;
   const openQuestionCount = (data?.open_question_ids || []).length;
   const projectOpenQuestions = Number(project?.open_editor_questions) || 0;
-  const shouldPoll = active || askActive || openQuestionCount > 0 || projectOpenQuestions > 0;
+  // A screen check / design options run is none of the three states above — it
+  // is a browser driving the app for a minute or two with no cycle and no ask
+  // job. So the chat stopped polling and the findings only appeared when the
+  // operator refreshed the page by hand, which is exactly what was reported.
+  const screenJob = data?.screen_job || null;
+  const screenActive = !!screenJob && !['done', 'failed'].includes(screenJob.phase);
+  const shouldPoll = active || askActive || screenActive || openQuestionCount > 0 || projectOpenQuestions > 0;
   useEffect(() => {
     if (!shouldPoll) return undefined;
     const t = setInterval(load, askActive ? 900 : 2500);
@@ -739,8 +745,9 @@ export default function BuildChat({
           canEdit={canEdit}
           answering={answering}
           onAnswer={answerQuestion}
-          working={active || askActive}
-          workingLabel={askActive ? (askJob?.message || 'Answering…') : (job?.message || 'Building…')}
+          working={active || askActive || screenActive}
+          workingLabel={screenActive ? (screenJob?.message || 'Looking at the app…')
+            : askActive ? (askJob?.message || 'Answering…') : (job?.message || 'Building…')}
           partialText={askPartial}
           activity={active ? activity : []}
           onQuickUpdate={canEdit && online && !needsFeedback && !resumeMode ? quickUpdateFromMessage : null}

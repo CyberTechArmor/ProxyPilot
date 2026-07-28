@@ -1815,7 +1815,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           // make every permission check pass and prove nothing.
           viewerLogin = acct?.viewerLogin || null;
         } catch (e) { console.warn('[mock2] pre-smoke review account failed:', e?.message); }
-        const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, requiredIds: decision.finishAcceptanceIds || [], logEvent, env: process.env, reviewLogin, viewerLogin });
+        const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, requiredIds: decision.finishAcceptanceIds || [], logEvent, env: process.env, reviewLogin, viewerLogin, projectId: project.id });
         // A malformed TEST FILE is not a broken app. Project 38 deployed
         // successfully, served correctly, and the cycle went red because
         // state/ui-checks.json used a different (equally valid, more

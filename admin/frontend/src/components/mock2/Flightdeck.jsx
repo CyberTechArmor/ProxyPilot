@@ -176,6 +176,7 @@ export default function Flightdeck({
   const previewPane = previewSrc
     ? <PreviewPanel src={previewSrc} title={project?.name} approved reloadKey={externalNonce}
         fullHeight={previewFull} onToggleFullHeight={devMode ? (() => setPreviewFull((v) => !v)) : null}
+        watchProjectId={project?.id ?? null}
         onAnnotate={canEdit && online ? annotatePreview : null} />
     : (
       <div className="flex flex-col items-center justify-center gap-3 h-full p-4 text-center">

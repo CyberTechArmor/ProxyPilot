@@ -46,6 +46,7 @@ import {
 } from './design-findings-logic.js';
 import { listNewElements, promotionInviteMessage } from './design-promote.js';
 import { ensureReviewAccount, getReviewLogin, REVIEW_EMAIL } from './review-account.js';
+import { startScreenJob, updateScreenJob, finishScreenJob } from './screen-job.js';
 
 const APP_DIR = '/srv/app';
 const MOBILE = { width: 390, height: 780 };
@@ -494,12 +495,17 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   const ready = buildRunnerReady();
   if (!ready.ok) return { ok: false, error: ready.reason || 'No build model connector is ready.' };
 
+  // Progress from here on. Two minutes of a browser driving the app used to
+  // show nothing at all, on the one surface that IS a picture of the app.
+  startScreenJob(project.id, 'review');
+
   // Make sure there is an account to sign in WITH before opening the browser.
   // This is the fix for "the ai can never see past the login screen": the
   // platform provisions its own fixture-domain admin instead of depending on
   // the build model having written fixture users.
   let reviewLogin = null;
   try {
+    updateScreenJob(project.id, { phase: 'signing-in', message: 'Signing in as the screen account…' });
     const acct = await ensureReviewAccount(project);
     reviewLogin = acct.login;
     if (!acct.ok && acct.state !== 'no-auth') {
@@ -509,10 +515,16 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
     console.warn('[mock2] design review: review-account provisioning failed:', e?.message);
   }
 
+  updateScreenJob(project.id, { phase: 'capturing', message: 'Screenshotting the app at phone and laptop width…' });
   const capture = await captureAppScreens({ containerName, webPort: project.web_port || 3000, reviewLogin });
   if (!capture.shots.length) {
+    finishScreenJob(project.id, { ok: false, message: capture.detail || 'Could not screenshot the app.' });
     return { ok: false, error: capture.detail || 'Could not capture any screenshots of the app.' };
   }
+  updateScreenJob(project.id, {
+    phase: 'reading', shots: capture.shots.length,
+    message: `Reading ${capture.shots.length} screenshot(s) against the approved design…`,
+  });
 
   // The visual contract + tokens ride the critique; both optional (older projects).
   const mockupHtml = await readContainerFile(containerName, MOCKUP_CURRENT);
@@ -568,7 +580,10 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
     transcript: [{ role: 'user', text: userText, images: capture.shots.map((s) => ({ media_type: s.media_type, data: s.data })) }],
     effort: 'high', thinking: null, timeoutMs: 240000,
   });
-  if (!res.ok) return { ok: false, error: `review model call failed: ${res.error || 'unknown'}` };
+  if (!res.ok) {
+    finishScreenJob(project.id, { ok: false, message: `The screen check could not read the app: ${res.error || 'the model call failed'}.` });
+    return { ok: false, error: `review model call failed: ${res.error || 'unknown'}` };
+  }
   try {
     const u = res.usage || {};
     const cost = costCentsForUsage({
@@ -579,6 +594,7 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   } catch (e) { console.warn('[mock2] design-review ledger write failed:', e?.message); }
 
   const review = parseReviewReply(res.text) || { summary: '', findings: [] };
+  updateScreenJob(project.id, { phase: 'writing', message: 'Writing the findings…' });
 
   // Persist the critique as project state before it becomes a chat message.
   //
@@ -654,6 +670,10 @@ ${message}`;
     attachments = null;
   }
   try { insertMessage({ projectId: project.id, kind: 'system', body: message, attachments }); } catch { /* best effort */ }
+  finishScreenJob(project.id, {
+    ok: true,
+    message: `Screen check finished — ${capture.shots.length} screenshot(s) and ${review.findings.length} finding(s) are in the chat.`,
+  });
 
   let queued = null;
   if (apply) {

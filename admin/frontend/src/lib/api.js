@@ -1542,6 +1542,10 @@ export const api = {
   // its lowest-privilege viewer, and whatever users this project's own
   // ui-checks.json declares (which nothing had ever created).
   mock2CreateScreenAccounts: (id) => request(`/mock2/projects/${id}/app-access/screen-accounts`, { method: 'POST', body: JSON.stringify({}) }),
+  // Live progress for the screen check / design options — a browser driving the
+  // app for a minute or two. Polled by the preview so the surface that IS a
+  // picture of the app says when something is looking at it.
+  mock2ScreenJob: (id) => request(`/mock2/projects/${id}/screen-job`),
   // Guided setup — the first-run path. The read is derived server-side from
   // real data (accounts, assets, mockup, approval), so it is safe to poll and
   // impossible to desync from what the project actually has.

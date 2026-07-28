@@ -26,51 +26,129 @@ import assert from 'node:assert/strict';
 import {
   screenAccountsFromSpec, screenAccountsNote, reviewFixtureAccounts, seedFixtureUserScript,
   parseSeedResult, FIXTURE_EMAIL_DOMAIN, REVIEW_ROLE_PREFERENCE, VIEWER_ROLE_PREFERENCE,
-  REVIEW_EMAIL, REVIEW_VIEWER_EMAIL,
+  REVIEW_EMAIL, REVIEW_VIEWER_EMAIL, withScreenLogins, fixtureEmail, fixtureSlug,
+  reviewEmailFor, viewerEmailFor,
 } from '../mock2/review-account-logic.js';
 
 const spec = (users) => ({ login: { path: '/login', user_field: '#e', pass_field: '#p', submit: '#s', users } });
+const PROJECT = { id: 44, name: 'N8' };
+const PW = 'mzQJXb04XIamWNyhNLtsz06O1UhFD5dk';
+const from = (users) => screenAccountsFromSpec(spec(users), { project: PROJECT, password: PW });
 
-test('the users a spec declares become accounts to mint', () => {
-  const { accounts, skipped } = screenAccountsFromSpec(spec({
-    admin: { username: `admin${FIXTURE_EMAIL_DOMAIN}`, password: 'correct-horse-battery' },
-    viewer: { username: `viewer${FIXTURE_EMAIL_DOMAIN}`, password: 'staple-battery-horse' },
-  }));
-  assert.equal(skipped.length, 0);
-  assert.deepEqual(accounts.map((a) => a.email), [`admin${FIXTURE_EMAIL_DOMAIN}`, `viewer${FIXTURE_EMAIL_DOMAIN}`]);
-  assert.equal(accounts[0].password, 'correct-horse-battery', 'the password the SPEC declares — the checks type that one');
+test('every declared role becomes an account, named for the role and the project', () => {
+  const { accounts } = from({
+    admin: { username: `whatever${FIXTURE_EMAIL_DOMAIN}`, password: 'correct-horse-battery' },
+    viewer: { username: `other${FIXTURE_EMAIL_DOMAIN}`, password: 'staple-battery-horse' },
+  });
+  assert.deepEqual(accounts.map((a) => a.email), ['admin-n8@fixture.invalid', 'viewer-n8@fixture.invalid']);
 });
 
-test('A REAL ADDRESS IS NEVER MINTED', () => {
-  // The security property. That account is the operator's; creating it would
-  // count as "a real user exists" and take the first-admin slot.
-  const { accounts, skipped } = screenAccountsFromSpec(spec({
+test('THE PASSWORD IS NEVER THE ONE THE SPEC DECLARES', () => {
+  // A live project was seeded with `n8-admin-password-123` because that is what
+  // the build model wrote into its own spec. The platform already holds a
+  // 32-character secret per project; there is no reason for a weaker one to
+  // exist anywhere.
+  const { accounts } = from({ admin: { username: `a${FIXTURE_EMAIL_DOMAIN}`, password: 'n8-admin-password-123' } });
+  assert.equal(accounts[0].password, PW);
+  assert.ok(!accounts.some((a) => a.password.includes('password-123')));
+});
+
+test('A REAL ADDRESS IS NEVER MINTED — it is replaced, not skipped', () => {
+  // The security property is unchanged: no account on a real domain is ever
+  // created, because it would be a real person's, would count as "a real user
+  // exists", and would take the operator's first-admin slot. Substituting beats
+  // skipping, because the check that declared it now RUNS.
+  const { accounts, renamed } = from({
     admin: { username: 'thomas@fractionate.ai', password: 'whatever-the-model-invented' },
-    viewer: { username: `viewer${FIXTURE_EMAIL_DOMAIN}`, password: 'pw-for-the-viewer' },
-  }));
-  assert.deepEqual(skipped, ['thomas@fractionate.ai']);
-  assert.deepEqual(accounts.map((a) => a.email), [`viewer${FIXTURE_EMAIL_DOMAIN}`]);
+  });
+  assert.deepEqual(accounts.map((a) => a.email), ['admin-n8@fixture.invalid']);
+  assert.deepEqual(renamed, [{ role: 'admin', from: 'thomas@fractionate.ai', to: 'admin-n8@fixture.invalid' }]);
 });
 
-test('and a lookalike domain is not the reserved one', () => {
-  const { accounts, skipped } = screenAccountsFromSpec(spec({
-    admin: { username: 'admin@fixture.invalid.example.com', password: 'p'.repeat(12) },
-    b: { username: 'admin@notfixture.invalid', password: 'p'.repeat(12) },
-  }));
-  // Neither is the reserved domain: a subdomain of it is somebody's real host,
-  // and `@notfixture.invalid` merely ends with `.invalid`. The match is on the
-  // full `@fixture.invalid` suffix, so both are refused.
-  assert.equal(accounts.length, 0);
-  assert.equal(skipped.length, 2);
+test('EVERY minted address ends with the reserved domain, whatever the spec said', () => {
+  // The one invariant the auth component's `NOT LIKE '%@fixture.invalid'` guard
+  // depends on. A `{role}@{project}.com` address would not match it and would
+  // silently consume the first-admin slot — see the note in the module.
+  const { accounts } = from({
+    admin: { username: 'admin@n8.com', password: 'x'.repeat(12) },
+    'we!rd role': { username: 'x@n8.fixture.invalid', password: 'x'.repeat(12) },
+    auditor: { username: '', password: '' },
+  });
+  assert.equal(accounts.length, 3);
+  for (const a of accounts) assert.ok(a.email.endsWith(FIXTURE_EMAIL_DOMAIN), a.email);
+});
+
+test('the slug is bounded, safe, and never empty', () => {
+  assert.equal(fixtureSlug({ id: 1, name: 'N8' }), 'n8');
+  assert.equal(fixtureSlug({ id: 1, name: 'My Notes App!' }), 'my-notes-app');
+  assert.equal(fixtureSlug({ id: 7, name: '!!!' }), 'p7', 'a nameless project still gets a distinct address');
+  assert.equal(fixtureSlug({ id: 7, name: '' }), 'p7');
+  const long = fixtureSlug({ id: 1, name: 'x'.repeat(200) });
+  assert.ok(long.length <= 24);
+  assert.match(fixtureEmail('admin', { id: 1, name: 'N8' }), /^admin-n8@fixture\.invalid$/);
+  assert.match(fixtureEmail('we!rd role', { id: 1, name: 'N8' }), /^[a-z0-9-]+-n8@fixture\.invalid$/);
+});
+
+test('the platform pair is role-named and project-scoped too', () => {
+  assert.equal(reviewEmailFor(PROJECT), 'admin-n8@fixture.invalid');
+  assert.equal(viewerEmailFor(PROJECT), 'viewer-n8@fixture.invalid');
+  // A spec declaring `admin` lands on the SAME address as the platform
+  // reviewer, which is the point: one admin fixture per project, not two.
+  const { accounts } = from({ admin: { username: 'x@y.com', password: 'p' } });
+  assert.equal(accounts[0].email, reviewEmailFor(PROJECT));
+});
+
+test('the spec the CHECKS run gets the substituted credentials back', () => {
+  // Without this the platform would create the accounts and the checks would go
+  // on signing in as whatever the model invented — the substitution would be
+  // worse than doing nothing.
+  const original = spec({
+    admin: { username: 'n8-admin@fixture.invalid', password: 'n8-admin-password-123' },
+    viewer: { username: 'nobody@example.com', password: 'hunter2' },
+  });
+  const { accounts } = screenAccountsFromSpec(original, { project: PROJECT, password: PW });
+  const out = withScreenLogins(original, accounts);
+  assert.equal(out.login.users.admin.username, 'admin-n8@fixture.invalid');
+  assert.equal(out.login.users.admin.password, PW);
+  assert.equal(out.login.users.viewer.username, 'viewer-n8@fixture.invalid');
+  assert.equal(out.login.users.viewer.password, PW);
+  // Untouched on disk and untouched in memory — the original object is not
+  // mutated, so a caller that kept a reference still sees what the build wrote.
+  assert.equal(original.login.users.admin.password, 'n8-admin-password-123');
+  // Everything else about the spec survives.
+  assert.equal(out.login.path, '/login');
+});
+
+test('withScreenLogins is a no-op when there is nothing to substitute', () => {
+  const sp = spec({ admin: { username: 'a@fixture.invalid', password: 'p' } });
+  assert.equal(withScreenLogins(sp, []), sp);
+  assert.equal(withScreenLogins(null, [{ role: 'admin', email: 'x', password: 'y' }]), null);
+  assert.equal(withScreenLogins({ login: null, checks: [] }, [{ role: 'admin' }]).login, null);
+});
+
+test('an incomplete or absent login block yields nothing, quietly', () => {
+  for (const sp of [null, undefined, {}, { login: null }, { login: {} }, { login: { users: null } }, spec({})]) {
+    assert.deepEqual(screenAccountsFromSpec(sp, { project: PROJECT, password: PW }), { accounts: [], renamed: [] });
+  }
+});
+
+test('the note names what was created AND what was replaced', () => {
+  const { accounts, renamed } = from({
+    admin: { username: 'real@example.com', password: 'x'.repeat(12) },
+  });
+  const note = screenAccountsNote({ accounts, renamed, seeded: { ok: true, state: 'seeded' } });
+  assert.match(note, /1 declared fixture user\(s\) ready/);
+  assert.match(note, /real@example\.com → admin-n8@fixture\.invalid/);
+  assert.match(note, /never the one written into the spec/);
 });
 
 test('an admin role gets admin preference; anything else falls to the LEAST privileged', () => {
   // A viewer fixture that quietly became an admin makes every permission check
   // pass and proves nothing — the exact defect the second fixture exists to find.
-  const { accounts } = screenAccountsFromSpec(spec({
+  const { accounts } = from({
     admin: { username: `a${FIXTURE_EMAIL_DOMAIN}`, password: 'x'.repeat(12) },
     viewer: { username: `v${FIXTURE_EMAIL_DOMAIN}`, password: 'x'.repeat(12) },
-  }));
+  });
   const [admin, viewer] = accounts;
   assert.equal(admin.fallback, 'first');
   assert.deepEqual(admin.prefer, [...REVIEW_ROLE_PREFERENCE]);
@@ -80,48 +158,10 @@ test('an admin role gets admin preference; anything else falls to the LEAST priv
 });
 
 test('a role name the platform has never heard of still gets its own role first', () => {
-  const { accounts } = screenAccountsFromSpec(spec({
-    auditor: { username: `x${FIXTURE_EMAIL_DOMAIN}`, password: 'x'.repeat(12) },
-  }));
+  const { accounts } = from({ auditor: { username: `x${FIXTURE_EMAIL_DOMAIN}`, password: 'x'.repeat(12) } });
   assert.equal(accounts[0].prefer[0], 'auditor');
   assert.equal(accounts[0].fallback, 'least', 'an unknown role is not assumed to be an admin one');
   assert.equal(accounts[0].key, 'spec-auditor');
-});
-
-test('a key is always shell/JSON safe', () => {
-  const { accounts } = screenAccountsFromSpec(spec({
-    'we!rd $role`name': { username: `x${FIXTURE_EMAIL_DOMAIN}`, password: 'x'.repeat(12) },
-  }));
-  assert.match(accounts[0].key, /^spec-[a-z0-9_-]*$/);
-});
-
-test('an incomplete or absent login block yields nothing, quietly', () => {
-  for (const s of [null, undefined, {}, { login: null }, { login: {} }, { login: { users: null } }, spec({})]) {
-    assert.deepEqual(screenAccountsFromSpec(s), { accounts: [], skipped: [] });
-  }
-  // A user with no password cannot be signed in as, so there is nothing to mint.
-  assert.deepEqual(
-    screenAccountsFromSpec(spec({ admin: { username: `a${FIXTURE_EMAIL_DOMAIN}` } })),
-    { accounts: [], skipped: [] },
-  );
-});
-
-test('`email` is accepted as well as `username`', () => {
-  const { accounts } = screenAccountsFromSpec(spec({
-    admin: { email: `a${FIXTURE_EMAIL_DOMAIN}`, password: 'x'.repeat(12) },
-  }));
-  assert.equal(accounts.length, 1);
-});
-
-test('the note names what was minted AND what was refused', () => {
-  const { accounts, skipped } = screenAccountsFromSpec(spec({
-    admin: { username: `a${FIXTURE_EMAIL_DOMAIN}`, password: 'x'.repeat(12) },
-    owner: { username: 'real@example.com', password: 'x'.repeat(12) },
-  }));
-  const note = screenAccountsNote({ accounts, skipped, seeded: { ok: true, state: 'seeded' } });
-  assert.match(note, /1 declared fixture user\(s\) ready/);
-  assert.match(note, /real@example\.com/);
-  assert.match(note, /never creates a real-domain account/);
 });
 
 test('the note distinguishes "no auth component" from "it failed"', () => {
@@ -140,7 +180,8 @@ test('the seeder script carries every account and leaks no password to argv', ()
     ...reviewFixtureAccounts({
       email: REVIEW_EMAIL, password: 'platform-pw-1234', viewerEmail: REVIEW_VIEWER_EMAIL, viewerPassword: 'platform-pw-1234',
     }),
-    ...screenAccountsFromSpec(spec({ admin: { username: `a${FIXTURE_EMAIL_DOMAIN}`, password: 'spec-pw-5678' } })).accounts,
+    ...screenAccountsFromSpec(spec({ admin: { username: `a${FIXTURE_EMAIL_DOMAIN}`, password: 'ignored' } }),
+      { project: PROJECT, password: 'spec-pw-5678' }).accounts,
   ];
   const script = seedFixtureUserScript({ accounts });
   for (const a of accounts) assert.ok(script.includes(a.email), `${a.email} must be in the payload`);
@@ -197,7 +238,7 @@ test('RATCHET: the smoke gate seeds from the spec AS WRITTEN, before withPlatfor
     { login: null, checks: [{ id: 'c', paths: ['**/*'], steps: [] }] },
     { email: REVIEW_EMAIL, password: 'p'.repeat(12) },
   );
-  const { accounts } = screenAccountsFromSpec(transformed);
+  const { accounts } = screenAccountsFromSpec(transformed, { project: PROJECT, password: PW });
   assert.equal(accounts.length, 1);
   assert.equal(accounts[0].fallback, 'least',
     'seeding the TRANSFORMED spec would demote the reviewer — which is why the order above is asserted');

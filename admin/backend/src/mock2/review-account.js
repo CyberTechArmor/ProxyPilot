@@ -21,7 +21,8 @@ import { DEFAULT_WEB_PORT } from './template.js';
 import {
   REVIEW_EMAIL, REVIEW_VIEWER_EMAIL, generateReviewPassword, reviewAccountScript,
   parseReviewAccountResult, seedFixtureUserScript, parseSeedResult, reviewFixtureAccounts,
-  screenAccountsFromSpec, screenAccountsNote,
+  screenAccountsFromSpec, screenAccountsNote, withScreenLogins,
+  reviewEmailFor, viewerEmailFor, fixtureEmail, fixtureSlug,
 } from './review-account-logic.js';
 
 function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
@@ -48,7 +49,7 @@ export function getReviewLogin(projectId) {
 // the only thing they exist to differ by.
 export function getViewerLogin(projectId) {
   const review = getReviewLogin(projectId);
-  return review ? { email: REVIEW_VIEWER_EMAIL, password: review.password } : null;
+  return review ? { email: viewerEmailFor(getProject(projectId)), password: review.password } : null;
 }
 
 // Provision (or confirm) the review account inside a deployed project.
@@ -63,10 +64,21 @@ export async function ensureReviewAccount(project, { timeoutMs = 60000 } = {}) {
   }
   const port = project.web_port || DEFAULT_WEB_PORT;
 
-  // Reuse the stored password when there is one, so a re-run can verify the
-  // existing account rather than reseeding it on every build.
+  // The PASSWORD is reused when there is one — it is the project's single
+  // fixture secret and every fixture account shares it, so rotating it would
+  // invalidate accounts this run is not reseeding.
+  //
+  // The ADDRESS is always the canonical one. A project created before the
+  // rename has `design-review@fixture.invalid` stored; keeping it would leave
+  // that project permanently on the old shape, since nothing else reseeds. The
+  // canonical address simply fails the probe below on the first run after the
+  // rename, which takes the seed path, mints both accounts and stores the new
+  // address — so every project converges on its own. The old rows are left
+  // where they are: fixtures on the reserved domain, invisible to the
+  // first-admin bootstrap, removed by "Free the first-admin slot" like any
+  // other.
   const existing = getReviewLogin(project.id);
-  const email = existing?.email || REVIEW_EMAIL;
+  const email = reviewEmailFor(project);
   const password = existing?.password || generateReviewPassword();
 
   const persist = () => {
@@ -109,7 +121,7 @@ export async function ensureReviewAccount(project, { timeoutMs = 60000 } = {}) {
   let seeded;
   try {
     const accounts = reviewFixtureAccounts({
-      email, password, viewerEmail: REVIEW_VIEWER_EMAIL, viewerPassword: password,
+      email, password, viewerEmail: viewerEmailFor(project), viewerPassword: password,
     });
     seeded = parseSeedResult(
       (await containerSh(containerName, seedFixtureUserScript({ accounts }), { timeoutMs }))?.stdout || '',
@@ -142,7 +154,7 @@ export async function ensureReviewAccount(project, { timeoutMs = 60000 } = {}) {
       // Only offer the viewer when it actually got an unprivileged role. A
       // viewer that fell back to admin would make every permission check pass.
       viewerLogin: seeded.accounts?.viewer && seeded.accounts.viewer !== seeded.accounts.reviewer
-        ? { email: REVIEW_VIEWER_EMAIL, password, role: seeded.accounts.viewer }
+        ? { email: viewerEmailFor(project), password, role: seeded.accounts.viewer }
         : null,
     };
   }
@@ -173,26 +185,32 @@ export async function ensureReviewAccount(project, { timeoutMs = 60000 } = {}) {
 // in both is that the platform's own baseline checks passed in the same run —
 // because those use accounts the platform creates.
 //
-// Only @fixture.invalid addresses are minted (screenAccountsFromSpec enforces
-// it). A spec naming a real address is asking for a real person's account: it is
-// the operator's, it would count as "a real user exists", and it would consume
-// the first-admin slot. Those are skipped and named in the note.
+// The spec's ROLES are honoured; its invented credentials are not. Each role
+// gets the canonical `{role}-{project}@fixture.invalid` address and the
+// project's own generated password — see screenAccountsFromSpec for why both
+// substitutions close a real defect rather than express a preference. The
+// returned `spec` has those credentials put back into it, so the checks sign in
+// as the accounts that now exist.
 //
 // Best-effort throughout. An app with no auth component, no pg driver, or a
 // spec with no login block are ordinary outcomes — the checks then run exactly
 // as they did before.
 //
-// Returns { ok, ran, accounts, skipped, seeded, note }.
-export async function ensureScreenAccounts(spec, { containerName, timeoutMs = 60000 } = {}) {
-  const { accounts, skipped } = screenAccountsFromSpec(spec);
-  if (!containerName || (!accounts.length && !skipped.length)) {
-    return { ok: true, ran: false, accounts, skipped, seeded: null, note: '' };
-  }
-  if (!accounts.length) {
-    // Nothing mintable, but the skipped addresses still need saying — a check
-    // failing because it signs in as a real person is otherwise unexplainable.
-    return { ok: true, ran: false, accounts, skipped, seeded: null, note: screenAccountsNote({ accounts, skipped }) };
-  }
+// Returns { ok, ran, accounts, renamed, seeded, note, spec }.
+// The project ROW rather than the object, so a caller deep in the smoke gate
+// does not have to thread one down through four signatures for the sake of a
+// name and an id.
+export async function ensureScreenAccounts(spec, { projectId, containerName, timeoutMs = 60000 } = {}) {
+  const project = getProject(projectId);
+  const password = getReviewLogin(projectId)?.password || '';
+  const { accounts, renamed } = screenAccountsFromSpec(spec, { project, password });
+  const idle = { ok: true, ran: false, accounts: [], renamed: [], seeded: null, note: '', spec };
+  if (!containerName || !accounts.length) return idle;
+  // Without the project's stored secret there is nothing to seed these accounts
+  // WITH, and inventing one here would leave the checks holding a password the
+  // panel cannot show. ensureReviewAccount mints and stores it; it runs first.
+  if (!password) return { ...idle, note: 'screen accounts: the project has no stored fixture password yet — nothing was created' };
+
   let seeded;
   try {
     seeded = parseSeedResult(
@@ -208,9 +226,14 @@ export async function ensureScreenAccounts(spec, { containerName, timeoutMs = 60
     ok: seeded.ok !== false,
     ran: true,
     accounts,
-    skipped,
+    renamed,
     seeded,
-    note: screenAccountsNote({ accounts, skipped, seeded }),
+    note: screenAccountsNote({ accounts, renamed, seeded }),
+    // Only rewrite the spec when the rows actually landed. Pointing the checks
+    // at credentials that were not created would turn a seeding failure into a
+    // wall of sign-in timeouts — the exact report this whole feature exists to
+    // stop producing.
+    spec: seeded.ok ? withScreenLogins(spec, accounts) : spec,
   };
 }
 
@@ -242,28 +265,31 @@ export async function provisionScreenAccounts(project, { timeoutMs = 90000 } = {
   }
   const port = project.web_port || DEFAULT_WEB_PORT;
   const existing = getReviewLogin(project.id);
-  const email = existing?.email || REVIEW_EMAIL;
+  const email = reviewEmailFor(project);
+  // One secret per project, shared by every fixture account and stored
+  // encrypted — 32 base64url characters, never the `n8-admin-password-123` a
+  // build model writes into its own spec.
   const password = existing?.password || generateReviewPassword();
 
   // What the project's own checks say they will sign in as. Read before the
   // seed so all of it lands in ONE exec; a missing or malformed spec is an
   // ordinary outcome — the platform's own pair still gets created.
   let specAccounts = [];
-  let skipped = [];
+  let renamed = [];
   try {
     const { UI_CHECKS_PATH, parseUiChecks } = await import('./ui-check-logic.js');
     const r = await containerSh(containerName, `cat '/srv/app/${UI_CHECKS_PATH}' 2>/dev/null`, { timeoutMs: 20000 });
     const text = (r?.stdout || '').trim();
     if (text) {
       const parsed = parseUiChecks(text);
-      if (parsed.ok) ({ accounts: specAccounts, skipped } = screenAccountsFromSpec(parsed.spec));
+      if (parsed.ok) ({ accounts: specAccounts, renamed } = screenAccountsFromSpec(parsed.spec, { project, password }));
     }
   } catch (e) {
     console.warn(`[mock2] could not read the ui-checks spec for project ${project.id}:`, e?.message);
   }
 
   const platformPair = reviewFixtureAccounts({
-    email, password, viewerEmail: REVIEW_VIEWER_EMAIL, viewerPassword: password,
+    email, password, viewerEmail: viewerEmailFor(project), viewerPassword: password,
   });
   // The platform's pair first, so its addresses win if the spec happens to name
   // one of them — the seeder writes in order and the last write would otherwise
@@ -316,15 +342,15 @@ export async function provisionScreenAccounts(project, { timeoutMs = 90000 } = {
       role: seeded.accounts?.[a.key] || null,
       purpose: purposeFor(a.key),
     })),
-    skipped,
+    renamed,
     // Honest about the one thing worth knowing beyond "created": a seeded row
     // that still cannot sign in means the app's own login path is broken, which
     // is a different problem from the one this button solves.
     signedIn: signIn?.state === 'existing',
     note: signIn && signIn.state !== 'existing'
       ? `The accounts were written, but signing in still returned ${signIn.code ?? '?'} — the app's login path itself is not working.`
-      : screenAccountsNote({ accounts: specAccounts, skipped, seeded }),
+      : screenAccountsNote({ accounts: specAccounts, renamed, seeded }),
   };
 }
 
-export { REVIEW_EMAIL, REVIEW_VIEWER_EMAIL, screenAccountsFromSpec };
+export { REVIEW_EMAIL, REVIEW_VIEWER_EMAIL, screenAccountsFromSpec, fixtureEmail, fixtureSlug };

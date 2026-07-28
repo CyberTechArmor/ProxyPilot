@@ -519,7 +519,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     // cheap HTTP always; browser + read-only DB connectors only on a relevance hit
     // (default OFF). Same shared code path, so the run/skip decision is runner-agnostic.
     if (!deployed.skipped) {
-      const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: 'SDK runner change', instruction: cycle.instruction, logEvent, env: process.env });
+      const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: 'SDK runner change', instruction: cycle.instruction, logEvent, env: process.env, projectId: project.id });
       if (!smoke.ok) {
         const detail = smokeFailSummary(smoke.report);
         finishCycle(cycle.id, { status: 'failed', error: `Smoke gate failed after deploy — ${detail}` });

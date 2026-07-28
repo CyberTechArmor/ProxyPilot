@@ -148,7 +148,7 @@ async function readUiChecksFile(containerName, appDir) {
 // (visible-form count on the root page) when the project has no spec or no
 // check matches this diff. A spec that exists but does not parse FAILS the
 // connector — a broken test manifest must never read as a pass. Never throws.
-async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles, requiredIds = [], reviewLogin = null, viewerLogin = null }) {
+async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles, requiredIds = [], reviewLogin = null, viewerLogin = null, projectId = null }) {
   // 1) Project interaction checks, when declared. The run set is the UNION of
   //    the diff-matched checks and the ACCEPTANCE-REQUIRED ids (cycle-94: the
   //    task's live acceptance — e.g. "Test connection turns all three checks
@@ -199,7 +199,11 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
       let screenAccounts = null;
       try {
         const { ensureScreenAccounts } = await import('./review-account.js');
-        screenAccounts = await ensureScreenAccounts(parsed.spec, { containerName });
+        screenAccounts = await ensureScreenAccounts(parsed.spec, { projectId, containerName });
+        // The spec comes BACK with the credentials that now exist substituted
+        // in. Without this the platform would create the accounts and the
+        // checks would go on signing in as whatever the build model invented.
+        if (screenAccounts?.spec) parsed.spec = screenAccounts.spec;
       } catch (e) {
         screenAccounts = { note: `screen accounts could not be checked: ${e?.message || 'unknown error'}` };
       }
@@ -359,7 +363,7 @@ function shSingleQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 export async function runSmokeGate({
   containerName, appDir = '/srv/app', webPort = 3000, url = null,
   changedFiles = [], changeMeta = {}, escalations = [], requiredIds = [], env = process.env,
-  reviewLogin = null, viewerLogin = null,
+  reviewLogin = null, viewerLogin = null, projectId = null,
 }) {
   // The dashboard's browser toggle (settings.smokeEnv) overlays the env var —
   // an operator flips the connector from the UI without touching .env.
@@ -401,7 +405,7 @@ export async function runSmokeGate({
 
   if (resolved.browser.disposition === 'ran') {
     const target = url || await resolveBrowserTarget(containerName, webPort);
-    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles, requiredIds: acceptanceUi, reviewLogin, viewerLogin })), reason: resolved.browser.reason };
+    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles, requiredIds: acceptanceUi, reviewLogin, viewerLogin, projectId })), reason: resolved.browser.reason };
   }
   if (resolved.db.disposition === 'ran') {
     report.db = { ...(await driveDbConnector({ containerName, appDir })), reason: resolved.db.reason };
@@ -446,10 +450,11 @@ export async function smokeAfterDeploy({
   containerName, appDir = '/srv/app', webPort = 3000, url = null,
   commitSha = null, summary = '', instruction = '', escalations = [],
   requiredIds = [], logEvent = null, env = process.env, reviewLogin = null, viewerLogin = null,
+  projectId = null,
 }) {
   const changedFiles = await changedFilesForCommit(containerName, appDir, commitSha);
   const changeMeta = { summary: summary || '', ruleUnderTest: instruction || '' };
-  const result = await runSmokeGate({ containerName, appDir, webPort, url, changedFiles, changeMeta, escalations, requiredIds, env, reviewLogin, viewerLogin });
+  const result = await runSmokeGate({ containerName, appDir, webPort, url, changedFiles, changeMeta, escalations, requiredIds, env, reviewLogin, viewerLogin, projectId });
   if (typeof logEvent === 'function') {
     try {
       logEvent('smoke', {

@@ -143,6 +143,13 @@ export const HARNESS_STEPS = Object.freeze([
     defaults: { model: 'claude-haiku-4-5-20251001', effort: 'high', thinking: 'off', budgetNote: 'uncapped (model max)' }, tunable: true,
   },
   {
+    id: 'design-options', stage: 'Post-build', title: 'Design options',
+    description: 'A design COMPLAINT ("this does not look right") answered with 2-3 named layouts to choose between, read off screenshots of the live app plus the deterministic density measurements. Proposes only — nothing is applied until the operator presses Build on one.',
+    intendedOutcome: 'The operator picks a layout instead of paying a build to find out what they asked for.',
+    slotKey: 'build_runner', laneKey: null, envModelVar: 'MOCK2_DESIGN_OPTIONS_MODEL', envEffortVar: null,
+    defaults: { model: '(build_runner slot model)', effort: 'high', thinking: 'off', budgetNote: 'one read, no tools' }, tunable: true,
+  },
+  {
     id: 'design-review', stage: 'Post-build', title: 'Design review / Polish pass',
     description: 'Screenshot-based vision critique of the LIVE app against the approved mockup + tokens, with deterministic overflow/axe/rogue-color riders. Never a gate.',
     intendedOutcome: 'Design defects surfaced (and optionally auto-fixed) after builds ship.',

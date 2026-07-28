@@ -432,24 +432,25 @@ export default function BuildChat({
     } finally { setBusy(false); }
   };
 
-  // Design help: the interview that turns "make it look professional" into a
-  // brief a build can execute. It goes through Ask — one drafted message, one
-  // lane — by sending the trigger phrase the backend matches, so the button and
-  // someone typing "design help" are the same code path and cannot drift.
+  // Design options: for when the screen does not look right and you cannot say
+  // why. It goes through Ask — one drafted message, one lane — sending the
+  // phrase the backend matches, so the button and someone typing "this doesn't
+  // look right" are the same code path and cannot drift.
   //
   // Available with an EMPTY composer, unlike the other two: this is the action
-  // for someone who does not yet know what to type. Anything already drafted
-  // rides along as context rather than being thrown away.
-  const startDesignHelp = async () => {
+  // for someone who has a feeling rather than an instruction. Anything already
+  // drafted rides along, because "the header feels cramped" is exactly the kind
+  // of half-formed sentence this is for.
+  const startDesignOptions = async () => {
     const draft = instruction.trim();
     setBusy(true);
     try {
-      await api.mock2Ask(projectId, draft ? `Design help — ${draft}` : 'Design help', toWireImages(attach.images));
+      await api.mock2Ask(projectId, draft ? `Design options — ${draft}` : 'Design options', toWireImages(attach.images));
       setInstruction('');
       attach.clear();
       await load();
     } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not start design help', description: err.message });
+      toast({ variant: 'destructive', title: 'Could not get design options', description: err.message });
     } finally { setBusy(false); }
   };
 
@@ -893,10 +894,10 @@ export default function BuildChat({
             {/* The action row exists only when it has something in it: an empty
                 flex row still costs the parent's vertical gap, and on a phone
                 that is a line of chat. */}
-            {/* `online` is in this condition for Design help: it is the one
+            {/* `online` is in this condition for Design options: it is the one
                 action that needs no draft, and a button that only appears once
-                you have typed something is no use to the person who does not
-                know what to type. */}
+                you have typed something is no use to the person whose whole
+                problem is not knowing what to type. */}
             {(active && cycle?.id) || resumeMode || hasDraft || online ? (
             <div className="flex flex-wrap items-center justify-between gap-2">
               {/* Interrupt — visible while a build is running: stops it at the
@@ -932,18 +933,19 @@ export default function BuildChat({
                       To annotate the running app, use the "Annotate" button on
                       the Preview — pins there land on the live signed-in app
                       (and resolve to components). */}
-                  {/* Design help is the third action here, and the only one
+                  {/* Design options is the third action here, and the only one
                       that needs no draft: it goes through Ask (same lane, same
-                      lock) and interviews you toward a brief instead of asking
-                      you to arrive with one. */}
+                      lock), looks at the real screen, and posts two or three
+                      layouts to choose between. Nothing changes until you press
+                      Build on one of them. */}
                   <Button
                     variant="ghost"
                     className="h-11 sm:h-10 ml-auto"
                     disabled={askDisabled}
-                    onClick={startDesignHelp}
-                    title={'Eight questions that turn "make it look professional" into a brief a build can execute — the screen\'s job, the hardest real row, which numbers are tappable, how many rows fit, what each status says. Answer or skip each one; it writes the brief at the end.'}
+                    onClick={startDesignOptions}
+                    title={"When a screen does not look right and you cannot say why: this screenshots the live app, measures it, and posts 2–3 named layouts with what each one changes. Nothing is applied until you press Build on one."}
                   >
-                    <Wand2 className="h-4 w-4 mr-1" /> Design help
+                    <Wand2 className="h-4 w-4 mr-1" /> Design options
                   </Button>
                   {hasDraft ? (
                     <>

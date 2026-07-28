@@ -197,18 +197,11 @@ export function detectPolishIntent(question) {
 // message and bounded overall, oldest dropped first.
 export const ASK_CONTEXT_MAX_MESSAGES = 12;
 export const ASK_CONTEXT_MAX_CHARS = 9000;
-// The interview's own bounds: eight questions and eight answers is 16 messages
-// before anything else in the chat, and the brief is written from all of them.
-export const DESIGN_HELP_CONTEXT_MAX_MESSAGES = 40;
-export const DESIGN_HELP_CONTEXT_MAX_CHARS = 24000;
 const ASK_CONTEXT_PER_MESSAGE_CHARS = 1800;
 
-// Bounds are arguments, because one caller genuinely needs more of the chat: a
-// design-help interview IS the conversation, and its final turn writes a brief
-// from every answer given. At the ordinary 12-message bound, an eight-question
-// interview (16 messages) would reach the brief having forgotten what the
-// operator said about the screen's purpose — the first and most important
-// answer, dropped for being the oldest.
+// Bounds are arguments so a caller that genuinely needs more of the chat can
+// ask for it (design options reads the recent design conversation to know what
+// the operator has already tried).
 export function buildAskContextBlock(messages = [], {
   maxMessages = ASK_CONTEXT_MAX_MESSAGES, maxChars = ASK_CONTEXT_MAX_CHARS,
 } = {}) {

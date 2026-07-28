@@ -51,3 +51,38 @@ node --test 'src/__tests__/*.test.js'
 ```
 
 and confirm `pass 76 / fail 0`.
+
+## Smoke UI checks fail (rather than skip) on an app with no first administrator
+
+Observed on project 46 build 129: 5 of 7 checks reported
+`locator.waitFor: Timeout 5000ms exceeded`, including the platform's own
+`platform-baseline-signin-legal`.
+
+Not a build defect. The first administrator belongs to the operator and the
+build is forbidden to create it, so a freshly built app is legitimately in
+first-run state — and in that state:
+
+- `/login` shows the create-administrator form and HIDES the sign-in form, so
+  `expect_visible #login-password` (or any sign-in selector) times out;
+- every check declaring `login: <someone>@fixture.invalid` fails, because the
+  build writes those credentials into `state/ui-checks.json` and nothing
+  creates the account. The platform seeds a fixture admin for the design
+  REVIEW (`review-account.js`), never for the smoke.
+
+So the checks are not failing — they are not yet possible, and the report
+cannot tell those apart. An operator reads "5 of 7 failed" on a build that did
+nothing wrong.
+
+Two fixes, either of which closes it:
+
+1. Have the smoke seed the fixture users a project's `ui-checks.json`
+   declares, the way `ensureReviewAccount` already does for the review. Same
+   reserved `@fixture.invalid` domain, same exclusion from "a real user
+   exists", so it cannot consume the operator's bootstrap.
+2. Detect first-run state (`GET /api/auth/bootstrap/status` →
+   `canCreateSuperadmin: true`) and report "no first administrator yet — N
+   session checks could not run" instead of N failures.
+
+(1) is the better outcome — the checks actually run — and is the one to do
+unless it turns out a project's declared users need roles the platform cannot
+safely mint.

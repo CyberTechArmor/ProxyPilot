@@ -107,7 +107,7 @@ test('a new app is named after its project, not "Application"', () => {
   // it: an app called "N8" served "© 2026 Application" in its footer and on its
   // sign-in screen — the first thing anyone saw of it.
   const b = scaffold().get('src/platform/branding.ts');
-  assert.match(b, /const SEED_ORG_NAME = "probe";/);
+  assert.match(b, /const SEED_ORG_NAME: string = "probe";/);
   assert.match(b, /orgName: SEED_ORG_NAME/, 'the seeded row must take the project name');
   // seedOrgName is the only shared definition of the fallback, so an unnamed
   // project still gets a legal notice rather than "© 2026 undefined".
@@ -215,6 +215,56 @@ test('uploaded assets are served sandboxed and type-pinned', () => {
   // SVG is a storable asset type ONLY because of these headers.
   assert.match(fn, /default-src 'none'; sandbox/);
   assert.ok(!/'text\/html'/.test(routes), 'HTML must never be a storable asset type');
+});
+
+test('RATCHET: no emitted TypeScript compares two constants that can never be equal', () => {
+  // The emitted platform code is TYPESCRIPT and nothing here compiles it, so a
+  // type error ships into every new project and is only found by a build paying
+  // to find it. That happened: the v8 branding seed baked the project name in
+  // as `const SEED_ORG_NAME = "N10"` and compared it with
+  // `const PLACEHOLDER_ORG_NAME = "Application"`. TypeScript narrows both to
+  // LITERAL types, sees they can never be equal, and fails the file with
+  //   TS2367: This comparison appears to be unintentional because the types
+  //           '"N10"' and '"Application"' have no overlap.
+  // — in every project whose name is not the word "Application", which is every
+  // real project. Project 46 spent build turns diagnosing it and then patched a
+  // platform-owned file, which the next upgrade would have overwritten.
+  //
+  // A full tsc is not available here (typescript is not a backend dependency),
+  // so this catches the DEFECT CLASS rather than every type error: a comparison
+  // between two unannotated string-literal constants with different values.
+  // Annotating either side `: string` widens it and makes the comparison legal,
+  // which is the fix and is why the annotations in brandingTs are load-bearing.
+  const CONST_RE = /(?:^|\n)\s*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(:\s*[^=;]+)?=\s*(['"])((?:\\.|(?!\3)[^\\])*)\3\s*;/g;
+  const CMP_RE = /([A-Za-z_$][\w$]*)\s*([!=]==)\s*([A-Za-z_$][\w$]*)/g;
+  const bad = [];
+  for (const [path, content] of new Map([...scaffold(), ...wired()])) {
+    if (!path.endsWith('.ts')) continue;
+    const literals = new Map();
+    for (const m of content.matchAll(CONST_RE)) {
+      // An annotated const is widened — `: string` is exactly the fix, so a
+      // const carrying one is deliberately not a candidate.
+      if (m[2]) continue;
+      literals.set(m[1], m[4]);
+    }
+    for (const m of content.matchAll(CMP_RE)) {
+      const [, left, , right] = m;
+      if (!literals.has(left) || !literals.has(right)) continue;
+      if (literals.get(left) === literals.get(right)) continue;
+      bad.push(`${path}: ${left} ${m[2]} ${right} — "${literals.get(left)}" vs "${literals.get(right)}" can never be equal (TS2367)`);
+    }
+  }
+  assert.deepEqual(bad, []);
+});
+
+test('REGRESSION: the branding seed compiles on a project that is not called "Application"', () => {
+  // The two annotations are the whole fix. A later tidy-up that removes them as
+  // "redundant" reintroduces a typecheck failure in every generated project, so
+  // they are asserted by name.
+  const b = scaffold().get('src/platform/branding.ts');
+  assert.match(b, /const SEED_ORG_NAME: string = "probe";/);
+  assert.match(b, /const PLACEHOLDER_ORG_NAME: string = "Application";/);
+  assert.match(b, /LOAD-BEARING, not style/, 'and the reason is written where the next reader will look');
 });
 
 test('the migration matches the Drizzle schema', () => {

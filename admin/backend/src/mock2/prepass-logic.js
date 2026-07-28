@@ -23,6 +23,9 @@
 import { ROUTING_EFFORTS } from './routing-logic.js';
 
 export const PREPASS_SCOPES = Object.freeze(['simple', 'multi_part', 'feature_scale']);
+// Whether the request has an outcome anyone could check afterwards. See
+// clarify-logic.js for why this is the test and why length is not.
+export const PREPASS_SPECIFICITY = Object.freeze(['clear', 'vague']);
 export const PREPASS_DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
 export const PREPASS_MAX_TOKENS = 900;
 const LIST_MAX = 6;
@@ -43,6 +46,8 @@ export function buildPrepassPrompt() {
 Reply with STRICT JSON only — no prose, no code fences. Schema:
 {
   "scope": "simple" | "multi_part" | "feature_scale",
+  "specificity": "clear" | "vague",
+  "pages": ["/route the request refers to", ...],
   "brief": {
     "touches": ["screens/areas/files likely affected", ...],
     "states": ["UI/data states worth handling (empty, loading, error, edge sizes)", ...],
@@ -52,6 +57,15 @@ Reply with STRICT JSON only — no prose, no code fences. Schema:
   },
   "split": { "parts": [{ "title": "...", "items": ["deliverable", ...] }, ...] }
 }
+"specificity" answers ONE question: after this build, could anyone tell whether
+it was done? "clear" = yes, there is an outcome to look at. "vague" = it names a
+judgement with no object ("make it look better", "fix the css issues", "it feels
+off") and you could not write a single concrete acceptance check for it. Judge
+the REQUEST, not its length — "put the cursor back where the server last saw it"
+is clear at 50 characters, "please doublecheck the design and fix any css
+issues" is vague at 50 words.
+"pages" lists only routes the request actually refers to (e.g. "/admin"), for
+screenshotting. Omit it when the request names none — do not guess.
 Scope rubric:
 - "simple": one screen/element, one behavior — a button, a label, one endpoint tweak.
 - "multi_part": several coordinated changes — a screen plus its API, or 2-4 related elements.
@@ -83,6 +97,10 @@ export function parsePrepassReply(text) {
   if (!doc || typeof doc !== 'object') return null;
   const scope = PREPASS_SCOPES.includes(doc.scope) ? doc.scope : null;
   if (!scope) return null;
+  // Absent is neither: an older model output, or one that skipped the field,
+  // must not read as a verdict either way — the clarifier falls back to its own
+  // deterministic read rather than interrupting on no evidence.
+  const specificity = PREPASS_SPECIFICITY.includes(doc.specificity) ? doc.specificity : null;
   const clampList = (v) => (Array.isArray(v)
     ? v.filter((x) => typeof x === 'string' && x.trim()).slice(0, LIST_MAX).map((x) => x.trim().slice(0, ITEM_MAX_CHARS))
     : []);
@@ -106,7 +124,10 @@ export function parsePrepassReply(text) {
     })).filter((p) => p.title && p.items.length);
     if (parts.length >= 2) split = { parts };
   }
-  return { scope, brief: hasContent ? brief : null, split };
+  const pages = (Array.isArray(doc.pages) ? doc.pages : [])
+    .filter((p) => typeof p === 'string' && /^\/[a-z]/i.test(p.trim()))
+    .slice(0, 4).map((p) => p.trim().slice(0, 120));
+  return { scope, specificity, pages, brief: hasContent ? brief : null, split };
 }
 
 // How a project handles the pre-pass's domain expectations:

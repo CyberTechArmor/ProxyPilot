@@ -143,6 +143,20 @@ export const HARNESS_STEPS = Object.freeze([
     defaults: { model: 'claude-haiku-4-5-20251001', effort: 'high', thinking: 'off', budgetNote: 'uncapped (model max)' }, tunable: true,
   },
   {
+    id: 'demo-content', stage: 'Post-build', title: 'Demo content',
+    description: 'Fills the app with realistic content through its OWN API, signed in as the screen-capture account only. An empty app can only be critiqued for its chrome — which is every finding the review has produced so far.',
+    intendedOutcome: 'The design review sees the screens with twelve items on them, so "what does this look like full?" becomes a question it can answer.',
+    slotKey: 'build_runner', laneKey: null, envModelVar: 'MOCK2_DEMO_CONTENT_MODEL', envEffortVar: null,
+    defaults: { model: '(build_runner slot model)', effort: 'high', thinking: 'off', budgetNote: 'once per project' }, tunable: true,
+  },
+  {
+    id: 'clarify', stage: 'Build', title: 'Request clarifier',
+    description: 'Runs when a request has no checkable outcome. Looks ONLY at the pages the request names, then offers 2-3 pressable rewrites through a front-end-craft and domain lens. Never blocks — "Build it anyway" always sends the request as written.',
+    intendedOutcome: 'A vague report becomes a request with an outcome the operator can check, before a build spends money interpreting it.',
+    slotKey: 'build_runner', laneKey: null, envModelVar: 'MOCK2_CLARIFY_MODEL', envEffortVar: null,
+    defaults: { model: '(build_runner slot model)', effort: 'high', thinking: 'off', budgetNote: 'one read, at most two screenshots' }, tunable: true,
+  },
+  {
     id: 'design-options', stage: 'Post-build', title: 'Design options',
     description: 'A design COMPLAINT ("this does not look right") answered with 2-3 named layouts to choose between, read off screenshots of the live app plus the deterministic density measurements. Proposes only — nothing is applied until the operator presses Build on one.',
     intendedOutcome: 'The operator picks a layout instead of paying a build to find out what they asked for.',

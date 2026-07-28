@@ -1389,6 +1389,11 @@ export const api = {
         ...(opts.skipSplit ? { skip_split: true } : {}),
         ...(opts.skipSuggest ? { skip_suggest: true } : {}),
         ...(opts.extras?.length ? { extras: opts.extras } : {}),
+        ...(opts.skipClarify ? { skip_clarify: true } : {}),
+        // The options the clarifier offered and the operator declined — sent
+        // back with "Build it anyway" so the build gets them as labelled
+        // guesses instead of losing them.
+        ...(opts.clarifyGuesses?.length ? { clarify_guesses: opts.clarifyGuesses } : {}),
       }),
     }),
   // `since` = the highest activity seq the caller already has; the server then
@@ -1538,10 +1543,17 @@ export const api = {
   // with a 400 the global handler reports as "Internal server error".
   mock2CreateFirstAdmin: (id, body) => request(`/mock2/projects/${id}/app-access/first-admin`, { method: 'POST', body: JSON.stringify(body) }),
   mock2FreeFirstAdminSlot: (id) => request(`/mock2/projects/${id}/app-access/free-slot`, { method: 'POST', body: JSON.stringify({}) }),
+  // 'ask' (default) shows the clarifier card on a request with no checkable
+  // outcome; 'off' builds exactly what was typed.
+  mock2SetClarifyMode: (id, mode) => request(`/mock2/projects/${id}/clarify-mode`, { method: 'PUT', body: JSON.stringify({ mode }) }),
   // The accounts that exist to LOOK AT the app — the platform's admin reviewer,
   // its lowest-privilege viewer, and whatever users this project's own
   // ui-checks.json declares (which nothing had ever created).
   mock2CreateScreenAccounts: (id) => request(`/mock2/projects/${id}/app-access/screen-accounts`, { method: 'POST', body: JSON.stringify({}) }),
+  // Fill the app with realistic content through its OWN API, signed in as the
+  // capture account only — never the operator's account, never a real user's.
+  mock2SeedDemoContent: (id, force = false) =>
+    request(`/mock2/projects/${id}/app-access/demo-content`, { method: 'POST', body: JSON.stringify({ force }) }),
   // Live progress for the screen check / design options — a browser driving the
   // app for a minute or two. Polled by the preview so the surface that IS a
   // picture of the app says when something is looking at it.

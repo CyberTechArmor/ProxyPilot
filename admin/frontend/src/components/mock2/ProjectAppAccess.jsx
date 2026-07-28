@@ -130,6 +130,26 @@ export default function ProjectAppAccess({ projectId, canEdit = false }) {
     }
   };
 
+  // Fill the app so the design review has something to look at. An empty app
+  // can only be critiqued for its chrome, which is every finding it has ever
+  // produced — and the content lands in the capture account, not yours.
+  const [seeding, setSeeding] = useState(false);
+  const seedDemo = async () => {
+    setScreenError('');
+    setSeeding(true);
+    try {
+      const res = await api.mock2SeedDemoContent(projectId);
+      toast({
+        title: res.alreadySeeded ? 'Already filled' : 'Demo content added',
+        description: res.alreadySeeded
+          ? 'This app already has demo content in the capture account.'
+          : `${res.created} item(s) created as ${res.account}. The screen check can now see full screens.`,
+      });
+    } catch (err) {
+      setScreenError(String(err?.message || err));
+    } finally { setSeeding(false); }
+  };
+
   const offline = state?.offline;
   const open = state?.canAttempt === true;
   // The app says its door is closed and the only accounts are the platform's
@@ -280,6 +300,25 @@ export default function ProjectAppAccess({ projectId, canEdit = false }) {
                     ))}
                   </div>
                 ) : null}
+
+                {/* The content, once the accounts exist. Separate button because
+                    it is a separate decision and a slower one — and because an
+                    operator who wants the accounts does not always want twelve
+                    invented notes in them. */}
+                <div className="space-y-2 border-t pt-3">
+                  <p className="text-muted-foreground">
+                    An empty app can only be reviewed for its chrome. Fill the capture account with realistic
+                    content — long titles, items with and without children, a spread of dates — so the screen check
+                    can see what your screens look like when they are actually in use. Your own account is untouched.
+                  </p>
+                  <Button
+                    variant="outline" onClick={seedDemo} disabled={seeding || busy}
+                    className="min-h-[44px] w-full sm:w-auto"
+                  >
+                    {seeding ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    Fill with demo content
+                  </Button>
+                </div>
 
                 {state?.note ? <p className="text-xs text-amber-500">{state.note}</p> : null}
                 {state?.renamed?.length ? (

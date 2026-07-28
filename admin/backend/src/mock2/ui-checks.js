@@ -108,6 +108,63 @@ async function runStep(page, step) {
           return { ok: false, detail: `${s.selector} IS visible — this role must not be offered it` };
         }
       }
+      case 'expect_no_scroll': {
+        // A SCROLLBAR NEEDS BOTH: content that overflows AND an overflow mode
+        // that scrolls rather than spills or clips.
+        //
+        // Overflowing content alone is not a scrollbar, and getting this wrong
+        // would have been catastrophic for the one case this step exists for.
+        // The build that motivated it fixed its scrollbar with
+        // `#panel-todos { overflow: visible }`; measured in a real browser,
+        // that element still reports scrollHeight 120 against clientHeight 60.
+        // Comparing those alone would have told a build that had CORRECTLY
+        // removed the scrollbar that it was still there — punishing the fix.
+        // `overflow: hidden` is the same story: clipped, unscrollable, no bar.
+        //
+        // 2px of tolerance on the overflow itself, because sub-pixel layout
+        // rounding makes an exact comparison flap on real pages.
+        // AND THE PAGE IS NOT AN ELEMENT EITHER. The root element's overflow
+        // propagates to the VIEWPORT (and <body>'s propagates when the root is
+        // `visible`), so on `body`, `html` or `:root` the element's own
+        // computed value describes nothing at all. Measured here: a page with
+        // 3000px of content reports `overflow-y: visible` on all three while
+        // window.scrollTo(0, 500) really moves it 500px. Under the element rule
+        // that reads as "does not scroll" — a check that CANNOT FAIL, which is
+        // the one thing a removal check must never be, since this step kind is
+        // accepted as falsifying evidence. On the viewport, `visible` behaves
+        // as `auto`, so it counts as scrollable.
+        await loc.waitFor({ state: 'visible', timeout: STEP_TIMEOUT_MS });
+        const m = await loc.evaluate((el) => {
+          const scrollable = (v) => v === 'auto' || v === 'scroll';
+          const doc = el.ownerDocument;
+          if (el === doc.documentElement || el === doc.body) {
+            const rootCs = getComputedStyle(doc.documentElement);
+            const bodyCs = doc.body ? getComputedStyle(doc.body) : rootCs;
+            const eff = (a) => (rootCs[a] !== 'visible' ? rootCs[a] : bodyCs[a]);
+            const oy = eff('overflowY');
+            const ox = eff('overflowX');
+            const se = doc.scrollingElement || doc.documentElement;
+            return {
+              y: scrollable(oy) || oy === 'visible' ? se.scrollHeight - se.clientHeight : 0,
+              x: scrollable(ox) || ox === 'visible' ? se.scrollWidth - se.clientWidth : 0,
+              overflowY: oy,
+              overflowX: ox,
+            };
+          }
+          const cs = getComputedStyle(el);
+          return {
+            y: scrollable(cs.overflowY) ? el.scrollHeight - el.clientHeight : 0,
+            x: scrollable(cs.overflowX) ? el.scrollWidth - el.clientWidth : 0,
+            overflowY: cs.overflowY,
+            overflowX: cs.overflowX,
+          };
+        });
+        if (m.y <= 2 && m.x <= 2) return { ok: true, detail: `${s.selector} does not scroll` };
+        const parts = [];
+        if (m.y > 2) parts.push(`${m.y}px of hidden height (overflow-y: ${m.overflowY})`);
+        if (m.x > 2) parts.push(`${m.x}px of hidden width (overflow-x: ${m.overflowX})`);
+        return { ok: false, detail: `${s.selector} still scrolls — ${parts.join(', ')}` };
+      }
       case 'expect_text': {
         await loc.waitFor({ state: 'visible', timeout: STEP_TIMEOUT_MS });
         const text = (await loc.textContent()) || '';

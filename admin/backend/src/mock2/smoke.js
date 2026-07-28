@@ -215,7 +215,15 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
       // assert base-app guarantees the platform ships and therefore knows are
       // there — including the one question a single admin fixture could never
       // ask: is the admin route actually denied to a viewer, or only hidden?
-      parsed.spec = withBaselineChecks(parsed.spec, { reviewLogin, viewerLogin });
+      // The app's own shell layout, so a build that legitimately hid or moved
+      // the nav is not failed by a check looking for the header it removed.
+      let shell = null;
+      try {
+        const { SHELL_CONTRACT_PATH, parseShellContract } = await import('./shell-contract-logic.js');
+        const raw = await containerSh(containerName, `cat '${appDir}/${SHELL_CONTRACT_PATH}' 2>/dev/null`, { timeoutMs: 15000 });
+        if ((raw.stdout || '').trim()) shell = parseShellContract(raw.stdout);
+      } catch { shell = null; }
+      parsed.spec = withBaselineChecks(parsed.spec, { reviewLogin, viewerLogin, shell });
       const matched = checksForChangedFiles(parsed.spec, changedFiles);
       const byId = new Map(matched.map((c) => [c.id, c]));
       for (const id of required) {

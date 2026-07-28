@@ -20,6 +20,8 @@ import { matchGlob } from './smoke-triggers.js';
 
 // Where the spec lives in a project's working tree (committed, hash-chained
 // like all state/ content).
+import { shellShellSteps, shellAdminSteps } from './shell-contract-logic.js';
+
 export const UI_CHECKS_PATH = 'state/ui-checks.json';
 
 // The step vocabulary. Each step object carries EXACTLY ONE of these keys
@@ -37,6 +39,17 @@ export const STEP_KINDS = Object.freeze([
   // checked it. Absent OR hidden both satisfy it: what matters is that the user
   // is not offered the thing, not which mechanism withheld it.
   'expect_absent',    // selector → element is absent, or present but not visible
+  // "This container does not scroll." The step that had to exist before a
+  // REMOVAL of a scrollbar could be claimed at all.
+  //
+  // A build claimed "removed the To-dos inner scrollbar", wrote an acceptance
+  // sentence saying "no scrollbar beside the Note/To-dos content", named two
+  // ui-checks that assert nothing of the kind, and shipped with the scrollbar
+  // still there. It was not being dishonest — a scrollbar is not an ELEMENT, so
+  // `expect_absent` cannot reach it and there was no other way to say it.
+  // Demanding a machine check for a claim the check language cannot express
+  // would just teach builds to write checks that miss.
+  'expect_no_scroll', // selector → the element's content fits: no inner scrollbar
   'expect_text',      // { expect_text: selector, contains: 'substr' }
   'fill',             // { fill: selector, value: '...', expect_value: true } → type, optionally assert it persisted
   'click',            // selector → click (used for e.g. the "Replace" write-only-secret flow)
@@ -305,7 +318,7 @@ export function withPlatformLogin(spec, reviewLogin) {
 // the value on the plain page loads.
 export const BASELINE_CHECK_PREFIX = 'platform-baseline-';
 
-export function buildBaselineChecks({ reviewerRole = null, viewerRole = null } = {}) {
+export function buildBaselineChecks({ reviewerRole = null, viewerRole = null, shell = null } = {}) {
   const checks = [];
   const id = (name) => `${BASELINE_CHECK_PREFIX}${name}`;
   // paths ['**/*'] so these run on EVERY cycle: a baseline that only fires when
@@ -356,11 +369,11 @@ export function buildBaselineChecks({ reviewerRole = null, viewerRole = null } =
       name: 'The signed-in app shell renders, with its theme control and legal footer',
       role: reviewerRole,
       page: '/',
-      steps: [
-        { expect_visible: 'header' },
-        { expect_visible: '.theme-toggle' },
-        { expect_visible: '[data-legal-footer]' },
-      ],
+      // The app's OWN layout decides the shape; the platform only insists the
+      // guarantees survive. Asserting a visible `header` here is what blocked
+      // "hide the nav" and "move it to the side" — the check had frozen one
+      // implementation of a promise it was meant to be testing.
+      steps: shellShellSteps(shell),
     });
     checks.push({
       ...base,
@@ -368,7 +381,7 @@ export function buildBaselineChecks({ reviewerRole = null, viewerRole = null } =
       name: 'An administrator can reach the admin screens',
       role: reviewerRole,
       page: '/admin',
-      steps: [{ expect_visible: 'header' }, { expect_visible: '#add-role' }],
+      steps: shellAdminSteps(shell),
     });
   }
 
@@ -404,7 +417,7 @@ export function buildBaselineChecks({ reviewerRole = null, viewerRole = null } =
 // wins on its own ground), and never runs a role the platform could not
 // actually provision: no viewer fixture, no viewer checks. A check that cannot
 // sign in would fail for a reason that has nothing to do with the app.
-export function withBaselineChecks(spec, { reviewLogin = null, viewerLogin = null } = {}) {
+export function withBaselineChecks(spec, { reviewLogin = null, viewerLogin = null, shell = null } = {}) {
   if (!spec || !reviewLogin?.email || !reviewLogin?.password) return spec;
   const reviewerRole = 'platform';
   const viewerRole = viewerLogin?.email && viewerLogin?.password ? 'platform_viewer' : null;
@@ -413,7 +426,7 @@ export function withBaselineChecks(spec, { reviewLogin = null, viewerLogin = nul
   if (viewerRole) users[viewerRole] = { username: viewerLogin.email, password: viewerLogin.password };
 
   const existing = new Set((spec.checks || []).map((c) => c.id));
-  const added = buildBaselineChecks({ reviewerRole, viewerRole }).filter((c) => !existing.has(c.id));
+  const added = buildBaselineChecks({ reviewerRole, viewerRole, shell }).filter((c) => !existing.has(c.id));
   if (!added.length) return spec;
 
   return {

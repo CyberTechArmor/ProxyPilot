@@ -141,6 +141,19 @@ export const RUNNER_TOOLS = Object.freeze([
           items: { type: 'string' },
           description: 'MACHINE-EXECUTED acceptance: for each user-visible happy path above, ADD a matching interaction check to state/ui-checks.json (page + steps: expect_visible / expect_text / click / fill / expect_enabled) and list its id here. These ids are run against the DEPLOYED app right after deploy — an id with no defined check is a hard smoke failure, so define the check first. Acceptance that exists only as prose is never executed by a machine; give at least the happy path an id.',
         },
+        removals: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              what: { type: 'string', description: 'The thing you removed, in the same words as the summary (e.g. "the To-dos inner scrollbar").' },
+              check_id: { type: 'string', description: 'The id of a check in state/ui-checks.json that FAILS while that thing is still present.' },
+            },
+            required: ['what', 'check_id'],
+            additionalProperties: false,
+          },
+          description: 'REQUIRED when the summary says you removed, hid, dropped or deleted something a user can SEE. For each one, add a step to state/ui-checks.json that would fail if it were still there — { "expect_absent": "#delete-note" } for an element, { "expect_no_scroll": "#panel-todos" } for a scrollbar, { "expect_text": … } for wording — and name that check here. These ids are run against the DEPLOYED app, so an untrue claim comes back red. Code-only removals (a dead helper, an unused import, a file) need no entry. If you cannot write a check that could fail, say what you actually did instead of claiming a removal.',
+        },
         assumptions: {
           type: 'object',
           description: 'Cross-layer assumptions behind this change, split HONESTLY: verified = values you READ the authoritative source for THIS cycle (name the file, e.g. "src/routes/profile.ts returns lowercase role slugs"); assumed = values you relied on without reading. A permission or role-name value in `assumed` is a defect — verify it before finishing. Use empty arrays only when genuinely none exist.',
@@ -480,6 +493,43 @@ The \`design-adherence\` gate measures this, and it measures your MARKUP as well
 as your CSS: shipping screens with neither their own styling nor the approved
 component classes reds the build. "The app has no stylesheet" is not a way to
 pass it.
+
+## Claiming a removal (binding)
+If your summary says you REMOVED, hid, dropped or deleted something a user can
+SEE, you must also add a check that would FAIL while that thing is still there,
+and name it in \`finish(removals: [...])\`:
+
+    { "expect_absent": "#delete-note" }        an element or control is gone
+    { "expect_no_scroll": "#panel-todos" }     a scrollbar is gone
+    { "expect_text": "#title-row", "contains": "…" }   wording is gone
+
+Those checks are RUN against the deployed app, so an untrue claim comes back
+red. Code-only removals — a dead helper, an unused import, a file — need no
+entry, and neither does a style tweak like dropping some padding.
+
+A build once claimed "removed the To-dos inner scrollbar", wrote an acceptance
+sentence about it, named two checks that assert nothing of the kind, and shipped
+with the scrollbar still on the screen. If you cannot write a check that could
+fail, do not claim the removal — say what you actually did.
+
+## Restructuring the app shell (binding)
+The shell — the nav, the theme control, the legal footer — is APP-OWNED markup in
+\`public/app-shell.html\` and the app's own stylesheet. You may hide the top nav,
+move it to a sidebar, fold its controls into a menu, or collapse it on mobile.
+
+What you may NOT do is drop the base app's guarantees, and the platform's own
+baseline checks hold you to that. Those checks read \`state/shell.json\`, so when
+you change the shell's STRUCTURE you must write that file in the SAME change —
+otherwise the checks go looking for a visible \`header\` you deliberately removed
+and fail your own work:
+
+    { "nav": "side", "navSelector": "aside.app-nav", "menuOpener": "#nav-toggle" }
+
+\`nav\` is "top" | "side" | "hidden". Set \`menuOpener\` only when the theme control
+or legal footer sit behind a menu — the check clicks it before asserting. Omit
+what you did not change. Whatever you write, from the default screen the theme
+control, the legal footer and the admin route must each still be reachable in at
+most one interaction: moving a control into a menu is fine, deleting it is not.
 
 ## Browser tests (binding)
 The project owns a real Playwright suite. \`playwright.config.ts\` starts the app
@@ -1047,7 +1097,17 @@ export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
     // against the deployed app by smoke — ratchet 7; prose alone is never
     // machine-executed).
     const acceptanceIds = strList(input?.acceptance_ids) || [];
-    return { summary: String(input?.summary || 'change complete'), acceptance, assumptions, acceptanceIds };
+    // Declared removals: what was taken away, and the check that would catch it
+    // if it were still there. Structured rather than parsed out of the summary
+    // — the platform should not be guessing which sentence maps to which check.
+    const removals = (Array.isArray(input?.removals) ? input.removals : [])
+      .map((r) => ({
+        what: String(r?.what ?? '').trim().slice(0, 200),
+        check_id: String(r?.check_id ?? '').trim().slice(0, 120),
+      }))
+      .filter((r) => r.what || r.check_id)
+      .slice(0, 12);
+    return { summary: String(input?.summary || 'change complete'), acceptance, assumptions, acceptanceIds, removals };
   };
   // A calm PENDING-OPERATOR-VERIFICATION conclusion: the same finish-shaped
   // payload, but the builder is declaring "real + complete in-fence, awaiting a
@@ -1073,6 +1133,7 @@ export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
       finishAcceptance: f.acceptance,
       finishAssumptions: f.assumptions,
       finishAcceptanceIds: f.acceptanceIds,
+      finishRemovals: f.removals,
     };
   }
   if (calls.length === 0) {

@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   getScreenJob, startScreenJob, updateScreenJob, finishScreenJob, screenJobActive,
+  setScreenFrame, getScreenFrame,
   _resetScreenJobs, _ageScreenJob, SCREEN_JOB_KINDS, SCREEN_JOB_MAX_AGE_MS, SCREEN_JOB_DONE_TTL_MS,
 } from '../mock2/screen-job.js';
 
@@ -134,4 +135,85 @@ test('RATCHET: both browser-driving runs report progress', async () => {
     // an operator is left staring at.
     assert.ok(/finishScreenJob\([^)]*ok: false/.test(src), `${mod} must close the record when it FAILS`);
   }
+});
+
+// A one-pixel JPEG is enough: what is under test is the transport, not the image.
+const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64');
+
+test('THE FRAME BYTES NEVER RIDE THE STATUS PAYLOAD', (t) => {
+  // The status is polled every couple of seconds. A 200KB JPEG in it would be
+  // paid for on every tick whether or not the picture had changed — so the
+  // status carries a sequence number and the bytes come from their own
+  // endpoint, fetched only when that number moves.
+  t.after(_resetScreenJobs);
+  startScreenJob(7, 'review');
+  setScreenFrame(7, { data: JPEG, path: '/admin', width: 390 });
+  const status = getScreenJob(7);
+  assert.equal(status.frame, undefined, 'the bytes must not be in the polled payload');
+  assert.equal(status.frameSeq, 1);
+  assert.equal(status.framePath, '/admin');
+  assert.equal(status.frameWidth, 390);
+  const frame = getScreenFrame(7);
+  assert.ok(Buffer.isBuffer(frame.buffer));
+  assert.equal(frame.seq, 1);
+});
+
+test('each shot advances the sequence, so the preview knows to refetch', (t) => {
+  t.after(_resetScreenJobs);
+  startScreenJob(7, 'review');
+  setScreenFrame(7, { data: JPEG, path: '/', width: 390 });
+  setScreenFrame(7, { data: JPEG, path: '/', width: 1280 });
+  setScreenFrame(7, { data: JPEG, path: '/admin', width: 390 });
+  const j = getScreenJob(7);
+  assert.equal(j.frameSeq, 3);
+  assert.equal(j.shots, 3, 'the count the operator sees is the count of frames taken');
+  assert.equal(j.framePath, '/admin', 'and the caption follows the latest frame');
+});
+
+test('a frame for a job that is gone is not served', (t) => {
+  t.after(_resetScreenJobs);
+  assert.equal(setScreenFrame(9, { data: JPEG }), null, 'no job, nothing to attach it to');
+  assert.equal(getScreenFrame(9), null);
+  startScreenJob(7, 'review');
+  assert.equal(getScreenFrame(7), null, 'a job with no frame yet serves nothing rather than a stale one');
+});
+
+test('an expired job takes its frame with it', (t) => {
+  // The bytes are the largest thing here; leaving them readable after the job
+  // has aged out would show a picture of work that finished ten minutes ago.
+  t.after(_resetScreenJobs);
+  startScreenJob(7, 'review');
+  setScreenFrame(7, { data: JPEG, path: '/', width: 390 });
+  _ageScreenJob(7, SCREEN_JOB_MAX_AGE_MS + 1000);
+  assert.equal(getScreenFrame(7), null);
+  assert.equal(getScreenJob(7), null);
+});
+
+test('RATCHET: the capture reports every shot as it lands', async () => {
+  // Without onShot the viewfinder has nothing to show and the preview is back
+  // to a spinner — which is the complaint, one release later.
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../mock2/design-review.js', import.meta.url), 'utf8');
+  assert.match(src, /captureAppScreens\(\{[^}]*onShot/s, 'the capture must accept a per-shot callback');
+  // Both widths, not just the first: a review that reports only the phone shot
+  // freezes the viewfinder halfway through every run.
+  assert.equal((src.match(/\breport\(\w+Entry\)/g) || []).length, 2, 'mobile AND desktop shots must report');
+  // And a viewfinder that throws must never cost the review it decorates.
+  assert.match(src, /try \{ onShot\?\.\(shot\); \} catch/);
+  for (const mod of ['design-review.js', 'design-options.js']) {
+    const m = readFileSync(new URL(`../mock2/${mod}`, import.meta.url), 'utf8');
+    assert.match(m, /setScreenFrame\(/, `${mod} must stream its frames to the preview`);
+  }
+});
+
+test('RATCHET: the preview locks its controls while a capture runs', async () => {
+  // "for that period to be locked from navigating until it finishes". The
+  // overlay covers the frame, but the toolbar sits above it — Desktop/Mobile,
+  // reload and Annotate all still reachable unless they are disabled too.
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../../../frontend/src/components/mock2/ProjectPreview.jsx', import.meta.url), 'utf8');
+  assert.match(src, /active: screenBusy/, 'the panel must know a capture is running');
+  assert.match(src, /ScreenWorkViewfinder/, 'and show the frames over the preview');
+  assert.ok((src.match(/disabled=\{screenBusy\}/g) || []).length >= 4,
+    'reload, Desktop, Mobile and Annotate must all be locked for the duration');
 });

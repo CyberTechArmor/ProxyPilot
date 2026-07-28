@@ -302,6 +302,13 @@ export function checkDesignAdherence({ designCss = '', appCss = '', appHtml = ''
 // ---- output composition ----
 
 // The chat message a review posts (manual Polish pass or the after-build pass).
+// The opening words of every review message. The chat keys the "Fix these" /
+// "Fix + add a note" buttons off this prefix — a findings note is the one system
+// message that is a TO-DO LIST rather than status, and it has to be
+// distinguishable from "the base app deployed". A ratchet asserts both labels
+// start with it, so the two files cannot drift apart silently.
+export const REVIEW_MESSAGE_PREFIX = 'Design review (';
+
 export function reviewChatMessage({ review, axe = [], rogue = [], adherence = null, trigger = 'manual', screenshotCount = 0 }) {
   const lines = [];
   const label = trigger === 'auto' ? 'Design review (after build)' : 'Design review (Polish pass)';
@@ -339,6 +346,15 @@ export function reviewChatMessage({ review, axe = [], rogue = [], adherence = nu
   }
   // The adherence findings themselves — the numbers already led the message.
   for (const f of adherence?.findings || []) lines.push(`• [${f.severity}] ${f.code}: ${f.detail}`);
+  // WHAT TO DO ABOUT IT. Every line above is a defect with a fix already
+  // written next to it, and until the buttons existed the only way to act on
+  // any of them was to re-type the instruction into the composer by hand. Said
+  // in the message as well as shown in the UI, because the message is also what
+  // gets copied and saved.
+  if (n || serious.length || (adherence?.findings || []).length) {
+    lines.push('Press **Fix these** to turn this into a build, or **Fix + add a note** to say which findings '
+      + 'matter most, what to leave alone, or anything the screenshots cannot show.');
+  }
   return lines.join('\n');
 }
 

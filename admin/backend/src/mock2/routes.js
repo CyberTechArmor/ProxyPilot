@@ -199,7 +199,7 @@ import {
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
 import { startAsk, getAskJobStatus } from './ask.js';
-import { getScreenJob } from './screen-job.js';
+import { getScreenJob, getScreenFrame } from './screen-job.js';
 // ---- Multi-modal chat images (migration 526) ----
 import { validateChatImages, MAX_CHAT_IMAGES, isChatImageId } from './chat-image-logic.js';
 import { readChatImage } from './chat-images.js';
@@ -3985,6 +3985,19 @@ export function createMock2Router() {
   // the chat payload; in-memory, so this is a cheap read.
   router.get('/projects/:id/screen-job', requireMock2Role('viewer'), (req, res) => {
     res.json({ job: getScreenJob(req.mock2Project.id) });
+  });
+
+  // The frame the capture is looking at RIGHT NOW. Kept off the status payload
+  // on purpose: that is polled every two seconds, and a 200KB JPEG in it would
+  // be paid for on every tick whether or not the picture had changed. The
+  // status carries `frameSeq`; the preview refetches only when it moves.
+  router.get('/projects/:id/screen-job/frame', requireMock2Role('viewer'), (req, res) => {
+    const frame = getScreenFrame(req.mock2Project.id);
+    if (!frame) return res.status(404).json({ error: 'no frame' });
+    res.setHeader('Content-Type', frame.mediaType || 'image/jpeg');
+    // Transient by nature — the next shot replaces it a second later.
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(frame.buffer);
   });
 
   // Chat image bytes (migration 526). Content-addressed id ("<sha256>.<ext>"),

@@ -114,39 +114,33 @@ async function capturePreviewImage(iframeEl, pins) {
 // back to a coordinate overlay. Send optionally attaches a real screenshot of
 // the signed-in view and routes it to the build as a Quick update. Omitted for
 // the mockup preview (pre-build).
-// ScreenWorkBanner — "something is looking at your app right now".
+// useScreenWork — the shared watcher for "a browser is driving your app".
 //
-// The screen check and Design options both drive a real browser for a minute or
-// two: sign in, screenshot at two widths, measure, ask a model. Both were
-// silent while they did it. A toast said "running" and then nothing, so a slow
-// capture and a dead one looked identical — and the findings only appeared if
-// the operator refreshed the page by hand.
-//
-// It belongs HERE, over the preview, because that is the surface which is a
-// picture of the app: the thing being looked at is the thing on screen.
-//
-// Polls only while there is something to say. The record is in-memory on the
-// backend and expires on read, so an interrupted run stops reporting on its own
-// rather than leaving a spinner over a preview forever.
-export function ScreenWorkBanner({ projectId }) {
+// Polls the in-memory progress record. Quick while something is happening, slow
+// otherwise: an idle project must not pay a two-second poll it will never use.
+function useScreenWork(projectId) {
   const [job, setJob] = useState(null);
   useEffect(() => {
-    if (!projectId) return undefined;
+    if (!projectId) { setJob(null); return undefined; }
     let stopped = false;
     let timer = null;
     const tick = async () => {
-      try {
-        const r = await api.mock2ScreenJob(projectId);
-        if (!stopped) setJob(r?.job || null);
-      } catch { if (!stopped) setJob(null); }
-      // Slow when idle, quick while working: an idle project must not pay for a
-      // 2-second poll it will never use.
-      if (!stopped) timer = setTimeout(tick, 4000);
+      let next = null;
+      try { next = (await api.mock2ScreenJob(projectId))?.job || null; } catch { next = null; }
+      if (stopped) return;
+      setJob(next);
+      const busy = !!next && !['done', 'failed'].includes(next.phase);
+      timer = setTimeout(tick, busy ? 1500 : 6000);
     };
     tick();
     return () => { stopped = true; if (timer) clearTimeout(timer); };
   }, [projectId]);
+  const active = !!job && !['done', 'failed'].includes(job.phase);
+  return { job, active };
+}
 
+// ScreenWorkBanner — the strip above the frame: what is happening, in words.
+export function ScreenWorkBanner({ job }) {
   if (!job) return null;
   const done = job.phase === 'done' || job.phase === 'failed';
   const failed = job.phase === 'failed';
@@ -168,9 +162,65 @@ export function ScreenWorkBanner({ projectId }) {
   );
 }
 
+// ScreenWorkViewfinder — WHAT THE BROWSER IS SEEING, over the preview.
+//
+// "I want to see the screen changes reflected in the preview area (I want to
+// see it being driven, and for that period to be locked from navigating until
+// it finishes)."
+//
+// The capture runs headless in the backend process, so there is nothing in the
+// operator's own browser to watch. Driving the preview iframe along the same
+// routes would only be a re-enactment — a second browser, a different session,
+// possibly different data. So this shows the ACTUAL frame that was just
+// captured, which is literally what the review is about to be written from.
+//
+// It covers the frame rather than sitting beside it, which is also the lock:
+// the iframe underneath cannot be reached, and the toolbar controls are
+// disabled for the same period. Navigating away mid-capture would leave the
+// operator looking at a screen the findings are not about.
+function ScreenWorkViewfinder({ projectId, job }) {
+  const seq = job?.frameSeq || 0;
+  return (
+    <div className="absolute inset-0 z-30 flex flex-col bg-background/95 backdrop-blur-sm">
+      <div className="flex items-center gap-2 border-b px-3 py-2">
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+        <span className="min-w-0 flex-1 truncate text-xs font-medium">{job.label} is driving your app</span>
+        {job.framePath ? (
+          <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+            {job.framePath}{job.frameWidth ? ` · ${job.frameWidth}px` : ''}
+          </span>
+        ) : null}
+      </div>
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden p-3">
+        {seq ? (
+          // `key` on the seq so each frame is a NEW element: reusing one <img>
+          // and swapping src leaves the previous picture up until the next
+          // decodes, which reads as a frozen capture.
+          <img
+            key={seq}
+            src={api.mock2ScreenFrameUrl(projectId, seq)}
+            alt={`${job.label}: ${job.framePath || 'the app'} at ${job.frameWidth || ''}px`}
+            className="enter max-h-full max-w-full rounded border object-contain shadow-sm"
+          />
+        ) : (
+          <p className="text-xs text-muted-foreground">{job.message}</p>
+        )}
+      </div>
+      <p className="border-t px-3 py-2 text-[11px] text-muted-foreground">
+        The preview is locked while this runs — these are the frames the findings will be written from.
+        {job.shots ? ` ${job.shots} taken so far.` : ''}
+      </p>
+    </div>
+  );
+}
+
 export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null, projectId = null, watchProjectId = null }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
   const [annotating, setAnnotating] = useState(false);
+  // A capture in flight LOCKS this panel: the frames on screen are the ones
+  // the findings will be written from, and navigating away mid-run leaves the
+  // operator looking at a screen the findings are not about.
+  const { job: screenJob, active: screenBusy } = useScreenWork(watchProjectId);
   // Overlay (no-bridge) annotate only: lift the tap catcher so the app scrolls.
   const [scrollMode, setScrollMode] = useState(false);
   // Which screen the embedded app is showing, reported by the annotate bridge.
@@ -338,8 +388,8 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
           <span className="truncate text-xs font-mono text-muted-foreground">{src}</span>
           <Button
             variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-            onClick={reloadBack}
-            aria-label="Reload preview" title="Reload preview"
+            onClick={reloadBack} disabled={screenBusy}
+            aria-label="Reload preview" title={screenBusy ? 'Locked while the app is being captured' : 'Reload preview'}
           >
             <RefreshCw className="h-3.5 w-3.5" />
           </Button>
@@ -347,14 +397,14 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
         <div className="flex items-center gap-1 shrink-0">
           <div className="flex rounded-md border p-0.5">
             <button
-              type="button" aria-pressed={width === 'desktop'} onClick={() => setWidth('desktop')}
-              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs ${width === 'desktop' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+              type="button" aria-pressed={width === 'desktop'} onClick={() => setWidth('desktop')} disabled={screenBusy}
+              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs disabled:opacity-40 ${width === 'desktop' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
             >
               <Monitor className="h-3.5 w-3.5" /><span className="hidden sm:inline">Desktop</span>
             </button>
             <button
-              type="button" aria-pressed={width === 'mobile'} onClick={() => setWidth('mobile')}
-              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs ${width === 'mobile' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+              type="button" aria-pressed={width === 'mobile'} onClick={() => setWidth('mobile')} disabled={screenBusy}
+              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs disabled:opacity-40 ${width === 'mobile' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
             >
               <Smartphone className="h-3.5 w-3.5" /><span className="hidden sm:inline">Mobile</span>
             </button>
@@ -363,8 +413,9 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
             <Button
               variant={annotating ? 'default' : 'outline'} size="sm" className="h-9 shrink-0"
               onClick={() => (annotating ? exitAnnotate() : setAnnotating(true))}
-              aria-pressed={annotating}
-              title={annotating ? 'Exit annotate mode' : 'Drop pins on the live preview and send them as a Quick update'}
+              aria-pressed={annotating} disabled={screenBusy}
+              title={screenBusy ? 'Locked while the app is being captured'
+                : annotating ? 'Exit annotate mode' : 'Drop pins on the live preview and send them as a Quick update'}
             >
               <MapPin className="h-4 w-4" /><span className="ml-1 hidden sm:inline">{annotating ? 'Done' : 'Annotate'}</span>
             </Button>
@@ -411,10 +462,11 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
           ) : null}
         </p>
       ) : null}
-      {/* Above the frame, not over it: a capture must not hide the thing it
-          is capturing, and the operator may well want to watch. */}
-      <ScreenWorkBanner projectId={watchProjectId} />
+      <ScreenWorkBanner job={screenJob} />
       <div className="relative flex-1 min-h-0 overflow-hidden bg-background">
+        {/* z-30: above the problem overlay too. While a capture is running,
+            what the browser is looking at is the only thing worth showing. */}
+        {screenBusy ? <ScreenWorkViewfinder projectId={watchProjectId} job={screenJob} /> : null}
         {/* When the server says there is nothing to render, say WHY — over the
             frame, so the broken-page icon underneath is never what the operator
             is left looking at. Retry re-probes and reloads in one press. */}
@@ -555,6 +607,12 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
 // answer its port?) and stays disabled, pulsing "Updating…", through the
 // deploy window — where a click used to serve the placeholder, then a
 // connection error, then finally the app. Solid "Open app" only when live.
+// The bar's own watcher, so LiveAppBar keeps its single-prop signature.
+function LiveAppBarScreenWork({ projectId }) {
+  const { job } = useScreenWork(projectId);
+  return <ScreenWorkBanner job={job} />;
+}
+
 export function LiveAppBar({ url, projectId, probeKey = '' }) {
   const [live, setLive] = useState(null); // null = unknown (first probe pending)
   useEffect(() => {
@@ -613,8 +671,10 @@ export function LiveAppBar({ url, projectId, probeKey = '' }) {
         ) : null}
       </div>
       {/* Build mode cannot iframe the built app, so this bar IS the preview —
-          and it is where "a browser is looking at your app right now" belongs. */}
-      <ScreenWorkBanner projectId={projectId} />
+          and it is where "a browser is looking at your app right now" belongs.
+          No viewfinder here: there is no frame to cover, and the bar is a
+          single row. */}
+      <LiveAppBarScreenWork projectId={projectId} />
       <p className="px-3 py-2.5 text-[11px] text-muted-foreground">
         {ready
           ? 'The running app opens in a new tab — it sets a frame policy that blocks being embedded here.'

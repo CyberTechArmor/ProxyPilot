@@ -58,13 +58,12 @@ test('RATCHET: the frontend tests for exactly that prefix', () => {
 });
 
 test('the message says what to do about it, in its own words', () => {
-  // Shown in the UI as buttons AND said in the text, because the text is also
+  // Shown in the UI as a button AND said in the text, because the text is also
   // what gets copied and saved — a note that leaves the chat should still tell
   // the reader there was something to press.
   const m = message();
   assert.match(m, /Fix these/);
-  assert.match(m, /Fix \+ add a note/);
-  assert.match(m, /what to leave alone/);
+  assert.match(m, /untick anything you disagree with/);
 });
 
 test('a clean review does not invite a build that has nothing to do', () => {
@@ -91,14 +90,24 @@ test('accessibility or adherence findings alone still earn the invitation', () =
   assert.match(adherenceOnly, /Fix these/);
 });
 
-test('RATCHET: the note actually renders both actions and the note field', () => {
-  const src = readFileSync(new URL('../../../frontend/src/components/mock2/chat-messages.jsx', import.meta.url), 'utf8');
-  assert.match(src, /Fix these/, 'the quick-update action');
-  assert.match(src, /Fix \+ add a note/, 'the "Update and input" action');
-  assert.match(src, /<textarea/, 'and somewhere to type the anything-else');
-  // The extra note must reach the build, not be collected and dropped.
+test('RATCHET: the note opens a dialog, and the dialog can do all three things', () => {
+  const note = readFileSync(new URL('../../../frontend/src/components/mock2/chat-messages.jsx', import.meta.url), 'utf8');
+  assert.match(note, /Fix these/, 'the note carries the action');
+  assert.match(note, /FindingsCard/, 'and renders the findings as a list rather than a blob');
+
+  const dlg = readFileSync(new URL('../../../frontend/src/components/mock2/FixFindingsDialog.jsx', import.meta.url), 'utf8');
+  assert.match(dlg, /type="checkbox"/, 'a tick per finding, so one can be dropped');
+  assert.match(dlg, /<textarea/, 'somewhere to say anything else');
+  assert.match(dlg, /ImageAttachmentBar/, 'and images — a photo of the real screen says what a paragraph cannot');
+  assert.match(dlg, /composeFixInstruction\(picked, note\)/,
+    'the instruction must come from what SURVIVED the ticking, not from the message');
+
+  // The old path was a real bug: distill-prompt rejects system notes outright.
   const chat = readFileSync(new URL('../../../frontend/src/components/mock2/BuildChat.jsx', import.meta.url), 'utf8');
-  assert.match(chat, /quickUpdateFromMessage = async \(m, extra = ''\)/);
-  assert.match(chat, /this wins where it disagrees/,
-    'a note that cannot override the findings is not worth typing');
+  assert.match(chat, /const sendFix = async/);
+  assert.doesNotMatch(
+    chat.slice(chat.indexOf('const sendFix'), chat.indexOf('const sendFix') + 900),
+    /mock2DistillPrompt/,
+    'fixing findings must not go through the distiller — it only accepts Ask answers, and it would discard the ticking',
+  );
 });

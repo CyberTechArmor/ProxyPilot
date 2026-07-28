@@ -23,7 +23,29 @@ import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { DoorOpen, Loader2, ShieldCheck, AlertTriangle, RefreshCw } from 'lucide-react';
+import { DoorOpen, Loader2, ShieldCheck, AlertTriangle, RefreshCw, Copy, Eye } from 'lucide-react';
+
+// One credential, readable and copyable on a phone. break-all and wrap, never
+// truncate: a clipped password is a password nobody can use.
+function CopyValue({ label, value }) {
+  const { toast } = useToast();
+  return (
+    <div className="flex items-start gap-1.5">
+      <code className="min-w-0 flex-1 whitespace-pre-wrap break-all rounded border bg-muted/40 px-2 py-2 font-mono text-xs leading-relaxed">
+        {value}
+      </code>
+      <Button
+        variant="outline" size="icon" className="h-11 w-11 shrink-0 sm:h-9 sm:w-9" aria-label={`Copy ${label}`}
+        onClick={async () => {
+          try { await navigator.clipboard.writeText(value); toast({ title: 'Copied' }); }
+          catch { toast({ variant: 'destructive', title: 'Copy failed — select and copy manually' }); }
+        }}
+      >
+        <Copy className="h-4 w-4 sm:h-3.5 sm:w-3.5" />
+      </Button>
+    </div>
+  );
+}
 
 export default function ProjectAppAccess({ projectId, canEdit = false }) {
   const { toast } = useToast();
@@ -33,6 +55,14 @@ export default function ProjectAppAccess({ projectId, canEdit = false }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  // Returned once, by the action that created them. Deliberately not part of
+  // the panel's polled read: these are shown to the person who pressed the
+  // button, not rendered on every page load.
+  const [screenAccounts, setScreenAccounts] = useState(null);
+  // Its own error, not the shared one: the two forms above are conditional, so
+  // a failure here would otherwise render under whichever of them happened to
+  // be visible — or nowhere at all.
+  const [screenError, setScreenError] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -75,6 +105,26 @@ export default function ProjectAppAccess({ projectId, canEdit = false }) {
       });
     } catch (err) {
       setError(String(err?.message || err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createScreenAccounts = async () => {
+    setScreenError('');
+    setBusy(true);
+    try {
+      const res = await api.mock2CreateScreenAccounts(projectId);
+      setState(res);
+      setScreenAccounts(res.screenAccounts || []);
+      toast({
+        title: 'Screen accounts ready',
+        description: res.signedIn === false
+          ? 'The rows were written, but signing in still fails — see the note in the panel.'
+          : `${res.screenAccounts?.length || 0} account(s) created. Sign in with them to see what the checks see.`,
+      });
+    } catch (err) {
+      setScreenError(String(err?.message || err));
     } finally {
       setBusy(false);
     }
@@ -185,6 +235,58 @@ export default function ProjectAppAccess({ projectId, canEdit = false }) {
               <p className="text-xs text-muted-foreground">
                 This app has no administrator yet. Ask a project editor to create it.
               </p>
+            ) : null}
+
+            {/* SCREEN ACCOUNTS. Separate from the first-administrator door above
+                and unconditional next to it: this is not about who owns the app,
+                it is about whether anything can get past its sign-in page to
+                look at it. Every build that "could not log in and assess the
+                screens" was signing in as a user nobody had created. */}
+            {canEdit && !offline ? (
+              <div className="space-y-3 border-t pt-4">
+                <p className="text-sm font-medium flex items-center gap-2"><Eye className="h-4 w-4" /> Screen accounts</p>
+                <p className="text-muted-foreground">
+                  Test accounts on the reserved <code>@fixture.invalid</code> domain: an administrator, a
+                  lowest-privilege viewer, and any user this project's own checks declare. They let the design review,
+                  the screen checks and you sign in and actually see the app. They never count as users and never take
+                  your first-admin slot.
+                </p>
+                {screenError ? <p className="text-sm text-red-500">{screenError}</p> : null}
+                <Button
+                  variant="outline" onClick={createScreenAccounts} disabled={busy}
+                  className="min-h-[44px] w-full sm:w-auto"
+                >
+                  {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  {screenAccounts ? 'Recreate the screen accounts' : 'Create the screen accounts'}
+                </Button>
+
+                {screenAccounts?.length ? (
+                  <div className="space-y-4">
+                    <p className="text-xs text-muted-foreground">
+                      Shown once, here. Sign in at the app's own URL — these are the same credentials the automated
+                      checks use, so what you see is what they see.
+                    </p>
+                    {screenAccounts.map((a) => (
+                      <div key={a.email} className="space-y-2 rounded border p-3">
+                        <p className="text-xs text-muted-foreground">
+                          {a.role ? <span className="font-medium">{a.role}</span> : null}
+                          {a.role ? ' — ' : null}{a.purpose}
+                        </p>
+                        <CopyValue label="email" value={a.email} />
+                        <CopyValue label="password" value={a.password} />
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {state?.note ? <p className="text-xs text-amber-500">{state.note}</p> : null}
+                {state?.skipped?.length ? (
+                  <p className="text-xs text-muted-foreground">
+                    Skipped {state.skipped.join(', ')} — the platform never creates an account on a real domain. That
+                    address would be a real person's, and it would take your first-admin slot.
+                  </p>
+                ) : null}
+              </div>
             ) : null}
           </>
         )}

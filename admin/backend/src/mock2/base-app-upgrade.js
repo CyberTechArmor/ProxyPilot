@@ -27,10 +27,24 @@ function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
   return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
 }
 
+// The payload goes to the container's STDIN still ENCODED, because the script
+// running inside decodes it. Piping `base64 -d` on the HOST first decoded it
+// twice: the container's `base64 -d` then read plain source, consumed the
+// leading run of base64-legal characters, and wrote those few bytes before
+// erroring on the first space.
+//
+// That is not theoretical. Project 44's src/platform/schema.ts was found as
+// FOUR BYTES — 8a 6a 68 ae — which is exactly `printf 'import' | base64 -d`,
+// the opening word of the file it was supposed to contain. A failed upgrade
+// left a load-bearing platform file destroyed, and a later build spent turns
+// discovering it and restoring it from git.
+//
+// concept.js and audit.js always did this correctly (`{ input: b64(content) }`)
+// — this helper is the one that decoded first. Do not add a host-side decode.
 function containerShWithStdin(containerName, script, b64Payload, { timeoutMs = 60000 } = {}) {
   return sh(
-    `printf '%s' '${b64Payload}' | base64 -d | incus exec ${containerName} -- sh -c "$(printf '%s' '${b64(script)}' | base64 -d)"`,
-    { timeoutMs },
+    `incus exec ${containerName} -- sh -c "$(printf '%s' '${b64(script)}' | base64 -d)"`,
+    { timeoutMs, input: b64Payload },
   );
 }
 

@@ -23,6 +23,13 @@
 // PURE (stub-first, risk R9): returns [{ path, content }]. No I/O, no native
 // modules. Terminology (risk R7): nothing here is named "agent".
 
+// v9: v8's branding seed compared two baked-in string literals, which
+// TypeScript narrows to literal TYPES — so `SEED_ORG_NAME !== 'Application'`
+// failed with TS2367 in every project not literally named "Application".
+// Project 46 spent build turns diagnosing and patching it inside a
+// platform-owned file, which the next upgrade would have overwritten. The
+// version bump is what carries the fix to projects that already have v8.
+//
 // v8: the branding row is seeded from the PROJECT NAME instead of the literal
 // "Application", and an existing row still holding that placeholder adopts it
 // on the next boot — an app called N8 stopped shipping "© 2026 Application" in
@@ -34,7 +41,7 @@
 // longer destroys the host page's event listeners. Existing projects need the
 // upgrade: public/login.html is NOT platform-owned (a build may restyle it),
 // so the fix has to reach them through platform.js.
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v8';
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v9';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
@@ -157,9 +164,17 @@ import { branding, legalPages, assets } from './schema.js';
 // The name this app was provisioned under. Baked in at scaffold time — the
 // operator can rename the organisation at any point in Admin → Branding, and
 // this value is never applied again once they have (see ensureSeeded).
-const SEED_ORG_NAME = ${JSON.stringify(seedOrg)};
+//
+// The \`: string\` annotations are LOAD-BEARING, not style. Without them
+// TypeScript infers the literal types ("N10" and "Application"), sees that two
+// different string literals can never be equal, and fails the file with
+// TS2367 — "This comparison appears to be unintentional because the types
+// '"N10"' and '"Application"' have no overlap". That is a typecheck failure in
+// every project whose name is not the word "Application", which is every real
+// project. Do not remove them.
+const SEED_ORG_NAME: string = ${JSON.stringify(seedOrg)};
 // What the column defaults to. Also means "never named" — nothing else does.
-const PLACEHOLDER_ORG_NAME = ${JSON.stringify(PLACEHOLDER_ORG_NAME)};
+const PLACEHOLDER_ORG_NAME: string = ${JSON.stringify(PLACEHOLDER_ORG_NAME)};
 
 /* CONTRACT — appContext.
  *

@@ -150,10 +150,12 @@ async function readContainerFile(containerName, relPath, { timeoutMs = 60000 } =
 // Written with the payload on STDIN rather than inlined: a ledger is small, but
 // so was every other file that later grew past the argv limit.
 async function writeContainerFile(containerName, relPath, content, { timeoutMs = 30000 } = {}) {
+  // ENCODED payload on stdin — the container's script decodes it. Decoding on
+  // the host as well writes four bytes of garbage; see base-app-upgrade.js.
   const script = `d="${APP_DIR}/${relPath}"; mkdir -p "$(dirname "$d")"; base64 -d > "$d"`;
   const r = await sh(
-    `printf '%s' '${b64(content)}' | base64 -d | incus exec ${containerName} -- sh -c "$(printf '%s' '${b64(script)}' | base64 -d)"`,
-    { timeoutMs },
+    `incus exec ${containerName} -- sh -c "$(printf '%s' '${b64(script)}' | base64 -d)"`,
+    { timeoutMs, input: b64(content) },
   );
   return r.code === 0;
 }

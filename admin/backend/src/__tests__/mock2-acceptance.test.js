@@ -143,3 +143,33 @@ test('acceptanceRecord: "gates green" and "acceptance demonstrated" are distinct
   // a feature demonstrates via its declared checks, not red→green
   assert.equal(acceptanceRecord({ spec: null, instructionKind: 'feature' }).demonstrated, true);
 });
+
+test('REGRESSION: a summary that ENDS a sentence with a filename is not an over-claim', () => {
+  // Project 46's build lost two of its five finish attempts to this, and both
+  // times the model diagnosed it correctly as a false positive. The token class
+  // includes '.', so the sentence's full stop was captured into the path and
+  // matched no changed file. Repeated over-claiming AUTO-HALTS a cycle — this
+  // could kill a build over punctuation.
+  const changed = ['public/login.html', 'public/theme.js', 'public/design.css', 'src/platform/branding.ts'];
+  for (const summary of [
+    'restyled login head to load theme.js/design.css.',
+    'fixed a literal-comparison type error in src/platform/branding.ts.',
+    'Rewrote public/login.html!',
+    'Which file changed? public/theme.js;',
+  ]) {
+    const oc = summaryOverclaims(summary, changed);
+    assert.equal(oc.ok, true, `${JSON.stringify(summary)} should pass, got ${JSON.stringify(oc.unmatched)}`);
+  }
+  // Mid-sentence claims were always fine and must stay fine.
+  assert.equal(summaryOverclaims('touched src/platform/branding.ts and stopped', changed).ok, true);
+
+  // And a real over-claim is still caught, WITH the punctuation stripped so the
+  // rejection names the file rather than the file-plus-full-stop.
+  const bad = summaryOverclaims('also rewrote src/nope/missing.ts.', changed);
+  assert.equal(bad.ok, false);
+  assert.deepEqual(bad.unmatched, ['src/nope/missing.ts']);
+
+  // The extractor itself: punctuation never survives into a claim.
+  assert.deepEqual(extractSummaryPathClaims('see src/a/b.ts.'), ['src/a/b.ts']);
+  assert.deepEqual(extractSummaryPathClaims('a.ts, b.ts; c.ts!'), ['a.ts', 'b.ts', 'c.ts']);
+});

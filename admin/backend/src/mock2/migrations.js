@@ -1692,4 +1692,24 @@ export const MOCK2_MIGRATIONS = [
       d.exec('ALTER TABLE mock2_design_presets ADD COLUMN references_json TEXT;');
     },
   },
+  {
+    // Guided setup: the three "about this app" answers, plus whether the panel
+    // was dismissed and whether the composed context has been pushed into the
+    // app's own branding row.
+    //
+    // On the PROJECT rather than in the app's database on purpose. appContext
+    // lives in the generated app, which is not reachable while the container is
+    // still provisioning — and "who is this for" is exactly the question an
+    // operator answers in the first thirty seconds. Storing it here makes the
+    // step answerable immediately and lets a reconciler push it through when
+    // the app comes up.
+    //
+    // Additive: one nullable column holding a small JSON document, so adding a
+    // fourth question later is not another migration.
+    version: 550,
+    name: 'mock2_projects_setup_intake',
+    up: (d) => {
+      d.exec('ALTER TABLE mock2_projects ADD COLUMN setup_intake_json TEXT;');
+    },
+  },
 ];

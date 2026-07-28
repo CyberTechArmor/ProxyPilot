@@ -179,6 +179,30 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
       if (missing.length) {
         return { ok: false, specInvalid: true, detail: `acceptance ui check(s) not defined in ${UI_CHECKS_PATH}: ${missing.join(', ')}` };
       }
+      // THE USERS THE SPEC ITSELF DECLARES MUST EXIST.
+      //
+      // withPlatformLogin below stands aside when the spec has a login block —
+      // a build that said how to sign in has made a choice. But nothing ever
+      // CREATED the users that block names: the model invents an address and a
+      // password, and every check logging in as one of them is rejected at the
+      // form and times out behind the gate. Project 44 build 133 lost three
+      // checks that way on a build that had deployed and worked.
+      //
+      // Seeded here rather than at deploy time because here is where the spec is
+      // read. Fixture domain only, best effort, one exec.
+      //
+      // Order matters: this reads the spec AS WRITTEN, before the two transforms
+      // below add their own users. withPlatformLogin adds the reviewer under a
+      // role called `platform`, which is not an admin role name — seeding from
+      // the transformed spec would give the reviewer the LEAST privileged role
+      // in the table and quietly break every admin screen it exists to reach.
+      let screenAccounts = null;
+      try {
+        const { ensureScreenAccounts } = await import('./review-account.js');
+        screenAccounts = await ensureScreenAccounts(parsed.spec, { containerName });
+      } catch (e) {
+        screenAccounts = { note: `screen accounts could not be checked: ${e?.message || 'unknown error'}` };
+      }
       // Sign the checks in when the spec did not say how — otherwise they run
       // anonymous, get bounced to /login, and time out on elements that only
       // exist behind the gate (project 40: three checks, three timeouts).
@@ -209,7 +233,14 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
             ? `${run.results.length} interaction check(s) passed${baselineRan ? ` (incl. ${baselineRan} platform baseline)` : ''}${required.length ? ` (incl. ${required.length} acceptance check(s))` : ''}`
             : `${acceptanceFailed.length ? 'ACCEPTANCE check failed — ' : baselineFailed.length && baselineFailed.length === run.results.filter((r) => !r.ok).length ? 'BASE APP check failed (not your change) — ' : 'interaction checks failed — '}${uiCheckFailSummary(run.results) || run.detail || 'see results'}`,
           uiChecks: run.results.map((r) => ({ ...r, acceptance: required.includes(r.id), baseline: isBaselineCheck(r) })),
-          logLines: uiCheckLogLines(run.results),
+          // The screen-accounts line goes FIRST: when a login check fails, the
+          // next question is always "did that user exist?", and the answer
+          // should be on the line above rather than inferred from a timeout.
+          logLines: [
+            ...(screenAccounts?.note ? [`ui-check ${screenAccounts.note}`] : []),
+            ...uiCheckLogLines(run.results),
+          ],
+          screenAccounts: screenAccounts?.note || null,
         };
       }
       // Spec exists but nothing matches this diff — fall through to the render

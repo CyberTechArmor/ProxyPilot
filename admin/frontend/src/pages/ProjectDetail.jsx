@@ -57,6 +57,7 @@ import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectCompon
 import ProjectApiKeys from '@/components/mock2/ProjectApiKeys';
 import ProjectAppAccess from '@/components/mock2/ProjectAppAccess';
 import ProjectDesignElements from '@/components/mock2/ProjectDesignElements';
+import ProjectSetup from '@/components/mock2/ProjectSetup';
 import MobilePanelBar from '@/components/mock2/MobilePanelBar';
 import { fireConfetti } from '@/lib/confetti';
 
@@ -434,6 +435,22 @@ export default function ProjectDetail() {
             members are kept, but nothing can change until you rehydrate it.
             {project.archived_at ? <> Archived {new Date(project.archived_at).toLocaleString()}.</> : null}
           </span>
+        </div>
+      ) : null}
+
+      {/* Guided setup — above the tabs on purpose, because it is the answer to
+          "what do I do now" and a card buried in Details is not. It hides
+          itself when the flow is set to classic, when it is dismissed, or when
+          every step is done, so it is not a permanent fixture.
+          Suppressed in Flightdeck and on a phone in the mockup studio: both are
+          deliberately chromeless workspaces. */}
+      {!flightdeckActive && !mobileStudio ? (
+        <div className="shrink-0">
+          <ProjectSetup
+            projectId={id}
+            canEdit={canEdit && !isArchived}
+            onJump={() => setTab('chat')}
+          />
         </div>
       ) : null}
 

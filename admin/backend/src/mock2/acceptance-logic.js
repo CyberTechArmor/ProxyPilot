@@ -234,7 +234,16 @@ export function extractSummaryPathClaims(summary) {
   const re = /(?:^|[\s`'"(])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|sql|html|css|scss|json|ya?ml|md))(?=$|[\s`'"),.:;!?])/g;
   let m;
   while ((m = re.exec(s)) !== null) {
-    const tok = m[1].replace(/^\.\//, '');
+    // Trailing SENTENCE punctuation is not part of the path. The token class
+    // includes '.', so a summary that ends a sentence with a filename —
+    // "…a type error in src/platform/branding.ts." — captured the full stop,
+    // matched no changed file, and was rejected as an over-claim. Project 46
+    // lost two of its five finish attempts to exactly that, and the model
+    // correctly called it a false positive both times; repeated over-claiming
+    // AUTO-HALTS a cycle, so this could kill a build for punctuation.
+    // No filename ends in sentence punctuation, so stripping is always safe.
+    const tok = m[1].replace(/^\.\//, '').replace(/[.,;:!?]+$/, '');
+    if (!tok) continue;
     // Skip bare version-ish tokens and URLs.
     if (/^\d+(\.\d+)*$/.test(tok) || /:\/\//.test(tok)) continue;
     const segs = tok.split('/');

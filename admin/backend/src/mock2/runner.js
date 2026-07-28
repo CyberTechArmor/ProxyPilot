@@ -100,7 +100,7 @@ import { needsOperatorUiVerification, smokeConfigFromEnv } from './smoke-trigger
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
   acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord, codeChangedFiles,
-  mutationActions, actionParityReport, actionLabelWords,
+  mutationActions, actionParityReport, actionLabelWords, actionLabelCore,
 } from './acceptance-logic.js';
 import {
   evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
@@ -1533,19 +1533,32 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             // there — then renamed the control to satisfy the grep. Rejecting a
             // finish over a name is how a gate teaches a build to edit labels
             // for the detector.
+            // THE CORE, not every word. Requiring all significant words on one
+            // line meant "Edit note title/body" needed edit AND note AND title
+            // AND body together — which no designed control ever satisfies, so
+            // a build with a perfectly good `More actions → Edit` was told the
+            // action appeared NOWHERE and printed the contract string on a
+            // button to get past it. Two words is what a real control can
+            // carry: the verb somewhere near the noun.
             const wordGrep = (a) => {
-              const words = actionLabelWords(a.label).filter((w) => /^[a-z0-9]+$/.test(w)).slice(0, 6);
+              const words = actionLabelCore(a.label).filter((w) => /^[a-z0-9]+$/.test(w));
               if (!words.length) return null;
               if (words.length === 1) return `grep -rqi -- '${words[0]}' src public app views 2>/dev/null`;
-              return `grep -rhi -- '${words[0]}' src public app views 2>/dev/null`
-                + words.slice(1, -1).map((w) => ` | grep -i -- '${w}'`).join('')
-                + ` | grep -qi -- '${words[words.length - 1]}'`;
+              return `grep -rhi -- '${words[0]}' src public app views 2>/dev/null | grep -qi -- '${words[1]}'`;
             };
             const script = ['cd "' + APP_DIR + '"']
               .concat(actions.map((a) => {
                 const wg = wordGrep(a);
+                // HIDDEN-ONLY is checked FIRST: an exact label whose every
+                // occurrence sits on a line carrying a `hidden` attribute is
+                // not a surfaced action, it is this grep being gamed. Project
+                // 47 shipped `<p id="admin-settings-hint" hidden>` for exactly
+                // that, and the old check counted it as present.
                 return `l=$(printf '%s' '${b64(a.label)}' | base64 -d)\n`
-                  + `if grep -rqiF -- "$l" src public app views 2>/dev/null; then printf 'FOUND\\t%s\\n' "$l"\n`
+                  + `n=$(grep -rhiF -- "$l" src public app views 2>/dev/null | wc -l)\n`
+                  + `v=$(grep -rhiF -- "$l" src public app views 2>/dev/null | grep -vc 'hidden')\n`
+                  + `if [ "$n" -gt 0 ] && [ "$v" -eq 0 ]; then printf 'HIDDEN\\t%s\\n' "$l"\n`
+                  + `elif [ "$n" -gt 0 ]; then printf 'FOUND\\t%s\\n' "$l"\n`
                   + (wg ? `elif ${wg}; then printf 'WORDS\\t%s\\n' "$l"\n` : '')
                   + 'fi';
               }))
@@ -1555,7 +1568,18 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
               .filter((x) => x.startsWith(`${tag}\t`)).map((x) => x.slice(tag.length + 1).trim().toLowerCase()));
             const found = tagged('FOUND');
             const wordHits = tagged('WORDS');
-            const parity = actionParityReport(actions, found, wordHits);
+            const hiddenOnly = tagged('HIDDEN');
+            const parity = actionParityReport(actions, found, wordHits, hiddenOnly);
+            if (parity.hiddenOnly?.length) {
+              // Said out loud and separately from "missing": the build DID
+              // write the label, on an element nobody can see. That is a
+              // different mistake from dropping the action, and the message
+              // has to name it or the next build repeats it.
+              logEvent('note', {
+                role: 'system',
+                content: `Action parity: ${parity.hiddenOnly.length} action(s) matched ONLY on a hidden element: ${parity.hiddenOnly.map((a) => `"${a.label}"`).join(', ')}`,
+              });
+            }
             if (parity.drifted?.length) {
               // Reported, never blocking: the action shipped, its NAME drifted
               // from the approved contract. Worth an operator's attention and
@@ -1570,7 +1594,20 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
               const list = parity.missing.slice(0, 10).map((a) => `"${a.label}" (${a.screen})`).join(', ');
               transcript.push({
                 role: 'tool', toolCallId: termId, name: termName,
-                content: `Not finished — action parity: these inventory mutation actions are in the approved contract but appear NOWHERE in the app's UI source: ${list}. Implement each one, or render its control disabled with a visible "Not built yet" badge — never silently drop a contract action. Then re-call finish.`,
+                // THE WORDING OF THIS MESSAGE IS THE FEATURE. The old one said
+                // the actions "appear NOWHERE in the app's UI source", and a
+                // build read that as "the checker wants the exact string" and
+                // shipped a button labelled "Edit note title/body". A gate that
+                // dictates copy is worse than the drop it catches, so this
+                // says explicitly that the contract is a list of CAPABILITIES,
+                // names the good design as acceptable, and forbids the two
+                // shortcuts that gaming it produces.
+                content: `Not finished — action parity: a user has no way to perform these actions from the approved contract: ${list}.\n\n`
+                  + 'The contract names CAPABILITIES, not button copy. Give each one a real control and label it however reads best — '
+                  + '"Edit", a pencil icon with an aria-label, or an item inside a "More actions" menu all pass. '
+                  + 'Do NOT put the contract\'s wording on screen: a button reading "Edit note title/body" is this check being satisfied instead of a user being served.\n\n'
+                  + 'Two things that do NOT count: an element with the `hidden` attribute, and a control that leads somewhere the action cannot actually be performed. '
+                  + 'If you genuinely cannot build one this cycle, render it disabled with a visible "Not built yet" badge. Then re-call finish.',
               });
               logEvent('note', { role: 'system', content: `Finish rejected — action parity: silently missing: ${list}` });
               touchLock(projectId, holder);

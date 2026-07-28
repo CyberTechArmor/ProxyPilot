@@ -25,6 +25,8 @@ import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import ChangeHistory from './ChangeHistory';
 import { toWireImages } from '@/lib/chat-images';
+import { parseFindings } from '@/lib/findings';
+import FixFindingsDialog from './FixFindingsDialog';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
 // Client-side JSON download (no server round-trip), same pattern as the classic
@@ -143,7 +145,13 @@ export default function BuildChat({
   // and not at all once polling stops.
   const prevScreenActive = useRef(false);
   useEffect(() => {
-    if (prevScreenActive.current && !screenActive) load();
+    if (prevScreenActive.current && !screenActive) {
+      // Re-arm the follow: a capture takes two minutes and the operator has
+      // very likely scrolled around in the meantime. The findings are what they
+      // were waiting for, so land on them.
+      interactedRef.current = false;
+      load();
+    }
     prevScreenActive.current = screenActive;
   }, [screenActive, load]);
 
@@ -233,6 +241,11 @@ export default function BuildChat({
     // follow the BOTTOM so the newest line stays in view (VS Code / Claude-Code
     // feel), instead of pinning to the top of the last message.
     if (active) { el.scrollTop = el.scrollHeight; return; }
+    // TOP-ANCHORING IS FOR PROSE. It exists so a long Ask answer reads from its
+    // first line. A SYSTEM note is not prose: the findings card ends in six
+    // thumbnails and the Fix button, and landing on its top put every one of
+    // them below the fold — "please auto scroll the chat to the bottom".
+    if (newestMsg && newestMsg.kind !== 'assistant') { el.scrollTop = el.scrollHeight; return; }
     const kids = [...el.children].filter((k) => !k.hasAttribute('data-scroll-skip'));
     const last = kids[kids.length - 1];
     if (last) el.scrollTop = Math.max(0, last.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 8);
@@ -392,27 +405,46 @@ export default function BuildChat({
   // through the NORMAL quick lane — split/suggestion cards and the queue all
   // apply to the composed prompt exactly as if the user typed it.
   const [distillingId, setDistillingId] = useState(null);
-  // `extra` is the "Update and input" half: whatever the operator knows that
-  // the message does not. It is appended AFTER the distilled instruction and
-  // labelled, so the build reads it as an additional constraint rather than as
-  // more of the same — and so a note that contradicts the findings wins, which
-  // is the only reason to type one.
-  const quickUpdateFromMessage = async (m, extra = '') => {
+  const quickUpdateFromMessage = async (m) => {
     if (busy || distillingId) return;
     setDistillingId(m.id);
     try {
       const r = await api.mock2DistillPrompt(projectId, m.id);
-      const note = String(extra || '').trim();
-      const text = note ? `${r.instruction}\n\nAlso, from the operator (this wins where it disagrees with the above):\n${note}` : r.instruction;
-      setInstruction(text);
-      toast({
-        title: 'Prompt composed from the chat',
-        description: note ? 'Sending it with your note as a Quick update…' : 'Sending it as a Quick update…',
-      });
-      await startBuild('quick', { textOverride: text });
+      setInstruction(r.instruction);
+      toast({ title: 'Prompt composed from the chat', description: 'Sending it as a Quick update…' });
+      await startBuild('quick', { textOverride: r.instruction });
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not turn the message into a prompt', description: err.message });
     } finally { setDistillingId(null); }
+  };
+
+  // FIXING FINDINGS is not the same action as turning a chat message into a
+  // prompt, and trying to reuse that path was a bug: distill-prompt only
+  // accepts genuine Ask answers (assistant rows with no cycle), so pressing Fix
+  // on a system note answered "Only Ask answers can be turned into a build
+  // prompt" and did nothing.
+  //
+  // It should not have gone through there anyway. The dialog composes the
+  // instruction from the findings the operator TICKED — unticking four of seven
+  // is them saying something, and a distiller reading the whole message would
+  // throw that away. Nothing to distil: the review already wrote a precise fix
+  // for each finding, and they are carried verbatim.
+  const [fixMessage, setFixMessage] = useState(null);
+  const [fixBusyId, setFixBusyId] = useState(null);
+  const sendFix = async ({ text, images }) => {
+    if (!fixMessage || busy) return;
+    setFixBusyId(fixMessage.id);
+    try {
+      setInstruction(text);
+      setFixMessage(null);
+      toast({ title: 'Fixing the findings', description: 'Running them as one Quick update…' });
+      // skipSplit/skipSuggest: a ticked list of findings is already precise
+      // scope, and asking the operator to re-group what they just grouped is
+      // the second decision nobody wants.
+      await startBuild('quick', { skipSplit: true, skipSuggest: true, textOverride: text, extraImages: images || [] });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start the build', description: err.message });
+    } finally { setFixBusyId(null); }
   };
 
   // Annotate-on-screenshot: the dialog composes the pin list + burned-in image
@@ -721,6 +753,15 @@ export default function BuildChat({
           </div>
         </div>
       </CardHeader>
+      {/* Parsed at the mount point rather than carried on the message, so the
+          dialog and the card cannot disagree about what the findings are. */}
+      <FixFindingsDialog
+        open={!!fixMessage}
+        onOpenChange={(v) => { if (!v) setFixMessage(null); }}
+        findings={fixMessage ? parseFindings(String(fixMessage.body || '')).items : []}
+        busy={fixBusyId != null || busy}
+        onSend={sendFix}
+      />
       {showChanges ? (
         <div className="mx-4 mb-2 max-h-[60vh] overflow-y-auto rounded-lg border bg-background/60 p-2">
           <ChangeHistory projectId={projectId} canRestore={canEdit && online && !active} />
@@ -799,6 +840,8 @@ export default function BuildChat({
           activity={active ? activity : []}
           onQuickUpdate={canEdit && online && !needsFeedback && !resumeMode ? quickUpdateFromMessage : null}
           quickBusyId={distillingId}
+          onFix={canEdit && online && !active && !needsFeedback && !resumeMode ? setFixMessage : null}
+          fixBusyId={fixBusyId}
           emptyLabel={online
             ? 'Describe a change below and send it as a Quick update, or Ask a question / request an action (run a test, add a user). Rule questions and build events appear here.'
             : 'Bring the project online to run a build.'}

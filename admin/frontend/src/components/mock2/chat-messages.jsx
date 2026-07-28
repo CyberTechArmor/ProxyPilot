@@ -12,9 +12,10 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle, Trash2, FolderOpen, Activity, Copy, Download, Send } from 'lucide-react';
+import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle, Trash2, FolderOpen, Activity, Copy, Download } from 'lucide-react';
 import ExplainThis from './ExplainThis';
 import Markdown from './Markdown';
+import { parseFindings, KIND_LABEL } from '@/lib/findings';
 import { chatImageUrl } from '@/lib/chat-images';
 import ImageLightbox from './ImageLightbox';
 
@@ -216,77 +217,107 @@ function NoteActions({ body, name = 'note' }) {
 //
 // Every other note here is status ("the base app deployed", "3 screen accounts
 // created") — nothing to do with it but read it. The design review is the
-// opposite: seven numbered defects, each with a fix already written, and until
-// now the only way to act on any of them was to read them, decide which
-// mattered, and re-type the instruction into the composer by hand.
+// opposite: a headline and then five to eight numbered defects, each with a fix
+// already written next to it.
 //
 // Keyed on the prefix the review composes, which a backend ratchet holds in
-// place (mock2-design-review-actions.test.js) — the two files cannot drift
-// without a test going red.
+// place (mock2-findings-actions.test.js) — the two files cannot drift without a
+// test going red.
 export function isFindingsNote(body) {
   return /^Design review \(/.test(String(body || '').trimStart());
 }
 
-// FindingsActions — turn the note into a build, with or without a word first.
+const SEVERITY_STYLE = {
+  critical: 'bg-destructive/15 text-destructive',
+  high: 'bg-destructive/15 text-destructive',
+  serious: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
+  medium: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
+  moderate: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
+};
+
+// FindingsCard — the review as the LIST it is.
 //
-// "offer a quick update from that specific chat / and an 'Update and Input'
-// where they specify anything else."
+// It arrived as one preformatted blob: five kilobytes of `whitespace-pre-wrap`
+// with the severity, the screen, the problem and the fix run together on each
+// line, collapsed behind "Show all (4.6k chars)". Every finding is a separate
+// thing to decide about and they were rendered as one paragraph of text.
 //
-// Fix these:      the findings as written, distilled into an instruction.
-// Fix + add note: the same, plus whatever the operator knows that the review
-//                 does not — which screen matters, what to leave alone, a
-//                 constraint no screenshot can show.
-function FindingsActions({ m, onQuickUpdate, busyId }) {
-  const [noting, setNoting] = useState(false);
-  const [extra, setExtra] = useState('');
-  if (!onQuickUpdate) return null;
-  const thisBusy = busyId === m.id;
-  const anyBusy = busyId != null;
+// So: a row per finding, severity and screen as chips, the problem in the
+// reading colour and the fix in the quiet one. The headline and the adherence
+// arithmetic lead, because "did it drift from the approved design" is the
+// question the review exists to answer.
+function FindingsCard({ parsed, body }) {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? parsed.items : parsed.items.slice(0, 4);
+  const hidden = parsed.items.length - shown.length;
   return (
-    <div className="mt-2 space-y-2 border-t border-border/60 pt-2">
-      <div className="flex flex-wrap items-center gap-1.5">
+    <div className="space-y-2">
+      {parsed.headline ? <p className="text-xs font-medium text-foreground">{parsed.headline}</p> : null}
+      {parsed.adherence ? <p className="text-[11px] text-muted-foreground">{parsed.adherence}</p> : null}
+      {parsed.items.length ? (
+        <ul className="space-y-1.5">
+          {shown.map((f) => (
+            <li key={f.id} className="rounded border border-border/60 bg-background/40 p-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${SEVERITY_STYLE[f.severity] || 'bg-muted text-muted-foreground'}`}>
+                  {f.severity}
+                </span>
+                {f.kind !== 'design' ? (
+                  <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">
+                    {KIND_LABEL[f.kind] || f.kind}
+                  </span>
+                ) : null}
+                <code className="min-w-0 break-all font-mono text-[11px] text-muted-foreground">{f.scope}</code>
+              </div>
+              <p className="mt-1 break-words text-xs text-foreground">{f.issue}</p>
+              {f.fix ? (
+                <p className="mt-0.5 break-words text-[11px] text-muted-foreground">
+                  <span className="font-medium">Fix:</span> {f.fix}
+                </p>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">{body}</p>
+      )}
+      {hidden > 0 || expanded ? (
         <button
           type="button"
-          className="inline-flex h-9 items-center gap-1 rounded-md border border-primary/40 px-2.5 text-[11px] font-medium text-primary hover:bg-primary/10 disabled:opacity-50"
-          disabled={anyBusy}
-          onClick={() => onQuickUpdate(m)}
-          title="Turn these findings into a well-formed prompt and run it as a Quick update"
+          className="min-h-[32px] text-[11px] font-medium text-primary underline underline-offset-2"
+          onClick={() => setExpanded((v) => !v)}
         >
-          {thisBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-          {thisBusy ? 'Composing the prompt…' : 'Fix these'}
+          {expanded ? 'Show fewer' : `Show ${hidden} more finding${hidden === 1 ? '' : 's'}`}
         </button>
-        <button
-          type="button"
-          className="inline-flex h-9 items-center gap-1 rounded-md border px-2.5 text-[11px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-50"
-          disabled={anyBusy}
-          aria-expanded={noting}
-          onClick={() => setNoting((v) => !v)}
-          title="Run these findings as a Quick update, plus anything else you want to say"
-        >
-          <Pencil className="h-3 w-3" /> {noting ? 'Cancel' : 'Fix + add a note'}
-        </button>
-      </div>
-      {noting ? (
-        <div className="space-y-1.5">
-          <textarea
-            value={extra}
-            onChange={(e) => setExtra(e.target.value)}
-            rows={3}
-            autoFocus
-            placeholder="Anything else — which findings matter most, what to leave alone, a constraint the screenshots cannot show…"
-            className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-xs"
-          />
-          <button
-            type="button"
-            className="inline-flex h-9 w-full items-center justify-center gap-1 rounded-md border border-primary/40 px-2.5 text-[11px] font-medium text-primary hover:bg-primary/10 disabled:opacity-50 sm:w-auto"
-            disabled={anyBusy || !extra.trim()}
-            onClick={() => { onQuickUpdate(m, extra.trim()); setNoting(false); setExtra(''); }}
-          >
-            {thisBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
-            Send the findings and this note
-          </button>
-        </div>
       ) : null}
+      {parsed.extras.length ? (
+        <p className="whitespace-pre-wrap break-words text-[11px] text-muted-foreground">{parsed.extras.join('\n')}</p>
+      ) : null}
+    </div>
+  );
+}
+
+// FindingsActions — one button, because the choosing happens in the dialog.
+//
+// It used to be two ("Fix these" and "Fix + add a note"), which made the note
+// feel like a different action rather than part of the same one — and neither
+// let the operator drop a finding they disagreed with. Now: one button, a
+// popup, a tick per finding, and one place to say anything else.
+function FindingsActions({ m, onFix, busyId }) {
+  if (!onFix) return null;
+  const thisBusy = busyId === m.id;
+  return (
+    <div className="mt-2 border-t border-border/60 pt-2">
+      <button
+        type="button"
+        className="inline-flex h-9 items-center gap-1 rounded-md border border-primary/40 px-2.5 text-[11px] font-medium text-primary hover:bg-primary/10 disabled:opacity-50"
+        disabled={busyId != null}
+        onClick={() => onFix(m)}
+        title="Choose which findings to fix, add anything else, and run it as one Quick update"
+      >
+        {thisBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+        {thisBusy ? 'Starting the build…' : 'Fix these…'}
+      </button>
     </div>
   );
 }
@@ -295,10 +326,14 @@ function FindingsActions({ m, onQuickUpdate, busyId }) {
 // screenshots with its findings. A note WITH attachments always uses the boxed
 // layout: the centred pill has nowhere to put a thumbnail, and a critique whose
 // evidence is invisible is exactly the thing the operator has to take on trust.
-function SystemNote({ body, m, projectId, onQuickUpdate = null, quickBusyId = null }) {
+function SystemNote({ body, m, projectId, onFix = null, fixBusyId = null }) {
   const [expanded, setExpanded] = useState(false);
   const hasShots = !!(projectId && m?.attachments?.length);
-  if (body.length <= LONG_SYSTEM_NOTE_CHARS && !hasShots) {
+  // A findings note renders as a LIST, not as the preformatted blob it arrives
+  // as. Parsed once per render of a message that changes only when a new review
+  // lands, so memoising it would be ceremony.
+  const findings = isFindingsNote(body) ? parseFindings(body) : null;
+  if (body.length <= LONG_SYSTEM_NOTE_CHARS && !hasShots && !findings) {
     return (
       <div className="flex flex-col items-center">
         <p className="text-[11px] text-muted-foreground bg-muted/60 rounded-full px-3 py-1 max-w-[90%] text-center">
@@ -307,14 +342,20 @@ function SystemNote({ body, m, projectId, onQuickUpdate = null, quickBusyId = nu
       </div>
     );
   }
-  const long = body.length > LONG_SYSTEM_NOTE_CHARS;
+  const long = !findings && body.length > LONG_SYSTEM_NOTE_CHARS;
   return (
     <div className="flex justify-center">
       <div className="w-full max-w-[95%] rounded-md border bg-muted/40 px-3 py-2">
-        <div className={long && !expanded ? 'max-h-32 overflow-hidden relative' : ''}>
-          <p className="text-xs text-muted-foreground whitespace-pre-wrap break-words">{body}</p>
-          {long && !expanded && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background/90 to-transparent" />}
-        </div>
+        {findings ? (
+          // No collapse on a findings card: the whole value is seeing the list,
+          // and "Show all (4.6k chars)" was hiding the reason the review ran.
+          <FindingsCard parsed={findings} body={body} />
+        ) : (
+          <div className={long && !expanded ? 'max-h-32 overflow-hidden relative' : ''}>
+            <p className="text-xs text-muted-foreground whitespace-pre-wrap break-words">{body}</p>
+            {long && !expanded && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background/90 to-transparent" />}
+          </div>
+        )}
         {/* The expander and the take-it-with-you actions share a row: a long
             note is exactly the one somebody wants out of the chat, and putting
             Save next to "Show all" means they never have to expand it first. */}
@@ -340,21 +381,19 @@ function SystemNote({ body, m, projectId, onQuickUpdate = null, quickBusyId = nu
         ) : null}
         {/* LAST, under the evidence: the buttons are the answer to "so what do
             I do about it", and that question comes after reading and looking. */}
-        {isFindingsNote(body) ? (
-          <FindingsActions m={m} onQuickUpdate={onQuickUpdate} busyId={quickBusyId} />
-        ) : null}
+        {findings ? <FindingsActions m={m} onFix={onFix} busyId={fixBusyId} /> : null}
       </div>
     </div>
   );
 }
 
-export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBusyId = null }) {
+export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBusyId = null, onFix = null, fixBusyId = null }) {
   if (m.kind === 'system') {
     // System messages are status, never asks — no build chip (operator
     // decision: the chip belongs to genuine Ask answers only). Long notes
     // (a design review's findings) render as a collapsible left-aligned
     // card — a giant centered pill was unreadable (user report).
-    return <SystemNote body={String(m.body || '')} m={m} projectId={projectId} onQuickUpdate={onQuickUpdate} quickBusyId={quickBusyId} />;
+    return <SystemNote body={String(m.body || '')} m={m} projectId={projectId} onFix={onFix} fixBusyId={fixBusyId} />;
   }
   if (m.kind === 'rule_answer') {
     return (
@@ -520,7 +559,7 @@ export function ActivityStream({ items = [], working = false }) {
 export function ChatMessageList({
   scrollRef, messages = [], openIds, canEdit, answering, onAnswer,
   working = false, workingLabel = 'Working…', emptyLabel, projectId = null,
-  partialText = null, onQuickUpdate = null, quickBusyId = null, activity = [],
+  partialText = null, onQuickUpdate = null, quickBusyId = null, onFix = null, fixBusyId = null, activity = [],
 }) {
   const open = openIds instanceof Set ? openIds : new Set(openIds || []);
   return (
@@ -540,7 +579,7 @@ export function ChatMessageList({
           <div key={m.id} id={`bcmsg-${m.id}`} data-msg-kind={m.kind}>
             {m.kind === 'rule_question'
               ? <RuleQuestion m={m} open={open.has(m.question_id)} canEdit={canEdit} busy={answering} onAnswer={onAnswer} projectId={projectId} />
-              : <ChatBubble m={m} projectId={projectId} onQuickUpdate={onQuickUpdate} quickBusyId={quickBusyId} />}
+              : <ChatBubble m={m} projectId={projectId} onQuickUpdate={onQuickUpdate} quickBusyId={quickBusyId} onFix={onFix} fixBusyId={fixBusyId} />}
           </div>
         ))
       )}

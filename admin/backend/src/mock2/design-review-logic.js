@@ -352,8 +352,8 @@ export function reviewChatMessage({ review, axe = [], rogue = [], adherence = nu
   // in the message as well as shown in the UI, because the message is also what
   // gets copied and saved.
   if (n || serious.length || (adherence?.findings || []).length) {
-    lines.push('Press **Fix these** to turn this into a build, or **Fix + add a note** to say which findings '
-      + 'matter most, what to leave alone, or anything the screenshots cannot show.');
+    lines.push('Press **Fix these…** to choose which of these to fix — untick anything you disagree with, '
+      + 'and add a note or a screenshot for whatever the review could not see.');
   }
   return lines.join('\n');
 }

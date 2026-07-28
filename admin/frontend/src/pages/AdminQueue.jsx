@@ -332,6 +332,31 @@ export default function AdminQueue() {
     } finally { setSavingReview(false); }
   };
 
+  // First-run setup flow — guided (default) or the previous no-panel behaviour.
+  const [setupFlow, setSetupFlow] = useState(null);
+  const [savingSetupFlow, setSavingSetupFlow] = useState(false);
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetSetupFlow()
+      .then((r) => setSetupFlow(r.setting))
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load setup-flow failed:', err); });
+  }, [gate]);
+  const saveSetupFlow = async (setting) => {
+    setSavingSetupFlow(true);
+    try {
+      const r = await api.mock2SetSetupFlow(setting);
+      setSetupFlow(r.setting);
+      toast({
+        title: 'Setup flow updated',
+        description: setting === 'classic'
+          ? 'New projects go straight to the project page, as before.'
+          : 'New projects show the six-step setup panel — every step skippable.',
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+    } finally { setSavingSetupFlow(false); }
+  };
+
   // Save one lane's patch; on failure re-fetch to resync (edits are per-field).
   const saveLaneTuning = async (lane, patch) => {
     setLaneTuning((cur) => cur && ({ ...cur, lanes: { ...cur.lanes, [lane]: { ...cur.lanes[lane], ...patch } } }));
@@ -637,6 +662,43 @@ export default function AdminQueue() {
                 visibly rather than pretending it was checked.
               </p>
             </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* First-run setup flow. Guided is the default because the alternative —
+          landing on a page of fifteen cards with no order — is what made the
+          common first move "type one sentence and hope", and that sentence is
+          what the mockup, the inventory, the first build's instruction and both
+          design measurements are all calibrated to. Skipping every step
+          reproduces classic exactly, so the default costs nothing. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">First-run setup flow</CardTitle>
+          <CardDescription>
+            What a newly created project shows. Guided walks through six steps — your admin account,
+            logo, three questions about who the app is for, the design prompt, approval — with every
+            step skippable and each one deriving its own done-state, so it is resumable. The answers
+            shape the first mockup, ride the first build&apos;s instruction, and become how the app
+            describes itself on its own sign-in screen.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {setupFlow == null ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : (
+            <div className="space-y-1 max-w-md">
+              <label className="text-xs text-muted-foreground" htmlFor="setup-flow-setting">New projects</label>
+              <Select value={setupFlow} disabled={savingSetupFlow} onValueChange={saveSetupFlow}>
+                <SelectTrigger id="setup-flow-setting" className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="guided">Guided (default) — six-step setup panel, every step skippable</SelectItem>
+                  <SelectItem value="classic">Classic — straight to the project page, no panel</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           )}
         </CardContent>
       </Card>

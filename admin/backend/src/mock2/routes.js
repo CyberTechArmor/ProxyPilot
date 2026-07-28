@@ -126,7 +126,7 @@ import {
   isBaseAppDeploying,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getMock2Db } from './db.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
@@ -1763,6 +1763,18 @@ export function createMock2Router() {
   // Design review toggle — the after-build screenshot + vision critique pass.
   // 'on' (default) posts findings to the chat after each succeeded build;
   // 'off' silences the automatic pass (the manual Polish pass still works).
+  // First-run setup flow — guided (default) or the previous no-panel behaviour.
+  router.get('/settings/setup-flow', requireAdmin, (_req, res) => {
+    res.json({ setting: getSetupFlowSetting() });
+  });
+  router.post('/settings/setup-flow', requireAdmin, (req, res) => {
+    const parsed = z.object({ setting: z.enum(['guided', 'classic']) }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: "setting must be 'guided' or 'classic'" });
+    const value = setSetupFlowSetting(parsed.data.setting, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_SETUP_FLOW', 'mock2_setting', 0, { setup_flow: value }, req.ip);
+    res.json({ setting: value });
+  });
+
   router.get('/settings/design-review', requireAdmin, (_req, res) => {
     res.json({ setting: getDesignReviewSetting() });
   });
@@ -3005,6 +3017,42 @@ export function createMock2Router() {
       .catch((e) => console.warn('[mock2] polish run failed:', e?.message));
     logAudit(req.user.id, 'MOCK2_POLISH_RUN', 'mock2_project', project.id, { apply }, req.ip);
     res.status(202).json({ started: true, apply });
+  });
+
+  // GUIDED SETUP — the first-run path.
+  //
+  // Read is viewer-gated (looking at your own project's progress is not an
+  // edit); writing the intake or dismissing the panel is an editor action.
+  // Every step's done-state is DERIVED here rather than stored, so closing the
+  // tab mid-setup loses nothing.
+  router.get('/projects/:id/setup', requireMock2Role('viewer'), async (req, res) => {
+    const { readSetupState } = await import('./setup-flow.js');
+    const state = await readSetupState(req.mock2Project.id);
+    if (!state) return res.status(404).json({ error: 'No such project.' });
+    res.json(state);
+  });
+
+  router.put('/projects/:id/setup/intake', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const parsed = z.object({
+      audience: z.string().max(600).optional(),
+      summary: z.string().max(600).optional(),
+      problem: z.string().max(600).optional(),
+    }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'Each answer is at most 600 characters.' });
+    const { saveSetupIntake, readSetupState } = await import('./setup-flow.js');
+    const r = await saveSetupIntake(req.mock2Project.id, parsed.data);
+    if (!r.ok) return res.status(409).json(r);
+    res.json(await readSetupState(req.mock2Project.id));
+  });
+
+  // Dismiss = "stop showing me the panel", deliberately NOT the same as
+  // finishing it. Reversible, because an operator who dismissed it on day one
+  // and wants it back on day two should not have to make a new project.
+  router.post('/projects/:id/setup/dismiss', requireMock2Role('editor'), async (req, res) => {
+    const dismissed = req.body?.dismissed !== false;
+    const { saveSetupIntake, readSetupState } = await import('./setup-flow.js');
+    await saveSetupIntake(req.mock2Project.id, { dismissed });
+    res.json(await readSetupState(req.mock2Project.id));
   });
 
   // NEW ELEMENTS — the approved design's growth path.

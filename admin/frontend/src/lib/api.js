@@ -1538,6 +1538,18 @@ export const api = {
   // with a 400 the global handler reports as "Internal server error".
   mock2CreateFirstAdmin: (id, body) => request(`/mock2/projects/${id}/app-access/first-admin`, { method: 'POST', body: JSON.stringify(body) }),
   mock2FreeFirstAdminSlot: (id) => request(`/mock2/projects/${id}/app-access/free-slot`, { method: 'POST', body: JSON.stringify({}) }),
+  // Guided setup — the first-run path. The read is derived server-side from
+  // real data (accounts, assets, mockup, approval), so it is safe to poll and
+  // impossible to desync from what the project actually has.
+  mock2Setup: (id) => request(`/mock2/projects/${id}/setup`),
+  mock2SaveSetupIntake: (id, answers) =>
+    request(`/mock2/projects/${id}/setup/intake`, { method: 'PUT', body: JSON.stringify(answers) }),
+  mock2DismissSetup: (id, dismissed = true) =>
+    request(`/mock2/projects/${id}/setup/dismiss`, { method: 'POST', body: JSON.stringify({ dismissed }) }),
+  // Admin: guided setup on (default) or the previous no-panel behaviour.
+  mock2GetSetupFlow: () => request('/mock2/settings/setup-flow'),
+  mock2SetSetupFlow: (setting) =>
+    request('/mock2/settings/setup-flow', { method: 'POST', body: JSON.stringify({ setting }) }),
   // New elements — what a build designed that the approved design does not have,
   // and the operator's accept. Promotion is how the design system grows past
   // the mockup it was frozen at.

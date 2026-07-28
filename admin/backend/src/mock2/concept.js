@@ -40,6 +40,8 @@ import {
 import { acquireLock, releaseLock, touchLock } from './locks.js';
 import { listAssets, hydrateMockupAssetImages, addImage, updateAsset, findAssetByBytes } from './project-assets.js';
 import { buildMockupAssetSection, summarize as summarizeAssets, planReferencePins, referencePinNote } from './project-assets-logic.js';
+import { projectIntake } from './setup-flow.js';
+import { intakeBriefPreamble, intakeBuildSection } from './setup-flow-logic.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import { insertMessage, listMessages, getOrCreateChat } from './chats.js';
@@ -655,8 +657,17 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // useless — it has to be placed, colour-matched and weighted), plus the
     // text context naming them so an image block is not just a picture.
     const assetPics = hydrateMockupAssetImages(projectId, projectAssets, { max: 4 });
+    // WHO THIS IS FOR, from guided setup. Placed ahead of the brief as context
+    // rather than instead of it: the brief is what the operator asked for, this
+    // is who it is for — and a design that knows its audience picks a different
+    // screen to make big. Empty when setup was skipped, so nothing changes for
+    // a project that answered nothing.
+    const setupIntake = projectIntake(getProject(projectId));
+    const audiencePreamble = intakeBriefPreamble(setupIntake);
     const mockupTask = buildMockupTask({
-      brief: decision.brief, currentHtml, projectName: project.name,
+      brief: audiencePreamble ? `${audiencePreamble}\n\n${String(decision.brief || '').trim()}` : decision.brief,
+      currentHtml,
+      projectName: project.name,
       conversation: conversationRecap(listMessages(projectId)),
       restyle: restyleBrief,
       assetSection: buildMockupAssetSection(projectAssets, { attachedImages: assetPics.used }),
@@ -1403,10 +1414,17 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
     // notes into the initial build (design-template-logic.js) — for a
     // home-grown design this is INITIAL_BUILD_INSTRUCTION verbatim.
     const fresh = getProject(projectId);
-    const instruction = buildInitialBuildInstruction({
+    // The initial build instruction is a TEMPLATE — "implement every screen,
+    // field and action the inventory defines" — and a template cannot be made
+    // specific in general. It can, however, carry who the app is for, which is
+    // the difference the evidence actually shows: on project 46 that template
+    // took 110 turns and $9.65, while a brief that said what to build with
+    // numbers in it took 39 turns and $2.53 and closed on its first attempt.
+    // This does not add scope; it tells the build what to make prominent.
+    const instruction = `${buildInitialBuildInstruction({
       base: INITIAL_BUILD_INSTRUCTION,
       designImport: parseDesignImport(fresh?.design_import_json),
-    });
+    })}${intakeBuildSection(projectIntake(fresh))}`;
     // The initial build runs as an MVP build (speed path): rule interview
     // skipped, reduced gate battery, fast model — from approved mockup to a
     // TESTABLE first version as directly as possible. A later full Build (the

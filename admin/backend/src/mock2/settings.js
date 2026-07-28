@@ -180,6 +180,33 @@ export function setDesignReviewSetting(value, updatedBy = null) {
   return getDesignReviewSetting();
 }
 
+// ---- first-run setup flow ----
+//
+// 'guided' (DEFAULT): a new project shows the six-step setup panel — your
+// admin account, logo, the three "about this app" questions, the design
+// prompt, approval. Every step is skippable and skipping all of them
+// reproduces 'classic' exactly, so this is a default rather than a decision
+// imposed on anyone.
+//
+// 'classic': the previous behaviour — a new project lands on the project page
+// with no panel and no order. Kept because an operator who has done this
+// twenty times does not need to be walked through it, and because a setting
+// with no honest off-switch is not a setting.
+export const SETUP_FLOW_KEY = 'setup_flow';
+export const SETUP_FLOW_GUIDED = 'guided';
+export const SETUP_FLOW_CLASSIC = 'classic';
+
+export function getSetupFlowSetting() {
+  const v = String(getMock2Setting(SETUP_FLOW_KEY, '') || '').trim().toLowerCase();
+  return v === SETUP_FLOW_CLASSIC ? SETUP_FLOW_CLASSIC : SETUP_FLOW_GUIDED;
+}
+
+export function setSetupFlowSetting(value, updatedBy = null) {
+  const v = String(value || '').trim().toLowerCase();
+  setMock2Setting(SETUP_FLOW_KEY, v === SETUP_FLOW_CLASSIC ? SETUP_FLOW_CLASSIC : SETUP_FLOW_GUIDED, updatedBy);
+  return getSetupFlowSetting();
+}
+
 // ---- Global thinking switch (kill thinking everywhere at once) ----
 export const GLOBAL_THINKING_KEY = 'global_thinking';
 

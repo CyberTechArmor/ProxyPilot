@@ -21,6 +21,7 @@ import { DEFAULT_WEB_PORT } from './template.js';
 import {
   REVIEW_EMAIL, REVIEW_VIEWER_EMAIL, generateReviewPassword, reviewAccountScript,
   parseReviewAccountResult, seedFixtureUserScript, parseSeedResult, reviewFixtureAccounts,
+  screenAccountsFromSpec, screenAccountsNote,
 } from './review-account-logic.js';
 
 function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
@@ -154,4 +155,176 @@ export async function ensureReviewAccount(project, { timeoutMs = 60000 } = {}) {
   };
 }
 
-export { REVIEW_EMAIL, REVIEW_VIEWER_EMAIL };
+// ensureScreenAccounts — make the users a project's OWN ui-checks.json declares
+// actually exist, so the checks written against them can get past the sign-in
+// page.
+//
+// THE FAILURE THIS ENDS. `ensureReviewAccount` above guarantees the PLATFORM's
+// two fixtures, and `withPlatformLogin` deliberately stands aside when the spec
+// declares a login block of its own — a build that says how to sign in has made
+// a choice the platform must not override. But nothing ever created the users
+// that block names. The build model invents an address and a password, writes
+// them into the spec, and every check that logs in as one of them signs in
+// against a form that rejects it, gets bounced, and times out on an element that
+// only exists behind the gate. That is reported as the app failing.
+//
+// Project 44 build 133: three checks, three timeouts, on a build that had
+// deployed and worked. Project 46 build 129: five of seven, at $9.65. The tell
+// in both is that the platform's own baseline checks passed in the same run —
+// because those use accounts the platform creates.
+//
+// Only @fixture.invalid addresses are minted (screenAccountsFromSpec enforces
+// it). A spec naming a real address is asking for a real person's account: it is
+// the operator's, it would count as "a real user exists", and it would consume
+// the first-admin slot. Those are skipped and named in the note.
+//
+// Best-effort throughout. An app with no auth component, no pg driver, or a
+// spec with no login block are ordinary outcomes — the checks then run exactly
+// as they did before.
+//
+// Returns { ok, ran, accounts, skipped, seeded, note }.
+export async function ensureScreenAccounts(spec, { containerName, timeoutMs = 60000 } = {}) {
+  const { accounts, skipped } = screenAccountsFromSpec(spec);
+  if (!containerName || (!accounts.length && !skipped.length)) {
+    return { ok: true, ran: false, accounts, skipped, seeded: null, note: '' };
+  }
+  if (!accounts.length) {
+    // Nothing mintable, but the skipped addresses still need saying — a check
+    // failing because it signs in as a real person is otherwise unexplainable.
+    return { ok: true, ran: false, accounts, skipped, seeded: null, note: screenAccountsNote({ accounts, skipped }) };
+  }
+  let seeded;
+  try {
+    seeded = parseSeedResult(
+      (await containerSh(containerName, seedFixtureUserScript({ accounts }), { timeoutMs }))?.stdout || '',
+    );
+  } catch (e) {
+    seeded = { ok: false, state: 'failed', reason: e?.message || 'seed exec failed', accounts: {} };
+  }
+  if (!seeded.ok && seeded.state !== 'no-auth') {
+    console.warn(`[mock2] screen accounts could not be created: ${seeded.reason}`);
+  }
+  return {
+    ok: seeded.ok !== false,
+    ran: true,
+    accounts,
+    skipped,
+    seeded,
+    note: screenAccountsNote({ accounts, skipped, seeded }),
+  };
+}
+
+// provisionScreenAccounts — the OPERATOR's button: create every account that
+// exists to look at this app's screens, now, and tell them what to sign in with.
+//
+// WHY IT IS NOT JUST ensureReviewAccount. That function is the build's, and it
+// is deliberately lazy: its first step asks "does the reviewer already sign in?"
+// and stops on a yes. On a project whose reviewer exists but whose VIEWER never
+// landed — every project built before the viewer fixture existed — pressing a
+// button that calls it would report success and create nothing. This seeds the
+// whole set unconditionally, in one pass, and is idempotent because the seeder
+// resets an existing row rather than failing on it.
+//
+// It also covers the third group: the users the project's own ui-checks.json
+// declares. Those are why the operator is here — "no build to date has been able
+// to login and assess the screens" is a build signing in as a user nobody made.
+//
+// Returns { ok, error, accounts: [{ email, password, role, purpose }], note }.
+// The passwords ARE returned. They are the PLATFORM's own fixture credentials on
+// the reserved @fixture.invalid domain, already stored encrypted against this
+// project, and the entire point of the action is that a person can sign in and
+// see what the automated checks see. Nothing here touches the operator's own
+// account, whose password the platform still never generates, stores, or echoes.
+export async function provisionScreenAccounts(project, { timeoutMs = 90000 } = {}) {
+  const containerName = project?.container_name;
+  if (!containerName || project.lifecycle !== 'active') {
+    return { ok: false, error: 'The project is not online — start it, then try again.', accounts: [], note: '' };
+  }
+  const port = project.web_port || DEFAULT_WEB_PORT;
+  const existing = getReviewLogin(project.id);
+  const email = existing?.email || REVIEW_EMAIL;
+  const password = existing?.password || generateReviewPassword();
+
+  // What the project's own checks say they will sign in as. Read before the
+  // seed so all of it lands in ONE exec; a missing or malformed spec is an
+  // ordinary outcome — the platform's own pair still gets created.
+  let specAccounts = [];
+  let skipped = [];
+  try {
+    const { UI_CHECKS_PATH, parseUiChecks } = await import('./ui-check-logic.js');
+    const r = await containerSh(containerName, `cat '/srv/app/${UI_CHECKS_PATH}' 2>/dev/null`, { timeoutMs: 20000 });
+    const text = (r?.stdout || '').trim();
+    if (text) {
+      const parsed = parseUiChecks(text);
+      if (parsed.ok) ({ accounts: specAccounts, skipped } = screenAccountsFromSpec(parsed.spec));
+    }
+  } catch (e) {
+    console.warn(`[mock2] could not read the ui-checks spec for project ${project.id}:`, e?.message);
+  }
+
+  const platformPair = reviewFixtureAccounts({
+    email, password, viewerEmail: REVIEW_VIEWER_EMAIL, viewerPassword: password,
+  });
+  // The platform's pair first, so its addresses win if the spec happens to name
+  // one of them — the seeder writes in order and the last write would otherwise
+  // decide the reviewer's role.
+  const seen = new Set(platformPair.map((a) => a.email.toLowerCase()));
+  const accounts = [...platformPair, ...specAccounts.filter((a) => !seen.has(a.email.toLowerCase()))];
+
+  let seeded;
+  try {
+    seeded = parseSeedResult(
+      (await containerSh(containerName, seedFixtureUserScript({ accounts }), { timeoutMs }))?.stdout || '',
+    );
+  } catch (e) {
+    return { ok: false, error: e?.message || 'The seeder could not be run in the container.', accounts: [], note: '' };
+  }
+  if (seeded.state === 'no-auth') {
+    return { ok: false, error: 'This app has no auth component, so there are no accounts to create.', accounts: [], note: '' };
+  }
+  if (!seeded.ok) {
+    return { ok: false, error: seeded.reason || 'The accounts could not be created.', accounts: [], note: '' };
+  }
+
+  try {
+    updateProject(project.id, { review_login_email: email, review_login_password_enc: encryptSecret(password) });
+  } catch (e) {
+    console.warn(`[mock2] could not store the review login for project ${project.id}:`, e?.message);
+  }
+
+  // Prove it. A row that exists and cannot sign in is exactly the failure this
+  // action is meant to end, and finding it here beats finding it in a screenshot
+  // of the login page two builds later.
+  let signIn = null;
+  try {
+    signIn = parseReviewAccountResult(
+      (await containerSh(containerName, reviewAccountScript({ email, password, port }), { timeoutMs: 60000 }))?.stdout || '',
+    );
+  } catch { signIn = null; }
+
+  const purposeFor = (key) => {
+    if (key === 'reviewer') return 'Administrator. This is the account the design review and the screen checks sign in with — use it to see exactly what they see.';
+    if (key === 'viewer') return 'Lowest-privilege role. It exists to prove the admin screens are actually denied on the server, not just hidden in the UI.';
+    return 'Declared by this project\'s own ui-checks.json. The checks sign in as this user; until now it had never been created.';
+  };
+  return {
+    ok: true,
+    error: null,
+    accounts: accounts.map((a) => ({
+      email: a.email,
+      password: a.password,
+      role: seeded.accounts?.[a.key] || null,
+      purpose: purposeFor(a.key),
+    })),
+    skipped,
+    // Honest about the one thing worth knowing beyond "created": a seeded row
+    // that still cannot sign in means the app's own login path is broken, which
+    // is a different problem from the one this button solves.
+    signedIn: signIn?.state === 'existing',
+    note: signIn && signIn.state !== 'existing'
+      ? `The accounts were written, but signing in still returned ${signIn.code ?? '?'} — the app's login path itself is not working.`
+      : screenAccountsNote({ accounts: specAccounts, skipped, seeded }),
+  };
+}
+
+export { REVIEW_EMAIL, REVIEW_VIEWER_EMAIL, screenAccountsFromSpec };

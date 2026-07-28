@@ -54,6 +54,24 @@ and confirm `pass 76 / fail 0`.
 
 ## Smoke UI checks fail (rather than skip) on an app with no first administrator
 
+**Half closed** (fix 1 below is done; fix 2 is not needed for the declared-user
+half and is still open for the create-administrator-form half).
+
+The smoke gate now seeds the fixture users a project's `ui-checks.json`
+declares, immediately before it runs the checks
+(`ensureScreenAccounts`, `smoke.js` → `driveBrowserConnector`), and the
+operator can create the same set on demand from **App access → Screen
+accounts**. Only the reserved `@fixture.invalid` domain is minted; a spec
+naming a real address is skipped and reported, because that account is the
+operator's and would consume their first-admin slot.
+
+What remains: on an app with no first administrator, `/login` still shows the
+create-administrator form and hides the sign-in form, so a baseline check
+asserting a sign-in selector still times out rather than reporting "not yet
+possible". Fix 2 below is the remedy for that half.
+
+The original diagnosis follows.
+
 Observed on project 46 build 129: 5 of 7 checks reported
 `locator.waitFor: Timeout 5000ms exceeded`, including the platform's own
 `platform-baseline-signin-legal`.
@@ -86,3 +104,9 @@ Two fixes, either of which closes it:
 (1) is the better outcome — the checks actually run — and is the one to do
 unless it turns out a project's declared users need roles the platform cannot
 safely mint.
+
+(1) is now done; see the note at the top of this section. A declared user's
+ROLE is honoured where the project has one by that name, and anything that is
+not clearly an admin role falls back to the LEAST privileged role in the table
+rather than the first — a viewer fixture that quietly became an admin would
+make every permission check pass and prove nothing.

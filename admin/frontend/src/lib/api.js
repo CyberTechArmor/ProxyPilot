@@ -1538,6 +1538,10 @@ export const api = {
   // with a 400 the global handler reports as "Internal server error".
   mock2CreateFirstAdmin: (id, body) => request(`/mock2/projects/${id}/app-access/first-admin`, { method: 'POST', body: JSON.stringify(body) }),
   mock2FreeFirstAdminSlot: (id) => request(`/mock2/projects/${id}/app-access/free-slot`, { method: 'POST', body: JSON.stringify({}) }),
+  // The accounts that exist to LOOK AT the app — the platform's admin reviewer,
+  // its lowest-privilege viewer, and whatever users this project's own
+  // ui-checks.json declares (which nothing had ever created).
+  mock2CreateScreenAccounts: (id) => request(`/mock2/projects/${id}/app-access/screen-accounts`, { method: 'POST', body: JSON.stringify({}) }),
   // Guided setup — the first-run path. The read is derived server-side from
   // real data (accounts, assets, mockup, approval), so it is safe to poll and
   // impossible to desync from what the project actually has.

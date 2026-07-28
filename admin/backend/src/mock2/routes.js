@@ -1272,6 +1272,46 @@ export function createMock2Router() {
     res.json({ ok: true, removed: result.removed, ...state, summary: accessSummary(state) });
   });
 
+  // Create the accounts that exist to LOOK AT the app: the platform's admin
+  // reviewer, its lowest-privilege viewer, and whatever users this project's own
+  // ui-checks.json declares. Every build so far that "could not log in and
+  // assess the screens" was signing in as a user nobody had created.
+  //
+  // Editor-only, and only ever the reserved @fixture.invalid domain — a spec
+  // naming a real address is skipped and reported, because that account is the
+  // operator's and would consume their first-admin slot.
+  router.post('/projects/:id/app-access/screen-accounts', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const { provisionScreenAccounts } = await import('./review-account.js');
+    const { readAppAccess, accessSummary } = await import('./app-access.js');
+    const result = await provisionScreenAccounts(req.mock2Project);
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    const state = await readAppAccess(req.mock2Project);
+    try {
+      insertMessage({
+        projectId: req.mock2Project.id,
+        kind: 'system',
+        // The addresses, never the passwords: the chat is the project's durable
+        // record and these credentials are shown once, in the panel, to the
+        // person who pressed the button.
+        body: `Created ${result.accounts.length} screen account${result.accounts.length === 1 ? '' : 's'} `
+          + `(${result.accounts.map((a) => a.email).join(', ')}). The checks and the design review can sign in now — `
+          + 'the passwords are in **App access**.'
+          + (result.skipped?.length
+            ? `\n\nSkipped ${result.skipped.join(', ')} — the platform never creates an account on a real domain.`
+            : ''),
+      });
+    } catch { /* best effort */ }
+    res.json({
+      ok: true,
+      screenAccounts: result.accounts,
+      skipped: result.skipped || [],
+      signedIn: result.signedIn,
+      note: result.note,
+      ...state,
+      summary: accessSummary(state),
+    });
+  });
+
   router.post('/projects/:id/app-access/first-admin', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const { createFirstAdmin, readAppAccess, accessSummary } = await import('./app-access.js');
     const { email, password } = req.body || {};

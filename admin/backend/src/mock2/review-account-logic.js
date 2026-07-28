@@ -178,6 +178,76 @@ export function seedFixtureUserScript({ email, password, accounts = null, appDir
   ].join('\n');
 }
 
+// screenAccountsFromSpec(spec) — the accounts a project's OWN ui-checks declare.
+//
+// THE DEFECT THIS CLOSES. A build writes `state/ui-checks.json` with a login
+// block naming, say, `admin@fixture.invalid` and a password it invented. The
+// platform seeds its own review fixtures and nothing else, so those declared
+// accounts have never existed. Every check that says `login: <that user>` then
+// signs in against a form that rejects it, times out on the first element
+// behind the gate, and is reported as a FAILURE of the build.
+//
+// Project 44 build 133: three checks, three timeouts, request left open, on a
+// build that had deployed and done its job. Project 46 build 129: five of seven,
+// at $9.65. In both, the platform's own baseline checks passed in the same run —
+// which is the tell, because those use accounts the platform creates.
+//
+// Only the reserved fixture domain is minted. A spec naming a real address is
+// asking for a real person's account, and the platform must never create that:
+// it is the operator's, it would count as "a real user exists", and it would
+// take the first-admin slot. Those are skipped and reported.
+//
+// The declared ROLE becomes the role preference, so a check that asked for a
+// viewer gets a viewer — `fallback: 'least'` for anything that is not clearly
+// an admin role, because a viewer fixture that quietly became an admin makes
+// every permission check pass and proves nothing.
+export function screenAccountsFromSpec(spec) {
+  const users = spec?.login?.users;
+  if (!users || typeof users !== 'object') return { accounts: [], skipped: [] };
+  const accounts = [];
+  const skipped = [];
+  for (const [role, u] of Object.entries(users)) {
+    const email = String(u?.username || u?.email || '').trim();
+    const password = String(u?.password || '');
+    if (!email || !password) continue;
+    if (!email.toLowerCase().endsWith(FIXTURE_EMAIL_DOMAIN)) {
+      skipped.push(email);
+      continue;
+    }
+    const isAdminRole = REVIEW_ROLE_PREFERENCE.includes(String(role).toLowerCase());
+    accounts.push({
+      key: `spec-${String(role).toLowerCase().replace(/[^a-z0-9_-]/g, '') || 'user'}`,
+      email,
+      password,
+      prefer: isAdminRole ? [...REVIEW_ROLE_PREFERENCE] : [String(role).toLowerCase(), ...VIEWER_ROLE_PREFERENCE],
+      fallback: isAdminRole ? 'first' : 'least',
+    });
+  }
+  return { accounts, skipped };
+}
+
+// The line the smoke logs so an operator can see what was minted rather than
+// wondering why a check that failed yesterday passes today.
+export function screenAccountsNote({ accounts = [], skipped = [], seeded = null } = {}) {
+  const parts = [];
+  if (accounts.length) {
+    // Three outcomes, said differently on purpose: "ready" means the checks can
+    // sign in, "no auth component" means nothing in this app can, and a failure
+    // needs its reason attached or the next person re-derives it.
+    const state = seeded?.state === 'no-auth'
+      ? 'not created — this app has no auth component'
+      : seeded?.ok
+        ? 'ready'
+        : `could not be created (${seeded?.reason || 'unknown reason'})`;
+    parts.push(`screen accounts: ${accounts.length} declared fixture user(s) ${state} (${accounts.map((a) => a.email).join(', ')})`);
+  }
+  if (skipped.length) {
+    parts.push(`skipped ${skipped.length} non-fixture address(es) in the spec — the platform never creates a real-domain account (${skipped.join(', ')})`);
+  }
+  if (!parts.length) return '';
+  return parts.join('; ');
+}
+
 // The pair every project gets: an admin reviewer that can reach the admin
 // screens, and a viewer that must NOT be able to.
 export function reviewFixtureAccounts({ email, password, viewerEmail, viewerPassword }) {

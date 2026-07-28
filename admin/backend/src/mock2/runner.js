@@ -118,6 +118,10 @@ import { scanProjectForLegacyStubs, blockingLegacyFindings } from './migration-s
 import { touchedSubsystems as touchedSubsystemsOf } from './stub-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 import { crudRulesFloorSection } from './rules-pack-logic.js';
+import { UI_CHECKS_PATH, parseUiChecks } from './ui-check-logic.js';
+import {
+  removalCoverage, removalRejectionMessage, removalWarningMessage, removalCoverageNote,
+} from './removal-claims-logic.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
 // BUILD_RUNNER=sdk — docs/agent-sdk-migration.md) orients in the same container
@@ -1108,6 +1112,8 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // silently-missing inventory mutations — a second finish proceeds with a
   // loud note instead of looping.
   let parityRejected = false;
+  // Rejects a removal claim at most once — a repeated rejection auto-halts.
+  let removalRejected = false;
   // An enforced reproduce-first waiver carried on the resume context (admin-
   // granted upstream). Applied at the acceptance verdict — the real enforcement
   // layer — and stamped into the acceptance record, never merely narrated.
@@ -1421,6 +1427,71 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         }
         continue;
       }
+      // REMOVAL CLAIMS: "I took it out" has to be checkable.
+      //
+      // Project 44 finished with "removed the To-dos inner scrollbar", an
+      // acceptance sentence saying "no scrollbar beside the Note/To-dos
+      // content", and two acceptance_ids that assert nothing of the kind. The
+      // scrollbar is still on the screen. Nothing contradicted it because
+      // nothing could — the gates catch overflow, dead controls and design
+      // drift, and none of them catch "the thing you said you removed is
+      // still there". Across 86 real finish payloads this shape is one in
+      // seven, and two thirds of those declared no acceptance ids at all.
+      //
+      // Rejects ONCE, exactly like action parity: a repeated rejection
+      // auto-halts a cycle, and a detector that can kill builds is worse than
+      // the defect (LEARNINGS 107). The second finish ships and tells the
+      // OPERATOR instead.
+      try {
+        const claimed = decision.finishRemovals || [];
+        const uiSpecRead = await readFileInContainer(containerName, UI_CHECKS_PATH);
+        const uiSpec = uiSpecRead.ok ? parseUiChecks(uiSpecRead.content) : { ok: false };
+        const verdict = removalCoverage({
+          summary: decision.finishSummary,
+          removals: claimed,
+          spec: uiSpec.ok ? uiSpec.spec : null,
+        });
+        const note = removalCoverageNote(verdict);
+        if (note) logEvent('note', { role: 'system', content: note });
+        if (!verdict.ok && !removalRejected) {
+          removalRejected = true;
+          transcript.push({
+            role: 'tool', toolCallId: termId, name: termName,
+            content: removalRejectionMessage(verdict),
+          });
+          logEvent('note', {
+            role: 'system',
+            content: `Finish rejected — unverified removal claim(s): ${verdict.uncovered.map((c) => c.raw).join(' | ') || verdict.badRefs.map((b) => b.why).join(' | ')}`,
+          });
+          touchLock(projectId, holder);
+          continue;
+        }
+        if (!verdict.ok) {
+          // Shipped, but a person should know. The build's own summary will
+          // say it removed something; this is the only place that says nothing
+          // checked whether it did.
+          const warning = removalWarningMessage(verdict);
+          // Both halves, or a badRefs-only verdict logs an empty list and reads
+          // as though nothing was wrong.
+          const unverified = [
+            ...verdict.uncovered.map((c) => c.raw),
+            ...verdict.badRefs.map((b) => `${b.what || '(unnamed)'} — ${b.why}`),
+          ].join(' | ');
+          logEvent('note', { role: 'system', content: `Removal claims still unverified after rejection (accepted with warning): ${unverified}` });
+          try {
+            if (warning) insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: warning });
+          } catch (e) { console.warn('[mock2] removal warning message failed:', e?.message); }
+        } else if (verdict.claims.length) {
+          // The declared checks are FORCED to run against the deployed app —
+          // the same machinery acceptance_ids uses. Verifying the check exists
+          // and never running it would only move the unverified claim one step
+          // later.
+          const ids = (verdict.declared || []).map((r) => r.checkId).filter(Boolean);
+          if (ids.length) {
+            decision.finishAcceptanceIds = [...new Set([...(decision.finishAcceptanceIds || []), ...ids])];
+          }
+        }
+      } catch (e) { console.warn('[mock2] removal-claim check failed open:', e?.message); }
       // ACTION PARITY (ratchet 3): on the inventory-implementation build,
       // every mutation action in the contract must be SURFACED in the app's
       // UI source — working control or a visible "Not built yet" badge both

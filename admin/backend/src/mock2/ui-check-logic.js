@@ -39,6 +39,17 @@ export const STEP_KINDS = Object.freeze([
   // checked it. Absent OR hidden both satisfy it: what matters is that the user
   // is not offered the thing, not which mechanism withheld it.
   'expect_absent',    // selector → element is absent, or present but not visible
+  // "This container does not scroll." The step that had to exist before a
+  // REMOVAL of a scrollbar could be claimed at all.
+  //
+  // A build claimed "removed the To-dos inner scrollbar", wrote an acceptance
+  // sentence saying "no scrollbar beside the Note/To-dos content", named two
+  // ui-checks that assert nothing of the kind, and shipped with the scrollbar
+  // still there. It was not being dishonest — a scrollbar is not an ELEMENT, so
+  // `expect_absent` cannot reach it and there was no other way to say it.
+  // Demanding a machine check for a claim the check language cannot express
+  // would just teach builds to write checks that miss.
+  'expect_no_scroll', // selector → the element's content fits: no inner scrollbar
   'expect_text',      // { expect_text: selector, contains: 'substr' }
   'fill',             // { fill: selector, value: '...', expect_value: true } → type, optionally assert it persisted
   'click',            // selector → click (used for e.g. the "Replace" write-only-secret flow)

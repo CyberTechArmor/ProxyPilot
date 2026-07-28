@@ -481,6 +481,25 @@ as your CSS: shipping screens with neither their own styling nor the approved
 component classes reds the build. "The app has no stylesheet" is not a way to
 pass it.
 
+## Restructuring the app shell (binding)
+The shell — the nav, the theme control, the legal footer — is APP-OWNED markup in
+\`public/app-shell.html\` and the app's own stylesheet. You may hide the top nav,
+move it to a sidebar, fold its controls into a menu, or collapse it on mobile.
+
+What you may NOT do is drop the base app's guarantees, and the platform's own
+baseline checks hold you to that. Those checks read \`state/shell.json\`, so when
+you change the shell's STRUCTURE you must write that file in the SAME change —
+otherwise the checks go looking for a visible \`header\` you deliberately removed
+and fail your own work:
+
+    { "nav": "side", "navSelector": "aside.app-nav", "menuOpener": "#nav-toggle" }
+
+\`nav\` is "top" | "side" | "hidden". Set \`menuOpener\` only when the theme control
+or legal footer sit behind a menu — the check clicks it before asserting. Omit
+what you did not change. Whatever you write, from the default screen the theme
+control, the legal footer and the admin route must each still be reachable in at
+most one interaction: moving a control into a menu is fine, deleting it is not.
+
 ## Browser tests (binding)
 The project owns a real Playwright suite. \`playwright.config.ts\` starts the app
 itself (build → migrate a scratch database → serve), so \`npm run test:e2e\`

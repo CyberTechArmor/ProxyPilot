@@ -1,0 +1,270 @@
+// Mock2 finish-handshake GUARD — PURE decision layer (native-free, unit-tested).
+//
+// Born from project 47 request 141: the build's finish tool call was malformed —
+// the `summary` parameter literally contained
+//     "</summary>\n<parameter name=\"acceptance\">[...]"
+// so the harness never received an `acceptance` parameter at all. The rejection
+// message ("finish requires `acceptance` …") never showed the model what WAS
+// received, so five consecutive retries were the same structural bug, $4.75 was
+// spent, and the cycle ended awaiting_admin with all the work complete and
+// stranded. That was a parse/diagnostics failure, not a prose-quality failure.
+//
+// This module owns the four fixes:
+//   1. malformedFinishInput — a parameter value carrying tool-call syntax
+//      fragments IS a malformed call; name the fragment and where it appeared.
+//   2. receivedParamsEcho — every finish rejection now lists the parameter
+//      names the harness actually received and a short snippet of each, so a
+//      structural bug is visible to the model on the FIRST rejection.
+//   3. identical-retry detection — a retry whose payload is the same as the
+//      last rejected one gets an escalated diagnostic naming the likely cause,
+//      not the same rejection again.
+//   4. a SHARED rejection budget across ALL finish validators (gate-audit.md
+//      recommendation #1). N real rejections total — repeated-identical
+//      rejections charge the budget once — and on exhaustion the runner
+//      CONCLUDES the cycle with a checkpoint and an operator summary instead
+//      of negotiating further. A type-clean tree is never stranded behind the
+//      handshake.
+//
+// CHEAPEST-PASS NOTE (the standing rule from docs/gate-audit.md): the cheapest
+// thing a build can do to get past this guard is to send ONE well-formed finish
+// call — which is exactly the thing we want. The budget cannot be gamed into
+// shipping bad work: exhaustion concludes as pending-operator-verification
+// (checkpointed, not deployed as a success), so "get rejected three times on
+// purpose" buys a build nothing except an operator reading its unfinished
+// summary. Evidence: P47 request 141 ($4.75, five identical rejections,
+// nothing shipped); P34 (no gate battery, 24/24 shipped).
+//
+// Terminology (risk R7): nothing here is named "agent".
+
+// N real rejections shared across every finish validator. Three is deliberate:
+// P34's whole median request cost $1.51; five rejection round-trips on a large
+// context cost more than most useful cycles. One rejection fixes an honest
+// omission; two fixes a misunderstanding; a third non-identical rejection is
+// the last chance — after that the operator decides, not the loop.
+export const FINISH_REJECTION_BUDGET = 3;
+
+// The syntax fragments that can only appear in a parameter VALUE when the
+// model's tool call was serialized/parsed wrong (request 141's exact shape).
+export const TOOL_SYNTAX_FRAGMENTS = Object.freeze(['</summary>', '</parameter>', '<parameter ']);
+
+const SNIPPET_LEN = 120;
+
+function snippet(v, len = SNIPPET_LEN) {
+  let s;
+  if (typeof v === 'string') s = v;
+  else { try { s = JSON.stringify(v); } catch { s = String(v); } }
+  s = String(s ?? '').replace(/\s+/g, ' ').trim();
+  return s.length > len ? `${s.slice(0, len)}…` : s;
+}
+
+// malformedFinishInput — walk every string value in the finish input (top level
+// and one level into arrays/objects, which covers acceptance[] and
+// assumptions.verified[]) looking for tool-call syntax fragments. Returns
+// { malformed:false } or { malformed:true, param, fragment, where } with a
+// quotable excerpt around the offending fragment.
+export function malformedFinishInput(input) {
+  const check = (param, v) => {
+    if (typeof v !== 'string') return null;
+    for (const frag of TOOL_SYNTAX_FRAGMENTS) {
+      const i = v.indexOf(frag);
+      if (i !== -1) {
+        const start = Math.max(0, i - 40);
+        return {
+          malformed: true,
+          param,
+          fragment: frag,
+          where: `${v.slice(start, i)}▶${v.slice(i, i + frag.length + 60)}`.replace(/\s+/g, ' ').slice(0, 160),
+        };
+      }
+    }
+    return null;
+  };
+  const obj = input && typeof input === 'object' ? input : {};
+  for (const [k, v] of Object.entries(obj)) {
+    const hit = check(k, v);
+    if (hit) return hit;
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i++) {
+        const h = check(`${k}[${i}]`, v[i]) || (v[i] && typeof v[i] === 'object'
+          ? Object.entries(v[i]).map(([kk, vv]) => check(`${k}[${i}].${kk}`, vv)).find(Boolean)
+          : null);
+        if (h) return h;
+      }
+    } else if (v && typeof v === 'object') {
+      for (const [kk, vv] of Object.entries(v)) {
+        const h = check(`${k}.${kk}`, vv)
+          || (Array.isArray(vv) ? vv.map((x, i) => check(`${k}.${kk}[${i}]`, x)).find(Boolean) : null);
+        if (h) return h;
+      }
+    }
+  }
+  return { malformed: false };
+}
+
+// malformedRejectionMessage — the rejection for a malformed call. Quotes the
+// offending fragment and where it appeared (request 141's fix: the model can
+// only correct a structural bug it can see).
+export function malformedRejectionMessage(hit, input) {
+  return `Not finished — this finish call is MALFORMED: the \`${hit.param}\` parameter value contains tool-call syntax `
+    + `("${hit.fragment}"), which means the call's parameters were serialized into one string instead of arriving separately.\n\n`
+    + `Where it appeared (▶ marks the fragment): …${hit.where}…\n\n`
+    + `${receivedParamsEcho(input)}\n\n`
+    + 'Do not rephrase the prose — fix the STRUCTURE: re-call finish with `summary`, `acceptance`, and `assumptions` as '
+    + 'separate parameters, each a plain value with no XML/tool-call markup inside it.';
+}
+
+// receivedParamsEcho — "here is what the harness actually received", appended
+// to EVERY finish rejection. Request 141's five identical retries happened
+// because nothing showed the model the gap between what it thought it sent and
+// what arrived.
+export function receivedParamsEcho(input, { expected = ['summary', 'acceptance', 'assumptions'] } = {}) {
+  const obj = input && typeof input === 'object' ? input : {};
+  const keys = Object.keys(obj);
+  const lines = ['Parameters the harness received in this call:'];
+  if (!keys.length) lines.push('  (none — the call carried no parameters at all)');
+  for (const k of keys) {
+    const v = obj[k];
+    const empty = v == null || v === '' || (Array.isArray(v) && v.length === 0);
+    lines.push(`  - ${k}: ${empty ? '(empty)' : `"${snippet(v)}"`}`);
+  }
+  const missing = (expected || []).filter((k) => {
+    const v = obj[k];
+    return v == null || v === '' || (Array.isArray(v) && v.length === 0);
+  });
+  if (missing.length) lines.push(`Missing or empty: ${missing.join(', ')}.`);
+  return lines.join('\n');
+}
+
+// ---- identical-retry detection + the shared budget ----
+
+function normalizePayload(input) {
+  const obj = input && typeof input === 'object' ? input : {};
+  const sorted = {};
+  for (const k of Object.keys(obj).sort()) sorted[k] = obj[k];
+  let s;
+  try { s = JSON.stringify(sorted); } catch { s = String(obj); }
+  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function tokenSet(s) {
+  // Trailing-s stemming so a payload that only pluralizes a word ("view" →
+  // "views") still reads as the same retry — the point is catching a model
+  // re-sending the same thing lightly reworded, not exact-match trivia.
+  return new Set(String(s).split(/[^a-z0-9]+/i)
+    .filter((t) => t.length > 2)
+    .map((t) => t.replace(/s$/, '')));
+}
+
+// similarity — token Jaccard, 0..1. Cheap, order-insensitive: a payload that
+// reshuffles the same sentences is still "the same retry".
+export function payloadSimilarity(a, b) {
+  const sa = tokenSet(a);
+  const sb = tokenSet(b);
+  if (!sa.size && !sb.size) return 1;
+  let inter = 0;
+  for (const t of sa) if (sb.has(t)) inter++;
+  const union = sa.size + sb.size - inter;
+  return union ? inter / union : 1;
+}
+
+export const NEAR_IDENTICAL_SIMILARITY = 0.9;
+
+export function initFinishGuard() {
+  return {
+    charged: 0,          // budget-charged rejections
+    total: 0,            // every rejection, including uncharged repeats
+    repeats: 0,          // consecutive identical/near-identical retries
+    lastRejectedNorm: null,
+    history: [],         // [{ validator, identical }] — for the operator summary
+  };
+}
+
+// recordFinishRejection — fold one rejection into the guard state. Returns
+// { state, count, identicalRepeat, exhausted }:
+//   - identicalRepeat: this payload is the same (or nearly) as the last
+//     rejected one → the caller sends the escalated diagnostic, and the budget
+//     is NOT charged again (repeated-identical rejections count once).
+//   - exhausted: the budget is spent (or the model has sent the same payload
+//     three times) → the caller CONCLUDES the cycle instead of rejecting.
+export function recordFinishRejection(state, { validator = 'finish', input = null } = {}) {
+  const s = { ...state, history: [...(state.history || [])] };
+  const norm = normalizePayload(input);
+  const identicalRepeat = s.lastRejectedNorm != null
+    && (norm === s.lastRejectedNorm || payloadSimilarity(norm, s.lastRejectedNorm) >= NEAR_IDENTICAL_SIMILARITY);
+  s.total += 1;
+  if (identicalRepeat) s.repeats += 1;
+  else { s.repeats = 0; s.charged += 1; }
+  s.lastRejectedNorm = norm;
+  s.history.push({ validator, identical: identicalRepeat });
+  // Exhausted when the budget of REAL rejections is spent, or when the model
+  // has re-sent a near-identical payload twice after the escalated diagnostic —
+  // at that point another round-trip cannot change anything.
+  const exhausted = s.charged > FINISH_REJECTION_BUDGET || s.repeats >= 2;
+  return { state: s, count: s.charged, identicalRepeat, exhausted };
+}
+
+// escalatedRetryDiagnostic — the message for an identical retry. Names the
+// likely structural cause instead of repeating the rejection the model has
+// already failed to act on.
+export function escalatedRetryDiagnostic({ validator = 'finish', input = null } = {}) {
+  const hit = malformedFinishInput(input);
+  const cause = hit.malformed
+    ? `The likely cause: your \`${hit.param}\` parameter contains tool-call syntax ("${hit.fragment}") — the call is being `
+      + 'serialized wrong, so the other parameters never arrive as parameters. Fix the call STRUCTURE, not the wording.'
+    : 'The likely cause is structural — a parameter arriving under the wrong name, folded into another parameter, or in the '
+      + 'wrong shape — not the wording of your prose. Compare the echo below against what you intended to send.';
+  return `This finish payload is essentially IDENTICAL to the one just rejected (${validator}). `
+    + 'Re-sending it cannot succeed, so this is a diagnostic instead of the same rejection again.\n\n'
+    + `${cause}\n\n${receivedParamsEcho(input)}\n\n`
+    + 'If you believe the payload is correct and the harness is rejecting it in error, call halt and say so — quote the '
+    + 'payload and the rejection verbatim. A halt that asserts a harness fault after repeated rejections is accepted as-is.';
+}
+
+// budgetNote — one line appended to every charged rejection so the model knows
+// where it stands.
+export function budgetNote(count) {
+  return `(Finish rejection ${count} of ${FINISH_REJECTION_BUDGET} for this cycle — after that the cycle concludes for operator review.)`;
+}
+
+// ---- budget-exhaustion conclusion ----
+
+// The operator summary posted when the handshake budget is exhausted. The work
+// is checkpointed; nothing is stranded.
+export function budgetExhaustedSummary({ history = [], finishSummary = '', changedFiles = [] } = {}) {
+  const validators = [...new Set(history.map((h) => h.validator))];
+  const identical = history.filter((h) => h.identical).length;
+  const lines = [
+    '**Build concluded for your review — the finish handshake used up its rejection budget.**',
+    '',
+    `The build completed its work and tried to finish, but the finish payload was rejected ${history.length} time(s)`
+      + ` (${validators.join(', ')}${identical ? `; ${identical} retr${identical === 1 ? 'y was' : 'ies were'} identical to a rejected payload` : ''}).`,
+    'Rather than keep spending money on the handshake, the work has been CHECKPOINTED as-is.',
+    '',
+  ];
+  if (finishSummary) lines.push(`The build's own summary of what it did:\n${String(finishSummary).slice(0, 1500)}`, '');
+  const files = (changedFiles || []).slice(0, 15);
+  if (files.length) lines.push(`Files changed: ${files.join(', ')}${(changedFiles || []).length > files.length ? ', …' : ''}`, '');
+  lines.push(
+    'What to do: review the checkpointed change (Change history), try the app, and press Deploy if it is right.',
+    'If the rejections look like a harness bug (e.g. a malformed tool call), that is flagged for harness triage below.',
+  );
+  return lines.join('\n');
+}
+
+// ---- harness-fault halts (fix 1.e) ----
+
+// A halt whose reason asserts the HARNESS is at fault (rejections malformed,
+// validator wrong, tool call mangled). When the finish-rejection history is
+// consistent with that assertion — there were rejections — the halt is
+// accepted as-is: no options re-litigation, and it is flagged for harness
+// triage. Request 141's endgame was a halt REJECTED for wording while the
+// model was correctly reporting a harness bug.
+export function isHarnessFaultHalt(reason) {
+  const r = String(reason || '').toLowerCase();
+  return /harness|validator|rejection|finish (call|tool|payload)|tool.?call|malformed|parameter|parse/.test(r)
+    && /(reject|malform|bug|fault|error|wrong|stuck|loop|cannot|can't|refus)/.test(r);
+}
+
+export function harnessFaultHaltAccepted({ reason, rejectionTotal = 0 } = {}) {
+  return rejectionTotal > 0 && isHarnessFaultHalt(reason);
+}

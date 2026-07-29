@@ -122,6 +122,11 @@ import { UI_CHECKS_PATH, parseUiChecks } from './ui-check-logic.js';
 import {
   removalCoverage, removalRejectionMessage, removalWarningMessage, removalCoverageNote,
 } from './removal-claims-logic.js';
+import {
+  malformedFinishInput, malformedRejectionMessage, receivedParamsEcho,
+  initFinishGuard, recordFinishRejection, escalatedRetryDiagnostic, budgetNote,
+  budgetExhaustedSummary, harnessFaultHaltAccepted,
+} from './finish-guard-logic.js';
 import { recordFeature, takeFeatureLedger } from './feature-activation.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
@@ -1115,10 +1120,87 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   let parityRejected = false;
   // Rejects a removal claim at most once — a repeated rejection auto-halts.
   let removalRejected = false;
+  // SHARED finish-rejection budget across ALL finish validators (gate-audit.md
+  // #1; P47 request 141 spent $4.75 on five identical rejections). Every
+  // validator rejection charges ONE shared budget; identical retries are
+  // detected, diagnosed, and counted once; exhaustion CONCLUDES the cycle with
+  // a checkpoint + operator summary instead of another round-trip.
+  let finishGuard = initFinishGuard();
   // An enforced reproduce-first waiver carried on the resume context (admin-
   // granted upstream). Applied at the acceptance verdict — the real enforcement
   // layer — and stamped into the acceptance record, never merely narrated.
   const reproduceFirstWaiver = (resumeCtx?.waivers || []).find((w) => w && w.rule === 'reproduce_first') || null;
+
+  // concludeFinishBudget — the finish handshake's rejection budget is spent:
+  // CHECKPOINT the completed work, tell the operator plainly what happened, and
+  // land the calm pending-operator-verification terminal. Never strand a
+  // type-clean tree behind the handshake (P47 request 141 ended awaiting_admin
+  // with all work complete and nothing shipped).
+  const concludeFinishBudget = async ({ decision, gateReports }) => {
+    let changed = [];
+    try {
+      const wt = await execInContainer(containerName, `{ git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u | grep -v '^state/changes/'`);
+      changed = (wt.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    } catch { /* best effort */ }
+    let record = null;
+    try {
+      record = await checkpointAndRecord({
+        cycle: getCycle(cycle.id), project, containerName, holder,
+        gateReports: gateReports || [], gateScripts, framework,
+        summary: `checkpoint: finish handshake budget exhausted\n\n${decision.finishSummary || ''}`.trim(),
+      });
+    } catch (e) { console.warn('[mock2] finish-budget checkpoint failed:', e?.message); }
+    const summaryMsg = budgetExhaustedSummary({ history: finishGuard.history, finishSummary: decision.finishSummary, changedFiles: changed });
+    try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: summaryMsg }); } catch (e) { console.warn('[mock2] finish-budget message failed:', e?.message); }
+    try {
+      openVerificationChecklist({
+        projectId, cycleId: cycle.id,
+        checklist: ['Review the checkpointed work — the finish handshake rejected this build\'s completion payload repeatedly. If the app looks right, press Deploy.'],
+      });
+      updateCycle(cycle.id, { verification_state: 'pending' });
+    } catch (e) { console.warn('[mock2] finish-budget checklist failed:', e?.message); }
+    // Flag for harness triage: repeated finish rejections are as likely to be a
+    // harness-side parser/validator fault as a build fault (request 141 was ours).
+    safeRaise({
+      kind: 'flag', project_id: projectId, dedupe_key: `mock2-finish-budget:${cycle.id}`,
+      ref_table: 'mock2_cycles', ref_id: cycle.id,
+      detail: `${project.name}: finish handshake budget exhausted on cycle ${cycle.id} (${finishGuard.history.map((h) => h.validator).join(', ')}) — triage for a harness-side validator/parser fault.`,
+    });
+    logEvent('note', { role: 'system', content: 'Finish handshake budget exhausted — cycle concluded with a checkpoint for operator review.', meta: { finish_budget_exhausted: true, history: finishGuard.history } });
+    finishCycle(cycle.id, { status: 'awaiting_user', error: null });
+    releaseLock(projectId, holder);
+    setJob(cycle.id, {
+      phase: 'pending_verification',
+      message: 'Concluded — the work is checkpointed. The finish handshake kept rejecting the completion payload; review the change and press Deploy if it is right.',
+      commit: record?.commit_sha || null,
+    });
+    void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'pending_verification' });
+  };
+
+  // rejectFinishOrConclude — EVERY finish-validator rejection goes through here
+  // (fix 1.a/1.b/1.d): the message carries an echo of the parameters actually
+  // received; an identical retry gets an escalated diagnostic naming the likely
+  // cause instead of the same rejection; and the SHARED budget decides whether
+  // to reject at all or conclude the cycle. Returns 'rejected' | 'concluded'.
+  const rejectFinishOrConclude = async ({ validator, termId, termName, decision, message, gateReports, echo = true }) => {
+    const g = recordFinishRejection(finishGuard, { validator, input: decision.finishInput || {} });
+    finishGuard = g.state;
+    if (g.exhausted) {
+      await concludeFinishBudget({ decision, gateReports });
+      return 'concluded';
+    }
+    const body = g.identicalRepeat
+      ? escalatedRetryDiagnostic({ validator, input: decision.finishInput || {} })
+      : `${message}${echo ? `\n\n${receivedParamsEcho(decision.finishInput || {})}` : ''}\n\n${budgetNote(g.count)}`;
+    transcript.push({ role: 'tool', toolCallId: termId, name: termName, content: body });
+    logEvent('note', {
+      role: 'system',
+      content: `Finish rejected (${validator})${g.identicalRepeat ? ' — identical retry; escalated diagnostic sent' : ''}: ${String(message).replace(/\s+/g, ' ').slice(0, 300)}`,
+      meta: { finish_rejections_charged: finishGuard.charged, identical_retry: g.identicalRepeat },
+    });
+    touchLock(projectId, holder);
+    return 'rejected';
+  };
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     // 1) Honor interrupts at the step boundary.
@@ -1281,11 +1363,27 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     //     resumable, surfaced as needs-attention with the model's reason. Answer any
     //     tool call it paired with halt so the transcript stays well-formed.
     if (decision.halted) {
+      // Fix 1.e (P47 request 141's endgame): a halt that asserts a HARNESS
+      // fault, when this cycle's finish-rejection history is consistent with
+      // that assertion, is accepted AS-IS — no wording re-litigation, no
+      // "restate with 2–4 options" round-trip — and flagged for harness
+      // triage. Request 141's correct bug report ("the finish tool keeps
+      // rejecting a payload I believe is well-formed") was itself rejected
+      // for its format, which is the harness disputing its own fault.
+      const harnessFault = harnessFaultHaltAccepted({ reason: decision.haltReason, rejectionTotal: finishGuard.total });
+      if (harnessFault) {
+        safeRaise({
+          kind: 'flag', project_id: projectId, dedupe_key: `mock2-harness-fault:${cycle.id}`,
+          ref_table: 'mock2_cycles', ref_id: cycle.id,
+          detail: `${project.name}: the build asserts a HARNESS fault after ${finishGuard.total} finish rejection(s) — "${String(decision.haltReason || '').slice(0, 200)}". Triage the finish validators/parser, not the build.`,
+        });
+        logEvent('note', { role: 'system', content: `Halt asserts a harness fault after ${finishGuard.total} finish rejection(s) — accepted as-is and flagged for harness triage.`, meta: { harness_triage: true } });
+      }
       // A model halt must carry viable resolution options. If it doesn't and we
       // haven't already asked, feed the validation error back to the halt tool call
       // and let the model restate — ONE retry, then we halt regardless.
       const optCheck = validateHaltOptions(decision.haltOptions);
-      if (!optCheck.ok && !haltOptionsRetried) {
+      if (!optCheck.ok && !haltOptionsRetried && !harnessFault) {
         haltOptionsRetried = true;
         for (const call of decision.toolCalls) {
           if (call.name === 'halt') {
@@ -1358,17 +1456,42 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
         logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
       }
+      // FINISH GUARD, fix 1.c (P47 request 141's root cause): a parameter value
+      // carrying tool-call syntax fragments is a MALFORMED CALL, not missing
+      // prose. Detected FIRST, with the offending fragment quoted — otherwise a
+      // validator complains about a "missing" parameter that was never going to
+      // arrive and the model rephrases prose five times ($4.75, nothing shipped).
+      // CHEAPEST PASS: send one structurally well-formed finish call — which is
+      // the desired behavior; there is no way to satisfy this check that makes
+      // the app worse.
+      {
+        const malformed = malformedFinishInput(decision.finishInput || {});
+        if (malformed.malformed) {
+          const r = await rejectFinishOrConclude({
+            validator: 'malformed-call', termId, termName, decision, gateReports: lastGateReports,
+            message: malformedRejectionMessage(malformed, decision.finishInput || {}), echo: false,
+          });
+          if (r === 'concluded') return scheduleJobCleanup(cycle.id);
+          continue;
+        }
+      }
       // Acceptance criteria are REQUIRED on finish (constitution §11): a
       // human-runnable check per user-visible change + the verified-vs-assumed
       // assumption split. A finish without them is rejected back to the model;
-      // the no-progress breaker terminates a cycle that keeps refusing.
+      // the SHARED rejection budget (not the old one-per-validator scheme)
+      // bounds the round-trips, and the no-progress breaker still terminates a
+      // cycle that keeps refusing.
+      // CHEAPEST PASS: write more acceptance prose (gate-audit.md #8/9 called
+      // this COSTLY — it produces no product). That is why the rejection now
+      // echoes what was received (a structural bug is fixable in one pass) and
+      // why the budget is shared: prose negotiation is capped at 3 round-trips
+      // total, then the operator decides.
       if (!decision.finishAcceptance?.length || !decision.finishAssumptions) {
-        transcript.push({
-          role: 'tool', toolCallId: termId, name: termName,
-          content: 'Not finished: finish requires `acceptance` (≥1 human-runnable check — "as <role>, do X, expect Y" — one per user-visible change, or one entry describing the non-UI verification performed) and `assumptions` ({verified:[…], assumed:[…]} — the cross-layer values you READ the source for this cycle, naming the file, vs the ones you assumed). Re-call finish with both.',
+        const r = await rejectFinishOrConclude({
+          validator: 'acceptance-present', termId, termName, decision, gateReports: lastGateReports,
+          message: 'Not finished: finish requires `acceptance` (≥1 human-runnable check — "as <role>, do X, expect Y" — one per user-visible change, or one entry describing the non-UI verification performed) and `assumptions` ({verified:[…], assumed:[…]} — the cross-layer values you READ the source for this cycle, naming the file, vs the ones you assumed). Re-call finish with both.',
         });
-        logEvent('note', { role: 'system', content: 'Finish rejected — missing acceptance checks / assumptions; asked the build to restate.' });
-        touchLock(projectId, holder);
+        if (r === 'concluded') return scheduleJobCleanup(cycle.id);
         if (progress.tripped) {
           await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); finish kept omitting acceptance criteria.`, logEvent });
           return scheduleJobCleanup(cycle.id);
@@ -1400,12 +1523,15 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         ? { ok: true, reasons: [], reproduce_first: 'mvp_not_required' }
         : acceptanceVerdict({ parsed: accParsed, instructionKind: taskKind, redTestObserved, changedFiles: changedThisCycle, reproduceFirstWaiver });
       if (!verdict.ok) {
-        transcript.push({
-          role: 'tool', toolCallId: termId, name: termName,
-          content: `Not finished — acceptance not demonstrated:\n${verdict.reasons.map((r) => `- ${r}`).join('\n')}`,
+        // CHEAPEST PASS: write a plausible state/acceptance.json (or reword the
+        // spec) without new verification — honest work for a real bugfix, prose
+        // for everything else. Shares the finish budget so it can no longer
+        // consume five round-trips on its own (P47 request 141).
+        const r = await rejectFinishOrConclude({
+          validator: 'acceptance-demonstrated', termId, termName, decision, gateReports: lastGateReports,
+          message: `Not finished — acceptance not demonstrated:\n${verdict.reasons.map((x) => `- ${x}`).join('\n')}`,
         });
-        logEvent('note', { role: 'system', content: `Finish rejected — acceptance not demonstrated: ${verdict.reasons.join(' | ')}` });
-        touchLock(projectId, holder);
+        if (r === 'concluded') return scheduleJobCleanup(cycle.id);
         if (progress.tripped) {
           await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped: finish kept arriving without demonstrated acceptance (${verdict.reasons[0]}).`, logEvent });
           return scheduleJobCleanup(cycle.id);
@@ -1416,12 +1542,13 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // the cycle did not touch (bundling prior cycles' work) is rejected.
       const oc = summaryOverclaims(decision.finishSummary, changedThisCycle);
       if (!oc.ok) {
-        transcript.push({
-          role: 'tool', toolCallId: termId, name: termName,
-          content: `Not finished — the summary names files this cycle did NOT change (${oc.unmatched.join(', ')}). The change record must describe THIS cycle's diff only — do not bundle prior cycles' work. Files actually changed: ${changedThisCycle.slice(0, 20).join(', ') || '(none)'}. Re-call finish with a summary scoped to this diff.`,
+        // CHEAPEST PASS: a shorter, accurate summary — which is the goal
+        // (gate-audit.md #10: SOUND). Budget-shared like every other validator.
+        const r = await rejectFinishOrConclude({
+          validator: 'summary-overclaim', termId, termName, decision, gateReports: lastGateReports,
+          message: `Not finished — the summary names files this cycle did NOT change (${oc.unmatched.join(', ')}). The change record must describe THIS cycle's diff only — do not bundle prior cycles' work. Files actually changed: ${changedThisCycle.slice(0, 20).join(', ') || '(none)'}. Re-call finish with a summary scoped to this diff.`,
         });
-        logEvent('note', { role: 'system', content: `Finish rejected — summary over-claims (${oc.unmatched.join(', ')}).` });
-        touchLock(projectId, holder);
+        if (r === 'concluded') return scheduleJobCleanup(cycle.id);
         if (progress.tripped) {
           await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: 'Auto-stopped: finish summary kept over-claiming beyond this cycle\'s diff.', logEvent });
           return scheduleJobCleanup(cycle.id);
@@ -1465,15 +1592,15 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             : 'the summary claimed no user-visible removal');
         if (!verdict.ok && !removalRejected) {
           removalRejected = true;
-          transcript.push({
-            role: 'tool', toolCallId: termId, name: termName,
-            content: removalRejectionMessage(verdict),
+          // CHEAPEST PASS: add an expect_absent/expect_no_scroll check, or
+          // withdraw the claim — both honest, neither touches the UI
+          // (gate-audit.md #11: SOUND, but it costs a round-trip; the cost is
+          // now bounded by the shared budget). Still rejects at most once.
+          const r = await rejectFinishOrConclude({
+            validator: 'removal-claims', termId, termName, decision, gateReports: lastGateReports,
+            message: removalRejectionMessage(verdict), echo: false,
           });
-          logEvent('note', {
-            role: 'system',
-            content: `Finish rejected — unverified removal claim(s): ${verdict.uncovered.map((c) => c.raw).join(' | ') || verdict.badRefs.map((b) => b.why).join(' | ')}`,
-          });
-          touchLock(projectId, holder);
+          if (r === 'concluded') return scheduleJobCleanup(cycle.id);
           continue;
         }
         if (!verdict.ok) {
@@ -1592,7 +1719,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             if (!parity.ok && !parityRejected) {
               parityRejected = true;
               const list = parity.missing.slice(0, 10).map((a) => `"${a.label}" (${a.screen})`).join(', ');
-              transcript.push({
+              const parityRejection = {
                 role: 'tool', toolCallId: termId, name: termName,
                 // THE WORDING OF THIS MESSAGE IS THE FEATURE. The old one said
                 // the actions "appear NOWHERE in the app's UI source", and a
@@ -1608,9 +1735,12 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
                   + 'Do NOT put the contract\'s wording on screen: a button reading "Edit note title/body" is this check being satisfied instead of a user being served.\n\n'
                   + 'Two things that do NOT count: an element with the `hidden` attribute, and a control that leads somewhere the action cannot actually be performed. '
                   + 'If you genuinely cannot build one this cycle, render it disabled with a visible "Not built yet" badge. Then re-call finish.',
+              };
+              const r = await rejectFinishOrConclude({
+                validator: 'action-parity', termId, termName, decision, gateReports: lastGateReports,
+                message: parityRejection.content, echo: false,
               });
-              logEvent('note', { role: 'system', content: `Finish rejected — action parity: silently missing: ${list}` });
-              touchLock(projectId, holder);
+              if (r === 'concluded') return scheduleJobCleanup(cycle.id);
               continue;
             }
             if (!parity.ok) {

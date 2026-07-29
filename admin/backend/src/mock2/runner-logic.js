@@ -1121,6 +1121,10 @@ export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
     return {
       ...base, pendingVerification: true,
       finishSummary: f.summary, finishAcceptance: f.acceptance, finishAssumptions: f.assumptions,
+      // The RAW input rides along for the finish guard (request 141: a summary
+      // carrying "</summary><parameter …" is a malformed call, and the guard
+      // can only diagnose what it can see un-normalized).
+      finishInput: pendingCall.input || {},
     };
   }
   const finishCall = calls.find((c) => c && c.name === 'finish');
@@ -1134,6 +1138,7 @@ export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
       finishAssumptions: f.assumptions,
       finishAcceptanceIds: f.acceptanceIds,
       finishRemovals: f.removals,
+      finishInput: finishCall.input || {},
     };
   }
   if (calls.length === 0) {

@@ -46,9 +46,24 @@ export function asAdvisory(script, name) {
 
 // ---- design-adherence ----
 //
-// The approved design must actually be consumed. Deliberately blunt: it does
-// not judge taste, spacing or hierarchy — the design review does that. It only
-// fires on the unambiguous signatures of "the approved design was ignored".
+// DRIFT, NOT BREADTH (redesigned per docs/gate-audit.md #1, evidence P47).
+// The old gate scored adoption breadth — "42 of 109 approved component
+// classes, 9 of 60 approved variables" — and its cheapest pass was to spray
+// approved class names onto elements to raise the count, while a small,
+// well-built app could never win the denominator. What actually indicates
+// drift is a HARDCODED value where a token exists, and a re-made component
+// where an approved class already covers the case. That is what this scores.
+//
+// CHEAPEST PASS: use var(--...) from state/design.css for colors/spacing and
+// put the approved class on the element instead of re-making it — which is
+// exactly following the design. There is no count to inflate: adoption
+// numbers are REPORTED, never scored, so class-spraying buys nothing.
+//
+// BLOCKING ONLY ON NEW DRIFT: literals/shadow-classes that exist at HEAD are
+// pre-existing debt — reported, never blocking — so old drift cannot wedge an
+// unrelated change (in a fresh tree with no git history, everything is new).
+// The shell checks (--app-* bridge, design.css-last, dark theme) stay
+// blocking: each is a direct, unambiguous defect, not a breadth score.
 export const DESIGN_ADHERENCE_GATE_NAME = 'design-adherence';
 
 export const DESIGN_ADHERENCE_GATE_SCRIPT = `# Baseline gate (ProxyPilot): the approved design must actually be consumed.
@@ -166,68 +181,93 @@ APPROVED=$(wc -l < "$WORK/approved" | tr -d ' ')
 USED=$(comm -12 "$WORK/appuse" "$WORK/approved" | wc -l | tr -d ' ')
 OWN=$(comm -23 "$WORK/appdef" "$WORK/approved" | wc -l | tr -d ' ')
 
-# HARDCODED COLOURS — the direct measure of "the theme is off".
+# ---- DRIFT SIGNAL A: hardcoded COLOUR literals where a token exists ----
 #
-# Counting the app's own VARIABLES misses the shape that actually happens: a
-# build declares only a handful of tokens and then writes thousands of bytes of
-# CSS with the colours typed straight in. Project 38 used 9 of 55 approved
-# variables and declared just 6 of its own — under every existing threshold —
-# while writing 15.8KB of its own CSS, and the operator's report was "the theme
-# is still off from the mockup".
-#
-# var(--x, #fallback) fallbacks are legitimate (the token bridge is built from
-# them), so literals inside a var() are stripped before counting.
+# The direct measure of "the theme is off": a colour typed in does not follow
+# the theme and does not change when the design does. var(--x, #fallback)
+# fallbacks are legitimate (the token bridge is built from them), so literals
+# inside a var() are stripped before counting.
 # NO BACKSLASHES in this pipeline. It is emitted from a JS template literal,
 # where a backslash-b becomes a literal backspace character and an escaped
-# paren collapses into a capture group — which is exactly how the first version
-# of this counted zero colours in a file full of them. Bracket expressions
-# express the same thing with nothing to escape. (Writing that explanation with
-# the escapes in it reintroduced the bug in a COMMENT, which is how the
-# no-mangled-escape test earned its place.)
-sed 's/var([^)]*)//g' "$APP" | grep -o -E '#[0-9a-fA-F]{3,8}|rgba?[(][^)]*[)]|hsla?[(][^)]*[)]' | sort -u > "$WORK/hard" || true
-HARD=$(wc -l < "$WORK/hard" | tr -d ' ')
+# paren collapses into a capture group — which is exactly how an earlier
+# version of this counted zero colours in a file full of them. Bracket
+# expressions express the same thing with nothing to escape.
+sed 's/var([^)]*)//g' "$APP" | grep -o -E '#[0-9a-fA-F]{3,8}|rgba?[(][^)]*[)]|hsla?[(][^)]*[)]' | sort -u > "$WORK/lits"
+HARD=$(wc -l < "$WORK/lits" | tr -d ' ')
 
-# COMPONENT ADOPTION — the closest deterministic answer to "does the built app
-# look like the mockup".
-#
-# state/design.css carries the approved mockup's own component CSS verbatim
-# (renderDesignCssFromMockup lifts it, not just the token block). So the mockup's
-# components have NAMES, and whether the built screens use them is a question the
-# markup answers directly. Variables alone cannot: an app can reference the right
-# colours and still lay the screen out nothing like the contract.
-grep -o -E '[.][A-Za-z][A-Za-z0-9_-]{2,}' "$DESIGN" | sed 's/^[.]//' | sort -u > "$WORK/dclass"
-# Every class the built markup actually puts on an element.
-grep -o -E 'class="[^"]*"' "$HTML" 2>/dev/null | sed 's/class="//; s/"$//' | tr ' ' '\n' \
-  | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | sort -u > "$WORK/hclass"
+# ---- DRIFT SIGNAL B: hardcoded SPACING literals where a spacing token exists ----
+# Only counted when the approved design actually publishes spacing tokens —
+# an app cannot be marked down for not using a token that does not exist.
+SPACETOK=$(grep -c -E -- '--(space|spacing|gap|pad)[A-Za-z0-9_-]*[[:space:]]*:' "$DESIGN" 2>/dev/null || true)
+: > "$WORK/space"
+if [ "$SPACETOK" -gt 0 ]; then
+  sed 's/var([^)]*)//g' "$APP" | grep -o -E '(margin|padding|gap)[a-z-]*[[:space:]]*:[^;}]*' \\
+    | grep -o -E '[0-9][0-9]*px' | grep -v -E '^0px$' | sort -u > "$WORK/space" || true
+fi
+SPACE=$(wc -l < "$WORK/space" | tr -d ' ')
+
+# ---- DRIFT SIGNAL C: a RE-MADE component — an app-defined class whose stem
+# duplicates an approved class name (.note-card2 / .note-card-alt beside the
+# approved .note-card). A genuinely NEW element is welcome (the system
+# growing); re-making a covered one is drift by construction.
+grep -o -E '[.][A-Za-z][A-Za-z0-9_-]{2,}' "$DESIGN" | sed 's/^[.]//' | tr 'A-Z' 'a-z' | sort -u > "$WORK/dclass"
+grep -o -E 'class="[^"]*"' "$HTML" 2>/dev/null | sed 's/class="//; s/"$//' | tr ' ' '\\n' \\
+  | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | tr 'A-Z' 'a-z' | sort -u > "$WORK/hclass"
+grep -o -E '[.][A-Za-z][A-Za-z0-9_-]{2,}' "$APP" 2>/dev/null | sed 's/^[.]//' | tr 'A-Z' 'a-z' | sort -u > "$WORK/aclass" || : > "$WORK/aclass"
 DCLASS=$(wc -l < "$WORK/dclass" | tr -d ' ')
 UCLASS=$(comm -12 "$WORK/dclass" "$WORK/hclass" 2>/dev/null | wc -l | tr -d ' ')
+comm -23 "$WORK/aclass" "$WORK/dclass" > "$WORK/newcls" 2>/dev/null || : > "$WORK/newcls"
+NEWCLS=$(wc -l < "$WORK/newcls" | tr -d ' ')
+: > "$WORK/shadow"
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
+  s=$(printf '%s' "$c" | sed -E 's/[-_]?(v2|alt|new|copy|custom|2)$//')
+  [ "$s" = "$c" ] && continue
+  if grep -qxF "$s" "$WORK/dclass" 2>/dev/null; then
+    printf '%s (approved: .%s)\\n' "$c" "$s" >> "$WORK/shadow"
+  fi
+done < "$WORK/newcls"
 
-# INVENTED VOCABULARY — elements the build designed that the mockup did not.
-#
-# This used to be invisible, and invisible meant punished: the only class
-# number the gate had was ADOPTION (how much of the approved vocabulary appears
-# in the markup), so a build that thought of a better element scored the same
-# as one that ignored the design, and a build that traced the mockup scored
-# best of all. The mockup is approved at the moment the operator has seen the
-# least; a design system that cannot grow past it is a design system that
-# freezes there.
-#
-# So count what the app's OWN stylesheet defines that the approved design does
-# not, and judge it on the question that actually matters — is it built FROM
-# the design system, or beside it. A new element made of approved variables is
-# the system growing. A new element with the colours typed in is drift, and
-# that is what the hardcoded-colour rules below are for.
-grep -o -E '[.][A-Za-z][A-Za-z0-9_-]{2,}' "$APP" 2>/dev/null | sed 's/^[.]//' | sort -u > "$WORK/aclass" || : > "$WORK/aclass"
-NEWCLS=$(comm -23 "$WORK/aclass" "$WORK/dclass" 2>/dev/null | wc -l | tr -d ' ')
-# Token-clean: the app's own CSS reaches for the approved palette and almost
-# never types a colour in. Four is not zero on purpose — a shadow, an overlay
-# scrim and a focus ring are legitimately literal.
-TOKENCLEAN=0
-[ "$HARD" -le 4 ] && [ $((USED * 4)) -ge "$APPROVED" ] && TOKENCLEAN=1
+# ---- NEW-THIS-CYCLE scoping: drift already at HEAD is debt, not this build ----
+# The container tree is a git checkout whose HEAD is the last checkpoint, so
+# "introduced by this cycle" is exactly "present now, absent at HEAD". With no
+# git history (a fresh tree), everything counts as new.
+: > "$WORK/headapp"
+if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+  for f in public/*.css; do
+    [ -f "$f" ] || continue
+    case "$f" in */base.css|*/design.css|*/platform.css) continue ;; esac
+    git show "HEAD:$f" >> "$WORK/headapp" 2>/dev/null || true
+  done
+  for f in public/*.html; do
+    [ -f "$f" ] || continue
+    case "$f" in */login.html|*/admin.html|*/profile.html) continue ;; esac
+    git show "HEAD:$f" 2>/dev/null | awk 'BEGIN{p=0} index($0,"<style"){p=1} p{print} index($0,"</style>"){p=0}' >> "$WORK/headapp" || true
+  done
+fi
+sed 's/var([^)]*)//g' "$WORK/headapp" | grep -o -E '#[0-9a-fA-F]{3,8}|rgba?[(][^)]*[)]|hsla?[(][^)]*[)]' | sort -u > "$WORK/headlits" || true
+comm -23 "$WORK/lits" "$WORK/headlits" > "$WORK/newlits" 2>/dev/null || cp "$WORK/lits" "$WORK/newlits"
+NEWLITS=$(wc -l < "$WORK/newlits" | tr -d ' ')
+: > "$WORK/headspace"
+if [ "$SPACETOK" -gt 0 ]; then
+  sed 's/var([^)]*)//g' "$WORK/headapp" | grep -o -E '(margin|padding|gap)[a-z-]*[[:space:]]*:[^;}]*' \\
+    | grep -o -E '[0-9][0-9]*px' | grep -v -E '^0px$' | sort -u > "$WORK/headspace" || true
+fi
+comm -23 "$WORK/space" "$WORK/headspace" > "$WORK/newspace" 2>/dev/null || cp "$WORK/space" "$WORK/newspace"
+NEWSPACE=$(wc -l < "$WORK/newspace" | tr -d ' ')
+grep -o -E '[.][A-Za-z][A-Za-z0-9_-]{2,}' "$WORK/headapp" 2>/dev/null | sed 's/^[.]//' | tr 'A-Z' 'a-z' | sort -u > "$WORK/headcls" || : > "$WORK/headcls"
+: > "$WORK/newshadow"
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  c=\${line%% *}
+  grep -qxF "$c" "$WORK/headcls" 2>/dev/null || printf '%s\\n' "$line" >> "$WORK/newshadow"
+done < "$WORK/shadow"
+NEWSHADOW=$(wc -l < "$WORK/newshadow" | tr -d ' ')
 
-echo "design-adherence: \${APPROVED} approved variable(s); the app uses \${USED} of them, declares \${OWN} of its own, in \${APPBYTES} bytes of its own CSS."
-echo "design-adherence: \${HARD} distinct hardcoded colour(s) written outside the approved variables."
-echo "design-adherence: the approved design defines \${DCLASS} component class(es); the built screens use \${UCLASS}, and the build defines \${NEWCLS} of its own."
+# ---- the report (adoption is REPORTED, never scored) ----
+echo "design-adherence: $APPROVED approved variable(s); the app uses $USED, declares $OWN of its own, in $APPBYTES bytes of its own CSS (reported, not scored)."
+echo "design-adherence: drift — $HARD hardcoded colour(s) total, $NEWLITS introduced by this change; $SPACE spacing literal(s), $NEWSPACE new."
+echo "design-adherence: the approved design defines $DCLASS component class(es); the built screens use $UCLASS; the build defines $NEWCLS of its own, $NEWSHADOW re-making an approved one."
 
 # Too little approved design to judge against (a preset-only project).
 if [ "$APPROVED" -lt 8 ]; then
@@ -237,8 +277,7 @@ if [ "$APPROVED" -lt 8 ]; then
   exit 0
 fi
 # Nothing built yet — no styling AND no screens. That is an early cycle, not a
-# defect. But a build that shipped MARKUP and no styling is not exempt: that is
-# precisely the shape that ships an app which looks nothing like its mockup.
+# defect.
 if [ "$APPBYTES" -lt 2000 ] && [ "$HTMLBYTES" -lt 2000 ]; then
   echo "design-adherence: the app has not written screens or CSS of its own yet."
   if [ "$SHELLFAIL" -ne 0 ]; then exit 1; fi
@@ -248,69 +287,39 @@ fi
 
 FAIL=$SHELLFAIL
 
-# ADOPTION — via either route the approved design offers.
-#
-# A build can consume the design two ways, and both are legitimate:
-#   VARIABLES — it writes its own CSS on var(--...) from state/design.css.
-#   COMPONENTS — it puts the mockup's own class names on its elements and lets
-#                design.css (which carries the mockup's component CSS verbatim)
-#                style them. An app doing this correctly may write almost no CSS
-#                and reference almost no variables, and that is FAITHFUL.
-# So neither signal alone can condemn a build; only both being weak can.
-VAR_OK=0
-[ $((USED * 4)) -ge "$APPROVED" ] && VAR_OK=1
-CLS_OK=0
-[ "$DCLASS" -ge 6 ] && [ $((UCLASS * 4)) -ge "$DCLASS" ] && CLS_OK=1
-# No component vocabulary was published at all — then variables are the only
-# route, and the app cannot be marked down for not taking a road that is absent.
-[ "$DCLASS" -lt 6 ] && CLS_OK=-1
-
-SHIPPED=0
-[ "$APPBYTES" -ge 2000 ] || [ "$HTMLBYTES" -ge 2000 ] && SHIPPED=1
-
-# Ordered sharpest-diagnosis-first: a build should be told the most specific
-# true thing about what it did, not the most general one that also applies.
-if [ "$USED" -eq 0 ] && [ "$APPBYTES" -ge 2000 ] && [ "$CLS_OK" -ne 1 ]; then
-  echo "FAIL: the app's stylesheets reference NONE of the \${APPROVED} approved design variables."
-  echo "      state/design.css is loaded and ignored. Restyle the screens on var(--...) from state/design.css"
-  echo "      instead of a parallel palette; state/mockups/current.html is the visual contract."
-  FAIL=1
-elif [ "$OWN" -ge 12 ] && [ "$VAR_OK" -eq 0 ] && [ "$CLS_OK" -ne 1 ]; then
-  echo "FAIL: the app declares \${OWN} design variables of its own while using only \${USED} of \${APPROVED} approved ones."
-  echo "      That is a second palette; the two will drift. Delete the parallel tokens and consume state/design.css."
-  FAIL=1
-elif [ "$SHIPPED" -eq 1 ] && [ "$VAR_OK" -eq 0 ] && [ "$CLS_OK" -ne 1 ]; then
-  echo "FAIL: the built app does not reproduce the approved design."
-  echo "      It uses \${USED} of \${APPROVED} approved variables, and \${UCLASS} of \${DCLASS} approved component classes,"
-  echo "      across \${HTMLBYTES} bytes of screens and \${APPBYTES} bytes of its own CSS."
-  echo "      state/mockups/current.html is the visual contract. Reproduce its markup — layout, navigation"
-  echo "      pattern, cards, controls — using the component classes in state/design.css, and style anything"
-  echo "      new on var(--...) from the same file. Plain elements on the base shell will not look like it."
-  FAIL=1
-elif [ "$HARD" -ge 20 ] && [ $((USED * 2)) -lt "$APPROVED" ] && { [ "$CLS_OK" -ne 1 ] || [ "$NEWCLS" -ge 6 ]; }; then
-  # Enough approved design consumed to be credible, but the colours are still
-  # typed in — which is why a built app drifts and why dark mode looks wrong.
-  #
-  # The "it consumes the design through its components" waiver does NOT cover a
-  # build that defined six or more elements of its own: a build inventing its
-  # own vocabulary cannot also claim it is living inside the mockup's, and
-  # inventing with the colours typed in is exactly the drift this gate exists
-  # to catch. Invent freely; invent out of the design system.
-  echo "FAIL: the app writes \${HARD} distinct hardcoded colours while using only \${USED} of \${APPROVED} approved variables."
-  echo "      Hardcoded colours do not follow the theme. Replace them with var(--...) from state/design.css."
-  if [ "$NEWCLS" -ge 6 ]; then
-    echo "      \${NEWCLS} of the classes styled here are the build's own. New elements are welcome — build them"
-    echo "      out of the approved variables and they become part of the design instead of a second palette."
-  fi
+# NEW colour drift. Four literals of allowance on purpose — a shadow, an
+# overlay scrim and a focus ring are legitimately literal.
+if [ "$NEWLITS" -gt 4 ]; then
+  echo "FAIL: this change introduces $NEWLITS hardcoded colour literal(s) where the approved design provides tokens:"
+  head -10 "$WORK/newlits" | sed 's/^/        /'
+  echo "      Hardcoded colours do not follow the theme. Replace each with var(--...) from state/design.css."
+  echo "      (Pre-existing literals are reported above but do not block — only what this change adds does.)"
   FAIL=1
 fi
 
-# Screens with no styling ANYWHERE — not their own CSS, and not the approved
-# components. This is project 39's shape exactly: 328 lines of markup, zero
-# stylesheet, and an app that looked nothing like its mockup while the gate said
-# "the app has not written substantial CSS of its own. Passed."
-if [ "$HTMLBYTES" -ge 4000 ] && [ "$APPBYTES" -lt 500 ] && [ "$CLS_OK" -ne 1 ]; then
-  echo "FAIL: the app ships \${HTMLBYTES} bytes of screens with \${APPBYTES} bytes of styling."
+# NEW spacing drift — only when the design actually publishes spacing tokens.
+if [ "$SPACETOK" -gt 0 ] && [ "$NEWSPACE" -gt 6 ]; then
+  echo "FAIL: this change introduces $NEWSPACE hardcoded spacing value(s) while the approved design provides spacing tokens:"
+  head -8 "$WORK/newspace" | sed 's/^/        /'
+  echo "      Use var(--space-...) / the approved spacing tokens so rhythm follows the design."
+  FAIL=1
+fi
+
+# NEW re-made components.
+if [ "$NEWSHADOW" -gt 0 ]; then
+  echo "FAIL: this change re-makes component(s) the approved design already covers:"
+  head -6 "$WORK/newshadow" | sed 's/^/        .../'
+  echo "      Put the approved class on the element instead of defining a near-copy — a parallel"
+  echo "      component drifts from the design the first time either one changes."
+  FAIL=1
+fi
+
+# Screens with NO styling anywhere — project 39's exact shape (LEARNINGS 52):
+# substantial markup, no CSS of the app's own, and ZERO approved component
+# classes on it. This is an absolute-zero detector, not a breadth ratio: it
+# must never be cheaper to skip the design than to follow it.
+if [ "$HTMLBYTES" -ge 4000 ] && [ "$APPBYTES" -lt 500 ] && [ "$UCLASS" -eq 0 ] && [ "$DCLASS" -ge 6 ]; then
+  echo "FAIL: the app ships $HTMLBYTES bytes of screens with $APPBYTES bytes of styling and none of the approved component classes."
   echo "      Unstyled markup on the base shell cannot look like state/mockups/current.html."
   echo "      Either use the approved component classes or write the screens' CSS on var(--...)."
   FAIL=1
@@ -318,77 +327,21 @@ fi
 
 # A dropped dark theme is a broken shipped feature, not a style opinion.
 if grep -q 'data-theme' "$DESIGN" && [ "$OWN" -ge 8 ] && ! grep -q 'data-theme' "$APP"; then
-  echo "FAIL: the approved design defines a dark theme; the app's own \${OWN} variables have no dark variant,"
+  echo "FAIL: the approved design defines a dark theme; the app's own $OWN variables have no dark variant,"
   echo "      so the theme toggle changes nothing for them. Add the [data-theme=\\"dark\\"] values or use the approved ones."
   FAIL=1
 fi
 
 if [ "$FAIL" -ne 0 ]; then exit 1; fi
 
-# PARTIAL ADOPTION — credible, but not what "passed" is read to mean.
-#
-# The failing bars above are deliberately generous: a QUARTER of the approved
-# variables, or a quarter of the approved component classes, clears them. The
-# consequence is that a build sitting just over that line reports exactly the
-# same single word — "Passed." — as one that reproduced the design. Project 42
-# used 51 of 128 approved component classes on a build whose whole instruction
-# was "reproduce the mockup faithfully", and 8/8 green is what the operator
-# read before trusting the deploy.
-#
-# This does NOT move the failing bar; nothing here can red a build that the
-# rules above passed. It reports.
-#
-# It fires only when NEITHER route reaches half, which is the same shape as the
-# FAIL rules and for the same reason: a build consuming the design through its
-# COMPONENTS may reference almost no variables and be entirely faithful, so a
-# variable count on its own is not evidence of anything. Flagging that would be
-# noise, and a gate people learn to ignore is worse than no gate.
-#
-# The numbers go on the LAST line on purpose: the cycle report shows each gate's
-# final three lines, which is how project 42's variable count never reached
-# anyone.
-CLS_HALF=0
-[ "$DCLASS" -ge 6 ] && [ $((UCLASS * 2)) -ge "$DCLASS" ] && CLS_HALF=1
-[ "$DCLASS" -lt 6 ] && CLS_HALF=-1
-VAR_HALF=0
-[ $((USED * 2)) -ge "$APPROVED" ] && VAR_HALF=1
-
-if [ "$CLS_HALF" -ne 1 ] && [ "$VAR_HALF" -ne 1 ]; then
-  # PARTIAL has TWO voices, because "under half the approved vocabulary" has two
-  # causes and they are not the same news.
-  #
-  # The adoption ratio answers "how much of the mockup's vocabulary is in the
-  # markup". Read as the only class number — which it was — it says a build that
-  # invented a better element did WORSE than one that traced, on a product whose
-  # premise is that the app gets better than its first sketch. The mockup is
-  # approved at the moment the operator has seen the least; a design system that
-  # cannot grow past it freezes there.
-  #
-  # So the shortfall is still reported either way (nothing is hidden, and the
-  # numbers still ride the last line), but a build whose own elements are made
-  # entirely of approved variables is told what it actually did: extended the
-  # system. A build whose own elements have the colours typed in is told the
-  # other thing.
-  if [ "$NEWCLS" -ge 3 ] && [ "$TOKENCLEAN" -eq 1 ]; then
-    echo "design-adherence: PARTIAL — under half the approved vocabulary is in the built screens, but the"
-    echo "      \${NEWCLS} element(s) this build defined are made entirely from the approved variables"
-    echo "      (\${HARD} hardcoded colour(s)). That is the design system growing, not drifting — promote the"
-    echo "      ones worth keeping so later builds inherit them, and check the screens you did NOT touch."
-  else
-    echo "design-adherence: PARTIAL — over the bar, so this does not block, but under half the"
-    echo "      approved design is in the built screens. The screens this build wrote may look"
-    echo "      right while the rest of the app does not. state/mockups/current.html is the"
-    echo "      visual contract; state/design.css carries its component CSS by name."
-  fi
-  if [ "$CLS_HALF" -eq -1 ]; then
-    echo "design-adherence: PARTIAL — \${USED} of \${APPROVED} approved variables (no component vocabulary published), \${NEWCLS} of the build's own."
-  else
-    echo "design-adherence: PARTIAL — \${UCLASS} of \${DCLASS} approved component classes, \${USED} of \${APPROVED} approved variables, \${NEWCLS} of the build's own."
-  fi
+# Pre-existing drift is reported as debt, never blocking (the operator decides
+# when to spend a cycle on it).
+if [ "$HARD" -gt 4 ] || [ -s "$WORK/shadow" ]; then
+  echo "design-adherence: pre-existing drift on file ($HARD hardcoded colour(s), $(wc -l < "$WORK/shadow" | tr -d ' ') re-made class(es)) — not introduced by this change; not blocking. Passed."
   exit 0
 fi
 
-echo "design-adherence: the app builds on the approved design, and the shell is bridged onto it. Passed."
+echo "design-adherence: no drift — the app builds on the approved design, and the shell is bridged onto it. Passed."
 exit 0
 `;
 

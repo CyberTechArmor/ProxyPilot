@@ -1174,7 +1174,9 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       message: 'Concluded — the work is checkpointed. The finish handshake kept rejecting the completion payload; review the change and press Deploy if it is right.',
       commit: record?.commit_sha || null,
     });
-    void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'pending_verification' });
+    // outcome 'paused', not 'pending_verification': this conclusion did NOT
+    // deploy, so the deployed-terminal review chain must not treat it as one.
+    void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'paused' });
   };
 
   // rejectFinishOrConclude — EVERY finish-validator rejection goes through here

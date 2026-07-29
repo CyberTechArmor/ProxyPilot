@@ -643,8 +643,8 @@ test('design-adherence: an app that reproduces little of the approved design fai
   ].join('\n');
   const r = adherenceFixture({ appCss });
   assert.equal(r.status, 1, `expected a failure:\n${r.out}`);
-  assert.match(r.out, /does not reproduce the approved design/);
-  assert.match(r.out, /uses 9 of \d+ approved variables/);
+  assert.match(r.out, /introduces \d+ hardcoded colour literal/);
+  assert.match(r.out, /the app uses 9/);
 });
 
 test('design-adherence: hardcoded colours fail even at decent coverage', () => {
@@ -655,7 +655,7 @@ test('design-adherence: hardcoded colours fail even at decent coverage', () => {
   ].join('\n');
   const r = adherenceFixture({ appCss });
   assert.equal(r.status, 1, `expected a failure:\n${r.out}`);
-  assert.match(r.out, /25 distinct hardcoded colours/);
+  assert.match(r.out, /25 hardcoded colour\(s\) total, 25 introduced by this change/);
   assert.match(r.out, /do not follow the theme/);
 });
 
@@ -666,7 +666,7 @@ test('design-adherence: a faithful app still passes', () => {
   ].join('\n');
   const r = adherenceFixture({ appCss });
   assert.equal(r.status, 0, `expected a pass:\n${r.out}`);
-  assert.match(r.out, /0 distinct hardcoded colour/);
+  assert.match(r.out, /0 hardcoded colour/);
 });
 
 test('design-adherence: var() fallbacks are not counted as hardcoded colours', () => {
@@ -677,7 +677,7 @@ test('design-adherence: var() fallbacks are not counted as hardcoded colours', (
     filler(200),
   ].join('\n');
   const r = adherenceFixture({ appCss });
-  assert.match(r.out, /0 distinct hardcoded colour/);
+  assert.match(r.out, /0 hardcoded colour/);
   assert.equal(r.status, 0, r.out);
 });
 
@@ -723,7 +723,7 @@ ${Array.from({ length: 90 }, (_, i) => `<div class="row"><span class="label">Fie
 test('design-adherence: screens with no styling and none of the approved components fail', () => {
   const r = adherenceRun({ html: genericScreens });
   assert.equal(r.status, 1, `expected a failure:\n${r.out}`);
-  assert.match(r.out, /does not reproduce the approved design/);
+  assert.match(r.out, /none of the approved component classes/);
   assert.match(r.out, /bytes of screens/);
 });
 
@@ -832,7 +832,7 @@ ${Array.from({ length: 80 }, (_, i) => `<div><span>Note ${i}</span><button class
 </body></html>`;
   const a = runWholeBattery({ html: drifted });
   assert.equal(a['design-adherence'].status, 1, `project 39's shape must red design-adherence:\n${a['design-adherence'].out}`);
-  assert.match(a['design-adherence'].out, /does not reproduce the approved design/);
+  assert.match(a['design-adherence'].out, /none of the approved component classes/);
 
   const faithful = `<!doctype html><html><head>${E2E_HEAD}</head><body>
 <div class="n4-shell"><header class="n4-topbar"><span class="n4-search"></span></header>
@@ -904,103 +904,66 @@ function adherenceCounts(out) {
   return { approved: +v[1], used: +v[2], dclass: +c[1], uclass: +c[2] };
 }
 
-test('design-adherence: full adoption passes clean; partial adoption passes and SAYS it is partial', () => {
-  // Project 42 used 51 of 128 approved component classes on a build whose whole
-  // instruction was "reproduce the mockup faithfully", and reported the same
-  // single word — "Passed." — as a build that used all of them. 8/8 green is
-  // what the operator read before trusting the deploy.
+test('design-adherence: adoption is REPORTED, never scored — full, partial and zero all pass without drift', () => {
+  // The old gate scored adoption breadth, and its headline ("9 of 60
+  // variables") condemned every small app forever while its cheapest pass was
+  // spraying approved class names to raise the count (docs/gate-audit.md #1,
+  // P47). Since the drift redesign the numbers are still printed — the
+  // operator sees them — but no ratio can red or nag a build. Only DRIFT
+  // (hardcoded values where a token exists; re-made components) blocks, and
+  // only when introduced by the current change.
   const full = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({}));
   assert.equal(full.code, 0);
   const fc = adherenceCounts(full.out);
   assert.equal(fc.uclass, fc.dclass, 'the fixture must actually adopt every class');
-  assert.match(full.out, /the app builds on the approved design.*Passed\./);
   assert.doesNotMatch(full.out, /PARTIAL/);
 
-  // STRONG ON ONE ROUTE IS A CLEAN PASS. A build that wears every approved
-  // component class and references few variables is faithful — the gate says so
-  // itself — and flagging it would be noise. The first version of this rule did
-  // exactly that on a fixture that adopted 6 of 6 classes.
-  const componentsOnly = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({ useVars: 2 }));
-  assert.equal(componentsOnly.code, 0);
-  assert.doesNotMatch(componentsOnly.out, /PARTIAL/, 'full component adoption is faithful, not partial');
-  const varsOnly = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({ adoptClasses: 6 }));
-  assert.equal(varsOnly.code, 0);
-  assert.doesNotMatch(varsOnly.out, /PARTIAL/, 'full variable adoption is faithful, not partial');
-
-  // NEITHER route at half — over the failing bar, under half on both.
   const partial = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({ classes: 20, adoptClasses: 8, vars: 20, useVars: 8 }));
-  assert.equal(partial.code, 0, 'a partial pass must not red the build — that would fail honest work over taste');
+  assert.equal(partial.code, 0, 'partial adoption with no drift must pass — breadth is not scored');
+  assert.doesNotMatch(partial.out, /PARTIAL/);
   const pc = adherenceCounts(partial.out);
-  assert.ok(pc.uclass * 4 >= pc.dclass && pc.used * 4 >= pc.approved, 'the fixture must clear the failing bars');
-  assert.ok(pc.uclass * 2 < pc.dclass && pc.used * 2 < pc.approved, 'and sit under half on both routes');
-  assert.match(partial.out, /PARTIAL/);
-  assert.doesNotMatch(partial.out, /and the shell is bridged onto it\. Passed\./);
+  assert.ok(pc.uclass < pc.dclass && pc.used < pc.approved, 'the fixture really is partial');
+  assert.match(partial.out, /reported, not scored/);
 
-  // The numbers must survive the cycle report, which keeps each gate's LAST
-  // THREE LINES — which is how project 42's variable count reached nobody.
-  const tail = partial.out.trim().split('\n').slice(-3).join('\n');
-  assert.match(tail, new RegExp(`${pc.uclass} of ${pc.dclass} approved component classes`));
-  assert.match(tail, new RegExp(`${pc.used} of ${pc.approved} approved variables`));
-
-  // Still red when it is actually red: nothing adopted either way.
+  // Even ZERO adoption passes when there is no drift: an app with no
+  // hardcoded values and no re-made components has nothing this gate blocks
+  // on. (No styling AT ALL on substantial screens is different — that is the
+  // project-39 rule, tested separately.)
   const none = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, designFixture({ adoptClasses: 0, useVars: 0 }));
-  assert.equal(none.code, 1, 'no adoption at all is still a failure, not a partial');
+  assert.equal(none.code, 0, `zero adoption without drift must not block:\n${none.out}`);
 });
 
-test('design-adherence: inventing an element is growth when it is built from the design system', () => {
-  // The gate used to have exactly ONE class number — how much of the mockup's
-  // vocabulary appears in the markup — so a build that thought of a better
-  // element scored the same as one that ignored the design, and a build that
-  // traced the mockup scored best of all. The mockup is approved at the moment
-  // the operator has seen the least; a system that cannot grow past it freezes
-  // there.
+test('design-adherence: token-clean invention passes; hardcoded invention is NEW drift and blocks', () => {
   const withOwn = (n, hardcoded) => {
     const own = Array.from({ length: n }, (_, i) => (hardcoded
       ? `.mine${i}{color:#${(0xcc3300 + i * 13).toString(16)};background:#${(0x223344 + i * 17).toString(16)}}`
-      // The SAME approved variables the fixture already uses, so this tests the
-      // vocabulary rule and not an accidental jump in variable adoption.
       : `.mine${i}{color:var(--tok0${i % 8});border:1px solid var(--tok0${(i + 1) % 8})}`)).join('\n');
     const f = designFixture({ classes: 20, adoptClasses: 8, vars: 20, useVars: 8 });
     return { ...f, 'public/app.css': `${f['public/app.css']}\n${own}` };
   };
 
-  // Token-clean invention: still under half the approved vocabulary (so the
-  // honesty report stands), but named as growth rather than as a shortfall.
+  // A new element built from the approved variables is the system growing.
   const growth = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, withOwn(6, false));
-  assert.equal(growth.code, 0, `growth must never block:\n${growth.out}`);
-  assert.match(growth.out, /the design system growing, not drifting/);
-  assert.match(growth.out, /promote the/i, 'and point at how it becomes permanent');
-  assert.doesNotMatch(growth.out, /may look\s+right while the rest of the app does not/,
-    'a build that extended the system must not be read the drift message');
+  assert.equal(growth.code, 0, `token-clean invention must never block:\n${growth.out}`);
+  assert.match(growth.out, /no drift/);
 
-  // The same shape with the colours typed in is the other story entirely.
+  // The same shape with the colours typed in is drift, and (in a tree with no
+  // git history everything is "this change") it blocks with the literals named.
   const drift = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, withOwn(14, true));
-  assert.doesNotMatch(drift.out, /growing, not drifting/, 'hardcoded invention is not growth');
-
-  // The count is reported either way — nothing is hidden, and it survives the
-  // cycle report, which keeps a gate's LAST THREE LINES.
-  for (const r of [growth, drift]) {
-    assert.match(r.out, /the build defines \d+ of its own/);
-  }
-  assert.match(growth.out.trim().split('\n').slice(-3).join('\n'), /of the build's own/);
+  assert.equal(drift.code, 1, `hardcoded invention must block:\n${drift.out}`);
+  assert.match(drift.out, /introduces \d+ hardcoded colour literal/);
+  assert.match(drift.out, /Replace each with var\(--\.\.\.\)/);
 });
 
-test("design-adherence: inventing elements forfeits the \"I use their components\" waiver", () => {
-  // The waiver is real and earned: an app consuming the design through its
-  // COMPONENTS may write almost no CSS and be entirely faithful. But a build
-  // that defined a dozen elements of its own is not living inside the mockup's
-  // vocabulary, and letting it claim so is how the colours get typed in while
-  // the gate stays green.
-  const base = designFixture({ classes: 20, adoptClasses: 20, vars: 40, useVars: 8 });
-  const invented = Array.from({ length: 12 }, (_, i) => `.own-thing${i}{color:#${(0xdd4400 + i * 19).toString(16)};background:rgb(${i},${i + 9},${i + 3})}`).join('\n');
-  const hard = Array.from({ length: 24 }, (_, i) => `.h${i}{border-color:#${(0xab1200 + i * 23).toString(16)}}`).join('\n');
+test('design-adherence: a re-made component (approved class + suffix) is named as drift', () => {
+  const f = designFixture({ classes: 8, adoptClasses: 8, vars: 20, useVars: 8 });
   const r = runScript(DESIGN_ADHERENCE_GATE_SCRIPT, {
-    ...base,
-    'public/app.css': `${base['public/app.css']}\n${invented}\n${hard}`,
+    ...f,
+    'public/app.css': `${f['public/app.css']}\n.card01-alt{color:var(--tok01);padding:4px}`,
   });
-  assert.equal(r.code, 1, `hardcoded colours across invented elements must fail:\n${r.out}`);
-  assert.match(r.out, /hardcoded colours/);
-  assert.match(r.out, /New elements are welcome/, 'and the message must say how to do it right');
+  assert.equal(r.code, 1, `a near-copy of an approved class must block:\n${r.out}`);
+  assert.match(r.out, /re-makes component\(s\) the approved design already covers/);
+  assert.match(r.out, /card01-alt \(approved: \.card01\)/);
 });
 
 test('design-adherence: PARTIAL is reported as a pass, and a no-design skip as a skip', async () => {

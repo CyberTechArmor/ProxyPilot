@@ -238,7 +238,7 @@ test('GATE: fails the build that re-invented the design system', () => {
     + Array.from({ length: 400 }, (_, i) => `.c${i}{color:var(--own-1);padding:8px}`).join('\n');
   const r = runGate({ 'state/design.css': GATE_DESIGN, 'public/app.css': appCss });
   assert.equal(r.code, 1, 'red');
-  assert.match(r.out, /reference NONE of the \d+ approved design variables/);
+  assert.match(r.out, /introduces \d+ hardcoded colour literal/);
   assert.match(r.out, /theme toggle changes nothing/);
 });
 
@@ -249,7 +249,8 @@ test('GATE: fails a parallel palette even when a few approved vars are used', ()
     + '[data-theme="dark"] .a{opacity:.9}';
   const r = runGate({ 'state/design.css': GATE_DESIGN, 'public/app.css': appCss });
   assert.equal(r.code, 1);
-  assert.match(r.out, /declares 15 design variables of its own/);
+  assert.match(r.out, /introduces \d+ hardcoded colour literal/);
+  assert.match(r.out, /declares 15 of its own/);
 });
 
 test('GATE: passes an app built on the approved design', () => {

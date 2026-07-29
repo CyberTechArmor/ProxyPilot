@@ -559,10 +559,25 @@ exit 0
 
 // ---- no-dead-controls ----
 //
-// The build prompt already binds this ("anything you do NOT implement must be
-// VISIBLY marked — a disabled control with a small 'Not built yet' badge").
-// Nothing enforced it, so unimplemented features shipped as buttons that did
-// nothing at all — the single worst thing a demo can do.
+// A control that LOOKS clickable and does nothing is the single worst thing a
+// demo can do — so a rendered control either works, or is honestly disabled.
+//
+// SCOPE (binding, and the reason this gate is safe): it applies ONLY to
+// controls the build CHOSE to render. It never asks for a control to exist,
+// never counts the inventory, and never fails an app for leaving a capability
+// out. CHEAPEST PASS: wire the controls you rendered, or render fewer — both
+// make the app better.
+//
+// THE PAIR (gate-audit.md #4 called the combination HARMFUL; reviewed together
+// with action parity in runner.js on 2026-07-29): read jointly, the old pair
+// said "render every contract action; badge the ones you did not build" —
+// which is how the notes app became a form. The pair cannot force
+// render-everything any more, because each side gave up one half of that
+// instruction: action parity accepts a capability placed in a menu or any
+// secondary surface, and accepts "left out + stated in the finish summary"
+// (it warns the operator instead of demanding a control); this gate only ever
+// looks at what is already on screen. Neither check, alone or together, can
+// require a control the design does not show.
 export const NO_DEAD_CONTROLS_GATE_NAME = 'no-dead-controls';
 
 export const NO_DEAD_CONTROLS_GATE_SCRIPT = `# Baseline gate (ProxyPilot): a control either works or says it does not yet.

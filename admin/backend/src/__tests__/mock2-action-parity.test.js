@@ -207,3 +207,28 @@ test('RATCHET: the greps use the core and detect hidden-only', () => {
   assert.match(src, /grep -vc 'hidden'/);
   assert.match(src, /actionParityReport\(actions, found, wordHits, hiddenOnly\)/);
 });
+
+test('RATCHET: the pair cannot force render-everything', () => {
+  // gate-audit.md #4: no-dead-controls + action parity, read together, used to
+  // say "render every contract action; badge the rest" — the form-like app.
+  // Each side has given up its half of that instruction, and the message must
+  // keep saying so.
+  const runner = readFileSync(new URL('../mock2/runner.js', import.meta.url), 'utf8');
+  const i = runner.indexOf('Not finished — action parity');
+  const msg = runner.slice(i, i + 1600);
+  assert.match(msg, /never asks for a new top-level control/);
+  assert.match(msg, /menu item, a detail view, a settings screen all count/);
+  // The badge is conditional on the MOCKUP showing the control — never a
+  // blanket instruction to render.
+  assert.match(msg, /when the mockup SHOWS its control/);
+  assert.match(msg, /leave it out and say so in your finish summary/);
+  assert.ok(!/If you genuinely cannot build one this cycle, render it disabled/.test(msg),
+    'the unconditional badge instruction must be gone');
+
+  const gates = readFileSync(new URL('../mock2/baseline-gates.js', import.meta.url), 'utf8');
+  const j = gates.indexOf('---- no-dead-controls ----');
+  const header = gates.slice(j, j + 1800);
+  assert.match(header, /ONLY to\n\/\/ controls the build CHOSE to render/);
+  assert.match(header, /THE PAIR/);
+  assert.match(header, /CHEAPEST PASS/);
+});

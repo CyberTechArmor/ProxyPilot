@@ -1663,11 +1663,23 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         recordFeature(projectId, 'removal_claims', 'failed', e?.message || 'threw');
       }
       // ACTION PARITY (ratchet 3): on the inventory-implementation build,
-      // every mutation action in the contract must be SURFACED in the app's
-      // UI source — working control or a visible "Not built yet" badge both
-      // put the label in the source; a label found NOWHERE is silently
+      // every mutation action in the contract must be REACHABLE BY A USER —
+      // a control, a menu item, or any secondary surface all count; a
+      // hidden-only match never does. A capability found nowhere is silently
       // missing and rejects the finish once (with the list). Deterministic:
       // one container grep per label over src/ + public/.
+      //
+      // CHEAPEST PASS + THE PAIR (gate-audit.md #4/#12; reviewed together
+      // with no-dead-controls in baseline-gates.js): the cheapest pass is to
+      // put the capability wherever the design places it — a "More actions"
+      // menu item satisfies this check completely. The pair cannot jointly
+      // force render-everything: THIS check accepts menu/secondary placement
+      // and accepts "left out + stated in the summary" (warn path, operator
+      // told), so it never demands a rendered top-level control; and
+      // no-dead-controls only inspects controls the build CHOSE to render —
+      // it never asks for one to exist. P47's "Edit note title/body" button
+      // came from a message that read as "the checker wants the string";
+      // the message below forbids that reading explicitly.
       if (/approved design inventory/i.test(String(cycle.instruction || ''))) {
         try {
           const invRead = await readFileInContainer(containerName, 'state/inventory.json');
@@ -1764,7 +1776,10 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
                   + '"Edit", a pencil icon with an aria-label, or an item inside a "More actions" menu all pass. '
                   + 'Do NOT put the contract\'s wording on screen: a button reading "Edit note title/body" is this check being satisfied instead of a user being served.\n\n'
                   + 'Two things that do NOT count: an element with the `hidden` attribute, and a control that leads somewhere the action cannot actually be performed. '
-                  + 'If you genuinely cannot build one this cycle, render it disabled with a visible "Not built yet" badge. Then re-call finish.',
+                  + 'PLACEMENT IS THE DESIGN\'S CALL, not this check\'s: put the capability where the approved mockup puts it — a menu item, a detail view, a settings screen all count as reachable. '
+                  + 'This message never asks for a new top-level control; adding one to satisfy it is the wrong reading. '
+                  + 'If you genuinely cannot build a capability this cycle: when the mockup SHOWS its control, ship that control disabled with a visible "Not built yet" badge; '
+                  + 'when the mockup does not show it, leave it out and say so in your finish summary — the operator is told either way. Then re-call finish.',
               };
               const r = await rejectFinishOrConclude({
                 validator: 'action-parity', termId, termName, decision, gateReports: lastGateReports,

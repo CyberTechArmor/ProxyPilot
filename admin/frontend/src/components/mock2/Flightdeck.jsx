@@ -69,17 +69,28 @@ export default function Flightdeck({
       const cycleId = r.cycle?.id ?? null;
       const fresh = Array.isArray(r.activity) ? r.activity : [];
       if (activityCycleRef.current !== cycleId) {
-        // New (or no) cycle — start its stream clean.
+        // New (or no) cycle — start its stream clean. CRITICALLY, ignore this
+        // response's watermark: the request was made with the PREVIOUS cycle's
+        // high seq, so the server filtered the NEW cycle's stream against a
+        // number from a different stream (P48: a queued build started, its
+        // early activity was all below the old watermark, and adopting the
+        // echoed watermark made the blindness permanent — the chat sat on
+        // "Queued build started" until a page refresh reset the poll). Seed
+        // the watermark from the rows actually received; null re-fetches the
+        // stream from the top on the next poll (~3s), which self-heals
+        // whatever this transitional response missed.
         activityCycleRef.current = cycleId;
-        activitySinceRef.current = null;
+        activitySinceRef.current = fresh.length ? Math.max(...fresh.map((a) => a.seq)) : null;
         setActivity(fresh);
       } else if (fresh.length) {
         setActivity((cur) => {
           const seen = new Set(cur.map((a) => a.seq));
           return [...cur, ...fresh.filter((a) => !seen.has(a.seq))].slice(-200);
         });
+        if (r.activity_since != null) activitySinceRef.current = r.activity_since;
+      } else if (r.activity_since != null) {
+        activitySinceRef.current = r.activity_since;
       }
-      if (r.activity_since != null) activitySinceRef.current = r.activity_since;
     } catch { /* transient */ }
   }, [projectId, online]);
   useEffect(() => { load(); }, [load]);

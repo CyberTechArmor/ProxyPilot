@@ -4148,17 +4148,24 @@ export function createMock2Router() {
   router.get('/projects/:id/design-options/screens', requireMock2Role('viewer'), async (req, res) => {
     const project = req.mock2Project;
     let pages = ['/', '/login'];
+    // The in-page screen VIEWS ("/#note-detail") — selectable like any page
+    // (P48: the screen the operator wanted was a view, and the picker only
+    // offered routes); the capture navigates the route and activates the
+    // named data-screen panel.
+    let views = [];
     if (project.container_name && project.lifecycle === 'active') {
       try {
-        const { listAppScreenPaths } = await import('./design-review.js');
-        pages = await listAppScreenPaths(project.container_name);
+        const { listAppScreenPaths, listAppScreenViews } = await import('./design-review.js');
+        [pages, views] = await Promise.all([
+          listAppScreenPaths(project.container_name),
+          listAppScreenViews(project.container_name),
+        ]);
       } catch { /* the fallback pair still works */ }
     }
-    // The inventory's named screen views — shown for context; they ride their
-    // route's capture automatically.
+    // The inventory's named screens — display context for the views list.
     let screens = [];
     try { screens = listScreenPlan(project.id).map((r) => r.name).filter(Boolean); } catch { screens = []; }
-    res.json({ pages, screens });
+    res.json({ pages, views, screens });
   });
 
   router.post('/projects/:id/design-options', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {

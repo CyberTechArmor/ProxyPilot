@@ -12,7 +12,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { ANNOTATION_CLOSING } from '@/lib/annotation';
-import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2, MapPin, X, Send, Sparkle, MousePointer2, FileWarning } from 'lucide-react';
+import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2, Maximize2, Minimize2, MapPin, X, Send, Sparkle, MousePointer2, FileWarning, Zap, Wand2 } from 'lucide-react';
 
 const MAX_PREVIEW_PINS = 8;
 
@@ -38,12 +38,18 @@ function describeEl(el) {
 // walking it — dashboard, then settings, then a detail page — and a flat list
 // that says "the screen currently shown in the preview" is actively wrong the
 // moment a second screen is involved: it points every fix at one page.
-function composePreviewAnnotation(src, pins, { hasImage = false, elementAware = false } = {}) {
+// `forOptions` — the pins are a complaint for the Design-options read, not a
+// build instruction: the header frames them as "places that do not feel right"
+// and the quick-update closing boilerplate is left off.
+// A pin may carry a precomputed display number `n` (assigned across the WHOLE
+// noted set before it was split by kind) so the numbers in a split message
+// still match the numbers burned into the shared screenshot.
+function composePreviewAnnotation(src, pins, { hasImage = false, elementAware = false, forOptions = false } = {}) {
   const noted = pins.filter((p) => p.note.trim());
   if (!noted.length) return '';
   const order = [];
   for (const p of noted) { const k = p.page || '/'; if (!order.includes(k)) order.push(k); }
-  const numberOf = (p) => noted.indexOf(p) + 1;
+  const numberOf = (p) => p.n ?? (noted.indexOf(p) + 1);
   const blocks = order.map((page) => {
     const mine = noted.filter((p) => (p.page || '/') === page);
     const lines = mine.map((p) => {
@@ -59,6 +65,9 @@ function composePreviewAnnotation(src, pins, { hasImage = false, elementAware = 
     : 'pins are a percentage of the visible preview area';
   const img = hasImage ? ' A screenshot with the numbered pins burned in is attached.' : '';
   const scope = order.length > 1 ? `${order.length} screens of the live app` : `the live preview (${src})`;
+  if (forOptions) {
+    return `The operator pinned place(s) on ${scope} that do not look right and wants LAYOUT OPTIONS for them, not a prescribed fix (${how}).${img}\n\n${blocks.join('\n\n')}`;
+  }
   return `Annotated ${scope} — the numbered pins mark where the operator was pointing (${how}).${img}\n\n${blocks.join('\n\n')}\n\n${ANNOTATION_CLOSING}`;
 }
 
@@ -214,7 +223,12 @@ function ScreenWorkViewfinder({ projectId, job }) {
   );
 }
 
-export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null, projectId = null, watchProjectId = null }) {
+// onAnnotateOptions (optional) — async ({ text, image, pages }) => void. When
+// provided alongside onAnnotate, each pin gets a Fix/Options toggle: Fix pins
+// send as the Quick update (onAnnotate, unchanged); Options pins ask for
+// design options scoped to their pinned page(s) instead — "this doesn't look
+// right HERE" without having to prescribe the fix.
+export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight = false, onToggleFullHeight = null, onAnnotate = null, onAnnotateOptions = null, projectId = null, watchProjectId = null }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
   const [annotating, setAnnotating] = useState(false);
   // A capture in flight LOCKS this panel: the frames on screen are the ones
@@ -314,6 +328,7 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
         setPins((cur) => (cur.length >= MAX_PREVIEW_PINS ? cur : [...cur, {
           x: Number(d.pin.x) || 0, y: Number(d.pin.y) || 0, note: '', el: d.pin,
           page: d.pin.page || currentPageRef.current || '/',
+          kind: 'fix',
         }]));
       }
     };
@@ -350,23 +365,43 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
     const rect = e.currentTarget.getBoundingClientRect();
     const x = Math.round(((e.clientX - rect.left) / rect.width) * 1000) / 10;
     const y = Math.round(((e.clientY - rect.top) / rect.height) * 1000) / 10;
-    setPins((cur) => [...cur, { x, y, note: '', page: currentPageRef.current || '/' }]);
+    setPins((cur) => [...cur, { x, y, note: '', page: currentPageRef.current || '/', kind: 'fix' }]);
   };
   const setNote = (i, note) => setPins((cur) => cur.map((p, j) => (j === i ? { ...p, note } : p)));
+  const setKind = (i, kind) => setPins((cur) => cur.map((p, j) => (j === i ? { ...p, kind } : p)));
   const removePin = (i) => setPins((cur) => cur.filter((_, j) => j !== i));
   const notedCount = pins.filter((p) => p.note.trim()).length;
+  // The per-pin lanes. Without onAnnotateOptions every pin is a fix — the
+  // toggle never renders and behavior is exactly the old single-lane send.
+  const fixCount = pins.filter((p) => p.note.trim() && (onAnnotateOptions ? (p.kind || 'fix') !== 'options' : true)).length;
+  const optCount = onAnnotateOptions ? pins.filter((p) => p.note.trim() && p.kind === 'options').length : 0;
   const elementAware = mode === 'bridge';
 
   const sendPins = async () => {
     if (!notedCount || !onAnnotate) return;
     setSending(true);
     try {
+      // Numbers are assigned across the WHOLE noted set BEFORE the split, so
+      // the burned-in screenshot (which shows every pin) and both messages
+      // agree on which pin is which.
+      const noted = pins.filter((p) => p.note.trim()).map((p, i) => ({ ...p, n: i + 1 }));
+      const fixPins = noted.filter((p) => !onAnnotateOptions || (p.kind || 'fix') !== 'options');
+      const optPins = onAnnotateOptions ? noted.filter((p) => p.kind === 'options') : [];
       let image = null;
       if (attachShot) {
         postToApp('disable'); // stop pin capture during the snapshot
-        image = await capturePreviewImage(frontIframe(), pins.filter((p) => p.note.trim())).catch(() => null);
+        image = await capturePreviewImage(frontIframe(), noted).catch(() => null);
       }
-      await onAnnotate({ text: composePreviewAnnotation(src, pins, { hasImage: !!image, elementAware }), image });
+      if (fixPins.length) {
+        await onAnnotate({ text: composePreviewAnnotation(src, fixPins, { hasImage: !!image, elementAware }), image });
+      }
+      if (optPins.length) {
+        await onAnnotateOptions({
+          text: composePreviewAnnotation(src, optPins, { hasImage: !!image, elementAware, forOptions: true }),
+          image,
+          pages: [...new Set(optPins.map((p) => p.page || '/'))],
+        });
+      }
       exitAnnotate();
       setSentAt(Date.now());
     } finally { setSending(false); }
@@ -545,9 +580,11 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
       </div>
       {annotating ? (
         <div className="max-h-[45%] shrink-0 space-y-2 overflow-y-auto border-t bg-background/95 p-3">
-          {pins.length ? pins.map((p, i) => (
+          {pins.length ? pins.map((p, i) => {
+            const isOpt = onAnnotateOptions && p.kind === 'options';
+            return (
             <div key={i} className="flex items-start gap-2">
-              <span className="mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-600 text-[11px] font-bold text-white">{i + 1}</span>
+              <span className={`mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white ${isOpt ? 'bg-violet-600' : 'bg-red-600'}`}>{i + 1}</span>
               <div className="flex-1 min-w-0">
                 {p.el ? (
                   <p className="mb-1 truncate text-[11px] text-muted-foreground" title={describeEl(p.el)}>
@@ -559,16 +596,44 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
                   className="h-10 w-full rounded-md border bg-background px-3 text-sm"
                   value={p.note}
                   onChange={(e) => setNote(i, e.target.value)}
-                  placeholder="What should change here?"
+                  placeholder={isOpt ? 'What feels wrong here? (options come back to choose from)' : 'What should change here?'}
                   aria-label={`Note for pin ${i + 1}`}
                 />
               </div>
+              {/* The pin's lane: Fix = a prescribed change (Quick update);
+                  Options = "this doesn't look right here" — design options for
+                  that part/page come back to choose from. Only offered when the
+                  host wired the options lane. */}
+              {onAnnotateOptions ? (
+                <div className="mt-0.5 flex shrink-0 rounded-md border p-0.5" role="radiogroup" aria-label={`Pin ${i + 1} action`}>
+                  <button
+                    type="button" role="radio" aria-checked={!isOpt}
+                    onClick={() => setKind(i, 'fix')}
+                    className={`inline-flex h-9 items-center gap-1 rounded px-1.5 text-[11px] ${!isOpt ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+                    title="Send this pin as a fix instruction (Quick update)"
+                  >
+                    <Zap className="h-3 w-3" /><span className="hidden sm:inline">Fix</span>
+                  </button>
+                  <button
+                    type="button" role="radio" aria-checked={isOpt}
+                    onClick={() => setKind(i, 'options')}
+                    className={`inline-flex h-9 items-center gap-1 rounded px-1.5 text-[11px] ${isOpt ? 'bg-violet-600/15 text-violet-600' : 'text-muted-foreground'}`}
+                    title="Get design options for this part/page instead of prescribing a fix"
+                  >
+                    <Wand2 className="h-3 w-3" /><span className="hidden sm:inline">Options</span>
+                  </button>
+                </div>
+              ) : null}
               <Button variant="ghost" size="icon" className="mt-0.5 h-9 w-9 shrink-0 text-red-500" onClick={() => removePin(i)} aria-label={`Remove pin ${i + 1}`}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
-          )) : (
-            <p className="text-xs text-muted-foreground">No pins yet — tap the preview where something should change.</p>
+            );
+          }) : (
+            <p className="text-xs text-muted-foreground">
+              No pins yet — tap the preview where something should change.
+              {onAnnotateOptions ? ' Each pin can be a Fix (tell the build what to change) or Options (get layouts to choose from for that spot).' : ''}
+            </p>
           )}
           <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
             <input type="checkbox" checked={attachShot} onChange={(e) => setAttachShot(e.target.checked)} className="h-3.5 w-3.5" />
@@ -577,7 +642,11 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
           <div className="flex gap-2 pt-1">
             <Button className="min-h-[40px] flex-1" disabled={sending || !notedCount} onClick={sendPins}>
               {sending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Send className="h-4 w-4 mr-1" />}
-              Send {notedCount || ''} change{notedCount === 1 ? '' : 's'} as Quick update
+              {optCount && fixCount
+                ? `Send ${fixCount} fix${fixCount === 1 ? '' : 'es'} + options for ${optCount}`
+                : optCount
+                  ? `Get design options for ${optCount} pin${optCount === 1 ? '' : 's'}`
+                  : `Send ${notedCount || ''} change${notedCount === 1 ? '' : 's'} as Quick update`}
             </Button>
             <Button variant="ghost" className="min-h-[40px]" disabled={sending} onClick={exitAnnotate}>Cancel</Button>
           </div>
@@ -585,7 +654,7 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
       ) : null}
       {!annotating && sentAt ? (
         <p className="flex items-center gap-1.5 border-t bg-emerald-500/10 px-3 py-1.5 text-[11px] text-emerald-600 shrink-0">
-          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> Sent as a Quick update — watch the build chat.
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> Sent — watch the build chat (fixes run as a Quick update; options arrive as layouts to choose from).
         </p>
       ) : null}
       {!approved && !annotating ? (

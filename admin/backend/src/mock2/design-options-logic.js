@@ -170,12 +170,33 @@ Reply with STRICT JSON only — no prose, no markdown fences:
 }`;
 }
 
+// The human-readable target: 'all screens', a single route, or a joined list.
+// One place, so the started message, the job line, and the diagnosis header
+// cannot disagree about what was looked at.
+export function screensLabel(pages = [], allScreens = false) {
+  if (allScreens) return 'all screens';
+  const list = (Array.isArray(pages) ? pages : []).filter(Boolean);
+  if (!list.length) return '/';
+  return list.join(', ');
+}
+
 export function buildDesignOptionsTask({
   projectName = 'the app', complaint = '', page = '/', measurements = '', designNote = '', shots = [],
+  multi = false, attachedCount = 0,
 } = {}) {
-  const parts = [`Project: ${projectName}`, `Screen: ${page}`];
+  const parts = [`Project: ${projectName}`, `Screen${multi ? 's' : ''}: ${page}`];
   parts.push(`What the operator said:\n"${clip(complaint, 1200)}"`);
   if (shots.length) parts.push(`Screenshots attached, in order: ${shots.map((s) => `${s.path}@${s.width}px`).join(', ')}.`);
+  if (multi) {
+    parts.push('Several screens are attached. Options may target different screens — start each option\'s '
+      + 'name with the screen it applies to (e.g. "/admin — Collapse the chrome") and make each brief name '
+      + 'its screen explicitly, so the operator knows what they are pressing Build on.');
+  }
+  if (attachedCount > 0) {
+    parts.push(`The operator also attached ${attachedCount} image(s) of their own (shown last) — e.g. an annotated `
+      + 'screenshot with numbered red pins. Treat each pin as a pointer to a place that feels wrong; the pin '
+      + 'notes are in their words above.');
+  }
   if (measurements) parts.push(measurements);
   if (designNote) parts.push(designNote);
   parts.push('Diagnose it, then give two or three options as the JSON object described. Nothing will be changed until the operator picks one.');
@@ -270,7 +291,8 @@ export function optionsFailureMessage(reason) {
 }
 
 // The line posted as soon as the request is accepted, so a two-minute capture
-// does not look like nothing happening.
+// does not look like nothing happening. `page` may be a single route, a joined
+// list, or 'all screens' (screensLabel).
 export function optionsStartedMessage(page) {
   return `Looking at \`${page}\` at phone and laptop width, then working out two or three ways to fix it. Nothing will change until you pick one.`;
 }

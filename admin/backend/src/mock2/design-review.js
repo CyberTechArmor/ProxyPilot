@@ -295,12 +295,24 @@ function loadAxeSource() {
 
 // The paths worth shooting: '/' always, '/login', plus the pages the project's
 // own ui-checks spec exercises (they are the screens the builds touched).
-function pathsToShoot(spec) {
+// `max` bounds the list for cost (the review's default); Infinity enumerates
+// every page — the design-options "all screens" mode, which the operator has
+// explicitly opted into paying for.
+function pathsToShoot(spec, max = MAX_PATHS) {
   const paths = ['/', '/login'];
   for (const chk of spec?.checks || []) {
     if (chk.page && !paths.includes(chk.page)) paths.push(chk.page);
   }
-  return paths.slice(0, MAX_PATHS);
+  return Number.isFinite(max) ? paths.slice(0, max) : paths;
+}
+
+// Every path worth shooting for this app, UNCAPPED — the screen picker's list.
+// (captureAppScreens' own default stays capped for cost; the picker exists to
+// opt into more, knowingly.)
+export async function listAppScreenPaths(containerName) {
+  const specText = await readContainerFile(containerName, UI_CHECKS_PATH);
+  const parsed = specText ? parseUiChecks(specText) : { ok: false };
+  return pathsToShoot(parsed.ok ? parsed.spec : null, Infinity);
 }
 
 // Screenshot the deployed app. Returns { shots, axe, detail } — shots are
@@ -309,7 +321,10 @@ function pathsToShoot(spec) {
 // operator what the browser is looking at RIGHT NOW rather than a spinner and a
 // two-minute wait. Best-effort and never allowed to break the capture: a
 // viewfinder that throws would cost the review it was decorating.
-export async function captureAppScreens({ containerName, webPort = 3000, paths = null, withAxe = true, reviewLogin = null, onShot = null }) {
+// `uncapped` — no MAX_PATHS / MAX_SCREEN_PANELS limits: every requested route
+// AND every in-route `data-screen` panel view is shot. Only for flows the
+// operator explicitly scoped (design-options screen picker / all-screens).
+export async function captureAppScreens({ containerName, webPort = 3000, paths = null, withAxe = true, reviewLogin = null, onShot = null, uncapped = false }) {
   const report = (shot) => { try { onShot?.(shot); } catch { /* a viewfinder must never fail a capture */ } };
   const chromium = await loadChromium();
   if (!chromium) return { shots: [], axe: [], overflows: [], detail: 'playwright-core is not installed (rerun update.sh / npm install)' };
@@ -317,7 +332,9 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
   const specText = await readContainerFile(containerName, UI_CHECKS_PATH);
   const parsed = specText ? parseUiChecks(specText) : { ok: false };
   const spec = parsed.ok ? parsed.spec : null;
-  const targets = paths?.length ? paths.slice(0, MAX_PATHS) : pathsToShoot(spec);
+  const targets = paths?.length
+    ? (uncapped ? paths : paths.slice(0, MAX_PATHS))
+    : pathsToShoot(spec, uncapped ? Infinity : MAX_PATHS);
   const axeSource = withAxe ? loadAxeSource() : null;
 
   let browser = null;
@@ -381,7 +398,7 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
             .filter((el) => !el.classList.contains('screen-active'))
             .map((el) => el.getAttribute('data-screen'))
             .filter(Boolean), SCREEN_PANEL_SELECTOR);
-          for (const name of names.slice(0, MAX_SCREEN_PANELS)) {
+          for (const name of names.slice(0, uncapped ? names.length : MAX_SCREEN_PANELS)) {
             // eslint-disable-next-line no-await-in-loop
             const shown = await page.evaluate(([sel, want]) => {
               const all = Array.from(document.querySelectorAll(sel));

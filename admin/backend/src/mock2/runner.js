@@ -100,7 +100,7 @@ import { needsOperatorUiVerification, smokeConfigFromEnv } from './smoke-trigger
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
   acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord, codeChangedFiles,
-  mutationActions, actionParityReport, actionLabelWords,
+  mutationActions, actionParityReport, actionLabelWords, actionLabelCore,
 } from './acceptance-logic.js';
 import {
   evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
@@ -122,6 +122,7 @@ import { UI_CHECKS_PATH, parseUiChecks } from './ui-check-logic.js';
 import {
   removalCoverage, removalRejectionMessage, removalWarningMessage, removalCoverageNote,
 } from './removal-claims-logic.js';
+import { recordFeature, takeFeatureLedger } from './feature-activation.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
 // BUILD_RUNNER=sdk — docs/agent-sdk-migration.md) orients in the same container
@@ -1453,6 +1454,15 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         });
         const note = removalCoverageNote(verdict);
         if (note) logEvent('note', { role: 'system', content: note });
+        // The ledger row, INCLUDING the quiet case. "No removal was claimed" is
+        // the answer an operator cannot get any other way — a feature that
+        // declines to act writes nothing, and silence reads identically to
+        // never having run.
+        recordFeature(projectId, 'removal_claims',
+          verdict.claims.length ? 'fired' : 'skipped',
+          verdict.claims.length
+            ? `${verdict.claims.length} claim(s); ${verdict.ok ? 'each asserted by a check that could fail' : `${verdict.uncovered.length} unverified, ${verdict.badRefs.length} unfalsifiable`}`
+            : 'the summary claimed no user-visible removal');
         if (!verdict.ok && !removalRejected) {
           removalRejected = true;
           transcript.push({
@@ -1491,7 +1501,10 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             decision.finishAcceptanceIds = [...new Set([...(decision.finishAcceptanceIds || []), ...ids])];
           }
         }
-      } catch (e) { console.warn('[mock2] removal-claim check failed open:', e?.message); }
+      } catch (e) {
+        console.warn('[mock2] removal-claim check failed open:', e?.message);
+        recordFeature(projectId, 'removal_claims', 'failed', e?.message || 'threw');
+      }
       // ACTION PARITY (ratchet 3): on the inventory-implementation build,
       // every mutation action in the contract must be SURFACED in the app's
       // UI source — working control or a visible "Not built yet" badge both
@@ -1520,19 +1533,32 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             // there — then renamed the control to satisfy the grep. Rejecting a
             // finish over a name is how a gate teaches a build to edit labels
             // for the detector.
+            // THE CORE, not every word. Requiring all significant words on one
+            // line meant "Edit note title/body" needed edit AND note AND title
+            // AND body together — which no designed control ever satisfies, so
+            // a build with a perfectly good `More actions → Edit` was told the
+            // action appeared NOWHERE and printed the contract string on a
+            // button to get past it. Two words is what a real control can
+            // carry: the verb somewhere near the noun.
             const wordGrep = (a) => {
-              const words = actionLabelWords(a.label).filter((w) => /^[a-z0-9]+$/.test(w)).slice(0, 6);
+              const words = actionLabelCore(a.label).filter((w) => /^[a-z0-9]+$/.test(w));
               if (!words.length) return null;
               if (words.length === 1) return `grep -rqi -- '${words[0]}' src public app views 2>/dev/null`;
-              return `grep -rhi -- '${words[0]}' src public app views 2>/dev/null`
-                + words.slice(1, -1).map((w) => ` | grep -i -- '${w}'`).join('')
-                + ` | grep -qi -- '${words[words.length - 1]}'`;
+              return `grep -rhi -- '${words[0]}' src public app views 2>/dev/null | grep -qi -- '${words[1]}'`;
             };
             const script = ['cd "' + APP_DIR + '"']
               .concat(actions.map((a) => {
                 const wg = wordGrep(a);
+                // HIDDEN-ONLY is checked FIRST: an exact label whose every
+                // occurrence sits on a line carrying a `hidden` attribute is
+                // not a surfaced action, it is this grep being gamed. Project
+                // 47 shipped `<p id="admin-settings-hint" hidden>` for exactly
+                // that, and the old check counted it as present.
                 return `l=$(printf '%s' '${b64(a.label)}' | base64 -d)\n`
-                  + `if grep -rqiF -- "$l" src public app views 2>/dev/null; then printf 'FOUND\\t%s\\n' "$l"\n`
+                  + `n=$(grep -rhiF -- "$l" src public app views 2>/dev/null | wc -l)\n`
+                  + `v=$(grep -rhiF -- "$l" src public app views 2>/dev/null | grep -vc 'hidden')\n`
+                  + `if [ "$n" -gt 0 ] && [ "$v" -eq 0 ]; then printf 'HIDDEN\\t%s\\n' "$l"\n`
+                  + `elif [ "$n" -gt 0 ]; then printf 'FOUND\\t%s\\n' "$l"\n`
                   + (wg ? `elif ${wg}; then printf 'WORDS\\t%s\\n' "$l"\n` : '')
                   + 'fi';
               }))
@@ -1542,7 +1568,18 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
               .filter((x) => x.startsWith(`${tag}\t`)).map((x) => x.slice(tag.length + 1).trim().toLowerCase()));
             const found = tagged('FOUND');
             const wordHits = tagged('WORDS');
-            const parity = actionParityReport(actions, found, wordHits);
+            const hiddenOnly = tagged('HIDDEN');
+            const parity = actionParityReport(actions, found, wordHits, hiddenOnly);
+            if (parity.hiddenOnly?.length) {
+              // Said out loud and separately from "missing": the build DID
+              // write the label, on an element nobody can see. That is a
+              // different mistake from dropping the action, and the message
+              // has to name it or the next build repeats it.
+              logEvent('note', {
+                role: 'system',
+                content: `Action parity: ${parity.hiddenOnly.length} action(s) matched ONLY on a hidden element: ${parity.hiddenOnly.map((a) => `"${a.label}"`).join(', ')}`,
+              });
+            }
             if (parity.drifted?.length) {
               // Reported, never blocking: the action shipped, its NAME drifted
               // from the approved contract. Worth an operator's attention and
@@ -1557,7 +1594,20 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
               const list = parity.missing.slice(0, 10).map((a) => `"${a.label}" (${a.screen})`).join(', ');
               transcript.push({
                 role: 'tool', toolCallId: termId, name: termName,
-                content: `Not finished — action parity: these inventory mutation actions are in the approved contract but appear NOWHERE in the app's UI source: ${list}. Implement each one, or render its control disabled with a visible "Not built yet" badge — never silently drop a contract action. Then re-call finish.`,
+                // THE WORDING OF THIS MESSAGE IS THE FEATURE. The old one said
+                // the actions "appear NOWHERE in the app's UI source", and a
+                // build read that as "the checker wants the exact string" and
+                // shipped a button labelled "Edit note title/body". A gate that
+                // dictates copy is worse than the drop it catches, so this
+                // says explicitly that the contract is a list of CAPABILITIES,
+                // names the good design as acceptable, and forbids the two
+                // shortcuts that gaming it produces.
+                content: `Not finished — action parity: a user has no way to perform these actions from the approved contract: ${list}.\n\n`
+                  + 'The contract names CAPABILITIES, not button copy. Give each one a real control and label it however reads best — '
+                  + '"Edit", a pencil icon with an aria-label, or an item inside a "More actions" menu all pass. '
+                  + 'Do NOT put the contract\'s wording on screen: a button reading "Edit note title/body" is this check being satisfied instead of a user being served.\n\n'
+                  + 'Two things that do NOT count: an element with the `hidden` attribute, and a control that leads somewhere the action cannot actually be performed. '
+                  + 'If you genuinely cannot build one this cycle, render it disabled with a visible "Not built yet" badge. Then re-call finish.',
               });
               logEvent('note', { role: 'system', content: `Finish rejected — action parity: silently missing: ${list}` });
               touchLock(projectId, holder);
@@ -1887,6 +1937,25 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           viewerLogin = acct?.viewerLogin || null;
         } catch (e) { console.warn('[mock2] pre-smoke review account failed:', e?.message); }
         const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, requiredIds: decision.finishAcceptanceIds || [], logEvent, env: process.env, reviewLogin, viewerLogin, projectId: project.id });
+        // The smoke-side ledger rows, then the ledger itself. This is the last
+        // stage that reports anything, so it is where the note gets written —
+        // and it is written on the failure paths below too, because a build
+        // that went red is exactly when "which platform features even ran"
+        // stops being trivia. Instrumentation, so it can never throw.
+        try {
+          const sa = smoke.report?.browser?.screenAccounts;
+          recordFeature(project.id, 'screen_accounts', sa ? 'fired' : 'skipped',
+            sa || 'the spec declared no fixture users');
+          recordFeature(project.id, 'first_run', smoke.notYetPossible ? 'fired' : 'skipped',
+            smoke.notYetPossible
+              ? 'no first administrator — session checks could not run'
+              : 'the app has a first administrator (or nothing failed to explain)');
+          const ledger = takeFeatureLedger(project.id);
+          if (ledger.note) {
+            logEvent('note', { role: 'system', content: ledger.note, meta: { feature_activation: ledger.summary } });
+            insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: ledger.note });
+          }
+        } catch (e) { console.warn('[mock2] feature ledger failed:', e?.message); }
         // A malformed TEST FILE is not a broken app. Project 38 deployed
         // successfully, served correctly, and the cycle went red because
         // state/ui-checks.json used a different (equally valid, more
@@ -1947,9 +2016,39 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           } catch (e) { console.warn('[mock2] post-smoke readiness check failed:', e?.message); }
           // The readiness line goes FIRST when it fired: it is the cause, and
           // the check failures below it are the symptoms.
+          // EVERY failure is a platform baseline → an identical retry gets an
+          // identical report, and the operator is the one who presses Continue.
+          // Project 47 ran three cycles and $10.28 before anyone could tell
+          // that was the situation: cycles 2 and 3 both changed no product
+          // code, and one of the two failures was not fixable from inside the
+          // app at all. Best-effort — this only decides what the cycle fails
+          // SAYING.
+          let baselineLine = '';
+          try {
+            if (smoke.baselineOnly) {
+              const { baselineBlockedMessage } = await import('./ui-check-logic.js');
+              // "No product code changed" is what makes a retry provably
+              // futile rather than merely unpromising; state/ and the build-id
+              // stamps are not product code.
+              const product = (changedThisCycle || []).filter((f) => !/^state\//.test(f)
+                && !/^public\/(build-id\.(js|txt)|sw\.js)$/.test(f));
+              const msg = baselineBlockedMessage(smoke.baselineOnly, { emptyDiff: product.length === 0 });
+              if (msg) {
+                insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: msg });
+                baselineLine = product.length === 0
+                  ? 'Only platform baseline checks failed, and this build changed no product code — running it again will report the same thing. '
+                  : 'Only platform baseline checks failed (not your change). ';
+              }
+              logEvent('note', {
+                role: 'system',
+                content: `Baseline-only smoke failure: ${smoke.baselineOnly.ids.join(', ')} (product files changed: ${product.length})`,
+                meta: { baseline_only: true, ids: smoke.baselineOnly.ids },
+              });
+            }
+          } catch (e) { console.warn('[mock2] baseline-only report failed:', e?.message); }
           const error = readyLine
             ? `The deployed app is not reachable — ${readyLine}. Downstream: ${detail}`
-            : `Smoke gate failed after deploy — ${detail}`;
+            : `${baselineLine}Smoke gate failed after deploy — ${detail}`;
           finishCycle(cycle.id, { status: 'failed', error });
           releaseLock(projectId, holder);
           setJob(cycle.id, { phase: 'smoke_failed', message: error, commit: record?.commit_sha || null });

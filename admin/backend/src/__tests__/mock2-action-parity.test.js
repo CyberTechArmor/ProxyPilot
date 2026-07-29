@@ -1,6 +1,7 @@
 // Action-parity gate (ratchet 3): pure selection/normalization/classification.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { mutationActions, actionParityReport, normalizeActionLabel } from '../mock2/acceptance-logic.js';
 
 test('mutationActions: mutations selected, navigation/expand noise excluded, deduped', () => {
@@ -113,4 +114,96 @@ test('summary over-claim precision (ratchet 9): the project-32 rejection now pas
   assert.deepEqual(bad.unmatched, ['src/auth/session.ts']);
   // A directory nothing changed under is still an over-claim.
   assert.equal(summaryOverclaims('reworked src/billing', changed).ok, false);
+});
+
+/* ===================== THE GATE THAT DICTATED THE UI ====================== */
+//
+// Project 47's build had already designed `More actions → Edit`. The drift
+// grep required EVERY significant word of the contract label on ONE LINE —
+// for "Edit note title/body" that is edit AND note AND title AND body,
+// together — which no designed control ever satisfies. So the gate reported
+// the action as appearing NOWHERE, and the build reasoned:
+//
+//   "I have it via More actions → Edit, but the checker likely wants an
+//    explicit id/label. Let me add explicit affordances"
+//
+// It shipped a button reading "Edit note title/body" and a second path to
+// /admin. The gate did not catch a missing feature; it wrote two labels and
+// added a redundant control.
+
+test('THE CORE IS TWO WORDS, because that is what a real control can carry', async () => {
+  const { actionLabelCore, actionLabelWords } = await import('../mock2/acceptance-logic.js');
+  assert.deepEqual(actionLabelWords('Edit note title/body'), ['edit', 'note', 'title', 'body']);
+  assert.deepEqual(actionLabelCore('Edit note title/body'), ['edit', 'note'],
+    'the verb and the thing it acts on — a button reading "Edit" inside a note view can satisfy this');
+  assert.deepEqual(actionLabelCore('Edit application name / legal text'), ['edit', 'application']);
+  assert.deepEqual(actionLabelCore('Delete to-do / subtask'), ['delete', 'subtask']);
+  assert.deepEqual(actionLabelCore('Add to-do'), ['add'], 'a one-word core is fine — a loose miss costs less than a false rejection');
+  assert.deepEqual(actionLabelCore(''), []);
+});
+
+test('A HIDDEN ELEMENT IS NOT A SURFACED ACTION', async () => {
+  // Project 47 shipped, and still ships:
+  //   <p class="app-footer t-faint" id="admin-settings-hint" hidden …>
+  //     <a href="/admin">Settings</a> — edit application name / legal text…
+  // A dead element whose only purpose was to match the grep. The old check
+  // counted it as present.
+  const { actionParityReport } = await import('../mock2/acceptance-logic.js');
+  const actions = [{ label: 'Edit application name / legal text', screen: 'Admin' }];
+  const r = actionParityReport(actions, new Set(), new Set(), new Set(['edit application name / legal text']));
+  assert.equal(r.ok, false, 'hidden-only must not pass');
+  assert.equal(r.hiddenOnly.length, 1);
+  assert.equal(r.present.length, 0);
+  assert.deepEqual(r.missing.map((a) => a.label), ['Edit application name / legal text'],
+    'and it must still be reported as not surfaced');
+});
+
+test('hidden-only wins over a stale FOUND for the same label', async () => {
+  const { actionParityReport } = await import('../mock2/acceptance-logic.js');
+  const actions = [{ label: 'Delete asset', screen: 'Admin' }];
+  const r = actionParityReport(actions, new Set(['delete asset']), new Set(), new Set(['delete asset']));
+  assert.equal(r.ok, false);
+  assert.equal(r.hiddenOnly.length, 1);
+});
+
+test('the three original buckets are unchanged when nothing is hidden', async () => {
+  const { actionParityReport } = await import('../mock2/acceptance-logic.js');
+  const actions = [
+    { label: 'Add note', screen: 'List' },
+    { label: 'Delete asset', screen: 'Admin' },
+    { label: 'Archive note', screen: 'List' },
+  ];
+  const r = actionParityReport(actions, new Set(['add note']), new Set(['delete asset']));
+  assert.deepEqual(r.present.map((a) => a.label), ['Add note']);
+  assert.deepEqual(r.drifted.map((a) => a.label), ['Delete asset'], 'renamed, reported, not blocking');
+  assert.deepEqual(r.missing.map((a) => a.label), ['Archive note']);
+  assert.deepEqual(r.hiddenOnly, []);
+  assert.equal(r.ok, false);
+});
+
+test('RATCHET: the rejection must not ask for the contract wording', () => {
+  // The old message said the actions "appear NOWHERE in the app's UI source",
+  // which a build correctly read as "print the string". A gate that dictates
+  // copy is worse than the drop it catches.
+  const src = readFileSync(new URL('../mock2/runner.js', import.meta.url), 'utf8');
+  const i = src.indexOf('Not finished — action parity');
+  assert.ok(i > 0);
+  const msg = src.slice(i, i + 1400);
+  assert.match(msg, /CAPABILITIES, not button copy/);
+  assert.match(msg, /More actions" menu all pass/, 'the good design must be named as acceptable');
+  // The source escapes the apostrophe inside its single-quoted string.
+  assert.match(msg, /Do NOT put the contract\\?'s wording on screen/);
+  assert.match(msg, /Edit note title\/body/, 'name the actual bad outcome, not an abstraction');
+  assert.match(msg, /`hidden` attribute/);
+  assert.ok(!/appear NOWHERE in the app's UI source/.test(msg), 'the wording that caused it must be gone');
+});
+
+test('RATCHET: the greps use the core and detect hidden-only', () => {
+  const src = readFileSync(new URL('../mock2/runner.js', import.meta.url), 'utf8');
+  assert.match(src, /actionLabelCore\(a\.label\)/, 'the full word list was the wrong bar');
+  assert.ok(!/actionLabelWords\(a\.label\)\.filter\(\(w\) => \/\^\[a-z0-9\]\+\$\/\.test\(w\)\)\.slice\(0, 6\)/.test(src),
+    'the all-words-on-one-line grep must be gone');
+  assert.match(src, /printf 'HIDDEN/, 'hidden-only must be its own signal');
+  assert.match(src, /grep -vc 'hidden'/);
+  assert.match(src, /actionParityReport\(actions, found, wordHits, hiddenOnly\)/);
 });

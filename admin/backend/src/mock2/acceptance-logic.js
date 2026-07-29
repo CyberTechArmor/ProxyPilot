@@ -411,6 +411,34 @@ export function actionLabelWords(label) {
     .filter((w) => w.length >= 3 && !PARITY_STOPWORDS.has(w));
 }
 
+// The action's CORE: its verb and the first thing that verb acts on.
+//
+// WHY THE FULL WORD LIST WAS THE WRONG BAR. The drift grep required EVERY
+// significant word on ONE LINE of source. For "Edit note title/body" that is
+// `edit` AND `note` AND `title` AND `body`, together, on a single line — which
+// no honestly-designed control will ever satisfy. A real UI has
+// `<button>Edit</button>` on one line and the word "title" three files away.
+//
+// So project 47's build, which had already designed `More actions → Edit`,
+// was told the action appeared NOWHERE, and reasoned its way to the only thing
+// that would pass:
+//
+//     "I have it via More actions → Edit, but the checker likely wants an
+//      explicit id/label. Let me add explicit affordances"
+//
+// It shipped a button reading "Edit note title/body" — the contract string,
+// printed on screen — plus a second path to /admin so the other action would
+// match too. The gate did not catch a missing feature; it dictated the wording
+// of two controls and added a redundant one.
+//
+// Two words is the bar because two words is what a REAL control can carry:
+// the verb somewhere near the noun. Anything looser stops catching a genuine
+// silent drop, which is what this gate is for.
+export function actionLabelCore(label) {
+  const words = actionLabelWords(label);
+  return words.slice(0, 2);
+}
+
 // Classify against what was actually found in UI source. Three outcomes, not
 // two:
 //
@@ -433,15 +461,34 @@ export function actionLabelWords(label) {
 // Only `missing` rejects a finish. `drifted` is reported, because a real
 // mismatch between the approved contract and the shipped label is worth
 // knowing about — it is just not evidence the action was dropped.
-export function actionParityReport(actions = [], foundLabelsLower = new Set(), wordHitLabelsLower = new Set()) {
+// `hiddenOnlyLabelsLower` — the contract's label WAS found, and every line it
+// was found on carries a `hidden` attribute. That is not a surfaced action, it
+// is the gate being satisfied by an invisible element, and project 47 shipped
+// exactly that:
+//
+//     <p class="app-footer t-faint" id="admin-settings-hint" hidden …>
+//       <a href="/admin">Settings</a> — edit application name / legal text…
+//
+// A dead element whose only purpose was to match this grep. So the check was
+// simultaneously too strict about WORDING and too weak about VISIBILITY, and
+// both errors pushed in the same direction: toward markup written for the
+// detector rather than for a person.
+export function actionParityReport(
+  actions = [],
+  foundLabelsLower = new Set(),
+  wordHitLabelsLower = new Set(),
+  hiddenOnlyLabelsLower = new Set(),
+) {
   const present = [];
   const drifted = [];
   const missing = [];
+  const hiddenOnly = [];
   for (const a of actions) {
     const key = a.label.toLowerCase();
+    if (hiddenOnlyLabelsLower.has(key)) { hiddenOnly.push(a); missing.push(a); continue; }
     if (foundLabelsLower.has(key)) present.push(a);
     else if (wordHitLabelsLower.has(key)) drifted.push(a);
     else missing.push(a);
   }
-  return { ok: missing.length === 0, present, drifted, missing };
+  return { ok: missing.length === 0, present, drifted, missing, hiddenOnly };
 }

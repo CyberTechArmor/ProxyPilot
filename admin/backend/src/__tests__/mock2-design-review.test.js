@@ -94,3 +94,42 @@ test('feedback distillation + inventory journeys ride the pure layers', async ()
   assert.equal(mockupRenderModel({ MOCK2_MOCKUP_MODEL: 'claude-opus-4-8' }, 'x'), 'claude-opus-4-8');
   assert.equal(mockupRenderModel({ MOCK2_MOCKUP_MODEL: 'slot' }, 'claude-haiku-4-5'), 'claude-haiku-4-5');
 });
+
+/* ================== SCREENS ARE NOT ROUTES (project 47) ================== */
+//
+// "Please tell me why the screen capture seems capped at 6 screens and not all
+// seemed filled out/tested."
+//
+// MAX_PATHS = 4 routes × (mobile + desktop on the first two) = 6 shots. The
+// paths were `/`, `/login`, and whatever pages the ui-checks spec named — for
+// the notes app, `/admin` and `/profile`. But the app is an SPA built to the
+// mockup's own convention (`section[data-screen]`, one `.screen-active`), so
+// the note DETAIL and the note EDITOR both live at `/`. The two screens the
+// operator was unhappy with had never been photographed by any review, on any
+// build — while the reviewer spent two of its four slots on the platform's own
+// admin and profile pages.
+
+test('RATCHET: the review reaches screens inside a route, not just routes', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../mock2/design-review.js', import.meta.url), 'utf8');
+  assert.match(src, /section\[data-screen\]/,
+    "the mockup's own screen convention must be what the reviewer looks for");
+  assert.match(src, /MAX_SCREEN_PANELS/);
+  // Only the panels that are NOT already showing — the active one is the shot
+  // that was just taken, and re-shooting it would spend a slot on a duplicate.
+  assert.match(src, /!el\.classList\.contains\('screen-active'\)/);
+  // Labelled so a finding cites something the operator can navigate to.
+  assert.match(src, /\$\{path\}#\$\{name\}/);
+});
+
+test('RATCHET: it puts the route back, and can never fail the capture', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../mock2/design-review.js', import.meta.url), 'utf8');
+  const i = src.indexOf('The screens INSIDE this route');
+  assert.ok(i > 0);
+  const block = src.slice(i, src.indexOf('if (axeSource) {', i));
+  assert.match(block, /classList\.toggle\('screen-active', i === 0\)/,
+    'the desktop shot below must be of the same screen as the mobile one above');
+  assert.match(block, /catch \{ \/\* a screen that will not activate is not worth failing over \*\/ \}/,
+    'the review is never a gate — a stubborn panel must not cost the critique around it');
+});

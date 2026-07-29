@@ -52,6 +52,23 @@ const APP_DIR = '/srv/app';
 const MOBILE = { width: 390, height: 780 };
 const DESKTOP = { width: 1280, height: 800 };
 const MAX_PATHS = 4; // × (mobile + desktop on the first two) ≤ 6 shots per review
+
+// SCREENS ARE NOT ROUTES, and reviewing only routes meant never seeing most of
+// the app. The generated apps are SPAs built to the mockup's own convention —
+// `section[data-screen="…"]`, one `.screen-active` at a time — so a notes app's
+// note DETAIL and note EDITOR both live at `/`. Four routes and six shots
+// sounded like broad coverage; in practice it was `/`, `/login`, `/admin`,
+// `/profile`, and the two screens the operator was actually unhappy with had
+// never been photographed by any review, on any build.
+//
+// Activated the way the app itself does it — the class, not a synthesised
+// click — because there is no general way to know which control opens which
+// panel, and a review that can only see what it can navigate to would still
+// miss the editor. The screen is shown in its resting state, which is exactly
+// what a design review is for: layout, spacing, control arrangement, and the
+// empty state are all legible without real data behind them.
+const MAX_SCREEN_PANELS = 4;
+const SCREEN_PANEL_SELECTOR = 'section[data-screen]';
 const NAV_TIMEOUT_MS = 20000;
 const LOGIN_TIMEOUT_MS = 12000;
 const SETTLE_MS = 700;
@@ -357,6 +374,42 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
             signalMeasurements.push({ path, width: MOBILE.width, total: s.statusTotal, colorOnly: s.colorOnly, examples: s.examples });
           }
         } catch { /* advisory */ }
+        // The screens INSIDE this route. Only the panels that are not already
+        // showing — the active one is the shot just taken.
+        try {
+          const names = await page.evaluate((sel) => Array.from(document.querySelectorAll(sel))
+            .filter((el) => !el.classList.contains('screen-active'))
+            .map((el) => el.getAttribute('data-screen'))
+            .filter(Boolean), SCREEN_PANEL_SELECTOR);
+          for (const name of names.slice(0, MAX_SCREEN_PANELS)) {
+            // eslint-disable-next-line no-await-in-loop
+            const shown = await page.evaluate(([sel, want]) => {
+              const all = Array.from(document.querySelectorAll(sel));
+              const target = all.find((el) => el.getAttribute('data-screen') === want);
+              if (!target) return false;
+              all.forEach((el) => el.classList.remove('screen-active'));
+              target.classList.add('screen-active');
+              return true;
+            }, [SCREEN_PANEL_SELECTOR, name]);
+            if (!shown) continue;
+            // eslint-disable-next-line no-await-in-loop
+            const buf = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false });
+            // Labelled `/#screen` so a finding cites something the operator can
+            // actually navigate to, rather than a bare route that shows a
+            // different screen when they open it.
+            const entry = { path: `${path}#${name}`, width: MOBILE.width, media_type: 'image/jpeg', data: buf.toString('base64') };
+            shots.push(entry);
+            report(entry);
+          }
+          if (names.length) {
+            // Put the route back the way the app had it, so the desktop shot
+            // below is of the same screen as the mobile one above.
+            await page.evaluate((sel) => {
+              const all = Array.from(document.querySelectorAll(sel));
+              all.forEach((el, i) => el.classList.toggle('screen-active', i === 0));
+            }, SCREEN_PANEL_SELECTOR);
+          }
+        } catch { /* a screen that will not activate is not worth failing over */ }
         if (axeSource) {
           try {
             await page.addScriptTag({ content: axeSource });

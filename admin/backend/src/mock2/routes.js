@@ -1124,6 +1124,46 @@ export function createMock2Router() {
     });
   });
 
+  // THE RULES THIS APP IS BUILT AGAINST — the read side sign-off #2 never had.
+  //
+  // The audit writes state/rules.md (hash-chained, committed, anchored) and
+  // nothing ever showed it back: an editor confirmed a rule and from that
+  // moment could only see it by opening a terminal into the container. The
+  // stage indicator drew "Define" while its one artefact stayed invisible.
+  //
+  // BOTH sources, labelled and never merged. Most projects have an empty
+  // rules.md — it is only written by the audited Full build lane — and are
+  // nonetheless governed by the CRUD floor injected into every quick/MVP
+  // build. Returning only the confirmed set would tell the majority of
+  // projects "you have no rules", which is false in the more dangerous
+  // direction.
+  router.get('/projects/:id/rules', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    const { rulesView } = await import('./rules-view-logic.js');
+    const { CRUD_RULES_PACK } = await import('./rules-pack-logic.js');
+    let md = '';
+    let reachable = true;
+    if (project.container_name && project.lifecycle === 'active') {
+      try {
+        const { readProjectFile } = await import('./audit.js');
+        const r = await readProjectFile(project.container_name, 'state/rules.md');
+        md = r.ok ? r.content : '';
+      } catch (e) {
+        // An unreachable container is not "no rules". Saying so would be the
+        // same lie as the empty case, with a worse excuse.
+        reachable = false;
+        console.warn('[mock2] rules read failed:', e?.message);
+      }
+    } else {
+      reachable = false;
+    }
+    // "The audit ran and you answered nothing" and "the audit never ran" need
+    // different sentences: the first is a nudge, the second is an explanation.
+    const auditRan = listQuestionsForProject(project.id).length > 0;
+    const view = rulesView({ rulesMd: md, packText: CRUD_RULES_PACK, auditRan });
+    res.json({ ...view, reachable, path: 'state/rules.md' });
+  });
+
   // Is the REAL app answering on its port right now? Drives the "Open app"
   // button: disabled + pulsing "Updating…" until this says live (the deploy
   // window between the placeholder and the built app otherwise hands the user

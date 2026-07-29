@@ -89,6 +89,9 @@ export default function ProjectDetail() {
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
   const [provStatus, setProvStatus] = useState(null); // live provisioning progress + step log
   const [tab, setTab] = useState('chat'); // 'chat' | 'terminal' | 'details'
+  // Details sub-tab — the card list grew past scannable, so it is grouped into
+  // categories. Spend is the default (the most-asked question).
+  const [detailsTab, setDetailsTab] = useState('spend');
   // Build-phase view: Flightdeck (IDE, default) vs the classic build view. The
   // URL (?view=) wins for deep-links, else the per-project remembered choice,
   // else Flightdeck. Persisted per project.
@@ -379,6 +382,9 @@ export default function ProjectDetail() {
   const readOnly = isArchived;
   const jobBusy = busy || !!pendingJob;
   const designApproved = !!project.stage?.design_approved;
+  // The Details "Manage" sub-tab holds only admin/editor levers (debug, archive,
+  // delete) — hidden entirely for roles that would find it empty.
+  const showManage = isAdmin || (canEdit && !isArchived && !isProvisioning);
 
   // The Chat tab's centerpiece: the live preview iframe. While online, prefer
   // the current mockup (served same-origin by the dashboard's /mockup-preview
@@ -516,8 +522,11 @@ export default function ProjectDetail() {
                     />
                   </Suspense>
                 ) : (
-                  <div className="space-y-2">
-                    <div className="flex justify-end">
+                  // A min-h-0 flex column, NOT a plain block: the Chat tab is
+                  // overflow-hidden, so a block wrapper here let BuildMode grow
+                  // past it and get clipped — the classic view could not scroll.
+                  <div className="flex min-h-0 flex-1 flex-col gap-2">
+                    <div className="flex justify-end shrink-0">
                       <Button variant="outline" size="sm" className="min-h-[36px]" onClick={() => setBuildView('flightdeck')}>
                         Open Flightdeck
                       </Button>
@@ -666,6 +675,31 @@ export default function ProjectDetail() {
           <Button size="sm" className="h-11 md:h-8" onClick={() => setTab('chat')}><LayoutPanelLeft className="h-3.5 w-3.5 mr-1" />Flightdeck</Button>
         </div>
       ) : null}
+      {/* The card list outgrew one scroll — grouped into categories, spend
+          first. MOBILE_FIRST: the strip wraps at 360px, 44px triggers. */}
+      <Tabs value={detailsTab} onValueChange={setDetailsTab} className="w-full">
+        <TabsList className={`grid w-full h-auto gap-1 ${showManage ? 'grid-cols-3 sm:grid-cols-5' : 'grid-cols-2 sm:grid-cols-4'}`}>
+          <TabsTrigger value="spend" className="min-h-[44px]">Spend</TabsTrigger>
+          <TabsTrigger value="overview" className="min-h-[44px]">Overview</TabsTrigger>
+          <TabsTrigger value="build" className="min-h-[44px]">Build</TabsTrigger>
+          <TabsTrigger value="access" className="min-h-[44px]">Access</TabsTrigger>
+          {showManage ? (
+            <TabsTrigger value="manage" className="min-h-[44px]">Manage</TabsTrigger>
+          ) : null}
+        </TabsList>
+
+        {/* SPEND (default) — the breakdown first, then everything else that
+            decides where the money goes. */}
+        <TabsContent value="spend" className="mt-4 space-y-6">
+          {/* Time tracking + model spend (tokens & cost by stage) — live. */}
+          <ProjectTimeCard projectId={id} />
+          {/* Provider API keys ride with spend: they decide whose bill the
+              model calls land on (personal key → project key → global). */}
+          <ProjectApiKeys projectId={id} canEdit={canEdit && !isArchived} isAdmin={isAdmin} />
+        </TabsContent>
+
+        {/* OVERVIEW — the URL, the setup guide, the people. */}
+        <TabsContent value="overview" className="mt-4 space-y-6">
       {/* Live URL + provisioning progress */}
       <Card>
         <CardHeader>
@@ -752,43 +786,9 @@ export default function ProjectDetail() {
         </CardContent>
       </Card>
 
-      {/* Build harness — ProxyPilot's runner or the Claude Agent SDK, per project. */}
-      <HarnessCard projectId={id} canEdit={canEdit && !isArchived} />
-
-      {/* Per-project / per-user provider API keys — layered over the global
-          connectors (personal key → project key → global). */}
-      <ProjectAppAccess projectId={id} canEdit={canEdit && !isArchived} />
-
-      {/* New elements — what the builds designed that the approved mockup does
-          not have. Promotion is the only way the design vocabulary grows past
-          the one mockup it was frozen at. */}
-      <ProjectDesignElements projectId={id} canEdit={canEdit && !isArchived} />
-
-      {/* The rules every build honours — confirmed (sign-off #2) and the
-          baseline floor. Read-only: this is the read side state/rules.md
-          never had, not a second place to edit it. */}
-      <ProjectRules projectId={id} />
-      <ProjectApiKeys projectId={id} canEdit={canEdit && !isArchived} isAdmin={isAdmin} />
-
-      {/* Time tracking — project start + where the time went (live). */}
-      <ProjectTimeCard projectId={id} />
-
-      {/* Framework decisions log (admin) — every deviation request + how it was decided. */}
-      {isAdmin ? <FrameworkDecisionsLog projectId={id} /> : null}
-
-      {/* Declared outbound egress — the internal hosts the app must reach, each
-          admin-approved; anything not declared+approved stays blocked. */}
-      <EgressGrantsCard projectId={id} isAdmin={isAdmin} />
-
-      {/* Standard components — what this app uses (suggested at define time or
-          picked here), installed by the platform with zero build credits. */}
-      <ProjectComponentsCard projectId={id} canEdit={canEdit} isActive={project.lifecycle === 'active'} />
-
-      {/* Quick connect — clone/push the project repo from VS Code or any git
-          client; pushes are recorded, synced into the container, and deployed. */}
-      {!isArchived ? <ConnectVsCode projectId={id} canEdit={canEdit} /> : null}
-
-      {/* (build cycle + build chat now live in the Chat tab above) */}
+      {/* Setup guide — the first-run checklist, reviewable here even after the
+          panel above the tabs was dismissed (and the way to bring it back). */}
+      <ProjectSetup projectId={id} canEdit={canEdit && !isArchived} onJump={() => setTab('chat')} variant="details" />
 
       {/* Design archive — where the design started. Once the design is approved
           the Chat tab becomes the build/run/maintenance chat, so the original
@@ -911,6 +911,44 @@ export default function ProjectDetail() {
           </CardContent>
         </Card>
       ) : null}
+        </TabsContent>
+
+        {/* BUILD — how this project's builds run: the engine, the app's own
+            accounts, the design vocabulary, the rules, and the components. */}
+        <TabsContent value="build" className="mt-4 space-y-6">
+      {/* Build harness — ProxyPilot's runner or the Claude Agent SDK, per project. */}
+      <HarnessCard projectId={id} canEdit={canEdit && !isArchived} />
+
+      {/* The app's own accounts (first admin, screen accounts, demo content). */}
+      <ProjectAppAccess projectId={id} canEdit={canEdit && !isArchived} />
+
+      {/* New elements — what the builds designed that the approved mockup does
+          not have. Promotion is the only way the design vocabulary grows past
+          the one mockup it was frozen at. */}
+      <ProjectDesignElements projectId={id} canEdit={canEdit && !isArchived} />
+
+      {/* The rules every build honours — confirmed (sign-off #2) and the
+          baseline floor. Read-only: this is the read side state/rules.md
+          never had, not a second place to edit it. */}
+      <ProjectRules projectId={id} />
+
+      {/* Standard components — what this app uses (suggested at define time or
+          picked here), installed by the platform with zero build credits. */}
+      <ProjectComponentsCard projectId={id} canEdit={canEdit} isActive={project.lifecycle === 'active'} />
+
+      {/* Quick connect — clone/push the project repo from VS Code or any git
+          client; pushes are recorded, synced into the container, and deployed. */}
+      {!isArchived ? <ConnectVsCode projectId={id} canEdit={canEdit} /> : null}
+
+      {/* Framework decisions log (admin) — every deviation request + how it was decided. */}
+      {isAdmin ? <FrameworkDecisionsLog projectId={id} /> : null}
+        </TabsContent>
+
+        {/* ACCESS — domains, network, and the repository. */}
+        <TabsContent value="access" className="mt-4 space-y-6">
+      {/* Declared outbound egress — the internal hosts the app must reach, each
+          admin-approved; anything not declared+approved stays blocked. */}
+      <EgressGrantsCard projectId={id} isAdmin={isAdmin} />
 
       {/* Admin: custom domain + debug */}
       {isAdmin && !readOnly ? (
@@ -988,7 +1026,11 @@ export default function ProjectDetail() {
 
       {/* M5: repository export (any member) + git push remote (admin). */}
       <RepoRemoteCard projectId={id} isAdmin={isAdmin} slug={project.slug} />
+        </TabsContent>
 
+        {/* MANAGE — the admin/editor levers: debug, archive, delete. */}
+        {showManage ? (
+        <TabsContent value="manage" className="mt-4 space-y-6">
       {isAdmin ? (
         <Card>
           <CardHeader className="pb-3">
@@ -1045,6 +1087,9 @@ export default function ProjectDetail() {
           </CardContent>
         </Card>
       ) : null}
+        </TabsContent>
+        ) : null}
+      </Tabs>
         </div>
         {studioBarOnDetails ? (
           <MobilePanelBar

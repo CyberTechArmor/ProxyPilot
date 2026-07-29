@@ -17,7 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
   Loader2, Zap, Hammer, HelpCircle, Wand2, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye,
-  MonitorSmartphone, RotateCcw, GitCompare,
+  MonitorSmartphone, RotateCcw, GitCompare, ShieldAlert,
 } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
 import BuildLogViewer from './BuildLogViewer';
@@ -37,6 +37,39 @@ function downloadJson(filename, obj) {
   const a = document.createElement('a');
   a.href = url; a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// SpendBadge — the project's dollar spend, right next to the chat title so the
+// money is visible where it is being spent. Click to rotate between the
+// PROJECT TOTAL and TODAY (the current UTC day). Data is the same time-summary
+// roll-up the Details spend card reads, refreshed when the live cycle's cost
+// moves and on a slow heartbeat otherwise.
+function SpendBadge({ projectId, cycleCostCents }) {
+  const [usage, setUsage] = useState(null);
+  const [mode, setMode] = useState('total'); // 'total' | 'today'
+
+  const load = useCallback(async () => {
+    try { setUsage((await api.mock2GetTimeSummary(projectId))?.usage || null); }
+    catch { /* transient — keep the last figure */ }
+  }, [projectId]);
+  // cycleCostCents: reload as the running build spends, so the badge tracks it.
+  useEffect(() => { load(); }, [load, cycleCostCents]);
+  useEffect(() => { const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+
+  if (!usage) return null;
+  const cents = mode === 'today' ? (usage.today?.cost_cents || 0) : (usage.total_cost_cents || 0);
+  return (
+    <button
+      type="button"
+      onClick={() => setMode((m) => (m === 'total' ? 'today' : 'total'))}
+      className="inline-flex h-11 sm:h-7 shrink-0 items-center gap-1 rounded-md border px-2 font-mono text-xs text-foreground hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      title="Project spend — click to switch between the project total and today"
+      aria-label={`Spend ${mode === 'today' ? 'today' : 'total'}: $${(cents / 100).toFixed(2)} — click to switch`}
+    >
+      <span className="font-sans text-[10px] uppercase tracking-wide text-muted-foreground">{mode === 'today' ? 'Today' : 'Total'}</span>
+      ${(cents / 100).toFixed(2)}
+    </button>
+  );
 }
 
 export default function BuildChat({
@@ -733,54 +766,59 @@ export default function BuildChat({
     <Card className={`flex flex-col overflow-hidden ${fill ? 'h-full min-h-0 flex-1' : 'min-h-[26rem] lg:min-h-0 lg:flex-1'}`}>
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between gap-2">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Hammer className="h-4 w-4" /> Build chat
+          <CardTitle className="text-base flex items-center gap-2 min-w-0">
+            <Hammer className="h-4 w-4 shrink-0" /> <span className="truncate">Build chat</span>
+            <SpendBadge projectId={projectId} cycleCostCents={cycle?.used_cost_cents} />
           </CardTitle>
+          {/* Icon-only at EVERY width (the mobile presentation): with labels the
+              row overflowed the ~380px Flightdeck chat pane on desktop too. The
+              title/aria-label carry the words. */}
           <div className="flex items-center gap-1.5">
           {/* Continue build — first, because when it is showing it is the only
               thing the operator wants. Primary styling: a stopped build is the
               one state where the next action is unambiguous. */}
           {canContinue ? (
             <Button
-              type="button" size="sm" className="h-11 sm:h-8"
+              type="button" size="sm" className="h-11 w-11 sm:h-8 sm:w-8 p-0"
               onClick={continueBuild} disabled={continuing}
               title="Continue the stopped build from its last checkpoint — nothing done so far is lost"
+              aria-label="Continue build"
             >
-              {continuing ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" /> : <RotateCcw className="h-3.5 w-3.5 sm:mr-1" />}
-              <span className="hidden sm:inline">Continue build</span>
+              {continuing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
             </Button>
           ) : null}
           {canEdit && online ? (
             <Button
-              type="button" variant="outline" size="sm" className="h-11 sm:h-8"
+              type="button" variant="outline" size="sm" className="h-11 w-11 sm:h-8 sm:w-8 p-0"
               onClick={runScreenCheck} disabled={screenCheckBusy || active}
-              title="Screenshot the app at mobile and desktop width and review it against the approved design — findings and shots arrive in this chat"
+              title="Screen check — screenshot the app at mobile and desktop width and review it against the approved design; findings and shots arrive in this chat"
+              aria-label="Screen check"
             >
-              {screenCheckBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" /> : <MonitorSmartphone className="h-3.5 w-3.5 sm:mr-1" />}
-              <span className="hidden sm:inline">Screen check</span>
+              {screenCheckBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MonitorSmartphone className="h-3.5 w-3.5" />}
             </Button>
           ) : null}
           {/* Change history — what the builds actually changed, and the restore
               points. Next to Screen check because they answer the two halves of
               "what happened": how it looks, and what moved. */}
           <Button
-            type="button" variant="outline" size="sm" className="h-11 sm:h-8"
+            type="button" variant="outline" size="sm" className="h-11 w-11 sm:h-8 sm:w-8 p-0"
             aria-expanded={showChanges}
             onClick={() => setShowChanges((v) => !v)}
-            title="The change records for this project — what each build changed, with restore points"
+            title="Changes — the change records for this project: what each build changed, with restore points"
+            aria-label="Changes"
           >
-            <GitCompare className="h-3.5 w-3.5 sm:mr-1" />
-            <span className="hidden sm:inline">Changes</span>
+            <GitCompare className="h-3.5 w-3.5" />
           </Button>
           {buildRequests.length > 0 ? (
             <Button
-              type="button" variant="outline" size="sm" className="h-11 sm:h-8"
+              type="button" variant="outline" size="sm" className="h-11 sm:h-8 px-2"
               aria-expanded={showHistory}
               onClick={() => setShowHistory((v) => !v)}
+              title="Build History — every request you've made, with transcripts and downloads"
+              aria-label={`Build History (${buildRequests.length})`}
             >
-              <History className="h-3.5 w-3.5 sm:mr-1" />
-              <span className="hidden sm:inline">Build History</span>
-              <span className="ml-1 text-[11px] text-muted-foreground">({buildRequests.length})</span>
+              <History className="h-3.5 w-3.5" />
+              <span className="ml-1 text-[11px] text-muted-foreground">{buildRequests.length}</span>
             </Button>
           ) : null}
           </div>
@@ -879,6 +917,31 @@ export default function BuildChat({
             ? 'Describe a change below and send it as a Quick update, or Ask a question / request an action (run a test, add a user). Rule questions and build events appear here.'
             : 'Bring the project online to run a build.'}
         />
+
+        {/* Blocked build — say so IN the chat, loudly. The classic Build panel
+            always showed this state, but Flightdeck has no Build panel, so a
+            build waiting on an admin was invisible there: the composer quietly
+            became a resume box and nothing said why. */}
+        {cycle?.status === 'awaiting_admin' ? (
+          <div className="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 space-y-1">
+            <p className="flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
+              <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+              Build blocked — {cycle.halt_reason
+                ? 'the build reported it cannot proceed'
+                : cycle.error
+                  ? 'it stopped on an error'
+                  : 'waiting on an admin decision (e.g. a framework deviation)'}
+            </p>
+            {cycle.error ? (
+              <p className="break-words text-xs text-amber-700 dark:text-amber-300">{String(cycle.error)}</p>
+            ) : null}
+            <p className="text-[11px] text-muted-foreground">
+              {canEdit
+                ? 'Add guidance below (optional) and press Resume build. The classic Build panel (Details → or the Classic view) has the full set of controls.'
+                : 'An editor or admin can resume it from here or the classic Build panel.'}
+            </p>
+          </div>
+        ) : null}
 
         {baseAppMissing ? (
           <div className="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 flex flex-col sm:flex-row sm:items-center gap-2">

@@ -2097,7 +2097,7 @@ export function createMock2Router() {
     res.json({
       summary: computeTimeSummary({ project, cycles, deviations, nowMs: Date.now() }),
       // askEntries: the ask lane's cycle-less spend → the "Questions" line item.
-      usage: computeUsageSummary({ cycles, askEntries: cyclelessLedger(project.id) }),
+      usage: computeUsageSummary({ cycles, askEntries: cyclelessLedger(project.id), nowMs: Date.now() }),
     });
   });
 

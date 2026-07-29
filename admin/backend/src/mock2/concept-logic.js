@@ -771,7 +771,7 @@ Output ONLY a JSON object (no markdown, no code fences, no commentary) with this
         { "name": "string", "type": "text|textarea|number|email|password|date|time|datetime|select|multiselect|checkbox|radio|toggle|file|search|currency|phone|url|other",
           "required": true|false, "notes": "string — options, placeholder, or constraints if shown" }
       ],
-      "actions": [ { "label": "string — the button/link text", "effect": "string — what it appears to do", "inferred": false } ],
+      "actions": [ { "label": "string — a SHORT capability name, 2-3 words (see the ACTION LABELS rule)", "effect": "string — what it appears to do", "inferred": false } ],
       "states": [ "string — e.g. empty, loading, error, success, selected — states the mockup implies" ],
       "default_state": "string — the screen's RESTING state on a fresh load with typical data (REQUIRED)"
     }
@@ -789,6 +789,14 @@ Output ONLY a JSON object (no markdown, no code fences, no commentary) with this
 Rules:
 - Every distinct screen or view in the mockup is a screen. In-page tabs/steps that
   show different content are separate screens.
+- ACTION LABELS ARE CAPABILITY NAMES, 2-3 words: verb + noun ("Edit note",
+  "Delete asset", "Archive project"), never the mockup's full caption or a
+  compound like "Edit note title/body". WHY: each label becomes a CONTRACT
+  STRING — the build is later checked for the capability it names, matched as
+  a capability rather than as button copy. A verbose or compound label makes
+  that check unmatchable against any well-designed control, and a build once
+  shipped a button literally captioned "Edit note title/body" to satisfy it.
+  Put the detail in "effect", not in "label".
 - MUTATION COVERAGE: a static mockup rarely demonstrates edit/delete flows, but
   real apps are not append-only. After extracting what IS shown, ADD the implied
   mutation actions for every record a user can create — edit its fields, delete/

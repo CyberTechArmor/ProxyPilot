@@ -52,6 +52,9 @@ export default function Flightdeck({
   const [buildQueue, setBuildQueue] = useState([]);
   const [activity, setActivity] = useState([]);
   const active = !!cycle && ['queued', 'running', 'awaiting_admin', 'paused'].includes(cycle.status);
+  // A build waiting on an admin is easy to miss in Flightdeck (no Build panel
+  // here) — the top bar says so, and the chat carries the reason + Resume.
+  const blocked = cycle?.status === 'awaiting_admin';
 
   // Activity is delta-polled: we send the highest seq we hold and append what
   // comes back, so a 3s poll ships only new rows instead of the last 40 each
@@ -209,21 +212,29 @@ export default function Flightdeck({
         <span className="text-muted-foreground truncate hidden sm:inline">· {project?.name} · Build</span>
         <div className="flex-1" />
         {routing?.model ? <span className="text-xs text-muted-foreground hidden md:inline">{routing.model}{routing.effort ? ` · ${routing.effort}` : ''}</span> : null}
+        {blocked ? (
+          <span
+            className="text-[11px] font-medium px-2 py-0.5 rounded border border-amber-500/40 bg-amber-500/15 text-amber-600"
+            title="The build is waiting on an admin — the chat shows why and how to resume it"
+          >
+            Blocked — see chat
+          </span>
+        ) : null}
         <span className="text-xs font-mono px-2 py-0.5 rounded bg-background border" title="Spend this cycle">{costText}</span>
         {active ? <Button size="sm" variant="destructive" className="h-8" onClick={stop}><StopCircle className="h-3.5 w-3.5 mr-1" /> Stop</Button> : null}
         {/* Is the app actually live — and the one-tap fix when it is not
             (operator report: "the app did not work until redeployed"). */}
         <DeployButton projectId={projectId} online={online} canEdit={canEdit} onDeployed={load} />
-        {/* Dev toggle: green (off) = clean preview+chat view; blue (on) = full IDE
-            (file tree + editor + terminal). */}
+        {/* Code/Chat toggle: green (Chat, the default) = clean preview+chat
+            view; blue (Code) = full IDE (file tree + editor + terminal). */}
         <button
-          type="button" role="switch" aria-checked={devMode} aria-label="Developer view"
+          type="button" role="switch" aria-checked={devMode} aria-label="Code view"
           onClick={() => setDevMode((v) => !v)}
-          title={devMode ? 'Developer view on — file tree, editor and terminal (click for the clean view)' : 'Clean view — just the preview and chat (click for the developer view)'}
-          className={`relative inline-flex h-7 w-[3.25rem] shrink-0 items-center rounded-full transition-colors ${devMode ? 'bg-blue-600' : 'bg-emerald-600'}`}
+          title={devMode ? 'Code view on — file tree, editor and terminal (click for the Chat view)' : 'Chat view — just the preview and chat (click for the Code view)'}
+          className={`relative inline-flex h-7 w-[3.75rem] shrink-0 items-center rounded-full transition-colors ${devMode ? 'bg-blue-600' : 'bg-emerald-600'}`}
         >
-          <span className={`absolute text-[9px] font-bold uppercase tracking-wide text-white ${devMode ? 'left-1.5' : 'right-1.5'}`}>Dev</span>
-          <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${devMode ? 'translate-x-[1.875rem]' : 'translate-x-1'}`} />
+          <span className={`absolute text-[9px] font-bold uppercase tracking-wide text-white ${devMode ? 'left-1.5' : 'right-1.5'}`}>{devMode ? 'Code' : 'Chat'}</span>
+          <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${devMode ? 'translate-x-[2.375rem]' : 'translate-x-1'}`} />
         </button>
         <Button size="sm" variant="outline" className="h-8" onClick={onSwitchView} title="Switch to the classic build view">Classic view</Button>
         {onShowDetails ? (

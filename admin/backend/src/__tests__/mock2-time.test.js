@@ -134,3 +134,33 @@ test('computeUsageSummary: no askEntries → questions bucket is zero (back-comp
   const u = computeUsageSummary({ cycles: [] });
   assert.deepEqual(u.by_stage.questions, { tokens: 0, cost_cents: 0 });
 });
+
+test('computeUsageSummary: today bucket sums only the current UTC day (cycles + ask entries)', () => {
+  const nowMs = Date.UTC(2026, 6, 29, 15, 30, 0);
+  const iso = (ms) => new Date(ms).toISOString();
+  const u = computeUsageSummary({
+    cycles: [
+      { stage: 'build', created_at: iso(Date.UTC(2026, 6, 28, 23, 59, 0)), used_tokens: 5000, used_cost_cents: 90 }, // yesterday
+      { stage: 'build', created_at: iso(Date.UTC(2026, 6, 29, 0, 5, 0)), used_tokens: 1000, used_cost_cents: 10 },   // today
+      { stage: 'concept', created_at: iso(Date.UTC(2026, 6, 29, 12, 0, 0)), used_tokens: 300, used_cost_cents: 2 },  // today (stage irrelevant)
+    ],
+    askEntries: [
+      // SQLite 'YYYY-MM-DD HH:MM:SS' shape, like the real ledger rows.
+      { created_at: '2026-07-29 14:00:00', input_tokens: 400, output_tokens: 100, cost_cents: 3 }, // today
+      { created_at: '2026-07-20 14:00:00', input_tokens: 900, output_tokens: 100, cost_cents: 7 }, // last week
+    ],
+    nowMs,
+  });
+  assert.equal(u.today.tokens, 1000 + 300 + 500);
+  assert.equal(u.today.cost_cents, 10 + 2 + 3);
+  // Totals are unchanged by the today bucket (it is a slice, not a new stage).
+  assert.equal(u.total_tokens, 5000 + 1000 + 300 + 500 + 1000);
+  assert.equal(u.total_cost_cents, 90 + 10 + 2 + 3 + 7);
+});
+
+test('computeUsageSummary: no nowMs → today bucket is zero (back-compat)', () => {
+  const u = computeUsageSummary({
+    cycles: [{ stage: 'build', created_at: new Date().toISOString(), used_tokens: 100, used_cost_cents: 1 }],
+  });
+  assert.deepEqual(u.today, { tokens: 0, cost_cents: 0 });
+});

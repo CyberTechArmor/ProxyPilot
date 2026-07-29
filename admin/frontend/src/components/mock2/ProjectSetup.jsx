@@ -27,7 +27,11 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Check, Circle, Loader2, Rocket, X, Clock } from 'lucide-react';
 
-export default function ProjectSetup({ projectId, canEdit = false, onJump }) {
+// variant: 'panel' (the dismissible first-run card above the tabs) or
+// 'details' (the permanent copy on the Details tab — the place to REVIEW the
+// checklist after the panel was dismissed, and to bring the panel back).
+export default function ProjectSetup({ projectId, canEdit = false, onJump, variant = 'panel' }) {
+  const inDetails = variant === 'details';
   const { toast } = useToast();
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -68,14 +72,27 @@ export default function ProjectSetup({ projectId, canEdit = false, onJump }) {
     } finally { setBusy(false); }
   };
 
-  const dismiss = async () => {
+  // Dismiss/undismiss is OPTIMISTIC: the server round-trip can take many
+  // seconds (the save also tries to push app context into the container), and
+  // an X that does nothing for that long reads as broken. Hide first, persist
+  // behind it, roll back on failure.
+  const setDismissedFlag = async (dismissed) => {
     setBusy(true);
-    try { setState(await api.mock2DismissSetup(projectId, true)); }
-    catch (err) { toast({ variant: 'destructive', title: 'Could not dismiss', description: err.message }); }
-    finally { setBusy(false); }
+    const prev = state;
+    setState((cur) => (cur ? { ...cur, dismissed, show: dismissed ? false : cur.show || !cur.complete } : cur));
+    try { setState(await api.mock2DismissSetup(projectId, dismissed)); }
+    catch (err) {
+      setState(prev);
+      toast({ variant: 'destructive', title: dismissed ? 'Could not dismiss' : 'Could not restore', description: err.message });
+    } finally { setBusy(false); }
   };
+  const dismiss = () => setDismissedFlag(true);
 
-  if (loading || !state || !state.show) return null;
+  if (loading || !state) return null;
+  // The panel hides itself once dismissed/complete; the Details copy stays (it
+  // is the way back) unless the whole guided flow is switched off globally.
+  if (!inDetails && !state.show) return null;
+  if (inDetails && state.mode && state.mode !== 'guided') return null;
 
   const { steps = [], progress = { done: 0, total: 0 }, current, fields = [] } = state;
   const currentStep = steps.find((s) => s.id === current);
@@ -97,10 +114,19 @@ export default function ProjectSetup({ projectId, canEdit = false, onJump }) {
             {progress.done} of {progress.total} done · every step is optional
           </p>
         </div>
-        {canEdit ? (
-          <Button variant="ghost" size="sm" className="min-h-[44px]" onClick={dismiss} disabled={busy} title="Hide this panel">
+        {canEdit && !inDetails ? (
+          <Button variant="ghost" size="sm" className="min-h-[44px]" onClick={dismiss} disabled={busy} title="Hide this panel — it stays reviewable under Details">
             <X className="h-4 w-4" />
             <span className="sr-only">Hide setup</span>
+          </Button>
+        ) : null}
+        {canEdit && inDetails && !state.complete ? (
+          <Button
+            variant="outline" size="sm" className="min-h-[44px]" disabled={busy}
+            onClick={() => setDismissedFlag(!state.dismissed)}
+            title={state.dismissed ? 'Show the setup guide on the project page again' : 'Hide the setup guide from the project page (it stays here)'}
+          >
+            {state.dismissed ? 'Show on project page' : 'Hide from project page'}
           </Button>
         ) : null}
       </CardHeader>

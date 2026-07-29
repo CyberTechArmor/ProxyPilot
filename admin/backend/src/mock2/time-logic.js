@@ -100,7 +100,7 @@ export function computeTimeSummary({ project = {}, cycles = [], deviations = [],
 // and a total. Costs are whole cents (as stored on the cycle); tokens are whole
 // tokens. Pure — same stage classification as computeTimeSummary so the two
 // cards agree on which cycle is "the first build".
-export function computeUsageSummary({ cycles = [], askEntries = [] } = {}) {
+export function computeUsageSummary({ cycles = [], askEntries = [], nowMs = 0 } = {}) {
   const concept = cycles.filter((c) => c && c.stage === 'concept');
   const appBuilds = cycles
     .filter((c) => c && c.stage !== 'concept')
@@ -117,6 +117,10 @@ export function computeUsageSummary({ cycles = [], askEntries = [] } = {}) {
     // sub-cent floor); the client rounds the total for display.
     b.cost_cents += Math.max(0, Number(c.used_cost_cents) || 0);
   };
+  const addAsk = (b, e) => {
+    b.tokens += Math.max(0, Math.round(Number(e.input_tokens) || 0)) + Math.max(0, Math.round(Number(e.output_tokens) || 0));
+    b.cost_cents += Math.max(0, Number(e.cost_cents) || 0);
+  };
 
   for (const c of concept) add(mockup, c);
   appBuilds.forEach((c, i) => add(i === 0 ? building : adjustments, c));
@@ -125,12 +129,27 @@ export function computeUsageSummary({ cycles = [], askEntries = [] } = {}) {
   const questions = bucket();
   for (const e of askEntries || []) {
     if (!e) continue;
-    questions.tokens += Math.max(0, Math.round(Number(e.input_tokens) || 0)) + Math.max(0, Math.round(Number(e.output_tokens) || 0));
-    questions.cost_cents += Math.max(0, Number(e.cost_cents) || 0);
+    addAsk(questions, e);
+  }
+
+  // Today's spend (the UTC calendar day of nowMs), across every stage AND the
+  // ask lane — the chat header's total/today badge. Zero when nowMs is omitted
+  // (back-compat: callers that only want the stage buckets).
+  const today = bucket();
+  if (nowMs) {
+    const d = new Date(nowMs);
+    const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    const isToday = (ts) => {
+      const t = parseTs(ts);
+      return t != null && t >= dayStart && t < dayStart + 86_400_000;
+    };
+    for (const c of cycles) if (c && isToday(c.created_at)) add(today, c);
+    for (const e of askEntries || []) if (e && isToday(e.created_at)) addAsk(today, e);
   }
 
   return {
     by_stage: { mockup, building, adjustments, questions },
+    today,
     total_tokens: mockup.tokens + building.tokens + adjustments.tokens + questions.tokens,
     total_cost_cents: mockup.cost_cents + building.cost_cents + adjustments.cost_cents + questions.cost_cents,
   };

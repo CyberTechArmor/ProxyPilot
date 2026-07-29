@@ -49,7 +49,7 @@ import { applyLaneTuning } from './lane-tuning-logic.js';
 import { decideRouting, escalationAttempts, routingMode, parseRoutingJson, mvpRoutingDecision, quickRoutingDecision } from './routing-logic.js';
 import {
   prepassEnabled, prepassModel, buildPrepassPrompt, parsePrepassReply,
-  prepassEffort, formatBriefForTask, featureScaleNotice,
+  prepassEffort, formatBriefForTask, formatSpecificityForTask, featureScaleNotice,
   normalizeSuggestMode,
   buildDistillSystemPrompt, buildDistillUserTurn, cleanDistilledInstruction,
 } from './prepass-logic.js';
@@ -967,7 +967,14 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // run started) rides the task turn as subordinate sizing notes — the
   // verbatim instruction stays authoritative.
   let prepassBrief = '';
-  try { prepassBrief = formatBriefForTask(parseRoutingJson(getCycle(cycle.id)?.routing_json)?.prepass); } catch { /* optional */ }
+  let specificitySection = '';
+  try {
+    const prepass = parseRoutingJson(getCycle(cycle.id)?.routing_json)?.prepass;
+    prepassBrief = formatBriefForTask(prepass);
+    // Phase-2 point 3: the pre-pass's vague/specific read now REACHES the
+    // build — vague expands like a domain expert, specific executes literally.
+    specificitySection = formatSpecificityForTask(prepass);
+  } catch { /* optional */ }
   // Standing operator taste: recent thumbs-down notes ride every task so a
   // flagged mistake is corrected once, not re-flagged build after build.
   let feedbackSection = '';
@@ -1025,7 +1032,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // the inventory/instruction still outrank it where they explicitly
   // deviate. Full builds are unchanged (their interview owns the rules).
   const rulesFloor = mvpBuild ? crudRulesFloorSection() : '';
-  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${rulesFloor}${feedbackSection}${designFindingsSectionText}${assetSection}${assetChangeSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
+  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${specificitySection}${prepassBrief}${rulesFloor}${feedbackSection}${designFindingsSectionText}${assetSection}${assetChangeSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
   // Counted here rather than at read time: the count means "builds that were
   // told and shipped anyway", and a run that died before its first turn was
   // never told anything.

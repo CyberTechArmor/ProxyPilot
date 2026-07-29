@@ -404,6 +404,44 @@ export function parseFrameworkSkills(skillsJson) {
 // harness's system prompt and the SDK harness's CLAUDE.md) so the two can
 // never drift apart — the duplicated shell paragraph below them is exactly the
 // kind of drift this avoids.
+// BUILD_CONTRACT_SECTION — the capability/restraint/honesty contract, shared
+// verbatim by BOTH prompt builders (same no-drift discipline as
+// PLATFORM_SECTION). Written for the 2026-07 harness redesign: P47's builds
+// printed contract strings on buttons, promoted every action to the top
+// level, and rephrased rejected finish prose five times — each paragraph
+// below closes one of those, and the checks it references were changed in the
+// same branch so prompt and harness agree.
+export const BUILD_CONTRACT_SECTION = `FEATURE-COMPLETENESS HONESTY (binding): never ship a dead button, a silently
+missing element, or a fake success path. Anything from the inventory/
+instruction you cannot finish this cycle: if the approved mockup SHOWS its
+control, ship that control disabled with a small "Not built yet" badge; if the
+mockup does NOT show it, leave it out and say so in your finish summary — an
+unrequested control is not honesty, it is clutter. STATES are conditions to
+HANDLE when they genuinely occur — NEVER fabricate an artificial state to
+satisfy a spec item (no fake spinners, invented delays, or placeholder loading
+UX for data that arrives at once).
+CAPABILITY PLACEMENT (binding): the inventory's actions are CAPABILITIES a
+user must be able to perform, not button captions. Put each one where the
+approved design says it belongs — a card's overflow menu, a detail view, a
+settings screen — not all on the top level. The action-parity check accepts
+any placement a user can reach; it never requires a top-level control and
+never requires the contract's wording on screen.
+RESTRAINT (binding): the mockup's density is part of the contract. When a
+gate, a validator message, or a review finding seems to push toward adding a
+control the approved design does not show, THE DESIGN WINS pending an operator
+decision — state the conflict in your finish summary instead of contorting the
+UI to satisfy a checker. The design guidelines bind by default; an EXPLICIT
+user instruction to depart from them wins over them — follow it and record the
+departure in your finish summary as a project deviation.
+HARNESS REJECTIONS (read once — it saves whole cycles): every finish rejection
+echoes the parameter names and values the harness actually received. If a tool
+rejects your payload repeatedly with the same message, do NOT keep rephrasing
+the prose: re-read the rejection's echo, compare it against what you meant to
+send, and fix the STRUCTURAL cause (a parameter folded into another one, a
+wrong parameter name, tool-call syntax inside a value). If it still persists,
+halt and quote the payload and the rejection verbatim — a halt reporting a
+harness fault after repeated rejections is accepted as-is.`;
+
 export const PLATFORM_SECTION = `
 ## The platform module (binding — already built, do not rebuild)
 \`src/platform/\` is the base app's own feature set. It is LOAD-BEARING: it is
@@ -634,6 +672,10 @@ minutes. Think "editor session", not "project build".
   are changing before editing them (never guess API shapes or element ids),
   keep the approved design tokens (/design.css), and keep every existing
   behavior working.
+- SPECIFIC MEANS LITERAL: build what the instruction says, not an adjacent
+  improvement, and never modify the UI to satisfy what you guess a checker
+  matches on. If the instruction conflicts with a gate or the approved design,
+  satisfy the instruction and state the conflict in your finish summary.
 - Do NOT write state/acceptance.json, ui-checks, per-rule tests, or new test
   suites. There is NO gate battery this cycle and NO run_gates tool — verify
   the change yourself (keep it type-clean) and call finish when it is complete
@@ -706,13 +748,7 @@ visual CONTRACT beyond the tokens: read it and reproduce its layout, navigation
 structure (e.g. a mobile bottom tab bar), and component arrangement for the
 screens you build — the app should look and navigate like the mockup.
 ${PLATFORM_SECTION}
-FEATURE-COMPLETENESS HONESTY (binding): anything from the inventory/instruction
-you do NOT implement in this cycle must be VISIBLY marked in the UI — a
-disabled control with a small "Not built yet" badge — never a dead button, a
-silently missing element, or a fake success path. STATES are conditions to
-HANDLE when they genuinely occur — NEVER fabricate an artificial state to
-satisfy a spec item (no fake spinners, invented delays, or placeholder loading
-UX for data that arrives at once).
+${BUILD_CONTRACT_SECTION}
 TIME HANDLING (binding): the SERVER is the time authority. Store and compute
 timestamps in UTC (ISO-8601 / timestamptz) and define day/period boundaries
 server-side; the BROWSER only CONVERTS for display with the user's own locale
@@ -1505,13 +1541,7 @@ visual CONTRACT beyond the tokens: read it and reproduce its layout, navigation
 structure (e.g. a mobile bottom tab bar), and component arrangement for the
 screens you build — the app should look and navigate like the mockup.
 ${PLATFORM_SECTION}
-FEATURE-COMPLETENESS HONESTY (binding): anything from the inventory/instruction
-you do NOT implement in this cycle must be VISIBLY marked in the UI — a
-disabled control with a small "Not built yet" badge — never a dead button, a
-silently missing element, or a fake success path. STATES are conditions to
-HANDLE when they genuinely occur — NEVER fabricate an artificial state to
-satisfy a spec item (no fake spinners, invented delays, or placeholder loading
-UX for data that arrives at once).
+${BUILD_CONTRACT_SECTION}
 TIME HANDLING (binding): the SERVER is the time authority. Store and compute
 timestamps in UTC (ISO-8601 / timestamptz) and define day/period boundaries
 server-side; the BROWSER only CONVERTS for display with the user's own locale

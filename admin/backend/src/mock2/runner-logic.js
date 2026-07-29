@@ -105,7 +105,7 @@ export const RUNNER_TOOLS = Object.freeze([
   {
     name: 'materialize_component',
     description:
-      'Adopt a component: the platform writes every file of the published component verbatim into the app source tree server-side (byte-exact at any size — contents never pass through your context) and returns a manifest of what landed (path, bytes, sha256, per-file status). Files that already exist are kept untouched and reported unless overwrite is true. Afterwards read/adapt the real files with read_file/write_file and wire the glue per the integration notes.',
+      'Adopt a component: the platform writes every file of the published component verbatim into the app source tree server-side (byte-exact at any size — contents never pass through your context) and returns a manifest of what landed (path, bytes, sha256, per-file status). Files that already exist are kept untouched and reported unless overwrite is true. Afterwards read/adapt the real files with your read/edit tools and wire the glue per the integration notes.',
     input_schema: {
       type: 'object',
       properties: {
@@ -649,7 +649,8 @@ This is an MVP build: deliver a WORKING, testable end-to-end version fast.
   - BATCH tool calls: emit MULTIPLE independent tool calls in ONE turn (write
     several files at once; run several independent commands together). One
     call per turn wastes a full model round-trip each time.
-  - Write each file COMPLETE in a single write_file. Never draft-then-extend.
+  - Write each file COMPLETE in a single whole-file write (write_file or
+    create_file — whichever this cycle's tools provide). Never draft-then-extend.
   - Do not re-read files you just wrote, and skip exploratory reads of
     scaffold files whose content the task description already tells you.
   - Plan once, briefly, then execute; target well under 40 turns total.
@@ -683,9 +684,9 @@ minutes. Think "editor session", not "project build".
   is the verification backstop. Quick means live, not unverified.
 - Never touch the auth wiring (src/auth/*, withAuth/bootstrapGate in
   src/app.ts) or the login/bootstrap flow.
-- SPEED: batch independent tool calls in one turn, write files complete in one
-  write_file, no exploratory reads beyond the files involved; target well
-  under 15 turns total.
+- SPEED: batch independent tool calls in one turn, write new files complete in
+  one whole-file write (write_file/create_file), no exploratory reads beyond
+  the files involved; target well under 15 turns total.
 - finish still requires the one-line summary, one human-runnable check, and
   the verified-vs-assumed split.` : '';
   return `You are the Mock2 build runner. You make one small, targeted change to a project's
@@ -872,11 +873,12 @@ runs the live check after deploy (pending_verification is then your finish).
    falsely, propose the gate/allowlist change as a reviewed act — NEVER reword
    or restructure product code just to slip past a detector pattern.
    To CHANGE an existing file, use apply_edit (targeted anchored replacement) —
-   not a whole-file write_file. Copy old_string byte-for-byte from the file
+   never a whole-file rewrite. Copy old_string byte-for-byte from the file
    (exact indentation) with 3+ lines of surrounding context so it is unique. On
    NO_MATCH, re-read the file and copy the exact text; on AMBIGUOUS_MATCH, add
-   more context or set replace_all. Use write_file only to CREATE a new file (or
-   when a change is essentially a full rewrite).
+   more context or set replace_all. Whole-file writes (write_file/create_file —
+   whichever this cycle's tools provide) are for CREATING a new file, or when a
+   change is essentially a full rewrite.
 4. Call run_gates. If any gate is red, fix the cause and run them again.
 5. When every gate is green, call finish with a one-line summary, the
    human-runnable acceptance check(s) ("as <role>, do X, expect Y" — one per
@@ -1273,7 +1275,10 @@ export function updateProgress(state, { toolCalls = [], text = '' } = {}, limit 
   const s = { ...initProgressState(), ...(state || {}) };
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
   const hadTool = calls.length > 0;
-  const hadWrite = calls.some((c) => c?.name === 'write_file' || c?.name === 'apply_edit' || c?.name === 'Write' || c?.name === 'Edit');
+  // create_file is the copilot harness's file-creation tool (it has no
+  // write_file) — omitting it here made a copilot turn that only created
+  // files count as "no write" for the breaker.
+  const hadWrite = calls.some((c) => c?.name === 'write_file' || c?.name === 'create_file' || c?.name === 'apply_edit' || c?.name === 'Write' || c?.name === 'Edit');
   const toolSig = toolCallSignature(calls);
   const msgSig = progressSignature(text);
 

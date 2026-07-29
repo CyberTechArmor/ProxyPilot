@@ -954,6 +954,16 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     installedComponents,
     buildMode: cycleMode,
   }), { CONSTITUTION: framework.constitution_md, APP_DIR, WEB_PORT: project.web_port || 3000 });
+  // WHICH ENGINE IS BUILDING — stamped on every run. Operator request: build 47
+  // ran on the copilot harness (the install default) and nothing in its log
+  // said so, so the harness variable was invisible when reading the evidence.
+  // One event at the top of every cycle names the harness, mode and model.
+  const engineName = harnessProfile?.name || 'proxypilot';
+  logEvent('note', {
+    role: 'system',
+    content: `Build engine: ${engineName} harness · ${cycleMode} mode · model ${ready.model}`,
+    meta: { harness: engineName, build_mode: cycleMode, model: ready.model },
+  });
   // Multi-modal: images attached to the Build press live on the REQUEST row
   // (migration 526), so every segment of the request — the first build, a
   // deferred build after rule questions, a resume — re-hydrates the same

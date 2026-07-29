@@ -225,6 +225,8 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     await mkdir(join(checkoutDir, '.claude'), { recursive: true });
     await writeFile(join(checkoutDir, '.claude', 'CLAUDE.md'), claudeMd, 'utf8');
     await materializeComponents(checkoutDir, adoptableCatalog);
+    // Same engine stamp as runCycle: every run names its harness up front.
+    logEvent('note', { role: 'system', content: `Build engine: claude harness (Agent SDK) · model ${ready.model}`, meta: { harness: 'claude', model: ready.model } });
     logEvent('note', { role: 'system', content: 'Constitution loaded from .claude/CLAUDE.md (auto-loaded by the SDK, not re-explored).', meta: { components: componentCatalog.length } });
 
     // 3) Drive the SDK loop, then verify the pinned gates. Bounded gate-feedback

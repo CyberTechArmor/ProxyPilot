@@ -74,17 +74,46 @@ test('copilotToolsForCycle: drops run_gates in fast (no-gate) modes, keeps it ot
   }
 });
 
-test('buildCopilotSystemPrompt: Copilot workflow preamble + the full runner prompt body', () => {
+test('buildCopilotSystemPrompt: ONE identity, copilot-named, with the shared editing mechanics', () => {
+  // The old shape prepended a second identity ("You are ProxyPilot's coding
+  // agent…") on top of "You are the Mock2 build runner" and restated the
+  // editing workflow the shared prompt also carried. Since the 2026-07
+  // restructure the copilot prompt IS the runner prompt, introducing itself
+  // as the copilot engine, with the mechanics stated once for every harness.
   const p = buildCopilotSystemPrompt({ constitution: 'CONSTITUTION TEXT', appDir: '/srv/app', webPort: 3000 });
+  assert.match(p, /^You are ProxyPilot's copilot build engine/);
+  assert.equal(p.match(/You are ProxyPilot's/g).length, 1, 'exactly one identity');
+  assert.match(p, /# Editing mechanics/);
   assert.match(p, /apply_edit/);
   assert.match(p, /search_workspace/);
   assert.match(p, /get_diagnostics/);
-  assert.match(p, /NEVER edit a file you have not read/i);
+  assert.match(p, /NEVER edit a file\s+you have not read/i);
   // Preserves the runner body (completion discipline / constitution wiring).
   assert.match(p, /build runner/i);
+  assert.match(p, /CONSTITUTION TEXT/);
+  assert.ok(!p.includes('write_file only'), 'no instruction to use a tool this harness does not have');
   assert.equal(COPILOT_PROFILE.name, 'copilot');
   assert.equal(COPILOT_PROFILE.toolsForCycle, copilotToolsForCycle);
   assert.equal(COPILOT_PROFILE.buildSystemPrompt, buildCopilotSystemPrompt);
+});
+
+test('the mode header leads the prompt and is TRUE for the mode (no override-later pattern)', () => {
+  const mvp = buildCopilotSystemPrompt({ constitution: 'C', buildMode: 'mvp' });
+  const quick = buildCopilotSystemPrompt({ constitution: 'C', buildMode: 'quick' });
+  const full = buildCopilotSystemPrompt({ constitution: 'C', buildMode: 'full' });
+  // The mode's own contract appears in the first ~40 lines, not ~700 lines in.
+  assert.ok(mvp.indexOf('THIS CYCLE IS AN MVP BUILD') < 600, 'mvp header leads');
+  assert.ok(quick.indexOf('THIS CYCLE IS A QUICK UPDATE') < 600, 'quick header leads');
+  assert.ok(full.indexOf('THIS CYCLE IS A FULL BUILD') < 600, 'full header leads');
+  // The workflow is BUILT per mode, not patched by an override section.
+  assert.match(mvp, /# How to work — MVP build/);
+  assert.match(quick, /# How to work — quick update/);
+  assert.match(full, /# How to work — full build/);
+  for (const p of [mvp, quick, full]) {
+    assert.ok(!p.includes('overrides the spec-first steps below'), 'the patch-on-patch pattern is gone');
+  }
+  // Fast lanes never mention writing the spec artifacts as their workflow.
+  assert.ok(!/How to work — MVP build[\s\S]*?state\/acceptance\.json FIRST/.test(mvp));
 });
 
 // ---- read_file range formatting (Part D3) ----

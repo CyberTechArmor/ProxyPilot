@@ -136,30 +136,18 @@ export function copilotToolsForCycle({ hasGates = true } = {}) {
   return [...COPILOT_FILE_TOOLS, ...sharedTail];
 }
 
-// The Copilot coding-agent workflow preamble (ported from the bundle's
-// system-prompt.ts, adapted to the container tool vocabulary). Prepended to the
-// full runner system prompt so ALL of ProxyPilot's completion discipline (gates,
-// finish/pending/halt, integration honesty, design fidelity) is preserved — only
-// the editing workflow is restated in Copilot terms.
-export const COPILOT_WORKFLOW_PREAMBLE = `You are ProxyPilot's coding agent working in a real repository. Use tools to inspect and change code; never answer from assumption.
-
-Editing workflow (how to make the change):
-- Understand first. Use search_workspace to find the code and read_file (with line ranges) to read the exact lines before changing them. NEVER edit a file you have not read this cycle.
-- Make minimal, targeted edits with apply_edit — the smallest change that solves the task. Do NOT rewrite whole files.
-- For apply_edit, old_string must be copied byte-for-byte from the file (exact indentation) with enough surrounding context (usually 3+ lines) to be unique. On NO_MATCH, re-read the file and copy the exact text; on AMBIGUOUS_MATCH, add more context or set replace_all.
-- Create NEW files with create_file; modify EXISTING files with apply_edit.
-- Read narrow: request line ranges, and do not re-read files or re-run searches you already have.
-- After editing, VERIFY: run get_diagnostics and, when the cycle has a gate battery, run_gates — fix every error before you finish. Only run_terminal commands that are necessary (they are policy-checked).
-- Stop when the task is complete and diagnostics/gates are clean. If you cannot resolve an error after a few attempts, halt and explain what remains rather than looping.
-
-`;
-
-// buildCopilotSystemPrompt — the Copilot workflow preamble followed by the full
-// runner system prompt (constitution, components, gate/finish/integration
-// discipline, design fidelity). Same signature as buildRunnerSystemPrompt so
-// runCycle can call either behind the harness profile.
+// buildCopilotSystemPrompt — the shared runner prompt with the copilot
+// identity. The old shape prepended a COPILOT_WORKFLOW_PREAMBLE ("You are
+// ProxyPilot's coding agent…") on top of a prompt that then said "You are the
+// Mock2 build runner" — two identities ten lines apart — and restated the
+// editing workflow the shared prompt also carried (twice). The 2026-07
+// restructure moved the editing mechanics into the shared
+// EDITING_MECHANICS_SECTION (stated once, harness-neutral), so the copilot
+// prompt is now just the runner prompt introducing itself as the copilot
+// engine. Same signature as buildRunnerSystemPrompt so runCycle can call
+// either behind the harness profile.
 export function buildCopilotSystemPrompt(args = {}) {
-  return COPILOT_WORKFLOW_PREAMBLE + buildRunnerSystemPrompt(args);
+  return buildRunnerSystemPrompt({ ...args, harness: 'copilot' });
 }
 
 // ---- pure formatting helpers (used by runner.executeTool; tested here) ----

@@ -465,6 +465,79 @@ export function baselineOnlyFailure(results = []) {
   return { failed, ids: failed.map((r) => r.id) };
 }
 
+// ---- pre-existing red (P47 request 171) ----
+//
+// One genuinely broken check becomes a WALL: after notes-todo-add first
+// failed, a pure-CSS two-column change deployed fine and was then marked
+// failed by that same unrelated check — and so would every build after it,
+// whatever its diff. The smoke gate could not tell "your change broke this"
+// from "this was already red before you started".
+//
+// preexistingSmokeVerdict decides whether a failed smoke run should SHIP WITH
+// A WARNING instead of failing the cycle. Deliberately narrow:
+//   * the http layer must be green (an unreachable app is always fatal) and
+//     the db connector must not have failed (a broken migration chain is
+//     always this cycle's problem);
+//   * every failing check must be either a platform baseline (never the
+//     build's to fix) or already failing before this cycle (priorFailingIds —
+//     parsed from the latest prior smoke-failed cycle's recorded error);
+//   * EXCEPT a check this cycle declared as its own acceptance
+//     (requiredIds) — a build that claimed "notes-todo-add now passes" fails
+//     on it however old the red is.
+// Anything newly red fails the cycle exactly as before. The origin cycle —
+// the one that first turned the check red — has no prior record naming it,
+// so it always fails: the wall never protects the build that built it.
+export function preexistingSmokeVerdict({ report = null, priorFailingIds = [], requiredIds = [] } = {}) {
+  const none = { ship: false, preexisting: [], newlyRed: [] };
+  if (!report || report.http?.ok === false) return none;
+  if (report.db && report.db.ok === false) return none;
+  const browser = report.browser;
+  if (!browser || browser.ok !== false || browser.unavailable || browser.specInvalid) return none;
+  const results = Array.isArray(browser.uiChecks) ? browser.uiChecks : [];
+  const failing = results.filter((r) => r && r.ok === false && !r.notPossible);
+  // A failure with no per-check attribution (the render fallback) cannot be
+  // classified — it stays a failure.
+  if (!failing.length) return none;
+  const prior = new Set((priorFailingIds || []).map(String));
+  const required = new Set((requiredIds || []).map(String));
+  const preexisting = [];
+  const newlyRed = [];
+  for (const r of failing) {
+    const id = String(r.id || '');
+    if (required.has(id)) { newlyRed.push(id); continue; }
+    if (isBaselineCheck(r) || prior.has(id)) preexisting.push(id);
+    else newlyRed.push(id);
+  }
+  return {
+    ship: newlyRed.length === 0 && preexisting.length > 0,
+    preexisting: [...new Set(preexisting)],
+    newlyRed: [...new Set(newlyRed)],
+  };
+}
+
+// The operator's message for a shipped-despite-red cycle: which checks are
+// still red, that they predate this change, and that only a build naming them
+// (or a corrected check) clears them.
+export function preexistingShippedMessage({ preexisting = [], results = [] } = {}) {
+  if (!preexisting.length) return '';
+  const byId = new Map((results || []).map((r) => [String(r?.id || ''), r]));
+  const lines = [
+    `This change's own checks passed and it is deployed — but ${preexisting.length} check(s) that were ALREADY failing before this build are still red:`,
+    '',
+  ];
+  for (const id of preexisting.slice(0, 6)) {
+    const r = byId.get(String(id));
+    lines.push(`- ${id}: ${r?.detail || 'failed'}`);
+  }
+  lines.push(
+    '',
+    'These are not this change\'s doing, so the build is not marked failed for them — but they stay red until',
+    'a build fixes them by name (send a Quick update naming each check id), or the check itself is corrected',
+    'in state/ui-checks.json if it asserts something the design has moved past.',
+  );
+  return lines.join('\n');
+}
+
 // The message an operator reads. Carries each failure's DETAIL verbatim,
 // because that detail now contains the selector bisection — "the slot is
 // present and empty" is the whole difference between a one-line fix and

@@ -101,6 +101,56 @@ export function malformedFinishInput(input) {
   return { malformed: false };
 }
 
+// ---- the file-based finish fallback (P47 cycle 587) ----
+//
+// The mangling is EMISSION flakiness, not a parser bug: the same model sent
+// three glued calls in one cycle and a clean one in the next. Re-issuing the
+// call is a coin flip — so there is a path serialization cannot mangle: write
+// the SAME fields as one JSON object to state/finish.json with the file tools
+// (which demonstrably work — the whole build was made with them), then call
+// finish again, even bare. The runner reads the file as the call's parameters
+// and CONSUMES it (deleted before the diff is read), so it can never leak into
+// a checkpoint or feed a later cycle.
+export const FINISH_FILE_PATH = 'state/finish.json';
+
+export function finishFileHint() {
+  return `If a re-issued call gets mangled again, use the FILE FALLBACK: write the same fields as ONE JSON object to \`${FINISH_FILE_PATH}\` `
+    + '({"summary": "…", "acceptance": ["…"], "assumptions": {"verified": ["…"], "assumed": []}}, plus optional '
+    + '"acceptance_ids"/"removals") using your file tools, then call finish again — even with no parameters. '
+    + 'The harness reads that file as the call\'s parameters and deletes it.';
+}
+
+// parseFinishFile — tolerant read of the fallback file. Only well-shaped fields
+// are taken; a file with nothing usable is an error the rejection can quote.
+export function parseFinishFile(text) {
+  let doc;
+  try { doc = JSON.parse(String(text || '')); } catch (e) {
+    return { ok: false, error: `${FINISH_FILE_PATH} is not valid JSON: ${e?.message || e}` };
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    return { ok: false, error: `${FINISH_FILE_PATH} must be a JSON object` };
+  }
+  const fields = {};
+  if (typeof doc.summary === 'string' && doc.summary.trim()) fields.summary = doc.summary.trim();
+  if (Array.isArray(doc.acceptance)) {
+    const acc = doc.acceptance.map((s) => String(s || '').trim()).filter(Boolean);
+    if (acc.length) fields.acceptance = acc;
+  }
+  const a = doc.assumptions;
+  if (a && typeof a === 'object' && Array.isArray(a.verified) && Array.isArray(a.assumed)) {
+    fields.assumptions = {
+      verified: a.verified.map((s) => String(s || '').trim()).filter(Boolean),
+      assumed: a.assumed.map((s) => String(s || '').trim()).filter(Boolean),
+    };
+  }
+  if (Array.isArray(doc.acceptance_ids)) fields.acceptance_ids = doc.acceptance_ids.map((s) => String(s || '').trim()).filter(Boolean);
+  if (Array.isArray(doc.removals)) fields.removals = doc.removals;
+  if (!Object.keys(fields).length) {
+    return { ok: false, error: `${FINISH_FILE_PATH} carries no usable finish fields (summary / acceptance / assumptions / acceptance_ids / removals)` };
+  }
+  return { ok: true, fields };
+}
+
 // malformedRejectionMessage — the rejection for a malformed call. Quotes the
 // offending fragment and where it appeared (request 141's fix: the model can
 // only correct a structural bug it can see).
@@ -110,7 +160,7 @@ export function malformedRejectionMessage(hit, input) {
     + `Where it appeared (▶ marks the fragment): …${hit.where}…\n\n`
     + `${receivedParamsEcho(input)}\n\n`
     + 'Do not rephrase the prose — fix the STRUCTURE: re-call finish with `summary`, `acceptance`, and `assumptions` as '
-    + 'separate parameters, each a plain value with no XML/tool-call markup inside it.';
+    + `separate parameters, each a plain value with no XML/tool-call markup inside it.\n\n${finishFileHint()}`;
 }
 
 // receivedParamsEcho — "here is what the harness actually received", appended
@@ -215,7 +265,7 @@ export function escalatedRetryDiagnostic({ validator = 'finish', input = null } 
       + 'wrong shape — not the wording of your prose. Compare the echo below against what you intended to send.';
   return `This finish payload is essentially IDENTICAL to the one just rejected (${validator}). `
     + 'Re-sending it cannot succeed, so this is a diagnostic instead of the same rejection again.\n\n'
-    + `${cause}\n\n${receivedParamsEcho(input)}\n\n`
+    + `${cause}\n\n${receivedParamsEcho(input)}\n\n${finishFileHint()}\n\n`
     + 'If you believe the payload is correct and the harness is rejecting it in error, call halt and say so — quote the '
     + 'payload and the rejection verbatim. A halt that asserts a harness fault after repeated rejections is accepted as-is.';
 }

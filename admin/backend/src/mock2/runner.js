@@ -123,7 +123,7 @@ import {
   removalCoverage, removalRejectionMessage, removalWarningMessage, removalCoverageNote,
 } from './removal-claims-logic.js';
 import {
-  malformedFinishInput, malformedRejectionMessage, receivedParamsEcho,
+  malformedFinishInput, malformedRejectionMessage, receivedParamsEcho, FINISH_FILE_PATH, parseFinishFile,
   initFinishGuard, recordFinishRejection, escalatedRetryDiagnostic, budgetNote,
   budgetExhaustedSummary, harnessFaultHaltAccepted,
 } from './finish-guard-logic.js';
@@ -1475,6 +1475,43 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
         logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
       }
+      // FILE-BASED FINISH FALLBACK (P47 cycle 587): the mangling below is
+      // EMISSION flakiness — the same model glued three finish calls into one
+      // string in one cycle and sent a clean call in the next, so re-issuing is
+      // a coin flip. When the arriving call is malformed or missing its
+      // required fields AND state/finish.json exists (the fallback the
+      // rejection messages teach), the file's fields become the call's
+      // parameters. The file is CONSUMED either way — deleted before the diff
+      // is read — so it can never leak into a checkpoint or feed a later cycle.
+      {
+        const needsFile = malformedFinishInput(decision.finishInput || {}).malformed
+          || !decision.finishAcceptance?.length || !decision.finishAssumptions;
+        if (needsFile) {
+          try {
+            const ff = await readFileInContainer(containerName, FINISH_FILE_PATH);
+            if (ff.ok && String(ff.content || '').trim()) {
+              const parsedFile = parseFinishFile(ff.content);
+              await execInContainer(containerName, `rm -f '${APP_DIR}/${FINISH_FILE_PATH}'`);
+              if (parsedFile.ok) {
+                const f = parsedFile.fields;
+                if (f.summary) decision.finishSummary = f.summary;
+                if (f.acceptance) decision.finishAcceptance = f.acceptance;
+                if (f.assumptions) decision.finishAssumptions = f.assumptions;
+                if (f.acceptance_ids) decision.finishAcceptanceIds = f.acceptance_ids;
+                if (f.removals) decision.finishRemovals = f.removals;
+                decision.finishInput = { ...(decision.finishInput || {}), ...f };
+                logEvent('note', {
+                  role: 'system',
+                  content: `finish parameters hydrated from ${FINISH_FILE_PATH} (serialization fallback): ${Object.keys(f).join(', ')}.`,
+                  meta: { finish_file: true },
+                });
+              } else {
+                logEvent('note', { role: 'system', content: `${FINISH_FILE_PATH} exists but was unusable — ${parsedFile.error}. It was removed; the normal rejection follows.`, meta: { finish_file: false } });
+              }
+            }
+          } catch (e) { console.warn('[mock2] finish-file fallback failed open:', e?.message); }
+        }
+      }
       // FINISH GUARD, fix 1.c (P47 request 141's root cause): a parameter value
       // carrying tool-call syntax fragments is a MALFORMED CALL, not missing
       // prose. Detected FIRST, with the offending fragment quoted — otherwise a
@@ -2215,6 +2252,47 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           // Falls through to the honest gate / pending-verification path below —
           // the cycle is NOT failed and nothing suggests running it again.
         } else if (!smoke.ok) {
+          // PRE-EXISTING RED (P47 request 171): before failing the cycle over
+          // check failures, ask whether every one of them was ALREADY red
+          // before this build — parsed from the latest prior smoke-failed
+          // cycle's recorded error. A pure-CSS change must not be marked
+          // failed by a to-do bug it never touched; the cycle that FIRST
+          // turned a check red still fails (there is no prior record naming
+          // it), and a cycle that declared a red check as its own acceptance
+          // fails on it however old the red is. Classification failing for
+          // any reason fails CLOSED — the cycle fails, as before.
+          let preexisting = null;
+          try {
+            const priorFailed = listCyclesForProject(projectId, { limit: 50 })
+              .find((c) => c.id !== cycle.id && /smoke gate failed after deploy/i.test(String(c.error || '')));
+            const { appOwnedFailureIds, preexistingSmokeVerdict, preexistingShippedMessage } = await import('./ui-check-logic.js');
+            const v = preexistingSmokeVerdict({
+              report: smoke.report,
+              priorFailingIds: priorFailed ? appOwnedFailureIds(priorFailed.error) : [],
+              requiredIds: decision.finishAcceptanceIds || [],
+            });
+            if (v.ship) preexisting = { ...v, message: preexistingShippedMessage({ preexisting: v.preexisting, results: smoke.report?.browser?.uiChecks || [] }) };
+          } catch (e) { console.warn('[mock2] preexisting-smoke classification failed closed:', e?.message); }
+          if (preexisting) {
+            try {
+              insertMessage({
+                projectId, kind: 'system', cycleId: cycle.id,
+                body: `**Shipped — pre-existing check failures (not this change).**\n\n${preexisting.message}`,
+              });
+            } catch { /* best effort */ }
+            safeRaise({
+              kind: 'flag', project_id: projectId, dedupe_key: `mock2-preexisting-smoke:${projectId}`,
+              ref_table: 'mock2_cycles', ref_id: cycle.id,
+              detail: `${project.name}: check(s) still red from before this build: ${preexisting.preexisting.join(', ')}. They fail every build until fixed by name.`,
+            });
+            logEvent('note', {
+              role: 'system',
+              content: `Shipped — pre-existing check failure(s), not this change's: ${preexisting.preexisting.join(', ')}. The deploy is kept; they stay red until a build fixes them by name.`,
+              meta: { preexisting_smoke: true, ids: preexisting.preexisting },
+            });
+            // Falls through to the honest gate / pending-verification path
+            // below — the cycle is NOT failed over reds it did not create.
+          } else {
           const detail = smokeFailSummary(smoke.report);
           // ASK THE APP WHETHER IT IS EVEN REACHABLE, before reporting a wall of
           // failed checks.
@@ -2258,6 +2336,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           setJob(cycle.id, { phase: 'smoke_failed', message: error, commit: record?.commit_sha || null });
           void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'smoke_failed' });
           return scheduleJobCleanup(cycle.id);
+          }
         }
         // THE HONEST GATE. The smoke gate passing is not the same as "someone
         // saw it work": a user-visible change that no browser check observed is

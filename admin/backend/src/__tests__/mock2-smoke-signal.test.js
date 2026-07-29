@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import {
   uiCheckLogLines, uiCheckFailSummary, baselineOnlyFailure,
   appOwnedFailureIds, unansweredSmokeFailures, BASELINE_CHECK_PREFIX,
+  preexistingSmokeVerdict, preexistingShippedMessage,
 } from '../mock2/ui-check-logic.js';
 
 const app = (id, ok, detail = 'expect_visible #x: Timeout') => ({ id, ok, page: '/', role: 'admin', steps: ok ? [] : [{ ok: false, detail }], consoleErrors: [] });
@@ -81,4 +82,90 @@ test('naming the check in the summary or acceptance answers it', () => {
     summary: 'No change needed.',
     acceptance: ['the notes-todo-add check asserts the removed legacy button; as admin, press New to-do — the item appears'],
   }), []);
+});
+
+// ---- pre-existing red (P47 request 171: the smoke wall) ----
+
+const wallReport = (failing, { httpOk = true, dbOk = null } = {}) => ({
+  http: { ok: httpOk, checks: [] },
+  db: dbOk === null ? null : { ok: dbOk },
+  browser: {
+    ok: false,
+    uiChecks: [
+      { id: 'notes-empty-and-create', ok: true },
+      ...failing,
+    ],
+  },
+});
+
+test('preexistingSmokeVerdict: a check red before this cycle ships with a warning', () => {
+  const v = preexistingSmokeVerdict({
+    report: wallReport([{ id: 'notes-todo-add', ok: false, detail: '#todo-list text missing "Oat milk"' }]),
+    priorFailingIds: ['notes-todo-add'],
+    requiredIds: [],
+  });
+  assert.equal(v.ship, true);
+  assert.deepEqual(v.preexisting, ['notes-todo-add']);
+  assert.deepEqual(v.newlyRed, []);
+});
+
+test('preexistingSmokeVerdict: the ORIGIN cycle (no prior record) still fails', () => {
+  const v = preexistingSmokeVerdict({
+    report: wallReport([{ id: 'notes-todo-add', ok: false }]),
+    priorFailingIds: [],
+    requiredIds: [],
+  });
+  assert.equal(v.ship, false);
+  assert.deepEqual(v.newlyRed, ['notes-todo-add']);
+});
+
+test('preexistingSmokeVerdict: a cycle that DECLARED the red check as its acceptance fails on it', () => {
+  const v = preexistingSmokeVerdict({
+    report: wallReport([{ id: 'notes-todo-add', ok: false }]),
+    priorFailingIds: ['notes-todo-add'],
+    requiredIds: ['notes-todo-add'],
+  });
+  assert.equal(v.ship, false);
+});
+
+test('preexistingSmokeVerdict: mixed old red + NEW red fails; baseline reds count as pre-existing', () => {
+  const mixed = preexistingSmokeVerdict({
+    report: wallReport([
+      { id: 'notes-todo-add', ok: false },
+      { id: 'brand-new-check', ok: false },
+    ]),
+    priorFailingIds: ['notes-todo-add'],
+  });
+  assert.equal(mixed.ship, false);
+  assert.deepEqual(mixed.newlyRed, ['brand-new-check']);
+
+  const withBaseline = preexistingSmokeVerdict({
+    report: wallReport([
+      { id: 'notes-todo-add', ok: false },
+      { id: `${BASELINE_CHECK_PREFIX}signin-legal`, ok: false, baseline: true },
+    ]),
+    priorFailingIds: ['notes-todo-add'],
+  });
+  assert.equal(withBaseline.ship, true);
+});
+
+test('preexistingSmokeVerdict: an unreachable app or a failed db connector is never pre-existing', () => {
+  assert.equal(preexistingSmokeVerdict({
+    report: wallReport([{ id: 'notes-todo-add', ok: false }], { httpOk: false }),
+    priorFailingIds: ['notes-todo-add'],
+  }).ship, false);
+  assert.equal(preexistingSmokeVerdict({
+    report: wallReport([{ id: 'notes-todo-add', ok: false }], { dbOk: false }),
+    priorFailingIds: ['notes-todo-add'],
+  }).ship, false);
+});
+
+test('preexistingShippedMessage names the checks, their details, and the way out', () => {
+  const msg = preexistingShippedMessage({
+    preexisting: ['notes-todo-add'],
+    results: [{ id: 'notes-todo-add', ok: false, detail: '#todo-list text missing "Oat milk"' }],
+  });
+  assert.match(msg, /ALREADY failing before this build/);
+  assert.match(msg, /notes-todo-add: #todo-list text missing/);
+  assert.match(msg, /Quick update naming each check id/);
 });

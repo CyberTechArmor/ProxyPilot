@@ -45,14 +45,34 @@ export default function FrameworkVersions() {
   const [current, setCurrent] = useState(null);
   const [viewing, setViewing] = useState(null); // a full version being viewed
   const [busyId, setBusyId] = useState(null);
+  // Automatic adoption (ADR-003 amendment): '' until loaded, then 'on'/'off'.
+  const [autoAdopt, setAutoAdopt] = useState('');
+  const [autoAdoptBusy, setAutoAdoptBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const [v, c] = await Promise.all([api.mock2ListFrameworkVersions(), api.mock2GetCurrentFramework()]);
       setVersions(v.versions || []);
       setCurrent(c.version || null);
+      api.mock2GetFrameworkAutoAdopt().then((r) => setAutoAdopt(r.setting || 'on')).catch(() => {});
     } catch (err) { if (!(err instanceof ApiError)) console.error('load framework failed:', err); }
   }, []);
+
+  const toggleAutoAdopt = async () => {
+    const next = autoAdopt === 'off' ? 'on' : 'off';
+    setAutoAdoptBusy(true);
+    try {
+      const r = await api.mock2SetFrameworkAutoAdopt(next);
+      setAutoAdopt(r.setting);
+      toast({
+        title: `Automatic adoption ${r.setting}`,
+        description: r.setting === 'on'
+          ? 'Idle online projects adopt a newly published version on their own (one attempt per project per version).'
+          : 'Projects show the update banner and wait for the manual "Update now" press.',
+      });
+    } catch (err) { toast({ variant: 'destructive', title: 'Could not save', description: err.message }); }
+    finally { setAutoAdoptBusy(false); }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -159,6 +179,29 @@ export default function FrameworkVersions() {
           </CardContent>
         </Card>
       )}
+
+      {/* Automatic adoption (ADR-003 amendment) — publishing a version is only
+          half the job; this is whether projects pick it up on their own. */}
+      <Card>
+        <CardContent className="flex flex-col gap-3 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <p className="font-medium">Automatic adoption</p>
+            <p className="text-xs text-muted-foreground">
+              When a new version is published, projects that are online, idle, and past their first build start the
+              update cycle on their own — one attempt per project per version. Off restores the banner + manual
+              &quot;Update now&quot; only.
+            </p>
+          </div>
+          <Button
+            variant="outline" className="min-h-[44px] shrink-0"
+            disabled={autoAdoptBusy || !autoAdopt} onClick={toggleAutoAdopt}
+            role="switch" aria-checked={autoAdopt === 'on'}
+          >
+            {autoAdoptBusy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            {autoAdopt === 'off' ? 'Off — turn on' : 'On — turn off'}
+          </Button>
+        </CardContent>
+      </Card>
 
       <div className="flex flex-wrap justify-end gap-2">
         <Button variant="outline" onClick={() => setImportOpen(true)} className="min-h-[44px]"><Upload className="mr-1 h-4 w-4" /> Import framework</Button>

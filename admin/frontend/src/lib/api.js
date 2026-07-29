@@ -1577,6 +1577,11 @@ export const api = {
   mock2GetSetupFlow: () => request('/mock2/settings/setup-flow'),
   mock2SetSetupFlow: (setting) =>
     request('/mock2/settings/setup-flow', { method: 'POST', body: JSON.stringify({ setting }) }),
+  // Admin: automatic framework adoption — 'on' (default) starts the update
+  // cycle automatically when the framework moves; 'off' = manual button only.
+  mock2GetFrameworkAutoAdopt: () => request('/mock2/settings/framework-auto-adopt'),
+  mock2SetFrameworkAutoAdopt: (setting) =>
+    request('/mock2/settings/framework-auto-adopt', { method: 'POST', body: JSON.stringify({ setting }) }),
   // New elements — what a build designed that the approved design does not have,
   // and the operator's accept. Promotion is how the design system grows past
   // the mockup it was frozen at.

@@ -444,12 +444,12 @@ export default function BuildStatus({
                 Framework update available
                 {project?.framework_last_built_version && project?.framework_current_version
                   ? ` (v${project.framework_last_built_version} → v${project.framework_current_version})` : ''}.
-                Nothing changes until you run an update cycle.
+                It is adopted automatically when the project is idle — or start the update cycle now.
               </span>
             </p>
             {canEdit && online && !active ? (
               <Button variant="outline" size="sm" className="h-10 shrink-0 self-start sm:self-auto" disabled={busy} onClick={onRemediate}>
-                Start update cycle
+                Update now
               </Button>
             ) : null}
           </div>

@@ -106,6 +106,18 @@ cycle; change records stamp it immutably. Drift = audit compares the project's
 last-built version against current and raises a `drift` queue item; remediation
 only ever happens as an explicit consented cycle labeled `Mock2 X → Y`.
 
+**Amendment (2026-07-29, operator decision).** Adoption is now **automatic by
+default**: a sweep (`auto-adopt.js`, boot + 10-minute timer) starts the same
+`Mock2 X → Y` update cycle for any project that is online, idle, past design
+approval, and has built before — at most once per project per published
+version (every cycle pins the version at insert, so even a refused or failed
+attempt latches). The explicit-consent behaviour survives as the
+`framework_auto_adopt = off` setting (Framework admin page /
+`MOCK2_FRAMEWORK_AUTO_ADOPT`), and the manual "Update now" button still works
+either way. Rationale: the banner nagged on every project after every publish,
+and a project whose operator missed it kept building against a constitution
+the install had moved past.
+
 **Consequences.** Gate scripts are content-addressed by version — the runner
 copies the pinned version's gate scripts into the container at cycle start
 (never "latest"). Optional git sync of the framework is an import path only;

@@ -493,7 +493,7 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, createMock2GitRouter, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, loadCustomDesignPresets, sweepMock2Locks, mock2TerminalAuthorize } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, createMock2GitRouter, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, loadCustomDesignPresets, sweepMock2Locks, mock2TerminalAuthorize, sweepFrameworkAutoAdopt } = await import('./mock2/index.js');
     initMock2Db();
     // Register the project-terminal authorizer into the core streaming-terminal
     // route now that the module is enabled (ADR-001: the core never imports mock2
@@ -506,8 +506,9 @@ if (mock2Gate.enabled) {
     try { seedFrameworkV1(null); } catch (err) { console.error('[mock2] framework seed failed:', err?.message || err); }
     // Seed upgrade: if the vendored framework seed changed since the latest
     // published version (e.g. a fixed gate script), publish it as a new version so
-    // the fix can actually reach projects (they adopt it via drift → update cycle;
-    // nothing auto-remediates). Idempotent — a no-op when the seed is unchanged.
+    // the fix can actually reach projects. Idempotent — a no-op when the seed is
+    // unchanged. Adoption is then automatic (the sweep below); the manual update
+    // cycle remains as the fallback and the off-switch path.
     try { upgradeFrameworkFromSeed(null); } catch (err) { console.error('[mock2] framework seed upgrade failed:', err?.message || err); }
     // Built-in component seed: the bundled auth component (sign-in + forced
     // first-admin bootstrap) is published on first boot, and an existing stored
@@ -546,6 +547,18 @@ if (mock2Gate.enabled) {
     setInterval(() => {
       sweepMock2Locks().catch((err) => console.error('[mock2] lock sweep failed:', err?.message || err));
     }, 60000).unref();
+    // Automatic framework adoption (ADR-003 amendment): when the framework has
+    // moved past a project's last build, start the update cycle for it — on
+    // boot (a moment after the reconciles, so a just-published seed upgrade is
+    // adopted without anyone pressing anything) and every 10 minutes for
+    // projects that come online later. One attempt per project per version;
+    // framework_auto_adopt 'off' disables it. Non-fatal.
+    setTimeout(() => {
+      sweepFrameworkAutoAdopt().catch((err) => console.error('[mock2] framework auto-adopt failed:', err?.message || err));
+    }, 30000).unref();
+    setInterval(() => {
+      sweepFrameworkAutoAdopt().catch((err) => console.error('[mock2] framework auto-adopt failed:', err?.message || err));
+    }, 10 * 60 * 1000).unref();
     console.log('[mock2] module ENABLED — /api/mock2 mounted, mock2.db ready');
   } catch (err) {
     console.error('[mock2] failed to initialize — leaving module unmounted:', err?.message || err);

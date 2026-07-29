@@ -126,7 +126,7 @@ import {
   isBaseAppDeploying,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getMock2Db } from './db.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
@@ -1888,6 +1888,20 @@ export function createMock2Router() {
     if (!parsed.success) return res.status(400).json({ error: "setting must be 'guided' or 'classic'" });
     const value = setSetupFlowSetting(parsed.data.setting, req.user.id);
     logAudit(req.user.id, 'MOCK2_SETTING_SETUP_FLOW', 'mock2_setting', 0, { setup_flow: value }, req.ip);
+    res.json({ setting: value });
+  });
+
+  // Automatic framework adoption (ADR-003 amendment) — 'on' (default) starts
+  // the update cycle automatically when the framework moves; 'off' restores
+  // the explicit-consent banner + button only.
+  router.get('/settings/framework-auto-adopt', requireAdmin, (_req, res) => {
+    res.json({ setting: getFrameworkAutoAdopt() ? 'on' : 'off' });
+  });
+  router.post('/settings/framework-auto-adopt', requireAdmin, (req, res) => {
+    const parsed = z.object({ setting: z.enum(['on', 'off']) }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: "setting must be 'on' or 'off'" });
+    const value = setFrameworkAutoAdopt(parsed.data.setting, req.user.id) ? 'on' : 'off';
+    logAudit(req.user.id, 'MOCK2_SETTING_FRAMEWORK_AUTO_ADOPT', 'mock2_setting', 0, { framework_auto_adopt: value }, req.ip);
     res.json({ setting: value });
   });
 

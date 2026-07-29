@@ -50,9 +50,14 @@ export const TASK_KINDS = Object.freeze(['bugfix', 'feature', 'chore']);
 // construction, whatever prose follows.
 
 // A canned, platform-authored instruction. These describe building or
-// verifying an app, never fixing a reported defect.
+// verifying an app, never fixing a reported defect. Includes the two shapes
+// behind the P48 tripwire storm (7 of 9 deploys held): the design review's
+// own "Fix these N design-review findings…" brief and the annotate lanes'
+// "Annotated …" pin composition — both are DESIGN work (layout, labels,
+// spacing) where a cheap close with no red test is normal, not suspicious;
+// classifying them bugfix armed the no-red-test hold on every one.
 const PLATFORM_FEATURE_INSTRUCTION_RE =
-  /^(initial build|build the working application|production check|design polish pass|screen build|feature build)/i;
+  /^(initial build|build the working application|production check|design polish pass|screen build|feature build|fix these \d+ design-review findings|annotated\b)/i;
 
 // The unambiguous defect vocabulary — a single word is enough.
 const DEFECT_WORDS_RE =

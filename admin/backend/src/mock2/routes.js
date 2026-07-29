@@ -126,7 +126,7 @@ import {
   isBaseAppDeploying,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getMock2Db } from './db.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
@@ -489,6 +489,9 @@ const cycleStartSchema = z.object({
   // options, or by pressing "Build it anyway". It never fires twice on the
   // same request: pushing back a second time is how a helper becomes a gate.
   skip_clarify: z.boolean().optional(),
+  // Operator escalation ("redo this on the bigger model"): run this cycle on
+  // the escalation model at high effort, regardless of the fast lane.
+  escalate: z.boolean().optional(),
   // The options the clarifier OFFERED and the operator did NOT pick, sent back
   // with "Build it anyway" so the build gets them as labelled guesses rather
   // than losing them. Never scope — see composeWithGuesses.
@@ -1891,6 +1894,22 @@ export function createMock2Router() {
     res.json({ setting: value });
   });
 
+  // Cost saver — one switch for the cheap-first + escalate-on-failure posture.
+  // ON snapshots the operator's current fast-model / quick-effort / escalation
+  // values, then applies the economy set (sonnet-5 fast model, quick at
+  // medium, opus-4-8 escalation). OFF restores the snapshot — the LAST KNOWN
+  // state, never a hardcoded default.
+  router.get('/settings/cost-saver', requireAdmin, (_req, res) => {
+    res.json(getCostSaver());
+  });
+  router.post('/settings/cost-saver', requireAdmin, (req, res) => {
+    const parsed = z.object({ setting: z.enum(['on', 'off']) }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: "setting must be 'on' or 'off'" });
+    const state = setCostSaver(parsed.data.setting, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_COST_SAVER', 'mock2_setting', 0, { cost_saver: state.setting }, req.ip);
+    res.json(state);
+  });
+
   // Automatic framework adoption (ADR-003 amendment) — 'on' (default) starts
   // the update cycle automatically when the framework moves; 'off' restores
   // the explicit-consent banner + button only.
@@ -3103,6 +3122,7 @@ export function createMock2Router() {
         images: imgCheck.images,
         buildMode: mode,
         echoToChat: true,
+        escalate: !!parsed.data.escalate,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not start the build: ${err?.message || 'unknown error'}` });

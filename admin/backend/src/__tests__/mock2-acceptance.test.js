@@ -210,3 +210,15 @@ test('runner wires verificationOnlyFinish into the over-claim rejection (source 
   assert.match(logic, /Do NOT halt for "already done"/, 'finish description must name the verification-only path');
   assert.match(logic, /halting for "already done" strands finished work/i, 'halt description must redirect "already done" to finish');
 });
+
+test('classifyTaskKind: the design-review fix brief and annotate compositions are features, not bugfixes (P48 tripwire storm)', () => {
+  // 7 of 9 deploys were HELD because these platform-authored shapes carry the
+  // word "Fix"/pin notes and classified bugfix — arming the no-red-test hold
+  // on layout work where a cheap close is normal.
+  assert.equal(classifyTaskKind('Fix these 12 design-review findings on the built app:\n\n- On /admin: Form elements must have labels'), 'feature');
+  assert.equal(classifyTaskKind('Fix these 9 design-review findings on the built app:\n\n- On /admin@390: On max-width:639px…'), 'feature');
+  assert.equal(classifyTaskKind('Annotated the live preview (https://x.example) — the numbered pins mark where the operator was pointing: 1. fix the orphaned trash icon'), 'feature');
+  assert.equal(classifyTaskKind('Annotated screenshots of 3 screens attached — the numbered red pins mark where the operator was pointing.'), 'feature');
+  // A typed bug report is still a bugfix — the discipline stays for real defects.
+  assert.equal(classifyTaskKind('Fix the save button — it fails with a 500 when the title is empty'), 'bugfix');
+});

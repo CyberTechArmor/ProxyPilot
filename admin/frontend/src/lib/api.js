@@ -1394,6 +1394,8 @@ export const api = {
         // back with "Build it anyway" so the build gets them as labelled
         // guesses instead of losing them.
         ...(opts.clarifyGuesses?.length ? { clarify_guesses: opts.clarifyGuesses } : {}),
+        // Operator escalation — "redo this on the bigger model".
+        ...(opts.escalate ? { escalate: true } : {}),
       }),
     }),
   // `since` = the highest activity seq the caller already has; the server then
@@ -1583,6 +1585,11 @@ export const api = {
   mock2GetSetupFlow: () => request('/mock2/settings/setup-flow'),
   mock2SetSetupFlow: (setting) =>
     request('/mock2/settings/setup-flow', { method: 'POST', body: JSON.stringify({ setting }) }),
+  // Admin: cost saver — one switch for cheap-first + escalate-on-failure.
+  // OFF restores the values snapshotted when it was turned on.
+  mock2GetCostSaver: () => request('/mock2/settings/cost-saver'),
+  mock2SetCostSaver: (setting) =>
+    request('/mock2/settings/cost-saver', { method: 'POST', body: JSON.stringify({ setting }) }),
   // Admin: automatic framework adoption — 'on' (default) starts the update
   // cycle automatically when the framework moves; 'off' = manual button only.
   mock2GetFrameworkAutoAdopt: () => request('/mock2/settings/framework-auto-adopt'),

@@ -238,7 +238,7 @@ import {
   getCycle, listCyclesForProject, listRecentSucceededCyclesAllProjects, latestCycle, latestDeployCycle, setInterrupt, finishCycle, updateCycle,
   countRunningCycles,
 } from './cycles.js';
-import { publicCycleShape, INTERRUPTS, typicalDurationMs } from './cycle-logic.js';
+import { publicCycleShape, INTERRUPTS, typicalDurationMs, queueMayAdvancePast } from './cycle-logic.js';
 import { parseRoutingJson } from './routing-logic.js';
 import {
   getLock, releaseLock, requestTakeover, getLockIdleMinutes,
@@ -3525,6 +3525,19 @@ export function createMock2Router() {
     // the same poll so the chat shows "building now / up next" for free.
     let buildQueue = [];
     try { buildQueue = listBuildQueue(req.mock2Project.id).map(publicQueueShape); } catch { /* pre-migration */ }
+    // SELF-HEAL a wedged queue (P48): a queued build waiting behind a cycle
+    // that has already concluded should not need anyone to find the magic
+    // button — every open client polls this route, so a fire-and-forget drain
+    // here un-wedges within seconds of anyone looking. Cheap when nothing is
+    // queued (this list is already in hand); drainBuildQueue dedupes
+    // re-entrancy itself, and a drain failure never affects the poll.
+    try {
+      if (buildQueue.some((q) => q.status === 'queued')
+        && !buildQueue.some((q) => q.status === 'started')
+        && queueMayAdvancePast(cycle)) {
+        drainBuildQueue(req.mock2Project.id).catch((e) => console.warn('[mock2] poll queue drain failed:', e?.message));
+      }
+    } catch { /* advisory */ }
     // Live "what's being worked on" stream — the recent tool calls + narration
     // for an in-flight cycle (VS Code / Claude-Code style). Only while the build
     // is active, so a settled cycle's poll stays lean; the full transcript lives

@@ -162,6 +162,25 @@ export function buildCycleNotification({ project = {}, cycle = {}, outcome }) {
     };
   }
 
+  // The calm completion (P48 cycle 596): the build DEPLOYED and works in-fence;
+  // live external checks await the operator's confirmation. This previously
+  // fell through to "Build failed" below — a phone saying "failed" about a
+  // build that shipped, for an operator who then finds no failure anywhere.
+  if (outcome === 'pending_verification') {
+    const title = `Build complete — verify when ready — ${name}`;
+    const line = 'The app is deployed and live. Live check(s) await your confirmation in the build panel — the build is not failed, it is waiting for you.';
+    const body = [short ? `Change: ${short}` : null, line, url ? url : null].filter(Boolean).join('\n');
+    return {
+      level: 'info',
+      title,
+      body,
+      subject: title,
+      text: `${line}${short ? `\n\nChange: ${short}` : ''}${url ? `\n\n${url}` : ''}`,
+      sms: `ProxyPilot: build complete for ${name} — live checks await your confirmation.`,
+      link: project.id ? `/projects/${project.id}` : '/',
+    };
+  }
+
   if (outcome === 'blocked') {
     const title = `Build blocked — ${name}`;
     const line = `The build stopped without finishing and needs attention${cycle.error ? `: ${String(cycle.error).slice(0, 160)}` : '.'} Resume it once the blocker is cleared.`;

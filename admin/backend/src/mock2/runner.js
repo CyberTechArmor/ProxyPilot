@@ -39,6 +39,7 @@ import {
   interruptDecision, estimateCycleTokens, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
   noopStartRefusal,
   normalizeBuildMode, isFastBuildMode, BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK,
+  queueMayAdvancePast,
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
@@ -171,6 +172,23 @@ export function setJob(cycleId, patch) {
 }
 export function scheduleJobCleanup(cycleId) {
   setTimeout(() => activeCycles.delete(Number(cycleId)), 120000);
+  // THE CLOSE-HOOK RE-DRAIN (P48): build-queue.js always said "the close hook
+  // re-drains" and nothing ever did — the drains lived only at enqueue points
+  // and the after-build review, so a queued build could sit "Up next" forever
+  // behind a cycle that had already concluded (the design-fix build wedged
+  // behind a pending-verification completion). This is called at every cycle
+  // exit, so it IS the close hook: when the concluded cycle no longer blocks
+  // the queue (terminal, or the calm pending-verification completion — never a
+  // blocked cycle whose resume needs the lock a queued build would take),
+  // advance the queue. Fire-and-forget; a drain failure never affects cleanup.
+  try {
+    const c = getCycle(Number(cycleId));
+    if (c && queueMayAdvancePast(c)) {
+      import('./build-queue.js')
+        .then(({ drainBuildQueue }) => drainBuildQueue(c.project_id))
+        .catch((e) => console.warn('[mock2] close-hook queue drain failed:', e?.message));
+    }
+  } catch { /* cleanup must never throw */ }
 }
 
 // Raise an admin-queue item without letting a queue write abort the cycle (the

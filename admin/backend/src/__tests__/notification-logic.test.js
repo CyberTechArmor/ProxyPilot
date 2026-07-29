@@ -139,3 +139,17 @@ test('buildCycleNotification truncates a very long instruction', () => {
   const m = buildCycleNotification({ project: { name: 'Fly' }, cycle: { instruction: long, deploy_status: 'serving' }, outcome: 'succeeded' });
   assert.ok(m.body.includes('…'));
 });
+
+test('buildCycleNotification: pending_verification is a calm completion, never "failed" (P48)', () => {
+  const m = buildCycleNotification({
+    project: { id: 48, name: 'Noteme', url: 'https://noteme.example' },
+    cycle: { instruction: 'Build the working application from the approved design inventory', deploy_status: 'serving' },
+    outcome: 'pending_verification',
+  });
+  assert.equal(m.level, 'info');
+  assert.match(m.title, /Build complete — verify when ready/);
+  assert.doesNotMatch(m.title, /failed/i);
+  assert.match(m.body, /deployed and live/);
+  assert.match(m.body, /not failed/);
+  assert.match(m.sms, /await your confirmation/);
+});

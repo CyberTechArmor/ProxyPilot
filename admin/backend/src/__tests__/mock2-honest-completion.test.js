@@ -18,7 +18,7 @@ import {
   acceptanceVerdict, acceptanceRecord, codeChangedFiles, classifyTaskKind, parseAcceptance,
 } from '../mock2/acceptance-logic.js';
 import {
-  cycleWasNoop, consecutiveNoopCycles, noopStartRefusal, NOOP_CYCLE_LIMIT,
+  cycleWasNoop, consecutiveNoopCycles, noopStartRefusal, NOOP_CYCLE_LIMIT, queueMayAdvancePast,
 } from '../mock2/cycle-logic.js';
 import {
   deriveVerificationChecklist, failureBugfixInstruction, verificationTransition,
@@ -679,4 +679,24 @@ export async function syncPeople() {
   const r = analyzeIntegrations({ files: canned, manifest: AUTH_MANIFEST });
   assert.equal(r.verdict, 'fail');
   assert.ok(r.findings.some((f) => f.kind === 'fabricated_output'), JSON.stringify(r.findings));
+});
+
+// ---- queueMayAdvancePast (P48: the wedged "Up next" build) ----
+
+test('queueMayAdvancePast: terminals and the pending-verification completion advance the queue', () => {
+  for (const status of ['succeeded', 'failed', 'abandoned', 'refused_quota', 'interrupted']) {
+    assert.equal(queueMayAdvancePast({ status }), true, status);
+  }
+  assert.equal(queueMayAdvancePast({ status: 'awaiting_user', verification_state: 'pending' }), true);
+  assert.equal(queueMayAdvancePast({ status: 'awaiting_user', verification_state: 'verified' }), true);
+  assert.equal(queueMayAdvancePast(null), true); // no cycle at all blocks nothing
+});
+
+test('queueMayAdvancePast: blocked cycles hold the queue (their resume needs the lock)', () => {
+  assert.equal(queueMayAdvancePast({ status: 'awaiting_admin' }), false);
+  // awaiting_user on OPEN RULE QUESTIONS (no verification checklist) blocks.
+  assert.equal(queueMayAdvancePast({ status: 'awaiting_user', verification_state: null }), false);
+  for (const status of ['queued', 'estimating', 'running']) {
+    assert.equal(queueMayAdvancePast({ status }), false, status);
+  }
 });

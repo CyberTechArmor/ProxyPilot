@@ -358,6 +358,20 @@ export function cycleWasNoop(cycle = {}) {
   } catch { return false; }
 }
 
+// queueMayAdvancePast — may the build queue start its next entry past this
+// cycle? (P48: the queue's "close hook re-drains" was a comment, not code — a
+// design-fix build sat "Up next" forever behind a concluded pending-
+// verification cycle.) Yes once the cycle is out of the way: any terminal
+// status, or the calm pending-verification completion (deployed; only operator
+// confirmation outstanding). NOT a blocked cycle — awaiting_admin, or
+// awaiting_user on open rule questions — because its resume needs the checkout
+// lock a queued build would take.
+export function queueMayAdvancePast(cycle) {
+  if (!cycle) return true;
+  if (['succeeded', 'failed', 'abandoned', 'refused_quota', 'interrupted'].includes(cycle.status)) return true;
+  return cycle.status === 'awaiting_user' && ['pending', 'verified'].includes(cycle.verification_state);
+}
+
 // How many consecutive completed no-op cycles may run for the SAME instruction
 // before the orchestrator declares the work done and refuses to open another.
 // Two is enough to prove idempotence (the first no-op already finished cleanly;
@@ -418,6 +432,10 @@ export function publicCycleShape(row) {
     framework_version_id: row.framework_version_id,
     stage: row.stage,
     status: row.status,
+    // Distinguishes "awaiting_user on open rule questions" from the calm
+    // pending-operator-verification completion (P48: they looked identical to
+    // the UI, and one of them is a build that already shipped).
+    verification_state: row.verification_state || null,
     current_gate: row.current_gate || null,
     gates,
     instruction: row.instruction || null,

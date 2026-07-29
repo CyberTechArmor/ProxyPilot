@@ -24,6 +24,7 @@ import BuildLogViewer from './BuildLogViewer';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import ChangeHistory from './ChangeHistory';
+import VerificationChecklist from './VerificationChecklist';
 import { toWireImages } from '@/lib/chat-images';
 import { parseFindings } from '@/lib/findings';
 import FixFindingsDialog from './FixFindingsDialog';
@@ -73,7 +74,7 @@ function SpendBadge({ projectId, cycleCostCents }) {
 }
 
 export default function BuildChat({
-  projectId, project, cycle = null, canEdit, online, active, job, needsFeedback = false,
+  projectId, project, cycle = null, canEdit, isAdmin = false, online, active, job, needsFeedback = false,
   buildQueue = [], activity = [], onStarted,
   // `fill` — the chat OWNS its box and scrolls internally (Flightdeck's
   // single-panel phone layout). Without it the card claims an intrinsic
@@ -986,6 +987,22 @@ export default function BuildChat({
             ) : (
               <p className="text-[11px] text-muted-foreground">An editor or admin can resume it from here or the classic Build panel.</p>
             )}
+          </div>
+        ) : null}
+
+        {/* PENDING VERIFICATION (P48): a build that completes with live checks
+            outstanding used to be invisible here — the checklist rendered only
+            in the classic Build panel, so on a phone (Flightdeck is the whole
+            UI) the operator got a notification, found no button anywhere, and
+            the queued next build sat "Up next" behind a state they could not
+            see. The checklist renders nothing when no check is outstanding.
+            `fill` only: the classic view already shows it in the Build panel. */}
+        {fill && cycle?.status === 'awaiting_user' ? (
+          <div className="shrink-0 max-h-[45vh] overflow-y-auto">
+            <VerificationChecklist
+              projectId={projectId} canEdit={canEdit} isAdmin={isAdmin} online={online}
+              cycle={cycle} onRefresh={onStarted}
+            />
           </div>
         ) : null}
 

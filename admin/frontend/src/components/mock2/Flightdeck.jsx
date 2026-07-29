@@ -201,7 +201,7 @@ export default function Flightdeck({
       </div>
     );
   const chatPane = (
-    <BuildChat projectId={projectId} project={project} cycle={cycle} canEdit={canEdit} online={online} active={active}
+    <BuildChat projectId={projectId} project={project} cycle={cycle} canEdit={canEdit} isAdmin={isAdmin} online={online} active={active}
       job={job} buildQueue={buildQueue} activity={activity} onStarted={load} fill />
   );
   const terminalPane = online

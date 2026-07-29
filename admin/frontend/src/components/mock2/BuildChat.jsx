@@ -599,10 +599,16 @@ export default function BuildChat({
     setOptionsPicker({ mode: 'all', pages: [], screens: [], loading: true });
     try {
       const r = await api.mock2DesignOptionsScreens(projectId);
+      // Routes first, then the in-page screen views ("/#note-detail") — the
+      // views are what the operator is usually LOOKING AT (P48: the notes view
+      // wasn't offered, only its route), so they are selectable like any page.
       setOptionsPicker((cur) => (cur ? {
         ...cur,
         loading: false,
-        pages: (r.pages || ['/']).map((p) => ({ path: p, include: false })),
+        pages: [
+          ...(r.pages || ['/']).map((p) => ({ path: p, include: false })),
+          ...(r.views || []).map((v) => ({ path: v.key, include: false, view: true })),
+        ],
         screens: r.screens || [],
       } : cur));
     } catch {
@@ -1214,12 +1220,15 @@ export default function BuildChat({
                             onChange={() => setOptionsPicker((c) => ({ ...c, pages: c.pages.map((x, j) => (j === i ? { ...x, include: !x.include } : x)) }))}
                           />
                           <span className="font-mono break-all">{p.path}</span>
+                          {p.view ? <span className="shrink-0 text-[10px] text-muted-foreground">screen view</span> : null}
                         </label>
                       ))}
                     </div>
                   )
                 ) : null}
-                {optionsPicker.screens?.length ? (
+                {/* Only when the app exposed no selectable views — otherwise
+                    the names are IN the list above as "/#…" entries. */}
+                {optionsPicker.screens?.length && !optionsPicker.pages.some((p) => p.view) ? (
                   <p className="text-[11px] text-muted-foreground break-words">
                     Screen views the design defines (captured with their page): {optionsPicker.screens.join(', ')}.
                   </p>

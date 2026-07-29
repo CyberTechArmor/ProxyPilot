@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import {
   detectDesignOptionsIntent, parseDesignOptions, buildDesignOptionsPrompt,
   buildDesignOptionsTask, diagnosisMessage, optionMessage, optionsFailureMessage,
-  pageFromComplaint, screensLabel, MIN_OPTIONS, MAX_OPTIONS, OPTION_STRATEGIES,
+  pageFromComplaint, screensLabel, parseScreenViews, MIN_OPTIONS, MAX_OPTIONS, OPTION_STRATEGIES,
 } from '../mock2/design-options-logic.js';
 
 test('a complaint routes to options', () => {
@@ -280,4 +280,19 @@ test('buildDesignOptionsTask: operator-attached images are announced with their 
   assert.match(t, /attached 2 image\(s\) of their own/);
   assert.match(t, /numbered red pins/);
   assert.doesNotMatch(buildDesignOptionsTask({ page: '/' }), /image\(s\) of their own/);
+});
+
+test('parseScreenViews: container grep output becomes selectable /#panel entries, deduped, file mapped to route', () => {
+  const out = [
+    '/srv/app/public/app-shell.html|data-screen="notes"|data-screen="note-detail"|',
+    '/srv/app/public/admin.html|data-screen="users"|',
+    '/srv/app/public/login.html|',
+    '/srv/app/public/app-shell.html|data-screen="notes"|', // duplicate line
+    '',
+  ].join('\n');
+  const views = parseScreenViews(out);
+  assert.deepEqual(views.map((v) => v.key), ['/#notes', '/#note-detail', '/admin#users']);
+  assert.equal(views[0].page, '/');
+  assert.equal(views[2].panel, 'users');
+  assert.deepEqual(parseScreenViews(''), []);
 });

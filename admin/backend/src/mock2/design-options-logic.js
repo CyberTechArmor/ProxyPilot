@@ -180,6 +180,34 @@ export function screensLabel(pages = [], allScreens = false) {
   return list.join(', ');
 }
 
+// parseScreenViews — the pure half of listAppScreenViews (design-review.js):
+// parse the container grep's output (`file|data-screen="a"|data-screen="b"|`
+// per line) into selectable "/#panel" picker entries, mapping each HTML file
+// to the route that serves it (app-shell/index → '/', X.html → '/X').
+export function parseScreenViews(stdout) {
+  const routeForFile = (file) => {
+    const base = String(file).split('/').pop().replace(/\.html$/, '');
+    if (base === 'app-shell' || base === 'index') return '/';
+    return `/${base}`;
+  };
+  const views = [];
+  const seen = new Set();
+  for (const line of String(stdout || '').split('\n')) {
+    const [file, ...rest] = line.split('|');
+    if (!file || !file.trim()) continue;
+    const page = routeForFile(file.trim());
+    for (const frag of rest) {
+      const m = /^data-screen="([^"]+)"$/.exec(frag.trim());
+      if (!m) continue;
+      const key = `${page}#${m[1]}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      views.push({ key, page, panel: m[1] });
+    }
+  }
+  return views;
+}
+
 export function buildDesignOptionsTask({
   projectName = 'the app', complaint = '', page = '/', measurements = '', designNote = '', shots = [],
   multi = false, attachedCount = 0,

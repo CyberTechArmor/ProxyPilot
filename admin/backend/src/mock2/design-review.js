@@ -315,6 +315,21 @@ export async function listAppScreenPaths(containerName) {
   return pathsToShoot(parsed.ok ? parsed.spec : null, Infinity);
 }
 
+// The in-page screen VIEWS the app defines — its `data-screen` panels,
+// enumerated statically from the container's public HTML (one cheap exec, no
+// browser) and mapped to the route that serves each file. These are the
+// selectable "/#note-detail" entries in the design-options screen picker
+// (P48: the screen the operator wanted was a view, and the picker only
+// offered routes). Best-effort: an unreadable tree returns [].
+export async function listAppScreenViews(containerName) {
+  const script = `for f in /srv/app/public/*.html; do [ -f "$f" ] || continue; printf '%s|' "$f"; grep -o 'data-screen="[^"]*"' "$f" 2>/dev/null | tr '\\n' '|'; echo; done`;
+  try {
+    const r = await sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs: 20000 });
+    const { parseScreenViews } = await import('./design-options-logic.js');
+    return parseScreenViews(r.stdout || '');
+  } catch { return []; }
+}
+
 // Screenshot the deployed app. Returns { shots, axe, detail } — shots are
 // JPEG base64 (cheaper tokens than PNG at review fidelity). Never throws.
 // onShot(shot) — called as each screenshot lands, so a caller can show the
@@ -332,9 +347,24 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
   const specText = await readContainerFile(containerName, UI_CHECKS_PATH);
   const parsed = specText ? parseUiChecks(specText) : { ok: false };
   const spec = parsed.ok ? parsed.spec : null;
-  const targets = paths?.length
-    ? (uncapped ? paths : paths.slice(0, MAX_PATHS))
-    : pathsToShoot(spec, uncapped ? Infinity : MAX_PATHS);
+  // A requested path may name an in-page screen view — "/#note-detail": the
+  // route, then the data-screen panel to activate on it (the screen-picker's
+  // selectable views, P48: the screen the operator wanted options for was a
+  // view, and the picker only offered routes). Split those out; bare routes
+  // flow through the ordinary loop below, explicit views get their own pass.
+  const requested = paths?.length ? (uncapped ? paths : paths.slice(0, MAX_PATHS)).map(String) : null;
+  const explicitViews = [];
+  let targets;
+  if (requested) {
+    targets = [];
+    for (const p of requested) {
+      const hash = p.indexOf('#');
+      if (hash >= 0) explicitViews.push({ route: p.slice(0, hash) || '/', panel: p.slice(hash + 1) });
+      else targets.push(p);
+    }
+  } else {
+    targets = pathsToShoot(spec, uncapped ? Infinity : MAX_PATHS);
+  }
   const axeSource = withAxe ? loadAxeSource() : null;
 
   let browser = null;
@@ -458,6 +488,54 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
       } catch (err) {
         console.warn(`[mock2] design-review screenshot failed for ${path}:`, err?.message);
       }
+    }
+    // Explicitly selected in-page screen views: navigate the route, activate
+    // the named data-screen panel, shoot it (mobile always; desktop for the
+    // first two, same pair rule as routes). Name matching is TOLERANT — exact
+    // attr first, then case/slug-insensitive — because pickers carry display
+    // names ("Note detail") while the app's attrs are slugs ("note-detail").
+    for (let i = 0; i < explicitViews.length; i++) {
+      const t = explicitViews[i];
+      try {
+        await page.setViewportSize(MOBILE);
+        await gotoSettled(page, new URL(t.route, baseUrl).toString());
+        const shown = await page.evaluate(([sel, want]) => {
+          const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+          const all = Array.from(document.querySelectorAll(sel));
+          const target = all.find((el) => el.getAttribute('data-screen') === want)
+            || all.find((el) => norm(el.getAttribute('data-screen')) === norm(want));
+          if (!target) return null;
+          all.forEach((el) => el.classList.remove('screen-active'));
+          target.classList.add('screen-active');
+          return target.getAttribute('data-screen');
+        }, [SCREEN_PANEL_SELECTOR, t.panel]);
+        if (!shown) continue;
+        const entry = { path: `${t.route}#${shown}`, width: MOBILE.width, media_type: 'image/jpeg', data: (await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false })).toString('base64') };
+        shots.push(entry);
+        report(entry);
+        if (i < 2) {
+          await page.setViewportSize(DESKTOP);
+          await page.waitForTimeout(250);
+          const dentry = { path: `${t.route}#${shown}`, width: DESKTOP.width, media_type: 'image/jpeg', data: (await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false })).toString('base64') };
+          shots.push(dentry);
+          report(dentry);
+        }
+      } catch (err) {
+        console.warn(`[mock2] design-review view screenshot failed for ${t.route}#${t.panel}:`, err?.message);
+      }
+    }
+    // A route's automatic panel discovery can duplicate an explicitly selected
+    // view — keep the first of each path@width.
+    if (explicitViews.length) {
+      const seen = new Set();
+      for (let i = shots.length - 1; i >= 0; i--) {
+        const key = `${shots[i].path}@${shots[i].width}`;
+        if (seen.has(key)) shots.splice(i, 1);
+        else seen.add(key);
+      }
+      shots.reverse();
+      // (walked backwards keeping the LAST occurrence — reverse restores order;
+      // the explicit shot wins over an earlier auto-discovered duplicate.)
     }
     return { shots, axe: axeViolations, overflows: overflowFindings, density: densityMeasurements, signals: signalMeasurements, detail: null, authenticated: authed };
   } catch (err) {

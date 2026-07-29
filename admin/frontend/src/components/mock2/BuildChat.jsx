@@ -333,13 +333,13 @@ export default function BuildChat({
   // buildMode: 'quick' is the default iteration path — one small scoped
   // change, minimal gates, straight to deploy; 'full' runs the audited build
   // (rule questions, whole gate battery); 'mvp' is the scaffold speed path.
-  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null, textOverride = null, extraImages = null } = {}) => {
+  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null, textOverride = null, extraImages = null, escalate = false } = {}) => {
     const body = (textOverride ?? instruction).trim();
     if (!body) return;
     setBusy(true);
     try {
       const images = [...toWireImages(attach.images), ...(extraImages || [])];
-      const res = await api.mock2StartCycle(projectId, body, images, buildMode, { skipSplit, skipSuggest, extras });
+      const res = await api.mock2StartCycle(projectId, body, images, buildMode, { skipSplit, skipSuggest, extras, escalate });
       if (res.split_proposal) {
         // Feature-scale ask that decomposes — show the grouping card; nothing
         // has started yet. Default: every part included, one group per part.
@@ -1329,9 +1329,25 @@ export default function BuildChat({
                       changes until you press Build on one of them.
                       Outline, not ghost: as a ghost it read as inert footer
                       text on desktop and operators never found it. */}
+                  {/* Redo on the bigger model — for a result that is merely
+                      UNSATISFYING (automatic escalation only fires on hard
+                      failure). Re-runs the last build's exact instruction on
+                      the escalation model at high effort. */}
+                  {canEdit && cycle?.instruction && !active
+                    && ['succeeded', 'failed', 'interrupted', 'abandoned'].includes(cycle.status) ? (
+                    <Button
+                      variant="ghost"
+                      className="h-11 sm:h-10 ml-auto"
+                      disabled={quickDisabled}
+                      onClick={() => startBuild('quick', { textOverride: cycle.instruction, skipSplit: true, skipSuggest: true, escalate: true })}
+                      title="Not satisfied with the last build? Re-run its exact request on the escalation model at high effort."
+                    >
+                      <RefreshCw className="h-4 w-4 mr-1" /> Redo, bigger model
+                    </Button>
+                  ) : null}
                   <Button
                     variant="outline"
-                    className="h-11 sm:h-10 ml-auto"
+                    className={`h-11 sm:h-10 ${canEdit && cycle?.instruction && !active && ['succeeded', 'failed', 'interrupted', 'abandoned'].includes(cycle.status) ? '' : 'ml-auto'}`}
                     disabled={askDisabled}
                     aria-expanded={!!optionsPicker}
                     onClick={() => (optionsPicker ? setOptionsPicker(null) : openDesignOptions())}

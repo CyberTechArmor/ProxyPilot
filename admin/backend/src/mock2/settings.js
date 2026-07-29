@@ -131,11 +131,102 @@ export function setFastCodeModelSetting(value, updatedBy = null) {
   return getFastCodeModelSetting();
 }
 
+// ---- Quick-lane effort override (dashboard-stored MOCK2_QUICK_EFFORT) ----
+// '' = the lane's built-in default (quickRoutingDecision: medium); a stored
+// effort level wins over the env var.
+export const QUICK_EFFORT_KEY = 'quick_effort';
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+export function getQuickEffortSetting() {
+  const v = String(getMock2Setting(QUICK_EFFORT_KEY, '') || '').trim().toLowerCase();
+  return EFFORT_LEVELS.includes(v) ? v : '';
+}
+
+export function setQuickEffortSetting(value, updatedBy = null) {
+  const v = String(value || '').trim().toLowerCase();
+  setMock2Setting(QUICK_EFFORT_KEY, EFFORT_LEVELS.includes(v) ? v : '', updatedBy);
+  return getQuickEffortSetting();
+}
+
+// ---- Global escalation model (dashboard-stored MOCK2_ESCALATE_MODEL) ----
+// The rung-1 model a failed/halted attempt (or a difficulty-5 task) steps up
+// to when the task's routing rule names none. '' = no global escalation.
+export const ESCALATE_MODEL_KEY = 'escalate_model';
+
+export function getEscalateModelSetting() {
+  return String(getMock2Setting(ESCALATE_MODEL_KEY, '') || '').trim();
+}
+
+export function setEscalateModelSetting(value, updatedBy = null) {
+  setMock2Setting(ESCALATE_MODEL_KEY, String(value || '').trim(), updatedBy);
+  return getEscalateModelSetting();
+}
+
 // The env the routing decisions should read: process.env with the stored
-// fast-model choice overlaid (stored setting wins over the env var).
+// choices overlaid (a stored setting wins over its env var).
 export function routingEnv(env = process.env) {
-  const v = getFastCodeModelSetting();
-  return v ? { ...env, MOCK2_FAST_MODEL: v } : env;
+  const out = { ...env };
+  const fast = getFastCodeModelSetting();
+  if (fast) out.MOCK2_FAST_MODEL = fast;
+  const quick = getQuickEffortSetting();
+  if (quick) out.MOCK2_QUICK_EFFORT = quick;
+  const esc = getEscalateModelSetting();
+  if (esc) out.MOCK2_ESCALATE_MODEL = esc;
+  return out;
+}
+
+// ---- Cost saver (one switch for the cheap-first + escalate-on-failure posture) ----
+//
+// ON applies the recommended economy routing IN ONE MOVE: the fast code model
+// back to its platform default (claude-sonnet-5 for quick/MVP/routine tasks),
+// the quick lane at medium effort, and claude-opus-4-8 as the global
+// escalation model so any failed cheap attempt automatically re-runs big.
+// The operator's PREVIOUS values are snapshotted first, and OFF restores that
+// snapshot exactly — "if I turn it off it goes to the last known state", never
+// to a hardcoded default.
+export const COST_SAVER_KEY = 'cost_saver';
+export const COST_SAVER_SNAPSHOT_KEY = 'cost_saver_snapshot';
+const COST_SAVER_APPLIED = Object.freeze({
+  fast_code_model: '',        // '' = platform default (DEFAULT_FAST_MODEL, sonnet-5)
+  quick_effort: 'medium',
+  escalate_model: 'claude-opus-4-8',
+});
+
+export function getCostSaver() {
+  const on = String(getMock2Setting(COST_SAVER_KEY, '') || '').trim().toLowerCase() === 'on';
+  let snapshot = null;
+  try { snapshot = JSON.parse(getMock2Setting(COST_SAVER_SNAPSHOT_KEY, 'null') || 'null'); } catch { snapshot = null; }
+  return {
+    setting: on ? 'on' : 'off',
+    applies: COST_SAVER_APPLIED,
+    snapshot,
+    current: {
+      fast_code_model: getFastCodeModelSetting(),
+      quick_effort: getQuickEffortSetting(),
+      escalate_model: getEscalateModelSetting(),
+    },
+  };
+}
+
+export function setCostSaver(value, updatedBy = null) {
+  const on = String(value || '').trim().toLowerCase() === 'on';
+  const state = getCostSaver();
+  if (on && state.setting !== 'on') {
+    // Snapshot the operator's values BEFORE applying, so off = last known state.
+    setMock2Setting(COST_SAVER_SNAPSHOT_KEY, JSON.stringify(state.current), updatedBy);
+    setFastCodeModelSetting(COST_SAVER_APPLIED.fast_code_model, updatedBy);
+    setQuickEffortSetting(COST_SAVER_APPLIED.quick_effort, updatedBy);
+    setEscalateModelSetting(COST_SAVER_APPLIED.escalate_model, updatedBy);
+    setMock2Setting(COST_SAVER_KEY, 'on', updatedBy);
+  } else if (!on && state.setting === 'on') {
+    const snap = state.snapshot || {};
+    setFastCodeModelSetting(snap.fast_code_model ?? '', updatedBy);
+    setQuickEffortSetting(snap.quick_effort ?? '', updatedBy);
+    setEscalateModelSetting(snap.escalate_model ?? '', updatedBy);
+    setMock2Setting(COST_SAVER_SNAPSHOT_KEY, 'null', updatedBy);
+    setMock2Setting(COST_SAVER_KEY, 'off', updatedBy);
+  }
+  return getCostSaver();
 }
 
 // ---- browser smoke connector toggle (dashboard-controlled) ----

@@ -281,6 +281,32 @@ export default function AdminQueue() {
       .catch((err) => { if (!(err instanceof ApiError)) console.error('load lane tuning failed:', err); });
   }, [gate]);
 
+  // Cost saver — the one-switch economy posture. OFF restores the snapshot
+  // taken when it was turned on (the last known state).
+  const [costSaver, setCostSaver] = useState(null);
+  const [savingCostSaver, setSavingCostSaver] = useState(false);
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetCostSaver()
+      .then(setCostSaver)
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load cost saver failed:', err); });
+  }, [gate]);
+  const toggleCostSaver = async (on) => {
+    setSavingCostSaver(true);
+    try {
+      const state = await api.mock2SetCostSaver(on ? 'on' : 'off');
+      setCostSaver(state);
+      toast({
+        title: `Cost saver ${state.setting}`,
+        description: state.setting === 'on'
+          ? 'Routine builds now run on the fast model (Sonnet 5) at medium effort; failures escalate to Opus automatically. Your previous values were saved.'
+          : 'Restored your previous model/effort/escalation values (the last known state).',
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+    } finally { setSavingCostSaver(false); }
+  };
+
   // Browser smoke connector (post-deploy UI verification) — toggle + readiness.
   const [smokeBrowser, setSmokeBrowser] = useState(null);
   const [savingSmoke, setSavingSmoke] = useState(false);
@@ -499,6 +525,51 @@ export default function AdminQueue() {
           <p className="pt-2 text-xs text-muted-foreground">
             Explicitly declined components stay declined, and files a build already adapted are never overwritten.
           </p>
+        </CardContent>
+      </Card>
+
+      {/* Cost saver — cheap-first + escalate-on-failure, one switch, reversible
+          to the operator's exact previous values. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Cost saver</CardTitle>
+          <CardDescription>
+            One switch for the economy posture: routine builds (Quick updates, annotate fixes, MVP scaffolds)
+            run on the fast code model (Sonnet 5) at medium effort, and any attempt that fails or halts
+            automatically re-runs on the escalation model (Opus 4.8). The audit, design review, and full
+            builds keep their own models. Turning it OFF restores exactly the values you had before turning
+            it on — never a hardcoded default.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {costSaver == null ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : (
+            <>
+              <label htmlFor="cost-saver" className="flex min-h-11 items-center gap-3 cursor-pointer rounded-md border p-3">
+                <Switch
+                  id="cost-saver"
+                  checked={costSaver.setting === 'on'}
+                  disabled={savingCostSaver}
+                  onCheckedChange={toggleCostSaver}
+                />
+                <span className="text-sm">
+                  {costSaver.setting === 'on'
+                    ? 'On — cheap first, escalate on failure. Turning off restores your saved values.'
+                    : 'Off — every lane uses your own model/effort settings below.'}
+                </span>
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Current routing: fast model{' '}
+                <span className="font-mono">{costSaver.current?.fast_code_model === 'off' ? 'off' : (costSaver.current?.fast_code_model || 'default (claude-sonnet-5)')}</span>
+                {' '}· quick effort <span className="font-mono">{costSaver.current?.quick_effort || 'default (medium)'}</span>
+                {' '}· escalation <span className="font-mono">{costSaver.current?.escalate_model || 'none (per-rule only)'}</span>.
+                Per-cycle model, effort, and cost land in the request log — the evidence for tuning further.
+              </p>
+            </>
+          )}
         </CardContent>
       </Card>
 

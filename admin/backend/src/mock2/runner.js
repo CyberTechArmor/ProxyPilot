@@ -362,7 +362,7 @@ export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 
 // cycle and injected as a labeled user turn after the task. A fresh (non-resume)
 // build passes null, which also expires any dangling one-time authorizations so a
 // stale grant can never apply to an unrelated later build ("expires with the cycle").
-export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null, task = null, buildMode = null }) {
+export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null, task = null, buildMode = null, escalate = false }) {
   const projectId = Number(project.id);
   if (!resumeContext) { try { expireStaleAuthorizations(projectId); } catch { /* best effort */ } }
   // Refresh the base app BEFORE the build reads the tree, so the cycle works
@@ -447,6 +447,22 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     const fast = mvpBuild ? mvpRoutingDecision(routingEnv(), ready.model) : quickRoutingDecision(routingEnv(), ready.model);
     routing = { ...(routing || {}), ...fast, mode, applied_model: fast.model };
     ready = { ...ready, model: fast.model, effort: fast.effort };
+  }
+
+  // OPERATOR ESCALATION — the "redo this on the bigger model" button. Unlike
+  // rung-1 escalation (which needs a FAILED prior attempt), this is the
+  // operator saying the result was unsatisfying: force the escalation model
+  // (per-rule, else the global setting/env) at high effort, over whatever the
+  // fast lane or the knowledge base just decided. Lane tuning still gets the
+  // last word below — an operator's standing override outranks a per-press one.
+  if (escalate) {
+    const env = routingEnv();
+    const escModel = String(routing?.escalation_model || env.MOCK2_ESCALATE_MODEL || '').trim() || ready.model;
+    routing = {
+      ...(routing || {}), model: escModel, effort: 'high', rung: 1,
+      reason: 'operator escalation (redo on the bigger model)', mode, applied_model: escModel,
+    };
+    ready = { ...ready, model: escModel, effort: 'high' };
   }
 
   // Operator lane tuning (admin settings → Model thinking & effort) — the LAST

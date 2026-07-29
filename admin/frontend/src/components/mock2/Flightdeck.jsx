@@ -171,6 +171,18 @@ export default function Flightdeck({
     await api.mock2StartCycle(projectId, text, list, 'quick', { skipSplit: true, skipSuggest: true });
     load();
   }, [projectId, canEdit, online, load]);
+  // Pins toggled to "Options" are a complaint, not an instruction: run Design
+  // options scoped to the pinned page(s), with the burned-in screenshot
+  // attached so the model sees the exact spots. Layouts come back in the chat.
+  const annotateOptions = useCallback(async ({ text, image, pages }) => {
+    if (!canEdit || !online) return;
+    await api.mock2RunDesignOptions(projectId, {
+      pages: pages?.length ? pages : ['/'],
+      complaint: String(text || '').slice(0, 4000),
+      images: image ? [image] : [],
+    });
+    load();
+  }, [projectId, canEdit, online, load]);
 
   // The preview embeds the running app directly. Caddy relaxes the app's
   // frame-ancestors to allow ONLY the dashboard origin (see mock2/caddy.js), so
@@ -180,7 +192,8 @@ export default function Flightdeck({
     ? <PreviewPanel src={previewSrc} title={project?.name} approved reloadKey={externalNonce}
         fullHeight={previewFull} onToggleFullHeight={devMode ? (() => setPreviewFull((v) => !v)) : null}
         watchProjectId={project?.id ?? null}
-        onAnnotate={canEdit && online ? annotatePreview : null} />
+        onAnnotate={canEdit && online ? annotatePreview : null}
+        onAnnotateOptions={canEdit && online ? annotateOptions : null} />
     : (
       <div className="flex flex-col items-center justify-center gap-3 h-full p-4 text-center">
         <p className="text-sm text-muted-foreground">No preview — the app isn’t serving yet.</p>

@@ -1558,6 +1558,12 @@ export const api = {
   // capture account only — never the operator's account, never a real user's.
   mock2SeedDemoContent: (id, force = false) =>
     request(`/mock2/projects/${id}/app-access/demo-content`, { method: 'POST', body: JSON.stringify({ force }) }),
+  // Design options screen picker: which routes the app has (uncapped), and the
+  // explicit "run it on these screens / all screens" path. The typed-complaint
+  // route through Ask still works; this is the button's picker.
+  mock2DesignOptionsScreens: (id) => request(`/mock2/projects/${id}/design-options/screens`),
+  mock2RunDesignOptions: (id, body) =>
+    request(`/mock2/projects/${id}/design-options`, { method: 'POST', body: JSON.stringify(body) }),
   // Live progress for the screen check / design options — a browser driving the
   // app for a minute or two. Polled by the preview so the surface that IS a
   // picture of the app says when something is looking at it.

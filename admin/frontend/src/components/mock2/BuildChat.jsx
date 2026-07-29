@@ -584,25 +584,56 @@ export default function BuildChat({
   };
 
   // Design options: for when the screen does not look right and you cannot say
-  // why. It goes through Ask — one drafted message, one lane — sending the
-  // phrase the backend matches, so the button and someone typing "this doesn't
-  // look right" are the same code path and cannot drift.
+  // why. The button opens a SCREEN PICKER — all screens (every route and every
+  // in-route screen view, uncapped) or a chosen set — then runs the options
+  // read on exactly that coverage. Typing the complaint ("this doesn't look
+  // right") into the chat still triggers the same feature through Ask.
   //
-  // Available with an EMPTY composer, unlike the other two: this is the action
-  // for someone who has a feeling rather than an instruction. Anything already
-  // drafted rides along, because "the header feels cramped" is exactly the kind
-  // of half-formed sentence this is for.
-  const startDesignOptions = async () => {
-    const draft = instruction.trim();
-    setBusy(true);
+  // Available with an EMPTY composer, unlike the other send actions: this is
+  // the action for someone who has a feeling rather than an instruction.
+  // Anything already drafted rides along as the complaint.
+  const [optionsPicker, setOptionsPicker] = useState(null); // { mode:'all'|'pick', pages:[{path,include}], screens:[], loading }
+  const [optionsBusy, setOptionsBusy] = useState(false);
+  const openDesignOptions = async () => {
+    setOptionsPicker({ mode: 'all', pages: [], screens: [], loading: true });
     try {
-      await api.mock2Ask(projectId, draft ? `Design options — ${draft}` : 'Design options', toWireImages(attach.images));
+      const r = await api.mock2DesignOptionsScreens(projectId);
+      setOptionsPicker((cur) => (cur ? {
+        ...cur,
+        loading: false,
+        pages: (r.pages || ['/']).map((p) => ({ path: p, include: false })),
+        screens: r.screens || [],
+      } : cur));
+    } catch {
+      setOptionsPicker((cur) => (cur ? { ...cur, loading: false, pages: [{ path: '/', include: false }] } : cur));
+    }
+  };
+  const runDesignOptions = async () => {
+    if (!optionsPicker) return;
+    const all = optionsPicker.mode === 'all';
+    const chosen = optionsPicker.pages.filter((p) => p.include).map((p) => p.path);
+    if (!all && !chosen.length) return;
+    setOptionsBusy(true);
+    try {
+      await api.mock2RunDesignOptions(projectId, {
+        all,
+        pages: all ? [] : chosen,
+        complaint: instruction.trim(),
+        images: toWireImages(attach.images),
+      });
+      toast({
+        title: 'Design options running',
+        description: all
+          ? 'Screenshotting every screen (and every in-page screen view) — the layouts to choose from land in this chat.'
+          : `Screenshotting ${chosen.length} screen${chosen.length === 1 ? '' : 's'} — the layouts to choose from land in this chat.`,
+      });
+      setOptionsPicker(null);
       setInstruction('');
       attach.clear();
       await load();
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not get design options', description: err.message });
-    } finally { setBusy(false); }
+    } finally { setOptionsBusy(false); }
   };
 
   // When the cycle is blocked/awaiting an admin, the composer becomes the
@@ -1116,6 +1147,81 @@ export default function BuildChat({
                 </div>
               </div>
             ) : null}
+            {/* Design options screen picker — which screens should it look at?
+                "All screens" is genuinely all of them: every route plus every
+                in-page screen view (the button-switched panels), uncapped. */}
+            {optionsPicker ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+                <p className="flex items-center gap-1.5 text-xs font-medium">
+                  <Wand2 className="h-3.5 w-3.5" /> Design options — which screens should it look at?
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  It screenshots the chosen screens at phone and laptop width, then posts 2–3 layouts to choose
+                  between — nothing changes until you press Build on one.
+                  {instruction.trim() ? ' Your drafted text rides along as the complaint.' : ''}
+                </p>
+                <label className="flex cursor-pointer items-start gap-2 rounded border bg-background/40 p-2">
+                  <input
+                    type="radio" name="dopt-scope" className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
+                    checked={optionsPicker.mode === 'all'}
+                    onChange={() => setOptionsPicker((c) => ({ ...c, mode: 'all' }))}
+                  />
+                  <span className="min-w-0 flex-1 text-xs">
+                    <span className="font-medium">All screens</span>
+                    <span className="block text-[11px] text-muted-foreground">
+                      Every page{optionsPicker.pages.length ? ` (${optionsPicker.pages.length})` : ''} and every
+                      in-page screen view — including the button-switched panels — with no cap.
+                    </span>
+                  </span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-2 rounded border bg-background/40 p-2">
+                  <input
+                    type="radio" name="dopt-scope" className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
+                    checked={optionsPicker.mode === 'pick'}
+                    onChange={() => setOptionsPicker((c) => ({ ...c, mode: 'pick' }))}
+                  />
+                  <span className="min-w-0 flex-1 text-xs">
+                    <span className="font-medium">Only these screens</span>
+                    <span className="block text-[11px] text-muted-foreground">Their in-page screen views are included automatically.</span>
+                  </span>
+                </label>
+                {optionsPicker.mode === 'pick' ? (
+                  optionsPicker.loading ? (
+                    <p className="flex items-center gap-2 pl-1 text-[11px] text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> Listing the app&apos;s screens…</p>
+                  ) : (
+                    <div className="max-h-44 space-y-1 overflow-y-auto pl-1">
+                      {optionsPicker.pages.map((p, i) => (
+                        <label key={p.path} className="flex min-h-[36px] cursor-pointer items-center gap-2 text-xs">
+                          <input
+                            type="checkbox" className="h-4 w-4 shrink-0 accent-primary" checked={p.include}
+                            onChange={() => setOptionsPicker((c) => ({ ...c, pages: c.pages.map((x, j) => (j === i ? { ...x, include: !x.include } : x)) }))}
+                          />
+                          <span className="font-mono break-all">{p.path}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )
+                ) : null}
+                {optionsPicker.screens?.length ? (
+                  <p className="text-[11px] text-muted-foreground break-words">
+                    Screen views the design defines (captured with their page): {optionsPicker.screens.join(', ')}.
+                  </p>
+                ) : null}
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Button
+                    className="min-h-[44px] flex-1"
+                    disabled={optionsBusy || optionsPicker.loading || (optionsPicker.mode === 'pick' && !optionsPicker.pages.some((p) => p.include))}
+                    onClick={runDesignOptions}
+                  >
+                    {optionsBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Wand2 className="h-4 w-4 mr-1" />}
+                    Get design options
+                  </Button>
+                  <Button variant="ghost" className="min-h-[44px]" disabled={optionsBusy} onClick={() => setOptionsPicker(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {needsFeedback && !resumeMode ? (
               <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next update — Ask still works meanwhile.</p>
             ) : null}
@@ -1191,16 +1297,19 @@ export default function BuildChat({
                       the Preview — pins there land on the live signed-in app
                       (and resolve to components). */}
                   {/* Design options is the third action here, and the only one
-                      that needs no draft: it goes through Ask (same lane, same
-                      lock), looks at the real screen, and posts two or three
-                      layouts to choose between. Nothing changes until you press
-                      Build on one of them. */}
+                      that needs no draft: it opens the screen picker (all
+                      screens, or a chosen set), looks at the real screens, and
+                      posts two or three layouts to choose between. Nothing
+                      changes until you press Build on one of them.
+                      Outline, not ghost: as a ghost it read as inert footer
+                      text on desktop and operators never found it. */}
                   <Button
-                    variant="ghost"
+                    variant="outline"
                     className="h-11 sm:h-10 ml-auto"
                     disabled={askDisabled}
-                    onClick={startDesignOptions}
-                    title={"When a screen does not look right and you cannot say why: this screenshots the live app, measures it, and posts 2–3 named layouts with what each one changes. Nothing is applied until you press Build on one."}
+                    aria-expanded={!!optionsPicker}
+                    onClick={() => (optionsPicker ? setOptionsPicker(null) : openDesignOptions())}
+                    title={"When a screen does not look right and you cannot say why: pick which screens to look at (or all of them), and it screenshots the live app, measures it, and posts 2–3 named layouts with what each one changes. Nothing is applied until you press Build on one."}
                   >
                     <Wand2 className="h-4 w-4 mr-1" /> Design options
                   </Button>

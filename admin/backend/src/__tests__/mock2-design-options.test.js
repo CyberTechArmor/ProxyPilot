@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import {
   detectDesignOptionsIntent, parseDesignOptions, buildDesignOptionsPrompt,
   buildDesignOptionsTask, diagnosisMessage, optionMessage, optionsFailureMessage,
-  pageFromComplaint, MIN_OPTIONS, MAX_OPTIONS, OPTION_STRATEGIES,
+  pageFromComplaint, screensLabel, MIN_OPTIONS, MAX_OPTIONS, OPTION_STRATEGIES,
 } from '../mock2/design-options-logic.js';
 
 test('a complaint routes to options', () => {
@@ -254,4 +254,30 @@ test('the design-options prompt is renderable from the prompt registry', async (
   assert.ok(entry, 'the operator must be able to read and tune this prompt like every other');
   assert.deepEqual(entry.placeholders, []);
   assert.match(entry.render(), /senior product designer/);
+});
+
+// ---- the screen picker (all screens / chosen screens) ----
+
+test('screensLabel: all screens, a single route, and a chosen set', () => {
+  assert.equal(screensLabel([], true), 'all screens');
+  assert.equal(screensLabel(['/admin'], false), '/admin');
+  assert.equal(screensLabel(['/admin', '/notes'], false), '/admin, /notes');
+  assert.equal(screensLabel([], false), '/'); // nothing chosen falls back to home
+});
+
+test('buildDesignOptionsTask: multi-screen runs tell the model to name the screen per option', () => {
+  const t = buildDesignOptionsTask({ page: '/admin, /notes', multi: true, complaint: 'everything feels cramped' });
+  assert.match(t, /Screens: \/admin, \/notes/);
+  assert.match(t, /start each option's name with the screen/i);
+  // Single-screen stays as before — no per-screen naming demand.
+  const single = buildDesignOptionsTask({ page: '/admin', complaint: 'cramped' });
+  assert.match(single, /Screen: \/admin/);
+  assert.doesNotMatch(single, /start each option's name with the screen/i);
+});
+
+test('buildDesignOptionsTask: operator-attached images are announced with their count', () => {
+  const t = buildDesignOptionsTask({ page: '/', complaint: 'see pins', attachedCount: 2 });
+  assert.match(t, /attached 2 image\(s\) of their own/);
+  assert.match(t, /numbered red pins/);
+  assert.doesNotMatch(buildDesignOptionsTask({ page: '/' }), /image\(s\) of their own/);
 });

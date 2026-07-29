@@ -30,7 +30,7 @@ import { MOCKUP_CURRENT, DESIGN_CSS_PATH } from './concept-logic.js';
 import { startScreenJob, updateScreenJob, finishScreenJob, setScreenFrame } from './screen-job.js';
 import {
   buildDesignOptionsPrompt, buildDesignOptionsTask, parseDesignOptions,
-  diagnosisMessage, optionMessage, optionsFailureMessage, optionsStartedMessage,
+  diagnosisMessage, optionMessage, optionsFailureMessage, optionsStartedMessage, screensLabel,
 } from './design-options-logic.js';
 
 const APP_DIR = '/srv/app';
@@ -61,9 +61,20 @@ function measurementBlock(capture) {
   return `Measured from the live DOM (these are facts, not impressions):\n${lines.join('\n')}`;
 }
 
-// runDesignOptions({ project, complaint, page, initiatedBy })
+// runDesignOptions({ project, complaint, page, pages, allScreens, extraImages, initiatedBy })
 //   → { ok, options, error }.  Posts to the chat; never throws.
-export async function runDesignOptions({ project, complaint = '', page = '/', initiatedBy = null }) {
+//
+// Targets, three ways (the screen picker):
+//   * page       — the classic single-screen path (typed complaint / ask lane)
+//   * pages[]    — explicit routes the operator picked; captured UNCAPPED,
+//     including every in-route `data-screen` panel view
+//   * allScreens — every route the app has ('/', '/login', every ui-checks
+//     page) plus every panel view, UNCAPPED — the operator opted into the cost
+// extraImages — operator-attached images (e.g. an annotated screenshot with
+// numbered pins) shown to the model AFTER the live capture.
+export async function runDesignOptions({
+  project, complaint = '', page = '/', pages = null, allScreens = false, extraImages = [], initiatedBy = null,
+}) {
   const projectId = Number(project.id);
   const containerName = project.container_name;
   if (!containerName || project.lifecycle !== 'active') {
@@ -72,8 +83,13 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
   const ready = buildRunnerReady();
   if (!ready.ok) return { ok: false, error: ready.reason || 'No model connector is ready.' };
 
+  const explicit = Array.isArray(pages) ? [...new Set(pages.filter(Boolean))] : null;
+  const uncapped = allScreens || !!explicit?.length;
+  const capturePaths = allScreens ? null : (explicit?.length ? explicit : [page]);
+  const label = screensLabel(capturePaths || [], allScreens);
+
   getOrCreateChat(projectId);
-  insertMessage({ projectId, kind: 'system', body: optionsStartedMessage(page) });
+  insertMessage({ projectId, kind: 'system', body: optionsStartedMessage(label) });
   // Same progress record the screen check uses. Both drive a browser for a
   // minute or two, and both used to show nothing at all while they did.
   startScreenJob(projectId, 'options');
@@ -90,13 +106,16 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
 
   let capture;
   try {
-    updateScreenJob(projectId, { phase: 'capturing', message: `Screenshotting \`${page}\` at phone and laptop width…` });
+    updateScreenJob(projectId, { phase: 'capturing', message: `Screenshotting \`${label}\` at phone and laptop width…` });
     capture = await captureAppScreens({
       containerName,
       webPort: project.web_port || 3000,
-      // The complained-about screen first; the capture adds a desktop shot for
-      // the first two paths, which is exactly the pair a layout question needs.
-      paths: [page],
+      // The chosen screens (null = every route the app has). Explicit picks and
+      // all-screens run UNCAPPED — every route AND every in-route data-screen
+      // panel view is shot; the operator chose the coverage knowingly. The
+      // classic single-page complaint keeps the default caps.
+      paths: capturePaths,
+      uncapped,
       withAxe: false,
       reviewLogin,
       onShot: (shot) => {
@@ -114,7 +133,7 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
   }
   updateScreenJob(projectId, {
     phase: 'reading', shots: capture.shots.length,
-    message: `Working out two or three ways to fix \`${page}\` from ${capture.shots.length} screenshot(s)…`,
+    message: `Working out two or three ways to fix \`${label}\` from ${capture.shots.length} screenshot(s)…`,
   });
 
   // The approved design, so an option can name the app's own classes rather
@@ -131,6 +150,12 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
   } catch { designNote = ''; }
 
   const model = String(process.env.MOCK2_DESIGN_OPTIONS_MODEL || '').trim() || ready.model;
+  // Operator-attached images (annotated screenshots with pins) ride AFTER the
+  // live capture, so "shown last" in the task note is literally true.
+  const attached = (Array.isArray(extraImages) ? extraImages : [])
+    .filter((im) => im && im.data)
+    .map((im) => ({ media_type: im.media_type || 'image/png', data: im.data }));
+  const multi = new Set(capture.shots.map((s) => String(s.path).split('#')[0])).size > 1;
   const res = await callStepTurn('design-options', {
     connector: ready.connector,
     apiKey: ready.apiKey,
@@ -142,12 +167,14 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
       text: buildDesignOptionsTask({
         projectName: project.name,
         complaint,
-        page,
+        page: label,
         measurements: measurementBlock(capture),
         designNote,
         shots: capture.shots,
+        multi,
+        attachedCount: attached.length,
       }),
-      images: capture.shots.map((s) => ({ media_type: s.media_type, data: s.data })),
+      images: [...capture.shots.map((s) => ({ media_type: s.media_type, data: s.data })), ...attached],
     }],
     effort: 'high',
     thinking: null,
@@ -192,7 +219,7 @@ export async function runDesignOptions({ project, complaint = '', page = '/', in
   } catch (e) {
     console.warn('[mock2] design-options screenshot store failed:', e?.message);
   }
-  insertMessage({ projectId, kind: 'system', body: diagnosisMessage(parsed, { page }), attachments });
+  insertMessage({ projectId, kind: 'system', body: diagnosisMessage(parsed, { page: label }), attachments });
 
   // ONE MESSAGE PER OPTION. An assistant message with no cycle_id already
   // carries the "Build this as a Quick update" chip, so every option gets its

@@ -199,7 +199,7 @@ import {
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
 import { startAsk, getAskJobStatus } from './ask.js';
-import { getScreenJob, getScreenFrame } from './screen-job.js';
+import { getScreenJob, getScreenFrame, screenJobActive } from './screen-job.js';
 // ---- Multi-modal chat images (migration 526) ----
 import { validateChatImages, MAX_CHAT_IMAGES, isChatImageId } from './chat-image-logic.js';
 import { readChatImage } from './chat-images.js';
@@ -253,7 +253,7 @@ import { KEY_PROVIDERS, canManageKey, visibleKeyRows, publicKeyShape } from './p
 import { listAssets, getAsset, assetFilePath, addImage, addContent, updateAsset, removeAsset } from './project-assets.js';
 import { ASSET_TAGS, MAX_ASSET_BYTES, summarize } from './project-assets-logic.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
-import { listMessages, getMessage, getChat, insertMessage } from './chats.js';
+import { listMessages, getMessage, getChat, insertMessage, getOrCreateChat } from './chats.js';
 import {
   startConceptTurn, startDesignApproval, skipDesign, getConceptJobStatus, conceptReady,
   exportDesignTemplate, importDesignTemplate, adjustDesignPreset,
@@ -4122,6 +4122,67 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_ASK_START', 'mock2_project', req.mock2Project.id,
       { chars: parsed.data.question.length, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     res.status(202).json({ status: 'started' });
+  });
+
+  // ---- Design options: the screen picker path ----
+  // The typed-complaint route stays in the ask lane (intent-matched); these two
+  // are the explicit picker: which screens exist, and "run it on these".
+
+  // The routes worth offering. Uncapped by design — the picker's whole point is
+  // choosing coverage, and a silently trimmed list would make "all screens" a
+  // lie. In-route `data-screen` panel views (the button-switched screens) are
+  // not listed: the capture discovers and shoots them automatically per route.
+  router.get('/projects/:id/design-options/screens', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    let pages = ['/', '/login'];
+    if (project.container_name && project.lifecycle === 'active') {
+      try {
+        const { listAppScreenPaths } = await import('./design-review.js');
+        pages = await listAppScreenPaths(project.container_name);
+      } catch { /* the fallback pair still works */ }
+    }
+    // The inventory's named screen views — shown for context; they ride their
+    // route's capture automatically.
+    let screens = [];
+    try { screens = listScreenPlan(project.id).map((r) => r.name).filter(Boolean); } catch { screens = []; }
+    res.json({ pages, screens });
+  });
+
+  router.post('/projects/:id/design-options', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const parsed = z.object({
+      all: z.boolean().optional(),
+      pages: z.array(z.string().trim().min(1).max(200)).max(100).optional(),
+      complaint: z.string().trim().max(4000).optional(),
+      images: chatImagesSchema,
+    }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'invalid body — pass all:true or pages:[…], optional complaint/images' });
+    const { all = false, pages = [], complaint = '' } = parsed.data;
+    if (!all && !pages.length) return res.status(400).json({ error: 'Pick at least one screen, or all screens.' });
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') return res.status(409).json({ error: 'The project must be online.' });
+    if (screenJobActive(project.id)) return res.status(409).json({ error: 'A screen capture is already running for this project — wait for it to finish.' });
+    const imgCheck = validateChatImages(parsed.data.images);
+    if (!imgCheck.ok) return res.status(400).json({ error: imgCheck.error });
+    // Echo the ask as the operator's own message, like the ask lane does — a
+    // two-minute background run must explain who started it and why.
+    getOrCreateChat(project.id);
+    try {
+      insertMessage({
+        projectId: project.id, authorUserId: req.user.id,
+        actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0, kind: 'user',
+        body: `Design options — ${all ? 'all screens' : pages.join(', ')}${complaint ? ` — ${complaint}` : ''}`,
+      });
+    } catch { /* the run is the point */ }
+    const { runDesignOptions } = await import('./design-options.js');
+    void runDesignOptions({
+      project, complaint, pages: all ? null : pages, allScreens: all,
+      extraImages: imgCheck.images, initiatedBy: req.user.id,
+    })
+      .then((r) => { if (!r?.ok && r?.error) console.warn('[mock2] design options failed:', r.error); })
+      .catch((e) => console.warn('[mock2] design options crashed:', e?.message));
+    logAudit(req.user.id, 'MOCK2_DESIGN_OPTIONS_START', 'mock2_project', project.id,
+      { all, pages: pages.length, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    res.status(202).json({ started: true });
   });
 
   router.get('/projects/:id/ask/status', requireMock2Role('viewer'), (req, res) => {

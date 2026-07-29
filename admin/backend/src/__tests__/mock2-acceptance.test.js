@@ -7,11 +7,12 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   ACCEPTANCE_PATH, TASK_KINDS, classifyTaskKind, parseAcceptance,
   batteryHasRedTestGate, acceptanceVerdict, extractSummaryPathClaims,
-  summaryOverclaims, anomalySignals, acceptanceRecord, ANOMALY_TOKEN_FRACTION,
+  summaryOverclaims, verificationOnlyFinish, anomalySignals, acceptanceRecord, ANOMALY_TOKEN_FRACTION,
 } from '../mock2/acceptance-logic.js';
 
 const ADP_INSTRUCTION = 'Fix three issues in the ADP connection screen. The ADP mTLS connection fails ("private key does not match the stored certificate"; SSL alert 40) even though the cert/key pair is valid.';
@@ -172,4 +173,40 @@ test('REGRESSION: a summary that ENDS a sentence with a filename is not an over-
   // The extractor itself: punctuation never survives into a claim.
   assert.deepEqual(extractSummaryPathClaims('see src/a/b.ts.'), ['src/a/b.ts']);
   assert.deepEqual(extractSummaryPathClaims('a.ts, b.ts; c.ts!'), ['a.ts', 'b.ts', 'c.ts']);
+});
+
+// ---- verification-only finish (P47 request 141 — the resume dead-end) ----
+
+test('verificationOnlyFinish: an empty code diff + explicit already-done phrasing passes', () => {
+  const summaries = [
+    'Verified all 13 design-review findings already implemented in public/admin.js and state/design.css — no code changes needed.',
+    'The requested fixes are already present in the tree; nothing to change.',
+    'Verification-only: the header icons and labels match the approved mockup.',
+    'No changes were required — every finding was already addressed by a prior cycle.',
+  ];
+  for (const s of summaries) assert.equal(verificationOnlyFinish(s, []), true, s);
+});
+
+test('verificationOnlyFinish: any product-code change means the normal over-claim rule applies', () => {
+  assert.equal(verificationOnlyFinish('Everything already implemented — no changes needed.', ['public/admin.js']), false);
+});
+
+test('verificationOnlyFinish: an empty diff WITHOUT the phrasing stays subject to over-claim', () => {
+  // "I fixed X" with an empty diff is the dishonest shape the over-claim rule
+  // exists for — the explicit phrasing is the honesty forcing-function.
+  assert.equal(verificationOnlyFinish('Fixed the users-table labels in public/admin.js and the footer contrast.', []), false);
+  assert.equal(verificationOnlyFinish('', []), false);
+  assert.equal(verificationOnlyFinish(null, []), false);
+});
+
+test('runner wires verificationOnlyFinish into the over-claim rejection (source contract)', () => {
+  // The pure predicate is only worth anything if the runner consults it where
+  // the dead-end lived: the summary-overclaim validator.
+  const src = readFileSync(new URL('../mock2/runner.js', import.meta.url), 'utf8');
+  assert.match(src, /!oc\.ok && !verificationOnlyFinish\(/, 'over-claim rejection must be guarded by verificationOnlyFinish');
+  assert.match(src, /already implemented — no code changes needed/, 'the empty-diff rejection must teach the verification-only phrasing');
+  // And the model must be TOLD the path exists, on both sides of the choice.
+  const logic = readFileSync(new URL('../mock2/runner-logic.js', import.meta.url), 'utf8');
+  assert.match(logic, /Do NOT halt for "already done"/, 'finish description must name the verification-only path');
+  assert.match(logic, /halting for "already done" strands finished work/i, 'halt description must redirect "already done" to finish');
 });

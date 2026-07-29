@@ -99,7 +99,7 @@ import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smo
 import { needsOperatorUiVerification, smokeConfigFromEnv } from './smoke-triggers.js';
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
-  acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord, codeChangedFiles,
+  acceptanceVerdict, summaryOverclaims, verificationOnlyFinish, anomalySignals, acceptanceRecord, codeChangedFiles,
   mutationActions, actionParityReport, actionLabelWords, actionLabelCore,
 } from './acceptance-logic.js';
 import {
@@ -1559,13 +1559,21 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       }
       // The change-record summary must describe THIS cycle's diff — naming files
       // the cycle did not touch (bundling prior cycles' work) is rejected.
+      // EXCEPT the verification-only finish (P47 request 141, the resume
+      // dead-end): a cycle that changed no product code and whose summary SAYS
+      // the work already exists may name the files it verified — that is the
+      // evidence trail, not an authorship claim. Without this, a resumed
+      // request whose work a prior cycle completed had no honest completion
+      // at all (finish over-claimed, halt re-blocked), ~$1 per resume.
       const oc = summaryOverclaims(decision.finishSummary, changedThisCycle);
-      if (!oc.ok) {
+      if (!oc.ok && !verificationOnlyFinish(decision.finishSummary, codeChanged)) {
         // CHEAPEST PASS: a shorter, accurate summary — which is the goal
         // (gate-audit.md #10: SOUND). Budget-shared like every other validator.
         const r = await rejectFinishOrConclude({
           validator: 'summary-overclaim', termId, termName, decision, gateReports: lastGateReports,
-          message: `Not finished — the summary names files this cycle did NOT change (${oc.unmatched.join(', ')}). The change record must describe THIS cycle's diff only — do not bundle prior cycles' work. Files actually changed: ${changedThisCycle.slice(0, 20).join(', ') || '(none)'}. Re-call finish with a summary scoped to this diff.`,
+          message: `Not finished — the summary names files this cycle did NOT change (${oc.unmatched.join(', ')}). The change record must describe THIS cycle's diff only — do not bundle prior cycles' work. Files actually changed: ${changedThisCycle.slice(0, 20).join(', ') || '(none)'}. Re-call finish with a summary scoped to this diff.${codeChanged.length === 0
+            ? ' If nothing needed changing because the requested work ALREADY EXISTS in the tree (e.g. a resumed request a prior cycle completed), say exactly that — a summary stating it is "already implemented — no code changes needed", naming what you verified, is a legitimate finish. Do not halt for "already done".'
+            : ''}`,
         });
         if (r === 'concluded') return scheduleJobCleanup(cycle.id);
         if (progress.tripped) {

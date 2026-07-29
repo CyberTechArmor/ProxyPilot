@@ -158,10 +158,11 @@ function resolveSeedAuthor(createdBy = null) {
 // flow. Seed-side fixes (e.g. a corrected gate script) otherwise stay inert: a
 // project builds against its PINNED version, and seedFrameworkV1 only runs on an
 // empty registry, so an edited seed would never reach an existing install. This
-// makes the fix a real new version; projects then adopt it through the normal
-// drift → update-cycle path (explicit consent — nothing auto-remediates a
-// project). Idempotent: a no-op when the seed matches the latest version. Called
-// on boot after seedFrameworkV1.
+// makes the fix a real new version; projects then adopt it automatically (the
+// auto-adopt sweep starts the update cycle when they are idle and online —
+// ADR-003 amendment; framework_auto_adopt 'off' restores the manual
+// explicit-consent path). Idempotent: a no-op when the seed matches the latest
+// version. Called on boot after seedFrameworkV1.
 export function upgradeFrameworkFromSeed(createdBy = null) {
   const latest = getCurrentFrameworkVersion();
   if (!latest) return null; // nothing seeded yet — first boot goes through seedFrameworkV1
@@ -175,7 +176,7 @@ export function upgradeFrameworkFromSeed(createdBy = null) {
   if (unchanged) return null;
   const row = insertFrameworkVersion({
     ...content,
-    changelog: `Seed upgrade — vendored framework content changed since v${latest.version} (gate / skill / constitution fixes). Projects adopt it via an update cycle.`,
+    changelog: `Seed upgrade — vendored framework content changed since v${latest.version} (gate / skill / constitution fixes). Projects adopt it automatically (or via a manual update cycle).`,
     source: 'in_app',
     createdBy: resolveSeedAuthor(createdBy),
   });

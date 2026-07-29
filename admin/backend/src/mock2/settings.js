@@ -207,6 +207,27 @@ export function setSetupFlowSetting(value, updatedBy = null) {
   return getSetupFlowSetting();
 }
 
+// ---- Automatic framework adoption (ADR-003 amendment) ----
+//
+// 'on' (DEFAULT): when a new framework version is published, projects that are
+// online, design-approved, idle, and have built before get the update cycle
+// started automatically (one attempt per project per version) — no operator
+// press required. 'off': the previous explicit-consent behaviour — the drift
+// banner + manual "Start update cycle" button only.
+// Precedence: stored setting → MOCK2_FRAMEWORK_AUTO_ADOPT env → 'on'.
+export const FRAMEWORK_AUTO_ADOPT_KEY = 'framework_auto_adopt';
+
+export function getFrameworkAutoAdopt() {
+  const raw = String(getMock2Setting(FRAMEWORK_AUTO_ADOPT_KEY, process.env.MOCK2_FRAMEWORK_AUTO_ADOPT || 'on')).trim().toLowerCase();
+  return !(raw === 'off' || raw === '0' || raw === 'false');
+}
+
+export function setFrameworkAutoAdopt(value, updatedBy = null) {
+  const v = String(value || '').trim().toLowerCase();
+  setMock2Setting(FRAMEWORK_AUTO_ADOPT_KEY, v === 'off' || v === '0' || v === 'false' ? 'off' : 'on', updatedBy);
+  return getFrameworkAutoAdopt();
+}
+
 // ---- Global thinking switch (kill thinking everywhere at once) ----
 export const GLOBAL_THINKING_KEY = 'global_thinking';
 

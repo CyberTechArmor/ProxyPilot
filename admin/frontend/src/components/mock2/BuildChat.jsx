@@ -923,7 +923,7 @@ export default function BuildChat({
             build waiting on an admin was invisible there: the composer quietly
             became a resume box and nothing said why. */}
         {cycle?.status === 'awaiting_admin' ? (
-          <div className="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 space-y-1">
+          <div className="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 space-y-1.5">
             <p className="flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
               <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
               Build blocked — {cycle.halt_reason
@@ -932,14 +932,29 @@ export default function BuildChat({
                   ? 'it stopped on an error'
                   : 'waiting on an admin decision (e.g. a framework deviation)'}
             </p>
+            {/* The reason scrolls INSIDE the banner. A halt message can be
+                paragraphs long, and unbounded it filled the phone screen and
+                pushed the composer — the Resume control — clean off it
+                (operator report: "blocked is stuck/can't scroll"). */}
             {cycle.error ? (
-              <p className="break-words text-xs text-amber-700 dark:text-amber-300">{String(cycle.error)}</p>
+              <p className="max-h-32 sm:max-h-40 overflow-y-auto break-words text-xs text-amber-700 dark:text-amber-300">{String(cycle.error)}</p>
             ) : null}
-            <p className="text-[11px] text-muted-foreground">
-              {canEdit
-                ? 'Add guidance below (optional) and press Resume build. The classic Build panel (Details → or the Classic view) has the full set of controls.'
-                : 'An editor or admin can resume it from here or the classic Build panel.'}
-            </p>
+            {/* Resume lives IN the banner, not only in the composer row below
+                it — the way out must never depend on scrolling past the thing
+                that is blocking you. */}
+            {canEdit && online ? (
+              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                <Button size="sm" className="h-11 sm:h-8" disabled={busy} onClick={sendResume}>
+                  {busy ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Zap className="h-3.5 w-3.5 mr-1" />}
+                  Resume build
+                </Button>
+                <span className="text-[11px] text-muted-foreground">
+                  Optionally type guidance in the box below first — it rides the resume.
+                </span>
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">An editor or admin can resume it from here or the classic Build panel.</p>
+            )}
           </div>
         ) : null}
 

@@ -211,7 +211,7 @@ function detectDrift(project, framework) {
     raiseQueueItem({
       kind: 'drift', project_id: Number(project.id), dedupe_key: driftDedupeKey(project.id),
       ref_table: 'mock2_framework_versions', ref_id: framework.id,
-      detail: `${project.name}: framework moved since the last build — ${label}. Start an update cycle to adopt it (explicit consent; nothing auto-remediates).`,
+      detail: `${project.name}: framework moved since the last build — ${label}. The update cycle starts automatically when the project is idle (framework auto-adopt; a manual "Start update cycle" also works).`,
     });
   } catch (e) { console.warn('[mock2] drift raise failed:', e?.message); }
   return { drifted: true, label };

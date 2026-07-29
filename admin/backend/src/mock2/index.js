@@ -28,6 +28,10 @@ export { reconcileMock2Egress } from './egress.js';
 // (routes.js) imports the data-access modules directly; only the boot seed is
 // re-exported here for index.js's first-enabled-boot insert (ADR-003 / R8).
 export { seedFrameworkV1, upgradeFrameworkFromSeed } from './framework.js';
+// Automatic framework adoption (ADR-003 amendment): starts the update cycle
+// for drifted, idle, online projects — on boot (after the seed upgrade may
+// have published a new version) and on a slow timer.
+export { sweepFrameworkAutoAdopt } from './auto-adopt.js';
 export { seedBuiltinComponents } from './component-seed.js';
 export { loadCustomDesignPresets } from './design-presets-store.js';
 // Project terminal authorizer (ADR-007). Registered into the core

@@ -1555,6 +1555,34 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         }
         continue;
       }
+      // APP-OWNED SMOKE FAILURES MUST BE ANSWERED (fix 2.c; P47 request 140:
+      // beneath the platform noise sat a real app failure, notes-todo-add, and
+      // two cycles concluded "no product-code change was needed" without ever
+      // naming it). A finish with an EMPTY product diff, arriving after a
+      // smoke-failed cycle in the same request, must either have fixed the
+      // failing app-owned checks (then the diff is not empty) or answer each
+      // one BY NAME in its summary/acceptance. Cheapest-pass note lives with
+      // unansweredSmokeFailures in ui-check-logic.js.
+      if (codeChanged.length === 0 && cycle.request_id) {
+        try {
+          const { appOwnedFailureIds, unansweredSmokeFailures } = await import('./ui-check-logic.js');
+          const prior = listCyclesForProject(projectId, { limit: 20 })
+            .find((c) => c.id !== cycle.id && c.request_id === cycle.request_id && c.status === 'failed'
+              && /smoke gate failed after deploy/i.test(String(c.error || '')));
+          const failedIds = prior ? appOwnedFailureIds(prior.error) : [];
+          const unanswered = unansweredSmokeFailures({ failedIds, summary: decision.finishSummary, acceptance: decision.finishAcceptance });
+          if (unanswered.length) {
+            const r = await rejectFinishOrConclude({
+              validator: 'smoke-failure-unanswered', termId, termName, decision, gateReports: lastGateReports,
+              message: `Not finished — the previous build in this request failed app-owned smoke check(s) [${unanswered.join(', ')}], and this finish changes no product code without answering them. `
+                + 'Either fix what the failing check(s) caught, or state explicitly — naming each check id in your summary or acceptance — why the app is correct and no product change is needed '
+                + '(e.g. the check asserts a selector the approved design renamed). Silence about a failing app check is not "no change needed".',
+            });
+            if (r === 'concluded') return scheduleJobCleanup(cycle.id);
+            continue;
+          }
+        } catch (e) { console.warn('[mock2] smoke-answer check failed open:', e?.message); }
+      }
       // REMOVAL CLAIMS: "I took it out" has to be checkable.
       //
       // Project 44 finished with "removed the To-dos inner scrollbar", an
@@ -2113,6 +2141,37 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
                 + 'to be fixed in the next update.',
             });
           } catch { /* best effort */ }
+        } else if (!smoke.ok && smoke.baselineOnly) {
+          // EVERY failure is a platform-owned check (fix 2.b; P47 request 140:
+          // $10.28 / 3 cycles re-running a build against failures that were
+          // not fixable from inside the app). The app's own checks passed and
+          // the deploy works — so this cycle concludes SHIPPED, with the
+          // platform failures named as the platform's, and no retry implied.
+          // The failures are not hidden: they ride the chat message, the event
+          // log, and a harness-triage flag — the base app or the platform
+          // contract has to change, not the build.
+          const product = (changedThisCycle || []).filter((f) => !/^state\//.test(f)
+            && !/^public\/(build-id\.(js|txt)|sw\.js)$/.test(f));
+          try {
+            const { baselineBlockedMessage } = await import('./ui-check-logic.js');
+            const msg = baselineBlockedMessage(smoke.baselineOnly, { emptyDiff: product.length === 0 });
+            insertMessage({
+              projectId, kind: 'system', cycleId: cycle.id,
+              body: `**Shipped — platform checks failing (not yours).**\n\n${msg}`,
+            });
+          } catch (e) { console.warn('[mock2] baseline-only report failed:', e?.message); }
+          safeRaise({
+            kind: 'flag', project_id: projectId, dedupe_key: `mock2-baseline-smoke:${projectId}`,
+            ref_table: 'mock2_cycles', ref_id: cycle.id,
+            detail: `${project.name}: platform baseline check(s) failing after a build whose own checks passed: ${smoke.baselineOnly.ids.join(', ')}. Fix belongs in the platform, not in a build retry.`,
+          });
+          logEvent('note', {
+            role: 'system',
+            content: `Shipped — platform checks failing (not yours): ${smoke.baselineOnly.ids.join(', ')}. The deploy is kept; a build retry cannot clear these.`,
+            meta: { baseline_only: true, ids: smoke.baselineOnly.ids },
+          });
+          // Falls through to the honest gate / pending-verification path below —
+          // the cycle is NOT failed and nothing suggests running it again.
         } else if (!smoke.ok) {
           const detail = smokeFailSummary(smoke.report);
           // ASK THE APP WHETHER IT IS EVEN REACHABLE, before reporting a wall of
@@ -2145,40 +2204,13 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             }
           } catch (e) { console.warn('[mock2] post-smoke readiness check failed:', e?.message); }
           // The readiness line goes FIRST when it fired: it is the cause, and
-          // the check failures below it are the symptoms.
-          // EVERY failure is a platform baseline → an identical retry gets an
-          // identical report, and the operator is the one who presses Continue.
-          // Project 47 ran three cycles and $10.28 before anyone could tell
-          // that was the situation: cycles 2 and 3 both changed no product
-          // code, and one of the two failures was not fixable from inside the
-          // app at all. Best-effort — this only decides what the cycle fails
-          // SAYING.
-          let baselineLine = '';
-          try {
-            if (smoke.baselineOnly) {
-              const { baselineBlockedMessage } = await import('./ui-check-logic.js');
-              // "No product code changed" is what makes a retry provably
-              // futile rather than merely unpromising; state/ and the build-id
-              // stamps are not product code.
-              const product = (changedThisCycle || []).filter((f) => !/^state\//.test(f)
-                && !/^public\/(build-id\.(js|txt)|sw\.js)$/.test(f));
-              const msg = baselineBlockedMessage(smoke.baselineOnly, { emptyDiff: product.length === 0 });
-              if (msg) {
-                insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: msg });
-                baselineLine = product.length === 0
-                  ? 'Only platform baseline checks failed, and this build changed no product code — running it again will report the same thing. '
-                  : 'Only platform baseline checks failed (not your change). ';
-              }
-              logEvent('note', {
-                role: 'system',
-                content: `Baseline-only smoke failure: ${smoke.baselineOnly.ids.join(', ')} (product files changed: ${product.length})`,
-                meta: { baseline_only: true, ids: smoke.baselineOnly.ids },
-              });
-            }
-          } catch (e) { console.warn('[mock2] baseline-only report failed:', e?.message); }
+          // the check failures below it are the symptoms. (A failure set that
+          // is ONLY platform baselines never reaches this branch — it
+          // concludes shipped above. Anything here includes at least one
+          // app-owned failure, and the summary lists app-owned ones first.)
           const error = readyLine
             ? `The deployed app is not reachable — ${readyLine}. Downstream: ${detail}`
-            : `${baselineLine}Smoke gate failed after deploy — ${detail}`;
+            : `Smoke gate failed after deploy — ${detail}`;
           finishCycle(cycle.id, { status: 'failed', error });
           releaseLock(projectId, holder);
           setJob(cycle.id, { phase: 'smoke_failed', message: error, commit: record?.commit_sha || null });

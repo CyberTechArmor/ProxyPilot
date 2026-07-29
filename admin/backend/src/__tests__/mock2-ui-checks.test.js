@@ -128,9 +128,13 @@ test('uiCheckLogLines + uiCheckFailSummary: no silent results', () => {
     { id: 'c', role: null, page: '/q', ok: false, steps: [{ ok: true, detail: 'x' }], consoleErrors: ['TypeError: boom'] },
   ];
   const lines = uiCheckLogLines(results);
-  assert.match(lines[0], /a \[admin \/p\]: PASS/);
-  assert.match(lines[1], /FAIL — #adp-client-id is disabled/);
-  assert.match(lines[2], /1 console error/);
+  // Grouped failures-first (P47 request 140: the real app failure was buried
+  // under noise) — every result still gets a line, nothing is silent.
+  assert.equal(lines.length, 3);
+  assert.ok(lines.some((l) => /a \[admin \/p\]: PASS/.test(l)));
+  assert.match(lines[0], /FAIL/);
+  assert.ok(lines.some((l) => /FAIL — #adp-client-id is disabled/.test(l)));
+  assert.ok(lines.some((l) => /1 console error/.test(l)));
   assert.match(uiCheckFailSummary(results), /b: #adp-client-id is disabled/);
 });
 
@@ -597,16 +601,22 @@ test('THE MESSAGE SAYS A RETRY IS FUTILE, and carries the diagnosis', async () =
   assert.equal(baselineBlockedMessage({ failed: [] }), '');
 });
 
-test('RATCHET: the runner reports it, and build-id stamps are not product code', () => {
+test('RATCHET: the runner concludes shipped on baseline-only, and build-id stamps are not product code', () => {
   // Cycles 2 and 3 touched only public/sw.js + build-id + state/. Counting
-  // those as product changes would make the futility claim never fire on the
-  // exact shape that motivated it.
+  // those as product changes would misstate the empty-diff fact in the report.
+  // Since the smoke-signal redesign, a baseline-only failure CONCLUDES the
+  // cycle as shipped ("platform checks failing — not yours") instead of
+  // failing it: a retry provably cannot clear a platform-owned failure.
   const src = readFileSync(new URL('../mock2/runner.js', import.meta.url), 'utf8');
   assert.match(src, /smoke\.baselineOnly/);
   assert.match(src, /baselineBlockedMessage/);
   assert.match(src, /build-id\\\.\(js\|txt\)\|sw\\\.js/, 'the stamps must not count as product code');
   assert.match(src, /\^state\\\//, 'nor state/');
-  const block = src.slice(src.indexOf('let baselineLine'));
-  assert.match(block.slice(0, 1600), /catch \(e\) \{ console\.warn\('\[mock2\] baseline-only report failed/,
-    'this only decides what the cycle fails SAYING — it must never throw');
+  assert.match(src, /Shipped — platform checks failing \(not yours\)/,
+    'a baseline-only failure ships with the platform named, never a red build');
+  const block = src.slice(src.indexOf('smoke.baselineOnly'));
+  assert.match(block.slice(0, 2400), /catch \(e\) \{ console\.warn\('\[mock2\] baseline-only report failed/,
+    'this only decides what the cycle SAYS — it must never throw');
+  // And the generic failure branch no longer double-handles baseline-only.
+  assert.ok(!src.includes('let baselineLine'), 'the old fail-path baseline report is gone');
 });

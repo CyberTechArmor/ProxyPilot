@@ -177,3 +177,25 @@ test('severity ordering puts what matters first', () => {
   assert.ok(severityRank('medium') < severityRank('low'));
   assert.ok(severityRank('nonsense') > severityRank('low'), 'an unknown severity sorts last, not first');
 });
+
+test('groups compose short, referent-anchored requests — <=500 chars per group', async () => {
+  const { groupFindings, composeGroupRequest, GROUP_CHAR_TARGET } = await import('../../../frontend/src/lib/findings.js');
+  const long = (n) => Array.from({ length: 6 }, (_, i) => ({
+    id: `f${n}-${i}`, scope: `/screen${n}`, severity: 'high', kind: 'design',
+    issue: 'the stat tiles use 8px gaps where the cards above use 16px and the header wraps onto a second row at 390px'.repeat(2),
+    fix: 'set the tile grid gap to var(--space-3), collapse the header actions into the overflow menu below 640px, and align the numeric column right'.repeat(2),
+  }));
+  const groups = groupFindings([...long(1), ...long(2)]);
+  assert.equal(groups.length, 2, 'grouped by screen');
+  for (const g of groups) {
+    const req = composeGroupRequest(g);
+    assert.ok(req.length <= GROUP_CHAR_TARGET, `group request must stay short, got ${req.length}`);
+    assert.ok(req.startsWith(`On ${g.screen}:`), 'anchored on the screen referent');
+  }
+});
+
+test('a short fix still rides verbatim inside its group', async () => {
+  const { composeGroupRequest } = await import('../../../frontend/src/lib/findings.js');
+  const req = composeGroupRequest({ screen: '/', findings: [{ issue: 'gap off', fix: 'use var(--space-2)' }] });
+  assert.ok(req.includes('use var(--space-2)'));
+});

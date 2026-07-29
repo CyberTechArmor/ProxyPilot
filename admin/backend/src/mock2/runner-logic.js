@@ -105,7 +105,7 @@ export const RUNNER_TOOLS = Object.freeze([
   {
     name: 'materialize_component',
     description:
-      'Adopt a component: the platform writes every file of the published component verbatim into the app source tree server-side (byte-exact at any size — contents never pass through your context) and returns a manifest of what landed (path, bytes, sha256, per-file status). Files that already exist are kept untouched and reported unless overwrite is true. Afterwards read/adapt the real files with read_file/write_file and wire the glue per the integration notes.',
+      'Adopt a component: the platform writes every file of the published component verbatim into the app source tree server-side (byte-exact at any size — contents never pass through your context) and returns a manifest of what landed (path, bytes, sha256, per-file status). Files that already exist are kept untouched and reported unless overwrite is true. Afterwards read/adapt the real files with your read/edit tools and wire the glue per the integration notes.',
     input_schema: {
       type: 'object',
       properties: {
@@ -404,6 +404,44 @@ export function parseFrameworkSkills(skillsJson) {
 // harness's system prompt and the SDK harness's CLAUDE.md) so the two can
 // never drift apart — the duplicated shell paragraph below them is exactly the
 // kind of drift this avoids.
+// BUILD_CONTRACT_SECTION — the capability/restraint/honesty contract, shared
+// verbatim by BOTH prompt builders (same no-drift discipline as
+// PLATFORM_SECTION). Written for the 2026-07 harness redesign: P47's builds
+// printed contract strings on buttons, promoted every action to the top
+// level, and rephrased rejected finish prose five times — each paragraph
+// below closes one of those, and the checks it references were changed in the
+// same branch so prompt and harness agree.
+export const BUILD_CONTRACT_SECTION = `FEATURE-COMPLETENESS HONESTY (binding): never ship a dead button, a silently
+missing element, or a fake success path. Anything from the inventory/
+instruction you cannot finish this cycle: if the approved mockup SHOWS its
+control, ship that control disabled with a small "Not built yet" badge; if the
+mockup does NOT show it, leave it out and say so in your finish summary — an
+unrequested control is not honesty, it is clutter. STATES are conditions to
+HANDLE when they genuinely occur — NEVER fabricate an artificial state to
+satisfy a spec item (no fake spinners, invented delays, or placeholder loading
+UX for data that arrives at once).
+CAPABILITY PLACEMENT (binding): the inventory's actions are CAPABILITIES a
+user must be able to perform, not button captions. Put each one where the
+approved design says it belongs — a card's overflow menu, a detail view, a
+settings screen — not all on the top level. The action-parity check accepts
+any placement a user can reach; it never requires a top-level control and
+never requires the contract's wording on screen.
+RESTRAINT (binding): the mockup's density is part of the contract. When a
+gate, a validator message, or a review finding seems to push toward adding a
+control the approved design does not show, THE DESIGN WINS pending an operator
+decision — state the conflict in your finish summary instead of contorting the
+UI to satisfy a checker. The design guidelines bind by default; an EXPLICIT
+user instruction to depart from them wins over them — follow it and record the
+departure in your finish summary as a project deviation.
+HARNESS REJECTIONS (read once — it saves whole cycles): every finish rejection
+echoes the parameter names and values the harness actually received. If a tool
+rejects your payload repeatedly with the same message, do NOT keep rephrasing
+the prose: re-read the rejection's echo, compare it against what you meant to
+send, and fix the STRUCTURAL cause (a parameter folded into another one, a
+wrong parameter name, tool-call syntax inside a value). If it still persists,
+halt and quote the payload and the rejection verbatim — a halt reporting a
+harness fault after repeated rejections is accepted as-is.`;
+
 export const PLATFORM_SECTION = `
 ## The platform module (binding — already built, do not rebuild)
 \`src/platform/\` is the base app's own feature set. It is LOAD-BEARING: it is
@@ -611,7 +649,8 @@ This is an MVP build: deliver a WORKING, testable end-to-end version fast.
   - BATCH tool calls: emit MULTIPLE independent tool calls in ONE turn (write
     several files at once; run several independent commands together). One
     call per turn wastes a full model round-trip each time.
-  - Write each file COMPLETE in a single write_file. Never draft-then-extend.
+  - Write each file COMPLETE in a single whole-file write (write_file or
+    create_file — whichever this cycle's tools provide). Never draft-then-extend.
   - Do not re-read files you just wrote, and skip exploratory reads of
     scaffold files whose content the task description already tells you.
   - Plan once, briefly, then execute; target well under 40 turns total.
@@ -634,6 +673,10 @@ minutes. Think "editor session", not "project build".
   are changing before editing them (never guess API shapes or element ids),
   keep the approved design tokens (/design.css), and keep every existing
   behavior working.
+- SPECIFIC MEANS LITERAL: build what the instruction says, not an adjacent
+  improvement, and never modify the UI to satisfy what you guess a checker
+  matches on. If the instruction conflicts with a gate or the approved design,
+  satisfy the instruction and state the conflict in your finish summary.
 - Do NOT write state/acceptance.json, ui-checks, per-rule tests, or new test
   suites. There is NO gate battery this cycle and NO run_gates tool — verify
   the change yourself (keep it type-clean) and call finish when it is complete
@@ -641,9 +684,9 @@ minutes. Think "editor session", not "project build".
   is the verification backstop. Quick means live, not unverified.
 - Never touch the auth wiring (src/auth/*, withAuth/bootstrapGate in
   src/app.ts) or the login/bootstrap flow.
-- SPEED: batch independent tool calls in one turn, write files complete in one
-  write_file, no exploratory reads beyond the files involved; target well
-  under 15 turns total.
+- SPEED: batch independent tool calls in one turn, write new files complete in
+  one whole-file write (write_file/create_file), no exploratory reads beyond
+  the files involved; target well under 15 turns total.
 - finish still requires the one-line summary, one human-runnable check, and
   the verified-vs-assumed split.` : '';
   return `You are the Mock2 build runner. You make one small, targeted change to a project's
@@ -706,13 +749,7 @@ visual CONTRACT beyond the tokens: read it and reproduce its layout, navigation
 structure (e.g. a mobile bottom tab bar), and component arrangement for the
 screens you build — the app should look and navigate like the mockup.
 ${PLATFORM_SECTION}
-FEATURE-COMPLETENESS HONESTY (binding): anything from the inventory/instruction
-you do NOT implement in this cycle must be VISIBLY marked in the UI — a
-disabled control with a small "Not built yet" badge — never a dead button, a
-silently missing element, or a fake success path. STATES are conditions to
-HANDLE when they genuinely occur — NEVER fabricate an artificial state to
-satisfy a spec item (no fake spinners, invented delays, or placeholder loading
-UX for data that arrives at once).
+${BUILD_CONTRACT_SECTION}
 TIME HANDLING (binding): the SERVER is the time authority. Store and compute
 timestamps in UTC (ISO-8601 / timestamptz) and define day/period boundaries
 server-side; the BROWSER only CONVERTS for display with the user's own locale
@@ -836,11 +873,12 @@ runs the live check after deploy (pending_verification is then your finish).
    falsely, propose the gate/allowlist change as a reviewed act — NEVER reword
    or restructure product code just to slip past a detector pattern.
    To CHANGE an existing file, use apply_edit (targeted anchored replacement) —
-   not a whole-file write_file. Copy old_string byte-for-byte from the file
+   never a whole-file rewrite. Copy old_string byte-for-byte from the file
    (exact indentation) with 3+ lines of surrounding context so it is unique. On
    NO_MATCH, re-read the file and copy the exact text; on AMBIGUOUS_MATCH, add
-   more context or set replace_all. Use write_file only to CREATE a new file (or
-   when a change is essentially a full rewrite).
+   more context or set replace_all. Whole-file writes (write_file/create_file —
+   whichever this cycle's tools provide) are for CREATING a new file, or when a
+   change is essentially a full rewrite.
 4. Call run_gates. If any gate is red, fix the cause and run them again.
 5. When every gate is green, call finish with a one-line summary, the
    human-runnable acceptance check(s) ("as <role>, do X, expect Y" — one per
@@ -1121,6 +1159,10 @@ export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
     return {
       ...base, pendingVerification: true,
       finishSummary: f.summary, finishAcceptance: f.acceptance, finishAssumptions: f.assumptions,
+      // The RAW input rides along for the finish guard (request 141: a summary
+      // carrying "</summary><parameter …" is a malformed call, and the guard
+      // can only diagnose what it can see un-normalized).
+      finishInput: pendingCall.input || {},
     };
   }
   const finishCall = calls.find((c) => c && c.name === 'finish');
@@ -1134,6 +1176,7 @@ export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
       finishAssumptions: f.assumptions,
       finishAcceptanceIds: f.acceptanceIds,
       finishRemovals: f.removals,
+      finishInput: finishCall.input || {},
     };
   }
   if (calls.length === 0) {
@@ -1232,7 +1275,10 @@ export function updateProgress(state, { toolCalls = [], text = '' } = {}, limit 
   const s = { ...initProgressState(), ...(state || {}) };
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
   const hadTool = calls.length > 0;
-  const hadWrite = calls.some((c) => c?.name === 'write_file' || c?.name === 'apply_edit' || c?.name === 'Write' || c?.name === 'Edit');
+  // create_file is the copilot harness's file-creation tool (it has no
+  // write_file) — omitting it here made a copilot turn that only created
+  // files count as "no write" for the breaker.
+  const hadWrite = calls.some((c) => c?.name === 'write_file' || c?.name === 'create_file' || c?.name === 'apply_edit' || c?.name === 'Write' || c?.name === 'Edit');
   const toolSig = toolCallSignature(calls);
   const msgSig = progressSignature(text);
 
@@ -1500,13 +1546,7 @@ visual CONTRACT beyond the tokens: read it and reproduce its layout, navigation
 structure (e.g. a mobile bottom tab bar), and component arrangement for the
 screens you build — the app should look and navigate like the mockup.
 ${PLATFORM_SECTION}
-FEATURE-COMPLETENESS HONESTY (binding): anything from the inventory/instruction
-you do NOT implement in this cycle must be VISIBLY marked in the UI — a
-disabled control with a small "Not built yet" badge — never a dead button, a
-silently missing element, or a fake success path. STATES are conditions to
-HANDLE when they genuinely occur — NEVER fabricate an artificial state to
-satisfy a spec item (no fake spinners, invented delays, or placeholder loading
-UX for data that arrives at once).
+${BUILD_CONTRACT_SECTION}
 TIME HANDLING (binding): the SERVER is the time authority. Store and compute
 timestamps in UTC (ISO-8601 / timestamptz) and define day/period boundaries
 server-side; the BROWSER only CONVERTS for display with the user's own locale

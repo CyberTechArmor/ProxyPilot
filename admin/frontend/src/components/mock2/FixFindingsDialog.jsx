@@ -28,7 +28,7 @@ import { useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Loader2, Zap } from 'lucide-react';
-import { KIND_LABEL, composeFixInstruction, severityRank } from '@/lib/findings';
+import { KIND_LABEL, composeFixInstruction, groupFindings, severityRank } from '@/lib/findings';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
 import { useToast } from '@/hooks/use-toast';
@@ -65,6 +65,17 @@ export default function FixFindingsDialog({ open, onOpenChange, findings = [], b
     return next;
   });
 
+  // Small related groups by screen (redesign 6.c): the fix request is composed
+  // per group in the short, referent-anchored P34 style, and the group header
+  // lets an operator take or leave a whole screen in one tap.
+  const groups = useMemo(() => groupFindings(ordered), [ordered]);
+  const toggleGroup = (g) => setOff((prev) => {
+    const next = new Set(prev);
+    const allOn = g.findings.every((f) => !prev.has(f.id));
+    for (const f of g.findings) { if (allOn) next.add(f.id); else next.delete(f.id); }
+    return next;
+  });
+
   const send = () => {
     const text = composeFixInstruction(picked, note);
     if (!text) return;
@@ -86,11 +97,25 @@ export default function FixFindingsDialog({ open, onOpenChange, findings = [], b
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-          <ul className="space-y-2">
-            {ordered.map((f) => {
-              const on = !off.has(f.id);
-              return (
-                <li key={f.id}>
+          <ul className="space-y-3">
+            {groups.map((g) => (
+              <li key={g.screen}>
+                {/* Group header: the screen the review named. One tap takes or
+                    leaves the whole group; ≥44px target on touch. */}
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <code className="min-w-0 break-all font-mono text-[11px] font-medium text-muted-foreground">{g.screen}</code>
+                  <button
+                    type="button" disabled={busy} onClick={() => toggleGroup(g)}
+                    className="min-h-[44px] shrink-0 px-2 text-[11px] text-muted-foreground underline underline-offset-2 sm:min-h-0"
+                  >
+                    {g.findings.every((f) => !off.has(f.id)) ? 'Untick group' : 'Tick group'}
+                  </button>
+                </div>
+                <ul className="space-y-2">
+                  {g.findings.map((f) => {
+                    const on = !off.has(f.id);
+                    return (
+                      <li key={f.id}>
                   {/* The whole row is the target, not a 16px checkbox — this is
                       a list somebody ticks through on a phone. */}
                   <label
@@ -120,9 +145,12 @@ export default function FixFindingsDialog({ open, onOpenChange, findings = [], b
                       ) : null}
                     </span>
                   </label>
-                </li>
-              );
-            })}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </li>
+            ))}
           </ul>
 
           <div className="mt-4 space-y-2">

@@ -484,6 +484,18 @@ leaving them out is what makes a finished app feel half-wired.
 - Output the COMPLETE document ending with </body></html>. Never stop partway —
   a truncated document renders as a blank page.
 
+# Vague brief vs specific brief (read the request before designing)
+When the brief is THIN or names only a judgement ("a simple notes app", "make
+it feel professional"), you are the DOMAIN EXPERT: open the design-rationale
+HTML comment by stating, in 3-6 lines, what an app in this domain typically
+needs that the brief does not mention, then design in the additions a
+thoughtful expert would include at this stage — integrated properly (a
+reminder has a date/time and recurrence; a search has an empty state; a table
+collapses on mobile). Expand the idea; do not gold-plate — every addition must
+serve the stated purpose. When the brief is SPECIFIC — it names screens,
+fields, palettes, or behaviors — follow it literally and completely; do not
+substitute your own preferences or add adjacent features it did not ask for.
+
 # Design craft (binding — the mockup is judged on design judgment, not mechanics)
 The mockup is the visual contract every build inherits. You will be judged
 purely on design judgment and craft, so treat EVERY default as a decision you
@@ -771,7 +783,7 @@ Output ONLY a JSON object (no markdown, no code fences, no commentary) with this
         { "name": "string", "type": "text|textarea|number|email|password|date|time|datetime|select|multiselect|checkbox|radio|toggle|file|search|currency|phone|url|other",
           "required": true|false, "notes": "string — options, placeholder, or constraints if shown" }
       ],
-      "actions": [ { "label": "string — the button/link text", "effect": "string — what it appears to do", "inferred": false } ],
+      "actions": [ { "label": "string — a SHORT capability name, 2-3 words (see the ACTION LABELS rule)", "effect": "string — what it appears to do", "inferred": false } ],
       "states": [ "string — e.g. empty, loading, error, success, selected — states the mockup implies" ],
       "default_state": "string — the screen's RESTING state on a fresh load with typical data (REQUIRED)"
     }
@@ -789,6 +801,14 @@ Output ONLY a JSON object (no markdown, no code fences, no commentary) with this
 Rules:
 - Every distinct screen or view in the mockup is a screen. In-page tabs/steps that
   show different content are separate screens.
+- ACTION LABELS ARE CAPABILITY NAMES, 2-3 words: verb + noun ("Edit note",
+  "Delete asset", "Archive project"), never the mockup's full caption or a
+  compound like "Edit note title/body". WHY: each label becomes a CONTRACT
+  STRING — the build is later checked for the capability it names, matched as
+  a capability rather than as button copy. A verbose or compound label makes
+  that check unmatchable against any well-designed control, and a build once
+  shipped a button literally captioned "Edit note title/body" to satisfy it.
+  Put the detail in "effect", not in "label".
 - MUTATION COVERAGE: a static mockup rarely demonstrates edit/delete flows, but
   real apps are not append-only. After extracting what IS shown, ADD the implied
   mutation actions for every record a user can create — edit its fields, delete/

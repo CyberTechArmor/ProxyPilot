@@ -239,6 +239,27 @@ export function formatBriefForTask(prepass) {
   return `\n\nWorking brief (auto-generated sizing notes — the request above is authoritative; ignore any note that contradicts it):\n- ${lines.join('\n- ')}`;
 }
 
+// The specificity directive (harness redesign, Phase 2 point 3). The pre-pass
+// already classifies every request clear/vague and by scope; until now that
+// classification never reached the BUILD, so a vague request got a literal
+// build of its vagueness and a specific one got adjacent "improvements". One
+// block, injected into the task turn right after the instruction: vague →
+// think like the domain expert and expand deliberately (P34's quality came
+// from cheap iterations on exactly such expansions); specific → literal and
+// complete, never contorted toward what a checker might match on.
+export function formatSpecificityForTask(prepass) {
+  if (!prepass) return '';
+  const spec = String(prepass.specificity || '').toLowerCase();
+  const scope = String(prepass.scope || 'simple').toLowerCase();
+  if (spec === 'vague') {
+    return `\n\nThis request was classified VAGUE (scope: ${scope}) — no single checkable outcome. You are the domain expert for this kind of app. BEFORE building, state in 3-6 lines what an app in this domain typically needs that the request does not mention, choose the additions a thoughtful expert would include at this stage, and integrate them properly (a reminder has a date/time and recurrence; a search has an empty state; a table collapses on mobile). Expand the idea; do not gold-plate — every addition must serve the stated purpose.`;
+  }
+  if (spec === 'clear') {
+    return `\n\nThis request was classified SPECIFIC (scope: ${scope}). Follow the instruction literally and completely: do not substitute, do not add adjacent features, and never modify the UI to satisfy what you guess a checker matches on. If the instruction conflicts with a gate, satisfy the instruction and state the conflict in your finish summary rather than contorting the UI.`;
+  }
+  return '';
+}
+
 // The chat note posted when a quick update reads feature-sized. Suggestion
 // only — the build still runs.
 export function featureScaleNotice() {

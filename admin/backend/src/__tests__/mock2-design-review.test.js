@@ -133,3 +133,35 @@ test('RATCHET: it puts the route back, and can never fail the capture', async ()
   assert.match(block, /catch \{ \/\* a screen that will not activate is not worth failing over \*\/ \}/,
     'the review is never a gate — a stubborn panel must not cost the critique around it');
 });
+
+test('the review can SUBTRACT: kind survives the parse and the chat message says simplify', async () => {
+  const { parseReviewReply, reviewChatMessage, buildReviewPrompt } = await import('../mock2/design-review-logic.js');
+  // gate-audit structural finding #1: every gate is additive and nothing could
+  // ever say "this screen has too much on it". The prompt now asks, the parser
+  // keeps it, and the message renders it as a different ask from "add".
+  assert.match(buildReviewPrompt(), /RESTRAINT/);
+  assert.match(buildReviewPrompt(), /"subtract"/);
+  const parsed = parseReviewReply(JSON.stringify({
+    summary: 'dense',
+    findings: [
+      { screen: '/', severity: 'high', kind: 'subtract', issue: 'six top-level buttons compete on one row', fix: 'fold Edit/Archive/Delete into the card overflow menu' },
+      { screen: '/', severity: 'low', issue: 'gap off', fix: 'use var(--space-2)' },
+    ],
+  }));
+  assert.equal(parsed.findings[0].kind, 'subtract');
+  assert.equal(parsed.findings[1].kind, 'add', 'kind defaults to add');
+  const msg = reviewChatMessage({ review: parsed, trigger: 'auto', screenshotCount: 2 });
+  assert.match(msg, /\[high·simplify\]/);
+  assert.match(msg, /\[low\]/);
+});
+
+test('demo content runs before capture and the review says whether it did', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../mock2/design-review.js', import.meta.url), 'utf8');
+  const body = src.slice(src.indexOf('export async function runDesignReview'));
+  const seedAt = body.indexOf('seedDemoContent');
+  const captureAt = body.indexOf('await captureAppScreens({');
+  assert.ok(seedAt > 0 && captureAt > 0 && seedAt < captureAt, 'seeding must precede capture');
+  assert.match(src, /Demo content: did NOT run before capture/);
+  assert.match(src, /Demo content: seeded /);
+});

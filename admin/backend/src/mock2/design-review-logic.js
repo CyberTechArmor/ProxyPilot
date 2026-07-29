@@ -42,6 +42,11 @@ Judge like a design lead doing a polish review, not a linter:
   inferable), badge/status colors not tied to meaning.
 - MOBILE: horizontal scroll, touch targets that look under 44px, layouts that
   did not collapse to one column.
+- RESTRAINT: a screen can also have TOO MUCH. Controls competing on one row,
+  every action promoted to a top-level button, badges on everything, a form
+  where the mockup shows a list — compare against the mockup's own density.
+  When the right fix is to REMOVE, SIMPLIFY, or fold controls into a menu, say
+  that: a subtractive finding is as valid as an additive one, at any severity.
 
 Reply with STRICT JSON only — no prose, no code fences. Schema:
 {
@@ -49,13 +54,16 @@ Reply with STRICT JSON only — no prose, no code fences. Schema:
   "findings": [
     { "screen": "path or screen name the screenshot shows",
       "severity": "high" | "medium" | "low",
+      "kind": "add" | "subtract",
       "issue": "what is wrong, specific and visual",
       "fix": "the concrete CSS/markup-level change that fixes it" }
   ]
 }
-Order findings by severity. Be specific ("the stat tiles use 8px gaps where the
-cards above use 16px") — never generic ("improve spacing"). An empty findings
-array is a valid answer for a genuinely polished app. At most ${MAX_FINDINGS} findings.`;
+"kind" is "subtract" when the fix removes or simplifies (delete a control,
+fold actions into a menu, reduce a badge set); "add" otherwise. Order findings
+by severity. Be specific ("the stat tiles use 8px gaps where the cards above
+use 16px") — never generic ("improve spacing"). An empty findings array is a
+valid answer for a genuinely polished app. At most ${MAX_FINDINGS} findings.`;
 }
 
 // Tolerant reply parser (same discipline as the pre-pass): fences stripped,
@@ -77,6 +85,10 @@ export function parseReviewReply(text) {
     .map((f) => ({
       screen: clip(f.screen) || '/',
       severity: REVIEW_SEVERITIES.includes(f.severity) ? f.severity : 'medium',
+      // Subtractive findings (redesign 6.b): before this field existed, every
+      // review category was additive and nothing could ever say "this screen
+      // has too much on it" (gate-audit.md structural finding #1).
+      kind: f.kind === 'subtract' ? 'subtract' : 'add',
       issue: clip(f.issue),
       fix: clip(f.fix),
     }));
@@ -334,7 +346,10 @@ export function reviewChatMessage({ review, axe = [], rogue = [], adherence = nu
     }
   }
   for (const f of review?.findings || []) {
-    lines.push(`• [${f.severity}] ${f.screen}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`);
+    // Subtractive findings carry their kind, so "remove this" is visibly a
+    // different ask from "add this" (the review can now subtract — 6.b).
+    const tag = f.kind === 'subtract' ? `${f.severity}·simplify` : f.severity;
+    lines.push(`• [${tag}] ${f.screen}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`);
   }
   const serious = axe.filter((v) => v.impact === 'critical' || v.impact === 'serious');
   if (serious.length) {

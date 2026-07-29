@@ -577,3 +577,18 @@ test('the mockup task carries the assets, after the brief and before the output 
   // No library, no tokens.
   assert.doesNotMatch(buildMockupTask({ brief: 'x' }), /Use the supplied logo/);
 });
+
+test('extractor prompt: action labels are short capability names, with the why', async () => {
+  // The action labels become contract strings the parity check hunts for
+  // (pipeline-walkthrough step 7 warning; P47's "Edit note title/body" button
+  // is what a verbose label turns into). The extractor is told to emit 2-3
+  // word capability names and told why, so the contract is matchable against
+  // real controls.
+  const { buildInventoryExtractionPrompt } = await import('../mock2/concept-logic.js');
+  const p = buildInventoryExtractionPrompt();
+  assert.match(p, /ACTION LABELS ARE CAPABILITY NAMES, 2-3 words/);
+  assert.match(p, /CONTRACT\s+STRING/);
+  assert.match(p, /Edit note title\/body/);
+  assert.match(p, /SHORT capability name/);
+  assert.ok(!p.includes('the button/link text'), 'the caption-transcription instruction must be gone');
+});

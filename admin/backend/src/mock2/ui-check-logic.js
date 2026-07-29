@@ -519,25 +519,84 @@ export function stepShape(step) {
 }
 
 // One line per check for the cycle log ("no silent skips" discipline).
+//
+// GROUPED YOURS-FIRST (P47: $10.28 went into reading platform-check noise for
+// an app defect that was listed underneath it — the real app failure,
+// notes-todo-add, was ignored beneath two recurring platform baselines). App
+// failures first, then app passes, then the platform's own checks, each
+// platform line tagged so nobody reads it as a statement about the change.
 export function uiCheckLogLines(results = []) {
-  return results.map((r) => {
+  const line = (r) => {
     const bad = (r.steps || []).filter((s) => !s.ok);
     const consoleBad = (r.consoleErrors || []).length;
     const why = r.ok ? 'ok'
       : bad.length ? bad.map((s) => s.detail).join('; ')
         : consoleBad ? `${consoleBad} console error(s)`
           : r.detail || 'failed';
-    return `ui-check ${r.id} [${r.role || 'anonymous'} ${r.page}]: ${r.ok ? 'PASS' : 'FAIL'} — ${why}`;
-  });
+    const tag = isBaselineCheck(r) ? ' [platform check]' : '';
+    return `ui-check ${r.id}${tag} [${r.role || 'anonymous'} ${r.page}]: ${r.ok ? 'PASS' : 'FAIL'} — ${why}`;
+  };
+  const yours = results.filter((r) => !isBaselineCheck(r));
+  const platform = results.filter(isBaselineCheck);
+  const order = [
+    ...yours.filter((r) => !r.ok), ...yours.filter((r) => r.ok),
+    ...platform.filter((r) => !r.ok), ...platform.filter((r) => r.ok),
+  ];
+  return order.map(line);
 }
 
-// A short failure summary for the cycle error line.
+// A short failure summary for the cycle error line. App-owned failures FIRST —
+// they are the ones the build can act on; platform-owned ones are tagged.
 export function uiCheckFailSummary(results = []) {
   const bad = results.filter((r) => !r.ok);
   if (!bad.length) return '';
-  return bad.map((r) => {
+  const ordered = [...bad.filter((r) => !isBaselineCheck(r)), ...bad.filter(isBaselineCheck)];
+  return ordered.map((r) => {
     const step = (r.steps || []).find((s) => !s.ok);
     const consoleBad = (r.consoleErrors || []).length;
-    return `${r.id}: ${step ? step.detail : consoleBad ? `${consoleBad} console error(s)` : r.detail || 'failed'}`;
+    const tag = isBaselineCheck(r) ? ' [platform check — not your change]' : '';
+    return `${r.id}${tag}: ${step ? step.detail : consoleBad ? `${consoleBad} console error(s)` : r.detail || 'failed'}`;
   }).join(' · ');
+}
+
+// ---- app-owned smoke failures must be answered, not waved off ----
+//
+// P47 request 140: beneath two recurring platform-baseline failures sat a real
+// app failure (notes-todo-add), and cycles 2 and 3 both concluded "no
+// product-code change was needed" without ever addressing or even naming it.
+// The rule: a cycle following an app-owned smoke failure may finish with an
+// empty product diff ONLY if its finish payload explicitly answers each
+// failing check by name. Fixing it is the normal path; answering it ("check X
+// asserts a selector the approved design renamed; the app behavior is
+// correct") is the honest alternative; silence is neither.
+//
+// CHEAPEST PASS: mention each failing check id in the finish summary with any
+// sentence at all. That is deliberate — this is an honesty floor, not a proof
+// obligation: the id lands in the change record where the operator can judge
+// the sentence, which beats an unexplained empty diff every time. It cannot
+// push UI changes because it never runs when the diff is non-empty.
+
+// Extract the APP-OWNED check ids from a smoke-failure error line
+// (`smokeFailSummary` output: "id: detail · id2: detail …"). Platform
+// baselines and the http/browser/db layer prefixes are not app-owned.
+export function appOwnedFailureIds(errorText) {
+  const s = String(errorText || '');
+  if (!/smoke gate failed after deploy/i.test(s)) return [];
+  const ids = [];
+  for (const seg of s.split('·')) {
+    const m = seg.match(/(?:^|—|-)\s*([a-z0-9][a-z0-9_-]{2,60}):/i);
+    if (!m) continue;
+    const id = m[1];
+    if (/^(http|browser|db)$/i.test(id)) continue;
+    if (id.startsWith(BASELINE_CHECK_PREFIX)) continue;
+    ids.push(id);
+  }
+  return [...new Set(ids)];
+}
+
+// Given the prior failure's app-owned ids and this cycle's finish payload,
+// which failing checks did the build neither fix (empty diff) nor answer?
+export function unansweredSmokeFailures({ failedIds = [], summary = '', acceptance = [] } = {}) {
+  const hay = `${summary}\n${(Array.isArray(acceptance) ? acceptance : []).join('\n')}`.toLowerCase();
+  return (failedIds || []).filter((id) => !hay.includes(String(id).toLowerCase()));
 }

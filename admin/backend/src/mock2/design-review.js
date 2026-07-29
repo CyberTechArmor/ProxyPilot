@@ -577,6 +577,24 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
     console.warn('[mock2] design review: review-account provisioning failed:', e?.message);
   }
 
+  // DEMO CONTENT BEFORE CAPTURE (redesign 6.a). Every automatic review used to
+  // screenshot whatever content existed — normally an empty app — because demo
+  // seeding only ran from the operator's button, so the critique judged empty
+  // states it was never told were empty (P34's operator, by contrast, used the
+  // app between builds and always reviewed it full). Idempotent: the seed
+  // no-ops behind its marker, so this costs one probe on every later review.
+  // Best-effort — a seed failure must never cost the review — and RECORDED
+  // either way, because "the review ran on an empty app" changes how to read
+  // every finding in it.
+  let demoSeed = null;
+  try {
+    updateScreenJob(project.id, { phase: 'seeding', message: 'Making sure the app has demo content to photograph…' });
+    const { seedDemoContent } = await import('./demo-content.js');
+    demoSeed = await seedDemoContent(project, { initiatedBy });
+  } catch (e) {
+    demoSeed = { ok: false, created: 0, error: e?.message || 'demo seeding crashed' };
+  }
+
   updateScreenJob(project.id, { phase: 'capturing', message: 'Screenshotting the app at phone and laptop width…' });
   const capture = await captureAppScreens({
     containerName, webPort: project.web_port || 3000, reviewLogin,
@@ -691,6 +709,12 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   }
 
   let message = reviewChatMessage({ review, axe: capture.axe, rogue, adherence, trigger, screenshotCount: capture.shots.length });
+  // Whether the screens had content when they were photographed — the single
+  // fact that changes how every finding reads.
+  message = `${message}\n${demoSeed == null ? 'Demo content: not attempted before capture.'
+    : demoSeed.alreadySeeded ? 'Demo content: was already seeded before capture.'
+      : demoSeed.ok ? `Demo content: seeded ${demoSeed.created} item(s) before capture.`
+        : `Demo content: did NOT run before capture (${demoSeed.error || 'unknown reason'}) — the screens below may be empty-state shots.`}`;
   // Measured, not eyeballed: how much a screen puts in front of someone before
   // they scroll, and whether any status is carried by colour alone.
   const signalLines = signalsChatLines(signals);

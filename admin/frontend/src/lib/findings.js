@@ -113,17 +113,60 @@ export const KIND_LABEL = Object.freeze({
   adherence: 'Adherence',
 });
 
+// ---- grouped, short fix requests (harness redesign 6.c) ----
+//
+// P34's requests — the good baseline — were short and referent-anchored
+// (median 170 chars): they named a screen and what to change, and leaned on
+// what both sides had just looked at instead of restating it. The old
+// composer emitted up to ~7KB of restated findings. Findings are now grouped
+// by the screen the review named (a small related group), and each group's
+// request targets <= GROUP_CHAR_TARGET chars; the full findings still reach
+// the build through the design-findings ledger (state/design-findings.json
+// is briefed into every build task), so clipping here loses nothing.
+
+export const GROUP_CHAR_TARGET = 500;
+
+// Small related groups, keyed by the screen/scope the review named.
+export function groupFindings(items) {
+  const map = new Map();
+  for (const f of (items || []).filter(Boolean)) {
+    const key = String(f.scope || '/').trim() || '/';
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(f);
+  }
+  return [...map.entries()].map(([screen, findings]) => ({ screen, findings }));
+}
+
+function clipTo(s, n) {
+  s = String(s || '').replace(/\s+/g, ' ').trim();
+  if (s.length <= n) return s;
+  return `${s.slice(0, Math.max(0, n - 1)).replace(/[\s,;:.]+\S*$/, '')}…`;
+}
+
+// One screen's ticked findings as one short block. The review's own fix
+// wording is carried intact when it fits the group budget, clipped when it
+// does not — the verbatim detail is one scroll away in the review message and
+// rides the findings ledger into the build either way.
+export function composeGroupRequest({ screen, findings }) {
+  const head = `On ${screen}:`;
+  const budget = Math.max(80, GROUP_CHAR_TARGET - head.length - 2);
+  const per = Math.max(60, Math.floor(budget / findings.length) - 8);
+  const parts = findings.map((f) => {
+    const both = `${f.issue}${f.fix ? ` — ${f.fix}` : ''}`;
+    return both.length <= per ? both : clipTo(f.fix || f.issue, per);
+  });
+  let text = `${head} ${parts.join('; ')}`;
+  if (text.length > GROUP_CHAR_TARGET) text = clipTo(text, GROUP_CHAR_TARGET);
+  return text;
+}
+
 // composeFixInstruction(items, note) — the build prompt.
 //
 // Built from the TICKED findings rather than from the message, which is the
 // whole point of the dialog: an operator who unticks four of seven has said
 // something, and sending the original text would throw it away.
-//
-// The review already wrote a fix for each finding. Those are carried verbatim
-// — they are specific, they name variables and breakpoints, and rewording them
-// into a summary is how a precise instruction becomes a vague one.
 export function composeFixInstruction(items, note = '') {
-  const picked = items.filter(Boolean);
+  const picked = (items || []).filter(Boolean);
   const lines = [];
   if (picked.length) {
     lines.push(
@@ -132,10 +175,9 @@ export function composeFixInstruction(items, note = '') {
         : `Fix these ${picked.length} design-review findings on the built app:`,
     );
     lines.push('');
-    for (const f of picked) {
-      lines.push(`- [${f.severity}] ${f.scope} — ${f.issue}`);
-      if (f.fix) lines.push(`  Fix: ${f.fix}`);
-    }
+    for (const g of groupFindings(picked)) lines.push(`- ${composeGroupRequest(g)}`);
+    lines.push('');
+    lines.push('Full detail (severities, exact fixes) is in the design review just posted; the open findings also ride state/design-findings.json into this build.');
   }
   const extra = String(note || '').trim();
   if (extra) {

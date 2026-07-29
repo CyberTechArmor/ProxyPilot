@@ -18,6 +18,7 @@ import {
   malformedFinishInput, malformedRejectionMessage, receivedParamsEcho,
   initFinishGuard, recordFinishRejection, escalatedRetryDiagnostic, budgetNote,
   budgetExhaustedSummary, payloadSimilarity, isHarnessFaultHalt, harnessFaultHaltAccepted,
+  FINISH_FILE_PATH, parseFinishFile, finishFileHint,
 } from '../mock2/finish-guard-logic.js';
 
 // Request 141's payload shape: the whole rest of the call serialized into summary.
@@ -178,4 +179,41 @@ test('a harness-fault claim with NO rejection history is not auto-accepted', () 
 
 test('an ordinary blocked halt is not a harness-fault halt', () => {
   assert.equal(isHarnessFaultHalt('blocked: the external ADP endpoint needs credentials I do not have'), false);
+});
+
+// ---- the file-based fallback (P47 cycle 587: emission flakiness) ----
+
+test('parseFinishFile: a well-formed file yields every usable field', () => {
+  const r = parseFinishFile(JSON.stringify({
+    summary: 'Verified all findings already implemented — no code changes needed.',
+    acceptance: ['as admin, open /admin at 390px — user rows render as stacked cards'],
+    assumptions: { verified: ['public/admin.js — aria-labels present'], assumed: [] },
+    acceptance_ids: ['notes-header-aligned'],
+    removals: [{ what: 'the leaked helper copy', check_id: 'notes-header-aligned' }],
+  }));
+  assert.equal(r.ok, true);
+  assert.equal(r.fields.acceptance.length, 1);
+  assert.deepEqual(r.fields.assumptions.assumed, []);
+  assert.deepEqual(r.fields.acceptance_ids, ['notes-header-aligned']);
+});
+
+test('parseFinishFile: malformed JSON, wrong shapes, and empty docs are named errors', () => {
+  assert.equal(parseFinishFile('not json').ok, false);
+  assert.equal(parseFinishFile('[1,2]').ok, false);
+  const empty = parseFinishFile('{}');
+  assert.equal(empty.ok, false);
+  assert.match(empty.error, /no usable finish fields/);
+  // A bad assumptions shape is simply not taken; other fields still are.
+  const partial = parseFinishFile(JSON.stringify({ summary: 'x', assumptions: { verified: 'nope' } }));
+  assert.equal(partial.ok, true);
+  assert.equal(partial.fields.assumptions, undefined);
+  assert.equal(partial.fields.summary, 'x');
+});
+
+test('the malformed rejection and the escalated diagnostic both teach the file fallback', () => {
+  const hit = malformedFinishInput({ summary: 'done.</summary>\n<parameter name="acceptance">[…]' });
+  assert.equal(hit.malformed, true);
+  assert.match(malformedRejectionMessage(hit, { summary: 'x' }), new RegExp(FINISH_FILE_PATH.replace('/', '\\/')));
+  assert.match(escalatedRetryDiagnostic({ validator: 'malformed-call', input: { summary: 'x' } }), /finish\.json/);
+  assert.match(finishFileHint(), /reads that file as the call/);
 });

@@ -271,6 +271,41 @@ export function extractSummaryPathClaims(summary) {
   return [...out];
 }
 
+// ---- verification-only finish (the resume dead-end, P47 request 141) ----
+//
+// A halted cycle's work was already committed; every RESUME then replayed the
+// original instruction, verified the tree already satisfied it, changed
+// nothing — and had no honest exit: a finish summary naming the files it
+// VERIFIED was rejected as an over-claim (empty diff ⇒ every named file is
+// "not changed this cycle"), so the model halted again. ~$1 per resume,
+// forever, with the work sitting finished the whole time.
+//
+// A finish that changed NO PRODUCT CODE and says so in terms is a legitimate
+// completion: the files it names are the evidence trail of the verification,
+// not a claim of authorship. The explicit phrasing requirement is the honesty
+// forcing-function — an empty-diff summary that still reads as "I fixed X"
+// stays rejected (and the rejection message teaches the phrasing).
+const VERIFICATION_ONLY_RE = new RegExp(
+  [
+    String.raw`\balready\s+(?:implemented|present|resolved|fixed|addressed|satisfied|applied|in\s+place|done|correct|complete|exists?)\b`,
+    String.raw`\bno\s+(?:code\s+|product\s+)?changes?\s+(?:were\s+|was\s+|are\s+|is\s+)?(?:needed|required|made|necessary)\b`,
+    String.raw`\bnothing\s+(?:to\s+change|needed\s+changing|left\s+to\s+(?:change|fix))\b`,
+    String.raw`\bverification[- ]only\b`,
+  ].join('|'),
+  'i',
+);
+
+// verificationOnlyFinish(summary, codeChanged) → true when this finish changed
+// no product code AND the summary explicitly frames itself as verification of
+// work that already exists. Callers pass the CODE diff (codeChangedFiles), not
+// the raw working-tree list — platform-owned state files (a refreshed findings
+// ledger) legitimately move under a verification cycle.
+export function verificationOnlyFinish(summary, codeChanged = []) {
+  const changed = (Array.isArray(codeChanged) ? codeChanged : []).filter(Boolean);
+  if (changed.length) return false;
+  return VERIFICATION_ONLY_RE.test(String(summary || ''));
+}
+
 // summaryOverclaims — does the summary name files this cycle did NOT touch?
 // A named file counts as covered when it matches a changed path exactly, by
 // basename, or as a suffix (summaries often shorten "src/adp/tls.ts" to

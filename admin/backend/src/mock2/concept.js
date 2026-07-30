@@ -72,7 +72,7 @@ import { modelMaxOutputTokens } from './routing-logic.js';
 import { resolveStepTuning } from './harness-steps-logic.js';
 import { runMockupChecks, mockupChecksNote } from './mockup-checks-logic.js';
 import { startBuild } from './audit.js';
-import { getLaneTuning } from './settings.js';
+import { getLaneTuning, getDesignArtDirection } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
 import { applyDesignPreset, applyExploreDesign, getDesignPreset, parseDesignDoc, DESIGN_DOC_FORMAT } from './design-presets.js';
 import { replaceScreenPlan, queueScreens, drainScreenQueue } from './screen-plan.js';
@@ -589,9 +589,14 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // (extend-complementarily wording), 'explore' sets it aside for a fresh,
   // reference-quality look — adopted as the project design only on approval.
   const explore = design === 'explore';
+  // The art-direction contract (admin toggle, on by default) rides both paths:
+  // a themed turn gets the flagship craft contract, an explore turn must
+  // declare its own before using it.
+  let artDirection = true;
+  try { artDirection = getDesignArtDirection(); } catch { /* default on */ }
   const boundDesignSystem = explore
-    ? applyExploreDesign(framework.design_system_md)
-    : applyDesignPreset(framework.design_system_md, project.design_preset);
+    ? applyExploreDesign(framework.design_system_md, { artDirection })
+    : applyDesignPreset(framework.design_system_md, project.design_preset, { artDirection });
   const system = stepSystemPrompt('concept-chat',
     buildConceptChatSystemPrompt({
       designSystem: boundDesignSystem, projectName: project.name, hasMockup, mode,

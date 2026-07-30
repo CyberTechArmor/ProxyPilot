@@ -34,6 +34,28 @@ export const DESIGN_PRESETS = Object.freeze([
     key: 'portal-blue',
     name: 'Portal Blue',
     description: 'Professional blue/teal SaaS — white cards on a cool-gray wash, soft shadows, pill badges. The recommended base look.',
+    // One of the four FLAGSHIP themes (with the three Folio registers below):
+    // each carries a full art-direction contract, not just tokens.
+    artDirection: {
+      register: 'SaaS portal — dense, legible, working software',
+      namedPalette: [
+        { name: 'portal-blue', hex: '#1466b8', role: 'the one interactive accent: primary buttons, links, active nav' },
+        { name: 'teal', hex: '#12a3a3', role: 'secondary accent for data highlights only — never on controls' },
+        { name: 'cool-wash', hex: '#f5f8fc', role: 'the page behind everything' },
+        { name: 'card-white', hex: '#ffffff', role: 'every working surface' },
+        { name: 'slate-ink', hex: '#12263f', role: 'all text — one ink, weight carries hierarchy' },
+        { name: 'hairline', hex: '#e2e8f1', role: 'borders and dividers' },
+      ],
+      fontPairing: {
+        display: 'the same sans, heavier', ui: '-apple-system/Segoe UI/Roboto sans',
+        rules: 'A deliberately SINGLE-FACE register: hierarchy comes from weight (800 brand, 700 headings, 600 labels) and size steps, never from a second family.',
+      },
+      signature: [
+        'pill status badges with a leading colored dot',
+        'numbered section cards with slim progress meters in the header',
+        'primary buttons carry a small leading icon',
+      ],
+    },
     tokens: {
       colors: {
         background: '#f5f8fc', surface: '#ffffff', text: '#12263f', muted: '#5a6b81',
@@ -46,6 +68,144 @@ export const DESIGN_PRESETS = Object.freeze([
       shadow: { card: '0 1px 2px rgba(16,42,72,0.06), 0 8px 24px rgba(16,42,72,0.07)' },
       motion: {
         durationFast: '120ms', durationBase: '200ms', durationSlow: '320ms',
+        easingStandard: 'cubic-bezier(0.2,0,0,1)',
+        easingEntrance: 'cubic-bezier(0,0,0,1)',
+        easingExit: 'cubic-bezier(0.3,0,1,1)',
+      },
+    },
+  },
+  {
+    // FLAGSHIP 2/4 — distilled from the operator's warm FOLIO reference (the
+    // paper-and-rust editorial studio): the work sits on a lighter sheet above
+    // a darker desk, Georgia display over Inter UI, one rust accent doing all
+    // interactive emphasis.
+    key: 'folio-warm',
+    name: 'Folio Warm',
+    description: 'Warm editorial studio — paper surfaces on a linen desk, Georgia display over sans UI, a single rust accent. For editorial, publishing, and studio tools.',
+    artDirection: {
+      register: 'editorial studio — calm, tactile, gallery-quiet',
+      namedPalette: [
+        { name: 'ink', hex: '#1d1b18', role: 'all text — near-black warm ink' },
+        { name: 'ink-soft', hex: '#6e675f', role: 'secondary text and captions' },
+        { name: 'rust', hex: '#a74f36', role: 'THE accent: selection, primary actions, live indicators — nothing else gets a hue' },
+        { name: 'rust-pale', hex: '#ead3ca', role: 'rust tint for chips and soft fills' },
+        { name: 'paper', hex: '#fbf6ea', role: 'the working sheet (cards, canvases, panels)' },
+        { name: 'shell', hex: '#d8d2c8', role: 'the desk behind the sheet (app frame)' },
+        { name: 'rail', hex: '#eee8de', role: 'side rails and secondary panels' },
+        { name: 'line', hex: '#c9c0b4', role: 'hairlines and borders' },
+      ],
+      fontPairing: {
+        display: 'Georgia serif', ui: 'Inter/system sans',
+        rules: 'Georgia ONLY for display moments — page titles, pull quotes, page-number furniture, big numerals. Every control, label, and body-UI string is the sans. The serif/sans rhythm IS the register.',
+      },
+      signature: [
+        'paper-on-desk layering: the work floats as a lighter sheet above a darker surround',
+        'dashed selection frames with small square corner handles',
+        'one rust accent; everything else earns attention through type and spacing',
+      ],
+    },
+    tokens: {
+      colors: {
+        background: '#eee8de', surface: '#fbf6ea', text: '#1d1b18', muted: '#6e675f',
+        border: '#c9c0b4', primary: '#a74f36', primaryText: '#ffffff', accent: '#8f402b',
+        danger: '#9c2f1f', success: '#5f7040',
+      },
+      typography: { fontFamily: 'Inter, -apple-system, "Segoe UI", Roboto, sans-serif', headingFamily: 'Georgia, "Times New Roman", serif', baseSize: '15px', monoFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' },
+      radius: { sm: '6px', md: '10px', lg: '14px' },
+      spacing: { unit: '8px' },
+      shadow: { card: '0 1px 2px rgba(29,27,24,0.08), 0 12px 32px rgba(29,27,24,0.08)' },
+      motion: {
+        durationFast: '140ms', durationBase: '260ms', durationSlow: '400ms',
+        easingStandard: 'cubic-bezier(0.2,0,0,1)',
+        easingEntrance: 'cubic-bezier(0,0,0,1)',
+        easingExit: 'cubic-bezier(0.3,0,1,1)',
+      },
+    },
+  },
+  {
+    // FLAGSHIP 3/4 — the light FOLIO register: white chrome on a cool gallery
+    // wash, hairlines instead of boxes, one cobalt accent, serif display.
+    key: 'folio-light',
+    name: 'Folio Light',
+    description: 'Light gallery — white chrome on a cool wash, hairline structure, one cobalt accent, serif display over sans UI. For collaboration and review tools.',
+    artDirection: {
+      register: 'light gallery — airy, precise, professional',
+      namedPalette: [
+        { name: 'gallery-wash', hex: '#f6f7f9', role: 'the page behind everything' },
+        { name: 'paper-white', hex: '#ffffff', role: 'every working surface' },
+        { name: 'ink', hex: '#17181c', role: 'all text — cool near-black' },
+        { name: 'quiet', hex: '#697077', role: 'secondary text' },
+        { name: 'cobalt', hex: '#2563eb', role: 'THE accent: primary actions, selection, active states' },
+        { name: 'leaf', hex: '#16a34a', role: 'positive status chips only' },
+        { name: 'hairline', hex: '#e4e7eb', role: 'dividers carry the structure — not boxes' },
+      ],
+      fontPairing: {
+        display: 'Georgia serif', ui: 'Inter/system sans',
+        rules: 'Georgia for document titles and content display; sans for all chrome. Content reads like print, chrome reads like software.',
+      },
+      signature: [
+        'structure from hairline dividers and generous margins, not filled boxes',
+        'status lives in soft pill chips (tinted background, darker text)',
+        'floating micro-toolbars appear on selection, close to the work',
+      ],
+    },
+    tokens: {
+      colors: {
+        background: '#f6f7f9', surface: '#ffffff', text: '#17181c', muted: '#697077',
+        border: '#e4e7eb', primary: '#2563eb', primaryText: '#ffffff', accent: '#1d4ed8',
+        danger: '#dc2626', success: '#16a34a',
+      },
+      typography: { fontFamily: 'Inter, -apple-system, "Segoe UI", Roboto, sans-serif', headingFamily: 'Georgia, "Times New Roman", serif', baseSize: '15px', monoFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' },
+      radius: { sm: '8px', md: '10px', lg: '14px' },
+      spacing: { unit: '8px' },
+      shadow: { card: '0 1px 2px rgba(23,24,28,0.05), 0 8px 24px rgba(23,24,28,0.06)' },
+      motion: {
+        durationFast: '120ms', durationBase: '200ms', durationSlow: '320ms',
+        easingStandard: 'cubic-bezier(0.2,0,0,1)',
+        easingEntrance: 'cubic-bezier(0,0,0,1)',
+        easingExit: 'cubic-bezier(0.3,0,1,1)',
+      },
+    },
+  },
+  {
+    // FLAGSHIP 4/4 — the dark FOLIO register: a near-black studio where the
+    // work canvas floats as warm parchment, with one moss/olive accent.
+    key: 'folio-dark',
+    name: 'Folio Dark',
+    description: 'Dark studio — near-black chrome, the work floats as warm parchment, one moss accent, serif display. For focused creative and review tools.',
+    artDirection: {
+      register: 'dark studio — focused, warm-on-dark, theatrical about the work',
+      namedPalette: [
+        { name: 'char', hex: '#141511', role: 'the studio (page background)' },
+        { name: 'panel', hex: '#1b1d17', role: 'chrome surfaces (rails, bars, cards)' },
+        { name: 'parchment', hex: '#f3ecd9', role: 'the WORK canvas only — the one bright thing on screen' },
+        { name: 'bone', hex: '#e8e4d8', role: 'all text on the dark chrome' },
+        { name: 'ash', hex: '#98988a', role: 'secondary text' },
+        { name: 'moss', hex: '#a3b53c', role: 'THE accent: selection, confirmation ticks, leader lines' },
+        { name: 'seam', hex: '#2a2c24', role: 'borders' },
+      ],
+      fontPairing: {
+        display: 'Georgia serif', ui: 'Inter/system sans',
+        rules: 'Georgia lives on the parchment (content display); the dark chrome is all sans. The two worlds — warm work, dark studio — never swap type.',
+      },
+      signature: [
+        'the work canvas is warm parchment floating on the near-black studio — maximum contrast reserved for the work itself',
+        'dashed leader lines connect comments/annotations to their target',
+        'moss is the only accent; selected items get a thin moss frame with square handles',
+      ],
+    },
+    tokens: {
+      colors: {
+        background: '#141511', surface: '#1b1d17', text: '#e8e4d8', muted: '#98988a',
+        border: '#2a2c24', primary: '#a3b53c', primaryText: '#15170a', accent: '#c6d16a',
+        danger: '#e06c4f', success: '#8aa53f',
+      },
+      typography: { fontFamily: 'Inter, -apple-system, "Segoe UI", Roboto, sans-serif', headingFamily: 'Georgia, "Times New Roman", serif', baseSize: '15px', monoFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' },
+      radius: { sm: '6px', md: '10px', lg: '14px' },
+      spacing: { unit: '8px' },
+      shadow: { card: '0 1px 2px rgba(0,0,0,0.5), 0 12px 32px rgba(0,0,0,0.35)' },
+      motion: {
+        durationFast: '120ms', durationBase: '220ms', durationSlow: '360ms',
         easingStandard: 'cubic-bezier(0.2,0,0,1)',
         easingEntrance: 'cubic-bezier(0,0,0,1)',
         easingExit: 'cubic-bezier(0.3,0,1,1)',
@@ -361,12 +521,38 @@ export function buildDesignPresetSeedFiles(key) {
 // "EXACTLY these tokens, nothing else" wording measurably flattened mockups
 // (the model couldn't reach the modern component/detail language it knows).
 // No preset → the design system rides unchanged (the model picks the look).
-export function applyDesignPreset(designSystemMd, key) {
+// artDirectionSection — the CRAFT CONTRACT a flagship theme carries beyond its
+// tokens: the named palette with usage roles, the type pairing with its rules,
+// and the signature details that make the register IT. This is the concrete
+// answer to "function A-, form B": tokens alone make a look consistent; the
+// contract is what makes it designed. Gated by the admin "Art direction
+// contract" toggle (on by default) via the caller's opts.
+function artDirectionSection(ad) {
+  if (!ad) return '';
+  return `
+
+## Art direction (craft contract — this is what separates A-grade form from B)
+Register: ${ad.register}.
+Named palette — use these ROLES; beyond tints/shades of them, invent no new hues:
+${ad.namedPalette.map((c) => `- ${c.name} ${c.hex} — ${c.role}`).join('\n')}
+Type pairing: display = ${ad.fontPairing.display}; UI = ${ad.fontPairing.ui}.
+${ad.fontPairing.rules}
+Signature details — every screen should show at least one:
+${ad.signature.map((s) => `- ${s}`).join('\n')}
+Craft rules (always):
+- One spacing scale (multiples of the spacing unit); no ad-hoc gaps.
+- ONE accent does interactive emphasis; status colors appear only on status.
+- The display face appears only in display moments — never on controls.
+- Every screen has one focal point and one clear primary action.`;
+}
+
+export function applyDesignPreset(designSystemMd, key, { artDirection = true } = {}) {
   const preset = getDesignPreset(key);
   const base = String(designSystemMd || '');
   if (!preset) return base;
   const t = preset.tokens;
-  return `${base}
+  const contract = artDirection ? artDirectionSection(preset.artDirection) : '';
+  return `${base}${contract}
 
 ## Base design theme (binding as a BASE): ${preset.name}
 The Builder chose this theme at project creation. Treat it as the FOUNDATION,
@@ -393,8 +579,17 @@ Base tokens:
 // theme is set aside and the model designs freely at reference quality. If the
 // mockup is approved, the extractor adopts its look as the project's design
 // system — exploration is a proposal until approval, never a silent fork.
-export function applyExploreDesign(designSystemMd) {
+export function applyExploreDesign(designSystemMd, { artDirection = true } = {}) {
   const base = String(designSystemMd || '');
+  const contract = artDirection ? `
+3. DECLARE your art direction before you use it, in a CSS comment at the top of
+   the mockup: a NAMED palette (5–8 named hex tokens, each with a usage role),
+   a type PAIRING (display face + UI face, with the rule for when each
+   appears), and ONE signature detail (the crafted touch that makes this app
+   recognizably itself). Then follow your own declaration on every screen —
+   one accent for interaction, one spacing scale, display face only in display
+   moments. The four flagship themes (Folio Warm/Light/Dark, Portal Blue) are
+   the quality bar: commit to a register the way they do.` : '';
   return `${base}
 
 ## Design direction for THIS turn: EXPLORE a new look (Builder's choice)
@@ -404,7 +599,7 @@ Linear/Stripe-class polish):
 1. First think about what THIS application's domain needs — its core objects,
    states, and tasks — and the display patterns the best products use for them.
 2. Then choose a palette, typography, and component language that FIT that
-   domain (not a generic default), and apply them consistently.
+   domain (not a generic default), and apply them consistently.${contract}
 Everything must remain fully self-contained HTML/CSS (no CDNs, no external
 fonts — pick from families commonly installed). If the Builder approves this
 mockup, its look becomes the project's design system going forward.`;

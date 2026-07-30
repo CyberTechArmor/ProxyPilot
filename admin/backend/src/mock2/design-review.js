@@ -39,7 +39,7 @@ import { effectivePrice } from './connectors.js';
 import { insertMessage } from './chats.js';
 import { saveChatImages } from './chat-images.js';
 import { enqueueBuild, drainBuildQueue } from './build-queue.js';
-import { getDesignReviewSetting } from './settings.js';
+import { getDesignReviewSetting, getDesignTasteRubric } from './settings.js';
 import { densityFindings, colorOnlyFindings, signalsPromptBlock, signalsChatLines } from './design-signals-logic.js';
 import {
   DESIGN_FINDINGS_PATH, parseFindingsLedger, renderFindingsLedger, mergeFindings, ledgerDelta,
@@ -759,7 +759,7 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   ].join('\n\n');
   const res = await callStepTurn('design-review', {
     connector: ready.connector, apiKey: ready.apiKey, model,
-    system: stepSystemPrompt('design-review', buildReviewPrompt(), {}), tools: [],
+    system: stepSystemPrompt('design-review', buildReviewPrompt({ tasteRubric: getDesignTasteRubric() }), {}), tools: [],
     transcript: [{ role: 'user', text: userText, images: capture.shots.map((s) => ({ media_type: s.media_type, data: s.data })) }],
     effort: 'high', thinking: null, timeoutMs: 240000,
   });

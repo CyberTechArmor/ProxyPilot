@@ -341,6 +341,25 @@ export default function AdminQueue() {
     } finally { setSavingStall(false); }
   };
 
+  // Design quality — the art-direction contract + the review taste rubric.
+  const [designQuality, setDesignQuality] = useState(null); // { art_direction, taste_rubric }
+  const [savingQuality, setSavingQuality] = useState(false);
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetDesignQuality()
+      .then(setDesignQuality)
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load design quality failed:', err); });
+  }, [gate]);
+  const saveDesignQuality = async (patch) => {
+    setSavingQuality(true);
+    try {
+      setDesignQuality(await api.mock2SetDesignQuality(patch));
+      toast({ title: 'Design quality updated' });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+    } finally { setSavingQuality(false); }
+  };
+
   // Browser smoke connector (post-deploy UI verification) — toggle + readiness.
   const [smokeBrowser, setSmokeBrowser] = useState(null);
   const [savingSmoke, setSavingSmoke] = useState(false);
@@ -659,6 +678,60 @@ export default function AdminQueue() {
                   no activity while it thinks — set the hard stop generously.
                 </p>
               </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Design quality — the craft layer: flagship-theme art direction and
+          the review taste rubric. Both on by default. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Design quality</CardTitle>
+          <CardDescription>
+            The craft layer behind the four flagship themes (Folio Warm / Light / Dark, Portal Blue): a
+            binding art-direction contract on every mockup (named palette roles, display/UI type pairing,
+            signature details), and a taste rubric in the after-build design review (typographic rhythm,
+            palette restraint, register coherence). Turn either off to restore the plainer behavior.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {designQuality == null ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : (
+            <>
+              <label htmlFor="dq-art" className="flex min-h-11 items-center gap-3 cursor-pointer rounded-md border p-3">
+                <Switch
+                  id="dq-art"
+                  checked={designQuality.art_direction === 'on'}
+                  disabled={savingQuality}
+                  onCheckedChange={(on) => saveDesignQuality({ art_direction: on ? 'on' : 'off' })}
+                />
+                <span className="text-sm">
+                  <span className="font-medium">Art-direction contract</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Mockups follow the chosen theme&apos;s craft rules; a &quot;new look&quot; turn must declare its own
+                    named palette, type pairing, and signature detail before using them.
+                  </span>
+                </span>
+              </label>
+              <label htmlFor="dq-taste" className="flex min-h-11 items-center gap-3 cursor-pointer rounded-md border p-3">
+                <Switch
+                  id="dq-taste"
+                  checked={designQuality.taste_rubric === 'on'}
+                  disabled={savingQuality}
+                  onCheckedChange={(on) => saveDesignQuality({ taste_rubric: on ? 'on' : 'off' })}
+                />
+                <span className="text-sm">
+                  <span className="font-medium">Design taste rubric</span>
+                  <span className="block text-xs text-muted-foreground">
+                    The screenshot review grades form like a design lead — typographic rhythm, one-accent
+                    restraint, register coherence, signature details — not just fidelity and defects.
+                  </span>
+                </span>
+              </label>
             </>
           )}
         </CardContent>

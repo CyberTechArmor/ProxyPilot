@@ -272,6 +272,41 @@ export function setDesignReviewSetting(value, updatedBy = null) {
   return getDesignReviewSetting();
 }
 
+// ---- design quality (art-direction contract + taste rubric) ----
+//
+// Two switches, both ON by default:
+//   design_art_direction — the flagship themes' craft contract (named palette
+//     roles, type-pairing rules, signature details) rides the mockup prompts,
+//     and an explore turn must declare its own art direction before using it.
+//   design_taste_rubric — the after-build design review grades TASTE
+//     (typographic rhythm, palette restraint, register coherence, signature
+//     detail) alongside fidelity/craft/states.
+// Precedence per switch: stored setting → env → 'on'.
+export const DESIGN_ART_DIRECTION_KEY = 'design_art_direction';
+export const DESIGN_TASTE_RUBRIC_KEY = 'design_taste_rubric';
+
+function onOff(raw, fallback = 'on') {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (v === 'off' || v === '0' || v === 'false') return 'off';
+  if (v === 'on' || v === '1' || v === 'true') return 'on';
+  return fallback;
+}
+
+export function getDesignArtDirection() {
+  return onOff(getMock2Setting(DESIGN_ART_DIRECTION_KEY, process.env.MOCK2_DESIGN_ART_DIRECTION)) === 'on';
+}
+export function setDesignArtDirection(value, updatedBy = null) {
+  setMock2Setting(DESIGN_ART_DIRECTION_KEY, onOff(value), updatedBy);
+  return getDesignArtDirection();
+}
+export function getDesignTasteRubric() {
+  return onOff(getMock2Setting(DESIGN_TASTE_RUBRIC_KEY, process.env.MOCK2_DESIGN_TASTE_RUBRIC)) === 'on';
+}
+export function setDesignTasteRubric(value, updatedBy = null) {
+  setMock2Setting(DESIGN_TASTE_RUBRIC_KEY, onOff(value), updatedBy);
+  return getDesignTasteRubric();
+}
+
 // ---- first-run setup flow ----
 //
 // 'guided' (DEFAULT): a new project shows the six-step setup panel — your

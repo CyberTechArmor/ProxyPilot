@@ -226,7 +226,7 @@ function detectDrift(project, framework) {
 // so they ride every segment: the audit call here, and the build's first task
 // turn (runner.js hydrates them from the request row), surviving the
 // rule-question gate and resumes.
-export async function startBuild({ project, instruction, user, actingAsAdmin = 0, images = [], buildMode = 'full', echoToChat = false, escalate = false }) {
+export async function startBuild({ project, instruction, user, actingAsAdmin = 0, images = [], buildMode = 'full', echoToChat = false, escalate = false, escalateModel = null }) {
   const projectId = Number(project.id);
   const mode = normalizeBuildMode(buildMode);
 
@@ -311,7 +311,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
     setJob(projectId, { phase: 'building', message: quick ? 'Quick update starting…' : 'MVP build starting — installing standard components, then building.', cycleId: mvpCycle.id, startedAt: Date.now() });
     proceedToBuild({
       project, instruction, initiatedBy: user.id, actingAsAdmin, framework,
-      requestId: request.id, task: { kind: 'feature', difficulty: null }, buildMode: mode, escalate,
+      requestId: request.id, task: { kind: 'feature', difficulty: null }, buildMode: mode, escalate, escalateModel,
     })
       .catch((err) => {
         console.error(`[mock2] MVP build start failed for project ${projectId}:`, err?.message || err);
@@ -486,7 +486,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
 // (the drift comparison input) + resolves the drift item (the app is now being
 // built against current), then startCycle (which takes the lock as the cycle
 // holder and drives the M6 runner). Non-fatal if startCycle refuses.
-async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework, adminDecisions = '', requestId = null, task = null, buildMode = null, escalate = false }) {
+async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework, adminDecisions = '', requestId = null, task = null, buildMode = null, escalate = false, escalateModel = null }) {
   const projectId = Number(project.id);
   updateProject(projectId, { last_built_framework_version_id: framework.id, last_activity_at: nowIso() });
   try { resolveQueueItem(driftDedupeKey(projectId), { resolution: 'built against current framework' }); } catch { /* best effort */ }
@@ -526,7 +526,7 @@ async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin
     // Thread the umbrella request EXPLICITLY (one build request = one log): the
     // build cycle joins the audit cycle's request instead of relying on the
     // latest-open-request fallback inside startCycle.
-    result = await startCycle({ project: getProject(projectId), instruction: fullInstruction, initiatedBy, actingAsAdmin, requestId, segment: 'build', task, buildMode, escalate });
+    result = await startCycle({ project: getProject(projectId), instruction: fullInstruction, initiatedBy, actingAsAdmin, requestId, segment: 'build', task, buildMode, escalate, escalateModel });
   } catch (err) {
     insertMessage({ projectId, kind: 'system', body: `Could not start the build: ${err?.message || err}` });
     return { ok: false, error: err?.message || String(err) };

@@ -1394,8 +1394,11 @@ export const api = {
         // back with "Build it anyway" so the build gets them as labelled
         // guesses instead of losing them.
         ...(opts.clarifyGuesses?.length ? { clarify_guesses: opts.clarifyGuesses } : {}),
-        // Operator escalation — "redo this on the bigger model".
+        // Operator escalation — "redo this on the bigger model". The Redo
+        // card's explicit model pick (optional) rides along and wins over the
+        // rule/global escalation model for this one run.
         ...(opts.escalate ? { escalate: true } : {}),
+        ...(opts.escalate && opts.escalateModel ? { escalate_model: opts.escalateModel } : {}),
       }),
     }),
   // `since` = the highest activity seq the caller already has; the server then

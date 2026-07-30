@@ -492,6 +492,11 @@ const cycleStartSchema = z.object({
   // Operator escalation ("redo this on the bigger model"): run this cycle on
   // the escalation model at high effort, regardless of the fast lane.
   escalate: z.boolean().optional(),
+  // The Redo card's explicit model pick for THIS escalated run — wins over the
+  // rule's escalation model and the global setting. Only read when escalate is
+  // set; free-form like the routing-rule model fields (a custom connector id
+  // must not be rejected here).
+  escalate_model: z.string().trim().max(120).optional(),
   // The options the clarifier OFFERED and the operator did NOT pick, sent back
   // with "Build it anyway" so the build gets them as labelled guesses rather
   // than losing them. Never scope — see composeWithGuesses.
@@ -3140,6 +3145,7 @@ export function createMock2Router() {
         buildMode: mode,
         echoToChat: true,
         escalate: !!parsed.data.escalate,
+        escalateModel: parsed.data.escalate ? (parsed.data.escalate_model || null) : null,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not start the build: ${err?.message || 'unknown error'}` });

@@ -12,7 +12,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle, Trash2, FolderOpen, Activity, Copy, Download } from 'lucide-react';
+import { Loader2, CheckCircle2, HelpCircle, Zap, Pencil, FilePlus2, BookOpen, TerminalSquare, Search, Circle, Trash2, FolderOpen, Activity, Copy, Download, RefreshCw } from 'lucide-react';
 import ExplainThis from './ExplainThis';
 import Markdown from './Markdown';
 import { parseFindings, KIND_LABEL } from '@/lib/findings';
@@ -303,21 +303,39 @@ function FindingsCard({ parsed, body }) {
 // feel like a different action rather than part of the same one — and neither
 // let the operator drop a finding they disagreed with. Now: one button, a
 // popup, a tick per finding, and one place to say anything else.
-function FindingsActions({ m, onFix, busyId }) {
-  if (!onFix) return null;
+function FindingsActions({ m, onFix, busyId, onRedo = null }) {
+  if (!onFix && !onRedo) return null;
   const thisBusy = busyId === m.id;
   return (
-    <div className="mt-2 border-t border-border/60 pt-2">
-      <button
-        type="button"
-        className="inline-flex h-9 items-center gap-1 rounded-md border border-primary/40 px-2.5 text-[11px] font-medium text-primary hover:bg-primary/10 disabled:opacity-50"
-        disabled={busyId != null}
-        onClick={() => onFix(m)}
-        title="Choose which findings to fix, add anything else, and run it as one Quick update"
-      >
-        {thisBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-        {thisBusy ? 'Starting the build…' : 'Fix these…'}
-      </button>
+    <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2">
+      {onFix ? (
+        <button
+          type="button"
+          className="inline-flex h-9 items-center gap-1 rounded-md border border-primary/40 px-2.5 text-[11px] font-medium text-primary hover:bg-primary/10 disabled:opacity-50"
+          disabled={busyId != null}
+          onClick={() => onFix(m)}
+          title="Choose which findings to fix, add anything else, and run it as one Quick update"
+        >
+          {thisBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+          {thisBusy ? 'Starting the build…' : 'Fix these…'}
+        </button>
+      ) : null}
+      {/* Redo sits NEXT TO "Fix these…": findings follow a build, and the two
+          honest reactions to a disappointing one are "fix these specifics"
+          and "run the whole request again, harder". The card it opens shows
+          the original request (collapsible), an optional amendment, and a
+          model dropdown. */}
+      {onRedo ? (
+        <button
+          type="button"
+          className="inline-flex h-9 items-center gap-1 rounded-md border px-2.5 text-[11px] font-medium text-muted-foreground hover:bg-muted/60 disabled:opacity-50"
+          disabled={busyId != null}
+          onClick={() => onRedo(m)}
+          title="Re-run the build's original request — optionally amended — on a model you pick, at high effort"
+        >
+          <RefreshCw className="h-3 w-3" /> Redo build…
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -326,7 +344,7 @@ function FindingsActions({ m, onFix, busyId }) {
 // screenshots with its findings. A note WITH attachments always uses the boxed
 // layout: the centred pill has nowhere to put a thumbnail, and a critique whose
 // evidence is invisible is exactly the thing the operator has to take on trust.
-function SystemNote({ body, m, projectId, onFix = null, fixBusyId = null }) {
+function SystemNote({ body, m, projectId, onFix = null, fixBusyId = null, onRedo = null }) {
   const [expanded, setExpanded] = useState(false);
   const hasShots = !!(projectId && m?.attachments?.length);
   // A findings note renders as a LIST, not as the preformatted blob it arrives
@@ -381,19 +399,19 @@ function SystemNote({ body, m, projectId, onFix = null, fixBusyId = null }) {
         ) : null}
         {/* LAST, under the evidence: the buttons are the answer to "so what do
             I do about it", and that question comes after reading and looking. */}
-        {findings ? <FindingsActions m={m} onFix={onFix} busyId={fixBusyId} /> : null}
+        {findings ? <FindingsActions m={m} onFix={onFix} busyId={fixBusyId} onRedo={onRedo} /> : null}
       </div>
     </div>
   );
 }
 
-export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBusyId = null, onFix = null, fixBusyId = null }) {
+export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBusyId = null, onFix = null, fixBusyId = null, onRedo = null }) {
   if (m.kind === 'system') {
     // System messages are status, never asks — no build chip (operator
     // decision: the chip belongs to genuine Ask answers only). Long notes
     // (a design review's findings) render as a collapsible left-aligned
     // card — a giant centered pill was unreadable (user report).
-    return <SystemNote body={String(m.body || '')} m={m} projectId={projectId} onFix={onFix} fixBusyId={fixBusyId} />;
+    return <SystemNote body={String(m.body || '')} m={m} projectId={projectId} onFix={onFix} fixBusyId={fixBusyId} onRedo={onRedo} />;
   }
   if (m.kind === 'rule_answer') {
     return (
@@ -559,7 +577,7 @@ export function ActivityStream({ items = [], working = false }) {
 export function ChatMessageList({
   scrollRef, messages = [], openIds, canEdit, answering, onAnswer,
   working = false, workingLabel = 'Working…', emptyLabel, projectId = null,
-  partialText = null, onQuickUpdate = null, quickBusyId = null, onFix = null, fixBusyId = null, activity = [],
+  partialText = null, onQuickUpdate = null, quickBusyId = null, onFix = null, fixBusyId = null, onRedo = null, activity = [],
   // `footer` renders INSIDE the scroll container, after the newest message —
   // for live state that belongs to the conversation's "now" (build queue,
   // stall banner, verification checklist). Stacking these under the composer
@@ -585,7 +603,7 @@ export function ChatMessageList({
           <div key={m.id} id={`bcmsg-${m.id}`} data-msg-kind={m.kind}>
             {m.kind === 'rule_question'
               ? <RuleQuestion m={m} open={open.has(m.question_id)} canEdit={canEdit} busy={answering} onAnswer={onAnswer} projectId={projectId} />
-              : <ChatBubble m={m} projectId={projectId} onQuickUpdate={onQuickUpdate} quickBusyId={quickBusyId} onFix={onFix} fixBusyId={fixBusyId} />}
+              : <ChatBubble m={m} projectId={projectId} onQuickUpdate={onQuickUpdate} quickBusyId={quickBusyId} onFix={onFix} fixBusyId={fixBusyId} onRedo={onRedo} />}
           </div>
         ))
       )}

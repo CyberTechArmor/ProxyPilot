@@ -26,6 +26,7 @@ import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import ChangeHistory from './ChangeHistory';
 import VerificationChecklist from './VerificationChecklist';
 import { toWireImages } from '@/lib/chat-images';
+import { MODEL_OPTIONS, RECOMMENDED_ESCALATE_MODEL } from '@/lib/model-options';
 import { parseFindings } from '@/lib/findings';
 import FixFindingsDialog from './FixFindingsDialog';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
@@ -90,6 +91,10 @@ export default function BuildChat({
   const [answering, setAnswering] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  // The Redo card: re-run the last build's request, optionally amended, on an
+  // explicitly chosen model at high effort. null = closed; open carries
+  // { instruction (the original, read-only), amendment, model, showFull }.
+  const [redoCard, setRedoCard] = useState(null);
   // The split-proposal card (route-time pre-pass): { instruction, parts } with
   // per-part include + group assignment edited locally before submit.
   const [splitPlan, setSplitPlan] = useState(null);
@@ -334,13 +339,13 @@ export default function BuildChat({
   // buildMode: 'quick' is the default iteration path — one small scoped
   // change, minimal gates, straight to deploy; 'full' runs the audited build
   // (rule questions, whole gate battery); 'mvp' is the scaffold speed path.
-  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null, textOverride = null, extraImages = null, escalate = false } = {}) => {
+  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null, textOverride = null, extraImages = null, escalate = false, escalateModel = null } = {}) => {
     const body = (textOverride ?? instruction).trim();
     if (!body) return;
     setBusy(true);
     try {
       const images = [...toWireImages(attach.images), ...(extraImages || [])];
-      const res = await api.mock2StartCycle(projectId, body, images, buildMode, { skipSplit, skipSuggest, extras, escalate });
+      const res = await api.mock2StartCycle(projectId, body, images, buildMode, { skipSplit, skipSuggest, extras, escalate, escalateModel });
       if (res.split_proposal) {
         // Feature-scale ask that decomposes — show the grouping card; nothing
         // has started yet. Default: every part included, one group per part.
@@ -727,6 +732,41 @@ export default function BuildChat({
     } finally { setRestarting(false); }
   };
 
+  // ---- Redo card (rerun the last request: optional amendment + model pick) ----
+  // Offered on any settled build, INCLUDING pending-operator-verification (the
+  // state every touch-behavior build lands in — the old "Redo, bigger model"
+  // button skipped it, which was exactly when the operator wanted a redo).
+  const redoEligible = !!(canEdit && online && cycle?.instruction && !active && (
+    ['succeeded', 'failed', 'interrupted', 'abandoned'].includes(cycle.status)
+    || (cycle.status === 'awaiting_user' && ['pending', 'verified'].includes(cycle.verification_state))
+  ));
+  const openRedo = useCallback(() => {
+    if (!cycle?.instruction) return;
+    setRedoCard({
+      instruction: cycle.instruction,
+      amendment: '',
+      // Default to the strongest coding model the provider offers — the whole
+      // point of a redo is "same ask, more capable attempt".
+      model: RECOMMENDED_ESCALATE_MODEL,
+      showFull: false,
+    });
+  }, [cycle?.instruction]);
+  const submitRedo = async () => {
+    if (!redoCard) return;
+    const amendment = redoCard.amendment.trim();
+    // The amendment rides UNDER the original so the build sees both — and is
+    // told the amendment wins where they disagree (that is what "redo with a
+    // correction" means).
+    const text = amendment
+      ? `${redoCard.instruction}\n\nREDO AMENDMENT (operator correction for this re-run — where it conflicts with the request above, the amendment wins):\n${amendment}`
+      : redoCard.instruction;
+    setRedoCard(null);
+    await startBuild('quick', {
+      textOverride: text, skipSplit: true, skipSuggest: true,
+      escalate: true, escalateModel: redoCard.model || null,
+    });
+  };
+
   const sendResume = async () => {
     const body = instruction.trim();
     setBusy(true);
@@ -1002,6 +1042,7 @@ export default function BuildChat({
           quickBusyId={distillingId}
           onFix={canEdit && online && !active && !needsFeedback && !resumeMode ? setFixMessage : null}
           fixBusyId={fixBusyId}
+          onRedo={redoEligible && !needsFeedback && !resumeMode ? openRedo : null}
           emptyLabel={online
             ? 'Describe a change below and send it as a Quick update, or Ask a question / request an action (run a test, add a user). Rule questions and build events appear here.'
             : 'Bring the project online to run a build.'}
@@ -1356,6 +1397,60 @@ export default function BuildChat({
                 </div>
               </div>
             ) : null}
+            {/* The REDO card — rerun the last build's request with an optional
+                amendment and an explicit model pick (dropdown, defaulting to
+                the strongest coding model; the run goes at high effort). The
+                original request renders collapsed with its own scroll when
+                expanded (row 134 discipline: server-length text never gets to
+                size a fixed column). */}
+            {redoCard ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+                <p className="flex items-center gap-1.5 text-xs font-medium">
+                  <RefreshCw className="h-3.5 w-3.5" /> Redo this build
+                </p>
+                <div className="rounded border bg-background/40 p-2">
+                  <p className="text-[11px] font-medium text-muted-foreground">Original request (re-sent as-is unless you amend it)</p>
+                  <p className={`mt-1 whitespace-pre-wrap break-words text-xs ${redoCard.showFull ? 'max-h-48 overflow-y-auto' : 'line-clamp-3'}`}>
+                    {redoCard.instruction}
+                  </p>
+                  <button
+                    type="button"
+                    className="mt-1 min-h-[28px] text-[11px] font-medium text-primary underline-offset-2 hover:underline"
+                    onClick={() => setRedoCard((c) => ({ ...c, showFull: !c.showFull }))}
+                  >
+                    {redoCard.showFull ? 'Collapse' : 'Show full request'}
+                  </button>
+                </div>
+                <textarea
+                  rows={2}
+                  className="flex min-h-[44px] w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  placeholder="Optional amendment — what must be different this time (e.g. “edit text INSIDE the box, not in the Properties panel”). It overrides the original where they conflict."
+                  value={redoCard.amendment}
+                  onChange={(e) => setRedoCard((c) => ({ ...c, amendment: e.target.value }))}
+                />
+                <label className="block text-xs">
+                  <span className="mb-1 block text-[11px] font-medium text-muted-foreground">Model for this run (at high effort)</span>
+                  <select
+                    className="h-11 sm:h-9 w-full rounded-md border bg-background px-2 text-xs"
+                    value={redoCard.model}
+                    onChange={(e) => setRedoCard((c) => ({ ...c, model: e.target.value }))}
+                  >
+                    {MODEL_OPTIONS.map((m) => (
+                      <option key={m.id} value={m.id}>{m.label} — {m.tier}</option>
+                    ))}
+                  </select>
+                </label>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Button className="min-h-[44px] flex-1" disabled={busy} onClick={submitRedo}>
+                    {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />}
+                    Redo build
+                  </Button>
+                  <Button variant="ghost" className="min-h-[44px]" disabled={busy} onClick={() => setRedoCard(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {needsFeedback && !resumeMode ? (
               <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next update — Ask still works meanwhile.</p>
             ) : null}
@@ -1437,25 +1532,28 @@ export default function BuildChat({
                       changes until you press Build on one of them.
                       Outline, not ghost: as a ghost it read as inert footer
                       text on desktop and operators never found it. */}
-                  {/* Redo on the bigger model — for a result that is merely
-                      UNSATISFYING (automatic escalation only fires on hard
-                      failure). Re-runs the last build's exact instruction on
-                      the escalation model at high effort. */}
-                  {canEdit && cycle?.instruction && !active
-                    && ['succeeded', 'failed', 'interrupted', 'abandoned'].includes(cycle.status) ? (
+                  {/* Redo — for a result that is merely UNSATISFYING
+                      (automatic escalation only fires on hard failure). Opens
+                      the card: the original request (collapsible), an optional
+                      amendment, and a model dropdown defaulting to the
+                      strongest coding model. Also offered on a build that
+                      completed as pending verification — that is exactly when
+                      "still not right, try harder" happens. */}
+                  {redoEligible ? (
                     <Button
                       variant="ghost"
                       className="h-11 sm:h-10 ml-auto"
                       disabled={quickDisabled}
-                      onClick={() => startBuild('quick', { textOverride: cycle.instruction, skipSplit: true, skipSuggest: true, escalate: true })}
-                      title="Not satisfied with the last build? Re-run its exact request on the escalation model at high effort."
+                      aria-expanded={!!redoCard}
+                      onClick={() => (redoCard ? setRedoCard(null) : openRedo())}
+                      title="Not satisfied with the last build? Re-run its request — optionally amended — on a model you pick, at high effort."
                     >
-                      <RefreshCw className="h-4 w-4 mr-1" /> Redo, bigger model
+                      <RefreshCw className="h-4 w-4 mr-1" /> Redo…
                     </Button>
                   ) : null}
                   <Button
                     variant="outline"
-                    className={`h-11 sm:h-10 ${canEdit && cycle?.instruction && !active && ['succeeded', 'failed', 'interrupted', 'abandoned'].includes(cycle.status) ? '' : 'ml-auto'}`}
+                    className={`h-11 sm:h-10 ${redoEligible ? '' : 'ml-auto'}`}
                     disabled={askDisabled}
                     aria-expanded={!!optionsPicker}
                     onClick={() => (optionsPicker ? setOptionsPicker(null) : openDesignOptions())}

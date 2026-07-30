@@ -110,3 +110,17 @@ ROLE is honoured where the project has one by that name, and anything that is
 not clearly an admin role falls back to the LEAST privileged role in the table
 rather than the first — a viewer fixture that quietly became an admin would
 make every permission check pass and prove nothing.
+
+## Frontend has no linter — a use-before-declare shipped a blank page
+
+2026-07-30 (LEARNINGS row 144): a derived const in `BuildChat.jsx` read a
+state variable declared ~350 lines later. Vite compiled it clean (builds
+don't evaluate component bodies) and the temporal-dead-zone ReferenceError
+only fired at render — blanking the entire dashboard until the hotfix.
+
+Follow-up: add ESLint to `admin/frontend` (flat config; at minimum
+`no-use-before-define` with `variables: true` plus `eslint-plugin-react-hooks`)
+and run it next to `npm run build` in the pre-push checklist. Expect a
+first-run cleanup pass: the rule is reference-order-based and will flag some
+benign callback-ordering patterns that need either reordering or targeted
+disables.

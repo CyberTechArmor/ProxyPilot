@@ -112,6 +112,11 @@ export default function BuildChat({
   // The split-proposal card (route-time pre-pass): { instruction, parts } with
   // per-part include + group assignment edited locally before submit.
   const [splitPlan, setSplitPlan] = useState(null);
+  // Design options screen picker state. Declared HERE with the other card
+  // states — the anyCardOpen scroll effect below reads it, and a later
+  // declaration is a temporal-dead-zone crash that blanks the whole page
+  // (exactly what shipped on 2026-07-30).
+  const [optionsPicker, setOptionsPicker] = useState(null); // { mode:'all'|'pick', pages:[{path,include}], screens:[], loading }
   const [splitBusy, setSplitBusy] = useState(false);
   // The suggestions card (project suggest_mode 'ask'): domain expectations the
   // pre-pass surfaced beyond the literal request — tick to include as binding
@@ -623,7 +628,6 @@ export default function BuildChat({
   // Available with an EMPTY composer, unlike the other send actions: this is
   // the action for someone who has a feeling rather than an instruction.
   // Anything already drafted rides along as the complaint.
-  const [optionsPicker, setOptionsPicker] = useState(null); // { mode:'all'|'pick', pages:[{path,include}], screens:[], loading }
   const [optionsBusy, setOptionsBusy] = useState(false);
   const openDesignOptions = async () => {
     setOptionsPicker({ mode: 'all', pages: [], screens: [], loading: true });

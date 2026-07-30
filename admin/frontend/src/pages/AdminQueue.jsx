@@ -26,6 +26,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { Input } from '@/components/ui/input';
 import { modelOptionsWith } from '@/lib/model-options';
 import {
   Inbox, Loader2, ArrowLeft, CheckCircle2, XCircle, PlayCircle, RotateCcw, AlertTriangle,
@@ -307,6 +308,39 @@ export default function AdminQueue() {
     } finally { setSavingCostSaver(false); }
   };
 
+  // Stall watchdog thresholds — when a silent build offers manual Restart and
+  // when the sweep hard-stops it unattended. Edited as local drafts, saved on
+  // blur/button so typing doesn't fire a request per keystroke.
+  const [stall, setStall] = useState(null); // { restart_minutes, hard_minutes }
+  const [stallDraft, setStallDraft] = useState({ restart_minutes: '', hard_minutes: '' });
+  const [savingStall, setSavingStall] = useState(false);
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetStallWatchdog()
+      .then((s) => { setStall(s); setStallDraft({ restart_minutes: String(s.restart_minutes), hard_minutes: String(s.hard_minutes) }); })
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load stall watchdog failed:', err); });
+  }, [gate]);
+  const saveStall = async () => {
+    const restart = Math.round(Number(stallDraft.restart_minutes));
+    const hard = Math.round(Number(stallDraft.hard_minutes));
+    if (!Number.isFinite(restart) || !Number.isFinite(hard) || restart < 2 || hard < 2 || restart > 1440 || hard > 1440) {
+      toast({ variant: 'destructive', title: 'Invalid minutes', description: 'Both values must be whole numbers between 2 and 1440.' });
+      return;
+    }
+    setSavingStall(true);
+    try {
+      const state = await api.mock2SetStallWatchdog({ restart_minutes: restart, hard_minutes: hard });
+      setStall(state);
+      setStallDraft({ restart_minutes: String(state.restart_minutes), hard_minutes: String(state.hard_minutes) });
+      toast({
+        title: 'Stall watchdog updated',
+        description: `Restart offered after ${state.restart_minutes} min of silence; automatic stop after ${state.hard_minutes} min.`,
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+    } finally { setSavingStall(false); }
+  };
+
   // Browser smoke connector (post-deploy UI verification) — toggle + readiness.
   const [smokeBrowser, setSmokeBrowser] = useState(null);
   const [savingSmoke, setSavingSmoke] = useState(false);
@@ -568,6 +602,63 @@ export default function AdminQueue() {
                 {' '}· escalation <span className="font-mono">{costSaver.current?.escalate_model || 'none (per-rule only)'}</span>.
                 Per-cycle model, effort, and cost land in the request log — the evidence for tuning further.
               </p>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Stall watchdog — when a silent build offers Restart, and when it is
+          stopped automatically. MOBILE_FIRST: fields stack to one column. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Stall watchdog</CardTitle>
+          <CardDescription>
+            When a build goes silent (a dropped API connection, a hung call), the chat offers a one-click
+            “Restart build” after the first window, and the platform stops the build on its own after the
+            second — safely, resuming from the last checkpoint with no work lost. The automatic stop never
+            fires before the Restart offer.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {stall == null ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <label className="space-y-1 text-sm">
+                  <span className="block text-xs font-medium text-muted-foreground">Offer Restart after (minutes of silence)</span>
+                  <Input
+                    type="number" min={2} max={1440} inputMode="numeric"
+                    className="h-11"
+                    value={stallDraft.restart_minutes}
+                    onChange={(e) => setStallDraft((d) => ({ ...d, restart_minutes: e.target.value }))}
+                    disabled={savingStall}
+                  />
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="block text-xs font-medium text-muted-foreground">Hard stop after (minutes of silence)</span>
+                  <Input
+                    type="number" min={2} max={1440} inputMode="numeric"
+                    className="h-11"
+                    value={stallDraft.hard_minutes}
+                    onChange={(e) => setStallDraft((d) => ({ ...d, hard_minutes: e.target.value }))}
+                    disabled={savingStall}
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <Button className="h-11 sm:h-9" disabled={savingStall} onClick={saveStall}>
+                  {savingStall ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
+                  Save
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Current: Restart offered at <span className="font-mono">{stall.restart_minutes}m</span>, automatic
+                  stop at <span className="font-mono">{stall.hard_minutes}m</span>. A single long model turn writes
+                  no activity while it thinks — set the hard stop generously.
+                </p>
+              </div>
             </>
           )}
         </CardContent>

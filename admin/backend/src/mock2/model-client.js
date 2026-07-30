@@ -29,6 +29,26 @@ import { anthropicTuning } from './routing-logic.js';
 
 const DEFAULT_TIMEOUT_MS = 120000;
 
+// Idle watchdog for STREAMING calls. The overall deadline below scales with the
+// requested output (~50ms/token), so a 128k-token budget legitimately gets a
+// ~106-minute window — but that window assumed bytes keep flowing. A connection
+// that dies mid-stream WITHOUT an error (the observed "API hiccuped and the
+// build stopped" wedge) otherwise sits silent for the whole deadline, which
+// reads as a dead platform. If no bytes arrive for this long the request is
+// aborted and surfaced as a stall (timedOut, so the cycle-level retry machinery
+// owns recovery — not the blind in-call retry). MOCK2_MODEL_IDLE_TIMEOUT_MS
+// overrides; "off"/"0" disables; floored so a typo can't abort every call.
+const DEFAULT_IDLE_TIMEOUT_MS = 300000; // 5 minutes of silence = dead connection
+const MIN_IDLE_TIMEOUT_MS = 30000;
+
+export function modelIdleTimeoutMs(env = process.env) {
+  const raw = String(env?.MOCK2_MODEL_IDLE_TIMEOUT_MS ?? '').trim().toLowerCase();
+  if (raw === 'off' || raw === '0') return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_IDLE_TIMEOUT_MS;
+  return Math.max(MIN_IDLE_TIMEOUT_MS, Math.floor(n));
+}
+
 function openAiBase(provider, baseUrl) {
   if (provider === 'openai') return 'https://api.openai.com/v1';
   const b = String(baseUrl || '').replace(/\/+$/, '');
@@ -93,10 +113,21 @@ async function callModelOnce({
   const effectiveTimeoutMs = timeoutMs != null ? timeoutMs : Math.max(DEFAULT_TIMEOUT_MS, Number(maxTokens || 0) * 50);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
+  // Idle watchdog — armed by the stream reader (onActivity fires when headers
+  // land and on every received chunk), so it only ever runs on a path that
+  // streams. Non-streaming requests are already covered by undici's ~5-minute
+  // headers timeout plus the overall deadline above.
+  const idleMs = modelIdleTimeoutMs();
+  let idleTimer = null;
+  let idleFired = false;
+  const onActivity = idleMs > 0 ? () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { idleFired = true; controller.abort(); }, idleMs);
+  } : null;
   try {
     switch (provider) {
       case 'anthropic':
-        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools, effort, onDelta, thinking });
+        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools, effort, onDelta, thinking, onActivity });
       case 'gemini':
         return await callGemini({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal });
       case 'openai':
@@ -107,6 +138,13 @@ async function callModelOnce({
         return { ok: false, error: `unsupported provider "${provider}"`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
     }
   } catch (err) {
+    // Name a stall as a stall: the idle watchdog firing means the connection
+    // went silent mid-response, which is a very different fact from "the model
+    // legitimately used its whole window". Both count as timedOut (the caller
+    // owns recovery), but the message must say what actually happened.
+    if (idleFired) {
+      return { ok: false, timedOut: true, stalled: true, error: `model call failed: the response stream went silent for ${Math.round(idleMs / 1000)}s (the connection likely dropped mid-response) — the request was cancelled server-side`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+    }
     // Name a timeout as what it is — "This operation was aborted" reads like a
     // user action when it was our own deadline firing.
     const msg = err?.name === 'AbortError' || /abort/i.test(String(err?.message || ''))
@@ -115,11 +153,12 @@ async function callModelOnce({
     return { ok: false, timedOut: err?.name === 'AbortError' || /abort/i.test(String(err?.message || '')), error: `model call failed: ${msg}`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
   } finally {
     clearTimeout(timer);
+    clearTimeout(idleTimer);
   }
 }
 
 // ---- Anthropic Messages API (tool use) ----
-async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [], effort = null, onDelta = null, thinking = null }) {
+async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [], effort = null, onDelta = null, thinking = null, onActivity = null }) {
   const url = `${String(baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/messages`;
   const messages = withMessageCacheBreakpoint(anthropicMessages(transcript));
   // Stream when the caller wants deltas OR the request is HEAVY: images in the
@@ -172,10 +211,13 @@ async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript
     const text = await res.text();
     return { ok: false, error: `anthropic HTTP ${res.status}: ${text.slice(0, 300)}`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
   }
+  // Headers landed — the connection is alive; the stream reader keeps bumping
+  // the idle watchdog from here (a silent death mid-stream is what it catches).
+  if (onActivity) { try { onActivity(); } catch { /* watchdog must never kill the call */ } }
   // Streaming path: accumulate SSE events back into the exact non-streaming
   // response shape (a proxy that strips SSE falls through to the JSON path).
   if (streaming && String(res.headers.get('content-type') || '').includes('text/event-stream')) {
-    return anthropicAccumulateStream(res, emitDelta);
+    return anthropicAccumulateStream(res, emitDelta, onActivity);
   }
   const text = await res.text();
   let j; try { j = JSON.parse(text); } catch { return { ok: false, error: 'anthropic: non-JSON response', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; }
@@ -212,7 +254,7 @@ async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript
 // signature. The resulting `raw` array is therefore replay-safe (thinking
 // blocks return unchanged, signatures intact). Only visible text-block deltas
 // reach onDelta — thinking and tool-input JSON never leak to the UI.
-async function anthropicAccumulateStream(res, onDelta) {
+async function anthropicAccumulateStream(res, onDelta, onActivity = null) {
   const blocks = [];
   const jsonAcc = new Map(); // block index → accumulating partial_json string
   let stopReason = null;
@@ -277,6 +319,9 @@ async function anthropicAccumulateStream(res, onDelta) {
   const decoder = new TextDecoder();
   let buf = '';
   for await (const chunk of res.body) {
+    // Every received chunk (including pings) proves the connection is alive —
+    // bump the idle watchdog so only true silence trips it.
+    if (onActivity) { try { onActivity(); } catch { /* watchdog must never kill the call */ } }
     buf += decoder.decode(chunk, { stream: true });
     let sep;
     while ((sep = buf.indexOf('\n\n')) >= 0) {

@@ -493,7 +493,7 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, createMock2GitRouter, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, loadCustomDesignPresets, sweepMock2Locks, mock2TerminalAuthorize, sweepFrameworkAutoAdopt } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, createMock2GitRouter, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, loadCustomDesignPresets, sweepMock2Locks, mock2TerminalAuthorize, sweepFrameworkAutoAdopt, sweepStalledBuilds } = await import('./mock2/index.js');
     initMock2Db();
     // Register the project-terminal authorizer into the core streaming-terminal
     // route now that the module is enabled (ADR-001: the core never imports mock2
@@ -559,6 +559,13 @@ if (mock2Gate.enabled) {
     setInterval(() => {
       sweepFrameworkAutoAdopt().catch((err) => console.error('[mock2] framework auto-adopt failed:', err?.message || err));
     }, 10 * 60 * 1000).unref();
+    // Stall watchdog: every 60s, stop running cycles that went silent past the
+    // stall threshold (a dropped API connection mid-build) and requeue orphaned
+    // "Building now" queue rows — recovery happens with nobody watching, and
+    // the chat gets a note pointing at Restart. Non-fatal.
+    setInterval(() => {
+      sweepStalledBuilds().catch((err) => console.error('[mock2] stall sweep failed:', err?.message || err));
+    }, 60000).unref();
     console.log('[mock2] module ENABLED — /api/mock2 mounted, mock2.db ready');
   } catch (err) {
     console.error('[mock2] failed to initialize — leaving module unmounted:', err?.message || err);

@@ -372,6 +372,59 @@ export function queueMayAdvancePast(cycle) {
   return cycle.status === 'awaiting_user' && ['pending', 'verified'].includes(cycle.verification_state);
 }
 
+// ---- stall detection (the "API hiccuped and nothing is happening" wedge) ----
+
+// Two thresholds, operator-tunable from the dashboard (settings.js
+// getStallSettings; the env vars below are the fallback when no setting is
+// stored):
+//   RESTART (default 10 min) — the chat shows the "looks stuck — Restart?"
+//     banner, and the restart route accepts a force-stop. Manual: a human is
+//     looking at it and decides.
+//   HARD STOP (default 30 min) — the 60s sweep stops the build on its own
+//     (interrupted + lock released + chat note). Deliberately far above the
+//     model-client idle watchdog (5 min of stream silence aborts the call,
+//     after which the runner writes an event either way) AND above any honest
+//     long model turn, because the sweep kills unattended — a build only
+//     reaches it when every softer recovery path went quiet.
+export const DEFAULT_RESTART_STALL_MINUTES = 10;
+export const DEFAULT_STALL_MINUTES = 30;
+const MIN_STALL_MINUTES = 2;
+
+// Clamp an operator-supplied minutes value: unparseable/non-positive falls
+// back; otherwise floored (never hair-trigger) and capped at a day.
+export function normalizeStallMinutes(raw, { fallback, min = MIN_STALL_MINUTES, max = 1440 } = {}) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
+
+export function stallThresholdMinutes(env = {}) {
+  return normalizeStallMinutes(env?.MOCK2_STALL_MINUTES, { fallback: DEFAULT_STALL_MINUTES });
+}
+
+export function restartStallMinutes(env = {}) {
+  return normalizeStallMinutes(env?.MOCK2_RESTART_STALL_MINUTES, { fallback: DEFAULT_RESTART_STALL_MINUTES });
+}
+
+// buildStallVerdict — is this cycle stalled? Pure: the sweep (stall-watchdog.js)
+// and the restart route both drive this one implementation. Liveness is the
+// NEWEST of started_at and the last cycle-event timestamp — a cycle with no
+// events yet is judged from its start, and a cycle whose clock skews (event
+// older than start) from its start too. Only a 'running' cycle can stall;
+// missing/unparseable timestamps yield not-stalled (never guess a kill).
+export function buildStallVerdict({ nowMs, status, startedAt = null, lastEventAt = null, thresholdMinutes = DEFAULT_STALL_MINUTES } = {}) {
+  if (status !== 'running') return { stalled: false, idleMs: null };
+  const started = Date.parse(startedAt || '');
+  const lastEvent = Date.parse(lastEventAt || '');
+  const ref = Math.max(
+    Number.isFinite(started) ? started : -Infinity,
+    Number.isFinite(lastEvent) ? lastEvent : -Infinity,
+  );
+  if (!Number.isFinite(ref)) return { stalled: false, idleMs: null };
+  const idleMs = Math.max(0, Number(nowMs) - ref);
+  return { stalled: idleMs > Number(thresholdMinutes) * 60000, idleMs };
+}
+
 // How many consecutive completed no-op cycles may run for the SAME instruction
 // before the orchestrator declares the work done and refuses to open another.
 // Two is enough to prove idempotence (the first no-op already finished cleanly;

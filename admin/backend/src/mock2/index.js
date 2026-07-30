@@ -32,6 +32,10 @@ export { seedFrameworkV1, upgradeFrameworkFromSeed } from './framework.js';
 // for drifted, idle, online projects — on boot (after the seed upgrade may
 // have published a new version) and on a slow timer.
 export { sweepFrameworkAutoAdopt } from './auto-adopt.js';
+// Stall watchdog: stop running cycles that went silent (dropped API
+// connection) and requeue orphaned build-queue entries — the "platform is
+// stuck with nothing to click" recovery. index.js runs it every 60s.
+export { sweepStalledBuilds } from './stall-watchdog.js';
 export { seedBuiltinComponents } from './component-seed.js';
 export { loadCustomDesignPresets } from './design-presets-store.js';
 // Project terminal authorizer (ADR-007). Registered into the core

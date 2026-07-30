@@ -1411,6 +1411,15 @@ export const api = {
   // resumed cycle. A bare call resumes with no new context.
   mock2RetryCycle: (id, cycleId, body = null) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/retry`, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) }),
+  // One-click recovery for a STUCK build (no activity for minutes / "Building
+  // now" over an idle chat): force-stops the silent cycle and resumes it from
+  // the last checkpoint, and requeues orphaned queue entries. 409 if the build
+  // is actually alive.
+  mock2RestartBuild: (id) => request(`/mock2/projects/${id}/build-restart`, { method: 'POST' }),
+  // Stall watchdog thresholds (admin): { restart_minutes, hard_minutes } —
+  // when a silent build offers manual Restart, and when the sweep hard-stops it.
+  mock2GetStallWatchdog: () => request('/mock2/settings/stall-watchdog'),
+  mock2SetStallWatchdog: (body) => request('/mock2/settings/stall-watchdog', { method: 'POST', body: JSON.stringify(body) }),
   // "Explain this" — plain-language rewrite of a blocker/authorization/deviation/rule
   // card via the summary lane. Read-only; returns { ok, explanation } or { ok:false }.
   // With a `question` (+ optional `prior` explanation context) in the body it answers

@@ -69,6 +69,49 @@ export function settleStartedBuilds(projectId) {
   }
 }
 
+// A 'started' row whose request has NO live cycle behind it is an ORPHAN: the
+// start died between marking the row and the cycle surviving (the observed
+// wedge — "Building now: …" over an idle chat after an API hiccup killed the
+// start, with nothing to click). Requeue it ONCE (the error column carries the
+// marker so a second orphaning means the instruction itself cannot start —
+// that one is marked failed with a chat note and the queue moves on). Rows
+// younger than graceMs are left alone: a row legitimately flips 'started'
+// moments before its cycle exists. Settles finished rows first so a
+// legitimately-completed request is deleted, not requeued.
+const ORPHAN_REQUEUED_MARKER = 'requeued after a stall';
+const LIVE_CYCLE_STATUSES = `('queued','estimating','running','awaiting_user','awaiting_admin')`;
+
+export function requeueOrphanedStartedBuilds(projectId, { nowMs = Date.now(), graceMs = 3 * 60000 } = {}) {
+  const pid = Number(projectId);
+  const db = getMock2Db();
+  settleStartedBuilds(pid);
+  const started = db.prepare(`SELECT * FROM mock2_build_queue WHERE project_id = ? AND status = 'started'`).all(pid);
+  const requeued = [];
+  const failed = [];
+  for (const row of started) {
+    const updated = Date.parse(row.updated_at || row.created_at || '');
+    if (Number.isFinite(updated) && nowMs - updated < graceMs) continue;
+    const live = row.request_id
+      ? db.prepare(`SELECT id FROM mock2_cycles WHERE request_id = ? AND status IN ${LIVE_CYCLE_STATUSES} LIMIT 1`).get(row.request_id)
+      : null;
+    if (live) continue;
+    if (row.error === ORPHAN_REQUEUED_MARKER) {
+      markQueueRow(row.id, { status: 'failed', error: 'could not restart after a stall (orphaned twice)' });
+      failed.push(row.id);
+      try {
+        insertMessage({ projectId: pid, kind: 'system', body: `A queued build could not be restarted after a stall and was dropped: ${row.label || row.instruction.slice(0, 80)}. Submit it again to retry.` });
+      } catch { /* best effort */ }
+      continue;
+    }
+    markQueueRow(row.id, { status: 'queued', request_id: null, error: ORPHAN_REQUEUED_MARKER });
+    requeued.push(row.id);
+    try {
+      insertMessage({ projectId: pid, kind: 'system', body: `A build start was lost (likely an API hiccup) — requeued: ${row.label || row.instruction.slice(0, 80)}` });
+    } catch { /* best effort */ }
+  }
+  return { requeued, failed };
+}
+
 // In-process re-entrancy guard (the DB writer lock is the real serializer).
 const draining = new Set();
 

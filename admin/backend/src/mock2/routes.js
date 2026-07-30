@@ -126,7 +126,7 @@ import {
   isBaseAppDeploying,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver, getStallSettings, setStallSettings } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getMock2Db } from './db.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
@@ -212,7 +212,7 @@ import {
 // ---- M6: cycle runner + checkout lock ----
 import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer, buildRunnerReady } from './runner.js';
 import { mintConnectToken, listConnectTokens, getConnectToken, revokeConnectToken } from './connect.js';
-import { enqueueBuild, listBuildQueue, cancelQueuedBuild, drainBuildQueue, publicQueueShape } from './build-queue.js';
+import { enqueueBuild, listBuildQueue, cancelQueuedBuild, drainBuildQueue, publicQueueShape, requeueOrphanedStartedBuilds } from './build-queue.js';
 import { buildGroupInstruction, composeWithAdditions, normalizeSuggestMode, SUGGEST_MODES } from './prepass-logic.js';
 import { composeWithGuesses, CLARIFY_MODES } from './clarify-logic.js';
 import { probeSplitProposal, distillChatPrompt } from './runner.js';
@@ -238,7 +238,7 @@ import {
   getCycle, listCyclesForProject, listRecentSucceededCyclesAllProjects, latestCycle, latestDeployCycle, setInterrupt, finishCycle, updateCycle,
   countRunningCycles,
 } from './cycles.js';
-import { publicCycleShape, INTERRUPTS, typicalDurationMs, queueMayAdvancePast } from './cycle-logic.js';
+import { publicCycleShape, INTERRUPTS, typicalDurationMs, queueMayAdvancePast, buildStallVerdict } from './cycle-logic.js';
 import { parseRoutingJson } from './routing-logic.js';
 import {
   getLock, releaseLock, requestTakeover, getLockIdleMinutes,
@@ -247,7 +247,7 @@ import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
 import { listChangeRecords, verifyProjectChain, insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestoreRequest } from './restore-logic.js';
 import { buildCheckpointScript } from './template.js';
-import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback, listCycleActivity } from './cycle-events.js';
+import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback, listCycleActivity, lastCycleEventAt } from './cycle-events.js';
 import { listKeyRows, getKeyRow, upsertKey, deleteKey, describeKeySource } from './project-keys.js';
 import { KEY_PROVIDERS, canManageKey, visibleKeyRows, publicKeyShape } from './project-keys-logic.js';
 import { listAssets, getAsset, assetFilePath, addImage, addContent, updateAsset, removeAsset } from './project-assets.js';
@@ -1907,6 +1907,23 @@ export function createMock2Router() {
     if (!parsed.success) return res.status(400).json({ error: "setting must be 'on' or 'off'" });
     const state = setCostSaver(parsed.data.setting, req.user.id);
     logAudit(req.user.id, 'MOCK2_SETTING_COST_SAVER', 'mock2_setting', 0, { cost_saver: state.setting }, req.ip);
+    res.json(state);
+  });
+
+  // Stall watchdog thresholds — when a silent build offers manual Restart
+  // (restart_minutes, default 10) and when the sweep hard-stops it unattended
+  // (hard_minutes, default 30; clamped to >= restart at read time).
+  router.get('/settings/stall-watchdog', requireAdmin, (_req, res) => {
+    res.json(getStallSettings());
+  });
+  router.post('/settings/stall-watchdog', requireAdmin, (req, res) => {
+    const parsed = z.object({
+      restart_minutes: z.number().int().min(2).max(1440).optional(),
+      hard_minutes: z.number().int().min(2).max(1440).optional(),
+    }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'minutes must be whole numbers between 2 and 1440' });
+    const state = setStallSettings(parsed.data, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_STALL_WATCHDOG', 'mock2_setting', 0, state, req.ip);
     res.json(state);
   });
 
@@ -3578,6 +3595,14 @@ export function createMock2Router() {
         if (lastSeq != null) activityWatermark = lastSeq;
       } catch { /* best-effort */ }
     }
+    // Liveness stamp for the client-side stall banner: the newest event
+    // timestamp on an active cycle (falling back to its start). The client
+    // compares it against its own clock — minutes of silence on a RUNNING
+    // build is what earns the "looks stuck — Restart?" offer.
+    let lastEventAt = null;
+    if (cycleActive) {
+      lastEventAt = lastCycleEventAt(cycle.id) || cycle.started_at || cycle.created_at || null;
+    }
     res.json({
       cycle: cycle ? { ...publicCycleShape(cycle), feedback: getCycleFeedback(cycle.id) } : null,
       job: cycle ? getCycleJobStatus(cycle.id) : null,
@@ -3585,6 +3610,10 @@ export function createMock2Router() {
       build_queue: buildQueue,
       activity,
       activity_since: activityWatermark,
+      last_event_at: lastEventAt,
+      // The dashboard-tunable silence window before the chat offers Restart —
+      // sent with every poll so the banner follows the admin setting live.
+      stall_restart_minutes: getStallSettings().restart_minutes,
       // Pending one-time authorization requests (Part 4) so the blocked card can show
       // them + an admin Grant/Deny without a separate fetch.
       authorizations: listOpenAuthorizations(req.mock2Project.id).map(publicAuthorizationShape),
@@ -3629,6 +3658,73 @@ export function createMock2Router() {
     setInterrupt(cycle.id, parsed.data.action);
     logAudit(req.user.id, 'MOCK2_CYCLE_INTERRUPT', 'mock2_cycle', cycle.id, { action: parsed.data.action }, req.ip);
     res.json({ cycle: publicCycleShape(getCycle(cycle.id)) });
+  });
+
+  // RESTART a stuck build (editor). Operator report: "the api hiccuped and the
+  // build stopped and I have no way of turning it back on." One click covers
+  // both wedge shapes:
+  //   1. an active cycle that has gone SILENT (hung model call): force-stop it
+  //      ('interrupted' + lock released) and resume it immediately as a fresh
+  //      segment from the last checkpoint — the same machinery as Retry.
+  //   2. an orphaned 'started' queue row with no live cycle behind it
+  //      ("Building now:" over an idle chat): requeue it once and drain.
+  // A build that showed event activity in the last couple of minutes is NOT
+  // restarted (409) — that one is alive; Interrupt is the deliberate stop.
+  // The 60s stall-watchdog sweep does the same recovery unattended; this
+  // button exists so the operator staring at the wedge never has to wait.
+  router.post('/projects/:id/build-restart', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    let cycle = latestCycle(project.id);
+    let stopped = false;
+    let resumed = null;
+    if (cycle && ['queued', 'estimating', 'running'].includes(cycle.status)) {
+      // status forced to 'running' so queued/estimating wedges get the same
+      // silence test — a healthy cycle passes through those in seconds.
+      // The gate is the dashboard's restart_minutes (default 10) less a small
+      // buffer so the server never refuses the click its own banner invited.
+      const restartAfter = Math.max(1, getStallSettings().restart_minutes - 0.5);
+      const verdict = buildStallVerdict({
+        nowMs: Date.now(), status: 'running',
+        startedAt: cycle.started_at || cycle.created_at,
+        lastEventAt: lastCycleEventAt(cycle.id),
+        thresholdMinutes: restartAfter,
+      });
+      if (!verdict.stalled) {
+        return res.status(409).json({ error: `The build showed activity in the last ${Math.round(restartAfter)} minutes — it looks alive. Use Interrupt to stop a working build.` });
+      }
+      // If the runner is somehow still alive it honors this at the next
+      // boundary; either way the cycle is closed out and its lock released.
+      try { setInterrupt(cycle.id, 'abandon'); } catch { /* best effort */ }
+      finishCycle(cycle.id, { status: 'interrupted', error: 'restarted by operator: the build was unresponsive (likely a dropped API connection)' });
+      updateCycle(cycle.id, { pause_reason: 'stalled' });
+      try { releaseLock(project.id, { type: 'cycle', id: cycle.id }); } catch { /* best effort */ }
+      stopped = true;
+      cycle = getCycle(cycle.id);
+      try {
+        resumed = await retryCycle({ project, cycle, initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0 });
+      } catch (err) {
+        resumed = { status: 'error', error: err?.message || 'the resume failed' };
+      }
+    }
+    // Queue-side recovery: orphaned started rows requeued (short grace — the
+    // operator pressed the button because it is visibly wedged), then drain.
+    let queueFix = { requeued: [], failed: [] };
+    try { queueFix = requeueOrphanedStartedBuilds(project.id, { graceMs: 60000 }); } catch { /* best effort */ }
+    try {
+      if (queueMayAdvancePast(latestCycle(project.id))) await drainBuildQueue(project.id);
+    } catch { /* best effort */ }
+    const restarted = stopped || queueFix.requeued.length > 0;
+    logAudit(req.user.id, 'MOCK2_BUILD_RESTART', 'mock2_project', project.id,
+      { stopped_cycle: stopped ? cycle.id : null, resume_status: resumed?.status || null, requeued: queueFix.requeued.length, dropped: queueFix.failed.length }, req.ip);
+    res.json({
+      ok: true,
+      restarted,
+      stopped_cycle_id: stopped ? cycle.id : null,
+      resume_status: resumed?.status || null,
+      resume_error: resumed && ['error', 'refused'].includes(resumed.status) ? (resumed.error || null) : null,
+      requeued: queueFix.requeued.length,
+      cycle: publicCycleShape(latestCycle(project.id)),
+    });
   });
 
   // Retry a stalled cycle (editor). When the runner exhausts its retries on a

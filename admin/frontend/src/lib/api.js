@@ -1429,6 +1429,9 @@ export const api = {
   // when a silent build offers manual Restart, and when the sweep hard-stops it.
   mock2GetStallWatchdog: () => request('/mock2/settings/stall-watchdog'),
   mock2SetStallWatchdog: (body) => request('/mock2/settings/stall-watchdog', { method: 'POST', body: JSON.stringify(body) }),
+  // Design quality: { art_direction, taste_rubric } — 'on'|'off' each.
+  mock2GetDesignQuality: () => request('/mock2/settings/design-quality'),
+  mock2SetDesignQuality: (body) => request('/mock2/settings/design-quality', { method: 'POST', body: JSON.stringify(body) }),
   // "Explain this" — plain-language rewrite of a blocker/authorization/deviation/rule
   // card via the summary lane. Read-only; returns { ok, explanation } or { ok:false }.
   // With a `question` (+ optional `prior` explanation context) in the body it answers

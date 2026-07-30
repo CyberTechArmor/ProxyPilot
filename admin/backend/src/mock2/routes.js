@@ -126,7 +126,7 @@ import {
   isBaseAppDeploying,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver, getStallSettings, setStallSettings } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver, getStallSettings, setStallSettings, getDesignArtDirection, setDesignArtDirection, getDesignTasteRubric, setDesignTasteRubric } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getMock2Db } from './db.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
@@ -1924,6 +1924,31 @@ export function createMock2Router() {
     if (!parsed.success) return res.status(400).json({ error: "setting must be 'on' or 'off'" });
     const state = setCostSaver(parsed.data.setting, req.user.id);
     logAudit(req.user.id, 'MOCK2_SETTING_COST_SAVER', 'mock2_setting', 0, { cost_saver: state.setting }, req.ip);
+    res.json(state);
+  });
+
+  // Design quality — the art-direction contract (flagship theme craft rules +
+  // explore-turn declarations) and the design-review taste rubric. Both ON by
+  // default; these switches exist so an operator who wants the old, plainer
+  // behavior can have it.
+  router.get('/settings/design-quality', requireAdmin, (_req, res) => {
+    res.json({
+      art_direction: getDesignArtDirection() ? 'on' : 'off',
+      taste_rubric: getDesignTasteRubric() ? 'on' : 'off',
+    });
+  });
+  router.post('/settings/design-quality', requireAdmin, (req, res) => {
+    const parsed = z.object({
+      art_direction: z.enum(['on', 'off']).optional(),
+      taste_rubric: z.enum(['on', 'off']).optional(),
+    }).safeParse(req.body || {});
+    if (!parsed.success || Object.keys(parsed.data).length === 0) {
+      return res.status(400).json({ error: "send art_direction and/or taste_rubric as 'on' or 'off'" });
+    }
+    if (parsed.data.art_direction) setDesignArtDirection(parsed.data.art_direction, req.user.id);
+    if (parsed.data.taste_rubric) setDesignTasteRubric(parsed.data.taste_rubric, req.user.id);
+    const state = { art_direction: getDesignArtDirection() ? 'on' : 'off', taste_rubric: getDesignTasteRubric() ? 'on' : 'off' };
+    logAudit(req.user.id, 'MOCK2_SETTING_DESIGN_QUALITY', 'mock2_setting', 0, state, req.ip);
     res.json(state);
   });
 

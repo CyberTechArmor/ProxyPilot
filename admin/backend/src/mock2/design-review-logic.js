@@ -22,7 +22,20 @@ export const REVIEW_SEVERITIES = Object.freeze(['high', 'medium', 'low']);
 
 // The vision critique prompt. The model sees screenshots (mobile first, then
 // desktop), the approved mockup HTML, and the design tokens. STRICT JSON out.
-export function buildReviewPrompt() {
+export function buildReviewPrompt({ tasteRubric = true } = {}) {
+  // The TASTE rubric (admin toggle "Design taste rubric", on by default) —
+  // the explicit form-grade criteria: without them the review catches drift
+  // and defects but never says WHY a screen is a B instead of an A.
+  const taste = tasteRubric ? `
+- TASTE (grade against Apple/Anthropic-level craft): typographic rhythm (a
+  display face and a UI face each used where they belong, sizes on a scale —
+  not one-off values), palette restraint (ONE accent doing the interactive
+  work; no orphan hues that belong to no role), register coherence (an
+  editorial app must not sprout dashboard chrome; a console must not sprout
+  marketing type), and a SIGNATURE detail per screen (the crafted touch that
+  makes the app recognizably itself — a selection treatment, a leader line,
+  paper-on-desk layering). Name the missing craft precisely; these findings
+  are usually "medium".` : '';
   return `You are a senior product designer reviewing a deployed web app against its
 approved design. You are given SCREENSHOTS of the live app (mobile-width first,
 then desktop where provided), the approved mockup HTML (the visual contract),
@@ -46,7 +59,7 @@ Judge like a design lead doing a polish review, not a linter:
   every action promoted to a top-level button, badges on everything, a form
   where the mockup shows a list — compare against the mockup's own density.
   When the right fix is to REMOVE, SIMPLIFY, or fold controls into a menu, say
-  that: a subtractive finding is as valid as an additive one, at any severity.
+  that: a subtractive finding is as valid as an additive one, at any severity.${taste}
 
 Reply with STRICT JSON only — no prose, no code fences. Schema:
 {

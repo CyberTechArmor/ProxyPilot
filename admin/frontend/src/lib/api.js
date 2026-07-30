@@ -631,6 +631,10 @@ export const api = {
   // Version (display-only). The auto-update flow was removed —
   // operators update via their own deploy mechanism.
   getVersion: () => request('/user/version'),
+  // Platform branding (name / logo / favicon). GET is public; PUT is admin.
+  // Images travel as data URIs; '' clears a field back to the default.
+  getBranding: () => request('/branding'),
+  updateBranding: (data) => request('/branding', { method: 'PUT', body: JSON.stringify(data) }),
 
   // LXC Container Management
   getLxcStatus: () => request('/lxc/status'),

@@ -31,12 +31,16 @@ import {
 } from 'lucide-react';
 import { useTheme } from '@/context/ThemeContext';
 import { cn } from '@/lib/utils';
+import { useBranding } from '@/lib/branding';
 import { SnapshotExportProvider } from '@/context/SnapshotExportContext';
 import SnapshotExportBanner from '@/components/SnapshotExportBanner';
 import AiAssistant from '@/components/lbp/AiAssistant';
 
 export default function Layout() {
   const { user, logout } = useAuth();
+  // Operator-set platform branding (Profile → Platform branding); falls back
+  // to the built-in ProxyPilot name/rocket when unset.
+  const branding = useBranding();
   const location = useLocation();
   const { toasts } = useToast();
 
@@ -302,9 +306,11 @@ export default function Layout() {
         >
           <Menu className="h-5 w-5" />
         </Button>
-        <div className="flex items-center gap-2">
-          <Rocket className="h-6 w-6 text-primary" />
-          <span className="text-lg font-bold">ProxyPilot</span>
+        <div className="flex items-center gap-2 min-w-0">
+          {branding.logo
+            ? <img src={branding.logo} alt="" className="h-6 w-6 shrink-0 rounded object-contain" />
+            : <Rocket className="h-6 w-6 shrink-0 text-primary" />}
+          <span className="text-lg font-bold truncate">{branding.name}</span>
         </div>
         <Button
           variant="ghost"
@@ -357,9 +363,11 @@ export default function Layout() {
           {/* Logo and Version */}
           <div className="flex items-start justify-between gap-2 px-6 py-4 border-b">
             <div className="flex flex-col min-w-0">
-              <div className="flex items-center gap-2">
-                <Rocket className="h-8 w-8 text-primary shrink-0" />
-                <span className="text-xl font-bold">ProxyPilot</span>
+              <div className="flex items-center gap-2 min-w-0">
+                {branding.logo
+                  ? <img src={branding.logo} alt="" className="h-8 w-8 shrink-0 rounded object-contain" />
+                  : <Rocket className="h-8 w-8 text-primary shrink-0" />}
+                <span className="text-xl font-bold truncate">{branding.name}</span>
               </div>
               <div className="flex items-center gap-2 mt-1">
                 <span className="text-xs text-muted-foreground">

@@ -24,6 +24,7 @@ import { notificationsRouter } from './routes/notifications.js';
 import { ldapRouter } from './routes/ldap.js';
 import { domainsRouter } from './routes/domains.js';
 import { tlsCertsRouter } from './routes/tls-certs.js';
+import { brandingRouter } from './routes/branding.js';
 import { createLeanBeafRouter } from './routes/lean-beaf.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
@@ -478,6 +479,9 @@ app.use('/api/ldap', authenticateToken, ldapRouter);
 // cookie-session middleware themselves.
 app.use('/api/domains', domainsRouter);
 app.use('/api/tls-certs', tlsCertsRouter);
+// Platform branding: GET is public (the login page shows the name/logo before
+// a session exists); the PUT applies the cookie-session admin middleware itself.
+app.use('/api/branding', brandingRouter);
 
 // Mock2 — absence-by-installation (ADR-001). The gate is evaluated with
 // no native imports; only when it resolves enabled do we dynamically

@@ -22,9 +22,139 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, Key, Shield, QrCode, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Github, Download, Bell, BellOff, Smartphone, Monitor, LogOut, Fingerprint, Plus } from 'lucide-react';
+import { Loader2, Key, Shield, QrCode, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Github, Download, Bell, BellOff, Smartphone, Monitor, LogOut, Fingerprint, Plus, Palette, ImagePlus, X, Rocket } from 'lucide-react';
 import QRCode from 'qrcode';
 import { registerPasskey, defaultPasskeyLabel, isPasskeySupported } from '@/lib/passkey';
+import { applyBranding, DEFAULT_BRANDING } from '@/lib/branding';
+
+// Platform branding (admin) — the dashboard's OWN name, logo, and favicon.
+// Self-contained: loads the current values, previews picked files, saves them
+// as small data URIs, and applies the result immediately (tab title, favicon,
+// sidebar, login page) through lib/branding.js. Caps mirror the server's
+// (~300 KB logo, ~150 KB favicon); an empty field falls back to the built-in
+// ProxyPilot branding, so "Reset to defaults" is just clearing everything.
+function PlatformBrandingCard() {
+  const { toast } = useToast();
+  const [branding, setBranding] = useState(null); // { name, logo, favicon } — local draft
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.getBranding()
+      .then((b) => setBranding({ name: b.name || '', logo: b.logo || null, favicon: b.favicon || null }))
+      .catch(() => setBranding({ name: '', logo: null, favicon: null }));
+  }, []);
+
+  const pickImage = (field, maxChars, label) => (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast({ variant: 'destructive', title: 'Not an image', description: 'Pick a PNG, JPEG, WebP, GIF, SVG, or ICO file.' });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const uri = String(reader.result || '');
+      if (uri.length > maxChars) {
+        toast({ variant: 'destructive', title: `${label} too large`, description: `Keep it under ~${Math.round((maxChars * 3) / 4 / 1024)} KB.` });
+        return;
+      }
+      setBranding((b) => ({ ...b, [field]: uri }));
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const persist = async (payload, doneTitle) => {
+    setSaving(true);
+    try {
+      const next = await api.updateBranding(payload);
+      setBranding({ name: next.name || '', logo: next.logo || null, favicon: next.favicon || null });
+      applyBranding(next);
+      toast({ title: doneTitle, description: 'Applied everywhere immediately — the login page included.' });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save branding', description: err.message });
+    } finally { setSaving(false); }
+  };
+
+  const imageRow = (field, label, maxChars, hint) => (
+    <div className="space-y-2">
+      <Label className="text-muted-foreground">{label}</Label>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded border bg-muted/40">
+          {branding[field]
+            ? <img src={branding[field]} alt={`${label} preview`} className="h-full w-full object-contain" />
+            : <Rocket className="h-5 w-5 text-primary" />}
+        </span>
+        <label className="inline-flex">
+          <input type="file" accept="image/*,.ico" className="hidden" onChange={pickImage(field, maxChars, label)} />
+          <span className="inline-flex min-h-[44px] cursor-pointer items-center gap-1.5 rounded-md border px-3 text-sm font-medium hover:bg-muted">
+            <ImagePlus className="h-4 w-4" />{branding[field] ? 'Replace' : 'Choose image'}
+          </span>
+        </label>
+        {branding[field] ? (
+          <Button variant="ghost" className="min-h-[44px] text-muted-foreground" onClick={() => setBranding((b) => ({ ...b, [field]: null }))}>
+            <X className="h-4 w-4 mr-1" />Remove
+          </Button>
+        ) : null}
+      </div>
+      <p className="text-xs text-muted-foreground">{hint}</p>
+    </div>
+  );
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Palette className="h-5 w-5" />
+          Platform branding
+        </CardTitle>
+        <CardDescription>
+          The name, logo, and favicon this dashboard shows everywhere — sidebar, tab title, and the
+          sign-in page. Leave a field empty to keep the built-in {DEFAULT_BRANDING.name} branding.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        {branding == null ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+          </div>
+        ) : (
+          <>
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">Platform name</Label>
+              <Input
+                value={branding.name}
+                maxLength={80}
+                placeholder={DEFAULT_BRANDING.name}
+                onChange={(e) => setBranding((b) => ({ ...b, name: e.target.value }))}
+              />
+            </div>
+            {imageRow('logo', 'Logo', 400000, 'Shown beside the name in the sidebar and on the sign-in page. Square works best; SVG or PNG, under ~300 KB.')}
+            {imageRow('favicon', 'Favicon', 200000, 'The browser-tab icon. SVG, PNG, or ICO, under ~150 KB — small squares (32–64px) look sharpest.')}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                className="min-h-[44px]"
+                disabled={saving}
+                onClick={() => persist({ name: branding.name.trim(), logo: branding.logo || '', favicon: branding.favicon || '' }, 'Branding saved')}
+              >
+                {saving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Check className="h-4 w-4 mr-1" />}
+                Save branding
+              </Button>
+              <Button
+                variant="outline"
+                className="min-h-[44px]"
+                disabled={saving}
+                onClick={() => persist({ name: '', logo: '', favicon: '' }, 'Branding reset')}
+              >
+                Reset to defaults
+              </Button>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 import PasskeyConfirmButton from '@/components/PasskeyConfirmButton';
 
 export default function Profile() {
@@ -1358,6 +1488,9 @@ export default function Profile() {
           </CardContent>
         </Card>
       )}
+
+      {/* Platform branding — admin-only, right under Application Settings. */}
+      {isAdmin && <PlatformBrandingCard />}
 
     </div>
   );

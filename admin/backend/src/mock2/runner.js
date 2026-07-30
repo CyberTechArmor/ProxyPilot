@@ -362,7 +362,7 @@ export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 
 // cycle and injected as a labeled user turn after the task. A fresh (non-resume)
 // build passes null, which also expires any dangling one-time authorizations so a
 // stale grant can never apply to an unrelated later build ("expires with the cycle").
-export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null, task = null, buildMode = null, escalate = false }) {
+export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null, task = null, buildMode = null, escalate = false, escalateModel = null }) {
   const projectId = Number(project.id);
   if (!resumeContext) { try { expireStaleAuthorizations(projectId); } catch { /* best effort */ } }
   // Refresh the base app BEFORE the build reads the tree, so the cycle works
@@ -457,7 +457,10 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // last word below — an operator's standing override outranks a per-press one.
   if (escalate) {
     const env = routingEnv();
-    const escModel = String(routing?.escalation_model || env.MOCK2_ESCALATE_MODEL || '').trim() || ready.model;
+    // Model precedence: the operator's explicit per-press pick (the Redo
+    // card's dropdown) → the rule's escalation model → the global setting/env
+    // → the slot model. A per-press choice is the most specific intent there is.
+    const escModel = String(escalateModel || routing?.escalation_model || env.MOCK2_ESCALATE_MODEL || '').trim() || ready.model;
     routing = {
       ...(routing || {}), model: escModel, effort: 'high', rung: 1,
       reason: 'operator escalation (redo on the bigger model)', mode, applied_model: escModel,

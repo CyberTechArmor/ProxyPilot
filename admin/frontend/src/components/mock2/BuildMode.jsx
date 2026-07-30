@@ -31,6 +31,7 @@ export default function BuildMode({
   const [typical, setTypical] = useState(null); // { p50, p80, n } wall-clock band
   const [buildQueue, setBuildQueue] = useState([]); // queued/started background builds
   const [lastEventAt, setLastEventAt] = useState(null); // liveness stamp for the stall banner
+  const [stallMinutes, setStallMinutes] = useState(10); // admin-tunable silence window before Restart is offered
   const [busy, setBusy] = useState(false);
   const lastBuiltCycleId = useRef(null);
   const lastTerminalKey = useRef(null);
@@ -45,6 +46,7 @@ export default function BuildMode({
       setTypical(r.typical_duration || null);
       setBuildQueue(r.build_queue || []);
       setLastEventAt(r.last_event_at || null);
+      if (r.stall_restart_minutes) setStallMinutes(r.stall_restart_minutes);
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('load cycle failed:', err);
     }
@@ -225,6 +227,7 @@ export default function BuildMode({
           needsFeedback={needsFeedback}
           buildQueue={buildQueue}
           lastEventAt={lastEventAt}
+          stallMinutes={stallMinutes}
           onStarted={refresh}
         />
       </div>

@@ -12,7 +12,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildStallVerdict, stallThresholdMinutes, DEFAULT_STALL_MINUTES,
+  buildStallVerdict, stallThresholdMinutes, restartStallMinutes, normalizeStallMinutes,
+  DEFAULT_STALL_MINUTES, DEFAULT_RESTART_STALL_MINUTES,
 } from '../mock2/cycle-logic.js';
 import { modelIdleTimeoutMs, isTransientModelError } from '../mock2/model-client.js';
 
@@ -61,14 +62,32 @@ test('threshold default applies when not passed', () => {
   assert.equal(v.stalled, true);
 });
 
-// ---- B. stallThresholdMinutes ----
+// ---- B. thresholds: hard stop (30m default), restart offer (10m default) ----
 
-test('stall threshold: default, override, floor, garbage', () => {
-  assert.equal(stallThresholdMinutes({}), DEFAULT_STALL_MINUTES);
+test('hard-stop threshold: default 30, override, floor, garbage', () => {
+  assert.equal(DEFAULT_STALL_MINUTES, 30);
+  assert.equal(stallThresholdMinutes({}), 30);
   assert.equal(stallThresholdMinutes({ MOCK2_STALL_MINUTES: '20' }), 20);
   assert.equal(stallThresholdMinutes({ MOCK2_STALL_MINUTES: '1' }), 2); // floored — never hair-trigger
-  assert.equal(stallThresholdMinutes({ MOCK2_STALL_MINUTES: 'soon' }), DEFAULT_STALL_MINUTES);
-  assert.equal(stallThresholdMinutes({ MOCK2_STALL_MINUTES: '-5' }), DEFAULT_STALL_MINUTES);
+  assert.equal(stallThresholdMinutes({ MOCK2_STALL_MINUTES: 'soon' }), 30);
+  assert.equal(stallThresholdMinutes({ MOCK2_STALL_MINUTES: '-5' }), 30);
+});
+
+test('restart-offer threshold: default 10, env override', () => {
+  assert.equal(DEFAULT_RESTART_STALL_MINUTES, 10);
+  assert.equal(restartStallMinutes({}), 10);
+  assert.equal(restartStallMinutes({ MOCK2_RESTART_STALL_MINUTES: '5' }), 5);
+  assert.equal(restartStallMinutes({ MOCK2_RESTART_STALL_MINUTES: 'garbage' }), 10);
+});
+
+test('normalizeStallMinutes clamps operator input: fallback, floor, cap, rounding', () => {
+  assert.equal(normalizeStallMinutes(null, { fallback: 30 }), 30);
+  assert.equal(normalizeStallMinutes('', { fallback: 30 }), 30);
+  assert.equal(normalizeStallMinutes('0', { fallback: 30 }), 30);
+  assert.equal(normalizeStallMinutes('1', { fallback: 30 }), 2);       // floor
+  assert.equal(normalizeStallMinutes('9000', { fallback: 30 }), 1440); // cap (a day)
+  assert.equal(normalizeStallMinutes('12.7', { fallback: 30 }), 13);   // whole minutes
+  assert.equal(normalizeStallMinutes('45', { fallback: 30 }), 45);
 });
 
 // ---- C. modelIdleTimeoutMs ----

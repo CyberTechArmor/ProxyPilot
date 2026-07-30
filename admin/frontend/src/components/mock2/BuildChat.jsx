@@ -75,7 +75,7 @@ function SpendBadge({ projectId, cycleCostCents }) {
 
 export default function BuildChat({
   projectId, project, cycle = null, canEdit, isAdmin = false, online, active, job, needsFeedback = false,
-  buildQueue = [], activity = [], lastEventAt = null, onStarted,
+  buildQueue = [], activity = [], lastEventAt = null, stallMinutes = 10, onStarted,
   // `fill` — the chat OWNS its box and scrolls internally (Flightdeck's
   // single-panel phone layout). Without it the card claims an intrinsic
   // 26rem, which on a 360x640 phone pushes the composer off screen and
@@ -680,7 +680,8 @@ export default function BuildChat({
   // ---- stall detection (operator report: "the api hiccuped and the build
   // stopped and I have no way of turning it back on") ----
   // Two wedge shapes get the banner + one-click Restart:
-  //   1. a RUNNING cycle with no event activity for a few minutes — could be a
+  //   1. a RUNNING cycle with no event activity for stallMinutes (the
+  //      admin-tunable window, default 10, rides the cycle poll) — could be a
   //      dropped API connection, could be one long model turn, so the copy is
   //      soft and the server refuses the restart if the build proves alive;
   //   2. "Building now:" in the queue with NO live cycle behind it (the start
@@ -703,7 +704,7 @@ export default function BuildChat({
   const lastEventMs = lastEventAt ? Date.parse(lastEventAt) : NaN;
   const runningSilentMs = cycle?.status === 'running' && Number.isFinite(lastEventMs)
     ? Math.max(0, nowTick - lastEventMs) : null;
-  const STALL_BANNER_MS = 3 * 60000;
+  const STALL_BANNER_MS = Math.max(1, Number(stallMinutes) || 10) * 60000;
   const stalled = canEdit && online && (
     (runningSilentMs != null && runningSilentMs > STALL_BANNER_MS)
     || (startedOrphan && orphanSinceRef.current != null && nowTick - orphanSinceRef.current > 90000)

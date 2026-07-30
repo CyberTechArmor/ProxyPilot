@@ -12,6 +12,7 @@ import { getMock2Db } from './db.js';
 import { GATE_MODE_ENFORCE, normalizeGateMode } from './accept-pending-logic.js';
 import { COMPONENT_AUTO_APPLY_ON, normalizeComponentAutoApply } from './component-logic.js';
 import { normalizeLaneTuning, normalizeTuningEntry, normalizeGlobalThinking } from './lane-tuning-logic.js';
+import { normalizeStallMinutes, stallThresholdMinutes, restartStallMinutes } from './cycle-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -317,6 +318,43 @@ export function setFrameworkAutoAdopt(value, updatedBy = null) {
   const v = String(value || '').trim().toLowerCase();
   setMock2Setting(FRAMEWORK_AUTO_ADOPT_KEY, v === 'off' || v === '0' || v === 'false' ? 'off' : 'on', updatedBy);
   return getFrameworkAutoAdopt();
+}
+
+// ---- Stall watchdog thresholds (stuck-build recovery timing) ----
+//
+// Two dashboard-tunable minute values:
+//   restart_minutes (default 10) — silence before the chat offers "Restart
+//     build" and the restart route accepts a force-stop (manual recovery);
+//   hard_minutes (default 30) — silence before the 60s sweep stops the build
+//     on its own (unattended recovery).
+// Precedence per value: stored setting → env (MOCK2_RESTART_STALL_MINUTES /
+// MOCK2_STALL_MINUTES) → default. hard is clamped to >= restart at read time —
+// the automatic kill must never fire before the human was even offered the
+// button.
+export const STALL_RESTART_MINUTES_KEY = 'stall_restart_minutes';
+export const STALL_HARD_MINUTES_KEY = 'stall_hard_minutes';
+
+export function getStallSettings(env = process.env) {
+  const restart = normalizeStallMinutes(
+    getMock2Setting(STALL_RESTART_MINUTES_KEY, null),
+    { fallback: restartStallMinutes(env) },
+  );
+  let hard = normalizeStallMinutes(
+    getMock2Setting(STALL_HARD_MINUTES_KEY, null),
+    { fallback: stallThresholdMinutes(env) },
+  );
+  if (hard < restart) hard = restart;
+  return { restart_minutes: restart, hard_minutes: hard };
+}
+
+export function setStallSettings({ restart_minutes = null, hard_minutes = null } = {}, updatedBy = null) {
+  if (restart_minutes != null) {
+    setMock2Setting(STALL_RESTART_MINUTES_KEY, String(normalizeStallMinutes(restart_minutes, { fallback: restartStallMinutes() })), updatedBy);
+  }
+  if (hard_minutes != null) {
+    setMock2Setting(STALL_HARD_MINUTES_KEY, String(normalizeStallMinutes(hard_minutes, { fallback: stallThresholdMinutes() })), updatedBy);
+  }
+  return getStallSettings();
 }
 
 // ---- Global thinking switch (kill thinking everywhere at once) ----

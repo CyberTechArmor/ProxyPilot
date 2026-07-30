@@ -126,7 +126,7 @@ import {
   isBaseAppDeploying,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver, getStallSettings, setStallSettings } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getMock2Db } from './db.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
@@ -1910,6 +1910,23 @@ export function createMock2Router() {
     res.json(state);
   });
 
+  // Stall watchdog thresholds — when a silent build offers manual Restart
+  // (restart_minutes, default 10) and when the sweep hard-stops it unattended
+  // (hard_minutes, default 30; clamped to >= restart at read time).
+  router.get('/settings/stall-watchdog', requireAdmin, (_req, res) => {
+    res.json(getStallSettings());
+  });
+  router.post('/settings/stall-watchdog', requireAdmin, (req, res) => {
+    const parsed = z.object({
+      restart_minutes: z.number().int().min(2).max(1440).optional(),
+      hard_minutes: z.number().int().min(2).max(1440).optional(),
+    }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'minutes must be whole numbers between 2 and 1440' });
+    const state = setStallSettings(parsed.data, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_STALL_WATCHDOG', 'mock2_setting', 0, state, req.ip);
+    res.json(state);
+  });
+
   // Automatic framework adoption (ADR-003 amendment) — 'on' (default) starts
   // the update cycle automatically when the framework moves; 'off' restores
   // the explicit-consent banner + button only.
@@ -3594,6 +3611,9 @@ export function createMock2Router() {
       activity,
       activity_since: activityWatermark,
       last_event_at: lastEventAt,
+      // The dashboard-tunable silence window before the chat offers Restart —
+      // sent with every poll so the banner follows the admin setting live.
+      stall_restart_minutes: getStallSettings().restart_minutes,
       // Pending one-time authorization requests (Part 4) so the blocked card can show
       // them + an admin Grant/Deny without a separate fetch.
       authorizations: listOpenAuthorizations(req.mock2Project.id).map(publicAuthorizationShape),
@@ -3660,14 +3680,17 @@ export function createMock2Router() {
     if (cycle && ['queued', 'estimating', 'running'].includes(cycle.status)) {
       // status forced to 'running' so queued/estimating wedges get the same
       // silence test — a healthy cycle passes through those in seconds.
+      // The gate is the dashboard's restart_minutes (default 10) less a small
+      // buffer so the server never refuses the click its own banner invited.
+      const restartAfter = Math.max(1, getStallSettings().restart_minutes - 0.5);
       const verdict = buildStallVerdict({
         nowMs: Date.now(), status: 'running',
         startedAt: cycle.started_at || cycle.created_at,
         lastEventAt: lastCycleEventAt(cycle.id),
-        thresholdMinutes: 2.5,
+        thresholdMinutes: restartAfter,
       });
       if (!verdict.stalled) {
-        return res.status(409).json({ error: 'The build showed activity in the last couple of minutes — it looks alive. Use Interrupt to stop a working build.' });
+        return res.status(409).json({ error: `The build showed activity in the last ${Math.round(restartAfter)} minutes — it looks alive. Use Interrupt to stop a working build.` });
       }
       // If the runner is somehow still alive it honors this at the next
       // boundary; either way the cycle is closed out and its lock released.

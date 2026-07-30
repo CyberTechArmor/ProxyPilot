@@ -374,19 +374,36 @@ export function queueMayAdvancePast(cycle) {
 
 // ---- stall detection (the "API hiccuped and nothing is happening" wedge) ----
 
-// Minutes of total event silence before a RUNNING build is declared stalled and
-// the watchdog stops it. Deliberately above the model-client idle watchdog
-// (5 min of stream silence aborts the call, after which the runner writes an
-// event either way), so a build only reads as stalled when even that recovery
-// path went quiet. A single long model turn writes no events while it thinks —
-// this is a last-resort tripwire, not a liveness meter.
-export const DEFAULT_STALL_MINUTES = 10;
+// Two thresholds, operator-tunable from the dashboard (settings.js
+// getStallSettings; the env vars below are the fallback when no setting is
+// stored):
+//   RESTART (default 10 min) — the chat shows the "looks stuck — Restart?"
+//     banner, and the restart route accepts a force-stop. Manual: a human is
+//     looking at it and decides.
+//   HARD STOP (default 30 min) — the 60s sweep stops the build on its own
+//     (interrupted + lock released + chat note). Deliberately far above the
+//     model-client idle watchdog (5 min of stream silence aborts the call,
+//     after which the runner writes an event either way) AND above any honest
+//     long model turn, because the sweep kills unattended — a build only
+//     reaches it when every softer recovery path went quiet.
+export const DEFAULT_RESTART_STALL_MINUTES = 10;
+export const DEFAULT_STALL_MINUTES = 30;
 const MIN_STALL_MINUTES = 2;
 
+// Clamp an operator-supplied minutes value: unparseable/non-positive falls
+// back; otherwise floored (never hair-trigger) and capped at a day.
+export function normalizeStallMinutes(raw, { fallback, min = MIN_STALL_MINUTES, max = 1440 } = {}) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
+
 export function stallThresholdMinutes(env = {}) {
-  const n = Number(env?.MOCK2_STALL_MINUTES);
-  if (!Number.isFinite(n) || n <= 0) return DEFAULT_STALL_MINUTES;
-  return Math.max(MIN_STALL_MINUTES, n);
+  return normalizeStallMinutes(env?.MOCK2_STALL_MINUTES, { fallback: DEFAULT_STALL_MINUTES });
+}
+
+export function restartStallMinutes(env = {}) {
+  return normalizeStallMinutes(env?.MOCK2_RESTART_STALL_MINUTES, { fallback: DEFAULT_RESTART_STALL_MINUTES });
 }
 
 // buildStallVerdict — is this cycle stalled? Pure: the sweep (stall-watchdog.js)

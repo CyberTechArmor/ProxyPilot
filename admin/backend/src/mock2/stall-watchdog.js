@@ -20,7 +20,8 @@
 import { getMock2Db } from './db.js';
 import { finishCycle, updateCycle, latestCycle } from './cycles.js';
 import { lastCycleEventAt } from './cycle-events.js';
-import { buildStallVerdict, stallThresholdMinutes, queueMayAdvancePast } from './cycle-logic.js';
+import { buildStallVerdict, queueMayAdvancePast } from './cycle-logic.js';
+import { getStallSettings } from './settings.js';
 import { releaseLock } from './locks.js';
 import { insertMessage } from './chats.js';
 import { requeueOrphanedStartedBuilds, drainBuildQueue } from './build-queue.js';
@@ -29,7 +30,9 @@ export async function sweepStalledBuilds({ nowMs = Date.now(), env = process.env
   const summary = { interrupted: 0, requeued: 0, dropped: 0 };
   let db;
   try { db = getMock2Db(); } catch { return summary; }
-  const threshold = stallThresholdMinutes(env);
+  // The HARD-stop threshold (dashboard-tunable, default 30 min; the manual
+  // Restart offer in the chat fires earlier at restart_minutes).
+  const threshold = getStallSettings(env).hard_minutes;
 
   // 1) Running cycles gone silent.
   let running = [];

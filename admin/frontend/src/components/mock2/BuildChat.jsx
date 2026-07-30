@@ -75,7 +75,7 @@ function SpendBadge({ projectId, cycleCostCents }) {
 
 export default function BuildChat({
   projectId, project, cycle = null, canEdit, isAdmin = false, online, active, job, needsFeedback = false,
-  buildQueue = [], activity = [], onStarted,
+  buildQueue = [], activity = [], lastEventAt = null, onStarted,
   // `fill` — the chat OWNS its box and scrolls internally (Flightdeck's
   // single-panel phone layout). Without it the card claims an intrinsic
   // 26rem, which on a 360x640 phone pushes the composer off screen and
@@ -89,6 +89,7 @@ export default function BuildChat({
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   // The split-proposal card (route-time pre-pass): { instruction, parts } with
   // per-part include + group assignment edited locally before submit.
   const [splitPlan, setSplitPlan] = useState(null);
@@ -674,6 +675,55 @@ export default function BuildChat({
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not interrupt', description: err.message });
     } finally { setInterrupting(false); }
+  };
+
+  // ---- stall detection (operator report: "the api hiccuped and the build
+  // stopped and I have no way of turning it back on") ----
+  // Two wedge shapes get the banner + one-click Restart:
+  //   1. a RUNNING cycle with no event activity for a few minutes — could be a
+  //      dropped API connection, could be one long model turn, so the copy is
+  //      soft and the server refuses the restart if the build proves alive;
+  //   2. "Building now:" in the queue with NO live cycle behind it (the start
+  //      died) — held for 90s before it reads as a wedge, because a row flips
+  //      'started' moments before its cycle appears and that gap is normal.
+  // nowTick exists because the banner must appear WITHOUT new data arriving —
+  // that is the entire point of a stall.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const startedOrphan = !active && (buildQueue || []).some((q) => q.status === 'started');
+  useEffect(() => {
+    if (!active && !startedOrphan) return undefined;
+    const t = setInterval(() => setNowTick(Date.now()), 15000);
+    return () => clearInterval(t);
+  }, [active, startedOrphan]);
+  const orphanSinceRef = useRef(null);
+  useEffect(() => {
+    if (startedOrphan) { if (orphanSinceRef.current == null) orphanSinceRef.current = Date.now(); }
+    else orphanSinceRef.current = null;
+  }, [startedOrphan]);
+  const lastEventMs = lastEventAt ? Date.parse(lastEventAt) : NaN;
+  const runningSilentMs = cycle?.status === 'running' && Number.isFinite(lastEventMs)
+    ? Math.max(0, nowTick - lastEventMs) : null;
+  const STALL_BANNER_MS = 3 * 60000;
+  const stalled = canEdit && online && (
+    (runningSilentMs != null && runningSilentMs > STALL_BANNER_MS)
+    || (startedOrphan && orphanSinceRef.current != null && nowTick - orphanSinceRef.current > 90000)
+  );
+  const restartBuild = async () => {
+    setRestarting(true);
+    try {
+      const r = await api.mock2RestartBuild(projectId);
+      if (r.resume_error) {
+        toast({ variant: 'destructive', title: 'Could not restart', description: r.resume_error });
+      } else if (r.restarted) {
+        toast({ title: 'Build restarted', description: 'Picking up from the last checkpoint — no work lost.' });
+      } else {
+        toast({ title: 'Nothing to restart', description: 'The build recovered on its own.' });
+      }
+      if (onStarted) onStarted();
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not restart', description: err.message });
+    } finally { setRestarting(false); }
   };
 
   const sendResume = async () => {
@@ -1380,6 +1430,28 @@ export default function BuildChat({
                 </>
               )}
             </div>
+            ) : null}
+            {/* Stall banner — the build has gone quiet (or "Building now" has
+                no build behind it) and the operator needs a way back that isn't
+                waiting. Soft copy: a long model turn also looks like silence,
+                and the server refuses the restart if the build proves alive. */}
+            {stalled ? (
+              <div className="shrink-0 rounded-md border border-amber-500/50 bg-amber-500/10 p-2.5">
+                <p className="text-xs font-medium text-amber-600 dark:text-amber-400">The build looks stuck</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  {runningSilentMs != null && runningSilentMs > STALL_BANNER_MS
+                    ? `No response for ~${Math.max(1, Math.round(runningSilentMs / 60000))} min — the API may have hiccuped. Restart stops it safely and picks up from the last checkpoint.`
+                    : 'A queued build says “building now” but nothing is running — the start likely died. Restart requeues it.'}
+                </p>
+                <Button
+                  variant="outline" className="mt-2 h-11 sm:h-8 border-amber-500/50"
+                  disabled={restarting} onClick={restartBuild}
+                  title="Force-stop the unresponsive build and continue it from the last checkpoint"
+                >
+                  {restarting ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
+                  {restarting ? 'Restarting…' : 'Restart build'}
+                </Button>
+              </div>
             ) : null}
             {/* The build queue — "building now / up next", each queued entry
                 cancellable. Submissions while a build runs land here and run

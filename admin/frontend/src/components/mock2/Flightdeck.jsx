@@ -51,6 +51,9 @@ export default function Flightdeck({
   const [job, setJob] = useState(null);
   const [buildQueue, setBuildQueue] = useState([]);
   const [activity, setActivity] = useState([]);
+  // Liveness stamp for the chat's stall banner (newest cycle-event timestamp
+  // on an active cycle; null when idle).
+  const [lastEventAt, setLastEventAt] = useState(null);
   const active = !!cycle && ['queued', 'running', 'awaiting_admin', 'paused'].includes(cycle.status);
   // A build waiting on an admin is easy to miss in Flightdeck (no Build panel
   // here) — the top bar says so, and the chat carries the reason + Resume.
@@ -66,6 +69,7 @@ export default function Flightdeck({
     try {
       const r = await api.mock2GetLatestCycle(projectId, activitySinceRef.current);
       setCycle(r.cycle || null); setJob(r.job || null); setBuildQueue(r.build_queue || []);
+      setLastEventAt(r.last_event_at || null);
       const cycleId = r.cycle?.id ?? null;
       const fresh = Array.isArray(r.activity) ? r.activity : [];
       if (activityCycleRef.current !== cycleId) {
@@ -213,7 +217,7 @@ export default function Flightdeck({
     );
   const chatPane = (
     <BuildChat projectId={projectId} project={project} cycle={cycle} canEdit={canEdit} isAdmin={isAdmin} online={online} active={active}
-      job={job} buildQueue={buildQueue} activity={activity} onStarted={load} fill />
+      job={job} buildQueue={buildQueue} activity={activity} lastEventAt={lastEventAt} onStarted={load} fill />
   );
   const terminalPane = online
     ? <ProjectTerminal projectId={projectId} containerName={containerName} defaultOpen fill />

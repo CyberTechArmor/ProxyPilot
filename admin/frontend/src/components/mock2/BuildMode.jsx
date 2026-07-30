@@ -30,6 +30,7 @@ export default function BuildMode({
   const [job, setJob] = useState(null);
   const [typical, setTypical] = useState(null); // { p50, p80, n } wall-clock band
   const [buildQueue, setBuildQueue] = useState([]); // queued/started background builds
+  const [lastEventAt, setLastEventAt] = useState(null); // liveness stamp for the stall banner
   const [busy, setBusy] = useState(false);
   const lastBuiltCycleId = useRef(null);
   const lastTerminalKey = useRef(null);
@@ -43,6 +44,7 @@ export default function BuildMode({
       setJob(r.job || null);
       setTypical(r.typical_duration || null);
       setBuildQueue(r.build_queue || []);
+      setLastEventAt(r.last_event_at || null);
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('load cycle failed:', err);
     }
@@ -222,6 +224,7 @@ export default function BuildMode({
           job={job}
           needsFeedback={needsFeedback}
           buildQueue={buildQueue}
+          lastEventAt={lastEventAt}
           onStarted={refresh}
         />
       </div>

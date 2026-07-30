@@ -48,6 +48,18 @@ export function insertCycleEvent({ projectId, cycleId, kind, role = null, conten
   }
 }
 
+// The newest event timestamp for a cycle — the stall watchdog's liveness
+// signal (and the poll route's `last_event_at`). Null when the cycle has no
+// events yet (judge liveness from started_at instead).
+export function lastCycleEventAt(cycleId) {
+  try {
+    const row = getMock2Db()
+      .prepare(`SELECT MAX(created_at) AS m FROM mock2_cycle_events WHERE cycle_id = ?`)
+      .get(Number(cycleId));
+    return row?.m || null;
+  } catch { return null; }
+}
+
 function shapeEvent(row) {
   let meta = null;
   try { meta = row.meta_json ? JSON.parse(row.meta_json) : null; } catch { meta = null; }

@@ -372,6 +372,42 @@ export function queueMayAdvancePast(cycle) {
   return cycle.status === 'awaiting_user' && ['pending', 'verified'].includes(cycle.verification_state);
 }
 
+// ---- stall detection (the "API hiccuped and nothing is happening" wedge) ----
+
+// Minutes of total event silence before a RUNNING build is declared stalled and
+// the watchdog stops it. Deliberately above the model-client idle watchdog
+// (5 min of stream silence aborts the call, after which the runner writes an
+// event either way), so a build only reads as stalled when even that recovery
+// path went quiet. A single long model turn writes no events while it thinks —
+// this is a last-resort tripwire, not a liveness meter.
+export const DEFAULT_STALL_MINUTES = 10;
+const MIN_STALL_MINUTES = 2;
+
+export function stallThresholdMinutes(env = {}) {
+  const n = Number(env?.MOCK2_STALL_MINUTES);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_STALL_MINUTES;
+  return Math.max(MIN_STALL_MINUTES, n);
+}
+
+// buildStallVerdict — is this cycle stalled? Pure: the sweep (stall-watchdog.js)
+// and the restart route both drive this one implementation. Liveness is the
+// NEWEST of started_at and the last cycle-event timestamp — a cycle with no
+// events yet is judged from its start, and a cycle whose clock skews (event
+// older than start) from its start too. Only a 'running' cycle can stall;
+// missing/unparseable timestamps yield not-stalled (never guess a kill).
+export function buildStallVerdict({ nowMs, status, startedAt = null, lastEventAt = null, thresholdMinutes = DEFAULT_STALL_MINUTES } = {}) {
+  if (status !== 'running') return { stalled: false, idleMs: null };
+  const started = Date.parse(startedAt || '');
+  const lastEvent = Date.parse(lastEventAt || '');
+  const ref = Math.max(
+    Number.isFinite(started) ? started : -Infinity,
+    Number.isFinite(lastEvent) ? lastEvent : -Infinity,
+  );
+  if (!Number.isFinite(ref)) return { stalled: false, idleMs: null };
+  const idleMs = Math.max(0, Number(nowMs) - ref);
+  return { stalled: idleMs > Number(thresholdMinutes) * 60000, idleMs };
+}
+
 // How many consecutive completed no-op cycles may run for the SAME instruction
 // before the orchestrator declares the work done and refuses to open another.
 // Two is enough to prove idempotence (the first no-op already finished cleanly;

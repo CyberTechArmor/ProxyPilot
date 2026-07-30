@@ -587,6 +587,17 @@ export function baseCss() {
    these classes; colors/radii come from /design.css tokens with safe fallbacks. */
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
+/* Standard slim scrollbars — every scrolling area in a generated app uses
+   these, not the browser default. Thumb rides the muted token so it restyles
+   with the design like everything else. */
+*{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--app-muted,#5a6b81) 40%,transparent) transparent}
+*::-webkit-scrollbar{width:8px;height:8px}
+*::-webkit-scrollbar-track{background:transparent}
+*::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--app-muted,#5a6b81) 40%,transparent);border-radius:8px}
+*::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--app-muted,#5a6b81) 60%,transparent)}
+/* The page itself never scrolls sideways — wide content (tables, code) gets
+   its own overflow-x container instead of widening the document. */
+html,body{overflow-x:clip}
 body{font-family:var(--app-font,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif);color:var(--app-text,#12263f);background:var(--app-bg,#f5f8fc);line-height:1.5;-webkit-font-smoothing:antialiased}
 a{color:var(--app-primary,#1466b8);text-decoration:none;cursor:pointer}
 button{font-family:inherit;cursor:pointer}

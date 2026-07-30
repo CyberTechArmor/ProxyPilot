@@ -17,7 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
   Loader2, Zap, Hammer, HelpCircle, Wand2, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye,
-  MonitorSmartphone, RotateCcw, GitCompare, ShieldAlert,
+  MonitorSmartphone, RotateCcw, GitCompare, ShieldAlert, Rocket,
 } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
 import BuildLogViewer from './BuildLogViewer';
@@ -95,6 +95,20 @@ export default function BuildChat({
   // explicitly chosen model at high effort. null = closed; open carries
   // { instruction (the original, read-only), amendment, model, showFull }.
   const [redoCard, setRedoCard] = useState(null);
+  // The extra-effort BOOST — armed for the NEXT build only, then reverts:
+  // "I know this one is complex, spend more on it." { model, effort, thinking }
+  // when armed, null otherwise; boostOpen shows the picker card.
+  const [boost, setBoost] = useState(null);
+  const [boostOpen, setBoostOpen] = useState(false);
+  const [boostDraft, setBoostDraft] = useState({ model: RECOMMENDED_ESCALATE_MODEL, effort: 'high', thinking: 'default' });
+  const consumeBoost = () => {
+    if (!boost) return {};
+    setBoost(null);
+    return {
+      escalate: true, escalateModel: boost.model, escalateEffort: boost.effort,
+      escalateThinking: boost.thinking === 'default' ? null : boost.thinking,
+    };
+  };
   // The split-proposal card (route-time pre-pass): { instruction, parts } with
   // per-part include + group assignment edited locally before submit.
   const [splitPlan, setSplitPlan] = useState(null);
@@ -804,7 +818,7 @@ export default function BuildChat({
   // respecting the same gate as the buttons.
   const submitComposer = () => {
     if (quickDisabled) return;
-    return resumeMode ? sendResume() : startBuild('quick');
+    return resumeMode ? sendResume() : startBuild('quick', consumeBoost());
   };
 
   // Build History — every request you've made (your instruction messages),
@@ -1451,6 +1465,76 @@ export default function BuildChat({
                 </div>
               </div>
             ) : null}
+            {/* The extra-effort picker — arms {model, effort, thinking} for
+                the next build; the send itself stays the normal Quick update. */}
+            {boostOpen ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+                <p className="flex items-center gap-1.5 text-xs font-medium">
+                  <Rocket className="h-3.5 w-3.5" /> Extra effort — next build only
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  For a change you already know is complex: this one build runs on the model and effort you
+                  pick here, then everything reverts to your normal settings.
+                </p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  <label className="block text-xs">
+                    <span className="mb-1 block text-[11px] font-medium text-muted-foreground">Model</span>
+                    <select
+                      className="h-11 sm:h-9 w-full rounded-md border bg-background px-2 text-xs"
+                      value={boostDraft.model}
+                      onChange={(e) => setBoostDraft((d) => ({ ...d, model: e.target.value }))}
+                    >
+                      {MODEL_OPTIONS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                    </select>
+                  </label>
+                  <label className="block text-xs">
+                    <span className="mb-1 block text-[11px] font-medium text-muted-foreground">Effort</span>
+                    <select
+                      className="h-11 sm:h-9 w-full rounded-md border bg-background px-2 text-xs"
+                      value={boostDraft.effort}
+                      onChange={(e) => setBoostDraft((d) => ({ ...d, effort: e.target.value }))}
+                    >
+                      {['medium', 'high', 'xhigh', 'max'].map((v) => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                  </label>
+                  <label className="block text-xs">
+                    <span className="mb-1 block text-[11px] font-medium text-muted-foreground">Thinking</span>
+                    <select
+                      className="h-11 sm:h-9 w-full rounded-md border bg-background px-2 text-xs"
+                      value={boostDraft.thinking}
+                      onChange={(e) => setBoostDraft((d) => ({ ...d, thinking: e.target.value }))}
+                    >
+                      <option value="default">Follow settings</option>
+                      <option value="on">On (for this build)</option>
+                      <option value="off">Off (for this build)</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Button
+                    className="min-h-[44px] flex-1"
+                    onClick={() => { setBoost({ ...boostDraft }); setBoostOpen(false); }}
+                  >
+                    <Rocket className="h-4 w-4 mr-1" /> Arm for the next build
+                  </Button>
+                  {boost ? (
+                    <Button variant="outline" className="min-h-[44px]" onClick={() => { setBoost(null); setBoostOpen(false); }}>
+                      Disarm
+                    </Button>
+                  ) : null}
+                  <Button variant="ghost" className="min-h-[44px]" onClick={() => setBoostOpen(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+            {boost && !boostOpen ? (
+              <p className="text-[11px] text-primary">
+                <Rocket className="mr-1 inline h-3 w-3" />
+                Extra effort armed for the next build: {boost.model} · {boost.effort} effort
+                {boost.thinking !== 'default' ? ` · thinking ${boost.thinking}` : ''}.
+              </p>
+            ) : null}
             {needsFeedback && !resumeMode ? (
               <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next update — Ask still works meanwhile.</p>
             ) : null}
@@ -1561,6 +1645,22 @@ export default function BuildChat({
                   >
                     <Wand2 className="h-4 w-4 mr-1" /> Design options
                   </Button>
+                  {/* Extra-effort BOOST (icon): arm model/effort/thinking for
+                      the NEXT build only — for the change you already know is
+                      complex. Reverts automatically after that build starts. */}
+                  <Button
+                    variant="outline" size="icon"
+                    className={`h-11 w-11 sm:h-10 sm:w-10 ${boost ? 'border-primary text-primary bg-primary/10' : ''}`}
+                    disabled={quickDisabled}
+                    aria-expanded={boostOpen}
+                    aria-label={boost ? 'Extra effort armed for the next build — tap to review' : 'Extra effort for the next build'}
+                    onClick={() => setBoostOpen((v) => !v)}
+                    title={boost
+                      ? `Extra effort armed for the next build: ${boost.model} · ${boost.effort} effort${boost.thinking !== 'default' ? ` · thinking ${boost.thinking}` : ''} — tap to review or disarm`
+                      : 'Extra effort for the next build: pick model/effort/thinking for one build (it reverts after) — for a change you already know is complex'}
+                  >
+                    <Rocket className="h-4 w-4" />
+                  </Button>
                   {hasDraft ? (
                     <>
                       <Button
@@ -1575,7 +1675,7 @@ export default function BuildChat({
                       <Button
                         className="h-11 sm:h-10"
                         disabled={quickDisabled}
-                        onClick={() => startBuild('quick')}
+                        onClick={() => startBuild('quick', consumeBoost())}
                         title="One small scoped code change — no gate battery, straight to deploy (Ctrl+Enter)"
                       >
                         {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Zap className="h-4 w-4 mr-1" />}

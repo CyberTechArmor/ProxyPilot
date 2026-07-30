@@ -1005,6 +1005,75 @@ export default function BuildChat({
           emptyLabel={online
             ? 'Describe a change below and send it as a Quick update, or Ask a question / request an action (run a test, add a user). Rule questions and build events appear here.'
             : 'Bring the project online to run a build.'}
+          footer={(
+            <>
+              {/* This footer rides INSIDE the chat scroll, after the newest
+                  message: the verification checklist, the stall banner, and
+                  the build queue. Stacked under the composer they overflowed
+                  the fixed column on phones with nothing scrollable (operator
+                  report — the checklist explaining a "stuck" build was
+                  literally off-screen). */}
+              {/* PENDING VERIFICATION (P48): render where the operator is
+                  looking. Renders nothing when no check is outstanding.
+                  `fill` only: the classic view shows it in the Build panel. */}
+              {fill && cycle?.status === 'awaiting_user' ? (
+                <VerificationChecklist
+                  projectId={projectId} canEdit={canEdit} isAdmin={isAdmin} online={online}
+                  cycle={cycle} onRefresh={onStarted}
+                />
+              ) : null}
+              {/* Stall banner — the build has gone quiet (or "Building now"
+                  has no build behind it) and the operator needs a way back
+                  that isn't waiting. Soft copy: a long model turn also looks
+                  like silence, and the server refuses the restart if the
+                  build proves alive. */}
+              {stalled ? (
+                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-2.5">
+                  <p className="text-xs font-medium text-amber-600 dark:text-amber-400">The build looks stuck</p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    {runningSilentMs != null && runningSilentMs > STALL_BANNER_MS
+                      ? `No response for ~${Math.max(1, Math.round(runningSilentMs / 60000))} min — the API may have hiccuped. Restart stops it safely and picks up from the last checkpoint.`
+                      : 'A queued build says “building now” but nothing is running — the start likely died. Restart requeues it.'}
+                  </p>
+                  <Button
+                    variant="outline" className="mt-2 h-11 sm:h-8 border-amber-500/50"
+                    disabled={restarting} onClick={restartBuild}
+                    title="Force-stop the unresponsive build and continue it from the last checkpoint"
+                  >
+                    {restarting ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
+                    {restarting ? 'Restarting…' : 'Restart build'}
+                  </Button>
+                </div>
+              ) : null}
+              {/* The build queue — "building now / up next", each queued entry
+                  cancellable (editors). Submissions while a build runs land
+                  here and run back-to-back automatically. */}
+              {buildQueue.length ? (
+                <div className="space-y-1">
+                  <p className="text-[11px] font-medium text-muted-foreground">Build queue</p>
+                  {buildQueue.map((q) => (
+                    <div key={q.id} className="flex items-center gap-2 rounded border p-1.5 text-[11px]">
+                      {q.status === 'started'
+                        ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-sky-500" />
+                        : <span className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/40" />}
+                      <span className="min-w-0 flex-1 break-words">
+                        {q.status === 'started' ? 'Building now: ' : 'Up next: '}
+                        {q.label || q.instruction.slice(0, 120)}
+                      </span>
+                      {canEdit && q.status === 'queued' ? (
+                        <Button
+                          variant="ghost" size="icon" className="h-8 w-8 shrink-0 text-red-500"
+                          onClick={() => cancelQueued(q.id)} aria-label="Cancel this queued build"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </>
+          )}
         />
 
         {/* Blocked build — say so IN the chat, loudly. The classic Build panel
@@ -1047,21 +1116,9 @@ export default function BuildChat({
           </div>
         ) : null}
 
-        {/* PENDING VERIFICATION (P48): a build that completes with live checks
-            outstanding used to be invisible here — the checklist rendered only
-            in the classic Build panel, so on a phone (Flightdeck is the whole
-            UI) the operator got a notification, found no button anywhere, and
-            the queued next build sat "Up next" behind a state they could not
-            see. The checklist renders nothing when no check is outstanding.
-            `fill` only: the classic view already shows it in the Build panel. */}
-        {fill && cycle?.status === 'awaiting_user' ? (
-          <div className="shrink-0 max-h-[45vh] overflow-y-auto">
-            <VerificationChecklist
-              projectId={projectId} canEdit={canEdit} isAdmin={isAdmin} online={online}
-              cycle={cycle} onRefresh={onStarted}
-            />
-          </div>
-        ) : null}
+        {/* PENDING VERIFICATION (P48) now renders inside the chat scroll (the
+            ChatMessageList footer above) so it can never be pushed off-screen
+            by the composer stack. */}
 
         {baseAppMissing ? (
           <div className="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 flex flex-col sm:flex-row sm:items-center gap-2">
@@ -1432,55 +1489,9 @@ export default function BuildChat({
               )}
             </div>
             ) : null}
-            {/* Stall banner — the build has gone quiet (or "Building now" has
-                no build behind it) and the operator needs a way back that isn't
-                waiting. Soft copy: a long model turn also looks like silence,
-                and the server refuses the restart if the build proves alive. */}
-            {stalled ? (
-              <div className="shrink-0 rounded-md border border-amber-500/50 bg-amber-500/10 p-2.5">
-                <p className="text-xs font-medium text-amber-600 dark:text-amber-400">The build looks stuck</p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {runningSilentMs != null && runningSilentMs > STALL_BANNER_MS
-                    ? `No response for ~${Math.max(1, Math.round(runningSilentMs / 60000))} min — the API may have hiccuped. Restart stops it safely and picks up from the last checkpoint.`
-                    : 'A queued build says “building now” but nothing is running — the start likely died. Restart requeues it.'}
-                </p>
-                <Button
-                  variant="outline" className="mt-2 h-11 sm:h-8 border-amber-500/50"
-                  disabled={restarting} onClick={restartBuild}
-                  title="Force-stop the unresponsive build and continue it from the last checkpoint"
-                >
-                  {restarting ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
-                  {restarting ? 'Restarting…' : 'Restart build'}
-                </Button>
-              </div>
-            ) : null}
-            {/* The build queue — "building now / up next", each queued entry
-                cancellable. Submissions while a build runs land here and run
-                back-to-back automatically. */}
-            {buildQueue.length ? (
-              <div className="space-y-1">
-                <p className="text-[11px] font-medium text-muted-foreground">Build queue</p>
-                {buildQueue.map((q) => (
-                  <div key={q.id} className="flex items-center gap-2 rounded border p-1.5 text-[11px]">
-                    {q.status === 'started'
-                      ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-sky-500" />
-                      : <span className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/40" />}
-                    <span className="min-w-0 flex-1 break-words">
-                      {q.status === 'started' ? 'Building now: ' : 'Up next: '}
-                      {q.label || q.instruction.slice(0, 120)}
-                    </span>
-                    {q.status === 'queued' ? (
-                      <Button
-                        variant="ghost" size="icon" className="h-8 w-8 shrink-0 text-red-500"
-                        onClick={() => cancelQueued(q.id)} aria-label="Cancel this queued build"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </Button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            ) : null}
+            {/* The stall banner and the build queue render inside the chat
+                scroll (the ChatMessageList footer) — nothing below the
+                composer can be pushed off a phone screen again. */}
           </div>
         ) : (
           <p className="text-sm text-muted-foreground shrink-0">Viewers can follow the build; editors run cycles.</p>

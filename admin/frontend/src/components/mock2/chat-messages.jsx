@@ -560,6 +560,12 @@ export function ChatMessageList({
   scrollRef, messages = [], openIds, canEdit, answering, onAnswer,
   working = false, workingLabel = 'Working…', emptyLabel, projectId = null,
   partialText = null, onQuickUpdate = null, quickBusyId = null, onFix = null, fixBusyId = null, activity = [],
+  // `footer` renders INSIDE the scroll container, after the newest message —
+  // for live state that belongs to the conversation's "now" (build queue,
+  // stall banner, verification checklist). Stacking these under the composer
+  // instead overflowed the fixed column on phones with no way to scroll to
+  // them (operator report: "there is no scrolling for things under the chat").
+  footer = null,
 }) {
   const open = openIds instanceof Set ? openIds : new Set(openIds || []);
   return (
@@ -595,6 +601,7 @@ export function ChatMessageList({
           </div>
         )
       ) : null}
+      {footer}
     </div>
   );
 }

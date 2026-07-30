@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
+import { useBranding } from '@/lib/branding';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,6 +14,7 @@ import QRCode from 'qrcode';
 import { authenticateWithPasskey, isPasskeySupported } from '@/lib/passkey';
 
 export default function Login() {
+  const branding = useBranding();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
@@ -229,7 +231,7 @@ export default function Login() {
       // Login complete — backend has set the pp_token + pp_csrf
       // cookies. Cache user metadata for fast initial render.
       localStorage.setItem('user', JSON.stringify(result.user));
-      toast({ title: 'Setup complete!', description: 'Welcome to ProxyPilot.' });
+      toast({ title: 'Setup complete!', description: `Welcome to ${branding.name}.` });
       window.location.href = '/';
     } catch (error) {
       toast({ variant: 'destructive', title: 'Error', description: error.message });
@@ -449,9 +451,11 @@ export default function Login() {
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
             <div className="flex justify-center mb-4">
-              <Rocket className="h-12 w-12 text-primary" />
+              {branding.logo
+                ? <img src={branding.logo} alt="" className="h-12 w-12 rounded object-contain" />
+                : <Rocket className="h-12 w-12 text-primary" />}
             </div>
-            <CardTitle className="text-2xl">Welcome to ProxyPilot</CardTitle>
+            <CardTitle className="text-2xl">Welcome to {branding.name}</CardTitle>
             <CardDescription>
               Create your admin password to get started
             </CardDescription>
@@ -644,9 +648,11 @@ export default function Login() {
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <div className="flex justify-center mb-4">
-            <Rocket className="h-12 w-12 text-primary" />
+            {branding.logo
+              ? <img src={branding.logo} alt="" className="h-12 w-12 rounded object-contain" />
+              : <Rocket className="h-12 w-12 text-primary" />}
           </div>
-          <CardTitle className="text-2xl">ProxyPilot Admin</CardTitle>
+          <CardTitle className="text-2xl">{branding.name === 'ProxyPilot' ? 'ProxyPilot Admin' : branding.name}</CardTitle>
           <CardDescription>
             {totpSetup
               ? 'Set up Two-Factor Authentication'

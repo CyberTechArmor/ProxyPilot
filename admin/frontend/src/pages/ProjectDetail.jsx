@@ -1459,6 +1459,13 @@ function LockBanner({ projectId, canEdit, isAdmin }) {
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
   if (!lock) return null;
+  // A BUILD CYCLE holding the lock is normal operation, not a conflict — the
+  // build UI already shows the running build with Stop, and the stall watchdog
+  // + Restart own the stuck case. Showing a lock/Force-release banner for it
+  // read as a warning about routine work (operator report). The banner exists
+  // for HUMAN checkouts: another editor holding the project is something you
+  // may genuinely need to see and act on.
+  if (lock.holder_type === 'cycle') return null;
 
   const mins = lock.remaining_seconds == null ? null : Math.max(0, Math.floor(lock.remaining_seconds / 60));
   const secs = lock.remaining_seconds == null ? null : Math.max(0, lock.remaining_seconds % 60);

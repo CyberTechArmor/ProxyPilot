@@ -410,3 +410,23 @@ export function referencePinNote(pinned = []) {
   if (!n) return '';
   return `Kept ${n} reference image${n === 1 ? '' : 's'} in this project's library, pinned — every later mockup render will see ${n === 1 ? 'it' : 'them'}, not just this turn. Remove ${n === 1 ? 'it' : 'them'} from Assets if that is not what you wanted.`;
 }
+
+// sniffImageMime — the REAL image type from the leading bytes (magic numbers),
+// or null when unrecognized. Exists because a filename lies exactly where it
+// matters most: a chat-pasted reference is re-encoded to WebP client-side but
+// keeps its original .png/.jpg name, so the stored extension-derived mime says
+// PNG over WebP bytes — and with X-Content-Type-Options: nosniff on the raw
+// route, a mislabelled Content-Type is a broken thumbnail. Pure (a Buffer or
+// Uint8Array in, a string out); the route trusts these bytes over the row.
+export function sniffImageMime(buffer) {
+  const b = buffer;
+  if (!b || b.length < 12) return null;
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif';
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
+    && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+  const head = Buffer.from(b.slice(0, 256)).toString('utf8').replace(/^﻿/, '').trimStart().toLowerCase();
+  if (head.startsWith('<?xml') || head.startsWith('<svg')) return 'image/svg+xml';
+  return null;
+}

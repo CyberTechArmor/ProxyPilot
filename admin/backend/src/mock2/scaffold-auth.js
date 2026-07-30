@@ -881,12 +881,28 @@ function loginHtml() {
       --lg-radius: var(--app-radius-lg, 12px);
     }
     * { box-sizing: border-box; }
+    /* Standard slim scrollbars — every area that scrolls uses these, not the
+       browser default (the platform look; base.css carries the same block for
+       the in-app screens). */
+    * { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--lg-muted) 45%, transparent) transparent; }
+    *::-webkit-scrollbar { width: 8px; height: 8px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--lg-muted) 45%, transparent); border-radius: 8px; }
+    *::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--lg-muted) 65%, transparent); }
     body {
-      margin: 0; min-height: 100vh; background: var(--lg-bg); color: var(--lg-fg);
+      margin: 0; min-height: 100vh; min-height: 100dvh; background: var(--lg-bg); color: var(--lg-fg);
       font: 15px/1.5 var(--app-font, system-ui, -apple-system, Segoe UI, Roboto, sans-serif);
     }
-    .split { display: grid; grid-template-columns: 1fr; min-height: 100vh; }
-    @media (min-width: 900px) { .split { grid-template-columns: 2fr 1fr; } }
+    .split { display: grid; grid-template-columns: 1fr; min-height: 100vh; min-height: 100dvh; }
+    /* On the split layout the PAGE never scrolls (operator report: the sign-in
+       screen scrolled into a sea of empty banner). The banner is fixed chrome;
+       the form column scrolls internally when its content is taller than the
+       viewport. Below 900px (stacked) the page flows naturally instead —
+       clipping a stacked phone layout to the viewport would hide the form. */
+    @media (min-width: 900px) {
+      .split { grid-template-columns: 2fr 1fr; height: 100vh; height: 100dvh; overflow: hidden; }
+      .pane { overflow-y: auto; max-height: 100vh; max-height: 100dvh; }
+    }
 
     /* ---- banner (2/3) ---- */
     .banner {
@@ -909,8 +925,10 @@ function loginHtml() {
     @media (min-width: 900px) { .banner .foot { left: 64px; } }
 
     /* ---- form column (1/3) ---- */
-    .pane { display: flex; align-items: center; justify-content: center; padding: 28px 20px; }
-    .login-wrap { width: 100%; max-width: 380px; }
+    /* Centered via margin:auto, NOT align-items:center — flex-centering clips
+       the top of content taller than the pane, and this column may scroll. */
+    .pane { display: flex; padding: 28px 20px; }
+    .login-wrap { width: 100%; max-width: 380px; margin: auto; }
     .login-card {
       background: var(--lg-card); border: 1px solid var(--lg-border);
       border-radius: var(--lg-radius); padding: 28px;
@@ -1100,6 +1118,9 @@ const WIRED_HISTORY = new Map([
     // administrator", so a seeded fixture user — the account the design review
     // and the smoke checks sign in with — is unreachable from the page.
     '133cc0441980b296ef88ccb9104f37226f6d176b4adaa1d2000965fd28556b8c',
+    // v3: before the no-page-scroll split layout (the pane scrolls internally
+    // at >=900px; margin-auto centering; standard slim scrollbars).
+    '9fa665d5c9b33039cf73cd3ed7ad2d3cdeee9c7a27f5e773a775a7f54c35af1e',
   ]],
   ['public/admin.js', [
     '4123ff0a11d3adf2bdb1b245bcc496f1f04ef165faed35a4fbffdb967346d4f8', // v1: pre sign-in-link button

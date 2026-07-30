@@ -1399,6 +1399,8 @@ export const api = {
         // rule/global escalation model for this one run.
         ...(opts.escalate ? { escalate: true } : {}),
         ...(opts.escalate && opts.escalateModel ? { escalate_model: opts.escalateModel } : {}),
+        ...(opts.escalate && opts.escalateEffort ? { escalate_effort: opts.escalateEffort } : {}),
+        ...(opts.escalate && opts.escalateThinking ? { escalate_thinking: opts.escalateThinking } : {}),
       }),
     }),
   // `since` = the highest activity seq the caller already has; the server then

@@ -15,9 +15,35 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
+import ImageLightbox from './ImageLightbox';
 import {
-  ImagePlus, FileText, Pin, PinOff, Trash2, Loader2, Send, X, Check, Pencil,
+  ImagePlus, FileText, Pin, PinOff, Trash2, Loader2, Send, X, Check, Pencil, ImageOff,
 } from 'lucide-react';
+
+// A thumbnail that says so when its bytes fail to load, instead of the
+// browser's broken-image glyph over the caption (operator report). The click
+// still works either way — the lightbox's open-in-new-tab is the diagnostic.
+function AssetThumb({ src, alt }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [src]);
+  if (failed) {
+    return (
+      <span className="flex h-24 w-full flex-col items-center justify-center gap-1 text-[11px] text-muted-foreground">
+        <ImageOff className="h-4 w-4" />
+        Preview unavailable — tap to open
+      </span>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      onError={() => setFailed(true)}
+      className="max-h-56 w-full object-contain"
+    />
+  );
+}
 
 // Mirrors ASSET_TAGS in mock2/project-assets-logic.js. Kept as a fallback only:
 // the server sends the authoritative list with every load, so adding a tag
@@ -68,6 +94,7 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
   const [editing, setEditing] = useState(null);      // id being renamed
   const [editValue, setEditValue] = useState('');
   const [dragOver, setDragOver] = useState(false);
+  const [lightboxAt, setLightboxAt] = useState(null); // index into the image assets, or null
 
   const fileRef = useRef(null);
   const feedRef = useRef(null);
@@ -222,14 +249,16 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
         ) : assets.map((a) => (
           <div key={a.id} className={`rounded-lg border ${a.pinned ? 'border-primary/50 bg-primary/5' : 'bg-card'} overflow-hidden`}>
             {a.kind === 'image' ? (
-              <a href={api.mock2ProjectAssetRawUrl(projectId, a.id)} target="_blank" rel="noreferrer" className="block bg-muted/40">
-                <img
-                  src={api.mock2ProjectAssetRawUrl(projectId, a.id)}
-                  alt={a.body || a.name}
-                  loading="lazy"
-                  className="max-h-56 w-full object-contain"
-                />
-              </a>
+              // Opens the LIGHTBOX (arrow through every image in the library)
+              // instead of throwing the reader into a new tab.
+              <button
+                type="button"
+                className="block w-full cursor-zoom-in bg-muted/40"
+                onClick={() => setLightboxAt(assets.filter((x) => x.kind === 'image').findIndex((x) => x.id === a.id))}
+                aria-label={`View ${a.name} full size`}
+              >
+                <AssetThumb src={api.mock2ProjectAssetRawUrl(projectId, a.id)} alt={a.body || a.name} />
+              </button>
             ) : (
               <div className="px-3 pt-2.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words">{a.body}</div>
             )}
@@ -370,6 +399,19 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
           <FileText className="h-3.5 w-3.5" />Read-only — editor access is needed to change assets.
         </div>
       )}
+
+      {lightboxAt != null ? (
+        <ImageLightbox
+          images={assets.filter((x) => x.kind === 'image').map((x) => ({
+            url: api.mock2ProjectAssetRawUrl(projectId, x.id),
+            name: x.name,
+            label: labelFor(x.tag),
+            caption: x.body || null,
+          }))}
+          index={lightboxAt}
+          onClose={() => setLightboxAt(null)}
+        />
+      ) : null}
     </div>
   );
 }

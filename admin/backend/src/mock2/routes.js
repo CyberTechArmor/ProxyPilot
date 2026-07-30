@@ -251,7 +251,7 @@ import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleF
 import { listKeyRows, getKeyRow, upsertKey, deleteKey, describeKeySource } from './project-keys.js';
 import { KEY_PROVIDERS, canManageKey, visibleKeyRows, publicKeyShape } from './project-keys-logic.js';
 import { listAssets, getAsset, assetFilePath, addImage, addContent, updateAsset, removeAsset } from './project-assets.js';
-import { ASSET_TAGS, MAX_ASSET_BYTES, summarize } from './project-assets-logic.js';
+import { ASSET_TAGS, MAX_ASSET_BYTES, summarize, sniffImageMime } from './project-assets-logic.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages, getMessage, getChat, insertMessage, getOrCreateChat } from './chats.js';
 import {
@@ -492,11 +492,15 @@ const cycleStartSchema = z.object({
   // Operator escalation ("redo this on the bigger model"): run this cycle on
   // the escalation model at high effort, regardless of the fast lane.
   escalate: z.boolean().optional(),
-  // The Redo card's explicit model pick for THIS escalated run — wins over the
-  // rule's escalation model and the global setting. Only read when escalate is
-  // set; free-form like the routing-rule model fields (a custom connector id
-  // must not be rejected here).
+  // The Redo card / extra-effort boost's explicit picks for THIS escalated run
+  // — they win over the rule's escalation model, the global setting, AND the
+  // standing lane tuning (a per-press choice is the most specific intent there
+  // is), then revert: nothing sticky changes. Only read when escalate is set;
+  // the model is free-form like the routing-rule model fields (a custom
+  // connector id must not be rejected here).
   escalate_model: z.string().trim().max(120).optional(),
+  escalate_effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+  escalate_thinking: z.enum(['on', 'off']).optional(),
   // The options the clarifier OFFERED and the operator did NOT pick, sent back
   // with "Build it anyway" so the build gets them as labelled guesses rather
   // than losing them. Never scope — see composeWithGuesses.
@@ -1541,13 +1545,21 @@ export function createMock2Router() {
     if (!asset || asset.kind !== 'image') return res.status(404).json({ error: 'asset not found' });
     const full = assetFilePath(project.id, req.params.assetId);
     if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'asset file missing' });
-    res.setHeader('Content-Type', asset.mime || 'application/octet-stream');
+    // The REAL type comes from the bytes, not the stored name: a chat-pasted
+    // reference is re-encoded to WebP client-side but keeps its .png/.jpg
+    // filename, and with nosniff a mislabelled Content-Type is a broken
+    // thumbnail (the browser refuses to decode what we misdeclared).
+    const buffer = fs.readFileSync(full);
+    const mime = sniffImageMime(buffer) || asset.mime || 'application/octet-stream';
+    res.setHeader('Content-Type', mime);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     // An uploaded SVG is script-bearing; sandbox + no-sniff make it inert when
-    // it is rendered in an <img> and when it is navigated to directly.
-    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    // it is rendered in an <img> and when it is navigated to directly. Raster
+    // images get no CSP — the header is document-scoped and has nothing to
+    // protect on a PNG, and some embedded webviews mishandle it on subresources.
+    if (mime === 'image/svg+xml') res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
     res.setHeader('Cache-Control', 'private, max-age=3600');
-    fs.createReadStream(full).pipe(res);
+    res.send(buffer);
   });
 
   router.patch('/projects/:id/assets/:assetId', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
@@ -3146,6 +3158,8 @@ export function createMock2Router() {
         echoToChat: true,
         escalate: !!parsed.data.escalate,
         escalateModel: parsed.data.escalate ? (parsed.data.escalate_model || null) : null,
+        escalateEffort: parsed.data.escalate ? (parsed.data.escalate_effort || null) : null,
+        escalateThinking: parsed.data.escalate ? (parsed.data.escalate_thinking || null) : null,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not start the build: ${err?.message || 'unknown error'}` });

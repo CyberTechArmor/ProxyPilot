@@ -3562,16 +3562,18 @@ export function createMock2Router() {
     // the same poll so the chat shows "building now / up next" for free.
     let buildQueue = [];
     try { buildQueue = listBuildQueue(req.mock2Project.id).map(publicQueueShape); } catch { /* pre-migration */ }
-    // SELF-HEAL a wedged queue (P48): a queued build waiting behind a cycle
-    // that has already concluded should not need anyone to find the magic
-    // button — every open client polls this route, so a fire-and-forget drain
-    // here un-wedges within seconds of anyone looking. Cheap when nothing is
-    // queued (this list is already in hand); drainBuildQueue dedupes
-    // re-entrancy itself, and a drain failure never affects the poll.
+    // SELF-HEAL a wedged queue (P48/P49): any queue entry sitting behind a
+    // cycle that has already concluded should not need anyone to find the
+    // magic button — every open client polls this route, so a fire-and-forget
+    // drain here un-wedges within seconds of anyone looking. This includes a
+    // 'started' row over a concluded build (the pending-verification wedge:
+    // the request stays open by design, so only the drain's cycle-evidence
+    // settle clears the row and starts the next queued build). Cheap when the
+    // queue is empty (this list is already in hand); drainBuildQueue settles
+    // first, dedupes re-entrancy itself, and a drain failure never affects
+    // the poll.
     try {
-      if (buildQueue.some((q) => q.status === 'queued')
-        && !buildQueue.some((q) => q.status === 'started')
-        && queueMayAdvancePast(cycle)) {
+      if (buildQueue.length && queueMayAdvancePast(cycle)) {
         drainBuildQueue(req.mock2Project.id).catch((e) => console.warn('[mock2] poll queue drain failed:', e?.message));
       }
     } catch { /* advisory */ }

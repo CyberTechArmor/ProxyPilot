@@ -372,6 +372,20 @@ export function queueMayAdvancePast(cycle) {
   return cycle.status === 'awaiting_user' && ['pending', 'verified'].includes(cycle.verification_state);
 }
 
+// queueRowConcluded — has this cycle CONCLUDED the build-queue slot that
+// started it? The queue settle used to trust only the REQUEST's status, but a
+// pending-operator-verification finish keeps the request open BY DESIGN (a
+// failed live check resumes it as a new segment) — so its 'started' queue row
+// never settled: "Building now:" sat forever over a build that had deployed,
+// the drain reported busy, and the next queued build never started (the P49
+// wedge). The cycle is the evidence: not still active, and in a state the
+// queue may advance past. null (no cycle yet) is NOT concluded — that is the
+// orphaned-start shape, which requeues instead of settling.
+export function queueRowConcluded(cycle) {
+  if (!cycle) return false;
+  return !ACTIVE_STATUSES.includes(cycle.status) && queueMayAdvancePast(cycle);
+}
+
 // ---- stall detection (the "API hiccuped and nothing is happening" wedge) ----
 
 // Two thresholds, operator-tunable from the dashboard (settings.js

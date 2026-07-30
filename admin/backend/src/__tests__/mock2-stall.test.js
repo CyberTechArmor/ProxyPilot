@@ -13,7 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildStallVerdict, stallThresholdMinutes, restartStallMinutes, normalizeStallMinutes,
-  DEFAULT_STALL_MINUTES, DEFAULT_RESTART_STALL_MINUTES,
+  DEFAULT_STALL_MINUTES, DEFAULT_RESTART_STALL_MINUTES, queueRowConcluded,
 } from '../mock2/cycle-logic.js';
 import { modelIdleTimeoutMs, isTransientModelError } from '../mock2/model-client.js';
 
@@ -90,7 +90,34 @@ test('normalizeStallMinutes clamps operator input: fallback, floor, cap, roundin
   assert.equal(normalizeStallMinutes('45', { fallback: 30 }), 45);
 });
 
-// ---- C. modelIdleTimeoutMs ----
+// ---- C. queueRowConcluded (the P49 "Building now forever" wedge) ----
+// A pending-operator-verification finish keeps the REQUEST open by design, so
+// the queue settle must judge by the CYCLE: concluded (settle the row) vs
+// still building / blocked (leave it) vs no cycle at all (the orphaned-start
+// shape — requeue, not settle).
+
+test('a pending-verification build concludes its queue slot', () => {
+  assert.equal(queueRowConcluded({ status: 'awaiting_user', verification_state: 'pending' }), true);
+  assert.equal(queueRowConcluded({ status: 'awaiting_user', verification_state: 'verified' }), true);
+});
+
+test('terminal cycles conclude the slot; active and blocked ones do not', () => {
+  for (const status of ['succeeded', 'failed', 'abandoned', 'refused_quota', 'interrupted']) {
+    assert.equal(queueRowConcluded({ status }), true, status);
+  }
+  for (const status of ['queued', 'estimating', 'running']) {
+    assert.equal(queueRowConcluded({ status }), false, status);
+  }
+  assert.equal(queueRowConcluded({ status: 'awaiting_admin' }), false);
+  assert.equal(queueRowConcluded({ status: 'awaiting_user', verification_state: null }), false); // open rule questions
+});
+
+test('no cycle at all is NOT concluded (that is the orphan/requeue shape)', () => {
+  assert.equal(queueRowConcluded(null), false);
+  assert.equal(queueRowConcluded(undefined), false);
+});
+
+// ---- D. modelIdleTimeoutMs ----
 
 test('model idle timeout: default 5 min, off/0 disable, floor 30s', () => {
   assert.equal(modelIdleTimeoutMs({}), 300000);

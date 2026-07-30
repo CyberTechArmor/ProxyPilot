@@ -14,6 +14,7 @@ import { getMock2Db } from './db.js';
 import { getProject } from './projects.js';
 import { insertMessage } from './chats.js';
 import { isTransientStartError } from './screen-plan-logic.js';
+import { queueRowConcluded } from './cycle-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -53,7 +54,7 @@ function markQueueRow(id, patch) {
     .run(...cols.map((c) => patch[c]), nowIso(), Number(id));
 }
 
-// A started entry whose request finished: settle it (the request hook calls
+// A started entry whose build finished: settle it (the request hook calls
 // this before draining the next one, so the queue view stays truthful).
 export function settleStartedBuilds(projectId) {
   const db = getMock2Db();
@@ -64,6 +65,18 @@ export function settleStartedBuilds(projectId) {
     if (req && req.status !== 'open' && req.status !== 'running') {
       // Terminal either way — the queue entry's job is done; the request/cycle
       // record carries the outcome.
+      db.prepare(`DELETE FROM mock2_build_queue WHERE id = ?`).run(row.id);
+      continue;
+    }
+    // The request can be STILL OPEN with the build nonetheless concluded:
+    // pending-operator-verification deliberately keeps the request open (a
+    // failed live check resumes it as a new segment), and a crash between
+    // finishCycle and closeRequest leaves the same shape. Judge by the CYCLE:
+    // its latest segment settled in a state the queue may advance past means
+    // this slot is done — otherwise "Building now:" sits forever over a build
+    // that already deployed, and everything queued behind it is wedged.
+    const latest = db.prepare(`SELECT status, verification_state FROM mock2_cycles WHERE request_id = ? ORDER BY id DESC LIMIT 1`).get(row.request_id);
+    if (latest && queueRowConcluded(latest)) {
       db.prepare(`DELETE FROM mock2_build_queue WHERE id = ?`).run(row.id);
     }
   }

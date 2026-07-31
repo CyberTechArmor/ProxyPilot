@@ -1905,6 +1905,25 @@ export function initDatabase() {
     `);
     d.exec('CREATE INDEX IF NOT EXISTS idx_tls_certificates_fingerprint ON tls_certificates(fingerprint)');
   });
+  // MCP access tokens (block 900): bearer secrets for the remote MCP server
+  // (routes/mcp.js) that lets an AI client on a Claude subscription operate
+  // ProxyPilot. Only the sha256 hash is stored — the raw ppmcp_… token is
+  // shown once at mint time. Revocation is a soft flag so the audit trail
+  // keeps the row.
+  runMigration(db, 900, 'mcp_tokens', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT,
+        revoked_at TEXT
+      )
+    `);
+  });
+
   // Seed the global TLS mode from the install-time env (.env is authoritative on
   // first boot; the UI toggle writes app_settings thereafter). Absent env → the
   // default 'acme', so existing installs are unchanged.

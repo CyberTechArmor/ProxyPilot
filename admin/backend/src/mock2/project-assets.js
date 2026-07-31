@@ -293,6 +293,44 @@ export function removeAsset(projectId, id) {
 }
 
 // Called when a project is deleted, so an asset directory does not outlive it.
+// Copy EVERY asset row + its stored file from one project's library into
+// another's — the Clone feature's "bring the assets" half (both clone modes).
+// Tags, pins, captions, and document summaries ride along verbatim (no
+// re-summarize pass — the content is identical). Returns the copied count;
+// a missing source file skips that asset rather than failing the clone.
+export function copyProjectAssets(sourceProjectId, targetProjectId) {
+  let rows = [];
+  try {
+    rows = getMock2Db()
+      .prepare('SELECT * FROM mock2_project_assets WHERE project_id = ? ORDER BY id')
+      .all(Number(sourceProjectId));
+  } catch { return 0; }   // pre-migration
+  if (!rows.length) return 0;
+  const srcDir = projectDir(sourceProjectId);
+  const dstDir = projectDir(targetProjectId);
+  fs.mkdirSync(dstDir, { recursive: true });
+  const insert = getMock2Db().prepare(`
+    INSERT INTO mock2_project_assets
+      (project_id, kind, name, body, mime, size, width, height, stored_as, tag, pinned, created_by, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  let copied = 0;
+  for (const row of rows) {
+    if (row.stored_as) {
+      const from = path.join(srcDir, path.basename(String(row.stored_as)));
+      if (!from.startsWith(srcDir) || !fs.existsSync(from)) continue;
+      try { fs.copyFileSync(from, path.join(dstDir, path.basename(String(row.stored_as)))); } catch { continue; }
+    }
+    insert.run(
+      Number(targetProjectId), row.kind, row.name, row.body, row.mime, row.size,
+      row.width, row.height, row.stored_as, row.tag, row.pinned, row.created_by,
+      row.created_at || nowIso(), nowIso(),
+    );
+    copied++;
+  }
+  return copied;
+}
+
 export function removeProjectAssets(projectId) {
   try { fs.rmSync(projectDir(projectId), { recursive: true, force: true }); } catch { /* nothing to remove */ }
   try {

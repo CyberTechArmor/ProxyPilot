@@ -1232,6 +1232,17 @@ export const api = {
       body: JSON.stringify({ name, description, parent_domain_id, design_preset, lbp_project_id }),
     }),
   mock2ProjectProvisionStatus: (id) => request(`/mock2/projects/${id}/provision-status`),
+  // Clone a project under a new name/domain. mode 'fresh' = app + git history
+  // + assets with a fresh database; 'full' = also copy the source database.
+  mock2CloneProject: (id, { name, parent_domain_id, mode }) =>
+    request(`/mock2/projects/${id}/clone`, {
+      method: 'POST',
+      body: JSON.stringify({ name, parent_domain_id, mode }),
+    }),
+  // ---- MCP access tokens (Claude connector) ----
+  mcpListTokens: () => request('/mcp-tokens'),
+  mcpCreateToken: (name) => request('/mcp-tokens', { method: 'POST', body: JSON.stringify({ name }) }),
+  mcpRevokeToken: (id) => request(`/mcp-tokens/${id}`, { method: 'DELETE' }),
   // Pin/unpin a project for the current user — a personal favourite that floats
   // the card to the top of the Projects list, not a shared flag.
   mock2PinProject: (id, pinned) =>

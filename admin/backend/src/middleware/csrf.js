@@ -33,6 +33,15 @@ const CSRF_EXEMPT_PREFIXES = [
   // double-submit check has nothing to protect (git clients also cannot
   // echo a CSRF header).
   '/api/mock2/git/',
+  // Remote MCP server: auth is a per-token bearer secret (header or
+  // tokenized URL) — no ambient cookies are involved, so a cross-site
+  // request can't ride a session and the double-submit check has nothing
+  // to protect (MCP clients also cannot echo a CSRF header). The upload
+  // endpoint's ticket is minted over the same authenticated channel.
+  // Deliberately '/api/mcp/' + the exact-path check below — a bare
+  // '/api/mcp' prefix would also exempt /api/mcp-tokens (cookie-session
+  // admin endpoints that MUST keep double-submit protection).
+  '/api/mcp/',
 ];
 
 export function csrfProtection(req, res, next) {
@@ -46,6 +55,12 @@ export function csrfProtection(req, res, next) {
   // on a path prefix is unaffected by them.)
   for (const prefix of CSRF_EXEMPT_PREFIXES) {
     if (req.originalUrl.startsWith(prefix)) return next();
+  }
+
+  // The MCP endpoint itself (POST /api/mcp with a Bearer token, no trailing
+  // path) — exact match, so /api/mcp-tokens stays protected.
+  if (req.originalUrl === '/api/mcp' || req.originalUrl.startsWith('/api/mcp?')) {
+    return next();
   }
 
   // Domain provisioning is dual-auth: an X-API-Key request carries no

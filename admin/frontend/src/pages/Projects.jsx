@@ -41,7 +41,7 @@ import {
 } from '@/components/ui/select';
 import {
   FolderGit2, Loader2, Plus, ExternalLink, Sparkles, Hammer, Settings, Search, Star,
-  LayoutGrid, List, Users, CalendarDays, Wallet, X,
+  LayoutGrid, List, Users, CalendarDays, Wallet, X, Copy, Database,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 
@@ -146,6 +146,7 @@ export default function Projects() {
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({ name: '', parent_domain_id: '' });
   const [creating, setCreating] = useState(false);
+  const [cloneTarget, setCloneTarget] = useState(null); // project being cloned, or null
 
   // View preferences are per-browser, not per-account — they are a display
   // habit, not project state, so localStorage is the right home for them.
@@ -389,6 +390,7 @@ export default function Projects() {
             items={pinned}
             view={view}
             onTogglePin={togglePin}
+            onClone={isAdmin ? setCloneTarget : null}
           />
           <Section
             title={pinned.length > 0 ? 'All projects' : null}
@@ -396,6 +398,7 @@ export default function Projects() {
             items={active}
             view={view}
             onTogglePin={togglePin}
+            onClone={isAdmin ? setCloneTarget : null}
           />
           <Section
             title="Archived"
@@ -407,6 +410,18 @@ export default function Projects() {
           />
         </div>
       )}
+
+      <CloneDialog
+        project={cloneTarget}
+        domains={domains}
+        onOpenChange={(o) => { if (!o) setCloneTarget(null); }}
+        onCloned={(res) => {
+          setCloneTarget(null);
+          toast({ title: 'Clone starting', description: 'Provisioning the copy — this takes a minute.' });
+          if (res.project?.id) navigate(`/projects/${res.project.id}`);
+          else load();
+        }}
+      />
 
       <Dialog open={createOpen} onOpenChange={(o) => { if (!creating) setCreateOpen(o); }}>
         <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-md sm:h-auto sm:rounded-lg">
@@ -495,7 +510,7 @@ function StatTile({ label, value }) {
 
 // A titled block of projects in whichever view is active. Renders nothing when
 // empty so an unpinned install shows one plain grid with no headings at all.
-function Section({ title, count, items, view, archived = false, onTogglePin }) {
+function Section({ title, count, items, view, archived = false, onTogglePin, onClone = null }) {
   if (items.length === 0) return null;
   return (
     <div className="space-y-3">
@@ -507,17 +522,152 @@ function Section({ title, count, items, view, archived = false, onTogglePin }) {
       {view === 'list' ? (
         <div className="divide-y rounded-lg border">
           {items.map((p) => (
-            <ProjectRow key={p.id} p={p} archived={archived || p.lifecycle === 'archived'} onTogglePin={onTogglePin} />
+            <ProjectRow key={p.id} p={p} archived={archived || p.lifecycle === 'archived'} onTogglePin={onTogglePin} onClone={onClone} />
           ))}
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {items.map((p) => (
-            <ProjectTile key={p.id} p={p} archived={archived || p.lifecycle === 'archived'} onTogglePin={onTogglePin} />
+            <ProjectTile key={p.id} p={p} archived={archived || p.lifecycle === 'archived'} onTogglePin={onTogglePin} onClone={onClone} />
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+// The clone button next to the pin — admin-only (the callback is null
+// otherwise) and hidden while the source is still provisioning.
+function CloneButton({ p, onClone }) {
+  if (!onClone || p.lifecycle === 'provisioning') return null;
+  return (
+    <button
+      type="button"
+      onClick={() => onClone(p)}
+      aria-label={`Clone ${p.name}`}
+      title="Clone this project under a new name"
+      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:text-foreground sm:h-9 sm:w-9"
+    >
+      <Copy className="h-4 w-4" />
+    </button>
+  );
+}
+
+// Clone dialog — name + domain + what to bring. 'fresh' copies the app, its
+// full git history, and the asset library (fresh database); 'full' also dumps
+// and restores the source's database, which needs the source online.
+function CloneDialog({ project, domains, onOpenChange, onCloned }) {
+  const { toast } = useToast();
+  const [name, setName] = useState('');
+  const [domainId, setDomainId] = useState('');
+  const [mode, setMode] = useState('fresh');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (project) {
+      setName(`${project.name} copy`);
+      setDomainId(String(project.parent_domain_id || domains[0]?.id || ''));
+      setMode('fresh');
+    }
+  }, [project, domains]);
+
+  if (!project) return null;
+  const fullAvailable = project.lifecycle === 'active';
+
+  const submit = async () => {
+    if (!name.trim() || !domainId) return;
+    setBusy(true);
+    try {
+      const res = await api.mock2CloneProject(project.id, {
+        name: name.trim(),
+        parent_domain_id: Number(domainId),
+        mode,
+      });
+      onCloned(res);
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not clone', description: err.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!busy) onOpenChange(o); }}>
+      <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-md sm:h-auto sm:rounded-lg">
+        <DialogHeader>
+          <DialogTitle>Clone “{project.name}”</DialogTitle>
+          <DialogDescription>
+            The copy gets the app, its full build history, and the asset library, on its own
+            container and URL.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={(e) => { e.preventDefault(); submit(); }} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="clone-name">New name</Label>
+            <Input
+              id="clone-name" className="h-11 sm:h-10" value={name}
+              onChange={(e) => setName(e.target.value)} autoFocus
+            />
+            {name.trim() && domainId && previewSlug(name) ? (
+              <p className="text-xs text-muted-foreground break-all">
+                URL:{' '}
+                <code className="text-foreground">
+                  {previewSlug(name)}.{domains.find((d) => String(d.id) === domainId)?.domain}
+                </code>
+              </p>
+            ) : null}
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="clone-domain">Parent domain</Label>
+            <Select value={domainId} onValueChange={setDomainId}>
+              <SelectTrigger id="clone-domain" className="h-11 sm:h-10">
+                <SelectValue placeholder="Choose a verified domain" />
+              </SelectTrigger>
+              <SelectContent>
+                {domains.map((d) => (
+                  <SelectItem key={d.id} value={String(d.id)}>{d.domain}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2" role="radiogroup" aria-label="What to bring">
+            <Label>What to bring</Label>
+            <button
+              type="button" role="radio" aria-checked={mode === 'fresh'}
+              onClick={() => setMode('fresh')}
+              className={`w-full rounded-lg border p-3 text-left min-h-[44px] ${mode === 'fresh' ? 'border-primary ring-1 ring-primary' : ''}`}
+            >
+              <span className="flex items-center gap-2 text-sm font-medium"><Copy className="h-4 w-4" />Fresh start</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">
+                App + git history + assets. The database starts empty (the app’s own setup runs).
+              </span>
+            </button>
+            <button
+              type="button" role="radio" aria-checked={mode === 'full'}
+              onClick={() => fullAvailable && setMode('full')}
+              disabled={!fullAvailable}
+              className={`w-full rounded-lg border p-3 text-left min-h-[44px] ${mode === 'full' ? 'border-primary ring-1 ring-primary' : ''} ${fullAvailable ? '' : 'opacity-50'}`}
+            >
+              <span className="flex items-center gap-2 text-sm font-medium"><Database className="h-4 w-4" />Bring the database too</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">
+                {fullAvailable
+                  ? 'Everything above, plus a copy of the source project’s database (users, records, content).'
+                  : 'Needs the source project online — wake it first.'}
+              </span>
+            </button>
+          </div>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy} className="h-11 sm:h-10">
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy || !name.trim() || !domainId} className="h-11 sm:h-10">
+              {busy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Clone project
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -589,7 +739,7 @@ function ProjectMeta({ p }) {
 // One project card — used by both the active grid and the archived section. An
 // archived card is dimmed and shows a rehydrate hint instead of a live URL (its
 // slug is retained but currently 404s).
-function ProjectTile({ p, archived = false, onTogglePin }) {
+function ProjectTile({ p, archived = false, onTogglePin, onClone = null }) {
   return (
     <Card className={`flex h-full flex-col min-w-0${archived ? ' opacity-75' : ''}`}>
       <CardHeader className="pb-3">
@@ -603,6 +753,7 @@ function ProjectTile({ p, archived = false, onTogglePin }) {
               {statusChip(p.status, p.flagged)}
             </span>
           </div>
+          <CloneButton p={p} onClone={onClone} />
           <PinButton p={p} onTogglePin={onTogglePin} />
         </div>
       </CardHeader>
@@ -636,7 +787,7 @@ function ProjectTile({ p, archived = false, onTogglePin }) {
 
 // The same project as a dense row — the list view, for installs with enough
 // projects that a grid becomes a scroll. Stacks on <sm like every other row.
-function ProjectRow({ p, archived = false, onTogglePin }) {
+function ProjectRow({ p, archived = false, onTogglePin, onClone = null }) {
   return (
     <div className={`flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between${archived ? ' opacity-75' : ''}`}>
       <div className="flex min-w-0 flex-1 items-start gap-2">
@@ -667,6 +818,7 @@ function ProjectRow({ p, archived = false, onTogglePin }) {
       </div>
       <div className="flex shrink-0 items-center gap-3">
         <span className="hidden text-xs text-muted-foreground md:inline">{agoLabel(p.last_activity_at)}</span>
+        <CloneButton p={p} onClone={onClone} />
         <Button asChild variant="outline" size="sm" className="h-9">
           <Link to={`/projects/${p.id}`}>Open</Link>
         </Button>

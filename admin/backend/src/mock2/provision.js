@@ -145,6 +145,77 @@ export function startProvision(project) {
   return true;
 }
 
+// ---- Clone provisioning (create a sibling project from a source project) ----
+//
+// The new project's bare repo starts as a byte-for-byte clone of the SOURCE
+// project's bare repo (full history — the app, its committed state/, its rules
+// and change records), then the standard bringUpFromRepo + base-app deploy
+// sequence brings it up exactly like a fresh provision whose "seed" is the
+// source app: install → migrate → build → serve on the new project's own URL.
+//
+// With copyDatabase, the source container's in-container Postgres (ADR-008:
+// postgres://app:app@127.0.0.1:5432/app) is dumped and restored into the new
+// container AFTER the app deploys — the restore's --clean drops the schema the
+// migrate step just created and replaces it with the source's schema + data.
+// A failed data copy leaves the app serving (fresh-database state) and raises
+// a queue item rather than failing the whole clone.
+export function startCloneProvision(project, { sourceRepoPath, sourceContainerName, copyDatabase = false } = {}) {
+  const projectId = Number(project.id);
+  const repoPath = project.repo_path || repoPathForProject(projectId);
+  const containerName = project.container_name || containerNameForProject(projectId);
+  setStatus(projectId, { phase: 'starting', message: 'Starting clone…', startedAt: Date.now(), error: null });
+  cloneProvision(project, { repoPath, containerName, sourceRepoPath, sourceContainerName, copyDatabase }).catch((err) => {
+    console.error(`[mock2] clone crashed for project ${projectId}:`, err?.message || err);
+    fail(project, `clone crashed: ${err?.message || err}`);
+  });
+  return true;
+}
+
+async function cloneProvision(project, { repoPath, containerName, sourceRepoPath, sourceContainerName, copyDatabase }) {
+  const projectId = Number(project.id);
+  setStatus(projectId, { phase: 'repo', message: 'Cloning source repository…' });
+  const script = `set -e
+SRC="${sourceRepoPath}"
+DST="${repoPath}"
+test -d "$SRC" || { echo "source repo missing: $SRC" >&2; exit 1; }
+mkdir -p "$(dirname "$DST")"
+rm -rf "$DST"
+git clone --bare --no-hardlinks -q "$SRC" "$DST"
+echo "[mock2] cloned bare repo $SRC -> $DST"
+`;
+  const cloneRes = await sh(script, { timeoutMs: 120000 });
+  if (cloneRes.code !== 0) {
+    return fail(project, `source repo clone failed: ${(cloneRes.stderr || cloneRes.stdout || '').trim().slice(-500)}`);
+  }
+  await bringUpFromRepo(project, { repoPath, containerName, mode: 'provision' });
+
+  if (!copyDatabase) return;
+  // Only copy data when the bring-up actually reached 'active' (the migrate
+  // step created the app role + database the restore needs).
+  const fresh = getProject(projectId);
+  if (fresh?.lifecycle !== 'active') return;
+  setStatus(projectId, { phase: 'database', message: 'Copying database from the source project…' });
+  const pipe = await sh(
+    `incus exec ${sourceContainerName} -- su - postgres -c 'pg_dump --clean --if-exists app' | incus exec ${containerName} -- su - postgres -c 'psql -q -v ON_ERROR_STOP=0 app' 2>&1 | tail -n 3`,
+    { timeoutMs: 600000 },
+  );
+  if (pipe.code !== 0) {
+    setStatus(projectId, { phase: 'ready', message: `Clone online, but the database copy failed: ${(pipe.stderr || pipe.stdout || '').trim().slice(-400)} — the app starts with a fresh database.` });
+    try {
+      raiseQueueItem({
+        kind: 'provisioning_failed', project_id: projectId,
+        dedupe_key: `mock2-clone-db:${projectId}`, ref_table: 'mock2_projects', ref_id: projectId,
+        detail: `${project.name}: clone database copy failed — the app is serving with a fresh database`,
+      });
+    } catch { /* best effort */ }
+    return;
+  }
+  // Restart the app unit so any pooled connections re-establish against the
+  // restored schema.
+  await sh(`incus exec ${containerName} -- systemctl restart mock2-dev.service 2>/dev/null || true`).catch(() => {});
+  setStatus(projectId, { phase: 'ready', message: 'Clone online — app deployed and database copied from the source project.' });
+}
+
 // Land the project in a terminal failure state. `lifecycle` is the state to
 // mark: 'failed_provisioning' for a create (M2), but 'archived' for a failed
 // REHYDRATE so the project falls back to its safe archived state and can be

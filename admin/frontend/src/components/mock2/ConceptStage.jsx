@@ -35,6 +35,7 @@ import ProjectAssets from './ProjectAssets';
 import { ChatBubble, RuleQuestion, StreamingBubble, ActivityStream } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
+import { uploadReferenceFiles } from '@/lib/reference-uploads';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
 const STAGE_LABELS = { concept: 'Concept', define: 'Define', build: 'Build', run: 'Run' };
@@ -487,8 +488,17 @@ export default function ConceptStage({
 
   // Multi-modal: design references / screenshots pasted, dropped, or picked
   // into the composer ride the turn (and the mockup render) — downscaled
-  // client-side before upload (lib/chat-images.js).
-  const attach = useChatImages({ onError: (m) => toast({ variant: 'destructive', title: 'Image not attached', description: m }) });
+  // client-side before upload (lib/chat-images.js). Non-image files (a spec,
+  // a .ts, a zip of a site) dropped into the same composer go to the project
+  // asset library instead, where the build references them.
+  const onDocumentFiles = useCallback(
+    (files) => { uploadReferenceFiles(projectId, files, { toast }); },
+    [projectId, toast],
+  );
+  const attach = useChatImages({
+    onError: (m) => toast({ variant: 'destructive', title: 'Image not attached', description: m }),
+    onDocumentFiles,
+  });
 
   const send = async () => {
     const text = message.trim();
@@ -867,6 +877,7 @@ export default function ConceptStage({
             <ImageAttachmentBar
               images={attach.images} busy={attach.busy} disabled={busy}
               onPickFiles={attach.addFiles} onRemove={attach.remove}
+              allowDocuments
             />
             {/* flex-wrap, not a single row: at 360px the direction toggle +
                 Build MVP + Send are wider than the screen, and without it Send

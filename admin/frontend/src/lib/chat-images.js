@@ -135,20 +135,30 @@ export async function prepareChatImage(file) {
   };
 }
 
-// Extract image files from a paste or drop event (ignores everything else).
-export function imageFilesFromDataTransfer(dt) {
-  const files = [];
+// True when this file goes down the chat-image pipeline (vs. the reference
+// document / zip path).
+export function isChatImageFile(f) {
+  return !!f && ACCEPTED_INPUT.includes(f.type);
+}
+
+// Split the files of a paste/drop into chat-attachable images and everything
+// else (text files and zips headed for the project asset library).
+export function partitionFilesFromDataTransfer(dt) {
+  const all = [];
   const list = dt?.files ? Array.from(dt.files) : [];
-  for (const f of list) if (ACCEPTED_INPUT.includes(f.type)) files.push(f);
-  if (!files.length && dt?.items) {
+  for (const f of list) all.push(f);
+  if (!all.length && dt?.items) {
     for (const item of Array.from(dt.items)) {
       if (item.kind === 'file') {
         const f = item.getAsFile();
-        if (f && ACCEPTED_INPUT.includes(f.type)) files.push(f);
+        if (f) all.push(f);
       }
     }
   }
-  return files;
+  const images = [];
+  const others = [];
+  for (const f of all) (isChatImageFile(f) ? images : others).push(f);
+  return { images, others };
 }
 
 // The wire shape the API expects ({media_type, data, name} only).

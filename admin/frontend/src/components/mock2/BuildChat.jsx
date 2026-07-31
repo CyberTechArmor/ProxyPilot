@@ -26,6 +26,7 @@ import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import ChangeHistory from './ChangeHistory';
 import VerificationChecklist from './VerificationChecklist';
 import { toWireImages } from '@/lib/chat-images';
+import { uploadReferenceFiles } from '@/lib/reference-uploads';
 import { MODEL_OPTIONS, RECOMMENDED_ESCALATE_MODEL } from '@/lib/model-options';
 import { parseFindings } from '@/lib/findings';
 import FixFindingsDialog from './FixFindingsDialog';
@@ -141,8 +142,17 @@ export default function BuildChat({
   const onTyping = useTypingTracker(projectId, canEdit && online);
   const approvedAt = project?.design_approved_at || null;
   // Multi-modal: images pasted/dropped/picked ride the build instruction or the
-  // ask — downscaled client-side before upload (lib/chat-images.js).
-  const attach = useChatImages({ onError: (m) => toast({ variant: 'destructive', title: 'Image not attached', description: m }) });
+  // ask — downscaled client-side before upload (lib/chat-images.js). Non-image
+  // files (a spec, a .ts, a zip of a site) dropped into the same composer go
+  // to the project asset library instead, where the build references them.
+  const onDocumentFiles = useCallback(
+    (files) => { uploadReferenceFiles(projectId, files, { toast }); },
+    [projectId, toast],
+  );
+  const attach = useChatImages({
+    onError: (m) => toast({ variant: 'destructive', title: 'Image not attached', description: m }),
+    onDocumentFiles,
+  });
 
   const load = useCallback(async () => {
     try { setData(await api.mock2GetChat(projectId)); }
@@ -1589,6 +1599,7 @@ export default function BuildChat({
                 images={attach.images} busy={attach.busy} disabled={busy}
                 onPickFiles={attach.addFiles} onRemove={attach.remove}
                 onAnnotate={(i) => setAnnotateAttachIdx(i)}
+                allowDocuments
               />
             ) : null}
             {/* The action row exists only when it has something in it: an empty

@@ -34,6 +34,8 @@ import { buildDemoContentPrompt } from './demo-content-logic.js';
 import { EXPLAIN_SYSTEM_PROMPT, EXPLAIN_FOLLOWUP_SYSTEM_PROMPT } from './explain-logic.js';
 import { CONSULT_SYSTEM_PROMPT } from './consult-logic.js';
 import { buildAskSystemPrompt } from './ask-logic.js';
+import { CHAT_SUMMARY_SYSTEM_PROMPT } from './chat-summary-logic.js';
+import { DOC_SUMMARY_SYSTEM_PROMPT } from './project-assets-logic.js';
 
 export const STEP_PROMPT_MAX_LENGTH = 200_000;
 
@@ -74,6 +76,8 @@ export const STEP_PROMPT_SPECS = Object.freeze({
   consult: { placeholders: [], render: () => CONSULT_SYSTEM_PROMPT },
   'explain-card': { placeholders: [], render: () => EXPLAIN_SYSTEM_PROMPT },
   'explain-followup': { placeholders: [], render: () => EXPLAIN_FOLLOWUP_SYSTEM_PROMPT },
+  'chat-summary': { placeholders: [], render: () => CHAT_SUMMARY_SYSTEM_PROMPT },
+  'doc-summary': { placeholders: [], render: () => DOC_SUMMARY_SYSTEM_PROMPT },
   'checklist-postpass': { placeholders: [], render: () => buildChecklistPostPassPrompt() },
   'design-review': { placeholders: [], render: () => buildReviewPrompt() },
   'design-options': { placeholders: [], render: () => buildDesignOptionsPrompt() },

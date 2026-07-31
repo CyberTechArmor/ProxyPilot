@@ -1729,4 +1729,69 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Concept-chat bridge summary (cost lever): the rolling brief that
+    // replaces full-history replay on the concept lane. `summary` is the
+    // Haiku-maintained brief; `summary_through_id` is the last chat message
+    // id it covers — the transcript replays the brief plus everything after
+    // that id (chat-summary-logic.js owns the windowing/refresh rules; a
+    // NULL summary means full-history replay, byte-identical to before).
+    // Additive: two nullable columns on the bare chat join row.
+    version: 552,
+    name: 'mock2_chats_bridge_summary',
+    up: (d) => {
+      d.exec('ALTER TABLE mock2_chats ADD COLUMN summary TEXT;');
+      d.exec('ALTER TABLE mock2_chats ADD COLUMN summary_through_id INTEGER;');
+    },
+  },
+  {
+    // Document assets — uploaded reference FILES (a .ts source, a spec, a
+    // website export unpacked from a zip). Bytes live on disk like images
+    // (`stored_as`); `body` holds the model-generated summary/index that is
+    // what actually enters build/concept prompts — the full content is
+    // materialized into the project container under state/assets/ for
+    // on-demand reads, so context stays cheap without losing fidelity.
+    //
+    // kind gains 'document', which lives in a CHECK — SQLite cannot ALTER a
+    // CHECK, so this is the 528 rebuild idiom. Data copies verbatim.
+    version: 553,
+    name: 'mock2_project_assets_documents',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_project_assets_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'image',
+          name TEXT,
+          body TEXT,
+          mime TEXT,
+          size INTEGER,
+          width INTEGER,
+          height INTEGER,
+          stored_as TEXT,
+          tag TEXT,
+          pinned INTEGER NOT NULL DEFAULT 0,
+          created_by TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          CHECK (kind IN ('image', 'content', 'document')),
+          CHECK (
+            (kind = 'image' AND stored_as IS NOT NULL)
+            OR (kind = 'content' AND body IS NOT NULL)
+            OR (kind = 'document' AND stored_as IS NOT NULL)
+          )
+        );
+        INSERT INTO mock2_project_assets_new
+          SELECT id, project_id, kind, name, body, mime, size, width, height,
+                 stored_as, tag, pinned, created_by, created_at, updated_at
+            FROM mock2_project_assets;
+        DROP TABLE mock2_project_assets;
+        ALTER TABLE mock2_project_assets_new RENAME TO mock2_project_assets;
+        CREATE INDEX idx_mock2_project_assets_project
+          ON mock2_project_assets (project_id, id);
+        CREATE INDEX idx_mock2_project_assets_pinned
+          ON mock2_project_assets (project_id, pinned) WHERE pinned = 1;
+      `);
+    },
+  },
 ];

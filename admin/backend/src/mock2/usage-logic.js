@@ -191,3 +191,40 @@ export function budgetMode(env = {}) {
   const v = String(env?.[BUDGET_DOLLARS_FLAG] ?? '').trim().toLowerCase();
   return v === 'on' || v === '1' || v === 'true' ? 'dollars' : 'tokens';
 }
+
+// ---- Cache health (silent-invalidator detector) ----
+//
+// A lane that resends a large stable prefix every call (build runner,
+// concept chat) should show cache_read > 0 from the second call on. When
+// it doesn't, one of two silent failure modes is burning full-price input
+// and NOTHING in the totals says so:
+//   'cache_never_engaged' — no reads AND no writes despite big inputs
+//     (breakpoint not being sent, or prefix below the model's cacheable
+//     minimum on every call);
+//   'cache_never_read'    — writes every call but never a read (a byte
+//     changes at the front of the prefix each call: a timestamp,
+//     unstable ordering, per-request id — each write is orphaned).
+// Pure: feed it the last few canonical usage records for ONE lane, in
+// call order. Small prefixes are ignored (nothing worth caching).
+export const CACHE_HEALTH_MIN_CALLS = 3;
+export const CACHE_HEALTH_MIN_INPUT_TOKENS = 20_000;
+
+export function cacheHealth(records = [], {
+  minCalls = CACHE_HEALTH_MIN_CALLS,
+  minInputTokens = CACHE_HEALTH_MIN_INPUT_TOKENS,
+} = {}) {
+  const rows = (Array.isArray(records) ? records : [])
+    .filter(Boolean)
+    .map((r) => (r.input != null ? r : canonicalUsage(r)));
+  // Only calls that actually paid for a big uncached prefix are evidence.
+  const big = rows.filter((r) => Number(r.input || 0) >= minInputTokens);
+  if (big.length < minCalls) return { healthy: true, reason: null, suspectCalls: big.length };
+  const anyRead = big.some((r) => Number(r.cache_read || 0) > 0);
+  if (anyRead) return { healthy: true, reason: null, suspectCalls: 0 };
+  const anyWrite = big.some((r) => Number(r.cache_write || 0) > 0);
+  return {
+    healthy: false,
+    reason: anyWrite ? 'cache_never_read' : 'cache_never_engaged',
+    suspectCalls: big.length,
+  };
+}

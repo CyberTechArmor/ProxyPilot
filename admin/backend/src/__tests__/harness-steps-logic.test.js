@@ -15,14 +15,14 @@ import {
 } from '../mock2/harness-steps-logic.js';
 
 test('registry: one entry per model-bearing call site, ids unique and stable', () => {
-  assert.equal(HARNESS_STEPS.length, 22);
+  assert.equal(HARNESS_STEPS.length, 24);
   const ids = HARNESS_STEPS.map((s) => s.id);
   assert.equal(new Set(ids).size, ids.length, 'duplicate step id');
   // The ids go on ledger rows — this list is the data contract.
   assert.deepEqual(ids.sort(), [
-    'ask', 'build-runner', 'chat-distill', 'checklist-postpass', 'clarify',
+    'ask', 'build-runner', 'chat-distill', 'chat-summary', 'checklist-postpass', 'clarify',
     'concept-chat', 'consult', 'demo-content', 'design-doc-adjust', 'design-options', 'design-review',
-    'design-token-extraction', 'explain-card', 'explain-followup',
+    'design-token-extraction', 'doc-summary', 'explain-card', 'explain-followup',
     'inventory-extraction', 'mockup-continuation', 'mockup-render', 'mockup-screen',
     'mockup-tweak', 'quick-prepass', 'rule-audit', 'split-probe',
   ].sort());

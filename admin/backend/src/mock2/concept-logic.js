@@ -23,6 +23,7 @@
 
 import { parseAttachmentsJson, publicAttachmentShape } from './chat-image-logic.js';
 import { MOCKUP_BASE_CSS, MOCKUP_THEME_TOGGLE_JS } from './mockup-template.js';
+import { MODEL_FRONTIER } from './models.js';
 
 // ---- in-repo paths (03-data-model.md: the concept stage lives in the repo) ----
 
@@ -632,7 +633,7 @@ Return the full HTML document and nothing else.`;
 // spend in the pipeline. MOCK2_MOCKUP_MODEL overrides; the literal value
 // 'slot' restores the slot model. The caller falls back to the slot model when
 // the preferred one is rejected by the connector (older keys/orgs).
-export const MOCKUP_PREFERRED_MODEL = 'claude-fable-5';
+export const MOCKUP_PREFERRED_MODEL = MODEL_FRONTIER;
 
 // mockupRenderBudget — output-token budget for a FULL render, sized from the
 // document being revised. The old flat 40k truncated large multi-screen

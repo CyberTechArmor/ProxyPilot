@@ -58,6 +58,9 @@ const FALLBACK_TAGS = [
   { key: 'about', label: 'About this app', kinds: ['content'] },
   { key: 'brand', label: 'Brand & voice', kinds: ['content'] },
   { key: 'note', label: 'Note', kinds: ['content'] },
+  { key: 'reference-file', label: 'Reference file', kinds: ['document'] },
+  { key: 'website', label: 'Website export', kinds: ['document'] },
+  { key: 'spec', label: 'Spec / requirements', kinds: ['document'] },
 ];
 
 function fmtBytes(n) {
@@ -136,6 +139,7 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
 
   const contentTags = useMemo(() => tags.filter((t) => t.kinds.includes('content')), [tags]);
   const imageTags = useMemo(() => tags.filter((t) => t.kinds.includes('image')), [tags]);
+  const documentTags = useMemo(() => tags.filter((t) => t.kinds.includes('document')), [tags]);
   const labelFor = useCallback((key) => (tags.find((t) => t.key === key) || {}).label || key, [tags]);
 
   const addFiles = useCallback(async (files) => {
@@ -143,19 +147,33 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
     if (!list.length || !canEdit) return;
     setBusy(true);
     setError('');
+    const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg)$/i;
     for (const f of list) {
       try {
-        // Measure the image client-side: the dimensions ride along so the
-        // harness context can say "logo.svg 240x60" without the server
-        // decoding every upload.
-        const dims = await new Promise((resolve) => {
-          const img = new Image();
-          const url = URL.createObjectURL(f);
-          img.onload = () => { URL.revokeObjectURL(url); resolve({ width: img.naturalWidth, height: img.naturalHeight }); };
-          img.onerror = () => { URL.revokeObjectURL(url); resolve({}); };
-          img.src = url;
-        });
-        await api.mock2UploadProjectImage(projectId, f, { tag: 'reference', ...dims });
+        if (IMAGE_EXT.test(f.name || '')) {
+          // Measure the image client-side: the dimensions ride along so the
+          // harness context can say "logo.svg 240x60" without the server
+          // decoding every upload.
+          const dims = await new Promise((resolve) => {
+            const img = new Image();
+            const url = URL.createObjectURL(f);
+            img.onload = () => { URL.revokeObjectURL(url); resolve({ width: img.naturalWidth, height: img.naturalHeight }); };
+            img.onerror = () => { URL.revokeObjectURL(url); resolve({}); };
+            img.src = url;
+          });
+          await api.mock2UploadProjectImage(projectId, f, { tag: 'reference', ...dims });
+        } else if (/\.zip$/i.test(f.name || '')) {
+          // A zip of reference material (e.g. a website export) — unpacked
+          // server-side; each text file inside becomes its own asset.
+          const out = await api.mock2UploadProjectArchive(projectId, f);
+          const sk = out?.skipped || {};
+          const skippedTotal = Object.values(sk).reduce((n, v) => n + (Number(v) || 0), 0);
+          if (skippedTotal) setError(`Ingested ${out.ingested} file(s) from ${f.name}; skipped ${skippedTotal} (binaries, oversized, or dependency folders).`);
+        } else {
+          // Any other file is a reference document — the server accepts any
+          // extension as long as the content is text.
+          await api.mock2UploadProjectDocument(projectId, f);
+        }
       } catch (e) {
         setError(e?.message || `Could not upload ${f.name}.`);
       }
@@ -221,12 +239,13 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
           {summary ? (
             <div className="text-[11px] text-muted-foreground">
               {summary.images} image{summary.images === 1 ? '' : 's'} · {summary.content} content
+              {summary.documents ? ` · ${summary.documents} file${summary.documents === 1 ? '' : 's'}` : ''}
               {summary.bytes ? ` · ${fmtBytes(summary.bytes)}` : ''}
             </div>
           ) : null}
         </div>
         <p className="text-[11px] text-muted-foreground mt-0.5">
-          Images and content for this project. The build sees these as reference on every cycle.
+          Images, content, and reference files (any text file, or a zip of them) for this project. The build sees these as reference on every cycle.
         </p>
       </div>
 
@@ -244,7 +263,7 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
         ) : assets.length === 0 ? (
           <div className="text-xs text-muted-foreground py-8 text-center">
             <ImagePlus className="h-6 w-6 mx-auto mb-2 opacity-40" />
-            Nothing here yet. Drop an image, or write the copy and brand notes the build should follow.
+            Nothing here yet. Drop an image, a reference file (.ts, .md, a spec…), or a zip of a site — or write the copy and brand notes the build should follow.
           </div>
         ) : assets.map((a) => (
           <div key={a.id} className={`rounded-lg border ${a.pinned ? 'border-primary/50 bg-primary/5' : 'bg-card'} overflow-hidden`}>
@@ -259,6 +278,10 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
               >
                 <AssetThumb src={api.mock2ProjectAssetRawUrl(projectId, a.id)} alt={a.body || a.name} />
               </button>
+            ) : a.kind === 'document' ? (
+              <div className="px-3 pt-2.5 text-[12px] leading-relaxed whitespace-pre-wrap break-words text-muted-foreground">
+                {a.body || 'Summary being generated — the build can already read the full file at state/assets/.'}
+              </div>
             ) : (
               <div className="px-3 pt-2.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words">{a.body}</div>
             )}
@@ -311,7 +334,7 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
                     aria-label={`Tag for ${a.name}`}
                     className="min-h-[44px] rounded border bg-background px-1.5 text-[11px] max-w-[120px]"
                   >
-                    {(a.kind === 'image' ? imageTags : contentTags).map((t) => (
+                    {(a.kind === 'image' ? imageTags : a.kind === 'document' ? documentTags : contentTags).map((t) => (
                       <option key={t.key} value={t.key}>{t.label}</option>
                     ))}
                   </select>
@@ -377,7 +400,7 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
             <input
               ref={fileRef}
               type="file"
-              accept=".png,.jpg,.jpeg,.gif,.webp,.svg"
+              
               multiple
               className="hidden"
               onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}

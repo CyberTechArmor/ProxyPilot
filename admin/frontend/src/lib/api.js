@@ -1581,6 +1581,49 @@ export const api = {
     return data;
   },
 
+  // Reference-file upload (any text file — .ts, .md, a spec, …). Same
+  // raw-bytes shape as the image upload; the server content-sniffs and
+  // refuses binaries with a clear message.
+  mock2UploadProjectDocument: async (id, file, { tag } = {}) => {
+    const csrf = readCookie('pp_csrf');
+    const response = await fetch(`${API_BASE}/mock2/projects/${id}/assets/document`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Filename': file.name || 'document.txt',
+        ...(csrf ? { 'X-CSRF-Token': csrf } : {}),
+        ...(tag ? { 'X-Asset-Tag': tag } : {}),
+      },
+      body: file,
+    });
+    let data = {};
+    try { data = await response.json(); } catch { /* non-JSON error body */ }
+    if (!response.ok) throw new ApiError(data.error || 'Upload failed', response.status, data);
+    return data;
+  },
+  // Zip of reference material (e.g. a website export) — unpacked server-side,
+  // each text file becomes its own reference-file asset.
+  mock2UploadProjectArchive: async (id, file, { tag } = {}) => {
+    const csrf = readCookie('pp_csrf');
+    const response = await fetch(`${API_BASE}/mock2/projects/${id}/assets/archive`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/zip',
+        'X-Filename': file.name || 'archive.zip',
+        ...(csrf ? { 'X-CSRF-Token': csrf } : {}),
+        ...(tag ? { 'X-Asset-Tag': tag } : {}),
+      },
+      body: file,
+    });
+    let data = {};
+    try { data = await response.json(); } catch { /* non-JSON error body */ }
+    if (!response.ok) throw new ApiError(data.error || 'Upload failed', response.status, data);
+    return data;
+  },
+  mock2ProjectAssetText: (id, assetId) => request(`/mock2/projects/${id}/assets/${assetId}/text`),
+
   mock2GetCycleLog: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}/log`),
   mock2SubmitCycleFeedback: (id, cycleId, body) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/feedback`, { method: 'POST', body: JSON.stringify(body) }),

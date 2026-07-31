@@ -39,7 +39,7 @@ import {
 import { initialGateReports, allGatesGreen, interruptDecision, shouldStopForBudget } from './cycle-logic.js';
 import { releaseLock, touchLock } from './locks.js';
 import { insertCycleEvent, listRecentDownNotes } from './cycle-events.js';
-import { listAssets } from './project-assets.js';
+import { listAssets, materializeDocAssetsToDir } from './project-assets.js';
 import { buildAssetSection } from './project-assets-logic.js';
 import { buildDesignFindingsBrief, markDesignFindingsBriefed } from './design-findings.js';
 import {
@@ -225,6 +225,12 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     await mkdir(join(checkoutDir, '.claude'), { recursive: true });
     await writeFile(join(checkoutDir, '.claude', 'CLAUDE.md'), claudeMd, 'utf8');
     await materializeComponents(checkoutDir, adoptableCatalog);
+    // Reference-file (document) assets: full content at state/assets/<path>
+    // so the SDK's Read tool reaches it — the prompt carries only summaries.
+    try {
+      const docMat = materializeDocAssetsToDir(checkoutDir, listAssets(project.id));
+      if (docMat.written) logEvent('note', { role: 'system', content: `materialized ${docMat.written} reference file(s) into state/assets/` });
+    } catch (err) { console.warn('[mock2] doc asset materialization failed:', err?.message); }
     // Same engine stamp as runCycle: every run names its harness up front.
     logEvent('note', { role: 'system', content: `Build engine: claude harness (Agent SDK) · model ${ready.model}`, meta: { harness: 'claude', model: ready.model } });
     logEvent('note', { role: 'system', content: 'Constitution loaded from .claude/CLAUDE.md (auto-loaded by the SDK, not re-explored).', meta: { components: componentCatalog.length } });

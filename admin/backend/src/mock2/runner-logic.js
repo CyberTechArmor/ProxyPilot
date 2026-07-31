@@ -15,6 +15,7 @@
 import { parseHaltOptions, HALT_OPTION_KINDS } from './unblock-logic.js';
 import { buildComponentCatalogSection, buildInstalledComponentsSection } from './component-logic.js';
 import { normalizeHarness } from './project-logic.js';
+import { MODEL_PRIMARY } from './models.js';
 
 // The runner's tool set, as provider-neutral JSON-Schema tool definitions.
 // model-client.js maps these onto each provider's tool-calling shape (Anthropic
@@ -366,6 +367,73 @@ export function truncateToolResult(text) {
   const s = String(text ?? '');
   if (s.length <= MAX_TOOL_RESULT_CHARS) return s;
   return `${s.slice(0, MAX_TOOL_RESULT_CHARS)}\n…[truncated ${s.length - MAX_TOOL_RESULT_CHARS} chars]`;
+}
+
+// ── Transcript cost levers ──────────────────────────────────────────
+//
+// RUNNER_CACHE_TTL — the build lane opts into the 1-hour prompt cache
+// by default: a slow gate battery or long tool run between turns easily
+// exceeds the 5-minute default TTL, and every expired gap re-writes the
+// entire transcript prefix at full cache-write price. 1h costs 2x to
+// write (vs 1.25x) but a multi-turn cycle reads it back dozens of
+// times at ~0.1x, clearing the ~3-reads break-even trivially.
+export const RUNNER_CACHE_TTL = (() => {
+  const v = String(process.env?.MOCK2_RUNNER_CACHE_TTL ?? '').trim().toLowerCase();
+  if (v === '5m' || v === 'off') return null; // null → provider default (5m)
+  return '1h';
+})();
+
+// Stale tool-result pruning. Deep into a cycle the transcript is
+// dominated by old file reads and command output that later edits made
+// obsolete — yet every turn re-reads them in the cached prefix, and
+// every cache miss re-writes them. Pruning replaces the BODY of tool
+// results older than the last PRUNE_KEEP_RECENT tool turns with a short
+// head + marker (the runner can always re-run the tool if it truly
+// needs the content again).
+//
+// Why batched: an edit anywhere in the transcript invalidates the
+// cached prefix from that point, so pruning one result per turn would
+// force a prefix re-write EVERY turn — worse than not pruning. Instead
+// nothing is touched until PRUNE_BATCH_MIN results are stale, then the
+// whole batch is pruned at once: one amortized re-write of a now much
+// smaller prefix, followed by many cheap reads of it.
+export const PRUNE_KEEP_RECENT_TOOL_RESULTS = envNum('MOCK2_PRUNE_KEEP_TOOL_RESULTS', 20);
+export const PRUNE_BATCH_MIN = envNum('MOCK2_PRUNE_BATCH_MIN', 12);
+export const PRUNE_STUB_KEEP_CHARS = 500;
+export const PRUNE_MIN_CHARS = 2_000; // small results aren't worth stubbing
+export const PRUNED_MARKER = '[stale tool result pruned';
+
+// Mutates `transcript` in place (it is cycle-local); returns
+// { prunedCount, prunedChars } — zeros when below the batch threshold.
+// Idempotent: already-pruned results carry PRUNED_MARKER and are never
+// re-counted or re-pruned. Disable with MOCK2_PRUNE_KEEP_TOOL_RESULTS=0.
+export function pruneStaleToolResults(transcript, {
+  keepRecent = PRUNE_KEEP_RECENT_TOOL_RESULTS,
+  batchMin = PRUNE_BATCH_MIN,
+  keepChars = PRUNE_STUB_KEEP_CHARS,
+  minChars = PRUNE_MIN_CHARS,
+} = {}) {
+  if (!Array.isArray(transcript) || keepRecent <= 0) return { prunedCount: 0, prunedChars: 0 };
+  // Find stale candidates: tool turns beyond the most recent `keepRecent`,
+  // not yet pruned, big enough to matter.
+  const toolIdxs = [];
+  for (let i = 0; i < transcript.length; i++) {
+    if (transcript[i]?.role === 'tool') toolIdxs.push(i);
+  }
+  const staleIdxs = toolIdxs.slice(0, Math.max(0, toolIdxs.length - keepRecent)).filter((i) => {
+    const c = String(transcript[i].content ?? '');
+    return c.length >= minChars && !c.includes(PRUNED_MARKER);
+  });
+  if (staleIdxs.length < Math.max(1, batchMin)) return { prunedCount: 0, prunedChars: 0 };
+
+  let prunedChars = 0;
+  for (const i of staleIdxs) {
+    const turn = transcript[i];
+    const c = String(turn.content ?? '');
+    prunedChars += c.length - keepChars;
+    turn.content = `${c.slice(0, keepChars)}\n…${PRUNED_MARKER}: ${c.length - keepChars} chars removed to keep the context lean — re-run \`${turn.name || 'the tool'}\` if you need this content again]`;
+  }
+  return { prunedCount: staleIdxs.length, prunedChars };
 }
 
 // Parse the pinned framework's skills_json (the four skills as one JSON doc) into
@@ -1480,7 +1548,7 @@ export function resolveClaudeAuth({ provider = null, hasConnectorKey = false, ha
 // running on the server-env ANTHROPIC_API_KEY with a non-Anthropic slot — the
 // slot's model belongs to another provider and can't be sent to the SDK, so
 // fall back to CLAUDE_HARNESS_MODEL (env) or the pinned default.
-export const CLAUDE_HARNESS_FALLBACK_MODEL = 'claude-opus-5';
+export const CLAUDE_HARNESS_FALLBACK_MODEL = MODEL_PRIMARY;
 export function claudeHarnessModel({ provider = null, slotModel = null, env = {} } = {}) {
   if (String(provider || '').trim().toLowerCase() === 'anthropic' && slotModel) return slotModel;
   return String(env.CLAUDE_HARNESS_MODEL || '').trim() || CLAUDE_HARNESS_FALLBACK_MODEL;

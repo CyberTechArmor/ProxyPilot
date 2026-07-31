@@ -8,7 +8,9 @@
 
 // The model the consult runs on — Fable 5, everywhere the consult is invoked. This is
 // the ONLY build-time code path (besides the audit lane) that names Fable 5.
-export const CONSULT_MODEL = 'claude-fable-5';
+import { MODEL_FRONTIER } from './models.js';
+
+export const CONSULT_MODEL = MODEL_FRONTIER;
 
 // Feature flag for AUTO consults (triggers a–c fire from the runner mid-halt). Default
 // OFF so the runner is byte-identical until an operator opts in on the live install. The

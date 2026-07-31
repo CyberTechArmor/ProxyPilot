@@ -21,12 +21,13 @@
 // Terminology (risk R7): nothing here is named "agent".
 
 import { ROUTING_EFFORTS } from './routing-logic.js';
+import { MODEL_CHEAP_PINNED } from './models.js';
 
 export const PREPASS_SCOPES = Object.freeze(['simple', 'multi_part', 'feature_scale']);
 // Whether the request has an outcome anyone could check afterwards. See
 // clarify-logic.js for why this is the test and why length is not.
 export const PREPASS_SPECIFICITY = Object.freeze(['clear', 'vague']);
-export const PREPASS_DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
+export const PREPASS_DEFAULT_MODEL = MODEL_CHEAP_PINNED;
 export const PREPASS_MAX_TOKENS = 900;
 const LIST_MAX = 6;
 const ITEM_MAX_CHARS = 140;

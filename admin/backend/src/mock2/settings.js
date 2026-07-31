@@ -13,6 +13,7 @@ import { GATE_MODE_ENFORCE, normalizeGateMode } from './accept-pending-logic.js'
 import { COMPONENT_AUTO_APPLY_ON, normalizeComponentAutoApply } from './component-logic.js';
 import { normalizeLaneTuning, normalizeTuningEntry, normalizeGlobalThinking } from './lane-tuning-logic.js';
 import { normalizeStallMinutes, stallThresholdMinutes, restartStallMinutes } from './cycle-logic.js';
+import { MODEL_PRIMARY_PREV } from './models.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -190,7 +191,7 @@ export const COST_SAVER_SNAPSHOT_KEY = 'cost_saver_snapshot';
 const COST_SAVER_APPLIED = Object.freeze({
   fast_code_model: '',        // '' = platform default (DEFAULT_FAST_MODEL, sonnet-5)
   quick_effort: 'medium',
-  escalate_model: 'claude-opus-4-8',
+  escalate_model: MODEL_PRIMARY_PREV,
 });
 
 export function getCostSaver() {

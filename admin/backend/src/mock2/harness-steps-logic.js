@@ -136,6 +136,20 @@ export const HARNESS_STEPS = Object.freeze([
     defaults: { model: null, effort: 'high', thinking: 'adaptive', budgetNote: 'uncapped (model max)' }, tunable: true,
   },
   {
+    id: 'doc-summary', stage: 'Concept', title: 'Reference-file summary',
+    description: 'Brief + where-to-find index for an uploaded reference file (or each text file of a zip); the brief is what enters prompts, the full file stays readable at state/assets/.',
+    intendedOutcome: 'Reference material costs a summary, not its full length, on every turn.',
+    slotKey: 'summary', laneKey: null, envModelVar: null, envEffortVar: null,
+    defaults: { model: null, effort: 'low', thinking: 'off', budgetNote: '1.5k output cap' }, tunable: true,
+  },
+  {
+    id: 'chat-summary', stage: 'Concept', title: 'Chat bridge summary',
+    description: 'Folds older concept-chat history into the rolling brief that replaces full-history replay (cost lever; chat-summary-logic owns the windowing rules).',
+    intendedOutcome: 'Concept turns replay brief + recent tail instead of the whole conversation.',
+    slotKey: 'summary', laneKey: null, envModelVar: null, envEffortVar: null,
+    defaults: { model: null, effort: 'low', thinking: 'off', budgetNote: '2k output cap' }, tunable: true,
+  },
+  {
     id: 'checklist-postpass', stage: 'Post-build', title: 'Checklist post-pass',
     description: 'One cheap call per finished build keeps the screens/features checklist truthful (conservative; empty lists are the normal answer).',
     intendedOutcome: 'The checklist reflects what the build ACTUALLY did.',

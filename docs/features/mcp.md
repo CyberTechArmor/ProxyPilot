@@ -47,3 +47,14 @@ Revoking the token (same card) immediately cuts the client off.
   possible follow-up (see docs/known-issues.md).
 - Upload tickets live in process memory — a backend restart between
   `create_upload_ticket` and the PUT invalidates the ticket (re-create it).
+
+## Troubleshooting
+
+- **"Couldn't register with ProxyPilot's sign-in service" on claude.ai** —
+  fixed in 1.4.0: OAuth discovery probes (`/.well-known/oauth-*`) used to be
+  answered by the SPA with a 200, which made claude.ai attempt OAuth client
+  registration. They now 404 cleanly. Leave the OAuth Client ID/Secret fields
+  empty — auth is the token in the connector URL.
+- **Connector URL starts with `http://`** — fixed in 1.4.0 (the backend now
+  honors the proxy's X-Forwarded-Proto). Re-copy the URL after updating, or
+  just change the scheme to `https://` by hand.

@@ -605,6 +605,26 @@ app.use('/api', (req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
+// OAuth discovery probes must 404 CLEANLY — never fall through to the SPA.
+// MCP clients (claude.ai custom connectors) probe these well-known paths to
+// decide whether the server has an OAuth sign-in service. The SPA catch-all
+// answered them with index.html and a 200, so claude.ai believed an
+// authorization server existed, attempted dynamic client registration
+// against it, and failed with "Couldn't register with ProxyPilot's sign-in
+// service" (operator report). A JSON 404 here tells the client there is no
+// OAuth — it then talks directly to the tokenized MCP URL, which is the
+// supported auth model (docs/features/mcp.md).
+app.all([
+  '/.well-known/oauth-authorization-server',
+  '/.well-known/oauth-authorization-server/*',
+  '/.well-known/oauth-protected-resource',
+  '/.well-known/oauth-protected-resource/*',
+  '/.well-known/openid-configuration',
+  '/.well-known/openid-configuration/*',
+], (_req, res) => {
+  res.status(404).json({ error: 'No OAuth authorization server — ProxyPilot MCP uses token auth (see MCP Access page)' });
+});
+
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {
   console.log('Serving static files from:', FRONTEND_PATH);

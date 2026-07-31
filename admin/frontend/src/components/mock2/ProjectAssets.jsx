@@ -168,7 +168,10 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
           const out = await api.mock2UploadProjectArchive(projectId, f);
           const sk = out?.skipped || {};
           const skippedTotal = Object.values(sk).reduce((n, v) => n + (Number(v) || 0), 0);
-          if (skippedTotal) setError(`Ingested ${out.ingested} file(s) from ${f.name}; skipped ${skippedTotal} (binaries, oversized, or dependency folders).`);
+          const notes = [];
+          if (out?.warning) notes.push(out.warning);
+          if (skippedTotal) notes.push(`Ingested ${out.ingested} file(s) from ${f.name}; skipped ${skippedTotal} (binaries, oversized, or dependency folders).`);
+          if (notes.length) setError(notes.join(' '));
         } else {
           // Any other file is a reference document — the server accepts any
           // extension as long as the content is text.
@@ -280,7 +283,7 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
               </button>
             ) : a.kind === 'document' ? (
               <div className="px-3 pt-2.5 text-[12px] leading-relaxed whitespace-pre-wrap break-words text-muted-foreground">
-                {a.body || 'Summary being generated — the build can already read the full file at state/assets/.'}
+                {a.body || 'No summary yet — the build reads the full file at state/assets/ either way. (Summaries need a Summary model on the Connectors page; retried automatically.)'}
               </div>
             ) : (
               <div className="px-3 pt-2.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words">{a.body}</div>

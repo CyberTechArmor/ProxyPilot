@@ -370,8 +370,17 @@ export default function Layout() {
                 <span className="text-xl font-bold truncate">{branding.name}</span>
               </div>
               <div className="flex items-center gap-2 mt-1">
-                <span className="text-xs text-muted-foreground">
+                {/* Version (backend, moves on releases) + UI build stamp
+                    (moves on EVERY build) — together they answer "did the
+                    update install?" without reading server logs. */}
+                <span
+                  className="text-xs text-muted-foreground truncate"
+                  title={`Backend v${version || '…'} — UI built ${typeof __PP_BUILD_TIME__ !== 'undefined' ? __PP_BUILD_TIME__ : 'dev'}`}
+                >
                   v{version || '...'}
+                  {typeof __PP_BUILD_TIME__ !== 'undefined'
+                    ? ` · ${__PP_BUILD_TIME__.slice(5, 16)}`
+                    : ''}
                 </span>
               </div>
             </div>

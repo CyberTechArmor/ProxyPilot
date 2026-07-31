@@ -82,3 +82,23 @@ export function queueDocumentSummaries(projectId, assetIds) {
     }
   })();
 }
+
+// Self-heal for summaries that never landed: the upload-time queue is
+// fire-and-forget and in-memory, so a backend restart (an update mid-upload)
+// or a then-unconfigured summary slot leaves documents summary-less forever
+// while the panel implies work in progress. Whenever the asset list is READ,
+// re-queue any document without a summary — debounced per project so a
+// permanently failing slot is retried at most every 10 minutes.
+const backfillAt = new Map();
+const BACKFILL_EVERY_MS = 10 * 60 * 1000;
+export function maybeBackfillDocumentSummaries(projectId, assets) {
+  const missing = (Array.isArray(assets) ? assets : [])
+    .filter((a) => a && a.kind === 'document' && !String(a.body || '').trim())
+    .map((a) => a.id);
+  if (!missing.length) return;
+  const key = Number(projectId);
+  const last = backfillAt.get(key) || 0;
+  if (Date.now() - last < BACKFILL_EVERY_MS) return;
+  backfillAt.set(key, Date.now());
+  queueDocumentSummaries(projectId, missing);
+}

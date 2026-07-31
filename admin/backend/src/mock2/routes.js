@@ -255,10 +255,10 @@ import { KEY_PROVIDERS, canManageKey, visibleKeyRows, publicKeyShape } from './p
 import { listAssets, getAsset, assetFilePath, addImage, addContent, addDocument, updateAsset, removeAsset, readAssetText, copyProjectAssets } from './project-assets.js';
 import {
   ASSET_TAGS, MAX_ASSET_BYTES, summarize, sniffImageMime,
-  MAX_DOCUMENT_BYTES, MAX_ARCHIVE_BYTES, pickArchiveTextFiles, isProbablyText,
+  MAX_DOCUMENT_BYTES, MAX_ARCHIVE_BYTES, pickArchiveTextFiles, isProbablyText, detectBuildArtifactArchive,
 } from './project-assets-logic.js';
 import { parseZip, extractEntryData, effectiveEntries, ZipError } from '../lib/zip-extract.js';
-import { queueDocumentSummaries } from './asset-summary.js';
+import { queueDocumentSummaries, maybeBackfillDocumentSummaries } from './asset-summary.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages, getMessage, getChat, insertMessage, getOrCreateChat } from './chats.js';
 import {
@@ -1563,6 +1563,9 @@ export function createMock2Router() {
 
   router.get('/projects/:id/assets', requireMock2Role('viewer'), (req, res) => {
     const assets = listAssets(req.mock2Project.id);
+    // Self-heal: re-queue summaries for documents that never got one (the
+    // upload-time queue is in-memory — a restart drops it). Debounced inside.
+    try { maybeBackfillDocumentSummaries(req.mock2Project.id, assets); } catch { /* advisory */ }
     res.json({ assets, tags: ASSET_TAGS, summary: summarize(assets), limits: { maxBytes: MAX_ASSET_BYTES } });
   });
 
@@ -1689,6 +1692,10 @@ export function createMock2Router() {
         assets: added,
         ingested: added.length,
         skipped: { ...pick.skipped, notText },
+        // Heads-up when the zip is a compiled dist/ rather than source — the
+        // most common way an operator hands the AI something it can read but
+        // not edit, then wonders why the build says the source is missing.
+        warning: detectBuildArtifactArchive(added.map((a) => a.name)),
       });
     });
 

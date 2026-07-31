@@ -12,7 +12,7 @@ import zlib from 'node:zlib';
 import {
   isProbablyText, validateDocumentUpload, pickArchiveTextFiles, docAssetPath,
   buildDocSummaryPrompt, buildAssetContext, normalizeTag, summarize,
-  MAX_DOCUMENT_BYTES,
+  MAX_DOCUMENT_BYTES, detectBuildArtifactArchive,
 } from '../mock2/project-assets-logic.js';
 import { parseZip, effectiveEntries } from '../lib/zip-extract.js';
 
@@ -116,4 +116,28 @@ test('prompt context: documents render summary + state/assets path, never full c
   assert.ok(ctx.includes('(summary pending — read the file if needed)'));
   // The counts surface documents distinctly.
   assert.equal(summarize([{ kind: 'document' }, { kind: 'image' }]).documents, 1);
+});
+
+// ---- dist-vs-source detection (operator report: a dist zip read as "the
+// source didn't upload" when the build honestly said the source wasn't there) ----
+
+test('detectBuildArtifactArchive: flags a Vite dist/ (hashed bundles, no source)', () => {
+  const warning = detectBuildArtifactArchive([
+    'index.html', 'favicon.svg',
+    'assets/index-CkX8WY30.js', 'assets/index-_WXy9k7H.css',
+  ]);
+  assert.ok(warning, 'expected a warning for a dist-shaped archive');
+  assert.match(warning, /compiled production build/i);
+  assert.match(warning, /SOURCE zip/);
+});
+
+test('detectBuildArtifactArchive: silent for source zips and plain site exports', () => {
+  // Real source: bundle-like names may exist, but src/ + package.json win.
+  assert.equal(detectBuildArtifactArchive([
+    'package.json', 'vite.config.ts', 'index.html',
+    'src/main.tsx', 'src/App.tsx', 'assets/logo-abcdef12.css',
+  ]), null);
+  // A plain website export (no hashed bundles at all) is fine.
+  assert.equal(detectBuildArtifactArchive(['index.html', 'about.html', 'style.css']), null);
+  assert.equal(detectBuildArtifactArchive([]), null);
 });

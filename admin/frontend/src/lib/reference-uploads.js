@@ -22,6 +22,9 @@ export async function uploadReferenceFiles(projectId, files, { toast } = {}) {
           title: `Added ${out?.ingested ?? 0} file${out?.ingested === 1 ? '' : 's'} from ${f.name}`,
           description: `Saved to this project's assets — the AI can reference them from now on.${skipped ? ` ${skipped} entr${skipped === 1 ? 'y was' : 'ies were'} skipped (binaries, oversized files, or dependency folders).` : ''}`,
         });
+        if (out?.warning) {
+          toast?.({ variant: 'destructive', title: 'Heads up: this looks like a build, not source', description: out.warning });
+        }
       } else {
         await api.mock2UploadProjectDocument(projectId, f);
         added += 1;

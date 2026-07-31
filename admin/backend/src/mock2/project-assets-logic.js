@@ -95,6 +95,28 @@ export function pickArchiveTextFiles(entries, {
   return { selected, skipped, totalBytes: total };
 }
 
+// detectBuildArtifactArchive — heads-up when an uploaded zip is a COMPILED
+// build output (a Vite/webpack dist/: hashed minified bundles, no source),
+// not source code. The build can read it as reference, but it cannot edit or
+// vendor an app from a bundle — an operator uploaded a dist zip believing
+// they'd handed the AI the app's source, and the build (correctly) halted on
+// "the source files don't exist" (operator report, 2026-07-31). Returns a
+// warning string, or null when the archive looks fine.
+const HASHED_BUNDLE_RE = /(^|\/)assets\/[^/]+-[A-Za-z0-9_-]{8,}\.(js|css)$/;
+const SOURCE_MARKER_RE = /(^|\/)(package\.json|vite\.config\.[jt]s|tsconfig[^/]*\.json|webpack\.config\.[jt]s)$|\.(ts|tsx|jsx|vue|svelte)$|(^|\/)src\//;
+
+export function detectBuildArtifactArchive(paths) {
+  const list = (paths || []).map(String);
+  if (!list.length) return null;
+  const hashedBundles = list.filter((p) => HASHED_BUNDLE_RE.test(p));
+  const hasSource = list.some((p) => SOURCE_MARKER_RE.test(p));
+  if (hashedBundles.length === 0 || hasSource) return null;
+  return 'This zip looks like a compiled production build (hashed, minified bundles — a dist/ folder), '
+    + 'not source code. The AI can read it as reference, but it cannot modify or vendor an app from a '
+    + 'build output. If you want the AI to work on the app itself, upload the SOURCE zip '
+    + '(src/, package.json, config files).';
+}
+
 // Archive paths keep their directory structure for the materialized copy
 // (state/assets/<docAssetPath>) — sanitize per segment, cap depth/length.
 export function docAssetPath(name) {

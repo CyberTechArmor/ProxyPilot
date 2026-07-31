@@ -24,8 +24,15 @@ INSTALL_DIR=""
 # on every Debian/Ubuntu we support; if it's missing we just warn and
 # continue.
 LOCK_FILE="/var/lock/proxypilot-update.lock"
-if command -v flock &>/dev/null; then
-    exec 200>"$LOCK_FILE" 2>/dev/null || true
+# The writability probe runs in a SUBSHELL so its 2>/dev/null cannot stick.
+# Never put a redirection like 2>/dev/null on the bare `exec` below:
+# redirections on exec are permanent for the whole script, and doing so
+# pointed stderr at /dev/null from here on — every interactive `read -p`
+# prompt (which writes to stderr) became invisible, so updates looked hung
+# at the uncommitted-changes question, and all error output was swallowed
+# (operator report, 2026-07-31).
+if command -v flock &>/dev/null && ( : >"$LOCK_FILE" ) 2>/dev/null; then
+    exec 200>"$LOCK_FILE"
     if ! flock -n 200 2>/dev/null; then
         # A held lock during the self-update re-exec is our own
         # lineage, not a second operator. Children spawned while the

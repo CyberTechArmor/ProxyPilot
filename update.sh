@@ -27,10 +27,25 @@ LOCK_FILE="/var/lock/proxypilot-update.lock"
 if command -v flock &>/dev/null; then
     exec 200>"$LOCK_FILE" 2>/dev/null || true
     if ! flock -n 200 2>/dev/null; then
-        echo -e "\033[0;31m[ERROR]\033[0m Another update.sh is already running (lock: $LOCK_FILE)."
-        echo "If you're sure no other process is running:"
-        echo "  rm $LOCK_FILE && retry"
-        exit 1
+        # A held lock during the self-update re-exec is our own
+        # lineage, not a second operator. Children spawned while the
+        # pre-pull process held fd 200 (git's post-pull background
+        # maintenance is the usual one) inherit the locked file
+        # description and keep the flock alive past the exec, which
+        # used to abort the update right after "[2/7] Pulling latest
+        # code". The re-exec'd run already owns this update — warn
+        # and carry on; the stray child exits on its own shortly.
+        if [ -n "${PROXYPILOT_UPDATE_REEXEC:-}" ]; then
+            echo -e "\033[1;33m[WARN]\033[0m Update lock still held by a child of the pre-update process; continuing (self-update re-exec)."
+            # Best-effort re-acquire so the rest of this run is still
+            # guarded once the straggler exits (git gc is quick).
+            flock -w 30 200 2>/dev/null || true
+        else
+            echo -e "\033[0;31m[ERROR]\033[0m Another update.sh is already running (lock: $LOCK_FILE)."
+            echo "If you're sure no other process is running:"
+            echo "  rm $LOCK_FILE && retry"
+            exit 1
+        fi
     fi
 fi
 
@@ -877,6 +892,12 @@ else
         export PROXYPILOT_DB_BACKUP_FILE="$DB_BACKUP_FILE"
         export PROXYPILOT_DB_BACKUP_SOURCE="$DB_BACKUP_SOURCE"
         log_verbose "Re-executing update.sh with the freshly-pulled version"
+        # Release our claim on the update lock before replacing the
+        # process image so the re-exec'd run can re-acquire it.
+        # Children that inherited fd 200 may still hold the old
+        # description; the lock block tolerates that when
+        # PROXYPILOT_UPDATE_REEXEC is set.
+        exec 200>&- 2>/dev/null || true
         exec bash "$SCRIPT_DIR/update.sh" --rebuild "$@"
     fi
 fi

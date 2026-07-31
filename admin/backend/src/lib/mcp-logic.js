@@ -191,6 +191,46 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: 'read_lxc_file',
+    description: 'Read a text file from inside an LXC container (e.g. /opt/app/config.json). Use this to see the current content before proposing an edit with write_lxc_file. Returns up to 512 KB; refuses binary files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string', description: 'Container name from list_lxc_containers (without the pp- prefix).' },
+        path: { type: 'string', description: 'Absolute file path inside the container.' },
+      },
+      required: ['container', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'write_lxc_file',
+    description: 'Write one text file inside an LXC container. If the file already exists and confirm_overwrite is not true, this returns the current file info instead of writing — show the user your proposed change and get their go-ahead first. On overwrite the previous version is kept as `<path>.old`. Parent directories are created. After config/code edits, redeploy with rerun_startup.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        path: { type: 'string', description: 'Absolute file path inside the container.' },
+        content: { type: 'string', description: 'The complete new file content (UTF-8).' },
+        confirm_overwrite: { type: 'boolean', description: 'Set true only after the user approved replacing the existing file.' },
+      },
+      required: ['container', 'path', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'rerun_startup',
+    description: 'Re-run the startup script registered for an LXC container (the redeploy step after write_lxc_file edits). Returns the run output and exit code. Fails if no startup script has been registered — register one via apply_lxc_zip.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+      },
+      required: ['container'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'list_projects',
     description: 'List ProxyPilot AI-dev projects (id, name, url, lifecycle, latest build status).',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },

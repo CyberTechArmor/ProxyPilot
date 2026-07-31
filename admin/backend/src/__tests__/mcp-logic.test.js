@@ -74,6 +74,7 @@ test('tool catalog: every tool has a name, description, and object schema', () =
   for (const required of [
     'list_static_sites', 'inspect_static_site_zip', 'apply_static_site_zip',
     'list_lxc_containers', 'inspect_lxc_zip', 'apply_lxc_zip',
+    'read_lxc_file', 'write_lxc_file', 'rerun_startup',
     'list_projects', 'send_project_build', 'clone_project', 'create_upload_ticket',
   ]) {
     assert.ok(names.has(required), `missing tool ${required}`);

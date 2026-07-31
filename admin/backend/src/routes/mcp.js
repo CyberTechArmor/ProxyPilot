@@ -43,7 +43,7 @@ import {
 import { stageZipUpload, getZipUpload, discardZipUpload } from '../lib/zip-staging.js';
 import {
   checkContainerConflicts, readContainerStartup, applyTarToContainer,
-  setupStartupScript, writeTarFromZip, runHostCapture,
+  setupStartupScript, writeTarFromZip, runHostCapture, runInContainer,
 } from '../lib/lxc-zip.js';
 import { resolveMock2Gate } from '../mock2/gating.js';
 
@@ -69,7 +69,7 @@ const MCP_TMP_DIR = process.env.ZIP_UPLOAD_TMP_DIR || join(os.tmpdir(), 'proxypi
 
 function validTargetDir(p) {
   const s = String(p || '').trim();
-  if (!s.startsWith('/') || s.includes('..') || /[\s'"`\\;|&<>$]/.test(s)) return null;
+  if (!s.startsWith('/') || s.includes('..') || /[\u0000-\u001f\u007f]/.test(s)) return null;
   return s.replace(/\/+$/, '') || '/';
 }
 
@@ -399,6 +399,115 @@ async function toolApplyLxcZip(args, auth) {
   });
 }
 
+// ---- single-file LXC editing (the chat-only "update and redeploy" loop:
+// read → propose → write with .old backup → rerun_startup) ----
+
+const LXC_FILE_READ_CAP = 512 * 1024;
+const LXC_FILE_WRITE_CAP = 2 * 1024 * 1024;
+
+// Absolute path inside the container. Executed via argv (no shell string for
+// the path itself), so spaces are fine — only control chars and traversal
+// dots are rejected as nonsense.
+function validLxcFilePath(p) {
+  const s = String(p || '').trim();
+  if (!s.startsWith('/') || s.includes('..') || /[ -]/.test(s)) return null;
+  return s;
+}
+
+async function toolReadLxcFile(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const path = validLxcFilePath(args.path);
+  if (!path) return toolResult('path must be an absolute file path inside the container', { isError: true });
+  const r = await runHostCapture(
+    'incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c', 'p="$1"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; wc -c < "$p"; head -c 524288 -- "$p"', 'sh', path],
+    { timeoutMs: 30000 },
+  );
+  if (r.status === 66) return toolResult(`Not a file: ${path}`, { isError: true });
+  if (r.status !== 0) {
+    return toolResult(`Could not read ${path} — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  const nl = r.stdout.indexOf('\n');
+  const size = Number(String(r.stdout.slice(0, nl)).trim()) || 0;
+  const body = Buffer.from(r.stdout.slice(nl + 1), 'utf8');
+  if (body.includes(0)) return toolResult(`${path} looks binary — this tool reads text files only`, { isError: true });
+  return toolResult({
+    path, size_bytes: size,
+    truncated: size > LXC_FILE_READ_CAP,
+    content: body.toString('utf8'),
+  });
+}
+
+async function toolWriteLxcFile(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const path = validLxcFilePath(args.path);
+  if (!path) return toolResult('path must be an absolute file path inside the container', { isError: true });
+  const content = String(args.content ?? '');
+  if (Buffer.byteLength(content) > LXC_FILE_WRITE_CAP) {
+    return toolResult(`Content exceeds the ${Math.floor(LXC_FILE_WRITE_CAP / (1024 * 1024))} MB single-file cap — use the zip flow for bigger payloads`, { isError: true });
+  }
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  // Ask-first when the file exists — same contract as every other overwrite.
+  const probe = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'p="$1"; if [ -e "$p" ]; then echo EXISTS; wc -c < "$p"; else echo ABSENT; fi', 'sh', path],
+    { timeoutMs: 30000 },
+  );
+  if (probe.status !== 0) {
+    return toolResult(`Cannot inspect ${name} — is it running? ${(probe.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  const exists = probe.stdout.startsWith('EXISTS');
+  if (exists && args.confirm_overwrite !== true) {
+    const size = Number(String(probe.stdout.split('\n')[1] || '').trim()) || 0;
+    return toolResult({
+      written: false,
+      needs_confirmation: true,
+      path,
+      existing_size_bytes: size,
+      message: `${path} already exists (${size} bytes; it will be kept as ${path}.old). Show the user your proposed change and re-call with confirm_overwrite: true after they approve.`,
+    });
+  }
+
+  const w = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; if [ -e "$p" ]; then rm -rf -- "$p.old"; cp -a -- "$p" "$p.old"; fi; mkdir -p "$(dirname -- "$p")"; cat > "$p"', 'sh', path],
+    { input: content, timeoutMs: 60000 },
+  );
+  if (w.status !== 0) {
+    return toolResult(`Write failed: ${(w.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  logAudit(auth.created_by, 'LXC_FILE_WRITTEN', 'lxc', name, { via: 'mcp', path, bytes: Buffer.byteLength(content), replaced: exists }, null);
+  return toolResult({
+    written: true, path, bytes: Buffer.byteLength(content),
+    backup: exists ? `${path}.old` : null,
+    next: 'If this container has a registered startup script, redeploy with rerun_startup.',
+  });
+}
+
+async function toolRerunStartup(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const incusName = `${LXC_PREFIX}${name}`;
+  const startup = await readContainerStartup(incusName).catch(() => null);
+  if (!startup?.scriptPath) {
+    return toolResult('No startup script is registered for this container — deploy one via apply_lxc_zip (startup_script) first', { isError: true });
+  }
+  const wd = startup.workingDir || '/';
+  const r = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'cd "$1" && exec "$2"', 'sh', wd, startup.scriptPath],
+    { timeoutMs: parseInt(process.env.PROXYPILOT_STARTUP_RUN_TIMEOUT_MS || '120000', 10) },
+  );
+  logAudit(auth.created_by, 'LXC_STARTUP_RERUN', 'lxc', name, { via: 'mcp', script: startup.scriptPath, exit: r.status }, null);
+  return toolResult({
+    script: startup.scriptPath,
+    working_dir: wd,
+    exit_code: r.status,
+    timed_out: !!r.timedOut,
+    stdout: r.stdout.slice(-16 * 1024),
+    stderr: r.stderr.slice(-16 * 1024),
+  });
+}
+
 async function toolListProjects() {
   const m = await mock2Modules();
   const rows = m.projects.listProjects().filter((p) => p.lifecycle !== 'failed_provisioning');
@@ -512,6 +621,9 @@ const TOOL_HANDLERS = {
   list_lxc_containers: toolListLxcContainers,
   inspect_lxc_zip: toolInspectLxcZip,
   apply_lxc_zip: toolApplyLxcZip,
+  read_lxc_file: toolReadLxcFile,
+  write_lxc_file: toolWriteLxcFile,
+  rerun_startup: toolRerunStartup,
   list_projects: toolListProjects,
   get_project: toolGetProject,
   send_project_build: toolSendProjectBuild,

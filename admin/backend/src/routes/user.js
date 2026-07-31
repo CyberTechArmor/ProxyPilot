@@ -69,14 +69,25 @@ const DEFAULT_GITHUB_REPO = 'CyberTechArmor/ProxyPilot';
 
 // Get version from package.json
 function getPackageVersion() {
-  try {
-    const packagePath = join(PROJECT_ROOT, 'admin', 'backend', 'package.json');
-    if (existsSync(packagePath)) {
-      const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
-      return pkg.version || '1.0.0';
+  // Resolve the backend's OWN package.json relative to this module, not to a
+  // guessed repo root — inside the Docker image the source lives at
+  // /app/backend (no admin/ prefix), so the PROJECT_ROOT-based path missed
+  // and every deployed install reported the '1.0.0' fallback in the sidebar,
+  // making real updates look like they never installed (operator report).
+  // The repo-root path is kept as a fallback for unusual layouts.
+  const candidates = [
+    fileURLToPath(new URL('../../package.json', import.meta.url)),
+    join(PROJECT_ROOT, 'admin', 'backend', 'package.json'),
+  ];
+  for (const packagePath of candidates) {
+    try {
+      if (existsSync(packagePath)) {
+        const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
+        if (pkg.version) return pkg.version;
+      }
+    } catch (e) {
+      console.error('Error reading package.json:', e);
     }
-  } catch (e) {
-    console.error('Error reading package.json:', e);
   }
   return '1.0.0';
 }

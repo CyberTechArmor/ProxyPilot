@@ -794,7 +794,22 @@ log_verbose "Working directory: $SCRIPT_DIR"
 # Get current version
 CURRENT_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")
 log "Current version: ${YELLOW}v${CURRENT_VERSION}${NC}"
+# The version number only moves on releases; the COMMIT is what proves which
+# build this checkout actually is (operator report: "up to date" read as a
+# refusal because the version banner never changed between real updates).
+CURRENT_COMMIT_LINE="$($GIT_CMD log -1 --format='%h (%ad) %s' --date=short 2>/dev/null || echo unknown)"
+log "Current commit:  ${YELLOW}${CURRENT_COMMIT_LINE}${NC}"
 log ""
+
+# package-lock.json files are generated artifacts: any host-side npm run
+# rewrites their self-version fields, and that drift then (a) triggers the
+# scary uncommitted-changes prompt on every update and (b) can conflict with
+# a pulled lockfile change. Restore them to the committed state before the
+# dirty check — nothing hand-edited lives in a lockfile.
+if $GIT_CMD status --porcelain 2>/dev/null | grep -qE 'package-lock\.json$'; then
+    log "${BLUE}Restoring locally drifted package-lock.json (generated file)...${NC}"
+    $GIT_CMD checkout -- 'admin/frontend/package-lock.json' 'admin/backend/package-lock.json' 2>/dev/null || true
+fi
 
 # Check for uncommitted changes
 if [ -n "$($GIT_CMD status --porcelain 2>/dev/null)" ]; then
@@ -848,6 +863,9 @@ if [ "$LOCAL" = "$REMOTE" ]; then
         log "${YELLOW}Code is up to date, but rebuilding as requested...${NC}"
     else
         log "${GREEN}Code is already up to date!${NC}"
+        # Prove it: name the commit both sides sit on, so "up to date" is
+        # verifiable against GitHub instead of taken on faith.
+        log "Local and origin/main are both at: $($GIT_CMD log -1 --format='%h (%ad) %s' --date=short origin/main 2>/dev/null || echo "$REMOTE")"
         log ""
         read -p "Do you want to rebuild anyway? (y/N) " -n 1 -r
         echo

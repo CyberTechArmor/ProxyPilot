@@ -250,8 +250,13 @@ import { buildCheckpointScript } from './template.js';
 import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback, listCycleActivity, lastCycleEventAt } from './cycle-events.js';
 import { listKeyRows, getKeyRow, upsertKey, deleteKey, describeKeySource } from './project-keys.js';
 import { KEY_PROVIDERS, canManageKey, visibleKeyRows, publicKeyShape } from './project-keys-logic.js';
-import { listAssets, getAsset, assetFilePath, addImage, addContent, updateAsset, removeAsset } from './project-assets.js';
-import { ASSET_TAGS, MAX_ASSET_BYTES, summarize, sniffImageMime } from './project-assets-logic.js';
+import { listAssets, getAsset, assetFilePath, addImage, addContent, addDocument, updateAsset, removeAsset, readAssetText } from './project-assets.js';
+import {
+  ASSET_TAGS, MAX_ASSET_BYTES, summarize, sniffImageMime,
+  MAX_DOCUMENT_BYTES, MAX_ARCHIVE_BYTES, pickArchiveTextFiles, isProbablyText,
+} from './project-assets-logic.js';
+import { parseZip, extractEntryData, effectiveEntries, ZipError } from '../lib/zip-extract.js';
+import { queueDocumentSummaries } from './asset-summary.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages, getMessage, getChat, insertMessage, getOrCreateChat } from './chats.js';
 import {
@@ -1536,6 +1541,100 @@ export function createMock2Router() {
         { kind: 'image', tag: out.asset.tag, name: out.asset.name, size: out.asset.size }, req.ip);
       res.status(201).json({ asset: out.asset });
     });
+
+  // Upload a reference FILE (any extension — .ts, .md, a spec, …). Raw bytes
+  // like the image route; acceptance is decided by content (text sniff), not
+  // the name. The stored asset carries a model-generated summary shortly
+  // after (asset-summary.js, fire-and-forget) — prompts get the summary, the
+  // full file is materialized into the project at state/assets/ for reads.
+  router.post('/projects/:id/assets/document',
+    requireMock2Role('editor'), refuseIfArchived,
+    expressRaw({ type: () => true, limit: MAX_DOCUMENT_BYTES }),
+    (req, res) => {
+      const project = req.mock2Project;
+      const buffer = Buffer.isBuffer(req.body) ? req.body : null;
+      if (!buffer || !buffer.length) return res.status(400).json({ error: 'No file data received.', code: 'EMPTY' });
+      const out = addDocument({
+        projectId: project.id,
+        name: req.get('X-Filename') || 'document.txt',
+        buffer,
+        tag: req.get('X-Asset-Tag') || null,
+        createdBy: req.user.id,
+      });
+      if (!out.ok) {
+        const status = out.code === 'TOO_LARGE' ? 413 : (out.code === 'NOT_TEXT' ? 415 : 400);
+        const message = out.code === 'NOT_TEXT'
+          ? 'This looks like a binary file — reference files must be text (source, markdown, HTML, CSV, …).'
+          : out.code === 'TOO_LARGE' ? `Reference files are capped at ${Math.round(MAX_DOCUMENT_BYTES / (1024 * 1024))} MB.` : 'Upload failed.';
+        return res.status(status).json({ error: message, code: out.code });
+      }
+      logAudit(req.user.id, 'MOCK2_PROJECT_ASSET_ADDED', 'mock2_project', project.id,
+        { kind: 'document', tag: out.asset.tag, name: out.asset.name, size: out.asset.size }, req.ip);
+      queueDocumentSummaries(project.id, [out.asset.id]);
+      res.status(201).json({ asset: out.asset });
+    });
+
+  // Upload a ZIP of reference material (e.g. a website export): unpacked
+  // server-side through lib/zip-extract's validated parser (zip-slip and
+  // bomb guards), each contained text file becomes its own document asset
+  // named by its archive path. Binaries/deps/build output are skipped and
+  // the counts reported — never silently.
+  router.post('/projects/:id/assets/archive',
+    requireMock2Role('editor'), refuseIfArchived,
+    expressRaw({ type: () => true, limit: MAX_ARCHIVE_BYTES }),
+    (req, res) => {
+      const project = req.mock2Project;
+      const buffer = Buffer.isBuffer(req.body) ? req.body : null;
+      if (!buffer || !buffer.length) return res.status(400).json({ error: 'No zip data received.', code: 'EMPTY' });
+      let parsed;
+      try {
+        parsed = parseZip(buffer, { maxZipBytes: MAX_ARCHIVE_BYTES, maxExtractedBytes: 200 * 1024 * 1024, maxEntries: 20000 });
+      } catch (err) {
+        if (err instanceof ZipError) {
+          return res.status(err.code === 'TOO_LARGE' ? 413 : 400).json({ error: err.message, code: err.code });
+        }
+        throw err;
+      }
+      // Strip a single wrapper folder (dist/, site-export/) so asset paths
+      // read naturally, then pick the text files worth ingesting.
+      const entries = effectiveEntries(parsed.entries, true);
+      const pick = pickArchiveTextFiles(entries);
+      const added = [];
+      let notText = 0;
+      for (const entry of pick.selected) {
+        let data;
+        try { data = extractEntryData(buffer, entry); } catch { notText++; continue; }
+        if (!isProbablyText(data)) { notText++; continue; }
+        const out = addDocument({
+          projectId: project.id, name: entry.path, buffer: data,
+          tag: req.get('X-Asset-Tag') || 'website', createdBy: req.user.id,
+        });
+        if (out.ok) added.push(out.asset);
+      }
+      if (!added.length) {
+        return res.status(415).json({
+          error: 'No text files could be ingested from this zip.',
+          code: 'NO_TEXT_FILES',
+          skipped: { ...pick.skipped, notText },
+        });
+      }
+      logAudit(req.user.id, 'MOCK2_PROJECT_ASSET_ADDED', 'mock2_project', project.id,
+        { kind: 'document', archive: true, files: added.length, name: req.get('X-Filename') || 'archive.zip' }, req.ip);
+      queueDocumentSummaries(project.id, added.map((a) => a.id));
+      res.status(201).json({
+        assets: added,
+        ingested: added.length,
+        skipped: { ...pick.skipped, notText },
+      });
+    });
+
+  // A document's full text (viewer-gated) — the panel's "view file" action.
+  router.get('/projects/:id/assets/:assetId/text', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const text = readAssetText(project.id, req.params.assetId);
+    if (text == null) return res.status(404).json({ error: 'asset not found' });
+    res.json({ text: text.slice(0, 2 * 1024 * 1024) });
+  });
 
   // Serve an image's bytes. Viewer-gated like every other project read — these
   // are operator working files, not public site furniture.

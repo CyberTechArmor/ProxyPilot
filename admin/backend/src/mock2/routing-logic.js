@@ -24,6 +24,8 @@
 
 // ---- task kinds (the dictionary keys) ----
 
+import { MODEL_BALANCED } from './models.js';
+
 export const ROUTING_TASK_KINDS = Object.freeze([
   'chore', 'bugfix', 'feature', 'refactor', 'question', 'default',
 ]);
@@ -134,7 +136,7 @@ export function escalationAttempts({ priorCycles = [], requestId = null, instruc
 // of the slot model. Hard tasks (difficulty 4–5), unclassified tasks, explicit
 // rule overrides, and escalations are untouched. MOCK2_FAST_MODEL=off disables;
 // MOCK2_FAST_MODEL=<id> overrides the default id.
-export const DEFAULT_FAST_MODEL = 'claude-sonnet-5';
+export const DEFAULT_FAST_MODEL = MODEL_BALANCED;
 export const FAST_MODEL_MAX_DIFFICULTY = 3;
 
 export function fastCodeModel(env = {}) {

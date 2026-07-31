@@ -96,7 +96,7 @@ test('summary counts each kind separately', () => {
     { kind: 'image', size: 500 },
     { kind: 'content', pinned: true },
   ]);
-  assert.deepEqual(s, { total: 3, images: 2, content: 1, pinned: 2, bytes: 1500 });
+  assert.deepEqual(s, { total: 3, images: 2, content: 1, documents: 0, pinned: 2, bytes: 1500 });
 });
 
 test('harness context: empty library costs nothing', () => {

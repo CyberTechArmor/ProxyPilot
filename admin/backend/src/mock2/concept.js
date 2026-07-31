@@ -44,7 +44,11 @@ import { projectIntake } from './setup-flow.js';
 import { intakeBriefPreamble, intakeBuildSection } from './setup-flow-logic.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
-import { insertMessage, listMessages, getOrCreateChat } from './chats.js';
+import { insertMessage, listMessages, getOrCreateChat, getChat, updateChatSummary } from './chats.js';
+import {
+  chatSummaryEnabled, chatSummaryWindow, shouldRefreshChatSummary,
+  buildChatSummaryPrompt, CHAT_SUMMARY_MAX_CHARS, CHAT_SUMMARY_SYSTEM_PROMPT,
+} from './chat-summary-logic.js';
 import { saveChatImages, readChatImage, hydrateAttachments, hydrateChatMessagesForModel } from './chat-images.js';
 import {
   CONCEPT_CHAT_TOOLS, buildConceptChatSystemPrompt, buildMockupSystemPrompt, buildMockupTask,
@@ -77,6 +81,7 @@ import { applyLaneTuning } from './lane-tuning-logic.js';
 import { applyDesignPreset, applyExploreDesign, getDesignPreset, parseDesignDoc, DESIGN_DOC_FORMAT } from './design-presets.js';
 import { replaceScreenPlan, queueScreens, drainScreenQueue } from './screen-plan.js';
 import { INITIAL_BUILD_INSTRUCTION_PREFIX } from './screen-plan-logic.js';
+import { MODEL_PRIMARY } from './models.js';
 
 const APP_DIR = '/srv/app';
 const nowIso = () => new Date().toISOString();
@@ -197,7 +202,7 @@ export async function adjustDesignPreset({ presetKey, instruction }) {
   if (!ready.ok) return { ok: false, error: ready.reason };
   const system = stepSystemPrompt('design-doc-adjust', DESIGN_DOC_ADJUST_SYSTEM_PROMPT, {});
   const user = `Current design "${preset.name}" (${preset.description || 'no description'}):\n${JSON.stringify(preset.tokens, null, 2)}\n\nAdjustment instruction: ${String(instruction || '').slice(0, 1000)}\n\nReturn the full adjusted token set as strict JSON.`;
-  const tuned = applyLaneTuning({ model: 'claude-opus-5', effort: 'high', thinking: null }, getLaneTuning('chat'));
+  const tuned = applyLaneTuning({ model: MODEL_PRIMARY, effort: 'high', thinking: null }, getLaneTuning('chat'));
   // Transcript turns use `text` (anthropicMessages reads turn.text — a
   // `content` key maps to an EMPTY text block, which the API rejects when the
   // cache breakpoint lands on it).
@@ -255,6 +260,38 @@ function quotaVerdict(projectId, estCostCents) {
     { spentCents: usage.costCents, runningCycles },
   );
   return { verdict, quota };
+}
+
+// Bridge-summary refresh (best-effort, after a concept reply lands). Folds
+// the oldest un-summarized messages into the rolling brief via the cheap
+// `summary` slot so the NEXT turn replays brief + tail instead of the whole
+// history. Every failure path is a silent no-op — the window only ever
+// activates on a successfully stored brief, so the worst case is one more
+// full-history turn.
+async function maybeRefreshChatSummary({ projectId, cycleId = null }) {
+  if (!chatSummaryEnabled()) return;
+  const need = shouldRefreshChatSummary(listMessages(projectId), getChat(projectId));
+  if (!need) return;
+  const ready = slotReady('summary');
+  if (!ready.ok) return; // no summary model configured — full replay stands
+  const chatRow = getChat(projectId);
+  const prompt = buildChatSummaryPrompt({
+    previousSummary: chatRow?.summary || '',
+    slice: need.slice,
+    maxChars: CHAT_SUMMARY_MAX_CHARS,
+  });
+  const res = await callStepTurn('chat-summary', {
+    connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
+    system: stepSystemPrompt('chat-summary', CHAT_SUMMARY_SYSTEM_PROMPT, {}),
+    tools: [], transcript: [{ role: 'user', text: prompt }],
+    maxTokens: 2000, effort: 'low', thinking: 'off', timeoutMs: 120000,
+  });
+  if (!res.ok || !String(res.text || '').trim()) return;
+  const brief = String(res.text).trim().slice(0, CHAT_SUMMARY_MAX_CHARS);
+  updateChatSummary(projectId, { summary: brief, throughId: need.throughId });
+  if (cycleId != null) {
+    recordSpend({ projectId, cycleId, connector: ready.connector, model: res.modelUsed || ready.model, usage: res.usage || {}, step: 'chat-summary' });
+  }
 }
 
 // Ledger + cycle usage after a model call. Cache read/write tokens are counted
@@ -572,7 +609,14 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   //    reads the whole history (including it) — don't append it again.
   // Multi-modal: hydrate image attachments into the transcript (the most
   // recent few as real image blocks; older ones as stable placeholders).
-  const transcript = buildConceptTranscript(hydrateChatMessagesForModel(projectId, listMessages(projectId)));
+  // Bridge summary (cost lever): when a rolling brief covers the older
+  // history, replay brief + recent tail instead of the whole chat — the
+  // full-history replay grew quadratically in cached-read volume on the
+  // most expensive lane. No brief yet → full history, unchanged behavior.
+  const windowed = chatSummaryWindow(listMessages(projectId), getChat(projectId), {
+    enabled: chatSummaryEnabled(),
+  });
+  const transcript = buildConceptTranscript(hydrateChatMessagesForModel(projectId, windowed.messages));
   // The asset library the operator collected for THIS project. Read once and
   // used twice: the design partner is told what is on hand (so it can say
   // "I'll use the logo you uploaded" instead of inventing a wordmark), and the
@@ -621,7 +665,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // maxTokens covers the reply + the generate_mockup tool call AND, on capable
   // models, adaptive thinking (routing turned it on; it shares the budget) —
   // sized up from the pre-thinking 4000 so the tool call can't be squeezed out.
-  const chatTuned = applyLaneTuning({ model: 'claude-opus-5', effort: 'high', thinking: null }, getLaneTuning('chat'));
+  const chatTuned = applyLaneTuning({ model: MODEL_PRIMARY, effort: 'high', thinking: null }, getLaneTuning('chat'));
   const chatRes = await callStepTurn('concept-chat', {
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: chatTuned.model,
     system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript,
@@ -1076,6 +1120,14 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: mockupSystemNote });
   }
 
+  // Bridge-summary refresh — after the reply is stored so the fold sees the
+  // complete exchange. Best-effort: a failure changes nothing about this turn.
+  try {
+    await maybeRefreshChatSummary({ projectId, cycleId: cycle.id });
+  } catch (e) {
+    console.warn('[mock2] chat summary refresh failed (advisory):', e?.message);
+  }
+
   finishCycle(cycle.id, { status: 'succeeded' });
   // Keep the human lock held (the Builder is actively working — the idle sweep
   // reclaims it, or design approval releases it: ADR-004 "release on idle/approval").
@@ -1240,7 +1292,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // approval is a hard gate — ONE automatic retry on a parse failure before we
   // make the Builder redo it.
   const extractCall = () => callStepTurn('inventory-extraction', {
-    connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: 'claude-opus-5',
+    connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: MODEL_PRIMARY,
     system: stepSystemPrompt('inventory-extraction', buildInventoryExtractionPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: buildInventoryExtractionTask({ html, projectName: project.name }) }],
     effort: 'medium',
@@ -1299,7 +1351,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // so this never blocks approval.
   try {
     const tokRes = await callStepTurn('design-token-extraction', {
-      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: 'claude-opus-5',
+      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: MODEL_PRIMARY,
       system: stepSystemPrompt('design-token-extraction', buildDesignTokenExtractionPrompt(), {}), tools: [],
       transcript: [{ role: 'user', text: buildDesignTokenExtractionTask({ html, projectName: project.name }) }],
       effort: 'high',

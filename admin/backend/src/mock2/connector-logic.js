@@ -19,6 +19,8 @@
 // drives it is `build_runner`; nothing here is named "agent".
 
 // The 7 slots (migration 503 CHECK). One connector+model is pinned per slot.
+import { MODEL_PRIMARY, MODEL_FRONTIER, MODEL_CHEAP } from './models.js';
+
 export const MODEL_SLOTS = Object.freeze([
   'concept_chat',
   'mockup',
@@ -76,13 +78,13 @@ export function isValidSlot(slot) {
 // build or remediation to Fable 5 by default (see lanesRecommendingFable5 + its guard
 // test). Model ids are the latest Claude family (Opus 5 / Haiku 4.5 / Fable 5).
 export const RECOMMENDED_MODEL_FOR_SLOT = Object.freeze({
-  concept_chat: 'claude-opus-5',
-  mockup: 'claude-opus-5',
-  audit: 'claude-fable-5',       // ← the one deliberate Fable 5 lane
-  classifier: 'claude-haiku-4-5',
-  build_runner: 'claude-opus-5',
-  summary: 'claude-haiku-4-5',
-  remediation: 'claude-opus-5',
+  concept_chat: MODEL_PRIMARY,
+  mockup: MODEL_PRIMARY,
+  audit: MODEL_FRONTIER,       // ← the one deliberate Fable 5 lane
+  classifier: MODEL_CHEAP,
+  build_runner: MODEL_PRIMARY,
+  summary: MODEL_CHEAP,
+  remediation: MODEL_PRIMARY,
 });
 
 export function recommendedModelForSlot(slot) {

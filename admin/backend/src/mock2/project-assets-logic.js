@@ -22,7 +22,117 @@ export const MAX_ASSET_BYTES = 8 * 1024 * 1024;   // 8 MB
 export const MAX_BODY_CHARS = 20000;
 export const MAX_NAME_CHARS = 200;
 export const MAX_TAG_CHARS = 40;
-export const ASSET_KINDS = ['image', 'content'];
+export const ASSET_KINDS = ['image', 'content', 'document'];
+
+// ---- Document assets (uploaded reference files + zip archives) ----
+//
+// A document is a TEXT file the operator wants the AI to be able to
+// reference — source files, specs, a website export. Any extension is
+// accepted; acceptance is decided by CONTENT (isProbablyText), not the
+// name, so `.ts`, `.svelte`, `Makefile`, or extensionless files all work
+// while a mislabelled binary is refused. Zips are unpacked server-side
+// (through lib/zip-extract's validated parser) and each contained text
+// file becomes its own document asset named by its archive path.
+export const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;      // 2 MB per file
+export const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024;      // 50 MB zip upload
+export const MAX_ARCHIVE_FILES = 200;                   // docs ingested per zip
+export const MAX_ARCHIVE_TEXT_BYTES = 15 * 1024 * 1024; // total text ingested per zip
+export const DOC_SUMMARY_MAX_CHARS = 2500;              // stored brief per document
+// Archive entries that are never worth ingesting (build output, deps, VCS).
+const ARCHIVE_SKIP_DIRS = /(^|\/)(node_modules|\.git|dist|build|\.next|\.cache|vendor|__pycache__)(\/|$)/;
+// Extensions that are certainly binary — skipped without content-sniffing.
+const BINARY_EXTS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.zip', '.gz', '.tar',
+  '.woff', '.woff2', '.ttf', '.otf', '.eot', '.mp3', '.mp4', '.webm', '.wasm',
+  '.exe', '.dll', '.so', '.dylib', '.class', '.jar', '.db', '.sqlite',
+]);
+
+// Content sniff: text files have no NULs and a low control-char ratio.
+// Checks the first 8k bytes — enough to classify any real file.
+export function isProbablyText(buffer) {
+  if (!buffer || !buffer.length) return false;
+  const n = Math.min(buffer.length, 8192);
+  let control = 0;
+  for (let i = 0; i < n; i++) {
+    const b = buffer[i];
+    if (b === 0) return false;
+    if (b < 0x09 || (b > 0x0d && b < 0x20)) control++;
+  }
+  return control / n < 0.02;
+}
+
+// validateDocumentUpload — everything decidable before bytes are stored.
+export function validateDocumentUpload({ name, buffer }) {
+  if (!buffer || !buffer.length) return { ok: false, error: 'EMPTY' };
+  if (buffer.length > MAX_DOCUMENT_BYTES) return { ok: false, error: 'TOO_LARGE' };
+  if (!isProbablyText(buffer)) return { ok: false, error: 'NOT_TEXT' };
+  if (!sanitizeName(name, '')) return { ok: false, error: 'BAD_NAME' };
+  return { ok: true };
+}
+
+// pickArchiveTextFiles — which entries of a parsed zip become documents.
+// `entries` are lib/zip-extract parsed entries (paths already validated
+// against traversal). Selection is by path heuristics only; the caller
+// content-sniffs each candidate after inflating and reports final skips.
+export function pickArchiveTextFiles(entries, {
+  maxFiles = MAX_ARCHIVE_FILES,
+  maxFileBytes = MAX_DOCUMENT_BYTES,
+  maxTotalBytes = MAX_ARCHIVE_TEXT_BYTES,
+} = {}) {
+  const selected = [];
+  const skipped = { dirs: 0, binaryExt: 0, tooLarge: 0, overFileCap: 0, overTotalCap: 0 };
+  let total = 0;
+  for (const e of entries || []) {
+    if (e.isDirectory) continue;
+    if (ARCHIVE_SKIP_DIRS.test(e.path)) { skipped.dirs++; continue; }
+    if (BINARY_EXTS.has(extFor(e.path))) { skipped.binaryExt++; continue; }
+    if (e.uncompressedSize > maxFileBytes) { skipped.tooLarge++; continue; }
+    if (selected.length >= maxFiles) { skipped.overFileCap++; continue; }
+    if (total + e.uncompressedSize > maxTotalBytes) { skipped.overTotalCap++; continue; }
+    selected.push(e);
+    total += e.uncompressedSize;
+  }
+  return { selected, skipped, totalBytes: total };
+}
+
+// Archive paths keep their directory structure for the materialized copy
+// (state/assets/<docAssetPath>) — sanitize per segment, cap depth/length.
+export function docAssetPath(name) {
+  const segs = String(name || '')
+    .split('/')
+    .map((s) => s.replace(/[\u0000-\u001f\u007f\\]/g, '').trim())
+    .filter((s) => s && s !== '.' && s !== '..')
+    .slice(0, 12);
+  const joined = segs.join('/').slice(0, 300);
+  return joined || 'document.txt';
+}
+
+// The system prompt for the summary-slot call (harness-prompts-logic
+// registers it so operators can preview/override it like any other step).
+export const DOC_SUMMARY_SYSTEM_PROMPT = [
+  'You summarize reference files for an AI build assistant. The assistant can read any file',
+  'in full on demand, so your summary is a MAP, not a replacement: say what the file is,',
+  'what it contains, and where the notable things live (sections, functions, pages, data',
+  'shapes) so the assistant knows when a full read is worth it. Be concrete — names and',
+  'pointers, not generalities. Output ONLY the summary text, no preamble or commentary.',
+].join('\n');
+
+// The summary-model prompt for one document: a brief + a "where to find
+// things" index, which is what enters build/concept prompts in place of
+// the full content.
+export function buildDocSummaryPrompt({ name, text, maxChars = DOC_SUMMARY_MAX_CHARS }) {
+  return [
+    `Summarize the reference file "${name}" for an AI build assistant that can read the full`,
+    'file on demand but should rarely need to. Produce, in plain text:',
+    '1. Two or three sentences: what this file is and what it contains.',
+    '2. A short "where to find things" index: the notable sections/functions/pages and a',
+    '   line-or-heading pointer for each (e.g. "auth flow — handleLogin(), ~line 120").',
+    `Hard limit ${maxChars} characters total. Return only the summary text.`,
+    '',
+    'File content (may be truncated):',
+    String(text || '').slice(0, 60_000),
+  ].join('\n');
+}
 
 // Tags are a fixed vocabulary rather than free text: they drive what the build
 // harness is told an asset IS ("this is the logo" vs "this is a screenshot"),
@@ -37,6 +147,9 @@ export const ASSET_TAGS = [
   { key: 'about', label: 'About this app', kinds: ['content'] },
   { key: 'brand', label: 'Brand & voice', kinds: ['content'] },
   { key: 'note', label: 'Note', kinds: ['content'] },
+  { key: 'reference-file', label: 'Reference file', kinds: ['document'] },
+  { key: 'website', label: 'Website export', kinds: ['document'] },
+  { key: 'spec', label: 'Spec / requirements', kinds: ['document'] },
 ];
 const TAG_KEYS = new Set(ASSET_TAGS.map((t) => t.key));
 
@@ -57,12 +170,13 @@ export function sanitizeName(name, fallback = 'asset') {
 }
 
 export function normalizeTag(tag, kind) {
+  const fallback = kind === 'content' ? 'note' : kind === 'document' ? 'reference-file' : 'reference';
   const t = String(tag || '').trim().toLowerCase();
-  if (!TAG_KEYS.has(t)) return kind === 'content' ? 'note' : 'reference';
+  if (!TAG_KEYS.has(t)) return fallback;
   const def = ASSET_TAGS.find((x) => x.key === t);
   // A tag that does not apply to this kind falls back rather than erroring —
   // switching an item's kind should not strand it with a nonsense label.
-  if (def && !def.kinds.includes(kind)) return kind === 'content' ? 'note' : 'reference';
+  if (def && !def.kinds.includes(kind)) return fallback;
   return t;
 }
 
@@ -126,6 +240,7 @@ export function summarize(assets) {
     total: list.length,
     images: list.filter((a) => a.kind === 'image').length,
     content: list.filter((a) => a.kind === 'content').length,
+    documents: list.filter((a) => a.kind === 'document').length,
     pinned: list.filter((a) => a.pinned).length,
     bytes: list.reduce((n, a) => n + (a.size || 0), 0),
   };
@@ -168,6 +283,22 @@ export function buildAssetContext(assets, { maxChars = 6000 } = {}) {
       const label = ASSET_TAGS.find((t) => t.key === im.tag);
       const dims = im.width && im.height ? ` ${im.width}x${im.height}` : '';
       lines.push(`- ${im.name}${dims} — ${label ? label.label : 'reference'}${im.pinned ? ' (pinned)' : ''}`);
+    }
+  }
+  const documents = ordered.filter((a) => a.kind === 'document');
+  if (documents.length) {
+    if (lines.length) lines.push('');
+    // Only the SUMMARY enters the prompt; the full file is on disk in the
+    // project at state/assets/<path> for on-demand reads. That split is the
+    // cost/quality contract for reference files: cheap context, full
+    // fidelity one read away.
+    lines.push('Reference files the operator uploaded (full content readable in the project at state/assets/<path>; the summary below is usually enough):');
+    for (const doc of documents) {
+      const label = ASSET_TAGS.find((t) => t.key === doc.tag);
+      const kb = doc.size ? ` (${Math.max(1, Math.round(doc.size / 1024))} KB)` : '';
+      lines.push(`- state/assets/${docAssetPath(doc.name)}${kb} — ${label ? label.label : 'Reference file'}${doc.pinned ? ' (pinned)' : ''}`);
+      const summary = String(doc.body || '').trim();
+      lines.push(summary ? `  ${summary.replace(/\n+/g, '\n  ')}` : '  (summary pending — read the file if needed)');
     }
   }
 

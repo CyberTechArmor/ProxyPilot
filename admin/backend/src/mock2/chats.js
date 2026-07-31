@@ -76,3 +76,16 @@ export function countMessages(projectId) {
   if (!chat) return 0;
   return getMock2Db().prepare(`SELECT COUNT(*) AS n FROM mock2_chat_messages WHERE chat_id = ?`).get(chat.id).n;
 }
+
+// Bridge summary (migration 552; chat-summary-logic owns the rules).
+// throughId only ever moves FORWARD — a stale refresh racing a newer one
+// must not roll coverage back and double-drop messages from the window.
+export function updateChatSummary(projectId, { summary, throughId }) {
+  const chat = getOrCreateChat(projectId);
+  getMock2Db()
+    .prepare(
+      `UPDATE mock2_chats SET summary = ?, summary_through_id = ?
+       WHERE id = ? AND (summary_through_id IS NULL OR summary_through_id <= ?)`,
+    )
+    .run(String(summary ?? ''), Number(throughId) || null, chat.id, Number(throughId) || 0);
+}

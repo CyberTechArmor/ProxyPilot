@@ -103,7 +103,7 @@ export async function callModelTurn(args) {
 }
 
 async function callModelOnce({
-  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null, serverTools = [], effort = null, onDelta = null, thinking = null,
+  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null, serverTools = [], effort = null, onDelta = null, thinking = null, cacheTtl = null,
 }) {
   const provider = connector?.provider;
   // The abort deadline scales with the REQUESTED OUTPUT unless the caller pins
@@ -127,7 +127,7 @@ async function callModelOnce({
   try {
     switch (provider) {
       case 'anthropic':
-        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools, effort, onDelta, thinking, onActivity });
+        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools, effort, onDelta, thinking, onActivity, cacheTtl });
       case 'gemini':
         return await callGemini({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal });
       case 'openai':
@@ -158,9 +158,17 @@ async function callModelOnce({
 }
 
 // ---- Anthropic Messages API (tool use) ----
-async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [], effort = null, onDelta = null, thinking = null, onActivity = null }) {
+async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [], effort = null, onDelta = null, thinking = null, onActivity = null, cacheTtl = null }) {
   const url = `${String(baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/messages`;
-  const messages = withMessageCacheBreakpoint(anthropicMessages(transcript));
+  // cacheTtl:'1h' opts a lane into the 1-hour cache (2x write vs 1.25x for
+  // the default 5-minute TTL, ~0.1x reads either way). Worth it for long
+  // build cycles where slow gate batteries / tool runs stretch the gap
+  // between turns past 5 minutes — without it every such gap re-writes the
+  // whole transcript prefix at full write price. Break-even is ~3 reads per
+  // write, which a multi-turn runner loop clears trivially; short chat lanes
+  // stay on the default.
+  const cacheControl = cacheTtl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
+  const messages = withMessageCacheBreakpoint(anthropicMessages(transcript), cacheControl);
   // Stream when the caller wants deltas OR the request is HEAVY: images in the
   // transcript, or a large output budget. A heavy non-streaming request can
   // take minutes to first byte (image processing + adaptive thinking), and
@@ -190,7 +198,7 @@ async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript
     // together, and one on the last message block caches the whole conversation
     // prefix — each new turn then only pays for the new turns. Below the model's
     // minimum cacheable size it silently no-ops, which is fine.
-    ...(system ? { system: [{ type: 'text', text: String(system), cache_control: { type: 'ephemeral' } }] } : {}),
+    ...(system ? { system: [{ type: 'text', text: String(system), cache_control: cacheControl }] } : {}),
     // Function tools first, then provider-executed server tools verbatim (e.g.
     // web_search — Anthropic runs the search server-side during this call; the
     // response's server_tool_use / web_search_tool_result blocks are informational
@@ -359,7 +367,7 @@ async function anthropicAccumulateStream(res, onDelta, onActivity = null) {
 // reprocessing every prior turn. Non-mutating (clones the touched message +
 // block). anthropicMessages always emits object blocks, so there's a block to
 // mark; a request with no messages is left untouched.
-function withMessageCacheBreakpoint(messages) {
+function withMessageCacheBreakpoint(messages, cacheControl = { type: 'ephemeral' }) {
   if (!messages.length) return messages;
   const out = messages.slice();
   const lastIdx = out.length - 1;
@@ -371,7 +379,7 @@ function withMessageCacheBreakpoint(messages) {
     // cannot be set for empty text blocks") — skip the breakpoint rather than
     // reject the whole request when the last block carries no text.
     if (!(tail.type === 'text' && !String(tail.text || '').length)) {
-      content[content.length - 1] = { ...tail, cache_control: { type: 'ephemeral' } };
+      content[content.length - 1] = { ...tail, cache_control: { ...cacheControl } };
       out[lastIdx] = { ...last, content };
     }
   }

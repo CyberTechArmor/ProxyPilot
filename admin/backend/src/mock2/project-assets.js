@@ -15,6 +15,7 @@ import { getMock2Db } from './db.js';
 import {
   toAsset, sortAssets, sanitizeName, normalizeTag,
   validateImageUpload, validateContent, ASSET_MIMES, extFor, selectMockupImages,
+  validateDocumentUpload, docAssetPath,
 } from './project-assets-logic.js';
 
 const nowIso = () => new Date().toISOString();
@@ -56,10 +57,23 @@ export function getAsset(projectId, id) { return toAsset(getAssetRow(projectId, 
 // stored_as cannot escape it.
 export function assetFilePath(projectId, id) {
   const row = getAssetRow(projectId, id);
-  if (!row || row.kind !== 'image' || !row.stored_as) return null;
+  if (!row || (row.kind !== 'image' && row.kind !== 'document') || !row.stored_as) return null;
   const dir = projectDir(projectId);
   const full = path.join(dir, path.basename(String(row.stored_as)));
   return full.startsWith(dir) ? full : null;
+}
+
+// readAssetText — a document asset's full content as UTF-8, or null. Used
+// by the summary pass and by materialization; prompts get only the stored
+// summary (row.body).
+export function readAssetText(projectId, id) {
+  try {
+    const row = getAssetRow(projectId, id);
+    if (!row || row.kind !== 'document') return null;
+    const full = assetFilePath(projectId, id);
+    if (!full || !fs.existsSync(full)) return null;
+    return fs.readFileSync(full, 'utf-8');
+  } catch { return null; }
 }
 
 // readAssetImage — an image asset as a model-ready block, or null.
@@ -168,6 +182,69 @@ export function addContent({ projectId, name, body, tag = null, createdBy = null
   return { ok: true, asset: getAsset(projectId, info.lastInsertRowid) };
 }
 
+// addDocument — an uploaded reference file (or one text file out of a zip).
+// Bytes on disk like images; `body` starts as the caller-provided summary
+// (usually null — the summary pass fills it in asynchronously). `name` may
+// carry archive path separators; it is display + materialization key, never
+// a filesystem path here (stored name is a uuid).
+export function addDocument({ projectId, name, buffer, tag = null, summary = null, createdBy = null }) {
+  const clean = String(name || '').includes('/') ? docAssetPath(name) : sanitizeName(name, 'document.txt');
+  const check = validateDocumentUpload({ name: clean, buffer });
+  if (!check.ok) return { ok: false, code: check.error };
+
+  const dir = projectDir(projectId);
+  fs.mkdirSync(dir, { recursive: true });
+  const rawExt = extFor(clean);
+  const ext = /^\.[a-z0-9]{1,10}$/.test(rawExt) ? rawExt : '.txt';
+  const storedAs = `${crypto.randomUUID()}${ext}`;
+  fs.writeFileSync(path.join(dir, storedAs), buffer);
+
+  const ts = nowIso();
+  const info = getMock2Db().prepare(`
+    INSERT INTO mock2_project_assets
+      (project_id, kind, name, body, mime, size, stored_as, tag, pinned, created_by, created_at, updated_at)
+    VALUES (?, 'document', ?, ?, 'text/plain', ?, ?, ?, 0, ?, ?, ?)
+  `).run(
+    Number(projectId), clean, summary == null ? null : String(summary).slice(0, 20000),
+    buffer.length, storedAs, normalizeTag(tag, 'document'),
+    createdBy ? String(createdBy) : null, ts, ts,
+  );
+  return { ok: true, asset: getAsset(projectId, info.lastInsertRowid) };
+}
+
+// setDocumentSummary — the async summary pass writes its result here.
+export function setDocumentSummary(projectId, id, summary) {
+  try {
+    getMock2Db()
+      .prepare(`UPDATE mock2_project_assets SET body = ?, updated_at = ? WHERE project_id = ? AND id = ? AND kind = 'document'`)
+      .run(String(summary || '').slice(0, 20000), nowIso(), Number(projectId), Number(id));
+    return true;
+  } catch { return false; }
+}
+
+// materializeDocAssetsToDir — copy every document asset's full content into
+// <dir>/state/assets/<docAssetPath(name)> so the build harness can read it
+// with its normal file tools (the prompt only ever carries the summary +
+// this path). Best-effort per file; returns { written, bytes }.
+export function materializeDocAssetsToDir(dir, assets) {
+  const rootDir = path.resolve(path.join(dir, 'state', 'assets'));
+  let written = 0; let bytes = 0;
+  for (const a of assets || []) {
+    if (a.kind !== 'document') continue;
+    try {
+      const content = readAssetText(a.projectId ?? a.project_id, a.id);
+      if (content == null) continue;
+      const rel = docAssetPath(a.name);
+      const dest = path.resolve(path.join(rootDir, rel));
+      if (dest !== rootDir && !dest.startsWith(rootDir + path.sep)) continue; // defense in depth
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, content);
+      written++; bytes += Buffer.byteLength(content);
+    } catch { /* per-file best effort */ }
+  }
+  return { written, bytes };
+}
+
 // updateAsset — name, caption/body, tag and pin. The kind and the bytes are
 // immutable: changing either means a different asset, so re-upload instead.
 export function updateAsset({ projectId, id, name, body, tag, pinned }) {
@@ -185,6 +262,11 @@ export function updateAsset({ projectId, id, name, body, tag, pinned }) {
     if (!check.ok) return { ok: false, ...check.error };
     next.body = check.body;
     next.name = check.name;
+  } else if (row.kind === 'document') {
+    next.body = next.body.slice(0, 20000);  // summary/index
+    // Archive-path names keep their separators (sanitizeName strips to the
+    // basename, which would collapse a website export's structure).
+    next.name = name === undefined ? row.name : docAssetPath(name);
   } else {
     next.body = next.body.slice(0, 2000);   // caption
   }
@@ -198,7 +280,7 @@ export function updateAsset({ projectId, id, name, body, tag, pinned }) {
 export function removeAsset(projectId, id) {
   const row = getAssetRow(projectId, id);
   if (!row) return { ok: false, code: 'NOT_FOUND', message: 'Asset not found.' };
-  if (row.kind === 'image' && row.stored_as) {
+  if (row.stored_as) { // images AND documents keep bytes on disk
     try {
       const dir = projectDir(projectId);
       const full = path.join(dir, path.basename(String(row.stored_as)));

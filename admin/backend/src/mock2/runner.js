@@ -42,7 +42,7 @@ import {
   queueMayAdvancePast,
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
-import { insertChangeRecord, changeRecordMirror } from './change-records.js';
+import { insertChangeRecord, changeRecordMirror, lastChangeRecord } from './change-records.js';
 import { insertMessage } from './chats.js';
 import { webSearchServerTools, RUNNER_WEB_SEARCH_FLAG } from './ask-logic.js';
 import { getRoutingRule } from './routing.js';
@@ -55,8 +55,8 @@ import {
   buildDistillSystemPrompt, buildDistillUserTurn, cleanDistilledInstruction,
 } from './prepass-logic.js';
 import { insertCycleEvent, listRecentDownNotes } from './cycle-events.js';
-import { listAssets } from './project-assets.js';
-import { buildAssetSection, diffAssetFingerprint, buildAssetChangeSection } from './project-assets-logic.js';
+import { listAssets, readAssetText } from './project-assets.js';
+import { buildAssetSection, diffAssetFingerprint, buildAssetChangeSection, docAssetPath } from './project-assets-logic.js';
 import { buildDesignFindingsBrief, markDesignFindingsBriefed } from './design-findings.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
@@ -72,6 +72,7 @@ import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
   RUNNER_TOOLS, runnerToolsForCycle, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
+  RUNNER_CACHE_TTL, pruneStaleToolResults,
   groupToolCallsForExecution,
   buildRunnerSystemPrompt, buildRunnerTask, buildFeedbackSection, classifyTurn, describeRunnerStep, STALL_NUDGE, formatAcceptanceBlock,
   buildCompletionSummaryBody,
@@ -92,6 +93,7 @@ import {
 import { logAudit } from '../db.js';
 import {
   budgetMode, budgetPauseReasonCents, budgetCentsForTokenLegacy, dollars, USAGE_SCHEMA_VERSION,
+  cacheHealth,
 } from './usage-logic.js';
 import { deployProject, readRunContract, readDeclaredEgress, stampDeployedCommit } from './deploy.js';
 import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
@@ -129,6 +131,7 @@ import {
   budgetExhaustedSummary, harnessFaultHaltAccepted,
 } from './finish-guard-logic.js';
 import { recordFeature, takeFeatureLedger } from './feature-activation.js';
+import { MODEL_PRIMARY } from './models.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
 // BUILD_RUNNER=sdk — docs/agent-sdk-migration.md) orients in the same container
@@ -339,7 +342,7 @@ export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 
   const ready = buildRunnerReady();
   if (!ready.ok) return null;
   const call = callStepTurn('chat-distill', {
-    connector: ready.connector, apiKey: ready.apiKey, model: 'claude-opus-5',
+    connector: ready.connector, apiKey: ready.apiKey, model: MODEL_PRIMARY,
     system: stepSystemPrompt('chat-distill', buildDistillSystemPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: buildDistillUserTurn({ body, precedingUser }) }],
     timeoutMs: 120000, effort: 'high', thinking: 'off',
@@ -1080,6 +1083,23 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         meta: { added: diff.added.length, updated: diff.updated.length, removed: diff.removed.length },
       });
     }
+    // Materialize reference-file (document) assets into the container at
+    // state/assets/<path> so the model's read tools reach the FULL content —
+    // the prompt above only carries each file's summary. Re-written when the
+    // library changed (or on first sight), skipped otherwise.
+    const docs = assets.filter((a) => a.kind === 'document');
+    if (docs.length && (diff.changed || diff.firstRun)) {
+      let written = 0;
+      for (const doc of docs) {
+        const content = readAssetText(projectId, doc.id);
+        if (content == null) continue;
+        try {
+          const w = await writeFileInContainer(containerName, `state/assets/${docAssetPath(doc.name)}`, content);
+          if (w?.ok !== false) written++;
+        } catch { /* per-file best effort */ }
+      }
+      if (written) logEvent('status', { text: `materialized ${written} reference file(s) into state/assets/` });
+    }
   } catch { /* optional */ }
   // Record what THIS build was told about the library — but only once it has
   // actually shipped. Recording it up front would mean a build that failed
@@ -1146,6 +1166,15 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   let resumeCtx = null;
   try { const rc = getCycle(cycle.id)?.resume_context_json; resumeCtx = rc ? JSON.parse(rc) : null; } catch { resumeCtx = null; }
   if (resumeCtx) {
+    // Resume bridge: carry the previous cycle's diff-anchored checkpoint
+    // summary so the resumed build doesn't re-pay orientation turns
+    // rediscovering what was already done before acting on the guidance.
+    if (!resumeCtx.lastCheckpoint) {
+      try {
+        const last = lastChangeRecord(projectId);
+        if (last) resumeCtx.lastCheckpoint = { seq: last.seq, summary: last.summary };
+      } catch { /* advisory — a bare resume stays a bare resume */ }
+    }
     const block = buildResumeContextBlock(resumeCtx);
     if (block) {
       transcript.push({ role: 'user', text: block });
@@ -1163,6 +1192,12 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // usage basis. usedCostThisRun tracks fractional cents like the ledger.
   let usedCostThisRun = 0;
   const runUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  // Cache-health watch: per-turn usage tail for the silent-invalidator
+  // detector (usage-logic.cacheHealth). Warn once per run — a build lane
+  // paying full price for its whole prefix every turn is a ~10x input-cost
+  // leak that no total reveals on its own.
+  const cacheWatch = [];
+  let cacheWarned = false;
   // Soft-pause budget mode (default 'tokens' — behavior unchanged until an operator sets
   // MOCK2_BUDGET_DOLLARS on the live install). In 'dollars' mode the token ceiling is
   // replaced by its migrated dollar equivalent at THIS lane's model rate.
@@ -1340,11 +1375,19 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     // Web search rides along ONLY when the operator opted the build lane in
     // (MOCK2_RUNNER_WEB_SEARCH=on, Anthropic connectors only) — Anthropic runs
     // the search server-side during the call, so the fence stays sealed.
+    // Cost levers (see runner-logic): batch-prune stale tool-result bodies so
+    // the cached prefix stops growing with dead weight, and ride the 1-hour
+    // cache so slow gate rounds don't expire it between turns.
+    const pruned = pruneStaleToolResults(transcript);
+    if (pruned.prunedCount) {
+      logEvent('status', { text: `pruned ${pruned.prunedCount} stale tool results (~${Math.round(pruned.prunedChars / 1000)}k chars) from the transcript` });
+    }
     const result = await callStepTurn('build-runner', {
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: (harnessProfile?.toolsForCycle || runnerToolsForCycle)({ hasGates: gateScripts.length > 0 }), transcript, maxTokens: RUNNER_MAX_TOKENS || undefined,
       serverTools: webSearchServerTools({ provider: ready.connector.provider, env: process.env, flag: RUNNER_WEB_SEARCH_FLAG, defaultOn: false }),
       effort: ready.effort || null,
       thinking: ready.thinking || null,
+      cacheTtl: RUNNER_CACHE_TTL,
     });
     if (!result.ok) {
       // Transient model failure — retry up to MAX_CYCLE_RETRIES, then escalate.
@@ -1385,6 +1428,21 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       });
     } catch (e) { console.warn('[mock2] canonical usage write failed:', e?.message); }
     try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: result.modelUsed || ready.model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents, wallClockMs: 0, step: 'build-runner' }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
+    // Cache-health: after enough evidence, surface a never-read/never-engaged
+    // cache exactly once per run (advisory — never blocks the cycle).
+    cacheWatch.push({ input: u.inputTokens || 0, cache_read: cacheRead, cache_write: cacheWrite });
+    if (cacheWatch.length > 6) cacheWatch.shift();
+    if (!cacheWarned) {
+      const health = cacheHealth(cacheWatch);
+      if (!health.healthy) {
+        cacheWarned = true;
+        const msg = health.reason === 'cache_never_read'
+          ? `prompt cache is being written every turn but never read (${health.suspectCalls} consecutive large calls) — a byte at the front of the prompt is changing per call (timestamp/unstable ordering); the full prefix is being re-billed each turn`
+          : `prompt cache never engaged across ${health.suspectCalls} consecutive large calls — the transcript prefix is billing at full input price every turn`;
+        console.warn(`[mock2] cache-health (build-runner, project ${projectId}): ${msg}`);
+        logEvent('status', { text: `cache-health warning: ${msg}` });
+      }
+    }
 
     // Only record a NON-EMPTY assistant turn. An empty one (no text, no tool
     // calls) serializes to empty message content, which Anthropic/OpenAI reject —

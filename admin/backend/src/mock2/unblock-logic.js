@@ -140,13 +140,14 @@ export function resolveSelectedOption(options = [], selected) {
 // operator's free-text message, the resolution option they chose, and any scoped
 // one-time authorizations granted for THIS resume. Returns '' when there's nothing to
 // add (a bare resume stays a bare resume).
-export function buildResumeContextBlock({ message = '', selectedOption = null, authorizations = [], waivers = [], findings = [] } = {}) {
+export function buildResumeContextBlock({ message = '', selectedOption = null, authorizations = [], waivers = [], findings = [], lastCheckpoint = null } = {}) {
   const msg = String(message || '').trim();
   const opt = selectedOption && selectedOption.label ? selectedOption : null;
   const auths = (Array.isArray(authorizations) ? authorizations : []).filter((a) => a && a.scope);
   const waived = (Array.isArray(waivers) ? waivers : []).filter(Boolean);
   const found = (Array.isArray(findings) ? findings : []).map((f) => String(f || '').trim()).filter(Boolean);
-  if (!msg && !opt && !auths.length && !waived.length && !found.length) return '';
+  const checkpoint = lastCheckpoint && String(lastCheckpoint.summary || '').trim() ? lastCheckpoint : null;
+  if (!msg && !opt && !auths.length && !waived.length && !found.length && !checkpoint) return '';
 
   const lines = [
     'Operator guidance on resume (AUTHORITATIVE — a human is directing this build after it',
@@ -154,6 +155,16 @@ export function buildResumeContextBlock({ message = '', selectedOption = null, a
     'conflict, but never the constitution unless an authorization or approved deviation below',
     'explicitly permits it):',
   ];
+  if (checkpoint) {
+    // The previous cycle's outcome, up front. Without it a resumed build
+    // re-pays 10-30 orientation turns rediscovering what was already done
+    // (reads, greps, git log) before it can act on the guidance below. The
+    // summary is diff-anchored (checkpointAndRecord embeds the diffstat), so
+    // this is evidence-shaped context, not narrative — verify against the
+    // tree as usual before relying on any claim in it.
+    const seq = checkpoint.seq != null ? ` (change record ${checkpoint.seq})` : '';
+    lines.push('', `Last checkpoint before this resume${seq}:`, String(checkpoint.summary).trim().slice(0, 4000));
+  }
   if (opt) {
     // Name the typed kind (except the neutral expand_scope) so the model knows what
     // KIND of direction this is, then the option's exact injectOnResume text if it

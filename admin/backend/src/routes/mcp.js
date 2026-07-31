@@ -47,6 +47,21 @@ import {
 } from '../lib/lxc-zip.js';
 import { resolveMock2Gate } from '../mock2/gating.js';
 
+// The public base URL for links we hand to MCP clients (connector URL, upload
+// URLs). The backend sits behind Caddy, and without app-level trust-proxy
+// req.protocol reports the INTERNAL hop ("http") — which minted an http://
+// connector URL that claude.ai refuses (operator report). Prefer the proxy's
+// X-Forwarded-Proto; and since claude.ai requires https anyway, never emit
+// http for a non-local host even if the header is missing.
+function publicBaseUrl(req) {
+  const fwd = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  let proto = fwd || req.protocol || 'https';
+  const host = req.get('host') || '';
+  const isLocal = /^(localhost|127\.|\[::1\])/i.test(host);
+  if (proto === 'http' && !isLocal) proto = 'https';
+  return `${proto}://${host}`;
+}
+
 const LXC_PREFIX = 'pp-';
 const LXC_NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
 const DEFAULT_LXC_TARGET = '/opt/app';
@@ -156,7 +171,7 @@ function toolCreateUploadTicket(req) {
   sweepTickets();
   const ticket = mintUploadTicket();
   uploadTickets.set(ticket, { createdAt: Date.now(), filePath: null });
-  const base = `${req.protocol}://${req.get('host')}`;
+  const base = publicBaseUrl(req);
   return toolResult({
     ticket,
     upload_url: `${base}/api/mcp/upload/${ticket}`,
@@ -639,7 +654,7 @@ export function createMcpAdminRouter() {
       VALUES (?, ?, ?, ?)
     `).run(name, hashMcpToken(token), String(req.user.id), new Date().toISOString());
     logAudit(req.user.id, 'MCP_TOKEN_CREATED', 'mcp_token', name, {}, req.ip);
-    const base = `${req.protocol}://${req.get('host')}`;
+    const base = publicBaseUrl(req);
     res.status(201).json({
       token,
       name,

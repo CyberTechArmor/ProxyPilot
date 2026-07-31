@@ -25,8 +25,26 @@ Revoking the token (same card) immediately cuts the client off.
 | Static sites | `list_static_sites`, `inspect_static_site_zip`, `apply_static_site_zip` | Two-phase: inspect reports conflicts; apply refuses to overwrite until `confirm_overwrite` — so the AI asks you in-conversation first. Replaced files are kept as `<name>.old`. |
 | LXC | `list_lxc_containers`, `inspect_lxc_zip`, `apply_lxc_zip` | Same conflict flow, plus optional startup-script registration (`startup.sh` convention) with run output + exit code returned. |
 | LXC file edits | `read_lxc_file`, `write_lxc_file`, `rerun_startup` | The chat-only update loop: read a file, propose the edit, write on approval (previous version kept as `<path>.old`), then re-run the registered startup script to redeploy — run output and exit code come back to the chat. Lets a Claude subscription do small container updates without any zip or shell. |
-| Projects | `list_projects`, `get_project`, `send_project_build`, `upload_project_reference`, `clone_project` | `send_project_build` queues a quick update on the project's own AI harness. `clone_project` mirrors the UI's Clone (fresh / full-with-database). |
+| Projects | `list_projects`, `get_project`, `send_project_build`, `upload_project_reference`, `clone_project` | `send_project_build` queues a quick update on the project's own AI harness — **this lane spends the project's configured API budget**. `clone_project` mirrors the UI's Clone (fresh / full-with-database). |
+| Project build control | `interrupt_project_build`, `cancel_queued_build` | Stop a running build (checkpoint-and-stop by default, or abandon) and cancel not-yet-started queue entries — the "that build is burning tokens on the wrong thing" stop switch, from chat. |
+| Project file edits | `list_project_files`, `read_project_file`, `write_project_file`, `redeploy_project` | The subscription lane for Projects: the chat does the thinking, ProxyPilot only executes file ops — no build tokens spent. Writes are git-committed to the project's history (and pushed to its repo), and refused while a build is running. `redeploy_project` then installs/migrates/builds/restarts and health-checks the live app. |
 | Transfer | `create_upload_ticket` | Big zips: the tool returns a one-shot `upload_url`; `curl -T site.zip -H 'Content-Type: application/zip' <url>` pushes the bytes, then the ticket is referenced in an inspect tool. Zips ≤ 2 MB may ride inline as `zip_base64`. |
+
+## The two AI lanes (how to phrase a request)
+
+A Claude chat connected to this server can update a Project two ways, and the
+words you use pick the lane:
+
+- **"Queue a build on X" / "have the project build …"** →
+  `send_project_build`: the project's own harness does the work on the API
+  key configured in ProxyPilot (estimates, gates, change records — and API
+  token spend).
+- **"Edit the files directly" / "use the MCP file tools, don't queue a
+  build"** → `read_project_file` → `write_project_file` →
+  `redeploy_project`: the chat itself (your Claude subscription) does the
+  thinking; ProxyPilot only reads/writes files and redeploys. No build
+  tokens are spent, but there are also no harness gates — review the diffs
+  the chat shows you before approving writes.
 
 ## Security model
 

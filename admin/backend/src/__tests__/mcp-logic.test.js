@@ -10,7 +10,7 @@ import {
   rpcResult, rpcError, toolResult,
   mintMcpToken, hashMcpToken, looksLikeMcpToken, tokenFromRequest,
   mintUploadTicket, looksLikeUploadTicket,
-  startupCandidates,
+  startupCandidates, validProjectFilePath,
 } from '../lib/mcp-logic.js';
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from '../mock2/clone-logic.js';
 
@@ -76,6 +76,8 @@ test('tool catalog: every tool has a name, description, and object schema', () =
     'list_lxc_containers', 'inspect_lxc_zip', 'apply_lxc_zip',
     'read_lxc_file', 'write_lxc_file', 'rerun_startup',
     'list_projects', 'send_project_build', 'clone_project', 'create_upload_ticket',
+    'interrupt_project_build', 'cancel_queued_build',
+    'list_project_files', 'read_project_file', 'write_project_file', 'redeploy_project',
   ]) {
     assert.ok(names.has(required), `missing tool ${required}`);
   }
@@ -96,6 +98,20 @@ test('startupCandidates finds .sh files and the startup.sh default', () => {
   assert.deepEqual(c.scripts, ['startup.sh', 'scripts/build.sh']);
   assert.equal(c.defaultScript, 'startup.sh');
   assert.equal(startupCandidates([{ path: 'a.txt', isDirectory: false }]).defaultScript, null);
+});
+
+test('validProjectFilePath: relative app paths only — no traversal, no .git, no absolutes', () => {
+  assert.equal(validProjectFilePath('src/server/routes.ts'), 'src/server/routes.ts');
+  assert.equal(validProjectFilePath('./package.json'), 'package.json');
+  assert.equal(validProjectFilePath('a dir/with spaces.md'), 'a dir/with spaces.md');
+  assert.equal(validProjectFilePath('/etc/passwd'), null);
+  assert.equal(validProjectFilePath('../outside'), null);
+  assert.equal(validProjectFilePath('src/../../etc'), null);
+  assert.equal(validProjectFilePath('.git/config'), null);
+  assert.equal(validProjectFilePath('src//double'), null);
+  assert.equal(validProjectFilePath('back\\slash'), null);
+  assert.equal(validProjectFilePath(''), null);
+  assert.equal(validProjectFilePath('bad\u0000byte'), null);
 });
 
 // ---- clone logic ----

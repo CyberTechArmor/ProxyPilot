@@ -117,9 +117,22 @@ test('anomalySignals: the cycle-94 signature flags — 19.8k of 405k, no red tes
     changedFiles: ['src/adp/scan-strings.ts'], redTestObserved: false,
   });
   assert.equal(a.flag, true);
+  assert.equal(a.hold, true); // cheap AND unproven — the runner withholds the deploy
   assert.match(a.reasons.join(' '), /5% of its token estimate/);
   assert.match(a.reasons.join(' '), /never have been reproduced/);
   assert.match(a.reasons.join(' '), /no test file/);
+});
+
+test('anomalySignals: a full-effort test-less bug fix flags for review but does NOT hold the deploy', () => {
+  // The operator-report case (2026-07-31): a routine fix (style tweak, copy
+  // change) that used its budget honestly but produced no test file. It stays
+  // reviewable — but holding it meant builds stopped auto-redeploying.
+  const a = anomalySignals({
+    kind: 'bugfix', usedTokens: 90000, estTokens: 100000,
+    changedFiles: ['src/components/Header.tsx'], redTestObserved: false,
+  });
+  assert.equal(a.flag, true);
+  assert.equal(a.hold, false);
 });
 
 test('anomalySignals: an honest bug fix (red observed, test touched) does not flag; features never flag', () => {

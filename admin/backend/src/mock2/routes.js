@@ -124,7 +124,9 @@ import {
   containerNameForProject,
   deployBaseApp,
   isBaseAppDeploying,
+  startCloneProvision,
 } from './provision.js';
+import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from './clone-logic.js';
 import { publishDomain } from './publish.js';
 import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver, getStallSettings, setStallSettings, getDesignArtDirection, setDesignArtDirection, getDesignTasteRubric, setDesignTasteRubric } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
@@ -250,7 +252,7 @@ import { buildCheckpointScript } from './template.js';
 import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback, listCycleActivity, lastCycleEventAt } from './cycle-events.js';
 import { listKeyRows, getKeyRow, upsertKey, deleteKey, describeKeySource } from './project-keys.js';
 import { KEY_PROVIDERS, canManageKey, visibleKeyRows, publicKeyShape } from './project-keys-logic.js';
-import { listAssets, getAsset, assetFilePath, addImage, addContent, addDocument, updateAsset, removeAsset, readAssetText } from './project-assets.js';
+import { listAssets, getAsset, assetFilePath, addImage, addContent, addDocument, updateAsset, removeAsset, readAssetText, copyProjectAssets } from './project-assets.js';
 import {
   ASSET_TAGS, MAX_ASSET_BYTES, summarize, sniffImageMime,
   MAX_DOCUMENT_BYTES, MAX_ARCHIVE_BYTES, pickArchiveTextFiles, isProbablyText,
@@ -1028,6 +1030,68 @@ export function createMock2Router() {
 
     startProvision(project);
     res.status(202).json({ project: shapeProject(project, { isAdmin: true }) });
+  });
+
+  // Clone a project under a new name (and optionally a different parent
+  // domain). Two modes: 'fresh' — full git history + asset library, fresh
+  // database; 'full' — also dump/restore the source's in-container Postgres.
+  // Same 202-and-poll shape as create (GET /projects/:id/provision-status).
+  router.post('/projects/:id/clone', requireAdmin, async (req, res) => {
+    const source = getProject(Number(req.params.id));
+    const mode = normalizeCloneMode(req.body?.mode || 'fresh');
+    if (!mode) return res.status(400).json({ error: "mode must be 'fresh' or 'full'" });
+    const srcErr = cloneSourceError(source, mode);
+    if (srcErr) return res.status(source ? 409 : 404).json({ error: srcErr });
+
+    const name = String(req.body?.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'A name for the clone is required' });
+    const parentId = Number(req.body?.parent_domain_id || source.parent_domain_id);
+    const parent = getParentDomain(parentId);
+    if (!parent) return res.status(400).json({ error: 'A verified parent domain is required' });
+    if (!isSelectable(parent)) {
+      return res.status(400).json({ error: `Parent domain "${parent.domain}" is not verified and enabled — it cannot host a project yet` });
+    }
+
+    let slug;
+    try {
+      slug = deriveProjectSlug(parentId, name);
+    } catch (err) {
+      if (err instanceof SlugError) return res.status(409).json({ error: err.message });
+      throw err;
+    }
+
+    let project;
+    try {
+      project = createProject({
+        name, description: source.description, parentDomainId: parentId, slug,
+        repoPathFor: repoPathForProject,
+        containerNameFor: containerNameForProject,
+        createdBy: req.user.id,
+      });
+      upsertMember({ projectId: project.id, userId: req.user.id, role: 'editor', invitedBy: req.user.id });
+      // Inherit the source's settings (preset, harness, design approval, …)
+      // so the clone behaves like its sibling from the first build.
+      project = updateProject(project.id, cloneCopyPatch(source));
+    } catch (err) {
+      console.error('[mock2] project clone create failed:', err?.message);
+      return res.status(500).json({ error: `Could not create clone: ${err?.message || 'unknown error'}` });
+    }
+
+    // Both modes bring the asset library (images, content, reference files).
+    let assetsCopied = 0;
+    try { assetsCopied = copyProjectAssets(source.id, project.id); }
+    catch (e) { console.warn('[mock2] clone asset copy failed (non-fatal):', e?.message); }
+
+    logAudit(req.user.id, 'MOCK2_PROJECT_CLONE', 'mock2_project', project.id, {
+      source_project_id: source.id, name, slug: project.slug, mode, assets_copied: assetsCopied,
+    }, req.ip);
+
+    startCloneProvision(project, {
+      sourceRepoPath: source.repo_path || repoPathForProject(source.id),
+      sourceContainerName: source.container_name || containerNameForProject(source.id),
+      copyDatabase: mode === 'full',
+    });
+    res.status(202).json({ project: shapeProject(project, { isAdmin: true }), assetsCopied, mode });
   });
 
   // The curated base-design presets a new project can start from (picker UI).

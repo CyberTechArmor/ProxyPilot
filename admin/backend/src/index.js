@@ -23,6 +23,7 @@ import { backupsRouter } from './routes/backups.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { ldapRouter } from './routes/ldap.js';
 import { domainsRouter } from './routes/domains.js';
+import { createMcpRouter, createMcpAdminRouter } from './routes/mcp.js';
 import { tlsCertsRouter } from './routes/tls-certs.js';
 import { brandingRouter } from './routes/branding.js';
 import { createLeanBeafRouter } from './routes/lean-beaf.js';
@@ -229,6 +230,13 @@ for (const p of uploadPaths) {
 const chatImagesJson = express.json({ limit: '16mb' });
 for (const p of ['/api/mock2/projects/:id/chat', '/api/mock2/projects/:id/ask', '/api/mock2/projects/:id/cycles']) {
   app.use(p, chatImagesJson);
+}
+// MCP endpoint: tools/call may carry a small zip inline as base64 (≤2MB
+// decoded ⇒ ~2.7MB encoded). The raw-bytes upload path (/api/mcp/upload/…)
+// uses its own express.raw parser inside the router and ignores this.
+const mcpJson = express.json({ limit: '8mb' });
+for (const p of ['/api/mcp', '/api/mcp/t/:token']) {
+  app.use(p, mcpJson);
 }
 app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: DEFAULT_BODY_LIMIT }));
@@ -479,6 +487,11 @@ app.use('/api/ldap', authenticateToken, ldapRouter);
 // cookie-session middleware themselves.
 app.use('/api/domains', domainsRouter);
 app.use('/api/tls-certs', tlsCertsRouter);
+// Remote MCP server (Model Context Protocol): NOT behind authenticateToken —
+// it authenticates with its own bearer tokens per-request (Claude clients
+// have no session cookie). Token management IS cookie-session + admin.
+app.use('/api/mcp', createMcpRouter());
+app.use('/api/mcp-tokens', authenticateToken, blockPendingRole, createMcpAdminRouter());
 // Platform branding: GET is public (the login page shows the name/logo before
 // a session exists); the PUT applies the cookie-session admin middleware itself.
 app.use('/api/branding', brandingRouter);

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
-import { writeFile, readdir, readFile, unlink, mkdir, stat } from 'fs/promises';
+import { writeFile, readdir, readFile, unlink, mkdir, stat, rm } from 'fs/promises';
 import { createReadStream, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -28,6 +28,17 @@ import {
   cancelSnapshotExport, sweepOrphanTempInstances, importSnapshotFromS3,
   getSnapshotExportQueueStatus, inspectSnapshotS3Object, getImportProgress,
 } from '../lib/snapshot-s3-export.js';
+import {
+  ZIP_LIMITS, ZipError, parseZip, detectWrapperDir, effectiveEntries,
+  findConflicts, collectCandidatePaths,
+} from '../lib/zip-extract.js';
+import {
+  writeTarFromZip, checkContainerConflicts, readContainerStartup,
+  applyTarToContainer, setupStartupScript,
+} from '../lib/lxc-zip.js';
+import {
+  stageZipUpload, getZipUpload, discardZipUpload,
+} from '../lib/zip-staging.js';
 
 const execAsync = promisify(exec);
 
@@ -3019,6 +3030,312 @@ lxcRouter.post('/containers/:name/files/upload', upload.single('file'), async (r
       error: `Failed to upload file: ${error.message}`,
     });
   }
+});
+
+// ==================== ZIP UPLOAD (app drop into container) ====================
+//
+// Same two-phase inspect → confirm → apply flow as the static-site
+// zip upload (routes/services.js), targeting a directory inside the
+// container. Extraction streams a tar built from the validated zip
+// into one `incus exec … tar -x` (staged in a hidden dir inside the
+// target, then merged, so a failed transfer doesn't half-write the
+// app). Optionally registers a startup script as a systemd unit —
+// see lib/lxc-zip.js.
+
+const LXC_ZIP_TMP_DIR = process.env.ZIP_UPLOAD_TMP_DIR || join(tmpdir(), 'proxypilot-zip-uploads');
+try { await mkdir(LXC_ZIP_TMP_DIR, { recursive: true }); } catch {}
+const lxcZipStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, LXC_ZIP_TMP_DIR),
+  filename: (_req, _file, cb) => cb(null, `lxc-${randomUUID()}.zip`),
+});
+const lxcZipUpload = multer({ storage: lxcZipStorage, limits: { fileSize: ZIP_LIMITS.maxZipBytes } });
+
+function lxcZipUploadSingle(req, res, next) {
+  lxcZipUpload.single('file')(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({
+          success: false,
+          error: `Zip exceeds the ${Math.floor(ZIP_LIMITS.maxZipBytes / (1024 * 1024))} MB upload limit`,
+        });
+      }
+      return res.status(400).json({ success: false, error: 'Upload failed: ' + (err.message || 'invalid upload') });
+    }
+    next();
+  });
+}
+
+export const DEFAULT_LXC_ZIP_TARGET = '/opt/app';
+
+// Absolute, normalized, shell-tame directory path inside the
+// container. Returns the normalized path or null.
+export function validateTargetDir(p) {
+  if (typeof p !== 'string' || p.length < 2 || p.length > 512) return null;
+  if (!/^\/[A-Za-z0-9._/ -]+$/.test(p)) return null;
+  const segs = p.replace(/\/+$/, '').split('/').slice(1);
+  if (segs.length === 0) return null; // never the container root itself
+  for (const seg of segs) {
+    if (seg === '' || seg === '.' || seg === '..') return null;
+  }
+  return '/' + segs.join('/');
+}
+
+// Startup-script candidates the UI can offer: shell scripts among
+// the (post-strip) file entries, `startup.sh` at the target root
+// being the convention and the default.
+function startupCandidates(entries) {
+  const scripts = entries
+    .filter((e) => !e.isDirectory && e.path.endsWith('.sh'))
+    .map((e) => e.path)
+    .slice(0, 100);
+  return { scripts, defaultScript: scripts.includes('startup.sh') ? 'startup.sh' : null };
+}
+
+// One batched in-container existence check answering for both
+// wrapper variants; returns findConflicts-compatible lookup.
+async function containerExistsKind(incusName, targetDir, variantEntries) {
+  const query = new Set();
+  for (const entries of variantEntries) {
+    for (const p of collectCandidatePaths(entries)) query.add(p);
+  }
+  const { files, dirs } = await checkContainerConflicts(incusName, targetDir, [...query]);
+  const kind = new Map();
+  for (const f of files) kind.set(f, 'file');
+  for (const d of dirs) kind.set(d, 'dir');
+  return (p) => kind.get(p) || null;
+}
+
+// POST /containers/:name/zip-upload — inspect. Parks the archive,
+// reports contents, conflicts inside the container's target dir,
+// startup-script candidates, and any previously registered startup
+// script. Nothing is written to the container here.
+lxcRouter.post('/containers/:name/zip-upload', lxcZipUploadSingle, async (req, res) => {
+  const { name } = req.params;
+  if (!validateName(name)) {
+    if (req.file) await rm(req.file.path, { force: true }).catch(() => {});
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'No zip file provided.' });
+  }
+  const targetDir = validateTargetDir(req.body?.targetDir || DEFAULT_LXC_ZIP_TARGET);
+  if (!targetDir) {
+    await rm(req.file.path, { force: true }).catch(() => {});
+    return res.status(400).json({
+      success: false,
+      error: 'Target directory must be an absolute path inside the container (e.g. /opt/app).',
+    });
+  }
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+
+    let parsed;
+    try {
+      parsed = parseZip(await readFile(req.file.path));
+    } catch (err) {
+      await rm(req.file.path, { force: true }).catch(() => {});
+      if (err instanceof ZipError) {
+        return res.status(err.code === 'TOO_LARGE' ? 413 : 400).json({ success: false, error: err.message, code: err.code });
+      }
+      throw err;
+    }
+
+    const wrapperDir = detectWrapperDir(parsed.entries);
+    const rawEntries = parsed.entries;
+    const strippedEntries = wrapperDir ? effectiveEntries(parsed.entries, true) : null;
+
+    // One exec answers existence for both variants. This also
+    // doubles as the "is the container reachable/running" probe.
+    let existsKind;
+    try {
+      existsKind = await containerExistsKind(
+        incusName, targetDir,
+        strippedEntries ? [rawEntries, strippedEntries] : [rawEntries],
+      );
+    } catch (err) {
+      await rm(req.file.path, { force: true }).catch(() => {});
+      return res.status(400).json({
+        success: false,
+        error: `Cannot inspect container ${name} — is it running? (${err.message})`,
+      });
+    }
+
+    const variant = (entries) => ({
+      fileCount: entries.filter((e) => !e.isDirectory).length,
+      conflicts: findConflicts(entries, existsKind),
+      ...startupCandidates(entries),
+    });
+    const variants = {
+      raw: variant(rawEntries),
+      stripped: strippedEntries ? variant(strippedEntries) : null,
+    };
+
+    const existingStartup = await readContainerStartup(incusName).catch(() => null);
+
+    const rec = stageZipUpload({
+      kind: 'lxc',
+      refId: name,
+      zipPath: req.file.path,
+      entries: parsed.entries,
+      wrapperDir,
+      targetDir,
+    });
+
+    logAudit(req.user.id, 'LXC_ZIP_UPLOAD_INSPECTED', 'lxc', name, {
+      filename: req.file.originalname,
+      bytes: req.file.size,
+      targetDir,
+      wrapperDir,
+    }, req.ip);
+
+    res.json({
+      success: true,
+      uploadId: rec.id,
+      filename: req.file.originalname,
+      zipBytes: req.file.size,
+      totalUncompressedBytes: parsed.totalUncompressedBytes,
+      targetDir,
+      wrapperDir,
+      variants,
+      existingStartup,
+    });
+  } catch (error) {
+    if (req.file) await rm(req.file.path, { force: true }).catch(() => {});
+    console.error('[LXC] zip inspect error:', error);
+    res.status(500).json({ success: false, error: 'Failed to inspect zip upload' });
+  }
+});
+
+// POST /containers/:name/zip-upload/:uploadId/apply — extract into
+// the container after the UI confirmed conflicts (each original is
+// kept as `<name>.old`), then optionally register + run the startup
+// script.
+lxcRouter.post('/containers/:name/zip-upload/:uploadId/apply', async (req, res) => {
+  const { name } = req.params;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
+  const body = req.body || {};
+  const stripWrapper = body.stripWrapper !== false;
+  const confirmOverwrite = body.confirmOverwrite === true;
+  const confirmReplaceStartup = body.confirmReplaceStartup === true;
+  const runStartup = body.runStartup !== false;
+  const startupScript = typeof body.startupScript === 'string' && body.startupScript.length > 0
+    ? body.startupScript
+    : null;
+
+  const rec = getZipUpload(req.params.uploadId, 'lxc', name);
+  if (!rec) {
+    return res.status(404).json({ success: false, error: 'Upload not found or expired — upload the zip again' });
+  }
+
+  let tarPath = null;
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    const { targetDir } = rec;
+    const entries = effectiveEntries(rec.entries, stripWrapper);
+
+    if (startupScript && !entries.some((e) => !e.isDirectory && e.path === startupScript)) {
+      return res.status(400).json({ success: false, error: `Startup script not found in the zip: ${startupScript}` });
+    }
+
+    // Recompute conflicts live — the container may have changed
+    // since inspect. Never overwrite without a fresh confirmation.
+    const existsKind = await containerExistsKind(incusName, targetDir, [entries]);
+    const conflicts = findConflicts(entries, existsKind);
+    if (conflicts.length > 0 && !confirmOverwrite) {
+      return res.status(409).json({
+        success: false,
+        error: `${conflicts.length} file(s) already exist and would be replaced`,
+        conflicts,
+      });
+    }
+
+    // Previously registered startup script → same ask-first + .old
+    // treatment before replacing it.
+    const existingStartup = startupScript
+      ? await readContainerStartup(incusName).catch(() => null)
+      : null;
+    const scriptAbs = startupScript ? `${targetDir}/${startupScript}` : null;
+    const startupReplaced = Boolean(
+      existingStartup && scriptAbs && existingStartup.scriptPath !== scriptAbs,
+    );
+    if (startupReplaced && !confirmReplaceStartup) {
+      return res.status(409).json({
+        success: false,
+        error: 'A startup script is already registered for this container',
+        startupConflict: existingStartup,
+      });
+    }
+
+    // Build the tar on disk (bounded memory), stream it into the
+    // staged in-container extraction.
+    tarPath = `${rec.zipPath}.tar`;
+    const zipBuf = await readFile(rec.zipPath);
+    await writeTarFromZip(zipBuf, entries, tarPath);
+    await applyTarToContainer(incusName, {
+      targetDir,
+      stageName: `.pp-zip-stage-${rec.id}`,
+      conflicts,
+      tarPath,
+    });
+
+    let startup = null;
+    if (startupScript) {
+      startup = await setupStartupScript(incusName, {
+        scriptPath: scriptAbs,
+        workingDir: targetDir,
+        previousScriptPath: startupReplaced ? existingStartup.scriptPath : null,
+        runNow: runStartup,
+      }, {
+        runTimeoutMs: parseInt(process.env.PROXYPILOT_STARTUP_RUN_TIMEOUT_MS || '120000', 10),
+      });
+    }
+
+    logAudit(req.user.id, 'LXC_ZIP_UPLOAD_APPLIED', 'lxc', name, {
+      targetDir,
+      files: entries.filter((e) => !e.isDirectory).length,
+      replaced: conflicts.length,
+      startupScript,
+      stripWrapper,
+    }, req.ip);
+
+    res.json({
+      success: true,
+      targetDir,
+      filesWritten: entries.filter((e) => !e.isDirectory).length,
+      replaced: conflicts,
+      startup,
+    });
+  } catch (error) {
+    if (error instanceof ZipError) {
+      return res.status(error.code === 'TOO_LARGE' ? 413 : 400).json({ success: false, error: error.message, code: error.code });
+    }
+    console.error('[LXC] zip apply error:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to extract zip into container' });
+  } finally {
+    if (tarPath) await rm(tarPath, { force: true }).catch(() => {});
+    // Keep the staged record only while the confirmation dance is in
+    // progress: a 409 leaves it for the confirmed retry; success and
+    // hard failures discard it (the client re-uploads on retry).
+    if (!res.headersSent || res.statusCode < 400 || res.statusCode >= 500) {
+      await discardZipUpload(rec.id);
+    }
+  }
+});
+
+// DELETE /containers/:name/zip-upload/:uploadId — cancel. Nothing
+// was written to the container.
+lxcRouter.delete('/containers/:name/zip-upload/:uploadId', async (req, res) => {
+  const { name } = req.params;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+  const rec = getZipUpload(req.params.uploadId, 'lxc', name);
+  if (rec) await discardZipUpload(rec.id);
+  res.json({ success: true });
 });
 
 // POST /containers/:name/start - Start a container

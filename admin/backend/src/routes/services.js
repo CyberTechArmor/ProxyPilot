@@ -7,7 +7,16 @@ import { writeFile, unlink, readdir, readFile, mkdir, rm, stat } from 'fs/promis
 import { existsSync } from 'fs';
 import { join, basename, resolve, dirname } from 'path';
 import os from 'os';
+import multer from 'multer';
+import { randomBytes } from 'crypto';
 import * as OTPAuth from 'otpauth';
+import {
+  ZIP_LIMITS, ZipError, parseZip, detectWrapperDir, effectiveEntries,
+  findConflicts, fsExistsKind, extractToStaging, applyStagingToTarget,
+} from '../lib/zip-extract.js';
+import {
+  stageZipUpload, getZipUpload, discardZipUpload,
+} from '../lib/zip-staging.js';
 import { getDb, logAudit, getAdminDomain } from '../db.js';
 import { decryptSecret } from '../lib/secrets.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
@@ -4122,6 +4131,219 @@ servicesRouter.get('/:id/download/*', async (req, res) => {
   } catch (error) {
     console.error('Error downloading file:', error);
     res.status(500).json({ error: 'Failed to download file' });
+  }
+});
+
+// ==================== ZIP UPLOAD (site bundle) ====================
+//
+// Two-phase flow so overwrites are never silent:
+//
+//   POST   /:id/zip-upload                    multipart upload; parse +
+//                                             validate, report conflicts
+//   POST   /:id/zip-upload/:uploadId/apply    extract (after the UI
+//                                             confirmed any conflicts)
+//   DELETE /:id/zip-upload/:uploadId          cancel — nothing written
+//
+// Disk-backed multer (lean-beaf pattern: random stored name, never
+// the client filename); the archive is parked by lib/zip-staging so
+// confirming doesn't re-upload the bytes.
+
+const ZIP_UPLOAD_TMP_DIR = process.env.ZIP_UPLOAD_TMP_DIR || join(os.tmpdir(), 'proxypilot-zip-uploads');
+await mkdir(ZIP_UPLOAD_TMP_DIR, { recursive: true }).catch(() => {});
+const zipStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, ZIP_UPLOAD_TMP_DIR),
+  filename: (_req, _file, cb) => cb(null, `${randomBytes(16).toString('hex')}.zip`),
+});
+const zipUpload = multer({ storage: zipStorage, limits: { fileSize: ZIP_LIMITS.maxZipBytes } });
+
+// Multer surfaces LIMIT_FILE_SIZE through the error middleware,
+// which would render as an opaque 500 — translate it to a clear 413.
+function zipUploadSingle(req, res, next) {
+  zipUpload.single('file')(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({
+          error: `Zip exceeds the ${Math.floor(ZIP_LIMITS.maxZipBytes / (1024 * 1024))} MB upload limit`,
+        });
+      }
+      return res.status(400).json({ error: 'Upload failed: ' + (err.message || 'invalid upload') });
+    }
+    next();
+  });
+}
+
+// Map ZipError codes to HTTP statuses the UI can message on.
+function zipErrorStatus(err) {
+  if (!(err instanceof ZipError)) return null;
+  return err.code === 'TOO_LARGE' ? 413 : 400;
+}
+
+// Conflict report for one strip variant, against the site directory.
+function serviceZipVariant(entries, dataDir) {
+  const conflicts = existsSync(dataDir)
+    ? findConflicts(entries, fsExistsKind(dataDir))
+    : [];
+  return {
+    fileCount: entries.filter((e) => !e.isDirectory).length,
+    conflicts,
+  };
+}
+
+// Inspect: park the zip, report contents + conflicts. Nothing is
+// written to the site directory here.
+servicesRouter.post('/:id/zip-upload', zipUploadSingle, async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No zip file provided' });
+    }
+
+    const db = getDb();
+    const service = db.prepare('SELECT data_dir, type FROM services WHERE id = ?').get(req.params.id);
+    if (!service || !service.data_dir) {
+      await rm(req.file.path, { force: true }).catch(() => {});
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    let parsed;
+    try {
+      parsed = parseZip(await readFile(req.file.path));
+    } catch (err) {
+      await rm(req.file.path, { force: true }).catch(() => {});
+      const status = zipErrorStatus(err);
+      if (status) return res.status(status).json({ error: err.message, code: err.code });
+      throw err;
+    }
+
+    const wrapperDir = detectWrapperDir(parsed.entries);
+    // Conflicts for both wrapper options so the UI's strip toggle
+    // doesn't need another round-trip.
+    const variants = {
+      raw: serviceZipVariant(parsed.entries, service.data_dir),
+      stripped: wrapperDir
+        ? serviceZipVariant(effectiveEntries(parsed.entries, true), service.data_dir)
+        : null,
+    };
+
+    const rec = stageZipUpload({
+      kind: 'service',
+      refId: req.params.id,
+      zipPath: req.file.path,
+      entries: parsed.entries,
+      wrapperDir,
+    });
+
+    logAudit(req.user.id, 'ZIP_UPLOAD_INSPECTED', 'service', req.params.id, {
+      filename: req.file.originalname,
+      bytes: req.file.size,
+      wrapperDir,
+    }, req.ip);
+
+    res.json({
+      uploadId: rec.id,
+      filename: req.file.originalname,
+      zipBytes: req.file.size,
+      totalUncompressedBytes: parsed.totalUncompressedBytes,
+      wrapperDir,
+      variants,
+    });
+  } catch (error) {
+    if (req.file) await rm(req.file.path, { force: true }).catch(() => {});
+    console.error('Error inspecting zip upload:', error);
+    res.status(500).json({ error: 'Failed to inspect zip upload' });
+  }
+});
+
+const zipApplySchema = z.object({
+  stripWrapper: z.boolean().optional().default(true),
+  confirmOverwrite: z.boolean().optional().default(false),
+});
+
+// Apply: extract into a staging dir inside the site, then commit
+// with the rename-and-move step. Conflicts (recomputed here — the
+// site may have changed since inspect) hard-stop with 409 unless the
+// user confirmed; on confirm each original is kept as `<name>.old`.
+servicesRouter.post('/:id/zip-upload/:uploadId/apply', async (req, res) => {
+  try {
+    const parsedBody = zipApplySchema.safeParse(req.body || {});
+    if (!parsedBody.success) {
+      return res.status(400).json({ error: 'Invalid request body' });
+    }
+    const { stripWrapper, confirmOverwrite } = parsedBody.data;
+
+    const db = getDb();
+    const service = db.prepare('SELECT data_dir, type FROM services WHERE id = ?').get(req.params.id);
+    if (!service || !service.data_dir) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const rec = getZipUpload(req.params.uploadId, 'service', req.params.id);
+    if (!rec) {
+      return res.status(404).json({ error: 'Upload not found or expired — upload the zip again' });
+    }
+
+    const entries = effectiveEntries(rec.entries, stripWrapper);
+    const conflicts = existsSync(service.data_dir)
+      ? findConflicts(entries, fsExistsKind(service.data_dir))
+      : [];
+
+    if (conflicts.length > 0 && !confirmOverwrite) {
+      return res.status(409).json({
+        error: `${conflicts.length} file(s) already exist and would be replaced`,
+        conflicts,
+      });
+    }
+
+    // Extract fully into a hidden staging dir on the same filesystem,
+    // then commit — a bad archive fails here without touching the
+    // live site.
+    const stagingDir = join(service.data_dir, `.pp-zip-stage-${rec.id}`);
+    try {
+      const zipBuf = await readFile(rec.zipPath);
+      await extractToStaging(zipBuf, entries, stagingDir);
+      await applyStagingToTarget(stagingDir, service.data_dir, entries, conflicts);
+    } catch (err) {
+      await rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+      const status = zipErrorStatus(err);
+      if (status) return res.status(status).json({ error: err.message, code: err.code });
+      throw err;
+    } finally {
+      await discardZipUpload(rec.id);
+    }
+
+    logAudit(req.user.id, 'ZIP_UPLOAD_APPLIED', 'service', req.params.id, {
+      files: entries.filter((e) => !e.isDirectory).length,
+      replaced: conflicts.length,
+      stripWrapper,
+    }, req.ip);
+
+    // Same auto-reload the single-file editor does for static sites.
+    let caddyReloaded = false;
+    if (service.type === 'static') {
+      const reloadResult = await reloadCaddy();
+      caddyReloaded = reloadResult.success;
+    }
+
+    res.json({
+      success: true,
+      filesWritten: entries.filter((e) => !e.isDirectory).length,
+      replaced: conflicts,
+      caddyReloaded,
+    });
+  } catch (error) {
+    console.error('Error applying zip upload:', error);
+    res.status(500).json({ error: 'Failed to extract zip' });
+  }
+});
+
+// Cancel: discard the parked archive. Nothing was written.
+servicesRouter.delete('/:id/zip-upload/:uploadId', async (req, res) => {
+  try {
+    const rec = getZipUpload(req.params.uploadId, 'service', req.params.id);
+    if (rec) await discardZipUpload(rec.id);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error cancelling zip upload:', error);
+    res.status(500).json({ error: 'Failed to cancel zip upload' });
   }
 });
 

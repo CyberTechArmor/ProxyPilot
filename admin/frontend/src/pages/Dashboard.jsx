@@ -95,9 +95,11 @@ import {
   Clock,
   Settings,
   Bell,
+  FileArchive,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
+import ZipUploadDialog from '@/components/ZipUploadDialog';
 
 // Language detection based on file extension
 const getLanguageFromFile = (filename) => {
@@ -231,6 +233,7 @@ export default function Dashboard() {
 
   // Full screen editor state
   const [editorOpen, setEditorOpen] = useState(false);
+  const [zipUploadOpen, setZipUploadOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   // Mobile-only file tree drawer toggle in the file editor
   const [mobileFileTreeOpen, setMobileFileTreeOpen] = useState(false);
@@ -5956,6 +5959,24 @@ volumes:
         </DialogContent>
       </Dialog>
 
+      {/* Zip site-bundle upload — two-phase confirm flow, conflicts
+          are listed and only replaced after explicit confirmation */}
+      <ZipUploadDialog
+        mode="service"
+        open={zipUploadOpen}
+        onOpenChange={setZipUploadOpen}
+        subjectName={selectedService?.name}
+        upload={(file, _targetDir, onProgress) => api.uploadServiceZip(selectedService.id, file, onProgress)}
+        apply={(uploadId, options) => api.applyServiceZip(selectedService.id, uploadId, options)}
+        cancel={(uploadId) => api.cancelServiceZip(selectedService.id, uploadId)}
+        onApplied={async () => {
+          try {
+            const { files: updatedFiles } = await api.getFiles(selectedService.id);
+            setFiles(updatedFiles);
+          } catch (e) { /* ignore */ }
+        }}
+      />
+
       {/* Full Screen File Editor */}
       <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
         <DialogContent className={`max-w-full h-full rounded-none ${isFullscreen ? 'sm:max-w-full sm:h-full sm:m-0 sm:rounded-none' : 'sm:max-w-6xl sm:h-[90vh] sm:rounded-lg'} flex flex-col`}>
@@ -5972,6 +5993,9 @@ volumes:
                     <span><FilePlus className="h-4 w-4" /></span>
                   </Button>
                 </label>
+                <Button variant="outline" size="sm" onClick={() => setZipUploadOpen(true)} title="Upload ZIP Bundle (extracts into the site)">
+                  <FileArchive className="h-4 w-4" />
+                </Button>
                 <Button variant="outline" size="sm" onClick={exportFiles} title="Export Files as JSON">
                   <Download className="h-4 w-4" />
                 </Button>

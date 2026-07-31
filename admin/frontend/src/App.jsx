@@ -10,6 +10,7 @@ import SshAccess from '@/pages/SshAccess';
 import Firewall from '@/pages/Firewall';
 import Vpn from '@/pages/Vpn';
 import CVEs from '@/pages/CVEs';
+import McpAccess from '@/pages/McpAccess';
 import Troubleshooting from '@/pages/Troubleshooting';
 import Housekeeping from '@/pages/Housekeeping';
 import Projects from '@/pages/Projects';
@@ -97,6 +98,7 @@ function App() {
             bookmark still lands somewhere useful. */}
         <Route path="security" element={<Navigate to="/cves" replace />} />
         <Route path="cves" element={<CVEs />} />
+        <Route path="mcp-access" element={<McpAccess />} />
         <Route path="troubleshooting" element={<Troubleshooting />} />
         <Route path="housekeeping" element={<Housekeeping />} />
         <Route path="notifications" element={<Notifications />} />

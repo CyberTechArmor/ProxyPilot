@@ -25,6 +25,7 @@ import {
   FolderGit2,
   Globe,
   Lock,
+  Plug,
   Sun,
   Moon,
   X,
@@ -271,6 +272,8 @@ export default function Layout() {
     { name: 'Notifications', href: '/notifications', icon: Bell, adminOnly: true },
     { name: 'Domains', href: '/domains', icon: Globe, adminOnly: true },
     { name: 'TLS Certificates', href: '/tls-certificates', icon: Lock, adminOnly: true },
+    // Remote MCP server tokens — connect a Claude subscription to ProxyPilot.
+    { name: 'MCP Access', href: '/mcp-access', icon: Plug, adminOnly: true },
     // Mock2 dev/build module — only present when the backend reports it
     // enabled (ADR-001). Hidden entirely on disabled/pinned hosts.
     ...(mock2Enabled ? [{ name: 'Projects', href: '/projects', icon: FolderGit2, adminOnly: true, permission: 'developer' }] : []),

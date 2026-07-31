@@ -51,6 +51,24 @@ npm run build      # production build (parallelism deliberately limited for low-
 
 Any change under `admin/frontend/src/pages/` or `admin/frontend/src/components/` must comply with `admin/frontend/MOBILE_FIRST.md` — it is a merge gate, not a suggestion. Key rules: default Tailwind breakpoints only; grids collapse to one column on mobile (`grid-cols-1 sm:grid-cols-2 …`); touch targets ≥44×44px; dialogs must be completable on a 360px screen (full-screen on `<sm`); no fixed-width desktop-only layouts. Complete its pre-merge checklist (render at 360/375/768, horizontal-scroll audit). Reference implementations: `Dashboard.jsx`, `LxcContainers.jsx`, `Users.jsx`, `Profile.jsx`, `Login.jsx`.
 
+## Atelier port (Mock2) — read-before-edit rules
+
+The Atelier port (client-work OS for a creative studio, built on the Mock2 base app) is
+governed by harness-referenced guides. These are binding:
+
+- Before any Atelier **UI** change, read `docs/design/folio-light.md` (the Folio Light
+  register — binding for all Atelier UI work).
+- Before any Atelier **schema or API** change, read `docs/design/data-model.md` and
+  `state/rules.md` (R1–R5 and the role matrix are non-negotiable; G1–G7 gate them).
+- The prototype at `docs/reference/atelier-prototype.html` is the **behavioral reference**;
+  run/check it before reimplementing any screen. It is an executable spec — port behavior
+  into the repo's stack, never copy its implementation wholesale.
+- `state/inventory.json` is the screen/field/action/state inventory (empty states included);
+  keep it current when screens change.
+- Phase 2 build work follows the mock2-build cycle (one group per cycle, gates green before
+  the next). Phase 1 sign-off status and open placement questions are recorded in
+  `state/rules.md` and the port session's change records.
+
 ## Gotchas
 
 - `docs/known-issues.md` is the punch list of parked follow-ups; check it before diagnosing "broken" behavior.

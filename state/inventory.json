@@ -1,0 +1,287 @@
+{
+  "$comment": "Mock2 inventory — Atelier, extracted from docs/reference/atelier-prototype.html (behavioral authority). Every screen, its fields, actions, and states, including empty states. Verified against a full Playwright walkthrough on 2026-07-31 (22/22 checks passed).",
+  "product": "Atelier — the client-work operating system for a small creative studio",
+  "source": "docs/reference/atelier-prototype.html",
+  "extractedAt": "2026-07-31",
+  "roles": ["admin", "producer", "creative", "client"],
+  "pipeline": {
+    "stages": ["inquiry", "brief", "concept", "estimate", "proposal", "production", "delivery", "report"],
+    "note": "Each stage has exactly one owning screen; the numbered stage rail (01–08, checkmarks on completed stages) is the project navigation."
+  },
+  "screens": [
+    {
+      "id": "dashboard",
+      "route": "#/dashboard",
+      "roles": ["admin", "producer", "creative"],
+      "purpose": "Studio at a glance: revenue, workload, project health — all computed from real data.",
+      "fields": ["in-pipeline value", "signed & running value", "billed this quarter", "awaiting-signature count", "pipeline funnel by stage (value+count)", "booked vs billed bars (6 months)", "budget burn per active project (spent/budget %)", "utilization heat row (person × 6 weeks, amber >95%)", "automation notifications feed"],
+      "actions": ["open pipeline", "click funnel row → pipeline", "click burn row → project overview"],
+      "states": ["with data", "burn empty (no active projects) → empty state with 'Open pipeline' action"],
+      "emptyState": {"burn": "No active projects / Burn appears once projects are in flight. → Open pipeline"}
+    },
+    {
+      "id": "pipeline",
+      "route": "#/pipeline",
+      "roles": ["admin", "producer", "creative"],
+      "purpose": "Eight-column board: every engagement from inquiry to report. Inquiry column shows unconverted leads; other columns show projects at that stage.",
+      "fields": ["per column: stage chip + count", "lead cards (name, contact, budget chip, age)", "project cards (name, client, budget, first teammate avatar)"],
+      "actions": ["new project (modal: name, client, budget USD, starting stage brief..proposal)", "open intake forms", "click lead card → inquiries", "click project card → project overview"],
+      "states": ["cards present", "per-column empty"],
+      "emptyState": {"perColumn": "Nothing in <stage>; inquiry column adds '— share your intake link' + 'Get the link' button"}
+    },
+    {
+      "id": "leads",
+      "route": "#/leads",
+      "roles": ["admin", "producer"],
+      "purpose": "Inquiries inbox — submissions from intake forms, convertible to projects.",
+      "fields": ["lead (company, contact, email)", "work type answer", "budget-range chip", "received age", "status chip"],
+      "actions": ["open lead modal (all answers)", "mark contacted", "convert → creates client if new, creates project at brief stage with budget mapped from range, seeds a Brief doc from the answers, links lead.projectId", "open converted project", "try the public form"],
+      "states": ["lead.status: new → contacted → converted (one-way)", "empty"],
+      "emptyState": {"list": "No inquiries yet / Publish an intake form and share the link. → Open form builder"}
+    },
+    {
+      "id": "forms",
+      "route": "#/forms",
+      "roles": ["admin", "producer"],
+      "purpose": "Intake forms list.",
+      "fields": ["name", "slug", "field count", "Live/Draft chip", "submission count"],
+      "actions": ["new form (seeds name+email fields)", "copy public link", "preview public form", "row → builder"],
+      "states": ["listed", "empty"],
+      "emptyState": {"list": "No intake forms yet / Build your first inquiry form. → Create a form"}
+    },
+    {
+      "id": "form-builder",
+      "route": "#/form/:id",
+      "roles": ["admin", "producer"],
+      "purpose": "Three-pane builder: palette (drag-in field types), form canvas, field settings.",
+      "fields": ["form name (inline serif input)", "intro text", "ordered fields: type ∈ {text, longtext, choice, budget, date, file}, label, required, options (choice/budget)"],
+      "actions": ["drag palette item into form (drop position honored) or click to append", "drag-reorder fields (top/bottom drop indicators)", "select field → edit label/type/required/options", "remove field", "publish/unpublish", "copy public link (when live)", "preview"],
+      "states": ["published (Live) vs draft", "field selected vs none (settings pane empty state)", "form empty"],
+      "emptyState": {"form": "An empty form / Drag your first field in from the palette. → Add short text", "settings": "Select a field / Choose any field to edit its prompt and rules."}
+    },
+    {
+      "id": "public-form",
+      "route": "#/pub/:slug",
+      "roles": ["public (unauthenticated)"],
+      "purpose": "The public intake form a visitor submits.",
+      "fields": ["per form definition: short text, long text, choice select, budget pill group (single-select), date, file upload box"],
+      "actions": ["fill + Send inquiry → validates required fields (toast names first missing), creates lead status=new with all answers attached, fires form_submitted automations, redirects to leads (studio preview)"],
+      "states": ["validation error (required missing)", "submitted"]
+    },
+    {
+      "id": "library",
+      "route": "#/library",
+      "roles": ["admin", "producer", "creative"],
+      "purpose": "Studio-wide reusable assets and collections.",
+      "fields": ["collection cards: cover, name, asset count"],
+      "actions": ["open collection → project delivery", "upload", "new collection"],
+      "states": ["populated", "empty"],
+      "emptyState": {"grid": "Nothing collected yet / Images from project deliveries gather here automatically. → Open a project"}
+    },
+    {
+      "id": "automations",
+      "route": "#/automations/:id?",
+      "roles": ["admin", "producer"],
+      "purpose": "Master-detail: flow list + visual node editor. Typed nodes; flows run live off real events.",
+      "fields": ["flow list (name, run count, trigger label, enable switch)", "canvas nodes: trigger {form_submitted, proposal_signed, deliverable_approved, date_reached}, condition, action {create_project, seed_tasks, send_email, move_stage, post_reminder}", "node config per type", "edges (out-port → node)", "last-run card", "run history"],
+      "actions": ["new flow (seeds a trigger)", "enable/pause", "add node (menu grouped triggers/conditions/actions)", "drag node", "click node → config modal", "connect via out-port then target (triggers cannot be targets)", "remove selected node (detaches edges)", "test run (synthetic context, only this flow)"],
+      "states": ["enabled vs paused", "node selected", "flow empty", "no flows"],
+      "emptyState": {"list": "No flows yet / Wire a trigger to actions. → Create a flow", "canvas": "Empty flow / Add a trigger, then chain actions after it. → Add node", "detail": "Pick a flow / Select a flow on the left, or create one."}
+    },
+    {
+      "id": "settings",
+      "route": "#/settings",
+      "roles": ["admin"],
+      "purpose": "Rate card and studio defaults; every estimate's margin computes from here.",
+      "fields": ["rate card rows: role, bill rate/h, cost/h, computed margin chip (warn <40%)", "studio name", "default currency", "margin target % (default 55)"],
+      "actions": ["edit rate/cost → margins recompute everywhere", "edit margin target → estimates re-judge"],
+      "states": ["always populated (seed rate card)"]
+    },
+    {
+      "id": "project-overview",
+      "route": "#/p/:pid/overview",
+      "roles": ["admin", "producer", "creative"],
+      "purpose": "Project hub under the stage rail: stats, pipeline dots, recent activity.",
+      "fields": ["stage chip", "budget + spent", "estimated margin %", "task progress (done/total + bar)", "8-stage dot strip", "activity feed"],
+      "actions": ["Go to <owning screen of current stage>", "team avatars"],
+      "states": ["active", "activity empty"],
+      "emptyState": {"activity": "Quiet so far / Activity from documents, estimates and production will appear here. → Open production"}
+    },
+    {
+      "id": "project-inquiry",
+      "route": "#/p/:pid/inquiry",
+      "stage": "inquiry",
+      "purpose": "Stage 01 — the original submission, kept whole; every answer stays attached to the lead that created the project.",
+      "fields": ["converted chip + source form + age", "answer list (question label + serif answer)", "client-of-record card when no linked lead"],
+      "actions": ["open public form", "open form builder", "see inquiries"],
+      "states": ["linked lead", "no linked inquiry"],
+      "emptyState": {"noLead": "No linked inquiry / Next time, share the public intake form. → See inquiries"}
+    },
+    {
+      "id": "project-docs",
+      "route": "#/p/:pid/docs",
+      "stage": "brief",
+      "purpose": "Stage 02 — living documents (Brief, Direction, SOW) with share states.",
+      "fields": ["title (serif)", "kind chip", "visibility chip (Private / Team / Shared with client — client tone is amber dashed)", "updated age", "comment button"],
+      "actions": ["new document (seeds h1 + empty paragraph)", "row → editor"],
+      "states": ["listed", "empty"],
+      "emptyState": {"list": "No documents yet / Start with the brief — it feeds the proposal later. → Write the brief"}
+    },
+    {
+      "id": "doc-editor",
+      "route": "#/p/:pid/docs/:docId",
+      "stage": "brief",
+      "purpose": "Block editor.",
+      "fields": ["contenteditable title (placeholder 'Untitled document')", "blocks: p, h1, h2, li, callout, quote, img (src+caption), divider"],
+      "actions": ["type '/' → slash menu (filterable) turns block into any type", "Enter splits → new block (li continues li)", "Backspace on empty merges up", "drag handle reorders (top/bottom indicators)", "block menu: turn-into + delete", "text selection → floating micro-toolbar (bold, italic, strike, comment-on-selection)", "share menu private/team/client (client = portal read-only, comments on)", "per-block comment buttons"],
+      "states": ["share state per doc", "block placeholders when empty"],
+      "emptyState": {"blocks": "placeholders per block type, e.g. 'Write, or type / for blocks…'"}
+    },
+    {
+      "id": "concept-board",
+      "route": "#/p/:pid/board/:boardId?",
+      "stage": "concept",
+      "purpose": "Stage 03 — pan/zoom infinite canvas for moodboards; client-visible boards accept comments, never edits.",
+      "fields": ["board picker", "share chip", "items: image (from file library), sticky note (editable), text card (kicker + serif text + swatches), frame (labeled)", "dashed connectors between item centers", "comment pins (amber = client author, cobalt = team)", "minimap with viewport rect", "left tool rail", "zoom control (25–250%)"],
+      "actions": ["scroll pans; ⌘/ctrl+scroll zooms at cursor; shift/middle-drag or touch pans", "marquee multi-select on empty space", "drag moves whole selection (connectors follow live)", "add note/text/frame", "add image from project file library or sample upload", "arm connect: pick two items", "delete selection", "share menu", "click pin → comment thread"],
+      "states": ["editable (team) vs read-only comment-only (client portal)", "selection set", "connect-armed", "empty"],
+      "emptyState": {"noBoards": "No boards yet / A pan-and-zoom canvas for moodboards. → Create a board", "blankCanvas": "A blank canvas / Drop in a note, an image or a frame from the toolbar."}
+    },
+    {
+      "id": "estimate",
+      "route": "#/p/:pid/estimate",
+      "stage": "estimate",
+      "purpose": "Stage 04 — spreadsheet grid priced from the rate card; live margin vs studio target.",
+      "fields": ["grid columns: row #, phase (select of 4), role (select from rate card), description, rate (auto-set from card on role change, editable), hours, computed subtotal, comment + delete", "frozen header + sticky footer totals", "summary rail: fees, 5% contingency, internal cost, total, margin bar vs target, healthy/below-target note, per-phase subtotals + %"],
+      "actions": ["add line", "edit cells", "select numeric cell → drag-fill handle fills value down", "role change re-prices from rate card (toast)", "delete line", "rate card shortcut", "add to proposal →"],
+      "states": ["editable", "locked (signed proposal — inputs render read-only, lock banner shows signed rev)", "no estimate", "empty sheet"],
+      "emptyState": {"noEstimate": "No estimate yet / Line items price from your rate card. → Start the estimate", "emptySheet": "Empty sheet / Add the first line item to start pricing. → Add line"}
+    },
+    {
+      "id": "proposal",
+      "route": "#/p/:pid/proposal",
+      "stage": "proposal",
+      "purpose": "Stage 05 — print-faithful warm-paper pages assembled live from brief + board + estimate; e-signature; signed revisions immutable.",
+      "fields": ["status chip (Draft rev n / Sent — awaiting signature / Signed · rev n locked)", "page outline rail with jump links", "pages: cover (eyebrow, h1, cover note, footer meta), contents (dotted-leader TOC), brief excerpt, selected direction (board images + note quotes), investment (grouped-by-phase table + total), terms & signature (sigbox: drawn image or typed script + timestamps)", "running heads + page numbers"],
+      "actions": ["assemble proposal (defaults: project brief doc, first board, estimate)", "edit sections modal (cover note, brief doc, board, terms)", "send for signature (audit row, stage → proposal if earlier)", "remind client", "audit trail modal", "export PDF (print CSS)", "portal: review & sign"],
+      "states": ["none", "draft", "sent", "signed (immutable; sections locked; audit shows full history)"],
+      "emptyState": {"none": "No proposal yet / Assemble brief excerpts, a board and the estimate. → Assemble proposal"}
+    },
+    {
+      "id": "production",
+      "route": "#/p/:pid/production",
+      "stage": "production",
+      "purpose": "Stage 06 — kanban + zoomable timeline + week/month calendar over ONE task store (R1).",
+      "fields": ["view segmented control + 'All views synced — one task store' note + active count", "kanban: 4 columns (To do / In progress / In review / Done), cards with phase dot chip, due (overdue flag), checklist progress, comments, assignee", "timeline: phase group rows with translucent phase bars, task bars colored by phase (done = faded), dependency bezier arrows, cobalt today line, sticky labels, zoom 8–60 px/day (weekly ticks when zoomed out)", "calendar: month (6 weeks) or week mode, mini-month rail + legend, entries: task due (cobalt), booking (teal, multi-day), meeting (violet), milestone (◆ bold)"],
+      "actions": ["drag card between columns (status changes, toast confirms other views updated)", "drag timeline bar → shift start+due by day delta", "drag across calendar cells → new entry modal (title, type, who, from/to)", "click task anywhere → task modal (title, status, phase, assignee, start, due, single dependency, checklist add/toggle, delete)", "seed 8-task studio template", "zoom timeline", "navigate/jump months"],
+      "states": ["three views over same store", "task.status ∈ {todo, doing, review, done}", "overdue flag", "no tasks", "nothing scheduled (timeline)", "open calendar"],
+      "emptyState": {"noTasks": "No tasks yet / Seed a task set from the studio template. → Seed template tasks", "timeline": "Nothing scheduled / Give tasks start and due dates. → Open a task", "calendar": "An open calendar / Drag across a few days to create the first booking. → Add an event"}
+    },
+    {
+      "id": "delivery",
+      "route": "#/p/:pid/delivery",
+      "stage": "delivery",
+      "purpose": "Stage 07 — folder tree, versioned files, share-to-portal, client approvals.",
+      "fields": ["tree: All files (count), Shared to portal, folders, storage meter", "file rows: kind thumb (image preview), name, version badge (opens history), size/uploader/age, approval chip (Approved by client / Changes requested + note / Awaiting client)", "x/y shared-approved chip", "delivery activity feed", "search filter"],
+      "actions": ["upload (name, folder) → v1", "new folder", "new version (+vN; a 'changes' file returns to pending, toast)", "version history modal", "preview (image or fake PDF page)", "share/unshare to portal (share sets approval=pending; unshare clears)", "comment per file"],
+      "states": ["file.approval: null → pending → approved | changes (changes + new version → pending)", "shared vs private", "filtered empty", "empty"],
+      "emptyState": {"none": "Nothing here yet / Upload the first deliverable. → Upload file", "search": "No matches / Nothing named '<q>' in this view. → Clear search"}
+    },
+    {
+      "id": "report",
+      "route": "#/p/:pid/report",
+      "stage": "report",
+      "purpose": "Stage 08 — close the loop: print-styled account of billed vs budget, margin vs target, approvals, tasks closed, shipped list, client quote.",
+      "fields": ["paper page: stats strip (billed, margin, deliverables approved %, tasks closed), numbered sections (outcome, what shipped, client's words)", "contents rail with readiness checks (n of 6 sections ready)"],
+      "actions": ["export PDF", "add retrospective", "comment"],
+      "states": ["sections conditionally ready based on real data"]
+    },
+    {
+      "id": "portal-home",
+      "route": "#/portal/home",
+      "roles": ["client"],
+      "purpose": "Client landing: serif welcome, 'Needs you' action list, per-project stage strips, recent conversation.",
+      "fields": ["welcome headline varies by pending work", "on-track chip", "action items: sign proposal (rev, sent age), review file (vN)", "project cards with 8-dot stage strip + task progress", "open threads"],
+      "actions": ["review & sign → portal proposal", "open file review", "persona menu"],
+      "states": ["actions pending vs all-clear", "no projects"],
+      "emptyState": {"noShares": "Nothing here yet / When the studio shares briefs, boards or files with you, they appear here.", "allClear": "All clear / We'll nudge you here when something needs a signature or an approval."}
+    },
+    {
+      "id": "portal-docs",
+      "route": "#/portal/docs/:docId?",
+      "roles": ["client"],
+      "purpose": "Only docs with share=client; read-only reader with per-block comment buttons.",
+      "fields": ["doc cards (title, project, kind, updated)", "reader renders all block types read-only"],
+      "actions": ["open doc", "comment on doc or any block"],
+      "states": ["shared docs exist", "empty"],
+      "emptyState": {"list": "No documents shared yet / Your brief and creative direction will appear here once the studio shares them."}
+    },
+    {
+      "id": "portal-boards",
+      "route": "#/portal/boards/:boardId?",
+      "roles": ["client"],
+      "purpose": "Only boards with share=client; full canvas in read-only comment-only mode ('View & comment — the studio edits').",
+      "fields": ["board picker", "canvas with pins"],
+      "actions": ["pan/zoom", "click any item → comment composer", "never edit/move/delete"],
+      "states": ["shared", "empty"],
+      "emptyState": {"list": "No boards shared yet / Moodboards and direction boards land here when the studio opens them up."}
+    },
+    {
+      "id": "portal-proposal",
+      "route": "#/portal/proposal/:pid?",
+      "roles": ["client"],
+      "purpose": "Sent/signed proposals only (never drafts); the signing surface.",
+      "fields": ["status banner (awaiting signature rev n / signed n ago, locked)", "full paper pages", "sign modal: legal name input, live typed-script preview, drawn signature canvas (pointer), clear"],
+      "actions": ["review & sign → typed (required) + drawn (optional) → locks revision, locks estimate, stage → production, 2 audit rows, proposal_signed automations fire", "PDF", "comment"],
+      "states": ["sent", "signed", "none"],
+      "emptyState": {"none": "No proposal yet / When a proposal is ready for you, it appears here to review and sign."}
+    },
+    {
+      "id": "portal-files",
+      "route": "#/portal/files/:pid?",
+      "roles": ["client"],
+      "purpose": "Shared deliverables: preview + detail; Approve / Needs changes (R4).",
+      "fields": ["file pill switcher", "paper-style preview (image or styled cover)", "detail rail: status chip (Ready for your review / Approved by you / In rework), version, uploaded, size, file comment threads", "footnote: 'Needs changes lands on the studio's production board as a task'"],
+      "actions": ["approve → deliverable_approved automations fire, studio notified", "needs changes → note modal → file.approval=changes + production task created carrying the note, assigned to the file's last uploader + file comment thread added"],
+      "states": ["pending / approved / changes", "empty"],
+      "emptyState": {"list": "No deliverables shared yet / Files the studio shares for your review will collect here, with versions."}
+    },
+    {
+      "id": "portal-comments",
+      "route": "#/portal/comments",
+      "roles": ["client"],
+      "purpose": "All threads the client may see (shared surfaces only), open + resolved.",
+      "fields": ["threads with anchor labels, client badge on client authors"],
+      "actions": ["reply", "resolve/reopen"],
+      "states": ["open/resolved", "empty"],
+      "emptyState": {"list": "No open threads / Comment on any brief, board or deliverable — the studio sees it instantly, badged as yours."}
+    }
+  ],
+  "crossCutting": [
+    {
+      "id": "comments-presence",
+      "purpose": "Anchored comment threads everywhere + per-screen presence.",
+      "anchors": ["doc", "block", "boarditem", "board", "estrow", "file", "proposal", "task", "report"],
+      "fields": ["comment button shows unresolved count; amber '· client' flag when a client participates", "drawer: scoped to current anchor or project or all; open + resolved groups", "thread: anchor label pill, resolve/reopen, replies, @mentions highlighted", "presence avatar stack with green dots in topbar"],
+      "actions": ["comment from any anchor (composer autofocuses)", "select doc text → comment on selection", "reply (Enter)", "resolve/reopen"],
+      "clientScoping": "Clients see threads only on shared surfaces: client-shared docs/blocks, client-shared boards/items, shared files, non-draft proposals.",
+      "emptyState": {"drawer": "No open comments / Select text in a doc, a board item, an estimate row or a file and start a thread."}
+    },
+    {
+      "id": "shell",
+      "purpose": "Studio chrome: sidebar (nav + active projects + persona footer), topbar (breadcrumb + stage chip, ⌘K search, presence, notifications bell, Client view, comments toggle).",
+      "actions": ["⌘K search across projects/tasks/docs/files/leads", "notifications menu (automation output)", "Client view → switch to this project's client persona", "persona switcher (studio + client guests)", "sidebar collapse (desktop) / drawer (mobile)", "help & shortcuts modal"],
+      "emptyState": {"search": "Nothing matches '<q>' yet.", "bell": "You're all caught up."}
+    }
+  ],
+  "stateTransitions": {
+    "lead.status": "new → contacted → converted (converted is terminal; sets projectId)",
+    "project.stage": "inquiry → brief → concept → estimate → proposal → production → delivery → report (send proposal fast-forwards to proposal; signing sets production; move_stage automation may set any)",
+    "proposal.status": "draft → sent → signed (signed is terminal; revision frozen)",
+    "estimate.locked": "false → true when linked proposal signs (no unlock path)",
+    "file.approval": "null → pending (on share) → approved | changes; changes → pending (on new version); unshare → null",
+    "task.status": "todo ↔ doing ↔ review ↔ done (free movement via any of the three views)",
+    "doc.share / board.share": "private ↔ team ↔ client (client exposes to portal, read-only/comment-only)",
+    "flow.enabled": "true ↔ false (paused flows never run)"
+  }
+}

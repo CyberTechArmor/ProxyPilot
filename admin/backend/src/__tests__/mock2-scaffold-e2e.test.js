@@ -272,6 +272,13 @@ test('platform.js mounts the footer itself rather than exposing it and hoping', 
   // Twice: once immediately (the fallback keeps the screen legally complete
   // while the fetch is in flight) and again once branding has landed.
   assert.match(js, /load\(\)\.then\(mountFooters\)/);
+  // v10: a page with NO slot gets one created (the theme control's learning-48
+  // self-heal, applied to the footer). A build that rewrites a page and drops
+  // the slot otherwise leaves every later build failing
+  // platform-baseline-signin-legal with no in-app fix.
+  assert.match(js, /slots\.length === 0 && document\.body/);
+  assert.match(js, /createElement\('footer'\)/);
+  assert.match(js, /setAttribute\('data-legal-footer', ''\)/);
 });
 
 test('platform.js carries the CSS for the UI it mounts', () => {

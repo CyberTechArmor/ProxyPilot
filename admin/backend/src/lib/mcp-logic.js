@@ -237,7 +237,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'get_project',
-    description: 'Details for one AI-dev project: lifecycle, live URL, latest build cycle status, build queue.',
+    description: 'Details for one AI-dev project: lifecycle, live URL, latest build cycle status, build queue, and shipped builds still awaiting operator verification. Check pending_verification before queuing a build — re-requesting already-shipped work pays for it twice.',
     inputSchema: {
       type: 'object',
       properties: { project_id: { type: 'number' } },
@@ -273,6 +273,84 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: 'interrupt_project_build',
+    description: 'Stop the build currently running on an AI-dev project. Default action stop_after_step checkpoints at the next step boundary (resumable from the UI); abandon discards the in-progress cycle. Use this when a build was queued by mistake or is burning API budget on the wrong thing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        action: { type: 'string', enum: ['stop_after_step', 'abandon'], description: 'stop_after_step (default): checkpoint and stop, resumable. abandon: discard the cycle.' },
+      },
+      required: ['project_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'cancel_queued_build',
+    description: 'Cancel a queued (not yet started) build on an AI-dev project. get_project lists queued builds with their ids. A build that has already started must be stopped with interrupt_project_build instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        queue_id: { type: 'number', description: 'Queue entry id from get_project.queued_builds.' },
+      },
+      required: ['project_id', 'queue_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_project_files',
+    description: 'List the tracked source files of an AI-dev project (git ls-files in its app checkout). Use this to find the files to read/edit with read_project_file / write_project_file. Optionally limit to a subdirectory.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        subdir: { type: 'string', description: 'Relative directory to limit the listing to, e.g. src/server.' },
+      },
+      required: ['project_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'read_project_file',
+    description: 'Read one text file from an AI-dev project\'s app checkout (path relative to the app root, e.g. src/server/routes.ts). Returns up to 512 KB; refuses binary files. Read before proposing an edit with write_project_file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        path: { type: 'string', description: 'File path relative to the app root.' },
+      },
+      required: ['project_id', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'write_project_file',
+    description: 'Write one text file in an AI-dev project\'s app checkout and commit it to the project\'s git history (the previous version stays recoverable via git — no build tokens are spent). If the file exists and confirm_overwrite is not true, returns the current file info instead of writing — show the user the proposed change first. Refused while a build is running (interrupt it first). After your edits, apply them with redeploy_project.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        path: { type: 'string', description: 'File path relative to the app root.' },
+        content: { type: 'string', description: 'The complete new file content (UTF-8).' },
+        commit_message: { type: 'string', description: 'Git commit message for this edit (a sensible default is used if omitted).' },
+        confirm_overwrite: { type: 'boolean', description: 'Set true only after the user approved replacing the existing file.' },
+      },
+      required: ['project_id', 'path', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'redeploy_project',
+    description: 'Deploy an AI-dev project\'s current checkout: install dependencies (skipped when unchanged), run migrations, build, restart the app service, and health-check it. The apply step after write_project_file edits. Can take a few minutes when dependencies changed. Refused while a build is running.',
+    inputSchema: {
+      type: 'object',
+      properties: { project_id: { type: 'number' } },
+      required: ['project_id'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'clone_project',
     description: 'Clone an AI-dev project under a new name. mode "fresh": full app + git history + asset library with a fresh database; mode "full": also copies the source database. Returns the new project; poll get_project on it for provisioning progress.',
     inputSchema: {
@@ -287,6 +365,18 @@ export const MCP_TOOLS = [
     },
   },
 ];
+
+// A file path RELATIVE to a project's app root, as accepted by the project
+// file tools. Rejects absolute paths, traversal, control characters, and
+// anything under .git (the repo plumbing is not an editing surface).
+export function validProjectFilePath(p) {
+  const s = String(p || '').trim().replace(/^\.\//, '');
+  if (!s || s.startsWith('/') || s.includes('\\') || /[\u0000-\u001f\u007f]/.test(s)) return null;
+  const segments = s.split('/');
+  if (segments.some((seg) => seg === '' || seg === '.' || seg === '..')) return null;
+  if (segments[0] === '.git') return null;
+  return s;
+}
 
 // Trivial but shared with the LXC UI semantics: candidate startup scripts are
 // the .sh files in the (effective) entry list; startup.sh at the root is the

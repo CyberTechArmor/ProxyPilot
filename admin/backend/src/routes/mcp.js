@@ -34,7 +34,7 @@ import {
   RPC_PARSE_ERROR, RPC_INVALID_REQUEST, RPC_METHOD_NOT_FOUND, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR,
   mintMcpToken, hashMcpToken, tokenFromRequest,
   mintUploadTicket, looksLikeUploadTicket, UPLOAD_TICKET_TTL_MS, INLINE_ZIP_MAX_BYTES,
-  startupCandidates,
+  startupCandidates, validProjectFilePath,
 } from '../lib/mcp-logic.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
@@ -135,12 +135,31 @@ function mock2Enabled() {
 
 async function mock2Modules() {
   if (!mock2Enabled()) throw new Error('The Projects module is not enabled on this ProxyPilot install');
-  const [projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic] = await Promise.all([
+  const [projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic, requests] = await Promise.all([
     import('../mock2/projects.js'), import('../mock2/cycles.js'), import('../mock2/build-queue.js'),
     import('../mock2/chats.js'), import('../mock2/domains.js'), import('../mock2/provision.js'),
     import('../mock2/clone-logic.js'), import('../mock2/project-assets.js'), import('../mock2/project-logic.js'),
+    import('../mock2/requests.js'),
   ]);
-  return { projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic };
+  return { projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic, requests };
+}
+
+// Builds that SHIPPED but still await the operator's verification checks.
+// Surfaced on get_project and echoed by send_project_build because re-sending
+// an instruction that already shipped is paid for twice: the operator's export
+// showed a $1.71 build re-queued in full because nothing at queue time said
+// "that one is done — it's waiting for you to verify it".
+function pendingVerification(m, projectId) {
+  return m.cycles.listCyclesForProject(projectId, { limit: 50 })
+    .filter((c) => c.verification_state === 'pending')
+    .map((c) => {
+      const req = c.request_id ? m.requests.getRequest(c.request_id) : null;
+      return {
+        cycle_id: c.id,
+        instruction: req ? String(req.instruction || '').slice(0, 160) : null,
+        finished_at: c.finished_at || c.updated_at || null,
+      };
+    });
 }
 
 function projectUrl(project, domains) {
@@ -410,7 +429,7 @@ const LXC_FILE_WRITE_CAP = 2 * 1024 * 1024;
 // dots are rejected as nonsense.
 function validLxcFilePath(p) {
   const s = String(p || '').trim();
-  if (!s.startsWith('/') || s.includes('..') || /[ -]/.test(s)) return null;
+  if (!s.startsWith('/') || s.includes('..') || /[\u0000-\u001f\u007f]/.test(s)) return null;
   return s;
 }
 
@@ -521,11 +540,14 @@ async function toolGetProject(args) {
   const summary = projectSummary(project, m);
   const provisionStatus = m.provision.getProvisionStatus(project.id);
   const queueRows = m.queue.listBuildQueue(project.id).filter((r) => r.status === 'queued');
+  const pending = pendingVerification(m, project.id);
   return toolResult({
     ...summary,
     description: project.description || null,
     provisioning: provisionStatus ? { phase: provisionStatus.phase, message: provisionStatus.message, error: provisionStatus.error || null } : null,
     queued_builds: queueRows.map((r) => ({ id: r.id, instruction: String(r.instruction || '').slice(0, 200) })),
+    pending_verification: pending,
+    ...(pending.length ? { note: `${pending.length} shipped build(s) await the operator's verification checks in the build chat — check them before queuing an instruction that may repeat one.` } : {}),
   });
 }
 
@@ -546,9 +568,14 @@ async function toolSendProjectBuild(args, auth) {
   // when the current build finishes.
   m.queue.drainBuildQueue(project.id).catch(() => {});
   logAudit(auth.created_by, 'MOCK2_BUILD_QUEUED', 'mock2_project', project.id, { via: 'mcp', queue_id: row.id }, null);
+  const pending = pendingVerification(m, project.id);
   return toolResult({
     queued: true, queue_id: row.id,
     message: 'Build queued — it starts immediately if the project is idle. Poll get_project for status.',
+    ...(pending.length ? {
+      pending_verification: pending,
+      warning: `${pending.length} earlier shipped build(s) still await operator verification — if this instruction repeats one of them, cancel it (cancel_queued_build) and verify instead of paying to rebuild.`,
+    } : {}),
   });
 }
 
@@ -613,6 +640,212 @@ async function toolCloneProject(args, auth) {
   });
 }
 
+// ---- project build control + chat-only project file editing ----
+//
+// The two AI lanes, made explicit: send_project_build spends the project's own
+// configured API budget (harness, gates, change records); the tools below let
+// the CHAT do the thinking on the operator's subscription while ProxyPilot
+// only executes file ops — read → propose → write (git-committed) → redeploy.
+// Writes and redeploys are refused while a build cycle is live, so the chat
+// lane never fights the harness for the checkout (ADR-004 spirit).
+
+const M2_APP_DIR = '/srv/app';
+const LIVE_CYCLE_STATUSES = ['queued', 'estimating', 'running'];
+
+function projectContainerName(m, project) {
+  return project.container_name || m.provision.containerNameForProject(project.id);
+}
+
+function liveBuildGuard(m, project) {
+  const cycle = m.cycles.latestCycle(project.id);
+  if (cycle && LIVE_CYCLE_STATUSES.includes(cycle.status)) {
+    return `A build is ${cycle.status} on this project — editing under it would collide with the build's own changes. Stop it first (interrupt_project_build) or send the change as a build instruction instead.`;
+  }
+  return null;
+}
+
+function requireActiveProject(m, args) {
+  const project = m.projects.getProject(Number(args.project_id));
+  if (!project) return { error: 'Project not found' };
+  if (project.lifecycle !== 'active') {
+    return { error: `Project is ${project.lifecycle} — its container must be online (wake/rehydrate it from the UI first)` };
+  }
+  return { project };
+}
+
+async function toolInterruptProjectBuild(args, auth) {
+  const m = await mock2Modules();
+  const project = m.projects.getProject(Number(args.project_id));
+  if (!project) return toolResult('Project not found', { isError: true });
+  const cycle = m.cycles.latestCycle(project.id);
+  if (!cycle || !LIVE_CYCLE_STATUSES.includes(cycle.status)) {
+    return toolResult(`No build is running on ${project.name}${cycle ? ` (latest cycle is ${cycle.status})` : ''}`, { isError: true });
+  }
+  const action = args.action === 'abandon' ? 'abandon' : 'stop_after_step';
+  m.cycles.setInterrupt(cycle.id, action);
+  logAudit(auth.created_by, 'MOCK2_CYCLE_INTERRUPT', 'mock2_cycle', cycle.id, { via: 'mcp', action }, null);
+  return toolResult({
+    interrupted: true, cycle_id: cycle.id, action,
+    message: action === 'abandon'
+      ? 'The build stops at its next step boundary and the cycle is discarded.'
+      : 'The build checkpoints and stops at its next step boundary (resumable from the UI). Poll get_project to confirm.',
+  });
+}
+
+async function toolCancelQueuedBuild(args, auth) {
+  const m = await mock2Modules();
+  const project = m.projects.getProject(Number(args.project_id));
+  if (!project) return toolResult('Project not found', { isError: true });
+  const r = m.queue.cancelQueuedBuild(project.id, Number(args.queue_id));
+  if (!r.ok) return toolResult(r.error, { isError: true });
+  logAudit(auth.created_by, 'MOCK2_BUILD_CANCELLED', 'mock2_project', project.id, { via: 'mcp', queue_id: Number(args.queue_id) }, null);
+  return toolResult({ cancelled: true, queue_id: Number(args.queue_id) });
+}
+
+async function toolListProjectFiles(args) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  let sub = '';
+  if (args.subdir != null && String(args.subdir).trim() !== '') {
+    sub = validProjectFilePath(args.subdir);
+    if (!sub) return toolResult('subdir must be a relative directory inside the app (no .., no leading /)', { isError: true });
+  }
+  const argv = ['exec', projectContainerName(m, project), '--', 'git', '-C', M2_APP_DIR, 'ls-files'];
+  if (sub) argv.push('--', sub);
+  const r = await runHostCapture('incus', argv, { timeoutMs: 30000 });
+  if (r.status !== 0) {
+    return toolResult(`Could not list files — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  const files = r.stdout.split('\n').filter(Boolean);
+  return toolResult({ file_count: files.length, files: files.slice(0, 2000), truncated: files.length > 2000 });
+}
+
+async function toolReadProjectFile(args) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const rel = validProjectFilePath(args.path);
+  if (!rel) return toolResult('path must be a file path relative to the app root, e.g. src/server/routes.ts', { isError: true });
+  const abs = `${M2_APP_DIR}/${rel}`;
+  const r = await runHostCapture(
+    'incus', ['exec', projectContainerName(m, project), '--', 'sh', '-c', 'p="$1"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; wc -c < "$p"; head -c 524288 -- "$p"', 'sh', abs],
+    { timeoutMs: 30000 },
+  );
+  if (r.status === 66) return toolResult(`Not a file: ${rel} (use list_project_files to see the tracked files)`, { isError: true });
+  if (r.status !== 0) {
+    return toolResult(`Could not read ${rel} — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  const nl = r.stdout.indexOf('\n');
+  const size = Number(String(r.stdout.slice(0, nl)).trim()) || 0;
+  const body = Buffer.from(r.stdout.slice(nl + 1), 'utf8');
+  if (body.includes(0)) return toolResult(`${rel} looks binary — this tool reads text files only`, { isError: true });
+  return toolResult({
+    path: rel, size_bytes: size,
+    truncated: size > LXC_FILE_READ_CAP,
+    content: body.toString('utf8'),
+  });
+}
+
+async function toolWriteProjectFile(args, auth) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const guard = liveBuildGuard(m, project);
+  if (guard) return toolResult(guard, { isError: true });
+  const rel = validProjectFilePath(args.path);
+  if (!rel) return toolResult('path must be a file path relative to the app root, e.g. src/server/routes.ts', { isError: true });
+  const content = String(args.content ?? '');
+  if (Buffer.byteLength(content) > LXC_FILE_WRITE_CAP) {
+    return toolResult(`Content exceeds the ${Math.floor(LXC_FILE_WRITE_CAP / (1024 * 1024))} MB single-file cap`, { isError: true });
+  }
+  const incusName = projectContainerName(m, project);
+  const abs = `${M2_APP_DIR}/${rel}`;
+
+  // Ask-first when the file exists — same contract as every other overwrite.
+  // git history (not a .old copy) is the backup here: a stray .old inside the
+  // checkout would ride into the next build's diff.
+  const probe = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'p="$1"; if [ -e "$p" ]; then echo EXISTS; wc -c < "$p"; else echo ABSENT; fi', 'sh', abs],
+    { timeoutMs: 30000 },
+  );
+  if (probe.status !== 0) {
+    return toolResult(`Cannot inspect the project container — is it running? ${(probe.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  const exists = probe.stdout.startsWith('EXISTS');
+  if (exists && args.confirm_overwrite !== true) {
+    const size = Number(String(probe.stdout.split('\n')[1] || '').trim()) || 0;
+    return toolResult({
+      written: false,
+      needs_confirmation: true,
+      path: rel,
+      existing_size_bytes: size,
+      message: `${rel} already exists (${size} bytes; the previous version stays in git history). Show the user your proposed change and re-call with confirm_overwrite: true after they approve.`,
+    });
+  }
+
+  const w = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; mkdir -p "$(dirname -- "$p")"; cat > "$p"', 'sh', abs],
+    { input: content, timeoutMs: 60000 },
+  );
+  if (w.status !== 0) {
+    return toolResult(`Write failed: ${(w.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+
+  // Commit the edit and push to the project's bare repo, so it survives
+  // rehydrate and shows in the project's history like any other change.
+  const message = String(args.commit_message || `chat edit: ${rel}`).slice(0, 200);
+  const commitScript = 'set -e; cd /srv/app; git add -A -- "$1"; '
+    + 'if git diff --cached --quiet -- "$1"; then echo PP_NOCHANGE; '
+    + 'else git -c user.email=mcp@proxypilot -c user.name="ProxyPilot MCP" commit -q -m "$2" -- "$1"; fi; '
+    + 'git push -q origin HEAD:main 2>/dev/null || echo PP_PUSH_FAILED >&2; git rev-parse HEAD';
+  const c = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', commitScript, 'sh', rel, message],
+    { timeoutMs: 60000 },
+  );
+  const unchanged = /PP_NOCHANGE/.test(c.stdout);
+  const sha = (c.stdout.trim().split('\n').pop() || '').trim();
+  logAudit(auth.created_by, 'MOCK2_FILE_WRITTEN', 'mock2_project', project.id, { via: 'mcp', path: rel, bytes: Buffer.byteLength(content), replaced: exists }, null);
+  return toolResult({
+    written: true, path: rel, bytes: Buffer.byteLength(content),
+    committed: c.status === 0 && !unchanged,
+    unchanged,
+    commit: /^[0-9a-f]{40}$/.test(sha) ? sha : null,
+    push_failed: /PP_PUSH_FAILED/.test(c.stderr || ''),
+    next: 'When your edits are complete, apply them with redeploy_project.',
+  });
+}
+
+async function toolRedeployProject(args, auth) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const guard = liveBuildGuard(m, project);
+  if (guard) return toolResult(guard, { isError: true });
+  const [{ deployProject }, { DEFAULT_WEB_PORT }] = await Promise.all([
+    import('../mock2/deploy.js'), import('../mock2/template.js'),
+  ]);
+  const steps = [];
+  const res = await deployProject({
+    containerName: projectContainerName(m, project),
+    webPort: project.web_port || DEFAULT_WEB_PORT,
+    onStep: (key, label) => steps.push(label || key),
+  });
+  logAudit(auth.created_by, 'MOCK2_PROJECT_REDEPLOY', 'mock2_project', project.id, { via: 'mcp', ok: !!res.ok, step: res.step || null }, null);
+  if (!res.ok) {
+    return toolResult(`Deploy failed at step "${res.step}": ${res.error}`, { isError: true });
+  }
+  return toolResult({
+    deployed: true,
+    skipped: !!res.skipped,
+    steps,
+    url: projectUrl(project, m.domains),
+    message: res.skipped
+      ? 'Nothing to deploy (no run contract — placeholder project).'
+      : 'Deployed and health-checked — the live URL serves the current checkout.',
+  });
+}
+
 const TOOL_HANDLERS = {
   list_static_sites: (args, auth, req) => toolListStaticSites(args, auth, req),
   create_upload_ticket: (_args, _auth, req) => toolCreateUploadTicket(req),
@@ -629,6 +862,12 @@ const TOOL_HANDLERS = {
   send_project_build: toolSendProjectBuild,
   upload_project_reference: toolUploadProjectReference,
   clone_project: toolCloneProject,
+  interrupt_project_build: toolInterruptProjectBuild,
+  cancel_queued_build: toolCancelQueuedBuild,
+  list_project_files: toolListProjectFiles,
+  read_project_file: toolReadProjectFile,
+  write_project_file: toolWriteProjectFile,
+  redeploy_project: toolRedeployProject,
 };
 
 /* ---------------------------- JSON-RPC core ------------------------------ */

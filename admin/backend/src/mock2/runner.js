@@ -2192,12 +2192,16 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       const noOpCycle = codeChanged.length === 0 && appCurrent;
       // ANOMALY TRIPWIRE — BEFORE deploy (ratchet 6; it used to fire as a
       // post-deploy note, i.e. after the under-verified change was live).
-      // A bug-fix that closed at a fraction of its estimate with no red
-      // test and no test file touched now HOLDS the deploy: the cycle
-      // still succeeds (work + record kept, gates already green), the flag
-      // is raised for review, and the operator releases it with the
+      // A bug-fix that closed at a FRACTION of its estimate with no red
+      // test HOLDS the deploy (anomaly.hold — the Goodhart signature): the
+      // cycle still succeeds (work + record kept, gates already green), the
+      // flag is raised for review, and the operator releases it with the
       // existing Deploy action once satisfied. Conservative option: hold,
       // never auto-rollback; the previous deploy keeps serving.
+      // A full-effort fix that merely shipped without a test file is
+      // flag-only (the post-deploy tripwire below raises it) and DEPLOYS —
+      // holding on that stopped every routine test-less fix from
+      // auto-redeploying (operator report, 2026-07-31).
       let anomalyHold = null;
       try {
         const preAnomaly = anomalySignals({ kind: accState.kind, usedTokens: usedTokensThisRun, estTokens: cycle.est_tokens, changedFiles: changedThisCycle, redTestObserved });
@@ -2210,7 +2214,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         // Deploy by hand. The flag is still raised for review either way.
         let everDeployed = true;
         try { everDeployed = projectHasBeenDeployed(projectId); } catch { everDeployed = true; }
-        if (preAnomaly.flag && !noOpCycle) {
+        if (preAnomaly.hold && !noOpCycle) {
           if (everDeployed) anomalyHold = preAnomaly;
           else {
             logEvent('note', {

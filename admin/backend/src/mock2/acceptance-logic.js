@@ -355,7 +355,14 @@ export function anomalySignals({
   if (!touchedTest) reasons.push('no test file was added or changed');
   // Flag when the cycle is cheap AND unproven, or completely test-free.
   const flag = (cheap && !redTestObserved) || (!touchedTest && !redTestObserved);
-  return { flag, reasons: flag ? reasons : [] };
+  // HOLD (the runner withholds the deploy) only on the true Goodhart
+  // signature: suspiciously cheap AND unproven. A full-effort fix that just
+  // didn't produce a test file stays a review flag — holding on that turned
+  // every routine test-less bug fix (a style tweak, a copy fix) into a manual
+  // "press Deploy" step, i.e. builds stopped auto-redeploying (operator
+  // report, 2026-07-31).
+  const hold = cheap && !redTestObserved;
+  return { flag, hold, reasons: flag ? reasons : [] };
 }
 
 // The machine-readable acceptance state stamped on the cycle (migration 517)

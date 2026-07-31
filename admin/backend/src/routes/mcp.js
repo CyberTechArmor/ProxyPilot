@@ -135,12 +135,31 @@ function mock2Enabled() {
 
 async function mock2Modules() {
   if (!mock2Enabled()) throw new Error('The Projects module is not enabled on this ProxyPilot install');
-  const [projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic] = await Promise.all([
+  const [projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic, requests] = await Promise.all([
     import('../mock2/projects.js'), import('../mock2/cycles.js'), import('../mock2/build-queue.js'),
     import('../mock2/chats.js'), import('../mock2/domains.js'), import('../mock2/provision.js'),
     import('../mock2/clone-logic.js'), import('../mock2/project-assets.js'), import('../mock2/project-logic.js'),
+    import('../mock2/requests.js'),
   ]);
-  return { projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic };
+  return { projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic, requests };
+}
+
+// Builds that SHIPPED but still await the operator's verification checks.
+// Surfaced on get_project and echoed by send_project_build because re-sending
+// an instruction that already shipped is paid for twice: the operator's export
+// showed a $1.71 build re-queued in full because nothing at queue time said
+// "that one is done — it's waiting for you to verify it".
+function pendingVerification(m, projectId) {
+  return m.cycles.listCyclesForProject(projectId, { limit: 50 })
+    .filter((c) => c.verification_state === 'pending')
+    .map((c) => {
+      const req = c.request_id ? m.requests.getRequest(c.request_id) : null;
+      return {
+        cycle_id: c.id,
+        instruction: req ? String(req.instruction || '').slice(0, 160) : null,
+        finished_at: c.finished_at || c.updated_at || null,
+      };
+    });
 }
 
 function projectUrl(project, domains) {
@@ -521,11 +540,14 @@ async function toolGetProject(args) {
   const summary = projectSummary(project, m);
   const provisionStatus = m.provision.getProvisionStatus(project.id);
   const queueRows = m.queue.listBuildQueue(project.id).filter((r) => r.status === 'queued');
+  const pending = pendingVerification(m, project.id);
   return toolResult({
     ...summary,
     description: project.description || null,
     provisioning: provisionStatus ? { phase: provisionStatus.phase, message: provisionStatus.message, error: provisionStatus.error || null } : null,
     queued_builds: queueRows.map((r) => ({ id: r.id, instruction: String(r.instruction || '').slice(0, 200) })),
+    pending_verification: pending,
+    ...(pending.length ? { note: `${pending.length} shipped build(s) await the operator's verification checks in the build chat — check them before queuing an instruction that may repeat one.` } : {}),
   });
 }
 
@@ -546,9 +568,14 @@ async function toolSendProjectBuild(args, auth) {
   // when the current build finishes.
   m.queue.drainBuildQueue(project.id).catch(() => {});
   logAudit(auth.created_by, 'MOCK2_BUILD_QUEUED', 'mock2_project', project.id, { via: 'mcp', queue_id: row.id }, null);
+  const pending = pendingVerification(m, project.id);
   return toolResult({
     queued: true, queue_id: row.id,
     message: 'Build queued — it starts immediately if the project is idle. Poll get_project for status.',
+    ...(pending.length ? {
+      pending_verification: pending,
+      warning: `${pending.length} earlier shipped build(s) still await operator verification — if this instruction repeats one of them, cancel it (cancel_queued_build) and verify instead of paying to rebuild.`,
+    } : {}),
   });
 }
 

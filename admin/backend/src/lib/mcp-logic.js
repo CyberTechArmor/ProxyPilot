@@ -237,7 +237,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'get_project',
-    description: 'Details for one AI-dev project: lifecycle, live URL, latest build cycle status, build queue.',
+    description: 'Details for one AI-dev project: lifecycle, live URL, latest build cycle status, build queue, and shipped builds still awaiting operator verification. Check pending_verification before queuing a build — re-requesting already-shipped work pays for it twice.',
     inputSchema: {
       type: 'object',
       properties: { project_id: { type: 'number' } },

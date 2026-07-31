@@ -41,7 +41,10 @@
 // longer destroys the host page's event listeners. Existing projects need the
 // upgrade: public/login.html is NOT platform-owned (a build may restyle it),
 // so the fix has to reach them through platform.js.
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v9';
+// v10: mountFooters self-heals a page that carries no [data-legal-footer]
+// slot at all (SpliceGirls' /login — every build paid a failing
+// platform-baseline-signin-legal check and a pending-verification round).
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v10';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
@@ -1585,9 +1588,22 @@ function platformClientJs() {
   // footer, on DOMContentLoaded and again once branding has actually loaded
   // (the first render uses the fallback so the screen is never legally bare
   // while a fetch is in flight).
+  //
+  // A page with NO slot gets one appended to <body> — the same self-heal the
+  // theme control got (learning 48), for the same reason: a build that
+  // rewrites a page drops the slot, and "this module fills slots" quietly
+  // becomes "this page ships with no copyright notice and no Privacy/Terms",
+  // which every later build then pays for as a failing platform baseline
+  // check. The slot contract is the platform's, so the platform keeps it.
   function mountFooters() {
     ensureChromeCss();
     var slots = document.querySelectorAll('[data-legal-footer]');
+    if (slots.length === 0 && document.body) {
+      var made = document.createElement('footer');
+      made.setAttribute('data-legal-footer', '');
+      document.body.appendChild(made);
+      slots = document.querySelectorAll('[data-legal-footer]');
+    }
     for (var i = 0; i < slots.length; i++) slots[i].innerHTML = footerHtml();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mountFooters);

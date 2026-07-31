@@ -17,7 +17,7 @@ import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import ImageLightbox from './ImageLightbox';
 import {
-  ImagePlus, FileText, Pin, PinOff, Trash2, Loader2, Send, X, Check, Pencil, ImageOff,
+  ImagePlus, Paperclip, FileText, Pin, PinOff, Trash2, Loader2, Send, X, Check, Pencil, ImageOff,
 } from 'lucide-react';
 
 // A thumbnail that says so when its bytes fail to load, instead of the
@@ -393,21 +393,21 @@ export default function ProjectAssets({ projectId, canEdit = false, onSummary = 
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submitContent(); }
             }}
             rows={2}
-            placeholder="Write copy, brand voice, or what this app is for… (or paste / drop an image)"
+            placeholder="Write copy, brand voice, or what this app is for… (or paste / drop images, text files, or a zip)"
             className="w-full rounded-md border bg-background px-2.5 py-2 text-xs resize-y min-h-[60px]"
           />
           <div className="flex items-center gap-2">
             <input
               ref={fileRef}
               type="file"
-              
               multiple
               className="hidden"
               onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
             />
             <Button type="button" variant="outline" size="sm" className="min-h-[44px]"
+              title="Attach images, text files (.ts, .md, a spec…), or a zip of a site"
               onClick={() => fileRef.current?.click()} disabled={busy}>
-              <ImagePlus className="h-3.5 w-3.5 mr-1.5" />Image
+              <Paperclip className="h-3.5 w-3.5 mr-1.5" />Attach
             </Button>
             <div className="flex-1" />
             <Button type="button" size="sm" className="min-h-[44px]"

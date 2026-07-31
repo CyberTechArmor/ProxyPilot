@@ -9,18 +9,29 @@
 // target (padded hit area), wraps to multiple rows on 360px.
 
 import { useCallback, useRef, useState } from 'react';
-import { ImagePlus, X, Loader2 } from 'lucide-react';
-import { prepareChatImage, imageFilesFromDataTransfer, MAX_CHAT_IMAGES } from '@/lib/chat-images';
+import { ImagePlus, Paperclip, X, Loader2 } from 'lucide-react';
+import { prepareChatImage, partitionFilesFromDataTransfer, isChatImageFile, MAX_CHAT_IMAGES } from '@/lib/chat-images';
 
 // useChatImages — attachment state + intake for a composer. Returns
 // { images, busy, addFiles, remove, clear, handlePaste, handleDrop }.
 // `onError(message)` surfaces intake problems (toast).
-export function useChatImages({ onError } = {}) {
+//
+// `onDocumentFiles(files)` — when provided, NON-image files (a .ts, a .md, a
+// zip of a site…) pasted/dropped/picked into the composer are handed to it
+// instead of being silently ignored; the callers route them to the project
+// asset library. Without it, non-images keep the old only-images error.
+export function useChatImages({ onError, onDocumentFiles = null } = {}) {
   const [images, setImages] = useState([]);
   const [busy, setBusy] = useState(false);
 
   const addFiles = useCallback(async (files) => {
-    const list = Array.from(files || []).slice(0, MAX_CHAT_IMAGES);
+    const all = Array.from(files || []);
+    const others = all.filter((f) => !isChatImageFile(f));
+    if (others.length) {
+      if (onDocumentFiles) onDocumentFiles(others);
+      else if (onError) onError('Only JPEG, PNG, WebP, or GIF images can be attached.');
+    }
+    const list = all.filter(isChatImageFile).slice(0, MAX_CHAT_IMAGES);
     if (!list.length) return;
     setBusy(true);
     try {
@@ -41,7 +52,7 @@ export function useChatImages({ onError } = {}) {
         });
       }
     } finally { setBusy(false); }
-  }, [onError]);
+  }, [onError, onDocumentFiles]);
 
   // previewUrl is a data: URL (the app CSP blocks blob:), so removal needs no
   // revoke bookkeeping — the string is garbage-collected with the state.
@@ -60,22 +71,29 @@ export function useChatImages({ onError } = {}) {
     } catch (err) { if (onError) onError(err.message); }
   }, [onError]);
 
-  // Wire these to the composer textarea / wrapper.
-  const handlePaste = useCallback((e) => {
-    const files = imageFilesFromDataTransfer(e.clipboardData);
-    if (files.length) { e.preventDefault(); addFiles(files); }
-  }, [addFiles]);
-  const handleDrop = useCallback((e) => {
-    const files = imageFilesFromDataTransfer(e.dataTransfer);
-    if (files.length) { e.preventDefault(); addFiles(files); }
-  }, [addFiles]);
+  // Wire these to the composer textarea / wrapper. Text-only pastes carry no
+  // files and fall through to the browser's normal paste.
+  const intake = useCallback((e, dt) => {
+    const { images: imgs, others } = partitionFilesFromDataTransfer(dt);
+    const docs = onDocumentFiles ? others : [];
+    if (!imgs.length && !docs.length) return;
+    e.preventDefault();
+    if (imgs.length) addFiles(imgs);
+    if (docs.length) onDocumentFiles(docs);
+  }, [addFiles, onDocumentFiles]);
+  const handlePaste = useCallback((e) => intake(e, e.clipboardData), [intake]);
+  const handleDrop = useCallback((e) => intake(e, e.dataTransfer), [intake]);
 
   return { images, busy, addFiles, remove, replaceAt, clear, handlePaste, handleDrop };
 }
 
 // The thumbnails row + "+" picker rendered under a composer. Renders nothing
 // when there are no images and the picker is disabled.
-export function ImageAttachmentBar({ images = [], busy = false, disabled = false, onPickFiles, onRemove, onAnnotate = null }) {
+//
+// `allowDocuments` — the composer's intake also routes text files / zips to
+// the asset library (its hook got onDocumentFiles), so the picker accepts any
+// file and says so; without it the picker stays images-only.
+export function ImageAttachmentBar({ images = [], busy = false, disabled = false, onPickFiles, onRemove, onAnnotate = null, allowDocuments = false }) {
   const inputRef = useRef(null);
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -106,18 +124,21 @@ export function ImageAttachmentBar({ images = [], busy = false, disabled = false
       ))}
       <button
         type="button"
-        aria-label="Attach images"
-        title="Attach images (or paste / drop them into the message box)"
-        disabled={disabled || busy || images.length >= MAX_CHAT_IMAGES}
+        aria-label={allowDocuments ? 'Attach images or reference files' : 'Attach images'}
+        title={allowDocuments
+          ? 'Attach images, text files (.ts, .md, …), or a zip of a site — or paste / drop them into the message box. Files and zips go to the project assets for the build to reference.'
+          : 'Attach images (or paste / drop them into the message box)'}
+        disabled={disabled || busy || (!allowDocuments && images.length >= MAX_CHAT_IMAGES)}
         onClick={() => inputRef.current?.click()}
         className="inline-flex h-11 w-11 items-center justify-center rounded-md border text-muted-foreground hover:text-foreground disabled:opacity-50"
       >
-        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImagePlus className="h-4 w-4" />}
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" />
+          : allowDocuments ? <Paperclip className="h-4 w-4" /> : <ImagePlus className="h-4 w-4" />}
       </button>
       <input
         ref={inputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/gif"
+        {...(allowDocuments ? {} : { accept: 'image/jpeg,image/png,image/webp,image/gif' })}
         multiple
         className="hidden"
         onChange={(e) => { onPickFiles(e.target.files); e.target.value = ''; }}

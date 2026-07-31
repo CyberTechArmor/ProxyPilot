@@ -29,7 +29,16 @@ function serviceWorkerPlugin() {
 }
 
 
+// Stamped into the bundle (__PP_BUILD_TIME__) and shown next to the version in
+// the sidebar, so "did the update actually install?" is answerable at a glance
+// — the backend's version number only moves on releases, but this moves on
+// every build (operator report: a successful update looked like a no-op).
+const buildTime = new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+
 export default defineConfig({
+  define: {
+    __PP_BUILD_TIME__: JSON.stringify(buildTime),
+  },
   plugins: [react(), serviceWorkerPlugin()],
   resolve: {
     alias: {

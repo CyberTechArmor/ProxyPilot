@@ -1,6 +1,6 @@
 {
   "name": "proxypilot-backend",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "ProxyPilot Admin Dashboard Backend",
   "main": "src/index.js",
   "type": "module",

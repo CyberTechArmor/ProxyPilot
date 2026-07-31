@@ -104,6 +104,44 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
   return data;
 }
 
+// Multipart zip upload with progress. Shared by the static-site and
+// LXC zip flows; same rationale as importContainerWithProgress —
+// fetch() can't report upload progress, XMLHttpRequest can. `fields`
+// are extra form fields (e.g. targetDir). onProgress gets
+// { loaded, total, phase: 'uploading' | 'processing' }.
+function uploadZipWithProgress(endpoint, fields, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const csrf = readCookie('pp_csrf');
+    const formData = new FormData();
+    for (const [k, v] of Object.entries(fields || {})) formData.append(k, v);
+    formData.append('file', file);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE}${endpoint}`);
+    xhr.withCredentials = true;
+    if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
+    xhr.upload.addEventListener('progress', (e) => {
+      if (onProgress && e.lengthComputable) {
+        onProgress({ loaded: e.loaded, total: e.total, phase: 'uploading' });
+      }
+    });
+    xhr.upload.addEventListener('load', () => {
+      if (onProgress) onProgress({ loaded: file.size, total: file.size, phase: 'processing' });
+    });
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data);
+      } else {
+        reject(new ApiError(data.error || `Upload failed (HTTP ${xhr.status})`, xhr.status, data));
+      }
+    };
+    xhr.onerror = () => reject(new ApiError('Network error during upload', 0, {}));
+    xhr.onabort = () => reject(new ApiError('Upload cancelled', 0, {}));
+    xhr.send(formData);
+  });
+}
+
 export const api = {
   // Auth
   login: (credentials) => request('/auth/login', {
@@ -387,6 +425,20 @@ export const api = {
     method: 'PUT',
     body: JSON.stringify({ notes }),
   }),
+
+  // Zip upload (per service): two-phase inspect → confirm → apply so
+  // conflicting files are never overwritten silently.
+  uploadServiceZip: (serviceId, file, onProgress) =>
+    uploadZipWithProgress(`/services/${serviceId}/zip-upload`, {}, file, onProgress),
+
+  applyServiceZip: (serviceId, uploadId, { stripWrapper = true, confirmOverwrite = false } = {}) =>
+    request(`/services/${serviceId}/zip-upload/${uploadId}/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ stripWrapper, confirmOverwrite }),
+    }),
+
+  cancelServiceZip: (serviceId, uploadId) =>
+    request(`/services/${serviceId}/zip-upload/${uploadId}`, { method: 'DELETE' }),
 
   // File Export/Import (per service)
   exportServiceFiles: (serviceId) => request(`/services/${serviceId}/export-files`),
@@ -960,6 +1012,21 @@ export const api = {
       xhr.send(formData);
     });
   },
+
+  // Zip upload into a container (two-phase inspect → confirm →
+  // apply, same contract as the static-site zip upload) with an
+  // optional startup script registered to run on container boot.
+  uploadLxcZip: (name, file, targetDir, onProgress) =>
+    uploadZipWithProgress(`/lxc/containers/${name}/zip-upload`, { targetDir }, file, onProgress),
+
+  applyLxcZip: (name, uploadId, options = {}) =>
+    request(`/lxc/containers/${name}/zip-upload/${uploadId}/apply`, {
+      method: 'POST',
+      body: JSON.stringify(options),
+    }),
+
+  cancelLxcZip: (name, uploadId) =>
+    request(`/lxc/containers/${name}/zip-upload/${uploadId}`, { method: 'DELETE' }),
 
   listContainerFiles: (name, path = '/root') => request(`/lxc/containers/${name}/files?path=${encodeURIComponent(path)}`),
 

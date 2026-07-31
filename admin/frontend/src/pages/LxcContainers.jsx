@@ -27,10 +27,11 @@ import {
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
   Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote,
-  X, Shield, Copy, Sparkles, Pencil, MoveRight
+  X, Shield, Copy, Sparkles, Pencil, MoveRight, FileArchive
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
+import ZipUploadDialog from '@/components/ZipUploadDialog';
 import { useSnapshotExports } from '@/context/SnapshotExportContext';
 
 const STATUS_COLORS = {
@@ -197,6 +198,7 @@ function ContainerFiles({ containerName, onOpenTerminal }) {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [zipUploadOpen, setZipUploadOpen] = useState(false);
   const fileInputRef = useRef(null);
 
   const fetchFiles = useCallback(async (path) => {
@@ -308,7 +310,31 @@ function ContainerFiles({ containerName, onOpenTerminal }) {
           {uploading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Upload className="h-3 w-3 mr-1" />}
           Upload
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 text-xs"
+          onClick={() => setZipUploadOpen(true)}
+          title="Extract a zip into the container (optional startup script)"
+        >
+          <FileArchive className="h-3 w-3 mr-1" />
+          Upload ZIP
+        </Button>
       </div>
+
+      {/* Zip app-drop upload — two-phase confirm flow; conflicts are
+          listed and only replaced (as .old) after confirmation */}
+      <ZipUploadDialog
+        mode="lxc"
+        open={zipUploadOpen}
+        onOpenChange={setZipUploadOpen}
+        subjectName={containerName}
+        defaultTargetDir="/opt/app"
+        upload={(file, targetDir, onProgress) => api.uploadLxcZip(containerName, file, targetDir, onProgress)}
+        apply={(uploadId, options) => api.applyLxcZip(containerName, uploadId, options)}
+        cancel={(uploadId) => api.cancelLxcZip(containerName, uploadId)}
+        onApplied={() => fetchFiles(currentPath)}
+      />
 
       {/* File list */}
       <div className="border rounded-lg overflow-hidden">

@@ -193,6 +193,24 @@ Mechanics (pure layer: `phase-routing-logic.js`, tested in
   path. Projects on framework versions without the marker are untouched
   either way, and the Tier-1 deterministic gate battery is unchanged in every
   mode.
+- **Cost posture** (`phase_routing_posture` setting on the same card/API, or
+  `MOCK2_PHASE_POSTURE` env): five presets applied over the resolved map at
+  cycle start, all provider-aware and all stamped into `routing_json` +
+  the change record's map line:
+
+  | Posture | Meaning | both / OpenAI-only | Anthropic-only |
+  |---|---|---|---|
+  | `default` | the manually set configuration, as resolved | (per-phase map) | (per-phase map) |
+  | `suggested` | recommended tier model at every phase | (per-phase map, overrides dropped) | (per-phase map, overrides dropped) |
+  | `ultra_cheap` | cheapest available model for everything | `gpt-5.6-luna` | `claude-haiku-4-5` |
+  | `balanced` | mid tier for everything | `gpt-5.6-terra` | `claude-sonnet-5` |
+  | `max_quality` | "take my money": best available flagship for everything | `claude-fable-5` (Sol when OpenAI-only) | `claude-fable-5` |
+
+  `max_quality` is the one sanctioned way a frontier tier runs outside the
+  plan phase — an explicit operator opt-in, never a default; `gpt-5.5-pro`
+  stays excluded even there (legacy, uncached). A posture never overrides the
+  neither-provider refusal, and the gate battery runs identically under every
+  posture.
 
 ## apply_edit — anchored targeted file editing
 

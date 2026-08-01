@@ -12,6 +12,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  PHASE_POSTURES,
+  PHASE_POSTURE_FLAG,
+  normalizePhasePosture,
+  phasePosture,
+  applyPhasePosture,
   PHASE_ROUTING_MARKER,
   PHASE_ROUTING_FLAG,
   phaseRoutingMode,
@@ -276,6 +281,81 @@ test('every phase has a tier and every tier is one of cheap/mid/top', () => {
   for (const phase of BUILD_PHASES) {
     assert.ok(['cheap', 'mid', 'top'].includes(PHASE_TIER[phase]), `${phase} tier`);
   }
+});
+
+// ---- cost postures (the five selectable presets) ----
+
+test('the five postures exist; junk normalizes to default; env reader works', () => {
+  assert.deepEqual(PHASE_POSTURES, ['default', 'suggested', 'ultra_cheap', 'balanced', 'max_quality']);
+  assert.equal(normalizePhasePosture('ULTRA_CHEAP'), 'ultra_cheap');
+  assert.equal(normalizePhasePosture('cheapest'), 'default');
+  assert.equal(normalizePhasePosture(null), 'default');
+  assert.equal(phasePosture({}), 'default');
+  assert.equal(phasePosture({ [PHASE_POSTURE_FLAG]: 'balanced' }), 'balanced');
+});
+
+test('posture default: the manually set configuration passes through untouched', () => {
+  const resolved = resolvePhaseModelMap({ providers: ['anthropic', 'openai'], planModelOverride: 'claude-fable-5' });
+  const out = applyPhasePosture(resolved, 'default');
+  assert.equal(out.posture, 'default');
+  assert.deepEqual(out.map, resolved.map);
+  assert.equal(out.map.plan.model, 'claude-fable-5'); // the manual override survives
+});
+
+test('posture suggested: the recommended tier map everywhere (manual overrides dropped)', () => {
+  const resolved = resolvePhaseModelMap({ providers: ['anthropic', 'openai'], planModelOverride: 'gpt-5.5-pro' });
+  const out = applyPhasePosture(resolved, 'suggested');
+  assert.equal(out.posture, 'suggested');
+  assert.equal(out.map.plan.model, 'claude-opus-5'); // back to the suggestion
+  assert.equal(out.map.recon.model, 'gpt-5.6-luna');
+  assert.equal(out.map.implement_complex.model, 'gpt-5.6-terra');
+});
+
+test('posture ultra_cheap: the lowest-cost available model for everything', () => {
+  const expect = { both: 'gpt-5.6-luna', openai: 'gpt-5.6-luna', anthropic: 'claude-haiku-4-5' };
+  for (const [scenario, providers] of [['both', ['anthropic', 'openai']], ['openai', ['openai']], ['anthropic', ['anthropic']]]) {
+    const out = applyPhasePosture(resolvePhaseModelMap({ providers }), 'ultra_cheap');
+    assert.equal(out.posture, 'ultra_cheap');
+    for (const phase of BUILD_PHASES) {
+      assert.equal(out.map[phase].model, expect[scenario], `${scenario}/${phase}`);
+    }
+  }
+});
+
+test('posture balanced: Terra / Sonnet level for everything', () => {
+  const expect = { both: 'gpt-5.6-terra', openai: 'gpt-5.6-terra', anthropic: 'claude-sonnet-5' };
+  for (const [scenario, providers] of [['both', ['anthropic', 'openai']], ['openai', ['openai']], ['anthropic', ['anthropic']]]) {
+    const out = applyPhasePosture(resolvePhaseModelMap({ providers }), 'balanced');
+    for (const phase of BUILD_PHASES) {
+      assert.equal(out.map[phase].model, expect[scenario], `${scenario}/${phase}`);
+    }
+  }
+});
+
+test('posture max_quality: the best available flagship for everything — never gpt-5.5-pro', () => {
+  const expect = { both: 'claude-fable-5', openai: 'gpt-5.6-sol', anthropic: 'claude-fable-5' };
+  for (const [scenario, providers] of [['both', ['anthropic', 'openai']], ['openai', ['openai']], ['anthropic', ['anthropic']]]) {
+    const out = applyPhasePosture(resolvePhaseModelMap({ providers }), 'max_quality');
+    for (const phase of BUILD_PHASES) {
+      assert.equal(out.map[phase].model, expect[scenario], `${scenario}/${phase}`);
+      assert.notEqual(out.map[phase].model, 'gpt-5.5-pro'); // legacy/uncached stays excluded even here
+    }
+  }
+});
+
+test('a posture never rescues the no-provider refusal, and the record line names the posture', () => {
+  const refused = applyPhasePosture(resolvePhaseModelMap({ providers: [] }), 'ultra_cheap');
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error, NO_PROVIDER_ERROR);
+  const out = applyPhasePosture(resolvePhaseModelMap({ providers: ['anthropic', 'openai'] }), 'ultra_cheap');
+  const line = phaseMapRecordLine({ phase_scenario: out.scenario, phase_posture: out.posture, phase_map: out.map });
+  assert.match(line, /^Phase model map \[both, posture: ultra_cheap\]: /);
+  // The default posture keeps the record line unchanged from the pre-posture shape.
+  const def = applyPhasePosture(resolvePhaseModelMap({ providers: ['anthropic', 'openai'] }), 'default');
+  assert.match(
+    phaseMapRecordLine({ phase_scenario: def.scenario, phase_posture: def.posture, phase_map: def.map }),
+    /^Phase model map \[both\]: /,
+  );
 });
 
 test('the only OpenAI models any phase map routes to are luna, terra, and sol', () => {

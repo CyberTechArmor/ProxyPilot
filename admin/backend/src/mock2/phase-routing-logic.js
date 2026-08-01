@@ -368,6 +368,81 @@ export function buildReviewDispatchInputs({
   return { ok: true, prompt: sections.join('\n\n'), error: null };
 }
 
+// ---- cost posture (the five selectable spend/quality presets) ----
+
+// How the resolved phase map is shaped before it runs. Applied AFTER provider
+// resolution, so every posture stays provider-aware (an Anthropic-only
+// install's "ultra cheap" is Haiku; with OpenAI configured it is Luna).
+//
+//   default     — the manually set configuration: the resolved map exactly as
+//                 configured (including any plan-phase override). Ships as
+//                 the default posture, so behavior is unchanged until an
+//                 operator picks something else.
+//   suggested   — the platform's recommended tier map at every phase
+//                 (drops manual overrides; pure cheap/mid/top routing).
+//   ultra_cheap — the lowest-cost model from the available providers for
+//                 EVERYTHING (Luna, else Haiku). The Tier-1 gates still run;
+//                 the touches carve-out becomes moot because 3a and 3b share
+//                 one model.
+//   balanced    — the mid tier (Terra / Sonnet level) for everything.
+//   max_quality — "take my money": the best available flagship across the
+//                 configured providers for everything (Fable 5 when Anthropic
+//                 is configured, else Sol). This is the one sanctioned way a
+//                 frontier tier runs outside the plan phase — an explicit
+//                 operator opt-in, never a default. gpt-5.5-pro stays
+//                 excluded even here (legacy, uncached, off the active sheet).
+export const PHASE_POSTURES = Object.freeze(['default', 'suggested', 'ultra_cheap', 'balanced', 'max_quality']);
+
+export const PHASE_POSTURE_FLAG = 'MOCK2_PHASE_POSTURE';
+
+export function normalizePhasePosture(value) {
+  const v = String(value || '').trim().toLowerCase();
+  return PHASE_POSTURES.includes(v) ? v : 'default';
+}
+
+export function phasePosture(env = {}) {
+  return normalizePhasePosture(env?.[PHASE_POSTURE_FLAG]);
+}
+
+// The single { model, provider } each uniform posture pins per scenario.
+const POSTURE_UNIFORM_MODELS = Object.freeze({
+  ultra_cheap: Object.freeze({
+    both: Object.freeze({ model: OPENAI_CHEAP, provider: 'openai' }),
+    openai: Object.freeze({ model: OPENAI_CHEAP, provider: 'openai' }),
+    anthropic: Object.freeze({ model: MODEL_CHEAP, provider: 'anthropic' }),
+  }),
+  balanced: Object.freeze({
+    both: Object.freeze({ model: OPENAI_MID, provider: 'openai' }),
+    openai: Object.freeze({ model: OPENAI_MID, provider: 'openai' }),
+    anthropic: Object.freeze({ model: MODEL_BALANCED, provider: 'anthropic' }),
+  }),
+  max_quality: Object.freeze({
+    both: Object.freeze({ model: MODEL_FRONTIER, provider: 'anthropic' }),
+    openai: Object.freeze({ model: OPENAI_TOP, provider: 'openai' }),
+    anthropic: Object.freeze({ model: MODEL_FRONTIER, provider: 'anthropic' }),
+  }),
+});
+
+// applyPhasePosture — shape a resolvePhaseModelMap result by the chosen
+// posture. Pure; returns a NEW result carrying `posture`. A failed resolution
+// passes through untouched (the no-provider refusal outranks any posture).
+export function applyPhasePosture(resolved, posture = 'default') {
+  if (!resolved?.ok) return resolved;
+  const p = normalizePhasePosture(posture);
+  if (p === 'default') return { ...resolved, posture: p };
+  if (p === 'suggested') {
+    // The recommended tier map, with any manual override dropped.
+    const fresh = resolvePhaseModelMap({ providers: resolved.providers });
+    return { ...fresh, posture: p };
+  }
+  const pick = POSTURE_UNIFORM_MODELS[p][resolved.scenario];
+  const map = {};
+  for (const phase of BUILD_PHASES) {
+    map[phase] = { ...pick, tier: p };
+  }
+  return { ...resolved, map, posture: p };
+}
+
 // ---- the change-record echo (reproducibility) ----
 
 // One compact line for the change-record summary naming the resolved map, so
@@ -377,10 +452,14 @@ export function buildReviewDispatchInputs({
 export function phaseMapRecordLine(doc) {
   const map = doc?.phase_map || doc?.map || null;
   const scenario = doc?.phase_scenario || doc?.scenario || null;
+  const posture = doc?.phase_posture || doc?.posture || null;
   if (!map || typeof map !== 'object') return null;
   const parts = BUILD_PHASES
     .filter((ph) => map[ph]?.model)
     .map((ph) => `${ph}=${map[ph].model} (${map[ph].provider || '?'})`);
   if (!parts.length) return null;
-  return `Phase model map [${scenario || 'unknown'}]: ${parts.join(', ')}`;
+  const head = posture && posture !== 'default'
+    ? `${scenario || 'unknown'}, posture: ${posture}`
+    : (scenario || 'unknown');
+  return `Phase model map [${head}]: ${parts.join(', ')}`;
 }

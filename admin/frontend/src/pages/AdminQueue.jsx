@@ -411,13 +411,15 @@ export default function AdminQueue() {
     } finally { setSavingReview(false); }
   };
 
-  // Per-phase model routing (phase-routing@1) — default on.
+  // Per-phase model routing (phase-routing@1) — default on — and its
+  // five-preset cost posture.
   const [phaseRouting, setPhaseRouting] = useState(null);
+  const [phasePosture, setPhasePosture] = useState(null);
   const [savingPhaseRouting, setSavingPhaseRouting] = useState(false);
   useEffect(() => {
     if (gate !== 'enabled') return;
     api.mock2GetPhaseRouting()
-      .then((r) => setPhaseRouting(r.setting))
+      .then((r) => { setPhaseRouting(r.setting); setPhasePosture(r.posture || 'default'); })
       .catch((err) => { if (!(err instanceof ApiError)) console.error('load phase-routing failed:', err); });
   }, [gate]);
   const savePhaseRouting = async (setting) => {
@@ -431,6 +433,23 @@ export default function AdminQueue() {
           ? 'Builds run each cycle on one model again (the single-model path).'
           : 'Builds on the phased framework route recon/plan/implement/summarize/review to independently chosen models.',
       });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+    } finally { setSavingPhaseRouting(false); }
+  };
+  const PHASE_POSTURE_TOAST = {
+    default: 'Phases run on your manually set configuration.',
+    suggested: 'Every phase runs the platform-suggested tier model.',
+    ultra_cheap: 'Every phase runs the cheapest available model (Luna / Haiku). Gates still run on everything.',
+    balanced: 'Every phase runs the mid tier (Terra / Sonnet level).',
+    max_quality: 'Every phase runs the best available flagship (Fable 5 / Sol). Expect frontier-tier spend.',
+  };
+  const savePhasePosture = async (posture) => {
+    setSavingPhaseRouting(true);
+    try {
+      const r = await api.mock2SetPhasePosture(posture);
+      setPhasePosture(r.posture);
+      toast({ title: 'Cost posture updated', description: PHASE_POSTURE_TOAST[r.posture] || r.posture });
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not save', description: err.message });
     } finally { setSavingPhaseRouting(false); }
@@ -1015,16 +1034,39 @@ export default function AdminQueue() {
               <Loader2 className="h-4 w-4 animate-spin" /> Loading…
             </div>
           ) : (
-            <div className="space-y-1 max-w-md">
-              <label className="text-xs text-muted-foreground" htmlFor="phase-routing-setting">Build pipeline</label>
-              <Select value={phaseRouting} disabled={savingPhaseRouting} onValueChange={savePhaseRouting}>
-                <SelectTrigger id="phase-routing-setting" className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="on">On (default) — five phases, each on its own model tier</SelectItem>
-                  <SelectItem value="off">Off — one model per build cycle (single-model path)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            <>
+              <div className="space-y-1 max-w-md">
+                <label className="text-xs text-muted-foreground" htmlFor="phase-routing-setting">Build pipeline</label>
+                <Select value={phaseRouting} disabled={savingPhaseRouting} onValueChange={savePhaseRouting}>
+                  <SelectTrigger id="phase-routing-setting" className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="on">On (default) — five phases, each on its own model tier</SelectItem>
+                    <SelectItem value="off">Off — one model per build cycle (single-model path)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {phaseRouting === 'on' && (
+                <div className="space-y-1 max-w-md">
+                  <label className="text-xs text-muted-foreground" htmlFor="phase-posture-setting">Cost posture</label>
+                  <Select value={phasePosture || 'default'} disabled={savingPhaseRouting} onValueChange={savePhasePosture}>
+                    <SelectTrigger id="phase-posture-setting" className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="default">Default — your manually set configuration</SelectItem>
+                      <SelectItem value="suggested">Suggested — the recommended model at every phase</SelectItem>
+                      <SelectItem value="ultra_cheap">Ultra cheap — lowest-cost available model for everything</SelectItem>
+                      <SelectItem value="balanced">Middle of the road — Terra / Sonnet level for everything</SelectItem>
+                      <SelectItem value="max_quality">Take my money — best available flagship for everything</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="pt-1 text-xs text-muted-foreground">
+                    Provider-aware: ultra cheap is Luna with OpenAI configured, Haiku on Anthropic alone;
+                    take-my-money is Fable 5 when Anthropic is configured, Sol on OpenAI alone. The
+                    Tier-1 gate battery runs identically under every posture, and each cycle&apos;s change
+                    record names the posture and map it ran with.
+                  </p>
+                </div>
+              )}
+            </>
           )}
         </CardContent>
       </Card>

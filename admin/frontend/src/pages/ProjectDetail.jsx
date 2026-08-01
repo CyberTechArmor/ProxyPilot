@@ -34,7 +34,7 @@ import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
   Archive, RotateCcw, Play, Lock, Download, GitBranch,
   Circle, Hammer, Unlock, Clock, Sparkles, TerminalSquare, MessageSquare, LayoutPanelLeft, Eye,
-  Library,
+  Library, Cpu,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
@@ -919,6 +919,10 @@ export default function ProjectDetail() {
       {/* Build harness — ProxyPilot's runner or the Claude Agent SDK, per project. */}
       <HarnessCard projectId={id} canEdit={canEdit && !isArchived} />
 
+      {/* AI provider — with multiple global providers configured, THIS project
+          must declare which one drives its phase-routed builds. */}
+      <ProviderCard project={project} canEdit={canEdit && !isArchived} onChanged={load} />
+
       {/* The app's own accounts (first admin, screen accounts, demo content). */}
       <ProjectAppAccess projectId={id} canEdit={canEdit && !isArchived} />
 
@@ -1215,6 +1219,75 @@ function HarnessCard({ projectId, canEdit }) {
         ) : null}
         {!canEdit ? (
           <p className="text-xs text-muted-foreground">Only editors can change the harness.</p>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Which AI provider drives this project's phase-routed builds. Global
+// connectors define what is AVAILABLE; when more than one provider holds a
+// usable credential, the project never silently overrides that — it must pick
+// Anthropic, OpenAI, or Hybrid (all providers, the mixed cheap/mid-on-OpenAI +
+// top-on-Anthropic map) here before a phase-routed build will start. With one
+// global provider the choice is moot and builds run without it. MOBILE_FIRST:
+// one column on phones, ≥44px targets.
+function ProviderCard({ project, canEdit, onChanged }) {
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const active = project?.provider_preference || null;
+
+  const choose = async (preference) => {
+    if (!project || busy || preference === active) return;
+    setBusy(true);
+    try {
+      await api.mock2SetProviderPreference(project.id, preference);
+      const label = preference === 'hybrid' ? 'Hybrid (all providers)' : preference === 'openai' ? 'OpenAI' : 'Anthropic';
+      toast({ title: `AI provider: ${label}`, description: 'Saved. Applies from the next build cycle.' });
+      if (onChanged) onChanged();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not set the provider', description: err.message });
+    } finally { setBusy(false); }
+  };
+
+  const seg = (value, label, caption) => (
+    <Button
+      type="button"
+      role="radio"
+      aria-checked={active === value}
+      variant={active === value ? 'default' : 'outline'}
+      disabled={!project || busy || !canEdit}
+      onClick={() => choose(value)}
+      className="min-h-[44px] h-auto w-full flex-col items-start gap-0.5 py-2"
+    >
+      <span className="font-medium">{label}{active === value ? ' · active' : ''}</span>
+      <span className="text-xs font-normal opacity-80">{caption}</span>
+    </Button>
+  );
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2"><Cpu className="h-4 w-4" /> AI provider</CardTitle>
+        <CardDescription>
+          Which provider&apos;s models drive this project&apos;s builds. When more than one provider is
+          configured platform-wide, a phase-routed build will not start until this project chooses —
+          the project never overrides the platform&apos;s provider setup on its own.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="AI provider">
+          {seg('anthropic', 'Anthropic', 'Claude models on every phase')}
+          {seg('openai', 'OpenAI', 'GPT-5.6 (sol/terra/luna) on every phase')}
+          {seg('hybrid', 'Hybrid', 'All providers — cheap/mid on OpenAI, top tier on Anthropic')}
+        </div>
+        {!active ? (
+          <p className="text-xs text-amber-500">
+            Not chosen yet. If multiple providers are configured, builds will ask for this before starting.
+          </p>
+        ) : null}
+        {!canEdit ? (
+          <p className="text-xs text-muted-foreground">Only editors can change the provider.</p>
         ) : null}
       </CardContent>
     </Card>

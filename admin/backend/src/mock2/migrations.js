@@ -1794,4 +1794,19 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Per-project AI provider preference (phase routing): with MULTIPLE global
+    // providers configured, each project must declare which one drives its
+    // builds — 'anthropic' | 'openai' | 'hybrid' (all providers, the mixed
+    // map). NULL = not chosen yet (cycle start refuses until it is, when more
+    // than one provider is available). design_choice_at stamps the design
+    // chat's mandatory preset-or-AI choice (the popup), so a project that has
+    // chosen is never re-prompted.
+    version: 554,
+    name: 'mock2_provider_preference_and_design_choice',
+    up: (d) => {
+      d.exec(`ALTER TABLE mock2_projects ADD COLUMN provider_preference TEXT;`);
+      d.exec(`ALTER TABLE mock2_projects ADD COLUMN design_choice_at TEXT;`);
+    },
+  },
 ];

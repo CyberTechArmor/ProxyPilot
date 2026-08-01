@@ -162,6 +162,15 @@ Mechanics (pure layer: `phase-routing-logic.js`, tested in
   second credential store). Neither Anthropic nor OpenAI configured → the
   cycle **fails at start** with an operator message, before any cycle row is
   inserted (no partial state). No hardcoded fallback.
+- **Per-project provider choice** (`provider_preference`, project page → "AI
+  provider" card, `PUT /projects/:id/provider-preference`): with MULTIPLE
+  global providers configured, a project never silently gets the mixed map —
+  it must choose **Anthropic**, **OpenAI**, or **Hybrid** (all providers)
+  before a phase-routed build starts (unset → the cycle refuses with a
+  pointer to the card). An explicit single-provider choice *binds*: if that
+  provider's credential later breaks, the cycle fails naming it rather than
+  silently flipping to the other provider. With one global provider the
+  choice is moot. Clones inherit the source's choice.
 - The resolved map is stamped into the cycle's `routing_json`
   (`phase_scenario` / `phase_providers` / `phase_map`) and echoed as a
   `Phase model map [...]` line in the change record, so any cycle is

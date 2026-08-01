@@ -1753,6 +1753,13 @@ export const api = {
   // Domain-suggestion handling: 'off' | 'ask' | 'auto'.
   mock2SetSuggestMode: (id, mode) =>
     request(`/mock2/projects/${id}/suggest-mode`, { method: 'PUT', body: JSON.stringify({ mode }) }),
+  // Per-project AI provider for phase-routed builds ('anthropic' | 'openai' |
+  // 'hybrid'; '' clears). Required when multiple global providers exist.
+  mock2SetProviderPreference: (id, preference) =>
+    request(`/mock2/projects/${id}/provider-preference`, { method: 'PUT', body: JSON.stringify({ preference }) }),
+  // The design chat's mandatory design choice: a saved preset key or 'ai'.
+  mock2SetProjectDesignPreset: (id, preset) =>
+    request(`/mock2/projects/${id}/design-preset`, { method: 'PUT', body: JSON.stringify({ preset }) }),
   // Design review: screenshot + vision critique (apply=true
   // also queues the fixes as a quick build) and the auto-review toggle.
   mock2Polish: (id, { apply = false } = {}) =>

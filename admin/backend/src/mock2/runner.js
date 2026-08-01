@@ -25,7 +25,7 @@ import { containerNameForProject } from './provision.js';
 import { buildCheckpointScript } from './template.js';
 import { buildDbSnapshotScript } from './restore-logic.js';
 import { getSlot, getConnector, decryptConnectorKey, effectivePrice, listConnectors, isSecretDecryptable } from './connectors.js';
-import { phaseRoutingApplies, detectPhaseProviders, resolvePhaseModelMap, applyPhasePosture, phasePosture, phaseMapRecordLine } from './phase-routing-logic.js';
+import { phaseRoutingApplies, detectPhaseProviders, applyProviderPreference, resolvePhaseModelMap, applyPhasePosture, phasePosture, phaseMapRecordLine } from './phase-routing-logic.js';
 import { resolveProjectKey } from './project-keys.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
@@ -555,7 +555,12 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
       console.warn('[mock2] phase-routing provider detection failed (single-model path applies):', e?.message);
     }
     if (providers) {
-      const resolved = resolvePhaseModelMap({ providers });
+      // With multiple global providers, THIS PROJECT must have declared which
+      // one drives its builds (anthropic / openai / hybrid) — a project never
+      // silently overrides that decision. One global provider needs no choice.
+      const preferred = applyProviderPreference({ providers, preference: project.provider_preference });
+      if (!preferred.ok) return { status: 'error', error: preferred.error };
+      const resolved = resolvePhaseModelMap({ providers: preferred.providers });
       if (!resolved.ok) return { status: 'error', error: resolved.error };
       // Cost posture (five presets): shape the resolved map — default keeps
       // the manual configuration; suggested/ultra_cheap/balanced/max_quality

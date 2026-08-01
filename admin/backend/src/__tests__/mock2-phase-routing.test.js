@@ -12,6 +12,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  PROJECT_PROVIDER_PREFS,
+  normalizeProviderPreference,
+  applyProviderPreference,
+  PROVIDER_CHOICE_REQUIRED_ERROR,
   PHASE_POSTURES,
   PHASE_POSTURE_FLAG,
   normalizePhasePosture,
@@ -281,6 +285,56 @@ test('every phase has a tier and every tier is one of cheap/mid/top', () => {
   for (const phase of BUILD_PHASES) {
     assert.ok(['cheap', 'mid', 'top'].includes(PHASE_TIER[phase]), `${phase} tier`);
   }
+});
+
+// ---- per-project provider preference (multiple global providers) ----
+
+test('multiple global providers: the project must choose — no silent override', () => {
+  const both = ['anthropic', 'openai'];
+  // No preference set → the cycle refuses with the choose-a-provider message.
+  const unset = applyProviderPreference({ providers: both, preference: null });
+  assert.equal(unset.ok, false);
+  assert.equal(unset.error, PROVIDER_CHOICE_REQUIRED_ERROR);
+  assert.match(unset.error, /AI provider/);
+  // An explicit single-provider choice narrows the map to that vendor's column.
+  const anth = applyProviderPreference({ providers: both, preference: 'anthropic' });
+  assert.deepEqual(anth, { ok: true, providers: ['anthropic'] });
+  assert.equal(resolvePhaseModelMap({ providers: anth.providers }).scenario, 'anthropic');
+  const oai = applyProviderPreference({ providers: both, preference: 'openai' });
+  assert.deepEqual(oai, { ok: true, providers: ['openai'] });
+  // 'hybrid' (the "all providers" option) keeps the mixed map.
+  const hyb = applyProviderPreference({ providers: both, preference: 'hybrid' });
+  assert.deepEqual(hyb.providers, both);
+  assert.equal(resolvePhaseModelMap({ providers: hyb.providers }).scenario, 'both');
+});
+
+test('single global provider: nothing to choose — unset/hybrid never block', () => {
+  // One provider, no preference → no choice required.
+  assert.deepEqual(applyProviderPreference({ providers: ['anthropic'], preference: null }),
+    { ok: true, providers: ['anthropic'] });
+  // 'hybrid' with one provider is just that provider.
+  assert.deepEqual(applyProviderPreference({ providers: ['openai'], preference: 'hybrid' }),
+    { ok: true, providers: ['openai'] });
+  // Zero providers passes through so resolvePhaseModelMap raises ITS refusal.
+  assert.deepEqual(applyProviderPreference({ providers: [], preference: 'hybrid' }),
+    { ok: true, providers: [] });
+});
+
+test('a chosen provider whose credential broke fails loudly — never silently flips', () => {
+  // The project chose OpenAI; the OpenAI key later broke while Anthropic still
+  // works. The choice binds: refuse and name the broken provider, don't run
+  // the build on a provider the project didn't pick.
+  const r = applyProviderPreference({ providers: ['anthropic'], preference: 'openai' });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /openai/);
+  assert.match(r.error, /credential/);
+  // A junk/unroutable stored value behaves as unset (choice still required).
+  const r2 = applyProviderPreference({ providers: ['anthropic', 'openai'], preference: 'gemini' });
+  assert.equal(r2.ok, false);
+  assert.equal(r2.error, PROVIDER_CHOICE_REQUIRED_ERROR);
+  assert.deepEqual(PROJECT_PROVIDER_PREFS, ['anthropic', 'openai', 'hybrid']);
+  assert.equal(normalizeProviderPreference('HYBRID'), 'hybrid');
+  assert.equal(normalizeProviderPreference('gemini'), null);
 });
 
 // ---- cost postures (the five selectable presets) ----

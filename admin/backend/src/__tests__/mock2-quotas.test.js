@@ -27,25 +27,34 @@ test('costCentsForUsage: cents per mtok, rounded', () => {
   assert.equal(costCentsForUsage({ inputTokens: 100, outputTokens: 100 }, null), 0); // self-hosted: no price → 0
 });
 
+// A partial-shape matcher: the sheet rows now carry cache/long-context/provenance
+// fields too (asserted in mock2-pricing-sheet.test.js); here we pin the base rates.
+const baseRate = (model, opts) => {
+  const p = defaultModelPrice(model, opts);
+  return p && { input_cents_per_mtok: p.input_cents_per_mtok, output_cents_per_mtok: p.output_cents_per_mtok };
+};
+
 test('defaultModelPrice: known Claude models resolve to their documented rate', () => {
-  assert.deepEqual(defaultModelPrice('claude-opus-4-8'), { input_cents_per_mtok: 500, output_cents_per_mtok: 2500 });
-  assert.deepEqual(defaultModelPrice('claude-sonnet-4-6'), { input_cents_per_mtok: 300, output_cents_per_mtok: 1500 });
-  assert.deepEqual(defaultModelPrice('claude-haiku-4-6'), { input_cents_per_mtok: 100, output_cents_per_mtok: 500 });
+  assert.deepEqual(baseRate('claude-opus-4-8'), { input_cents_per_mtok: 500, output_cents_per_mtok: 2500 });
+  assert.deepEqual(baseRate('claude-sonnet-4-6'), { input_cents_per_mtok: 300, output_cents_per_mtok: 1500 });
+  assert.deepEqual(baseRate('claude-haiku-4-6'), { input_cents_per_mtok: 100, output_cents_per_mtok: 500 });
   // Older / pricier Opus tiers and a date-suffixed id still resolve.
-  assert.deepEqual(defaultModelPrice('claude-opus-4-1'), { input_cents_per_mtok: 1500, output_cents_per_mtok: 7500 });
-  assert.deepEqual(defaultModelPrice('claude-opus-4-8-20260101'), { input_cents_per_mtok: 500, output_cents_per_mtok: 2500 });
+  assert.deepEqual(baseRate('claude-opus-4-1'), { input_cents_per_mtok: 1500, output_cents_per_mtok: 7500 });
+  assert.deepEqual(baseRate('claude-opus-4-8-20260101'), { input_cents_per_mtok: 500, output_cents_per_mtok: 2500 });
 });
 
 test('defaultModelPrice: OpenAI frontier + utility models resolve to their documented rate', () => {
-  assert.deepEqual(defaultModelPrice('gpt-5.6-sol'), { input_cents_per_mtok: 500, output_cents_per_mtok: 3000 });
-  assert.deepEqual(defaultModelPrice('gpt-5.6-terra'), { input_cents_per_mtok: 250, output_cents_per_mtok: 1500 });
-  assert.deepEqual(defaultModelPrice('gpt-5.6-luna'), { input_cents_per_mtok: 100, output_cents_per_mtok: 600 });
-  assert.deepEqual(defaultModelPrice('gpt-5.3-codex'), { input_cents_per_mtok: 175, output_cents_per_mtok: 1400 });
-  assert.deepEqual(defaultModelPrice('gpt-5.4-mini'), { input_cents_per_mtok: 75, output_cents_per_mtok: 450 });
-  assert.deepEqual(defaultModelPrice('gpt-5.4-nano'), { input_cents_per_mtok: 20, output_cents_per_mtok: 125 });
+  // Verified against the vendor sheet 2026-08-01 — luna cut ~80% and terra ~20%
+  // on 2026-07-30; sol was not cut.
+  assert.deepEqual(baseRate('gpt-5.6-sol'), { input_cents_per_mtok: 500, output_cents_per_mtok: 3000 });
+  assert.deepEqual(baseRate('gpt-5.6-terra'), { input_cents_per_mtok: 200, output_cents_per_mtok: 1200 });
+  assert.deepEqual(baseRate('gpt-5.6-luna'), { input_cents_per_mtok: 20, output_cents_per_mtok: 120 });
+  assert.deepEqual(baseRate('gpt-5.3-codex'), { input_cents_per_mtok: 175, output_cents_per_mtok: 1400 });
+  assert.deepEqual(baseRate('gpt-5.4-mini'), { input_cents_per_mtok: 75, output_cents_per_mtok: 450 });
+  assert.deepEqual(baseRate('gpt-5.4-nano'), { input_cents_per_mtok: 20, output_cents_per_mtok: 125 });
   // A dashed alias and a date suffix still resolve (dots folded to dashes).
-  assert.deepEqual(defaultModelPrice('gpt-5-6-terra'), { input_cents_per_mtok: 250, output_cents_per_mtok: 1500 });
-  assert.deepEqual(defaultModelPrice('gpt-5.6-sol-20260701'), { input_cents_per_mtok: 500, output_cents_per_mtok: 3000 });
+  assert.deepEqual(baseRate('gpt-5-6-terra'), { input_cents_per_mtok: 200, output_cents_per_mtok: 1200 });
+  assert.deepEqual(baseRate('gpt-5.6-sol-20260701'), { input_cents_per_mtok: 500, output_cents_per_mtok: 3000 });
 });
 
 test('defaultModelPrice: unknown / self-hosted models have no default (cost stays 0)', () => {

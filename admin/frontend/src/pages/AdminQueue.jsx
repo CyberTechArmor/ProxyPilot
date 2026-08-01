@@ -411,6 +411,31 @@ export default function AdminQueue() {
     } finally { setSavingReview(false); }
   };
 
+  // Per-phase model routing (phase-routing@1) — default on.
+  const [phaseRouting, setPhaseRouting] = useState(null);
+  const [savingPhaseRouting, setSavingPhaseRouting] = useState(false);
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetPhaseRouting()
+      .then((r) => setPhaseRouting(r.setting))
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load phase-routing failed:', err); });
+  }, [gate]);
+  const savePhaseRouting = async (setting) => {
+    setSavingPhaseRouting(true);
+    try {
+      const r = await api.mock2SetPhaseRouting(setting);
+      setPhaseRouting(r.setting);
+      toast({
+        title: 'Per-phase model routing updated',
+        description: setting === 'off'
+          ? 'Builds run each cycle on one model again (the single-model path).'
+          : 'Builds on the phased framework route recon/plan/implement/summarize/review to independently chosen models.',
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+    } finally { setSavingPhaseRouting(false); }
+  };
+
   // First-run setup flow — guided (default) or the previous no-panel behaviour.
   const [setupFlow, setSetupFlow] = useState(null);
   const [savingSetupFlow, setSavingSetupFlow] = useState(false);
@@ -962,6 +987,41 @@ export default function AdminQueue() {
                 <SelectContent>
                   <SelectItem value="on">On (recommended) — critique every successful build</SelectItem>
                   <SelectItem value="off">Off — review only when asked for in a project chat</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Per-phase model routing — the five-phase build pipeline
+          (recon/plan/implement/summarize/review), each phase on its own tier.
+          Applies only to projects on a framework version that carries the
+          phase-routing marker; off restores the single-model path everywhere. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Per-phase model routing</CardTitle>
+          <CardDescription>
+            Splits each full build into five phases — recon briefs, plan, implement, summarize,
+            Tier-2 review — and routes each to a cheap, mid, or top-tier model based on which
+            providers hold a usable credential. The resolved model map is recorded in every cycle&apos;s
+            change record. Only applies to projects on a framework version that supports it; the
+            deterministic gate battery is unchanged either way.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {phaseRouting == null ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : (
+            <div className="space-y-1 max-w-md">
+              <label className="text-xs text-muted-foreground" htmlFor="phase-routing-setting">Build pipeline</label>
+              <Select value={phaseRouting} disabled={savingPhaseRouting} onValueChange={savePhaseRouting}>
+                <SelectTrigger id="phase-routing-setting" className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="on">On (default) — five phases, each on its own model tier</SelectItem>
+                  <SelectItem value="off">Off — one model per build cycle (single-model path)</SelectItem>
                 </SelectContent>
               </Select>
             </div>

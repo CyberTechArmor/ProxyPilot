@@ -70,6 +70,7 @@ Connectors → Routing shows the dictionary and the **outcome scoreboard**
 | --- | --- | --- | --- |
 | `MOCK2_ROUTING` | `on` / `shadow` / `off` | `on` | `shadow` decides + records but keeps the slot model (trial mode); `off` skips entirely |
 | `MOCK2_ESCALATE_MODEL` | model id | unset | Global fallback escalation model when a rule has none |
+| `MOCK2_PHASE_ROUTING` | `on` / `off` | `on` | Per-phase model routing (phase-routing@1); the stored `phase_routing` setting wins over the env var |
 
 ## API
 
@@ -86,17 +87,33 @@ chat-completions shape; only its catalog and a tier map were missing). Two
 additive pieces:
 
 - **Pricing** — `quota-logic.DEFAULT_MODEL_PRICES` now carries the OpenAI
-  frontier + utility catalog (cents per 1M tokens, input / output; verified
-  2026-07 — re-check before billing):
+  frontier + utility catalog (per 1M tokens, input / cached input / output;
+  verified against the vendor pricing pages **2026-08-01** — OpenAI cut
+  `gpt-5.6-luna` ~80% and `gpt-5.6-terra` ~20% on 2026-07-30; `sol` was not
+  cut):
 
-  | Model | Input | Output | Role |
-  |---|---|---|---|
-  | `gpt-5.6-sol` | $5.00 | $30.00 | flagship, hardest coding + complex tool use |
-  | `gpt-5.6-terra` | $2.50 | $15.00 | balanced default production coding |
-  | `gpt-5.6-luna` | $1.00 | $6.00 | fast, low-cost |
-  | `gpt-5.3-codex` | $1.75 | $14.00 | coding specialist (400K context) |
-  | `gpt-5.4-mini` | $0.75 | $4.50 | cheap utility (below the Haiku floor) |
-  | `gpt-5.4-nano` | $0.20 | $1.25 | cheapest (below the Haiku floor) |
+  | Model | Input | Cached input | Output | Role |
+  |---|---|---|---|---|
+  | `gpt-5.6-sol` | $5.00 | $0.50 | $30.00 | flagship, hardest coding + complex tool use |
+  | `gpt-5.6-terra` | $2.00 | $0.20 | $12.00 | balanced default production coding |
+  | `gpt-5.6-luna` | $0.20 | $0.02 | $1.20 | fast, low-cost |
+  | `gpt-5.5-pro` *(legacy)* | $30.00 | — none (bills full input) | $180.00 | off the active sheet |
+  | `gpt-5.3-codex` | $1.75 | (0.1×) | $14.00 | coding specialist (400K context) |
+  | `gpt-5.4-mini` | $0.75 | (0.1×) | $4.50 | cheap utility (below the Haiku floor) |
+  | `gpt-5.4-nano` | $0.20 | (0.1×) | $1.25 | cheapest (below the Haiku floor) |
+
+  Every sheet row now carries `effective_date` + `source_url` (surfaced as
+  "prices last verified on <date>" via `estimateStageCostCents` /
+  `breakdownForDisplay`), per-model cache rates (write ×1.25 of uncached
+  input; reads ×0.1 except `gpt-5.5-pro`, which has no cached rate), a
+  **long-context multiplier** (OpenAI: 2× on input *and* output above a
+  ~270K-token breakpoint, applied via the usage record's
+  `longContextInputShare` / `longContextOutputShare`; Anthropic rows keep the
+  field at 1.0 — per-model, not per-vendor, so it can be corrected later),
+  and dated rows for promo transitions (`claude-sonnet-5` bills $2/$10 through
+  2026-08-31 and $3/$15 from 2026-09-01 — `defaultModelPrice(model, { date })`
+  resolves the row in effect for the estimate's date). Batch API is recorded
+  as a 50% input+output discount (metadata; the platform does not batch).
 
   Cost accounting picks these up unchanged (`defaultModelPrice` → the same
   cache-aware `costCentsForUsage`).
@@ -120,6 +137,62 @@ additive pieces:
 
 OpenAI keys, like every non-Anthropic provider, come from the connector row
 (encrypted in the DB), never an env var — see the note in `.env.example`.
+
+## Per-phase model routing (phase-routing@1)
+
+A full build on a framework version that carries the `phase-routing@1` marker
+(the shipped seed does) runs as **five phases with independently selectable
+models**, resolved once at cycle start:
+
+| Phase | Tier | Both providers | OpenAI only | Anthropic only |
+|---|---|---|---|---|
+| 1 recon | cheap | `gpt-5.6-luna` | `gpt-5.6-luna` | `claude-haiku-4-5` |
+| 2 plan | top | `claude-opus-5` | `gpt-5.6-sol` | `claude-opus-5` |
+| 3a implement (mechanical) | cheap | `gpt-5.6-luna` | `gpt-5.6-luna` | `claude-haiku-4-5` |
+| 3b implement (complex) | mid | `gpt-5.6-terra` | `gpt-5.6-terra` | `claude-sonnet-5` |
+| 4 summarize | cheap | `gpt-5.6-luna` | `gpt-5.6-luna` | `claude-haiku-4-5` |
+| 5 review | top | `claude-opus-5` | `gpt-5.6-sol` | `claude-opus-5` |
+
+Mechanics (pure layer: `phase-routing-logic.js`, tested in
+`mock2-phase-routing.test.js`; wiring: `runner.js` `startCycle` +
+`checkpointAndRecord`):
+
+- **Provider detection** reuses the connector rows (enabled + decryptable key
+  — the same `secret_decryptable` signal the provider selector shows; no
+  second credential store). Neither Anthropic nor OpenAI configured → the
+  cycle **fails at start** with an operator message, before any cycle row is
+  inserted (no partial state). No hardcoded fallback.
+- The resolved map is stamped into the cycle's `routing_json`
+  (`phase_scenario` / `phase_providers` / `phase_map`) and echoed as a
+  `Phase model map [...]` line in the change record, so any cycle is
+  reproducible from its record.
+- **Recon** (the only new phase) dispatches *scoped* briefs — one per touched
+  subsystem, written to `state/recon/NNN-<subsystem>.md` and committed; the
+  plan reads briefs, not the raw tree.
+- **3a/3b carve-out**: the plan classifies each work-file task with
+  `complexity: mechanical | complex` and `touches: [auth, rbac, crypto,
+  migration, external-integration, money, none]`. A task with non-empty
+  `touches` is **never** dispatched to the cheap tier, regardless of size
+  (the surface-trigger / human-sovereign lists, reused as the routing floor).
+  A mechanical task that fails Tier-1 gates twice escalates to the 3b model —
+  never a third cheap attempt.
+- **Assumption ledger**: phase 3 emits it (verified-with-citation vs.
+  assumed-with-reason); phase 4 writes only the narrative/tables and must not
+  author or edit the ledger — close-out fails a record whose ledger did not
+  come from the implement phase (`closeOutLedgerVerdict`, both the
+  `state/changes/N.json` and `NNN-change-record.md` serializations).
+- **Tier-2 dispatch** receives the change record *and* the full diff
+  (`buildReviewDispatchInputs` refuses to dispatch without the diff); findings
+  must cite `file:line` from the diff.
+- No phase routes to a pro/frontier tier by default (`gpt-5.5-pro` is legacy
+  + uncached; Fable is priced above Opus). The only opt-in is a plan-phase
+  override.
+- **Toggle**: `phase_routing` setting (Admin queue → "Per-phase model
+  routing", `GET/POST /api/mock2/settings/phase-routing`) or
+  `MOCK2_PHASE_ROUTING` env — default **on**; `off` restores the single-model
+  path. Projects on framework versions without the marker are untouched
+  either way, and the Tier-1 deterministic gate battery is unchanged in every
+  mode.
 
 ## apply_edit — anchored targeted file editing
 
@@ -145,6 +218,8 @@ On success the tool returns a unified diff. Pure logic in
 
 - `admin/backend/src/mock2/routing-logic.js` — pure decisions (tested:
   `src/__tests__/mock2-routing.test.js`).
+- `admin/backend/src/mock2/phase-routing-logic.js` — the per-phase pipeline's
+  pure decisions (tested: `src/__tests__/mock2-phase-routing.test.js`).
 - `admin/backend/src/mock2/model-equivalence.js` — the Anthropic↔OpenAI tier map
   (tested: `src/__tests__/mock2-model-equivalence.test.js`).
 - `admin/backend/src/mock2/apply-edit-logic.js` — the `apply_edit` contract

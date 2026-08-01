@@ -1760,6 +1760,10 @@ export const api = {
   mock2GetDesignReview: () => request('/mock2/settings/design-review'),
   mock2SetDesignReview: (setting) =>
     request('/mock2/settings/design-review', { method: 'POST', body: JSON.stringify({ setting }) }),
+  // Per-phase model routing (phase-routing@1) toggle — default on.
+  mock2GetPhaseRouting: () => request('/mock2/settings/phase-routing'),
+  mock2SetPhaseRouting: (setting) =>
+    request('/mock2/settings/phase-routing', { method: 'POST', body: JSON.stringify({ setting }) }),
   // Turn a chat message into a well-formed quick-update instruction.
   mock2DistillPrompt: (id, messageId) =>
     request(`/mock2/projects/${id}/chat-messages/${messageId}/distill-prompt`, { method: 'POST' }),

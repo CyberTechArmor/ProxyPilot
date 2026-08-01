@@ -137,6 +137,9 @@ export function breakdownForDisplay(record, price = null) {
       cost_cents: p ? classCost(cls) : null,
     })),
     billable_in_out: Number(u.input || 0) + Number(u.output || 0),
+    // The pricing basis's age ("prices last verified on <date>") when a
+    // built-in sheet row priced this display; null for hand-entered rows.
+    prices_verified_on: p?.effective_date ?? null,
   };
 }
 

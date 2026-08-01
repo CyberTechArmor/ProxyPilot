@@ -33,7 +33,8 @@ import {
   ArrowLeft, Loader2, Plus, Trash2, CheckCircle2, XCircle, CircleDashed, ShieldCheck, Cpu, GitBranch, Route,
 } from 'lucide-react';
 import {
-  SLOT_SUGGESTED_MODEL, RECOMMENDED_ESCALATE_MODEL, MODEL_OPTIONS, modelLabel, modelOptionsWith,
+  RECOMMENDED_ESCALATE_MODEL, MODEL_OPTIONS, modelLabel, modelOptionsWith,
+  modelOptionsForProvider, suggestedModelForSlot,
 } from '@/lib/model-options';
 
 const PROVIDERS = ['anthropic', 'openai', 'gemini', 'ollama', 'openai_compatible'];
@@ -374,8 +375,8 @@ export default function ModelConnectors() {
                     <SelectContent>
                       <SelectItem value="off">build_runner slot model (no fast model)</SelectItem>
                       <SelectItem value="default">claude-sonnet-5 · platform default</SelectItem>
-                      {MODEL_OPTIONS.filter((m) => m.value !== 'claude-sonnet-5').map((m) => (
-                        <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                      {MODEL_OPTIONS.filter((m) => m.id !== 'claude-sonnet-5').map((m) => (
+                        <SelectItem key={m.id} value={m.id}>{m.label}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -690,18 +691,33 @@ function RoutingRuleRow({ rule, efforts, onSave }) {
 }
 
 function SlotRow({ slot, cur, eligible, onAssign, onClear }) {
-  const suggested = SLOT_SUGGESTED_MODEL[slot];
   // Default the connector to the currently-assigned one, else the only eligible
   // one (so a single-provider setup needs no picking). Default the model to the
-  // current assignment, else this slot's suggestion.
-  const [connectorId, setConnectorId] = useState(
-    cur.connector_id ? String(cur.connector_id) : (eligible.length === 1 ? String(eligible[0].id) : ''),
-  );
-  const [model, setModel] = useState(cur.model || suggested || '');
+  // current assignment, else this slot's suggestion for that connector's provider.
+  const initialConnectorId = cur.connector_id ? String(cur.connector_id) : (eligible.length === 1 ? String(eligible[0].id) : '');
+  const providerOf = (id) => eligible.find((c) => String(c.id) === String(id))?.provider || null;
+  const [connectorId, setConnectorId] = useState(initialConnectorId);
+  const [model, setModel] = useState(cur.model || suggestedModelForSlot(slot, providerOf(initialConnectorId)) || '');
 
-  // Offer the standard models plus, if the slot already runs a custom id, that
-  // id too (so the dropdown never silently drops an existing assignment).
-  const options = modelOptionsWith(model);
+  // The model menu follows the SELECTED connector's provider: an OpenAI
+  // connector offers exactly the three active GPT-5.6 tiers (sol/terra/luna),
+  // an Anthropic one the Claude list — with the size-matched suggestion per
+  // slot. The current custom id is always kept so an existing assignment is
+  // never silently dropped.
+  const provider = providerOf(connectorId);
+  const suggested = suggestedModelForSlot(slot, provider);
+  const options = modelOptionsForProvider(provider, model);
+
+  // Switching connector across providers re-snaps the model: a Claude id is
+  // not servable by an OpenAI connector (and vice versa), so an id the new
+  // provider's menu doesn't carry falls back to that provider's suggestion.
+  const onConnectorChange = (id) => {
+    setConnectorId(id);
+    const p = providerOf(id);
+    setModel((m) => (m && modelOptionsForProvider(p, null).some((o) => o.id === m)
+      ? m
+      : (suggestedModelForSlot(slot, p) || '')));
+  };
 
   return (
     <Card>
@@ -722,9 +738,9 @@ function SlotRow({ slot, cur, eligible, onAssign, onClear }) {
           </p>
         ) : null}
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto]">
-          <Select value={connectorId} onValueChange={setConnectorId}>
+          <Select value={connectorId} onValueChange={onConnectorChange}>
             <SelectTrigger className="min-h-[44px]"><SelectValue placeholder={eligible.length ? 'Connector' : 'no eligible connector'} /></SelectTrigger>
-            <SelectContent>{eligible.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}</SelectContent>
+            <SelectContent>{eligible.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name} · {c.provider}</SelectItem>)}</SelectContent>
           </Select>
           <Select value={model} onValueChange={setModel}>
             <SelectTrigger className="min-h-[44px]">

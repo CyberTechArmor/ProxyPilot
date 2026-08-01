@@ -277,3 +277,25 @@ test('every phase has a tier and every tier is one of cheap/mid/top', () => {
     assert.ok(['cheap', 'mid', 'top'].includes(PHASE_TIER[phase]), `${phase} tier`);
   }
 });
+
+test('the only OpenAI models any phase map routes to are luna, terra, and sol', () => {
+  // The UI's OpenAI model menu offers exactly this trio (frontend
+  // model-options.js OPENAI_MODEL_OPTIONS) — the hybrid and single-vendor
+  // maps must never route to an OpenAI id outside it (gpt-5.5-pro stays a
+  // plan-phase opt-in only).
+  const allowed = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
+  for (const providers of [['openai'], ['anthropic', 'openai']]) {
+    const r = resolvePhaseModelMap({ providers });
+    for (const phase of BUILD_PHASES) {
+      const { model, provider } = r.map[phase];
+      if (provider !== 'openai') continue;
+      assert.ok(allowed.has(model), `${providers}/${phase} routes to unexpected OpenAI model ${model}`);
+    }
+  }
+  // The hybrid map's OpenAI tiers specifically: cheap=luna, mid=terra.
+  const both = resolvePhaseModelMap({ providers: ['anthropic', 'openai'] });
+  assert.equal(both.map.recon.model, 'gpt-5.6-luna');
+  assert.equal(both.map.implement_complex.model, 'gpt-5.6-terra');
+  // And the OpenAI-only top tier is sol.
+  assert.equal(resolvePhaseModelMap({ providers: ['openai'] }).map.plan.model, 'gpt-5.6-sol');
+});

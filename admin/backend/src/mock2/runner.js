@@ -25,7 +25,7 @@ import { containerNameForProject } from './provision.js';
 import { buildCheckpointScript } from './template.js';
 import { buildDbSnapshotScript } from './restore-logic.js';
 import { getSlot, getConnector, decryptConnectorKey, effectivePrice, listConnectors, isSecretDecryptable } from './connectors.js';
-import { phaseRoutingApplies, detectPhaseProviders, resolvePhaseModelMap, phaseMapRecordLine } from './phase-routing-logic.js';
+import { phaseRoutingApplies, detectPhaseProviders, resolvePhaseModelMap, applyPhasePosture, phasePosture, phaseMapRecordLine } from './phase-routing-logic.js';
 import { resolveProjectKey } from './project-keys.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
@@ -557,11 +557,16 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     if (providers) {
       const resolved = resolvePhaseModelMap({ providers });
       if (!resolved.ok) return { status: 'error', error: resolved.error };
+      // Cost posture (five presets): shape the resolved map — default keeps
+      // the manual configuration; suggested/ultra_cheap/balanced/max_quality
+      // re-pin every phase. The posture rides routing_json + the record line.
+      const postured = applyPhasePosture(resolved, phasePosture(routingEnv()));
       routing = {
         ...(routing || { mode }),
-        phase_scenario: resolved.scenario,
-        phase_providers: resolved.providers,
-        phase_map: resolved.map,
+        phase_scenario: postured.scenario,
+        phase_providers: postured.providers,
+        phase_posture: postured.posture,
+        phase_map: postured.map,
       };
     }
   }

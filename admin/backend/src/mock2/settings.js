@@ -13,6 +13,7 @@ import { GATE_MODE_ENFORCE, normalizeGateMode } from './accept-pending-logic.js'
 import { COMPONENT_AUTO_APPLY_ON, normalizeComponentAutoApply } from './component-logic.js';
 import { normalizeLaneTuning, normalizeTuningEntry, normalizeGlobalThinking } from './lane-tuning-logic.js';
 import { normalizeStallMinutes, stallThresholdMinutes, restartStallMinutes } from './cycle-logic.js';
+import { normalizePhasePosture } from './phase-routing-logic.js';
 import { MODEL_PRIMARY_PREV } from './models.js';
 
 const nowIso = () => new Date().toISOString();
@@ -175,6 +176,7 @@ export function routingEnv(env = process.env) {
   const esc = getEscalateModelSetting();
   if (esc) out.MOCK2_ESCALATE_MODEL = esc;
   out.MOCK2_PHASE_ROUTING = getPhaseRoutingSetting();
+  out.MOCK2_PHASE_POSTURE = getPhasePostureSetting();
   return out;
 }
 
@@ -197,6 +199,27 @@ export function setPhaseRoutingSetting(value, updatedBy = null) {
   const v = String(value || '').trim().toLowerCase();
   setMock2Setting(PHASE_ROUTING_KEY, v === 'off' || v === '0' || v === 'false' ? 'off' : 'on', updatedBy);
   return getPhaseRoutingSetting();
+}
+
+// ---- Phase-routing cost posture (five presets over the resolved map) ----
+//
+// 'default' — the manually set configuration, as resolved;
+// 'suggested' — the recommended tier map at every phase;
+// 'ultra_cheap' — the cheapest available model everywhere (Luna / Haiku);
+// 'balanced' — the mid tier everywhere (Terra / Sonnet);
+// 'max_quality' — the best available flagship everywhere (Fable 5 / Sol).
+// Normalization + application live in phase-routing-logic.js; this is the
+// native reader. Precedence: stored setting → MOCK2_PHASE_POSTURE env →
+// 'default'.
+export const PHASE_POSTURE_KEY = 'phase_routing_posture';
+
+export function getPhasePostureSetting() {
+  return normalizePhasePosture(getMock2Setting(PHASE_POSTURE_KEY, process.env.MOCK2_PHASE_POSTURE ?? 'default'));
+}
+
+export function setPhasePostureSetting(value, updatedBy = null) {
+  setMock2Setting(PHASE_POSTURE_KEY, normalizePhasePosture(value), updatedBy);
+  return getPhasePostureSetting();
 }
 
 // ---- Cost saver (one switch for the cheap-first + escalate-on-failure posture) ----

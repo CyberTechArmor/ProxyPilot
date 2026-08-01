@@ -128,7 +128,8 @@ import {
 } from './provision.js';
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from './clone-logic.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver, getStallSettings, setStallSettings, getDesignArtDirection, setDesignArtDirection, getDesignTasteRubric, setDesignTasteRubric, getPhaseRoutingSetting, setPhaseRoutingSetting } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver, getStallSettings, setStallSettings, getDesignArtDirection, setDesignArtDirection, getDesignTasteRubric, setDesignTasteRubric, getPhaseRoutingSetting, setPhaseRoutingSetting, getPhasePostureSetting, setPhasePostureSetting } from './settings.js';
+import { PHASE_POSTURES } from './phase-routing-logic.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getMock2Db } from './db.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
@@ -2154,16 +2155,24 @@ export function createMock2Router() {
   });
 
   // Per-phase model routing (phase-routing@1) — default on; 'off' restores the
-  // single-model build path regardless of framework version.
+  // single-model build path regardless of framework version. `posture` is the
+  // five-preset cost/quality shape over the resolved map (default / suggested /
+  // ultra_cheap / balanced / max_quality).
   router.get('/settings/phase-routing', requireAdmin, (_req, res) => {
-    res.json({ setting: getPhaseRoutingSetting() });
+    res.json({ setting: getPhaseRoutingSetting(), posture: getPhasePostureSetting(), postures: PHASE_POSTURES });
   });
   router.post('/settings/phase-routing', requireAdmin, (req, res) => {
-    const parsed = z.object({ setting: z.enum(['on', 'off']) }).safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: "setting must be 'on' or 'off'" });
-    const value = setPhaseRoutingSetting(parsed.data.setting, req.user.id);
-    logAudit(req.user.id, 'MOCK2_SETTING_PHASE_ROUTING', 'mock2_setting', 0, { phase_routing: value }, req.ip);
-    res.json({ setting: value });
+    const parsed = z.object({
+      setting: z.enum(['on', 'off']).optional(),
+      posture: z.enum(PHASE_POSTURES).optional(),
+    }).refine((b) => b.setting !== undefined || b.posture !== undefined, 'nothing to set')
+      .safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: "setting must be 'on'/'off' and posture one of the five presets" });
+    if (parsed.data.setting !== undefined) setPhaseRoutingSetting(parsed.data.setting, req.user.id);
+    if (parsed.data.posture !== undefined) setPhasePostureSetting(parsed.data.posture, req.user.id);
+    const out = { setting: getPhaseRoutingSetting(), posture: getPhasePostureSetting() };
+    logAudit(req.user.id, 'MOCK2_SETTING_PHASE_ROUTING', 'mock2_setting', 0, { phase_routing: out.setting, phase_posture: out.posture }, req.ip);
+    res.json(out);
   });
 
   router.get('/settings/design-review', requireAdmin, (_req, res) => {

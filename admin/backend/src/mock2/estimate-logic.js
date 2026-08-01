@@ -71,6 +71,9 @@ export function estimateStageCostCents({ baseTokens = 0, model = '', stage = 'bu
     baseCents,
     multiplier,
     model: String(model || ''),
+    // "prices last verified on <date>" — every surfaced estimate shows its
+    // pricing basis's age (two vendor cuts landed inside one month).
+    prices_verified_on: price?.effective_date ?? null,
   };
 }
 

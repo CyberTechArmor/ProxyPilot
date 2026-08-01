@@ -174,7 +174,29 @@ export function routingEnv(env = process.env) {
   if (quick) out.MOCK2_QUICK_EFFORT = quick;
   const esc = getEscalateModelSetting();
   if (esc) out.MOCK2_ESCALATE_MODEL = esc;
+  out.MOCK2_PHASE_ROUTING = getPhaseRoutingSetting();
   return out;
+}
+
+// ---- Per-phase model routing (phase-routing@1) toggle ----
+//
+// 'on' (DEFAULT): build cycles on a framework version that carries the
+// phase-routing marker resolve the five-phase model map at cycle start
+// (recon/plan/implement-3a/3b/summarize/review, provider-conditional).
+// 'off': the single-model path everywhere, regardless of framework version —
+// the honest off-switch. Precedence: stored setting → MOCK2_PHASE_ROUTING env
+// → 'on'. The pure gate lives in phase-routing-logic.js (phaseRoutingApplies).
+export const PHASE_ROUTING_KEY = 'phase_routing';
+
+export function getPhaseRoutingSetting() {
+  const raw = String(getMock2Setting(PHASE_ROUTING_KEY, process.env.MOCK2_PHASE_ROUTING ?? 'on') ?? 'on').trim().toLowerCase();
+  return raw === 'off' || raw === '0' || raw === 'false' ? 'off' : 'on';
+}
+
+export function setPhaseRoutingSetting(value, updatedBy = null) {
+  const v = String(value || '').trim().toLowerCase();
+  setMock2Setting(PHASE_ROUTING_KEY, v === 'off' || v === '0' || v === 'false' ? 'off' : 'on', updatedBy);
+  return getPhaseRoutingSetting();
 }
 
 // ---- Cost saver (one switch for the cheap-first + escalate-on-failure posture) ----

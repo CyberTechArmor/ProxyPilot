@@ -24,7 +24,8 @@ import { getProject, updateProject } from './projects.js';
 import { containerNameForProject } from './provision.js';
 import { buildCheckpointScript } from './template.js';
 import { buildDbSnapshotScript } from './restore-logic.js';
-import { getSlot, getConnector, decryptConnectorKey, effectivePrice } from './connectors.js';
+import { getSlot, getConnector, decryptConnectorKey, effectivePrice, listConnectors, isSecretDecryptable } from './connectors.js';
+import { phaseRoutingApplies, detectPhaseProviders, resolvePhaseModelMap, phaseMapRecordLine } from './phase-routing-logic.js';
 import { resolveProjectKey } from './project-keys.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
@@ -532,6 +533,38 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // version's gate scripts and content, stamped immutably on the cycle + records.
   const framework = getCurrentFrameworkVersion();
   if (!framework) return { status: 'error', error: 'No framework version exists to pin. Publish one first.' };
+
+  // Per-phase model routing (phase-routing@1): when the pinned framework
+  // carries the marker AND the phase_routing toggle is on, resolve the
+  // five-phase model map ONCE from which providers hold a usable credential
+  // (the same connector rows as the provider selector — no second credential
+  // store). Neither provider configured → fail HERE, before any cycle row is
+  // inserted, so a refused start writes no partial state. The resolved map is
+  // stamped into routing_json and echoed into the change record so the cycle
+  // is reproducible. Fast builds (mvp/quick) keep their explicit speed
+  // routing; frameworks without the marker keep the single-model path.
+  if (!fastBuild && phaseRoutingApplies({ skillsJson: framework.skills_json, env: routingEnv() })) {
+    let providers = null;
+    try {
+      providers = detectPhaseProviders(listConnectors().map((c) => ({
+        provider: c.provider, enabled: !!c.enabled, keyUsable: isSecretDecryptable(c),
+      })));
+    } catch (e) {
+      // Detection ERROR ≠ "no provider": fall back to the single-model path
+      // rather than refusing work on an infrastructure hiccup.
+      console.warn('[mock2] phase-routing provider detection failed (single-model path applies):', e?.message);
+    }
+    if (providers) {
+      const resolved = resolvePhaseModelMap({ providers });
+      if (!resolved.ok) return { status: 'error', error: resolved.error };
+      routing = {
+        ...(routing || { mode }),
+        phase_scenario: resolved.scenario,
+        phase_providers: resolved.providers,
+        phase_map: resolved.map,
+      };
+    }
+  }
 
   const { estTokens, estCostCents } = estimateCycle(ready.connector.id, ready.model);
   const { verdict } = quotaVerdict(projectId, estCostCents);
@@ -3006,7 +3039,11 @@ export async function checkpointAndRecord({ cycle, project, containerName, holde
     const stat = await execInContainer(containerName, `git -C ${APP_DIR} show --stat --format= ${commitSha} 2>/dev/null | tail -40`);
     diffStat = (stat.stdout || '').trim();
   }
-  const recordSummaryText = `${summary || 'checkpoint'}${diffStat ? `\n\nDiff (this checkpoint):\n${diffStat}` : ''}`;
+  // The resolved per-phase model map (when this cycle was phase-routed) rides
+  // in the record so any cycle can be reproduced from its change record alone.
+  let phaseLine = null;
+  try { phaseLine = phaseMapRecordLine(parseRoutingJson(getCycle(cycle.id)?.routing_json)); } catch { /* best effort */ }
+  const recordSummaryText = `${summary || 'checkpoint'}${phaseLine ? `\n\n${phaseLine}` : ''}${diffStat ? `\n\nDiff (this checkpoint):\n${diffStat}` : ''}`;
 
   // 3) Insert the hash-chained change record.
   const gatesRun = (gateReports || []).map((g) => ({ name: g.name, result: g.status }));

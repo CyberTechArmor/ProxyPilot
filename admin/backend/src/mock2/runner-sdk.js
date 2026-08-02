@@ -610,8 +610,8 @@ async function runSdkQuery({ query, prompt, options, cycleId, round, logEvent, n
       }
       if (msg.type === 'assistant') {
         const { text, toolCalls } = extractAssistant(msg);
-        if (text) { out.summary = text; logEvent('ai_message', { role: 'assistant', content: text, meta: { round, stream: true } }); }
-        for (const tc of toolCalls) logEvent('tool_call', { role: 'assistant', content: tc.name, meta: { name: tc.name, input: tc.input, round } });
+        if (text) { out.summary = text; logEvent('ai_message', { role: 'assistant', content: text, meta: { round, stream: true, model: options?.model || null } }); }
+        for (const tc of toolCalls) logEvent('tool_call', { role: 'assistant', content: tc.name, meta: { name: tc.name, input: tc.input, round, model: options?.model || null } });
         // Fold into the no-progress breaker; abort + halt if the SDK loop is stuck.
         const p = updateProgress(progress, { toolCalls, text }, noProgLimit);
         progress = p.state;

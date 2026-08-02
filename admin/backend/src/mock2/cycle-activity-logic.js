@@ -49,7 +49,11 @@ function classify(tool) {
 // `tool` keeps the raw name.
 export function deriveActivityItem(ev) {
   if (!ev) return null;
-  const base = { seq: ev.seq, at: ev.created_at };
+  // Per-action model attribution (operator ask): the runner stamps meta.model
+  // on ai_message/tool_call events, so each Read/Edit/Ran row can name the
+  // model that made it — the lane ladder and mid-request escalations mean one
+  // cycle is no longer one model.
+  const base = { seq: ev.seq, at: ev.created_at, model: (ev.meta && ev.meta.model) || null };
   if (ev.kind === 'ai_message') {
     const text = String(ev.content || '').trim();
     return text ? { ...base, type: 'message', text } : null;

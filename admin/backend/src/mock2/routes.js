@@ -268,6 +268,7 @@ import {
   exportDesignTemplate, importDesignTemplate, adjustDesignPreset,
 } from './concept.js';
 import { publicChatMessageShape, previewErrorCard, PREVIEW_ERRORS } from './concept-logic.js';
+import { ppAnnotateBridgeJs } from './scaffold.js';
 import { parseDesignTemplate, MAX_IMPORT_NOTES_CHARS } from './design-template-logic.js';
 // ---- Integration truthfulness (AUDIT.md; B.4/B.5/B.6) ----
 import {
@@ -1348,6 +1349,14 @@ export function createMock2Router() {
     // report). Once the render finishes, the snippet stops being injected and
     // the document is served untouched.
     let html = r.content;
+    // ELEMENT-AWARE PINS on the mockup too (operator request): inline the same
+    // annotate bridge the built apps ship, flagged as the mockup preview so
+    // pins report the ACTIVE data-screen section as their page ("/#screen")
+    // instead of this API path. Inert unless the dashboard preview enables
+    // annotate mode; the sandbox CSP above still applies (allow-scripts, no
+    // allow-same-origin — the bridge runs with an opaque origin and can only
+    // postMessage element metadata to its parent).
+    html += `\n<script>window.__ppMockupPreview = true;</script>\n<script>\n${ppAnnotateBridgeJs()}\n</script>`;
     try {
       const job = getConceptJobStatus(project.id);
       if (job && job.kind === 'turn' && job.phase === 'designing') {

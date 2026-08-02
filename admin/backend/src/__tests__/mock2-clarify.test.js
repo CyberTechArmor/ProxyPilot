@@ -306,7 +306,9 @@ test('RATCHET: the clarifier runs BEFORE the split and suggestion cards', async 
 test('RATCHET: it can never fail a build', async () => {
   const { readFileSync } = await import('node:fs');
   const src = readFileSync(new URL('../mock2/routes.js', import.meta.url), 'utf8');
-  const block = src.slice(src.indexOf('if (!parsed.data.skip_clarify)'), src.indexOf('clarify_proposal') + 600);
+  // Anchor without the closing paren: the gate has grown companions
+  // (`&& !parsed.data.redo` — a redo is a re-run, never re-clarified).
+  const block = src.slice(src.indexOf('if (!parsed.data.skip_clarify'), src.indexOf('clarify_proposal') + 600);
   assert.match(block, /catch \{ \/\* fail-open/,
     'a clarifier that can break a build by failing is a gate wearing a helper\'s clothes');
 });

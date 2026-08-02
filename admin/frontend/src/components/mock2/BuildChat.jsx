@@ -17,7 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
   Loader2, Zap, Hammer, HelpCircle, Wand2, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye,
-  MonitorSmartphone, RotateCcw, GitCompare, ShieldAlert, Rocket, ClipboardList,
+  MonitorSmartphone, RotateCcw, GitCompare, ShieldAlert, Rocket, ClipboardList, Globe,
 } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
 import BuildLogViewer from './BuildLogViewer';
@@ -408,13 +408,21 @@ export default function BuildChat({
   // buildMode: 'quick' is the default iteration path — one small scoped
   // change, minimal gates, straight to deploy; 'full' runs the audited build
   // (rule questions, whole gate battery); 'mvp' is the scaffold speed path.
-  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null, textOverride = null, extraImages = null, escalate = false, escalateModel = null } = {}) => {
+  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null, textOverride = null, extraImages = null, escalate = false, escalateModel = null, skipResearch = false, redo = false } = {}) => {
     const body = (textOverride ?? instruction).trim();
     if (!body) return;
     setBusy(true);
     try {
       const images = [...toWireImages(attach.images), ...(extraImages || [])];
-      const res = await api.mock2StartCycle(projectId, body, images, buildMode, { skipSplit, skipSuggest, extras, escalate, escalateModel });
+      const res = await api.mock2StartCycle(projectId, body, images, buildMode, { skipSplit, skipSuggest, extras, escalate, escalateModel, skipResearch, redo });
+      if (res.research_proposal) {
+        // The pre-pass judged this request depends on external knowledge —
+        // nothing has started; the card offers Research & plan first.
+        setResearchPlan({ ...res.research_proposal, addendum: '' });
+        setSplitPlan(null);
+        setSuggestPlan(null);
+        return;
+      }
       if (res.split_proposal) {
         // Feature-scale ask that decomposes — show the grouping card; nothing
         // has started yet. Default: every part included, one group per part.
@@ -659,6 +667,40 @@ export default function BuildChat({
     } finally { setBusy(false); }
   };
 
+  // ---- Research mode (Plan's deeper register) + the route-time research card ----
+  // Research = the ask lane under the research preamble: web search pulls the
+  // CURRENT external docs (API contracts, webhooks, limits), the code is read
+  // for touchpoints, only plan-changing questions are asked, and the reply
+  // ends with a phased build-ready plan. The card appears when the pre-pass
+  // judges a quick update depends on external knowledge; the follow-up card
+  // appears when the research finishes, with a Build button + addendum box.
+  const [researchPlan, setResearchPlan] = useState(null);       // { instruction, topic, reason, addendum }
+  const [researchFollowup, setResearchFollowup] = useState(null); // { instruction, addendum, ready }
+  const composeWithAddendum = (text, addendum) => (addendum && addendum.trim()
+    ? `${text}\n\nADDENDUM (operator):\n${addendum.trim()}` : text);
+  const startResearch = async (textOverride = null) => {
+    const body = String(textOverride ?? instruction).trim();
+    if (!body) return;
+    setBusy(true);
+    try {
+      await api.mock2Ask(projectId, body, toWireImages(attach.images), { research: true });
+      if (textOverride == null) { setInstruction(''); attach.clear(); }
+      setResearchFollowup({ instruction: body, addendum: '', ready: false });
+      toast({ title: 'Research started', description: 'Pulling the current docs and reading the code — the phased plan lands in this chat.' });
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start research', description: err.message });
+    } finally { setBusy(false); }
+  };
+  // The follow-up card arms when the research ask finishes.
+  const askWasActiveRef = useRef(false);
+  useEffect(() => {
+    if (askWasActiveRef.current && !askActive) {
+      setResearchFollowup((f) => (f && !f.ready ? { ...f, ready: true } : f));
+    }
+    askWasActiveRef.current = askActive;
+  }, [askActive]);
+
   // Plan mode's send: an Ask turn wrapped in the planning preamble — the reply
   // reads the current code and scopes a plan; nothing is built or changed.
   const startPlan = async () => {
@@ -836,9 +878,11 @@ export default function BuildChat({
     setRedoCard({
       instruction: cycle.instruction,
       amendment: '',
-      // Default to the strongest coding model the provider offers — the whole
-      // point of a redo is "same ask, more capable attempt".
-      model: RECOMMENDED_ESCALATE_MODEL,
+      // Default = the 5-phase routed harness (plan phase + lane ladder +
+      // escalation-on-repeat) rather than a pinned model — the routing is
+      // the capable attempt now, and an explicit model pick stays one
+      // dropdown away for when the operator knows better.
+      model: '',
       showFull: false,
     });
   }, [cycle?.instruction]);
@@ -852,9 +896,14 @@ export default function BuildChat({
       ? `${redoCard.instruction}\n\nREDO AMENDMENT (operator correction for this re-run — where it conflicts with the request above, the amendment wins):\n${amendment}`
       : redoCard.instruction;
     setRedoCard(null);
+    // redo: true — the server rides the prior attempt's change record (what
+    // it actually DID) as context, so the re-run builds on that work instead
+    // of re-running blind, and skips the route-time cards.
     await startBuild('quick', {
-      textOverride: text, skipSplit: true, skipSuggest: true,
-      escalate: true, escalateModel: redoCard.model || null,
+      textOverride: text, skipSplit: true, skipSuggest: true, redo: true,
+      // An explicit model pick is an operator escalation; Default leaves the
+      // 5-phase routing in charge.
+      ...(redoCard.model ? { escalate: true, escalateModel: redoCard.model } : {}),
     });
   };
 
@@ -1239,6 +1288,71 @@ export default function BuildChat({
                   boost card's own buttons were below the fold). */}
               {canEdit ? (
                 <>
+            {/* Research card — the pre-pass judged this request depends on
+                EXTERNAL knowledge (a third-party API/SDK contract). Research
+                pulls the current docs and returns a phased plan BEFORE any
+                build spends; nothing starts until you choose. */}
+            {researchPlan ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+                <p className="flex items-center gap-1.5 text-xs font-medium">
+                  <Globe className="h-3.5 w-3.5" /> This looks like it needs research first — {researchPlan.topic}
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  {researchPlan.reason ? `${researchPlan.reason} ` : ''}Research &amp; plan pulls the current documentation
+                  (web search), reads the code touchpoints, and returns a phased build-ready plan — so the build follows
+                  the real contract instead of guessing it.
+                </p>
+                <textarea
+                  className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  placeholder="Anything to add before it runs (optional)…"
+                  value={researchPlan.addendum}
+                  onChange={(e) => setResearchPlan((p) => (p ? { ...p, addendum: e.target.value } : p))}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm" className="h-11 sm:h-8" disabled={busy || askActive}
+                    onClick={() => { const p = researchPlan; setResearchPlan(null); startResearch(composeWithAddendum(p.instruction, p.addendum)); }}
+                  >
+                    <Globe className="h-3.5 w-3.5 mr-1" /> Research &amp; plan first
+                  </Button>
+                  <Button
+                    size="sm" variant="outline" className="h-11 sm:h-8" disabled={quickDisabled}
+                    onClick={() => { const p = researchPlan; setResearchPlan(null); startBuild('quick', { textOverride: composeWithAddendum(p.instruction, p.addendum), skipResearch: true }); }}
+                  >
+                    <Zap className="h-3.5 w-3.5 mr-1" /> Build anyway
+                  </Button>
+                  <Button size="sm" variant="ghost" className="h-11 sm:h-8" onClick={() => setResearchPlan(null)}>Cancel</Button>
+                </div>
+              </div>
+            ) : null}
+            {/* Research follow-up — the plan is in the chat above; one press
+                sends the build, with an addendum box for anything from the
+                plan you want binding. */}
+            {researchFollowup?.ready ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+                <p className="flex items-center gap-1.5 text-xs font-medium">
+                  <Globe className="h-3.5 w-3.5" /> Research done — send the build?
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Build runs your original request; paste anything from the plan above you want binding into the addendum.
+                </p>
+                <textarea
+                  className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  placeholder="Addendum from the plan (optional)…"
+                  value={researchFollowup.addendum}
+                  onChange={(e) => setResearchFollowup((f) => (f ? { ...f, addendum: e.target.value } : f))}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm" className="h-11 sm:h-8" disabled={quickDisabled}
+                    onClick={() => { const f = researchFollowup; setResearchFollowup(null); startBuild('quick', { textOverride: composeWithAddendum(f.instruction, f.addendum), skipResearch: true }); }}
+                  >
+                    <Zap className="h-3.5 w-3.5 mr-1" /> Build it
+                  </Button>
+                  <Button size="sm" variant="ghost" className="h-11 sm:h-8" onClick={() => setResearchFollowup(null)}>Cancel</Button>
+                </div>
+              </div>
+            ) : null}
             {/* Split-proposal card — a feature-scale ask that decomposes: pick
                 which parts to build, combine/reorder via group numbers, or run
                 it all as one build. Nothing starts until you choose. */}
@@ -1488,14 +1602,18 @@ export default function BuildChat({
                   onChange={(e) => setRedoCard((c) => ({ ...c, amendment: e.target.value }))}
                 />
                 <label className="block text-xs">
-                  <span className="mb-1 block text-[11px] font-medium text-muted-foreground">Model for this run (at high effort)</span>
+                  <span className="mb-1 block text-[11px] font-medium text-muted-foreground">Model for this run</span>
                   <select
                     className="h-11 sm:h-9 w-full rounded-md border bg-background px-2 text-xs"
                     value={redoCard.model}
                     onChange={(e) => setRedoCard((c) => ({ ...c, model: e.target.value }))}
                   >
+                    {/* Default = the 5-phase routed harness (top-tier plan, laned
+                        executor, escalation on repeat); a pinned model overrides
+                        it at high effort. */}
+                    <option value="">Default — 5-phase routing (recommended)</option>
                     {ESCALATE_MODEL_OPTIONS.map((m) => (
-                      <option key={m.id} value={m.id}>{m.label} — {m.tier}</option>
+                      <option key={m.id} value={m.id}>{m.label} — {m.tier} (high effort)</option>
                     ))}
                   </select>
                 </label>
@@ -1792,6 +1910,16 @@ export default function BuildChat({
                       update / Ask + Quick update). */}
                   {hasDraft ? (
                     chatMode === 'plan' ? (
+                      <>
+                      <Button
+                        variant="outline"
+                        className="h-11 sm:h-10"
+                        disabled={askDisabled}
+                        onClick={() => startResearch()}
+                        title="Research & plan — pulls the CURRENT docs for any external API/SDK involved (web search), reads the code touchpoints, asks only plan-changing questions, and returns a phased build-ready plan. For integrations, better than a bigger model guessing from memory."
+                      >
+                        <Globe className="h-4 w-4 mr-1" /> Research & plan
+                      </Button>
                       <Button
                         className="h-11 sm:h-10"
                         disabled={askDisabled}
@@ -1801,6 +1929,7 @@ export default function BuildChat({
                         {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ClipboardList className="h-4 w-4 mr-1" />}
                         Plan it
                       </Button>
+                      </>
                     ) : chatMode === 'design' ? (
                       <Button
                         className="h-11 sm:h-10"

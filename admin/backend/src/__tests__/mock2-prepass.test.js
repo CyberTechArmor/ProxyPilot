@@ -166,3 +166,13 @@ test('prepassModelFor: the cheap model follows the CONNECTOR provider', async ()
   // An explicit override is operator intent and wins for every provider.
   assert.equal(prepassModelFor('openai', { MOCK2_PREPASS_MODEL: 'my-model' }), 'my-model');
 });
+
+test('prepass research verdict: parsed defensively, needs a topic to count', () => {
+  const base = '{"scope":"simple","specificity":"clear","pages":[],"brief":{},"split":null';
+  const withResearch = parsePrepassReply(`${base},"research":{"needed":true,"topic":"Stripe Checkout API","reason":"external payment API"}}`);
+  assert.deepEqual(withResearch.research, { needed: true, topic: 'Stripe Checkout API', reason: 'external payment API' });
+  // needed:false, absent, or topicless → no verdict (nothing actionable).
+  assert.equal(parsePrepassReply(`${base},"research":{"needed":false}}`).research, null);
+  assert.equal(parsePrepassReply(`${base}}`).research, null);
+  assert.equal(parsePrepassReply(`${base},"research":{"needed":true,"topic":""}}`).research, null);
+});

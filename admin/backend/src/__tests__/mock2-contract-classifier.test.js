@@ -115,3 +115,14 @@ test('legitimate implementation vocabulary confined to one part never trips fide
   assert.ok(significantWords('folders and documents').has('folders'));
   assert.equal(splitPartsFidelity('add folder support', [{ title: 'x', items: ['folders everywhere'] }, { title: 'y', items: ['folders again'] }]).ok, true);
 });
+
+test('redoContextSection: the prior attempt rides a redo, bounded; empty record rides nothing', async () => {
+  const { redoContextSection } = await import('../mock2/contract-classifier-logic.js');
+  const s = redoContextSection({ summary: 'Fixed the export menu\n\nDiff (this checkpoint):\n public/notes.js | 12 +-' });
+  assert.match(s, /PRIOR ATTEMPT/);
+  assert.match(s, /Fixed the export menu/);
+  assert.match(s, /do not redo it blind/);
+  assert.equal(redoContextSection(null), '');
+  assert.equal(redoContextSection({ summary: '' }), '');
+  assert.ok(redoContextSection({ summary: 'x'.repeat(9000) }).length < 1800);
+});

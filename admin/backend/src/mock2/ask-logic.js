@@ -155,6 +155,39 @@ export function buildAskTask(question) {
   return String(question || '').trim().slice(0, ASK_MAX_QUESTION_CHARS);
 }
 
+// ---- Research mode (Plan's deeper register) ----
+//
+// A plan for a complex integration is only as good as its FACTS: the vendor's
+// actual endpoints, auth model, webhook contract, rate limits. A bigger model
+// guessing those from memory plans confidently and wrongly; a cost-effective
+// model that LOOKED THEM UP plans correctly — the facts do the lifting, not
+// the parameter count. The ask lane already has web search (webSearchServerTools,
+// on by default) and read/exec tools, so research mode is a register of Ask:
+// pull the current docs, read the codebase touchpoints, ask only questions
+// that change the plan, and finish with a phased build-ready plan.
+export const RESEARCH_MODE_PREAMBLE = `RESEARCH & PLAN — no code changes in this turn. You are an expert integration
+planner with web search and read/exec tools.
+
+1. RESEARCH FIRST: use web search to pull the CURRENT official documentation
+   for every external API, SDK, protocol, or file format this request
+   involves — endpoints, auth model, webhooks/signatures, rate limits, and
+   pricing tiers where they shape the design. Read the codebase for the
+   touchpoints the integration will land in. If documentation you need is not
+   publicly reachable, say EXACTLY what to upload to the project's Assets
+   panel (which document, from where) and plan around the gap — never guess a
+   contract you could not verify.
+2. QUESTIONS: ask ONLY questions whose answers change the plan (sandbox or
+   live? which pricing tier? are credentials available?). If the intent is
+   clear, ask nothing.
+3. THE PLAN: finish with a phased, build-ready plan — each phase sized as one
+   Quick update, external boundaries stubbed first so the app around them can
+   ship, the real integration last, and each phase naming the acceptance
+   check that proves it. Cite the documentation pages you used.`;
+
+export function withResearchPreamble(question) {
+  return `${RESEARCH_MODE_PREAMBLE}\n\nREQUEST TO RESEARCH AND PLAN:\n${String(question || '').trim()}`;
+}
+
 // ---- the polish intent ----
 //
 // "Polish pass" used to be a button next to Full build — a fourth name for what

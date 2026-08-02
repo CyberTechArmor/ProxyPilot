@@ -206,6 +206,18 @@ export function buildPlanTask({ instruction = '', inventoryJson = '', requiremen
   ].filter(Boolean).join('\n\n');
 }
 
+// redoContextSection — what the PRIOR attempt actually did, riding a redo's
+// instruction. A redo used to re-run the request blind: the new attempt could
+// not see the previous one's changes, so it either repeated them or fought
+// them (operator request: "check the logs on redo — not for fails, but for
+// what was done, for context of change"). The change record already carries
+// the summary AND the checkpoint's diff --stat, so this context is free.
+export function redoContextSection(record) {
+  const summary = String(record?.summary || '').trim();
+  if (!summary) return '';
+  return `\n\n---\nPRIOR ATTEMPT (context — this is a redo of the same request). The previous build recorded:\n${summary.slice(0, 1500)}\nBuild on or deliberately correct that work — do not redo it blind.`;
+}
+
 export function formatPlanForTask(planText, plannerModel = '') {
   const t = String(planText || '').trim();
   if (!t) return '';

@@ -63,6 +63,12 @@ attempts on this surface repaired adjacent code while the named check kept
 failing — do not repeat that; if the evidence is insufficient to be certain,
 say exactly what to look at instead of guessing.
 
+When SEVERAL checks fail, diagnose ALL of them in this one pass — group
+failures that share a root cause, give each distinct cause its own ROOT
+CAUSE/WHY pair — and write ONE combined FIX INSTRUCTION covering every
+failure, so a single build clears the whole set instead of one check per
+attempt.
+
 Reply in EXACTLY this structure (plain text, no code fences around the whole
 reply):
 

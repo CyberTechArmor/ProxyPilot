@@ -45,7 +45,7 @@ import { formatComponentForModel, parseContractJson, buildInstalledComponentsSec
 import {
   ASK_TOOLS, ASK_MAX_TURNS, estimateAskTokens,
   buildAskSystemPrompt, buildAskTask, askCommandAllowed, webSearchServerTools,
-  buildAskContextBlock, ASK_CONTEXT_MAX_MESSAGES, detectPolishIntent,
+  buildAskContextBlock, ASK_CONTEXT_MAX_MESSAGES, detectPolishIntent, withResearchPreamble,
 } from './ask-logic.js';
 import { detectDesignOptionsIntent } from './design-options-logic.js';
 
@@ -86,9 +86,13 @@ function recordSpend({ projectId, connector, model, usage, step = null, userId =
 // { status: 'started' | 'error', error }. `images` is the VALIDATED list from
 // chat-image-logic.validateChatImages — a screenshot of a bug or an API doc
 // rides the question straight into the model call.
-export async function startAsk({ project, question, user, actingAsAdmin = 0, images = [] }) {
+export async function startAsk({ project, question, user, actingAsAdmin = 0, images = [], research = false }) {
   const projectId = Number(project.id);
-  const q = buildAskTask(question);
+  // Research mode (Plan's deeper register): the same lane — web search +
+  // read/exec tools — under the research preamble: pull the current external
+  // docs, ask only plan-changing questions, finish with a phased build-ready
+  // plan. The chat shows the operator's own words; only the task is wrapped.
+  const q = buildAskTask(research ? withResearchPreamble(question) : question);
   if (!q) return { status: 'error', error: 'A question (or task) is required.' };
   if (project.lifecycle !== 'active') {
     return { status: 'error', error: `The project must be online to ask (it is "${project.lifecycle}").` };
@@ -109,7 +113,9 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   //
   // Checked BEFORE the polish intent: "the design looks bad" matches both, and
   // a screenshot-and-critique is not what someone asking for options wants.
-  const options = detectDesignOptionsIntent(question);
+  // A research request is explicitly a planning ask — never hijacked by the
+  // design-options / polish intent detectors below.
+  const options = research ? null : detectDesignOptionsIntent(question);
   if (options) {
     const { runDesignOptions } = await import('./design-options.js');
     getOrCreateChat(projectId);
@@ -132,7 +138,7 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   //
   // This is where the Polish pass BUTTON went (it was a fourth build-looking
   // action for something that is not a build).
-  const polish = detectPolishIntent(question);
+  const polish = research ? null : detectPolishIntent(question);
   if (polish) {
     const { runDesignReview } = await import('./design-review.js');
     getOrCreateChat(projectId);

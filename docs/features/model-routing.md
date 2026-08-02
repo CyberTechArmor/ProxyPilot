@@ -254,6 +254,21 @@ rather than design. Generated for preset and AI-derived designs alike; preset
 renders feed it back into their plans, and every build instruction points at
 it.
 
+**Contract classifier** (`contract-classifier-logic.js`, toggle
+`MOCK2_CONTRACT_CLASSIFIER`, default on): before every non-resume build (the
+initial inventory build excepted), one cheap strict-JSON call compares the
+request against `state/inventory.json`. Capabilities the contract lacks are
+**appended as a recorded amendment** — origin-stamped `request_amendment`
+entries, announced in the build chat, riding the cycle's checkpoint, and
+immediately enforced by action parity — so the build proceeds *authorized*
+instead of halting or shipping "Not built yet" placeholders (the project-53
+folders saga). No design-chat detour needed. Fail-open: classifier errors
+build on the existing contract. Companion guards: a **split-fidelity check**
+discards a split proposal whose parts introduce a domain word the original
+request never used across multiple parts (the folders→fonts corruption) and
+queues the original as one build; split part instructions now name the
+original request as ground truth that wins on any wording contradiction.
+
 **Label parity** (operator rule 2026-08): a contract action shipped without a
 visible control (the project-53 "missing buttons" class — click-to-edit, typed
 commands) now earns ONE finish rejection demanding a discoverable control,

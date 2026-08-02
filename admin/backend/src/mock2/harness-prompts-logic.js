@@ -37,6 +37,7 @@ import { buildAskSystemPrompt } from './ask-logic.js';
 import { CHAT_SUMMARY_SYSTEM_PROMPT } from './chat-summary-logic.js';
 import { DOC_SUMMARY_SYSTEM_PROMPT } from './project-assets-logic.js';
 import { DESIGN_PLAN_SYSTEM_PROMPT, DESIGN_REQUIREMENTS_SYSTEM_PROMPT } from './mockup-pipeline-logic.js';
+import { CONTRACT_CLASSIFIER_PROMPT, BUILD_PLAN_SYSTEM_PROMPT } from './contract-classifier-logic.js';
 
 export const STEP_PROMPT_MAX_LENGTH = 200_000;
 
@@ -64,6 +65,8 @@ export const STEP_PROMPT_SPECS = Object.freeze({
   'design-token-extraction': { placeholders: [], render: () => buildDesignTokenExtractionPrompt() },
   'mockup-design-plan': { placeholders: [], render: () => DESIGN_PLAN_SYSTEM_PROMPT },
   'design-requirements-doc': { placeholders: [], render: () => DESIGN_REQUIREMENTS_SYSTEM_PROMPT },
+  'contract-classifier': { placeholders: [], render: () => CONTRACT_CLASSIFIER_PROMPT },
+  'build-plan': { placeholders: [], render: () => BUILD_PLAN_SYSTEM_PROMPT },
   'rule-audit': {
     placeholders: ['CONSTITUTION', 'PROJECT_NAME'],
     render: () => buildAuditSystemPrompt({ constitution: '{{CONSTITUTION}}', projectName: '{{PROJECT_NAME}}' }),

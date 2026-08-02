@@ -217,6 +217,7 @@ import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendin
 import { mintConnectToken, listConnectTokens, getConnectToken, revokeConnectToken } from './connect.js';
 import { enqueueBuild, listBuildQueue, cancelQueuedBuild, drainBuildQueue, publicQueueShape, requeueOrphanedStartedBuilds } from './build-queue.js';
 import { buildGroupInstruction, composeWithAdditions, normalizeSuggestMode, SUGGEST_MODES } from './prepass-logic.js';
+import { splitPartsFidelity } from './contract-classifier-logic.js';
 import { composeWithGuesses, CLARIFY_MODES } from './clarify-logic.js';
 import { probeSplitProposal, distillChatPrompt } from './runner.js';
 import { queuePendingDesign, clearPendingDesign, publicPendingDesignShape } from './pending-design.js';
@@ -3416,6 +3417,27 @@ export function createMock2Router() {
     const parsed = buildGroupsSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'groups are required' });
     const { instruction, groups } = parsed.data;
+    // Split fidelity (the folders→fonts corruption): a significant word absent
+    // from the original request that shows up across MULTIPLE parts is a
+    // hallucinated domain from the split probe, not implementation vocabulary.
+    // A corrupted split is discarded — the original request queues as ONE
+    // build instead of burning a cycle per wrong-domain part.
+    const fidelity = splitPartsFidelity(instruction, groups);
+    if (!fidelity.ok) {
+      const row = enqueueBuild({
+        projectId: project.id, instruction, buildMode: 'quick',
+        label: instruction.slice(0, 80), initiatedBy: req.user.id,
+      });
+      try {
+        insertMessage({
+          projectId: project.id, kind: 'system',
+          body: `The split proposal drifted from your request (it introduced "${fidelity.foreign.slice(0, 3).join('", "')}" — words your request never used), so it was discarded. Your request is queued as one build instead.`,
+        });
+      } catch { /* best effort */ }
+      drainBuildQueue(project.id).catch((e) => console.warn('[mock2] build-queue drain failed:', e?.message));
+      logAudit(req.user.id, 'MOCK2_BUILD_GROUPS_REJECTED', 'mock2_project', project.id, { foreign: fidelity.foreign.slice(0, 6) }, req.ip);
+      return res.status(202).json({ queued: 1, queue: [publicQueueShape(row)], split_rejected: true, foreign: fidelity.foreign.slice(0, 6) });
+    }
     const rows = groups.map((g, i) => enqueueBuild({
       projectId: project.id,
       instruction: buildGroupInstruction({ title: g.title, items: g.items, index: i + 1, total: groups.length, original: instruction }),

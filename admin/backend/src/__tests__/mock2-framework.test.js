@@ -36,6 +36,28 @@ test('nextVersionNumber: monotonic, 1 when empty', () => {
   assert.equal(nextVersionNumber([{ version: 3 }, { version: 1 }]), 4); // max, not count
 });
 
+test('the VENDORED seed bundle validates — boot auto-publish can never brick', async () => {
+  // upgradeFrameworkFromSeed publishes a new framework version on every boot
+  // where the vendored seed changed — the mechanism that rolls harness
+  // changes out to ALL projects (cycles pin the LATEST version at start).
+  // A seed edit that fails validation would silently strand every project on
+  // the old bundle, so the real files are held to the publish bar here.
+  const { readFile } = await import('node:fs/promises');
+  const seed = (name) => readFile(new URL(`../mock2/framework-seed/${name}`, import.meta.url), 'utf8');
+  const content = {
+    constitution_md: await seed('constitution.md'),
+    skills_json: await seed('skills.json'),
+    gates_json: await seed('gates.json'),
+    design_system_md: await seed('design-system.md'),
+    project_template_ref: (await seed('project-template.ref')).trim(),
+  };
+  const v = validateFrameworkContent(content);
+  assert.equal(v.ok, true, v.error);
+  // The bundle carries the phased-pipeline contract + the reviewer diff rule.
+  assert.ok(content.skills_json.includes('phase-routing@1'));
+  assert.ok(content.skills_json.includes('cite file:line from the diff'));
+});
+
 test('validateFrameworkContent: requires all content, valid JSON gates/skills', () => {
   const good = {
     constitution_md: 'c', skills_json: '{"skills":[]}',

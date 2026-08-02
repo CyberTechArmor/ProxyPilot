@@ -163,7 +163,9 @@ export function buildGroupInstruction({ title, items = [], index = 1, total = 1,
   const later = total > index ? ` Later groups of this same request handle the rest — where this group's UI touches
 their territory, leave a visibly disabled control with a "Not built yet" badge, never a dead element.` : '';
   return `Part ${index} of ${total} of a split request — ${title}. Deliver exactly: ${items.join('; ')}. ` +
-    `The ORIGINAL full request, for context only (do NOT build beyond this part's deliverables): "${String(original).slice(0, 800)}". ` +
+    `The ORIGINAL full request — GROUND TRUTH for vocabulary and intent (do NOT build beyond this part's deliverables, ` +
+    `but where this part's wording contradicts the original — a feature or domain word the original never used — the ` +
+    `original wins; treat the discrepancy as a transcription error and correct to the original's terms): "${String(original).slice(0, 800)}". ` +
     'Scope is BINDING to this part. Match the approved mockup (state/mockups/current.html) and load /design.css. ' +
     'STATE items are conditions to handle when they genuinely occur — never fabricate artificial ones.' + later;
 }

@@ -97,6 +97,10 @@ export default function ConceptStage({
   // owns the toggle across stages (ProjectDetail), self-owned otherwise (the
   // phone MockupWorkspace, the read-only archive).
   mode: modeProp = null, onModeChange = null,
+  // Bumped when a design turn starts OUTSIDE this component (the mockup
+  // annotate flow lives in the preview panel) — reload so the new turn and
+  // its running job appear and the poll takes over.
+  reloadNonce = 0,
 }) {
   const { toast } = useToast();
   const [data, setData] = useState(null); // { messages, job, audit_job, stage, preview_url, open_question_ids, ... }
@@ -213,6 +217,7 @@ export default function ConceptStage({
   }, [projectId, onApproved]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { if (reloadNonce) load(); }, [reloadNonce, load]);
 
   // How many assets this project has. Asked once per mount (and again after the
   // Assets panel is opened) purely to decide whether the invitation still has a

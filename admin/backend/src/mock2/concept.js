@@ -66,7 +66,9 @@ import {
   buildMockupEditSystemPrompt, parseMockupEdits, applyMockupEdits,
   screenForEditTargets, buildTweakRetryMessage,
   findScreenSection, replaceScreenSection, extractSectionHtml, buildScreenRenderSystemPrompt,
+  attachRenderedMockupShots,
 } from './concept-logic.js';
+import { captureMockupShots } from './mockup-screenshot.js';
 import {
   projectHasDesign, buildDesignTemplate, mockupIdForImport, buildImportSeedMessage,
   designImportRecord, parseDesignImport, buildInitialBuildInstruction,
@@ -634,6 +636,24 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   let projectAssets = [];
   try { projectAssets = listAssets(projectId); } catch { projectAssets = []; }
   const hasMockup = !!project.current_mockup_id;
+  // LOOK AT THE MOCKUP, on every turn one exists — plan and design alike, and
+  // deliberately NOT gated by the design_review setting (that switch governs
+  // the after-BUILD critique pass; the operator keeps it off and still wants
+  // the design stage seeing its own render). The design partner is handed
+  // screenshots of what the Builder is looking at, so "the sidebar is broken"
+  // needs no further explanation and render defects that clean-looking HTML
+  // hides (giant glyphs, overlapping labels) are visible to the model about
+  // to revise it. Bounded + fail-open: no browser or a hung page → no shots,
+  // and the turn proceeds exactly as before.
+  let mockupShots = [];
+  if (hasMockup) {
+    setJob(projectId, { phase: 'thinking', message: 'Looking at the current mockup…', kind: 'turn', cycleId: cycle.id });
+    try {
+      const cur = await readWorkingFile(containerName, MOCKUP_CURRENT);
+      if (cur.ok && cur.content) mockupShots = await captureMockupShots(cur.content);
+    } catch (e) { console.warn('[mock2] mockup look failed:', e?.message); }
+    if (mockupShots.length) attachRenderedMockupShots(transcript, mockupShots);
+  }
   // The locked design system, plus the binding palette of the base preset the
   // Builder chose at creation (no preset → unchanged, the model picks the look).
   // Design direction (Builder's per-turn choice): 'theme' binds the base theme
@@ -652,6 +672,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     buildConceptChatSystemPrompt({
       designSystem: boundDesignSystem, projectName: project.name, hasMockup, mode,
       assets: summarizeAssets(projectAssets),
+      reviewShots: mockupShots.length > 0,
     }),
     { DESIGN_SYSTEM: boundDesignSystem, PROJECT_NAME: project.name });
 

@@ -26,6 +26,7 @@ import { buildCheckpointScript } from './template.js';
 import { buildDbSnapshotScript } from './restore-logic.js';
 import { getSlot, getConnector, decryptConnectorKey, effectivePrice, listConnectors, isSecretDecryptable } from './connectors.js';
 import { phaseRoutingApplies, detectPhaseProviders, applyProviderPreference, resolvePhaseModelMap, applyPhasePosture, phasePosture, phaseMapRecordLine } from './phase-routing-logic.js';
+import { contractClassifierMode, CONTRACT_CLASSIFIER_PROMPT, buildContractClassifierTask, parseContractClassifierReply, applyInventoryAdditions, contractAmendmentMessage } from './contract-classifier-logic.js';
 import { resolveProjectKey } from './project-keys.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
@@ -1109,6 +1110,63 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     content: `Build engine: ${engineName} harness · ${cycleMode} mode · model ${ready.model}`,
     meta: { harness: engineName, build_mode: cycleMode, model: ready.model },
   });
+  // CONTRACT CLASSIFIER (the project-53 folders lesson): before the build
+  // runs, a cheap model checks whether the request needs capabilities the
+  // approved inventory lacks. Missing ones are APPENDED to
+  // state/inventory.json as a recorded amendment — announced in the chat,
+  // riding this cycle's checkpoint, enforced by action parity — and the build
+  // proceeds AUTHORIZED. Without this, the builder's only legal moves were
+  // halting or shipping "Not built yet" placeholders, and the operator's only
+  // recourse was a design chat that is not reachable from the build chat.
+  // Skipped on resumes (the first attempt already extended) and on the
+  // initial inventory build (it implements the whole contract by definition).
+  // Fail-open everywhere: a classifier error builds on the existing contract.
+  if (contractClassifierMode(process.env) === 'on'
+    && !getCycle(cycle.id)?.resume_context_json
+    && !/approved design inventory/i.test(String(cycle.instruction || ''))) {
+    try {
+      const invRead = await readFileInContainer(containerName, 'state/inventory.json');
+      const inventory = invRead.ok ? JSON.parse(invRead.content) : null;
+      if (inventory && !inventory.skipped && Array.isArray(inventory.screens)) {
+        setJob(cycle.id, { phase: 'running', message: 'Checking the request against the approved design contract…' });
+        const clsModel = prepassModel(routingEnv());
+        const res = await callStepTurn('contract-classifier', {
+          connector: ready.connector, apiKey: ready.apiKey, model: clsModel,
+          system: stepSystemPrompt('contract-classifier', CONTRACT_CLASSIFIER_PROMPT, {}), tools: [],
+          transcript: [{ role: 'user', text: buildContractClassifierTask({ instruction: cycle.instruction, inventoryJson: invRead.content }) }],
+          timeoutMs: 120000, effort: 'low', thinking: 'off',
+        });
+        if (res.ok) {
+          try {
+            const u = res.usage || {};
+            const cost = costCentsForUsage({
+              inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
+              cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
+            }, effectivePrice(ready.connector.id, clsModel));
+            insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: res.modelUsed || clsModel, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'contract-classifier' });
+          } catch (e) { console.warn('[mock2] contract-classifier ledger write failed:', e?.message); }
+          const verdict = parseContractClassifierReply(res.text);
+          if (verdict && !verdict.covered) {
+            const applied = applyInventoryAdditions(inventory, verdict.additions, { at: nowIso() });
+            if (applied.added.total > 0) {
+              const w = await writeFileInContainer(containerName, 'state/inventory.json', JSON.stringify(applied.inventory, null, 2));
+              if (w.ok) {
+                logEvent('note', {
+                  role: 'system',
+                  content: `Contract extended before build: ${applied.summary || `${applied.added.total} addition(s)`}`,
+                  meta: { contract_amendment: applied.added, reason: verdict.reason },
+                });
+                try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: contractAmendmentMessage(applied.added, applied.summary, verdict.reason) }); } catch { /* best effort */ }
+              } else {
+                console.warn('[mock2] contract amendment write failed (build proceeds on the existing contract):', w.error);
+              }
+            }
+          }
+        }
+      }
+    } catch (e) { console.warn('[mock2] contract classifier failed (build proceeds on the existing contract):', e?.message); }
+  }
+
   // Multi-modal: images attached to the Build press live on the REQUEST row
   // (migration 526), so every segment of the request — the first build, a
   // deferred build after rule questions, a resume — re-hydrates the same

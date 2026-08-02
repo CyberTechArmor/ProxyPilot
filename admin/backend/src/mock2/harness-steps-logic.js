@@ -122,6 +122,13 @@ export const HARNESS_STEPS = Object.freeze([
     defaults: { model: 'claude-opus-5', effort: 'high', thinking: 'off', budgetNote: 'uncapped (model max), 60s race' }, tunable: true,
   },
   {
+    id: 'contract-classifier', stage: 'Build', title: 'Contract classifier',
+    description: 'Before a build runs, compares the request against the approved inventory; capabilities the contract lacks are appended as a recorded amendment (announced in chat, parity-enforced) so the build proceeds authorized instead of halting or shipping placeholders.',
+    intendedOutcome: 'No dead-ends on unapproved features — the contract extends loudly, never silently.',
+    slotKey: 'build_runner', laneKey: null, envModelVar: 'MOCK2_PREPASS_MODEL', envEffortVar: null,
+    defaults: { model: 'claude-haiku-4-5-20251001', effort: 'low', thinking: 'off', budgetNote: 'one strict-JSON call per non-resume build' }, tunable: true,
+  },
+  {
     id: 'build-runner', stage: 'Build', title: 'Build runner loop',
     description: 'THE builder: edits code in the fenced container via tools, runs gates, finishes. Full builds route via the knowledge base; MVP/quick use the fast model.',
     intendedOutcome: 'Working, contract-complete code. 80–90% of a request’s cost lives here — cost scales with TURNS.',

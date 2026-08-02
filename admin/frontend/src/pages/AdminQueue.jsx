@@ -415,11 +415,16 @@ export default function AdminQueue() {
   // five-preset cost posture.
   const [phaseRouting, setPhaseRouting] = useState(null);
   const [phasePosture, setPhasePosture] = useState(null);
+  const [phaseProviders, setPhaseProviders] = useState(null); // { providers, scenario, provider_error }
   const [savingPhaseRouting, setSavingPhaseRouting] = useState(false);
   useEffect(() => {
     if (gate !== 'enabled') return;
     api.mock2GetPhaseRouting()
-      .then((r) => { setPhaseRouting(r.setting); setPhasePosture(r.posture || 'default'); })
+      .then((r) => {
+        setPhaseRouting(r.setting);
+        setPhasePosture(r.posture || 'default');
+        setPhaseProviders({ providers: r.providers || [], scenario: r.scenario || null, provider_error: r.provider_error || null });
+      })
       .catch((err) => { if (!(err instanceof ApiError)) console.error('load phase-routing failed:', err); });
   }, [gate]);
   const savePhaseRouting = async (setting) => {
@@ -1046,6 +1051,13 @@ export default function AdminQueue() {
                   </SelectContent>
                 </Select>
               </div>
+              {phaseProviders ? (
+                <p className="text-xs text-muted-foreground">
+                  {phaseProviders.providers.length === 0
+                    ? '⚠ No usable Anthropic or OpenAI credential detected — phase-routed builds will refuse to start until a connector with a working key is enabled.'
+                    : `Detected providers: ${phaseProviders.providers.map((p) => (p === 'openai' ? 'OpenAI' : 'Anthropic')).join(' + ')}${phaseProviders.scenario === 'both' ? ' → hybrid map (cheap/mid on OpenAI, top tier on Anthropic)' : ` → ${phaseProviders.providers.length === 1 ? 'single-vendor map' : ''}`}`}
+                </p>
+              ) : null}
               {phaseRouting === 'on' && (
                 <div className="space-y-1 max-w-md">
                   <label className="text-xs text-muted-foreground" htmlFor="phase-posture-setting">Cost posture</label>

@@ -129,7 +129,7 @@ import {
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from './clone-logic.js';
 import { publishDomain } from './publish.js';
 import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver, getStallSettings, setStallSettings, getDesignArtDirection, setDesignArtDirection, getDesignTasteRubric, setDesignTasteRubric, getPhaseRoutingSetting, setPhaseRoutingSetting, getPhasePostureSetting, setPhasePostureSetting } from './settings.js';
-import { PHASE_POSTURES, PROJECT_PROVIDER_PREFS, normalizeProviderPreference } from './phase-routing-logic.js';
+import { PHASE_POSTURES, PROJECT_PROVIDER_PREFS, normalizeProviderPreference, detectPhaseProviders, resolvePhaseModelMap } from './phase-routing-logic.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getMock2Db } from './db.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
@@ -158,7 +158,7 @@ import {
   listConnectors, getConnector, getConnectorByName, insertConnector, updateConnector,
   deleteConnector, recordBaaAck, testConnector, shapeConnector,
   listSlots, getSlot, setSlot, clearSlot,
-  listPrices, upsertPrice, deletePrice,
+  listPrices, upsertPrice, deletePrice, isSecretDecryptable,
 } from './connectors.js';
 import {
   PROVIDERS, MODEL_SLOTS, CAPABILITIES, validateConnectorInput, normalizeCapabilities,
@@ -2159,7 +2159,25 @@ export function createMock2Router() {
   // five-preset cost/quality shape over the resolved map (default / suggested /
   // ultra_cheap / balanced / max_quality).
   router.get('/settings/phase-routing', requireAdmin, (_req, res) => {
-    res.json({ setting: getPhaseRoutingSetting(), posture: getPhasePostureSetting(), postures: PHASE_POSTURES });
+    // Provider awareness: which routable providers hold a usable credential
+    // RIGHT NOW, and the map the next phase-routed build would resolve — so
+    // the dashboard shows what ProxyPilot actually detected (one provider,
+    // both → hybrid, or none → the operator message).
+    let providers = [];
+    try {
+      providers = detectPhaseProviders(listConnectors().map((c) => ({
+        provider: c.provider, enabled: !!c.enabled, keyUsable: isSecretDecryptable(c),
+      })));
+    } catch { providers = []; }
+    const resolved = resolvePhaseModelMap({ providers });
+    res.json({
+      setting: getPhaseRoutingSetting(),
+      posture: getPhasePostureSetting(),
+      postures: PHASE_POSTURES,
+      providers,
+      scenario: resolved.ok ? resolved.scenario : null,
+      provider_error: resolved.ok ? null : resolved.error,
+    });
   });
   router.post('/settings/phase-routing', requireAdmin, (req, res) => {
     const parsed = z.object({

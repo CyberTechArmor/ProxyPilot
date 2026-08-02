@@ -424,20 +424,65 @@ function anthropicMessages(transcript) {
 }
 
 // ---- OpenAI-compatible chat completions (openai / openai_compatible / ollama) ----
+// ---- OpenAI output-cap parameter (the max_tokens → max_completion_tokens split) ----
+//
+// api.openai.com's current models (the gpt-5.x family) REJECT `max_tokens`
+// with HTTP 400 unsupported_parameter — they take `max_completion_tokens`.
+// Operator-hosted OpenAI-compatible endpoints (ollama, llama.cpp, vLLM, older
+// gateways) mostly still speak `max_tokens`. So: pick the right spelling per
+// provider up front, and if the endpoint rejects whichever we sent, retry
+// ONCE with the other spelling — both directions, so an old OpenAI model or a
+// new-style compatible gateway also work. Pure helpers, unit-tested (the
+// live-build failure mode: "Retries exhausted — openai HTTP 400: Unsupported
+// parameter: 'max_tokens'… Use 'max_completion_tokens' instead").
+export function openAiTokenParamForProvider(provider) {
+  return provider === 'openai' ? 'max_completion_tokens' : 'max_tokens';
+}
+
+export function isTokenParamRejection(status, bodyText) {
+  if (Number(status) !== 400) return false;
+  const t = String(bodyText || '');
+  return /max_(completion_)?tokens/i.test(t)
+    && /(unsupported[_ ]parameter|not supported|unknown[_ ]parameter|unrecognized)/i.test(t);
+}
+
+export function swapOpenAiTokenParam(body = {}) {
+  if ('max_tokens' in body) {
+    const { max_tokens: cap, ...rest } = body;
+    return { ...rest, max_completion_tokens: cap };
+  }
+  if ('max_completion_tokens' in body) {
+    const { max_completion_tokens: cap, ...rest } = body;
+    return { ...rest, max_tokens: cap };
+  }
+  return body;
+}
+
 async function callOpenAiCompatible({ provider, apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal }) {
   const url = `${openAiBase(provider, baseUrl)}/chat/completions`;
   const messages = [{ role: 'system', content: system }, ...openAiMessages(transcript)];
-  const body = {
+  let body = {
     model,
-    max_tokens: maxTokens,
+    [openAiTokenParamForProvider(provider)]: maxTokens,
     messages,
-    tools: tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } })),
-    tool_choice: 'auto',
+    // An EMPTY tools array is rejected by some OpenAI-compatible servers —
+    // omit tools/tool_choice entirely on tool-free calls.
+    ...(tools.length ? {
+      tools: tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } })),
+      tool_choice: 'auto',
+    } : {}),
   };
   const headers = { 'content-type': 'application/json' };
   if (apiKey) headers.authorization = `Bearer ${apiKey}`;
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
-  const text = await res.text();
+  let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  let text = await res.text();
+  if (!res.ok && isTokenParamRejection(res.status, text)) {
+    // The endpoint wants the other output-cap spelling — swap and retry once.
+    body = swapOpenAiTokenParam(body);
+    console.warn(`[mock2] ${provider}/${model} rejected the output-cap parameter — retrying with ${'max_tokens' in body ? 'max_tokens' : 'max_completion_tokens'}`);
+    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+    text = await res.text();
+  }
   if (!res.ok) return { ok: false, error: `${provider} HTTP ${res.status}: ${text.slice(0, 300)}`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
   let j; try { j = JSON.parse(text); } catch { return { ok: false, error: `${provider}: non-JSON response`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; }
   const msg = j.choices?.[0]?.message || {};

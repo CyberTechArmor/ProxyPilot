@@ -17,7 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
   Loader2, Zap, Hammer, HelpCircle, Wand2, RefreshCw, StopCircle, X, Layers, Sparkles, History, Download, Eye,
-  MonitorSmartphone, RotateCcw, GitCompare, ShieldAlert, Rocket,
+  MonitorSmartphone, RotateCcw, GitCompare, ShieldAlert, Rocket, ClipboardList,
 } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
 import BuildLogViewer from './BuildLogViewer';
@@ -37,6 +37,26 @@ const ESCALATE_MODEL_OPTIONS = modelOptionsWith(null);
 import { parseFindings } from '@/lib/findings';
 import FixFindingsDialog from './FixFindingsDialog';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
+
+// ---- post-build Plan / Design modes ----
+//
+// Once Build is unlocked the Plan/Design/Build toggle stays in this chat, but
+// Plan and Design are LIVE modes against the running app rather than a detour
+// back into the archived design conversation. Both start from the app's
+// CURRENT code and design and scope themselves to exactly what the request
+// names — asking for a backend change must never trigger a redesign (operator
+// request). Same-looking buttons, different sends:
+//   Plan   → an Ask turn (no code changes): read the current code, lay out a
+//            scoped plan for the request.
+//   Design → a Quick update scoped to look/layout only, starting from the
+//            current design; behavior and unrelated screens stay untouched.
+const PLAN_MODE_PREAMBLE = 'PLANNING REQUEST — no code changes. Read the app’s CURRENT code and design first, '
+  + 'then lay out a scoped plan for the request below: what would change, where, and any trade-offs. '
+  + 'Cover ONLY what the request names — do not propose redesigning or rebuilding unrelated parts of the app. '
+  + 'Finish with a short build-ready instruction so the plan can be sent as an update.';
+const DESIGN_MODE_PREAMBLE = 'DESIGN-SCOPED UPDATE — start from the app’s CURRENT design. '
+  + 'Change only the screens and elements the request below names; keep behavior, data, backend logic, '
+  + 'and unrelated screens exactly as they are. This is a targeted design change, not a redesign.';
 
 // Client-side JSON download (no server round-trip), same pattern as the classic
 // Change history. Used by Build History to save a build's full context.
@@ -90,15 +110,14 @@ export default function BuildChat({
   // makes the whole page scroll (operator report: "please fit everything
   // in screen").
   fill = false,
-  // Plan/Design/Build — the same conversation-mode toggle the design chat
-  // carries, so the user can step back into the (read-only) plan/design
-  // conversation from here. The parent (ProjectDetail) owns the state; when
-  // it doesn't pass a handler the toggle simply isn't shown.
-  onChatMode = null,
 }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [instruction, setInstruction] = useState('');
+  // Plan / Design / Build — the same toggle the design chat carries, kept
+  // alive here as this chat's SEND register (see the preambles above). Build
+  // is the default and stays available for the life of the project.
+  const [chatMode, setChatMode] = useState('build');
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
@@ -640,6 +659,29 @@ export default function BuildChat({
     } finally { setBusy(false); }
   };
 
+  // Plan mode's send: an Ask turn wrapped in the planning preamble — the reply
+  // reads the current code and scopes a plan; nothing is built or changed.
+  const startPlan = async () => {
+    const body = instruction.trim();
+    if (!body) return;
+    setBusy(true);
+    try {
+      await api.mock2Ask(projectId, `${PLAN_MODE_PREAMBLE}\n\n${body}`, toWireImages(attach.images));
+      setInstruction('');
+      attach.clear();
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start planning', description: err.message });
+    } finally { setBusy(false); }
+  };
+
+  // Design mode's send: a Quick update wrapped in the design-scope preamble —
+  // a targeted look/layout change to the current design, never a redesign.
+  const startDesignUpdate = () => startBuild('quick', {
+    textOverride: `${DESIGN_MODE_PREAMBLE}\n\n${instruction.trim()}`,
+    ...consumeBoost(),
+  });
+
   // Design options: for when the screen does not look right and you cannot say
   // why. The button opens a SCREEN PICKER — all screens (every route and every
   // in-route screen view, uncapped) or a chosen set — then runs the options
@@ -849,11 +891,14 @@ export default function BuildChat({
   // and a permanently greyed-out button teaches nothing.
   const hasDraft = instruction.trim().length > 0 || attach.images.length > 0;
 
-  // Ctrl+Enter = the default action (Resume when blocked, else Quick update),
-  // respecting the same gate as the buttons.
+  // Ctrl+Enter = the default action for the current mode (Resume when blocked,
+  // Plan/Design update in those modes, else Quick update), respecting the same
+  // gate as the mode's button.
   const submitComposer = () => {
-    if (quickDisabled) return;
-    return resumeMode ? sendResume() : startBuild('quick', consumeBoost());
+    if (resumeMode) { if (!quickDisabled) sendResume(); return; }
+    if (chatMode === 'plan') { if (!askDisabled) startPlan(); return; }
+    if (chatMode === 'design') { if (!quickDisabled) startDesignUpdate(); return; }
+    if (!quickDisabled) startBuild('quick', consumeBoost());
   };
 
   // Build History — every request you've made (your instruction messages),
@@ -1001,11 +1046,27 @@ export default function BuildChat({
           ) : null}
           </div>
         </div>
-        {/* Plan / Design / Build — Build is this chat; Plan and Design step
-            back to the (now read-only) design-stage conversation. Build stays
-            unlocked for the life of the project once it opens. */}
-        {onChatMode ? (
-          <ChatModeToggle className="mt-1" mode="build" onMode={onChatMode} buildUnlocked />
+        {/* Plan / Design / Build — the send register. Build stays available
+            for the life of the project; Plan and Design are live, scoped modes
+            against the current app (see the preambles at the top of the file). */}
+        {canEdit ? (
+          <>
+            <ChatModeToggle
+              className="mt-1" mode={chatMode} onMode={setChatMode} buildUnlocked
+              titles={{
+                plan: 'Plan — think a change through against the current code; a scoped plan comes back, nothing is built',
+                design: 'Design — a look/layout-only update starting from the current design; behavior stays untouched',
+                build: 'Build — code changes: Quick updates and Asks against the running app',
+              }}
+            />
+            {chatMode !== 'build' ? (
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                {chatMode === 'plan'
+                  ? 'Plan mode — sends come back as a scoped plan built from the app’s current code; nothing changes until you build it.'
+                  : 'Design mode — sends run as design-scoped updates: only the screens you name change, starting from the current design; behavior stays untouched.'}
+              </p>
+            ) : null}
+          </>
         ) : null}
       </CardHeader>
       {/* Parsed at the mount point rather than carried on the message, so the
@@ -1609,7 +1670,9 @@ export default function BuildChat({
                   : resumeMode ? 'The build is blocked — add context or an instruction for the resume (optional), then Resume…'
                     : active ? 'A build is running — draft the next change or question; send when it finishes (or Interrupt it)…'
                       : needsFeedback ? 'Rate the last build (Build panel) to run the next update — Ask still works…'
-                        : 'Describe a change (Quick update), or ask a question / request an action (Ask) — e.g. “Add a stats card” or “Add user bob@example.com as admin”')
+                        : chatMode === 'plan' ? 'Describe the change you’re weighing — the plan reads the current code and covers just that, nothing is built…'
+                          : chatMode === 'design' ? 'Describe the design change — only the screens you name are touched, starting from the current design…'
+                            : 'Describe a change (Quick update), or ask a question / request an action (Ask) — e.g. “Add a stats card” or “Add user bob@example.com as admin”')
                 : 'Draft your instruction while the project comes online — sending unlocks when it’s ready.'}
               value={instruction}
               onChange={(e) => { setInstruction(e.target.value); onTyping(); }}
@@ -1724,7 +1787,31 @@ export default function BuildChat({
                   >
                     <Rocket className="h-4 w-4" />
                   </Button>
+                  {/* The send button matches the toggle's register — the same
+                      spot, a different function per mode (Plan / Design
+                      update / Ask + Quick update). */}
                   {hasDraft ? (
+                    chatMode === 'plan' ? (
+                      <Button
+                        className="h-11 sm:h-10"
+                        disabled={askDisabled}
+                        onClick={startPlan}
+                        title="Plan it — reads the app's current code and lays out a scoped plan for exactly this request. Nothing is built or changed. (Ctrl+Enter)"
+                      >
+                        {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ClipboardList className="h-4 w-4 mr-1" />}
+                        Plan it
+                      </Button>
+                    ) : chatMode === 'design' ? (
+                      <Button
+                        className="h-11 sm:h-10"
+                        disabled={quickDisabled}
+                        onClick={startDesignUpdate}
+                        title="Design update — changes only the screens/elements you name, starting from the app's current design; behavior, data, and unrelated screens stay untouched. (Ctrl+Enter)"
+                      >
+                        {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Sparkles className="h-4 w-4 mr-1" />}
+                        {active ? 'Queue design update' : 'Design update'}
+                      </Button>
+                    ) : (
                     <>
                       <Button
                         variant="outline"
@@ -1745,6 +1832,7 @@ export default function BuildChat({
                         {active ? 'Queue update' : 'Quick update'}
                       </Button>
                     </>
+                    )
                   ) : null}
                 </>
               )}

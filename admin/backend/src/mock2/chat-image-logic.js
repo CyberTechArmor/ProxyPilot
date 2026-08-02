@@ -42,6 +42,26 @@ export function mediaTypeForExt(ext) {
   return MEDIA_TYPE_BY_EXT[String(ext || '').toLowerCase()] || null;
 }
 
+// ---- media-type sniffing (magic bytes) ----
+//
+// Browsers lie about image types: a clipboard paste or a re-saved download can
+// carry image/png in File.type while the bytes are WebP — and Anthropic rejects
+// the WHOLE model call on the mismatch ("The image was specified using the
+// image/png media type, but the image appears to be a image/webp image"), which
+// killed a mockup render mid-conversation (operator report). The first bytes of
+// the file are the truth, so every declared type is checked against them and
+// the bytes win. Returns one of CHAT_IMAGE_MEDIA_TYPES, or null when the head
+// matches no known signature (caller keeps the declared type).
+export function sniffImageMediaType(base64) {
+  let head;
+  try { head = Buffer.from(String(base64 || '').slice(0, 32), 'base64'); } catch { return null; }
+  if (head.length >= 4 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return 'image/png';
+  if (head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
+  if (head.length >= 6 && head.toString('latin1', 0, 4) === 'GIF8') return 'image/gif';
+  if (head.length >= 12 && head.toString('latin1', 0, 4) === 'RIFF' && head.toString('latin1', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
 // An attachment id is content-addressed: "<sha256 hex>.<ext>". Everything that
 // serves or reads an image validates against this exact shape (no traversal).
 const IMAGE_ID_RE = /^[a-f0-9]{64}\.(jpg|png|webp|gif)$/;
@@ -86,7 +106,10 @@ export function validateChatImages(images) {
     if (bytes > MAX_CHAT_IMAGE_BYTES) {
       return { ok: false, error: `image ${i + 1}: too large (${Math.round(bytes / 1024)}KB > ${Math.round(MAX_CHAT_IMAGE_BYTES / 1024)}KB) — the app resizes images before upload; try re-attaching` };
     }
-    out.push({ media_type: mediaType, data, name: img.name ? String(img.name).slice(0, 120) : null });
+    // The declared type is checked against the magic bytes and the bytes win —
+    // a mislabeled image otherwise 400s the model call it rides on, and the
+    // stored id's extension (derived from this type) would persist the lie.
+    out.push({ media_type: sniffImageMediaType(data) || mediaType, data, name: img.name ? String(img.name).slice(0, 120) : null });
   }
   return { ok: true, images: out };
 }

@@ -13,7 +13,18 @@
 
 import { ClipboardList, Sparkles, Hammer } from 'lucide-react';
 
-export default function ChatModeToggle({ mode, onMode, buildUnlocked = false, className = '' }) {
+// The default tooltips describe the DESIGN-STAGE semantics; the build chat
+// overrides them via `titles` — same three buttons, different registers
+// (post-build Plan and Design are live modes against the current app).
+const DEFAULT_TITLES = {
+  plan: 'Plan — think through the idea without changing the mockup',
+  design: 'Design — generate and iterate the mockup',
+  build: 'Build — change the running app',
+  buildLocked: 'Build unlocks once the mockup is accepted, the MVP is built, or the mockup is skipped',
+};
+
+export default function ChatModeToggle({ mode, onMode, buildUnlocked = false, className = '', titles = {} }) {
+  const t = { ...DEFAULT_TITLES, ...titles };
   const btn = (value, Icon, label, { disabled = false, title }) => (
     <button
       type="button"
@@ -32,17 +43,11 @@ export default function ChatModeToggle({ mode, onMode, buildUnlocked = false, cl
 
   return (
     <div className={`inline-flex self-start rounded-md border p-0.5 shrink-0 ${className}`} role="tablist" aria-label="Conversation mode">
-      {btn('plan', ClipboardList, 'Plan', {
-        title: 'Plan — think through the idea without changing the mockup',
-      })}
-      {btn('design', Sparkles, 'Design', {
-        title: 'Design — generate and iterate the mockup',
-      })}
+      {btn('plan', ClipboardList, 'Plan', { title: t.plan })}
+      {btn('design', Sparkles, 'Design', { title: t.design })}
       {btn('build', Hammer, 'Build', {
         disabled: !buildUnlocked,
-        title: buildUnlocked
-          ? 'Build — change the running app'
-          : 'Build unlocks once the mockup is accepted, the MVP is built, or the mockup is skipped',
+        title: buildUnlocked ? t.build : t.buildLocked,
       })}
     </div>
   );

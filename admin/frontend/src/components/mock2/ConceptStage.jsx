@@ -80,14 +80,14 @@ function StageIndicator({ stage }) {
 // `fill` — render as a panel that takes exactly its parent's height (the phone
 // workspace) instead of sizing to its content. Off everywhere else, so the
 // stacked desktop/tablet layouts keep the growth behaviour they were tuned for.
-// Two narration lines are "the same step" when they share their opening clause
-// — the part before the first em-dash, bracket or ellipsis. That is where the
-// phase name lives ("Designing the mockup…"), and everything after it is the
-// detail that keeps changing ("(29k characters)", "(18s — …)"). Without this the
-// timeline printed a new row every second and a half of a five-minute render.
-function sameNarration(a, b) {
-  const head = (t) => String(t || '').split(/[—(…]/)[0].trim().toLowerCase();
-  return head(a) === head(b);
+// Two narration lines are "the same step" when they differ only in their
+// numbers — the elapsed seconds and character counts that tick during a render
+// ("(29k characters)", "(18s — …)"). Those refresh their row in place; every
+// OTHER wording is its own step and gets its own persisted row, so the design
+// chat builds the same step-by-step timeline the build chat shows instead of
+// one line that keeps rewriting itself (operator request).
+function narrationStem(t) {
+  return String(t || '').replace(/\d+/g, '#').trim().toLowerCase();
 }
 
 export default function ConceptStage({
@@ -256,30 +256,35 @@ export default function ConceptStage({
   // rendered as a live assistant bubble; poll faster while it's arriving.
   const jobPartial = jobActive ? (data?.job?.partial || null) : null;
 
-  // Accumulate the job's narration into a timeline. Each distinct message is a
-  // line; a repeat of the line already at the bottom is ignored, so the
-  // character-count updates during a render ("Designing the mockup… (29k
-  // characters)") refresh in place instead of printing thirty near-identical
-  // rows. A new cycle starts a fresh timeline.
+  // Accumulate the job's narration into a timeline of PERSISTED steps, the way
+  // the build chat's activity feed works: every distinct wording is its own
+  // row, forever. A message that differs only in its ticking numbers (elapsed
+  // seconds, character counts) refreshes ITS OWN row in place — wherever that
+  // row sits — so the interleaved heartbeat + streaming-count narrations each
+  // keep one row instead of overwriting each other or printing thirty
+  // near-identical lines. A new cycle starts a fresh timeline.
   const jobMessage = data?.job?.message || null;
   const jobCycleId = data?.job?.cycleId ?? data?.job?.cycle_id ?? null;
   useEffect(() => {
     if (!jobActive) return;
     if (activityCycleRef.current !== jobCycleId) {
       activityCycleRef.current = jobCycleId;
-      setDesignActivity(jobMessage ? [{ type: 'message', text: jobMessage, seq: 0 }] : []);
+      setDesignActivity(jobMessage
+        ? [{ type: 'message', text: jobMessage, stem: narrationStem(jobMessage), seq: 0 }]
+        : []);
       return;
     }
     if (!jobMessage) return;
     setDesignActivity((prev) => {
-      const last = prev[prev.length - 1];
-      // Same phase, refreshed detail (a growing character count) → replace the
-      // line rather than stack it.
-      if (last && sameNarration(last.text, jobMessage)) {
-        if (last.text === jobMessage) return prev;
-        return [...prev.slice(0, -1), { ...last, text: jobMessage }];
+      const stem = narrationStem(jobMessage);
+      const idx = prev.findIndex((r) => r.stem === stem);
+      if (idx >= 0) {
+        if (prev[idx].text === jobMessage) return prev;
+        const next = [...prev];
+        next[idx] = { ...next[idx], text: jobMessage };
+        return next;
       }
-      return [...prev, { type: 'message', text: jobMessage, seq: prev.length }];
+      return [...prev, { type: 'message', text: jobMessage, stem, seq: prev.length }];
     });
   }, [jobActive, jobMessage, jobCycleId]);
 

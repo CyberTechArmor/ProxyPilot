@@ -26,8 +26,18 @@
 // Terminology (risk R7): the slot is build_runner; nothing here is named "agent".
 
 import { anthropicTuning } from './routing-logic.js';
+import { sniffImageMediaType } from './chat-image-logic.js';
 
 const DEFAULT_TIMEOUT_MS = 120000;
+
+// The declared media type checked against the image's magic bytes — the bytes
+// win. Attachments stored before the upload gate sniffed types can carry a
+// browser's lie (WebP bytes labeled image/png), and Anthropic rejects the
+// whole request on the mismatch; the OpenAI and Gemini shapes get the
+// corrected type too.
+function imageMediaType(img) {
+  return sniffImageMediaType(img?.data) || img?.media_type || 'image/png';
+}
 
 // Idle watchdog for STREAMING calls. The overall deadline below scales with the
 // requested output (~50ms/token), so a 128k-token budget legitimately gets a
@@ -391,7 +401,7 @@ function anthropicMessages(transcript) {
   for (const turn of transcript) {
     if (turn.role === 'user') {
       const content = (turn.images || []).map((img) => ({
-        type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data },
+        type: 'image', source: { type: 'base64', media_type: imageMediaType(img), data: img.data },
       }));
       content.push({ type: 'text', text: turn.text || '' });
       out.push({ role: 'user', content });
@@ -579,7 +589,7 @@ function openAiMessages(transcript) {
         out.push({
           role: 'user',
           content: [
-            ...turn.images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.media_type};base64,${img.data}` } })),
+            ...turn.images.map((img) => ({ type: 'image_url', image_url: { url: `data:${imageMediaType(img)};base64,${img.data}` } })),
             { type: 'text', text: turn.text || '' },
           ],
         });
@@ -632,7 +642,7 @@ function geminiContents(transcript) {
   const out = [];
   for (const turn of transcript) {
     if (turn.role === 'user') {
-      const parts = (turn.images || []).map((img) => ({ inlineData: { mimeType: img.media_type, data: img.data } }));
+      const parts = (turn.images || []).map((img) => ({ inlineData: { mimeType: imageMediaType(img), data: img.data } }));
       parts.push({ text: turn.text || '' });
       out.push({ role: 'user', parts });
     } else if (turn.role === 'assistant') {

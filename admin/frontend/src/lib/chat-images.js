@@ -123,8 +123,15 @@ export async function prepareChatImage(file) {
   }
   if (!blob) throw new Error('Could not encode the image.');
   if (file.type === 'image/png' && scale === 1 && file.size < blob.size) {
-    blob = file;
-    mediaType = 'image/png';
+    // The original bytes are kept only when they really are the PNG file.type
+    // claims: browsers hand over pasted/re-saved files whose declared type
+    // lies (WebP bytes labeled image/png), and the model provider rejects the
+    // whole request on the mismatch — check the magic bytes before trusting it.
+    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    if (head.length >= 4 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) {
+      blob = file;
+      mediaType = 'image/png';
+    }
   }
 
   const data = await blobToBase64(blob);

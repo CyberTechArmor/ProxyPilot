@@ -200,6 +200,29 @@ export default function ProjectDetail() {
     load();
   }, [load]);
 
+  // Annotate-the-mockup (design stage): the pins + burned-in screenshot from
+  // the PreviewPanel's annotate mode send as a DESIGN turn — the same feature
+  // the build preview has, pointed at the design chat (operator request).
+  // designChatNonce tells ConceptStage a turn started outside it, so it
+  // reloads and its poll picks the running job up.
+  const [designChatNonce, setDesignChatNonce] = useState(0);
+  const sendMockupAnnotation = useCallback(async ({ text, image }) => {
+    try {
+      const res = await api.mock2SendChatMessage(
+        id, text, 'design', image ? [image] : [],
+        project?.design_preset === 'ai' ? 'explore' : 'theme',
+      );
+      if (res?.refused) {
+        toast({ variant: 'destructive', title: 'Annotation not processed', description: res.reason || 'Quota exceeded.' });
+        return;
+      }
+      toast({ title: 'Annotation sent', description: 'The design partner is looking at your pins.' });
+      setDesignChatNonce((n) => n + 1);
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not send the annotation', description: err.message });
+    }
+  }, [id, project?.design_preset, toast]);
+
   useEffect(() => {
     let cancelled = false;
     api.mock2Status()
@@ -556,6 +579,8 @@ export default function ProjectDetail() {
                   onShowDetails={() => setTab('details')}
                   panel={studioPanel} onPanel={setStudioPanel}
                   chatMode={chatModeResolved} onChatMode={setChatMode}
+                  onAnnotate={canEdit && project.current_mockup_id ? sendMockupAnnotation : null}
+                  chatReloadNonce={designChatNonce}
                 />
               ) : previewSrc ? (
                 // Design mode — the live mockup preview on the left, the design
@@ -569,7 +594,13 @@ export default function ProjectDetail() {
                     <DesignLeftPane
                       tab={designPane} onTab={setDesignPane}
                       projectId={id} canEdit={canEdit}
-                      preview={<PreviewPanel src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce} projectId={designApproved ? null : id} watchProjectId={id} />}
+                      preview={(
+                        <PreviewPanel
+                          src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce}
+                          projectId={designApproved ? null : id} watchProjectId={id}
+                          onAnnotate={canEdit && project.current_mockup_id ? sendMockupAnnotation : null}
+                        />
+                      )}
                     />
                   </div>
                   <div className="min-w-0 flex flex-col gap-4 lg:flex-1 lg:min-h-0">
@@ -580,6 +611,7 @@ export default function ProjectDetail() {
                       provMessage={provStatus?.progress?.message || null}
                       onOpenAssets={() => setDesignPane('assets')}
                       mode={chatModeResolved} onModeChange={setChatMode}
+                      reloadNonce={designChatNonce}
                     />
                   </div>
                 </div>
@@ -607,6 +639,7 @@ export default function ProjectDetail() {
                       // "Add assets" scrolls to it rather than switching panes.
                       onOpenAssets={() => assetsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
                       mode={chatModeResolved} onModeChange={setChatMode}
+                      reloadNonce={designChatNonce}
                     />
                     {/* Before the first mockup exists is the MOST useful moment
                         to hand over a logo or a reference shot — it is what the
@@ -1465,7 +1498,7 @@ const MOCKUP_PANELS = [
 function MockupWorkspace({
   projectId, project, canEdit, previewSrc, previewReloadNonce, provLog, provMessage,
   onApproved, onMockupChanged, onOpenNav, onShowDetails, panel: panelProp, onPanel,
-  chatMode = null, onChatMode = null,
+  chatMode = null, onChatMode = null, onAnnotate = null, chatReloadNonce = 0,
 }) {
   // Start where the work is: the chat until a mockup exists, the mockup once
   // one does. The panel is MIRRORED to the parent (onPanel) rather than owned
@@ -1498,6 +1531,7 @@ function MockupWorkspace({
             provLog={provLog} provMessage={provMessage}
             onOpenAssets={() => setPanel('assets')}
             mode={chatMode} onModeChange={onChatMode}
+            reloadNonce={chatReloadNonce}
           />
         ) : panel === 'assets' ? (
           <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -1507,6 +1541,7 @@ function MockupWorkspace({
           <PreviewPanel
             src={previewSrc} title={project.name} approved={false} reloadKey={previewReloadNonce}
             projectId={projectId} watchProjectId={projectId}
+            onAnnotate={onAnnotate}
           />
         ) : (
           // No mockup yet — the placeholder is content-sized, so center it

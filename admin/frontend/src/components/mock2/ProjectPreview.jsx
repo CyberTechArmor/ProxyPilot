@@ -118,11 +118,13 @@ async function capturePreviewImage(iframeEl, pins) {
 
 // onAnnotate (optional) — async ({ text, image }) => void. When provided, the
 // toolbar shows an "Annotate" toggle: turning it on lets the operator drop pins
-// on the LIVE embedded app. If the app carries the annotate bridge, each tap
+// on the LIVE embedded frame. If the app carries the annotate bridge, each tap
 // resolves to the real element/component (element-aware); otherwise it falls
 // back to a coordinate overlay. Send optionally attaches a real screenshot of
-// the signed-in view and routes it to the build as a Quick update. Omitted for
-// the mockup preview (pre-build).
+// the view and routes it wherever the handler points: the BUILD preview sends
+// a Quick update; the MOCKUP preview (design stage) sends a design turn, so
+// pins are how you point at the mockup too (operator request). The mockup has
+// no bridge, so it always uses the coordinate overlay.
 // useScreenWork — the shared watcher for "a browser is driving your app".
 //
 // Polls the in-memory progress record. Quick while something is happening, slow

@@ -92,8 +92,22 @@ export const CONCEPT_CHAT_TOOL_NAMES = Object.freeze(CONCEPT_CHAT_TOOLS.map((t) 
 // exactly as the runner injects constitution_md. The model is a friendly guide
 // for a possibly non-technical Builder; it converses and requests mockups, and
 // it cannot build the real app.
-export function buildConceptChatSystemPrompt({ designSystem = '', projectName = 'this project', hasMockup = false, mode = 'design', assets = null } = {}) {
+export function buildConceptChatSystemPrompt({ designSystem = '', projectName = 'this project', hasMockup = false, mode = 'design', assets = null, reviewShots = false } = {}) {
   const planMode = mode === 'plan';
+  // The platform attached screenshots of the current mockup AS RENDERED
+  // (attachRenderedMockupShots) — tell the model to actually use them. Always
+  // on when a mockup exists, regardless of the design_review setting: that
+  // switch governs the after-BUILD critique, not the design conversation.
+  const reviewBlock = reviewShots
+    ? `\n\nRENDERED-MOCKUP REVIEW: screenshots of the current mockup AS ACTUALLY RENDERED
+(desktop and mobile) are attached to the newest message by the platform. Look at them
+before replying — they are exactly what the Builder is seeing, and a request like
+"the sidebar is broken" refers to what they show, not to the HTML. Review them for
+craft defects the HTML alone hides — overlapping or clipped text, oversized icons or
+glyphs, broken alignment, elements pushed off screen, horizontal scroll — and if you
+spot any, say so plainly and fix them in the next render even when the Builder did
+not mention them.`
+    : '';
   // What the operator has already handed over. The render is given the actual
   // logo and wording (concept.js attaches them); the design partner needs to
   // KNOW they exist so it uses them in the brief and stops asking for things it
@@ -170,7 +184,7 @@ domain expert on the Builder's behalf:
 non-technical — turn an app idea into a clear, interactive mockup. This is Stage 1
 of four (Concept → Define → Build → Run); you are ONLY doing Concept.
 
-${modeBlock}${assetBlock}
+${modeBlock}${assetBlock}${reviewBlock}
 
 What you CANNOT do (this is structural, not a preference):
 - You cannot write code, files, backend logic, or rules. You cannot build or run
@@ -1584,6 +1598,26 @@ export function buildConceptTranscript(messages = [], newUserText = null, { newU
     out.push(turn);
   }
   return out;
+}
+
+// attachRenderedMockupShots — ride the current mockup's screenshots on the
+// transcript's LAST user turn, labeled so an image block is not just an
+// unexplained picture. Mutates and returns the transcript (it is the
+// per-call array buildConceptTranscript just made, not shared state). The
+// label rides the newest turn only, so the cached conversation prefix stays
+// byte-identical turn to turn.
+export function attachRenderedMockupShots(transcript, shots = []) {
+  if (!Array.isArray(transcript) || !Array.isArray(shots) || !shots.length) return transcript;
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    const turn = transcript[i];
+    if (turn && turn.role === 'user') {
+      const images = [...(turn.images || []), ...shots.map((s) => ({ media_type: s.media_type, data: s.data }))];
+      const label = `[Attached by the platform: the CURRENT mockup as actually rendered — ${shots.map((s) => `${s.width}px`).join(', ')} screenshots. This is what the Builder is looking at right now.]`;
+      transcript[i] = { ...turn, images, text: `${String(turn.text || '')}\n\n${label}`.trim() };
+      return transcript;
+    }
+  }
+  return transcript;
 }
 
 // A short plain-text recap of the conversation for the mockup model (which does

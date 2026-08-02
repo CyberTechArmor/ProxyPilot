@@ -207,12 +207,15 @@ test('setup is wired: routes, the concept brief, the build instruction, the pane
   assert.match(flow, /if \(!code \|\| !\/\^2\/\.test\(code\)\) return false;/);
 
   const panel = readFileSync(path.join(here, '..', '..', '..', 'frontend', 'src', 'components', 'mock2', 'ProjectSetup.jsx'), 'utf8');
-  assert.match(panel, /state\.show/, 'the panel obeys the server, including the classic setting');
-  assert.match(panel, /mock2DismissSetup/);
+  // The classic setting is still a real off-switch for the checklist card.
+  assert.match(panel, /state\.mode && state\.mode !== 'guided'/, 'the card obeys the server classic setting');
   const detail = readFileSync(path.join(here, '..', '..', '..', 'frontend', 'src', 'pages', 'ProjectDetail.jsx'), 'utf8');
   assert.match(detail, /<ProjectSetup/);
-  // Above the tabs: a card buried in Details is not an answer to "what now".
-  assert.ok(detail.indexOf('<ProjectSetup') < detail.indexOf('<TabsList'), 'setup must sit above the tab strip');
+  // ONE home, inside the Details tab (operator request: only under Details →
+  // Overview, never also above the tab strip) — so it renders after the tab
+  // strip, not before it, and exactly once.
+  assert.ok(detail.indexOf('<ProjectSetup') > detail.indexOf('<TabsList'), 'setup lives inside the Details tab, not above the tab strip');
+  assert.equal(detail.match(/<ProjectSetup/g).length, 1, 'the checklist renders in exactly one place');
 });
 
 test('the default is guided, and classic is a real off-switch', () => {

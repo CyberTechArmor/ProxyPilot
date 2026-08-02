@@ -17,6 +17,11 @@
 // project). There is no progress counter to desync: close the tab at step 4 and
 // it is still step 4 tomorrow, on any device.
 //
+// Lives in ONE place: the Details tab's Overview section. It used to also
+// render as a dismissible panel above the project tabs, but two copies of the
+// same checklist on one page read as clutter, not guidance (operator request:
+// show it only under Details → Overview).
+//
 // MOBILE_FIRST: one column throughout, 44px targets, completes at 360px.
 
 import { useCallback, useEffect, useState } from 'react';
@@ -25,13 +30,9 @@ import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Check, Circle, Loader2, Rocket, X, Clock } from 'lucide-react';
+import { Check, Circle, Loader2, Rocket, Clock } from 'lucide-react';
 
-// variant: 'panel' (the dismissible first-run card above the tabs) or
-// 'details' (the permanent copy on the Details tab — the place to REVIEW the
-// checklist after the panel was dismissed, and to bring the panel back).
-export default function ProjectSetup({ projectId, canEdit = false, onJump, variant = 'panel' }) {
-  const inDetails = variant === 'details';
+export default function ProjectSetup({ projectId, canEdit = false, onJump }) {
   const { toast } = useToast();
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -54,7 +55,7 @@ export default function ProjectSetup({ projectId, canEdit = false, onJump, varia
   // the App access panel, the logo in Assets, the mockup in the design chat —
   // so the panel follows the project rather than waiting to be told.
   useEffect(() => {
-    if (!state || state.complete || state.dismissed) return undefined;
+    if (!state || state.complete) return undefined;
     const t = setInterval(load, 15000);
     return () => clearInterval(t);
   }, [state, load]);
@@ -72,27 +73,10 @@ export default function ProjectSetup({ projectId, canEdit = false, onJump, varia
     } finally { setBusy(false); }
   };
 
-  // Dismiss/undismiss is OPTIMISTIC: the server round-trip can take many
-  // seconds (the save also tries to push app context into the container), and
-  // an X that does nothing for that long reads as broken. Hide first, persist
-  // behind it, roll back on failure.
-  const setDismissedFlag = async (dismissed) => {
-    setBusy(true);
-    const prev = state;
-    setState((cur) => (cur ? { ...cur, dismissed, show: dismissed ? false : cur.show || !cur.complete } : cur));
-    try { setState(await api.mock2DismissSetup(projectId, dismissed)); }
-    catch (err) {
-      setState(prev);
-      toast({ variant: 'destructive', title: dismissed ? 'Could not dismiss' : 'Could not restore', description: err.message });
-    } finally { setBusy(false); }
-  };
-  const dismiss = () => setDismissedFlag(true);
-
   if (loading || !state) return null;
-  // The panel hides itself once dismissed/complete; the Details copy stays (it
-  // is the way back) unless the whole guided flow is switched off globally.
-  if (!inDetails && !state.show) return null;
-  if (inDetails && state.mode && state.mode !== 'guided') return null;
+  // The checklist stays reviewable here for the project's whole life, unless
+  // the guided flow is switched off globally (the admin "classic" setting).
+  if (state.mode && state.mode !== 'guided') return null;
 
   const { steps = [], progress = { done: 0, total: 0 }, current, fields = [] } = state;
   const currentStep = steps.find((s) => s.id === current);
@@ -105,30 +89,13 @@ export default function ProjectSetup({ projectId, canEdit = false, onJump, varia
 
   return (
     <Card className="border-primary/30">
-      <CardHeader className="flex flex-row items-start justify-between gap-2 space-y-0 pb-3">
-        <div>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Rocket className="h-4 w-4" /> Setting up this project
-          </CardTitle>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {progress.done} of {progress.total} done · every step is optional
-          </p>
-        </div>
-        {canEdit && !inDetails ? (
-          <Button variant="ghost" size="sm" className="min-h-[44px]" onClick={dismiss} disabled={busy} title="Hide this panel — it stays reviewable under Details">
-            <X className="h-4 w-4" />
-            <span className="sr-only">Hide setup</span>
-          </Button>
-        ) : null}
-        {canEdit && inDetails && !state.complete ? (
-          <Button
-            variant="outline" size="sm" className="min-h-[44px]" disabled={busy}
-            onClick={() => setDismissedFlag(!state.dismissed)}
-            title={state.dismissed ? 'Show the setup guide on the project page again' : 'Hide the setup guide from the project page (it stays here)'}
-          >
-            {state.dismissed ? 'Show on project page' : 'Hide from project page'}
-          </Button>
-        ) : null}
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Rocket className="h-4 w-4" /> Setting up this project
+        </CardTitle>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {progress.done} of {progress.total} done · every step is optional
+        </p>
       </CardHeader>
 
       <CardContent className="space-y-4 text-sm">

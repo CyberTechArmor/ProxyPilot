@@ -89,6 +89,14 @@ export default function ProjectDetail() {
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
   const [provStatus, setProvStatus] = useState(null); // live provisioning progress + step log
   const [tab, setTab] = useState('chat'); // 'chat' | 'terminal' | 'details'
+  // The DESIGN-STAGE conversation mode — Plan or Design, one toggle across the
+  // pre-approval layouts (the toggle itself also shows Build, greyed until it
+  // unlocks). null = "auto": Design if a mockup already exists, otherwise Plan
+  // (a fresh project starts by talking the idea through). Post-approval the
+  // build chat owns its own live Plan/Design/Build modes (BuildChat), so this
+  // state matters only before approval.
+  const [chatMode, setChatMode] = useState(null);
+  const chatModeResolved = chatMode ?? (project?.current_mockup_id ? 'design' : 'plan');
   // Details sub-tab — the card list grew past scannable, so it is grouped into
   // categories. Spend is the default (the most-asked question).
   const [detailsTab, setDetailsTab] = useState('spend');
@@ -445,22 +453,6 @@ export default function ProjectDetail() {
         </div>
       ) : null}
 
-      {/* Guided setup — above the tabs on purpose, because it is the answer to
-          "what do I do now" and a card buried in Details is not. It hides
-          itself when the flow is set to classic, when it is dismissed, or when
-          every step is done, so it is not a permanent fixture.
-          Suppressed in Flightdeck and on a phone in the mockup studio: both are
-          deliberately chromeless workspaces. */}
-      {!flightdeckActive && !mobileStudio ? (
-        <div className="shrink-0">
-          <ProjectSetup
-            projectId={id}
-            canEdit={canEdit && !isArchived}
-            onJump={() => setTab('chat')}
-          />
-        </div>
-      ) : null}
-
       {/* The stage flow (Chat to App → Build → Run) header was retired: the Build
           action lives at the bottom of the design chat (ConceptStage), and the
           Mockup/Build stage is shown on the project tiles. */}
@@ -563,6 +555,7 @@ export default function ProjectDetail() {
                   onOpenNav={openNav || null}
                   onShowDetails={() => setTab('details')}
                   panel={studioPanel} onPanel={setStudioPanel}
+                  chatMode={chatModeResolved} onChatMode={setChatMode}
                 />
               ) : previewSrc ? (
                 // Design mode — the live mockup preview on the left, the design
@@ -586,6 +579,7 @@ export default function ProjectDetail() {
                       provLog={provStatus?.progress?.log || null}
                       provMessage={provStatus?.progress?.message || null}
                       onOpenAssets={() => setDesignPane('assets')}
+                      mode={chatModeResolved} onModeChange={setChatMode}
                     />
                   </div>
                 </div>
@@ -612,6 +606,7 @@ export default function ProjectDetail() {
                       // This layout already has the library on screen below, so
                       // "Add assets" scrolls to it rather than switching panes.
                       onOpenAssets={() => assetsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                      mode={chatModeResolved} onModeChange={setChatMode}
                     />
                     {/* Before the first mockup exists is the MOST useful moment
                         to hand over a logo or a reference shot — it is what the
@@ -786,9 +781,9 @@ export default function ProjectDetail() {
         </CardContent>
       </Card>
 
-      {/* Setup guide — the first-run checklist, reviewable here even after the
-          panel above the tabs was dismissed (and the way to bring it back). */}
-      <ProjectSetup projectId={id} canEdit={canEdit && !isArchived} onJump={() => setTab('chat')} variant="details" />
+      {/* Setup guide — the first-run checklist. This Overview card is its ONE
+          home (operator request: not also above the tabs). */}
+      <ProjectSetup projectId={id} canEdit={canEdit && !isArchived} onJump={() => setTab('chat')} />
 
       {/* Design archive — where the design started. Once the design is approved
           the Chat tab becomes the build/run/maintenance chat, so the original
@@ -1470,6 +1465,7 @@ const MOCKUP_PANELS = [
 function MockupWorkspace({
   projectId, project, canEdit, previewSrc, previewReloadNonce, provLog, provMessage,
   onApproved, onMockupChanged, onOpenNav, onShowDetails, panel: panelProp, onPanel,
+  chatMode = null, onChatMode = null,
 }) {
   // Start where the work is: the chat until a mockup exists, the mockup once
   // one does. The panel is MIRRORED to the parent (onPanel) rather than owned
@@ -1501,6 +1497,7 @@ function MockupWorkspace({
             onApproved={onApproved} onMockupChanged={onMockupChanged}
             provLog={provLog} provMessage={provMessage}
             onOpenAssets={() => setPanel('assets')}
+            mode={chatMode} onModeChange={onChatMode}
           />
         ) : panel === 'assets' ? (
           <div className="min-h-0 flex-1 overflow-y-auto p-2">

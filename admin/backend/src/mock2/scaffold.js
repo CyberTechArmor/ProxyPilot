@@ -856,7 +856,12 @@ fetch('/api/me', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : 
 // scopes frame-ancestors), so the framer is trusted. It reads element metadata
 // only (tag, text, position, data-* hints); it never exfiltrates page data on
 // its own and touches nothing until annotate mode is explicitly enabled.
-function ppAnnotateBridgeJs() {
+//
+// Exported: the MOCKUP preview route inlines this same script into the served
+// mockup document (window.__ppMockupPreview set first), so pins on the mockup
+// are element-aware too — the mockup identifies screens by its own
+// section[data-screen] convention rather than by route.
+export function ppAnnotateBridgeJs() {
   return `/* ProxyPilot dev-plane annotate bridge — inert unless the dashboard enables it. */
 (function () {
   if (window.self === window.top) return; // not embedded → do nothing
@@ -894,11 +899,25 @@ function ppAnnotateBridgeJs() {
     } catch (e) {}
     return null;
   }
+  // WHICH SCREEN a page identity means. Apps identify screens by route; the
+  // MOCKUP is one document served from an API path, so its route never
+  // changes — there the ACTIVE data-screen section (the mockup's own screen
+  // convention) is the page identity, as "/#screen-name" (the same key the
+  // screen picker uses for in-page views).
+  function pageId() {
+    if (window.__ppMockupPreview) {
+      var act = document.querySelector('section[data-screen].screen-active') || document.querySelector('section[data-screen]');
+      var name = act && act.getAttribute('data-screen');
+      return name ? '/#' + name : '/';
+    }
+    return location.pathname + location.search;
+  }
   function describe(el) {
     if (!el || el.nodeType !== 1) return {};
     var hint = el.closest ? el.closest('[data-pp-component],[data-component],[data-testid],[data-test]') : null;
     var comp = hint && (hint.getAttribute('data-pp-component') || hint.getAttribute('data-component') || hint.getAttribute('data-testid') || hint.getAttribute('data-test'));
     var srcEl = el.closest ? el.closest('[data-pp-source]') : null;
+    var scrEl = el.closest ? el.closest('[data-screen]') : null;
     var r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
     var vw = window.innerWidth || 1, vh = window.innerHeight || 1;
     return {
@@ -907,6 +926,7 @@ function ppAnnotateBridgeJs() {
       classes: (typeof el.className === 'string' && el.className.trim()) ? el.className.trim().split(/\\s+/).slice(0, 4) : [],
       component: comp || reactName(el) || null,
       source: srcEl ? srcEl.getAttribute('data-pp-source') : null,
+      screen: scrEl ? scrEl.getAttribute('data-screen') : null,
       label: (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('name') || el.getAttribute('placeholder'))) || null,
       text: text(el),
       selector: selector(el),
@@ -950,7 +970,7 @@ function ppAnnotateBridgeJs() {
     // pins dropped on /settings from pins dropped on / — it drew every badge
     // over whatever page happened to be showing, and the sent instructions
     // named a single screen for all of them.
-    pin.page = location.pathname + location.search;
+    pin.page = pageId();
     pin.title = (document.title || '').slice(0, 80);
     post({ type: 'pin', pin: pin });
   }
@@ -959,7 +979,7 @@ function ppAnnotateBridgeJs() {
   // document loads — a client-rendered app never fires 'load' on navigation.
   var lastPage = null;
   function announcePage() {
-    var page = location.pathname + location.search;
+    var page = pageId();
     if (page === lastPage) return;
     lastPage = page;
     post({ type: 'page', page: page, title: (document.title || '').slice(0, 80) });

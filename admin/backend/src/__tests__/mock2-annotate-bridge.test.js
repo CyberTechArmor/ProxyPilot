@@ -69,7 +69,9 @@ test('pins carry document-relative coordinates and their page', () => {
   assert.match(onClick, /pageYOffset/);
   assert.match(onClick, /pin\.pageY = clamp/);
   assert.match(onClick, /pin\.scrolled/);
-  assert.match(onClick, /pin\.page = location\.pathname/);
+  // Page identity goes through the one pageId() — location-based for apps,
+  // active data-screen for the inlined mockup copy (asserted below).
+  assert.match(onClick, /pin\.page = pageId\(\);/);
 });
 
 test('SPA navigation is announced, not just full page loads', () => {
@@ -91,4 +93,28 @@ test('the bridge never reports on a page it was not asked about', () => {
   // host with a message every tick.
   const fn = s.slice(s.indexOf('function announcePage'), s.indexOf('function watchNavigation'));
   assert.match(fn, /if \(page === lastPage\) return;/);
+});
+
+test('mockup mode: page identity comes from the active data-screen section', () => {
+  const s = bridge();
+  // The mockup preview inlines this same script (window.__ppMockupPreview set
+  // first): its route never changes, so the active section[data-screen] is the
+  // page identity, as "/#screen" — the same key the screen picker uses.
+  assert.match(s, /window\.__ppMockupPreview/);
+  assert.match(s, /section\[data-screen\]\.screen-active/);
+  assert.match(s, /'\/#' \+ /);
+  // Both the pin and the page announcement go through the one pageId().
+  assert.match(s, /pin\.page = pageId\(\);/);
+  assert.match(s, /var page = pageId\(\);/);
+  // The enclosing screen rides each pin's element description too.
+  assert.match(s, /screen: scrEl \? scrEl\.getAttribute\('data-screen'\) : null/);
+});
+
+test('the bridge can be inlined into a served HTML document', async () => {
+  // The mockup route embeds the source inside a <script> tag — a literal
+  // "</script>" anywhere in it would truncate the element and break the page.
+  const { ppAnnotateBridgeJs } = await import('../mock2/scaffold.js');
+  const src = ppAnnotateBridgeJs();
+  assert.ok(!/<\/script/i.test(src), 'bridge source must not contain a script close tag');
+  assert.equal(src, bridge(), 'the inlined bridge and the scaffolded file are the same script');
 });

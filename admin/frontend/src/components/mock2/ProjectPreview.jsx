@@ -25,6 +25,9 @@ function describeEl(el) {
   if (el.label) meta.push(`label "${el.label}"`);
   if (el.id) meta.push(`#${el.id}`);
   if (el.source) meta.push(`source ${el.source}`);
+  // The enclosing data-screen section — how mockups (and the SPAs built to
+  // their convention) name their screens.
+  if (el.screen) meta.push(`screen "${el.screen}"`);
   if (!el.component && !el.source && el.selector) meta.push(`selector ${el.selector}`);
   const loc = el.rect ? ` (around ${el.rect.x}%, ${el.rect.y}%)` : '';
   return `${head}${meta.length ? ` — ${meta.join(', ')}` : ''}${loc}`;
@@ -309,8 +312,14 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
   }, [projectId, src, reloadKey]);
 
   const appOrigin = (() => { try { return new URL(src).origin; } catch { return '*'; } })();
+  // The MOCKUP preview (projectId set) is served under a sandbox WITHOUT
+  // allow-same-origin: its document has an OPAQUE origin, so a concrete
+  // targetOrigin can never match it and its messages arrive with origin
+  // "null". Address it with '*' (the payload is only enable/disable/ping)
+  // and authenticate its messages by WINDOW identity instead of origin.
+  const sandboxedPreview = !!projectId;
   const postToApp = (type) => {
-    try { frontIframe()?.contentWindow?.postMessage({ __pp: 'annotate-host', type }, appOrigin); } catch { /* cross-origin race */ }
+    try { frontIframe()?.contentWindow?.postMessage({ __pp: 'annotate-host', type }, sandboxedPreview ? '*' : appOrigin); } catch { /* cross-origin race */ }
   };
 
   // Bridge handshake + pin stream. We listen whenever annotate is available so
@@ -318,7 +327,11 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
   useEffect(() => {
     if (!onAnnotate) return undefined;
     const onMsg = (e) => {
-      if (appOrigin !== '*' && e.origin !== appOrigin) return;
+      // Accept a message when it comes from one of OUR two buffer iframes
+      // (window identity — the only check an opaque-origin mockup can pass),
+      // or from the app's origin (the build preview, same as before).
+      const ours = e.source && (e.source === refA.current?.contentWindow || e.source === refB.current?.contentWindow);
+      if (!ours && appOrigin !== '*' && e.origin !== appOrigin) return;
       const d = e.data;
       if (!d || d.__pp !== 'annotate-bridge') return;
       if (d.type === 'ready' || d.type === 'enabled') { bridgeSeenRef.current = true; setMode('bridge'); }

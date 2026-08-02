@@ -1443,10 +1443,16 @@ export const api = {
     request(`/mock2/projects/${projectId}/components/install`, { method: 'POST' }),
   // Ask lane: a codebase question / bounded read-and-run task in the build chat
   // (no build cycle). 202 + poll; the answer lands as a chat message.
-  mock2Ask: (projectId, question, images = null) =>
+  mock2Ask: (projectId, question, images = null, opts = {}) =>
     request(`/mock2/projects/${projectId}/ask`, {
       method: 'POST',
-      body: JSON.stringify(images?.length ? { question, images } : { question }),
+      body: JSON.stringify({
+        question,
+        ...(images?.length ? { images } : {}),
+        // Research mode — Plan's deeper register: web search + doc retrieval,
+        // ending in a phased build-ready plan.
+        ...(opts.research ? { research: true } : {}),
+      }),
     }),
   mock2AskStatus: (projectId) => request(`/mock2/projects/${projectId}/ask/status`),
 
@@ -1483,6 +1489,12 @@ export const api = {
         ...(opts.escalate && opts.escalateModel ? { escalate_model: opts.escalateModel } : {}),
         ...(opts.escalate && opts.escalateEffort ? { escalate_effort: opts.escalateEffort } : {}),
         ...(opts.escalate && opts.escalateThinking ? { escalate_thinking: opts.escalateThinking } : {}),
+        // True after the research card was answered "Build anyway" — the card
+        // never re-appears on the resend.
+        ...(opts.skipResearch ? { skip_research: true } : {}),
+        // A Redo: the prior attempt's change record rides as context server-side
+        // and route-time cards are skipped.
+        ...(opts.redo ? { redo: true } : {}),
       }),
     }),
   // `since` = the highest activity seq the caller already has; the server then

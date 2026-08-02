@@ -51,10 +51,14 @@ Reply with STRICT JSON only, no prose:
   }
 }
 
-complexity: "mechanical" ONLY for small, well-specified changes with no
+complexity: "mechanical" for small, well-specified changes with no
 cross-file invariants — copy, styling, a straightforward field or list on an
-existing pattern. Anything with schema changes, new subsystems, tricky state,
-or ambiguity is "complex". touches: every sensitive surface the request
+existing pattern, or a small bug fix scoped to one or two named files with a
+clear expected behavior. A top-tier plan phase writes the implementation
+plan before any mechanical build runs, so prefer "mechanical" when the
+change is small and precisely described. Anything with schema changes, new
+subsystems, tricky state, or genuine ambiguity is "complex". touches: every
+sensitive surface the request
 brushes — authentication/session, roles/permissions, crypto/secrets, data
 migration/deletion, external integrations, money/billing. Empty when none.
 
@@ -200,6 +204,18 @@ export function buildPlanTask({ instruction = '', inventoryJson = '', requiremen
     requirementsDoc ? `Design & functional requirements on record:\n${String(requirementsDoc).slice(0, 12000)}` : null,
     inventoryJson ? `Approved inventory:\n${String(inventoryJson).slice(0, 20000)}` : null,
   ].filter(Boolean).join('\n\n');
+}
+
+// redoContextSection — what the PRIOR attempt actually did, riding a redo's
+// instruction. A redo used to re-run the request blind: the new attempt could
+// not see the previous one's changes, so it either repeated them or fought
+// them (operator request: "check the logs on redo — not for fails, but for
+// what was done, for context of change"). The change record already carries
+// the summary AND the checkpoint's diff --stat, so this context is free.
+export function redoContextSection(record) {
+  const summary = String(record?.summary || '').trim();
+  if (!summary) return '';
+  return `\n\n---\nPRIOR ATTEMPT (context — this is a redo of the same request). The previous build recorded:\n${summary.slice(0, 1500)}\nBuild on or deliberately correct that work — do not redo it blind.`;
 }
 
 export function formatPlanForTask(planText, plannerModel = '') {

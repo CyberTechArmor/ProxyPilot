@@ -248,7 +248,8 @@ import {
   getLock, releaseLock, requestTakeover, getLockIdleMinutes,
 } from './locks.js';
 import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
-import { listChangeRecords, verifyProjectChain, insertChangeRecord, changeRecordMirror } from './change-records.js';
+import { listChangeRecords, lastChangeRecord, verifyProjectChain, insertChangeRecord, changeRecordMirror } from './change-records.js';
+import { redoContextSection } from './contract-classifier-logic.js';
 import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestoreRequest } from './restore-logic.js';
 import { buildCheckpointScript } from './template.js';
 import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback, listCycleActivity, lastCycleEventAt } from './cycle-events.js';
@@ -495,6 +496,13 @@ const cycleStartSchema = z.object({
   // The additions the user ticked on the suggestions card; folded into the
   // instruction as binding deliverables.
   extras: z.array(z.string().trim().min(1).max(300)).max(6).optional(),
+  // True after the research card was answered ("build anyway") — the card
+  // never re-appears on the resend.
+  skip_research: z.boolean().optional(),
+  // A Redo of the previous request: the prior attempt's change record rides
+  // the instruction as context, and route-time cards are skipped (a redo is a
+  // re-run, not a new ask to size or clarify).
+  redo: z.boolean().optional(),
   // True after the clarifier card was answered — by pressing one of its
   // options, or by pressing "Build it anyway". It never fires twice on the
   // same request: pushing back a second time is how a helper becomes a gate.
@@ -679,7 +687,13 @@ const componentVersionSchema = z.object({
   change_reason: z.string().trim().min(1).max(2000),
 });
 // The ask lane's input — a question/task for the read-and-run assistant.
-const askSchema = z.object({ question: z.string().trim().min(1).max(4000), images: chatImagesSchema });
+const askSchema = z.object({
+  question: z.string().trim().min(1).max(4000),
+  images: chatImagesSchema,
+  // Research mode — Plan's deeper register: web search + doc retrieval + a
+  // phased build-ready plan (ask-logic RESEARCH_MODE_PREAMBLE).
+  research: z.boolean().optional(),
+});
 // A routing-rule edit — every field optional; null/'' clears back to the default.
 const routingRuleSchema = z.object({
   model: z.string().trim().max(120).nullish(),
@@ -3317,8 +3331,16 @@ export function createMock2Router() {
     // ONE cheap probe, now for BOTH lanes. It was quick-only because only the
     // quick lane needed sizing; the clarifier needs its verdict on full builds
     // too, and a Haiku call is noise next to a full build's audit.
+    // REDO: carry what the prior attempt actually DID — its change record's
+    // summary + checkpoint diff stat — as context, so the re-run builds on or
+    // deliberately corrects that work instead of re-running blind (operator
+    // request). Route-time cards are skipped: a redo is a re-run, not a new
+    // ask to size, clarify, or research.
+    if (parsed.data.redo) {
+      try { instruction += redoContextSection(lastChangeRecord(project.id)); } catch { /* context is best-effort */ }
+    }
     let probe = null;
-    if (!parsed.data.skip_split || !parsed.data.skip_clarify) {
+    if ((!parsed.data.skip_split || !parsed.data.skip_clarify || !parsed.data.skip_research) && !parsed.data.redo) {
       try { probe = await probeSplitProposal(instruction); } catch { probe = null; }
     }
 
@@ -3326,7 +3348,7 @@ export function createMock2Router() {
     // suggesting additions to it, is decomposing a question before it has been
     // asked — and both of those cards would then be the second interruption in
     // a row.
-    if (!parsed.data.skip_clarify) {
+    if (!parsed.data.skip_clarify && !parsed.data.redo) {
       try {
         const { clarifyRequest } = await import('./clarify.js');
         const { normalizeClarifyMode } = await import('./clarify-logic.js');
@@ -3359,6 +3381,14 @@ export function createMock2Router() {
       instruction = composeWithGuesses(instruction, { options: parsed.data.clarify_guesses });
     }
 
+    // RESEARCH CARD: the pre-pass judged this request depends on EXTERNAL
+    // knowledge (a third-party API/SDK/protocol contract). Offer Research &
+    // plan BEFORE spending on a build that would guess the contract — nothing
+    // starts until the operator chooses.
+    if (mode === 'quick' && !parsed.data.skip_research && !parsed.data.redo && probe?.research?.needed) {
+      logAudit(req.user.id, 'MOCK2_RESEARCH_OFFERED', 'mock2_project', project.id, { topic: probe.research.topic }, req.ip);
+      return res.json({ research_proposal: { instruction, topic: probe.research.topic, reason: probe.research.reason || null } });
+    }
     if (mode === 'quick' && !parsed.data.skip_split && !hasImages) {
       try {
         if (probe?.scope === 'feature_scale' && probe.split?.parts?.length >= 2) {
@@ -4566,6 +4596,7 @@ export function createMock2Router() {
         project: req.mock2Project, question: parsed.data.question,
         user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
         images: imgCheck.images,
+        research: !!parsed.data.research,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not start the ask: ${err?.message || 'unknown error'}` });

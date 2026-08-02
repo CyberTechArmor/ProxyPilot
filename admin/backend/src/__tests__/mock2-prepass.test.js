@@ -154,3 +154,25 @@ test('distill: chat message → build prompt (contract, parse, context turn)', (
   assert.equal(cleanDistilledInstruction('ok'), null);
   assert.equal(cleanDistilledInstruction(''), null);
 });
+
+test('prepassModelFor: the cheap model follows the CONNECTOR provider', async () => {
+  const { prepassModelFor, PREPASS_DEFAULT_MODEL_OPENAI } = await import('../mock2/prepass-logic.js');
+  // The pinned Anthropic default on an OpenAI connector was an invalid model
+  // id — the call failed, fail-open swallowed it, and the mechanical (cheap)
+  // lane never triggered in hybrid setups.
+  assert.equal(prepassModelFor('openai', {}), PREPASS_DEFAULT_MODEL_OPENAI);
+  assert.equal(prepassModelFor('anthropic', {}), PREPASS_DEFAULT_MODEL);
+  assert.equal(prepassModelFor(null, {}), PREPASS_DEFAULT_MODEL);
+  // An explicit override is operator intent and wins for every provider.
+  assert.equal(prepassModelFor('openai', { MOCK2_PREPASS_MODEL: 'my-model' }), 'my-model');
+});
+
+test('prepass research verdict: parsed defensively, needs a topic to count', () => {
+  const base = '{"scope":"simple","specificity":"clear","pages":[],"brief":{},"split":null';
+  const withResearch = parsePrepassReply(`${base},"research":{"needed":true,"topic":"Stripe Checkout API","reason":"external payment API"}}`);
+  assert.deepEqual(withResearch.research, { needed: true, topic: 'Stripe Checkout API', reason: 'external payment API' });
+  // needed:false, absent, or topicless → no verdict (nothing actionable).
+  assert.equal(parsePrepassReply(`${base},"research":{"needed":false}}`).research, null);
+  assert.equal(parsePrepassReply(`${base}}`).research, null);
+  assert.equal(parsePrepassReply(`${base},"research":{"needed":true,"topic":""}}`).research, null);
+});

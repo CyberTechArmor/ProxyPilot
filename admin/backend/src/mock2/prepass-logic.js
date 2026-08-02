@@ -40,6 +40,24 @@ export function prepassModel(env = {}) {
   return String(env?.MOCK2_PREPASS_MODEL ?? '').trim() || PREPASS_DEFAULT_MODEL;
 }
 
+// The OpenAI-side cheap tier (phase-routing's TIER_MODELS.openai.cheap; the
+// id is repeated here so the pure layers stay import-acyclic).
+export const PREPASS_DEFAULT_MODEL_OPENAI = 'gpt-5.6-luna';
+
+// prepassModelFor — the cheap model for WHICHEVER CONNECTOR makes the call.
+// The pinned Anthropic default sent to an OpenAI connector is an invalid
+// model id: the call 400s, fail-open swallows it, and every consumer sees
+// "no verdict" — so in hybrid/OpenAI setups the contract classifier never
+// classified, the mechanical (cheap) lane never triggered, and every quick
+// update ran on the mid tier (operator report: "I don't see Luna being used
+// anywhere"). An explicit MOCK2_PREPASS_MODEL override still wins — that is
+// operator intent, wrong provider and all.
+export function prepassModelFor(provider, env = {}) {
+  const override = String(env?.MOCK2_PREPASS_MODEL ?? '').trim();
+  if (override) return override;
+  return String(provider || '').toLowerCase() === 'openai' ? PREPASS_DEFAULT_MODEL_OPENAI : PREPASS_DEFAULT_MODEL;
+}
+
 // The classifier/enricher prompt: STRICT JSON out, nothing else. The model
 // sees only the instruction — no project context needed at this altitude.
 export function buildPrepassPrompt() {
@@ -56,8 +74,17 @@ Reply with STRICT JSON only — no prose, no code fences. Schema:
     "acceptance": ["concrete checks that would prove it works", ...],
     "domain_expectations": ["what a domain expert would assume is included", ...]
   },
-  "split": { "parts": [{ "title": "...", "items": ["deliverable", ...] }, ...] }
+  "split": { "parts": [{ "title": "...", "items": ["deliverable", ...] }, ...] },
+  "research": { "needed": true | false, "reason": "<one sentence>", "topic": "<what to research>" }
 }
+
+research: needed:true ONLY when building this request correctly depends on
+EXTERNAL knowledge the builder cannot see in the codebase — a third-party
+API's endpoints/auth/webhooks, a vendor SDK's contract, a protocol or file
+format specification, a service's rate limits or pricing tiers. Ordinary web
+patterns (CRUD, auth forms, exports, charts) are NOT research. When true,
+"topic" names exactly what must be looked up ("Stripe Checkout session API +
+webhook signature verification").
 "specificity" answers ONE question: after this build, could anyone tell whether
 it was done? "clear" = yes, there is an outcome to look at. "vague" = it names a
 judgement with no object ("make it look better", "fix the css issues", "it feels
@@ -128,7 +155,15 @@ export function parsePrepassReply(text) {
   const pages = (Array.isArray(doc.pages) ? doc.pages : [])
     .filter((p) => typeof p === 'string' && /^\/[a-z]/i.test(p.trim()))
     .slice(0, 4).map((p) => p.trim().slice(0, 120));
-  return { scope, specificity, pages, brief: hasContent ? brief : null, split };
+  // Research verdict — external-knowledge dependency (a third-party API, an
+  // SDK contract, a protocol spec). Defensive: absent/malformed → null, and
+  // needed:true without a topic is no verdict (nothing actionable to offer).
+  let research = null;
+  if (doc.research && typeof doc.research === 'object' && doc.research.needed === true) {
+    const topic = String(doc.research.topic || '').trim().slice(0, 200);
+    if (topic) research = { needed: true, topic, reason: String(doc.research.reason || '').trim().slice(0, 300) };
+  }
+  return { scope, specificity, pages, brief: hasContent ? brief : null, split, research };
 }
 
 // How a project handles the pre-pass's domain expectations:

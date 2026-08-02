@@ -105,6 +105,7 @@ import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
   acceptanceVerdict, summaryOverclaims, verificationOnlyFinish, anomalySignals, acceptanceRecord, codeChangedFiles,
   mutationActions, actionParityReport, actionLabelWords, actionLabelCore,
+  actionLabelParityMode,
 } from './acceptance-logic.js';
 import {
   evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
@@ -1311,6 +1312,9 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // silently-missing inventory mutations — a second finish proceeds with a
   // loud note instead of looping.
   let parityRejected = false;
+  // Label-parity state (operator rule 2026-08): drifted labels also earn one
+  // rejection round (visible control demanded; wording stays the design's).
+  let labelParityRejected = false;
   // Rejects a removal claim at most once — a repeated rejection auto-halts.
   let removalRejected = false;
   // SHARED finish-rejection budget across ALL finish validators (gate-audit.md
@@ -2011,13 +2015,42 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
               });
             }
             if (parity.drifted?.length) {
-              // Reported, never blocking: the action shipped, its NAME drifted
-              // from the approved contract. Worth an operator's attention and
-              // not worth a build round-trip.
               logEvent('note', {
                 role: 'system',
                 content: `Action parity: ${parity.drifted.length} action(s) present under a different label than the contract: ${parity.drifted.slice(0, 8).map((a) => `"${a.label}"`).join(', ')}`,
               });
+            }
+            // Label parity (operator rule 2026-08): drifted is no longer
+            // report-only — the project-53 lesson was eight capabilities
+            // shipped as invisible affordances (click-to-edit, typed
+            // commands) that read as MISSING buttons. One rejection round
+            // demanding a VISIBLE control per drifted action; the wording
+            // stays the design's call (never dictate copy — project 47),
+            // and a second finish proceeds with the warning, like missing.
+            if (actionLabelParityMode(process.env) === 'enforce'
+              && parity.ok && parity.drifted?.length && !labelParityRejected && !parityRejected) {
+              labelParityRejected = true;
+              const list = parity.drifted.slice(0, 10).map((a) => `"${a.label}" (${a.screen})`).join(', ');
+              const msg = `Not finished — label parity: these contract actions exist in the code but have no VISIBLE control a user could find: ${list}.\n\n`
+                + 'Each one needs a real, discoverable control on its screen — a button, a menu item, an icon with an aria-label. '
+                + 'Call it whatever reads best (the wording is the design\'s call, NOT this check\'s — do not print the contract string). '
+                + 'What does NOT count: hover-only or click-target-only affordances with no visible cue, typed commands (e.g. "type remove to revoke"), '
+                + 'hidden elements, or code paths with no control at all. If the mockup genuinely shows no control for one of these, '
+                + 'leave it as is and say so in your finish summary. Then re-call finish.';
+              const r = await rejectFinishOrConclude({
+                validator: 'label-parity', termId, termName, decision, gateReports: lastGateReports,
+                message: msg, echo: false,
+              });
+              if (r === 'concluded') return scheduleJobCleanup(cycle.id);
+              continue;
+            }
+            if (actionLabelParityMode(process.env) === 'enforce' && parity.ok && parity.drifted?.length && labelParityRejected) {
+              try {
+                insertMessage({
+                  projectId, kind: 'system', cycleId: cycle.id,
+                  body: `Heads-up — ${parity.drifted.length} action${parity.drifted.length === 1 ? '' : 's'} from the approved design may lack a visible control (shipped under a different label/affordance): ${parity.drifted.slice(0, 8).map((a) => `"${a.label}"`).join(', ')}. Check them in the live app; send a build if any are hard to find.`,
+                });
+              } catch { /* best effort */ }
             }
             if (!parity.ok && !parityRejected) {
               parityRejected = true;

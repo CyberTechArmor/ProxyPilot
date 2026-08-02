@@ -38,6 +38,20 @@ export const HARNESS_STEPS = Object.freeze([
     defaults: { model: 'claude-fable-5', effort: 'high (deep) / low (iteration)', thinking: 'adaptive (deep) / off', budgetNote: 'uncapped (model max)' }, tunable: true,
   },
   {
+    id: 'mockup-design-plan', stage: 'Concept', title: 'Mockup design plan',
+    description: 'Preset pipeline stage 1: the flagship writes the render/edit plan a cheaper executor carries out. Runs only when a design preset is in force (explore keeps the direct flagship render).',
+    intendedOutcome: 'Flagship judgment at plan size; the render itself billed at Sonnet/Terra rates.',
+    slotKey: 'mockup', laneKey: null, envModelVar: null, envEffortVar: null,
+    defaults: { model: '(flagship for the mockup connector: claude-fable-5 / gpt-5.6-sol)', effort: 'high', thinking: 'adaptive', budgetNote: 'plan-sized output' }, tunable: true,
+  },
+  {
+    id: 'design-requirements-doc', stage: 'Concept', title: 'Design-requirements document',
+    description: 'On approval, writes state/design-requirements.md: the design requirements, the functional requirements (what is being built and why), and the user asks that are function rather than design. Read by on-theme renders and every build.',
+    intendedOutcome: 'The intent the diff cannot carry, captured once while the conversation still holds it.',
+    slotKey: 'concept_chat', laneKey: null, envModelVar: null, envEffortVar: null,
+    defaults: { model: '(flagship for the chat connector, else the slot model)', effort: 'high', thinking: 'adaptive', budgetNote: 'once per approval' }, tunable: true,
+  },
+  {
     id: 'mockup-tweak', stage: 'Concept', title: 'Mockup tweak',
     description: 'Surgical search/replace edit blocks against the current HTML (whitespace-tolerant matching). A miss gets ONE corrective retry, then escalates to a single-screen re-render when the edits localize to one screen; the full renderer is the last resort.',
     intendedOutcome: 'A one-line change costs cents and seconds — never a surprise whole-document rebuild.',

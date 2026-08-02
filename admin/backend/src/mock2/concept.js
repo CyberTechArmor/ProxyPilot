@@ -29,7 +29,8 @@ import { getProject, updateProject } from './projects.js';
 import { containerNameForProject, deployBaseApp } from './provision.js';
 import { projectHasBeenDeployed } from './cycles.js';
 import { buildCheckpointScript } from './template.js';
-import { getSlot, getConnector, decryptConnectorKey, effectivePrice } from './connectors.js';
+import { getSlot, getConnector, decryptConnectorKey, effectivePrice, listConnectors, isSecretDecryptable } from './connectors.js';
+import { detectPhaseProviders } from './phase-routing-logic.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
@@ -79,6 +80,11 @@ import { startBuild } from './audit.js';
 import { getLaneTuning, getDesignArtDirection } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
 import { applyDesignPreset, applyExploreDesign, getDesignPreset, parseDesignDoc, DESIGN_DOC_FORMAT } from './design-presets.js';
+import {
+  mockupPipelinePlan, buildDesignPlanTask, buildExecutorTask, DESIGN_PLAN_SYSTEM_PROMPT,
+  DESIGN_REQUIREMENTS_PATH, DESIGN_REQUIREMENTS_SYSTEM_PROMPT, buildDesignRequirementsTask,
+  mockupPipelineModels, DESIGN_REQUIREMENTS_BUILD_NOTE, bestFlagship,
+} from './mockup-pipeline-logic.js';
 import { replaceScreenPlan, queueScreens, drainScreenQueue } from './screen-plan.js';
 import { INITIAL_BUILD_INSTRUCTION_PREFIX } from './screen-plan-logic.js';
 import { MODEL_PRIMARY } from './models.js';
@@ -103,7 +109,8 @@ const INITIAL_BUILD_INSTRUCTION = `${INITIAL_BUILD_INSTRUCTION_PREFIX}: implemen
   + '2) The approved mockup at state/mockups/current.html is the visual contract — READ IT FIRST and reproduce its layout, navigation structure (including patterns like a mobile bottom tab bar), component arrangement, and interaction patterns, screen by screen. state/design.css is NOT just tokens: it carries the mockup\'s own component CSS verbatim — put the class names it defines on your elements for what they cover, style anything genuinely new on var(--...) from the same file, and never hardcode a color or spacing value a token provides. A screen of plain elements on the base shell is not a built screen. '
   + '3) The inventory\'s actions are CAPABILITIES users must be able to perform, not button captions: put each one where the design says it belongs — menus, detail views, settings — not all on the top level. '
   + '4) Restraint is part of the contract: prefer the mockup\'s density; when a check seems to push toward a control the design does not show, the design wins — say so in your summary. '
-  + '5) Anything you cannot finish this cycle: mark it "Not built yet" (disabled control + badge) only if the mockup shows its control; otherwise leave it out and say so in your summary — never a dead or silently missing element.';
+  + '5) Anything you cannot finish this cycle: mark it "Not built yet" (disabled control + badge) only if the mockup shows its control; otherwise leave it out and say so in your summary — never a dead or silently missing element. '
+  + DESIGN_REQUIREMENTS_BUILD_NOTE;
 
 // Bound the HTML we round-trip so a runaway mockup can't blow the token envelope
 // (R5) or the working tree. A real mockup is well under this.
@@ -742,6 +749,94 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // This turn's attachments FIRST (the operator just handed them over, so
     // they are the most immediate intent), then the library's.
     const mockupImages = [...hydrateAttachments(projectId, userAttachments), ...assetPics.images];
+
+    // ---- two-stage preset pipeline (mockup-pipeline-logic) ----
+    // A REAL design preset + pipeline on → the flagship writes the render/edit
+    // PLAN and a Sonnet/Terra-level executor carries it out (tweaks execute on
+    // the Luna/Haiku tier). Explore / "let the AI decide" keeps the flagship
+    // render untouched — a fresh look is where it earns its price. Every
+    // failure here is fail-open to the legacy single-model path.
+    // Hybrid roles (operator rule 2026-08): planner = the BEST flagship
+    // across the usable providers (Fable 5 when Anthropic is configured, else
+    // Sol); executor/tweak = the LOWEST-COST model at that tier, priced live
+    // off the sheet. Detection failure degrades to the mockup connector's
+    // single-provider roles; each cross-provider role resolves its own
+    // connector below, falling back to the slot connector's tier model.
+    let usableProviders = null;
+    if (!explore) {
+      try {
+        usableProviders = detectPhaseProviders(listConnectors().map((c) => ({
+          provider: c.provider, enabled: !!c.enabled, keyUsable: isSecretDecryptable(c),
+        })));
+      } catch { usableProviders = null; }
+    }
+    const pipeline = !explore
+      ? mockupPipelinePlan({
+        preset: project.design_preset, provider: ready.mockup.connector?.provider,
+        providers: usableProviders, env: process.env,
+      })
+      : null;
+    // Resolve a connector for a cross-provider role: the mockup slot's when
+    // providers match, else the first enabled connector of that provider with
+    // a usable key. Null → the caller substitutes the slot connector + the
+    // slot provider's model for that tier (never a dead call).
+    const slotRoles = mockupPipelineModels(ready.mockup.connector?.provider);
+    const pipelineConn = (role) => {
+      if (!role) return null;
+      if (!role.provider || role.provider === ready.mockup.connector?.provider) {
+        return { connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: role.model };
+      }
+      try {
+        for (const c of listConnectors()) {
+          if (!c?.enabled || c.provider !== role.provider) continue;
+          const key = decryptConnectorKey(c);
+          if (!key) continue;
+          return { connector: c, apiKey: key, model: role.model };
+        }
+      } catch { /* fall through */ }
+      return null;
+    };
+    const roleCall = (role, slotTierModel) => pipelineConn(role)
+      || { connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: slotTierModel || ready.mockup.model };
+    let requirementsDocText = '';
+    if (pipeline) {
+      try {
+        const rd = await readWorkingFile(containerName, DESIGN_REQUIREMENTS_PATH);
+        if (rd.ok) requirementsDocText = String(rd.content || '').slice(0, 20000);
+      } catch { /* the document is optional context */ }
+    }
+    let pipelinePlanText = null; // set right before a pipelined full render
+    const runDesignPlanStep = async ({ tweak = false } = {}) => {
+      if (!pipeline) return null;
+      try {
+        setJob(projectId, {
+          phase: 'designing', kind: 'turn', cycleId: cycle.id,
+          message: tweak ? 'Design director planning the change…' : 'Design director writing the render plan…',
+        });
+        const presetName = getDesignPreset(project.design_preset)?.name || project.design_preset;
+        const plannerCall = roleCall(pipeline.planner, slotRoles?.planner);
+        const res = await callStepTurn('mockup-design-plan', {
+          connector: plannerCall.connector, apiKey: plannerCall.apiKey, model: plannerCall.model,
+          system: stepSystemPrompt('mockup-design-plan', DESIGN_PLAN_SYSTEM_PROMPT, {}), tools: [],
+          transcript: [{
+            role: 'user',
+            text: buildDesignPlanTask({
+              brief: String(decision.brief || '').trim(), presetName,
+              hasMockup: !!currentHtml, tweak, requirementsDoc: requirementsDocText,
+            }),
+            ...(mockupImages.length && !tweak ? { images: mockupImages } : {}),
+          }],
+          timeoutMs: 300000, effort: 'high',
+        });
+        if (res.ok) recordSpend({ projectId, cycleId: cycle.id, connector: plannerCall.connector, model: res.modelUsed || plannerCall.model, usage: res.usage, step: 'mockup-design-plan' });
+        const plan = res.ok ? String(res.text || '').trim() : '';
+        // A thin plan is worse than none — fall back to the flagship render.
+        return plan.length > 100 ? plan : null;
+      } catch (e) {
+        console.warn('[mock2] mockup design-plan step failed (flagship render path applies):', e?.message);
+        return null;
+      }
+    };
     // STREAM the render (Anthropic guidance for long output / large max_tokens /
     // image input): a big non-streaming render — worsened by attached images and
     // adaptive thinking pushing time-to-first-byte past Node's ~5-min undici
@@ -780,7 +875,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         }
       }
     };
-    const mockupCall = (forceModel = null) => {
+    const mockupCall = (forceModel = null, connOverride = null) => {
       streamedChars = 0;
       // A render is transcription of the brief onto the design system — pure
       // output. The lane default turns thinking OFF so the WHOLE budget goes
@@ -800,18 +895,31 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // thinking-off "pure transcription" produced exactly the flat, junior
       // first designs the operator flagged. Iterations on an existing mockup
       // keep the fast lane defaults (they really are transcription).
-      const renderModel = mockupRenderModel(process.env, ready.mockup.model);
-      const deepRender = explore || !currentHtml || restyleBrief;
+      // A pipelined render (design plan in hand) executes on the cheaper
+      // executor as pure transcription of the director's spec — thinking off,
+      // whole budget to the HTML. Without a plan, the flagship path stands.
+      // `connOverride` carries the executor's (or, on elevation, the
+      // flagship's) cross-provider connector; absent → the mockup slot's.
+      const piped = !!(pipeline && pipelinePlanText);
+      const renderModel = piped ? (connOverride?.model || pipeline.executor.model) : mockupRenderModel(process.env, ready.mockup.model);
+      const deepRender = !piped && (explore || !currentHtml || restyleBrief);
       // Step override applied to the tuned baseline, not the call: forceModel
       // (the slot-model fallback retry) must stay the last word, and the
       // existing /model/i fallback below IS this step's bad-override guard.
       const mockupTuned = resolveStepTuning('mockup-render', deepRender
         ? { model: renderModel, effort: 'high', thinking: null }
-        : applyLaneTuning({ model: renderModel, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')), getHarnessStepTuning());
+        : applyLaneTuning({ model: renderModel, effort: piped ? 'high' : 'low', thinking: 'off' }, getLaneTuning('mockup')), getHarnessStepTuning());
       return callModelTurn({
-        connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: forceModel || mockupTuned.model,
+        connector: connOverride?.connector || ready.mockup.connector,
+        apiKey: connOverride ? connOverride.apiKey : ready.mockup.apiKey,
+        model: forceModel || mockupTuned.model,
         system: stepSystemPrompt('mockup-render', buildMockupSystemPrompt({ designSystem: boundDesignSystem }), { DESIGN_SYSTEM: boundDesignSystem }),
-        tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }],
+        tools: [],
+        transcript: [{
+          role: 'user',
+          text: piped ? buildExecutorTask({ plan: pipelinePlanText, originalTask: mockupTask }) : mockupTask,
+          ...(mockupImages.length ? { images: mockupImages } : {}),
+        }],
         maxTokens: modelMaxOutputTokens(forceModel || mockupTuned.model),
         timeoutMs: 900000,
         effort: mockupTuned.effort,
@@ -866,14 +974,30 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       setJob(projectId, { phase: 'designing', message: 'Applying a targeted tweak to the mockup…', kind: 'turn', cycleId: cycle.id });
       let lastEdits = null; // the most recent parsed (non-FULL_RERENDER) edit set that failed
       try {
-        const editModel = mockupRenderModel(process.env, ready.mockup.model);
+        // Pipelined tweak: the flagship plans the exact edits, the CHEAPEST
+        // cheap-tier model executes them (plan failure → the legacy flagship
+        // tweak). The corrective retry ELEVATES one tier (operator rule
+        // 2026-08: second failure climbs) instead of repeating the same model.
+        const tweakPlan = pipeline ? await runDesignPlanStep({ tweak: true }) : null;
+        const tweakCall = (pipeline && tweakPlan)
+          ? roleCall(pipeline.tweakExecutor, slotRoles?.tweakExecutor)
+          : { connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: mockupRenderModel(process.env, ready.mockup.model) };
+        const retryCall = (pipeline && tweakPlan)
+          ? roleCall(pipeline.executor, slotRoles?.executor)
+          : tweakCall;
+        const editModel = tweakCall.model;
         const editSystem = stepSystemPrompt('mockup-tweak', buildMockupEditSystemPrompt(), {});
-        const firstTurn = { role: 'user', text: `Revision request:\n${decision.brief}\n\nCurrent mockup HTML:\n${currentHtml}` };
-        const applyParsed = (parsed) => {
+        const firstTurn = {
+          role: 'user',
+          text: `Revision request:\n${decision.brief}\n\n`
+            + (tweakPlan ? `EDIT PLAN from the design director — follow it exactly:\n${tweakPlan}\n\n` : '')
+            + `Current mockup HTML:\n${currentHtml}`,
+        };
+        const applyParsed = (parsed, usedModel = editModel) => {
           const applied = applyMockupEdits(currentHtml, parsed.edits);
           if (applied.ok && isPlausibleMockup(applied.html)) {
             html = applied.html.slice(0, MAX_MOCKUP_CHARS);
-            activeModel = editModel;
+            activeModel = usedModel;
             tweaked = true;
             return null;
           }
@@ -881,34 +1005,34 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           return applied.ok ? 'the edited document was not a complete page' : applied.error;
         };
         const res = await callStepTurn('mockup-tweak', {
-          connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: editModel,
+          connector: tweakCall.connector, apiKey: tweakCall.apiKey, model: editModel,
           system: editSystem,
           tools: [],
           transcript: [firstTurn],
           timeoutMs: 300000, effort: 'high', thinking: 'off',
         });
         if (res.ok) {
-          recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: res.modelUsed || editModel, usage: res.usage, step: 'mockup-tweak' });
+          recordSpend({ projectId, cycleId: cycle.id, connector: tweakCall.connector, model: res.modelUsed || editModel, usage: res.usage, step: 'mockup-tweak' });
           const parsed = parseMockupEdits(res.text);
           if (parsed.ok && !parsed.fullRerender) {
             const failure = applyParsed(parsed);
             if (failure) {
-              // ONE corrective retry: same conversation, the exact miss named.
-              // Most tweak failures are copy-paste inexactness a second attempt
-              // fixes in seconds — far cheaper in time than any re-render.
-              setJob(projectId, { phase: 'designing', message: 'A tweak edit missed its target — retrying with corrections…', kind: 'turn', cycleId: cycle.id });
+              // ONE corrective retry: same conversation, the exact miss named
+              // — one tier UP when pipelined (cheap → mid), so a second
+              // failure never re-runs the model that just missed.
+              setJob(projectId, { phase: 'designing', message: `A tweak edit missed its target — retrying with corrections${retryCall.model !== editModel ? ` on ${retryCall.model}` : ''}…`, kind: 'turn', cycleId: cycle.id });
               const retry = await callStepTurn('mockup-tweak', {
-                connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: editModel,
+                connector: retryCall.connector, apiKey: retryCall.apiKey, model: retryCall.model,
                 system: editSystem,
                 tools: [],
                 transcript: [firstTurn, { role: 'assistant', text: res.text }, { role: 'user', text: buildTweakRetryMessage(failure) }],
                 timeoutMs: 300000, effort: 'high', thinking: 'off',
               });
               if (retry.ok) {
-                recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: retry.modelUsed || editModel, usage: retry.usage, step: 'mockup-tweak' });
+                recordSpend({ projectId, cycleId: cycle.id, connector: retryCall.connector, model: retry.modelUsed || retryCall.model, usage: retry.usage, step: 'mockup-tweak' });
                 const parsed2 = parseMockupEdits(retry.text);
                 if (parsed2.ok && !parsed2.fullRerender) {
-                  const failure2 = applyParsed(parsed2);
+                  const failure2 = applyParsed(parsed2, retryCall.model);
                   if (failure2) console.warn(`[mock2] mockup tweak retry did not apply cleanly (${failure2})`);
                 }
                 // A FULL_RERENDER on retry falls through (the model judged it
@@ -1024,6 +1148,10 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       return res.text;
     };
     if (!tweaked) try {
+      // Two-stage preset pipeline: get the flagship's render plan BEFORE the
+      // full render, so mockupCall executes it on the cheaper executor. A null
+      // plan (no preset / step failed / plan too thin) keeps the flagship path.
+      if (pipeline && !pipelinePlanText) pipelinePlanText = await runDesignPlanStep({ tweak: false });
       // Budgets are sized from the CURRENT document (a revision must be able
       // to re-emit the whole thing plus growth — the old flat 40k truncated
       // large multi-screen documents by construction), streamed so there is
@@ -1031,25 +1159,31 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // the ceiling.
       // Mirror mockupCall's model resolution (preferred model + lane tuning)
       // so spend is priced on the model that actually served the call.
+      // A pipelined render carries the executor's own (possibly
+      // cross-provider) connector; spend records against it.
+      const execCall = (pipeline && pipelinePlanText) ? roleCall(pipeline.executor, slotRoles?.executor) : null;
+      let renderConn = execCall ? execCall.connector : ready.mockup.connector;
       {
         const pref = mockupRenderModel(process.env, ready.mockup.model);
-        activeModel = (explore || !currentHtml || restyleBrief) ? pref
-          : applyLaneTuning({ model: pref, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')).model;
+        activeModel = execCall ? execCall.model
+          : (explore || !currentHtml || restyleBrief) ? pref
+            : applyLaneTuning({ model: pref, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')).model;
       }
-      let res = await mockupCall();
+      let res = await mockupCall(null, execCall);
       if (!res.ok && res.timedOut) {
         setJob(projectId, { phase: 'designing', message: 'The first render attempt timed out — retrying once…', kind: 'turn', cycleId: cycle.id });
-        res = await mockupCall();
+        res = await mockupCall(null, execCall);
       }
       // Preferred-model fallback: an org whose key doesn't serve the preferred
       // model gets the assigned slot model instead of a dead render.
       if (!res.ok && activeModel !== ready.mockup.model && /model/i.test(String(res.error || '')) ) {
         setJob(projectId, { phase: 'designing', message: `The preferred render model was rejected — falling back to the assigned mockup model (${ready.mockup.model})…`, kind: 'turn', cycleId: cycle.id });
         activeModel = ready.mockup.model;
+        renderConn = ready.mockup.connector;
         res = await mockupCall(ready.mockup.model);
       }
       if (res.ok) {
-        recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: res.usage, step: 'mockup-render' });
+        recordSpend({ projectId, cycleId: cycle.id, connector: renderConn, model: activeModel, usage: res.usage, step: 'mockup-render' });
         html = extractMockupHtml(await completeRenderText(res)).slice(0, MAX_MOCKUP_CHARS);
         if (!isPlausibleMockup(html)) {
           // Not a usable page (prose instead of HTML, or truncation on a
@@ -1058,14 +1192,28 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           // whole turn, so the retry is the cheaper outcome in expectation.
           const why = res.stopReason === 'max_tokens' ? 'it ran out of output budget' : 'it was not a complete HTML page';
           setJob(projectId, { phase: 'designing', message: `The first render was unusable (${why}) — retrying once with a larger budget…`, kind: 'turn', cycleId: cycle.id });
-          const retry = await mockupCall(activeModel);
+          const retry = await mockupCall(activeModel, execCall);
           if (retry.ok) {
-            recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: retry.usage, step: 'mockup-render' });
+            recordSpend({ projectId, cycleId: cycle.id, connector: renderConn, model: activeModel, usage: retry.usage, step: 'mockup-render' });
             const h2 = extractMockupHtml(await completeRenderText(retry)).slice(0, MAX_MOCKUP_CHARS);
             if (isPlausibleMockup(h2)) { html = h2; failureDetail = null; }
             else if (!failureDetail) failureDetail = retry.stopReason === 'max_tokens' ? 'the render exceeded its output budget twice' : 'the model did not return a complete HTML page';
           } else {
             failureDetail = retry.error;
+          }
+          // Tier elevation (operator rule 2026-08): the executor failed TWICE
+          // — the flagship takes over for one final attempt. Only meaningful
+          // on a pipelined render (the non-piped path already ran the
+          // flagship).
+          if (failureDetail && execCall && pipeline) {
+            const flagCall = roleCall(pipeline.planner, slotRoles?.planner);
+            setJob(projectId, { phase: 'designing', message: `The executor model failed twice — elevating the render to ${flagCall.model}…`, kind: 'turn', cycleId: cycle.id });
+            const lifted = await mockupCall(flagCall.model, flagCall);
+            if (lifted.ok) {
+              recordSpend({ projectId, cycleId: cycle.id, connector: flagCall.connector, model: flagCall.model, usage: lifted.usage, step: 'mockup-render' });
+              const h3 = extractMockupHtml(await completeRenderText(lifted)).slice(0, MAX_MOCKUP_CHARS);
+              if (isPlausibleMockup(h3)) { html = h3; failureDetail = null; activeModel = flagCall.model; }
+            }
           }
         } else {
           failureDetail = null;
@@ -1375,6 +1523,59 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
       + `${design.tokenCount} tokens, dark theme ${design.hasDark ? 'carried' : 'ABSENT'}`);
   } catch (e) {
     console.warn('[mock2] design-token extraction failed (build falls back to framework defaults):', e?.message);
+  }
+
+  // The design-requirements DOCUMENT (mockup-pipeline-logic): alongside the
+  // HTML mockup and the inventory, the flagship writes
+  // state/design-requirements.md — design requirements, functional
+  // requirements (what is being built and why), helpful context, and every
+  // user ask that is FUNCTION rather than design (a summarizer cannot recover
+  // those later). Written for preset AND AI-derived designs alike; on-theme
+  // renders and every build read it. Best-effort — never blocks approval.
+  try {
+    setJob(projectId, { phase: 'approving', message: 'Writing the design-requirements document…', kind: 'approval', cycleId: cycle.id });
+    // The document runs on the BEST available flagship (hybrid rule): Fable 5
+    // when Anthropic is configured, else Sol — on the chat connector when
+    // providers match, else the slot-provider flagship as fallback.
+    let docModel = MODEL_PRIMARY;
+    try {
+      const provs = detectPhaseProviders(listConnectors().map((c) => ({
+        provider: c.provider, enabled: !!c.enabled, keyUsable: isSecretDecryptable(c),
+      })));
+      const flag = bestFlagship(provs);
+      if (flag && flag.provider === ready.chat.connector?.provider) docModel = flag.model;
+      else docModel = mockupPipelineModels(ready.chat.connector?.provider)?.planner || MODEL_PRIMARY;
+    } catch {
+      docModel = mockupPipelineModels(ready.chat.connector?.provider)?.planner || MODEL_PRIMARY;
+    }
+    const presetName = project.design_preset && project.design_preset !== 'ai'
+      ? (getDesignPreset(project.design_preset)?.name || project.design_preset)
+      : '';
+    const chatDigest = conversationRecap(listMessages(projectId), { max: 40 }).slice(0, 30000);
+    const docRes = await callStepTurn('design-requirements-doc', {
+      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: docModel,
+      system: stepSystemPrompt('design-requirements-doc', DESIGN_REQUIREMENTS_SYSTEM_PROMPT, {}), tools: [],
+      transcript: [{
+        role: 'user',
+        text: buildDesignRequirementsTask({
+          projectName: project.name, presetName, chatDigest, inventoryJson: invJson.slice(0, 60000),
+        }),
+      }],
+      timeoutMs: 300000, effort: 'high',
+    });
+    if (docRes.ok) {
+      recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: docRes.modelUsed || docModel, usage: docRes.usage, step: 'design-requirements-doc' });
+      const doc = String(docRes.text || '').trim();
+      if (doc.length > 200) {
+        await writeWorkingFile(containerName, DESIGN_REQUIREMENTS_PATH, `${doc}\n`);
+      } else {
+        console.warn('[mock2] design-requirements doc too thin — not written');
+      }
+    } else {
+      console.warn('[mock2] design-requirements doc generation failed (approval proceeds):', docRes.error);
+    }
+  } catch (e) {
+    console.warn('[mock2] design-requirements doc step failed (approval proceeds):', e?.message);
   }
 
   await archiveMockups(containerName);

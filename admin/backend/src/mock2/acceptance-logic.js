@@ -520,6 +520,24 @@ export function actionLabelCore(label) {
 // simultaneously too strict about WORDING and too weak about VISIBILITY, and
 // both errors pushed in the same direction: toward markup written for the
 // detector rather than for a person.
+// ---- label parity (operator rule, 2026-08) ----
+//
+// `drifted` used to be report-only. Project 53 showed the cost: eight
+// capabilities shipped as low-discoverability affordances (click-to-edit,
+// "type remove to revoke") and the operator experienced them as MISSING
+// buttons. The new rule: a drifted action earns ONE finish rejection asking
+// for a visible, labeled control — with label wording still the design's
+// call (the project-47 lesson stands: the gate must never dictate copy, and
+// an element written for the detector is worse than the drift). After one
+// rejection the remainder is accepted with a warning, exactly like missing.
+// MOCK2_ACTION_LABEL_PARITY=warn restores report-only.
+export const ACTION_LABEL_PARITY_FLAG = 'MOCK2_ACTION_LABEL_PARITY';
+
+export function actionLabelParityMode(env = {}) {
+  const v = String(env?.[ACTION_LABEL_PARITY_FLAG] ?? '').trim().toLowerCase();
+  return v === 'warn' || v === 'off' ? 'warn' : 'enforce';
+}
+
 export function actionParityReport(
   actions = [],
   foundLabelsLower = new Set(),

@@ -223,6 +223,44 @@ Mechanics (pure layer: `phase-routing-logic.js`, tested in
   neither-provider refusal, and the gate battery runs identically under every
   posture.
 
+## Mockup pipeline (preset plan-then-execute) + design-requirements document
+
+The mockup lane was the costliest line item (every render on the flagship).
+With a real design preset in force (`mockup-pipeline-logic.js`, toggle
+`MOCK2_MOCKUP_PIPELINE`, default on): the **flagship plans, a cheaper model
+executes**, with hybrid role selection across the usable providers:
+
+- **Flagship (planner, requirements doc, elevation target): the BEST
+  available** — `claude-fable-5` whenever Anthropic is configured, else
+  `gpt-5.6-sol`.
+- **Every other role: the LOWEST-COST model at its tier**, priced live off
+  the sheet (`defaultModelPrice` is date-aware, so the mid tier flips from
+  Sonnet 5 to Terra automatically when the promo ends 2026-09-01; the cheap
+  tier is Luna while OpenAI is configured).
+- **Second failure elevates a tier**: an executor render that fails twice is
+  re-run once on the flagship; a tweak's corrective retry runs one tier up
+  (cheap → mid) instead of repeating the model that just missed.
+
+Cross-provider roles resolve their own connector (slot connector when
+providers match, else the first enabled connector with a usable key; no
+usable connector → the slot provider's tier model). Explore / "let the AI
+decide" keeps the direct flagship render, and every pipeline failure falls
+open to it.
+
+On approval, the flagship also writes **`state/design-requirements.md`**
+(`design-requirements-doc` step): design requirements, functional requirements
+(what is being built and why), context, and every user ask that is *function*
+rather than design. Generated for preset and AI-derived designs alike; preset
+renders feed it back into their plans, and every build instruction points at
+it.
+
+**Label parity** (operator rule 2026-08): a contract action shipped without a
+visible control (the project-53 "missing buttons" class — click-to-edit, typed
+commands) now earns ONE finish rejection demanding a discoverable control,
+with wording still the design's call (the project-47 anti-gaming lesson
+stands); a second finish proceeds with an operator heads-up.
+`MOCK2_ACTION_LABEL_PARITY=warn` restores report-only.
+
 ## apply_edit — anchored targeted file editing
 
 The runner exposes `apply_edit` alongside `write_file`: instead of re-emitting a

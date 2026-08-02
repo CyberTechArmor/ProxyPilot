@@ -40,6 +40,8 @@ Reply with STRICT JSON only, no prose:
 {
   "covered": true | false,
   "reason": "<one sentence>",
+  "complexity": "mechanical" | "complex",
+  "touches": ["auth" | "rbac" | "crypto" | "migration" | "external-integration" | "money"] | [],
   "additions": {
     "screens": [{ "name": "...", "purpose": "...",
                   "actions": [{ "label": "..." }],
@@ -48,6 +50,13 @@ Reply with STRICT JSON only, no prose:
     "fields":  [{ "screen": "<existing screen name>", "name": "..." }]
   }
 }
+
+complexity: "mechanical" ONLY for small, well-specified changes with no
+cross-file invariants — copy, styling, a straightforward field or list on an
+existing pattern. Anything with schema changes, new subsystems, tricky state,
+or ambiguity is "complex". touches: every sensitive surface the request
+brushes — authentication/session, roles/permissions, crypto/secrets, data
+migration/deletion, external integrations, money/billing. Empty when none.
 
 Rules:
 - covered:true (empty additions) when the contract already authorizes
@@ -85,7 +94,13 @@ export function parseContractClassifierReply(text) {
     fields: (Array.isArray(a.fields) ? a.fields : []).map((x) => ({ screen: str(x?.screen, 120), name: str(x?.name) })).filter((x) => x.name),
   };
   const empty = !additions.screens.length && !additions.actions.length && !additions.fields.length;
-  return { covered: doc.covered || empty, reason: str(doc.reason, 300), additions };
+  // The 3a/3b routing signals ride the same call (zero extra model spend):
+  // complexity + touches feed implementLaneForTask, whose hard carve-out
+  // (touches non-empty → never the cheap tier) is enforced downstream.
+  const complexity = String(doc.complexity || '').trim().toLowerCase() === 'mechanical' ? 'mechanical' : 'complex';
+  const touches = (Array.isArray(doc.touches) ? doc.touches : [])
+    .map((t) => String(t || '').trim().toLowerCase()).filter(Boolean).slice(0, 8);
+  return { covered: doc.covered || empty, reason: str(doc.reason, 300), complexity, touches, additions };
 }
 
 // ---- applying additions (append-only, origin-stamped, deduped) ----
@@ -155,6 +170,42 @@ export function contractAmendmentMessage(added, summary, reason = '') {
     + `${reason ? `(${reason}) ` : ''}`
     + 'The additions are appended to state/inventory.json (origin: request_amendment), ride this cycle\'s checkpoint, and are enforced by the action-parity gate like any approved action. '
     + 'If this is not what you wanted, say so — a build can remove them.';
+}
+
+// ---- the build plan step (phase 2 made real: top model thinks, cheap builds) ----
+
+// When the lane ladder sends a build to the CHEAP tier, the phase map's PLAN
+// model first writes a tight implementation plan that rides the task turn —
+// the five-phase pipeline's "plan" phase as an actual top-tier call, not just
+// a map entry. Cheap execution without top-tier thinking is how mechanical
+// changes miss cross-file invariants; the plan is what makes Luna-first safe
+// beyond the gates.
+export const BUILD_PLAN_SYSTEM_PROMPT = `You are the PLAN phase of a five-phase build pipeline. A cheaper model will
+implement this request in an existing TypeScript/Express/Drizzle codebase —
+YOU write the plan it follows. Be concrete enough that faithful execution is
+enough; flag anything the executor must not touch.
+
+Write, as tight numbered markdown (no code, no preamble):
+1. Files to read first, and what to look for in each.
+2. The changes, in order: file → what changes → why.
+3. Cross-file invariants and shared constants that must stay consistent
+   (role enums, shared modules, tests that assert cross-file equality).
+4. What must NOT change.
+5. The tests/gates this change must satisfy, incl. ui-checks for touched
+   screens.`;
+
+export function buildPlanTask({ instruction = '', inventoryJson = '', requirementsDoc = '' } = {}) {
+  return [
+    `Build request:\n${String(instruction).slice(0, 4000)}`,
+    requirementsDoc ? `Design & functional requirements on record:\n${String(requirementsDoc).slice(0, 12000)}` : null,
+    inventoryJson ? `Approved inventory:\n${String(inventoryJson).slice(0, 20000)}` : null,
+  ].filter(Boolean).join('\n\n');
+}
+
+export function formatPlanForTask(planText, plannerModel = '') {
+  const t = String(planText || '').trim();
+  if (!t) return '';
+  return `\n\n---\nIMPLEMENTATION PLAN from the plan phase${plannerModel ? ` (${plannerModel})` : ''} — follow it; where it names an invariant or a do-not-touch, that is binding:\n${t.slice(0, 8000)}`;
 }
 
 // ---- split fidelity (the folders→fonts corruption) ----

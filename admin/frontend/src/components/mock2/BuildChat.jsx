@@ -27,7 +27,12 @@ import ChangeHistory from './ChangeHistory';
 import VerificationChecklist from './VerificationChecklist';
 import { toWireImages } from '@/lib/chat-images';
 import { uploadReferenceFiles } from '@/lib/reference-uploads';
-import { MODEL_OPTIONS, RECOMMENDED_ESCALATE_MODEL } from '@/lib/model-options';
+import { RECOMMENDED_ESCALATE_MODEL, modelOptionsWith } from '@/lib/model-options';
+
+// The Redo / extra-effort ("rocketship") pickers offer BOTH provider
+// catalogs — the escalation target under hybrid routing may live on either
+// vendor (e.g. Sol for an OpenAI-pinned project).
+const ESCALATE_MODEL_OPTIONS = modelOptionsWith(null);
 import { parseFindings } from '@/lib/findings';
 import FixFindingsDialog from './FixFindingsDialog';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
@@ -1416,7 +1421,7 @@ export default function BuildChat({
                     value={redoCard.model}
                     onChange={(e) => setRedoCard((c) => ({ ...c, model: e.target.value }))}
                   >
-                    {MODEL_OPTIONS.map((m) => (
+                    {ESCALATE_MODEL_OPTIONS.map((m) => (
                       <option key={m.id} value={m.id}>{m.label} — {m.tier}</option>
                     ))}
                   </select>
@@ -1451,7 +1456,7 @@ export default function BuildChat({
                       value={boostDraft.model}
                       onChange={(e) => setBoostDraft((d) => ({ ...d, model: e.target.value }))}
                     >
-                      {MODEL_OPTIONS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                      {ESCALATE_MODEL_OPTIONS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
                     </select>
                   </label>
                   <label className="block text-xs">

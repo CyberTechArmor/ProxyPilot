@@ -25,8 +25,8 @@ import { containerNameForProject } from './provision.js';
 import { buildCheckpointScript } from './template.js';
 import { buildDbSnapshotScript } from './restore-logic.js';
 import { getSlot, getConnector, decryptConnectorKey, effectivePrice, listConnectors, isSecretDecryptable } from './connectors.js';
-import { phaseRoutingApplies, detectPhaseProviders, applyProviderPreference, resolvePhaseModelMap, applyPhasePosture, phasePosture, phaseMapRecordLine } from './phase-routing-logic.js';
-import { contractClassifierMode, CONTRACT_CLASSIFIER_PROMPT, buildContractClassifierTask, parseContractClassifierReply, applyInventoryAdditions, contractAmendmentMessage } from './contract-classifier-logic.js';
+import { phaseRoutingApplies, detectPhaseProviders, applyProviderPreference, resolvePhaseModelMap, applyPhasePosture, phasePosture, phaseMapRecordLine, implementLaneForTask } from './phase-routing-logic.js';
+import { contractClassifierMode, CONTRACT_CLASSIFIER_PROMPT, buildContractClassifierTask, parseContractClassifierReply, applyInventoryAdditions, contractAmendmentMessage, BUILD_PLAN_SYSTEM_PROMPT, buildPlanTask, formatPlanForTask } from './contract-classifier-logic.js';
 import { resolveProjectKey } from './project-keys.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
@@ -1061,6 +1061,160 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // best-effort — insertCycleEvent already swallows its own errors.
   const logEvent = (kind, { role = null, content = null, meta = null } = {}) =>
     insertCycleEvent({ projectId, cycleId: cycle.id, kind, role, content, meta });
+
+  // CONTRACT CLASSIFIER + IMPLEMENT-LANE LADDER (the project-53 lessons).
+  //
+  // One cheap strict-JSON call per non-resume build does two jobs:
+  //  1. Capabilities the approved inventory lacks are APPENDED as a recorded
+  //     amendment (announced in chat, riding this cycle's checkpoint, parity-
+  //     enforced) so the build proceeds AUTHORIZED instead of halting or
+  //     shipping "Not built yet" placeholders.
+  //  2. The same reply classifies the request (complexity + touches), which
+  //     drives the phase map's 3a/3b lane: mechanical + no sensitive touches
+  //     → the CHEAP tier builds first (Luna/Haiku); anything complex or on
+  //     the touches carve-out → the mid tier. Failed prior attempts climb:
+  //     second attempt one tier up, third the top tier — and an operator
+  //     Redo/boost pick always outranks the ladder.
+  // Fail-open everywhere: classifier errors classify as complex (the safe
+  // lane) and build on the existing contract.
+  let phasePlanBrief = '';
+  {
+    let verdict = null;
+    const isResume = !!getCycle(cycle.id)?.resume_context_json;
+    const isInventoryBuild = /approved design inventory/i.test(String(cycle.instruction || ''));
+    if (contractClassifierMode(process.env) === 'on' && !isResume && !isInventoryBuild) {
+      try {
+        const invRead = await readFileInContainer(containerName, 'state/inventory.json');
+        const inventory = invRead.ok ? JSON.parse(invRead.content) : null;
+        if (inventory && !inventory.skipped && Array.isArray(inventory.screens)) {
+          setJob(cycle.id, { phase: 'running', message: 'Checking the request against the approved design contract…' });
+          const clsModel = prepassModel(routingEnv());
+          const res = await callStepTurn('contract-classifier', {
+            connector: ready.connector, apiKey: ready.apiKey, model: clsModel,
+            system: stepSystemPrompt('contract-classifier', CONTRACT_CLASSIFIER_PROMPT, {}), tools: [],
+            transcript: [{ role: 'user', text: buildContractClassifierTask({ instruction: cycle.instruction, inventoryJson: invRead.content }) }],
+            timeoutMs: 120000, effort: 'low', thinking: 'off',
+          });
+          if (res.ok) {
+            try {
+              const u = res.usage || {};
+              const cost = costCentsForUsage({
+                inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
+                cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
+              }, effectivePrice(ready.connector.id, clsModel));
+              insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: res.modelUsed || clsModel, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'contract-classifier' });
+            } catch (e) { console.warn('[mock2] contract-classifier ledger write failed:', e?.message); }
+            verdict = parseContractClassifierReply(res.text);
+            if (verdict && !verdict.covered) {
+              const applied = applyInventoryAdditions(inventory, verdict.additions, { at: nowIso() });
+              if (applied.added.total > 0) {
+                const w = await writeFileInContainer(containerName, 'state/inventory.json', JSON.stringify(applied.inventory, null, 2));
+                if (w.ok) {
+                  logEvent('note', {
+                    role: 'system',
+                    content: `Contract extended before build: ${applied.summary || `${applied.added.total} addition(s)`}`,
+                    meta: { contract_amendment: applied.added, reason: verdict.reason },
+                  });
+                  try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: contractAmendmentMessage(applied.added, applied.summary, verdict.reason) }); } catch { /* best effort */ }
+                } else {
+                  console.warn('[mock2] contract amendment write failed (build proceeds on the existing contract):', w.error);
+                }
+              }
+            }
+          }
+        }
+      } catch (e) { console.warn('[mock2] contract classifier failed (build proceeds on the existing contract):', e?.message); }
+    }
+    // The lane ladder — applies whenever the cycle carries a phase map and
+    // the operator didn't hand-pick a model for this run.
+    try {
+      const routingDoc = parseRoutingJson(getCycle(cycle.id)?.routing_json);
+      const pm = routingDoc?.phase_map || null;
+      const operatorPick = /operator escalation/i.test(String(routingDoc?.reason || ''));
+      if (pm && !operatorPick && !isInventoryBuild) {
+        let attempts = 0;
+        try {
+          attempts = escalationAttempts({
+            priorCycles: listCyclesForProject(projectId, { limit: 20 }),
+            requestId: cycle.request_id, instruction: cycle.instruction,
+          });
+        } catch { attempts = 0; }
+        const lane = implementLaneForTask({ complexity: verdict?.complexity, touches: verdict?.touches });
+        let target; let why;
+        if (attempts >= 2) { target = pm.plan; why = `attempt ${attempts + 1} → top tier`; }
+        else if (attempts === 1) {
+          target = lane.lane === 'implement_mechanical' ? pm.implement_complex : pm.plan;
+          why = 'second attempt → one tier up';
+        } else { target = pm[lane.lane]; why = lane.reason; }
+        if (target?.model && target.model !== ready.model) {
+          let swap = null;
+          let applicable = true;
+          if (target.provider && target.provider !== ready.connector.provider) {
+            swap = agenticConnectorForProvider(target.provider, { projectId, userId: cycle.initiated_by });
+            if (!swap) {
+              applicable = false;
+              console.warn(`[mock2] lane ladder wants ${target.model} (${target.provider}) but no usable agentic connector exists — keeping ${ready.model}`);
+            }
+          }
+          if (applicable) {
+            ready = { ...ready, model: target.model, ...(swap ? { connector: swap.connector, apiKey: swap.apiKey } : {}) };
+            const updatedRouting = {
+              ...routingDoc, applied_model: target.model, implement_lane: lane.lane,
+              phase_attempts: attempts, reason: [routingDoc.reason, `lane:${lane.lane} (${why})`].filter(Boolean).join(' '),
+            };
+            try { updateCycle(cycle.id, { routing_json: JSON.stringify(updatedRouting) }); } catch { /* best effort */ }
+          }
+        } else if (routingDoc && routingDoc.implement_lane !== lane.lane) {
+          try { updateCycle(cycle.id, { routing_json: JSON.stringify({ ...routingDoc, implement_lane: lane.lane }) }); } catch { /* best effort */ }
+        }
+        // PLAN PHASE, made real: when the CHEAP tier will build (first
+        // attempt on the mechanical lane), the map's top-tier plan model
+        // first writes the implementation plan the executor follows — the
+        // five-phase pipeline's phase 2 as an actual call, not a map entry.
+        // This is what makes Luna-first safe beyond the gates: the cross-file
+        // invariants come from top-tier thinking, the typing from the cheap
+        // model. Fail-open: no plan → the build runs on the instruction alone.
+        if (attempts === 0 && lane.lane === 'implement_mechanical'
+          && pm.plan?.model && ready.model === pm.implement_mechanical?.model) {
+          const planConn = (!pm.plan.provider || pm.plan.provider === ready.connector.provider)
+            ? { connector: ready.connector, apiKey: ready.apiKey }
+            : agenticConnectorForProvider(pm.plan.provider, { projectId, userId: cycle.initiated_by });
+          if (planConn) {
+            setJob(cycle.id, { phase: 'running', message: `Plan phase (${pm.plan.model}) writing the implementation plan…` });
+            let reqDoc = '';
+            try { const rd = await readFileInContainer(containerName, 'state/design-requirements.md'); if (rd.ok) reqDoc = rd.content; } catch { /* optional */ }
+            let invJson = '';
+            try { const ir = await readFileInContainer(containerName, 'state/inventory.json'); if (ir.ok) invJson = ir.content; } catch { /* optional */ }
+            const planRes = await callStepTurn('build-plan', {
+              connector: planConn.connector, apiKey: planConn.apiKey, model: pm.plan.model,
+              system: stepSystemPrompt('build-plan', BUILD_PLAN_SYSTEM_PROMPT, {}), tools: [],
+              transcript: [{ role: 'user', text: buildPlanTask({ instruction: cycle.instruction, inventoryJson: invJson, requirementsDoc: reqDoc }) }],
+              timeoutMs: 300000, effort: 'high',
+            });
+            if (planRes.ok) {
+              try {
+                const u = planRes.usage || {};
+                const cost = costCentsForUsage({
+                  inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
+                  cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
+                }, effectivePrice(planConn.connector.id, pm.plan.model));
+                insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: planConn.connector.id, model: planRes.modelUsed || pm.plan.model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'build-plan' });
+              } catch (e) { console.warn('[mock2] build-plan ledger write failed:', e?.message); }
+              phasePlanBrief = formatPlanForTask(planRes.text, pm.plan.model);
+              logEvent('note', {
+                role: 'system',
+                content: `Plan phase (${pm.plan.model}) wrote the implementation plan; ${ready.model} executes it.`,
+                meta: { step: 'build-plan', model: pm.plan.model, executor: ready.model },
+              });
+            } else {
+              console.warn('[mock2] build-plan step failed (the build runs on the instruction alone):', planRes.error);
+            }
+          }
+        }
+      }
+    } catch (e) { console.warn('[mock2] implement-lane ladder failed (current model stands):', e?.message); }
+  }
+
   logEvent('task', { role: 'user', content: cycle.instruction || '', meta: { model: ready.model, framework_version: framework.version } });
   // The routing decision, durably in the cycle transcript (request-log review).
   try {
@@ -1110,63 +1264,6 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     content: `Build engine: ${engineName} harness · ${cycleMode} mode · model ${ready.model}`,
     meta: { harness: engineName, build_mode: cycleMode, model: ready.model },
   });
-  // CONTRACT CLASSIFIER (the project-53 folders lesson): before the build
-  // runs, a cheap model checks whether the request needs capabilities the
-  // approved inventory lacks. Missing ones are APPENDED to
-  // state/inventory.json as a recorded amendment — announced in the chat,
-  // riding this cycle's checkpoint, enforced by action parity — and the build
-  // proceeds AUTHORIZED. Without this, the builder's only legal moves were
-  // halting or shipping "Not built yet" placeholders, and the operator's only
-  // recourse was a design chat that is not reachable from the build chat.
-  // Skipped on resumes (the first attempt already extended) and on the
-  // initial inventory build (it implements the whole contract by definition).
-  // Fail-open everywhere: a classifier error builds on the existing contract.
-  if (contractClassifierMode(process.env) === 'on'
-    && !getCycle(cycle.id)?.resume_context_json
-    && !/approved design inventory/i.test(String(cycle.instruction || ''))) {
-    try {
-      const invRead = await readFileInContainer(containerName, 'state/inventory.json');
-      const inventory = invRead.ok ? JSON.parse(invRead.content) : null;
-      if (inventory && !inventory.skipped && Array.isArray(inventory.screens)) {
-        setJob(cycle.id, { phase: 'running', message: 'Checking the request against the approved design contract…' });
-        const clsModel = prepassModel(routingEnv());
-        const res = await callStepTurn('contract-classifier', {
-          connector: ready.connector, apiKey: ready.apiKey, model: clsModel,
-          system: stepSystemPrompt('contract-classifier', CONTRACT_CLASSIFIER_PROMPT, {}), tools: [],
-          transcript: [{ role: 'user', text: buildContractClassifierTask({ instruction: cycle.instruction, inventoryJson: invRead.content }) }],
-          timeoutMs: 120000, effort: 'low', thinking: 'off',
-        });
-        if (res.ok) {
-          try {
-            const u = res.usage || {};
-            const cost = costCentsForUsage({
-              inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
-              cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
-            }, effectivePrice(ready.connector.id, clsModel));
-            insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: res.modelUsed || clsModel, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'contract-classifier' });
-          } catch (e) { console.warn('[mock2] contract-classifier ledger write failed:', e?.message); }
-          const verdict = parseContractClassifierReply(res.text);
-          if (verdict && !verdict.covered) {
-            const applied = applyInventoryAdditions(inventory, verdict.additions, { at: nowIso() });
-            if (applied.added.total > 0) {
-              const w = await writeFileInContainer(containerName, 'state/inventory.json', JSON.stringify(applied.inventory, null, 2));
-              if (w.ok) {
-                logEvent('note', {
-                  role: 'system',
-                  content: `Contract extended before build: ${applied.summary || `${applied.added.total} addition(s)`}`,
-                  meta: { contract_amendment: applied.added, reason: verdict.reason },
-                });
-                try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: contractAmendmentMessage(applied.added, applied.summary, verdict.reason) }); } catch { /* best effort */ }
-              } else {
-                console.warn('[mock2] contract amendment write failed (build proceeds on the existing contract):', w.error);
-              }
-            }
-          }
-        }
-      }
-    } catch (e) { console.warn('[mock2] contract classifier failed (build proceeds on the existing contract):', e?.message); }
-  }
-
   // Multi-modal: images attached to the Build press live on the REQUEST row
   // (migration 526), so every segment of the request — the first build, a
   // deferred build after rule questions, a resume — re-hydrates the same
@@ -1262,7 +1359,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // the inventory/instruction still outrank it where they explicitly
   // deviate. Full builds are unchanged (their interview owns the rules).
   const rulesFloor = mvpBuild ? crudRulesFloorSection() : '';
-  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${specificitySection}${prepassBrief}${rulesFloor}${feedbackSection}${designFindingsSectionText}${assetSection}${assetChangeSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
+  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${phasePlanBrief}${specificitySection}${prepassBrief}${rulesFloor}${feedbackSection}${designFindingsSectionText}${assetSection}${assetChangeSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
   // Counted here rather than at read time: the count means "builds that were
   // told and shipped anyway", and a run that died before its first turn was
   // never told anything.

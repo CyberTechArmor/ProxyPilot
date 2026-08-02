@@ -31,17 +31,22 @@ test('classifier defaults on; only off/0/false disables', () => {
 
 // ---- parsing (fail-open on junk) ----
 
-test('parse: covered / additions / junk', () => {
-  assert.deepEqual(
-    parseContractClassifierReply('{"covered":true,"reason":"styling only","additions":{}}'),
-    { covered: true, reason: 'styling only', additions: { screens: [], actions: [], fields: [] } },
-  );
+test('parse: covered / additions / lane signals / junk', () => {
+  const covered = parseContractClassifierReply('{"covered":true,"reason":"styling only","complexity":"mechanical","touches":[],"additions":{}}');
+  assert.equal(covered.covered, true);
+  assert.equal(covered.complexity, 'mechanical');
+  assert.deepEqual(covered.touches, []);
   const v = parseContractClassifierReply(`Here you go:
-    {"covered":false,"reason":"folders are not in the contract","additions":{
+    {"covered":false,"reason":"folders are not in the contract","complexity":"complex","touches":["migration"],"additions":{
       "actions":[{"screen":"Documents","label":"Create folder"},{"screen":"Documents","label":"Move document to folder"}],
       "fields":[{"screen":"Documents","name":"Folder"}],"screens":[]}}`);
   assert.equal(v.covered, false);
   assert.equal(v.additions.actions.length, 2);
+  assert.deepEqual(v.touches, ['migration']);
+  // Missing/junk lane signals default to the SAFE side: complex, no touches.
+  const bare = parseContractClassifierReply('{"covered":true,"additions":{}}');
+  assert.equal(bare.complexity, 'complex');
+  assert.deepEqual(bare.touches, []);
   // covered:false with EMPTY additions normalizes to covered (nothing to add).
   assert.equal(parseContractClassifierReply('{"covered":false,"additions":{}}').covered, true);
   assert.equal(parseContractClassifierReply('not json at all'), null);

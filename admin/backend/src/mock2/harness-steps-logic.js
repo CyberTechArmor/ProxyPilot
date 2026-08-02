@@ -129,6 +129,13 @@ export const HARNESS_STEPS = Object.freeze([
     defaults: { model: 'claude-haiku-4-5-20251001', effort: 'low', thinking: 'off', budgetNote: 'one strict-JSON call per non-resume build' }, tunable: true,
   },
   {
+    id: 'build-plan', stage: 'Build', title: 'Build plan (phase 2)',
+    description: 'When the lane ladder sends a build to the cheap tier, the phase map\'s top-tier plan model first writes the implementation plan (files to read, ordered changes, cross-file invariants, do-not-touch) that rides the task turn.',
+    intendedOutcome: 'Top-tier thinking, cheap-tier typing — the plan phase as a real call, not a map entry.',
+    slotKey: 'build_runner', laneKey: null, envModelVar: null, envEffortVar: null,
+    defaults: { model: '(phase map plan model: claude-opus-5 / gpt-5.6-sol)', effort: 'high', thinking: 'adaptive', budgetNote: 'plan-sized output, cheap-lane first attempts only' }, tunable: true,
+  },
+  {
     id: 'build-runner', stage: 'Build', title: 'Build runner loop',
     description: 'THE builder: edits code in the fenced container via tools, runs gates, finishes. Full builds route via the knowledge base; MVP/quick use the fast model.',
     intendedOutcome: 'Working, contract-complete code. 80–90% of a request’s cost lives here — cost scales with TURNS.',

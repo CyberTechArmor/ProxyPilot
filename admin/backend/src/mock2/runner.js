@@ -86,6 +86,9 @@ import { applyEdits } from './apply-edit-logic.js';
 import { commandAllowed, redactSecrets } from './harness-safety.js';
 import { formatReadRange, formatSearchResults } from './harness-copilot.js';
 import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
+import {
+  failingAppChecks, diagnosisCandidateFiles, diagnosisEvidence, diagnosisChatMessage, DIAGNOSIS_SYSTEM_PROMPT,
+} from './diagnose-logic.js';
 import { listPublishedComponents, getPublishedComponentWithVersion, listProjectComponents } from './components.js';
 import {
   formatComponentForModel, parseFilesJson, safeComponentPath, buildComponentManifest,
@@ -381,6 +384,78 @@ export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 
   ]);
   if (!res || !res.ok) return null;
   return cleanDistilledInstruction(res.text);
+}
+
+// FAILURE DIAGNOSIS — the platform doing what the successful human loop did.
+// Measured on project 54's export saga: four fix builds ($1.07) each repaired
+// something plausible-but-adjacent while the acceptance report named the
+// exact failing selector every time; the one build that started from a
+// root-cause diagnosis fixed it for $0.17. The specificity already existed
+// in the platform's own artifacts — nothing compiled it, and nothing read it
+// before the next attempt.
+//
+// So, on a cycle that FAILS its own acceptance checks: gather the evidence
+// deterministically (zero model spend — the failing checks' exact steps, the
+// build's claimed finish, the changed files' code), hand it to the TOP-TIER
+// review model from the cycle's phase map, and post the root cause + a
+// build-ready FIX INSTRUCTION into the chat, where the ⚡ quick-update
+// shortcut can send it. One bounded top-tier call (~$0.10–0.25).
+//
+// Fire-and-forget and fail-open: the cycle is already recorded failed before
+// this runs, and a diagnosis failure changes nothing about it.
+// MOCK2_FAILURE_DIAGNOSIS=off disables.
+async function runFailureDiagnosis({ project, cycle, ready, smokeReport, changedFiles, finishSummary, logEvent }) {
+  if (String(process.env.MOCK2_FAILURE_DIAGNOSIS || '').trim().toLowerCase() === 'off') return;
+  const checks = failingAppChecks(smokeReport);
+  if (!checks.length) return;
+  const projectId = project.id;
+  const containerName = project.container_name || containerNameForProject(projectId);
+  const files = [];
+  for (const p of diagnosisCandidateFiles(changedFiles)) {
+    const r = await readFileInContainer(containerName, p).catch(() => null);
+    if (r?.ok && r.content) files.push({ path: p, content: r.content });
+  }
+  // The top tier from this cycle's phase map (review, else plan) — the same
+  // tier the human-loop diagnosis ran on; connector resolution mirrors the
+  // plan phase. No usable map entry → the build connector's own model.
+  let call = { connector: ready.connector, apiKey: ready.apiKey, model: ready.model };
+  try {
+    const pm = parseRoutingJson(getCycle(cycle.id)?.routing_json)?.phase_map || null;
+    const target = pm?.review || pm?.plan || null;
+    if (target?.model) {
+      if (!target.provider || target.provider === ready.connector.provider) {
+        call = { ...call, model: target.model };
+      } else {
+        const swap = agenticConnectorForProvider(target.provider, { projectId, userId: cycle.initiated_by });
+        if (swap) call = { connector: swap.connector, apiKey: swap.apiKey, model: target.model };
+      }
+    }
+  } catch { /* the build connector stands */ }
+  const res = await callStepTurn('failure-diagnosis', {
+    connector: call.connector, apiKey: call.apiKey, model: call.model,
+    system: stepSystemPrompt('failure-diagnosis', DIAGNOSIS_SYSTEM_PROMPT, {}),
+    tools: [],
+    transcript: [{ role: 'user', text: diagnosisEvidence({ instruction: cycle.instruction, finishSummary, checks, files }) }],
+    timeoutMs: 240000, effort: 'high', thinking: null,
+  });
+  if (!res.ok) { console.warn('[mock2] failure diagnosis failed:', res.error); return; }
+  try {
+    const u = res.usage || {};
+    const cost = costCentsForUsage({
+      inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
+      cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
+    }, effectivePrice(call.connector.id, call.model));
+    insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: call.connector.id, model: res.modelUsed || call.model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'failure-diagnosis' });
+  } catch (e) { console.warn('[mock2] failure-diagnosis ledger write failed:', e?.message); }
+  const body = diagnosisChatMessage(res.text, { model: res.modelUsed || call.model });
+  if (body) { try { insertMessage({ projectId, kind: 'assistant', cycleId: cycle.id, body }); } catch { /* best effort */ } }
+  try {
+    logEvent?.('ai_message', {
+      role: 'assistant',
+      content: 'Failure diagnosis written — root cause + a build-ready fix instruction posted to the chat.',
+      meta: { step: 'failure-diagnosis', model: res.modelUsed || call.model },
+    });
+  } catch { /* best effort */ }
 }
 
 // startCycle — the cycle-start sequence (04-phased-plan §M6):
@@ -2755,6 +2830,15 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           releaseLock(projectId, holder);
           setJob(cycle.id, { phase: 'smoke_failed', message: error, commit: record?.commit_sha || null });
           void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'smoke_failed' });
+          // The failure is recorded — now diagnose it (fire-and-forget): the
+          // top-tier review model reads the failing checks + the changed
+          // files and posts the root cause with a build-ready fix
+          // instruction, so the next attempt starts from evidence instead of
+          // re-guessing (see runFailureDiagnosis).
+          void runFailureDiagnosis({
+            project, cycle, ready, smokeReport: smoke.report,
+            changedFiles: changedThisCycle, finishSummary: decision.finishSummary, logEvent,
+          }).catch((e) => console.warn('[mock2] failure diagnosis crashed:', e?.message));
           return scheduleJobCleanup(cycle.id);
           }
         }

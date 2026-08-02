@@ -51,7 +51,7 @@ import { getRoutingRule } from './routing.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
 import { decideRouting, escalationAttempts, routingMode, parseRoutingJson, mvpRoutingDecision, quickRoutingDecision } from './routing-logic.js';
 import {
-  prepassEnabled, prepassModel, buildPrepassPrompt, parsePrepassReply,
+  prepassEnabled, prepassModelFor, buildPrepassPrompt, parsePrepassReply,
   prepassEffort, formatBriefForTask, formatSpecificityForTask, featureScaleNotice,
   normalizeSuggestMode,
   buildDistillSystemPrompt, buildDistillUserTurn, cleanDistilledInstruction,
@@ -134,7 +134,8 @@ import {
   budgetExhaustedSummary, harnessFaultHaltAccepted,
 } from './finish-guard-logic.js';
 import { recordFeature, takeFeatureLedger } from './feature-activation.js';
-import { MODEL_PRIMARY } from './models.js';
+// (models.js constants are no longer used directly here — the phase map and
+// provider-aware prepass pick every model.)
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
 // BUILD_RUNNER=sdk — docs/agent-sdk-migration.md) orients in the same container
@@ -295,7 +296,7 @@ function quotaVerdict(projectId, estCostCents) {
 // other model call. Any failure returns null — callers treat that as "no
 // pre-pass" and run unchanged.
 async function runQuickPrepass({ project, cycle, ready, routing }) {
-  const model = prepassModel(routingEnv());
+  const model = prepassModelFor(ready.connector.provider, routingEnv());
   const res = await callStepTurn('quick-prepass', {
     connector: ready.connector, apiKey: ready.apiKey, model,
     system: stepSystemPrompt('quick-prepass', buildPrepassPrompt(), {}), tools: [], transcript: [{ role: 'user', text: String(cycle.instruction || '') }],
@@ -344,7 +345,7 @@ export async function probeSplitProposal(instruction, { timeoutMs = 9000 } = {})
   const ready = buildRunnerReady();
   if (!ready.ok) return null;
   const call = callStepTurn('split-probe', {
-    connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
+    connector: ready.connector, apiKey: ready.apiKey, model: prepassModelFor(ready.connector.provider, routingEnv()),
     system: stepSystemPrompt('split-probe', buildPrepassPrompt(), {}), tools: [], transcript: [{ role: 'user', text: String(instruction || '') }],
     timeoutMs: 120000, effort: 'high', thinking: 'off',
   });
@@ -365,8 +366,11 @@ export async function probeSplitProposal(instruction, { timeoutMs = 9000 } = {})
 export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 60000 } = {}) {
   const ready = buildRunnerReady();
   if (!ready.ok) return null;
+  // A distillation is cheap-tier work ("one cheap turn", per the contract
+  // above) — and MODEL_PRIMARY here had the same provider bug as the
+  // classifier: an Anthropic id on an OpenAI build connector fails the call.
   const call = callStepTurn('chat-distill', {
-    connector: ready.connector, apiKey: ready.apiKey, model: MODEL_PRIMARY,
+    connector: ready.connector, apiKey: ready.apiKey, model: prepassModelFor(ready.connector.provider, routingEnv()),
     system: stepSystemPrompt('chat-distill', buildDistillSystemPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: buildDistillUserTurn({ body, precedingUser }) }],
     timeoutMs: 120000, effort: 'high', thinking: 'off',
@@ -1088,7 +1092,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         const inventory = invRead.ok ? JSON.parse(invRead.content) : null;
         if (inventory && !inventory.skipped && Array.isArray(inventory.screens)) {
           setJob(cycle.id, { phase: 'running', message: 'Checking the request against the approved design contract…' });
-          const clsModel = prepassModel(routingEnv());
+          const clsModel = prepassModelFor(ready.connector.provider, routingEnv());
           const res = await callStepTurn('contract-classifier', {
             connector: ready.connector, apiKey: ready.apiKey, model: clsModel,
             system: stepSystemPrompt('contract-classifier', CONTRACT_CLASSIFIER_PROMPT, {}), tools: [],

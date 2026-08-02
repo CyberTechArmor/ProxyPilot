@@ -40,6 +40,24 @@ export function prepassModel(env = {}) {
   return String(env?.MOCK2_PREPASS_MODEL ?? '').trim() || PREPASS_DEFAULT_MODEL;
 }
 
+// The OpenAI-side cheap tier (phase-routing's TIER_MODELS.openai.cheap; the
+// id is repeated here so the pure layers stay import-acyclic).
+export const PREPASS_DEFAULT_MODEL_OPENAI = 'gpt-5.6-luna';
+
+// prepassModelFor — the cheap model for WHICHEVER CONNECTOR makes the call.
+// The pinned Anthropic default sent to an OpenAI connector is an invalid
+// model id: the call 400s, fail-open swallows it, and every consumer sees
+// "no verdict" — so in hybrid/OpenAI setups the contract classifier never
+// classified, the mechanical (cheap) lane never triggered, and every quick
+// update ran on the mid tier (operator report: "I don't see Luna being used
+// anywhere"). An explicit MOCK2_PREPASS_MODEL override still wins — that is
+// operator intent, wrong provider and all.
+export function prepassModelFor(provider, env = {}) {
+  const override = String(env?.MOCK2_PREPASS_MODEL ?? '').trim();
+  if (override) return override;
+  return String(provider || '').toLowerCase() === 'openai' ? PREPASS_DEFAULT_MODEL_OPENAI : PREPASS_DEFAULT_MODEL;
+}
+
 // The classifier/enricher prompt: STRICT JSON out, nothing else. The model
 // sees only the instruction — no project context needed at this altitude.
 export function buildPrepassPrompt() {

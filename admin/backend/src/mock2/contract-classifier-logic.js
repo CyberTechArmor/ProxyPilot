@@ -51,10 +51,14 @@ Reply with STRICT JSON only, no prose:
   }
 }
 
-complexity: "mechanical" ONLY for small, well-specified changes with no
+complexity: "mechanical" for small, well-specified changes with no
 cross-file invariants — copy, styling, a straightforward field or list on an
-existing pattern. Anything with schema changes, new subsystems, tricky state,
-or ambiguity is "complex". touches: every sensitive surface the request
+existing pattern, or a small bug fix scoped to one or two named files with a
+clear expected behavior. A top-tier plan phase writes the implementation
+plan before any mechanical build runs, so prefer "mechanical" when the
+change is small and precisely described. Anything with schema changes, new
+subsystems, tricky state, or genuine ambiguity is "complex". touches: every
+sensitive surface the request
 brushes — authentication/session, roles/permissions, crypto/secrets, data
 migration/deletion, external integrations, money/billing. Empty when none.
 

@@ -94,11 +94,51 @@ export default function ConceptStage({
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
   const [mode, setMode] = useState('design');
-  // Design direction for design-mode turns: 'theme' keeps the project's base
-  // theme (the AI may extend it complementarily); 'explore' sets it aside for a
-  // fresh reference-quality look this turn (adopted only if approved). Explore
-  // renders with thinking on + high effort, so it is slower but deeper.
-  const [designDirection, setDesignDirection] = useState('theme'); // 'plan' | 'design' — directs the turn
+  // Design direction for design-mode turns: 'theme' binds the project's chosen
+  // preset; 'explore' lets the AI design freely ("let the AI decide" — thinking
+  // on, high effort; adopted only if approved). No longer a per-turn toggle:
+  // the direction FOLLOWS the project's mandatory design choice (the popup) —
+  // a chosen preset → 'theme', the AI option → 'explore'.
+  const [designDirection, setDesignDirection] = useState(
+    project?.design_preset === 'ai' ? 'explore' : 'theme',
+  );
+  // The mandatory design choice: before anything is submitted in the design
+  // chat (Skip mockup excepted), the Builder picks one of the saved design
+  // presets or "Let the AI decide" from a popup. Persisted on the project
+  // (design_choice_at), so a project that chose is never re-asked.
+  const [designChosen, setDesignChosen] = useState(!!project?.design_choice_at);
+  const [designChoiceOpen, setDesignChoiceOpen] = useState(false);
+  const [designPresets, setDesignPresets] = useState(null); // null = not loaded
+  const [choosingDesign, setChoosingDesign] = useState(false);
+  useEffect(() => {
+    if (project?.design_choice_at) {
+      setDesignChosen(true);
+      setDesignDirection(project?.design_preset === 'ai' ? 'explore' : 'theme');
+    }
+  }, [project?.design_choice_at, project?.design_preset]);
+  const openDesignChoice = useCallback(() => {
+    setDesignChoiceOpen(true);
+    if (designPresets == null) {
+      api.mock2DesignPresets()
+        .then((r) => setDesignPresets(r.presets || []))
+        .catch(() => setDesignPresets([]));
+    }
+  }, [designPresets]);
+  const chooseDesign = async (presetKey) => {
+    setChoosingDesign(true);
+    try {
+      await api.mock2SetProjectDesignPreset(projectId, presetKey);
+      setDesignChosen(true);
+      setDesignDirection(presetKey === 'ai' ? 'explore' : 'theme');
+      setDesignChoiceOpen(false);
+      const name = presetKey === 'ai'
+        ? 'Let the AI decide'
+        : (designPresets || []).find((p) => p.key === presetKey)?.name || presetKey;
+      toast({ title: `Design: ${name}`, description: presetKey === 'ai' ? 'The AI designs freely — approving the mockup adopts its look.' : 'Mockups stay on this design; you can change it anytime from the Design button.' });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save the design choice', description: err.message });
+    } finally { setChoosingDesign(false); }
+  };
   const scrollRef = useRef(null);
   const composerRef = useRef(null);   // focused when the assets modal hands back
   // Auto-scroll cadence, the same one the build chat uses: follow the newest
@@ -338,6 +378,17 @@ export default function ConceptStage({
   const provisioning = project?.lifecycle === 'provisioning';
   const previewUrl = data?.preview_url || project?.preview_url || null;
   const hasMockup = !!(data?.current_mockup_id || project?.current_mockup_id);
+  // The mandatory design choice pops up ONCE, unprompted, when an editable
+  // un-designed project opens its design chat — the Builder sees the four
+  // saved designs + "Let the AI decide" before typing anything. Send re-opens
+  // it if they dismissed without choosing; Skip mockup never requires it.
+  const designChoiceAutoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (designChoiceAutoOpenedRef.current) return;
+    if (!editable || approved || designChosen || hasMockup || mode !== 'design') return;
+    designChoiceAutoOpenedRef.current = true;
+    openDesignChoice();
+  }, [editable, approved, designChosen, hasMockup, mode, openDesignChoice]);
   // Ask at PAGE LAUNCH, while the answer can still change the first mockup: an
   // editable, unapproved project whose conversation has not started.
   //
@@ -503,6 +554,9 @@ export default function ConceptStage({
   const send = async () => {
     const text = message.trim();
     if (!text || sendDisabled) return; // Ctrl+Enter must respect the same gate as the button
+    // The design choice is mandatory before anything is submitted in the
+    // design chat (Skip mockup excepted): no choice yet → the popup, not a send.
+    if (mode === 'design' && !designChosen) { openDesignChoice(); return; }
     setBusy(true);
     try {
       const res = await api.mock2SendChatMessage(projectId, text, mode, toWireImages(attach.images), mode === 'design' ? designDirection : null);
@@ -579,6 +633,9 @@ export default function ConceptStage({
   const queueAction = async (kind) => {
     const text = message.trim();
     if (kind === 'design_send' && !text) return;
+    // Same mandatory-choice gate as send() — queueing a design message IS a
+    // submission. skip_mockup queues freely.
+    if (kind === 'design_send' && mode === 'design' && !designChosen) { openDesignChoice(); return; }
     setBusy(true);
     try {
       const res = await api.mock2QueueDesign(projectId, {
@@ -890,24 +947,20 @@ export default function ConceptStage({
                   model). The fully audited Build comes later, from the build
                   chat. */}
               {mode === 'design' ? (
-                <div className="inline-flex rounded-md border p-0.5 shrink-0" role="radiogroup" aria-label="Design direction">
-                  <button
-                    type="button" role="radio" aria-checked={designDirection === 'theme'}
-                    onClick={() => setDesignDirection('theme')}
-                    title="Stay on the project's base theme — the AI keeps the core colors/fonts/components and may add complementary touches"
-                    className={`rounded px-2.5 py-1.5 text-xs font-medium min-h-[36px] ${designDirection === 'theme' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
-                  >
-                    On theme
-                  </button>
-                  <button
-                    type="button" role="radio" aria-checked={designDirection === 'explore'}
-                    onClick={() => setDesignDirection('explore')}
-                    title="Explore a new look this turn — the AI designs freely at reference quality (thinking on, high effort; slower). Approving the mockup adopts its look as the project design."
-                    className={`rounded px-2.5 py-1.5 text-xs font-medium min-h-[36px] ${designDirection === 'explore' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
-                  >
-                    New look
-                  </button>
-                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-11 sm:h-10 shrink-0"
+                  onClick={openDesignChoice}
+                  title={designChosen
+                    ? 'Change the design this project renders on'
+                    : 'Choose a design before sending — one of the saved designs, or let the AI decide'}
+                >
+                  <Sparkles className="h-4 w-4 mr-1" />
+                  {designChosen
+                    ? `Design: ${project?.design_preset === 'ai' || designDirection === 'explore' ? 'AI decides' : (designPresets || []).find((p) => p.key === project?.design_preset)?.name || project?.design_preset || 'chosen'}`
+                    : 'Choose design'}
+                </Button>
               ) : null}
               {hasMockup && online ? (
                 <Button
@@ -1202,6 +1255,78 @@ export default function ConceptStage({
           <DialogFooter className="flex-col sm:flex-row gap-2">
             <Button variant="outline" onClick={() => setConfirmBuild(false)} className="h-11 sm:h-10">Not yet</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* The mandatory design choice: the saved designs + "Let the AI decide".
+          Opens unprompted on a fresh design chat and again on any send attempt
+          until a choice is made; Skip mockup never requires it. Full-screen on
+          phones (MOBILE_FIRST), one column of ≥44px cards. */}
+      <Dialog open={designChoiceOpen} onOpenChange={(o) => { if (!choosingDesign) setDesignChoiceOpen(o); }}>
+        <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-lg sm:h-auto sm:max-h-[85vh] sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle>Choose your design</DialogTitle>
+            <DialogDescription>
+              Pick one of the saved designs, or let the AI design freely. Mockups render on your choice;
+              you can change it here anytime. A choice is needed before the first design message —
+              only “Skip mockup” goes ahead without one.
+            </DialogDescription>
+          </DialogHeader>
+          {designPresets == null ? (
+            <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading designs…
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-2">
+              {designPresets.map((p) => (
+                <button
+                  key={p.key}
+                  type="button"
+                  disabled={choosingDesign}
+                  onClick={() => chooseDesign(p.key)}
+                  className={`w-full rounded-md border p-3 text-left min-h-[44px] hover:border-primary/60 hover:bg-muted/50 disabled:opacity-60 ${project?.design_preset === p.key && designChosen ? 'border-primary ring-1 ring-primary/40' : ''}`}
+                >
+                  <span className="flex items-start justify-between gap-3">
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium">
+                        {p.name}
+                        {project?.design_preset === p.key && designChosen ? ' · current' : ''}
+                      </span>
+                      <span className="mt-0.5 block text-xs text-muted-foreground">{p.description}</span>
+                    </span>
+                    {/* Palette swatches straight from the preset tokens. */}
+                    <span className="flex shrink-0 gap-1 pt-0.5" aria-hidden="true">
+                      {[p.tokens?.colors?.primary, p.tokens?.colors?.accent, p.tokens?.colors?.background, p.tokens?.colors?.text]
+                        .filter(Boolean).slice(0, 4)
+                        .map((hex, i) => (
+                          <span key={i} className="h-4 w-4 rounded-full border" style={{ backgroundColor: hex }} />
+                        ))}
+                    </span>
+                  </span>
+                </button>
+              ))}
+              <button
+                type="button"
+                disabled={choosingDesign}
+                onClick={() => chooseDesign('ai')}
+                className={`w-full rounded-md border border-dashed p-3 text-left min-h-[44px] hover:border-primary/60 hover:bg-muted/50 disabled:opacity-60 ${(project?.design_preset === 'ai' || designDirection === 'explore') && designChosen ? 'border-primary ring-1 ring-primary/40' : ''}`}
+              >
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <Sparkles className="h-4 w-4" /> Let the AI decide
+                  {project?.design_preset === 'ai' && designChosen ? ' · current' : ''}
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  The AI designs a fresh, reference-quality look from your description (slower, deeper render).
+                  Approving the mockup adopts it as the project design.
+                </span>
+              </button>
+            </div>
+          )}
+          {choosingDesign ? (
+            <p className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Saving…
+            </p>
+          ) : null}
         </DialogContent>
       </Dialog>
     </Card>

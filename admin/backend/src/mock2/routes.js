@@ -129,7 +129,7 @@ import {
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from './clone-logic.js';
 import { publishDomain } from './publish.js';
 import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver, getStallSettings, setStallSettings, getDesignArtDirection, setDesignArtDirection, getDesignTasteRubric, setDesignTasteRubric, getPhaseRoutingSetting, setPhaseRoutingSetting, getPhasePostureSetting, setPhasePostureSetting } from './settings.js';
-import { PHASE_POSTURES } from './phase-routing-logic.js';
+import { PHASE_POSTURES, PROJECT_PROVIDER_PREFS, normalizeProviderPreference } from './phase-routing-logic.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getMock2Db } from './db.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
@@ -3753,6 +3753,41 @@ export function createMock2Router() {
     }
     const updated = updateProject(req.mock2Project.id, { clarify_mode: mode });
     logAudit(req.user.id, 'MOCK2_CLARIFY_MODE_SET', 'mock2_project', req.mock2Project.id, { mode }, req.ip);
+    res.json({ project: shapeProject(updated, { isAdmin: isReqAdmin(req) }) });
+  });
+
+  // Which AI provider drives this project's phase-routed builds when MULTIPLE
+  // global providers are configured: 'anthropic' | 'openai' | 'hybrid' (all
+  // providers → the mixed map) | '' (clear — the project must choose again
+  // before a phase-routed build starts). With one global provider the choice
+  // is moot and the cycle never asks for it.
+  router.put('/projects/:id/provider-preference', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const raw = String(req.body?.preference ?? '');
+    const pref = normalizeProviderPreference(raw);
+    if (raw !== '' && !pref) {
+      return res.status(400).json({ error: `preference must be one of: ${PROJECT_PROVIDER_PREFS.join(', ')} (or empty to clear)` });
+    }
+    const updated = updateProject(req.mock2Project.id, { provider_preference: pref });
+    logAudit(req.user.id, 'MOCK2_PROVIDER_PREFERENCE_SET', 'mock2_project', req.mock2Project.id, { preference: pref }, req.ip);
+    res.json({ project: shapeProject(updated, { isAdmin: isReqAdmin(req) }) });
+  });
+
+  // The design chat's mandatory design choice: one of the saved design presets
+  // or 'ai' ("let the AI decide" — the mockup model designs freely). Stamps
+  // design_choice_at so the chat's popup never re-asks a project that chose.
+  router.put('/projects/:id/design-preset', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    // Strict on purpose (normalizeDesignPresetKey folds junk to 'ai', which
+    // would silently accept a typo as an explicit AI choice).
+    const key = String(req.body?.preset || '').trim();
+    const known = key === DESIGN_PRESET_AI || publicDesignPresets().some((p) => p.key === key);
+    if (!known) {
+      return res.status(400).json({ error: `preset must be '${DESIGN_PRESET_AI}' or a saved design preset key` });
+    }
+    const updated = updateProject(req.mock2Project.id, {
+      design_preset: key,
+      design_choice_at: new Date().toISOString(),
+    });
+    logAudit(req.user.id, 'MOCK2_DESIGN_PRESET_SET', 'mock2_project', req.mock2Project.id, { preset: key }, req.ip);
     res.json({ project: shapeProject(updated, { isAdmin: isReqAdmin(req) }) });
   });
 

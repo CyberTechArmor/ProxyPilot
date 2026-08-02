@@ -277,9 +277,15 @@ export function publicProjectShape(project, extra = {}) {
     // until a mockup exists.
     stage: conceptStageInfo(project),
     // The design preset the project was created with ('' / 'ai' = AI-derived) —
-    // the Design specs page highlights it.
+    // the Design specs page highlights it. design_choice_at is when the design
+    // chat's mandatory choice (preset or AI) was made — null means the popup
+    // must ask before the first design submission.
     design_preset: project.design_preset || null,
+    design_choice_at: project.design_choice_at || null,
     design_approved_at: project.design_approved_at || null,
+    // Which AI provider drives phase-routed builds when multiple are
+    // configured: 'anthropic' | 'openai' | 'hybrid' | null (not chosen).
+    provider_preference: project.provider_preference || null,
     // Set once the provision-time (or self-heal) base-app deploy succeeds — the
     // UI offers "Deploy base app" retry while this is null and nothing serves.
     base_app_deployed_at: project.base_app_deployed_at || null,

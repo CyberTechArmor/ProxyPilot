@@ -34,7 +34,7 @@ import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
   Archive, RotateCcw, Play, Lock, Download, GitBranch,
   Circle, Hammer, Unlock, Clock, Sparkles, TerminalSquare, MessageSquare, LayoutPanelLeft, Eye,
-  Library,
+  Library, Cpu,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
@@ -919,6 +919,10 @@ export default function ProjectDetail() {
       {/* Build harness — ProxyPilot's runner or the Claude Agent SDK, per project. */}
       <HarnessCard projectId={id} canEdit={canEdit && !isArchived} />
 
+      {/* AI provider — with multiple global providers configured, THIS project
+          must declare which one drives its phase-routed builds. */}
+      <ProviderCard project={project} canEdit={canEdit && !isArchived} onChanged={load} />
+
       {/* The app's own accounts (first admin, screen accounts, demo content). */}
       <ProjectAppAccess projectId={id} canEdit={canEdit && !isArchived} />
 
@@ -1215,6 +1219,91 @@ function HarnessCard({ projectId, canEdit }) {
         ) : null}
         {!canEdit ? (
           <p className="text-xs text-muted-foreground">Only editors can change the harness.</p>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Which AI providers drive this project's phase-routed builds. Multi-select:
+// pick one provider to pin the project to it (the choice BINDS — a broken
+// credential fails the build loudly instead of silently flipping), pick both
+// for Hybrid (cheap/mid on OpenAI, top tier on Anthropic), or pick none to
+// follow the global settings — every provider with a usable credential, which
+// with multiple providers configured IS hybrid. The project setting only ever
+// narrows what the platform has; it never adds a provider. Stored as
+// 'anthropic' | 'openai' | 'hybrid' (both) | null (default). MOBILE_FIRST:
+// one column on phones, ≥44px targets.
+function ProviderCard({ project, canEdit, onChanged }) {
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const pref = project?.provider_preference || null;
+  const selected = pref === 'hybrid' ? ['anthropic', 'openai'] : pref ? [pref] : [];
+
+  const save = async (nextSelected) => {
+    const preference = nextSelected.length === 2 ? 'hybrid' : (nextSelected[0] || '');
+    if (!project || busy) return;
+    setBusy(true);
+    try {
+      await api.mock2SetProviderPreference(project.id, preference);
+      const label = preference === 'hybrid' ? 'Hybrid (all providers)'
+        : preference === 'openai' ? 'OpenAI only'
+          : preference === 'anthropic' ? 'Anthropic only'
+            : 'Default — follow the global settings';
+      toast({ title: `AI providers: ${label}`, description: 'Saved. Applies from the next build cycle.' });
+      if (onChanged) onChanged();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not set the providers', description: err.message });
+    } finally { setBusy(false); }
+  };
+
+  const toggle = (value) => {
+    const next = selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value];
+    save(next);
+  };
+
+  const seg = (value, label, caption) => {
+    const on = selected.includes(value);
+    return (
+      <Button
+        type="button"
+        role="checkbox"
+        aria-checked={on}
+        variant={on ? 'default' : 'outline'}
+        disabled={!project || busy || !canEdit}
+        onClick={() => toggle(value)}
+        className="min-h-[44px] h-auto w-full flex-col items-start gap-0.5 py-2"
+      >
+        <span className="font-medium">{label}{on ? ' · selected' : ''}</span>
+        <span className="text-xs font-normal opacity-80">{caption}</span>
+      </Button>
+    );
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2"><Cpu className="h-4 w-4" /> AI providers</CardTitle>
+        <CardDescription>
+          Which providers&apos; models drive this project&apos;s builds. Select one to pin the project to it,
+          both for Hybrid (cheap/mid tiers on OpenAI, top tier on Anthropic), or none to follow the
+          global settings — with multiple providers configured, that default is Hybrid.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="group" aria-label="AI providers">
+          {seg('anthropic', 'Anthropic', 'Claude models (Opus / Sonnet / Haiku)')}
+          {seg('openai', 'OpenAI', 'GPT-5.6 (Sol / Terra / Luna)')}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {selected.length === 0
+            ? 'Default — following the global settings: every provider with a usable credential (Hybrid when more than one).'
+            : selected.length === 2
+              ? 'Hybrid — cheap/mid phases on OpenAI, top-tier phases (plan, review) on Anthropic.'
+              : `Pinned to ${selected[0] === 'openai' ? 'OpenAI' : 'Anthropic'} — if its credential breaks, builds fail loudly rather than switching providers on their own.`}
+        </p>
+        {!canEdit ? (
+          <p className="text-xs text-muted-foreground">Only editors can change the providers.</p>
         ) : null}
       </CardContent>
     </Card>

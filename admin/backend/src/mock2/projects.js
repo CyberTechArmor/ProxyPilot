@@ -146,6 +146,10 @@ const WRITABLE = new Set([
   // Never surfaced by the API — see toProjectResponse, which does not read it.
   'review_login_email', 'review_login_password_enc',
   'assets_fingerprint',
+  // Migration 554: which provider drives this project's phase-routed builds
+  // ('anthropic' | 'openai' | 'hybrid'; NULL = not chosen), and when the
+  // design chat's mandatory design choice (preset or AI) was made.
+  'provider_preference', 'design_choice_at',
 ]);
 export function updateProject(id, patch = {}) {
   const cols = Object.keys(patch).filter((k) => WRITABLE.has(k));

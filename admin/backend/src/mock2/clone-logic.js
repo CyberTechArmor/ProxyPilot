@@ -27,6 +27,9 @@ export function cloneCopyPatch(source) {
   for (const col of [
     'description', 'design_preset', 'harness', 'suggest_mode', 'clarify_mode',
     'design_approved_at', 'design_inventory_seq',
+    // The clone keeps the source's provider choice and its already-made design
+    // choice (a clone of a designed project must not re-prompt the popup).
+    'provider_preference', 'design_choice_at',
   ]) {
     if (source?.[col] != null) patch[col] = source[col];
   }

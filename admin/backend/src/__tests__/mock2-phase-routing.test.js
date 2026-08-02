@@ -12,6 +12,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  PROJECT_PROVIDER_PREFS,
+  normalizeProviderPreference,
+  applyProviderPreference,
   PHASE_POSTURES,
   PHASE_POSTURE_FLAG,
   normalizePhasePosture,
@@ -77,11 +80,13 @@ test('the shipped framework seed carries the marker in the build skill', async (
   assert.ok(review.body.includes(REVIEW_DIFF_INSTRUCTION));
 });
 
-test('phaseRoutingApplies: marker AND toggle — either missing → the single-model path', () => {
+test('phaseRoutingApplies: the toggle governs every build — framework marker no longer gates', () => {
   assert.equal(phaseRoutingApplies({ skillsJson: MARKED_SKILLS, env: {} }), true);
   assert.equal(phaseRoutingApplies({ skillsJson: MARKED_SKILLS, env: { [PHASE_ROUTING_FLAG]: 'off' } }), false);
-  assert.equal(phaseRoutingApplies({ skillsJson: UNMARKED_SKILLS, env: {} }), false);
-  assert.equal(phaseRoutingApplies({}), false);
+  // Pre-marker framework versions phase-route too ("use the 5 phase for everything").
+  assert.equal(phaseRoutingApplies({ skillsJson: UNMARKED_SKILLS, env: {} }), true);
+  assert.equal(phaseRoutingApplies({}), true);
+  assert.equal(phaseRoutingApplies({ env: { [PHASE_ROUTING_FLAG]: 'off' } }), false);
 });
 
 // ---- provider detection (reuses the connector rows — one credential store) ----
@@ -281,6 +286,55 @@ test('every phase has a tier and every tier is one of cheap/mid/top', () => {
   for (const phase of BUILD_PHASES) {
     assert.ok(['cheap', 'mid', 'top'].includes(PHASE_TIER[phase]), `${phase} tier`);
   }
+});
+
+// ---- per-project provider preference (multiple global providers) ----
+
+test('multiple global providers: unset defaults to HYBRID (the global settings)', () => {
+  const both = ['anthropic', 'openai'];
+  // No preference set → follow the global configuration: all providers → the
+  // mixed map. No per-project choice is required.
+  const unset = applyProviderPreference({ providers: both, preference: null });
+  assert.deepEqual(unset, { ok: true, providers: both });
+  assert.equal(resolvePhaseModelMap({ providers: unset.providers }).scenario, 'both');
+  // An explicit single-provider choice narrows the map to that vendor's column.
+  const anth = applyProviderPreference({ providers: both, preference: 'anthropic' });
+  assert.deepEqual(anth, { ok: true, providers: ['anthropic'] });
+  assert.equal(resolvePhaseModelMap({ providers: anth.providers }).scenario, 'anthropic');
+  const oai = applyProviderPreference({ providers: both, preference: 'openai' });
+  assert.deepEqual(oai, { ok: true, providers: ['openai'] });
+  // 'hybrid' (both providers selected) is the explicit spelling of the default.
+  const hyb = applyProviderPreference({ providers: both, preference: 'hybrid' });
+  assert.deepEqual(hyb.providers, both);
+  assert.equal(resolvePhaseModelMap({ providers: hyb.providers }).scenario, 'both');
+});
+
+test('single global provider: nothing to choose — unset/hybrid never block', () => {
+  // One provider, no preference → no choice required.
+  assert.deepEqual(applyProviderPreference({ providers: ['anthropic'], preference: null }),
+    { ok: true, providers: ['anthropic'] });
+  // 'hybrid' with one provider is just that provider.
+  assert.deepEqual(applyProviderPreference({ providers: ['openai'], preference: 'hybrid' }),
+    { ok: true, providers: ['openai'] });
+  // Zero providers passes through so resolvePhaseModelMap raises ITS refusal.
+  assert.deepEqual(applyProviderPreference({ providers: [], preference: 'hybrid' }),
+    { ok: true, providers: [] });
+});
+
+test('a chosen provider whose credential broke fails loudly — never silently flips', () => {
+  // The project chose OpenAI; the OpenAI key later broke while Anthropic still
+  // works. The choice binds: refuse and name the broken provider, don't run
+  // the build on a provider the project didn't pick.
+  const r = applyProviderPreference({ providers: ['anthropic'], preference: 'openai' });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /openai/);
+  assert.match(r.error, /credential/);
+  // A junk/unroutable stored value behaves as unset → the global default.
+  const r2 = applyProviderPreference({ providers: ['anthropic', 'openai'], preference: 'gemini' });
+  assert.deepEqual(r2, { ok: true, providers: ['anthropic', 'openai'] });
+  assert.deepEqual(PROJECT_PROVIDER_PREFS, ['anthropic', 'openai', 'hybrid']);
+  assert.equal(normalizeProviderPreference('HYBRID'), 'hybrid');
+  assert.equal(normalizeProviderPreference('gemini'), null);
 });
 
 // ---- cost postures (the five selectable presets) ----

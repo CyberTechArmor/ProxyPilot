@@ -60,10 +60,14 @@ export function frameworkSupportsPhaseRouting(skillsJson) {
 }
 
 // The one question the runner asks at cycle start: does the phased pipeline
-// govern THIS cycle? Both gates must pass; either failing means the untouched
-// single-model path (never an error).
-export function phaseRoutingApplies({ skillsJson = null, env = {} } = {}) {
-  return phaseRoutingMode(env) === 'on' && frameworkSupportsPhaseRouting(skillsJson);
+// govern THIS cycle? The operator toggle decides — for EVERY build mode
+// (full / mvp / quick) and every framework version. 'off' means the untouched
+// single-model path (never an error). The framework marker is informational
+// (it tells project-side skills the phased contract applies); it no longer
+// gates the router — operator decision 2026-08: "use the 5 phase for
+// everything", including projects pinned to pre-marker framework versions.
+export function phaseRoutingApplies({ skillsJson = null, env = {} } = {}) { // eslint-disable-line no-unused-vars
+  return phaseRoutingMode(env) === 'on';
 }
 
 // ---- the five phases and their tiers ----
@@ -144,6 +148,50 @@ export function detectPhaseProviders(connectors = []) {
     if (PHASE_PROVIDERS.includes(p)) found.add(p);
   }
   return PHASE_PROVIDERS.filter((p) => found.has(p));
+}
+
+// ---- per-project provider preference ----
+
+// A project may narrow which of the globally configured providers drive its
+// builds: 'anthropic' | 'openai' (that provider only) | 'hybrid' (all
+// providers → the mixed map) | NULL/unset (follow the global settings — every
+// provider with a usable credential, which with multiple providers IS the
+// hybrid map). The project setting only ever narrows; it never conjures a
+// provider the platform doesn't have.
+export const PROJECT_PROVIDER_PREFS = Object.freeze(['anthropic', 'openai', 'hybrid']);
+
+export function normalizeProviderPreference(value) {
+  const v = String(value || '').trim().toLowerCase();
+  return PROJECT_PROVIDER_PREFS.includes(v) ? v : null;
+}
+
+// applyProviderPreference — narrow the globally detected providers by the
+// project's declared preference. Returns { ok, providers } or { ok:false,
+// error }. Pure; the caller runs it between detectPhaseProviders and
+// resolvePhaseModelMap.
+//
+//   unset / junk → the global default: everything configured (multiple
+//                  providers default to HYBRID — no per-project choice needed)
+//   'hybrid'     → everything configured, explicitly
+//   'anthropic' / 'openai' → that provider only, and it BINDS: if its
+//                  credential is gone the cycle fails loudly naming it —
+//                  never a silent flip to whichever provider still works.
+export function applyProviderPreference({ providers = [], preference = null } = {}) {
+  const detected = PHASE_PROVIDERS.filter((p) => (providers || []).includes(p));
+  const pref = normalizeProviderPreference(preference);
+  if (pref && pref !== 'hybrid') {
+    if (!detected.includes(pref)) {
+      return {
+        ok: false,
+        error: `This project is set to the ${pref} provider, but no usable ${pref} credential is configured. `
+          + 'Fix the connector, or change the project\'s AI provider choice.',
+      };
+    }
+    return { ok: true, providers: [pref] };
+  }
+  // hybrid / unset: the global default — all configured providers (zero is
+  // handed to resolvePhaseModelMap, which owns the no-provider refusal).
+  return { ok: true, providers: detected };
 }
 
 // resolvePhaseModelMap — the phase → { model, provider, tier } map for this

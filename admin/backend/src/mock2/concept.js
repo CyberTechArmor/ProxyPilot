@@ -79,6 +79,11 @@ import { startBuild } from './audit.js';
 import { getLaneTuning, getDesignArtDirection } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
 import { applyDesignPreset, applyExploreDesign, getDesignPreset, parseDesignDoc, DESIGN_DOC_FORMAT } from './design-presets.js';
+import {
+  mockupPipelinePlan, buildDesignPlanTask, buildExecutorTask, DESIGN_PLAN_SYSTEM_PROMPT,
+  DESIGN_REQUIREMENTS_PATH, DESIGN_REQUIREMENTS_SYSTEM_PROMPT, buildDesignRequirementsTask,
+  mockupPipelineModels, DESIGN_REQUIREMENTS_BUILD_NOTE,
+} from './mockup-pipeline-logic.js';
 import { replaceScreenPlan, queueScreens, drainScreenQueue } from './screen-plan.js';
 import { INITIAL_BUILD_INSTRUCTION_PREFIX } from './screen-plan-logic.js';
 import { MODEL_PRIMARY } from './models.js';
@@ -103,7 +108,8 @@ const INITIAL_BUILD_INSTRUCTION = `${INITIAL_BUILD_INSTRUCTION_PREFIX}: implemen
   + '2) The approved mockup at state/mockups/current.html is the visual contract — READ IT FIRST and reproduce its layout, navigation structure (including patterns like a mobile bottom tab bar), component arrangement, and interaction patterns, screen by screen. state/design.css is NOT just tokens: it carries the mockup\'s own component CSS verbatim — put the class names it defines on your elements for what they cover, style anything genuinely new on var(--...) from the same file, and never hardcode a color or spacing value a token provides. A screen of plain elements on the base shell is not a built screen. '
   + '3) The inventory\'s actions are CAPABILITIES users must be able to perform, not button captions: put each one where the design says it belongs — menus, detail views, settings — not all on the top level. '
   + '4) Restraint is part of the contract: prefer the mockup\'s density; when a check seems to push toward a control the design does not show, the design wins — say so in your summary. '
-  + '5) Anything you cannot finish this cycle: mark it "Not built yet" (disabled control + badge) only if the mockup shows its control; otherwise leave it out and say so in your summary — never a dead or silently missing element.';
+  + '5) Anything you cannot finish this cycle: mark it "Not built yet" (disabled control + badge) only if the mockup shows its control; otherwise leave it out and say so in your summary — never a dead or silently missing element. '
+  + DESIGN_REQUIREMENTS_BUILD_NOTE;
 
 // Bound the HTML we round-trip so a runaway mockup can't blow the token envelope
 // (R5) or the working tree. A real mockup is well under this.
@@ -742,6 +748,54 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // This turn's attachments FIRST (the operator just handed them over, so
     // they are the most immediate intent), then the library's.
     const mockupImages = [...hydrateAttachments(projectId, userAttachments), ...assetPics.images];
+
+    // ---- two-stage preset pipeline (mockup-pipeline-logic) ----
+    // A REAL design preset + pipeline on → the flagship writes the render/edit
+    // PLAN and a Sonnet/Terra-level executor carries it out (tweaks execute on
+    // the Luna/Haiku tier). Explore / "let the AI decide" keeps the flagship
+    // render untouched — a fresh look is where it earns its price. Every
+    // failure here is fail-open to the legacy single-model path.
+    const pipeline = !explore
+      ? mockupPipelinePlan({ preset: project.design_preset, provider: ready.mockup.connector?.provider, env: process.env })
+      : null;
+    let requirementsDocText = '';
+    if (pipeline) {
+      try {
+        const rd = await readWorkingFile(containerName, DESIGN_REQUIREMENTS_PATH);
+        if (rd.ok) requirementsDocText = String(rd.content || '').slice(0, 20000);
+      } catch { /* the document is optional context */ }
+    }
+    let pipelinePlanText = null; // set right before a pipelined full render
+    const runDesignPlanStep = async ({ tweak = false } = {}) => {
+      if (!pipeline) return null;
+      try {
+        setJob(projectId, {
+          phase: 'designing', kind: 'turn', cycleId: cycle.id,
+          message: tweak ? 'Design director planning the change…' : 'Design director writing the render plan…',
+        });
+        const presetName = getDesignPreset(project.design_preset)?.name || project.design_preset;
+        const res = await callStepTurn('mockup-design-plan', {
+          connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: pipeline.planner,
+          system: stepSystemPrompt('mockup-design-plan', DESIGN_PLAN_SYSTEM_PROMPT, {}), tools: [],
+          transcript: [{
+            role: 'user',
+            text: buildDesignPlanTask({
+              brief: String(decision.brief || '').trim(), presetName,
+              hasMockup: !!currentHtml, tweak, requirementsDoc: requirementsDocText,
+            }),
+            ...(mockupImages.length && !tweak ? { images: mockupImages } : {}),
+          }],
+          timeoutMs: 300000, effort: 'high',
+        });
+        if (res.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: res.modelUsed || pipeline.planner, usage: res.usage, step: 'mockup-design-plan' });
+        const plan = res.ok ? String(res.text || '').trim() : '';
+        // A thin plan is worse than none — fall back to the flagship render.
+        return plan.length > 100 ? plan : null;
+      } catch (e) {
+        console.warn('[mock2] mockup design-plan step failed (flagship render path applies):', e?.message);
+        return null;
+      }
+    };
     // STREAM the render (Anthropic guidance for long output / large max_tokens /
     // image input): a big non-streaming render — worsened by attached images and
     // adaptive thinking pushing time-to-first-byte past Node's ~5-min undici
@@ -800,18 +854,27 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // thinking-off "pure transcription" produced exactly the flat, junior
       // first designs the operator flagged. Iterations on an existing mockup
       // keep the fast lane defaults (they really are transcription).
-      const renderModel = mockupRenderModel(process.env, ready.mockup.model);
-      const deepRender = explore || !currentHtml || restyleBrief;
+      // A pipelined render (design plan in hand) executes on the cheaper
+      // executor as pure transcription of the director's spec — thinking off,
+      // whole budget to the HTML. Without a plan, the flagship path stands.
+      const piped = !!(pipeline && pipelinePlanText);
+      const renderModel = piped ? pipeline.executor : mockupRenderModel(process.env, ready.mockup.model);
+      const deepRender = !piped && (explore || !currentHtml || restyleBrief);
       // Step override applied to the tuned baseline, not the call: forceModel
       // (the slot-model fallback retry) must stay the last word, and the
       // existing /model/i fallback below IS this step's bad-override guard.
       const mockupTuned = resolveStepTuning('mockup-render', deepRender
         ? { model: renderModel, effort: 'high', thinking: null }
-        : applyLaneTuning({ model: renderModel, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')), getHarnessStepTuning());
+        : applyLaneTuning({ model: renderModel, effort: piped ? 'high' : 'low', thinking: 'off' }, getLaneTuning('mockup')), getHarnessStepTuning());
       return callModelTurn({
         connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: forceModel || mockupTuned.model,
         system: stepSystemPrompt('mockup-render', buildMockupSystemPrompt({ designSystem: boundDesignSystem }), { DESIGN_SYSTEM: boundDesignSystem }),
-        tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }],
+        tools: [],
+        transcript: [{
+          role: 'user',
+          text: piped ? buildExecutorTask({ plan: pipelinePlanText, originalTask: mockupTask }) : mockupTask,
+          ...(mockupImages.length ? { images: mockupImages } : {}),
+        }],
         maxTokens: modelMaxOutputTokens(forceModel || mockupTuned.model),
         timeoutMs: 900000,
         effort: mockupTuned.effort,
@@ -866,9 +929,17 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       setJob(projectId, { phase: 'designing', message: 'Applying a targeted tweak to the mockup…', kind: 'turn', cycleId: cycle.id });
       let lastEdits = null; // the most recent parsed (non-FULL_RERENDER) edit set that failed
       try {
-        const editModel = mockupRenderModel(process.env, ready.mockup.model);
+        // Pipelined tweak: the flagship plans the exact edits, the Luna/Haiku
+        // tier executes them (plan failure → the legacy flagship tweak).
+        const tweakPlan = pipeline ? await runDesignPlanStep({ tweak: true }) : null;
+        const editModel = (pipeline && tweakPlan) ? pipeline.tweakExecutor : mockupRenderModel(process.env, ready.mockup.model);
         const editSystem = stepSystemPrompt('mockup-tweak', buildMockupEditSystemPrompt(), {});
-        const firstTurn = { role: 'user', text: `Revision request:\n${decision.brief}\n\nCurrent mockup HTML:\n${currentHtml}` };
+        const firstTurn = {
+          role: 'user',
+          text: `Revision request:\n${decision.brief}\n\n`
+            + (tweakPlan ? `EDIT PLAN from the design director — follow it exactly:\n${tweakPlan}\n\n` : '')
+            + `Current mockup HTML:\n${currentHtml}`,
+        };
         const applyParsed = (parsed) => {
           const applied = applyMockupEdits(currentHtml, parsed.edits);
           if (applied.ok && isPlausibleMockup(applied.html)) {
@@ -1024,6 +1095,10 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       return res.text;
     };
     if (!tweaked) try {
+      // Two-stage preset pipeline: get the flagship's render plan BEFORE the
+      // full render, so mockupCall executes it on the cheaper executor. A null
+      // plan (no preset / step failed / plan too thin) keeps the flagship path.
+      if (pipeline && !pipelinePlanText) pipelinePlanText = await runDesignPlanStep({ tweak: false });
       // Budgets are sized from the CURRENT document (a revision must be able
       // to re-emit the whole thing plus growth — the old flat 40k truncated
       // large multi-screen documents by construction), streamed so there is
@@ -1033,8 +1108,9 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // so spend is priced on the model that actually served the call.
       {
         const pref = mockupRenderModel(process.env, ready.mockup.model);
-        activeModel = (explore || !currentHtml || restyleBrief) ? pref
-          : applyLaneTuning({ model: pref, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')).model;
+        activeModel = (pipeline && pipelinePlanText) ? pipeline.executor
+          : (explore || !currentHtml || restyleBrief) ? pref
+            : applyLaneTuning({ model: pref, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')).model;
       }
       let res = await mockupCall();
       if (!res.ok && res.timedOut) {
@@ -1375,6 +1451,47 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
       + `${design.tokenCount} tokens, dark theme ${design.hasDark ? 'carried' : 'ABSENT'}`);
   } catch (e) {
     console.warn('[mock2] design-token extraction failed (build falls back to framework defaults):', e?.message);
+  }
+
+  // The design-requirements DOCUMENT (mockup-pipeline-logic): alongside the
+  // HTML mockup and the inventory, the flagship writes
+  // state/design-requirements.md — design requirements, functional
+  // requirements (what is being built and why), helpful context, and every
+  // user ask that is FUNCTION rather than design (a summarizer cannot recover
+  // those later). Written for preset AND AI-derived designs alike; on-theme
+  // renders and every build read it. Best-effort — never blocks approval.
+  try {
+    setJob(projectId, { phase: 'approving', message: 'Writing the design-requirements document…', kind: 'approval', cycleId: cycle.id });
+    const roles = mockupPipelineModels(ready.chat.connector?.provider);
+    const docModel = roles?.planner || MODEL_PRIMARY;
+    const presetName = project.design_preset && project.design_preset !== 'ai'
+      ? (getDesignPreset(project.design_preset)?.name || project.design_preset)
+      : '';
+    const chatDigest = conversationRecap(listMessages(projectId), { max: 40 }).slice(0, 30000);
+    const docRes = await callStepTurn('design-requirements-doc', {
+      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: docModel,
+      system: stepSystemPrompt('design-requirements-doc', DESIGN_REQUIREMENTS_SYSTEM_PROMPT, {}), tools: [],
+      transcript: [{
+        role: 'user',
+        text: buildDesignRequirementsTask({
+          projectName: project.name, presetName, chatDigest, inventoryJson: invJson.slice(0, 60000),
+        }),
+      }],
+      timeoutMs: 300000, effort: 'high',
+    });
+    if (docRes.ok) {
+      recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: docRes.modelUsed || docModel, usage: docRes.usage, step: 'design-requirements-doc' });
+      const doc = String(docRes.text || '').trim();
+      if (doc.length > 200) {
+        await writeWorkingFile(containerName, DESIGN_REQUIREMENTS_PATH, `${doc}\n`);
+      } else {
+        console.warn('[mock2] design-requirements doc too thin — not written');
+      }
+    } else {
+      console.warn('[mock2] design-requirements doc generation failed (approval proceeds):', docRes.error);
+    }
+  } catch (e) {
+    console.warn('[mock2] design-requirements doc step failed (approval proceeds):', e?.message);
   }
 
   await archiveMockups(containerName);

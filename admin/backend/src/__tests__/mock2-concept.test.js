@@ -31,7 +31,10 @@ test('CONCEPT_CHAT_TOOLS: exactly one tool, generate_mockup — no write/exec', 
   assert.ok(!CONCEPT_CHAT_TOOL_NAMES.includes('exec_in_container'));
   const t = CONCEPT_CHAT_TOOLS[0];
   assert.equal(t.input_schema.type, 'object');
-  assert.deepEqual(t.input_schema.required, ['brief']);
+  // scope is REQUIRED now — an omitted scope used to default to a silent full
+  // re-render, which is the expensive outcome the ladder exists to avoid.
+  assert.deepEqual(t.input_schema.required, ['brief', 'scope']);
+  assert.match(t.input_schema.properties.scope.description, /BIAS SMALL/);
 });
 
 // ---- prompts inject the pinned design system (ADR-003) ----
@@ -130,10 +133,40 @@ test('inventoryCounts: totals screens, fields, actions', () => {
 
 // ---- chat → model transcript ----
 
-test('classifyConceptTurn: detects generate_mockup + pulls the brief (scope defaults full)', () => {
-  assert.deepEqual(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: '  a form  ' } }]), { generateMockup: true, brief: 'a form', scope: 'full', screen: null });
-  assert.deepEqual(classifyConceptTurn([]), { generateMockup: false, brief: null, scope: 'full', screen: null });
-  assert.deepEqual(classifyConceptTurn([{ name: 'other' }]), { generateMockup: false, brief: null, scope: 'full', screen: null });
+test('classifyConceptTurn: detects generate_mockup + pulls the brief (first mockup is full)', () => {
+  assert.deepEqual(
+    classifyConceptTurn([{ name: 'generate_mockup', input: { brief: '  a form  ' } }]),
+    { generateMockup: true, brief: 'a form', scope: 'full', screen: null, demoted: false },
+  );
+  assert.deepEqual(classifyConceptTurn([]), { generateMockup: false, brief: null, scope: 'full', screen: null, demoted: false });
+  assert.deepEqual(classifyConceptTurn([{ name: 'other' }]), { generateMockup: false, brief: null, scope: 'full', screen: null, demoted: false });
+});
+
+test('classifyConceptTurn: on an existing mockup, an unjustified full is DEMOTED to a tweak', () => {
+  const call = (input) => classifyConceptTurn([{ name: 'generate_mockup', input }], { hasMockup: true });
+  // The reported failure mode: the model asked for scope "full" on a small
+  // revision and rewrote 71k characters over 8 minutes. Small briefs now run
+  // the ladder from the bottom — it escalates by itself if too small.
+  const small = call({ brief: 'Make the sidebar icons smaller and fix the overlapping labels', scope: 'full' });
+  assert.equal(small.scope, 'tweak');
+  assert.equal(small.demoted, true);
+  // A missing scope on an existing mockup is the same demotion.
+  assert.equal(call({ brief: 'Round the card corners' }).scope, 'tweak');
+  // Declared small scopes are believed as-is.
+  assert.equal(call({ brief: 'anything', scope: 'screen', screen: 'editor' }).scope, 'screen');
+  assert.equal(call({ brief: 'anything', scope: 'tweak' }).scope, 'tweak');
+  // Structural signals justify full: restyles, new screens, navigation.
+  for (const brief of [
+    'Restyle the whole app to the dark palette',
+    'Add a new screen for weekly reports',
+    'Rework the navigation structure across screens',
+  ]) {
+    const r = call({ brief, scope: 'full' });
+    assert.equal(r.scope, 'full', brief);
+    assert.equal(r.demoted, false, brief);
+  }
+  // So does a genuinely long brief (a full redesign described in detail).
+  assert.equal(call({ brief: 'x'.repeat(1500), scope: 'full' }).scope, 'full');
 });
 
 test('buildConceptTranscript: maps user/assistant, skips system, appends new user text', () => {

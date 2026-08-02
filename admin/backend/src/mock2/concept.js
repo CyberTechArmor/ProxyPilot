@@ -710,7 +710,18 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // reply remains visible while the design generates) and is cleared exactly
   // when the durable assistant message lands below.
   recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: chatRes.modelUsed || ready.chat.model, usage: chatRes.usage, step: 'concept-chat' });
-  const decision = classifyConceptTurn(chatRes.toolCalls);
+  const decision = classifyConceptTurn(chatRes.toolCalls, { hasMockup });
+  // A demoted full → tweak is said OUT LOUD (and durably): the operator must
+  // be able to see why a "rework everything" didn't happen — and that it will
+  // escalate on its own if the small pass turns out too small.
+  if (decision.generateMockup && decision.demoted) {
+    try {
+      insertMessage({
+        projectId, kind: 'system', cycleId: cycle.id,
+        body: 'Scoped down: this revision reads as a small change, so it runs as a targeted tweak instead of a full re-render. It escalates by itself (tweak → one screen → full) if it turns out bigger.',
+      });
+    } catch { /* best effort */ }
+  }
 
   // 2) If the model asked for a mockup, render it on the mockup slot and write it
   //    into the container (the only container write the concept stage performs).

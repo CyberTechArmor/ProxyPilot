@@ -546,12 +546,23 @@ function ActivityMessage({ text }) {
 // same kind of work in two different ways is two things to learn, and the one
 // with the poorer version reads as the poorer product — the design stage had a
 // single muted line where the build stage had a timeline.
-export function ActivityStream({ items = [], working = false }) {
+export function ActivityStream({ items = [], working = false, model = null, modelDetail = null }) {
   if (!items.length && !working) return null;
   return (
     <div className="overflow-hidden rounded-xl border bg-gradient-to-b from-muted/40 to-muted/10">
       <div className="flex items-center gap-1.5 border-b bg-muted/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         <Loader2 className="h-3 w-3 animate-spin text-primary" /> Working
+        {model ? (
+          // WHICH model is doing these steps — the phase-routed/routed model
+          // driving this cycle's build conversation (operator ask: name the
+          // model on the task, in the frontend).
+          <span
+            className="ml-auto normal-case font-mono font-normal tracking-normal truncate max-w-[55%] rounded bg-background/60 px-1.5 py-0.5 text-[10px]"
+            title={modelDetail || `This build is running on ${model}`}
+          >
+            {model}
+          </span>
+        ) : null}
       </div>
       <ol className="m-0 list-none space-y-0.5 p-2">
         {items.map((it, i) => (
@@ -578,6 +589,7 @@ export function ChatMessageList({
   scrollRef, messages = [], openIds, canEdit, answering, onAnswer,
   working = false, workingLabel = 'Working…', emptyLabel, projectId = null,
   partialText = null, onQuickUpdate = null, quickBusyId = null, onFix = null, fixBusyId = null, onRedo = null, activity = [],
+  activityModel = null, activityModelDetail = null,
   // `footer` renders INSIDE the scroll container, after the newest message —
   // for live state that belongs to the conversation's "now" (build queue,
   // stall banner, verification checklist). Stacking these under the composer
@@ -611,7 +623,7 @@ export function ChatMessageList({
       {working && !partialText ? (
         activity.length ? (
           // Rich "what's being worked on" stream (file ops + narration).
-          <ActivityStream items={activity} working />
+          <ActivityStream items={activity} working model={activityModel} modelDetail={activityModelDetail} />
         ) : (
           <div data-scroll-skip className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />

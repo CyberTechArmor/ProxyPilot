@@ -32,6 +32,7 @@ import {
 } from 'lucide-react';
 import { SetupProgress } from './ProjectPreview';
 import ProjectAssets from './ProjectAssets';
+import ChatModeToggle from './ChatModeToggle';
 import { ChatBubble, RuleQuestion, StreamingBubble, ActivityStream } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
@@ -39,6 +40,11 @@ import { uploadReferenceFiles } from '@/lib/reference-uploads';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
 const STAGE_LABELS = { concept: 'Concept', define: 'Define', build: 'Build', run: 'Run' };
+
+// What "Accept plan" sends, as a design turn: the plan conversation is already
+// in the same message stream, so the prompt only needs to say "go".
+const ACCEPT_PLAN_PROMPT = 'I accept the plan we worked out above. Turn it into the design: '
+  + 'generate the first mockup that implements the plan.';
 
 // The persistent stage indicator (Concept → Define → Build → Run). The current
 // stage is highlighted; earlier stages read as done. Derived server-side from
@@ -87,13 +93,25 @@ function sameNarration(a, b) {
 export default function ConceptStage({
   projectId, project, canEdit, onApproved, onMockupChanged, archived = false, fill = false,
   provLog = null, provMessage = null, onOpenAssets = null,
+  // Conversation mode (Plan/Design/Build) — controlled by the parent when it
+  // owns the toggle across stages (ProjectDetail), self-owned otherwise (the
+  // phone MockupWorkspace, the read-only archive).
+  mode: modeProp = null, onModeChange = null,
 }) {
   const { toast } = useToast();
   const [data, setData] = useState(null); // { messages, job, audit_job, stage, preview_url, open_question_ids, ... }
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
-  const [mode, setMode] = useState('design');
+  // A fresh project starts in Plan — talk the idea through first; Design is one
+  // tap away. A project that already has a mockup is mid-design, so it opens
+  // there instead.
+  const [ownMode, setOwnMode] = useState(project?.current_mockup_id ? 'design' : 'plan');
+  const mode = modeProp === 'plan' || modeProp === 'design' ? modeProp : ownMode;
+  const setMode = useCallback((m) => {
+    setOwnMode(m);
+    if (onModeChange) onModeChange(m);
+  }, [onModeChange]);
   // Design direction for design-mode turns: 'theme' binds the project's chosen
   // preset; 'explore' lets the AI design freely ("let the AI decide" — thinking
   // on, high effort; adopted only if approved). No longer a per-turn toggle:
@@ -135,7 +153,15 @@ export default function ConceptStage({
         ? 'Let the AI decide'
         : (designPresets || []).find((p) => p.key === presetKey)?.name || presetKey;
       toast({ title: `Design: ${name}`, description: presetKey === 'ai' ? 'The AI designs freely — approving the mockup adopts its look.' : 'Mockups stay on this design; you can change it anytime from the Design button.' });
+      // An "Accept plan" waiting on this choice continues on its own — the
+      // direction is passed explicitly because the state set just above hasn't
+      // re-rendered into this closure yet.
+      if (pendingAcceptPlanRef.current) {
+        pendingAcceptPlanRef.current = false;
+        startDesignFromPlan(presetKey === 'ai' ? 'explore' : 'theme');
+      }
     } catch (err) {
+      pendingAcceptPlanRef.current = false;
       toast({ variant: 'destructive', title: 'Could not save the design choice', description: err.message });
     } finally { setChoosingDesign(false); }
   };
@@ -621,6 +647,35 @@ export default function ConceptStage({
   // provisions or the model works, and press Send once it unlocks.
   const sendDisabled = busy || jobActive || !online || approved;
 
+  // ---- Accept plan → Design handoff ----
+  // The Plan chat's exit: one button that accepts the plan, flips the toggle
+  // to Design, and starts the first mockup automatically — the plan
+  // conversation is already in the design partner's context, so the prompt
+  // just says "go". It respects the mandatory design choice: with none made
+  // yet the choice popup opens first and the handoff continues right after
+  // choosing (pendingAcceptPlanRef bridges the two).
+  const planHasReply = shownMessages.some((m) => m.kind === 'assistant');
+  const pendingAcceptPlanRef = useRef(false);
+  const startDesignFromPlan = async (direction = designDirection) => {
+    setBusy(true);
+    try {
+      const res = await api.mock2SendChatMessage(projectId, ACCEPT_PLAN_PROMPT, 'design', [], direction);
+      if (res.refused) {
+        toast({ variant: 'destructive', title: 'Message not processed', description: res.reason || 'Quota exceeded.' });
+      } else {
+        toast({ title: 'Plan accepted', description: 'Turning the plan into the first mockup — watch the preview.' });
+      }
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start the design', description: err.message });
+    } finally { setBusy(false); }
+  };
+  const acceptPlan = () => {
+    setMode('design');
+    if (!designChosen) { pendingAcceptPlanRef.current = true; openDesignChoice(); return; }
+    startDesignFromPlan();
+  };
+
   // ---- fire-and-forget while provisioning ----
   // Offline pre-approval, both actions QUEUE instead of being dead: the queued
   // action runs server-side the moment provisioning completes (design_send →
@@ -752,25 +807,13 @@ export default function ConceptStage({
           </div>
         ) : null}
 
-        {/* Plan vs Design — above the chat. Plan talks through the idea without
-            touching the mockup; Design generates/iterates it. */}
+        {/* Plan / Design / Build — above the chat. Plan talks through the idea
+            without touching the mockup; Design generates/iterates it; Build is
+            greyed out here until the design stage completes (accept the mockup,
+            build the MVP, or skip the mockup) — at which point the parent
+            switches to the build chat, which carries the same toggle back. */}
         {editable && !approved ? (
-          <div className="inline-flex self-start rounded-md border p-0.5 shrink-0" role="tablist" aria-label="Conversation mode">
-            <button
-              type="button" role="tab" aria-selected={mode === 'plan'} title="Plan — think through the idea without changing the mockup"
-              onClick={() => setMode('plan')}
-              className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'plan' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
-            >
-              <ClipboardList className="h-3.5 w-3.5" /> Plan
-            </button>
-            <button
-              type="button" role="tab" aria-selected={mode === 'design'} title="Design — generate and iterate the mockup"
-              onClick={() => setMode('design')}
-              className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'design' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
-            >
-              <Sparkles className="h-3.5 w-3.5" /> Design
-            </button>
-          </div>
+          <ChatModeToggle mode={mode} onMode={setMode} buildUnlocked={false} />
         ) : null}
 
         {/* Conversation. Live: grows to fill the column (flex-1 + min-h-0).
@@ -960,6 +1003,22 @@ export default function ConceptStage({
                   {designChosen
                     ? `Design: ${project?.design_preset === 'ai' || designDirection === 'explore' ? 'AI decides' : (designPresets || []).find((p) => p.key === project?.design_preset)?.name || project?.design_preset || 'chosen'}`
                     : 'Choose design'}
+                </Button>
+              ) : null}
+              {/* Accept plan — the Plan chat's exit: switches to Design and
+                  turns the plan into the first mockup automatically. Unlocks
+                  once the plan partner has replied (there is a plan to accept). */}
+              {mode === 'plan' && online ? (
+                <Button
+                  variant="outline"
+                  className="h-11 sm:h-10 shrink-0"
+                  disabled={sendDisabled || !planHasReply}
+                  title={planHasReply
+                    ? 'Accept the plan — switch to Design and turn the plan into the first mockup automatically'
+                    : 'Talk the idea through first — Accept unlocks once the plan partner has replied'}
+                  onClick={acceptPlan}
+                >
+                  <CheckCircle2 className="h-4 w-4 mr-1" /> Accept plan
                 </Button>
               ) : null}
               {hasMockup && online ? (
@@ -1262,7 +1321,16 @@ export default function ConceptStage({
           Opens unprompted on a fresh design chat and again on any send attempt
           until a choice is made; Skip mockup never requires it. Full-screen on
           phones (MOBILE_FIRST), one column of ≥44px cards. */}
-      <Dialog open={designChoiceOpen} onOpenChange={(o) => { if (!choosingDesign) setDesignChoiceOpen(o); }}>
+      <Dialog
+        open={designChoiceOpen}
+        onOpenChange={(o) => {
+          if (choosingDesign) return;
+          setDesignChoiceOpen(o);
+          // Dismissing without choosing abandons a pending "Accept plan"
+          // handoff — nothing should auto-send later off a stale flag.
+          if (!o) pendingAcceptPlanRef.current = false;
+        }}
+      >
         <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-lg sm:h-auto sm:max-h-[85vh] sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Choose your design</DialogTitle>

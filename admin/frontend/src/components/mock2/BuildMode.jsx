@@ -24,6 +24,7 @@ import { ensureNotifyPermission, notifyBrowser } from '@/lib/browser-notify';
 
 export default function BuildMode({
   projectId, project, canEdit, isAdmin, previewSrc, provLog, provMessage, onChanged, onBuilt,
+  onChatMode = null,
 }) {
   const { toast } = useToast();
   const [cycle, setCycle] = useState(null);
@@ -229,6 +230,7 @@ export default function BuildMode({
           lastEventAt={lastEventAt}
           stallMinutes={stallMinutes}
           onStarted={refresh}
+          onChatMode={onChatMode}
         />
       </div>
     </div>

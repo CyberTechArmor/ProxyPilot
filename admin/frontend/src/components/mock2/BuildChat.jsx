@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import AnnotateApp from './AnnotateApp';
 import BuildLogViewer from './BuildLogViewer';
+import ChatModeToggle from './ChatModeToggle';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import ChangeHistory from './ChangeHistory';
@@ -89,6 +90,11 @@ export default function BuildChat({
   // makes the whole page scroll (operator report: "please fit everything
   // in screen").
   fill = false,
+  // Plan/Design/Build — the same conversation-mode toggle the design chat
+  // carries, so the user can step back into the (read-only) plan/design
+  // conversation from here. The parent (ProjectDetail) owns the state; when
+  // it doesn't pass a handler the toggle simply isn't shown.
+  onChatMode = null,
 }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
@@ -995,6 +1001,12 @@ export default function BuildChat({
           ) : null}
           </div>
         </div>
+        {/* Plan / Design / Build — Build is this chat; Plan and Design step
+            back to the (now read-only) design-stage conversation. Build stays
+            unlocked for the life of the project once it opens. */}
+        {onChatMode ? (
+          <ChatModeToggle className="mt-1" mode="build" onMode={onChatMode} buildUnlocked />
+        ) : null}
       </CardHeader>
       {/* Parsed at the mount point rather than carried on the message, so the
           dialog and the card cannot disagree about what the findings are. */}

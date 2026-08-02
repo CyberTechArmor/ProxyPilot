@@ -40,7 +40,7 @@ const PHONE_PANEL_KEYS = ['chat', 'preview', 'assets'];
 
 export default function Flightdeck({
   projectId, project, canEdit, isAdmin, previewSrc, provLog, provMessage, onChanged, onBuilt,
-  onSwitchView, onShowDetails, onOpenNav, panel: panelProp, onPanel,
+  onSwitchView, onShowDetails, onOpenNav, panel: panelProp, onPanel, onChatMode = null,
 }) {
   const online = project?.lifecycle === 'active';
   const containerName = project?.container_name || null;
@@ -220,7 +220,8 @@ export default function Flightdeck({
     );
   const chatPane = (
     <BuildChat projectId={projectId} project={project} cycle={cycle} canEdit={canEdit} isAdmin={isAdmin} online={online} active={active}
-      job={job} buildQueue={buildQueue} activity={activity} lastEventAt={lastEventAt} stallMinutes={stallMinutes} onStarted={load} fill />
+      job={job} buildQueue={buildQueue} activity={activity} lastEventAt={lastEventAt} stallMinutes={stallMinutes} onStarted={load} fill
+      onChatMode={onChatMode} />
   );
   const terminalPane = online
     ? <ProjectTerminal projectId={projectId} containerName={containerName} defaultOpen fill />

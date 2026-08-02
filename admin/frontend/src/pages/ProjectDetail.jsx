@@ -59,6 +59,7 @@ import ProjectAppAccess from '@/components/mock2/ProjectAppAccess';
 import ProjectDesignElements from '@/components/mock2/ProjectDesignElements';
 import ProjectRules from '@/components/mock2/ProjectRules';
 import ProjectSetup from '@/components/mock2/ProjectSetup';
+import ChatModeToggle from '@/components/mock2/ChatModeToggle';
 import MobilePanelBar from '@/components/mock2/MobilePanelBar';
 import { fireConfetti } from '@/lib/confetti';
 
@@ -89,6 +90,25 @@ export default function ProjectDetail() {
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
   const [provStatus, setProvStatus] = useState(null); // live provisioning progress + step log
   const [tab, setTab] = useState('chat'); // 'chat' | 'terminal' | 'details'
+  // The Chat tab's conversation mode — Plan / Design / Build, one toggle across
+  // both stages. null = "auto": Build once the design is approved, otherwise
+  // Design if a mockup already exists, otherwise Plan (a fresh project starts
+  // by talking the idea through). The user's explicit pick overrides auto, and
+  // Build stays selectable for the life of the project once it unlocks — so
+  // stepping back into Plan/Design always has a way back.
+  const [chatMode, setChatMode] = useState(null);
+  const chatModeResolved = chatMode
+    ?? (project?.stage?.design_approved ? 'build' : (project?.current_mockup_id ? 'design' : 'plan'));
+  // The design-stage exits (mockup accepted → MVP built, or mockup skipped) all
+  // flip design_approved — land in the build chat the moment that happens, even
+  // if the user had parked the toggle on Plan or Design.
+  const prevApprovedRef = useRef(null);
+  useEffect(() => {
+    if (!project) return;
+    const approvedNow = !!project.stage?.design_approved;
+    if (prevApprovedRef.current === false && approvedNow) setChatMode('build');
+    prevApprovedRef.current = approvedNow;
+  }, [project]);
   // Details sub-tab — the card list grew past scannable, so it is grouped into
   // categories. Spend is the default (the most-asked question).
   const [detailsTab, setDetailsTab] = useState('spend');
@@ -113,9 +133,10 @@ export default function ProjectDetail() {
   // hook lives ABOVE the early returns below so hook order stays stable; the
   // Flightdeck condition is inlined (project may still be loading here).
   useEffect(() => {
-    const fdActive = !!project?.stage?.design_approved && buildView === 'flightdeck' && project?.lifecycle !== 'archived';
+    const fdActive = !!project?.stage?.design_approved && chatModeResolved === 'build'
+      && buildView === 'flightdeck' && project?.lifecycle !== 'archived';
     if (fdActive && tab === 'terminal') setTab('chat');
-  }, [project, buildView, tab]);
+  }, [project, buildView, tab, chatModeResolved]);
   // On a phone the studio takes the WHOLE screen — BOTH stages, mockup and
   // build: ask the shell to drop its mobile top bar and content padding, and
   // drive the nav drawer from the workspace's own bottom bar instead. Reset on
@@ -132,7 +153,11 @@ export default function ProjectDetail() {
   const phoneStudio = isMobile
     && !!project
     && project.lifecycle !== 'archived'
-    && (project.stage?.design_approved ? buildView === 'flightdeck' : true);
+    && (project.stage?.design_approved
+      // Post-approval with Plan/Design selected the chat is a stacked read-only
+      // review page, not a panelled workspace — keep the shell's chrome there.
+      ? chatModeResolved === 'build' && buildView === 'flightdeck'
+      : true);
   const mobileStudio = phoneStudio && tab === 'chat';
   useEffect(() => {
     if (!setChromeless) return undefined;
@@ -398,7 +423,9 @@ export default function ProjectDetail() {
   // Flightdeck fills the whole build area: when active we hide the
   // Chat/Terminal/Details tab strip (the terminal is built in; chat is the
   // right pane) and toggle its own center between the workspace and Details.
-  const flightdeckActive = designApproved && buildView === 'flightdeck' && !isArchived;
+  // Only while the conversation mode is Build — stepping back to Plan/Design
+  // swaps the workspace for the read-only design review.
+  const flightdeckActive = designApproved && chatModeResolved === 'build' && buildView === 'flightdeck' && !isArchived;
   // The bottom bar the phone workspaces use, carried onto the Details page.
   // Same panel set as whichever stage the project is in, so tapping Details and
   // tapping back is one gesture each way rather than a dead end. Nothing on a
@@ -445,22 +472,6 @@ export default function ProjectDetail() {
         </div>
       ) : null}
 
-      {/* Guided setup — above the tabs on purpose, because it is the answer to
-          "what do I do now" and a card buried in Details is not. It hides
-          itself when the flow is set to classic, when it is dismissed, or when
-          every step is done, so it is not a permanent fixture.
-          Suppressed in Flightdeck and on a phone in the mockup studio: both are
-          deliberately chromeless workspaces. */}
-      {!flightdeckActive && !mobileStudio ? (
-        <div className="shrink-0">
-          <ProjectSetup
-            projectId={id}
-            canEdit={canEdit && !isArchived}
-            onJump={() => setTab('chat')}
-          />
-        </div>
-      ) : null}
-
       {/* The stage flow (Chat to App → Build → Run) header was retired: the Build
           action lives at the bottom of the design chat (ConceptStage), and the
           Mockup/Build stage is shown on the project tiles. */}
@@ -497,7 +508,21 @@ export default function ProjectDetail() {
               <div className="hidden sm:block">
                 <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} />
               </div>
-              {designApproved ? (
+              {designApproved && chatModeResolved !== 'build' ? (
+                // Build is unlocked but the toggle is parked on Plan/Design —
+                // the design-stage conversation, read-only (the design is
+                // locked in), with the toggle as the way back to Build.
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <div className="mx-auto w-full max-w-3xl space-y-3">
+                    <ChatModeToggle mode={chatModeResolved} onMode={setChatMode} buildUnlocked />
+                    <p className="text-sm text-muted-foreground">
+                      The design is locked in, so the plan and design conversation is read-only history now —
+                      switch to Build to keep changing the app.
+                    </p>
+                    <ConceptStage projectId={id} project={project} canEdit={false} archived />
+                  </div>
+                </div>
+              ) : designApproved ? (
                 // Build phase — Flightdeck IDE workspace by default (files +
                 // editor + agent chat + terminal + preview, one shared sandbox),
                 // with a toggle back to the classic build view. Both drive the
@@ -519,6 +544,7 @@ export default function ProjectDetail() {
                       onShowDetails={() => setTab('details')}
                       panel={studioPanel} onPanel={setStudioPanel}
                       onOpenNav={openNav || null}
+                      onChatMode={setChatMode}
                     />
                   </Suspense>
                 ) : (
@@ -542,6 +568,7 @@ export default function ProjectDetail() {
                       provMessage={provStatus?.progress?.message || null}
                       onChanged={load}
                       onBuilt={handleMockupChanged}
+                      onChatMode={setChatMode}
                     />
                   </div>
                 )
@@ -563,6 +590,7 @@ export default function ProjectDetail() {
                   onOpenNav={openNav || null}
                   onShowDetails={() => setTab('details')}
                   panel={studioPanel} onPanel={setStudioPanel}
+                  chatMode={chatModeResolved} onChatMode={setChatMode}
                 />
               ) : previewSrc ? (
                 // Design mode — the live mockup preview on the left, the design
@@ -586,6 +614,7 @@ export default function ProjectDetail() {
                       provLog={provStatus?.progress?.log || null}
                       provMessage={provStatus?.progress?.message || null}
                       onOpenAssets={() => setDesignPane('assets')}
+                      mode={chatModeResolved} onModeChange={setChatMode}
                     />
                   </div>
                 </div>
@@ -612,6 +641,7 @@ export default function ProjectDetail() {
                       // This layout already has the library on screen below, so
                       // "Add assets" scrolls to it rather than switching panes.
                       onOpenAssets={() => assetsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                      mode={chatModeResolved} onModeChange={setChatMode}
                     />
                     {/* Before the first mockup exists is the MOST useful moment
                         to hand over a logo or a reference shot — it is what the
@@ -786,9 +816,9 @@ export default function ProjectDetail() {
         </CardContent>
       </Card>
 
-      {/* Setup guide — the first-run checklist, reviewable here even after the
-          panel above the tabs was dismissed (and the way to bring it back). */}
-      <ProjectSetup projectId={id} canEdit={canEdit && !isArchived} onJump={() => setTab('chat')} variant="details" />
+      {/* Setup guide — the first-run checklist. This Overview card is its ONE
+          home (operator request: not also above the tabs). */}
+      <ProjectSetup projectId={id} canEdit={canEdit && !isArchived} onJump={() => setTab('chat')} />
 
       {/* Design archive — where the design started. Once the design is approved
           the Chat tab becomes the build/run/maintenance chat, so the original
@@ -1470,6 +1500,7 @@ const MOCKUP_PANELS = [
 function MockupWorkspace({
   projectId, project, canEdit, previewSrc, previewReloadNonce, provLog, provMessage,
   onApproved, onMockupChanged, onOpenNav, onShowDetails, panel: panelProp, onPanel,
+  chatMode = null, onChatMode = null,
 }) {
   // Start where the work is: the chat until a mockup exists, the mockup once
   // one does. The panel is MIRRORED to the parent (onPanel) rather than owned
@@ -1501,6 +1532,7 @@ function MockupWorkspace({
             onApproved={onApproved} onMockupChanged={onMockupChanged}
             provLog={provLog} provMessage={provMessage}
             onOpenAssets={() => setPanel('assets')}
+            mode={chatMode} onModeChange={onChatMode}
           />
         ) : panel === 'assets' ? (
           <div className="min-h-0 flex-1 overflow-y-auto p-2">

@@ -458,12 +458,54 @@ export function swapOpenAiTokenParam(body = {}) {
   return body;
 }
 
+// adaptOpenAiBodyForError — given a 400 response, the ONE body change that
+// addresses it, or null when the error isn't an adaptable parameter shape.
+// The adaptable classes (both observed on live builds):
+//   * output-cap spelling (max_tokens ↔ max_completion_tokens);
+//   * "Function tools with reasoning_effort are not supported for <model> in
+//     /v1/chat/completions … set reasoning_effort to 'none'" — the server
+//     applies a DEFAULT reasoning effort on gpt-5.x reasoning models, so a
+//     request that never mentioned reasoning_effort still trips it; the fix
+//     is to opt out explicitly;
+//   * reasoning_effort itself unsupported on the model → strip it.
+export function adaptOpenAiBodyForError(body = {}, status, bodyText) {
+  if (Number(status) !== 400) return null;
+  const t = String(bodyText || '');
+  if (isTokenParamRejection(status, t)) {
+    return { body: swapOpenAiTokenParam(body), reason: 'rejected the output-cap parameter spelling — swapping' };
+  }
+  if (/reasoning_effort/i.test(t) && /tools/i.test(t) && body.reasoning_effort !== 'none') {
+    return { body: { ...body, reasoning_effort: 'none' }, reason: "tools + default reasoning conflict — setting reasoning_effort:'none'" };
+  }
+  if (/reasoning_effort/i.test(t) && /(unsupported[_ ]parameter|unknown[_ ]parameter|not supported|unrecognized)/i.test(t) && 'reasoning_effort' in body) {
+    const { reasoning_effort: _drop, ...rest } = body;
+    return { body: rest, reason: 'reasoning_effort unsupported here — removing it' };
+  }
+  return null;
+}
+
+// What an adaptation taught us about a model, remembered for the rest of the
+// process so the runner's hundreds of calls don't each pay a wasted 400
+// round-trip re-learning it. Keyed provider|model; values are body patches
+// applied up front on later calls.
+const openAiParamMemory = new Map();
+
+function openAiMemoryKey(provider, model) { return `${provider}|${String(model || '').toLowerCase()}`; }
+
+function rememberOpenAiParams(provider, model, body) {
+  openAiParamMemory.set(openAiMemoryKey(provider, model), {
+    tokenParam: 'max_completion_tokens' in body ? 'max_completion_tokens' : 'max_tokens',
+    reasoningEffortNone: body.reasoning_effort === 'none',
+  });
+}
+
 async function callOpenAiCompatible({ provider, apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal }) {
   const url = `${openAiBase(provider, baseUrl)}/chat/completions`;
   const messages = [{ role: 'system', content: system }, ...openAiMessages(transcript)];
+  const learned = openAiParamMemory.get(openAiMemoryKey(provider, model)) || null;
   let body = {
     model,
-    [openAiTokenParamForProvider(provider)]: maxTokens,
+    [learned?.tokenParam || openAiTokenParamForProvider(provider)]: maxTokens,
     messages,
     // An EMPTY tools array is rejected by some OpenAI-compatible servers —
     // omit tools/tool_choice entirely on tool-free calls.
@@ -472,17 +514,32 @@ async function callOpenAiCompatible({ provider, apiKey, baseUrl, model, system, 
       tool_choice: 'auto',
     } : {}),
   };
+  // gpt-5.6-luna applies a DEFAULT reasoning effort, and /v1/chat/completions
+  // rejects function tools under it ("… set reasoning_effort to 'none'" — the
+  // live-build failure) — opt out explicitly on tool calls, up front for the
+  // known model and remembered per model after an adaptive retry teaches us.
+  // Deliberately NOT family-wide: if sol/terra DO support tools + reasoning,
+  // a blanket 'none' would silently disable their reasoning; they learn via
+  // one adaptation instead.
+  if (tools.length && provider === 'openai' && (learned?.reasoningEffortNone || /gpt-5[.-]6-luna\b/.test(String(model).toLowerCase()))) {
+    body.reasoning_effort = 'none';
+  }
   const headers = { 'content-type': 'application/json' };
   if (apiKey) headers.authorization = `Bearer ${apiKey}`;
   let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
   let text = await res.text();
-  if (!res.ok && isTokenParamRejection(res.status, text)) {
-    // The endpoint wants the other output-cap spelling — swap and retry once.
-    body = swapOpenAiTokenParam(body);
-    console.warn(`[mock2] ${provider}/${model} rejected the output-cap parameter — retrying with ${'max_tokens' in body ? 'max_tokens' : 'max_completion_tokens'}`);
+  // Adaptive parameter retries: at most two, each applying the ONE change the
+  // 400 asked for (output-cap spelling, reasoning_effort opt-out/strip). A
+  // successful adaptation is remembered so later calls start correct.
+  for (let i = 0; i < 2 && !res.ok; i++) {
+    const adapted = adaptOpenAiBodyForError(body, res.status, text);
+    if (!adapted) break;
+    body = adapted.body;
+    console.warn(`[mock2] ${provider}/${model}: ${adapted.reason} — retrying`);
     res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
     text = await res.text();
   }
+  if (res.ok) rememberOpenAiParams(provider, model, body);
   if (!res.ok) return { ok: false, error: `${provider} HTTP ${res.status}: ${text.slice(0, 300)}`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
   let j; try { j = JSON.parse(text); } catch { return { ok: false, error: `${provider}: non-JSON response`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; }
   const msg = j.choices?.[0]?.message || {};

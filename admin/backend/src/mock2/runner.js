@@ -1173,28 +1173,24 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           try { updateCycle(cycle.id, { routing_json: JSON.stringify({ ...routingDoc, implement_lane: lane.lane }) }); } catch { /* best effort */ }
         }
         }
-        // PLAN PHASE, made real — two cases:
-        //  * the CHEAP tier will build (first attempt on the mechanical
-        //    lane): the map's top-tier plan model first writes the
-        //    implementation plan the executor follows — the five-phase
-        //    pipeline's phase 2 as an actual call, not a map entry. This is
-        //    what makes Luna-first safe beyond the gates: the cross-file
-        //    invariants come from top-tier thinking, the typing from the
-        //    cheap model.
-        //  * the INVENTORY (MVP) BUILD — the biggest single build a project
-        //    runs. It used to skip this whole block, so the resolved phase
-        //    map was stamped on the cycle and then ignored: every step of a
-        //    $2 MVP ran on the mid-tier implement model (operator report,
-        //    project 54 — 177 of 178 model-stamped events on one model).
-        //    The top-tier plan model now reads the inventory + design
-        //    requirements first and writes the plan the executor follows,
-        //    which is also where contract misses (action parity, hidden
-        //    controls) are cheapest to prevent.
+        // PLAN PHASE, made real — for EVERY first-attempt build whose plan
+        // model differs from its executor, not only the cheap lane. It began
+        // as a cheap-lane safety net (top-tier invariants over Luna's
+        // typing), but that left the common case single-model: a quick
+        // update classified complex ran wholly on the mid tier, and the
+        // inventory (MVP) build skipped the block entirely — so the resolved
+        // phase map was stamped on the cycle and then ignored, and the
+        // operator watched every step of every build run on one model
+        // (project 54: 177 of 178 model-stamped events on the same model,
+        // twice reported). Now the map's top-tier plan model writes the
+        // implementation plan first and the lane's executor carries it out —
+        // which is also where contract misses (action parity, hidden
+        // controls) are cheapest to prevent. Same-model maps (ultra_cheap /
+        // max_quality postures) skip it: a separate call on the same model
+        // adds cost, not thinking. Repeat attempts skip it too — the ladder
+        // is already escalating the executor itself.
         // Fail-open: no plan → the build runs on the instruction alone.
-        if (pm.plan?.model && (
-          isInventoryBuild
-          || (attempts === 0 && lane.lane === 'implement_mechanical' && ready.model === pm.implement_mechanical?.model)
-        )) {
+        if (pm.plan?.model && pm.plan.model !== ready.model && (isInventoryBuild || attempts === 0)) {
           const planConn = (!pm.plan.provider || pm.plan.provider === ready.connector.provider)
             ? { connector: ready.connector, apiKey: ready.apiKey }
             : agenticConnectorForProvider(pm.plan.provider, { projectId, userId: cycle.initiated_by });
@@ -1220,9 +1216,15 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
                 insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: planConn.connector.id, model: planRes.modelUsed || pm.plan.model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'build-plan' });
               } catch (e) { console.warn('[mock2] build-plan ledger write failed:', e?.message); }
               phasePlanBrief = formatPlanForTask(planRes.text, pm.plan.model);
-              logEvent('note', {
-                role: 'system',
-                content: `Plan phase (${pm.plan.model}) wrote the implementation plan; ${ready.model} executes it.`,
+              // ai_message, not note: the live activity feed surfaces
+              // ai_message/tool_call rows only, so as a note the plan phase
+              // was invisible — the feed showed every step on the executor's
+              // model even when a top-tier plan had just run (operator
+              // report: "only terra is being used"). This row is the plan
+              // model's tag appearing in the feed.
+              logEvent('ai_message', {
+                role: 'assistant',
+                content: `Implementation plan written (plan phase) — ${ready.model} executes it.`,
                 meta: { step: 'build-plan', model: pm.plan.model, executor: ready.model },
               });
             } else {

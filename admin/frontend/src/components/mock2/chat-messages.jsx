@@ -510,6 +510,25 @@ function Rail({ children }) {
   );
 }
 
+// Compact per-action model tag ("terra", "luna", "opus-5"): the family+tier
+// without the vendor prefix, so a 360px row still fits. Full id on hover.
+function shortModel(id) {
+  const s = String(id || '');
+  return s.replace(/^claude-/, '').replace(/^gpt-[\d.]+-/, '').replace(/-\d{8}$/, '');
+}
+
+function ModelTag({ model }) {
+  if (!model) return null;
+  return (
+    <span
+      className="ml-auto shrink-0 rounded bg-muted/60 px-1 py-px font-mono text-[10px] text-muted-foreground"
+      title={model}
+    >
+      {shortModel(model)}
+    </span>
+  );
+}
+
 function ActivityRow({ it }) {
   const meta = ACTION_META[it.action] || ACTION_META.other;
   const { Icon } = meta;
@@ -528,16 +547,18 @@ function ActivityRow({ it }) {
         {it.detail ? <span className="min-w-0 truncate text-muted-foreground">{it.detail}</span> : null}
         {typeof it.adds === 'number' && it.adds > 0 ? <span className="shrink-0 font-mono text-[11px] font-medium text-emerald-500">+{it.adds}</span> : null}
         {typeof it.dels === 'number' && it.dels > 0 ? <span className="shrink-0 font-mono text-[11px] font-medium text-red-500">−{it.dels}</span> : null}
+        <ModelTag model={it.model} />
       </div>
     </li>
   );
 }
 
-function ActivityMessage({ text }) {
+function ActivityMessage({ text, model = null }) {
   return (
     <li className="flex gap-2">
       <Rail />
       <p className="min-w-0 flex-1 whitespace-pre-wrap break-words py-0.5 text-xs leading-relaxed text-foreground/80">{text}</p>
+      <ModelTag model={model} />
     </li>
   );
 }
@@ -567,7 +588,7 @@ export function ActivityStream({ items = [], working = false, model = null, mode
       <ol className="m-0 list-none space-y-0.5 p-2">
         {items.map((it, i) => (
           it.type === 'message'
-            ? <ActivityMessage key={`m${it.seq ?? i}`} text={it.text} />
+            ? <ActivityMessage key={`m${it.seq ?? i}`} text={it.text} model={it.model} />
             : <ActivityRow key={`t${it.seq ?? i}`} it={it} />
         ))}
         {working ? (

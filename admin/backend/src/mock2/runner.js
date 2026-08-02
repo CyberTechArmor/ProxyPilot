@@ -1706,12 +1706,16 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       content: result.text || '',
       meta: {
         turn, tools: (result.toolCalls || []).map((t) => t.name),
+        model: result.modelUsed || ready.model,
         input_tokens: u.inputTokens, output_tokens: u.outputTokens,
         cache_read_tokens: cacheRead, cache_write_tokens: cacheWrite, cost_cents: costCents,
       },
     });
     for (const tc of result.toolCalls || []) {
-      logEvent('tool_call', { role: 'assistant', content: tc.name, meta: { name: tc.name, input: tc.input || {} } });
+      // Per-action model attribution: the Working feed names WHICH model made
+      // each Read/Edit/Ran (operator ask — the lane ladder and escalations
+      // mean the answer is no longer one model per project).
+      logEvent('tool_call', { role: 'assistant', content: tc.name, meta: { name: tc.name, input: tc.input || {}, model: result.modelUsed || ready.model } });
     }
     const decision = classifyTurn(result.toolCalls, { stopReason: result.stopReason });
 

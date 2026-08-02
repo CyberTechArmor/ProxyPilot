@@ -9,11 +9,15 @@ import { groupToolCallsForExecution, isReadOnlyTool, READ_ONLY_TOOLS } from '../
 const ev = (kind, meta, content = null, seq = 1) => ({ seq, kind, content, meta, created_at: '2026-01-01T00:00:00Z' });
 const pick = (it) => ({ action: it.action, verb: it.verb, file: it.file });
 
-test('ai_message → narration row (empty dropped)', () => {
+test('ai_message → narration row (empty dropped); per-action model rides meta', () => {
   assert.deepEqual(deriveActivityItem(ev('ai_message', null, 'Recomposing the modal…')), {
-    seq: 1, at: '2026-01-01T00:00:00Z', type: 'message', text: 'Recomposing the modal…',
+    seq: 1, at: '2026-01-01T00:00:00Z', model: null, type: 'message', text: 'Recomposing the modal…',
   });
   assert.equal(deriveActivityItem(ev('ai_message', null, '   ')), null);
+  // The runner stamps meta.model on every ai_message/tool_call — each row
+  // names the model that made it (operator ask: per-action attribution).
+  assert.equal(deriveActivityItem(ev('ai_message', { model: 'gpt-5.6-luna' }, 'Reading…')).model, 'gpt-5.6-luna');
+  assert.equal(deriveActivityItem(ev('tool_call', { name: 'Read', input: { file_path: 'a.ts' }, model: 'gpt-5.6-terra' })).model, 'gpt-5.6-terra');
 });
 
 test('Edit → action/verb + basename + add/del line counts', () => {

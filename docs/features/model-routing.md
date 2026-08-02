@@ -228,11 +228,24 @@ Mechanics (pure layer: `phase-routing-logic.js`, tested in
 The mockup lane was the costliest line item (every render on the flagship).
 With a real design preset in force (`mockup-pipeline-logic.js`, toggle
 `MOCK2_MOCKUP_PIPELINE`, default on): the **flagship plans, a cheaper model
-executes** — `claude-fable-5`/`gpt-5.6-sol` writes a tailor-made render plan
-(`mockup-design-plan` step), `claude-sonnet-5`/`gpt-5.6-terra` renders it, and
-tweaks execute planned edits on `claude-haiku-4-5`/`gpt-5.6-luna`. Explore /
-"let the AI decide" keeps the direct flagship render, and every pipeline
-failure falls open to it.
+executes**, with hybrid role selection across the usable providers:
+
+- **Flagship (planner, requirements doc, elevation target): the BEST
+  available** — `claude-fable-5` whenever Anthropic is configured, else
+  `gpt-5.6-sol`.
+- **Every other role: the LOWEST-COST model at its tier**, priced live off
+  the sheet (`defaultModelPrice` is date-aware, so the mid tier flips from
+  Sonnet 5 to Terra automatically when the promo ends 2026-09-01; the cheap
+  tier is Luna while OpenAI is configured).
+- **Second failure elevates a tier**: an executor render that fails twice is
+  re-run once on the flagship; a tweak's corrective retry runs one tier up
+  (cheap → mid) instead of repeating the model that just missed.
+
+Cross-provider roles resolve their own connector (slot connector when
+providers match, else the first enabled connector with a usable key; no
+usable connector → the slot provider's tier model). Explore / "let the AI
+decide" keeps the direct flagship render, and every pipeline failure falls
+open to it.
 
 On approval, the flagship also writes **`state/design-requirements.md`**
 (`design-requirements-doc` step): design requirements, functional requirements

@@ -29,7 +29,8 @@ import { getProject, updateProject } from './projects.js';
 import { containerNameForProject, deployBaseApp } from './provision.js';
 import { projectHasBeenDeployed } from './cycles.js';
 import { buildCheckpointScript } from './template.js';
-import { getSlot, getConnector, decryptConnectorKey, effectivePrice } from './connectors.js';
+import { getSlot, getConnector, decryptConnectorKey, effectivePrice, listConnectors, isSecretDecryptable } from './connectors.js';
+import { detectPhaseProviders } from './phase-routing-logic.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
@@ -82,7 +83,7 @@ import { applyDesignPreset, applyExploreDesign, getDesignPreset, parseDesignDoc,
 import {
   mockupPipelinePlan, buildDesignPlanTask, buildExecutorTask, DESIGN_PLAN_SYSTEM_PROMPT,
   DESIGN_REQUIREMENTS_PATH, DESIGN_REQUIREMENTS_SYSTEM_PROMPT, buildDesignRequirementsTask,
-  mockupPipelineModels, DESIGN_REQUIREMENTS_BUILD_NOTE,
+  mockupPipelineModels, DESIGN_REQUIREMENTS_BUILD_NOTE, bestFlagship,
 } from './mockup-pipeline-logic.js';
 import { replaceScreenPlan, queueScreens, drainScreenQueue } from './screen-plan.js';
 import { INITIAL_BUILD_INSTRUCTION_PREFIX } from './screen-plan-logic.js';
@@ -755,9 +756,48 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // the Luna/Haiku tier). Explore / "let the AI decide" keeps the flagship
     // render untouched — a fresh look is where it earns its price. Every
     // failure here is fail-open to the legacy single-model path.
+    // Hybrid roles (operator rule 2026-08): planner = the BEST flagship
+    // across the usable providers (Fable 5 when Anthropic is configured, else
+    // Sol); executor/tweak = the LOWEST-COST model at that tier, priced live
+    // off the sheet. Detection failure degrades to the mockup connector's
+    // single-provider roles; each cross-provider role resolves its own
+    // connector below, falling back to the slot connector's tier model.
+    let usableProviders = null;
+    if (!explore) {
+      try {
+        usableProviders = detectPhaseProviders(listConnectors().map((c) => ({
+          provider: c.provider, enabled: !!c.enabled, keyUsable: isSecretDecryptable(c),
+        })));
+      } catch { usableProviders = null; }
+    }
     const pipeline = !explore
-      ? mockupPipelinePlan({ preset: project.design_preset, provider: ready.mockup.connector?.provider, env: process.env })
+      ? mockupPipelinePlan({
+        preset: project.design_preset, provider: ready.mockup.connector?.provider,
+        providers: usableProviders, env: process.env,
+      })
       : null;
+    // Resolve a connector for a cross-provider role: the mockup slot's when
+    // providers match, else the first enabled connector of that provider with
+    // a usable key. Null → the caller substitutes the slot connector + the
+    // slot provider's model for that tier (never a dead call).
+    const slotRoles = mockupPipelineModels(ready.mockup.connector?.provider);
+    const pipelineConn = (role) => {
+      if (!role) return null;
+      if (!role.provider || role.provider === ready.mockup.connector?.provider) {
+        return { connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: role.model };
+      }
+      try {
+        for (const c of listConnectors()) {
+          if (!c?.enabled || c.provider !== role.provider) continue;
+          const key = decryptConnectorKey(c);
+          if (!key) continue;
+          return { connector: c, apiKey: key, model: role.model };
+        }
+      } catch { /* fall through */ }
+      return null;
+    };
+    const roleCall = (role, slotTierModel) => pipelineConn(role)
+      || { connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: slotTierModel || ready.mockup.model };
     let requirementsDocText = '';
     if (pipeline) {
       try {
@@ -774,8 +814,9 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           message: tweak ? 'Design director planning the change…' : 'Design director writing the render plan…',
         });
         const presetName = getDesignPreset(project.design_preset)?.name || project.design_preset;
+        const plannerCall = roleCall(pipeline.planner, slotRoles?.planner);
         const res = await callStepTurn('mockup-design-plan', {
-          connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: pipeline.planner,
+          connector: plannerCall.connector, apiKey: plannerCall.apiKey, model: plannerCall.model,
           system: stepSystemPrompt('mockup-design-plan', DESIGN_PLAN_SYSTEM_PROMPT, {}), tools: [],
           transcript: [{
             role: 'user',
@@ -787,7 +828,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           }],
           timeoutMs: 300000, effort: 'high',
         });
-        if (res.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: res.modelUsed || pipeline.planner, usage: res.usage, step: 'mockup-design-plan' });
+        if (res.ok) recordSpend({ projectId, cycleId: cycle.id, connector: plannerCall.connector, model: res.modelUsed || plannerCall.model, usage: res.usage, step: 'mockup-design-plan' });
         const plan = res.ok ? String(res.text || '').trim() : '';
         // A thin plan is worse than none — fall back to the flagship render.
         return plan.length > 100 ? plan : null;
@@ -834,7 +875,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         }
       }
     };
-    const mockupCall = (forceModel = null) => {
+    const mockupCall = (forceModel = null, connOverride = null) => {
       streamedChars = 0;
       // A render is transcription of the brief onto the design system — pure
       // output. The lane default turns thinking OFF so the WHOLE budget goes
@@ -857,8 +898,10 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // A pipelined render (design plan in hand) executes on the cheaper
       // executor as pure transcription of the director's spec — thinking off,
       // whole budget to the HTML. Without a plan, the flagship path stands.
+      // `connOverride` carries the executor's (or, on elevation, the
+      // flagship's) cross-provider connector; absent → the mockup slot's.
       const piped = !!(pipeline && pipelinePlanText);
-      const renderModel = piped ? pipeline.executor : mockupRenderModel(process.env, ready.mockup.model);
+      const renderModel = piped ? (connOverride?.model || pipeline.executor.model) : mockupRenderModel(process.env, ready.mockup.model);
       const deepRender = !piped && (explore || !currentHtml || restyleBrief);
       // Step override applied to the tuned baseline, not the call: forceModel
       // (the slot-model fallback retry) must stay the last word, and the
@@ -867,7 +910,9 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         ? { model: renderModel, effort: 'high', thinking: null }
         : applyLaneTuning({ model: renderModel, effort: piped ? 'high' : 'low', thinking: 'off' }, getLaneTuning('mockup')), getHarnessStepTuning());
       return callModelTurn({
-        connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: forceModel || mockupTuned.model,
+        connector: connOverride?.connector || ready.mockup.connector,
+        apiKey: connOverride ? connOverride.apiKey : ready.mockup.apiKey,
+        model: forceModel || mockupTuned.model,
         system: stepSystemPrompt('mockup-render', buildMockupSystemPrompt({ designSystem: boundDesignSystem }), { DESIGN_SYSTEM: boundDesignSystem }),
         tools: [],
         transcript: [{
@@ -929,10 +974,18 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       setJob(projectId, { phase: 'designing', message: 'Applying a targeted tweak to the mockup…', kind: 'turn', cycleId: cycle.id });
       let lastEdits = null; // the most recent parsed (non-FULL_RERENDER) edit set that failed
       try {
-        // Pipelined tweak: the flagship plans the exact edits, the Luna/Haiku
-        // tier executes them (plan failure → the legacy flagship tweak).
+        // Pipelined tweak: the flagship plans the exact edits, the CHEAPEST
+        // cheap-tier model executes them (plan failure → the legacy flagship
+        // tweak). The corrective retry ELEVATES one tier (operator rule
+        // 2026-08: second failure climbs) instead of repeating the same model.
         const tweakPlan = pipeline ? await runDesignPlanStep({ tweak: true }) : null;
-        const editModel = (pipeline && tweakPlan) ? pipeline.tweakExecutor : mockupRenderModel(process.env, ready.mockup.model);
+        const tweakCall = (pipeline && tweakPlan)
+          ? roleCall(pipeline.tweakExecutor, slotRoles?.tweakExecutor)
+          : { connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: mockupRenderModel(process.env, ready.mockup.model) };
+        const retryCall = (pipeline && tweakPlan)
+          ? roleCall(pipeline.executor, slotRoles?.executor)
+          : tweakCall;
+        const editModel = tweakCall.model;
         const editSystem = stepSystemPrompt('mockup-tweak', buildMockupEditSystemPrompt(), {});
         const firstTurn = {
           role: 'user',
@@ -940,11 +993,11 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
             + (tweakPlan ? `EDIT PLAN from the design director — follow it exactly:\n${tweakPlan}\n\n` : '')
             + `Current mockup HTML:\n${currentHtml}`,
         };
-        const applyParsed = (parsed) => {
+        const applyParsed = (parsed, usedModel = editModel) => {
           const applied = applyMockupEdits(currentHtml, parsed.edits);
           if (applied.ok && isPlausibleMockup(applied.html)) {
             html = applied.html.slice(0, MAX_MOCKUP_CHARS);
-            activeModel = editModel;
+            activeModel = usedModel;
             tweaked = true;
             return null;
           }
@@ -952,34 +1005,34 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           return applied.ok ? 'the edited document was not a complete page' : applied.error;
         };
         const res = await callStepTurn('mockup-tweak', {
-          connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: editModel,
+          connector: tweakCall.connector, apiKey: tweakCall.apiKey, model: editModel,
           system: editSystem,
           tools: [],
           transcript: [firstTurn],
           timeoutMs: 300000, effort: 'high', thinking: 'off',
         });
         if (res.ok) {
-          recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: res.modelUsed || editModel, usage: res.usage, step: 'mockup-tweak' });
+          recordSpend({ projectId, cycleId: cycle.id, connector: tweakCall.connector, model: res.modelUsed || editModel, usage: res.usage, step: 'mockup-tweak' });
           const parsed = parseMockupEdits(res.text);
           if (parsed.ok && !parsed.fullRerender) {
             const failure = applyParsed(parsed);
             if (failure) {
-              // ONE corrective retry: same conversation, the exact miss named.
-              // Most tweak failures are copy-paste inexactness a second attempt
-              // fixes in seconds — far cheaper in time than any re-render.
-              setJob(projectId, { phase: 'designing', message: 'A tweak edit missed its target — retrying with corrections…', kind: 'turn', cycleId: cycle.id });
+              // ONE corrective retry: same conversation, the exact miss named
+              // — one tier UP when pipelined (cheap → mid), so a second
+              // failure never re-runs the model that just missed.
+              setJob(projectId, { phase: 'designing', message: `A tweak edit missed its target — retrying with corrections${retryCall.model !== editModel ? ` on ${retryCall.model}` : ''}…`, kind: 'turn', cycleId: cycle.id });
               const retry = await callStepTurn('mockup-tweak', {
-                connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: editModel,
+                connector: retryCall.connector, apiKey: retryCall.apiKey, model: retryCall.model,
                 system: editSystem,
                 tools: [],
                 transcript: [firstTurn, { role: 'assistant', text: res.text }, { role: 'user', text: buildTweakRetryMessage(failure) }],
                 timeoutMs: 300000, effort: 'high', thinking: 'off',
               });
               if (retry.ok) {
-                recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: retry.modelUsed || editModel, usage: retry.usage, step: 'mockup-tweak' });
+                recordSpend({ projectId, cycleId: cycle.id, connector: retryCall.connector, model: retry.modelUsed || retryCall.model, usage: retry.usage, step: 'mockup-tweak' });
                 const parsed2 = parseMockupEdits(retry.text);
                 if (parsed2.ok && !parsed2.fullRerender) {
-                  const failure2 = applyParsed(parsed2);
+                  const failure2 = applyParsed(parsed2, retryCall.model);
                   if (failure2) console.warn(`[mock2] mockup tweak retry did not apply cleanly (${failure2})`);
                 }
                 // A FULL_RERENDER on retry falls through (the model judged it
@@ -1106,26 +1159,31 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // the ceiling.
       // Mirror mockupCall's model resolution (preferred model + lane tuning)
       // so spend is priced on the model that actually served the call.
+      // A pipelined render carries the executor's own (possibly
+      // cross-provider) connector; spend records against it.
+      const execCall = (pipeline && pipelinePlanText) ? roleCall(pipeline.executor, slotRoles?.executor) : null;
+      let renderConn = execCall ? execCall.connector : ready.mockup.connector;
       {
         const pref = mockupRenderModel(process.env, ready.mockup.model);
-        activeModel = (pipeline && pipelinePlanText) ? pipeline.executor
+        activeModel = execCall ? execCall.model
           : (explore || !currentHtml || restyleBrief) ? pref
             : applyLaneTuning({ model: pref, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')).model;
       }
-      let res = await mockupCall();
+      let res = await mockupCall(null, execCall);
       if (!res.ok && res.timedOut) {
         setJob(projectId, { phase: 'designing', message: 'The first render attempt timed out — retrying once…', kind: 'turn', cycleId: cycle.id });
-        res = await mockupCall();
+        res = await mockupCall(null, execCall);
       }
       // Preferred-model fallback: an org whose key doesn't serve the preferred
       // model gets the assigned slot model instead of a dead render.
       if (!res.ok && activeModel !== ready.mockup.model && /model/i.test(String(res.error || '')) ) {
         setJob(projectId, { phase: 'designing', message: `The preferred render model was rejected — falling back to the assigned mockup model (${ready.mockup.model})…`, kind: 'turn', cycleId: cycle.id });
         activeModel = ready.mockup.model;
+        renderConn = ready.mockup.connector;
         res = await mockupCall(ready.mockup.model);
       }
       if (res.ok) {
-        recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: res.usage, step: 'mockup-render' });
+        recordSpend({ projectId, cycleId: cycle.id, connector: renderConn, model: activeModel, usage: res.usage, step: 'mockup-render' });
         html = extractMockupHtml(await completeRenderText(res)).slice(0, MAX_MOCKUP_CHARS);
         if (!isPlausibleMockup(html)) {
           // Not a usable page (prose instead of HTML, or truncation on a
@@ -1134,14 +1192,28 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           // whole turn, so the retry is the cheaper outcome in expectation.
           const why = res.stopReason === 'max_tokens' ? 'it ran out of output budget' : 'it was not a complete HTML page';
           setJob(projectId, { phase: 'designing', message: `The first render was unusable (${why}) — retrying once with a larger budget…`, kind: 'turn', cycleId: cycle.id });
-          const retry = await mockupCall(activeModel);
+          const retry = await mockupCall(activeModel, execCall);
           if (retry.ok) {
-            recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: retry.usage, step: 'mockup-render' });
+            recordSpend({ projectId, cycleId: cycle.id, connector: renderConn, model: activeModel, usage: retry.usage, step: 'mockup-render' });
             const h2 = extractMockupHtml(await completeRenderText(retry)).slice(0, MAX_MOCKUP_CHARS);
             if (isPlausibleMockup(h2)) { html = h2; failureDetail = null; }
             else if (!failureDetail) failureDetail = retry.stopReason === 'max_tokens' ? 'the render exceeded its output budget twice' : 'the model did not return a complete HTML page';
           } else {
             failureDetail = retry.error;
+          }
+          // Tier elevation (operator rule 2026-08): the executor failed TWICE
+          // — the flagship takes over for one final attempt. Only meaningful
+          // on a pipelined render (the non-piped path already ran the
+          // flagship).
+          if (failureDetail && execCall && pipeline) {
+            const flagCall = roleCall(pipeline.planner, slotRoles?.planner);
+            setJob(projectId, { phase: 'designing', message: `The executor model failed twice — elevating the render to ${flagCall.model}…`, kind: 'turn', cycleId: cycle.id });
+            const lifted = await mockupCall(flagCall.model, flagCall);
+            if (lifted.ok) {
+              recordSpend({ projectId, cycleId: cycle.id, connector: flagCall.connector, model: flagCall.model, usage: lifted.usage, step: 'mockup-render' });
+              const h3 = extractMockupHtml(await completeRenderText(lifted)).slice(0, MAX_MOCKUP_CHARS);
+              if (isPlausibleMockup(h3)) { html = h3; failureDetail = null; activeModel = flagCall.model; }
+            }
           }
         } else {
           failureDetail = null;
@@ -1462,8 +1534,20 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // renders and every build read it. Best-effort — never blocks approval.
   try {
     setJob(projectId, { phase: 'approving', message: 'Writing the design-requirements document…', kind: 'approval', cycleId: cycle.id });
-    const roles = mockupPipelineModels(ready.chat.connector?.provider);
-    const docModel = roles?.planner || MODEL_PRIMARY;
+    // The document runs on the BEST available flagship (hybrid rule): Fable 5
+    // when Anthropic is configured, else Sol — on the chat connector when
+    // providers match, else the slot-provider flagship as fallback.
+    let docModel = MODEL_PRIMARY;
+    try {
+      const provs = detectPhaseProviders(listConnectors().map((c) => ({
+        provider: c.provider, enabled: !!c.enabled, keyUsable: isSecretDecryptable(c),
+      })));
+      const flag = bestFlagship(provs);
+      if (flag && flag.provider === ready.chat.connector?.provider) docModel = flag.model;
+      else docModel = mockupPipelineModels(ready.chat.connector?.provider)?.planner || MODEL_PRIMARY;
+    } catch {
+      docModel = mockupPipelineModels(ready.chat.connector?.provider)?.planner || MODEL_PRIMARY;
+    }
     const presetName = project.design_preset && project.design_preset !== 'ai'
       ? (getDesignPreset(project.design_preset)?.name || project.design_preset)
       : '';

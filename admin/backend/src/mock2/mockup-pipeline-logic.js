@@ -25,6 +25,7 @@
 
 import { MODEL_FRONTIER, MODEL_BALANCED, MODEL_CHEAP } from './models.js';
 import { DESIGN_PRESET_AI } from './design-presets.js';
+import { defaultModelPrice } from './quota-logic.js';
 
 // ---- toggle (default on; 'off' restores single-model mockup renders) ----
 
@@ -58,12 +59,89 @@ export function mockupPipelineModels(provider) {
   return PIPELINE_MODELS[String(provider || '').trim().toLowerCase()] || null;
 }
 
-// The full decision: { planner, executor, tweakExecutor } when the two-stage
-// pipeline governs this render, else null (flagship/legacy path).
-export function mockupPipelinePlan({ preset = null, provider = null, env = {} } = {}) {
+// ---- hybrid roles (operator rule 2026-08: best flagship, cheapest tier) ----
+//
+// With the usable providers known, the roles go cross-provider like phase
+// routing does:
+//   * FLAGSHIP (planner + doc + escalation target): the BEST available —
+//     Fable 5 whenever Anthropic is configured (priced above Opus for a
+//     reason), else Sol.
+//   * every other role: the LOWEST-COST model at that tier across the
+//     configured providers, priced live off the sheet (defaultModelPrice is
+//     date-aware, so Sonnet-vs-Terra flips automatically when the Sonnet 5
+//     promo ends 2026-09-01).
+//   * on a SECOND failure of a role's model, the caller elevates one tier
+//     (executor → flagship; tweaks already climb the tweak→render ladder).
+
+const TIER_CANDIDATES = Object.freeze({
+  flagship: Object.freeze({ anthropic: MODEL_FRONTIER, openai: 'gpt-5.6-sol' }),
+  mid: Object.freeze({ anthropic: MODEL_BALANCED, openai: 'gpt-5.6-terra' }),
+  cheap: Object.freeze({ anthropic: MODEL_CHEAP, openai: 'gpt-5.6-luna' }),
+});
+
+// A comparable per-mtok rate for tier ranking: input + output list rate.
+// Renders are output-heavy, but the ordering is what matters and this stays
+// honest as the sheet changes. Unpriced models rank last (never chosen over
+// a priced one).
+export function blendedRateCents(model, { date = null } = {}) {
+  const p = defaultModelPrice(model, { date });
+  return p ? Number(p.input_cents_per_mtok || 0) + Number(p.output_cents_per_mtok || 0) : null;
+}
+
+export function cheapestAtTier(tier, providers = [], { date = null } = {}) {
+  const candidates = TIER_CANDIDATES[tier] || {};
+  let best = null;
+  for (const provider of providers || []) {
+    const model = candidates[provider];
+    if (!model) continue;
+    const rate = blendedRateCents(model, { date });
+    if (!best || (rate != null && (best.rate == null || rate < best.rate))) {
+      best = { model, provider, rate };
+    }
+  }
+  return best ? { model: best.model, provider: best.provider } : null;
+}
+
+export function bestFlagship(providers = []) {
+  // Fable 5 is the best available whenever Anthropic is configured; Sol
+  // otherwise. (Not a price pick — "for Flagship, default to the best".)
+  if ((providers || []).includes('anthropic')) return { model: MODEL_FRONTIER, provider: 'anthropic' };
+  if ((providers || []).includes('openai')) return { model: 'gpt-5.6-sol', provider: 'openai' };
+  return null;
+}
+
+// The hybrid role set for the configured providers, or null when none are
+// routable. Every role is { model, provider } so the caller can resolve a
+// connector per role (cross-provider, like the phase router).
+export function mockupPipelineRoles({ providers = [], date = null } = {}) {
+  const planner = bestFlagship(providers);
+  if (!planner) return null;
+  const executor = cheapestAtTier('mid', providers, { date });
+  const tweakExecutor = cheapestAtTier('cheap', providers, { date });
+  if (!executor || !tweakExecutor) return null;
+  return { planner, executor, tweakExecutor };
+}
+
+// The full decision: hybrid roles when the two-stage pipeline governs this
+// render, else null (flagship/legacy path). `providers` is the usable set
+// (detectPhaseProviders over the connector rows); when absent/empty the
+// single-connector fallback keys off `provider` (the mockup slot's), keeping
+// pre-hybrid behavior for installs the detector can't see.
+export function mockupPipelinePlan({ preset = null, provider = null, providers = null, env = {}, date = null } = {}) {
   if (mockupPipelineMode(env) !== 'on') return null;
   if (!pipelineAppliesForPreset(preset)) return null;
-  return mockupPipelineModels(provider);
+  if (Array.isArray(providers) && providers.length) {
+    const roles = mockupPipelineRoles({ providers, date });
+    if (roles) return roles;
+  }
+  const single = mockupPipelineModels(provider);
+  if (!single) return null;
+  const p = String(provider || '').trim().toLowerCase();
+  return {
+    planner: { model: single.planner, provider: p },
+    executor: { model: single.executor, provider: p },
+    tweakExecutor: { model: single.tweakExecutor, provider: p },
+  };
 }
 
 // ---- the design-plan step (flagship → tailor-made executor prompt) ----

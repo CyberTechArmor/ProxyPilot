@@ -18,6 +18,10 @@ import {
   DESIGN_REQUIREMENTS_SYSTEM_PROMPT,
   buildDesignRequirementsTask,
   DESIGN_REQUIREMENTS_BUILD_NOTE,
+  mockupPipelineRoles,
+  bestFlagship,
+  cheapestAtTier,
+  blendedRateCents,
 } from '../mock2/mockup-pipeline-logic.js';
 import { actionLabelParityMode, ACTION_LABEL_PARITY_FLAG } from '../mock2/acceptance-logic.js';
 
@@ -49,12 +53,45 @@ test('roles per provider: flagship plans, Sonnet/Terra renders, Luna/Haiku tweak
   assert.equal(mockupPipelineModels(null), null);
 });
 
-test('mockupPipelinePlan combines toggle + preset + provider', () => {
+test('mockupPipelinePlan combines toggle + preset + provider(s); roles carry provider', () => {
   const on = mockupPipelinePlan({ preset: 'portal-blue', provider: 'anthropic', env: {} });
-  assert.equal(on.planner, 'claude-fable-5');
+  assert.deepEqual(on.planner, { model: 'claude-fable-5', provider: 'anthropic' });
   assert.equal(mockupPipelinePlan({ preset: 'ai', provider: 'anthropic', env: {} }), null);
   assert.equal(mockupPipelinePlan({ preset: 'portal-blue', provider: 'anthropic', env: { [MOCKUP_PIPELINE_FLAG]: 'off' } }), null);
   assert.equal(mockupPipelinePlan({ preset: 'portal-blue', provider: 'ollama', env: {} }), null);
+  // Hybrid: an empty providers list falls back to the single-provider shape.
+  const fb = mockupPipelinePlan({ preset: 'portal-blue', provider: 'openai', providers: [], env: {} });
+  assert.deepEqual(fb.executor, { model: 'gpt-5.6-terra', provider: 'openai' });
+});
+
+// ---- hybrid roles (operator rule: best flagship, cheapest per tier) ----
+
+test('hybrid: flagship is the BEST available — Fable 5 whenever Anthropic is configured', () => {
+  assert.deepEqual(bestFlagship(['anthropic', 'openai']), { model: 'claude-fable-5', provider: 'anthropic' });
+  assert.deepEqual(bestFlagship(['openai']), { model: 'gpt-5.6-sol', provider: 'openai' });
+  assert.equal(bestFlagship([]), null);
+  const both = mockupPipelineRoles({ providers: ['anthropic', 'openai'], date: '2026-08-15' });
+  assert.equal(both.planner.model, 'claude-fable-5');
+});
+
+test('hybrid: every other role takes the LOWEST-COST model at its tier, date-aware', () => {
+  const both = ['anthropic', 'openai'];
+  // Cheap tier: Luna ($0.20+$1.20) undercuts Haiku ($1+$5) — always OpenAI.
+  assert.deepEqual(cheapestAtTier('cheap', both, { date: '2026-08-15' }), { model: 'gpt-5.6-luna', provider: 'openai' });
+  // Mid tier flips with the Sonnet 5 promo: $2+$10 beats Terra's $2+$12 in
+  // August; from 2026-09-01 Sonnet is $3+$15 and Terra wins.
+  assert.deepEqual(cheapestAtTier('mid', both, { date: '2026-08-15' }), { model: 'claude-sonnet-5', provider: 'anthropic' });
+  assert.deepEqual(cheapestAtTier('mid', both, { date: '2026-09-02' }), { model: 'gpt-5.6-terra', provider: 'openai' });
+  // Single provider: its own column.
+  assert.deepEqual(cheapestAtTier('mid', ['openai'], { date: '2026-08-15' }), { model: 'gpt-5.6-terra', provider: 'openai' });
+  // Full role set under the promo.
+  const roles = mockupPipelineRoles({ providers: both, date: '2026-08-15' });
+  assert.deepEqual(roles, {
+    planner: { model: 'claude-fable-5', provider: 'anthropic' },
+    executor: { model: 'claude-sonnet-5', provider: 'anthropic' },
+    tweakExecutor: { model: 'gpt-5.6-luna', provider: 'openai' },
+  });
+  assert.ok(blendedRateCents('gpt-5.6-luna') < blendedRateCents('claude-haiku-4-5'));
 });
 
 // ---- prompts ----

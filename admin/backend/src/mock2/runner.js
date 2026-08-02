@@ -1131,15 +1131,20 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       const routingDoc = parseRoutingJson(getCycle(cycle.id)?.routing_json);
       const pm = routingDoc?.phase_map || null;
       const operatorPick = /operator escalation/i.test(String(routingDoc?.reason || ''));
-      if (pm && !operatorPick && !isInventoryBuild) {
+      if (pm && !operatorPick) {
         let attempts = 0;
+        // The inventory (MVP) build skips the ladder — it is a full-scope
+        // build, so the whole-cycle implement_complex default already picked
+        // at start is the right lane and nothing should downgrade it.
+        let lane = { lane: 'implement_complex', reason: 'inventory build — full-scope implement' };
+        if (!isInventoryBuild) {
         try {
           attempts = escalationAttempts({
             priorCycles: listCyclesForProject(projectId, { limit: 20 }),
             requestId: cycle.request_id, instruction: cycle.instruction,
           });
         } catch { attempts = 0; }
-        const lane = implementLaneForTask({ complexity: verdict?.complexity, touches: verdict?.touches });
+        lane = implementLaneForTask({ complexity: verdict?.complexity, touches: verdict?.touches });
         let target; let why;
         if (attempts >= 2) { target = pm.plan; why = `attempt ${attempts + 1} → top tier`; }
         else if (attempts === 1) {
@@ -1167,15 +1172,29 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         } else if (routingDoc && routingDoc.implement_lane !== lane.lane) {
           try { updateCycle(cycle.id, { routing_json: JSON.stringify({ ...routingDoc, implement_lane: lane.lane }) }); } catch { /* best effort */ }
         }
-        // PLAN PHASE, made real: when the CHEAP tier will build (first
-        // attempt on the mechanical lane), the map's top-tier plan model
-        // first writes the implementation plan the executor follows — the
-        // five-phase pipeline's phase 2 as an actual call, not a map entry.
-        // This is what makes Luna-first safe beyond the gates: the cross-file
-        // invariants come from top-tier thinking, the typing from the cheap
-        // model. Fail-open: no plan → the build runs on the instruction alone.
-        if (attempts === 0 && lane.lane === 'implement_mechanical'
-          && pm.plan?.model && ready.model === pm.implement_mechanical?.model) {
+        }
+        // PLAN PHASE, made real — two cases:
+        //  * the CHEAP tier will build (first attempt on the mechanical
+        //    lane): the map's top-tier plan model first writes the
+        //    implementation plan the executor follows — the five-phase
+        //    pipeline's phase 2 as an actual call, not a map entry. This is
+        //    what makes Luna-first safe beyond the gates: the cross-file
+        //    invariants come from top-tier thinking, the typing from the
+        //    cheap model.
+        //  * the INVENTORY (MVP) BUILD — the biggest single build a project
+        //    runs. It used to skip this whole block, so the resolved phase
+        //    map was stamped on the cycle and then ignored: every step of a
+        //    $2 MVP ran on the mid-tier implement model (operator report,
+        //    project 54 — 177 of 178 model-stamped events on one model).
+        //    The top-tier plan model now reads the inventory + design
+        //    requirements first and writes the plan the executor follows,
+        //    which is also where contract misses (action parity, hidden
+        //    controls) are cheapest to prevent.
+        // Fail-open: no plan → the build runs on the instruction alone.
+        if (pm.plan?.model && (
+          isInventoryBuild
+          || (attempts === 0 && lane.lane === 'implement_mechanical' && ready.model === pm.implement_mechanical?.model)
+        )) {
           const planConn = (!pm.plan.provider || pm.plan.provider === ready.connector.provider)
             ? { connector: ready.connector, apiKey: ready.apiKey }
             : agenticConnectorForProvider(pm.plan.provider, { projectId, userId: cycle.initiated_by });

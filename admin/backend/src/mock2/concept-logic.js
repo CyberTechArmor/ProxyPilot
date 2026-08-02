@@ -69,14 +69,14 @@ export const CONCEPT_CHAT_TOOLS = Object.freeze([
         scope: {
           type: 'string',
           enum: ['tweak', 'screen', 'full'],
-          description: 'Size of the change. "tweak": a SMALL revision (copy/labels, a color, one element) — applied as surgical edits at a fraction of the cost. "screen": redesign or substantially change ONE screen — only that screen\'s section re-renders (name it in "screen"). "full": changes across screens, structural/navigation changes, or the first mockup. Default "full"; when unsure, use "full".',
+          description: 'Size of the change. "tweak": a SMALL revision (copy/labels, colors, spacing, sizing, one or a few named elements) — surgical edits at a fraction of a re-render\'s cost and time. "screen": ONE screen changes substantially — name it in "screen"; only that section re-renders. "full": ONLY for the first mockup, a restyle/rebrand, new screens, or structural/navigation changes. BIAS SMALL: when unsure between "tweak" and "screen" pick "tweak"; between "screen" and "full" pick "screen" — the smaller scopes escalate automatically if the change turns out bigger, but a needless "full" silently rebuilds the whole design, takes minutes, and can drift details the Builder liked.',
         },
         screen: {
           type: 'string',
           description: 'With scope "screen": the exact data-screen name of the one screen being changed (must match a <section data-screen="…"> in the current mockup).',
         },
       },
-      required: ['brief'],
+      required: ['brief', 'scope'],
       additionalProperties: false,
     },
   },
@@ -1554,21 +1554,51 @@ export function renderDesignCssFromMockup(html, tokens = DEFAULT_TOKENS) {
 // classifyConceptTurn — what a concept_chat turn asked for. Given the assistant
 // turn's tool calls, decide whether it requested a mockup and pull the brief.
 // The model may pair generate_mockup with its reply text (handled by the caller).
-export function classifyConceptTurn(toolCalls = []) {
+// What actually justifies a FULL re-render of an existing mockup: a restyle,
+// new screens, structural/navigation change — or a brief long enough to be
+// describing one. Everything else on an existing mockup should start small:
+// the tweak → screen → full ladder escalates BY ITSELF when a small scope
+// turns out too small, but nothing walks a needless "full" back down — the
+// operator watched an 8-minute 71k-character rewrite land for a revision
+// request (project 54), which is exactly the outcome the ladder exists to
+// avoid.
+const FULL_RENDER_SIGNALS = new RegExp(
+  '\\b(restyle|rebrand|re-?theme|themes?|palettes?|design tokens?|color scheme|dark mode|light mode'
+  + '|new screens?|add(?:ing)?\\s+(?:a\\s+|another\\s+)?screen|navigation|nav structure|information architecture'
+  + '|re-?architect|redesign|overhaul|start over|from scratch|entire|whole app|all screens|every screen)\\b', 'i',
+);
+export function fullScopeJustified(brief = '') {
+  const b = String(brief || '');
+  return FULL_RENDER_SIGNALS.test(b) || b.length >= 1400;
+}
+
+export function classifyConceptTurn(toolCalls = [], { hasMockup = false } = {}) {
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
   const gen = calls.find((c) => c && c.name === 'generate_mockup');
   if (gen) {
+    const brief = String(gen.input?.brief || '').trim();
+    const declared = ['tweak', 'screen', 'full'].includes(gen.input?.scope) ? gen.input.scope : null;
+    // 'tweak' = surgical edits; 'screen' = one section re-renders. With no
+    // mockup yet, everything is the first full render. On an EXISTING mockup,
+    // a declared small scope is believed — but 'full' (or a missing scope) is
+    // believed only when the brief actually reads structural; otherwise it is
+    // DEMOTED to a tweak, which self-escalates through the ladder if the
+    // change turns out bigger. The safe default flipped: a wrong 'tweak'
+    // costs one cheap corrective pass, a wrong 'full' costs minutes and can
+    // drift details the Builder liked.
+    let scope; let demoted = false;
+    if (declared === 'tweak' || declared === 'screen') scope = declared;
+    else if (!hasMockup || fullScopeJustified(brief)) scope = 'full';
+    else { scope = 'tweak'; demoted = true; }
     return {
       generateMockup: true,
-      brief: String(gen.input?.brief || '').trim(),
-      // 'tweak' = surgical edits; 'screen' = one section re-renders; anything
-      // else is a full render (safe default — a wrong 'full' costs money, a
-      // wrong smaller scope falls back to full anyway).
-      scope: ['tweak', 'screen'].includes(gen.input?.scope) ? gen.input.scope : 'full',
+      brief,
+      scope,
       screen: String(gen.input?.screen || '').trim() || null,
+      demoted,
     };
   }
-  return { generateMockup: false, brief: null, scope: 'full', screen: null };
+  return { generateMockup: false, brief: null, scope: 'full', screen: null, demoted: false };
 }
 
 // buildConceptTranscript — the neutral transcript (model-client.js turn shapes)

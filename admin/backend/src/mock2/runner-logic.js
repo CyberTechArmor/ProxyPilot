@@ -336,12 +336,59 @@ const envNum = (name, fallback) => {
 export const SOFT_PAUSE_TOKENS = envNum('MOCK2_SOFT_PAUSE_TOKENS', 1_000_000); // ~1M tokens of model spend in one run
 export const SOFT_PAUSE_MS = envNum('MOCK2_SOFT_PAUSE_MINUTES', 45) * 60 * 1000; // wall-clock in one run
 
+// ---- the context sweet spot (the handoff loop) ----
+//
+// A CONTEXT cap, distinct from the spend guards above — measured as the LIVE
+// prompt size of the newest model call (fresh input + cache read + cache
+// write), i.e. what the next turn will re-read.
+//
+// Why this line exists, in cache economics: the cache makes re-reading the
+// transcript ~0.1× input price, but every turn still re-reads ALL of it — so
+// a turn's floor cost grows linearly with context and a run's total with the
+// square of its turn count; output tokens (6× input) and first-read tool
+// results are never cached at all. Meanwhile quality falls as the window
+// fills — long-context attention is measurably sloppier past ~60–70% of a
+// 200k window. Restarting from a checkpoint instead costs one
+// re-establishment (re-reading the key files at full rate: roughly 10–25¢ on
+// the top tier, 4–10¢ on mid) and resets the per-turn floor from ~140k×cached
+// to ~30k×cached — which pays for itself within ~3–5 turns on every tier.
+//
+// So at CONTEXT_HANDOFF_TOKENS the runner stops grinding: the model WRITES A
+// HANDOFF (done / next steps / gotchas), the work is checkpointed, and the
+// continuation build is queued automatically — the loop — up to
+// CONTEXT_HANDOFF_MAX_CHAIN automatic runs per operator request, after which
+// the pause returns to a manual Resume (runaway backstop).
+export const CONTEXT_HANDOFF_TOKENS = envNum('MOCK2_CONTEXT_HANDOFF_TOKENS', 140_000);
+export const CONTEXT_HANDOFF_MAX_CHAIN = envNum('MOCK2_CONTEXT_HANDOFF_MAX_CHAIN', 3);
+
+const CONTINUATION_RE = /\n*---\nCONTINUATION \(auto-handoff run (\d+) of \d+\)[\s\S]*$/;
+
+// Which auto-continuation run an instruction already is (0 = the original).
+export function continuationRun(instruction) {
+  const m = CONTINUATION_RE.exec(String(instruction || ''));
+  return m ? Number(m[1]) : 0;
+}
+
+// The operator's ORIGINAL request, with any prior continuation section cut —
+// each handoff rebuilds from the original so the chain never nests.
+export function stripContinuationSection(instruction) {
+  return String(instruction || '').replace(CONTINUATION_RE, '').trim();
+}
+
+export function buildContinuationInstruction({ original, handoff, run, maxChain = CONTEXT_HANDOFF_MAX_CHAIN }) {
+  return `${stripContinuationSection(original)}\n\n---\nCONTINUATION (auto-handoff run ${run} of ${maxChain}) — a prior run completed part of this work and handed off at its context sweet spot. Its handoff:\n${String(handoff || '').trim().slice(0, 4000)}\n\nContinue from the NEXT STEPS; do not redo what is DONE.`;
+}
+
 // softPauseReason — pure decision for the runner's step-boundary check. Returns
-// 'budget_tokens' | 'budget_time' when this run has crossed a soft ceiling, or
-// null to keep going. Unit-tested so the thresholds can't silently drift.
+// 'context_handoff' | 'budget_tokens' | 'budget_time' when this run has crossed
+// a ceiling, or null to keep going. Context is checked FIRST: the handoff loop
+// is the productive outcome, the budget pauses are the guards behind it.
+// Unit-tested so the thresholds can't silently drift.
 export function softPauseReason({
-  usedTokens = 0, elapsedMs = 0, tokenLimit = SOFT_PAUSE_TOKENS, timeLimitMs = SOFT_PAUSE_MS,
+  usedTokens = 0, elapsedMs = 0, contextTokens = 0,
+  tokenLimit = SOFT_PAUSE_TOKENS, timeLimitMs = SOFT_PAUSE_MS, contextLimit = CONTEXT_HANDOFF_TOKENS,
 } = {}) {
+  if (Number(contextTokens) >= contextLimit) return 'context_handoff';
   if (Number(usedTokens) >= tokenLimit) return 'budget_tokens';
   if (Number(elapsedMs) >= timeLimitMs) return 'budget_time';
   return null;

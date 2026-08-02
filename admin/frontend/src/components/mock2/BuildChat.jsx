@@ -1076,6 +1076,17 @@ export default function BuildChat({
             : askActive ? (askJob?.message || 'Answering…') : (job?.message || 'Building…')}
           partialText={askPartial}
           activity={active ? activity : []}
+          // Name the model doing these steps: the routed/phase-routed model
+          // stamped on the running cycle (applied_model is ground truth — the
+          // model that actually runs, shadow mode included).
+          activityModel={active ? (cycle?.routing?.applied_model || cycle?.routing?.model || null) : null}
+          activityModelDetail={active && cycle?.routing ? [
+            `Model: ${cycle.routing.applied_model || cycle.routing.model || 'slot default'}`,
+            cycle.routing.effort ? `effort: ${cycle.routing.effort}` : null,
+            cycle.routing.phase_posture && cycle.routing.phase_posture !== 'default' ? `posture: ${cycle.routing.phase_posture}` : null,
+            cycle.routing.phase_scenario ? `providers: ${cycle.routing.phase_scenario}` : null,
+            cycle.routing.reason ? `(${cycle.routing.reason})` : null,
+          ].filter(Boolean).join(' · ') : null}
           onQuickUpdate={canEdit && online && !needsFeedback && !resumeMode ? quickUpdateFromMessage : null}
           quickBusyId={distillingId}
           onFix={canEdit && online && !active && !needsFeedback && !resumeMode ? setFixMessage : null}

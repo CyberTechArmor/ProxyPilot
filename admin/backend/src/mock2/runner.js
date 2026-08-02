@@ -79,6 +79,7 @@ import {
   buildRunnerSystemPrompt, buildRunnerTask, buildFeedbackSection, classifyTurn, describeRunnerStep, STALL_NUDGE, formatAcceptanceBlock,
   buildCompletionSummaryBody,
   softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS,
+  CONTEXT_HANDOFF_MAX_CHAIN, continuationRun, buildContinuationInstruction,
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
 import { harnessForProject } from './harness.js';
@@ -1184,6 +1185,19 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
               insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: res.modelUsed || clsModel, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'contract-classifier' });
             } catch (e) { console.warn('[mock2] contract-classifier ledger write failed:', e?.message); }
             verdict = parseContractClassifierReply(res.text);
+            // VISIBLE, with its model tag: the cheap-tier steps (classifier,
+            // prepass) never emitted feed events, so even when Luna ran, the
+            // activity stream showed only the executor's model and the
+            // operator reasonably concluded the cheap tier was never used
+            // (operator report, twice). One compact row names the verdict
+            // and the model that made it.
+            if (verdict) {
+              logEvent('ai_message', {
+                role: 'assistant',
+                content: `Sized by the classifier: ${verdict.complexity}${verdict.touches?.length ? ` · touches ${verdict.touches.join(', ')}` : ''} — the ${verdict.complexity === 'mechanical' ? 'cheap' : 'mid'}-tier lane builds it.`,
+                meta: { step: 'contract-classifier', model: res.modelUsed || clsModel },
+              });
+            }
             if (verdict && !verdict.covered) {
               const applied = applyInventoryAdditions(inventory, verdict.additions, { at: nowIso() });
               if (applied.added.total > 0) {
@@ -1530,6 +1544,10 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // clock + token count start at zero — each resume gets a fresh budget window).
   const runStartMs = Date.now();
   let usedTokensThisRun = 0;
+  // The LIVE context of the newest model call (fresh input + cache read +
+  // cache write) — what the next turn will re-read. The context-handoff
+  // sweet spot is judged on this, not on cumulative spend.
+  let lastContextTokens = 0;
   // Cost-truth: accumulate the four canonical token classes + the run's spend so the
   // soft-pause can trip on DOLLARS (behind the flag) and the cycle can store the honest
   // usage basis. usedCostThisRun tracks fractional cents like the ledger.
@@ -1699,20 +1717,72 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     const elapsedMs = Date.now() - runStartMs;
     const pauseReason = budgetDollars
       ? (budgetPauseReasonCents({ spentCents: usedCostThisRun, ceilingCents: dollarCeilingCents })
-        || softPauseReason({ usedTokens: 0, elapsedMs }))
-      : softPauseReason({ usedTokens: usedTokensThisRun, elapsedMs });
+        || softPauseReason({ usedTokens: 0, elapsedMs, contextTokens: lastContextTokens }))
+      : softPauseReason({ usedTokens: usedTokensThisRun, elapsedMs, contextTokens: lastContextTokens });
     if (pauseReason) {
       const mins = Math.round((Date.now() - runStartMs) / 60000);
       const detail = pauseReason === 'budget_tokens'
         ? `token budget reached (~${Math.round(usedTokensThisRun / 1000)}k tokens this run)`
         : pauseReason === 'budget_cost'
           ? `cost budget reached (~${dollars(usedCostThisRun)} this run)`
-          : `time budget reached (~${mins} min this run)`;
+          : pauseReason === 'context_handoff'
+            ? `context sweet spot reached (~${Math.round(lastContextTokens / 1000)}k live context)`
+            : `time budget reached (~${mins} min this run)`;
+      // THE HANDOFF LOOP (context sweet spot). Past ~140k of live context,
+      // every further turn re-reads the whole transcript at the cached rate
+      // and quality degrades — restarting fresh pays for itself in a few
+      // turns (see runner-logic CONTEXT_HANDOFF_TOKENS). So instead of a
+      // manual pause: the model — which still HAS the context — writes the
+      // handoff (done / next steps / gotchas), the work is checkpointed, and
+      // the continuation is QUEUED to run automatically, carrying the
+      // handoff. Bounded to CONTEXT_HANDOFF_MAX_CHAIN automatic runs per
+      // operator request; past that (or on a failed handoff write) it's the
+      // ordinary resumable pause. Every step here is fail-open.
+      let handoffQueued = false;
+      if (pauseReason === 'context_handoff') {
+        const priorRun = continuationRun(cycle.instruction);
+        if (priorRun < CONTEXT_HANDOFF_MAX_CHAIN) {
+          try {
+            const h = await callStepTurn('context-handoff', {
+              connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system,
+              tools: [],
+              transcript: [...transcript, { role: 'user', text: 'CONTEXT HANDOFF — stop working now. Write the handoff for the run that continues this work in a fresh context: DONE (what is complete, as verified facts), NEXT STEPS (ordered and specific — files and exact changes), GOTCHAS (anything the next run must know to not undo or repeat work). At most 300 words, no code blocks.' }],
+              effort: 'medium', thinking: 'off', timeoutMs: 180000,
+            });
+            const handoffText = h.ok ? String(h.text || '').trim() : '';
+            if (h.ok && h.usage) {
+              const hc = costCentsForUsage({ inputTokens: h.usage.inputTokens || 0, outputTokens: h.usage.outputTokens || 0, cacheReadTokens: h.usage.cacheReadInputTokens || 0, cacheWriteTokens: h.usage.cacheCreationInputTokens || 0 }, price);
+              insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: h.modelUsed || ready.model, inputTokens: h.usage.inputTokens || 0, outputTokens: h.usage.outputTokens || 0, costCents: hc, wallClockMs: 0, step: 'context-handoff' });
+            }
+            if (handoffText) {
+              const { enqueueBuild } = await import('./build-queue.js');
+              const nextRun = priorRun + 1;
+              enqueueBuild({
+                projectId,
+                instruction: buildContinuationInstruction({ original: cycle.instruction, handoff: handoffText, run: nextRun, maxChain: CONTEXT_HANDOFF_MAX_CHAIN }),
+                buildMode: cycleMode, initiatedBy: cycle.initiated_by,
+              });
+              handoffQueued = true;
+              logEvent('ai_message', {
+                role: 'assistant',
+                content: `Context handoff written — continuation queued (run ${nextRun} of ${CONTEXT_HANDOFF_MAX_CHAIN}).\n\n${handoffText.slice(0, 1200)}`,
+                meta: { step: 'context-handoff', model: ready.model },
+              });
+              try {
+                insertMessage({
+                  projectId, kind: 'system', cycleId: cycle.id,
+                  body: `**Context sweet spot reached** (~${Math.round(lastContextTokens / 1000)}k live context) — progress is checkpointed and the continuation is queued (run ${nextRun} of ${CONTEXT_HANDOFF_MAX_CHAIN}). The handoff — what's done, what's next — rides the queued build, so it starts sharp in a fresh context instead of grinding an expensive, degrading window.`,
+                });
+              } catch { /* best effort */ }
+            }
+          } catch (e) { console.warn('[mock2] context handoff failed (ordinary pause applies):', e?.message); }
+        }
+      }
       await checkpointAndRecord({ cycle: fresh, project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, summary: `checkpoint: paused — ${detail}` });
       updateCycle(cycle.id, { pause_reason: pauseReason });
-      finishCycle(cycle.id, { status: 'interrupted', error: `Paused — ${detail}. Resume to continue where it stopped.` });
+      finishCycle(cycle.id, { status: 'interrupted', error: handoffQueued ? `Paused — ${detail}. The continuation is queued and starts on its own.` : `Paused — ${detail}. Resume to continue where it stopped.` });
       releaseLock(projectId, holder);
-      setJob(cycle.id, { phase: 'paused', message: `Paused — ${detail}. Resume to continue.`, commit: null });
+      setJob(cycle.id, { phase: 'paused', message: handoffQueued ? `Paused — ${detail}. Continuation queued.` : `Paused — ${detail}. Resume to continue.`, commit: null });
       void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'paused' });
       return scheduleJobCleanup(cycle.id);
     }
@@ -1759,6 +1829,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     const turnTokens = u.inputTokens + u.outputTokens;
     usedTokensThisRun += turnTokens;
     usedCostThisRun += costCents;
+    lastContextTokens = (u.inputTokens || 0) + cacheRead + cacheWrite;
     // Cost-truth: accumulate the four canonical classes for this run and persist them on
     // the cycle (additive — used_tokens/used_cost_cents via addCycleUsage stay as-is).
     runUsage.input += u.inputTokens || 0;

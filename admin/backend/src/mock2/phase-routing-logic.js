@@ -60,10 +60,14 @@ export function frameworkSupportsPhaseRouting(skillsJson) {
 }
 
 // The one question the runner asks at cycle start: does the phased pipeline
-// govern THIS cycle? Both gates must pass; either failing means the untouched
-// single-model path (never an error).
-export function phaseRoutingApplies({ skillsJson = null, env = {} } = {}) {
-  return phaseRoutingMode(env) === 'on' && frameworkSupportsPhaseRouting(skillsJson);
+// govern THIS cycle? The operator toggle decides — for EVERY build mode
+// (full / mvp / quick) and every framework version. 'off' means the untouched
+// single-model path (never an error). The framework marker is informational
+// (it tells project-side skills the phased contract applies); it no longer
+// gates the router — operator decision 2026-08: "use the 5 phase for
+// everything", including projects pinned to pre-marker framework versions.
+export function phaseRoutingApplies({ skillsJson = null, env = {} } = {}) { // eslint-disable-line no-unused-vars
+  return phaseRoutingMode(env) === 'on';
 }
 
 // ---- the five phases and their tiers ----
@@ -148,12 +152,12 @@ export function detectPhaseProviders(connectors = []) {
 
 // ---- per-project provider preference ----
 
-// With MULTIPLE global providers configured, a project does not silently get
-// the mixed map — it must declare which provider drives its builds:
-// 'anthropic' | 'openai' | 'hybrid' (all providers → the mixed map). With a
-// single global provider there is nothing to choose and the preference is
-// ignored. NULL/unset + multiple providers → the cycle refuses at start with
-// a message pointing at the project's AI provider card.
+// A project may narrow which of the globally configured providers drive its
+// builds: 'anthropic' | 'openai' (that provider only) | 'hybrid' (all
+// providers → the mixed map) | NULL/unset (follow the global settings — every
+// provider with a usable credential, which with multiple providers IS the
+// hybrid map). The project setting only ever narrows; it never conjures a
+// provider the platform doesn't have.
 export const PROJECT_PROVIDER_PREFS = Object.freeze(['anthropic', 'openai', 'hybrid']);
 
 export function normalizeProviderPreference(value) {
@@ -161,21 +165,20 @@ export function normalizeProviderPreference(value) {
   return PROJECT_PROVIDER_PREFS.includes(v) ? v : null;
 }
 
-export const PROVIDER_CHOICE_REQUIRED_ERROR =
-  'Multiple AI providers are configured, and this project has not chosen which one drives its builds. '
-  + 'Pick Anthropic, OpenAI, or Hybrid (all providers) on the project page under "AI provider". '
-  + 'The cycle was not started and no state was written.';
-
 // applyProviderPreference — narrow the globally detected providers by the
 // project's declared preference. Returns { ok, providers } or { ok:false,
 // error }. Pure; the caller runs it between detectPhaseProviders and
 // resolvePhaseModelMap.
+//
+//   unset / junk → the global default: everything configured (multiple
+//                  providers default to HYBRID — no per-project choice needed)
+//   'hybrid'     → everything configured, explicitly
+//   'anthropic' / 'openai' → that provider only, and it BINDS: if its
+//                  credential is gone the cycle fails loudly naming it —
+//                  never a silent flip to whichever provider still works.
 export function applyProviderPreference({ providers = [], preference = null } = {}) {
   const detected = PHASE_PROVIDERS.filter((p) => (providers || []).includes(p));
   const pref = normalizeProviderPreference(preference);
-  // An explicit single-provider choice BINDS: if that provider's credential is
-  // gone, fail loudly naming it — never silently flip to whichever provider
-  // still works (the choice is the project's, not the failure mode's).
   if (pref && pref !== 'hybrid') {
     if (!detected.includes(pref)) {
       return {
@@ -186,12 +189,9 @@ export function applyProviderPreference({ providers = [], preference = null } = 
     }
     return { ok: true, providers: [pref] };
   }
-  // Zero or one provider detected: nothing to choose (resolvePhaseModelMap
-  // handles zero with its own refusal); 'hybrid'/unset pass what exists.
-  if (detected.length <= 1) return { ok: true, providers: detected };
-  // Multiple providers and no choice: refuse — the project must declare.
-  if (!pref) return { ok: false, error: PROVIDER_CHOICE_REQUIRED_ERROR };
-  return { ok: true, providers: detected }; // hybrid → the mixed map
+  // hybrid / unset: the global default — all configured providers (zero is
+  // handed to resolvePhaseModelMap, which owns the no-provider refusal).
+  return { ok: true, providers: detected };
 }
 
 // resolvePhaseModelMap — the phase → { model, provider, tier } map for this

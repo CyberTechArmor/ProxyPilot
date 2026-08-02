@@ -140,9 +140,11 @@ OpenAI keys, like every non-Anthropic provider, come from the connector row
 
 ## Per-phase model routing (phase-routing@1)
 
-A full build on a framework version that carries the `phase-routing@1` marker
-(the shipped seed does) runs as **five phases with independently selectable
-models**, resolved once at cycle start:
+With the toggle on (the default), **every build — full, MVP, and quick — runs
+as five phases with independently selectable models**, resolved once at cycle
+start, and the build conversation itself runs on the map's implement-lane
+model (cross-provider models swap to a usable agentic connector for that
+provider; if none exists, the slot model stands and a warning is logged):
 
 | Phase | Tier | Both providers | OpenAI only | Anthropic only |
 |---|---|---|---|---|
@@ -163,14 +165,14 @@ Mechanics (pure layer: `phase-routing-logic.js`, tested in
   cycle **fails at start** with an operator message, before any cycle row is
   inserted (no partial state). No hardcoded fallback.
 - **Per-project provider choice** (`provider_preference`, project page → "AI
-  provider" card, `PUT /projects/:id/provider-preference`): with MULTIPLE
-  global providers configured, a project never silently gets the mixed map —
-  it must choose **Anthropic**, **OpenAI**, or **Hybrid** (all providers)
-  before a phase-routed build starts (unset → the cycle refuses with a
-  pointer to the card). An explicit single-provider choice *binds*: if that
-  provider's credential later breaks, the cycle fails naming it rather than
-  silently flipping to the other provider. With one global provider the
-  choice is moot. Clones inherit the source's choice.
+  providers" card, `PUT /projects/:id/provider-preference`): multi-select —
+  pick one provider to pin the project to it, both for **Hybrid**, or none to
+  **follow the global settings** (every provider with a usable credential;
+  with multiple providers configured the default IS hybrid). The setting only
+  ever narrows what the platform has. An explicit single-provider choice
+  *binds*: if that provider's credential later breaks, the cycle fails naming
+  it rather than silently flipping to the other provider. Clones inherit the
+  source's choice.
 - The resolved map is stamped into the cycle's `routing_json`
   (`phase_scenario` / `phase_providers` / `phase_map`) and echoed as a
   `Phase model map [...]` line in the change record, so any cycle is
@@ -198,10 +200,10 @@ Mechanics (pure layer: `phase-routing-logic.js`, tested in
   override.
 - **Toggle**: `phase_routing` setting (Admin queue → "Per-phase model
   routing", `GET/POST /api/mock2/settings/phase-routing`) or
-  `MOCK2_PHASE_ROUTING` env — default **on**; `off` restores the single-model
-  path. Projects on framework versions without the marker are untouched
-  either way, and the Tier-1 deterministic gate battery is unchanged in every
-  mode.
+  `MOCK2_PHASE_ROUTING` env — default **on**, governing every build mode and
+  every framework version (the `phase-routing@1` marker in the seed skills is
+  informational, not a gate); `off` restores the single-model path. The
+  Tier-1 deterministic gate battery is unchanged in every mode.
 - **Cost posture** (`phase_routing_posture` setting on the same card/API, or
   `MOCK2_PHASE_POSTURE` env): five presets applied over the resolved map at
   cycle start, all provider-aware and all stamped into `routing_json` +

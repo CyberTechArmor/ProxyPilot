@@ -238,6 +238,27 @@ export function buildRunnerReady({ projectId = null, userId = null } = {}) {
 }
 
 
+// The connector (+ key) that can serve a phase-map model on ANOTHER provider
+// than the build_runner slot's: the first enabled connector of that provider
+// advertising agentic_build with a usable credential, with the project/user
+// key layered over the global one exactly like buildRunnerReady. Null when no
+// such connector exists — the caller keeps the slot connector and says so.
+function agenticConnectorForProvider(provider, { projectId = null, userId = null } = {}) {
+  for (const c of listConnectors()) {
+    if (!c?.enabled || c.provider !== provider) continue;
+    if (!parseCapabilities(c.capabilities).includes('agentic_build')) continue;
+    const globalKey = decryptConnectorKey(c);
+    const resolved = resolveProjectKey({ projectId, provider, userId, globalKey });
+    const apiKey = resolved.apiKey;
+    if (isCloudProvider(provider) && !apiKey) continue;
+    const connector = resolved.baseUrl && resolved.source !== 'global'
+      ? { ...c, base_url: resolved.baseUrl }
+      : c;
+    return { connector, apiKey };
+  }
+  return null;
+}
+
 // The cost ENVELOPE (R5): the buffered token estimate priced at the current rate.
 function estimateCycle(connectorId, model) {
   const { inputTokens, outputTokens } = estimateCycleTokens();
@@ -534,16 +555,17 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   const framework = getCurrentFrameworkVersion();
   if (!framework) return { status: 'error', error: 'No framework version exists to pin. Publish one first.' };
 
-  // Per-phase model routing (phase-routing@1): when the pinned framework
-  // carries the marker AND the phase_routing toggle is on, resolve the
-  // five-phase model map ONCE from which providers hold a usable credential
-  // (the same connector rows as the provider selector — no second credential
-  // store). Neither provider configured → fail HERE, before any cycle row is
-  // inserted, so a refused start writes no partial state. The resolved map is
-  // stamped into routing_json and echoed into the change record so the cycle
-  // is reproducible. Fast builds (mvp/quick) keep their explicit speed
-  // routing; frameworks without the marker keep the single-model path.
-  if (!fastBuild && phaseRoutingApplies({ skillsJson: framework.skills_json, env: routingEnv() })) {
+  // Per-phase model routing (phase-routing@1): with the phase_routing toggle
+  // on it governs EVERY build mode — full, mvp, and quick alike (operator
+  // decision 2026-08: "use the 5 phase for everything"). The five-phase map is
+  // resolved ONCE from which providers hold a usable credential (the same
+  // connector rows as the provider selector — no second credential store),
+  // narrowed by the project's provider choice (unset → the global default:
+  // all configured providers, i.e. hybrid), shaped by the cost posture, and
+  // stamped into routing_json + the change record so the cycle is
+  // reproducible. Neither provider configured → fail HERE, before any cycle
+  // row is inserted, so a refused start writes no partial state.
+  if (phaseRoutingApplies({ skillsJson: framework.skills_json, env: routingEnv() })) {
     let providers = null;
     try {
       providers = detectPhaseProviders(listConnectors().map((c) => ({
@@ -555,9 +577,6 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
       console.warn('[mock2] phase-routing provider detection failed (single-model path applies):', e?.message);
     }
     if (providers) {
-      // With multiple global providers, THIS PROJECT must have declared which
-      // one drives its builds (anthropic / openai / hybrid) — a project never
-      // silently overrides that decision. One global provider needs no choice.
       const preferred = applyProviderPreference({ providers, preference: project.provider_preference });
       if (!preferred.ok) return { status: 'error', error: preferred.error };
       const resolved = resolvePhaseModelMap({ providers: preferred.providers });
@@ -573,6 +592,31 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
         phase_posture: postured.posture,
         phase_map: postured.map,
       };
+      // The build conversation runs on the map's IMPLEMENT model (the 3b/
+      // complex lane — a whole-cycle default; 3a applies per-task via the
+      // work-file classification). This is what makes a posture real: with
+      // ultra_cheap the builder actually runs Luna/Haiku, not the slot model.
+      // A per-press operator escalation (Redo / extra effort) outranks the
+      // map — that is the most specific intent there is. Cross-provider
+      // models swap to a usable agentic connector for that provider; no such
+      // connector → keep the slot connector/model and say so.
+      const impl = postured.map?.implement_complex || null;
+      if (impl?.model && !escalate) {
+        let swap = null;
+        let applicable = true;
+        if (impl.provider && impl.provider !== ready.connector.provider) {
+          swap = agenticConnectorForProvider(impl.provider, { projectId, userId: initiatedBy });
+          if (!swap) {
+            applicable = false;
+            console.warn(`[mock2] phase map wants ${impl.model} (${impl.provider}) but no usable agentic ${impl.provider} connector exists — keeping ${ready.model}`);
+          }
+        }
+        if (applicable) {
+          ready = { ...ready, model: impl.model, ...(swap ? { connector: swap.connector, apiKey: swap.apiKey } : {}) };
+          routing.applied_model = impl.model;
+          routing.reason = [routing.reason, `phase-map:${postured.posture || 'default'}`].filter(Boolean).join(' ');
+        }
+      }
     }
   }
 

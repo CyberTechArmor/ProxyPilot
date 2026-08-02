@@ -182,12 +182,12 @@ export function routingEnv(env = process.env) {
 
 // ---- Per-phase model routing (phase-routing@1) toggle ----
 //
-// 'on' (DEFAULT): build cycles on a framework version that carries the
-// phase-routing marker resolve the five-phase model map at cycle start
-// (recon/plan/implement-3a/3b/summarize/review, provider-conditional).
-// 'off': the single-model path everywhere, regardless of framework version —
-// the honest off-switch. Precedence: stored setting → MOCK2_PHASE_ROUTING env
-// → 'on'. The pure gate lives in phase-routing-logic.js (phaseRoutingApplies).
+// 'on' (DEFAULT): EVERY build cycle — full, mvp, and quick — resolves the
+// five-phase model map at cycle start (recon/plan/implement-3a/3b/summarize/
+// review, provider-conditional) and runs the build conversation on the map's
+// implement model. 'off': the single-model path everywhere — the honest
+// off-switch. Precedence: stored setting → MOCK2_PHASE_ROUTING env → 'on'.
+// The pure gate lives in phase-routing-logic.js (phaseRoutingApplies).
 export const PHASE_ROUTING_KEY = 'phase_routing';
 
 export function getPhaseRoutingSetting() {

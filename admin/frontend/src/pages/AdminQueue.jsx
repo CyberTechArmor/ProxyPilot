@@ -1021,11 +1021,12 @@ export default function AdminQueue() {
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Per-phase model routing</CardTitle>
           <CardDescription>
-            Splits each full build into five phases — recon briefs, plan, implement, summarize,
-            Tier-2 review — and routes each to a cheap, mid, or top-tier model based on which
-            providers hold a usable credential. The resolved model map is recorded in every cycle&apos;s
-            change record. Only applies to projects on a framework version that supports it; the
-            deterministic gate battery is unchanged either way.
+            Splits every build — full, MVP, and quick — into five phases (recon briefs, plan,
+            implement, summarize, Tier-2 review) and routes each to a cheap, mid, or top-tier model
+            based on which providers hold a usable credential. The build itself runs on the map&apos;s
+            implement model, so the cost posture below applies to every build. The resolved map is
+            recorded in every cycle&apos;s change record; the deterministic gate battery is unchanged
+            either way.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">

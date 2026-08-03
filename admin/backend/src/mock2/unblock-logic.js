@@ -164,6 +164,15 @@ export function buildResumeContextBlock({ message = '', selectedOption = null, a
     // tree as usual before relying on any claim in it.
     const seq = checkpoint.seq != null ? ` (change record ${checkpoint.seq})` : '';
     lines.push('', `Last checkpoint before this resume${seq}:`, String(checkpoint.summary).trim().slice(0, 4000));
+    // D1.4: a halt summary produced by haltSummaryWithLandedWork names a real
+    // gate battery run against the checkpointed tree (the "N/M gates passed"
+    // shape) — tell the model that's evidence, not narration, so a resume
+    // doesn't re-derive what the halt already confirmed. Gated on the pattern
+    // so an older, pre-fix record (a bare label, no verification) never gets
+    // a false claim of having been verified.
+    if (/gates? passed/.test(checkpoint.summary)) {
+      lines.push('This was verified against the tree before the halt — do not re-derive what it already confirms.');
+    }
   }
   if (opt) {
     // Name the typed kind (except the neutral expand_scope) so the model knows what

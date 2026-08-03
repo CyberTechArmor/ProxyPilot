@@ -81,7 +81,8 @@ import {
   buildCompletionSummaryBody,
   softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS,
   CONTEXT_HANDOFF_MAX_CHAIN, continuationRun, buildContinuationInstruction,
-  updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
+  updateProgress, initProgressState, noProgressLimit, haltReasonLabel, haltSummaryWithLandedWork,
+  readSetFromTranscript,
 } from './runner-logic.js';
 import { harnessForProject } from './harness.js';
 import { applyEdits } from './apply-edit-logic.js';
@@ -143,6 +144,7 @@ import {
   malformedFinishInput, malformedRejectionMessage, receivedParamsEcho, FINISH_FILE_PATH, parseFinishFile,
   initFinishGuard, recordFinishRejection, escalatedRetryDiagnostic, budgetNote,
   budgetExhaustedSummary, harnessFaultHaltAccepted,
+  unverifiableClaims, sensitiveAssumedEntries,
 } from './finish-guard-logic.js';
 import { recordFeature, takeFeatureLedger } from './feature-activation.js';
 // (models.js constants are no longer used directly here — the phase map and
@@ -2212,6 +2214,27 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         }
         continue;
       }
+      // VERIFIED-VS-ASSUMED LEDGER CHECK (run-taxonomy fix #10/D3). A
+      // `verified` entry that cites a specific file is a checkable claim, and
+      // nothing checked it until now — assumptions.verified was taken on
+      // faith. Only a claim citing a file this cycle never read is rejected;
+      // an uncited claim (a cross-cutting invariant, a browser-probe
+      // observation per Spec B) is never touched — see unverifiableClaims'
+      // own contract. Placed right after summary-overclaim: both validators
+      // are about the summary/assumptions block's honesty.
+      const unverifiable = unverifiableClaims({ assumptions: decision.finishAssumptions, readSet: readSetFromTranscript(transcript) });
+      if (unverifiable.length) {
+        const r = await rejectFinishOrConclude({
+          validator: 'unverifiable-claim', termId, termName, decision, gateReports: lastGateReports,
+          message: `Not finished — assumptions.verified claims a file this cycle never read: ${unverifiable.map((c) => `"${c}"`).join('; ')}. Either read that file and re-verify, or move the claim to assumed.`,
+        });
+        if (r === 'concluded') return scheduleJobCleanup(cycle.id);
+        if (progress.tripped) {
+          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: 'Auto-stopped: finish kept claiming verification of files never read.', logEvent, consultSignals: haltSignals('Auto-stopped: finish kept claiming verification of files never read.') });
+          return scheduleJobCleanup(cycle.id);
+        }
+        continue;
+      }
       // APP-OWNED SMOKE FAILURES MUST BE ANSWERED (fix 2.c; P47 request 140:
       // beneath the platform noise sat a real app failure, notes-todo-add, and
       // two cycles concluded "no product-code change was needed" without ever
@@ -3053,9 +3076,13 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // checklist — NEVER as a needs-attention flag. If the builder declared
       // pending but nothing is actually outstanding, it is simply a success.
       // The live-external checklist, plus any user-visible change nothing
-      // observed in a browser (the honest gate above). Both are "a human still
-      // has to confirm this", so they share one calm pending-verification path.
-      const pendingChecklist = [...(integrationDecision?.checklist || []), ...(uiVerification.checklist || [])];
+      // observed in a browser (the honest gate above), plus any role/permission
+      // claim left in `assumed` (run-taxonomy fix #10/D3.5) — not rejected (this
+      // is a legitimate but risky claim, not a malformed submission), just
+      // folded into the same "a human still has to confirm this" path.
+      const sensitiveAssumedChecklist = sensitiveAssumedEntries(decision.finishAssumptions?.assumed)
+        .map((a) => `An assumption about roles/permissions was not verified this cycle: "${a}". Confirm this by hand before trusting access control on this change.`);
+      const pendingChecklist = [...(integrationDecision?.checklist || []), ...(uiVerification.checklist || []), ...sensitiveAssumedChecklist];
       const wantsPending = decision.pendingVerification === true;
       if (pendingChecklist.length) {
         openVerificationChecklist({ projectId, cycleId: cycle.id, checklist: pendingChecklist });
@@ -3917,11 +3944,31 @@ export async function haltCycle({ cycle, project, containerName, holder, gateRep
   const projectId = Number(project.id);
   setJob(cycle.id, { phase: 'blocked', message: 'Blocked — checkpointing before stopping…' });
 
+  // Verify the checkpointed tree BEFORE deciding what the halt record says
+  // (run-taxonomy fix #5/D1). Previously gateReports was whatever happened to
+  // have run before the halt — usually nothing — so a resume's record showed
+  // gates_run: [] regardless of how much landed work was actually there. Run
+  // the SAME battery a resume would run (the requested one, not a stricter
+  // one that would fail on in-progress work for unrelated reasons) against
+  // the tree this checkpoint is about to commit. Best-effort: a failure here
+  // keeps the pre-halt reports rather than claiming a battery that didn't run.
+  let verifiedGateReports = gateReports || [];
+  if (containerName && gateScripts?.length) {
+    try {
+      verifiedGateReports = await runGateBattery(cycle.id, containerName, gateScripts);
+    } catch (e) {
+      console.warn('[mock2] halt verification battery failed:', e?.message);
+    }
+  }
+
   // Best-effort WIP checkpoint + change record so the branch and any report the
   // cycle wrote are recoverable when a human resumes.
   let record = null;
   try {
-    record = await checkpointAndRecord({ cycle, project, containerName, holder, gateReports: gateReports || [], gateScripts, framework, summary: `halt: ${haltReasonLabel(trigger)}` });
+    record = await checkpointAndRecord({
+      cycle, project, containerName, holder, gateReports: verifiedGateReports, gateScripts, framework,
+      summary: haltSummaryWithLandedWork({ trigger, reason, gateReports: verifiedGateReports }),
+    });
   } catch (e) { console.warn('[mock2] halt checkpoint failed:', e?.message); }
 
   // Link any report artifacts the cycle wrote (state/changes/*.md, state/*.md).

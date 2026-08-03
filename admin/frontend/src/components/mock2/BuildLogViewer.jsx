@@ -137,6 +137,13 @@ export default function BuildLogViewer({ projectId, requestId, open, onOpenChang
               <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                 {log.final_status ? <span>Status: <b className="text-foreground">{log.final_status}</b></span> : null}
                 {log.cost ? <span>Cost: <b className="text-foreground">{money(log.cost.cents)}</b></span> : null}
+                {/* Halt cost visible (run-taxonomy fix #5/D1.5): the data already
+                    exists in cost.by_segment (request-log.js), this is the only
+                    surface for it. A non-zero figure means real spend went into
+                    work that got checkpointed and blocked, not shipped. */}
+                {log.cost?.by_segment?.halted > 0 ? (
+                  <span className="text-amber-500">Halted: <b>{money(log.cost.by_segment.halted)}</b></span>
+                ) : null}
                 {log.segments?.length ? <span>{log.segments.length} segment{log.segments.length === 1 ? '' : 's'}</span> : null}
                 {log.request?.created_at ? <span>{fmtWhen(log.request.created_at)}</span> : null}
               </div>

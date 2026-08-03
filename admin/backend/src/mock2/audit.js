@@ -36,8 +36,10 @@ import {
 } from './cycles.js';
 import { insertRequest } from './requests.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
-import { insertChangeRecord, changeRecordMirror, lastChangeRecord } from './change-records.js';
+import { insertChangeRecord, changeRecordMirror, lastChangeRecord, listChangeRecords } from './change-records.js';
 import { symptomAttemptCount, SYMPTOM_CAP, symptomCapEnabled } from './consult-logic.js';
+import { findLikelyDuplicate, duplicateRefusalMessage } from './duplicate-check-logic.js';
+import { refusalOverrideActive } from './refusal-override-logic.js';
 import {
   diagnosisCandidateFiles, diagnosisEvidence, diagnosisChatMessage, DIAGNOSIS_SYSTEM_PROMPT,
 } from './diagnose-logic.js';
@@ -213,14 +215,16 @@ async function maybePushRemote(projectId) {
 // Recent refusals per project, so an operator who presses Build again shortly
 // after seeing the diagnosis can override it — a cap with no escape hatch is
 // a wall, not a guardrail. In-memory (mirrors activeAuditJobs above); a
-// process restart just resets the window, which is harmless.
+// process restart just resets the window, which is harmless. The window
+// arithmetic itself is shared (refusal-override-logic.js, D2.3) with the
+// rule-gate and duplicate-work overrides below — this Map is this guardrail's
+// OWN state; overriding the symptom cap must never silently also override
+// the others.
 const recentSymptomCapRefusals = new Map();
-const SYMPTOM_CAP_OVERRIDE_WINDOW_MS = 10 * 60 * 1000;
 
 function symptomCapOverrideActive(projectId) {
   const at = recentSymptomCapRefusals.get(Number(projectId));
-  if (!at) return false;
-  if (Date.now() - at > SYMPTOM_CAP_OVERRIDE_WINDOW_MS) {
+  if (!refusalOverrideActive({ refusedAt: at })) {
     recentSymptomCapRefusals.delete(Number(projectId));
     return false;
   }
@@ -327,14 +331,13 @@ async function symptomCapRefusal({ project, instruction, ready }) {
 
 // Mirrors the symptom-cap override above (recentSymptomCapRefusals): a repeat
 // Build press within the window overrides a prior refusal, so an operator with
-// real work in flight is never wedged by this check.
+// real work in flight is never wedged by this check. Shares its window math
+// with the other two overrides (refusal-override-logic.js, D2.3) — its own Map.
 const recentRuleGateRefusals = new Map();
-const RULE_GATE_OVERRIDE_WINDOW_MS = 10 * 60 * 1000;
 
 function ruleGateOverrideActive(projectId) {
   const at = recentRuleGateRefusals.get(Number(projectId));
-  if (!at) return false;
-  if (Date.now() - at > RULE_GATE_OVERRIDE_WINDOW_MS) {
+  if (!refusalOverrideActive({ refusedAt: at })) {
     recentRuleGateRefusals.delete(Number(projectId));
     return false;
   }
@@ -366,6 +369,76 @@ async function ruleGateRefusal({ project, mode }) {
     return 'no confirmed rules — run Define first';
   } catch (e) {
     console.warn('[mock2] rule-gate check failed (proceeding, fail-open):', e?.message);
+    return null;
+  }
+}
+
+// ---- duplicate-work pre-check (run-taxonomy fix #6/D2) ----
+//
+// "Is this already done?" — the Encapsoul 650/652 case (an operator resent
+// literally the same request) and the Docs 740-vs-738 case (a re-request,
+// reworded, of already-shipped work). Ordered AFTER ruleGateRefusal above,
+// deliberately: rules-check is structural (the project cannot build sensibly
+// at all without confirmed rules) so it must be resolved first; this check is
+// informational (this specific ask may be moot) and would be confusing to
+// see before a build the operator can't even run yet.
+const recentDuplicateRefusals = new Map();
+const DUPLICATE_CHECK_WINDOW_DAYS = 14;
+const DUPLICATE_CHECK_RECORD_LIMIT = 20;
+
+function duplicateOverrideActive(projectId) {
+  const at = recentDuplicateRefusals.get(Number(projectId));
+  if (!refusalOverrideActive({ refusedAt: at })) {
+    recentDuplicateRefusals.delete(Number(projectId));
+    return false;
+  }
+  return true;
+}
+
+// The candidate pool findLikelyDuplicate compares against: recent, SUCCESSFUL
+// change records only (a halted/failed record's summary describes work that
+// did NOT land cleanly — it is not "already done"), most-recent-first,
+// windowed and capped so an old, huge project doesn't pay to scan its whole
+// history on every Build press. Native (DB + a per-record cycle-status
+// lookup); the matcher itself (duplicate-check-logic.js) stays pure.
+function recentSuccessfulChangeSummaries(projectId) {
+  const cutoff = Date.now() - DUPLICATE_CHECK_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const records = listChangeRecords(projectId).slice().reverse(); // seq DESC = most-recent-first
+  const out = [];
+  for (const r of records) {
+    if (out.length >= DUPLICATE_CHECK_RECORD_LIMIT) break;
+    const at = r.created_at ? Date.parse(r.created_at) : NaN;
+    if (Number.isFinite(at) && at < cutoff) break; // seq-ordered: once too old, so is the rest
+    if (r.cycle_id == null) continue;
+    let cycle = null;
+    try { cycle = getCycle(r.cycle_id); } catch { cycle = null; }
+    if (cycle?.status !== 'succeeded') continue;
+    out.push({ cycleId: r.cycle_id, seq: r.seq, summary: r.summary, createdAt: r.created_at });
+  }
+  return out;
+}
+
+// duplicateCheckRefusal — returns a refusal reason string when this instruction
+// looks like a recent, successful cycle already did it, or null to proceed.
+// Fails open on any error: a matcher mistake must never block a legitimate
+// build, and a false positive that can't be overridden costs trust in the
+// whole feature — see duplicateOverrideActive above.
+async function duplicateCheckRefusal({ project, instruction }) {
+  try {
+    const projectId = Number(project.id);
+    if (duplicateOverrideActive(projectId)) {
+      recentDuplicateRefusals.delete(projectId);
+      insertMessage({ projectId, kind: 'system', body: 'Building anyway — this looked like it might already be done.' });
+      return null;
+    }
+    const recentRecords = recentSuccessfulChangeSummaries(projectId);
+    const dup = findLikelyDuplicate({ instruction, recentRecords });
+    if (!dup) return null;
+    recentDuplicateRefusals.set(projectId, Date.now());
+    insertMessage({ projectId, kind: 'system', body: duplicateRefusalMessage(dup) });
+    return `looks already done — see cycle ${dup.match.cycleId} (change record ${dup.match.seq})`;
+  } catch (e) {
+    console.warn('[mock2] duplicate-check failed (proceeding, fail-open):', e?.message);
     return null;
   }
 }
@@ -445,6 +518,13 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // any state is written (no request, no cycle) — see ruleGateRefusal above.
   const ruleGate = await ruleGateRefusal({ project, mode });
   if (ruleGate) return { status: 'refused', error: ruleGate };
+
+  // Duplicate-work check (run-taxonomy fix #6/D2): does this ask look like a
+  // recent, successful cycle already did it? Ordered AFTER the rules check
+  // above (see the comment on duplicateCheckRefusal) and, like it, before
+  // insertRequest — refusing after that would orphan a request row.
+  const dupCheck = await duplicateCheckRefusal({ project, instruction });
+  if (dupCheck) return { status: 'refused', error: dupCheck };
 
   // Cost-truth: the operator's ask opens ONE request; the define audit + the build +
   // any resumes/consults are its segments (additive — request_id is nullable, this

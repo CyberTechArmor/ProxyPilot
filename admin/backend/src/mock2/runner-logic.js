@@ -1500,6 +1500,31 @@ function stableInput(input) {
   try { return JSON.stringify(input, Object.keys(input).sort()); } catch { return ''; }
 }
 
+// readSetFromTranscript — the files a cycle actually looked at, derived from
+// its own tool calls (run-taxonomy fix #10/D3). No new tracking side-channel:
+// the write-set is already derived from git at finish time
+// (`{ git diff --name-only HEAD; git ls-files --others --exclude-standard; }`)
+// rather than threaded through executeTool, so the read-set is built the same
+// lightweight way — from evidence already present in the transcript, which
+// interleaves assistant turns (each carrying `toolCalls: [{ id, name, input }]`,
+// model-client.js) with their tool-result turns. read_file and apply_edit both
+// read the file first (apply_edit's applyEdits works against the current
+// content), so both count; write_file/create_file do not — a fresh write is
+// not a read of prior content. Returns a Set of paths as given (relative to
+// the app dir, whatever the model passed as `input.path`).
+export function readSetFromTranscript(transcript = []) {
+  const paths = new Set();
+  for (const entry of (Array.isArray(transcript) ? transcript : [])) {
+    if (!entry || entry.role !== 'assistant' || !Array.isArray(entry.toolCalls)) continue;
+    for (const call of entry.toolCalls) {
+      if (!call || (call.name !== 'read_file' && call.name !== 'apply_edit')) continue;
+      const path = String(call.input?.path || '').trim();
+      if (path) paths.add(path);
+    }
+  }
+  return paths;
+}
+
 export function initProgressState() {
   return { noToolTurns: 0, staleTurns: 0, repeatCount: 0, lastMsgSig: null, lastToolSig: null };
 }
@@ -1550,6 +1575,28 @@ export function haltReasonLabel(reason) {
     case 'max_turns': return 'reached the step ceiling without finishing';
     default: return String(reason || 'blocked');
   }
+}
+
+// The halt record's summary (run-taxonomy fix #5/D1). Previously just a label
+// ("halt: the build reported it was blocked") — that cost noted/551 four
+// follow-on cycles: +190 real lines landed, then halted un-gated, so nothing
+// told the resume it was already there and 552/585/587 re-attempted it before
+// 588 spent a whole cycle just verifying it was already done. Names what
+// landed and what verified it, so a resume reads evidence, not a label. The
+// diff itself is appended separately by checkpointAndRecord's existing
+// composition (recordSummaryText) — this returns the summary WITHOUT it.
+export function haltSummaryWithLandedWork({ trigger, reason, gateReports = [] }) {
+  const label = haltReasonLabel(trigger);
+  const reports = Array.isArray(gateReports) ? gateReports : [];
+  const total = reports.length;
+  const passed = reports.filter((g) => g?.status === 'passed').length;
+  const failed = reports.filter((g) => g?.status === 'failed').map((g) => g.name);
+  const gateLine = total === 0
+    ? 'no gate battery ran against the checkpointed tree (verification unavailable at halt time)'
+    : failed.length
+      ? `${passed}/${total} gates passed on the checkpointed tree — failing: ${failed.join(', ')}`
+      : `${passed}/${total} gates passed on the checkpointed tree`;
+  return `halt: ${label}\n\n${gateLine}${reason ? `\n\nReason: ${String(reason).slice(0, 500)}` : ''}`;
 }
 
 // A model turn that ended in a safety refusal (Fable 5's classifier can emit

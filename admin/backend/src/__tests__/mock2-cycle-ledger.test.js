@@ -1,6 +1,11 @@
 // Ledger completeness (concludeCycle, run-taxonomy fix #8/A1) — pure logic
-// tests plus a source-level regression guard, covering BOTH build harnesses
-// (runner.js and its SDK-variant twin runner-sdk.js).
+// tests plus a source-level regression guard, covering both build harnesses
+// (runner.js and its SDK-variant twin runner-sdk.js) and the define-stage
+// terminals in audit.js (the audit interview, the quota refusal, the MVP
+// fast-path skip, and the rules-confirmed resume) — the same unrecorded-
+// terminal-cycle pattern, found while implementing the symptom-chase cap
+// (B2), which reads startBuild closely enough to notice its bare finishCycle
+// calls sit right next to the insertion point for that fix.
 //
 // Stub-first (risk R9): the pure half (conclude-logic.js) imports nothing
 // native. The source-level guards read the runner files as TEXT — concludeCycle
@@ -178,4 +183,48 @@ test('runner-sdk.js: the ir.checkpointFirst conditional gap is closed (parity wi
   // immediately followed by an unconditional finishCycle — must be gone.
   assert.doesNotMatch(src, /if \(ir\.checkpointFirst\) await checkpointAndRecord/);
   assert.match(src, /containerName: ir\.checkpointFirst \? containerName : null/);
+});
+
+// ---- audit.js: the define-stage terminals have the identical gap ----
+//
+// startBuild/runAudit/maybeResumeBuild end a DEFINE-stage cycle (the audit
+// interview, the MVP fast-path skip, the quota refusal, the rules-confirmed
+// resume) the same way the build harnesses end a BUILD-stage cycle — a bare
+// finishCycle with no change record. Unlike the build harnesses, none of
+// these terminals hold the checkout lock, so concludeCycle always takes the
+// minimal (no-container) recording path here — which is exactly right: there
+// is no container diff to checkpoint at these points, only the DB bookkeeping
+// that was previously left unrecorded.
+
+test('audit.js: no bare finishCycle(...) calls remain', async () => {
+  const src = await readFile(new URL('../mock2/audit.js', import.meta.url), 'utf8');
+  // audit.js never defines concludeCycle itself (that lives in runner.js), so
+  // unlike runner.js/runner-sdk.js there is no legitimate bare call left at
+  // all — every terminal must route through the imported concludeCycle.
+  const calls = [...src.matchAll(/\bfinishCycle\(/g)];
+  assert.equal(calls.length, 0, 'audit.js must not call finishCycle directly anywhere');
+});
+
+test('audit.js: every previously-unrecorded define-stage terminal now calls concludeCycle', async () => {
+  const src = await readFile(new URL('../mock2/audit.js', import.meta.url), 'utf8');
+  const gapMarkers = [
+    "status: 'refused_quota', error: verdict.reason",
+    "rule interview skipped (fast lane)",
+    'audit crashed: ${err?.message || err}',
+    "error: 'no approved inventory to audit'",
+    'audit failed: ${parsed.error}',
+    "summary: 'Audit passed — no rule questions.'",
+    "summary: 'All rules confirmed.'",
+  ];
+  for (const marker of gapMarkers) {
+    const idx = src.indexOf(marker);
+    assert.ok(idx !== -1, `expected to find marker "${marker}" in audit.js`);
+    const around = src.slice(Math.max(0, idx - 300), idx + 100);
+    assert.match(around, /concludeCycle\(/, `expected concludeCycle near "${marker}"`);
+  }
+});
+
+test('audit.js: concludeCycle is imported from runner.js, not reimplemented', async () => {
+  const src = await readFile(new URL('../mock2/audit.js', import.meta.url), 'utf8');
+  assert.match(src, /import\s*\{[^}]*concludeCycle[^}]*\}\s*from\s*'\.\/runner\.js'/);
 });

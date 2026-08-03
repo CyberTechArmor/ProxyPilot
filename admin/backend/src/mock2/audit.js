@@ -31,7 +31,7 @@ import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js'
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
 import { getCurrentFrameworkVersion, getFrameworkVersion } from './framework.js';
 import {
-  insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
+  insertCycle, getCycle, updateCycle, addCycleUsage, countRunningCycles,
   listCyclesForProject,
 } from './cycles.js';
 import { insertRequest } from './requests.js';
@@ -61,7 +61,7 @@ import {
   buildComponentSuggestionQuestion, parseComponentSuggestionAnswer,
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
-import { buildRunnerReady, startCycle, readFileInContainer } from './runner.js';
+import { buildRunnerReady, startCycle, readFileInContainer, concludeCycle } from './runner.js';
 import { normalizeBuildMode, isFastBuildMode, BUILD_MODE_MVP, BUILD_MODE_QUICK } from './cycle-logic.js';
 import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
 import {
@@ -410,7 +410,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
       initiatedBy: user.id, actingAsAdmin, estCostCents, status: 'refused_quota',
       requestId: request.id, segment: 'define',
     });
-    finishCycle(refused.id, { status: 'refused_quota', error: verdict.reason });
+    await concludeCycle({ cycle: refused, project, framework, status: 'refused_quota', error: verdict.reason });
     insertMessage({ projectId, kind: 'system', cycleId: refused.id, body: `Build not started — ${verdict.reason}` });
     return { status: 'refused', cycle: getCycle(refused.id), error: verdict.reason };
   }
@@ -429,7 +429,10 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
       requestId: request.id, segment: 'define',
     });
     updateCycle(mvpCycle.id, { started_at: nowIso() });
-    finishCycle(mvpCycle.id, { status: 'succeeded' });
+    await concludeCycle({
+      cycle: mvpCycle, project, framework, status: 'succeeded',
+      summary: quick ? 'quick update — rule interview skipped (fast lane)' : 'MVP build — rule interview skipped (fast lane)',
+    });
     getOrCreateChat(projectId);
     insertMessage({
       projectId, kind: 'system', cycleId: mvpCycle.id,
@@ -464,9 +467,9 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   setJob(projectId, { phase: 'auditing', message: 'Auditing the design against the rules and framework…', cycleId: cycle.id, startedAt: Date.now() });
 
   runAudit({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, instruction: String(instruction || ''), attachments })
-    .catch((err) => {
+    .catch(async (err) => {
       console.error(`[mock2] audit crashed for project ${projectId}:`, err?.message || err);
-      try { finishCycle(cycle.id, { status: 'failed', error: `audit crashed: ${err?.message || err}` }); } catch { /* ignore */ }
+      try { await concludeCycle({ cycle, project, framework, status: 'failed', error: `audit crashed: ${err?.message || err}` }); } catch { /* ignore */ }
       try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `The build audit failed: ${err?.message || err}` }); } catch { /* ignore */ }
       setJob(projectId, { phase: 'failed', message: `audit crashed: ${err?.message || err}` });
       scheduleJobCleanup(projectId);
@@ -484,7 +487,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   //    inventory — not pixels — is what the audit reads.
   const inv = await readWorkingFile(containerName, INVENTORY_PATH);
   if (!inv.ok || !String(inv.content || '').trim()) {
-    finishCycle(cycle.id, { status: 'failed', error: 'no approved inventory to audit' });
+    await concludeCycle({ cycle, project, framework, status: 'failed', error: 'no approved inventory to audit' });
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'Could not read the approved design inventory to audit the build. Re-approve the design and try again.' });
     setJob(projectId, { phase: 'failed', message: 'inventory unreadable' });
     return scheduleJobCleanup(projectId);
@@ -547,7 +550,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   if (auditRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.connector, model: auditRes.modelUsed || ready.model, usage: auditRes.usage, step: 'rule-audit' });
   const parsed = auditRes.ok ? parseAuditQuestions(auditRes.text) : { ok: false, error: auditRes.error, questions: [] };
   if (!parsed.ok) {
-    finishCycle(cycle.id, { status: 'failed', error: `audit failed: ${parsed.error}` });
+    await concludeCycle({ cycle, project, framework, status: 'failed', error: `audit failed: ${parsed.error}` });
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `The build audit couldn't complete: ${parsed.error}. Build was not started — try again.` });
     setJob(projectId, { phase: 'failed', message: parsed.error });
     return scheduleJobCleanup(projectId);
@@ -565,7 +568,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   // 3a) No questions (and no component suggestions) → the gate is clear; Build
   //     starts immediately (ADR-002).
   if (editor.length === 0 && admin.length === 0 && suggestionCount === 0) {
-    finishCycle(cycle.id, { status: 'succeeded' });
+    await concludeCycle({ cycle, project, framework, status: 'succeeded', summary: 'Audit passed — no rule questions.' });
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'Audit passed — no rule questions. Starting the build.' });
     setJob(projectId, { phase: 'building', message: 'Audit passed — starting the build.', cycleId: cycle.id });
     await proceedToBuild({ project, instruction, initiatedBy: cycle.initiated_by, actingAsAdmin, framework, requestId: cycle.request_id ?? null, task: parsed.task });
@@ -774,7 +777,9 @@ async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) 
   }
   const auditCycle = auditCycleId ? getCycle(auditCycleId) : null;
   if (auditCycle && ['awaiting_user', 'awaiting_admin', 'running'].includes(auditCycle.status)) {
-    finishCycle(auditCycle.id, { status: 'succeeded' });
+    // framework is not resolved yet at this point — concludeCycle derives it
+    // from the cycle's own pinned framework_version_id when not passed.
+    await concludeCycle({ cycle: auditCycle, project: getProject(projectId), status: 'succeeded', summary: 'All rules confirmed.' });
   }
   const framework = getCurrentFrameworkVersion();
   const project = getProject(projectId);

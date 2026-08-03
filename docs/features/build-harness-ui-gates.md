@@ -114,7 +114,11 @@ Enforcement is two-sided:
 - The **`ui-interaction` gate** (deterministic, in-container, `node`-evaluated)
   fails the cycle when the working-tree diff touches user-facing paths and any
   touched file has **no matching check** — or when the spec is missing or
-  malformed. Backend-only diffs skip green.
+  malformed. Backend-only diffs skip green. **Advisory in the MVP profile**
+  (`ADVISORY_GATE_PROFILES`, cycle-logic.js): that lane's own prompt sanctions
+  skipping `state/ui-checks.json`, so blocking there is a deadlock with no
+  legal exit — project 55 halted on it twice. It reports in MVP and blocks
+  from the full build up, where writing the checks IS the instruction.
 - The **browser connector** then executes the matched checks against the
   deployed app; any assertion or console error fails the cycle.
 

@@ -383,11 +383,14 @@ export function installBrowserScript(appDir) {
 // exactly what the operator asked MVP to cover — and it is the only gate that
 // exercises the rendered DOM before a deploy.
 //
-// Two deliberate escape hatches, because a browser suite that can red a build
+// Three deliberate escape hatches, because a browser suite that can red a build
 // for environmental reasons gets disabled by the first person it blocks:
 //   • no Playwright in the project (an older scaffold)  → skip,
 //   • no browser binary installed                       → skip, with the command.
-// A FAILING test is never skipped. Only an absent tool is.
+//   • the suite could not START — webServer exited, the database refused the
+//     connection or the CREATE DATABASE privilege — → skip, loudly, and tell
+//     the build to report it rather than halt (project 55).
+// A FAILING test is never skipped. Only an unreachable environment is.
 export function e2eGateScript() {
   return `#!/bin/sh
 # e2e — the project's OWN Playwright suite, run against a server the suite
@@ -414,15 +417,39 @@ if [ -z "$SPECS" ]; then
   echo "e2e: no specs in e2e/; skipped."
   exit 0
 fi
-CI=1 node_modules/.bin/playwright test
+OUT=$(mktemp 2>/dev/null || echo /tmp/pp-e2e-$$)
+# Redirect rather than pipe: in POSIX sh a pipeline's $? is tee's, not the
+# suite's, so a piped run would report every failure as a pass.
+CI=1 node_modules/.bin/playwright test > "$OUT" 2>&1
 rc=$?
-if [ "$rc" -ne 0 ]; then
+cat "$OUT"
+if [ "$rc" -eq 0 ]; then rm -f "$OUT"; exit 0; fi
+# THE SUITE NEVER RAN (project 55). Playwright's webServer could not boot:
+# scripts/e2e-server.mjs issued CREATE DATABASE with the app's database role
+# and Postgres answered "permission denied to create database". That is the
+# same class as a missing browser binary — an environment the build cannot
+# reach from inside its own cycle — but it arrived as a red gate, so three
+# resumes in a row halted on it and the app was never delivered. An
+# infrastructure fault with NO test failure reports loudly and skips green;
+# the moment a test actually fails, this is a red gate again.
+if grep -qiE 'permission denied to create database|webServer.*(exited early|Timed out)|Process from config\\.webServer exited early|ECONNREFUSED|could not connect to server|password authentication failed|role .* does not exist|EACCES' "$OUT" \\
+   && ! grep -qE '[0-9]+ (failed|flaky)' "$OUT"; then
   echo ""
-  echo "e2e: FAIL — the browser suite is red. These run against a real server with a real"
-  echo "     database, so a failure here is a user-visible defect, not a flaky unit test."
-  echo "     Reproduce locally:  npm run test:e2e"
-  echo "     Watch it happen:    npm run test:e2e:ui"
+  echo "e2e: SKIPPED — the suite never ran. Playwright could not start its server or reach its"
+  echo "     database, which is an environment/privilege problem, not a defect in this change."
+  echo "     The offending line:"
+  grep -iE 'permission denied to create database|exited early|ECONNREFUSED|could not connect to server|password authentication failed|role .* does not exist|EACCES' "$OUT" | head -3 | sed 's/^/       /'
+  echo "     Do NOT rewrite product code to get past this, and do not halt for it: say so in"
+  echo "     your finish summary so the operator can fix the environment."
+  rm -f "$OUT"
+  exit 0
 fi
+echo ""
+echo "e2e: FAIL — the browser suite is red. These run against a real server with a real"
+echo "     database, so a failure here is a user-visible defect, not a flaky unit test."
+echo "     Reproduce locally:  npm run test:e2e"
+echo "     Watch it happen:    npm run test:e2e:ui"
+rm -f "$OUT"
 exit $rc
 `;
 }

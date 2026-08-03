@@ -760,6 +760,35 @@ ${Array.from({ length: 40 }, (_, i) => `.s${i}{color:var(--d${i});padding:${i}px
   assert.doesNotMatch(r.out, /0 bytes of its own CSS/);
 });
 
+// MINIFIED CSS IS ONE LINE (project 55). The check grepped the LINE, then
+// split the whole line on non-digits and failed if ANY number exceeded 430 —
+// so `.bar{width:130px}` was reported as a fixed width wider than a phone
+// because `border-radius:999px` sat elsewhere on the same line. The build
+// spent a cycle chasing a width that was never there.
+test('mobile-overflow: a minified stylesheet is judged per declaration, not per line', () => {
+  const good = runScript(MOBILE_OVERFLOW_GATE_SCRIPT, {
+    'public/app.css': '#root{min-height:55vh}.stage-badge{padding:4px 10px;border-radius:999px}'
+      + '.bar{height:8px;width:130px;border-radius:99px;overflow:hidden}.card-menu{min-width:36px}\n',
+    'public/i.html': '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body></body></html>',
+  });
+  assert.equal(good.code, 0, `130px is not wider than a phone:\n${good.out}`);
+
+  // A REAL fixed width on the same minified line is still caught.
+  const bad = runScript(MOBILE_OVERFLOW_GATE_SCRIPT, {
+    'public/app.css': '.bar{width:130px;border-radius:999px}.rail{min-width:640px}\n',
+    'public/i.html': '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body></body></html>',
+  });
+  assert.equal(bad.code, 1, bad.out);
+  assert.match(bad.out, /min-width[[:space:]]*:[[:space:]]*640px|min-width:640px/);
+
+  // max-width is still exempt at any size.
+  const maxw = runScript(MOBILE_OVERFLOW_GATE_SCRIPT, {
+    'public/app.css': '.wrap{max-width:1200px;margin:0 auto}\n',
+    'public/i.html': '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body></body></html>',
+  });
+  assert.equal(maxw.code, 0, maxw.out);
+});
+
 test('mobile-overflow: a fixed width inside an inline <style> is still caught', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pp-mo-'));
   try {

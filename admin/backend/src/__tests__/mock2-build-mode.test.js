@@ -91,6 +91,45 @@ test('filterGatesForBuildMode: tolerant of empty/absent batteries', () => {
   assert.deepEqual(filterGatesForBuildMode(undefined, 'mvp'), []);
 });
 
+/* ==================== THE MVP DEADLOCK (project 55) ====================== */
+//
+// Two shipped statements, both true of the same cycle:
+//   • the MVP build prompt: "Do NOT write state/acceptance.json,
+//     state/ui-checks.json, or per-rule test suites — skipping them is
+//     sanctioned here and only here."
+//   • the ui-interaction gate: "FAIL - user-facing change (public/admin.html,
+//     public/app-shell.html, …) but state/ui-checks.json is missing".
+//
+// So the MVP lane had two exits and both were closed: obey the instruction and
+// the gate is red forever, or write the file and violate an explicit
+// instruction. Request 258 halted on exactly that ("explicitly prohibited for
+// this MVP cycle"), the operator resumed it twice, and it hit the same wall
+// each time. The gate now REPORTS in the lane whose contract forbids its
+// artifact, and still BLOCKS where writing ui-checks is the instruction.
+
+test('ui-interaction is advisory in the mvp battery and blocking in the full one', () => {
+  const mvp = buildGateBattery(battery, 'mvp').gates.find((g) => g.name === 'ui-interaction');
+  assert.ok(mvp, 'it still runs — the report is the point');
+  assert.equal(mvp.advisory, true);
+  assert.match(mvp.script, /ADVISORY placement of ui-interaction/);
+  assert.match(mvp.script, /exit 0/);
+
+  const full = buildGateBattery(battery, 'full').gates.find((g) => g.name === 'ui-interaction');
+  assert.equal(full.advisory, undefined);
+  assert.equal(full.script, '#', 'the full build runs the operator script verbatim');
+});
+
+test('the MVP prompt no longer forbids what the MVP battery requires', async () => {
+  const { buildRunnerSystemPrompt: prompt } = await import('../mock2/runner-logic.js');
+  const mvp = prompt({ constitution: 'C', skills: [], buildMode: 'mvp' });
+  assert.ok(!/Do NOT write\s+state\/acceptance\.json, state\/ui-checks\.json/.test(mvp),
+    'the flat prohibition that deadlocked the lane must be gone');
+  assert.match(mvp, /ui-interaction gate runs ADVISORY here/);
+  // And it must stop claiming a battery that demonstrably runs does not exist.
+  assert.ok(!/There is NO gate battery and NO run_gates tool this cycle/.test(mvp),
+    'the MVP lane does run a battery at finish — saying otherwise teaches the build to distrust the reports');
+});
+
 // ---- quick-lane escalation (run-taxonomy fix #4/C1) ----
 //
 // A quick update's regression gates ran only on greenfield/full builds — never

@@ -963,11 +963,18 @@ export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir
   const mode = String(buildMode);
   const modeHeader = mode === 'mvp' ? `THIS CYCLE IS AN MVP BUILD: deliver a WORKING, testable end-to-end version of
 the approved design, fast.
-- There is NO gate battery and NO run_gates tool this cycle. Do NOT write
-  state/acceptance.json, state/ui-checks.json, or per-rule test suites —
-  skipping them is sanctioned here and only here. A later FULL build adds the
-  rule interview, per-rule tests, ui-checks, and the acceptance spec — do not
-  attempt them now.
+- You have NO run_gates tool this cycle, but a REDUCED battery does run once at
+  finish — the "does it look and act right" gates: typecheck, design-adherence,
+  platform-intact, signin-reachable, mobile-overflow, no-dead-controls,
+  no-native-dialogs, e2e. Fix what they report.
+- Do NOT write state/acceptance.json, per-rule test suites, or the rule
+  interview — skipping them is sanctioned here and only here, and a later FULL
+  build adds them. state/ui-checks.json is OPTIONAL in this lane: the
+  ui-interaction gate runs ADVISORY here, so a missing check file reports and
+  never blocks. Write one only if it is genuinely faster than not.
+- No gate in this battery is satisfied by editing markup to match a detector.
+  If a gate's report contradicts the approved design, satisfy the design and
+  say so in your finish summary — that is a sanctioned outcome, not a failure.
 - ProxyPilot's deploy (tsc build + health check on the live URL) is the
   verification backstop. Everything else still binds: type-clean code, the
   constitution, honest integrations.
@@ -1509,15 +1516,27 @@ function stableInput(input) {
 // interleaves assistant turns (each carrying `toolCalls: [{ id, name, input }]`,
 // model-client.js) with their tool-result turns. read_file and apply_edit both
 // read the file first (apply_edit's applyEdits works against the current
-// content), so both count; write_file/create_file do not — a fresh write is
-// not a read of prior content. Returns a Set of paths as given (relative to
-// the app dir, whatever the model passed as `input.path`).
+// content); write_file/create_file count too — this set backs the question
+// "could the cycle honestly claim to have VERIFIED something about this file",
+// and authoring it answers that as well as reading it does. Returns a Set of
+// paths as given (relative to the app dir, whatever the model passed as
+// `input.path`).
+export const READ_SET_TOOLS = Object.freeze(new Set([
+  'read_file', 'apply_edit', 'write_file', 'create_file', 'Read', 'Write', 'Edit',
+]));
+
 export function readSetFromTranscript(transcript = []) {
   const paths = new Set();
   for (const entry of (Array.isArray(transcript) ? transcript : [])) {
     if (!entry || entry.role !== 'assistant' || !Array.isArray(entry.toolCalls)) continue;
     for (const call of entry.toolCalls) {
-      if (!call || (call.name !== 'read_file' && call.name !== 'apply_edit')) continue;
+      // AUTHORING a file is evidence at least as strong as reading it — the
+      // cycle knows what it just wrote. Omitting the write tools meant a
+      // build that CREATED src/pipeline/routes.ts this cycle and cited it in
+      // assumptions.verified was told it "claims a file this cycle never
+      // read" (project 55). create_file is the copilot harness's name;
+      // write_file the proxypilot one.
+      if (!call || !READ_SET_TOOLS.has(call.name)) continue;
       const path = String(call.input?.path || '').trim();
       if (path) paths.add(path);
     }

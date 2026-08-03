@@ -14,7 +14,7 @@
 
 import { USAGE_SCHEMA_VERSION } from './usage-logic.js';
 import { parseRoutingJson } from './routing-logic.js';
-import { GATE_TIERS, tierRank, baselineGatesForProfile } from './baseline-gates.js';
+import { GATE_TIERS, tierRank, baselineGatesForProfile, asAdvisory } from './baseline-gates.js';
 
 // The mock2_cycles.status vocabulary (migration 502 CHECK), split into the sets
 // the runner branches on. refused_quota / abandoned / failed / succeeded are
@@ -280,10 +280,40 @@ export function gateTier(gate) {
   return 'full';
 }
 
+// ADVISORY PLACEMENT for framework gates — the same mechanism baseline gates
+// have via `advisoryIn`, applied by name to the operator battery.
+//
+// THE MVP DEADLOCK (project 55). `ui-interaction` fails a cycle that touched a
+// user-facing file without a matching check in state/ui-checks.json. The MVP
+// build prompt says, in terms: "Do NOT write state/acceptance.json,
+// state/ui-checks.json, or per-rule test suites — skipping them is sanctioned
+// here and only here." Both statements were shipped, so an MVP build had two
+// exits and both were closed: obey the instruction and the gate is red
+// forever, or write the file and violate an explicit instruction. The build
+// halted on the contradiction ("ui-interaction requires state/ui-checks.json,
+// explicitly prohibited for this MVP cycle"), the operator resumed it twice,
+// and it halted on the same wall each time.
+//
+// The gate's VALUE in the MVP lane is the report — "these screens have no
+// interaction check" — not the block, because the lane it polices is the one
+// whose own contract forbids the artifact. So it reports here and blocks from
+// the full build up, where writing ui-checks IS the instruction.
+export const ADVISORY_GATE_PROFILES = Object.freeze({
+  'ui-interaction': ['mvp'],
+});
+
+export function gateIsAdvisoryIn(name, profile) {
+  return (ADVISORY_GATE_PROFILES[String(name || '')] || []).includes(profile);
+}
+
 // gatesForProfile — the operator gates that belong in a profile, ordered.
 export function gatesForProfile(gates = [], profile = 'full') {
   const rank = tierRank(profile);
-  return (Array.isArray(gates) ? gates : []).filter((g) => tierRank(gateTier(g)) <= rank);
+  return (Array.isArray(gates) ? gates : [])
+    .filter((g) => tierRank(gateTier(g)) <= rank)
+    .map((g) => (gateIsAdvisoryIn(g?.name, profile)
+      ? { ...g, script: asAdvisory(g.script, g.name), advisory: true }
+      : g));
 }
 
 // withBaselineGates — append the backend-owned baseline gates for this profile.

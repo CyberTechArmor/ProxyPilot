@@ -342,16 +342,52 @@ const PATH_TOKEN_RE = /[a-zA-Z0-9_.-]*\/[a-zA-Z0-9_./-]*[a-zA-Z0-9_-]|[a-zA-Z0-9
 // the citation; earlier parens are usually incidental prose). Returns null when
 // no path-shaped token is found — many true claims (a cross-cutting invariant,
 // a UI behavior observed via a browser probe, Spec B) legitimately cite nothing.
+// A ROUTE is not a file (project 55). The two claims that cost that build two
+// of its three finish attempts were:
+//
+//   "Verified /login rendered without console or network errors through
+//    browser_probe."
+//   "…GET /api/health returned 200; browser probe of /login reported no
+//    console or network errors."
+//
+// Neither cites a file — they are the browser-probe observations this module's
+// own contract says must never be flagged — but PATH_TOKEN_RE read "/login"
+// and "/api/health" as paths, found them in no read-set (nothing can read a
+// URL), and rejected the finish. A cited token is only treated as a FILE when
+// it carries a file extension or is rooted in a source directory; a bare
+// leading-slash route, a URL, or an HTTP-verb target is prose about the
+// running app.
+const SOURCE_ROOT_RE = /^(?:\.\/)?(?:src|public|app|lib|server|client|migrations|routes|components|pages|views|tests?|__tests__|scripts|state|docs|e2e|styles|db|config)\//i;
+const FILE_EXT_RE = /\.[A-Za-z][A-Za-z0-9]{0,4}$/;
+
+// Prose that the bare-filename half of PATH_TOKEN_RE reads as `name.ext`.
+const PROSE_ABBREV = new Set(['e.g', 'i.e', 'etc', 'vs', 'no', 'cf', 'a.k.a']);
+
+export function looksLikeFileCitation(token) {
+  const t = String(token || '').trim();
+  if (!t) return false;
+  // http://host/x, GET /api/health, /login — the running app, not the tree.
+  if (/:\/\//.test(t)) return false;
+  if (t.startsWith('/')) return false;
+  if (PROSE_ABBREV.has(t.toLowerCase())) return false;
+  return FILE_EXT_RE.test(t) || SOURCE_ROOT_RE.test(t);
+}
+
 export function extractCitedFile(verifiedEntry) {
   const s = String(verifiedEntry || '');
   let fromParens = null;
   for (const m of s.matchAll(/\(([^()]+)\)/g)) {
     const hit = m[1].trim().match(PATH_TOKEN_RE);
-    if (hit) fromParens = hit[0];
+    if (hit && looksLikeFileCitation(hit[0])) fromParens = hit[0];
   }
   if (fromParens) return fromParens;
-  const hit = s.match(PATH_TOKEN_RE);
-  return hit ? hit[0] : null;
+  // The FIRST token was the only one considered, so a claim that mentioned a
+  // route before its file ("GET /api/health is served by src/health.ts") cited
+  // the route. Scan every path-shaped token and take the first real file.
+  for (const m of s.matchAll(new RegExp(PATH_TOKEN_RE, 'g'))) {
+    if (looksLikeFileCitation(m[0])) return m[0];
+  }
+  return null;
 }
 
 function citationMatchesReadSet(cited, readSet) {

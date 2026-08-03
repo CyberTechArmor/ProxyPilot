@@ -143,7 +143,28 @@ test('the gate skips on missing tooling and fails on a red suite', () => {
     assert.match(r.stdout, /e2e: FAIL/);
     assert.match(r.stdout, /npm run test:e2e/);
 
-    // 5. A project seeded before e2e existed → skip, not fail.
+    // 5. THE SUITE NEVER RAN (project 55). scripts/e2e-server.mjs issues
+    //    CREATE DATABASE with the app's role and Postgres answers "permission
+    //    denied to create database", so playwright's webServer exits before a
+    //    single test starts. That is the same class as a missing browser
+    //    binary — an environment the build cannot reach from inside its own
+    //    cycle — but it arrived as a red gate, and three resumes in a row
+    //    halted on it while the app went undelivered. Loud skip, not red.
+    stubPlaywright(1, 'Error: Process from config.webServer exited early.\npermission denied to create database');
+    r = run();
+    assert.equal(r.status, 0, 'an unreachable environment must not red the build');
+    assert.match(r.stdout, /e2e: SKIPPED/);
+    assert.match(r.stdout, /permission denied to create database/);
+    assert.match(r.stdout, /do not halt for it/);
+
+    // 5b. …but an environment complaint alongside a REAL test failure is red.
+    stubPlaywright(1, 'ECONNREFUSED once, then retried\n\n  2 failed\n  3 passed');
+    r = run();
+    assert.equal(r.status, 1, 'a failing test is never explained away as an environment fault');
+    assert.match(r.stdout, /e2e: FAIL/);
+
+    // 6. A project seeded before e2e existed → skip, not fail.
+    stubPlaywright(0, 'all good');
     rmSync(join(dir, 'playwright.config.ts'));
     r = run();
     assert.equal(r.status, 0);

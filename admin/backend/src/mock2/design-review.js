@@ -868,7 +868,9 @@ ${message}`;
   if (apply) {
     const instruction = composePolishInstruction({ review, axe: capture.axe, rogue, adherence });
     if (instruction) {
-      queued = enqueueBuild({ projectId: project.id, instruction, buildMode: 'quick', label: 'Polish pass fixes', initiatedBy });
+      // Harness-composed, not typed by anyone: the pre-build gates would read
+      // a polish pass as a duplicate of the build that just ran.
+      queued = enqueueBuild({ projectId: project.id, instruction, buildMode: 'quick', label: 'Polish pass fixes', initiatedBy, origin: 'system' });
       drainBuildQueue(project.id).catch((e) => console.warn('[mock2] polish drain failed:', e?.message));
     }
   }

@@ -20,3 +20,36 @@ export function refusalOverrideActive({ refusedAt, now, withinMinutes = DEFAULT_
   const nowMs = Number.isFinite(now) ? now : Date.now();
   return (nowMs - Number(refusedAt)) <= withinMinutes * 60 * 1000;
 }
+
+// ---- who the guardrails are TALKING TO (project 55) ----
+//
+// Every one of these three refusals ends "press Build again within 10 minutes
+// to override". That sentence is the whole design: a guardrail with an escape
+// hatch. It also means the refusal is only meaningful when a PERSON is there
+// to read it — and the harness queues builds of its own.
+//
+// Project 55's context handoff checkpointed a half-finished build, queued the
+// continuation, and the rules gate refused it: "no confirmed rules — run
+// Define first". Nothing can press Build on a queue's behalf, so the row was
+// marked failed and the work abandoned mid-flight. The refusal ALSO armed the
+// ten-minute window, so the next queued row inherited an override nobody
+// granted — the gate dropped the build it should have run and waved through
+// the one it should have questioned.
+//
+// Two separate questions, two separate answers:
+//   preBuildGatesApply  — is this a NEW ASK that a human should be questioned
+//                         about? A harness-queued continuation is the second
+//                         half of work already authorized; it is also
+//                         near-identical to the cycle that just checkpointed,
+//                         which is exactly what the duplicate check and the
+//                         symptom cap are built to refuse.
+//   mayConsumeOverride  — was Build actually PRESSED? Draining a queue is not
+//                         "pressing Build again", however legitimate the
+//                         queued ask is.
+export function preBuildGatesApply(origin) {
+  return String(origin || 'operator') !== 'system';
+}
+
+export function mayConsumeOverride(origin) {
+  return String(origin || 'operator') === 'operator';
+}

@@ -15,15 +15,39 @@ import { getProject } from './projects.js';
 import { insertMessage } from './chats.js';
 import { isTransientStartError } from './screen-plan-logic.js';
 import { queueRowConcluded } from './cycle-logic.js';
+import { continuationRun } from './runner-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
-export function enqueueBuild({ projectId, instruction, buildMode = 'quick', label = null, initiatedBy = null }) {
+// WHO ASKED (migration 555). Three answers, because the pre-build gates need
+// two different facts about a build:
+//
+//   'operator' — a person pressed Build just now. Gates apply; a repeat press
+//                inside the ten-minute window overrides a prior refusal.
+//   'queued'   — a person's ask that waited for the writer lock. Gates apply
+//                in full (it is still a new ask), but it must NOT consume the
+//                override armed by someone's interactive press: draining a
+//                queue is not "pressing Build again".
+//   'system'   — the harness queued this itself: a context handoff's
+//                continuation, a polish pass. Work an operator already
+//                authorized, being carried on. The gates are CONVERSATIONS
+//                WITH A HUMAN — each ends "press Build again within 10 minutes
+//                to override" — so running a machine build through them can
+//                only ever strand it.
+//
+// Default 'operator': anything that does not say otherwise is a person's ask.
+export const BUILD_ORIGINS = Object.freeze(['operator', 'queued', 'system']);
+
+export function normalizeBuildOrigin(origin) {
+  return BUILD_ORIGINS.includes(String(origin || '')) ? String(origin) : 'operator';
+}
+
+export function enqueueBuild({ projectId, instruction, buildMode = 'quick', label = null, initiatedBy = null, origin = 'operator' }) {
   const db = getMock2Db();
   const info = db.prepare(`
-    INSERT INTO mock2_build_queue (project_id, instruction, build_mode, label, initiated_by, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(Number(projectId), String(instruction), String(buildMode), label, initiatedBy == null ? null : String(initiatedBy), nowIso(), nowIso());
+    INSERT INTO mock2_build_queue (project_id, instruction, build_mode, label, initiated_by, origin, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(Number(projectId), String(instruction), String(buildMode), label, initiatedBy == null ? null : String(initiatedBy), normalizeBuildOrigin(origin), nowIso(), nowIso());
   return db.prepare(`SELECT * FROM mock2_build_queue WHERE id = ?`).get(info.lastInsertRowid);
 }
 
@@ -145,10 +169,17 @@ export async function drainBuildQueue(projectId) {
 
     // Lazy import (audit.js sits above this module via concept.js).
     const { startBuild } = await import('./audit.js');
+    // A row written before migration 555 carries the default 'operator', but a
+    // continuation is still recognisable from the marker the harness itself
+    // wrote into the instruction — so a handoff queued by the old code is not
+    // stranded by the upgrade either.
+    const origin = normalizeBuildOrigin(next.origin) === 'system' || continuationRun(next.instruction) > 0
+      ? 'system' : 'queued';
     const res = await startBuild({
       project, instruction: next.instruction,
       user: { id: next.initiated_by ?? project.created_by ?? null },
       buildMode: next.build_mode || 'quick',
+      origin,
     });
     if (res.status === 'started') {
       markQueueRow(next.id, { status: 'started', request_id: res.cycle?.request_id ?? null });
@@ -160,7 +191,15 @@ export async function drainBuildQueue(projectId) {
     if (isTransientStartError(res.error)) return { status: 'waiting', error: res.error };
     markQueueRow(next.id, { status: 'failed', error: String(res.error || 'build did not start').slice(0, 500) });
     try {
-      insertMessage({ projectId: pid, kind: 'system', body: `Queued build could not start (${next.label || next.instruction.slice(0, 80)}): ${res.error}` });
+      // SAY WHAT TO DO. A queued row that dies here is work the operator asked
+      // for, dropped with a reason they cannot act on — project 55's chat
+      // showed "Queued build could not start (…): no confirmed rules — run
+      // Define first" and nothing else, over a build that was already half
+      // done. The refusal reasons are all human-resolvable; name the door.
+      const how = origin === 'system'
+        ? ' This was the harness continuing its own work, so nothing was queued by you — press Build to pick it up again.'
+        : ' Resolve the reason above, then submit it again (a refusal of this kind is overridden by pressing Build a second time within 10 minutes).';
+      insertMessage({ projectId: pid, kind: 'system', body: `Queued build could not start (${next.label || next.instruction.slice(0, 80)}): ${res.error}.${how}` });
     } catch { /* best effort */ }
     draining.delete(pid);
     return drainBuildQueue(pid); // move on to the next entry

@@ -1822,6 +1822,12 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
                 projectId,
                 instruction: buildContinuationInstruction({ original: cycle.instruction, handoff: handoffText, run: nextRun, maxChain: CONTEXT_HANDOFF_MAX_CHAIN }),
                 buildMode: cycleMode, initiatedBy: cycle.initiated_by,
+                // The harness queued this, not a person: the pre-build gates
+                // must not interrogate it (build-queue.js BUILD_ORIGINS). This
+                // is the second half of work already authorized, and it is
+                // near-identical to the cycle that just checkpointed — exactly
+                // what the duplicate check and symptom cap exist to refuse.
+                origin: 'system',
               });
               handoffQueued = true;
               logEvent('ai_message', {

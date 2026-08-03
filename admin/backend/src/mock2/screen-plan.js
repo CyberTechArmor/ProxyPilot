@@ -191,6 +191,10 @@ export async function startItemsBuild(projectId, { itemIds = null, initiatedBy =
   const res = await startBuild({
     project, instruction: buildItemsBuildInstruction(groups),
     user: { id: initiatedBy ?? project.created_by ?? null }, buildMode: 'quick',
+    // Harness-composed from the screen plan the operator already approved.
+    // Successive per-screen builds are near-identical by construction, which
+    // is precisely what the duplicate check and symptom cap exist to refuse.
+    origin: 'system',
   });
   if (res.status !== 'started') {
     return { status: 'error', error: res.error || res.reason || 'The build could not start.' };
@@ -316,6 +320,8 @@ export async function drainScreenQueue(projectId) {
       instruction: buildScreenBuildInstruction(next),
       user: { id: next.queued_by ?? project.created_by ?? null },
       buildMode: 'mvp',
+      // The screen queue draining itself — see the note on the items build.
+      origin: 'system',
     });
     if (res.status === 'started') {
       updateScreenRow(next.id, { status: 'building', request_id: res.cycle?.request_id ?? null });

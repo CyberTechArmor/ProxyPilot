@@ -127,6 +127,9 @@ async function maybeAdoptProject(projectId, framework) {
 
   const res = await startBuild({
     project, instruction, user: { id: initiator }, actingAsAdmin: 1, buildMode: 'full',
+    // The platform started this, not a person — the pre-build gates refuse
+    // with "press Build again within 10 minutes", which nobody is here to do.
+    origin: 'system',
   });
   if (res.status === 'started') {
     console.log(`[mock2] framework auto-adopt: update cycle started for project ${project.id} (v${from?.version ?? '?'} → v${framework.version})`);

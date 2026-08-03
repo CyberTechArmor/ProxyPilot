@@ -1809,4 +1809,21 @@ export const MOCK2_MIGRATIONS = [
       d.exec(`ALTER TABLE mock2_projects ADD COLUMN design_choice_at TEXT;`);
     },
   },
+  {
+    // WHO ASKED FOR THIS BUILD. The pre-build gates (Define-stage rules check,
+    // duplicate-work check, symptom-chase cap) all interrogate a NEW OPERATOR
+    // ASK — each one refuses with "press Build again within 10 minutes to
+    // override", which only a human at a keyboard can do. The queue drained
+    // machine-originated builds through the same door: project 55's context
+    // handoff checkpointed a half-finished build, queued its continuation, and
+    // the rules gate refused it ("no confirmed rules — run Define first"),
+    // marking the row failed and stranding the work with nobody able to press
+    // anything. 'operator' (default) keeps every existing row and every
+    // interactive press exactly as it was.
+    version: 555,
+    name: 'mock2_build_queue_origin',
+    up: (d) => {
+      d.exec(`ALTER TABLE mock2_build_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'operator';`);
+    },
+  },
 ];

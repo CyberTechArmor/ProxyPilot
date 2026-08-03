@@ -109,12 +109,59 @@ test('readSetFromTranscript: collects read_file and apply_edit paths', () => {
   assert.ok(set.has('src/b.ts'));
 });
 
-test('readSetFromTranscript: ignores write-only create_file/write_file calls', () => {
+// CHANGED DELIBERATELY (project 55). create_file/write_file used to be
+// excluded — "a fresh write is not a read of prior content" — but the question
+// this set answers is "could the cycle honestly claim to have verified
+// something about this file", and a file the cycle AUTHORED answers it as well
+// as one it read. An inventory build creates most of its files, so the old
+// rule rejected a build for citing its own work: request 258 spent a finish
+// attempt on "assumptions.verified claims a file this cycle never read" for
+// files it had written minutes earlier.
+test('readSetFromTranscript: a file the cycle AUTHORED counts as verifiable', () => {
   const transcript = [
     { role: 'assistant', text: '', toolCalls: [{ id: '1', name: 'create_file', input: { path: 'src/new.ts', content: 'x' } }] },
     { role: 'assistant', text: '', toolCalls: [{ id: '2', name: 'write_file', input: { path: 'src/new2.ts', content: 'x' } }] },
   ];
-  assert.equal(readSetFromTranscript(transcript).size, 0);
+  const set = readSetFromTranscript(transcript);
+  assert.ok(set.has('src/new.ts'));
+  assert.ok(set.has('src/new2.ts'));
+});
+
+// ---- a ROUTE is not a file (project 55) ----
+//
+// These two claims are browser-probe observations — the exact shape this
+// module's contract says must never be flagged — and both were rejected
+// because "/login" and "/api/health" are path-shaped. Together they cost
+// request 258 two of its three finish attempts.
+
+test('extractCitedFile: a URL route is never a file citation', () => {
+  assert.equal(extractCitedFile('Verified /login rendered without browser console or network errors through browser_probe.'), null);
+  assert.equal(extractCitedFile('npm run build completed; GET /api/health returned 200; browser probe of /login reported no console errors.'), null);
+  assert.equal(extractCitedFile('the health endpoint at https://example.test/api/health answers 200'), null);
+});
+
+test('extractCitedFile: a real file cited alongside a route is still found', () => {
+  assert.equal(extractCitedFile('GET /api/health is served by src/health.ts'), 'src/health.ts');
+  assert.equal(extractCitedFile('the /login page is rendered from public/login.html'), 'public/login.html');
+});
+
+test('unverifiableClaims: a browser-probe claim about a route is not flagged', () => {
+  const flagged = unverifiableClaims({
+    assumptions: {
+      verified: ['Verified /login rendered without console or network errors through browser_probe.'],
+      assumed: [],
+    },
+    readSet: new Set(['src/app.ts']),
+  });
+  assert.deepEqual(flagged, []);
+});
+
+test('unverifiableClaims: a genuine unread-file claim is STILL flagged', () => {
+  const flagged = unverifiableClaims({
+    assumptions: { verified: ['roles are lowercase (src/routes/profile.ts)'], assumed: [] },
+    readSet: new Set(['src/app.ts']),
+  });
+  assert.equal(flagged.length, 1);
 });
 
 test('readSetFromTranscript: tolerant of an empty/malformed transcript', () => {

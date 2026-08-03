@@ -315,12 +315,29 @@ export function verificationOnlyFinish(summary, codeChanged = []) {
 // A named file counts as covered when it matches a changed path exactly, by
 // basename, or as a suffix (summaries often shorten "src/adp/tls.ts" to
 // "adp/tls.ts"). Returns { ok, unmatched: [] }.
-export function summaryOverclaims(summary, changedFiles = []) {
+// `knownPaths` (optional) — the repo's tracked files. It only ever makes the
+// check MORE permissive, and it exists for one shape: an extension-less
+// slash-run whose first segment happens to be a source dir name. "src/billing"
+// is a real directory claim and must still reject; "state/pod" was PROSE — the
+// screen is called "State & Pod schedule" and the summary wrote it with a
+// slash. Nothing in the token distinguishes them, so project 55 lost a finish
+// attempt to a shorthand. With the tree in hand the difference is decidable: a
+// directory the repo does not have was never a claim about a directory.
+// Omitted ⇒ every directory claim is enforced, exactly as before.
+export function summaryOverclaims(summary, changedFiles = [], { knownPaths = null } = {}) {
   const changed = (Array.isArray(changedFiles) ? changedFiles : []).map((f) => String(f || '').replace(/^\.\//, ''));
   const basenames = new Set(changed.map((f) => f.split('/').pop()));
+  const known = Array.isArray(knownPaths) ? knownPaths.map((f) => String(f || '').replace(/^\.\//, '')) : null;
   const unmatched = [];
+  const prose = [];
   for (const claim of extractSummaryPathClaims(summary)) {
     const c = claim.replace(/^\.\//, '');
+    // A directory claim naming a directory that does not exist is prose.
+    if (known && !FILE_EXT_RE.test(c.split('/').pop())
+      && !known.some((f) => f === c || f.startsWith(`${c}/`))) {
+      prose.push(c);
+      continue;
+    }
     const covered = changed.some((f) => f === c || f.endsWith(`/${c}`))
       || (!c.includes('/') && basenames.has(c))
       || changed.some((f) => c.endsWith(`/${f}`))
@@ -329,7 +346,7 @@ export function summaryOverclaims(summary, changedFiles = []) {
       || changed.some((f) => f.startsWith(`${c}/`));
     if (!covered) unmatched.push(claim);
   }
-  return { ok: unmatched.length === 0, unmatched };
+  return { ok: unmatched.length === 0, unmatched, prose };
 }
 
 // ---- anomaly tripwire (heuristic — flags for human review, never blocks) ----
@@ -536,6 +553,93 @@ export const ACTION_LABEL_PARITY_FLAG = 'MOCK2_ACTION_LABEL_PARITY';
 export function actionLabelParityMode(env = {}) {
   const v = String(env?.[ACTION_LABEL_PARITY_FLAG] ?? '').trim().toLowerCase();
   return v === 'warn' || v === 'off' ? 'warn' : 'enforce';
+}
+
+// ---- the container probe (project 55: the one-line-file false positive) ----
+//
+// The probe used to decide "hidden-only" with `grep -vc 'hidden'` over the
+// matching LINES — a substring test on a whole line. Two properties of real
+// front-end code make that test meaningless:
+//
+//   1. A build's screen module is often ONE line. Project 55's `card()` renders
+//      the whole acquisition card — including `<div class="menu hidden">` and
+//      the three overflow-menu buttons inside it — as a single template
+//      literal, and `renderBoard()` puts the "+ New acquisition" button and
+//      `classList.toggle('hidden')` on one line too. Every occurrence of every
+//      label therefore sat on a line containing the word "hidden".
+//   2. "hidden" is a substring of things that are not an element's hidden
+//      attribute: `overflow:hidden` (in a MINIFIED stylesheet that is also one
+//      line), `aria-hidden`, `.hidden{}`, `data-hidden`.
+//
+// So project 55 shipped exactly the placement this gate says it wants — a
+// "More actions" overflow menu with real handlers for Edit / Change stage /
+// Delete — and was told three times that a user had no way to perform them.
+// Three rejections is the whole finish budget; the build halted, correctly
+// reporting a harness fault, and no app got built.
+//
+// The probe now asks the question it always meant to ask: is the label on an
+// element A USER CAN REACH?
+//   - stylesheets are not elements — they are excluded from the decision;
+//   - `hidden` counts only as a standalone token (not `aria-hidden`,
+//     `overflow:hidden`, `.hidden`, `data-hidden`);
+//   - and a COLLAPSED surface that the app itself opens — a menu toggled via
+//     classList/removeAttribute/`.hidden = false`, a <details>, a popover, a
+//     dialog — is REACHABLE. That is the difference between project 55's
+//     working dropdown and project 47's `<p id="admin-settings-hint" hidden>`,
+//     a dead element written for this grep and never unhidden by anything.
+const PARITY_STYLE_FILE_RE = '\\.(css|scss|sass|less)$';
+
+// A standalone `hidden` token. ERE has no lookbehind, so the neighbours are
+// matched explicitly: not preceded by [A-Za-z0-9_.:-] (kills `aria-hidden`,
+// `overflow:hidden`, `.hidden`, `data-hidden`) and not followed by a word
+// character (kills `hiddenPanel`).
+const PARITY_HIDDEN_TOKEN_RE = '(^|[^A-Za-z0-9_.:-])hidden([^A-Za-z0-9_-]|$)';
+
+// Code that UNHIDES something — the signature of a collapsed-but-reachable
+// surface. Deliberately narrow: each alternative must name `hidden` itself or
+// be a native disclosure element, so a page that merely contains a script does
+// not launder a dead hidden element into a reachable one.
+// `.` stands in for the quote character on purpose: this pattern travels
+// through a JS template literal into a double-quoted shell string, and a
+// literal quote in it would end the string.
+const PARITY_UNHIDE_RE = 'classList\\.(remove|toggle)\\(.hidden'
+  + '|(remove|toggle)Attribute\\(.hidden'
+  + '|\\.hidden[[:space:]]*=[[:space:]]*(false|!)'
+  + '|hidden[[:space:]]*=[[:space:]]*\\{[[:space:]]*(false|!)'
+  + '|\\[hidden\\][[:space:]]*='
+  + '|<details|showModal\\(|showPopover\\(|popover';
+
+export const PARITY_SEARCH_DIRS = 'src public app views';
+
+// base64 so a label with quotes/backticks cannot break out of the script.
+const b64 = (s) => Buffer.from(String(s), 'utf8').toString('base64');
+
+// actionParityProbeScript — the /bin/sh the runner executes in the container.
+// Pure string building so the classification is testable against real fixtures
+// (see mock2-action-parity.test.js, which runs this under sh).
+// Emits one `TAG\tlabel` line per matched action: FOUND | WORDS | HIDDEN.
+export function actionParityProbeScript(actions = [], { appDir = '.', wordGrep = null } = {}) {
+  const words = wordGrep || ((a) => {
+    const w = actionLabelCore(a.label).filter((x) => /^[a-z0-9]+$/.test(x));
+    if (!w.length) return null;
+    if (w.length === 1) return `grep -rqi -- '${w[0]}' ${PARITY_SEARCH_DIRS} 2>/dev/null`;
+    return `grep -rhi -- '${w[0]}' ${PARITY_SEARCH_DIRS} 2>/dev/null | grep -qi -- '${w[1]}'`;
+  });
+  return [`cd "${appDir}"`].concat((actions || []).map((a) => {
+    const wg = words(a);
+    return `l=$(printf '%s' '${b64(a.label)}' | base64 -d)\n`
+      // The files that mention the label at all, stylesheets excluded.
+      + `fs=$(grep -rliF -- "$l" ${PARITY_SEARCH_DIRS} 2>/dev/null | grep -vE '${PARITY_STYLE_FILE_RE}')\n`
+      + 'if [ -n "$fs" ]; then\n'
+      // Lines carrying the label that do NOT carry a standalone `hidden`.
+      + `  vis=$(grep -hiF -- "$l" $fs 2>/dev/null | grep -cvE '${PARITY_HIDDEN_TOKEN_RE}')\n`
+      + '  if [ "$vis" -gt 0 ]; then printf \'FOUND\\t%s\\n\' "$l"\n'
+      + `  elif grep -qE "${PARITY_UNHIDE_RE}" $fs 2>/dev/null; then printf 'FOUND\\t%s\\n' "$l"\n`
+      + '  else printf \'HIDDEN\\t%s\\n\' "$l"\n'
+      + '  fi\n'
+      + (wg ? `elif ${wg}; then printf 'WORDS\\t%s\\n' "$l"\n` : '')
+      + 'fi';
+  })).join('\n');
 }
 
 export function actionParityReport(

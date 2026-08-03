@@ -1,8 +1,13 @@
 // Action-parity gate (ratchet 3): pure selection/normalization/classification.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { mutationActions, actionParityReport, normalizeActionLabel } from '../mock2/acceptance-logic.js';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import {
+  mutationActions, actionParityReport, normalizeActionLabel, actionParityProbeScript,
+} from '../mock2/acceptance-logic.js';
 
 test('mutationActions: mutations selected, navigation/expand noise excluded, deduped', () => {
   const inv = { screens: [
@@ -116,6 +121,35 @@ test('summary over-claim precision (ratchet 9): the project-32 rejection now pas
   assert.equal(summaryOverclaims('reworked src/billing', changed).ok, false);
 });
 
+// ---- prose is not a path (project 55) ----
+//
+// The screen is called "State & Pod schedule". The summary wrote it
+// "state/pod", the token's first segment happened to be a source-dir name, and
+// the finish was rejected for naming a file it did not change — one of the
+// three rejections that ended request 258. Nothing in the token itself tells
+// prose from a directory claim; the TREE does.
+test('summaryOverclaims: an extension-less token naming no real directory is prose', async () => {
+  const { summaryOverclaims } = await import('../mock2/acceptance-logic.js');
+  const changed = ['public/pipeline.js', 'src/pipeline/routes.ts'];
+  const tracked = ['public/pipeline.js', 'src/pipeline/routes.ts', 'src/billing/invoice.ts', 'state/rules.md'];
+
+  const oc = summaryOverclaims('Built the state/pod schedule screen', changed, { knownPaths: tracked });
+  assert.equal(oc.ok, true, '"state/pod" is not a directory in this repo — it is prose');
+  assert.deepEqual(oc.prose, ['state/pod']);
+
+  // A directory that EXISTS and was not touched is still an over-claim.
+  const bad = summaryOverclaims('reworked src/billing', changed, { knownPaths: tracked });
+  assert.equal(bad.ok, false);
+  assert.deepEqual(bad.unmatched, ['src/billing']);
+
+  // A file claim is unaffected by the tree listing.
+  const file = summaryOverclaims('rewrote src/billing/invoice.ts', changed, { knownPaths: tracked });
+  assert.equal(file.ok, false);
+
+  // Without a listing, nothing changes: every directory claim is enforced.
+  assert.equal(summaryOverclaims('Built the state/pod schedule screen', changed).ok, false);
+});
+
 /* ===================== THE GATE THAT DICTATED THE UI ====================== */
 //
 // Project 47's build had already designed `More actions → Edit`. The drift
@@ -200,12 +234,126 @@ test('RATCHET: the rejection must not ask for the contract wording', () => {
 
 test('RATCHET: the greps use the core and detect hidden-only', () => {
   const src = readFileSync(new URL('../mock2/runner.js', import.meta.url), 'utf8');
-  assert.match(src, /actionLabelCore\(a\.label\)/, 'the full word list was the wrong bar');
-  assert.ok(!/actionLabelWords\(a\.label\)\.filter\(\(w\) => \/\^\[a-z0-9\]\+\$\/\.test\(w\)\)\.slice\(0, 6\)/.test(src),
+  const probe = readFileSync(new URL('../mock2/acceptance-logic.js', import.meta.url), 'utf8');
+  assert.match(probe, /actionLabelCore\(a\.label\)/, 'the full word list was the wrong bar');
+  assert.ok(!/actionLabelWords\(a\.label\)\.filter\(\(w\) => \/\^\[a-z0-9\]\+\$\/\.test\(w\)\)\.slice\(0, 6\)/.test(probe),
     'the all-words-on-one-line grep must be gone');
-  assert.match(src, /printf 'HIDDEN/, 'hidden-only must be its own signal');
-  assert.match(src, /grep -vc 'hidden'/);
+  const script = actionParityProbeScript([{ label: 'Delete asset', screen: 'Admin' }], { appDir: '/app' });
+  assert.match(script, /printf 'HIDDEN\\t/, 'hidden-only must be its own signal');
+  assert.match(script, /printf 'WORDS\\t/);
+  assert.match(script, /printf 'FOUND\\t/);
+  assert.match(probe, /PARITY_UNHIDE_RE/, 'a collapsed surface the app opens must stay reachable');
+  // THE LINE-SUBSTRING TEST IS THE DEFECT (project 55): the old probe counted
+  // lines with `grep -vc 'hidden'`, so a one-line module read as hidden
+  // because the word appeared ANYWHERE on it. Asserted against the emitted
+  // script, not the source — the prose above may name the old grep.
+  assert.ok(!/-vc '?hidden/.test(script), 'the whole-line substring test must never come back');
+  assert.ok(!/grep -vc 'hidden'/.test(src), 'and it must not be back in the runner either');
   assert.match(src, /actionParityReport\(actions, found, wordHits, hiddenOnly\)/);
+});
+
+/* ============== THE PROBE, RUN THE WAY THE CONTAINER RUNS IT ============== */
+//
+// Project 55 built the Board exactly as this gate says it wants — a "More
+// actions" overflow menu holding Edit / Change stage / Delete acquisition,
+// with real handlers — and was told three times that a user had no way to
+// perform any of them. Three rejections is the entire finish budget: the
+// build halted reporting a harness fault, and the operator got no app.
+//
+// Two properties of the file did it, and both are ordinary:
+//   • the renderer is ONE LINE (a template literal per screen), so the label
+//     and the collapsed menu's `class="menu hidden"` share a line;
+//   • `classList.toggle('hidden')` — the code that OPENS the menu — is on
+//     that line too, and its own text contains the word.
+// The fixtures below are that file, reduced.
+
+function runProbe(actions, files) {
+  const dir = mkdtempSync(join(tmpdir(), 'pp-parity-'));
+  try {
+    for (const [rel, content] of Object.entries(files)) {
+      const p = join(dir, rel);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, content);
+    }
+    const sp = join(dir, '.probe.sh');
+    writeFileSync(sp, actionParityProbeScript(actions, { appDir: dir }));
+    const r = spawnSync('sh', [sp], { cwd: dir, encoding: 'utf8' });
+    const tags = {};
+    for (const line of String(r.stdout || '').split('\n')) {
+      const [tag, label] = line.split('\t');
+      if (label) tags[label] = tag;
+    }
+    return tags;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const P55_ACTIONS = [
+  { label: 'New acquisition', screen: 'Board' },
+  { label: 'Change stage', screen: 'Board' },
+  { label: 'Delete acquisition', screen: 'Board' },
+];
+
+// The real markup, one line per renderer, as project 55 shipped it.
+const P55_FILES = {
+  'public/pipeline.js':
+    'function card(item) { return `<article class="acq-card"><div class="menu-wrap">'
+    + '<button class="icon-btn card-menu" data-menu="${item.id}" aria-label="Acquisition options">⋯</button>'
+    + '<div class="menu hidden" id="menu-${item.id}"><button data-edit="${item.id}">Edit acquisition</button>'
+    + '<button data-stage="${item.id}">Change stage</button>'
+    + '<button class="danger" data-delete="${item.id}">Delete acquisition</button></div></div></article>`; }\n'
+    + 'function renderBoard() { root.innerHTML = `<button class="btn-primary" id="new-acquisition">+ New acquisition</button>`;'
+    + " root.querySelectorAll('.card-menu').forEach((b) => b.addEventListener('click', () =>"
+    + " document.getElementById(`menu-${b.dataset.menu}`).classList.toggle('hidden'))); }\n",
+  // Minified: the whole stylesheet is one line, and it carries overflow:hidden.
+  'public/pipeline.css':
+    '.acq-card{border-radius:12px}.bar{height:8px;width:130px;border-radius:999px;overflow:hidden}.menu.hidden{display:none}\n',
+};
+
+test('the overflow menu is REACHABLE — a collapsed surface the app opens is not a hidden-only match', () => {
+  const tags = runProbe(P55_ACTIONS, P55_FILES);
+  for (const a of P55_ACTIONS) {
+    assert.equal(tags[a.label], 'FOUND', `"${a.label}" is in a menu the Board toggles open — it is reachable`);
+  }
+});
+
+test('a stylesheet\'s overflow:hidden can never make an action hidden-only', () => {
+  // Same markup with the toggle removed: the decision must come from the
+  // element, and CSS must not participate in it at all.
+  const tags = runProbe([{ label: 'Delete acquisition', screen: 'Board' }], {
+    'public/pipeline.js': 'const card = () => `<div class="menu"><button data-delete>Delete acquisition</button></div>`;\n',
+    'public/pipeline.css': '.bar{width:130px;overflow:hidden}\n',
+  });
+  assert.equal(tags['Delete acquisition'], 'FOUND');
+});
+
+test('project 47 stays caught: a dead `hidden` element nothing ever opens is hidden-only', () => {
+  const tags = runProbe([{ label: 'Edit note', screen: 'Notes' }], {
+    'public/index.html':
+      '<p class="app-footer" id="admin-settings-hint" hidden><a href="/admin">Settings</a> — Edit note</p>\n',
+    'public/app.js': 'document.getElementById("save").addEventListener("click", save);\n',
+  });
+  assert.equal(tags['Edit note'], 'HIDDEN', 'an element written for the grep is still not a control');
+});
+
+test('aria-hidden and data-hidden are not the hidden attribute', () => {
+  const tags = runProbe([{ label: 'Delete asset', screen: 'Admin' }], {
+    'public/admin.html': '<button data-hidden="false"><span aria-hidden="true">×</span>Delete asset</button>\n',
+  });
+  assert.equal(tags['Delete asset'], 'FOUND');
+});
+
+test('an action in no file at all is still missing', () => {
+  const tags = runProbe([{ label: 'Archive contract', screen: 'Board' }], P55_FILES);
+  assert.equal(tags['Archive contract'], undefined, 'nothing is emitted for an action with no match');
+});
+
+test('a label with quotes cannot break out of the probe script', () => {
+  const tags = runProbe([{ label: "Delete Bob's asset", screen: 'Admin' }], {
+    'public/admin.html': "<button>Delete Bob's asset</button>\n",
+  });
+  assert.equal(tags["Delete Bob's asset"], 'FOUND');
 });
 
 test('RATCHET: the pair cannot force render-everything', () => {

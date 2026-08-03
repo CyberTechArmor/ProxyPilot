@@ -506,8 +506,17 @@ HAS_CSS=1
 if [ "$HAS_CSS" -eq 1 ]; then
 # A fixed pixel width wider than the narrowest phone we support (390px) cannot
 # fit, whatever the container does. min-width is worse: it cannot even shrink.
-WIDE=$(grep -nE '(^|[;{[:space:]])(min-)?width[[:space:]]*:[[:space:]]*[0-9]{3,}px' "$CSS" \\
-       | awk -F'[^0-9]*' '{ for (i = 1; i <= NF; i++) if ($i + 0 > 430) { print; break } }' | head -20)
+#
+# PER DECLARATION, not per line (project 55). The old check grepped the LINE,
+# then split the WHOLE line on non-digits and failed if ANY number exceeded
+# 430. On a minified stylesheet — one line for the entire app — that reads
+# every number in every rule: project 55 was failed for ".bar{width:130px}"
+# because "border-radius:999px" sat elsewhere on the same line, and the build
+# spent a cycle chasing a fixed width that was never there. -o extracts the
+# declaration itself, so the number tested is the width's own.
+WIDE=$(grep -oE '(^|[;{[:space:]])(min-)?width[[:space:]]*:[[:space:]]*[0-9]{3,}px' "$CSS" \\
+       | awk -F'[^0-9]*' '{ for (i = 1; i <= NF; i++) if ($i + 0 > 430) { print; break } }' \\
+       | sort -u | head -20)
 if [ -n "$WIDE" ]; then
   echo "FAIL: fixed widths wider than a 390px phone:"
   echo "$WIDE" | sed 's/^/        /'

@@ -111,7 +111,7 @@ import { needsOperatorUiVerification, smokeConfigFromEnv } from './smoke-trigger
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
   acceptanceVerdict, summaryOverclaims, verificationOnlyFinish, anomalySignals, acceptanceRecord, codeChangedFiles,
-  mutationActions, actionParityReport, actionLabelWords, actionLabelCore,
+  mutationActions, actionParityReport, actionParityProbeScript,
   actionLabelParityMode,
 } from './acceptance-logic.js';
 import {
@@ -2197,7 +2197,19 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // evidence trail, not an authorship claim. Without this, a resumed
       // request whose work a prior cycle completed had no honest completion
       // at all (finish over-claimed, halt re-blocked), ~$1 per resume.
-      const oc = summaryOverclaims(decision.finishSummary, changedThisCycle);
+      // The tracked tree, so an extension-less token can be told apart from a
+      // directory claim: "src/billing" is a claim, "state/pod" (from "State &
+      // Pod schedule") is prose. Fail-open — no listing ⇒ the old behavior.
+      let trackedPaths = null;
+      try {
+        const ls = await execInContainer(containerName, 'git ls-files 2>/dev/null | head -n 5000');
+        const list = (ls.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+        if (list.length) trackedPaths = [...list, ...changedThisCycle];
+      } catch { /* fail-open: enforce every directory claim, as before */ }
+      const oc = summaryOverclaims(decision.finishSummary, changedThisCycle, { knownPaths: trackedPaths });
+      if (oc.prose?.length) {
+        logEvent('note', { role: 'system', content: `Summary check: ${oc.prose.join(', ')} read as prose, not a path (no such directory in the tree).` });
+      }
       if (!oc.ok && !verificationOnlyFinish(decision.finishSummary, codeChanged)) {
         // CHEAPEST PASS: a shorter, accurate summary — which is the goal
         // (gate-audit.md #10: SOUND). Budget-shared like every other validator.
@@ -2364,53 +2376,29 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           const inventory = invRead.ok ? JSON.parse(invRead.content) : null;
           const actions = inventory && !inventory.skipped ? mutationActions(inventory) : [];
           if (actions.length) {
-            // Two greps per label, and the second one is why this is not a
-            // label-matching gate any more.
+            // Three outcomes per label, and the probe that decides them lives
+            // in acceptance-logic.js (actionParityProbeScript) so it can be run
+            // under a real `sh` against real markup in the tests:
             //
-            //   FOUND — the contract's exact label is in the source.
-            //   WORDS — it is not, but every significant word of it lands on
-            //           ONE line of UI source, so a control for that action
-            //           exists under a different name.
+            //   FOUND  — the contract's exact label is on an element a user can
+            //            reach, INCLUDING a collapsed surface the app opens.
+            //   WORDS  — it is not, but the label's two-word core lands on one
+            //            line of UI source: the action exists under another name.
+            //   HIDDEN — the label is only ever on an element nothing unhides.
             //
-            // Project 42's inventory said "Delete asset"; the platform admin
-            // console already shipped exactly that control, labelled otherwise,
-            // wired to DELETE /branding/assets/:id. On the exact match alone
-            // the gate called it silently missing, rejected the finish, and the
-            // build spent seven searches finding out the feature was already
-            // there — then renamed the control to satisfy the grep. Rejecting a
-            // finish over a name is how a gate teaches a build to edit labels
-            // for the detector.
-            // THE CORE, not every word. Requiring all significant words on one
-            // line meant "Edit note title/body" needed edit AND note AND title
-            // AND body together — which no designed control ever satisfies, so
-            // a build with a perfectly good `More actions → Edit` was told the
-            // action appeared NOWHERE and printed the contract string on a
-            // button to get past it. Two words is what a real control can
-            // carry: the verb somewhere near the noun.
-            const wordGrep = (a) => {
-              const words = actionLabelCore(a.label).filter((w) => /^[a-z0-9]+$/.test(w));
-              if (!words.length) return null;
-              if (words.length === 1) return `grep -rqi -- '${words[0]}' src public app views 2>/dev/null`;
-              return `grep -rhi -- '${words[0]}' src public app views 2>/dev/null | grep -qi -- '${words[1]}'`;
-            };
-            const script = ['cd "' + APP_DIR + '"']
-              .concat(actions.map((a) => {
-                const wg = wordGrep(a);
-                // HIDDEN-ONLY is checked FIRST: an exact label whose every
-                // occurrence sits on a line carrying a `hidden` attribute is
-                // not a surfaced action, it is this grep being gamed. Project
-                // 47 shipped `<p id="admin-settings-hint" hidden>` for exactly
-                // that, and the old check counted it as present.
-                return `l=$(printf '%s' '${b64(a.label)}' | base64 -d)\n`
-                  + `n=$(grep -rhiF -- "$l" src public app views 2>/dev/null | wc -l)\n`
-                  + `v=$(grep -rhiF -- "$l" src public app views 2>/dev/null | grep -vc 'hidden')\n`
-                  + `if [ "$n" -gt 0 ] && [ "$v" -eq 0 ]; then printf 'HIDDEN\\t%s\\n' "$l"\n`
-                  + `elif [ "$n" -gt 0 ]; then printf 'FOUND\\t%s\\n' "$l"\n`
-                  + (wg ? `elif ${wg}; then printf 'WORDS\\t%s\\n' "$l"\n` : '')
-                  + 'fi';
-              }))
-              .join('\n');
-            const gr = await containerSh(containerName, script, { timeoutMs: 60000 });
+            // Each bucket is a scar. Project 42's "Delete asset" already shipped
+            // under another name and the exact-match gate called it silently
+            // missing, so the build renamed a control to satisfy a grep — that
+            // is WORDS. Project 47 was told `More actions → Edit` appeared
+            // NOWHERE (the old grep wanted every significant word on one line)
+            // and printed the contract string on a button — that is the
+            // two-word core. Project 47 also shipped `<p id="admin-settings-
+            // hint" hidden>`, an element written for the grep — that is HIDDEN.
+            // And project 55 shipped the overflow menu this gate asks for and
+            // was rejected three times because its renderer is one line and the
+            // word "hidden" was on it — that is why HIDDEN is now decided by
+            // whether anything can OPEN the element, not by a line substring.
+            const gr = await containerSh(containerName, actionParityProbeScript(actions, { appDir: APP_DIR }), { timeoutMs: 60000 });
             const tagged = (tag) => new Set(String(gr.stdout || '').split('\n')
               .filter((x) => x.startsWith(`${tag}\t`)).map((x) => x.slice(tag.length + 1).trim().toLowerCase()));
             const found = tagged('FOUND');

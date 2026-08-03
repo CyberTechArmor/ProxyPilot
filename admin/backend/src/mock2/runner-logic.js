@@ -16,6 +16,7 @@ import { parseHaltOptions, HALT_OPTION_KINDS } from './unblock-logic.js';
 import { buildComponentCatalogSection, buildInstalledComponentsSection } from './component-logic.js';
 import { normalizeHarness } from './project-logic.js';
 import { MODEL_PRIMARY } from './models.js';
+import { PROBE_TARGETS } from './probe-logic.js';
 
 // The runner's tool set, as provider-neutral JSON-Schema tool definitions.
 // model-client.js maps these onto each provider's tool-calling shape (Anthropic
@@ -122,6 +123,49 @@ export const RUNNER_TOOLS = Object.freeze([
     description:
       'Run the pinned verification gate battery (copied into the container at cycle start) against the current working tree. Returns each gate name, pass/fail, and its output. Run this after making a change; the cycle only succeeds when every gate is green.',
     input_schema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'http_probe',
+    description:
+      'Send ONE HTTP request to the app\'s own endpoint inside the container and return the real status, headers and body. Use this to OBSERVE what the API actually does instead of reasoning about what it should do — a wrong content-type, a 500 with a stack, an empty body. target "deployed" hits the app currently running (what the operator sees; use this to reproduce a reported bug). target "working" restarts the app from your working tree first (use this to confirm YOUR change). The URL is always this app on localhost — external hosts are not reachable from the fence.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', enum: [...PROBE_TARGETS], description: 'Which build to probe. "deployed" = the running app. "working" = restart from your edits first.' },
+        path: { type: 'string', description: 'Path on the app, e.g. "/api/notes" or "/login". Must start with "/".' },
+        method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'], description: 'HTTP method. Default GET.' },
+        body: { type: 'string', description: 'Request body, sent verbatim. Pair with a content-type header.' },
+        headers: {
+          type: 'object',
+          description: 'Request headers as a flat string map, e.g. {"content-type": "application/json"}.',
+          additionalProperties: { type: 'string' },
+        },
+      },
+      required: ['target', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_probe',
+    description:
+      'Open a page of the running app in a real browser and report what is ACTUALLY there: console errors, failed network requests, whether a selector is visible, its computed style, and a DOM excerpt. This is how you find out WHY something does not appear — a control hidden by a CSS rule, a handler that threw, a request that 404ed — instead of guessing. target "deployed" is what the operator sees; target "working" restarts the app from your edits first. Prefer this over reasoning about behaviour: read what the page is doing.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', enum: [...PROBE_TARGETS] },
+        path: { type: 'string', description: 'Page path, e.g. "/" or "/notes". Must start with "/".' },
+        role: { type: 'string', description: 'Optional role to sign in as first, using state/ui-checks.json login users (e.g. "admin").' },
+        selectors: {
+          type: 'array',
+          maxItems: 10,
+          items: { type: 'string' },
+          description: 'CSS selectors to inspect. For each: found, visible, and the computed display/visibility/opacity/position/z-index/overflow.',
+        },
+        dom_selector: { type: 'string', description: 'Optional selector whose outerHTML to return (capped). Use to see what actually rendered.' },
+      },
+      required: ['target', 'path'],
+      additionalProperties: false,
+    },
   },
   {
     name: 'finish',
@@ -880,6 +924,27 @@ export const EDITING_MECHANICS_SECTION = `# Editing mechanics
   has a gate battery) and fix every error before you finish. Terminal commands
   only when genuinely necessary — they are policy-checked.`;
 
+// Observation before theory. The measured failure mode: builds that could not
+// see the running app shipped a plausible guess, were told it was still
+// broken, and guessed again — five cycles on one CSS rule in the worst case.
+// The fix that worked always came from READING something. These tools are the
+// reading.
+export const OBSERVATION_SECTION = `# Observe before you theorise
+- When something "does not work", LOOK at it before you reason about it.
+  browser_probe opens the page in a real browser and tells you the console
+  errors, the failed requests, whether your selector is visible and its
+  COMPUTED STYLE. http_probe sends a real request to your own endpoint and
+  returns the real status, headers and body.
+- Reproduce first, then fix. Probe with target "deployed" to see what the
+  operator sees. Probe with target "working" to confirm your own change — it
+  restarts the app from your edits first.
+- A cause you OBSERVED goes in assumptions.verified, naming what you saw (e.g.
+  "the computed display of .popover.menu is none"). A cause you inferred is
+  ASSUMED, and you say so.
+- If two attempts at the same symptom have failed, stop guessing: probe for
+  the mechanism, or halt and say exactly what evidence you need. Do not ship a
+  third guess.`;
+
 // buildRunnerSystemPrompt — assemble the model's system prompt server-side from
 // the PINNED framework content (ADR-003 / brief §10.1: the framework is injected
 // fresh from a pinned version, never travels through chat, cannot be talked out
@@ -1053,6 +1118,8 @@ ${workflow}
 
 ${EDITING_MECHANICS_SECTION}
 
+${OBSERVATION_SECTION}
+
 # Work efficiently (this changes HOW you work, never WHAT you deliver)
 Every step above still binds — the discipline, the reads before edits, the gates,
 the honest finish. These rules only remove wasted round-trips:
@@ -1119,16 +1186,26 @@ deploys, and then runs all of this itself, against the REAL deployed app:
 
 So do NOT build a second copy of that. Specifically: do not create scratch
 databases, do not boot the server by hand, do not mint your own auth tokens to
-exercise your own API, and do not write throwaway curl/psql round-trips to
-prove the app works end to end. One build spent 34 of its 73 turns and 41% of
-its cost on exactly that — a whole hand-rolled integration harness for
-something that was going to run anyway five minutes later, and the turns were
-the most expensive in the run because they were the fattest end of the context.
+exercise your own API, and do not hand-roll a whole integration harness (a
+login flow, a session, a multi-step scenario) to prove the app works end to
+end. One build spent 34 of its 73 turns and 41% of its cost on exactly that —
+a whole hand-rolled integration harness for something that was going to run
+anyway five minutes later, and the turns were the most expensive in the run
+because they were the fattest end of the context.
+
+That is different from DIAGNOSIS. Use http_probe and browser_probe to OBSERVE
+the running app while you work — one targeted request, one page load, not a
+rebuilt test suite. Both tools boot the app FOR you when target is "working";
+that is not the same as booting it by hand. That is how you find a cause
+instead of guessing at one; see "Observe before you theorise" above.
 
 "Verified" in your finish means YOU READ THE SOURCE this cycle and can name the
-file. It does not mean you booted the app. If a cross-layer assumption cannot
-be settled by reading — a signature, a cookie name, a claim shape — read the
-file that defines it and cite it. That is the bar, and it is the whole bar.
+file. It does not mean you booted the app — except through http_probe or
+browser_probe, whose target "working" observation counts too: name what you
+saw (a status code, a computed style, a console error), not just that you
+looked. If a cross-layer assumption cannot be settled by reading or a single
+probe — a signature, a cookie name, a claim shape — read the file that defines
+it and cite it. That is the bar, and it is the whole bar.
 
 What IS worth running locally, because nothing downstream repeats it: the
 typecheck/build, your own Playwright specs under \`e2e/\`, and any unit test you
@@ -1360,6 +1437,8 @@ export function describeRunnerStep(turn, toolCalls = []) {
     if (c?.name === 'get_component') return `fetching component ${c.input?.key || ''}`.trim();
     if (c?.name === 'materialize_component') return `materializing component ${c.input?.key || ''}`.trim();
     if (c?.name === 'run_gates') return 'running the gate battery';
+    if (c?.name === 'http_probe') return `probing the API (${c.input?.target || 'deployed'})`;
+    if (c?.name === 'browser_probe') return `looking at the page (${c.input?.target || 'deployed'})`;
     if (c?.name === 'finish') return 'wrapping up';
     return c?.name || 'working';
   });
@@ -1421,6 +1500,31 @@ function stableInput(input) {
   try { return JSON.stringify(input, Object.keys(input).sort()); } catch { return ''; }
 }
 
+// readSetFromTranscript — the files a cycle actually looked at, derived from
+// its own tool calls (run-taxonomy fix #10/D3). No new tracking side-channel:
+// the write-set is already derived from git at finish time
+// (`{ git diff --name-only HEAD; git ls-files --others --exclude-standard; }`)
+// rather than threaded through executeTool, so the read-set is built the same
+// lightweight way — from evidence already present in the transcript, which
+// interleaves assistant turns (each carrying `toolCalls: [{ id, name, input }]`,
+// model-client.js) with their tool-result turns. read_file and apply_edit both
+// read the file first (apply_edit's applyEdits works against the current
+// content), so both count; write_file/create_file do not — a fresh write is
+// not a read of prior content. Returns a Set of paths as given (relative to
+// the app dir, whatever the model passed as `input.path`).
+export function readSetFromTranscript(transcript = []) {
+  const paths = new Set();
+  for (const entry of (Array.isArray(transcript) ? transcript : [])) {
+    if (!entry || entry.role !== 'assistant' || !Array.isArray(entry.toolCalls)) continue;
+    for (const call of entry.toolCalls) {
+      if (!call || (call.name !== 'read_file' && call.name !== 'apply_edit')) continue;
+      const path = String(call.input?.path || '').trim();
+      if (path) paths.add(path);
+    }
+  }
+  return paths;
+}
+
 export function initProgressState() {
   return { noToolTurns: 0, staleTurns: 0, repeatCount: 0, lastMsgSig: null, lastToolSig: null };
 }
@@ -1471,6 +1575,28 @@ export function haltReasonLabel(reason) {
     case 'max_turns': return 'reached the step ceiling without finishing';
     default: return String(reason || 'blocked');
   }
+}
+
+// The halt record's summary (run-taxonomy fix #5/D1). Previously just a label
+// ("halt: the build reported it was blocked") — that cost noted/551 four
+// follow-on cycles: +190 real lines landed, then halted un-gated, so nothing
+// told the resume it was already there and 552/585/587 re-attempted it before
+// 588 spent a whole cycle just verifying it was already done. Names what
+// landed and what verified it, so a resume reads evidence, not a label. The
+// diff itself is appended separately by checkpointAndRecord's existing
+// composition (recordSummaryText) — this returns the summary WITHOUT it.
+export function haltSummaryWithLandedWork({ trigger, reason, gateReports = [] }) {
+  const label = haltReasonLabel(trigger);
+  const reports = Array.isArray(gateReports) ? gateReports : [];
+  const total = reports.length;
+  const passed = reports.filter((g) => g?.status === 'passed').length;
+  const failed = reports.filter((g) => g?.status === 'failed').map((g) => g.name);
+  const gateLine = total === 0
+    ? 'no gate battery ran against the checkpointed tree (verification unavailable at halt time)'
+    : failed.length
+      ? `${passed}/${total} gates passed on the checkpointed tree — failing: ${failed.join(', ')}`
+      : `${passed}/${total} gates passed on the checkpointed tree`;
+  return `halt: ${label}\n\n${gateLine}${reason ? `\n\nReason: ${String(reason).slice(0, 500)}` : ''}`;
 }
 
 // A model turn that ended in a safety refusal (Fable 5's classifier can emit

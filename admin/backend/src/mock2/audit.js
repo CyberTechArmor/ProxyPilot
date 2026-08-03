@@ -31,11 +31,18 @@ import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js'
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
 import { getCurrentFrameworkVersion, getFrameworkVersion } from './framework.js';
 import {
-  insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
+  insertCycle, getCycle, updateCycle, addCycleUsage, countRunningCycles,
+  listCyclesForProject,
 } from './cycles.js';
 import { insertRequest } from './requests.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
-import { insertChangeRecord, changeRecordMirror } from './change-records.js';
+import { insertChangeRecord, changeRecordMirror, lastChangeRecord, listChangeRecords } from './change-records.js';
+import { symptomAttemptCount, SYMPTOM_CAP, symptomCapEnabled } from './consult-logic.js';
+import { findLikelyDuplicate, duplicateRefusalMessage } from './duplicate-check-logic.js';
+import { refusalOverrideActive } from './refusal-override-logic.js';
+import {
+  diagnosisCandidateFiles, diagnosisEvidence, diagnosisChatMessage, DIAGNOSIS_SYSTEM_PROMPT,
+} from './diagnose-logic.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import { insertMessage, getOrCreateChat } from './chats.js';
 import { saveChatImages, hydrateAttachments } from './chat-images.js';
@@ -56,7 +63,7 @@ import {
   buildComponentSuggestionQuestion, parseComponentSuggestionAnswer,
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
-import { buildRunnerReady, startCycle } from './runner.js';
+import { buildRunnerReady, startCycle, readFileInContainer, concludeCycle } from './runner.js';
 import { normalizeBuildMode, isFastBuildMode, BUILD_MODE_MVP, BUILD_MODE_QUICK } from './cycle-logic.js';
 import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
 import {
@@ -64,11 +71,12 @@ import {
   buildRuleQuestionBody, appendRule, auditGateCleared, blockedBuildStatus,
   isFrameworkDrifted, driftLabel, estimateAuditTokens,
   buildAdminDecisionsBlock, markDeviationDecision,
+  rulesGateApplies, countConfirmedRules,
 } from './audit-logic.js';
 import { approveAsEditedText } from './unblock-logic.js';
+import { RULES_PATH } from './rules-view-logic.js';
 
 const APP_DIR = '/srv/app';
-const RULES_PATH = 'state/rules.md';
 const nowIso = () => new Date().toISOString();
 
 // Cap on inventory/rules fed to the auditor. Raised from 120k: with 1M-token
@@ -194,6 +202,247 @@ async function maybePushRemote(projectId) {
   } catch (e) { console.warn('[mock2] audit push_on_checkpoint error:', e?.message); }
 }
 
+// ---- symptom-chase cap (run-taxonomy fix #7/B2) ----
+//
+// The problem, measured: docs2's export-menu saga ran five cycles guessing at
+// the same symptom before the answer (one CSS rule) surfaced. On the THIRD
+// build attempt at substantially the same ask, do not spend a cycle on
+// another guess: diagnose the most recent matching attempt's evidence instead
+// (cheap, review-tier, ~$0.10-0.25 via the audit slot — strictly less than
+// the build it replaces) and post the root cause + a build-ready fix
+// instruction, naming what was already ruled out.
+
+// Recent refusals per project, so an operator who presses Build again shortly
+// after seeing the diagnosis can override it — a cap with no escape hatch is
+// a wall, not a guardrail. In-memory (mirrors activeAuditJobs above); a
+// process restart just resets the window, which is harmless. The window
+// arithmetic itself is shared (refusal-override-logic.js, D2.3) with the
+// rule-gate and duplicate-work overrides below — this Map is this guardrail's
+// OWN state; overriding the symptom cap must never silently also override
+// the others.
+const recentSymptomCapRefusals = new Map();
+
+function symptomCapOverrideActive(projectId) {
+  const at = recentSymptomCapRefusals.get(Number(projectId));
+  if (!refusalOverrideActive({ refusedAt: at })) {
+    recentSymptomCapRefusals.delete(Number(projectId));
+    return false;
+  }
+  return true;
+}
+
+// Pull candidate file contents for the diagnosis from the container, using
+// the most recent change record's own diff-stat (rather than a live smoke
+// report, which doesn't exist at this pre-build point) — `git show --stat`
+// lines look like " src/routes/foo.ts | 12 +++---", so the file name is
+// everything before the first ' | '.
+function filesFromDiffStat(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => line.split('|')[0].trim())
+    .filter((p) => p && !p.startsWith('Diff (') && /[./]/.test(p));
+}
+
+async function diagnoseAndRefuse({ project, instruction, matchedCycles, ready }) {
+  const projectId = Number(project.id);
+  const containerName = project.container_name || containerNameForProject(projectId);
+  const mostRecent = matchedCycles[0];
+  let files = [];
+  try {
+    const record = lastChangeRecord(projectId);
+    const candidatePaths = diagnosisCandidateFiles(filesFromDiffStat(record?.summary));
+    for (const p of candidatePaths) {
+      const r = await readFileInContainer(containerName, p).catch(() => null);
+      if (r?.ok && r.content) files.push({ path: p, content: r.content });
+    }
+  } catch (e) { console.warn('[mock2] symptom-cap file gather failed:', e?.message); }
+
+  const finishSummary = mostRecent?.error || mostRecent?.halt_reason || '(no recorded reason — the prior attempt concluded without resolving the symptom)';
+  let diagnosisText = null;
+  try {
+    const res = await callStepTurn('symptom-cap-diagnosis', {
+      connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
+      system: stepSystemPrompt('symptom-cap-diagnosis', DIAGNOSIS_SYSTEM_PROMPT, {}),
+      tools: [],
+      transcript: [{ role: 'user', text: diagnosisEvidence({ instruction, finishSummary, checks: [], files }) }],
+      timeoutMs: 180000, effort: 'high', thinking: null,
+    });
+    if (res.ok) {
+      diagnosisText = res.text;
+      try {
+        const u = res.usage || {};
+        const cost = costCentsForUsage({
+          inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
+          cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
+        }, effectivePrice(ready.connector.id, ready.model));
+        insertLedgerEntry({ projectId, cycleId: null, connectorId: ready.connector.id, model: res.modelUsed || ready.model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'symptom-cap-diagnosis' });
+      } catch (e) { console.warn('[mock2] symptom-cap diagnosis ledger write failed:', e?.message); }
+    } else {
+      console.warn('[mock2] symptom-cap diagnosis call failed:', res.error);
+    }
+  } catch (e) { console.warn('[mock2] symptom-cap diagnosis crashed:', e?.message); }
+
+  const ruledOut = matchedCycles
+    .slice(0, SYMPTOM_CAP)
+    .map((c, i) => `${i + 1}. ${(c.error || c.halt_reason || 'no recorded outcome').slice(0, 200)}`)
+    .join('\n');
+  const diagnosisBody = diagnosisText ? diagnosisChatMessage(diagnosisText, { model: ready.model }) : null;
+  const body = [
+    '**Third attempt at the same symptom — diagnosing instead of building.**',
+    `Two prior cycles already tried this and the symptom persists. Rather than pay for a third guess, here is what was ruled out, ${diagnosisBody ? 'and a root-cause diagnosis of the last attempt' : 'though a fresh diagnosis could not be produced this time'}.`,
+    `*Ruled out so far:*\n${ruledOut}`,
+    diagnosisBody || '',
+    'Send a FIX INSTRUCTION above as the next Quick update, or press Build again within 10 minutes to override and build anyway.',
+  ].filter(Boolean).join('\n\n');
+
+  recentSymptomCapRefusals.set(projectId, Date.now());
+  try { insertMessage({ projectId, kind: 'system', body }); } catch (e) { console.warn('[mock2] symptom-cap message failed:', e?.message); }
+}
+
+// symptomCapRefusal — returns a refusal reason string when this instruction is
+// the THIRD attempt at substantially the same symptom, or null to proceed.
+// Fails open on any error: a matcher mistake must never block a legitimate
+// build, and this check must never be the reason a build silently vanishes.
+async function symptomCapRefusal({ project, instruction, ready }) {
+  try {
+    const projectId = Number(project.id);
+    if (!symptomCapEnabled(process.env)) return null;
+    if (symptomCapOverrideActive(projectId)) return null;
+    const recent = listCyclesForProject(projectId, { limit: 20 });
+    const matched = recent.filter((c) => c.instruction
+      && symptomAttemptCount({ instruction, priorInstructions: [c.instruction] }) > 0);
+    if (matched.length < SYMPTOM_CAP) return null;
+    await diagnoseAndRefuse({ project, instruction, matchedCycles: matched, ready });
+    return 'third attempt at the same symptom — diagnosed instead of built (see chat)';
+  } catch (e) {
+    console.warn('[mock2] symptom-cap check failed (proceeding, fail-open):', e?.message);
+    return null;
+  }
+}
+
+// ---- Define-stage enforcement (run-taxonomy fix #4/C2) ----
+//
+// rule-coverage (the full-build gate) exited 0 whenever state/rules.md had no
+// confirmed rules — a vacuous pass, green on 11 of 11 fleet projects, because
+// nothing else in the battery checks BEHAVIOUR. The gate alone fires too late
+// (after the cycle is already paid for) and only on full builds; this blocks a
+// build with no confirmed rules, once the project has built before, on every
+// mode — before any state is written.
+
+// Mirrors the symptom-cap override above (recentSymptomCapRefusals): a repeat
+// Build press within the window overrides a prior refusal, so an operator with
+// real work in flight is never wedged by this check. Shares its window math
+// with the other two overrides (refusal-override-logic.js, D2.3) — its own Map.
+const recentRuleGateRefusals = new Map();
+
+function ruleGateOverrideActive(projectId) {
+  const at = recentRuleGateRefusals.get(Number(projectId));
+  if (!refusalOverrideActive({ refusedAt: at })) {
+    recentRuleGateRefusals.delete(Number(projectId));
+    return false;
+  }
+  return true;
+}
+
+// ruleGateRefusal — returns a refusal reason string when this build has no
+// confirmed rules and the project has built before, or null to proceed. Fails
+// open on any error (a container read hiccup must never wedge every build).
+async function ruleGateRefusal({ project, mode }) {
+  try {
+    const projectId = Number(project.id);
+    const hasBuiltBefore = project.last_built_framework_version_id != null;
+    if (!rulesGateApplies({ hasBuiltBefore, buildMode: mode })) return null;
+    if (ruleGateOverrideActive(projectId)) {
+      recentRuleGateRefusals.delete(projectId);
+      insertMessage({ projectId, kind: 'system', body: 'Building without confirmed rules — the rule-coverage gate will fail until Define is run.' });
+      return null;
+    }
+    const containerName = project.container_name || containerNameForProject(projectId);
+    const rulesRead = await readWorkingFile(containerName, RULES_PATH);
+    const confirmed = rulesRead.ok ? countConfirmedRules(rulesRead.content) : 0;
+    if (confirmed > 0) return null;
+    recentRuleGateRefusals.set(projectId, Date.now());
+    insertMessage({
+      projectId, kind: 'system',
+      body: 'Build not started — this project has no confirmed rules yet. Run Define (Stage 2) to confirm what the app must do, then press Build. The gate battery has nothing behavioural to check until it has rules. Press Build again within 10 minutes to override and build anyway.',
+    });
+    return 'no confirmed rules — run Define first';
+  } catch (e) {
+    console.warn('[mock2] rule-gate check failed (proceeding, fail-open):', e?.message);
+    return null;
+  }
+}
+
+// ---- duplicate-work pre-check (run-taxonomy fix #6/D2) ----
+//
+// "Is this already done?" — the Encapsoul 650/652 case (an operator resent
+// literally the same request) and the Docs 740-vs-738 case (a re-request,
+// reworded, of already-shipped work). Ordered AFTER ruleGateRefusal above,
+// deliberately: rules-check is structural (the project cannot build sensibly
+// at all without confirmed rules) so it must be resolved first; this check is
+// informational (this specific ask may be moot) and would be confusing to
+// see before a build the operator can't even run yet.
+const recentDuplicateRefusals = new Map();
+const DUPLICATE_CHECK_WINDOW_DAYS = 14;
+const DUPLICATE_CHECK_RECORD_LIMIT = 20;
+
+function duplicateOverrideActive(projectId) {
+  const at = recentDuplicateRefusals.get(Number(projectId));
+  if (!refusalOverrideActive({ refusedAt: at })) {
+    recentDuplicateRefusals.delete(Number(projectId));
+    return false;
+  }
+  return true;
+}
+
+// The candidate pool findLikelyDuplicate compares against: recent, SUCCESSFUL
+// change records only (a halted/failed record's summary describes work that
+// did NOT land cleanly — it is not "already done"), most-recent-first,
+// windowed and capped so an old, huge project doesn't pay to scan its whole
+// history on every Build press. Native (DB + a per-record cycle-status
+// lookup); the matcher itself (duplicate-check-logic.js) stays pure.
+function recentSuccessfulChangeSummaries(projectId) {
+  const cutoff = Date.now() - DUPLICATE_CHECK_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const records = listChangeRecords(projectId).slice().reverse(); // seq DESC = most-recent-first
+  const out = [];
+  for (const r of records) {
+    if (out.length >= DUPLICATE_CHECK_RECORD_LIMIT) break;
+    const at = r.created_at ? Date.parse(r.created_at) : NaN;
+    if (Number.isFinite(at) && at < cutoff) break; // seq-ordered: once too old, so is the rest
+    if (r.cycle_id == null) continue;
+    let cycle = null;
+    try { cycle = getCycle(r.cycle_id); } catch { cycle = null; }
+    if (cycle?.status !== 'succeeded') continue;
+    out.push({ cycleId: r.cycle_id, seq: r.seq, summary: r.summary, createdAt: r.created_at });
+  }
+  return out;
+}
+
+// duplicateCheckRefusal — returns a refusal reason string when this instruction
+// looks like a recent, successful cycle already did it, or null to proceed.
+// Fails open on any error: a matcher mistake must never block a legitimate
+// build, and a false positive that can't be overridden costs trust in the
+// whole feature — see duplicateOverrideActive above.
+async function duplicateCheckRefusal({ project, instruction }) {
+  try {
+    const projectId = Number(project.id);
+    if (duplicateOverrideActive(projectId)) {
+      recentDuplicateRefusals.delete(projectId);
+      insertMessage({ projectId, kind: 'system', body: 'Building anyway — this looked like it might already be done.' });
+      return null;
+    }
+    const recentRecords = recentSuccessfulChangeSummaries(projectId);
+    const dup = findLikelyDuplicate({ instruction, recentRecords });
+    if (!dup) return null;
+    recentDuplicateRefusals.set(projectId, Date.now());
+    insertMessage({ projectId, kind: 'system', body: duplicateRefusalMessage(dup) });
+    return `looks already done — see cycle ${dup.match.cycleId} (change record ${dup.match.seq})`;
+  } catch (e) {
+    console.warn('[mock2] duplicate-check failed (proceeding, fail-open):', e?.message);
+    return null;
+  }
+}
+
 // ---- drift detection (ADR-003 — pinned-at-last-build vs current) ----
 
 function driftDedupeKey(projectId) { return `mock2-drift:${projectId}`; }
@@ -256,6 +505,27 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // Drift check (non-blocking) — surfaces the banner + queue item before the audit.
   detectDrift(project, framework);
 
+  // Symptom-chase cap (run-taxonomy fix #7/B2): refuse before ANY state is
+  // written (no request, no cycle) when this is the third attempt at
+  // substantially the same ask. Placed after the readiness guards (this needs
+  // `ready`, the audit slot, to run the diagnosis call) and before
+  // insertRequest — refusing after that would orphan a request row.
+  const symptomCap = await symptomCapRefusal({ project, instruction, ready });
+  if (symptomCap) return { status: 'refused', error: symptomCap };
+
+  // Define-stage enforcement (run-taxonomy fix #4/C2): a project that has
+  // built before but has zero confirmed rules never ran Define. Refuse before
+  // any state is written (no request, no cycle) — see ruleGateRefusal above.
+  const ruleGate = await ruleGateRefusal({ project, mode });
+  if (ruleGate) return { status: 'refused', error: ruleGate };
+
+  // Duplicate-work check (run-taxonomy fix #6/D2): does this ask look like a
+  // recent, successful cycle already did it? Ordered AFTER the rules check
+  // above (see the comment on duplicateCheckRefusal) and, like it, before
+  // insertRequest — refusing after that would orphan a request row.
+  const dupCheck = await duplicateCheckRefusal({ project, instruction });
+  if (dupCheck) return { status: 'refused', error: dupCheck };
+
   // Cost-truth: the operator's ask opens ONE request; the define audit + the build +
   // any resumes/consults are its segments (additive — request_id is nullable, this
   // never changes runner behavior).
@@ -281,7 +551,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
       initiatedBy: user.id, actingAsAdmin, estCostCents, status: 'refused_quota',
       requestId: request.id, segment: 'define',
     });
-    finishCycle(refused.id, { status: 'refused_quota', error: verdict.reason });
+    await concludeCycle({ cycle: refused, project, framework, status: 'refused_quota', error: verdict.reason });
     insertMessage({ projectId, kind: 'system', cycleId: refused.id, body: `Build not started — ${verdict.reason}` });
     return { status: 'refused', cycle: getCycle(refused.id), error: verdict.reason };
   }
@@ -300,7 +570,10 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
       requestId: request.id, segment: 'define',
     });
     updateCycle(mvpCycle.id, { started_at: nowIso() });
-    finishCycle(mvpCycle.id, { status: 'succeeded' });
+    await concludeCycle({
+      cycle: mvpCycle, project, framework, status: 'succeeded',
+      summary: quick ? 'quick update — rule interview skipped (fast lane)' : 'MVP build — rule interview skipped (fast lane)',
+    });
     getOrCreateChat(projectId);
     insertMessage({
       projectId, kind: 'system', cycleId: mvpCycle.id,
@@ -335,9 +608,9 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   setJob(projectId, { phase: 'auditing', message: 'Auditing the design against the rules and framework…', cycleId: cycle.id, startedAt: Date.now() });
 
   runAudit({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, instruction: String(instruction || ''), attachments })
-    .catch((err) => {
+    .catch(async (err) => {
       console.error(`[mock2] audit crashed for project ${projectId}:`, err?.message || err);
-      try { finishCycle(cycle.id, { status: 'failed', error: `audit crashed: ${err?.message || err}` }); } catch { /* ignore */ }
+      try { await concludeCycle({ cycle, project, framework, status: 'failed', error: `audit crashed: ${err?.message || err}` }); } catch { /* ignore */ }
       try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `The build audit failed: ${err?.message || err}` }); } catch { /* ignore */ }
       setJob(projectId, { phase: 'failed', message: `audit crashed: ${err?.message || err}` });
       scheduleJobCleanup(projectId);
@@ -355,7 +628,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   //    inventory — not pixels — is what the audit reads.
   const inv = await readWorkingFile(containerName, INVENTORY_PATH);
   if (!inv.ok || !String(inv.content || '').trim()) {
-    finishCycle(cycle.id, { status: 'failed', error: 'no approved inventory to audit' });
+    await concludeCycle({ cycle, project, framework, status: 'failed', error: 'no approved inventory to audit' });
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'Could not read the approved design inventory to audit the build. Re-approve the design and try again.' });
     setJob(projectId, { phase: 'failed', message: 'inventory unreadable' });
     return scheduleJobCleanup(projectId);
@@ -418,7 +691,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   if (auditRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.connector, model: auditRes.modelUsed || ready.model, usage: auditRes.usage, step: 'rule-audit' });
   const parsed = auditRes.ok ? parseAuditQuestions(auditRes.text) : { ok: false, error: auditRes.error, questions: [] };
   if (!parsed.ok) {
-    finishCycle(cycle.id, { status: 'failed', error: `audit failed: ${parsed.error}` });
+    await concludeCycle({ cycle, project, framework, status: 'failed', error: `audit failed: ${parsed.error}` });
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `The build audit couldn't complete: ${parsed.error}. Build was not started — try again.` });
     setJob(projectId, { phase: 'failed', message: parsed.error });
     return scheduleJobCleanup(projectId);
@@ -436,7 +709,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   // 3a) No questions (and no component suggestions) → the gate is clear; Build
   //     starts immediately (ADR-002).
   if (editor.length === 0 && admin.length === 0 && suggestionCount === 0) {
-    finishCycle(cycle.id, { status: 'succeeded' });
+    await concludeCycle({ cycle, project, framework, status: 'succeeded', summary: 'Audit passed — no rule questions.' });
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'Audit passed — no rule questions. Starting the build.' });
     setJob(projectId, { phase: 'building', message: 'Audit passed — starting the build.', cycleId: cycle.id });
     await proceedToBuild({ project, instruction, initiatedBy: cycle.initiated_by, actingAsAdmin, framework, requestId: cycle.request_id ?? null, task: parsed.task });
@@ -645,7 +918,9 @@ async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) 
   }
   const auditCycle = auditCycleId ? getCycle(auditCycleId) : null;
   if (auditCycle && ['awaiting_user', 'awaiting_admin', 'running'].includes(auditCycle.status)) {
-    finishCycle(auditCycle.id, { status: 'succeeded' });
+    // framework is not resolved yet at this point — concludeCycle derives it
+    // from the cycle's own pinned framework_version_id when not passed.
+    await concludeCycle({ cycle: auditCycle, project: getProject(projectId), status: 'succeeded', summary: 'All rules confirmed.' });
   }
   const framework = getCurrentFrameworkVersion();
   const project = getProject(projectId);

@@ -59,7 +59,7 @@ import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smo
 import { insertMessage } from './chats.js';
 import {
   APP_DIR, setJob, scheduleJobCleanup, copyGatesIntoContainer, runGateBattery,
-  checkpointAndRecord, deployStage, formatGateReports, containerSh, haltCycle,
+  checkpointAndRecord, concludeCycle, deployStage, formatGateReports, containerSh, haltCycle,
   execInContainer, readFileInContainer,
 } from './runner.js';
 import {
@@ -111,7 +111,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     hasEnvKey: !!String(process.env.ANTHROPIC_API_KEY || '').trim(),
   });
   if (!auth.ok) {
-    finishCycle(cycle.id, { status: 'failed', error: auth.reason });
+    await concludeCycle({ cycle, project, framework, containerName, holder, status: 'failed', error: auth.reason });
     releaseLock(projectId, holder);
     setJob(cycle.id, { phase: 'failed', message: 'The Claude harness has no Anthropic API key configured (see cycle error).' });
     return scheduleJobCleanup(cycle.id);
@@ -134,8 +134,8 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
   try {
     ({ query } = await import('@anthropic-ai/claude-agent-sdk'));
   } catch (err) {
-    finishCycle(cycle.id, {
-      status: 'failed',
+    await concludeCycle({
+      cycle, project, framework, containerName, holder, status: 'failed',
       error: `The Claude harness needs @anthropic-ai/claude-agent-sdk, which is not installed: ${err?.message || err}. `
         + 'It is a standard backend dependency now — run `npm install` in admin/backend '
         + '(or re-run update.sh) to pick it up, or switch this project back to the ProxyPilot harness.',
@@ -149,7 +149,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
   // hand-rolled path. Stamp the initial all-pending gate report.
   const copied = await copyGatesIntoContainer(containerName, gateScripts);
   if (!copied.ok) {
-    finishCycle(cycle.id, { status: 'failed', error: `could not copy gates into container: ${copied.error}` });
+    await concludeCycle({ cycle, project, framework, containerName, holder, gateScripts, status: 'failed', error: `could not copy gates into container: ${copied.error}` });
     releaseLock(projectId, holder);
     setJob(cycle.id, { phase: 'failed', message: copied.error });
     return scheduleJobCleanup(cycle.id);
@@ -192,7 +192,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     checkoutDir = await mkdtemp(join(tmpdir(), `mock2-sdk-${cycle.id}-`));
     const pulled = await pullWorkingTree(containerName, checkoutDir);
     if (!pulled.ok) {
-      finishCycle(cycle.id, { status: 'failed', error: `could not sync the project out of the container: ${pulled.error}` });
+      await concludeCycle({ cycle, project, framework, containerName, holder, gateScripts, status: 'failed', error: `could not sync the project out of the container: ${pulled.error}` });
       releaseLock(projectId, holder);
       setJob(cycle.id, { phase: 'failed', message: 'Could not sync the project for the SDK runner.' });
       return scheduleJobCleanup(cycle.id);
@@ -262,8 +262,18 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       if (!fresh || fresh.status !== 'running') { releaseLock(projectId, holder); return scheduleJobCleanup(cycle.id); }
       const ir = interruptDecision(fresh.interrupt_request);
       if (ir.stop) {
-        if (ir.checkpointFirst) await checkpointAndRecord({ cycle: fresh, project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, summary: `checkpoint: ${ir.terminalStatus}` });
-        finishCycle(cycle.id, { status: ir.terminalStatus, error: `interrupted (${fresh.interrupt_request})` });
+        // ir.checkpointFirst decides whether a checkpoint is even attempted —
+        // concludeCycle still records the terminal either way (parity with the
+        // same fix in runner.js: a false checkpointFirst previously left this
+        // cycle with NO change record at all).
+        await concludeCycle({
+          cycle: fresh, project, framework,
+          containerName: ir.checkpointFirst ? containerName : null,
+          holder: ir.checkpointFirst ? holder : null,
+          gateReports: lastGateReports, gateScripts,
+          status: ir.terminalStatus, error: `interrupted (${fresh.interrupt_request})`,
+          summary: ir.checkpointFirst ? `checkpoint: ${ir.terminalStatus}` : null,
+        });
         releaseLock(projectId, holder);
         setJob(cycle.id, { phase: 'stopped', message: `Stopped (${fresh.interrupt_request})` });
         return scheduleJobCleanup(cycle.id);
@@ -401,7 +411,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       // heavy dirs), then run the SAME pinned battery there.
       const pushed = await pushWorkingTree(containerName, checkoutDir);
       if (!pushed.ok) {
-        finishCycle(cycle.id, { status: 'failed', error: `could not sync the SDK's changes back into the container: ${pushed.error}` });
+        await concludeCycle({ cycle, project, framework, containerName, holder, gateReports: lastGateReports, gateScripts, status: 'failed', error: `could not sync the SDK's changes back into the container: ${pushed.error}` });
         releaseLock(projectId, holder);
         setJob(cycle.id, { phase: 'failed', message: 'Could not sync the SDK changes back.' });
         return scheduleJobCleanup(cycle.id);

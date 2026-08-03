@@ -9,6 +9,10 @@
 // The model the consult runs on — Fable 5, everywhere the consult is invoked. This is
 // the ONLY build-time code path (besides the audit lane) that names Fable 5.
 import { MODEL_FRONTIER } from './models.js';
+// Reused, not reimplemented: the same token-Jaccard similarity finish-guard-logic
+// uses to catch an identical-retry finish payload catches a re-reported symptom
+// here — both are "is this text substantially the same thing again".
+import { payloadSimilarity } from './finish-guard-logic.js';
 
 export const CONSULT_MODEL = MODEL_FRONTIER;
 
@@ -70,6 +74,83 @@ export function consultAllowed({ trigger = null, perHaltCount = 0, perRequestCou
     return { allowed: false, reason: `consult limit reached for this request (max ${CONSULT_MAX_PER_REQUEST}); use "Get guidance" to ask again` };
   }
   return { allowed: true, reason: `auto: ${trigger}` };
+}
+
+// ---- symptom-chase cap (run-taxonomy fix #7/B2) ----
+//
+// The problem, measured: docs2's export-menu saga ran five cycles guessing at
+// the same symptom before the answer (one CSS rule) surfaced. The apparatus to
+// stop this already existed — consultTrigger's 'same_reason_rehalt' case, the
+// diagnose-logic root-cause pass — but reHaltSameReason was never fed a real
+// value (every haltCycle call site passed only { gateFailStreak }), so the
+// trigger has never fired in production. These two functions are what actually
+// fill that in, plus a build-time cap that stops a THIRD attempt at the same
+// symptom from ever reaching the runner at all.
+
+// normalizeHaltReason — a halt reason reduced to its stable shape. Quoted
+// spans, path-like tokens, and digit runs carry the incidental detail (a line
+// number, a specific file); what remains is the SHAPE of the blocker, so
+// "blocked: cannot read foo.ts at line 42" and "blocked: cannot read foo.ts at
+// line 88" normalise to the same wall. Deliberately aggressive — a false match
+// costs a diagnosis instead of a third guess, which is a strictly better
+// outcome; a false miss just means the cap never trips.
+export function normalizeHaltReason(reason) {
+  let s = String(reason || '').toLowerCase().trim();
+  s = s.replace(/`[^`]*`/g, '<code>');
+  s = s.replace(/"[^"]*"/g, '<str>');
+  s = s.replace(/'[^']*'/g, '<str>');
+  s = s.replace(/\S*\/\S+\.\S+/g, '<path>'); // any slash-containing, dotted token
+  s = s.replace(/\d+/g, '#');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s.slice(0, 200);
+}
+
+// reHaltSameReason — did this request already halt for the same (normalised)
+// reason? Feeds consultTrigger's 'same_reason_rehalt' case directly.
+export function reHaltSameReason({ reason, priorReasons = [] } = {}) {
+  const norm = normalizeHaltReason(reason);
+  if (!norm) return false;
+  return (priorReasons || []).some((r) => normalizeHaltReason(r) === norm);
+}
+
+// The similarity floor for "this instruction is asking about the same
+// symptom". Calibrated empirically against payloadSimilarity's plain token
+// overlap, which turns out to be a BLUNT signal on short instructions — two
+// requests that share a feature's nouns but ask for opposite things ("add a
+// cancel button" vs "fix the cancel button's color") can score HIGHER than
+// two genuine paraphrases of the same complaint ("the export menu doesn't
+// open" vs "export menu click does nothing", 0.43), because short sentences
+// are dominated by shared function words. A high floor (0.7, close to
+// finish-guard-logic's own NEAR_IDENTICAL_SIMILARITY=0.9) catches the
+// realistic case — an operator re-sending the same or near-the-same bug
+// report — while erring toward MISSING a loosely-paraphrased repeat rather
+// than wrongly blocking a genuinely different request: a missed match costs
+// nothing beyond today's behavior; a false match blocks real work.
+export const SYMPTOM_SIMILARITY_THRESHOLD = 0.7;
+export const SYMPTOM_CAP = 2;
+
+// symptomAttemptCount — how many PRIOR instructions (cycles already run on
+// this project) were substantially the same ask as this one. The caller
+// refuses to build when this reaches SYMPTOM_CAP (2 prior attempts + this one
+// = the 3rd guess) and routes to diagnosis instead.
+export function symptomAttemptCount({ instruction, priorInstructions = [] } = {}) {
+  const a = String(instruction || '').trim();
+  if (!a) return 0;
+  return (priorInstructions || [])
+    .filter((p) => payloadSimilarity(a, String(p || '')) >= SYMPTOM_SIMILARITY_THRESHOLD)
+    .length;
+}
+
+export const MOCK2_SYMPTOM_CAP_FLAG = 'MOCK2_SYMPTOM_CAP';
+
+// Default ON (unlike MOCK2_CONSULT): the diagnosis this cap routes to is
+// cheap (review-tier, ~$0.10-0.25 — the same call diagnose-logic already
+// makes on a smoke failure) and strictly cheaper than the build it replaces,
+// so defaulting it on is cost-reducing, not cost-adding. Only an explicit
+// "off" disables it.
+export function symptomCapEnabled(env = {}) {
+  const v = String(env?.[MOCK2_SYMPTOM_CAP_FLAG] ?? '').trim().toLowerCase();
+  return v !== 'off' && v !== '0' && v !== 'false';
 }
 
 // estimateConsultCostCents — the fixed ceiling cost of one consult (input+output caps at

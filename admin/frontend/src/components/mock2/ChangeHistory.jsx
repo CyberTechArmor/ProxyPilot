@@ -36,7 +36,7 @@ import {
   ShieldCheck, XCircle, ChevronDown, ChevronRight, ChevronLeft, GitCommitHorizontal, Loader2, Coins, Download,
   RotateCcw,
 } from 'lucide-react';
-import { fmtUsage } from './ProjectTimeCard';
+import { fmtUsage, fmtCost } from './ProjectTimeCard';
 
 const GATE_TONE = {
   passed: 'text-green-600', failed: 'text-red-500', running: 'text-cyan-500', pending: 'text-muted-foreground',
@@ -465,6 +465,11 @@ export default function ChangeHistory({ projectId, canRestore = false }) {
             const usage = sumGroupUsage(g.records);
             const instruction = g.request?.instruction || head.summary;
             const status = g.request?.final_status || g.request?.status || null;
+            // Halt cost visible (run-taxonomy fix #5/D1.5): GET /projects/:id/requests
+            // already returns cost.by_segment per request (request-log.js) — this is
+            // the only surface for it. Non-zero means real spend went into work that
+            // got checkpointed and blocked, not shipped.
+            const haltedCents = g.request?.cost?.by_segment?.halted || 0;
             return (
               <li key={g.key} className="text-xs border rounded-md">
                 {/* Row = select checkbox · expand toggle · download icon. The
@@ -494,6 +499,7 @@ export default function ChangeHistory({ projectId, canRestore = false }) {
                         <span className="flex items-center gap-2">
                           {Number(head.seq) === latestSeq ? <CurrentChip /> : null}
                           {status ? <span className={`font-medium ${REQUEST_STATUS_TONE[status] || 'text-muted-foreground'}`}>{status}</span> : null}
+                          {haltedCents > 0 ? <span className="text-amber-500">Halted: {fmtCost(haltedCents)}</span> : null}
                           <span className="font-mono text-muted-foreground">{head.commit_sha ? head.commit_sha.slice(0, 8) : '—'}</span>
                         </span>
                       </span>

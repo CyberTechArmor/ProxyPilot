@@ -78,7 +78,9 @@ import { callStepTurn, getHarnessStepTuning, stepSystemPrompt } from './harness-
 import { modelMaxOutputTokens } from './routing-logic.js';
 import { resolveStepTuning } from './harness-steps-logic.js';
 import { runMockupChecks, mockupChecksNote } from './mockup-checks-logic.js';
-import { startBuild } from './audit.js';
+import { startBuild, readProjectFile } from './audit.js';
+import { countConfirmedRules } from './audit-logic.js';
+import { RULES_PATH } from './rules-view-logic.js';
 import { getLaneTuning, getDesignArtDirection } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
 import { applyDesignPreset, applyExploreDesign, getDesignPreset, parseDesignDoc, DESIGN_DOC_FORMAT } from './design-presets.js';
@@ -1731,6 +1733,16 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
     // acceptance discipline. MOCK2_INITIAL_BUILD_MODE=full restores the old
     // fully-audited initial build.
     const initialMode = String(process.env.MOCK2_INITIAL_BUILD_MODE || 'mvp').trim().toLowerCase() === 'full' ? 'full' : 'mvp';
+    // Define-stage pointer (run-taxonomy fix #4/C2.5): this greenfield build has
+    // nothing to check rules against yet (there's no app to define rules for
+    // until this build exists), so it runs regardless. The pointer sets the
+    // expectation that Define comes next — the C2.4 pre-build block in
+    // startBuild then enforces it starting with the SECOND build.
+    let hasRulesAlready = false;
+    try {
+      const rulesRead = await readProjectFile(containerNameForProject(projectId), RULES_PATH);
+      hasRulesAlready = rulesRead.ok && countConfirmedRules(rulesRead.content) > 0;
+    } catch { /* best effort */ }
     const res = await startBuild({ project: fresh, instruction, user, actingAsAdmin, buildMode: initialMode });
     if (res.status === 'started') {
       insertMessage({
@@ -1739,6 +1751,12 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
           ? 'Starting the MVP build from the approved design — a fast first testable version. Use Build afterwards for the fully audited build (rule questions, per-rule tests, acceptance checks).'
           : 'Starting the initial build from the approved design — auditing it against the rules and framework first.',
       });
+      if (!hasRulesAlready) {
+        insertMessage({
+          projectId, kind: 'system',
+          body: 'Once this build is live, run Define (Stage 2) to confirm the rules the app must follow — every build after this one is checked against them.',
+        });
+      }
     } else if (res.status !== 'refused') {
       // 'refused' already posts its own "Build not started — …" message.
       insertMessage({ projectId, kind: 'system', body: `Design is locked in, but the initial build didn't start automatically — ${res.error} Start it from the Build cycle panel below.` });

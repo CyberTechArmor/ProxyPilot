@@ -6,9 +6,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   normalizeBuildMode, filterGatesForBuildMode, isFastBuildMode,
   BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK, BUILD_MODES,
+  buildGateBattery, touchesUserFacing, USER_FACING_RE, UI_INFRA_EXEMPT_RE,
+  gatesForProfile, withBaselineGates,
 } from '../mock2/cycle-logic.js';
 import {
   fastCodeModel, mvpRoutingDecision, quickRoutingDecision, decideRouting, DEFAULT_FAST_MODEL,
@@ -86,6 +89,92 @@ test('filterGatesForBuildMode: mvp runs the look-and-act gates, not the slow one
 test('filterGatesForBuildMode: tolerant of empty/absent batteries', () => {
   assert.deepEqual(filterGatesForBuildMode([], 'mvp'), []);
   assert.deepEqual(filterGatesForBuildMode(undefined, 'mvp'), []);
+});
+
+// ---- quick-lane escalation (run-taxonomy fix #4/C1) ----
+//
+// A quick update's regression gates ran only on greenfield/full builds — never
+// on the lane that produces most changes. buildGateBattery escalates a quick
+// request to the mvp battery when its diff touches a user-facing file, so the
+// gates that catch a visible regression (mobile-overflow, no-dead-controls,
+// no-native-dialogs, e2e) actually see the change that could break them.
+const ESCALATION_ONLY_GATES = ['mobile-overflow', 'no-dead-controls', 'no-native-dialogs', 'e2e'];
+
+test('quick + a diff touching public/ escalates to the mvp battery', () => {
+  const result = buildGateBattery(battery, 'quick', { changedFiles: ['public/index.html', 'src/server.js'] });
+  assert.equal(result.profile, 'mvp');
+  assert.equal(result.requestedProfile, 'quick');
+  assert.equal(result.escalated, true);
+  const names = result.gates.map((g) => g.name);
+  for (const g of ESCALATION_ONLY_GATES) assert.ok(names.includes(g), `${g} must run once escalated`);
+});
+
+test('quick + a docs-only diff stays quick', () => {
+  const result = buildGateBattery(battery, 'quick', { changedFiles: ['README.md', 'docs/notes.md'] });
+  assert.equal(result.profile, 'quick');
+  assert.equal(result.requestedProfile, 'quick');
+  assert.equal(result.escalated, false);
+  const names = result.gates.map((g) => g.name);
+  for (const g of ESCALATION_ONLY_GATES) assert.ok(!names.includes(g), `${g} must not run on an unescalated quick update`);
+});
+
+test('quick + only sw.js and build-id.js does NOT escalate (infrastructure exempt)', () => {
+  const result = buildGateBattery(battery, 'quick', { changedFiles: ['public/sw.js', 'public/build-id.js', 'public/manifest.json'] });
+  assert.equal(result.escalated, false);
+  assert.equal(result.profile, 'quick');
+});
+
+test('quick with no changedFiles supplied is byte-identical to today', () => {
+  const withNull = buildGateBattery(battery, 'quick');
+  const withEmptyOpts = buildGateBattery(battery, 'quick', {});
+  assert.equal(withNull.escalated, false);
+  assert.equal(withNull.profile, 'quick');
+  const legacy = withBaselineGates(gatesForProfile(battery, 'quick'), 'quick').map((g) => g.name);
+  assert.deepEqual(withNull.gates.map((g) => g.name), legacy);
+  assert.deepEqual(withEmptyOpts.gates.map((g) => g.name), legacy);
+});
+
+test('mvp and full batteries are unchanged by the escalation parameter (only quick escalates)', () => {
+  const mvpNoFiles = buildGateBattery(battery, 'mvp');
+  const mvpWithFiles = buildGateBattery(battery, 'mvp', { changedFiles: ['public/index.html'] });
+  assert.equal(mvpNoFiles.escalated, false);
+  assert.equal(mvpWithFiles.escalated, false);
+  assert.deepEqual(mvpNoFiles.gates.map((g) => g.name), mvpWithFiles.gates.map((g) => g.name));
+
+  const fullNoFiles = buildGateBattery(battery, 'full');
+  const fullWithFiles = buildGateBattery(battery, 'full', { changedFiles: ['public/index.html'] });
+  assert.equal(fullWithFiles.escalated, false);
+  assert.deepEqual(fullNoFiles.gates.map((g) => g.name), fullWithFiles.gates.map((g) => g.name));
+});
+
+test('touchesUserFacing: matches screens, ignores infra files and non-UI code', () => {
+  assert.equal(touchesUserFacing(['public/app.html']), true);
+  assert.equal(touchesUserFacing(['src/views/profile.jsx']), true);
+  assert.equal(touchesUserFacing(['public/sw.js']), false);
+  assert.equal(touchesUserFacing(['public/build-id.json']), false);
+  assert.equal(touchesUserFacing(['src/routes/api.js']), false);
+  assert.equal(touchesUserFacing([]), false);
+  assert.equal(touchesUserFacing(undefined), false);
+});
+
+// DRIFT GUARD: the ui-interaction gate script (framework-seed/gates.json) runs
+// as shell inside the container and cannot import cycle-logic.js, so it keeps
+// its own hand-maintained copy of these two regex lists. If someone edits one
+// copy and not the other, this test catches it — comparing against the gate
+// script's OWN regex literals, not against smoke-triggers.js's browser globs
+// (a broader, unrelated set that only looks like a sibling copy).
+test('USER_FACING_RE / UI_INFRA_EXEMPT_RE match the literal uiRe/infraRe embedded in the ui-interaction gate script', () => {
+  const seed = JSON.parse(readFileSync(new URL('../mock2/framework-seed/gates.json', import.meta.url), 'utf8'));
+  const gates = Array.isArray(seed) ? seed : seed.gates;
+  const uiGate = gates.find((g) => g.name === 'ui-interaction');
+  assert.ok(uiGate, 'ui-interaction gate must exist in the seed');
+  const uiReMatch = uiGate.script.match(/const uiRe = (\[[^\]]*\]);/);
+  const infraReMatch = uiGate.script.match(/const infraRe = (\[[^\]]*\]);/);
+  assert.ok(uiReMatch, 'gate script must declare uiRe literally (drift guard broke on a script shape change)');
+  assert.ok(infraReMatch, 'gate script must declare infraRe literally (drift guard broke on a script shape change)');
+  const normalize = (s) => s.replace(/\s+/g, '');
+  assert.equal(normalize(uiReMatch[1]), normalize(`[${USER_FACING_RE.map((r) => r.toString()).join(', ')}]`));
+  assert.equal(normalize(infraReMatch[1]), normalize(`[${UI_INFRA_EXEMPT_RE.map((r) => r.toString()).join(', ')}]`));
 });
 
 // ---- fast code model ----

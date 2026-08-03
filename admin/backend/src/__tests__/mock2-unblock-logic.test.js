@@ -125,6 +125,24 @@ test('buildResumeContextBlock: empty when nothing given (a bare resume stays bar
   assert.equal(buildResumeContextBlock({ message: '   ' }), '');
 });
 
+// ---- D1.4: the "verified, don't re-derive" framing line ----
+
+test('a verified halt summary gets the "do not re-derive" framing line', () => {
+  const block = buildResumeContextBlock({
+    lastCheckpoint: { seq: 12, summary: 'halt: no progress\n\n3/4 gates passed on the checkpointed tree — failing: rule-coverage' },
+  });
+  assert.match(block, /Last checkpoint before this resume \(change record 12\):/);
+  assert.match(block, /This was verified against the tree before the halt — do not re-derive what it already confirms\./);
+});
+
+test('an unverified (pre-fix-shaped) summary does NOT get the framing line', () => {
+  const block = buildResumeContextBlock({
+    lastCheckpoint: { seq: 9, summary: 'halt: the build reported it was blocked' },
+  });
+  assert.match(block, /Last checkpoint before this resume \(change record 9\):/);
+  assert.doesNotMatch(block, /do not re-derive what it already confirms/);
+});
+
 test('buildResumeContextBlock: labels operator guidance, choice, and authorizations', () => {
   const block = buildResumeContextBlock({
     message: 'the test artifact is safe to remove',

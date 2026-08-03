@@ -318,3 +318,83 @@ export function isHarnessFaultHalt(reason) {
 export function harnessFaultHaltAccepted({ reason, rejectionTotal = 0 } = {}) {
   return rejectionTotal > 0 && isHarnessFaultHalt(reason);
 }
+
+// ---- verified-vs-assumed ledger checking (run-taxonomy fix #10/D3) ----
+//
+// `finish`'s assumptions: { verified: string[], assumed: string[] } is already
+// structurally required (both arrays, additionalProperties: false) — absence
+// is rejected. What was never checked is CONTENT: a `verified` entry was taken
+// on faith. This section checks a citing claim against the cycle's own
+// read-set (readSetFromTranscript, runner-logic.js) — evidence already in the
+// transcript, no new tracking side-channel.
+
+// A path-shaped token: a slash-separated path, or a bare filename ending in a
+// recognized extension pattern. Broad and forgiving on purpose — several
+// models will phrase a citation differently, and a false rejection here (a
+// real citation the regex missed) is worse than a missed one (an uncited claim
+// simply isn't checked at all, per unverifiableClaims below).
+const PATH_TOKEN_RE = /[a-zA-Z0-9_.-]*\/[a-zA-Z0-9_./-]*[a-zA-Z0-9_-]|[a-zA-Z0-9_-]+\.[a-zA-Z]{1,5}\b/;
+
+// extractCitedFile — a "verified" entry cites the file it was checked against,
+// either in parens at the end ("role slugs are lowercase (src/routes/profile.ts)")
+// or inline ("read src/routes/profile.ts: role slugs are lowercase"). Prefers
+// the LAST parenthesized citation when more than one exists (the closing one is
+// the citation; earlier parens are usually incidental prose). Returns null when
+// no path-shaped token is found — many true claims (a cross-cutting invariant,
+// a UI behavior observed via a browser probe, Spec B) legitimately cite nothing.
+export function extractCitedFile(verifiedEntry) {
+  const s = String(verifiedEntry || '');
+  let fromParens = null;
+  for (const m of s.matchAll(/\(([^()]+)\)/g)) {
+    const hit = m[1].trim().match(PATH_TOKEN_RE);
+    if (hit) fromParens = hit[0];
+  }
+  if (fromParens) return fromParens;
+  const hit = s.match(PATH_TOKEN_RE);
+  return hit ? hit[0] : null;
+}
+
+function citationMatchesReadSet(cited, readSet) {
+  if (readSet.has(cited)) return true;
+  for (const p of readSet) {
+    if (p === cited || p.endsWith(`/${cited}`) || cited.endsWith(`/${p}`)) return true;
+  }
+  return false;
+}
+
+// unverifiableClaims — the verified[] entries that cite a SPECIFIC file this
+// cycle never read. An entry with no citation at all is not included here —
+// that is a separate, non-blocking signal (many legitimate claims cite
+// nothing); only a claim naming a file the cycle demonstrably never opened is
+// flagged. `readSet` accepts a Set or an array (readSetFromTranscript returns
+// a Set; tests may pass either).
+export function unverifiableClaims({ assumptions, readSet } = {}) {
+  const verified = Array.isArray(assumptions?.verified) ? assumptions.verified : [];
+  const read = readSet instanceof Set ? readSet : new Set(Array.isArray(readSet) ? readSet : []);
+  const out = [];
+  for (const entry of verified) {
+    const cited = extractCitedFile(entry);
+    if (!cited) continue;
+    if (!citationMatchesReadSet(cited, read)) out.push(entry);
+  }
+  return out;
+}
+
+// ---- sensitive-assumed detection (D3.5) — downgrades to pending-verification ----
+
+const SENSITIVE_ASSUMED_RE = /\b(role|permission|rbac|admin|is_admin|authz|auth[zn]?|access[_ ]?level)\b/i;
+
+// hasSensitiveAssumedValue — true when any assumed[] entry looks like it's
+// making an access-control claim without having verified it. Not a rejection
+// signal (a legitimate but risky claim, not a malformed submission) — the
+// caller routes this to the existing pending-verification path instead.
+export function hasSensitiveAssumedValue(assumed = []) {
+  return (Array.isArray(assumed) ? assumed : []).some((entry) => SENSITIVE_ASSUMED_RE.test(String(entry || '')));
+}
+
+// sensitiveAssumedEntries — the actual matching assumed[] entries (not just
+// the boolean), so the caller can name each one in the pending-verification
+// checklist rather than a single generic line.
+export function sensitiveAssumedEntries(assumed = []) {
+  return (Array.isArray(assumed) ? assumed : []).filter((entry) => SENSITIVE_ASSUMED_RE.test(String(entry || '')));
+}

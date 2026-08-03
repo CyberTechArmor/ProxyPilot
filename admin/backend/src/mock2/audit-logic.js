@@ -385,6 +385,35 @@ export function driftLabel(fromVersion, toVersion) {
   return `Mock2 v${fromVersion} → v${toVersion}`;
 }
 
+// ---- rule-coverage gate / Define enforcement (run-taxonomy fix #4/C2) ----
+//
+// rule-coverage (the full-build gate, framework-seed/gates.json) used to exit 0
+// whenever state/rules.md had no confirmed rules — a vacuous pass that was
+// green on 11 of 11 fleet projects, because nothing else in the battery checks
+// BEHAVIOUR. Firing only at gate-run time, on full builds, after the cycle was
+// already paid for, was too late; this predicate backs a pre-build refusal
+// (audit.js's startBuild) that catches it before any spend.
+
+// rulesGateApplies — does the Define-stage block apply to this build? The
+// FIRST build of a project cannot have rules (the interview follows design
+// approval, and the greenfield cycle runs at MVP), so the block applies only
+// once a project has built at least once — on every mode from then on. A
+// quick update to a project that never ran Define is exactly the case that
+// produced the fleet's specification-failure waste; exempting the quick lane
+// would exempt most of it.
+export function rulesGateApplies({ hasBuiltBefore = false, buildMode = null } = {}) {
+  return !!hasBuiltBefore;
+}
+
+// countConfirmedRules — how many confirmed rules state/rules.md carries. Mirrors
+// the gate script's own check exactly: `grep -Ec "<!--[[:space:]]*rule-q[0-9]+"`
+// counts matching LINES, not total occurrences, so this does too (appendRule
+// always puts one anchor per line, but a hand-edited rules.md could not).
+export function countConfirmedRules(text) {
+  const lines = String(text || '').split('\n');
+  return lines.filter((line) => /<!--\s*rule-q\d+/i.test(line)).length;
+}
+
 // ---- API shapes ----
 
 // publicQuestionShape — client-safe view of an audit-question row. The choices

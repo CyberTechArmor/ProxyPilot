@@ -85,6 +85,12 @@ export const PHASE_TIER = Object.freeze({
   review: 'top',
 });
 
+// The phases whose job is JUDGEMENT, not production: deriving the work file
+// and reviewing the diff. A cost posture scales the phases that WRITE code; it
+// must never scale the phases that decide whether the code is right — see
+// applyPhasePosture below for why.
+export const JUDGEMENT_PHASES = Object.freeze(['plan', 'review']);
+
 // ---- providers and the tier → model maps ----
 
 // The two providers the phase map routes across. Detection reuses the platform
@@ -484,9 +490,19 @@ export function applyPhasePosture(resolved, posture = 'default') {
     return { ...fresh, posture: p };
   }
   const pick = POSTURE_UNIFORM_MODELS[p][resolved.scenario];
+  // max_quality only ever RAISES a phase's tier, so it applies uniformly. The
+  // downgrade postures (ultra_cheap, balanced) leave the judgement phases —
+  // plan and review — at their resolved top tier: a posture scales the phases
+  // that WRITE code, never the phases that decide whether the code is right.
+  // 808/721 is why this exists: the fleet's only ultra_cheap run is also its
+  // only failed build, and its review phase was the downgraded one.
+  const downgrade = p !== 'max_quality';
+  const base = downgrade ? resolvePhaseModelMap({ providers: resolved.providers }) : null;
   const map = {};
   for (const phase of BUILD_PHASES) {
-    map[phase] = { ...pick, tier: p };
+    map[phase] = (downgrade && JUDGEMENT_PHASES.includes(phase) && base?.ok)
+      ? { ...base.map[phase] }
+      : { ...pick, tier: p };
   }
   return { ...resolved, map, posture: p };
 }

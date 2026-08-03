@@ -42,6 +42,7 @@ import { buildCheckpointScript } from './template.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getCurrentFrameworkVersion } from './framework.js';
 import { insertMessage } from './chats.js';
+import { nodeRuntimeProbeScript, parseNodeRuntimeProbe, describeNodeRuntimeOutcome } from './node-runtime-logic.js';
 
 const APP_DIR = '/srv/app';
 const nowIso = () => new Date().toISOString();
@@ -267,6 +268,26 @@ export async function ensureScaffoldDeps({ containerName }) {
   return { ok: true, added };
 }
 
+// ensureNodeRuntime — bring an ALREADY-PROVISIONED container up to Node >= 20.
+// MOCK2_BASE_IMAGE is only read at `incus launch`, and buildContainerSetupScript
+// only runs during provisioning — a container never re-runs setup on its own, so
+// without this repair, projects that existed before the Node 20 template change
+// would keep running Node 18 (and skipping the e2e gate) forever. Idempotent and
+// best-effort, mirroring scripts/patch-wg-mtu.sh's contract: no-op when already
+// satisfied, never throws, never fails the caller. Wired into the deploy repair
+// path alongside ensureScaffoldDeps so every project self-heals on its next
+// deploy without operator action.
+export async function ensureNodeRuntime({ containerName }) {
+  let r;
+  try {
+    r = await containerSh(containerName, nodeRuntimeProbeScript(), { timeoutMs: 180000 });
+  } catch (e) {
+    return { ok: false, changed: false, version: null, detail: `ensureNodeRuntime crashed: ${e?.message || e}` };
+  }
+  const probe = parseNodeRuntimeProbe(r.stdout);
+  return describeNodeRuntimeOutcome(probe, { stderrTail: (r.stderr || r.stdout || '').slice(-300) });
+}
+
 // ---- the pre-install pass (all confirmed selections for a project) ----
 
 // preinstallComponents — install every confirmed (or previously failed)
@@ -374,6 +395,23 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
   try {
     scaffoldDeps = await ensureScaffoldDeps({ containerName });
   } catch (e) { console.warn('[mock2] scaffold dep repair failed:', e?.message); }
+
+  // Bring an already-provisioned container's Node runtime up to >= 20 (see
+  // ensureNodeRuntime) — containers never re-run their setup script on their
+  // own, so this is the only path that reaches a project provisioned before
+  // the Node 20 template change. Every build funnels through here, so this
+  // heals the whole fleet without an operator action.
+  try {
+    const nodeRuntime = await ensureNodeRuntime({ containerName });
+    if (nodeRuntime.changed) {
+      insertMessage({
+        projectId, kind: 'system', cycleId,
+        body: `Upgraded this container's Node runtime to ${nodeRuntime.version} (the e2e gate needs 20+; this project was provisioned before that landed).`,
+      });
+    } else if (!nodeRuntime.ok) {
+      console.warn(`[mock2] node runtime repair did not confirm a usable Node for project ${projectId}: ${nodeRuntime.detail}`);
+    }
+  } catch (e) { console.warn('[mock2] node runtime repair failed:', e?.message); }
 
   // Wiring repair pass: selections already 'installed' never re-run installOne,
   // so fixes to the WIRED entry files (e.g. mounting the /_preview mockup

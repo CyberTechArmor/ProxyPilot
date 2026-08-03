@@ -21,7 +21,7 @@ import {
   isFrameworkDrifted, driftLabel,
   publicQuestionShape, publicQueueItemShape, estimateAuditTokens,
   markDeviationDecision, buildAdminDecisionsBlock,
-  rulesGateApplies, countConfirmedRules,
+  rulesGateApplies, countConfirmedRules, rulesGateEnabled, MOCK2_RULES_GATE_FLAG,
 } from '../mock2/audit-logic.js';
 
 // ---- routing (ADR-002 — route by kind, never by convenience) ----
@@ -199,6 +199,28 @@ test('rulesGateApplies: true for a project that has built, on every build mode',
   for (const buildMode of ['full', 'mvp', 'quick']) {
     assert.equal(rulesGateApplies({ hasBuiltBefore: true, buildMode }), true, buildMode);
   }
+});
+
+// AN OPERATOR-LEVEL SWITCH (project 55). This guardrail can hold a project's
+// entire build lane, and its escape hatch — "press Build again" — lived in
+// process memory, so a restart erased it and the second press was refused like
+// the first. Every guardrail of this class needs a way out that does not
+// depend on timing; the symptom cap already had MOCK2_SYMPTOM_CAP.
+test('rulesGateEnabled: MOCK2_RULES_GATE=off stands the pre-build block down', () => {
+  assert.equal(rulesGateEnabled({}), true, 'on by default — an absent flag never disables a guardrail');
+  assert.equal(rulesGateEnabled({ [MOCK2_RULES_GATE_FLAG]: 'off' }), false);
+  assert.equal(rulesGateEnabled({ [MOCK2_RULES_GATE_FLAG]: 'OFF' }), false);
+  assert.equal(rulesGateEnabled({ [MOCK2_RULES_GATE_FLAG]: 'false' }), false);
+  assert.equal(rulesGateEnabled({ [MOCK2_RULES_GATE_FLAG]: '0' }), false);
+  assert.equal(rulesGateEnabled({ [MOCK2_RULES_GATE_FLAG]: 'on' }), true);
+  assert.equal(rulesGateEnabled({ [MOCK2_RULES_GATE_FLAG]: '' }), true);
+});
+
+test('rulesGateApplies: the env switch overrides, and omitting env keeps the old behaviour', () => {
+  assert.equal(rulesGateApplies({ hasBuiltBefore: true, env: { [MOCK2_RULES_GATE_FLAG]: 'off' } }), false);
+  assert.equal(rulesGateApplies({ hasBuiltBefore: true, env: {} }), true);
+  // Every existing caller passes no env at all — unchanged.
+  assert.equal(rulesGateApplies({ hasBuiltBefore: true }), true);
 });
 
 test('countConfirmedRules: counts rule-qN anchors, ignores prose and list items', () => {

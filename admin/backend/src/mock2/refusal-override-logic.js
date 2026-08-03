@@ -11,7 +11,15 @@
 // overriding the symptom cap must never silently also override the rule gate
 // or the duplicate-work check.
 
-export const DEFAULT_OVERRIDE_WINDOW_MINUTES = 10;
+// THE WINDOW RUNS ON THE OPERATOR'S CLOCK, not the machine's (project 55).
+// Ten minutes sounds generous until you watch what an operator actually does
+// with a refusal: they read it, go and look at the app, then answer it by
+// composing the instruction it asked for. The press that was refused in
+// project 55 was followed by a fifteen-line build instruction — written well
+// inside the hour, and well outside ten minutes. The window exists to tie the
+// override to THAT refusal, not to make the operator type fast; an hour does
+// that job and stops the escape hatch expiring mid-sentence.
+export const DEFAULT_OVERRIDE_WINDOW_MINUTES = 60;
 
 // now is a parameter (not Date.now() called internally) so this stays pure and
 // trivially testable; callers pass the wall-clock time they're checking against.

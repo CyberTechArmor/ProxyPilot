@@ -40,6 +40,7 @@ import { insertChangeRecord, changeRecordMirror, lastChangeRecord, listChangeRec
 import { symptomAttemptCount, SYMPTOM_CAP, symptomCapEnabled } from './consult-logic.js';
 import { findLikelyDuplicate, duplicateRefusalMessage } from './duplicate-check-logic.js';
 import { refusalOverrideActive, preBuildGatesApply, mayConsumeOverride } from './refusal-override-logic.js';
+import { recordRefusal, refusalAt, clearRefusal } from './refusal-store.js';
 import {
   diagnosisCandidateFiles, diagnosisEvidence, diagnosisChatMessage, DIAGNOSIS_SYSTEM_PROMPT,
 } from './diagnose-logic.js';
@@ -212,20 +213,21 @@ async function maybePushRemote(projectId) {
 // the build it replaces) and post the root cause + a build-ready fix
 // instruction, naming what was already ruled out.
 
-// Recent refusals per project, so an operator who presses Build again shortly
-// after seeing the diagnosis can override it — a cap with no escape hatch is
-// a wall, not a guardrail. In-memory (mirrors activeAuditJobs above); a
-// process restart just resets the window, which is harmless. The window
-// arithmetic itself is shared (refusal-override-logic.js, D2.3) with the
-// rule-gate and duplicate-work overrides below — this Map is this guardrail's
-// OWN state; overriding the symptom cap must never silently also override
-// the others.
-const recentSymptomCapRefusals = new Map();
-
+// Recent refusals per project, so an operator who presses Build again after
+// seeing the diagnosis can override it — a cap with no escape hatch is a wall,
+// not a guardrail.
+//
+// DURABLE (migration 556, project 55). This was a per-process Map whose own
+// comment called a restart "harmless"; it is not. A restart erases the escape
+// hatch from a refusal the operator is still reading, and the only symptom is
+// Build refusing a second time while the message still promises an override.
+// The window arithmetic stays shared (refusal-override-logic.js, D2.3); the
+// STATE is per (project, kind), so overriding the symptom cap never silently
+// overrides the rule gate or the duplicate check.
 function symptomCapOverrideActive(projectId) {
-  const at = recentSymptomCapRefusals.get(Number(projectId));
+  const at = refusalAt(projectId, 'symptom_cap');
   if (!refusalOverrideActive({ refusedAt: at })) {
-    recentSymptomCapRefusals.delete(Number(projectId));
+    clearRefusal(projectId, 'symptom_cap');
     return false;
   }
   return true;
@@ -292,10 +294,10 @@ async function diagnoseAndRefuse({ project, instruction, matchedCycles, ready })
     `Two prior cycles already tried this and the symptom persists. Rather than pay for a third guess, here is what was ruled out, ${diagnosisBody ? 'and a root-cause diagnosis of the last attempt' : 'though a fresh diagnosis could not be produced this time'}.`,
     `*Ruled out so far:*\n${ruledOut}`,
     diagnosisBody || '',
-    'Send a FIX INSTRUCTION above as the next Quick update, or press Build again within 10 minutes to override and build anyway.',
+    'Send a FIX INSTRUCTION above as the next Quick update, or press Build again within the hour to override and build anyway.',
   ].filter(Boolean).join('\n\n');
 
-  recentSymptomCapRefusals.set(projectId, Date.now());
+  recordRefusal(projectId, 'symptom_cap');
   try { insertMessage({ projectId, kind: 'system', body }); } catch (e) { console.warn('[mock2] symptom-cap message failed:', e?.message); }
 }
 
@@ -333,16 +335,15 @@ async function symptomCapRefusal({ project, instruction, ready, interactive = tr
 // build with no confirmed rules, once the project has built before, on every
 // mode — before any state is written.
 
-// Mirrors the symptom-cap override above (recentSymptomCapRefusals): a repeat
-// Build press within the window overrides a prior refusal, so an operator with
-// real work in flight is never wedged by this check. Shares its window math
-// with the other two overrides (refusal-override-logic.js, D2.3) — its own Map.
-const recentRuleGateRefusals = new Map();
-
+// Mirrors the symptom-cap override above: a repeat Build press within the
+// window overrides a prior refusal, so an operator with real work in flight is
+// never wedged by this check. Shares its window math with the other two
+// overrides (refusal-override-logic.js, D2.3) and its own durable row
+// (migration 556) — this is the guardrail project 55 was wedged BY, twice.
 function ruleGateOverrideActive(projectId) {
-  const at = recentRuleGateRefusals.get(Number(projectId));
+  const at = refusalAt(projectId, 'rule_gate');
   if (!refusalOverrideActive({ refusedAt: at })) {
-    recentRuleGateRefusals.delete(Number(projectId));
+    clearRefusal(projectId, 'rule_gate');
     return false;
   }
   return true;
@@ -355,9 +356,9 @@ async function ruleGateRefusal({ project, mode, interactive = true }) {
   try {
     const projectId = Number(project.id);
     const hasBuiltBefore = project.last_built_framework_version_id != null;
-    if (!rulesGateApplies({ hasBuiltBefore, buildMode: mode })) return null;
+    if (!rulesGateApplies({ hasBuiltBefore, buildMode: mode, env: process.env })) return null;
     if (interactive && ruleGateOverrideActive(projectId)) {
-      recentRuleGateRefusals.delete(projectId);
+      clearRefusal(projectId, 'rule_gate');
       insertMessage({ projectId, kind: 'system', body: 'Building without confirmed rules — the rule-coverage gate will fail until Define is run.' });
       return null;
     }
@@ -365,10 +366,10 @@ async function ruleGateRefusal({ project, mode, interactive = true }) {
     const rulesRead = await readWorkingFile(containerName, RULES_PATH);
     const confirmed = rulesRead.ok ? countConfirmedRules(rulesRead.content) : 0;
     if (confirmed > 0) return null;
-    recentRuleGateRefusals.set(projectId, Date.now());
+    recordRefusal(projectId, 'rule_gate');
     insertMessage({
       projectId, kind: 'system',
-      body: 'Build not started — this project has no confirmed rules yet. Run Define (Stage 2) to confirm what the app must do, then press Build. The gate battery has nothing behavioural to check until it has rules. Press Build again within 10 minutes to override and build anyway.',
+      body: 'Build not started — this project has no confirmed rules yet. Run Define (Stage 2) to confirm what the app must do, then press Build. The gate battery has nothing behavioural to check until it has rules.\n\nTo build without rules: press Build again (this message stays valid for an hour, and survives a restart). The build runs; only the rule-coverage gate stays red until Define is done.',
     });
     return 'no confirmed rules — run Define first';
   } catch (e) {
@@ -386,14 +387,14 @@ async function ruleGateRefusal({ project, mode, interactive = true }) {
 // at all without confirmed rules) so it must be resolved first; this check is
 // informational (this specific ask may be moot) and would be confusing to
 // see before a build the operator can't even run yet.
-const recentDuplicateRefusals = new Map();
+
 const DUPLICATE_CHECK_WINDOW_DAYS = 14;
 const DUPLICATE_CHECK_RECORD_LIMIT = 20;
 
 function duplicateOverrideActive(projectId) {
-  const at = recentDuplicateRefusals.get(Number(projectId));
+  const at = refusalAt(projectId, 'duplicate');
   if (!refusalOverrideActive({ refusedAt: at })) {
-    recentDuplicateRefusals.delete(Number(projectId));
+    clearRefusal(projectId, 'duplicate');
     return false;
   }
   return true;
@@ -431,14 +432,14 @@ async function duplicateCheckRefusal({ project, instruction, interactive = true 
   try {
     const projectId = Number(project.id);
     if (interactive && duplicateOverrideActive(projectId)) {
-      recentDuplicateRefusals.delete(projectId);
+      clearRefusal(projectId, 'duplicate');
       insertMessage({ projectId, kind: 'system', body: 'Building anyway — this looked like it might already be done.' });
       return null;
     }
     const recentRecords = recentSuccessfulChangeSummaries(projectId);
     const dup = findLikelyDuplicate({ instruction, recentRecords });
     if (!dup) return null;
-    recentDuplicateRefusals.set(projectId, Date.now());
+    recordRefusal(projectId, 'duplicate');
     insertMessage({ projectId, kind: 'system', body: duplicateRefusalMessage(dup) });
     return `looks already done — see cycle ${dup.match.cycleId} (change record ${dup.match.seq})`;
   } catch (e) {

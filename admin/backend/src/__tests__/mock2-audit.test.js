@@ -21,6 +21,7 @@ import {
   isFrameworkDrifted, driftLabel,
   publicQuestionShape, publicQueueItemShape, estimateAuditTokens,
   markDeviationDecision, buildAdminDecisionsBlock,
+  rulesGateApplies, countConfirmedRules,
 } from '../mock2/audit-logic.js';
 
 // ---- routing (ADR-002 — route by kind, never by convenience) ----
@@ -184,6 +185,52 @@ test('isFrameworkDrifted: only a built-before project can drift', () => {
   assert.equal(isFrameworkDrifted(2, 2), false);
   assert.equal(isFrameworkDrifted(2, 3), true);
   assert.equal(driftLabel(2, 3), 'Mock2 v2 → v3');
+});
+
+// ---- rule-coverage gate / Define enforcement (run-taxonomy fix #4/C2) ----
+
+test('rulesGateApplies: false for a project that has never built', () => {
+  assert.equal(rulesGateApplies({ hasBuiltBefore: false, buildMode: 'full' }), false);
+  assert.equal(rulesGateApplies({ hasBuiltBefore: false, buildMode: 'quick' }), false);
+  assert.equal(rulesGateApplies({}), false);
+});
+
+test('rulesGateApplies: true for a project that has built, on every build mode', () => {
+  for (const buildMode of ['full', 'mvp', 'quick']) {
+    assert.equal(rulesGateApplies({ hasBuiltBefore: true, buildMode }), true, buildMode);
+  }
+});
+
+test('countConfirmedRules: counts rule-qN anchors, ignores prose and list items', () => {
+  const md = [
+    '# Project rules',
+    '',
+    '## Bookings cannot overlap',
+    '<!-- rule-q1 -->',
+    '',
+    '**Answer:** No.',
+    '',
+    '- this is a plain list item, not an anchor',
+    '- neither is this one',
+    '',
+    '## Deletes require confirmation',
+    '<!--   rule-q2   -->',
+    '',
+    '**Answer:** Yes.',
+  ].join('\n');
+  assert.equal(countConfirmedRules(md), 2);
+});
+
+test('countConfirmedRules: an empty 54-byte stub counts zero (the actual stub content the fleet ships)', () => {
+  const stub = '# Project rules\n\nRule answers append here (Phase M8).\n';
+  assert.equal(Buffer.byteLength(stub, 'utf8'), 54);
+  assert.equal(countConfirmedRules(stub), 0);
+});
+
+test('countConfirmedRules: null/empty/undefined never throws, counts zero', () => {
+  assert.equal(countConfirmedRules(null), 0);
+  assert.equal(countConfirmedRules(undefined), 0);
+  assert.equal(countConfirmedRules(''), 0);
 });
 
 // ---- API shapes ----

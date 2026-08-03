@@ -302,11 +302,67 @@ export function withBaselineGates(gates = [], profile = 'full') {
   return list;
 }
 
+// The user-facing surface: files whose change can produce a visible
+// regression. Canonical home for a predicate that otherwise exists as a
+// hand-maintained copy inside the ui-interaction gate script itself
+// (framework-seed/gates.json — it runs as shell inside the container, so it
+// cannot import this module; a drift test keeps the two copies honest).
+// Infrastructure files are NOT screens — sw.js and build-id churn on every
+// deploy and would otherwise escalate every quick update.
+export const USER_FACING_RE = Object.freeze([
+  /^public\//i, /\.(html|css|scss|jsx|tsx)$/i, /(^|\/)views\//i, /(^|\/)templates\//i,
+]);
+export const UI_INFRA_EXEMPT_RE = Object.freeze([
+  /(^|\/)sw\.js$/i, /(^|\/)build-id\.(js|txt|json)$/i, /(^|\/)manifest(\.webmanifest|\.json)?$/i, /\.webmanifest$/i,
+]);
+
+export function touchesUserFacing(changedFiles = []) {
+  return (Array.isArray(changedFiles) ? changedFiles : []).some(
+    (f) => USER_FACING_RE.some((re) => re.test(f)) && !UI_INFRA_EXEMPT_RE.some((re) => re.test(f)),
+  );
+}
+
+// Gate authority hardening (run-taxonomy fix #11/C3) — VISIBILITY, not a block.
+// The executed battery is always the pinned framework version's (copied into
+// the container at cycle start, ADR-003); a build's own diff cannot change
+// what judged it. But a diff can touch state/ui-checks.json's `paths` globs —
+// legitimately and often, since the ui-interaction gate REQUIRES a cycle to
+// add or modify checks for the files it touches — or (defensively, should it
+// ever occur) a file named gates.json in the project's own tree. Neither is
+// blocked; a reviewer just gets told, because the exploit this guards against
+// (widening globs to fake coverage) is already closed at the gate itself.
+export const GATE_CONFIG_RE = Object.freeze([
+  /(^|\/)gates\.json$/i, /(^|\/)ui-checks\.json$/i,
+]);
+
+export function gateConfigTouchedFiles(changedFiles = []) {
+  return (Array.isArray(changedFiles) ? changedFiles : []).filter(
+    (f) => GATE_CONFIG_RE.some((re) => re.test(f)),
+  );
+}
+
 // buildGateBattery — the ONE place a cycle's battery is decided: operator gates
 // filtered to the mode's profile, plus the baseline gates for that profile.
-export function buildGateBattery(frameworkGates = [], mode = BUILD_MODE_FULL) {
-  const profile = gateProfileForMode(mode);
-  return { profile, gates: withBaselineGates(gatesForProfile(frameworkGates, profile), profile) };
+//
+// A quick update whose diff touches user-facing files escalates to the mvp
+// battery: the gates that catch a visible regression (ui-interaction,
+// no-dead-controls, mobile-overflow, e2e) previously ran only on greenfield
+// and full builds — i.e. on the code least likely to have a regression, and
+// never on the lane that produces most changes. changedFiles is optional and
+// defaults to null (no escalation) so every existing caller — which calls
+// this before any diff exists — is byte-identical to before; escalation only
+// applies when a caller passes changedFiles, which happens at gate-run time,
+// not cycle-start time (the diff is empty at start).
+export function buildGateBattery(frameworkGates = [], mode = BUILD_MODE_FULL, { changedFiles = null } = {}) {
+  const requestedProfile = gateProfileForMode(mode);
+  const escalated = requestedProfile === 'quick' && Array.isArray(changedFiles) && touchesUserFacing(changedFiles);
+  const profile = escalated ? 'mvp' : requestedProfile;
+  return {
+    profile,
+    requestedProfile,
+    escalated,
+    gates: withBaselineGates(gatesForProfile(frameworkGates, profile), profile),
+  };
 }
 
 // The initial gates_json the runner stamps on a cycle from the pinned gate

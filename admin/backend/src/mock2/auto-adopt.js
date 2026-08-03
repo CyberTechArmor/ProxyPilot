@@ -21,7 +21,10 @@ import { getCurrentFrameworkVersion, getFrameworkVersion } from './framework.js'
 import { getProject } from './projects.js';
 import { getLock } from './locks.js';
 import { insertMessage, getOrCreateChat } from './chats.js';
-import { startBuild } from './audit.js';
+import { startBuild, readProjectFile } from './audit.js';
+import { countConfirmedRules } from './audit-logic.js';
+import { RULES_PATH } from './rules-view-logic.js';
+import { containerNameForProject } from './provision.js';
 import { getFrameworkAutoAdopt } from './settings.js';
 import { shouldAutoAdopt, adoptInstruction, adoptChatNotice } from './auto-adopt-logic.js';
 
@@ -88,6 +91,27 @@ async function maybeAdoptProject(projectId, framework) {
     lockHeld,
   });
   if (!verdict.adopt) return false;
+
+  // Define-stage enforcement consequence (run-taxonomy fix #4/C2.6): every
+  // auto-adopt candidate has built before (the SQL pre-filter requires
+  // last_built_framework_version_id), so the C2.4 pre-build block would apply
+  // to all of them. Auto-adopt starts FULL builds, and a full build with no
+  // confirmed rules would just refuse loudly — a fleet-wide wave of "Build
+  // not started" the first time this ships. Skip those projects quietly
+  // instead (reversible: the next sweep after Define is run picks them back
+  // up). Fails open on a container read error — a hiccup here must not stall
+  // adoption for every project.
+  try {
+    const containerName = project.container_name || containerNameForProject(project.id);
+    const rulesRead = await readProjectFile(containerName, RULES_PATH);
+    const confirmed = rulesRead.ok ? countConfirmedRules(rulesRead.content) : 0;
+    if (confirmed === 0) {
+      console.log(`[mock2] framework auto-adopt: skipping project ${project.id} — no confirmed rules yet (run Define first).`);
+      return false;
+    }
+  } catch (e) {
+    console.warn(`[mock2] framework auto-adopt: rule-check failed for project ${project.id} (proceeding):`, e?.message);
+  }
 
   const from = project.last_built_framework_version_id
     ? getFrameworkVersion(project.last_built_framework_version_id)

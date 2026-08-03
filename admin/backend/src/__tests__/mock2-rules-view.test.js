@@ -146,5 +146,10 @@ test('RATCHET: the reader is shared with the writer', () => {
   const audit = readFileSync(new URL('../mock2/audit.js', import.meta.url), 'utf8');
   assert.match(audit, /export async function readProjectFile/);
   assert.equal(RULES_PATH, 'state/rules.md');
-  assert.match(audit, /const RULES_PATH = 'state\/rules\.md'/, 'the two must name the same file');
+  // audit.js used to hand-maintain its OWN 'state/rules.md' literal — a second
+  // copy of the exact path this module canonicalizes. It now imports RULES_PATH
+  // from here instead (C2), so there is one declaration, not two to keep in
+  // step; a stray re-declared literal would be the regression this guards.
+  assert.match(audit, /import \{ RULES_PATH \} from '\.\/rules-view-logic\.js'/, 'audit.js must import the canonical RULES_PATH, not redeclare it');
+  assert.doesNotMatch(audit, /const RULES_PATH = 'state\/rules\.md'/, 'audit.js must not hand-maintain a second copy of the path');
 });

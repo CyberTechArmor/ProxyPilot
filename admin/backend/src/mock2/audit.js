@@ -69,11 +69,12 @@ import {
   buildRuleQuestionBody, appendRule, auditGateCleared, blockedBuildStatus,
   isFrameworkDrifted, driftLabel, estimateAuditTokens,
   buildAdminDecisionsBlock, markDeviationDecision,
+  rulesGateApplies, countConfirmedRules,
 } from './audit-logic.js';
 import { approveAsEditedText } from './unblock-logic.js';
+import { RULES_PATH } from './rules-view-logic.js';
 
 const APP_DIR = '/srv/app';
-const RULES_PATH = 'state/rules.md';
 const nowIso = () => new Date().toISOString();
 
 // Cap on inventory/rules fed to the auditor. Raised from 120k: with 1M-token
@@ -315,6 +316,60 @@ async function symptomCapRefusal({ project, instruction, ready }) {
   }
 }
 
+// ---- Define-stage enforcement (run-taxonomy fix #4/C2) ----
+//
+// rule-coverage (the full-build gate) exited 0 whenever state/rules.md had no
+// confirmed rules — a vacuous pass, green on 11 of 11 fleet projects, because
+// nothing else in the battery checks BEHAVIOUR. The gate alone fires too late
+// (after the cycle is already paid for) and only on full builds; this blocks a
+// build with no confirmed rules, once the project has built before, on every
+// mode — before any state is written.
+
+// Mirrors the symptom-cap override above (recentSymptomCapRefusals): a repeat
+// Build press within the window overrides a prior refusal, so an operator with
+// real work in flight is never wedged by this check.
+const recentRuleGateRefusals = new Map();
+const RULE_GATE_OVERRIDE_WINDOW_MS = 10 * 60 * 1000;
+
+function ruleGateOverrideActive(projectId) {
+  const at = recentRuleGateRefusals.get(Number(projectId));
+  if (!at) return false;
+  if (Date.now() - at > RULE_GATE_OVERRIDE_WINDOW_MS) {
+    recentRuleGateRefusals.delete(Number(projectId));
+    return false;
+  }
+  return true;
+}
+
+// ruleGateRefusal — returns a refusal reason string when this build has no
+// confirmed rules and the project has built before, or null to proceed. Fails
+// open on any error (a container read hiccup must never wedge every build).
+async function ruleGateRefusal({ project, mode }) {
+  try {
+    const projectId = Number(project.id);
+    const hasBuiltBefore = project.last_built_framework_version_id != null;
+    if (!rulesGateApplies({ hasBuiltBefore, buildMode: mode })) return null;
+    if (ruleGateOverrideActive(projectId)) {
+      recentRuleGateRefusals.delete(projectId);
+      insertMessage({ projectId, kind: 'system', body: 'Building without confirmed rules — the rule-coverage gate will fail until Define is run.' });
+      return null;
+    }
+    const containerName = project.container_name || containerNameForProject(projectId);
+    const rulesRead = await readWorkingFile(containerName, RULES_PATH);
+    const confirmed = rulesRead.ok ? countConfirmedRules(rulesRead.content) : 0;
+    if (confirmed > 0) return null;
+    recentRuleGateRefusals.set(projectId, Date.now());
+    insertMessage({
+      projectId, kind: 'system',
+      body: 'Build not started — this project has no confirmed rules yet. Run Define (Stage 2) to confirm what the app must do, then press Build. The gate battery has nothing behavioural to check until it has rules. Press Build again within 10 minutes to override and build anyway.',
+    });
+    return 'no confirmed rules — run Define first';
+  } catch (e) {
+    console.warn('[mock2] rule-gate check failed (proceeding, fail-open):', e?.message);
+    return null;
+  }
+}
+
 // ---- drift detection (ADR-003 — pinned-at-last-build vs current) ----
 
 function driftDedupeKey(projectId) { return `mock2-drift:${projectId}`; }
@@ -384,6 +439,12 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // insertRequest — refusing after that would orphan a request row.
   const symptomCap = await symptomCapRefusal({ project, instruction, ready });
   if (symptomCap) return { status: 'refused', error: symptomCap };
+
+  // Define-stage enforcement (run-taxonomy fix #4/C2): a project that has
+  // built before but has zero confirmed rules never ran Define. Refuse before
+  // any state is written (no request, no cycle) — see ruleGateRefusal above.
+  const ruleGate = await ruleGateRefusal({ project, mode });
+  if (ruleGate) return { status: 'refused', error: ruleGate };
 
   // Cost-truth: the operator's ask opens ONE request; the define audit + the build +
   // any resumes/consults are its segments (additive — request_id is nullable, this

@@ -41,7 +41,7 @@ import {
   interruptDecision, estimateCycleTokens, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
   noopStartRefusal,
   normalizeBuildMode, isFastBuildMode, BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK,
-  queueMayAdvancePast,
+  queueMayAdvancePast, touchesUserFacing, gateConfigTouchedFiles,
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror, lastChangeRecord } from './change-records.js';
@@ -770,6 +770,15 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   const gateProfile = battery.profile;
   const gateScripts = battery.gates.filter((g) => !waivedGates.includes(g.name));
   const frameworkGates = gatesForProfile(parsedGates, gateProfile);
+  // Regression-gate escalation (run-taxonomy fix #3/C1): a quick update's diff
+  // isn't known until the cycle runs, so the escalation decision itself
+  // happens at finish time (see the finish-time gate run below) — but the MVP
+  // battery's SCRIPTS need to already be in the container in case it fires,
+  // so they are computed here and copied alongside the requested (quick)
+  // battery. null on any non-quick mode: nothing to escalate to.
+  const escalationGateScripts = gateProfile === 'quick'
+    ? buildGateBattery(parsedGates, BUILD_MODE_MVP).gates.filter((g) => !waivedGates.includes(g.name))
+    : null;
   console.log(`[mock2] cycle ${cycle.id} gate profile '${gateProfile}': `
     + gateScripts.map((g) => `${g.name}${g.advisory ? '(advisory)' : ''}`).join(', '));
   // A FULL build with zero FRAMEWORK gates is almost certainly a broken
@@ -807,7 +816,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // ProxyPilot-only install never needs @anthropic-ai/claude-agent-sdk present.
   // Both harnesses share the same args, the same terminal-error handling, and
   // the same gate/checkpoint/deploy tail.
-  const args = { cycle, project, containerName, framework, gateScripts, ready, buildMode: modeStr };
+  const args = { cycle, project, containerName, framework, gateScripts, escalationGateScripts, ready, buildMode: modeStr };
   const harness = harnessForProject(project, process.env);
   // Quick-lane pre-pass (prepass-logic.js): one cheap classifier+enrichment
   // call BEFORE the build — sizes the request (a "quick" ask can secretly be a
@@ -1118,7 +1127,7 @@ export async function acceptPendingVerification({ project, cycle, initiatedBy, a
 // Exported ONLY for the ProxyPilotHarness adapter (harness.js), which wraps this
 // loop unchanged — nothing else calls it directly; startCycle goes through the
 // harness factory.
-export async function runCycle({ cycle, project, containerName, framework, gateScripts, ready, buildMode = BUILD_MODE_FULL, harnessProfile = null }) {
+export async function runCycle({ cycle, project, containerName, framework, gateScripts, escalationGateScripts = null, ready, buildMode = BUILD_MODE_FULL, harnessProfile = null }) {
   const cycleMode = normalizeBuildMode(buildMode);
   const mvpBuild = isFastBuildMode(cycleMode); // fast modes share the relaxed acceptance path
   const projectId = Number(project.id);
@@ -1128,7 +1137,16 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
 
   // Copy the PINNED gate scripts into the container (ADR-003 — this version's, not
   // "latest"). Stamp the initial (all-pending) gate report on the cycle.
-  const copied = await copyGatesIntoContainer(containerName, gateScripts);
+  //
+  // Copying is cheap; running is what costs — so on a quick cycle, copy the
+  // UNION of the requested (quick) and escalation (mvp) scripts now, so a
+  // mid-cycle escalation (C1, decided at finish time once the diff is known)
+  // never needs a second container round-trip. Execution stays profile-gated:
+  // only the requested set runs unless the diff actually escalates.
+  const scriptsToCopy = escalationGateScripts
+    ? [...gateScripts, ...escalationGateScripts.filter((g) => !gateScripts.some((r) => r.name === g.name))]
+    : gateScripts;
+  const copied = await copyGatesIntoContainer(containerName, scriptsToCopy);
   if (!copied.ok) {
     await concludeCycle({ cycle, project, framework, containerName, holder, gateScripts, status: 'failed', error: `could not copy gates into container: ${copied.error}` });
     releaseLock(projectId, holder);
@@ -2489,17 +2507,40 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       });
       try { updateCycle(cycle.id, { acceptance_json: JSON.stringify(accState) }); } catch (e) { console.warn('[mock2] acceptance state write failed:', e?.message); }
       logEvent('note', { role: 'system', content: `Model requested finish: ${decision.finishSummary || ''}`, meta: { acceptance: accState } });
+      // Regression-gate escalation (run-taxonomy fix #3/C1) — decided HERE, not
+      // at cycle start, because the diff isn't known until now (a fresh cycle's
+      // tree is clean at start). A quick cycle whose diff touches user-facing
+      // files runs the mvp battery instead: the gates that catch a visible
+      // regression (ui-interaction, no-dead-controls, mobile-overflow, e2e)
+      // previously ran only on greenfield/full builds — never on the lane that
+      // produces most changes. The container already has both script sets
+      // copied (see copyGatesIntoContainer above), so escalating costs nothing
+      // extra to prepare.
+      let effectiveGateScripts = gateScripts;
+      let gateEscalated = false;
+      if (cycleMode === BUILD_MODE_QUICK && escalationGateScripts && touchesUserFacing(changedThisCycle)) {
+        effectiveGateScripts = escalationGateScripts;
+        gateEscalated = true;
+        try { updateCycle(cycle.id, { gates_json: JSON.stringify(initialGateReports(effectiveGateScripts)) }); } catch (e) { console.warn('[mock2] escalated gates_json stamp failed:', e?.message); }
+        try {
+          insertMessage({
+            projectId, kind: 'system', cycleId: cycle.id,
+            body: `Gate profile escalated: quick → mvp (this diff touches user-facing files: ${changedThisCycle.filter((f) => touchesUserFacing([f])).slice(0, 5).join(', ')}). Running ${effectiveGateScripts.map((g) => g.name).join(', ')}.`,
+          });
+        } catch { /* best effort */ }
+        logEvent('note', { role: 'system', content: 'Gate profile escalated: quick → mvp (diff touches user-facing files).', meta: { escalated: true } });
+      }
       // No battery in fast modes — skip both the run and the "Gate battery
       // (pending)" event noise; the deploy tail below is the verification.
-      const battery = gateScripts.length ? await runGateBattery(cycle.id, containerName, gateScripts) : [];
+      const battery = effectiveGateScripts.length ? await runGateBattery(cycle.id, containerName, effectiveGateScripts) : [];
       lastGateReports = battery;
-      if (gateScripts.length) {
+      if (effectiveGateScripts.length) {
         logEvent('gate', { role: 'system', content: formatGateReports(battery), meta: { gates: battery, green: allGatesGreen(battery) } });
       }
       // A framework with zero gates (placeholder content, risk R8 — parseGateScripts
       // returns []) is vacuously green: there is nothing to fail, so finish is
       // accepted. Only reject finish when there ARE gates and one isn't green.
-      if (gateScripts.length && !allGatesGreen(battery)) {
+      if (effectiveGateScripts.length && !allGatesGreen(battery)) {
         // Not green — feed the finish call its verdict and keep working ("review,
         // not error"). The next model turn answers with fresh work — UNLESS the
         // breaker shows the cycle is just re-calling finish on the same red gates
@@ -2507,7 +2548,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         transcript.push({ role: 'tool', toolCallId: termId, name: termName, content: `Gates are not all green yet — you cannot finish. Battery:\n${formatGateReports(battery)}` });
         touchLock(projectId, holder);
         if (progress.tripped) {
-          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); gates still red.`, logEvent, consultSignals: haltSignals(`Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); gates still red.`) });
+          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts: effectiveGateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); gates still red.`, logEvent, consultSignals: haltSignals(`Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); gates still red.`) });
           return scheduleJobCleanup(cycle.id);
         }
         continue;
@@ -2639,7 +2680,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         const findingLines = (bs.findings || integrationDecision.reasons || []);
         transcript.push({ role: 'tool', toolCallId: termId, name: termName, content: `Cannot finish — ${bs.reason}\n${findingLines.map((r) => `- ${r}`).join('\n')}${bs.requires_resolution ? `\n\n${bs.requires_resolution}` : ''}` });
         await haltCycle({
-          cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework,
+          cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts: effectiveGateScripts, framework,
           trigger, reason: bs.reason, options: bs.options, logEvent,
           consultSignals: haltSignals(bs.reason),
         });
@@ -2648,14 +2689,22 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       }
       // The change record carries the acceptance evidence (constitution §11):
       // summary + the acceptance/assumptions block, so a Reviewer can replay
-      // the human-runnable checks straight from the record.
-      const recordSummary = `${decision.finishSummary}\n\n${formatAcceptanceBlock(decision.finishAcceptance, decision.finishAssumptions)}`;
+      // the human-runnable checks straight from the record. The escalation
+      // line rides along when this cycle's battery was widened (C1) — a
+      // reviewer reading the record sees WHY a "quick" cycle ran mvp gates.
+      // The gate-config notice (C3.2) is visibility, not a block: editing
+      // checks is legitimate and often required by the ui-interaction gate
+      // itself; the executed battery is always the pinned one regardless.
+      const gateConfigTouched = gateConfigTouchedFiles(changedThisCycle);
+      const recordSummary = `${decision.finishSummary}\n\n${formatAcceptanceBlock(decision.finishAcceptance, decision.finishAssumptions)}`
+        + (gateEscalated ? '\n\nGate profile: quick → mvp (diff touches user-facing files)' : '')
+        + (gateConfigTouched.length ? `\n\nGate config touched this cycle: ${gateConfigTouched.join(', ')}. The battery that judged this cycle was the pinned one; this change affects later cycles.` : '');
       logEvent('acceptance', {
         role: 'assistant',
         content: formatAcceptanceBlock(decision.finishAcceptance, decision.finishAssumptions),
         meta: { acceptance: decision.finishAcceptance, assumptions: decision.finishAssumptions },
       });
-      const record = await checkpointAndRecord({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, summary: recordSummary });
+      const record = await checkpointAndRecord({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts: effectiveGateScripts, framework, summary: recordSummary });
       logEvent('checkpoint', { role: 'system', content: decision.finishSummary || '', meta: { commit_sha: record?.commit_sha || null, seq: record?.seq ?? null } });
 
       // Run phase — deploy the built app so "succeeded" means "serving". Install

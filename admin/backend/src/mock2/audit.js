@@ -39,7 +39,7 @@ import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror, lastChangeRecord, listChangeRecords } from './change-records.js';
 import { symptomAttemptCount, SYMPTOM_CAP, symptomCapEnabled } from './consult-logic.js';
 import { findLikelyDuplicate, duplicateRefusalMessage } from './duplicate-check-logic.js';
-import { refusalOverrideActive } from './refusal-override-logic.js';
+import { refusalOverrideActive, preBuildGatesApply, mayConsumeOverride } from './refusal-override-logic.js';
 import {
   diagnosisCandidateFiles, diagnosisEvidence, diagnosisChatMessage, DIAGNOSIS_SYSTEM_PROMPT,
 } from './diagnose-logic.js';
@@ -303,11 +303,15 @@ async function diagnoseAndRefuse({ project, instruction, matchedCycles, ready })
 // the THIRD attempt at substantially the same symptom, or null to proceed.
 // Fails open on any error: a matcher mistake must never block a legitimate
 // build, and this check must never be the reason a build silently vanishes.
-async function symptomCapRefusal({ project, instruction, ready }) {
+// `interactive` — was Build actually PRESSED? Only a press may consume the
+// ten-minute override; a queue drain is not "pressing Build again", and
+// letting it inherit someone else's override means the gate silently waves
+// through the build it was asked to question.
+async function symptomCapRefusal({ project, instruction, ready, interactive = true }) {
   try {
     const projectId = Number(project.id);
     if (!symptomCapEnabled(process.env)) return null;
-    if (symptomCapOverrideActive(projectId)) return null;
+    if (interactive && symptomCapOverrideActive(projectId)) return null;
     const recent = listCyclesForProject(projectId, { limit: 20 });
     const matched = recent.filter((c) => c.instruction
       && symptomAttemptCount({ instruction, priorInstructions: [c.instruction] }) > 0);
@@ -347,12 +351,12 @@ function ruleGateOverrideActive(projectId) {
 // ruleGateRefusal — returns a refusal reason string when this build has no
 // confirmed rules and the project has built before, or null to proceed. Fails
 // open on any error (a container read hiccup must never wedge every build).
-async function ruleGateRefusal({ project, mode }) {
+async function ruleGateRefusal({ project, mode, interactive = true }) {
   try {
     const projectId = Number(project.id);
     const hasBuiltBefore = project.last_built_framework_version_id != null;
     if (!rulesGateApplies({ hasBuiltBefore, buildMode: mode })) return null;
-    if (ruleGateOverrideActive(projectId)) {
+    if (interactive && ruleGateOverrideActive(projectId)) {
       recentRuleGateRefusals.delete(projectId);
       insertMessage({ projectId, kind: 'system', body: 'Building without confirmed rules — the rule-coverage gate will fail until Define is run.' });
       return null;
@@ -423,10 +427,10 @@ function recentSuccessfulChangeSummaries(projectId) {
 // Fails open on any error: a matcher mistake must never block a legitimate
 // build, and a false positive that can't be overridden costs trust in the
 // whole feature — see duplicateOverrideActive above.
-async function duplicateCheckRefusal({ project, instruction }) {
+async function duplicateCheckRefusal({ project, instruction, interactive = true }) {
   try {
     const projectId = Number(project.id);
-    if (duplicateOverrideActive(projectId)) {
+    if (interactive && duplicateOverrideActive(projectId)) {
       recentDuplicateRefusals.delete(projectId);
       insertMessage({ projectId, kind: 'system', body: 'Building anyway — this looked like it might already be done.' });
       return null;
@@ -475,7 +479,7 @@ function detectDrift(project, framework) {
 // so they ride every segment: the audit call here, and the build's first task
 // turn (runner.js hydrates them from the request row), surviving the
 // rule-question gate and resumes.
-export async function startBuild({ project, instruction, user, actingAsAdmin = 0, images = [], buildMode = 'full', echoToChat = false, escalate = false, escalateModel = null, escalateEffort = null, escalateThinking = null }) {
+export async function startBuild({ project, instruction, user, actingAsAdmin = 0, images = [], buildMode = 'full', echoToChat = false, escalate = false, escalateModel = null, escalateEffort = null, escalateThinking = null, origin = 'operator' }) {
   const projectId = Number(project.id);
   const mode = normalizeBuildMode(buildMode);
 
@@ -510,20 +514,41 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // substantially the same ask. Placed after the readiness guards (this needs
   // `ready`, the audit slot, to run the diagnosis call) and before
   // insertRequest — refusing after that would orphan a request row.
-  const symptomCap = await symptomCapRefusal({ project, instruction, ready });
+  // THE PRE-BUILD GATES ARE A CONVERSATION WITH A HUMAN, and all three end the
+  // same way: "press Build again within 10 minutes to override". A build the
+  // HARNESS queued has nobody to press anything, so running one through them
+  // can only strand it — project 55's context handoff checkpointed a
+  // half-finished build, queued its continuation, and the rules gate refused
+  // it ("no confirmed rules — run Define first"). The queue marked the row
+  // failed and the work was abandoned mid-flight. Worse, the refusal ARMS the
+  // ten-minute override, so the next queued row inherited it and built without
+  // rules anyway: the gate dropped the build it should have run and ran the
+  // one it should have questioned.
+  //
+  // A continuation is not a new ask — it is the second half of work the
+  // operator already authorized, and its instruction is near-identical to the
+  // cycle that just checkpointed, which is exactly what the duplicate check
+  // and the symptom cap are built to refuse. So all three gates apply to
+  // operator asks only. Queued OPERATOR asks (a quick update that waited for
+  // the writer lock) are still gated in full — the origin says who asked, not
+  // how it arrived.
+  const operatorAsk = preBuildGatesApply(origin);
+  const interactive = mayConsumeOverride(origin);
+
+  const symptomCap = operatorAsk ? await symptomCapRefusal({ project, instruction, ready, interactive }) : null;
   if (symptomCap) return { status: 'refused', error: symptomCap };
 
   // Define-stage enforcement (run-taxonomy fix #4/C2): a project that has
   // built before but has zero confirmed rules never ran Define. Refuse before
   // any state is written (no request, no cycle) — see ruleGateRefusal above.
-  const ruleGate = await ruleGateRefusal({ project, mode });
+  const ruleGate = operatorAsk ? await ruleGateRefusal({ project, mode, interactive }) : null;
   if (ruleGate) return { status: 'refused', error: ruleGate };
 
   // Duplicate-work check (run-taxonomy fix #6/D2): does this ask look like a
   // recent, successful cycle already did it? Ordered AFTER the rules check
   // above (see the comment on duplicateCheckRefusal) and, like it, before
   // insertRequest — refusing after that would orphan a request row.
-  const dupCheck = await duplicateCheckRefusal({ project, instruction });
+  const dupCheck = operatorAsk ? await duplicateCheckRefusal({ project, instruction, interactive }) : null;
   if (dupCheck) return { status: 'refused', error: dupCheck };
 
   // Cost-truth: the operator's ask opens ONE request; the define audit + the build +

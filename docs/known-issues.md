@@ -124,3 +124,26 @@ and run it next to `npm run build` in the pre-push checklist. Expect a
 first-run cleanup pass: the rule is reference-order-based and will flag some
 benign callback-ordering patterns that need either reordering or targeted
 disables.
+
+## Two mock2 gate-script tests flake under full-suite parallelism
+
+2026-08-03, noticed while fixing the project-55 build blockers. Both pass
+reliably in isolation and fail intermittently under `npm test`:
+
+- `mock2-ui-checks.test.js` — "the ui-interaction gate hands over a template
+  that is valid JSON, passes itself, and parses" (and, less often, its
+  neighbour "P47 shape: sw.js + build-id are infrastructure")
+- `mock2-scaffold-push.test.js` — "the generated push.ts encrypts what a
+  browser can decrypt, and signs a valid VAPID JWT"
+
+Verified pre-existing: on an unmodified checkout the ui-checks one failed in
+2 of 3 consecutive full-suite runs, so it is not a regression from any
+particular change. Both shell out (`git init`, `sh`, `execFileSync`) into
+`mkdtemp` directories while the rest of the suite runs concurrently, which is
+the likely cause — a timing/resource-contention flake, not a logic failure.
+
+Do not "fix" the gate scripts over this. The fix belongs in the tests: give
+each its own serialised context (`test('…', { concurrency: 1 })` or a
+per-file `--test-concurrency=1`), or drop the subprocess where a pure
+assertion would do. Until then, re-run a single failing file in isolation
+before believing it.

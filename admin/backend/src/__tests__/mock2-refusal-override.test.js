@@ -13,21 +13,34 @@ import {
   refusalOverrideActive, DEFAULT_OVERRIDE_WINDOW_MINUTES, preBuildGatesApply, mayConsumeOverride,
 } from '../mock2/refusal-override-logic.js';
 
-test('DEFAULT_OVERRIDE_WINDOW_MINUTES is 10 (matches B2/C2 already-shipped behaviour)', () => {
-  assert.equal(DEFAULT_OVERRIDE_WINDOW_MINUTES, 10);
+// WIDENED TO AN HOUR (project 55). The window runs on the OPERATOR's clock:
+// they read the refusal, look at the app, and answer it by writing the
+// instruction it asked for. The press refused in project 55 was followed by a
+// fifteen-line build instruction — comfortably inside an hour, and well
+// outside ten minutes, so the escape hatch expired mid-sentence.
+test('DEFAULT_OVERRIDE_WINDOW_MINUTES gives an operator time to answer the refusal', () => {
+  assert.equal(DEFAULT_OVERRIDE_WINDOW_MINUTES, 60);
+});
+
+test('the window covers the time it takes to write the instruction the refusal asked for', () => {
+  const now = 1_000_000_000_000;
+  // Read the refusal, open the app, compose a long build instruction.
+  assert.equal(refusalOverrideActive({ refusedAt: now - 25 * 60 * 1000, now }), true);
+  // …but it is still tied to THAT refusal, not to yesterday's.
+  assert.equal(refusalOverrideActive({ refusedAt: now - 90 * 60 * 1000, now }), false);
 });
 
 test('refusalOverrideActive: true just inside the window, false just outside it', () => {
   const now = 1_000_000_000_000;
-  const refusedAt = now - 9 * 60 * 1000; // 9 minutes ago
+  const refusedAt = now - 59 * 60 * 1000;
   assert.equal(refusalOverrideActive({ refusedAt, now }), true);
-  const tooLongAgo = now - 11 * 60 * 1000; // 11 minutes ago
+  const tooLongAgo = now - 61 * 60 * 1000;
   assert.equal(refusalOverrideActive({ refusedAt: tooLongAgo, now }), false);
 });
 
 test('refusalOverrideActive: exactly at the boundary is still active (inclusive)', () => {
   const now = 1_000_000_000_000;
-  const refusedAt = now - 10 * 60 * 1000;
+  const refusedAt = now - 60 * 60 * 1000;
   assert.equal(refusalOverrideActive({ refusedAt, now }), true);
 });
 

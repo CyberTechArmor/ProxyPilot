@@ -1826,4 +1826,26 @@ export const MOCK2_MIGRATIONS = [
       d.exec(`ALTER TABLE mock2_build_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'operator';`);
     },
   },
+  {
+    // The pre-build guardrails' escape hatch, made durable. Each refusal ends
+    // "press Build again to override" — a promise that lived in a per-process
+    // Map, so a backend restart erased it and the operator's second press was
+    // refused exactly like the first, with no way forward and the message
+    // still promising an override. One row per (project, guardrail): survives
+    // a restart, overriding one guardrail never overrides another, and the row
+    // is deleted when spent so one refusal buys exactly one override.
+    version: 556,
+    name: 'mock2_build_refusals',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_build_refusals (
+          project_id INTEGER NOT NULL,
+          kind       TEXT NOT NULL
+            CHECK (kind IN ('symptom_cap', 'rule_gate', 'duplicate')),
+          refused_at TEXT NOT NULL,
+          PRIMARY KEY (project_id, kind)
+        );
+      `);
+    },
+  },
 ];

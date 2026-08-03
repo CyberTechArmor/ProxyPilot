@@ -401,7 +401,21 @@ export function driftLabel(fromVersion, toVersion) {
 // quick update to a project that never ran Define is exactly the case that
 // produced the fleet's specification-failure waste; exempting the quick lane
 // would exempt most of it.
-export function rulesGateApplies({ hasBuiltBefore = false, buildMode = null } = {}) {
+// MOCK2_RULES_GATE=off turns the pre-build block into nothing, for parity with
+// the symptom cap's MOCK2_SYMPTOM_CAP (consult-logic.js). Every guardrail of
+// this class needs an operator-level switch: this one can hold a project's
+// whole build lane, and project 55 spent an afternoon inside it with an escape
+// hatch that a restart had quietly erased. The rule-coverage GATE still runs
+// and still reports — only the pre-build refusal stands down.
+export const MOCK2_RULES_GATE_FLAG = 'MOCK2_RULES_GATE';
+
+export function rulesGateEnabled(env = {}) {
+  const v = String(env?.[MOCK2_RULES_GATE_FLAG] ?? '').trim().toLowerCase();
+  return v !== 'off' && v !== 'false' && v !== '0';
+}
+
+export function rulesGateApplies({ hasBuiltBefore = false, buildMode = null, env = null } = {}) {
+  if (env && !rulesGateEnabled(env)) return false;
   return !!hasBuiltBefore;
 }
 

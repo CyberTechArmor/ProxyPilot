@@ -31,7 +31,7 @@ import { resolveProjectKey } from './project-keys.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
-import { getCurrentFrameworkVersion } from './framework.js';
+import { getCurrentFrameworkVersion, getFrameworkVersion } from './framework.js';
 import {
   insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
   listCyclesForProject, projectHasBeenDeployed } from './cycles.js';
@@ -45,6 +45,7 @@ import {
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror, lastChangeRecord } from './change-records.js';
+import { terminalRecordPlan } from './conclude-logic.js';
 import { insertMessage } from './chats.js';
 import { webSearchServerTools, RUNNER_WEB_SEARCH_FLAG } from './ask-logic.js';
 import { getRoutingRule } from './routing.js';
@@ -712,7 +713,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
       initiatedBy, actingAsAdmin, estTokens, estCostCents, status: 'refused_quota',
       requestId: reqId, segment: seg,
     });
-    finishCycle(refused.id, { status: 'refused_quota', error: verdict.reason });
+    await concludeCycle({ cycle: refused, project, framework, status: 'refused_quota', error: verdict.reason });
     safeRaise({
       kind: 'quota_exhausted', project_id: projectId, dedupe_key: `mock2-quota:${projectId}`,
       ref_table: 'mock2_cycles', ref_id: refused.id, detail: `${project.name}: ${verdict.reason}`,
@@ -736,7 +737,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   }
   const lock = acquireLock({ projectId, requester: { type: 'cycle', id: cycle.id }, role: 'admin' });
   if (!lock.ok) {
-    finishCycle(cycle.id, { status: 'failed', error: `could not acquire checkout lock: ${lock.reason}` });
+    await concludeCycle({ cycle, project, framework, status: 'failed', error: `could not acquire checkout lock: ${lock.reason}` });
     return { status: 'error', cycle: getCycle(cycle.id), error: `Could not acquire the checkout lock: ${lock.reason}` };
   }
 
@@ -822,9 +823,9 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
 
   // Fire-and-forget; the runner owns its own error handling and always lands the
   // cycle terminal + releases the lock.
-  driveCycle().catch((err) => {
+  driveCycle().catch(async (err) => {
     console.error(`[mock2] runner crashed for cycle ${cycle.id}:`, err?.message || err);
-    try { finishCycle(cycle.id, { status: 'failed', error: `runner crashed: ${err?.message || err}` }); } catch { /* ignore */ }
+    try { await concludeCycle({ cycle, project, framework, containerName, holder: { type: 'cycle', id: cycle.id }, status: 'failed', error: `runner crashed: ${err?.message || err}` }); } catch { /* ignore */ }
     try { releaseLock(projectId, { type: 'cycle', id: cycle.id }); } catch { /* ignore */ }
     setJob(cycle.id, { phase: 'failed', message: `runner crashed: ${err?.message || err}` });
     scheduleJobCleanup(cycle.id);
@@ -960,10 +961,11 @@ export async function retryDeploy({ project, cycle }) {
       // "Retry deploy" the one-click recovery. Dynamic import — the static one
       // would be a cycle (component-install imports runner for exec helpers).
       try {
-        const [{ ensureComponentDeps, ensureScaffoldDeps }, { listProjectComponents }] = await Promise.all([
+        const [{ ensureComponentDeps, ensureScaffoldDeps, ensureNodeRuntime }, { listProjectComponents }] = await Promise.all([
           import('./component-install.js'), import('./components.js'),
         ]);
         try { await ensureScaffoldDeps({ containerName }); } catch { /* best effort */ }
+        try { await ensureNodeRuntime({ containerName }); } catch (e) { console.warn('[mock2] retry-deploy node runtime repair failed:', e?.message); }
         const ensured = await ensureComponentDeps({ containerName, rows: listProjectComponents(projectId) });
         if (ensured.repaired.length) {
           insertMessage({
@@ -973,18 +975,18 @@ export async function retryDeploy({ project, cycle }) {
         }
         if (!ensured.ok) {
           const detail = ensured.failed.map((f) => f.error).join('; ');
-          finishCycle(cycle.id, { status: 'failed', error: detail });
+          await concludeCycle({ cycle, project, containerName, holder, status: 'failed', error: detail });
           setJob(cycle.id, { phase: 'deploy_failed', message: detail });
           return;
         }
       } catch (e) { console.warn('[mock2] retry-deploy dep repair failed:', e?.message); }
       const deployed = await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
       if (!deployed.ok) {
-        finishCycle(cycle.id, { status: 'failed', error: deployed.error });
+        await concludeCycle({ cycle, project, containerName, holder, status: 'failed', error: deployed.error });
         setJob(cycle.id, { phase: 'deploy_failed', message: deployed.error });
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'deploy_failed' });
       } else {
-        finishCycle(cycle.id, { status: restoreStatus, error: null });
+        await concludeCycle({ cycle, project, containerName, holder, status: restoreStatus, error: null, summary: `checkpoint: redeploy (${restoreStatus})` });
         if (restoreStatus === 'succeeded') {
           try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
         }
@@ -1002,7 +1004,7 @@ export async function retryDeploy({ project, cycle }) {
         }
       }
     } catch (err) {
-      finishCycle(cycle.id, { status: 'failed', error: `deploy retry crashed: ${err?.message || err}` });
+      await concludeCycle({ cycle, project, containerName, holder, status: 'failed', error: `deploy retry crashed: ${err?.message || err}` });
       setJob(cycle.id, { phase: 'deploy_failed', message: `deploy retry crashed: ${err?.message || err}` });
     } finally {
       releaseLock(projectId, holder);
@@ -1052,7 +1054,7 @@ export async function acceptPendingVerification({ project, cycle, initiatedBy, a
     try {
       const deployed = await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
       if (!deployed.ok) {
-        finishCycle(cycle.id, { status: 'failed', error: `accept-pending deploy failed: ${deployed.error}` });
+        await concludeCycle({ cycle, project, containerName, holder, status: 'failed', error: `accept-pending deploy failed: ${deployed.error}` });
         setJob(cycle.id, { phase: 'deploy_failed', message: deployed.error });
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'deploy_failed' });
         return;
@@ -1062,7 +1064,7 @@ export async function acceptPendingVerification({ project, cycle, initiatedBy, a
       // the runner's own B.5 branch produces — never "succeeded".
       openVerificationChecklist({ projectId, cycleId: cycle.id, checklist });
       updateCycle(cycle.id, { verification_state: 'pending', halt_reason: null });
-      finishCycle(cycle.id, { status: 'awaiting_user', error: null });
+      await concludeCycle({ cycle, project, containerName, holder, status: 'awaiting_user', error: null, summary: `accept-pending: deployed for live verification (${checklist.length} check(s) outstanding)` });
       try {
         recordIntegrationResolution({
           project_id: projectId, cycle_id: cycle.id, kind: 'operator_accept_pending',
@@ -1094,7 +1096,7 @@ export async function acceptPendingVerification({ project, cycle, initiatedBy, a
         .then((m) => m.afterBuildReview(projectId, { reason: 'accepted as pending verification' }))
         .catch((e) => console.warn('[mock2] post-build review (accept-pending) failed:', e?.message));
     } catch (err) {
-      finishCycle(cycle.id, { status: 'failed', error: `accept-pending crashed: ${err?.message || err}` });
+      await concludeCycle({ cycle, project, containerName, holder, status: 'failed', error: `accept-pending crashed: ${err?.message || err}` });
       setJob(cycle.id, { phase: 'failed', message: `accept-pending crashed: ${err?.message || err}` });
     } finally {
       releaseLock(projectId, holder);
@@ -1121,7 +1123,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // "latest"). Stamp the initial (all-pending) gate report on the cycle.
   const copied = await copyGatesIntoContainer(containerName, gateScripts);
   if (!copied.ok) {
-    finishCycle(cycle.id, { status: 'failed', error: `could not copy gates into container: ${copied.error}` });
+    await concludeCycle({ cycle, project, framework, containerName, holder, gateScripts, status: 'failed', error: `could not copy gates into container: ${copied.error}` });
     releaseLock(projectId, holder);
     setJob(cycle.id, { phase: 'failed', message: copied.error });
     return scheduleJobCleanup(cycle.id);
@@ -1684,8 +1686,18 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     }
     const ir = interruptDecision(fresh.interrupt_request);
     if (ir.stop) {
-      if (ir.checkpointFirst) await checkpointAndRecord({ cycle: fresh, project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, summary: `checkpoint: ${ir.terminalStatus}` });
-      finishCycle(cycle.id, { status: ir.terminalStatus, error: `interrupted (${fresh.interrupt_request})` });
+      // ir.checkpointFirst decides whether a checkpoint is even attempted — when
+      // false, concludeCycle still records the terminal (a minimal record), it
+      // just never touches the container. Previously a false checkpointFirst
+      // left this cycle with NO change record at all.
+      await concludeCycle({
+        cycle: fresh, project, framework,
+        containerName: ir.checkpointFirst ? containerName : null,
+        holder: ir.checkpointFirst ? holder : null,
+        gateReports: lastGateReports, gateScripts,
+        status: ir.terminalStatus, error: `interrupted (${fresh.interrupt_request})`,
+        summary: ir.checkpointFirst ? `checkpoint: ${ir.terminalStatus}` : null,
+      });
       releaseLock(projectId, holder);
       if (ir.queued) {
         safeRaise({ kind: 'retries_exhausted', project_id: projectId, dedupe_key: `mock2-requeue:${cycle.id}`, ref_table: 'mock2_cycles', ref_id: cycle.id, detail: `${project.name}: cycle re-queued by editor` });
@@ -1810,7 +1822,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       const retries = (getCycle(cycle.id).retries || 0) + 1;
       updateCycle(cycle.id, { retries });
       if (retriesExhausted(retries)) {
-        await escalateAwaitingAdmin({ cycle: getCycle(cycle.id), project, containerName, holder, reason: result.error });
+        await escalateAwaitingAdmin({ cycle: getCycle(cycle.id), project, framework, containerName, holder, gateReports: lastGateReports, gateScripts, reason: result.error });
         return scheduleJobCleanup(cycle.id);
       }
       setJob(cycle.id, { phase: 'retrying', message: `Model call failed (retry ${retries}/${MAX_CYCLE_RETRIES}): ${result.error}` });
@@ -3511,6 +3523,80 @@ export async function checkpointAndRecord({ cycle, project, containerName, holde
   return record;
 }
 
+// concludeCycle — the ONE terminal exit for a build cycle. Every path that ends
+// a cycle goes through here so the ledger has an entry for every cycle id: a
+// cycle row with no change record is invisible to the audit spine, which is how
+// crashed and refused cycles became "unlogged cycle IDs".
+//
+// Writes the richest record the situation allows:
+//   * container + holder present  → full checkpointAndRecord (commit + diff)
+//   * otherwise                   → a minimal record: no commit, no diff, but a
+//                                   seq, a hash-chain link, and the reason.
+// framework is optional — when the caller doesn't have it in scope (retryDeploy,
+// acceptPendingVerification, the crash handler), it is resolved from the
+// cycle's own pinned framework_version_id (ADR-003: the pin never changes).
+// Never throws: a failure to record must not mask the failure being recorded.
+export async function concludeCycle({
+  cycle, project, framework = null, status, error = null,
+  containerName = null, holder = null, gateReports = null, gateScripts = null,
+  summary = null, logEvent = null,
+}) {
+  const plan = terminalRecordPlan({ containerName, holder, summary, status, error });
+  let recordSummary = plan.summary;
+
+  let fw = framework;
+  if (!fw) {
+    try { fw = getFrameworkVersion(cycle.framework_version_id); } catch (e) { console.warn('[mock2] concludeCycle: framework lookup failed:', e?.message); fw = null; }
+  }
+
+  let record = null;
+  if (plan.strategy === 'checkpoint' && fw) {
+    try {
+      record = await checkpointAndRecord({
+        cycle, project, containerName, holder,
+        gateReports: gateReports || [], gateScripts, framework: fw,
+        summary: recordSummary,
+      });
+    } catch (e) {
+      console.warn('[mock2] concludeCycle checkpoint failed:', e?.message);
+      recordSummary = `${recordSummary} (checkpoint failed: ${e?.message || e})`;
+    }
+  }
+
+  if (!record) {
+    if (fw) {
+      try {
+        record = insertChangeRecord({
+          projectId: Number(project.id),
+          cycleId: cycle.id,
+          initiatedBy: cycle.initiated_by ?? null,
+          actingAsAdmin: cycle.acting_as_admin ? 1 : 0,
+          frameworkVersion: fw.version,
+          frameworkVersionId: fw.id,
+          rulesTouched: null,
+          gatesRun: gateReports ? gateReports.map((g) => ({ name: g.name, result: g.status })) : null,
+          commitSha: null,
+          summary: recordSummary,
+        });
+      } catch (e) {
+        console.warn('[mock2] concludeCycle minimal record failed:', e?.message);
+      }
+    } else {
+      console.warn(`[mock2] concludeCycle: no framework resolvable for cycle ${cycle.id} — no change record written`);
+    }
+  }
+
+  finishCycle(cycle.id, { status, error });
+
+  if (typeof logEvent === 'function') {
+    try {
+      logEvent('note', { role: 'system', content: recordSummary, meta: { terminal: status, recorded: !!record } });
+    } catch { /* best effort */ }
+  }
+
+  return record;
+}
+
 // ---- deploy stage (Run phase) ----
 
 // deployStage — after gates are green and the change is checkpointed, install +
@@ -3578,14 +3664,16 @@ export async function deployStage({ cycle, project, containerName, holder }) {
 // (container name, branch, last error). Terminal-until-an-admin-acts; the lock is
 // released (there is no in-process runner to hold it, and an admin re-drives with
 // a fresh cycle). 04-phased-plan §M6.
-async function escalateAwaitingAdmin({ cycle, project, containerName, holder, reason }) {
+async function escalateAwaitingAdmin({ cycle, project, framework = null, containerName, holder, gateReports = null, gateScripts = null, reason }) {
   const projectId = Number(project.id);
-  // Best-effort WIP checkpoint so the branch is at a recoverable state.
-  try {
-    const cp = buildCheckpointScript({ appDir: APP_DIR, message: 'checkpoint: auto (retries exhausted)' });
-    await containerSh(containerName, cp, { timeoutMs: 60000 });
-  } catch { /* best effort */ }
-  finishCycle(cycle.id, { status: 'awaiting_admin', error: `retries exhausted: ${reason}` });
+  // Checkpoint + record the WIP so the branch is at a recoverable state — this
+  // used to be a raw commit with no change record, which is exactly the
+  // invisible-cycle gap concludeCycle exists to close.
+  await concludeCycle({
+    cycle, project, framework, containerName, holder, gateReports, gateScripts,
+    status: 'awaiting_admin', error: `retries exhausted: ${reason}`,
+    summary: 'checkpoint: auto (retries exhausted)',
+  });
   releaseLock(projectId, holder);
   const handoff = { container: containerName, branch: 'main', cycle_id: cycle.id, error: reason };
   safeRaise({

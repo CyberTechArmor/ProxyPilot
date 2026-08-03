@@ -27,6 +27,7 @@ import {
   phaseRoutingApplies,
   BUILD_PHASES,
   PHASE_TIER,
+  JUDGEMENT_PHASES,
   PRO_TIER_MODELS,
   NO_PROVIDER_ERROR,
   detectPhaseProviders,
@@ -365,25 +366,71 @@ test('posture suggested: the recommended tier map everywhere (manual overrides d
   assert.equal(out.map.implement_complex.model, 'gpt-5.6-terra');
 });
 
-test('posture ultra_cheap: the lowest-cost available model for everything', () => {
+test('posture ultra_cheap: the lowest-cost available model for everything EXCEPT plan/review', () => {
+  // Judgement phases (plan, review) are exempt from every downgrade posture —
+  // see JUDGEMENT_PHASES / applyPhasePosture. They resolve to the SUGGESTED
+  // top tier instead, same as under 'default'/'suggested'.
   const expect = { both: 'gpt-5.6-luna', openai: 'gpt-5.6-luna', anthropic: 'claude-haiku-4-5' };
+  const expectTop = { both: 'claude-opus-5', openai: 'gpt-5.6-sol', anthropic: 'claude-opus-5' };
   for (const [scenario, providers] of [['both', ['anthropic', 'openai']], ['openai', ['openai']], ['anthropic', ['anthropic']]]) {
     const out = applyPhasePosture(resolvePhaseModelMap({ providers }), 'ultra_cheap');
     assert.equal(out.posture, 'ultra_cheap');
     for (const phase of BUILD_PHASES) {
-      assert.equal(out.map[phase].model, expect[scenario], `${scenario}/${phase}`);
+      if (JUDGEMENT_PHASES.includes(phase)) {
+        assert.equal(out.map[phase].model, expectTop[scenario], `${scenario}/${phase}`);
+        assert.equal(out.map[phase].tier, 'top', `${scenario}/${phase} tier`);
+      } else {
+        assert.equal(out.map[phase].model, expect[scenario], `${scenario}/${phase}`);
+      }
     }
   }
 });
 
-test('posture balanced: Terra / Sonnet level for everything', () => {
+test('posture balanced: Terra / Sonnet level for everything EXCEPT plan/review', () => {
   const expect = { both: 'gpt-5.6-terra', openai: 'gpt-5.6-terra', anthropic: 'claude-sonnet-5' };
+  const expectTop = { both: 'claude-opus-5', openai: 'gpt-5.6-sol', anthropic: 'claude-opus-5' };
   for (const [scenario, providers] of [['both', ['anthropic', 'openai']], ['openai', ['openai']], ['anthropic', ['anthropic']]]) {
     const out = applyPhasePosture(resolvePhaseModelMap({ providers }), 'balanced');
     for (const phase of BUILD_PHASES) {
-      assert.equal(out.map[phase].model, expect[scenario], `${scenario}/${phase}`);
+      if (JUDGEMENT_PHASES.includes(phase)) {
+        assert.equal(out.map[phase].model, expectTop[scenario], `${scenario}/${phase}`);
+        assert.equal(out.map[phase].tier, 'top', `${scenario}/${phase} tier`);
+      } else {
+        assert.equal(out.map[phase].model, expect[scenario], `${scenario}/${phase}`);
+      }
     }
   }
+});
+
+test('JUDGEMENT_PHASES is a subset of BUILD_PHASES and matches the top-tier phases (acceptance: 808/721)', () => {
+  for (const phase of JUDGEMENT_PHASES) {
+    assert.ok(BUILD_PHASES.includes(phase), `${phase} must be a real build phase`);
+    assert.equal(PHASE_TIER[phase], 'top', `${phase} must be a top-tier phase`);
+  }
+  // And nothing top-tier is missing from the exemption — a future phase added
+  // at tier 'top' should be reviewed for inclusion here, not silently downgraded.
+  const topTierPhases = BUILD_PHASES.filter((p) => PHASE_TIER[p] === 'top');
+  assert.deepEqual([...JUDGEMENT_PHASES].sort(), topTierPhases.sort());
+});
+
+test('the halt-report regression fixture: ultra_cheap review is never on the cheap tier', () => {
+  // 808 cycle 721 is the fleet's only ultra_cheap run and its only failed
+  // build; its review phase ran on the cheap tier. This assertion fails
+  // against the pre-fix behavior (review.model === 'gpt-5.6-luna').
+  const out = applyPhasePosture(resolvePhaseModelMap({ providers: ['anthropic', 'openai'] }), 'ultra_cheap');
+  assert.notEqual(out.map.review.model, 'gpt-5.6-luna');
+  assert.notEqual(out.map.plan.model, 'gpt-5.6-luna');
+});
+
+test('the record line reports the TRUE model for an exempted phase, not the posture label', () => {
+  // phaseMapRecordLine renders map[phase].model straight through — since the
+  // exempted entries keep their real (top) tier rather than being relabeled
+  // 'ultra_cheap', the change record stays honest about what actually ran.
+  const out = applyPhasePosture(resolvePhaseModelMap({ providers: ['anthropic', 'openai'] }), 'ultra_cheap');
+  const line = phaseMapRecordLine({ phase_scenario: out.scenario, phase_posture: out.posture, phase_map: out.map });
+  assert.match(line, /review=claude-opus-5/);
+  assert.match(line, /plan=claude-opus-5/);
+  assert.match(line, /implement_mechanical=gpt-5.6-luna/);
 });
 
 test('posture max_quality: the best available flagship for everything — never gpt-5.5-pro', () => {

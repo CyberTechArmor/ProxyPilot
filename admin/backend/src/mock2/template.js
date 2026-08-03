@@ -22,6 +22,7 @@ import { PLATFORM_MODULE_VERSION } from './scaffold-platform.js';
 import { PLATFORM_VERSION_PATH, renderPlatformVersionFile } from './base-app-upgrade-logic.js';
 import { buildDesignPresetSeedFiles } from './design-presets.js';
 import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from './deploy-logic.js';
+import { nodeRuntimeInstallScript } from './node-runtime-logic.js';
 
 // Bumped when the seed content changes so a rehydrate/diff (M3) can tell which
 // template a project was born from. m7-concept-1: the dev server also serves the
@@ -422,7 +423,15 @@ apt-get install -y --no-install-recommends postgresql || echo "[mock2] postgres 
 # install) are fetched at DEPLOY over the bridge's NAT egress to
 # registry.npmjs.org. Non-fatal: a project that never builds still comes online
 # on the placeholder dev server.
-apt-get install -y --no-install-recommends nodejs npm || echo "[mock2] nodejs/npm install skipped/failed (non-fatal; the app cannot deploy without it)"
+#
+# Node 20 LTS via nodesource — Debian 12's own \`nodejs\` package is 18, which
+# Playwright refuses to run on, which is why the e2e gate has never executed
+# anywhere in the fleet. Guarded and idempotent (skips if a usable Node is
+# already present) so re-running setup never re-fetches needlessly; best-effort
+# like every other install here — a container still boots without it. Shared
+# with the ensureNodeRuntime repair pass (component-install.js) so the two
+# never drift (node-runtime-logic.js).
+${nodeRuntimeInstallScript()}
 
 # Bring the in-container Postgres up if it installed (ADR-008). Non-fatal.
 if command -v pg_ctlcluster >/dev/null 2>&1; then

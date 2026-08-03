@@ -32,10 +32,15 @@ import { canStartCycle, costCentsForUsage } from './quota-logic.js';
 import { getCurrentFrameworkVersion, getFrameworkVersion } from './framework.js';
 import {
   insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
+  listCyclesForProject,
 } from './cycles.js';
 import { insertRequest } from './requests.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
-import { insertChangeRecord, changeRecordMirror } from './change-records.js';
+import { insertChangeRecord, changeRecordMirror, lastChangeRecord } from './change-records.js';
+import { symptomAttemptCount, SYMPTOM_CAP, symptomCapEnabled } from './consult-logic.js';
+import {
+  diagnosisCandidateFiles, diagnosisEvidence, diagnosisChatMessage, DIAGNOSIS_SYSTEM_PROMPT,
+} from './diagnose-logic.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import { insertMessage, getOrCreateChat } from './chats.js';
 import { saveChatImages, hydrateAttachments } from './chat-images.js';
@@ -56,7 +61,7 @@ import {
   buildComponentSuggestionQuestion, parseComponentSuggestionAnswer,
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
-import { buildRunnerReady, startCycle } from './runner.js';
+import { buildRunnerReady, startCycle, readFileInContainer } from './runner.js';
 import { normalizeBuildMode, isFastBuildMode, BUILD_MODE_MVP, BUILD_MODE_QUICK } from './cycle-logic.js';
 import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
 import {
@@ -194,6 +199,122 @@ async function maybePushRemote(projectId) {
   } catch (e) { console.warn('[mock2] audit push_on_checkpoint error:', e?.message); }
 }
 
+// ---- symptom-chase cap (run-taxonomy fix #7/B2) ----
+//
+// The problem, measured: docs2's export-menu saga ran five cycles guessing at
+// the same symptom before the answer (one CSS rule) surfaced. On the THIRD
+// build attempt at substantially the same ask, do not spend a cycle on
+// another guess: diagnose the most recent matching attempt's evidence instead
+// (cheap, review-tier, ~$0.10-0.25 via the audit slot — strictly less than
+// the build it replaces) and post the root cause + a build-ready fix
+// instruction, naming what was already ruled out.
+
+// Recent refusals per project, so an operator who presses Build again shortly
+// after seeing the diagnosis can override it — a cap with no escape hatch is
+// a wall, not a guardrail. In-memory (mirrors activeAuditJobs above); a
+// process restart just resets the window, which is harmless.
+const recentSymptomCapRefusals = new Map();
+const SYMPTOM_CAP_OVERRIDE_WINDOW_MS = 10 * 60 * 1000;
+
+function symptomCapOverrideActive(projectId) {
+  const at = recentSymptomCapRefusals.get(Number(projectId));
+  if (!at) return false;
+  if (Date.now() - at > SYMPTOM_CAP_OVERRIDE_WINDOW_MS) {
+    recentSymptomCapRefusals.delete(Number(projectId));
+    return false;
+  }
+  return true;
+}
+
+// Pull candidate file contents for the diagnosis from the container, using
+// the most recent change record's own diff-stat (rather than a live smoke
+// report, which doesn't exist at this pre-build point) — `git show --stat`
+// lines look like " src/routes/foo.ts | 12 +++---", so the file name is
+// everything before the first ' | '.
+function filesFromDiffStat(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => line.split('|')[0].trim())
+    .filter((p) => p && !p.startsWith('Diff (') && /[./]/.test(p));
+}
+
+async function diagnoseAndRefuse({ project, instruction, matchedCycles, ready }) {
+  const projectId = Number(project.id);
+  const containerName = project.container_name || containerNameForProject(projectId);
+  const mostRecent = matchedCycles[0];
+  let files = [];
+  try {
+    const record = lastChangeRecord(projectId);
+    const candidatePaths = diagnosisCandidateFiles(filesFromDiffStat(record?.summary));
+    for (const p of candidatePaths) {
+      const r = await readFileInContainer(containerName, p).catch(() => null);
+      if (r?.ok && r.content) files.push({ path: p, content: r.content });
+    }
+  } catch (e) { console.warn('[mock2] symptom-cap file gather failed:', e?.message); }
+
+  const finishSummary = mostRecent?.error || mostRecent?.halt_reason || '(no recorded reason — the prior attempt concluded without resolving the symptom)';
+  let diagnosisText = null;
+  try {
+    const res = await callStepTurn('symptom-cap-diagnosis', {
+      connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
+      system: stepSystemPrompt('symptom-cap-diagnosis', DIAGNOSIS_SYSTEM_PROMPT, {}),
+      tools: [],
+      transcript: [{ role: 'user', text: diagnosisEvidence({ instruction, finishSummary, checks: [], files }) }],
+      timeoutMs: 180000, effort: 'high', thinking: null,
+    });
+    if (res.ok) {
+      diagnosisText = res.text;
+      try {
+        const u = res.usage || {};
+        const cost = costCentsForUsage({
+          inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
+          cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
+        }, effectivePrice(ready.connector.id, ready.model));
+        insertLedgerEntry({ projectId, cycleId: null, connectorId: ready.connector.id, model: res.modelUsed || ready.model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'symptom-cap-diagnosis' });
+      } catch (e) { console.warn('[mock2] symptom-cap diagnosis ledger write failed:', e?.message); }
+    } else {
+      console.warn('[mock2] symptom-cap diagnosis call failed:', res.error);
+    }
+  } catch (e) { console.warn('[mock2] symptom-cap diagnosis crashed:', e?.message); }
+
+  const ruledOut = matchedCycles
+    .slice(0, SYMPTOM_CAP)
+    .map((c, i) => `${i + 1}. ${(c.error || c.halt_reason || 'no recorded outcome').slice(0, 200)}`)
+    .join('\n');
+  const diagnosisBody = diagnosisText ? diagnosisChatMessage(diagnosisText, { model: ready.model }) : null;
+  const body = [
+    '**Third attempt at the same symptom — diagnosing instead of building.**',
+    `Two prior cycles already tried this and the symptom persists. Rather than pay for a third guess, here is what was ruled out, ${diagnosisBody ? 'and a root-cause diagnosis of the last attempt' : 'though a fresh diagnosis could not be produced this time'}.`,
+    `*Ruled out so far:*\n${ruledOut}`,
+    diagnosisBody || '',
+    'Send a FIX INSTRUCTION above as the next Quick update, or press Build again within 10 minutes to override and build anyway.',
+  ].filter(Boolean).join('\n\n');
+
+  recentSymptomCapRefusals.set(projectId, Date.now());
+  try { insertMessage({ projectId, kind: 'system', body }); } catch (e) { console.warn('[mock2] symptom-cap message failed:', e?.message); }
+}
+
+// symptomCapRefusal — returns a refusal reason string when this instruction is
+// the THIRD attempt at substantially the same symptom, or null to proceed.
+// Fails open on any error: a matcher mistake must never block a legitimate
+// build, and this check must never be the reason a build silently vanishes.
+async function symptomCapRefusal({ project, instruction, ready }) {
+  try {
+    const projectId = Number(project.id);
+    if (!symptomCapEnabled(process.env)) return null;
+    if (symptomCapOverrideActive(projectId)) return null;
+    const recent = listCyclesForProject(projectId, { limit: 20 });
+    const matched = recent.filter((c) => c.instruction
+      && symptomAttemptCount({ instruction, priorInstructions: [c.instruction] }) > 0);
+    if (matched.length < SYMPTOM_CAP) return null;
+    await diagnoseAndRefuse({ project, instruction, matchedCycles: matched, ready });
+    return 'third attempt at the same symptom — diagnosed instead of built (see chat)';
+  } catch (e) {
+    console.warn('[mock2] symptom-cap check failed (proceeding, fail-open):', e?.message);
+    return null;
+  }
+}
+
 // ---- drift detection (ADR-003 — pinned-at-last-build vs current) ----
 
 function driftDedupeKey(projectId) { return `mock2-drift:${projectId}`; }
@@ -255,6 +376,14 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
 
   // Drift check (non-blocking) — surfaces the banner + queue item before the audit.
   detectDrift(project, framework);
+
+  // Symptom-chase cap (run-taxonomy fix #7/B2): refuse before ANY state is
+  // written (no request, no cycle) when this is the third attempt at
+  // substantially the same ask. Placed after the readiness guards (this needs
+  // `ready`, the audit slot, to run the diagnosis call) and before
+  // insertRequest — refusing after that would orphan a request row.
+  const symptomCap = await symptomCapRefusal({ project, instruction, ready });
+  if (symptomCap) return { status: 'refused', error: symptomCap };
 
   // Cost-truth: the operator's ask opens ONE request; the define audit + the build +
   // any resumes/consults are its segments (additive — request_id is nullable, this

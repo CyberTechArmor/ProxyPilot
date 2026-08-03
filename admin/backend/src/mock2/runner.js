@@ -34,7 +34,7 @@ import { canStartCycle, costCentsForUsage } from './quota-logic.js';
 import { getCurrentFrameworkVersion, getFrameworkVersion } from './framework.js';
 import {
   insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
-  listCyclesForProject, projectHasBeenDeployed } from './cycles.js';
+  listCyclesForProject, listCyclesForRequest, projectHasBeenDeployed } from './cycles.js';
 import {
   parseGateScripts, buildGateBattery, gatesForProfile, initialGateReports, gateBatteryVerdict, allGatesGreen,
   gateStatusFromOutput,
@@ -70,7 +70,7 @@ import { hydrateAttachments } from './chat-images.js';
 import { parseAttachmentsJson } from './chat-image-logic.js';
 import { countConsultsForCycle, countConsultsForRequest } from './consults.js';
 import { runConsult } from './consult.js';
-import { consultAutoEnabled, consultTrigger, consultAllowed } from './consult-logic.js';
+import { consultAutoEnabled, consultTrigger, consultAllowed, reHaltSameReason } from './consult-logic.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
@@ -1589,6 +1589,23 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // making the change. A mutable object (not a local let) so it can be passed
   // into executeTool and updated from any of this cycle's call sites.
   const probeState = { used: 0 };
+  // Symptom-chase cap (run-taxonomy fix #7/B2): prior halt reasons for this
+  // REQUEST (a resume chain shares one request_id), computed once so
+  // reHaltSameReason can be fed a REAL value — previously every haltCycle call
+  // site passed only { gateFailStreak }, so consultTrigger's
+  // 'same_reason_rehalt' case had never fired in production. Best-effort: a
+  // lookup failure yields no priors, never blocks the halt.
+  const priorHaltReasonsForRequest = (() => {
+    try {
+      return listCyclesForRequest(cycle.request_id)
+        .filter((c) => c.id !== cycle.id && c.halt_reason)
+        .map((c) => c.error || '');
+    } catch { return []; }
+  })();
+  const haltSignals = (reason) => ({
+    gateFailStreak,
+    reHaltSameReason: reHaltSameReason({ reason, priorReasons: priorHaltReasonsForRequest }),
+  });
   // Acceptance discipline (cycle-94 lesson). taskKind classifies the ask from
   // its instruction; redTestObserved records whether ANY battery this cycle
   // showed the test gate red — the reproduce-first proof a bug-fix cycle must
@@ -1930,7 +1947,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     //     state — needs-attention, resumable — with the refusal as the reason. Never a
     //     crash, never a retry loop, and never the "propose options" nudge.
     if (decision.refusal) {
-      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_refusal', reason: decision.haltReason, options: [], logEvent });
+      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_refusal', reason: decision.haltReason, options: [], logEvent, consultSignals: haltSignals(decision.haltReason) });
       return scheduleJobCleanup(cycle.id);
     }
 
@@ -1987,7 +2004,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
         logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
       }
-      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_halt', reason: decision.haltReason, options: haltOptions, logEvent, consultSignals: { gateFailStreak } });
+      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_halt', reason: decision.haltReason, options: haltOptions, logEvent, consultSignals: haltSignals(decision.haltReason) });
       return scheduleJobCleanup(cycle.id);
     }
 
@@ -2008,6 +2025,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         trigger: 'authorization_request',
         reason: `The build requested a one-time authorization: ${v.scope}${decision.authRequest.reason ? ` — ${decision.authRequest.reason}` : ''}`,
         options: [], logEvent,
+        consultSignals: haltSignals(`The build requested a one-time authorization: ${v.scope}${decision.authRequest.reason ? ` — ${decision.authRequest.reason}` : ''}`),
       });
       return scheduleJobCleanup(cycle.id);
     }
@@ -2106,7 +2124,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         });
         if (r === 'concluded') return scheduleJobCleanup(cycle.id);
         if (progress.tripped) {
-          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); finish kept omitting acceptance criteria.`, logEvent });
+          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); finish kept omitting acceptance criteria.`, logEvent, consultSignals: haltSignals(`Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); finish kept omitting acceptance criteria.`) });
           return scheduleJobCleanup(cycle.id);
         }
         continue;
@@ -2146,7 +2164,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         });
         if (r === 'concluded') return scheduleJobCleanup(cycle.id);
         if (progress.tripped) {
-          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped: finish kept arriving without demonstrated acceptance (${verdict.reasons[0]}).`, logEvent });
+          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped: finish kept arriving without demonstrated acceptance (${verdict.reasons[0]}).`, logEvent, consultSignals: haltSignals(`Auto-stopped: finish kept arriving without demonstrated acceptance (${verdict.reasons[0]}).`) });
           return scheduleJobCleanup(cycle.id);
         }
         continue;
@@ -2171,7 +2189,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         });
         if (r === 'concluded') return scheduleJobCleanup(cycle.id);
         if (progress.tripped) {
-          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: 'Auto-stopped: finish summary kept over-claiming beyond this cycle\'s diff.', logEvent });
+          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: 'Auto-stopped: finish summary kept over-claiming beyond this cycle\'s diff.', logEvent, consultSignals: haltSignals('Auto-stopped: finish summary kept over-claiming beyond this cycle\'s diff.') });
           return scheduleJobCleanup(cycle.id);
         }
         continue;
@@ -2489,7 +2507,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         transcript.push({ role: 'tool', toolCallId: termId, name: termName, content: `Gates are not all green yet — you cannot finish. Battery:\n${formatGateReports(battery)}` });
         touchLock(projectId, holder);
         if (progress.tripped) {
-          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); gates still red.`, logEvent });
+          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); gates still red.`, logEvent, consultSignals: haltSignals(`Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); gates still red.`) });
           return scheduleJobCleanup(cycle.id);
         }
         continue;
@@ -2623,6 +2641,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         await haltCycle({
           cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework,
           trigger, reason: bs.reason, options: bs.options, logEvent,
+          consultSignals: haltSignals(bs.reason),
         });
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'blocked' });
         return scheduleJobCleanup(cycle.id);
@@ -3087,7 +3106,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     //     blocked instead of nudging into another wasted turn. This is the guard
     //     the ADP repro needed: honesty gets an exit AND runaway can't spin.
     if (progress.tripped) {
-      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress: ${haltReasonLabel(progress.trigger)}.`, logEvent });
+      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress: ${haltReasonLabel(progress.trigger)}.`, logEvent, consultSignals: haltSignals(`Auto-stopped after ${noProgLimit} turns with no progress: ${haltReasonLabel(progress.trigger)}.`) });
       return scheduleJobCleanup(cycle.id);
     }
 

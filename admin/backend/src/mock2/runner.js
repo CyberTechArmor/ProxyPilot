@@ -105,7 +105,7 @@ import {
 import { deployProject, readRunContract, readDeclaredEgress, stampDeployedCommit } from './deploy.js';
 import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
 import { reconcileMock2Firewall } from './firewall.js';
-import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smoke.js';
+import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit, resolveBrowserTarget } from './smoke.js';
 import { needsOperatorUiVerification, smokeConfigFromEnv } from './smoke-triggers.js';
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
@@ -130,6 +130,12 @@ import { touchedSubsystems as touchedSubsystemsOf } from './stub-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 import { crudRulesFloorSection } from './rules-pack-logic.js';
 import { UI_CHECKS_PATH, parseUiChecks } from './ui-check-logic.js';
+import {
+  httpProbePlan, browserProbePlan, probeBudget,
+  formatHttpProbeResult, formatBrowserProbeResult, PROBE_MAX_PER_CYCLE,
+  httpProbeCommand, parseCurlDashI,
+} from './probe-logic.js';
+import { runBrowserProbe } from './browser-probe.js';
 import {
   removalCoverage, removalRejectionMessage, removalWarningMessage, removalCoverageNote,
 } from './removal-claims-logic.js';
@@ -1118,6 +1124,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   const projectId = Number(project.id);
   const holder = { type: 'cycle', id: cycle.id };
   const price = effectivePrice(ready.connector.id, ready.model);
+  const webPort = project.web_port || 3000;
 
   // Copy the PINNED gate scripts into the container (ADR-003 — this version's, not
   // "latest"). Stamp the initial (all-pending) gate report on the cycle.
@@ -1577,6 +1584,11 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // Consecutive red gate batteries (cost-truth Part 5.2 trigger a) so a halt after "the
   // same gate failing twice" can auto-fire a consult (flag-gated).
   let gateFailStreak = 0;
+  // Runtime-observation budget (run-taxonomy fix #1/B1): http_probe + browser_probe
+  // share one per-cycle cap so a build cannot substitute unbounded probing for
+  // making the change. A mutable object (not a local let) so it can be passed
+  // into executeTool and updated from any of this cycle's call sites.
+  const probeState = { used: 0 };
   // Acceptance discipline (cycle-94 lesson). taskKind classifies the ask from
   // its instruction; redTestObserved records whether ANY battery this cycle
   // showed the test gate red — the reproduce-first proof a bug-fix cycle must
@@ -1957,7 +1969,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             });
             continue;
           }
-          const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
+          const out = await executeTool({ call, cycle, containerName, holder, gateScripts, webPort, probeState });
           lastGateReports = out.gateReports || lastGateReports;
           if (out.gateReports) redTestObserved = redTestObserved || batteryHasRedTestGate(out.gateReports);
           transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
@@ -1969,7 +1981,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       const haltOptions = optCheck.ok ? optCheck.options : decision.haltOptions;
       for (const call of decision.toolCalls) {
         if (call.name === 'halt') continue;
-        const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
+        const out = await executeTool({ call, cycle, containerName, holder, gateScripts, webPort, probeState });
         lastGateReports = out.gateReports || lastGateReports;
         if (out.gateReports) redTestObserved = redTestObserved || batteryHasRedTestGate(out.gateReports);
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
@@ -2014,7 +2026,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // tool_use (providers reject a follow-up with an unmatched tool_use id).
       for (const call of decision.toolCalls) {
         if (call.name === termName) continue;
-        const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
+        const out = await executeTool({ call, cycle, containerName, holder, gateScripts, webPort, probeState });
         lastGateReports = out.gateReports || lastGateReports;
         if (out.gateReports) redTestObserved = redTestObserved || batteryHasRedTestGate(out.gateReports);
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
@@ -3096,8 +3108,8 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     let ranGates = false;
     for (const group of groupToolCallsForExecution(decision.toolCalls)) {
       const outs = group.parallel && group.calls.length > 1
-        ? await Promise.all(group.calls.map((call) => executeTool({ call, cycle, containerName, holder, gateScripts })))
-        : [await executeTool({ call: group.calls[0], cycle, containerName, holder, gateScripts })];
+        ? await Promise.all(group.calls.map((call) => executeTool({ call, cycle, containerName, holder, gateScripts, webPort, probeState })))
+        : [await executeTool({ call: group.calls[0], cycle, containerName, holder, gateScripts, webPort, probeState })];
       for (let i = 0; i < group.calls.length; i++) {
         const call = group.calls[i];
         const out = outs[i];
@@ -3130,9 +3142,128 @@ function finishCallId(toolCalls = []) {
   return (toolCalls.find((c) => c && c.name === 'finish') || {}).id || 'finish';
 }
 
+// ---- runtime observation (run-taxonomy fix #1/B1) ----
+//
+// Nothing starts the app during a cycle — mock2-dev.service serves whatever
+// the LAST DEPLOY left running, not the working tree a cycle is editing. So a
+// probe against "deployed" sees the operator's reality (right for reproducing
+// a report), but a probe against "working" needs the app rebuilt and
+// restarted from the current tree first, or it would silently observe stale
+// code. restartDevFromWorkingTree is that bridge: build (the mock2.yaml
+// DECLARED build command — never assumed) + restart the SAME unit, no
+// migrations, no gate battery, no checkpoint. Deliberately NOT deployStage:
+// deployStage migrates, is queued per container, and stamps deploy state —
+// side effects a probe must not have.
+
+// restartDevFromWorkingTree(containerName, webPort) → { ok, detail }. Never
+// throws. Falls back to reporting failure rather than silently leaving the
+// prior (stale) build serving.
+async function restartDevFromWorkingTree(containerName, webPort) {
+  let contract;
+  try {
+    contract = await readRunContract(containerName, APP_DIR);
+  } catch (e) {
+    return { ok: false, detail: `could not read the run contract: ${e?.message || e}` };
+  }
+  if (!contract.hasContract) {
+    return { ok: false, detail: 'no run contract yet (mock2.yaml has no run: block) — nothing to rebuild against' };
+  }
+  const buildCmd = contract.build || 'npm run build';
+  const buildScript = `cd '${APP_DIR}' 2>/dev/null || cd /\n${buildCmd}\necho "__MOCK2_PROBE_BUILD_EXIT__:$?"`;
+  const built = await containerSh(containerName, buildScript, { timeoutMs: 180000 });
+  const buildOut = built.stdout || '';
+  const exitMatch = buildOut.match(/__MOCK2_PROBE_BUILD_EXIT__:(\d+)/);
+  const buildExit = exitMatch ? Number(exitMatch[1]) : (built.code ?? 1);
+  if (buildExit !== 0) {
+    const tail = buildOut.replace(/__MOCK2_PROBE_BUILD_EXIT__:\d+\s*$/, '').trim().slice(-2000);
+    return { ok: false, detail: `build failed (exit ${buildExit}) before the restart:\n${tail}` };
+  }
+  await containerSh(containerName, 'systemctl restart mock2-dev.service', { timeoutMs: 30000 });
+  // Short readiness poll (this is a warm restart, not a cold deploy — deploy.js's
+  // own health check uses 45 attempts x 2s; a probe doesn't need that long).
+  const poll = await containerSh(
+    containerName,
+    'last="000"\ni=0\nwhile [ $i -lt 20 ]; do\n'
+      + `  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${webPort}/" 2>/dev/null)\n`
+      + '  [ -n "$code" ] && last="$code"\n'
+      + '  if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 500 ]; then echo "MOCK2_SERVING ($code)"; exit 0; fi\n'
+      + '  i=$((i+1)); sleep 1\n'
+      + 'done\n'
+      + 'echo "MOCK2_NOT_SERVING (last http_code: $last)"\n',
+    { timeoutMs: 30000 },
+  );
+  if (!/MOCK2_SERVING/.test(poll.stdout || '')) {
+    return { ok: false, detail: `rebuilt, but the app did not come back up after restart: ${(poll.stdout || '').trim().slice(-500)}` };
+  }
+  return { ok: true, detail: 'rebuilt and restarted from the working tree' };
+}
+
+// runHttpProbe — one curl round-trip against the app's OWN port inside the
+// container. The fence already blocks external egress; this never reaches
+// beyond loopback because the URL is CONSTRUCTED here (probe-logic.
+// httpProbeCommand), never taken from the model. Never throws — every failure
+// mode returns formatted text, matching every other executeTool case.
+async function runHttpProbe({ containerName, webPort, input }) {
+  const plan = httpProbePlan(input || {});
+  if (plan.error) return `error: ${plan.error}`;
+  if (plan.target === 'working') {
+    const restarted = await restartDevFromWorkingTree(containerName, webPort);
+    if (!restarted.ok) return `error: could not prepare the working build for probing — ${restarted.detail}`;
+  }
+  let r;
+  try {
+    r = await execInContainer(containerName, httpProbeCommand({ webPort, method: plan.method, path: plan.path, headers: plan.headers, body: plan.body }));
+  } catch (e) {
+    return formatHttpProbeResult({ target: plan.target, method: plan.method, path: plan.path, raw: { error: `probe crashed: ${e?.message || e}` } });
+  }
+  if (r.code !== 0 && !(r.stdout || '').trim()) {
+    return formatHttpProbeResult({ target: plan.target, method: plan.method, path: plan.path, raw: { error: `curl exited ${r.code}: ${(r.stderr || r.stdout || '').slice(-300)}` } });
+  }
+  const raw = parseCurlDashI(r.stdout || '');
+  return formatHttpProbeResult({ target: plan.target, method: plan.method, path: plan.path, raw });
+}
+
+// runBrowserProbeTool — resolve the target/login context and hand off to the
+// pure executor (browser-probe.js). Playwright runs in the BACKEND process,
+// not the container, so the base URL is the container's own IP (the same
+// resolveBrowserTarget smoke.js uses — 127.0.0.1 from the host fails
+// ERR_CONNECTION_REFUSED, the bug that fix already exists to avoid), never
+// localhost. Never throws.
+async function runBrowserProbeTool({ containerName, webPort, input }) {
+  const plan = browserProbePlan(input || {});
+  if (plan.error) return `error: ${plan.error}`;
+  if (plan.target === 'working') {
+    const restarted = await restartDevFromWorkingTree(containerName, webPort);
+    if (!restarted.ok) return `error: could not prepare the working build for probing — ${restarted.detail}`;
+  }
+  let spec = null;
+  if (plan.role) {
+    try {
+      const r = await readFileInContainer(containerName, UI_CHECKS_PATH);
+      if (r.ok) {
+        const parsed = parseUiChecks(r.content);
+        if (parsed.ok) spec = parsed.spec;
+      }
+    } catch { spec = null; }
+  }
+  let baseUrl;
+  try {
+    baseUrl = await resolveBrowserTarget(containerName, webPort);
+  } catch (e) {
+    return `error: could not resolve the container's address for the browser connector: ${e?.message || e}`;
+  }
+  let result;
+  try {
+    result = await runBrowserProbe({ baseUrl, spec, input: plan });
+  } catch (e) {
+    return `error: browser probe crashed: ${e?.message || e}`;
+  }
+  return formatBrowserProbeResult(result);
+}
+
 // ---- tool execution against the fenced container ----
 
-async function executeTool({ call, cycle, containerName, holder, gateScripts }) {
+async function executeTool({ call, cycle, containerName, holder, gateScripts, webPort, probeState }) {
   switch (call.name) {
     case 'exec_in_container': {
       const r = await execInContainer(containerName, String(call.input?.command || ''));
@@ -3282,6 +3413,22 @@ async function executeTool({ call, cycle, containerName, holder, gateScripts }) 
       }
       const battery = await runGateBattery(cycle.id, containerName, gateScripts);
       return { content: `Gate battery (${gateBatteryVerdict(battery)}):\n${formatGateReports(battery)}`, gateReports: battery };
+    }
+    case 'http_probe': {
+      const budget = probeBudget(probeState?.used ?? 0, PROBE_MAX_PER_CYCLE);
+      if (!budget.allowed) return { content: budget.message };
+      if (probeState) probeState.used += 1;
+      touchLock(cycle.project_id, holder);
+      const content = await runHttpProbe({ containerName, webPort, input: call.input || {} });
+      return { content };
+    }
+    case 'browser_probe': {
+      const budget = probeBudget(probeState?.used ?? 0, PROBE_MAX_PER_CYCLE);
+      if (!budget.allowed) return { content: budget.message };
+      if (probeState) probeState.used += 1;
+      touchLock(cycle.project_id, holder);
+      const content = await runBrowserProbeTool({ containerName, webPort, input: call.input || {} });
+      return { content };
     }
     default:
       return { content: `error: unknown tool "${call.name}"` };

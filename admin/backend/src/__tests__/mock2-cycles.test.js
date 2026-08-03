@@ -16,6 +16,7 @@ import {
 import {
   RUNNER_TOOLS, RUNNER_TOOL_NAMES, truncateToolResult, parseFrameworkSkills,
   buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, MAX_TOOL_RESULT_CHARS,
+  READ_ONLY_TOOLS, runnerToolsForCycle,
 } from '../mock2/runner-logic.js';
 
 // ---- status sets ----
@@ -158,6 +159,33 @@ test('RUNNER_TOOLS: the fixed tool set, all named, finish present', () => {
     assert.equal(typeof t.name, 'string');
     assert.equal(t.input_schema.type, 'object');
   }
+});
+
+test('RUNNER_TOOLS: http_probe and browser_probe are present and well-formed', () => {
+  const httpProbe = RUNNER_TOOLS.find((t) => t.name === 'http_probe');
+  const browserProbe = RUNNER_TOOLS.find((t) => t.name === 'browser_probe');
+  assert.ok(httpProbe, 'http_probe must be a runner tool');
+  assert.ok(browserProbe, 'browser_probe must be a runner tool');
+  for (const t of [httpProbe, browserProbe]) {
+    assert.equal(t.input_schema.type, 'object');
+    assert.ok(t.input_schema.required.includes('target'), `${t.name} must require target`);
+    assert.ok(t.input_schema.required.includes('path'), `${t.name} must require path`);
+    assert.deepEqual(t.input_schema.properties.target.enum, ['deployed', 'working']);
+    assert.equal(t.input_schema.additionalProperties, false);
+  }
+});
+
+test('the probe tools are NOT in READ_ONLY_TOOLS (they are side-effecting)', () => {
+  assert.ok(!READ_ONLY_TOOLS.includes('http_probe'));
+  assert.ok(!READ_ONLY_TOOLS.includes('browser_probe'));
+});
+
+test('runnerToolsForCycle keeps the probes on the quick lane (only run_gates drops)', () => {
+  const fast = runnerToolsForCycle({ hasGates: false });
+  const names = fast.map((t) => t.name);
+  assert.ok(names.includes('http_probe'), 'http_probe must survive the fast-lane filter');
+  assert.ok(names.includes('browser_probe'), 'browser_probe must survive the fast-lane filter');
+  assert.ok(!names.includes('run_gates'), 'run_gates is still removed on fast lanes');
 });
 
 test('truncateToolResult: caps at MAX_TOOL_RESULT_CHARS', () => {

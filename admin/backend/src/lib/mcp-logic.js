@@ -351,6 +351,26 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: 'run_project_command',
+    description: 'Run one allowlisted command in an AI-dev project\'s app checkout — the verification step the file tools cannot do themselves (e.g. "npm run gates", "npm run typecheck", "npx playwright test"). Runs in the SAME container and environment redeploy_project builds in, so a green result means what it says. Allowed: `npm ci`, `npm run <script>`, `npx playwright …`, and read-only `git` subcommands. No shell syntax — pipes, redirects, ;, && and $() are rejected. Returns exit_code plus the last 64 KB of stdout/stderr. Refused while a build is running.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        command: {
+          type: 'string',
+          description: 'The command, e.g. "npm run gates". Split on whitespace and executed directly — not through a shell.',
+        },
+        timeout_seconds: {
+          type: 'number',
+          description: 'Kill the command after this many seconds (default 600, max 1800). A run that hits the timeout reports timed_out: true.',
+        },
+      },
+      required: ['project_id', 'command'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'clone_project',
     description: 'Clone an AI-dev project under a new name. mode "fresh": full app + git history + asset library with a fresh database; mode "full": also copies the source database. Returns the new project; poll get_project on it for provisioning progress.',
     inputSchema: {
@@ -376,6 +396,96 @@ export function validProjectFilePath(p) {
   if (segments.some((seg) => seg === '' || seg === '.' || seg === '..')) return null;
   if (segments[0] === '.git') return null;
   return s;
+}
+
+// ---- run_project_command: the allowlist ----
+//
+// WHAT THIS DOES AND DOES NOT BUY YOU. The allowlist bounds the COMMAND
+// SURFACE, not privilege. `npm run <script>` executes whatever package.json
+// says, and write_project_file can edit package.json — so any client that can
+// call run_project_command can already reach arbitrary code by writing a
+// script and invoking it. That is accepted, not overlooked: the same token
+// already drives redeploy_project, which builds and runs the checkout. The
+// allowlist exists so the ORDINARY case is narrow and auditable (a typo or a
+// confused model cannot `rm -rf /` or curl something out), and so the audit
+// row records an intention a human can read. It is not a sandbox, and
+// docs/features/mcp.md says so in those words.
+//
+// The caller's tokens never reach a shell parser: the argv is handed to
+// `sh -c '… "$@" …' sh <argv…>` as POSITIONAL PARAMETERS and invoked as
+// `"$@"`, so each token goes to execve exactly as written. The charset check
+// below is therefore belt-and-braces — it exists
+// so a command carrying `;` or `$(…)` is REFUSED with a clear message rather
+// than silently running as a single weird argument.
+
+export const PROJECT_COMMAND_TIMEOUT_DEFAULT_S = 600;
+export const PROJECT_COMMAND_TIMEOUT_MAX_S = 1800;
+/** How much of each stream comes back. The TAIL, not the head: a failing test
+ *  run prints its summary last, and that is the whole reason to call this. */
+export const PROJECT_COMMAND_OUTPUT_CAP = 64 * 1024;
+
+// Deliberately excludes `branch`, `tag`, `checkout` and `stash` — each has a
+// destructive form (-D, -d, --force) and none is worth the parsing needed to
+// tell the read from the write. Anything that mutates the checkout belongs in
+// write_project_file, where it is committed and audited.
+const GIT_READ_ONLY_SUBCOMMANDS = [
+  'blame', 'cat-file', 'count-objects', 'describe', 'diff', 'diff-tree',
+  'log', 'ls-files', 'ls-tree', 'rev-list', 'rev-parse', 'shortlog',
+  'show', 'status',
+];
+
+// One token of an argv. No whitespace, quotes, or shell metacharacters; the
+// permitted punctuation covers flags (--reporter=list), paths (e2e/a.spec.ts)
+// and npm script names (test:unit).
+const SAFE_ARG = /^[A-Za-z0-9._/@:=+-]+$/;
+
+/**
+ * Validate a command string against the allowlist.
+ *
+ * Returns `{ argv }` for something runnable, or `{ error }` with a message
+ * written for the model that called it — every rejection says what IS allowed,
+ * because a tool that only says "no" gets retried verbatim.
+ */
+export function parseProjectCommand(command) {
+  const raw = String(command ?? '').trim();
+  if (!raw) return { error: 'command is required — e.g. "npm run gates"' };
+  if (/[\u0000-\u001f\u007f]/.test(raw)) {
+    return { error: 'command must not contain control characters or newlines' };
+  }
+  const argv = raw.split(/\s+/);
+  const bad = argv.find((tok) => !SAFE_ARG.test(tok));
+  if (bad) {
+    return {
+      error: `"${bad}" is not a plain argument. This tool runs ONE command without a shell, so pipes, redirects, quotes, ;, && and $(…) are not supported. Run the steps as separate calls.`,
+    };
+  }
+
+  const [head, ...rest] = argv;
+  if (head === 'npm') {
+    if (rest.length === 1 && rest[0] === 'ci') return { argv };
+    if (rest.length >= 2 && rest[0] === 'run') return { argv };
+    return { error: 'npm is allowed as "npm ci" or "npm run <script> [args…]" only. A package.json "test" script is reachable as "npm run test".' };
+  }
+  if (head === 'npx') {
+    if (rest[0] === 'playwright') return { argv };
+    return { error: 'npx is allowed for playwright only — e.g. "npx playwright test". Everything else should be a package.json script, run via "npm run <script>".' };
+  }
+  if (head === 'git') {
+    if (rest.length && GIT_READ_ONLY_SUBCOMMANDS.includes(rest[0])) return { argv };
+    return {
+      error: `git is allowed for read-only subcommands only (${GIT_READ_ONLY_SUBCOMMANDS.join(', ')}). Changes to the checkout go through write_project_file so they are committed and audited.`,
+    };
+  }
+  return {
+    error: `"${head}" is not an allowed command. Permitted: "npm ci", "npm run <script>", "npx playwright …", and read-only git (${GIT_READ_ONLY_SUBCOMMANDS.join(', ')}).`,
+  };
+}
+
+/** Clamp a caller-supplied timeout to the permitted window. */
+export function projectCommandTimeoutMs(seconds) {
+  const n = Number(seconds);
+  if (!Number.isFinite(n) || n <= 0) return PROJECT_COMMAND_TIMEOUT_DEFAULT_S * 1000;
+  return Math.min(Math.round(n), PROJECT_COMMAND_TIMEOUT_MAX_S) * 1000;
 }
 
 // Trivial but shared with the LXC UI semantics: candidate startup scripts are

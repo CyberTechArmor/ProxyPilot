@@ -313,14 +313,78 @@ export const MCP_TOOLS = [
   },
   {
     name: 'read_project_file',
-    description: 'Read one text file from an AI-dev project\'s app checkout (path relative to the app root, e.g. src/server/routes.ts). Returns up to 512 KB; refuses binary files. Read before proposing an edit with write_project_file.',
+    description: 'Read one text file from an AI-dev project\'s app checkout (path relative to the app root, e.g. src/server/routes.ts). Returns up to 512 KB; refuses binary files. Pass offset/limit to read a LINE RANGE instead of the whole file — pair it with search_project_files (which gives you path + line_number) to read just the part you need. total_lines always reports the file\'s real length, whether or not a range was requested.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'number' },
         path: { type: 'string', description: 'File path relative to the app root.' },
+        offset: { type: 'number', description: 'First line to return, 1-based (default 1).' },
+        limit: { type: 'number', description: 'How many lines to return from offset (default: the rest of the file, capped at 512 KB).' },
       },
       required: ['project_id', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'search_project_files',
+    description: 'Search an AI-dev project\'s tracked files for a regular expression (git grep -E) and return path + line_number + the matching line. Use this instead of reading whole files to find something — then read_project_file with offset/limit for the surrounding code. Binary files are skipped; the search covers tracked files only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        pattern: { type: 'string', description: 'Extended regular expression (POSIX ERE, as git grep -E takes).' },
+        glob: { type: 'string', description: 'Optional git pathspec to limit the search, e.g. "src/**/*.ts" or "apps/freshcut".' },
+        max_results: { type: 'number', description: 'Cap on returned matches (default 200, max 1000).' },
+        ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
+      },
+      required: ['project_id', 'pattern'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'edit_project_file',
+    description: 'Replace an exact string in one file of an AI-dev project and commit the change — the surgical alternative to write_project_file, which rewrites the whole file. Fails if old_string is absent, or if it matches a different number of times than expected (default: exactly once), so an edit can never land somewhere you did not mean. Refused while a build is running.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        path: { type: 'string', description: 'File path relative to the app root.' },
+        old_string: { type: 'string', description: 'The exact text to replace, copied from read_project_file. Include enough surrounding lines to make it unique.' },
+        new_string: { type: 'string', description: 'What to put in its place. May be empty to delete the text.' },
+        expect_occurrences: { type: 'number', description: 'How many times old_string should appear. Default 1. The edit is refused unless the real count matches exactly.' },
+        commit_message: { type: 'string', description: 'Git commit message (a sensible default is used if omitted).' },
+      },
+      required: ['project_id', 'path', 'old_string', 'new_string'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'delete_project_file',
+    description: 'Delete one file from an AI-dev project\'s checkout and commit the removal (git rm). The file stays recoverable from the project\'s git history. Refused while a build is running.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        path: { type: 'string', description: 'File path relative to the app root.' },
+        commit_message: { type: 'string' },
+      },
+      required: ['project_id', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'move_project_file',
+    description: 'Move or rename one file in an AI-dev project\'s checkout and commit it (git mv), so history follows the file. Parent directories of the destination are created. Refused while a build is running, or if the destination already exists.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        from: { type: 'string', description: 'Current path, relative to the app root.' },
+        to: { type: 'string', description: 'New path, relative to the app root.' },
+        commit_message: { type: 'string' },
+      },
+      required: ['project_id', 'from', 'to'],
       additionalProperties: false,
     },
   },
@@ -396,6 +460,128 @@ export function validProjectFilePath(p) {
   if (segments.some((seg) => seg === '' || seg === '.' || seg === '..')) return null;
   if (segments[0] === '.git') return null;
   return s;
+}
+
+// ---- edit_project_file: the replacement itself ----
+
+/**
+ * Apply a literal string replacement, refusing anything ambiguous.
+ *
+ * The whole point of a surgical edit is that it cannot land somewhere the
+ * caller did not mean, so the count is a precondition rather than a result:
+ * absent → refuse, and a count other than expected → refuse, naming both
+ * numbers. Default 1, because "replace the one place this appears" is what a
+ * caller means when they don't say.
+ *
+ * Literal, never regex: the caller pastes text back from read_project_file,
+ * and quietly treating `.` or `(` as a metacharacter there is a trap.
+ */
+export function applyStringEdit(content, oldString, newString, expectOccurrences) {
+  const src = String(content ?? '');
+  const from = String(oldString ?? '');
+  const to = String(newString ?? '');
+  if (!from) return { error: 'old_string is required and must not be empty.' };
+  if (from === to) return { error: 'old_string and new_string are identical — nothing to change.' };
+
+  let count = 0;
+  for (let i = src.indexOf(from); i !== -1; i = src.indexOf(from, i + from.length)) count += 1;
+  if (count === 0) {
+    return { error: 'old_string was not found in the file. Re-read the file (whitespace and indentation must match exactly) and try again.' };
+  }
+
+  let expected = 1;
+  if (expectOccurrences !== undefined && expectOccurrences !== null) {
+    expected = Number(expectOccurrences);
+    if (!Number.isInteger(expected) || expected < 1) {
+      return { error: 'expect_occurrences must be a positive whole number.' };
+    }
+  }
+  if (count !== expected) {
+    return {
+      error: `old_string appears ${count} time(s) but expect_occurrences is ${expected}. `
+        + (count > expected
+          ? 'Add surrounding context to make it unique, or set expect_occurrences to replace them all.'
+          : 'The file does not look the way you think — re-read it before editing.'),
+    };
+  }
+  return { content: src.split(from).join(to), replaced: count };
+}
+
+// ---- search_project_files ----
+
+export const SEARCH_MAX_RESULTS_DEFAULT = 200;
+export const SEARCH_MAX_RESULTS_CAP = 1000;
+/** Matching lines get truncated at this width — a minified bundle line is not
+ *  worth 200 KB of context, and the point of a hit is its location. */
+export const SEARCH_LINE_CAP = 500;
+
+/** A git pathspec, e.g. "src/**\/*.ts". Rejects absolutes, traversal and
+ *  control characters; the glob metacharacters git wants are left alone. */
+export function validPathspec(g) {
+  const s = String(g ?? '').trim();
+  if (!s) return null;
+  if (s.startsWith('/') || /[\u0000-\u001f\u007f]/.test(s)) return null;
+  if (s.split('/').includes('..')) return null;
+  return s;
+}
+
+/** The search pattern. Passed to git as a positional argument (never through a
+ *  shell), so regex punctuation is safe as-is — only control characters and
+ *  absurd lengths are refused. */
+export function validSearchPattern(p) {
+  const s = String(p ?? '');
+  if (!s.trim()) return null;
+  if (s.length > 1000 || /[\u0000-\u001f\u007f]/.test(s)) return null;
+  return s;
+}
+
+export function normalizeMaxResults(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 1) return SEARCH_MAX_RESULTS_DEFAULT;
+  return Math.min(Math.floor(v), SEARCH_MAX_RESULTS_CAP);
+}
+
+/**
+ * Parse `git grep -n` output into structured hits.
+ *
+ * Format is `path:line:content`. A path containing a colon would split early
+ * here — accepted, because git grep offers no unambiguous machine format worth
+ * the complexity, and a source path with a colon in it is vanishingly rare.
+ */
+export function parseGitGrepOutput(stdout, maxResults = SEARCH_MAX_RESULTS_DEFAULT) {
+  const hits = [];
+  for (const raw of String(stdout ?? '').split('\n')) {
+    if (!raw) continue;
+    const m = /^(.*?):(\d+):([\s\S]*)$/.exec(raw);
+    if (!m) continue;
+    hits.push({ path: m[1], line_number: Number(m[2]), line: m[3].slice(0, SEARCH_LINE_CAP) });
+    if (hits.length >= maxResults) break;
+  }
+  return hits;
+}
+
+// ---- read_project_file: line ranges ----
+
+/**
+ * Normalize an (offset, limit) pair into a 1-based inclusive line window.
+ *
+ * `ranged` says whether the caller actually asked for a window: when they did
+ * not, the reader keeps its original whole-file behaviour byte for byte, so
+ * existing callers see no change.
+ */
+export function normalizeReadRange(offset, limit) {
+  const off = Number(offset);
+  const lim = Number(limit);
+  const hasOff = Number.isFinite(off) && off >= 1;
+  const hasLim = Number.isFinite(lim) && lim >= 1;
+  const start = hasOff ? Math.floor(off) : 1;
+  const count = hasLim ? Math.floor(lim) : null;
+  return {
+    start,
+    count,
+    end: count === null ? null : start + count - 1,
+    ranged: hasOff || hasLim,
+  };
 }
 
 // ---- run_project_command: the allowlist ----

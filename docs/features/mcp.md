@@ -29,6 +29,9 @@ Revoking the token (same card) immediately cuts the client off.
 | Project build control | `interrupt_project_build`, `cancel_queued_build` | Stop a running build (checkpoint-and-stop by default, or abandon) and cancel not-yet-started queue entries — the "that build is burning tokens on the wrong thing" stop switch, from chat. |
 | Project file reads | `list_project_files`, `search_project_files`, `read_project_file` | Find first, read narrowly. `search_project_files` is `git grep -E` over the tracked files and returns `path` + `line_number` + the matching line; `read_project_file` then takes `offset`/`limit` to pull just that window (it always reports `total_lines`, so a ranged read can say what it left behind). Reading whole files to find one function is the expensive habit these two exist to break. |
 | Project file edits | `write_project_file`, `edit_project_file`, `delete_project_file`, `move_project_file`, `redeploy_project` | The subscription lane for Projects: the chat does the thinking, ProxyPilot only executes file ops — no build tokens spent. `edit_project_file` replaces an exact string and refuses unless the match count is what the caller expected, which is the one to reach for on a large file — `write_project_file` rewrites the whole thing and gets riskier the bigger the file. `move_project_file` uses `git mv` so history follows. All are git-committed and pushed, and all are refused while a build is running. `redeploy_project` then installs/migrates/builds/restarts and health-checks the live app. |
+| Project history | `project_git_log`, `project_git_diff`, `project_git_show` | Read-only history as structured data: `project_git_log` returns parsed commit rows rather than raw text. `project_git_diff` with no `ref` shows uncommitted work **and lists untracked files** — that is how you catch a build that wrote a file and never committed it, which is invisible to `git log` and to reviewers but still on disk and still running. Raw git is also reachable via `run_project_command` when you want a specific format. |
+| Build diagnosis | `get_build_log` | The recorded event stream of one cycle — status, error, and the steps it produced. A failed build otherwise surfaces as a status with no output, leaving nothing to diagnose from. Keeps the tail (a failure explains itself at the end). |
+| Audit trail | `append_change_record` | Appends a hash-chained record for chat-lane work, which otherwise writes none. ProxyPilot computes `seq`/`prev_hash`/`hash` server-side through the same code the build runner uses, and mirrors the record to `state/changes/<seq>.json` in the checkout. The chain is re-verified immediately after appending. **Never hand-compute these hashes** — see below. |
 | Project verification | `run_project_command` | Runs one allowlisted command in the project's checkout — `npm ci`, `npm run <script>`, `npx playwright …`, or a read-only `git` subcommand — so the chat lane can run the project's own gates instead of shipping unverified. Same container and environment `redeploy_project` builds in (`/etc/environment` sourced, cwd = the app dir), so a green result means what it says. Returns `exit_code` plus the **last** 64 KB of each stream (a failing test prints its summary last). Refused while a build is running. |
 | Transfer | `create_upload_ticket` | Big zips: the tool returns a one-shot `upload_url`; `curl -T site.zip -H 'Content-Type: application/zip' <url>` pushes the bytes, then the ticket is referenced in an inspect tool. Zips ≤ 2 MB may ride inline as `zip_base64`. |
 
@@ -54,6 +57,35 @@ words you use pick the lane:
   Note that `redeploy_project` runs the project's **build**, not its tests: a
   green deploy proves the checkout compiles and boots, never that it passes.
   Ask for `run_project_command` explicitly if you want the tests run.
+
+## The change-record chain (do not hand-compute it)
+
+`state/changes/` is an append-only, hash-chained audit trail:
+`hash = sha256(prev_hash + canonical_json(payload))`, with `prev_hash = ''`
+for `seq` 1. The authoritative implementation is
+`admin/backend/src/mock2/change-logic.js`.
+
+The part that catches people out is **what `payload` is**. It is not "the
+record minus its hashes" — it is an explicit twelve-field allowlist
+(`changePayload`), with its own defaults, in sorted-key canonical JSON:
+
+    project_id, cycle_id, seq, initiated_by, acting_as_admin,
+    framework_version, framework_version_id, rules_touched,
+    gates_run, commit_sha, summary, created_at
+
+Missing fields become `null` (`summary` becomes `''`), `acting_as_admin` is
+normalized to `1`/`0`, and anything else on the row — the SQLite `id` above
+all — is **excluded**. A recipe derived by matching existing records will
+agree on rows that happen to carry exactly those fields and silently diverge
+on any row that does not, which is the worst possible failure for an audit
+trail: it keeps looking verified while chaining to nothing.
+
+So append records with `append_change_record`, which calls
+`insertChangeRecord` and derives `seq` and `prev_hash` inside a transaction
+from the project's last record. It verifies the whole chain immediately
+afterwards and reports `chain_ok`. There is a unit test asserting that the
+naive recipe produces a *different* hash from the real one, so this cannot
+quietly stop being true.
 
 ## Security model
 

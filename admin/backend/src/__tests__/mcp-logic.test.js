@@ -4,6 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 
 import {
   MCP_PROTOCOL_VERSION, MCP_KNOWN_VERSIONS, MCP_TOOLS,
@@ -16,7 +17,11 @@ import {
   applyStringEdit, normalizeReadRange, parseGitGrepOutput,
   validSearchPattern, validPathspec, normalizeMaxResults,
   SEARCH_MAX_RESULTS_DEFAULT, SEARCH_MAX_RESULTS_CAP, SEARCH_LINE_CAP,
+  validGitRef, normalizeGitLogLimit, parseGitLogOutput, parseGitStatusPorcelain,
+  capPatch, GIT_LOG_SEP, GIT_LOG_LIMIT_DEFAULT, GIT_LOG_LIMIT_MAX, GIT_PATCH_CAP,
+  normalizeBuildLogLimit, buildLogFromEvents, BUILD_LOG_LIMIT_DEFAULT, BUILD_LOG_LIMIT_MAX,
 } from '../lib/mcp-logic.js';
+import { computeChangeHash, changePayload, canonicalJson } from '../mock2/change-logic.js';
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from '../mock2/clone-logic.js';
 
 // ---- tokens ----
@@ -85,9 +90,153 @@ test('tool catalog: every tool has a name, description, and object schema', () =
     'list_project_files', 'read_project_file', 'write_project_file', 'redeploy_project',
     'run_project_command', 'edit_project_file', 'search_project_files',
     'delete_project_file', 'move_project_file',
+    'project_git_log', 'project_git_diff', 'project_git_show',
+    'get_build_log', 'append_change_record',
   ]) {
     assert.ok(names.has(required), `missing tool ${required}`);
   }
+});
+
+// ---- git history ----
+
+test('validGitRef takes revisions and ranges, refuses option-lookalikes', () => {
+  for (const ok of ['HEAD', 'HEAD~3', 'abc1234', 'main', 'refs/heads/main', 'HEAD^', 'a1b2..c3d4', 'v1.2.3']) {
+    assert.equal(validGitRef(ok), ok, `should accept ${ok}`);
+  }
+  // A leading dash would be read by git as an option, not a revision.
+  assert.equal(validGitRef('--upload-pack=evil'), null);
+  assert.equal(validGitRef('-n'), null);
+  assert.equal(validGitRef(''), null);
+  assert.equal(validGitRef('a b'), null);
+  assert.equal(validGitRef('x'.repeat(201)), null);
+  assert.equal(validGitRef('ref;rm -rf /'), null);
+});
+
+test('normalizeGitLogLimit defaults and clamps', () => {
+  assert.equal(normalizeGitLogLimit(undefined), GIT_LOG_LIMIT_DEFAULT);
+  assert.equal(normalizeGitLogLimit(0), GIT_LOG_LIMIT_DEFAULT);
+  assert.equal(normalizeGitLogLimit(5), 5);
+  assert.equal(normalizeGitLogLimit(99999), GIT_LOG_LIMIT_MAX);
+});
+
+test('parseGitLogOutput splits on the unit separator and keeps subjects whole', () => {
+  const line = (sha, who, date, subj) => [sha, who, date, subj].join(GIT_LOG_SEP);
+  const out = [
+    line('a'.repeat(40), 'Ada', '2026-01-01T00:00:00Z', 'first: do the thing'),
+    line('b'.repeat(40), 'Grace', '2026-01-02T00:00:00Z', 'second'),
+  ].join('\n');
+  const rows = parseGitLogOutput(out);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].sha, 'a'.repeat(40));
+  assert.equal(rows[0].short_sha, 'aaaaaaaa');
+  assert.equal(rows[0].author, 'Ada');
+  // A subject with a colon must survive — it is not a delimiter here.
+  assert.equal(rows[0].subject, 'first: do the thing');
+  assert.deepEqual(parseGitLogOutput(''), []);
+});
+
+test('parseGitStatusPorcelain separates untracked from modified', () => {
+  const out = [
+    ' M src/a.ts',
+    'A  src/b.ts',
+    '?? src/never-committed.test.ts',
+    '?? scratch/',
+  ].join('\n');
+  const r = parseGitStatusPorcelain(out);
+  assert.deepEqual(r.untracked, ['src/never-committed.test.ts', 'scratch/']);
+  assert.deepEqual(r.tracked, [{ status: 'M', path: 'src/a.ts' }, { status: 'A', path: 'src/b.ts' }]);
+  // A clean tree reports both empty rather than throwing.
+  assert.deepEqual(parseGitStatusPorcelain(''), { tracked: [], untracked: [] });
+});
+
+test('capPatch truncates only when it must, and says so', () => {
+  assert.deepEqual(capPatch('small'), { text: 'small', truncated: false });
+  const big = capPatch('x'.repeat(GIT_PATCH_CAP + 10));
+  assert.equal(big.text.length, GIT_PATCH_CAP);
+  assert.equal(big.truncated, true);
+});
+
+// ---- build logs ----
+
+test('normalizeBuildLogLimit defaults and clamps', () => {
+  assert.equal(normalizeBuildLogLimit(undefined), BUILD_LOG_LIMIT_DEFAULT);
+  assert.equal(normalizeBuildLogLimit(-1), BUILD_LOG_LIMIT_DEFAULT);
+  assert.equal(normalizeBuildLogLimit(10), 10);
+  assert.equal(normalizeBuildLogLimit(10_000), BUILD_LOG_LIMIT_MAX);
+});
+
+test('buildLogFromEvents keeps the TAIL — a failure explains itself at the end', () => {
+  const events = Array.from({ length: 10 }, (_, i) => ({
+    seq: i + 1, kind: 'step', role: null, content: `step ${i + 1}`, created_at: `t${i + 1}`,
+  }));
+  const r = buildLogFromEvents(events, 3);
+  assert.equal(r.steps.length, 3);
+  assert.equal(r.steps[0].content, 'step 8', 'must keep the last events, not the first');
+  assert.equal(r.omitted, 7);
+  assert.equal(r.total_events, 10);
+  assert.match(r.log, /step 10/);
+  assert.ok(!r.log.includes('step 1\n'), 'dropped events must not appear in the log');
+});
+
+test('buildLogFromEvents survives empty and malformed event lists', () => {
+  assert.deepEqual(buildLogFromEvents([]), { steps: [], log: '', omitted: 0, total_events: 0 });
+  assert.deepEqual(buildLogFromEvents(null).steps, []);
+  const r = buildLogFromEvents([{ seq: 1, kind: 'note' }]);
+  assert.equal(r.steps.length, 1);
+  assert.ok(typeof r.log === 'string');
+});
+
+// ---- the change-record chain ----
+//
+// append_change_record must NEVER hand-compute a hash. These pin the reason:
+// the canonical payload is an explicit field allowlist, not "the record minus
+// its hashes", so the two agree only by coincidence.
+
+test('the change payload is an allowlist — extra fields are excluded from the hash', () => {
+  const base = {
+    project_id: 51, cycle_id: null, seq: 1, initiated_by: 'u1', acting_as_admin: 1,
+    framework_version: 17, framework_version_id: 17, rules_touched: null,
+    gates_run: null, commit_sha: 'abc', summary: 'x', created_at: '2026-01-01T00:00:00Z',
+  };
+  const withExtra = { ...base, id: 999, note: 'not part of the intent', hash: 'zz', prev_hash: 'yy' };
+  // The DB id, and anything else not on the allowlist, must not move the hash.
+  assert.equal(computeChangeHash('', base), computeChangeHash('', withExtra));
+  assert.ok(!('id' in changePayload(withExtra)));
+  assert.ok(!('note' in changePayload(withExtra)));
+});
+
+test('hand-computing the hash as "record minus its hashes" disagrees with the real chain', () => {
+  const row = {
+    project_id: 51, cycle_id: 786, seq: 22, initiated_by: 'u1', acting_as_admin: 1,
+    framework_version: 17, framework_version_id: 17, rules_touched: null,
+    gates_run: null, commit_sha: 'abc', summary: 'x', created_at: '2026-01-01T00:00:00Z',
+    id: 4242, prev_hash: 'deadbeef', hash: 'ignored',
+  };
+  const real = computeChangeHash('deadbeef', row);
+
+  // The plausible-looking recipe: everything except hash/prev_hash, keys
+  // sorted, compact separators. It picks up `id` and so produces a DIFFERENT
+  // hash — which is exactly how a hand-appended record starts looking
+  // verified while chaining to nothing.
+  const { hash: _h, prev_hash: _p, ...rest } = row;
+  const naive = createHash('sha256')
+    .update('deadbeef' + JSON.stringify(Object.fromEntries(Object.entries(rest).sort())))
+    .digest('hex');
+  assert.notEqual(naive, real, 'the naive recipe must not be mistaken for the real one');
+
+  // And the real one is reproducible from the documented pieces.
+  assert.equal(
+    real,
+    createHash('sha256').update('deadbeef' + canonicalJson(changePayload(row))).digest('hex'),
+  );
+});
+
+test('acting_as_admin is normalized, so a boolean and a 1 chain identically', () => {
+  const a = { seq: 1, summary: 's', acting_as_admin: true };
+  const b = { seq: 1, summary: 's', acting_as_admin: 1 };
+  assert.equal(computeChangeHash('', a), computeChangeHash('', b));
+  // ...and a falsy value is 0, not absent.
+  assert.equal(changePayload({ acting_as_admin: false }).acting_as_admin, 0);
 });
 
 test('read_project_file advertises the line-range parameters', () => {

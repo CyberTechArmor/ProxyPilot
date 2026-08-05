@@ -435,6 +435,81 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: 'project_git_log',
+    description: 'Recent commits in an AI-dev project\'s checkout, as structured rows ({ sha, author, date, subject }) rather than raw git output. Use it to see what the harness and the chat lane have actually committed. (Raw `git log` is also reachable through run_project_command when you want a specific format.)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        limit: { type: 'number', description: 'How many commits (default 20, max 200).' },
+        path: { type: 'string', description: 'Only commits touching this path, relative to the app root.' },
+      },
+      required: ['project_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'project_git_diff',
+    description: 'Diff an AI-dev project\'s checkout. With no ref this shows UNCOMMITTED work — the working tree against HEAD, PLUS the untracked files, which is how you catch a build that wrote a file and never committed it (invisible to `git log` and to every reviewer, but still on disk and still running). With a ref it diffs that revision or range instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        ref: { type: 'string', description: 'A revision or range, e.g. "HEAD~3", "abc123..def456". Omit for uncommitted changes.' },
+        path: { type: 'string', description: 'Limit the diff to this path, relative to the app root.' },
+        stat_only: { type: 'boolean', description: 'Return the --stat summary instead of the full patch.' },
+      },
+      required: ['project_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'project_git_show',
+    description: 'Show one commit in an AI-dev project: its metadata and its patch. Pass a sha from project_git_log.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        ref: { type: 'string', description: 'Commit sha or revision, e.g. "abc1234" or "HEAD~1".' },
+        path: { type: 'string', description: 'Limit the patch to this path.' },
+        stat_only: { type: 'boolean', description: 'Return the --stat summary instead of the full patch.' },
+      },
+      required: ['project_id', 'ref'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_build_log',
+    description: 'The recorded event stream of one build cycle: its status, any error, and the steps/messages it produced. A failed build otherwise surfaces as a status with no output, which leaves nothing to diagnose from. Cycle ids come from get_project.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        build_id: { type: 'number', description: 'Cycle id, from get_project (latest_build.id, queued_builds, or pending_verification.cycle_id).' },
+        limit: { type: 'number', description: 'Most recent events to return (default 200, max 1000).' },
+      },
+      required: ['project_id', 'build_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'append_change_record',
+    description: 'Append a hash-chained change record to an AI-dev project\'s audit trail, for work done through the MCP file tools (which write no record of their own). ProxyPilot computes the chain itself — seq, prev_hash and hash are derived server-side inside a transaction from the project\'s last record, so the chain keeps verifying. Also mirrors the record to state/changes/<seq>.json in the checkout and commits it, the same way a build cycle does. Never hand-compute these hashes: the canonical payload is an explicit field allowlist, not "the record minus its hashes".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        summary: { type: 'string', description: 'What this checkpoint recorded, in plain language.' },
+        commit_sha: { type: 'string', description: 'The commit this record attests to (e.g. from write_project_file or project_git_log).' },
+        gates_run: { type: 'string', description: 'What verification ran, e.g. the run_project_command result. JSON or plain text.' },
+        rules_touched: { type: 'string', description: 'Which rules this change touched, if any.' },
+        cycle_id: { type: 'number', description: 'Associate the record with a build cycle. Omit for chat-lane work, which has none.' },
+      },
+      required: ['project_id', 'summary'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'clone_project',
     description: 'Clone an AI-dev project under a new name. mode "fresh": full app + git history + asset library with a fresh database; mode "full": also copies the source database. Returns the new project; poll get_project on it for provisioning progress.',
     inputSchema: {
@@ -581,6 +656,118 @@ export function normalizeReadRange(offset, limit) {
     count,
     end: count === null ? null : start + count - 1,
     ranged: hasOff || hasLim,
+  };
+}
+
+// ---- project git history ----
+
+export const GIT_LOG_LIMIT_DEFAULT = 20;
+export const GIT_LOG_LIMIT_MAX = 200;
+/** Patches are unbounded in principle; this is what comes back before the
+ *  result says it truncated. Larger than the command-output cap because a
+ *  review diff is the thing being read, not a byproduct. */
+export const GIT_PATCH_CAP = 128 * 1024;
+
+/**
+ * A revision or range, as `git log`/`show` take it.
+ *
+ * Passed to git as a positional argument, so the containment is the same as
+ * everywhere else in this module — this refuses the shapes that would be
+ * CONFUSING rather than dangerous, most importantly a leading `-` that git
+ * would read as an option rather than a revision.
+ */
+export function validGitRef(ref) {
+  const s = String(ref ?? '').trim();
+  if (!s || s.length > 200) return null;
+  if (s.startsWith('-')) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/~^@{}-]*(\.\.\.?[A-Za-z0-9._/~^@{}-]+)?$/.test(s)) return null;
+  return s;
+}
+
+export function normalizeGitLogLimit(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 1) return GIT_LOG_LIMIT_DEFAULT;
+  return Math.min(Math.floor(v), GIT_LOG_LIMIT_MAX);
+}
+
+/** The unit separator. Chosen because it cannot appear in a commit subject,
+ *  author name or ISO date, so the split needs no escaping rules. */
+export const GIT_LOG_SEP = '\u001f';
+export const GIT_LOG_FORMAT = ['%H', '%an', '%aI', '%s'].join('%x1f');
+
+export function parseGitLogOutput(stdout) {
+  const rows = [];
+  for (const line of String(stdout ?? '').split('\n')) {
+    if (!line.trim()) continue;
+    const [sha, author, date, ...rest] = line.split(GIT_LOG_SEP);
+    if (!sha) continue;
+    rows.push({
+      sha,
+      short_sha: sha.slice(0, 8),
+      author: author || null,
+      date: date || null,
+      // A subject containing the separator would have split; rejoin so the
+      // message survives intact rather than being silently clipped.
+      subject: rest.join(GIT_LOG_SEP),
+    });
+  }
+  return rows;
+}
+
+/** Split `git status --porcelain` into staged/unstaged/untracked buckets.
+ *  Untracked is the interesting one: a file written but never committed is
+ *  invisible to git log and to every reviewer, while still being on disk. */
+export function parseGitStatusPorcelain(stdout) {
+  const tracked = [];
+  const untracked = [];
+  for (const line of String(stdout ?? '').split('\n')) {
+    if (line.length < 4) continue;
+    const code = line.slice(0, 2);
+    const path = line.slice(3);
+    if (code === '??') untracked.push(path);
+    else tracked.push({ status: code.trim(), path });
+  }
+  return { tracked, untracked };
+}
+
+/** Cap a patch/diff body, reporting whether anything was dropped. */
+export function capPatch(text, cap = GIT_PATCH_CAP) {
+  const s = String(text ?? '');
+  return s.length > cap
+    ? { text: s.slice(0, cap), truncated: true }
+    : { text: s, truncated: false };
+}
+
+// ---- build logs ----
+
+export const BUILD_LOG_LIMIT_DEFAULT = 200;
+export const BUILD_LOG_LIMIT_MAX = 1000;
+
+export function normalizeBuildLogLimit(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 1) return BUILD_LOG_LIMIT_DEFAULT;
+  return Math.min(Math.floor(v), BUILD_LOG_LIMIT_MAX);
+}
+
+/**
+ * Flatten cycle events into a readable log, newest LAST.
+ *
+ * `limit` keeps the TAIL, because a failed build's reason is at the end — the
+ * same argument run_project_command's output makes.
+ */
+export function buildLogFromEvents(events = [], limit = BUILD_LOG_LIMIT_DEFAULT) {
+  const all = Array.isArray(events) ? events : [];
+  const kept = all.length > limit ? all.slice(-limit) : all;
+  const lines = kept.map((e) => {
+    const who = e.role ? ` ${e.role}` : '';
+    const body = String(e.content ?? '').replace(/\s+$/, '');
+    return `[${e.created_at || ''}] ${e.kind}${who}${body ? `: ${body}` : ''}`;
+  });
+  return {
+    steps: kept,
+    log: lines.join('\n'),
+    omitted: all.length - kept.length,
+    total_events: all.length,
   };
 }
 

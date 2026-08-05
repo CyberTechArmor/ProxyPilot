@@ -38,6 +38,8 @@ import {
   parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
   applyStringEdit, normalizeReadRange,
   validSearchPattern, validPathspec, normalizeMaxResults, parseGitGrepOutput,
+  validGitRef, normalizeGitLogLimit, GIT_LOG_FORMAT, parseGitLogOutput,
+  parseGitStatusPorcelain, capPatch, normalizeBuildLogLimit, buildLogFromEvents,
 } from '../lib/mcp-logic.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
@@ -138,13 +140,16 @@ function mock2Enabled() {
 
 async function mock2Modules() {
   if (!mock2Enabled()) throw new Error('The Projects module is not enabled on this ProxyPilot install');
-  const [projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic, requests] = await Promise.all([
+  const [projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic, requests,
+    cycleEvents, changeRecords, framework] = await Promise.all([
     import('../mock2/projects.js'), import('../mock2/cycles.js'), import('../mock2/build-queue.js'),
     import('../mock2/chats.js'), import('../mock2/domains.js'), import('../mock2/provision.js'),
     import('../mock2/clone-logic.js'), import('../mock2/project-assets.js'), import('../mock2/project-logic.js'),
     import('../mock2/requests.js'),
+    import('../mock2/cycle-events.js'), import('../mock2/change-records.js'), import('../mock2/framework.js'),
   ]);
-  return { projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic, requests };
+  return { projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic, requests,
+    cycleEvents, changeRecords, framework };
 }
 
 // Builds that SHIPPED but still await the operator's verification checks.
@@ -1178,6 +1183,214 @@ async function toolRunProjectCommand(args, auth) {
   }, { isError: exitCode !== 0 });
 }
 
+// ---- read-only git history ----
+//
+// These overlap run_project_command, which already permits read-only git. They
+// exist because STRUCTURE beats raw text for a caller that has to act on the
+// answer: parsed commit rows, and a diff that also surfaces untracked files.
+
+async function toolProjectGitLog(args) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const limit = normalizeGitLogLimit(args.limit);
+  let rel = null;
+  if (args.path != null && String(args.path).trim() !== '') {
+    rel = validProjectFilePath(args.path);
+    if (!rel) return toolResult('path must be relative to the app root', { isError: true });
+  }
+  const argv = ['exec', projectContainerName(m, project), '--',
+    'git', '-C', M2_APP_DIR, 'log', `--max-count=${limit}`, `--format=${GIT_LOG_FORMAT}`];
+  if (rel) argv.push('--', rel);
+  const r = await runHostCapture('incus', argv, { timeoutMs: 30000 });
+  if (r.status !== 0) {
+    return toolResult(`Could not read history: ${(r.stderr || '').trim().slice(-300) || 'is the container running?'}`, { isError: true });
+  }
+  const commits = parseGitLogOutput(r.stdout);
+  return toolResult({ path: rel, count: commits.length, commits });
+}
+
+async function toolProjectGitDiff(args) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  let ref = null;
+  if (args.ref != null && String(args.ref).trim() !== '') {
+    ref = validGitRef(args.ref);
+    if (!ref) return toolResult('ref must be a revision or range, e.g. "HEAD~3" or "abc123..def456"', { isError: true });
+  }
+  let rel = null;
+  if (args.path != null && String(args.path).trim() !== '') {
+    rel = validProjectFilePath(args.path);
+    if (!rel) return toolResult('path must be relative to the app root', { isError: true });
+  }
+  const incusName = projectContainerName(m, project);
+  const argv = ['exec', incusName, '--', 'git', '-C', M2_APP_DIR, 'diff'];
+  if (args.stat_only === true) argv.push('--stat');
+  if (ref) argv.push(ref);
+  if (rel) argv.push('--', rel);
+  const r = await runHostCapture('incus', argv, { timeoutMs: 45000 });
+  if (r.status !== 0) {
+    return toolResult(`Diff failed: ${(r.stderr || '').trim().slice(-300) || 'is the container running?'}`, { isError: true });
+  }
+  const patch = capPatch(r.stdout);
+  const out = { ref, path: rel, stat_only: args.stat_only === true, diff: patch.text, truncated: patch.truncated };
+
+  // With no ref the question is "what is uncommitted", and a diff alone
+  // answers it only for TRACKED files. An untracked file is invisible to both
+  // git diff and git log while still sitting in the checkout — which is
+  // exactly how a written-but-never-committed test file hides from review.
+  if (!ref) {
+    const s = await runHostCapture(
+      'incus', ['exec', incusName, '--', 'git', '-C', M2_APP_DIR, 'status', '--porcelain'],
+      { timeoutMs: 30000 },
+    );
+    if (s.status === 0) {
+      const status = parseGitStatusPorcelain(s.stdout);
+      out.untracked_files = status.untracked;
+      out.changed_files = status.tracked;
+      out.clean = status.untracked.length === 0 && status.tracked.length === 0;
+      if (status.untracked.length) {
+        out.note = `${status.untracked.length} untracked file(s) are in the checkout but not in git — they are invisible to project_git_log and to reviewers, and will not survive a rehydrate. Commit them with write_project_file or delete them.`;
+      }
+    }
+  }
+  return toolResult(out);
+}
+
+async function toolProjectGitShow(args) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const ref = validGitRef(args.ref);
+  if (!ref) return toolResult('ref must be a commit sha or revision, e.g. "abc1234" or "HEAD~1"', { isError: true });
+  let rel = null;
+  if (args.path != null && String(args.path).trim() !== '') {
+    rel = validProjectFilePath(args.path);
+    if (!rel) return toolResult('path must be relative to the app root', { isError: true });
+  }
+  const argv = ['exec', projectContainerName(m, project), '--', 'git', '-C', M2_APP_DIR, 'show'];
+  if (args.stat_only === true) argv.push('--stat');
+  argv.push(ref);
+  if (rel) argv.push('--', rel);
+  const r = await runHostCapture('incus', argv, { timeoutMs: 45000 });
+  if (r.status !== 0) {
+    return toolResult(`Could not show ${ref}: ${(r.stderr || '').trim().slice(-300) || 'unknown revision?'}`, { isError: true });
+  }
+  const patch = capPatch(r.stdout);
+  return toolResult({ ref, path: rel, stat_only: args.stat_only === true, content: patch.text, truncated: patch.truncated });
+}
+
+// get_build_log — what a failed cycle actually did.
+//
+// A failed build otherwise surfaces as a status with no output, which leaves
+// nothing to diagnose from.
+async function toolGetBuildLog(args) {
+  const m = await mock2Modules();
+  const project = m.projects.getProject(Number(args.project_id));
+  if (!project) return toolResult('Project not found', { isError: true });
+  const cycle = m.cycles.getCycle(Number(args.build_id));
+  if (!cycle) return toolResult(`No build cycle ${args.build_id}`, { isError: true });
+  // A cycle id from another project would otherwise leak that project's log.
+  if (Number(cycle.project_id) !== Number(project.id)) {
+    return toolResult(`Build ${args.build_id} does not belong to project ${project.id}`, { isError: true });
+  }
+  const limit = normalizeBuildLogLimit(args.limit);
+  const events = m.cycleEvents.listCycleEvents(cycle.id);
+  const flat = buildLogFromEvents(events, limit);
+  return toolResult({
+    build_id: cycle.id,
+    project_id: project.id,
+    status: cycle.status,
+    error: cycle.error || null,
+    verification_state: cycle.verification_state || null,
+    started_at: cycle.started_at || cycle.created_at || null,
+    finished_at: cycle.finished_at || null,
+    total_events: flat.total_events,
+    omitted_older_events: flat.omitted,
+    steps: flat.steps,
+    log: flat.log,
+  });
+}
+
+// append_change_record — a correctly chained record for chat-lane work.
+//
+// The chain is computed SERVER-SIDE by the same insertChangeRecord the build
+// runner uses, inside its transaction. That is the whole point of the tool:
+// the canonical payload is an explicit field allowlist with its own defaults
+// (change-logic.js's changePayload), NOT "the record minus its hashes", so a
+// hand-computed hash agrees only by coincidence and stops agreeing the moment
+// a field is added. Hand-appending is how an audit trail comes to look
+// verified when nothing verified it.
+async function toolAppendChangeRecord(args, auth) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const guard = liveBuildGuard(m, project);
+  if (guard) return toolResult(guard, { isError: true });
+  const summary = String(args.summary || '').trim();
+  if (!summary) return toolResult('summary is required — say what this checkpoint recorded.', { isError: true });
+
+  const framework = m.framework.getCurrentFrameworkVersion();
+  if (!framework) {
+    return toolResult('This install has no framework version recorded, so a change record cannot be chained to one.', { isError: true });
+  }
+
+  let record;
+  try {
+    record = m.changeRecords.insertChangeRecord({
+      projectId: project.id,
+      cycleId: args.cycle_id == null ? null : Number(args.cycle_id),
+      initiatedBy: auth.created_by,
+      // MCP tokens are admin-minted and admin-scoped, so a record appended
+      // through one is an admin acting directly rather than the harness.
+      actingAsAdmin: 1,
+      frameworkVersion: framework.version,
+      frameworkVersionId: framework.id,
+      rulesTouched: args.rules_touched ?? null,
+      gatesRun: args.gates_run ?? null,
+      commitSha: args.commit_sha ?? null,
+      summary,
+    });
+  } catch (e) {
+    return toolResult(`Could not append the change record: ${e?.message || e}`, { isError: true });
+  }
+
+  // Mirror it into the checkout as state/changes/<seq>.json, the same file a
+  // build cycle writes, so the readable history survives losing mock2.db.
+  const incusName = projectContainerName(m, project);
+  const rel = `state/changes/${record.seq}.json`;
+  const mirror = JSON.stringify(m.changeRecords.changeRecordMirror(record), null, 2);
+  const w = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; mkdir -p "$(dirname -- "$p")"; cat > "$p"', 'sh', `${M2_APP_DIR}/${rel}`],
+    { input: mirror, timeoutMs: 30000 },
+  );
+  let git = { committed: false, unchanged: false, commit: null, push_failed: false };
+  if (w.status === 0) {
+    git = await commitProjectPaths(incusName, [rel], `mock2: change record ${record.seq}`);
+  }
+
+  logAudit(auth.created_by, 'MOCK2_CHANGE_RECORD_APPENDED', 'mock2_project', project.id, {
+    via: 'mcp', seq: record.seq, commit_sha: record.commit_sha || null,
+  }, null);
+
+  const chain = m.changeRecords.verifyProjectChain(project.id);
+  return toolResult({
+    appended: true,
+    seq: record.seq,
+    hash: record.hash,
+    prev_hash: record.prev_hash,
+    created_at: record.created_at,
+    mirror_path: rel,
+    mirror_written: w.status === 0,
+    ...git,
+    // Verified right after appending, because a record that broke the chain is
+    // worth hearing about now rather than at the next audit.
+    chain_ok: chain.ok,
+    chain_broken_at: chain.brokenAt,
+  }, { isError: !chain.ok });
+}
+
 const TOOL_HANDLERS = {
   list_static_sites: (args, auth, req) => toolListStaticSites(args, auth, req),
   create_upload_ticket: (_args, _auth, req) => toolCreateUploadTicket(req),
@@ -1204,6 +1417,11 @@ const TOOL_HANDLERS = {
   delete_project_file: toolDeleteProjectFile,
   move_project_file: toolMoveProjectFile,
   run_project_command: toolRunProjectCommand,
+  project_git_log: toolProjectGitLog,
+  project_git_diff: toolProjectGitDiff,
+  project_git_show: toolProjectGitShow,
+  get_build_log: toolGetBuildLog,
+  append_change_record: toolAppendChangeRecord,
   redeploy_project: toolRedeployProject,
 };
 

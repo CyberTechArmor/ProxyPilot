@@ -35,6 +35,7 @@ import {
   mintMcpToken, hashMcpToken, tokenFromRequest,
   mintUploadTicket, looksLikeUploadTicket, UPLOAD_TICKET_TTL_MS, INLINE_ZIP_MAX_BYTES,
   startupCandidates, validProjectFilePath,
+  parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
 } from '../lib/mcp-logic.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
@@ -846,6 +847,114 @@ async function toolRedeployProject(args, auth) {
   });
 }
 
+// run_project_command — the verification lane the file tools could not reach.
+//
+// ENVIRONMENT PARITY IS THE POINT. This mirrors deploy.js's runInApp exactly
+// (`set -a; . /etc/environment; cd <appDir>`), because a gates result produced
+// in a different environment answers a different question than the one asked —
+// and the reason to run it at all is to trust the answer.
+//
+// NO SHELL SEES THE CALLER'S INPUT. The argv arrives as POSITIONAL PARAMETERS
+// (`sh -c '… "$@" …' sh npm run gates`) and is invoked as `"$@"`, so the tokens
+// are passed to execve as-is and never re-parsed. Not `exec "$@"`, because the
+// wrapper still has to read $? and tail the output afterwards.
+// parseProjectCommand's charset check is a clarity guard, not the containment.
+//
+// OUTPUT IS THE TAIL, NOT THE HEAD. runHostCapture keeps the FIRST 256 KB it
+// reads, which is the wrong end of a test run — the failure summary prints
+// last. So each stream lands in a file inside the container and is tail'd
+// there. Markers carry a per-call nonce so output that happens to contain the
+// marker text cannot confuse the parse.
+async function toolRunProjectCommand(args, auth) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const guard = liveBuildGuard(m, project);
+  if (guard) return toolResult(guard, { isError: true });
+
+  const parsed = parseProjectCommand(args.command);
+  if (parsed.error) return toolResult(parsed.error, { isError: true });
+
+  const incusName = projectContainerName(m, project);
+  const timeoutMs = projectCommandTimeoutMs(args.timeout_seconds);
+  const nonce = randomBytes(6).toString('hex');
+  const mark = (k) => `PP_${nonce}_${k}`;
+  const script = [
+    'set -a', '. /etc/environment 2>/dev/null || true', 'set +a',
+    `cd ${M2_APP_DIR} || exit 97`,
+    'o=$(mktemp) || exit 98; e=$(mktemp) || exit 98',
+    '"$@" >"$o" 2>"$e"; ec=$?',
+    `echo "${mark('EXIT')}:$ec"`,
+    `echo "${mark('OUT')}"`,
+    `tail -c ${PROJECT_COMMAND_OUTPUT_CAP} "$o"`,
+    // Guarantees the next marker starts its own line even when the tail does
+    // not end in a newline; the stray blank line is trimmed on the way out.
+    'echo ""',
+    `echo "${mark('ERR')}"`,
+    `tail -c ${PROJECT_COMMAND_OUTPUT_CAP} "$e"`,
+    'rm -f "$o" "$e"',
+  ].join('\n');
+
+  const startedAt = Date.now();
+  const r = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', ...parsed.argv],
+    { timeoutMs },
+  );
+  const durationMs = Date.now() - startedAt;
+
+  if (r.status !== 0 && !r.stdout.includes(mark('EXIT'))) {
+    // The wrapper itself never got to report — container down, incus refused,
+    // or we killed it at the deadline.
+    const why = r.timedOut
+      ? `Timed out after ${Math.round(timeoutMs / 1000)}s. NOTE: the deadline kills the incus client, so the command may still be running inside the container — check with a short read-only call before retrying.`
+      : r.status === 97
+        ? `The app directory ${M2_APP_DIR} does not exist in this project's container.`
+        : r.status === 98
+          ? 'Could not create temporary files in the container (out of disk?).'
+          : (r.stderr || '').trim().slice(-500) || 'no output from the container';
+    return toolResult({
+      ran: false, command: parsed.argv.join(' '), timed_out: !!r.timedOut,
+      duration_ms: durationMs, error: why,
+    }, { isError: true });
+  }
+
+  const out = r.stdout;
+  const exitMatch = new RegExp(`${mark('EXIT')}:(-?\\d+)`).exec(out);
+  const exitCode = exitMatch ? Number(exitMatch[1]) : null;
+  const outAt = out.indexOf(`${mark('OUT')}\n`);
+  const errAt = out.indexOf(mark('ERR'));
+  const stdout = outAt >= 0 && errAt > outAt
+    ? out.slice(outAt + mark('OUT').length + 1, errAt).replace(/\n$/, '')
+    : '';
+  const stderr = errAt >= 0 ? out.slice(errAt + mark('ERR').length).replace(/^\n/, '') : '';
+
+  // The commit the result belongs to — so a green run can be tied to an exact
+  // checkout rather than to "whatever was there at the time".
+  const headR = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'git', '-C', M2_APP_DIR, 'rev-parse', 'HEAD'],
+    { timeoutMs: 15000 },
+  );
+  const headSha = (headR.stdout || '').trim();
+
+  logAudit(auth.created_by, 'MOCK2_PROJECT_COMMAND', 'mock2_project', project.id, {
+    via: 'mcp', command: parsed.argv.join(' '), exit_code: exitCode, duration_ms: durationMs,
+  }, null);
+
+  return toolResult({
+    ran: true,
+    command: parsed.argv.join(' '),
+    exit_code: exitCode,
+    ok: exitCode === 0,
+    duration_ms: durationMs,
+    head_sha: /^[0-9a-f]{40}$/.test(headSha) ? headSha : null,
+    stdout,
+    stderr,
+    output_truncated: stdout.length >= PROJECT_COMMAND_OUTPUT_CAP || stderr.length >= PROJECT_COMMAND_OUTPUT_CAP,
+    // A non-zero exit is a real answer, not a broken tool — but it is marked
+    // isError so a failing gate cannot be skimmed past as if it had passed.
+  }, { isError: exitCode !== 0 });
+}
+
 const TOOL_HANDLERS = {
   list_static_sites: (args, auth, req) => toolListStaticSites(args, auth, req),
   create_upload_ticket: (_args, _auth, req) => toolCreateUploadTicket(req),
@@ -867,6 +976,7 @@ const TOOL_HANDLERS = {
   list_project_files: toolListProjectFiles,
   read_project_file: toolReadProjectFile,
   write_project_file: toolWriteProjectFile,
+  run_project_command: toolRunProjectCommand,
   redeploy_project: toolRedeployProject,
 };
 

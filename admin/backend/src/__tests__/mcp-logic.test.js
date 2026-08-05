@@ -11,6 +11,8 @@ import {
   mintMcpToken, hashMcpToken, looksLikeMcpToken, tokenFromRequest,
   mintUploadTicket, looksLikeUploadTicket,
   startupCandidates, validProjectFilePath,
+  parseProjectCommand, projectCommandTimeoutMs,
+  PROJECT_COMMAND_TIMEOUT_DEFAULT_S, PROJECT_COMMAND_TIMEOUT_MAX_S,
 } from '../lib/mcp-logic.js';
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from '../mock2/clone-logic.js';
 
@@ -78,9 +80,72 @@ test('tool catalog: every tool has a name, description, and object schema', () =
     'list_projects', 'send_project_build', 'clone_project', 'create_upload_ticket',
     'interrupt_project_build', 'cancel_queued_build',
     'list_project_files', 'read_project_file', 'write_project_file', 'redeploy_project',
+    'run_project_command',
   ]) {
     assert.ok(names.has(required), `missing tool ${required}`);
   }
+});
+
+// ---- run_project_command allowlist ----
+
+test('parseProjectCommand accepts the four permitted shapes', () => {
+  assert.deepEqual(parseProjectCommand('npm run gates').argv, ['npm', 'run', 'gates']);
+  assert.deepEqual(parseProjectCommand('npm ci').argv, ['npm', 'ci']);
+  assert.deepEqual(parseProjectCommand('  npm   run   test:unit  ').argv, ['npm', 'run', 'test:unit']);
+  assert.deepEqual(
+    parseProjectCommand('npx playwright test --reporter=list').argv,
+    ['npx', 'playwright', 'test', '--reporter=list'],
+  );
+  assert.deepEqual(parseProjectCommand('git status').argv, ['git', 'status']);
+  assert.deepEqual(parseProjectCommand('git log -5 --oneline').argv, ['git', 'log', '-5', '--oneline']);
+  // Paths and script names with the punctuation real projects use.
+  assert.ok(parseProjectCommand('npx playwright test e2e/platform.spec.ts').argv);
+  assert.ok(parseProjectCommand('npm run build:prod').argv);
+});
+
+test('parseProjectCommand refuses anything outside the allowlist', () => {
+  for (const cmd of ['rm -rf /', 'curl https://x.example', 'node server.js', 'sh', 'sudo npm ci', 'bash -c ls']) {
+    assert.ok(parseProjectCommand(cmd).error, `should refuse: ${cmd}`);
+  }
+  // npm/npx/git are heads, not blank cheques.
+  assert.ok(parseProjectCommand('npm install left-pad').error);
+  assert.ok(parseProjectCommand('npm ci --extra').error, 'npm ci takes no arguments');
+  assert.ok(parseProjectCommand('npm run').error, 'npm run needs a script name');
+  assert.ok(parseProjectCommand('npx tsx evil.ts').error);
+  // Destructive git subcommands stay out — see the exclusion note in the source.
+  for (const sub of ['push', 'commit', 'checkout', 'branch', 'tag', 'stash', 'reset', 'clean']) {
+    assert.ok(parseProjectCommand(`git ${sub}`).error, `git ${sub} should be refused`);
+  }
+  assert.ok(parseProjectCommand('').error);
+  assert.ok(parseProjectCommand(null).error);
+});
+
+test('parseProjectCommand refuses shell syntax rather than running it as an argument', () => {
+  for (const cmd of [
+    'npm run gates; rm -rf /',
+    'npm run gates && curl x',
+    'npm run gates | tee out',
+    'npm run gates > /etc/passwd',
+    'npm run $(whoami)',
+    'npm run `id`',
+    "npm run 'a b'",
+    'git log --format=%H\nrm -rf /',
+  ]) {
+    const r = parseProjectCommand(cmd);
+    assert.ok(r.error, `should refuse: ${JSON.stringify(cmd)}`);
+    assert.ok(!r.argv, 'must not hand back an argv it half-understood');
+  }
+  // The refusal has to teach, or the model just retries the same string.
+  assert.match(parseProjectCommand('npm run a && npm run b').error, /separate calls/);
+});
+
+test('projectCommandTimeoutMs defaults, clamps, and ignores nonsense', () => {
+  assert.equal(projectCommandTimeoutMs(undefined), PROJECT_COMMAND_TIMEOUT_DEFAULT_S * 1000);
+  assert.equal(projectCommandTimeoutMs(0), PROJECT_COMMAND_TIMEOUT_DEFAULT_S * 1000);
+  assert.equal(projectCommandTimeoutMs(-9), PROJECT_COMMAND_TIMEOUT_DEFAULT_S * 1000);
+  assert.equal(projectCommandTimeoutMs('nope'), PROJECT_COMMAND_TIMEOUT_DEFAULT_S * 1000);
+  assert.equal(projectCommandTimeoutMs(30), 30_000);
+  assert.equal(projectCommandTimeoutMs(99_999), PROJECT_COMMAND_TIMEOUT_MAX_S * 1000);
 });
 
 test('protocol versions: ours is among the known list', () => {

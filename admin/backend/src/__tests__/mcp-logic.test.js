@@ -13,6 +13,9 @@ import {
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs,
   PROJECT_COMMAND_TIMEOUT_DEFAULT_S, PROJECT_COMMAND_TIMEOUT_MAX_S,
+  applyStringEdit, normalizeReadRange, parseGitGrepOutput,
+  validSearchPattern, validPathspec, normalizeMaxResults,
+  SEARCH_MAX_RESULTS_DEFAULT, SEARCH_MAX_RESULTS_CAP, SEARCH_LINE_CAP,
 } from '../lib/mcp-logic.js';
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from '../mock2/clone-logic.js';
 
@@ -80,10 +83,154 @@ test('tool catalog: every tool has a name, description, and object schema', () =
     'list_projects', 'send_project_build', 'clone_project', 'create_upload_ticket',
     'interrupt_project_build', 'cancel_queued_build',
     'list_project_files', 'read_project_file', 'write_project_file', 'redeploy_project',
-    'run_project_command',
+    'run_project_command', 'edit_project_file', 'search_project_files',
+    'delete_project_file', 'move_project_file',
   ]) {
     assert.ok(names.has(required), `missing tool ${required}`);
   }
+});
+
+test('read_project_file advertises the line-range parameters', () => {
+  const read = MCP_TOOLS.find((t) => t.name === 'read_project_file');
+  assert.ok(read.inputSchema.properties.offset, 'offset must be documented');
+  assert.ok(read.inputSchema.properties.limit, 'limit must be documented');
+  // Still only path + project_id are mandatory: a whole-file read is the
+  // default and existing callers must not have to change.
+  assert.deepEqual(read.inputSchema.required, ['project_id', 'path']);
+});
+
+// ---- edit_project_file ----
+
+test('applyStringEdit replaces exactly once by default', () => {
+  const r = applyStringEdit('a\nHELLO\nb\n', 'HELLO', 'WORLD');
+  assert.equal(r.content, 'a\nWORLD\nb\n');
+  assert.equal(r.replaced, 1);
+});
+
+test('applyStringEdit refuses an ambiguous match unless the count is declared', () => {
+  const src = 'x\nx\nx\n';
+  const ambiguous = applyStringEdit(src, 'x', 'y');
+  assert.ok(ambiguous.error);
+  assert.match(ambiguous.error, /appears 3 time\(s\)/);
+  assert.ok(!ambiguous.content, 'must not edit when the count is unexpected');
+
+  // Declaring the real count is the way to say "yes, all of them".
+  const all = applyStringEdit(src, 'x', 'y', 3);
+  assert.equal(all.content, 'y\ny\ny\n');
+  assert.equal(all.replaced, 3);
+
+  // A count that is too HIGH is refused too — the caller's model of the file
+  // is wrong either way.
+  assert.ok(applyStringEdit(src, 'x', 'y', 5).error);
+});
+
+test('applyStringEdit refuses absent, empty and no-op edits', () => {
+  assert.match(applyStringEdit('abc', 'zzz', 'q').error, /not found/);
+  assert.ok(applyStringEdit('abc', '', 'q').error);
+  assert.match(applyStringEdit('abc', 'abc', 'abc').error, /identical/);
+  assert.ok(applyStringEdit('abc', 'a', 'b', 0).error, 'expect_occurrences must be >= 1');
+  assert.ok(applyStringEdit('abc', 'a', 'b', 1.5).error);
+});
+
+test('applyStringEdit is literal, not regex — pasted code is not a pattern', () => {
+  const src = 'if (a.b) { c(1); }\n';
+  const r = applyStringEdit(src, 'a.b', 'a.z');
+  assert.equal(r.content, 'if (a.z) { c(1); }\n');
+  // '.' must not have matched 'a-b' style text elsewhere, and a regex-special
+  // old_string is found by its literal characters.
+  assert.equal(applyStringEdit('a.b and axb', 'a.b', 'Q').replaced, 1);
+  assert.ok(applyStringEdit('literal (paren)', '(paren)', '[bracket]').content);
+});
+
+test('applyStringEdit can delete text with an empty new_string', () => {
+  const r = applyStringEdit('keep\nDROP\n', 'DROP\n', '');
+  assert.equal(r.content, 'keep\n');
+});
+
+// ---- search_project_files ----
+
+test('parseGitGrepOutput turns path:line:content into structured hits', () => {
+  const out = 'src/a.ts:12:const x = 1;\nsrc/b.ts:3:function y() {\n';
+  assert.deepEqual(parseGitGrepOutput(out), [
+    { path: 'src/a.ts', line_number: 12, line: 'const x = 1;' },
+    { path: 'src/b.ts', line_number: 3, line: 'function y() {' },
+  ]);
+  assert.deepEqual(parseGitGrepOutput(''), []);
+});
+
+test('parseGitGrepOutput honours the result cap and truncates giant lines', () => {
+  const many = Array.from({ length: 50 }, (_, i) => `f.ts:${i + 1}:hit`).join('\n');
+  assert.equal(parseGitGrepOutput(many, 10).length, 10);
+  // A minified bundle line must not blow up the response.
+  const huge = `bundle.js:1:${'z'.repeat(SEARCH_LINE_CAP + 500)}`;
+  assert.equal(parseGitGrepOutput(huge)[0].line.length, SEARCH_LINE_CAP);
+});
+
+test('parseGitGrepOutput keeps colons that belong to the matched line', () => {
+  const [hit] = parseGitGrepOutput('src/a.ts:7:const url = "http://x";');
+  assert.equal(hit.line_number, 7);
+  assert.equal(hit.line, 'const url = "http://x";');
+});
+
+test('search inputs: patterns keep their regex punctuation, pathspecs stay relative', () => {
+  assert.equal(validSearchPattern('function\\s+\\w+'), 'function\\s+\\w+');
+  assert.equal(validSearchPattern('a|b(c)[d]'), 'a|b(c)[d]');
+  assert.equal(validSearchPattern(''), null);
+  assert.equal(validSearchPattern('   '), null);
+  assert.equal(validSearchPattern('x'.repeat(1001)), null);
+  assert.equal(validSearchPattern('bad\u0000null'), null);
+
+  assert.equal(validPathspec('src/**/*.ts'), 'src/**/*.ts');
+  assert.equal(validPathspec('apps/freshcut'), 'apps/freshcut');
+  assert.equal(validPathspec('/etc'), null);
+  assert.equal(validPathspec('../outside'), null);
+  assert.equal(validPathspec(''), null);
+});
+
+test('normalizeMaxResults defaults and clamps', () => {
+  assert.equal(normalizeMaxResults(undefined), SEARCH_MAX_RESULTS_DEFAULT);
+  assert.equal(normalizeMaxResults(0), SEARCH_MAX_RESULTS_DEFAULT);
+  assert.equal(normalizeMaxResults('x'), SEARCH_MAX_RESULTS_DEFAULT);
+  assert.equal(normalizeMaxResults(25), 25);
+  assert.equal(normalizeMaxResults(999999), SEARCH_MAX_RESULTS_CAP);
+});
+
+// ---- ranged reads ----
+
+test('normalizeReadRange leaves an unranged read alone', () => {
+  const r = normalizeReadRange(undefined, undefined);
+  assert.equal(r.ranged, false, 'no offset/limit must stay a whole-file read');
+  assert.equal(r.start, 1);
+  assert.equal(r.count, null);
+});
+
+test('normalizeReadRange builds an inclusive 1-based window', () => {
+  const r = normalizeReadRange(100, 20);
+  assert.deepEqual({ start: r.start, end: r.end, count: r.count, ranged: r.ranged },
+    { start: 100, end: 119, count: 20, ranged: true });
+
+  // offset alone runs to the end of the file
+  const openEnded = normalizeReadRange(50, undefined);
+  assert.equal(openEnded.start, 50);
+  assert.equal(openEnded.end, null);
+  assert.equal(openEnded.ranged, true);
+
+  // limit alone starts at line 1
+  const fromTop = normalizeReadRange(undefined, 5);
+  assert.equal(fromTop.start, 1);
+  assert.equal(fromTop.end, 5);
+  assert.equal(fromTop.ranged, true);
+});
+
+test('normalizeReadRange ignores nonsense rather than producing a bad window', () => {
+  for (const bad of [0, -5, 'abc', NaN]) {
+    const r = normalizeReadRange(bad, bad);
+    assert.equal(r.start, 1);
+    assert.equal(r.count, null);
+    assert.equal(r.ranged, false);
+  }
+  assert.equal(normalizeReadRange(3.7, 2.9).start, 3, 'fractions floor');
+  assert.equal(normalizeReadRange(3.7, 2.9).count, 2);
 });
 
 // ---- run_project_command allowlist ----

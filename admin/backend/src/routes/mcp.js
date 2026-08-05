@@ -36,6 +36,8 @@ import {
   mintUploadTicket, looksLikeUploadTicket, UPLOAD_TICKET_TTL_MS, INLINE_ZIP_MAX_BYTES,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
+  applyStringEdit, normalizeReadRange,
+  validSearchPattern, validPathspec, normalizeMaxResults, parseGitGrepOutput,
 } from '../lib/mcp-logic.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
@@ -665,6 +667,31 @@ function liveBuildGuard(m, project) {
   return null;
 }
 
+// Stage, commit and push one or more paths in a project's checkout.
+//
+// Extracted from toolWriteProjectFile so the edit/delete/move tools commit the
+// SAME way — same identity, same push, same "nothing actually changed" answer.
+// The message rides as $1 and the paths as "$@" after a shift, so neither is
+// ever interpolated into the script text.
+async function commitProjectPaths(incusName, paths, message) {
+  const script = 'set -e; cd /srv/app; msg="$1"; shift; git add -A -- "$@"; '
+    + 'if git diff --cached --quiet -- "$@"; then echo PP_NOCHANGE; '
+    + 'else git -c user.email=mcp@proxypilot -c user.name="ProxyPilot MCP" commit -q -m "$msg" -- "$@"; fi; '
+    + 'git push -q origin HEAD:main 2>/dev/null || echo PP_PUSH_FAILED >&2; git rev-parse HEAD';
+  const c = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', String(message).slice(0, 200), ...paths],
+    { timeoutMs: 60000 },
+  );
+  const unchanged = /PP_NOCHANGE/.test(c.stdout);
+  const sha = (c.stdout.trim().split('\n').pop() || '').trim();
+  return {
+    committed: c.status === 0 && !unchanged,
+    unchanged,
+    commit: /^[0-9a-f]{40}$/.test(sha) ? sha : null,
+    push_failed: /PP_PUSH_FAILED/.test(c.stderr || ''),
+  };
+}
+
 function requireActiveProject(m, args) {
   const project = m.projects.getProject(Number(args.project_id));
   if (!project) return { error: 'Project not found' };
@@ -729,23 +756,58 @@ async function toolReadProjectFile(args) {
   const rel = validProjectFilePath(args.path);
   if (!rel) return toolResult('path must be a file path relative to the app root, e.g. src/server/routes.ts', { isError: true });
   const abs = `${M2_APP_DIR}/${rel}`;
+  const range = normalizeReadRange(args.offset, args.limit);
+
+  // Size and line count come back on their own two lines FIRST, so total_lines
+  // reports the file's real length whether or not a window was asked for —
+  // that is what lets a ranged read say how much it did not return. The window
+  // is cut with sed INSIDE the container, so a 20-line read of a 2,000-line
+  // file moves 20 lines over the wire, which is the whole point.
+  const script = 'p="$1"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; '
+    + 'wc -c < "$p"; wc -l < "$p"; '
+    + 'if [ "$2" = "all" ]; then head -c "$4" -- "$p"; else sed -n "$2,$3p" "$p" | head -c "$4"; fi';
+  const startArg = range.ranged ? String(range.start) : 'all';
+  const endArg = range.ranged ? (range.end === null ? '$' : String(range.end)) : '0';
   const r = await runHostCapture(
-    'incus', ['exec', projectContainerName(m, project), '--', 'sh', '-c', 'p="$1"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; wc -c < "$p"; head -c 524288 -- "$p"', 'sh', abs],
+    'incus',
+    ['exec', projectContainerName(m, project), '--', 'sh', '-c', script,
+      'sh', abs, startArg, endArg, String(LXC_FILE_READ_CAP)],
     { timeoutMs: 30000 },
   );
   if (r.status === 66) return toolResult(`Not a file: ${rel} (use list_project_files to see the tracked files)`, { isError: true });
   if (r.status !== 0) {
     return toolResult(`Could not read ${rel} — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
   }
-  const nl = r.stdout.indexOf('\n');
-  const size = Number(String(r.stdout.slice(0, nl)).trim()) || 0;
-  const body = Buffer.from(r.stdout.slice(nl + 1), 'utf8');
+  const nl1 = r.stdout.indexOf('\n');
+  const nl2 = r.stdout.indexOf('\n', nl1 + 1);
+  const size = Number(r.stdout.slice(0, nl1).trim()) || 0;
+  // `wc -l` counts newlines, so a file with no trailing newline reads one
+  // short — the max with 1 keeps a single unterminated line from being 0.
+  const newlines = Number(r.stdout.slice(nl1 + 1, nl2).trim()) || 0;
+  const totalLines = size === 0 ? 0 : Math.max(newlines, 1);
+  const body = Buffer.from(r.stdout.slice(nl2 + 1), 'utf8');
   if (body.includes(0)) return toolResult(`${rel} looks binary — this tool reads text files only`, { isError: true });
-  return toolResult({
-    path: rel, size_bytes: size,
-    truncated: size > LXC_FILE_READ_CAP,
-    content: body.toString('utf8'),
-  });
+  const content = body.toString('utf8');
+  const returnedLines = content === '' ? 0 : content.replace(/\n$/, '').split('\n').length;
+
+  const out = {
+    path: rel,
+    size_bytes: size,
+    total_lines: totalLines,
+    content,
+  };
+  if (range.ranged) {
+    out.offset = range.start;
+    out.limit = range.count;
+    out.returned_lines = returnedLines;
+    out.truncated = body.length >= LXC_FILE_READ_CAP;
+    if (range.start > totalLines && totalLines > 0) {
+      out.note = `offset ${range.start} is past the end of the file (${totalLines} lines).`;
+    }
+  } else {
+    out.truncated = size > LXC_FILE_READ_CAP;
+  }
+  return toolResult(out);
 }
 
 async function toolWriteProjectFile(args, auth) {
@@ -795,24 +857,185 @@ async function toolWriteProjectFile(args, auth) {
 
   // Commit the edit and push to the project's bare repo, so it survives
   // rehydrate and shows in the project's history like any other change.
-  const message = String(args.commit_message || `chat edit: ${rel}`).slice(0, 200);
-  const commitScript = 'set -e; cd /srv/app; git add -A -- "$1"; '
-    + 'if git diff --cached --quiet -- "$1"; then echo PP_NOCHANGE; '
-    + 'else git -c user.email=mcp@proxypilot -c user.name="ProxyPilot MCP" commit -q -m "$2" -- "$1"; fi; '
-    + 'git push -q origin HEAD:main 2>/dev/null || echo PP_PUSH_FAILED >&2; git rev-parse HEAD';
-  const c = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', commitScript, 'sh', rel, message],
-    { timeoutMs: 60000 },
-  );
-  const unchanged = /PP_NOCHANGE/.test(c.stdout);
-  const sha = (c.stdout.trim().split('\n').pop() || '').trim();
+  const git = await commitProjectPaths(incusName, [rel], args.commit_message || `chat edit: ${rel}`);
   logAudit(auth.created_by, 'MOCK2_FILE_WRITTEN', 'mock2_project', project.id, { via: 'mcp', path: rel, bytes: Buffer.byteLength(content), replaced: exists }, null);
   return toolResult({
     written: true, path: rel, bytes: Buffer.byteLength(content),
-    committed: c.status === 0 && !unchanged,
-    unchanged,
-    commit: /^[0-9a-f]{40}$/.test(sha) ? sha : null,
-    push_failed: /PP_PUSH_FAILED/.test(c.stderr || ''),
+    ...git,
+    next: 'When your edits are complete, apply them with redeploy_project.',
+  });
+}
+
+// edit_project_file — the surgical write.
+//
+// Reads the file out, replaces in Node, writes it back. NOT sed/perl in the
+// container: the caller's old_string is arbitrary text, and building a script
+// around it is exactly the quoting hazard the positional-parameter convention
+// everywhere else in this file exists to avoid. Doing it here also means the
+// occurrence count is exact rather than whatever a regex engine thought.
+//
+// THE TRUNCATION TRAP: read_project_file caps at 512 KB. Replacing inside a
+// truncated copy and writing it back would silently DELETE everything past the
+// cap, so a file over the cap is refused outright rather than edited.
+async function toolEditProjectFile(args, auth) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const guard = liveBuildGuard(m, project);
+  if (guard) return toolResult(guard, { isError: true });
+  const rel = validProjectFilePath(args.path);
+  if (!rel) return toolResult('path must be a file path relative to the app root, e.g. src/server/routes.ts', { isError: true });
+
+  const incusName = projectContainerName(m, project);
+  const abs = `${M2_APP_DIR}/${rel}`;
+  const r = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c',
+      'p="$1"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; wc -c < "$p"; cat -- "$p"', 'sh', abs],
+    { timeoutMs: 30000 },
+  );
+  if (r.status === 66) return toolResult(`Not a file: ${rel} (use list_project_files to see the tracked files)`, { isError: true });
+  if (r.status !== 0) {
+    return toolResult(`Could not read ${rel} — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  const nl = r.stdout.indexOf('\n');
+  const size = Number(r.stdout.slice(0, nl).trim()) || 0;
+  if (size > LXC_FILE_READ_CAP) {
+    return toolResult(
+      `${rel} is ${size} bytes, over the ${Math.floor(LXC_FILE_READ_CAP / 1024)} KB limit this tool can edit safely — editing it would risk truncating the part it cannot see. Use write_project_file with the complete new content instead.`,
+      { isError: true },
+    );
+  }
+  const before = r.stdout.slice(nl + 1);
+  if (Buffer.from(before, 'utf8').includes(0)) {
+    return toolResult(`${rel} looks binary — this tool edits text files only`, { isError: true });
+  }
+
+  const edited = applyStringEdit(before, args.old_string, args.new_string, args.expect_occurrences);
+  if (edited.error) return toolResult(edited.error, { isError: true });
+
+  const w = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; cat > "$p"', 'sh', abs],
+    { input: edited.content, timeoutMs: 60000 },
+  );
+  if (w.status !== 0) {
+    return toolResult(`Write failed: ${(w.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+
+  const git = await commitProjectPaths(incusName, [rel], args.commit_message || `chat edit: ${rel}`);
+  logAudit(auth.created_by, 'MOCK2_FILE_EDITED', 'mock2_project', project.id, {
+    via: 'mcp', path: rel, replaced: edited.replaced,
+  }, null);
+  return toolResult({
+    edited: true,
+    path: rel,
+    replaced_count: edited.replaced,
+    bytes: Buffer.byteLength(edited.content),
+    ...git,
+    next: 'When your edits are complete, apply them with redeploy_project.',
+  });
+}
+
+// search_project_files — git grep over the tracked files.
+//
+// git grep rather than grep: it searches what is COMMITTED-and-tracked, skips
+// .git and node_modules for free, and is fast on a big checkout. The pattern
+// and pathspec are positional arguments to git — no shell — so regex
+// punctuation needs no escaping and cannot become a command.
+async function toolSearchProjectFiles(args) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const pattern = validSearchPattern(args.pattern);
+  if (!pattern) return toolResult('pattern is required (an extended regular expression, up to 1000 characters, no control characters)', { isError: true });
+  let glob = null;
+  if (args.glob != null && String(args.glob).trim() !== '') {
+    glob = validPathspec(args.glob);
+    if (!glob) return toolResult('glob must be a relative git pathspec, e.g. "src/**/*.ts" (no leading / and no ..)', { isError: true });
+  }
+  const maxResults = normalizeMaxResults(args.max_results);
+
+  const argv = ['exec', projectContainerName(m, project), '--',
+    'git', '-C', M2_APP_DIR, 'grep', '-n', '-I', '-E'];
+  if (args.ignore_case === true) argv.push('-i');
+  argv.push('-e', pattern);
+  if (glob) argv.push('--', glob);
+
+  const r = await runHostCapture('incus', argv, { timeoutMs: 60000 });
+  // git grep exits 1 for "no matches" — a result, not a failure.
+  if (r.status !== 0 && r.status !== 1) {
+    return toolResult(`Search failed: ${(r.stderr || '').trim().slice(-300) || 'is the container running?'}`, { isError: true });
+  }
+  const matches = parseGitGrepOutput(r.stdout, maxResults);
+  const totalLines = r.stdout ? r.stdout.split('\n').filter(Boolean).length : 0;
+  return toolResult({
+    pattern, glob, match_count: matches.length,
+    truncated: totalLines > matches.length,
+    matches,
+    next: matches.length
+      ? 'Read the surrounding code with read_project_file using offset/limit around a line_number.'
+      : 'No matches. Check the pattern (it is an extended regex, not a glob) or widen the pathspec.',
+  });
+}
+
+async function toolDeleteProjectFile(args, auth) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const guard = liveBuildGuard(m, project);
+  if (guard) return toolResult(guard, { isError: true });
+  const rel = validProjectFilePath(args.path);
+  if (!rel) return toolResult('path must be a file path relative to the app root', { isError: true });
+
+  const incusName = projectContainerName(m, project);
+  const r = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c',
+      'p="$1"; test -e "$p" || { echo PP_ABSENT >&2; exit 66; }; rm -rf -- "$p"', 'sh', `${M2_APP_DIR}/${rel}`],
+    { timeoutMs: 30000 },
+  );
+  if (r.status === 66) return toolResult(`${rel} does not exist in the checkout — nothing to delete.`, { isError: true });
+  if (r.status !== 0) {
+    return toolResult(`Delete failed: ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  const git = await commitProjectPaths(incusName, [rel], args.commit_message || `chat delete: ${rel}`);
+  logAudit(auth.created_by, 'MOCK2_FILE_DELETED', 'mock2_project', project.id, { via: 'mcp', path: rel }, null);
+  return toolResult({
+    deleted: true, path: rel, ...git,
+    // `unchanged` here means the path was not tracked, so the removal is real
+    // in the working tree but produced no commit — worth saying plainly.
+    note: git.unchanged ? 'The file was not tracked by git, so there was nothing to commit — it is gone from the checkout but not recoverable from history.' : undefined,
+    next: 'When your edits are complete, apply them with redeploy_project.',
+  });
+}
+
+async function toolMoveProjectFile(args, auth) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const guard = liveBuildGuard(m, project);
+  if (guard) return toolResult(guard, { isError: true });
+  const from = validProjectFilePath(args.from);
+  const to = validProjectFilePath(args.to);
+  if (!from || !to) return toolResult('from and to must both be file paths relative to the app root', { isError: true });
+  if (from === to) return toolResult('from and to are the same path — nothing to move.', { isError: true });
+
+  const incusName = projectContainerName(m, project);
+  const script = 'set -e; cd /srv/app; '
+    + 'test -e "$1" || { echo PP_ABSENT >&2; exit 66; }; '
+    + 'test -e "$2" && { echo PP_EXISTS >&2; exit 67; }; '
+    + 'mkdir -p -- "$(dirname -- "$2")"; git mv -- "$1" "$2"';
+  const r = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', from, to],
+    { timeoutMs: 30000 },
+  );
+  if (r.status === 66) return toolResult(`${from} does not exist in the checkout.`, { isError: true });
+  if (r.status === 67) return toolResult(`${to} already exists — move refused rather than overwriting it.`, { isError: true });
+  if (r.status !== 0) {
+    return toolResult(`Move failed: ${(r.stderr || '').trim().slice(-300)}. git mv needs the source to be tracked; use read + write_project_file + delete_project_file for an untracked file.`, { isError: true });
+  }
+  const git = await commitProjectPaths(incusName, [from, to], args.commit_message || `chat move: ${from} → ${to}`);
+  logAudit(auth.created_by, 'MOCK2_FILE_MOVED', 'mock2_project', project.id, { via: 'mcp', from, to }, null);
+  return toolResult({
+    moved: true, from, to, ...git,
     next: 'When your edits are complete, apply them with redeploy_project.',
   });
 }
@@ -976,6 +1199,10 @@ const TOOL_HANDLERS = {
   list_project_files: toolListProjectFiles,
   read_project_file: toolReadProjectFile,
   write_project_file: toolWriteProjectFile,
+  edit_project_file: toolEditProjectFile,
+  search_project_files: toolSearchProjectFiles,
+  delete_project_file: toolDeleteProjectFile,
+  move_project_file: toolMoveProjectFile,
   run_project_command: toolRunProjectCommand,
   redeploy_project: toolRedeployProject,
 };

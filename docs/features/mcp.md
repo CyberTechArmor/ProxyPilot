@@ -27,7 +27,8 @@ Revoking the token (same card) immediately cuts the client off.
 | LXC file edits | `read_lxc_file`, `write_lxc_file`, `rerun_startup` | The chat-only update loop: read a file, propose the edit, write on approval (previous version kept as `<path>.old`), then re-run the registered startup script to redeploy — run output and exit code come back to the chat. Lets a Claude subscription do small container updates without any zip or shell. |
 | Projects | `list_projects`, `get_project`, `send_project_build`, `upload_project_reference`, `clone_project` | `send_project_build` queues a quick update on the project's own AI harness — **this lane spends the project's configured API budget**. `clone_project` mirrors the UI's Clone (fresh / full-with-database). |
 | Project build control | `interrupt_project_build`, `cancel_queued_build` | Stop a running build (checkpoint-and-stop by default, or abandon) and cancel not-yet-started queue entries — the "that build is burning tokens on the wrong thing" stop switch, from chat. |
-| Project file edits | `list_project_files`, `read_project_file`, `write_project_file`, `redeploy_project` | The subscription lane for Projects: the chat does the thinking, ProxyPilot only executes file ops — no build tokens spent. Writes are git-committed to the project's history (and pushed to its repo), and refused while a build is running. `redeploy_project` then installs/migrates/builds/restarts and health-checks the live app. |
+| Project file reads | `list_project_files`, `search_project_files`, `read_project_file` | Find first, read narrowly. `search_project_files` is `git grep -E` over the tracked files and returns `path` + `line_number` + the matching line; `read_project_file` then takes `offset`/`limit` to pull just that window (it always reports `total_lines`, so a ranged read can say what it left behind). Reading whole files to find one function is the expensive habit these two exist to break. |
+| Project file edits | `write_project_file`, `edit_project_file`, `delete_project_file`, `move_project_file`, `redeploy_project` | The subscription lane for Projects: the chat does the thinking, ProxyPilot only executes file ops — no build tokens spent. `edit_project_file` replaces an exact string and refuses unless the match count is what the caller expected, which is the one to reach for on a large file — `write_project_file` rewrites the whole thing and gets riskier the bigger the file. `move_project_file` uses `git mv` so history follows. All are git-committed and pushed, and all are refused while a build is running. `redeploy_project` then installs/migrates/builds/restarts and health-checks the live app. |
 | Project verification | `run_project_command` | Runs one allowlisted command in the project's checkout — `npm ci`, `npm run <script>`, `npx playwright …`, or a read-only `git` subcommand — so the chat lane can run the project's own gates instead of shipping unverified. Same container and environment `redeploy_project` builds in (`/etc/environment` sourced, cwd = the app dir), so a green result means what it says. Returns `exit_code` plus the **last** 64 KB of each stream (a failing test prints its summary last). Refused while a build is running. |
 | Transfer | `create_upload_ticket` | Big zips: the tool returns a one-shot `upload_url`; `curl -T site.zip -H 'Content-Type: application/zip' <url>` pushes the bytes, then the ticket is referenced in an inspect tool. Zips ≤ 2 MB may ride inline as `zip_base64`. |
 
@@ -41,8 +42,8 @@ words you use pick the lane:
   key configured in ProxyPilot (estimates, gates, change records — and API
   token spend).
 - **"Edit the files directly" / "use the MCP file tools, don't queue a
-  build"** → `read_project_file` → `write_project_file` →
-  `run_project_command` → `redeploy_project`: the chat itself (your Claude
+  build"** → `search_project_files` → `read_project_file` →
+  `edit_project_file` → `run_project_command` → `redeploy_project`: the chat itself (your Claude
   subscription) does the thinking; ProxyPilot only reads/writes files, runs
   the project's own checks, and redeploys. No build tokens are spent. The
   harness's own gates still don't run in this lane, but `run_project_command`
@@ -88,6 +89,14 @@ words you use pick the lane:
   possible follow-up (see docs/known-issues.md).
 - Upload tickets live in process memory — a backend restart between
   `create_upload_ticket` and the PUT invalidates the ticket (re-create it).
+- `edit_project_file` refuses files over 512 KB. It reads the file out,
+  replaces in the backend and writes it back, and the reader caps at 512 KB —
+  so editing a larger file would silently drop everything past the cap. Use
+  `write_project_file` with the complete content for those.
+- `search_project_files` returns matching lines, not surrounding context. Pair
+  it with `read_project_file`'s `offset`/`limit` to pull the lines around a
+  hit; that composes better than a fixed context window and costs one extra
+  call only when you actually need the context.
 - `run_project_command`'s timeout (default 600s, max 1800s) kills the `incus`
   client, not the process inside the container — a command that overruns may
   still be running there. The result says so when it times out. `deploy.js`

@@ -107,6 +107,63 @@ function costLabel(cents) {
   return `$${(c / 100).toFixed(2)}`;
 }
 
+// ---- base-domain option (create + clone) ----
+
+// "Serve on the parent domain itself" — example.com rather than only
+// p-7f3a9c2e.example.com. Renders nothing until a domain is chosen or when the
+// backend didn't compute a verdict (base_domain_available === null, i.e. an
+// older API); renders disabled, naming the claimant, when something else on the
+// host already answers on the apex. Shared so create and clone can never drift.
+function BaseDomainOption({ id, domain, checked, onChange }) {
+  if (!domain || domain.base_domain_available == null) return null;
+  const free = !!domain.base_domain_available;
+  return (
+    <div className="rounded-md border p-3 space-y-2">
+      <label
+        htmlFor={id}
+        className={`flex min-h-11 items-center justify-between gap-3 ${free ? 'cursor-pointer' : ''}`}
+      >
+        <span className="min-w-0 space-y-1">
+          <span className="block text-sm font-medium leading-none">Use the base domain</span>
+          <span className="block text-xs text-muted-foreground break-all">
+            Serve on <code className="text-foreground">{domain.domain}</code> itself,
+            not just a subdomain.
+          </span>
+        </span>
+        <Switch
+          id={id}
+          className="shrink-0"
+          checked={free && checked}
+          disabled={!free}
+          onCheckedChange={(v) => onChange(!!v)}
+        />
+      </label>
+      {!free ? (
+        <p className="text-xs text-amber-500">
+          Not available — {domain.base_domain_claimed_by?.label || 'another service'}{' '}
+          already serves <code>{domain.domain}</code>.
+        </p>
+      ) : checked ? (
+        <p className="text-xs text-muted-foreground">
+          Point an A record for <code>{domain.domain}</code> at this host — the wildcard
+          that covers subdomains does not cover the base domain.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+// The URL a dialog is about to mint: the base domain when that option is on,
+// otherwise `<name-slug>.<parent>`. Returns null when the name yields no slug.
+function previewUrl(name, domain, baseDomainOn) {
+  const slug = previewSlug(name);
+  if (!slug || !domain) return null;
+  return {
+    primary: baseDomainOn ? domain.domain : `${slug}.${domain.domain}`,
+    also: baseDomainOn ? `${slug}.${domain.domain}` : null,
+  };
+}
+
 // ---- sorting ----
 
 const SORTS = {
@@ -205,6 +262,7 @@ export default function Projects() {
   // The toggle only counts when the apex is actually on offer, so a list that
   // went stale between load and submit can't ask for a taken hostname.
   const baseDomainOn = !!form.use_base_domain && !!selectedDomain?.base_domain_available;
+  const createUrl = previewUrl(form.name, selectedDomain, baseDomainOn);
 
   const submitCreate = async () => {
     if (!form.name.trim() || !form.parent_domain_id) return;
@@ -465,19 +523,11 @@ export default function Projects() {
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                 autoFocus
               />
-              {form.name.trim() && form.parent_domain_id ? (
-                previewSlug(form.name) ? (
+              {form.name.trim() && selectedDomain ? (
+                createUrl ? (
                   <p className="text-xs text-muted-foreground break-all">
-                    URL:{' '}
-                    <code className="text-foreground">
-                      {baseDomainOn ? selectedDomain?.domain : `${previewSlug(form.name)}.${selectedDomain?.domain}`}
-                    </code>
-                    {baseDomainOn ? (
-                      <>
-                        {' '}(also{' '}
-                        <code>{previewSlug(form.name)}.{selectedDomain?.domain}</code>)
-                      </>
-                    ) : null}
+                    URL: <code className="text-foreground">{createUrl.primary}</code>
+                    {createUrl.also ? <> (also <code>{createUrl.also}</code>)</> : null}
                   </p>
                 ) : (
                   <p className="text-xs text-amber-500">
@@ -504,47 +554,12 @@ export default function Projects() {
               <p className="text-xs text-muted-foreground">Only verified &amp; enabled domains appear here.</p>
             </div>
 
-            {/* Base-domain option — offered only once a domain is chosen, and
-                only when nothing else on this host already answers on its apex
-                (base_domain_available). When something does, the row still
-                renders, disabled, naming the claimant so the operator knows
-                why it isn't on offer. */}
-            {selectedDomain && selectedDomain.base_domain_available !== null ? (
-              <div className="rounded-md border p-3 space-y-2">
-                <label
-                  htmlFor="proj-base-domain"
-                  className={`flex min-h-11 items-center justify-between gap-3 ${selectedDomain.base_domain_available ? 'cursor-pointer' : ''}`}
-                >
-                  <span className="min-w-0 space-y-1">
-                    <span className="block text-sm font-medium leading-none">Use the base domain</span>
-                    <span className="block text-xs text-muted-foreground break-all">
-                      Serve on <code className="text-foreground">{selectedDomain.domain}</code> itself,
-                      not just a subdomain.
-                    </span>
-                  </span>
-                  <Switch
-                    id="proj-base-domain"
-                    className="shrink-0"
-                    checked={baseDomainOn}
-                    disabled={!selectedDomain.base_domain_available}
-                    onCheckedChange={(v) => setForm((f) => ({ ...f, use_base_domain: !!v }))}
-                  />
-                </label>
-                {selectedDomain.base_domain_available ? (
-                  baseDomainOn ? (
-                    <p className="text-xs text-muted-foreground">
-                      Point an A record for <code>{selectedDomain.domain}</code> at this host —
-                      the wildcard that covers subdomains does not cover the base domain.
-                    </p>
-                  ) : null
-                ) : (
-                  <p className="text-xs text-amber-500">
-                    Not available — {selectedDomain.base_domain_claimed_by?.label || 'another service'}{' '}
-                    already serves <code>{selectedDomain.domain}</code>.
-                  </p>
-                )}
-              </div>
-            ) : null}
+            <BaseDomainOption
+              id="proj-base-domain"
+              domain={selectedDomain}
+              checked={baseDomainOn}
+              onChange={(v) => setForm((f) => ({ ...f, use_base_domain: v }))}
+            />
             <p className="text-xs text-muted-foreground">
               The project starts on the built-in base design. In the design chat you can keep
               that look or let the AI explore a new one per message.
@@ -620,14 +635,16 @@ function CloneButton({ p, onClone }) {
   );
 }
 
-// Clone dialog — name + domain + what to bring. 'fresh' copies the app, its
-// full git history, and the asset library (fresh database); 'full' also dumps
-// and restores the source's database, which needs the source online.
+// Clone dialog — name + domain (+ the base-domain option, same as create) +
+// what to bring. 'fresh' copies the app, its full git history, and the asset
+// library (fresh database); 'full' also dumps and restores the source's
+// database, which needs the source online.
 function CloneDialog({ project, domains, onOpenChange, onCloned }) {
   const { toast } = useToast();
   const [name, setName] = useState('');
   const [domainId, setDomainId] = useState('');
   const [mode, setMode] = useState('fresh');
+  const [useBaseDomain, setUseBaseDomain] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -635,8 +652,15 @@ function CloneDialog({ project, domains, onOpenChange, onCloned }) {
       setName(`${project.name} copy`);
       setDomainId(String(project.parent_domain_id || domains[0]?.id || ''));
       setMode('fresh');
+      // Never inherited from the source: two projects cannot both hold the
+      // apex, so the copy has to ask for it on its own.
+      setUseBaseDomain(false);
     }
   }, [project, domains]);
+
+  const selectedDomain = domains.find((d) => String(d.id) === domainId) || null;
+  const baseDomainOn = useBaseDomain && !!selectedDomain?.base_domain_available;
+  const url = previewUrl(name, selectedDomain, baseDomainOn);
 
   if (!project) return null;
   const fullAvailable = project.lifecycle === 'active';
@@ -649,6 +673,7 @@ function CloneDialog({ project, domains, onOpenChange, onCloned }) {
         name: name.trim(),
         parent_domain_id: Number(domainId),
         mode,
+        use_base_domain: baseDomainOn,
       });
       onCloned(res);
     } catch (err) {
@@ -675,18 +700,19 @@ function CloneDialog({ project, domains, onOpenChange, onCloned }) {
               id="clone-name" className="h-11 sm:h-10" value={name}
               onChange={(e) => setName(e.target.value)} autoFocus
             />
-            {name.trim() && domainId && previewSlug(name) ? (
+            {name.trim() && url ? (
               <p className="text-xs text-muted-foreground break-all">
-                URL:{' '}
-                <code className="text-foreground">
-                  {previewSlug(name)}.{domains.find((d) => String(d.id) === domainId)?.domain}
-                </code>
+                URL: <code className="text-foreground">{url.primary}</code>
+                {url.also ? <> (also <code>{url.also}</code>)</> : null}
               </p>
             ) : null}
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="clone-domain">Parent domain</Label>
-            <Select value={domainId} onValueChange={setDomainId}>
+            <Select
+              value={domainId}
+              onValueChange={(v) => { setDomainId(v); setUseBaseDomain(false); }}
+            >
               <SelectTrigger id="clone-domain" className="h-11 sm:h-10">
                 <SelectValue placeholder="Choose a verified domain" />
               </SelectTrigger>
@@ -697,6 +723,12 @@ function CloneDialog({ project, domains, onOpenChange, onCloned }) {
               </SelectContent>
             </Select>
           </div>
+          <BaseDomainOption
+            id="clone-base-domain"
+            domain={selectedDomain}
+            checked={baseDomainOn}
+            onChange={setUseBaseDomain}
+          />
           <div className="space-y-2" role="radiogroup" aria-label="What to bring">
             <Label>What to bring</Label>
             <button

@@ -1105,6 +1105,19 @@ export function createMock2Router() {
       return res.status(400).json({ error: `Parent domain "${parent.domain}" is not verified and enabled — it cannot host a project yet` });
     }
 
+    // Same base-domain option create offers. Never inherited from the source
+    // (cloneCopyPatch deliberately skips custom_domain): only one project can
+    // hold a hostname, so the copy has to claim a free apex of its own.
+    const useBaseDomain = req.body?.use_base_domain === true;
+    if (useBaseDomain) {
+      const base = baseDomainStatus(parent.domain);
+      if (!base.available) {
+        return res.status(409).json({
+          error: `The base domain "${parent.domain}" cannot be used — it is already served by ${base.claimed_by?.label || 'another service'}. Clone onto a subdomain instead.`,
+        });
+      }
+    }
+
     let slug;
     try {
       slug = deriveProjectSlug(parentId, name);
@@ -1117,6 +1130,7 @@ export function createMock2Router() {
     try {
       project = createProject({
         name, description: source.description, parentDomainId: parentId, slug,
+        customDomain: useBaseDomain ? parent.domain : null,
         repoPathFor: repoPathForProject,
         containerNameFor: containerNameForProject,
         createdBy: req.user.id,
@@ -1137,6 +1151,7 @@ export function createMock2Router() {
 
     logAudit(req.user.id, 'MOCK2_PROJECT_CLONE', 'mock2_project', project.id, {
       source_project_id: source.id, name, slug: project.slug, mode, assets_copied: assetsCopied,
+      base_domain: useBaseDomain ? parent.domain : null,
     }, req.ip);
 
     startCloneProvision(project, {

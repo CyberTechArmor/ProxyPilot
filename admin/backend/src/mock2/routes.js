@@ -75,6 +75,8 @@ import {
   insertParentDomain,
   updateParentDomain,
   deleteParentDomain,
+  hostnameClaimSnapshot,
+  baseDomainStatus,
 } from './domains.js';
 import { validateDomain, publicDomainShape, isSelectable, parseHostIps } from './domain-logic.js';
 import { runVerification } from './verify.js';
@@ -378,6 +380,9 @@ const createProjectSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(2000).optional(),
   parent_domain_id: z.union([z.number().int(), z.string()]),
+  // Serve on the parent domain ITSELF (example.com) instead of only the minted
+  // subdomain. Refused when another service already answers on that hostname.
+  use_base_domain: z.boolean().optional(),
   // Base design preset (design-presets.js); omitted/'ai' → the mockup model
   // picks the look, exactly as before.
   design_preset: z.string().trim().max(40).optional(),
@@ -820,15 +825,24 @@ export function createMock2Router() {
 
   // ---- Parent domains ----
 
+  // Shape a domain row WITH the base-domain (apex) verdict the create dialog
+  // keys off — can a project serve on example.com itself, or does something
+  // else on this host already answer there? `snapshot` is the shared claim
+  // snapshot when shaping a list (one pair of queries for the whole page).
+  const shapeDomain = (row, snapshot = null) => publicDomainShape(row, {
+    baseDomain: baseDomainStatus(row.domain, { snapshot }),
+  });
+
   router.get('/parent-domains', requireAdmin, (_req, res) => {
-    const rows = listParentDomains().map(publicDomainShape);
+    const snapshot = hostnameClaimSnapshot();
+    const rows = listParentDomains().map((row) => shapeDomain(row, snapshot));
     res.json({ domains: rows });
   });
 
   router.get('/parent-domains/:id', requireAdmin, (req, res) => {
     const row = getParentDomain(Number(req.params.id));
     if (!row) return res.status(404).json({ error: 'Parent domain not found' });
-    res.json({ domain: { ...publicDomainShape(row), verifying: verifying.has(row.id) } });
+    res.json({ domain: { ...shapeDomain(row), verifying: verifying.has(row.id) } });
   });
 
   router.post('/parent-domains', requireAdmin, (req, res) => {
@@ -848,7 +862,7 @@ export function createMock2Router() {
     // Kick off verification in the background; the client polls GET for status.
     startVerification(row);
 
-    res.status(202).json({ domain: { ...publicDomainShape(row), verifying: true } });
+    res.status(202).json({ domain: { ...shapeDomain(row), verifying: true } });
   });
 
   router.post('/parent-domains/:id/verify', requireAdmin, (req, res) => {
@@ -856,7 +870,7 @@ export function createMock2Router() {
     if (!row) return res.status(404).json({ error: 'Parent domain not found' });
     const started = startVerification(row);
     logAudit(req.user?.id, 'MOCK2_DOMAIN_VERIFY', 'mock2_parent_domain', row.id, { domain: row.domain, started }, req.ip);
-    res.status(202).json({ domain: { ...publicDomainShape(getParentDomain(row.id)), verifying: true }, alreadyRunning: !started });
+    res.status(202).json({ domain: { ...shapeDomain(getParentDomain(row.id)), verifying: true }, alreadyRunning: !started });
   });
 
   router.post('/parent-domains/:id/enable', requireAdmin, async (req, res) => {
@@ -879,7 +893,7 @@ export function createMock2Router() {
       reload = { ok: false, error: err.message };
     }
     logAudit(req.user?.id, 'MOCK2_DOMAIN_ENABLE', 'mock2_parent_domain', row.id, { domain: row.domain }, req.ip);
-    res.json({ domain: publicDomainShape(updated), caddy: reload });
+    res.json({ domain: shapeDomain(updated), caddy: reload });
   });
 
   router.post('/parent-domains/:id/disable', requireAdmin, async (req, res) => {
@@ -893,7 +907,7 @@ export function createMock2Router() {
       reload = { ok: false, error: err.message };
     }
     logAudit(req.user?.id, 'MOCK2_DOMAIN_DISABLE', 'mock2_parent_domain', row.id, { domain: row.domain }, req.ip);
-    res.json({ domain: publicDomainShape(updated), caddy: reload });
+    res.json({ domain: shapeDomain(updated), caddy: reload });
   });
 
   // Destructive: remove the domain and its Caddy site file. Requires a fresh
@@ -971,6 +985,20 @@ export function createMock2Router() {
       return res.status(400).json({ error: `Parent domain "${parent.domain}" is not verified and enabled — it cannot host a project yet` });
     }
 
+    // Opt-in: also answer on the parent domain itself (example.com), not just
+    // the minted subdomain. Re-checked here rather than trusted from the UI —
+    // the dialog's availability flag can be stale by the time Create is
+    // pressed, and taking a hostname another service owns would break it.
+    const useBaseDomain = parsed.data.use_base_domain === true;
+    if (useBaseDomain) {
+      const base = baseDomainStatus(parent.domain);
+      if (!base.available) {
+        return res.status(409).json({
+          error: `The base domain "${parent.domain}" cannot be used — it is already served by ${base.claimed_by?.label || 'another service'}. Create the project on a subdomain instead.`,
+        });
+      }
+    }
+
     // The subdomain is derived from the project NAME (e.g. "My App" →
     // my-app.<domain>); a duplicate name is rejected, not disambiguated.
     let slug;
@@ -985,6 +1013,11 @@ export function createMock2Router() {
     try {
       project = createProject({
         name, description, parentDomainId: parentId, slug,
+        // The base domain rides the existing custom-domain column: it publishes
+        // its own Caddy block (projectActiveFqdns) and becomes the project's
+        // primary URL. The minted subdomain keeps working alongside it, so the
+        // project is still reachable while the apex A record propagates.
+        customDomain: useBaseDomain ? parent.domain : null,
         repoPathFor: repoPathForProject,
         containerNameFor: containerNameForProject,
         createdBy: req.user.id,
@@ -1019,7 +1052,10 @@ export function createMock2Router() {
       } catch (e) { console.warn('[mock2] preset reference seeding failed:', e?.message); }
     }
 
-    logAudit(req.user.id, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, { name, slug: project.slug, domain: parent.domain, design_preset: presetKey }, req.ip);
+    logAudit(req.user.id, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, {
+      name, slug: project.slug, domain: parent.domain, design_preset: presetKey,
+      base_domain: useBaseDomain ? parent.domain : null,
+    }, req.ip);
 
     // Lean BEAF Pro: every LXC AI-dev project gets a card on the innovation
     // board. If the create came FROM an LBP card ("Build LXC"), link that
@@ -1906,6 +1942,16 @@ export function createMock2Router() {
     const v = validateDomain(parsed.data.domain);
     if (!v.ok) return res.status(400).json({ error: v.error });
     if (!project.parent_domain_id) return res.status(409).json({ error: 'Custom domains attach to a slug-based project in M2' });
+
+    // Same rule the base-domain option enforces at create: never take a
+    // hostname another service (or project) already answers on. Excludes this
+    // project so re-submitting its current domain is a no-op, not a conflict.
+    const claim = baseDomainStatus(v.domain, { excludeProjectId: project.id });
+    if (!claim.available) {
+      return res.status(409).json({
+        error: `"${v.domain}" is already served by ${claim.claimed_by?.label || 'another service'} — free it there first, or choose a different domain.`,
+      });
+    }
 
     const dnsCheck = await checkARecord(v.domain);
     const updated = updateProject(project.id, { custom_domain: v.domain });

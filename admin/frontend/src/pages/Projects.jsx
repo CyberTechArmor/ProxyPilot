@@ -11,7 +11,10 @@
 // and the seven admin tiles moved behind the gear (Projects → Settings), and
 // create asks for a name and a domain only — no description, no design picker
 // (the base look is the built-in default; the design chat's On theme / New look
-// toggle decides how far the AI strays from it).
+// toggle decides how far the AI strays from it). The one extra choice create
+// offers is the base-domain toggle: serve on the parent domain itself rather
+// than only its minted subdomain, shown only while nothing else on the host
+// answers there (base_domain_available off the parent-domains API).
 //
 // The list itself carries search, sort, per-user pins, and a grid/list toggle;
 // each card shows team, age, spend, and last activity so the grid is scannable
@@ -39,6 +42,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import {
   FolderGit2, Loader2, Plus, ExternalLink, Sparkles, Hammer, Settings, Search, Star,
   LayoutGrid, List, Users, CalendarDays, Wallet, X, Copy, Database,
@@ -144,7 +148,7 @@ export default function Projects() {
   const [domains, setDomains] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', parent_domain_id: '' });
+  const [form, setForm] = useState({ name: '', parent_domain_id: '', use_base_domain: false });
   const [creating, setCreating] = useState(false);
   const [cloneTarget, setCloneTarget] = useState(null); // project being cloned, or null
 
@@ -191,6 +195,17 @@ export default function Projects() {
     return () => clearInterval(id);
   }, [gate, projects, load]);
 
+  // The parent domain chosen in the create dialog. base_domain_available comes
+  // from the backend (null on an older API ⇒ the option stays hidden), and
+  // base_domain_claimed_by names whatever already answers on the apex.
+  const selectedDomain = useMemo(
+    () => domains.find((d) => String(d.id) === form.parent_domain_id) || null,
+    [domains, form.parent_domain_id],
+  );
+  // The toggle only counts when the apex is actually on offer, so a list that
+  // went stale between load and submit can't ask for a taken hostname.
+  const baseDomainOn = !!form.use_base_domain && !!selectedDomain?.base_domain_available;
+
   const submitCreate = async () => {
     if (!form.name.trim() || !form.parent_domain_id) return;
     setCreating(true);
@@ -198,9 +213,12 @@ export default function Projects() {
       const res = await api.mock2CreateProject({
         name: form.name.trim(),
         parent_domain_id: Number(form.parent_domain_id),
+        // Only ever sent when the chosen domain's apex is actually free — the
+        // backend re-checks, so a stale flag is refused rather than obeyed.
+        use_base_domain: baseDomainOn,
       });
       setCreateOpen(false);
-      setForm({ name: '', parent_domain_id: '' });
+      setForm({ name: '', parent_domain_id: '', use_base_domain: false });
       toast({ title: 'Project creating', description: 'Provisioning the container and repo — this takes a minute.' });
       if (res.project?.id) navigate(`/projects/${res.project.id}`);
       else load();
@@ -429,7 +447,8 @@ export default function Projects() {
             <DialogTitle>New project</DialogTitle>
             <DialogDescription>
               A container, bare git repo, and a per-slug HTTPS URL are provisioned on the
-              chosen parent domain. The project name is display-only — the URL uses a minted slug.
+              chosen parent domain. The project name is display-only — the URL uses a minted slug,
+              or the base domain itself when nothing else is using it.
             </DialogDescription>
           </DialogHeader>
           <form
@@ -451,8 +470,14 @@ export default function Projects() {
                   <p className="text-xs text-muted-foreground break-all">
                     URL:{' '}
                     <code className="text-foreground">
-                      {previewSlug(form.name)}.{domains.find((d) => String(d.id) === form.parent_domain_id)?.domain}
+                      {baseDomainOn ? selectedDomain?.domain : `${previewSlug(form.name)}.${selectedDomain?.domain}`}
                     </code>
+                    {baseDomainOn ? (
+                      <>
+                        {' '}(also{' '}
+                        <code>{previewSlug(form.name)}.{selectedDomain?.domain}</code>)
+                      </>
+                    ) : null}
                   </p>
                 ) : (
                   <p className="text-xs text-amber-500">
@@ -465,7 +490,7 @@ export default function Projects() {
               <Label htmlFor="proj-domain">Parent domain</Label>
               <Select
                 value={form.parent_domain_id}
-                onValueChange={(v) => setForm((f) => ({ ...f, parent_domain_id: v }))}
+                onValueChange={(v) => setForm((f) => ({ ...f, parent_domain_id: v, use_base_domain: false }))}
               >
                 <SelectTrigger id="proj-domain" className="h-11 sm:h-10">
                   <SelectValue placeholder="Choose a verified domain" />
@@ -478,6 +503,48 @@ export default function Projects() {
               </Select>
               <p className="text-xs text-muted-foreground">Only verified &amp; enabled domains appear here.</p>
             </div>
+
+            {/* Base-domain option — offered only once a domain is chosen, and
+                only when nothing else on this host already answers on its apex
+                (base_domain_available). When something does, the row still
+                renders, disabled, naming the claimant so the operator knows
+                why it isn't on offer. */}
+            {selectedDomain && selectedDomain.base_domain_available !== null ? (
+              <div className="rounded-md border p-3 space-y-2">
+                <label
+                  htmlFor="proj-base-domain"
+                  className={`flex min-h-11 items-center justify-between gap-3 ${selectedDomain.base_domain_available ? 'cursor-pointer' : ''}`}
+                >
+                  <span className="min-w-0 space-y-1">
+                    <span className="block text-sm font-medium leading-none">Use the base domain</span>
+                    <span className="block text-xs text-muted-foreground break-all">
+                      Serve on <code className="text-foreground">{selectedDomain.domain}</code> itself,
+                      not just a subdomain.
+                    </span>
+                  </span>
+                  <Switch
+                    id="proj-base-domain"
+                    className="shrink-0"
+                    checked={baseDomainOn}
+                    disabled={!selectedDomain.base_domain_available}
+                    onCheckedChange={(v) => setForm((f) => ({ ...f, use_base_domain: !!v }))}
+                  />
+                </label>
+                {selectedDomain.base_domain_available ? (
+                  baseDomainOn ? (
+                    <p className="text-xs text-muted-foreground">
+                      Point an A record for <code>{selectedDomain.domain}</code> at this host —
+                      the wildcard that covers subdomains does not cover the base domain.
+                    </p>
+                  ) : null
+                ) : (
+                  <p className="text-xs text-amber-500">
+                    Not available — {selectedDomain.base_domain_claimed_by?.label || 'another service'}{' '}
+                    already serves <code>{selectedDomain.domain}</code>.
+                  </p>
+                )}
+              </div>
+            ) : null}
             <p className="text-xs text-muted-foreground">
               The project starts on the built-in base design. In the design chat you can keep
               that look or let the AI explore a new one per message.

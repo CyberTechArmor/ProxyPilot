@@ -1226,10 +1226,13 @@ export const api = {
     request(`/mock2/design-presets/${encodeURIComponent(key)}/adjust`, { method: 'POST', body: JSON.stringify({ instruction }) }),
   mock2DeleteDesignPreset: (key) =>
     request(`/mock2/design-presets/${encodeURIComponent(key)}`, { method: 'DELETE' }),
-  mock2CreateProject: ({ name, description, parent_domain_id, design_preset, lbp_project_id }) =>
+  // use_base_domain: serve the project on the parent domain itself
+  // (example.com) as well as its minted subdomain. The backend refuses it when
+  // another service already answers on that hostname.
+  mock2CreateProject: ({ name, description, parent_domain_id, use_base_domain, design_preset, lbp_project_id }) =>
     request('/mock2/projects', {
       method: 'POST',
-      body: JSON.stringify({ name, description, parent_domain_id, design_preset, lbp_project_id }),
+      body: JSON.stringify({ name, description, parent_domain_id, use_base_domain, design_preset, lbp_project_id }),
     }),
   mock2ProjectProvisionStatus: (id) => request(`/mock2/projects/${id}/provision-status`),
   // Clone a project under a new name/domain. mode 'fresh' = app + git history

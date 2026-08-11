@@ -53,11 +53,101 @@ export function isSelectable(row) {
     (row.verify_status === 'dns_ok' || row.verify_status === 'cert_ok');
 }
 
+// ---- base-domain (apex) availability ----
+
+// A project normally answers on a minted subdomain (`<slug>.<parent>`), but an
+// operator may want one to serve the PARENT DOMAIN ITSELF — example.com rather
+// than my-app.example.com. That is only offered when nothing else on this host
+// already answers on that exact hostname, because Caddy would otherwise end up
+// with two site blocks for the same address (a config-load failure) or Mock2
+// would quietly take over a hostname another surface owns.
+//
+// The claimants, in the order they are reported:
+//   - the ProxyPilot dashboard itself (app_settings.admin_domain),
+//   - a service in the main DB (`services`) or one of its extra HTTP routes
+//     (`service_http_routes`),
+//   - another Mock2 project that already claimed the hostname, and
+//   - a Caddy site file on disk with no DB row behind it — the LXC inline-
+//     services surface writes those directly (routes/lxc.js).
+//
+// Pure: the caller (domains.js) collects the rows and the on-disk flag; this
+// decides. Returns { domain, available, claimed_by, reason }, where claimed_by
+// is { kind, label, id } or null. `label` is written to drop straight into an
+// operator-facing sentence.
+//
+// Matching is EXACT (case- and trailing-dot-insensitive), never by suffix: a
+// service on `*.example.com` or on `app.example.com` does not claim
+// `example.com`. Caddy resolves an explicit address ahead of a wildcard one, so
+// those genuinely coexist — treating them as conflicts would refuse the option
+// on exactly the hosts most likely to want it.
+export function evaluateBaseDomain({
+  domain,
+  services = [],
+  routes = [],
+  projects = [],
+  adminDomain = null,
+  siteFileExists = false,
+  excludeProjectId = null,
+} = {}) {
+  // NOT normalizeDomain: that strips a leading `*.` (right for registering a
+  // parent domain, wrong here — it would make a wildcard service look like a
+  // claim on the apex). Case, whitespace, and the FQDN root dot only.
+  const host = (v) => String(v ?? '').trim().toLowerCase().replace(/\.$/, '');
+
+  const target = host(domain);
+  if (!target || target.includes('*')) {
+    return { domain: '', available: false, claimed_by: null, reason: 'no usable domain given' };
+  }
+
+  const same = (value) => !!value && host(value) === target;
+  const claimed = (kind, label, id = null) => ({
+    domain: target,
+    available: false,
+    claimed_by: { kind, label, id },
+    reason: `${target} is already served by ${label}`,
+  });
+
+  if (same(adminDomain)) return claimed('admin', 'the ProxyPilot dashboard');
+
+  const service = (services || []).find((s) => s && same(s.domain));
+  if (service) {
+    return claimed('service', `the service "${service.name || service.domain}"`, service.id ?? null);
+  }
+
+  const route = (routes || []).find((r) => r && same(r.domain));
+  if (route) return claimed('route', 'an existing service route', route.id ?? null);
+
+  const exclude = excludeProjectId == null ? null : String(excludeProjectId);
+  const project = (projects || []).find(
+    (p) => p && same(p.custom_domain) && String(p.id) !== exclude,
+  );
+  if (project) {
+    // An archived project keeps its hostname (it is rehydratable, ADR-006), so
+    // it still holds the claim — but say so, or the operator hunts for a live
+    // service that isn't there.
+    const archived = project.lifecycle === 'archived' ? ' (archived)' : '';
+    return claimed('project', `the project "${project.name || project.id}"${archived}`, project.id ?? null);
+  }
+
+  // No DB row owns it, but Caddy already has a site file for the hostname —
+  // an inline LXC service, or a leftover from a surface that writes site files
+  // directly. Refuse rather than clobber it.
+  if (siteFileExists) return claimed('caddy_site', 'an existing Caddy site file');
+
+  return { domain: target, available: true, claimed_by: null, reason: 'not in use by another service' };
+}
+
 // Decorate a stored row for API responses: never leak the encrypted DNS
 // credential blob, and surface the derived `selectable` flag the frontend and
 // M2 both key off. Pure — takes a plain row, returns a plain object.
-export function publicDomainShape(row) {
+//
+// `extra.baseDomain` is an evaluateBaseDomain verdict for this domain's apex,
+// computed by the caller (it needs the main DB + the Caddy site dir, neither of
+// which belongs in this module). Omitted ⇒ the base-domain fields are null,
+// meaning "not computed", which the UI reads as "don't offer the option".
+export function publicDomainShape(row, extra = {}) {
   if (!row) return null;
+  const { baseDomain = null } = extra;
   return {
     id: row.id,
     domain: row.domain,
@@ -67,6 +157,11 @@ export function publicDomainShape(row) {
     renewal_error: row.renewal_error || null,
     enabled: Number(row.enabled) === 1,
     selectable: isSelectable(row),
+    // Can a new project serve on the domain ITSELF (example.com) instead of a
+    // minted subdomain? null = the caller didn't compute it, which the UI reads
+    // as "don't offer the option".
+    base_domain_available: baseDomain ? !!baseDomain.available : null,
+    base_domain_claimed_by: baseDomain?.claimed_by || null,
     created_by: row.created_by ?? null,
     created_at: row.created_at || null,
     // Deferred wildcard DNS-01 columns — present for shape stability, always

@@ -49,7 +49,13 @@ CREATE TABLE mock2_projects (
   description TEXT,
   parent_domain_id INTEGER REFERENCES mock2_parent_domains(id),
   slug TEXT,                                   -- 'p-7f3a9c2e'; NULL when custom-domain project
-  custom_domain TEXT,                          -- alternative to slug; admin-gated
+  custom_domain TEXT,                          -- alternative to slug; admin-gated.
+                                               -- Also holds the PARENT DOMAIN itself when a
+                                               -- project was created with "use the base domain"
+                                               -- (offered only while nothing else on the host
+                                               -- answers there — mock2/domain-logic.js
+                                               -- evaluateBaseDomain). The minted slug FQDN keeps
+                                               -- serving alongside it.
   container_name TEXT,                         -- 'm2-<id>' (Incus name; NULL when archived)
   bridge_name TEXT,                            -- 'm2br<id>'
   repo_path TEXT NOT NULL,                     -- /var/lib/proxypilot/mock2/repos/<id>.git

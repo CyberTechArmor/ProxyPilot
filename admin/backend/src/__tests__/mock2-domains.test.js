@@ -18,6 +18,7 @@ import {
   validateDomain,
   isSelectable,
   publicDomainShape,
+  evaluateBaseDomain,
   canaryLabel,
   evaluateWildcardDns,
   classifyProbe,
@@ -82,6 +83,99 @@ test('publicDomainShape: derives selectable, never leaks the DNS credential blob
   assert.equal(shaped.has_dns_credentials, true);
   assert.equal('dns_credentials_enc' in shaped, false);
   assert.ok(!JSON.stringify(shaped).includes('SECRET-CIPHERTEXT'));
+});
+
+// ---- base-domain (apex) availability ----
+
+test('evaluateBaseDomain: free when nothing else answers on the hostname', () => {
+  const r = evaluateBaseDomain({
+    domain: 'Example.COM.',
+    services: [{ id: 's1', name: 'other', domain: 'app.example.com' }],
+    routes: [{ id: 'r1', domain: 'api.example.com' }],
+    projects: [{ id: 4, name: 'Sibling', custom_domain: 'demo.example.com' }],
+    adminDomain: 'admin.example.com',
+  });
+  assert.equal(r.available, true);
+  assert.equal(r.domain, 'example.com'); // normalized before comparing
+  assert.equal(r.claimed_by, null);
+});
+
+test('evaluateBaseDomain: a service, a route, a project, or the dashboard claims it', () => {
+  const svc = evaluateBaseDomain({
+    domain: 'example.com',
+    services: [{ id: 's1', name: 'Marketing site', domain: 'example.com' }],
+  });
+  assert.equal(svc.available, false);
+  assert.equal(svc.claimed_by.kind, 'service');
+  assert.match(svc.claimed_by.label, /Marketing site/);
+
+  const route = evaluateBaseDomain({ domain: 'example.com', routes: [{ id: 'r1', domain: 'EXAMPLE.com' }] });
+  assert.equal(route.available, false);
+  assert.equal(route.claimed_by.kind, 'route');
+
+  const proj = evaluateBaseDomain({
+    domain: 'example.com',
+    projects: [{ id: 7, name: 'Landing', custom_domain: 'example.com' }],
+  });
+  assert.equal(proj.available, false);
+  assert.equal(proj.claimed_by.kind, 'project');
+  assert.equal(proj.claimed_by.id, 7);
+
+  // An archived project still holds its hostname (it is rehydratable) and says so.
+  const archived = evaluateBaseDomain({
+    domain: 'example.com',
+    projects: [{ id: 7, name: 'Landing', custom_domain: 'example.com', lifecycle: 'archived' }],
+  });
+  assert.equal(archived.available, false);
+  assert.match(archived.claimed_by.label, /archived/);
+
+  const admin = evaluateBaseDomain({ domain: 'example.com', adminDomain: 'example.com' });
+  assert.equal(admin.available, false);
+  assert.equal(admin.claimed_by.kind, 'admin');
+});
+
+test('evaluateBaseDomain: a Caddy site file with no DB row still blocks it', () => {
+  const r = evaluateBaseDomain({ domain: 'example.com', siteFileExists: true });
+  assert.equal(r.available, false);
+  assert.equal(r.claimed_by.kind, 'caddy_site');
+});
+
+test('evaluateBaseDomain: excludeProjectId lets a project keep its own hostname', () => {
+  const projects = [{ id: 7, name: 'Landing', custom_domain: 'example.com' }];
+  assert.equal(evaluateBaseDomain({ domain: 'example.com', projects, excludeProjectId: 7 }).available, true);
+  assert.equal(evaluateBaseDomain({ domain: 'example.com', projects, excludeProjectId: 8 }).available, false);
+});
+
+test('evaluateBaseDomain: a subdomain claim never blocks the apex (and vice versa)', () => {
+  assert.equal(
+    evaluateBaseDomain({ domain: 'example.com', services: [{ id: 's', name: 'wild', domain: '*.example.com' }] }).available,
+    true,
+  );
+  assert.equal(
+    evaluateBaseDomain({ domain: 'dev.example.com', services: [{ id: 's', name: 'root', domain: 'example.com' }] }).available,
+    true,
+  );
+});
+
+test('evaluateBaseDomain: an empty/invalid domain is never available', () => {
+  assert.equal(evaluateBaseDomain({ domain: '' }).available, false);
+  assert.equal(evaluateBaseDomain({}).available, false);
+});
+
+test('publicDomainShape: carries the base-domain verdict, null when not computed', () => {
+  const row = { id: 3, domain: 'example.com', verify_status: 'dns_ok', enabled: 1 };
+  const plain = publicDomainShape(row);
+  assert.equal(plain.base_domain_available, null);
+  assert.equal(plain.base_domain_claimed_by, null);
+
+  const withVerdict = publicDomainShape(row, {
+    baseDomain: evaluateBaseDomain({
+      domain: 'example.com',
+      services: [{ id: 's1', name: 'Marketing site', domain: 'example.com' }],
+    }),
+  });
+  assert.equal(withVerdict.base_domain_available, false);
+  assert.equal(withVerdict.base_domain_claimed_by.kind, 'service');
 });
 
 test('canaryLabel: DNS-safe, recognizable, bounded', () => {

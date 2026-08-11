@@ -1237,10 +1237,12 @@ export const api = {
   mock2ProjectProvisionStatus: (id) => request(`/mock2/projects/${id}/provision-status`),
   // Clone a project under a new name/domain. mode 'fresh' = app + git history
   // + assets with a fresh database; 'full' = also copy the source database.
-  mock2CloneProject: (id, { name, parent_domain_id, mode }) =>
+  // use_base_domain: serve the copy on the parent domain itself — never
+  // inherited from the source, since only one project can hold that hostname.
+  mock2CloneProject: (id, { name, parent_domain_id, mode, use_base_domain }) =>
     request(`/mock2/projects/${id}/clone`, {
       method: 'POST',
-      body: JSON.stringify({ name, parent_domain_id, mode }),
+      body: JSON.stringify({ name, parent_domain_id, mode, use_base_domain }),
     }),
   // ---- MCP access tokens (Claude connector) ----
   mcpListTokens: () => request('/mcp-tokens'),

@@ -489,7 +489,7 @@ test('cloneCopyPatch carries settings, never identity or runtime state', () => {
     id: 7, name: 'Src', slug: 'src', container_name: 'm2-7', deployed_commit: 'abc',
     description: 'a thing', design_preset: 'portal-blue', harness: 'claude',
     suggest_mode: 'ask', clarify_mode: 'on', design_approved_at: '2026-01-01T00:00:00Z',
-    design_inventory_seq: 4, current_mockup_id: 99,
+    design_inventory_seq: 4, current_mockup_id: 99, custom_domain: 'example.com',
   });
   assert.deepEqual(patch, {
     description: 'a thing', design_preset: 'portal-blue', harness: 'claude',
@@ -497,6 +497,9 @@ test('cloneCopyPatch carries settings, never identity or runtime state', () => {
     design_inventory_seq: 4,
   });
   assert.ok(!('slug' in patch) && !('container_name' in patch) && !('current_mockup_id' in patch));
+  // custom_domain is identity too: only one project can hold a hostname, so a
+  // clone must claim its own base domain rather than inherit the source's.
+  assert.ok(!('custom_domain' in patch));
 });
 
 test('cloneSourceError: fresh works from archived; full needs the source active', () => {

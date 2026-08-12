@@ -930,3 +930,80 @@ test('classifyCurlExit maps the failure classes a caller acts on', () => {
   assert.equal(classifyCurlExit(127).class, 'curl_missing');
   assert.match(classifyCurlExit(99).hint, /99/);
 });
+
+// ---- cycle 5: observe parsing + static-site id handling ----
+
+import {
+  parseStatFileList, parseSystemctlShow, validUnitName, validProbeHost,
+  validFileGlob, normalizeServiceId,
+} from '../lib/mcp-logic.js';
+
+test('parseStatFileList: files, dirs, and symlinks with targets', () => {
+  const out = [
+    "-rw-r--r--|1024|1723400000|'/opt/app/config.json'",
+    "drwxr-xr-x|4096|1723400001|'/opt/app/data'",
+    "lrwxrwxrwx|11|1723400002|'/opt/app/current' -> '/opt/app/v2'",
+    'garbage line',
+  ].join('\n');
+  const entries = parseStatFileList(out);
+  assert.equal(entries.length, 3);
+  assert.deepEqual(entries[0], {
+    path: '/opt/app/config.json', type: 'file', size: 1024,
+    mode: 'rw-r--r--', mtime: new Date(1723400000 * 1000).toISOString(),
+  });
+  assert.equal(entries[1].type, 'dir');
+  assert.equal(entries[2].type, 'symlink');
+  assert.equal(entries[2].target, '/opt/app/v2');
+  assert.deepEqual(parseStatFileList(''), []);
+});
+
+test('parseSystemctlShow splits key=value, keeping = inside values', () => {
+  const r = parseSystemctlShow('ActiveState=active\nExecMainStatus=0\nResult=success\nX=a=b\n');
+  assert.equal(r.ActiveState, 'active');
+  assert.equal(r.ExecMainStatus, '0');
+  assert.equal(r.X, 'a=b');
+});
+
+test('validUnitName / validProbeHost / validFileGlob reject option-lookalikes and junk', () => {
+  assert.equal(validUnitName('docker.service'), 'docker.service');
+  assert.equal(validUnitName('proxypilot-startup.service'), 'proxypilot-startup.service');
+  assert.equal(validUnitName('-u'), null);
+  assert.equal(validUnitName('a b'), null);
+  assert.equal(validProbeHost('127.0.0.1'), '127.0.0.1');
+  assert.equal(validProbeHost('db.internal'), 'db.internal');
+  assert.equal(validProbeHost('-flag'), null);
+  assert.equal(validProbeHost('a b'), null);
+  assert.equal(validFileGlob('*.yml'), '*.yml');
+  assert.equal(validFileGlob('docker-compose.y?l'), 'docker-compose.y?l');
+  assert.equal(validFileGlob('../x'), null);
+  assert.equal(validFileGlob('a/b'), null);
+});
+
+test('normalizeServiceId keeps uuid AND legacy integer ids (the Number() NaN trap)', () => {
+  assert.equal(normalizeServiceId('3'), '3');
+  assert.equal(normalizeServiceId(3), '3');
+  const uuid = '550e8400-e29b-41d4-a716-446655440000';
+  assert.equal(normalizeServiceId(uuid), uuid);
+  assert.equal(normalizeServiceId(''), null);
+  assert.equal(normalizeServiceId("x'; DROP TABLE services;--"), null);
+  assert.equal(normalizeServiceId(null), null);
+});
+
+test('tool catalog covers the full 25-tool upgrade surface', () => {
+  const names = new Set(MCP_TOOLS.map((t) => t.name));
+  for (const required of [
+    // cycle 2
+    'get_lxc_container', 'run_lxc_command',
+    // cycle 3
+    'list_routes', 'get_route', 'test_route', 'set_route',
+    // cycle 4
+    'create_lxc_container', 'control_lxc_container', 'set_lxc_config',
+    'set_lxc_network', 'snapshot_lxc_container', 'lxc_file_diff', 'restore_lxc_file',
+    // cycle 5
+    'list_lxc_files', 'search_lxc_files', 'get_lxc_logs', 'probe_lxc_port', 'get_lxc_startup',
+    'create_static_site', 'get_static_site', 'list_static_site_files',
+    'read_static_site_file', 'write_static_site_file', 'get_static_site_cert',
+  ]) {
+    assert.ok(names.has(required), `missing tool ${required}`);
+  }
+});

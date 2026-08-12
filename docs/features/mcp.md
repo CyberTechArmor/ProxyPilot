@@ -24,6 +24,11 @@ Revoking the token (same card) immediately cuts the client off.
 |---|---|---|
 | Static sites | `list_static_sites`, `inspect_static_site_zip`, `apply_static_site_zip` | Two-phase: inspect reports conflicts; apply refuses to overwrite until `confirm_overwrite` — so the AI asks you in-conversation first. Replaced files are kept as `<name>.old`. |
 | LXC | `list_lxc_containers`, `inspect_lxc_zip`, `apply_lxc_zip` | Same conflict flow, plus optional startup-script registration (`startup.sh` convention) with run output + exit code returned. |
+| LXC observe | `get_lxc_container`, `list_lxc_files`, `search_lxc_files`, `get_lxc_logs`, `probe_lxc_port`, `get_lxc_startup` | All read-only. Container detail (addresses, security/limits config, snapshots, registered startup), file listing/grep inside a guest, journald / startup-service / docker-compose logs without redeploying, and an in-guest port probe that reports status metadata but **never response bodies**. `probe_lxc_port` + `test_route` together separate "app down" from "edge misrouted" in two calls. |
+| LXC exec | `run_lxc_command` | One allowlisted command inside a guest, same containment as `run_project_command` (argv → positional parameters, no shell, 64 KB tails, clamped timeout). The allowlist is `lib/mcp-policy/lxc-command-allowlist.json`: read-biased (docker/compose status+logs, systemctl status, journalctl, ip, ss, curl probes, df, free, ls, stat, du), `docker compose up/restart/stop/pull` only in the registered startup working dir, `deny_always` wins over everything — no shells, no package managers, no deletion. |
+| LXC lifecycle | `create_lxc_container`, `control_lxc_container`, `set_lxc_config`, `set_lxc_network`, `snapshot_lxc_container`, `lxc_file_diff`, `restore_lxc_file` | Every mutation requires `confirm: true` and snapshots first; there is deliberately **no delete verb** and no force-kill. `set_lxc_config` writes only the keys in `lib/mcp-policy/lxc-config-allowlist.json`; `security.privileged=true` additionally demands `acknowledge_risk: true` and carries the container-root-is-host-root warning. `set_lxc_network` pins a guest's IPv4 (static DHCP reservation) so a lease renewal can't silently 502 a route. `lxc_file_diff`/`restore_lxc_file` complete the `.old` backup story (restore swaps, so it's reversible). |
+| Routing | `list_routes`, `get_route`, `test_route`, `set_route` | Inspect every served hostname (orphaned upstreams flagged), per-domain TLS/cert detail, and an edge-vantage probe pinned to the local proxy that names which failure class it found — proxy down, stale proxy→upstream binding, or app-level. `set_route` binds a hostname to a container (preferred) or ip:port through the same DB → regenerate → adapt → reload pipeline the UI uses, with rollback on failure; overwrites need `confirm_overwrite` and return the previous binding. |
+| Static-site management | `create_static_site`, `get_static_site`, `list_static_site_files`, `read_static_site_file`, `write_static_site_file`, `get_static_site_cert` | Site creation (creation-only — refuses an already-routed domain), docroot inspection, single-file read/write with the `.old` + `confirm_overwrite` contract, and certificate status. Site ids are uuid strings for UI-created sites; the zip tools accept both uuid and legacy integer ids. |
 | LXC file edits | `read_lxc_file`, `write_lxc_file`, `rerun_startup` | The chat-only update loop: read a file, propose the edit, write on approval (previous version kept as `<path>.old`), then re-run the registered startup script to redeploy — run output and exit code come back to the chat. `write_lxc_file` takes an optional `mode` ("0755") so a script lands executable without a zip apply. `rerun_startup` takes `timeout_seconds` (default 120, max 1800) and returns the **last** 64 KB of each stream — a first-boot Docker install no longer has to fit inside a fixed 2-minute window, and the failure summary (which prints last) is what comes back. Lets a Claude subscription do small container updates without any zip or shell. |
 | Projects | `list_projects`, `get_project`, `send_project_build`, `upload_project_reference`, `clone_project` | `send_project_build` queues a quick update on the project's own AI harness — **this lane spends the project's configured API budget**. `clone_project` mirrors the UI's Clone (fresh / full-with-database). |
 | Project build control | `interrupt_project_build`, `cancel_queued_build` | Stop a running build (checkpoint-and-stop by default, or abandon) and cancel not-yet-started queue entries — the "that build is burning tokens on the wrong thing" stop switch, from chat. |
@@ -116,22 +121,20 @@ quietly stop being true.
 
 ## Limitations / follow-ups
 
-- The LXC and static-site surface is deploy-heavy and observe-poor: there is
-  no container detail/exec/lifecycle tooling, no route inspection or testing,
-  and no per-file static-site management. A field-derived upgrade spec for all
-  of this — 25 new tool definitions (LXC observability, allowlisted in-guest
-  exec, gated lifecycle/config with snapshot-before-mutate, routing,
-  static-site files) — is packaged as the importable component
+- The LXC / static-site / routing surface above implements the field-derived
+  upgrade spec packaged as
   `docs/features/examples/mcp-lxc-sites-upgrades.component.json`
-  (key `mcp-lxc-sites-upgrades`). The six defects its `docs/01-bugfixes.md`
-  catalogued in the *then-current* tools are fixed: `list_lxc_containers` now
-  reports listing failures as errors instead of an empty host (and covers all
-  Incus projects and non-eth0 NICs), `list_static_sites` reads `domain` from
-  `service_http_routes` (post-D.14 home), `rerun_startup` takes
-  `timeout_seconds` and returns real 64 KB output tails, the inspect tools
-  verify an optional `sha256` before extraction, chunked upload
-  (`append_upload_chunk`/`finish_upload`) replaces the PUT URL for sandboxed
-  clients, and `write_lxc_file` takes `mode`.
+  (key `mcp-lxc-sites-upgrades`) — its six bugfixes plus all 25 tool
+  definitions. The component remains the design record: its `policy/` files
+  are vendored verbatim as `admin/backend/src/lib/mcp-policy/*.json` (the
+  enforcement source of truth for `run_lxc_command` and `set_lxc_config`) and
+  must be kept in sync. Deviations from the spec, chosen deliberately:
+  `rerun_startup` gained `timeout_seconds` directly (no separate
+  `rerun_startup_v2`; `dry_run` is covered by `get_lxc_startup`), and
+  `set_route` has no `enabled` toggle because the Caddy regenerator renders
+  every stored route — parking a hostname stays a UI/host operation.
+- `set_route` manages root-path bindings only; path-prefixed fan-out routes
+  (e.g. `/api` → a second port) are still UI-only over MCP.
 - Auth is token-based, not OAuth 2.1 with dynamic client registration.
   claude.ai connects fine via the tokenized URL; a full OAuth flow is a
   possible follow-up (see docs/known-issues.md).

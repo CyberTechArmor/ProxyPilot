@@ -22,7 +22,7 @@
 
 import express from 'express';
 import { randomBytes } from 'node:crypto';
-import { appendFile, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
+import { appendFile, readFile, writeFile, rm, mkdir, stat as fsStat, readdir, copyFile, open as fsOpen } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -42,6 +42,7 @@ import {
   validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
   validIpv4, validImageAlias,
   validDomainName, normalizePort, parseCurlProbeOutput, classifyCurlExit,
+  parseStatFileList, parseSystemctlShow, validUnitName, validProbeHost, validFileGlob, normalizeServiceId,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
   applyStringEdit, normalizeReadRange,
@@ -57,10 +58,11 @@ import { stageZipUpload, getZipUpload, discardZipUpload } from '../lib/zip-stagi
 import {
   checkContainerConflicts, readContainerStartup, applyTarToContainer,
   setupStartupScript, writeTarFromZip, runHostCapture, runInContainer,
+  STARTUP_UNIT_NAME,
 } from '../lib/lxc-zip.js';
 import { resolveMock2Gate } from '../mock2/gating.js';
 import { ensureNetworkNat, findOrCreateLxcService } from './lxc.js';
-import { regenerateDomainCaddyConfig, ensureCaddyStructure, assertRoutesShareSslStance } from './services.js';
+import { regenerateDomainCaddyConfig, ensureCaddyStructure, assertRoutesShareSslStance, syncPrimaryRouteFromLegacy } from './services.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { resolveCertDir } from '../lib/caddy-cert.js';
@@ -352,7 +354,10 @@ async function toolFinishUpload(args) {
 }
 
 async function toolInspectStaticSiteZip(args, auth) {
-  const service = getDb().prepare(`SELECT id, name, data_dir, type FROM services WHERE id = ? AND type = 'static'`).get(Number(args.service_id));
+  // Ids are TEXT (uuid for UI-created sites, legacy integers as text) — the
+  // old Number() coercion NaN'd every uuid and reported "not found".
+  const siteId = normalizeServiceId(args.service_id);
+  const service = siteId ? getDb().prepare(`SELECT id, name, data_dir, type FROM services WHERE id = ? AND type = 'static'`).get(siteId) : null;
   if (!service || !service.data_dir) return toolResult('Static site not found — use list_static_sites for valid ids', { isError: true });
   const { buf, tmpPath } = await zipBytesFromArgs(args);
   let parsed;
@@ -382,7 +387,8 @@ async function toolInspectStaticSiteZip(args, auth) {
 }
 
 async function toolApplyStaticSiteZip(args, auth) {
-  const service = getDb().prepare(`SELECT id, name, data_dir, type FROM services WHERE id = ? AND type = 'static'`).get(Number(args.service_id));
+  const siteId = normalizeServiceId(args.service_id);
+  const service = siteId ? getDb().prepare(`SELECT id, name, data_dir, type FROM services WHERE id = ? AND type = 'static'`).get(siteId) : null;
   if (!service || !service.data_dir) return toolResult('Static site not found', { isError: true });
   const rec = getZipUpload(String(args.upload_id), 'service', String(service.id));
   if (!rec) return toolResult('Upload not found or expired — inspect the zip again', { isError: true });
@@ -875,6 +881,209 @@ async function toolRunLxcCommand(args, auth) {
   }, { isError: streams.exit_code !== 0 });
 }
 
+// ---- LXC observe, continued (spec cycle 5): file listing/search, logs,
+// port probes, startup detail — all read-only ----
+
+async function toolListLxcFiles(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const path = validTargetDir(args.path);
+  if (!path) return toolResult('path must be an absolute directory inside the guest, e.g. /opt/app', { isError: true });
+  const depth = args.recursive === true ? '' : '-maxdepth 1 ';
+  const script = `p="$1"; test -d "$p" || { echo PP_NOT_A_DIR >&2; exit 66; }; `
+    + `find "$p" -mindepth 1 ${depth}-exec stat -c '%A|%s|%Y|%N' {} + 2>/dev/null | head -n 2001`;
+  const r = await runHostCapture('incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c', script, 'sh', path], { timeoutMs: 60000 });
+  if (r.status === 66) return toolResult(`Not a directory: ${path}`, { isError: true });
+  if (r.status !== 0) return toolResult(`Could not list ${path} — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  const entries = parseStatFileList(r.stdout);
+  return toolResult({
+    path,
+    recursive: args.recursive === true,
+    entry_count: Math.min(entries.length, 2000),
+    truncated: entries.length > 2000,
+    entries: entries.slice(0, 2000),
+  });
+}
+
+async function toolSearchLxcFiles(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const path = validTargetDir(args.path);
+  if (!path) return toolResult('path must be an absolute directory inside the guest', { isError: true });
+  const pattern = validSearchPattern(args.pattern);
+  if (!pattern) return toolResult('pattern is required (an extended regular expression, up to 1000 characters)', { isError: true });
+  let glob = null;
+  if (args.glob != null && String(args.glob).trim() !== '') {
+    glob = validFileGlob(args.glob);
+    if (!glob) return toolResult('glob must be a simple filename glob, e.g. *.yml', { isError: true });
+  }
+  // Our own script text, so the pipe to head is fine — the caller's pattern
+  // and glob ride as positional parameters and never reach a parser.
+  const script = glob
+    ? 'grep -rnIE --include="$3" -e "$2" -- "$1" 2>/dev/null | head -n 201'
+    : 'grep -rnIE -e "$2" -- "$1" 2>/dev/null | head -n 201';
+  const r = await runHostCapture(
+    'incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c', script, 'sh', path, pattern, ...(glob ? [glob] : [])],
+    { timeoutMs: 60000 },
+  );
+  // grep exit 1 = no matches (head may also mask it) — a result, not a failure.
+  if (r.status !== 0 && r.status !== 1 && r.stdout.trim() === '') {
+    return toolResult(`Search failed: ${(r.stderr || '').trim().slice(-300) || 'is the container running?'}`, { isError: true });
+  }
+  const matches = parseGitGrepOutput(r.stdout, 200);
+  return toolResult({
+    path, pattern, glob,
+    match_count: matches.length,
+    truncated: r.stdout.split('\n').filter(Boolean).length > matches.length,
+    matches,
+  });
+}
+
+async function toolGetLxcLogs(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const source = String(args.source || '');
+  let lines = Number(args.lines);
+  lines = Number.isInteger(lines) && lines >= 1 ? Math.min(lines, 1000) : 100;
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  let argv;
+  if (source === 'startup') {
+    argv = ['exec', incusName, '--', 'journalctl', '-u', STARTUP_UNIT_NAME, '--no-pager', '-n', String(lines)];
+  } else if (source === 'journal') {
+    const unit = validUnitName(args.unit);
+    if (!unit) return toolResult('unit is required for source=journal, e.g. docker.service', { isError: true });
+    argv = ['exec', incusName, '--', 'journalctl', '-u', unit, '--no-pager', '-n', String(lines)];
+  } else if (source === 'docker-compose') {
+    const dir = validTargetDir(args.compose_dir);
+    if (!dir) return toolResult('compose_dir is required for source=docker-compose (absolute path containing docker-compose.yml)', { isError: true });
+    argv = ['exec', incusName, '--', 'sh', '-c', 'cd "$1" && docker compose logs --no-color --tail "$2"', 'sh', dir, String(lines)];
+  } else {
+    return toolResult("source must be 'startup' (the registered ProxyPilot startup service), 'journal' (a systemd unit — pass unit), or 'docker-compose' (pass compose_dir)", { isError: true });
+  }
+  const r = await runHostCapture('incus', argv, { timeoutMs: 60000 });
+  if (r.status !== 0) {
+    return toolResult(`Could not fetch logs: ${(r.stderr || '').trim().slice(-300) || 'is the container running?'}`, { isError: true });
+  }
+  return toolResult({
+    source, lines,
+    log: r.stdout.slice(-PROJECT_COMMAND_OUTPUT_CAP),
+    truncated: r.stdout.length > PROJECT_COMMAND_OUTPUT_CAP,
+  });
+}
+
+// probe_lxc_port — the one-call answer to "is the app up behind the proxy",
+// from INSIDE the guest. In the field, telling an edge 502 apart from an
+// in-guest 401 required rewriting the boot script to smuggle curl output
+// through startup stdout. Never returns response bodies.
+async function toolProbeLxcPort(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const port = normalizePort(args.port);
+  if (!port) return toolResult('port must be a port number (1–65535)', { isError: true });
+  const host = validProbeHost(args.host || '127.0.0.1');
+  if (!host) return toolResult('host must be an IP or hostname', { isError: true });
+  const scheme = String(args.scheme || 'http');
+  if (!['tcp', 'http', 'https'].includes(scheme)) return toolResult("scheme must be 'tcp', 'http', or 'https'", { isError: true });
+  let path = '/';
+  if (args.path != null && String(args.path).trim() !== '') {
+    path = String(args.path).trim();
+    if (!path.startsWith('/') || /[\u0000-\u001f\u007f\s]/.test(path)) return toolResult('path must be a URL path starting with /', { isError: true });
+  }
+  let timeout = Number(args.timeout_seconds);
+  timeout = Number.isFinite(timeout) && timeout > 0 ? Math.min(Math.round(timeout), 60) : 10;
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  const guestCurl = async (url, extraArgs = []) => {
+    const argv = ['exec', incusName, '--', 'curl', '-sS', '-o', '/dev/null', '-D', '-', '-k',
+      '--max-time', String(timeout), '-w', '\\nPP_TIME:%{time_total}\\nPP_CODE:%{http_code}', ...extraArgs, url];
+    const r = await runHostCapture('incus', argv, { timeoutMs: (timeout + 10) * 1000 });
+    return { r, parsed: parseCurlProbeOutput(r.stdout) };
+  };
+
+  if (scheme === 'tcp') {
+    // telnet:// makes curl connect and then wait for data — so a short
+    // timeout AFTER a successful connect (exit 28) means the port is OPEN,
+    // while refused/unreachable fail immediately.
+    const { r } = await guestCurl(`telnet://${host}:${port}`);
+    if (r.status === 127) return toolResult('curl is not installed in this guest — apt install curl (via the startup script) first', { isError: true });
+    const openish = r.status === 0 || r.status === 28 || r.status === 56;
+    return toolResult({
+      host, port, scheme: 'tcp',
+      tcp_connect: openish,
+      ...(openish ? {} : { failure: classifyCurlExit(r.status) }),
+    });
+  }
+
+  const url = `${scheme}://${host}:${port}${path}`;
+  const { r, parsed } = await guestCurl(url);
+  if (r.status === 127) return toolResult('curl is not installed in this guest — apt install curl (via the startup script) first', { isError: true });
+  const failed = r.status !== 0 && !parsed.status_code;
+  let websocket = null;
+  if (args.test_websocket === true && !failed) {
+    const key = randomBytes(16).toString('base64');
+    const w = await guestCurl(url, ['-H', 'Connection: Upgrade', '-H', 'Upgrade: websocket', '-H', `Sec-WebSocket-Key: ${key}`, '-H', 'Sec-WebSocket-Version: 13']);
+    websocket = { upgraded: w.parsed.status_code === 101, status_code: w.parsed.status_code };
+  }
+  return toolResult({
+    host, port, scheme, path,
+    ...(failed
+      ? { reachable: false, failure: classifyCurlExit(r.timedOut ? 28 : r.status) }
+      : {
+        reachable: true,
+        status_code: parsed.status_code,
+        server: parsed.server,
+        content_type: parsed.content_type,
+        time_seconds: parsed.time_seconds,
+        note: parsed.status_code === 401 || parsed.status_code === 403
+          ? 'An auth status means the app IS answering — if the public route fails, the problem is at the edge (see test_route).'
+          : undefined,
+      }),
+    websocket,
+  });
+}
+
+async function toolGetLxcStartup(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const incusName = `${LXC_PREFIX}${name}`;
+  const startup = await readContainerStartup(incusName).catch(() => null);
+  if (!startup?.scriptPath) {
+    return toolResult('No startup script is registered for this container — apply_lxc_zip with startup_script registers one', { isError: true });
+  }
+  const read = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'p="$1"; wc -c < "$p" 2>/dev/null || echo -1; head -c 524288 -- "$p" 2>/dev/null', 'sh', startup.scriptPath],
+    { timeoutMs: 30000 },
+  );
+  let content = null; let size = null;
+  if (read.status === 0) {
+    const nl = read.stdout.indexOf('\n');
+    size = Number(read.stdout.slice(0, nl).trim());
+    content = size >= 0 ? read.stdout.slice(nl + 1) : null;
+  }
+  const unitR = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'systemctl', 'show', STARTUP_UNIT_NAME,
+      '-p', 'ActiveState,SubState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp'],
+    { timeoutMs: 30000 },
+  );
+  const unit = unitR.status === 0 ? parseSystemctlShow(unitR.stdout) : {};
+  return toolResult({
+    script_path: startup.scriptPath,
+    working_dir: startup.workingDir || null,
+    size_bytes: size != null && size >= 0 ? size : null,
+    truncated: size != null && size > LXC_FILE_READ_CAP,
+    content,
+    unit: {
+      name: STARTUP_UNIT_NAME,
+      state: unit.ActiveState || null,
+      result: unit.Result || null,
+      last_exit_code: unit.ExecMainStatus != null && unit.ExecMainStatus !== '' ? Number(unit.ExecMainStatus) : null,
+      last_started_at: unit.ExecMainStartTimestamp || null,
+      last_exited_at: unit.ExecMainExitTimestamp || null,
+    },
+  });
+}
+
 // ---- LXC lifecycle/config (spec cycle 4: every mutation confirms and
 // snapshots first; deliberately NO delete verb — removal stays host-side) ----
 
@@ -1195,6 +1404,253 @@ async function toolRestoreLxcFile(args, auth) {
   return toolResult({
     restored: true, path,
     note: 'The previous live version now sits in the .old slot — calling restore again swaps back. If a startup script is registered, apply the restored file with rerun_startup.',
+  });
+}
+
+// ---- static sites (spec cycle 5): parity with the projects surface ----
+
+const SERVICES_DATA_DIR = process.env.SERVICES_DATA_DIR || '/data/services';
+const STATIC_FILE_READ_CAP = 512 * 1024;
+const STATIC_FILE_WRITE_CAP = 2 * 1024 * 1024;
+
+function getStaticSite(id) {
+  const siteId = normalizeServiceId(id);
+  if (!siteId) return null;
+  try {
+    return getDb().prepare(`SELECT * FROM services WHERE id = ? AND type = 'static'`).get(siteId) || null;
+  } catch { return null; }
+}
+
+function staticSiteDomains(siteId) {
+  try {
+    return getDb().prepare(`SELECT domain, path_prefix, ssl_enabled FROM service_http_routes WHERE service_id = ? ORDER BY (path_prefix = '/') DESC, created_at`).all(siteId);
+  } catch { return []; }
+}
+
+// Walk a docroot with a hard entry cap. Local fs — the backend owns
+// SERVICES_DATA_DIR directly (the UI file manager reads/writes it the same way).
+async function walkDocroot(root, subdir = '', cap = 2000) {
+  const base = subdir ? join(root, subdir) : root;
+  const out = [];
+  const stack = [''];
+  let truncated = false;
+  while (stack.length) {
+    const rel = stack.pop();
+    let entries;
+    try {
+      entries = await readdir(join(base, rel), { withFileTypes: true });
+    } catch { continue; }
+    for (const e of entries) {
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      if (out.length >= cap) { truncated = true; break; }
+      if (e.isDirectory()) {
+        stack.push(childRel);
+      } else if (e.isFile()) {
+        let st = null;
+        try { st = await fsStat(join(base, childRel)); } catch { /* raced */ }
+        out.push({ path: subdir ? `${subdir}/${childRel}` : childRel, size: st?.size ?? null, mtime: st ? st.mtime.toISOString() : null });
+      }
+    }
+    if (truncated) break;
+  }
+  return { files: out, truncated };
+}
+
+async function toolCreateStaticSite(args, auth) {
+  const siteName = String(args.name || '').trim().slice(0, 100);
+  if (!siteName) return toolResult('name is required', { isError: true });
+  const domain = validDomainName(args.domain);
+  if (!domain) return toolResult('domain must be a fully qualified hostname', { isError: true });
+  const tls = args.tls !== false;
+  if (args.confirm !== true) {
+    return toolResult(`Confirm with the user, then re-call with confirm: true to create static site "${siteName}" on ${domain}.`, { isError: true });
+  }
+  const db = getDb();
+  // Creation-only: the domain must not already be routed anywhere.
+  let taken = null;
+  try {
+    taken = db.prepare(`SELECT r.domain, s.name FROM service_http_routes r JOIN services s ON s.id = r.service_id WHERE r.domain = ? LIMIT 1`).get(domain);
+  } catch (err) {
+    return toolResult(`Could not check the domain: ${err?.message || err}`, { isError: true });
+  }
+  if (taken) return toolResult(`${domain} is already routed (service "${taken.name}") — creation never replaces. Pick another domain or manage the existing binding.`, { isError: true });
+
+  // Same derivation the UI uses: a filesystem-safe directory from the name.
+  const safeDir = siteName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  if (!safeDir) return toolResult('name must contain at least one letter or digit', { isError: true });
+  const dataDir = join(SERVICES_DATA_DIR, safeDir);
+  const dirTaken = db.prepare(`SELECT id, name FROM services WHERE data_dir = ? LIMIT 1`).get(dataDir);
+  if (dirTaken) return toolResult(`The derived directory ${dataDir} already belongs to service "${dirTaken.name}" — pick a different name.`, { isError: true });
+
+  try {
+    await mkdir(dataDir, { recursive: true });
+    if (!existsSync(join(dataDir, 'index.html'))) {
+      await writeFile(join(dataDir, 'index.html'),
+        `<!doctype html>\n<html><head><meta charset="utf-8"><title>${siteName}</title></head>\n<body><h1>${siteName}</h1><p>Deployed by ProxyPilot — replace this page via the static-site tools.</p></body></html>\n`);
+    }
+  } catch (err) {
+    return toolResult(`Could not create the docroot: ${err?.message || err}`, { isError: true });
+  }
+
+  const id = uuidv4();
+  try {
+    db.prepare(`INSERT INTO services (id, name, kind, runtime, type, root_dir, data_dir, status)
+                VALUES (?, ?, 'static_site', NULL, 'static', ?, ?, 'active')`).run(id, siteName, dataDir, dataDir);
+    syncPrimaryRouteFromLegacy(db, id, {
+      domain, pathPrefix: '/', targetPort: null,
+      sslEnabled: tls, forceHttps: tls, websocketEnabled: false, maxUploadSize: '1G',
+    });
+  } catch (err) {
+    try { db.prepare(`DELETE FROM service_http_routes WHERE service_id = ?`).run(id); } catch { /* fk cascade */ }
+    try { db.prepare(`DELETE FROM services WHERE id = ?`).run(id); } catch { /* best effort */ }
+    return toolResult(`Could not register the site: ${err?.message || err}`, { isError: true });
+  }
+
+  const undo = async (stage, detail) => {
+    try { db.prepare(`DELETE FROM service_http_routes WHERE service_id = ?`).run(id); } catch { /* */ }
+    try { db.prepare(`DELETE FROM services WHERE id = ?`).run(id); } catch { /* */ }
+    try { await regenerateDomainCaddyConfig(db, domain); } catch { /* */ }
+    try { await caddyReload({}); } catch { /* */ }
+    return toolResult(`${stage}: ${detail} — the site registration was rolled back (the docroot directory was left in place).`, { isError: true });
+  };
+  try { await ensureCaddyStructure(); } catch { /* regenerate re-checks */ }
+  try { await regenerateDomainCaddyConfig(db, domain); } catch (err) { return undo('Failed to render the Caddy config', err?.message || err); }
+  try { await caddyAdapt({}); } catch (err) { return undo('Generated Caddy config failed validation', err?.stderr || err?.message || err); }
+  try { await caddyReload({}); } catch (err) { return undo('Caddy reload failed', err?.stderr || err?.message || err); }
+
+  logAudit(auth.created_by, 'SERVICE_CREATED', 'service', id, { via: 'mcp', name: siteName, domain, type: 'static' }, null);
+  return toolResult({
+    created: true,
+    site: { id, name: siteName, domain, docroot: dataDir, tls },
+    next: 'Deploy content with inspect_static_site_zip → apply_static_site_zip, or write files directly with write_static_site_file. Verify with test_route.',
+  });
+}
+
+async function toolGetStaticSite(args) {
+  const site = getStaticSite(args.site_id);
+  if (!site) return toolResult('Static site not found — use list_static_sites for valid ids', { isError: true });
+  const domains = staticSiteDomains(site.id);
+  const primary = domains[0]?.domain || null;
+  let docroot = null;
+  if (site.data_dir) {
+    const walked = await walkDocroot(site.data_dir, '', 5000);
+    const bytes = walked.files.reduce((sum, f) => sum + (f.size || 0), 0);
+    const newest = walked.files.reduce((max, f) => (f.mtime && f.mtime > max ? f.mtime : max), '');
+    docroot = {
+      path: site.data_dir,
+      file_count: walked.files.length,
+      approximate: walked.truncated,
+      total_bytes: bytes,
+      last_modified: newest || null,
+    };
+  }
+  return toolResult({
+    id: site.id,
+    name: site.name,
+    status: site.status || null,
+    domains: domains.map((d) => ({ domain: d.domain, path_prefix: d.path_prefix, tls: !!d.ssl_enabled })),
+    docroot,
+    ...(primary ? await certInfoForDomain(primary) : {}),
+    next: primary ? `test_route probes ${primary} end-to-end.` : 'No domain is routed to this site yet.',
+  });
+}
+
+async function toolListStaticSiteFiles(args) {
+  const site = getStaticSite(args.site_id);
+  if (!site?.data_dir) return toolResult('Static site not found — use list_static_sites for valid ids', { isError: true });
+  let subdir = '';
+  if (args.subdir != null && String(args.subdir).trim() !== '') {
+    subdir = validProjectFilePath(args.subdir);
+    if (!subdir) return toolResult('subdir must be a relative directory inside the docroot (no .., no leading /)', { isError: true });
+  }
+  const walked = await walkDocroot(site.data_dir, subdir);
+  return toolResult({
+    site: { id: site.id, name: site.name },
+    subdir: subdir || null,
+    file_count: walked.files.length,
+    truncated: walked.truncated,
+    files: walked.files,
+  });
+}
+
+async function toolReadStaticSiteFile(args) {
+  const site = getStaticSite(args.site_id);
+  if (!site?.data_dir) return toolResult('Static site not found', { isError: true });
+  const rel = validProjectFilePath(args.path);
+  if (!rel) return toolResult('path must be relative to the docroot, e.g. css/site.css', { isError: true });
+  const abs = join(site.data_dir, rel);
+  let st;
+  try { st = await fsStat(abs); } catch { return toolResult(`Not a file: ${rel} (list_static_site_files shows the deployed files)`, { isError: true }); }
+  if (!st.isFile()) return toolResult(`Not a file: ${rel}`, { isError: true });
+  let buf;
+  try {
+    const fh = await fsOpen(abs, 'r');
+    try {
+      buf = Buffer.alloc(Math.min(st.size, STATIC_FILE_READ_CAP));
+      await fh.read(buf, 0, buf.length, 0);
+    } finally { await fh.close(); }
+  } catch (err) {
+    return toolResult(`Could not read ${rel}: ${err?.message || err}`, { isError: true });
+  }
+  if (buf.includes(0)) return toolResult(`${rel} looks binary — this tool reads text files only`, { isError: true });
+  return toolResult({
+    path: rel,
+    size_bytes: st.size,
+    truncated: st.size > STATIC_FILE_READ_CAP,
+    content: buf.toString('utf8'),
+  });
+}
+
+async function toolWriteStaticSiteFile(args, auth) {
+  const site = getStaticSite(args.site_id);
+  if (!site?.data_dir) return toolResult('Static site not found', { isError: true });
+  const rel = validProjectFilePath(args.path);
+  if (!rel) return toolResult('path must be relative to the docroot, e.g. robots.txt', { isError: true });
+  const content = String(args.content ?? '');
+  if (Buffer.byteLength(content) > STATIC_FILE_WRITE_CAP) {
+    return toolResult(`Content exceeds the ${Math.floor(STATIC_FILE_WRITE_CAP / (1024 * 1024))} MB single-file cap — use the zip flow for bigger payloads`, { isError: true });
+  }
+  const abs = join(site.data_dir, rel);
+  const exists = existsSync(abs);
+  if (exists && args.confirm_overwrite !== true) {
+    let size = null;
+    try { size = (await fsStat(abs)).size; } catch { /* */ }
+    return toolResult({
+      written: false, needs_confirmation: true, path: rel,
+      existing_size_bytes: size,
+      message: `${rel} already exists${size != null ? ` (${size} bytes)` : ''}; it will be kept as ${rel}.old. Show the user your proposed change and re-call with confirm_overwrite: true after they approve.`,
+    });
+  }
+  try {
+    await mkdir(join(abs, '..'), { recursive: true });
+    if (exists) await copyFile(abs, `${abs}.old`);
+    await writeFile(abs, content);
+  } catch (err) {
+    return toolResult(`Write failed: ${err?.message || err}`, { isError: true });
+  }
+  logAudit(auth.created_by, 'STATIC_FILE_WRITTEN', 'service', site.id, { via: 'mcp', path: rel, bytes: Buffer.byteLength(content), replaced: exists }, null);
+  return toolResult({
+    written: true, path: rel, bytes: Buffer.byteLength(content),
+    backup: exists ? `${rel}.old` : null,
+    note: 'Static files serve immediately — no reload step.',
+  });
+}
+
+async function toolGetStaticSiteCert(args) {
+  const site = getStaticSite(args.site_id);
+  if (!site) return toolResult('Static site not found', { isError: true });
+  const domains = staticSiteDomains(site.id);
+  if (!domains.length) return toolResult(`Site "${site.name}" has no routed domain — nothing to hold a certificate.`, { isError: true });
+  const primary = domains[0].domain;
+  const info = await certInfoForDomain(primary);
+  return toolResult({
+    site: { id: site.id, name: site.name },
+    domain: primary,
+    tls_enabled: !!domains[0].ssl_enabled,
+    ...info,
+    ...(info.certificate == null && domains[0].ssl_enabled
+      ? { note: 'No issued certificate found on disk — issuance may be in flight (Caddy retries automatically), or the domain may not resolve to this host yet.' }
+      : {}),
   });
 }
 
@@ -2417,6 +2873,11 @@ const TOOL_HANDLERS = {
   list_lxc_containers: toolListLxcContainers,
   get_lxc_container: toolGetLxcContainer,
   run_lxc_command: toolRunLxcCommand,
+  list_lxc_files: toolListLxcFiles,
+  search_lxc_files: toolSearchLxcFiles,
+  get_lxc_logs: toolGetLxcLogs,
+  probe_lxc_port: toolProbeLxcPort,
+  get_lxc_startup: toolGetLxcStartup,
   create_lxc_container: toolCreateLxcContainer,
   control_lxc_container: toolControlLxcContainer,
   set_lxc_config: toolSetLxcConfig,
@@ -2426,6 +2887,12 @@ const TOOL_HANDLERS = {
   restore_lxc_file: toolRestoreLxcFile,
   inspect_lxc_zip: toolInspectLxcZip,
   apply_lxc_zip: toolApplyLxcZip,
+  create_static_site: toolCreateStaticSite,
+  get_static_site: toolGetStaticSite,
+  list_static_site_files: toolListStaticSiteFiles,
+  read_static_site_file: toolReadStaticSiteFile,
+  write_static_site_file: toolWriteStaticSiteFile,
+  get_static_site_cert: toolGetStaticSiteCert,
   list_routes: toolListRoutes,
   get_route: toolGetRoute,
   test_route: toolTestRoute,

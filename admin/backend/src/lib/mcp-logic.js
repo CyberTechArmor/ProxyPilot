@@ -491,6 +491,77 @@ export function classifyCurlExit(code) {
   return { class: cls, hint };
 }
 
+// ---- LXC observe: file listings, unit names, systemctl parsing ----
+
+/**
+ * Parse `stat -c '%A|%s|%Y|%N' …` lines into file entries. %N renders as
+ * 'name' or 'name' -> 'target' for symlinks; %A's first char gives the type.
+ */
+export function parseStatFileList(stdout) {
+  const entries = [];
+  for (const line of String(stdout ?? '').split('\n')) {
+    if (!line) continue;
+    const m = /^([A-Za-z-]{10,11})\|(\d+)\|(\d+)\|(.*)$/.exec(line);
+    if (!m) continue;
+    const mode = m[1];
+    const names = /^'(.*?)'(?: -> '(.*)')?$/.exec(m[4]);
+    const type = mode[0] === 'd' ? 'dir' : mode[0] === 'l' ? 'symlink' : 'file';
+    entries.push({
+      path: names ? names[1] : m[4],
+      type,
+      size: Number(m[2]),
+      mode: mode.slice(1, 10),
+      mtime: new Date(Number(m[3]) * 1000).toISOString(),
+      ...(type === 'symlink' && names?.[2] ? { target: names[2] } : {}),
+    });
+  }
+  return entries;
+}
+
+/** Parse `systemctl show -p A,B` key=value output. */
+export function parseSystemctlShow(stdout) {
+  const out = {};
+  for (const line of String(stdout ?? '').split('\n')) {
+    const eq = line.indexOf('=');
+    if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return out;
+}
+
+/** A systemd unit name safe to hand journalctl as an argv token. */
+export function validUnitName(s) {
+  const v = String(s ?? '').trim();
+  if (!v || v.length > 128 || v.startsWith('-')) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9@._-]*(\.(service|socket|timer|target|mount|path))?$/.test(v)) return null;
+  return v;
+}
+
+/** A probe target host: IPv4 or a DNS name label chain. */
+export function validProbeHost(s) {
+  const v = String(s ?? '').trim();
+  if (!v || v.length > 253 || v.startsWith('-')) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(v)) return null;
+  return v;
+}
+
+/** A simple filename glob for grep --include (no paths, no traversal). */
+export function validFileGlob(s) {
+  const v = String(s ?? '').trim();
+  if (!v || v.length > 100) return null;
+  if (!/^[A-Za-z0-9*?\[\]._-]+$/.test(v)) return null;
+  return v;
+}
+
+/** A static-site/service id: uuid or legacy integer, as stored (TEXT column).
+ *  The old Number() coercion turned every uuid id into NaN — which read as
+ *  "Static site not found" for every UI-created site. */
+export function normalizeServiceId(v) {
+  const s = String(v ?? '').trim();
+  if (!s || s.length > 64) return null;
+  if (!/^[A-Za-z0-9-]+$/.test(s)) return null;
+  return s;
+}
+
 // ---- write_lxc_file: the mode parameter ----
 
 /** Three octal permission digits, with or without a leading zero ("0755",
@@ -563,7 +634,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        service_id: { type: 'number', description: 'Static site id from list_static_sites.' },
+        service_id: { type: ['number', 'string'], description: 'Static site id from list_static_sites (uuid string for UI-created sites, integer for legacy ones).' },
         ...uploadSourceProps,
       },
       required: ['service_id'],
@@ -576,7 +647,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        service_id: { type: 'number' },
+        service_id: { type: ['number', 'string'] },
         upload_id: { type: 'string', description: 'From inspect_static_site_zip.' },
         strip_wrapper: { type: 'boolean', description: 'Strip the single top-level wrapper folder (default true when one exists).' },
         confirm_overwrite: { type: 'boolean', description: 'Set true only after the user approved replacing the listed files.' },
@@ -614,6 +685,79 @@ export const MCP_TOOLS = [
         timeout_seconds: { type: 'number', description: 'Kill after this many seconds. Default 120, max 1800.' },
       },
       required: ['container', 'command'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_lxc_files',
+    description: 'List files under a directory inside an LXC guest (path, type, size, mode, mtime, symlink target). Counterpart of list_project_files. Capped at 2000 entries. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        path: { type: 'string', description: 'Absolute directory inside the guest, e.g. /opt/app.' },
+        recursive: { type: 'boolean', description: 'Recurse into subdirectories (default false).' },
+      },
+      required: ['container', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'search_lxc_files',
+    description: 'Grep text files under a directory inside an LXC guest (extended regex, binary files skipped). Counterpart of search_project_files: returns path + line_number + the matching line, capped at 200 matches. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        path: { type: 'string', description: 'Absolute directory to search under.' },
+        pattern: { type: 'string', description: 'Extended regular expression.' },
+        glob: { type: 'string', description: 'Optional filename glob filter, e.g. *.yml.' },
+      },
+      required: ['container', 'path', 'pattern'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_lxc_logs',
+    description: 'Fetch recent log output from inside an LXC guest without redeploying anything: the registered ProxyPilot startup service (source=startup), any systemd unit (source=journal + unit), or docker compose logs (source=docker-compose + compose_dir). Last N lines (default 100, max 1000). Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        source: { type: 'string', enum: ['startup', 'journal', 'docker-compose'] },
+        unit: { type: 'string', description: 'systemd unit name when source=journal, e.g. docker.service.' },
+        compose_dir: { type: 'string', description: 'Directory containing docker-compose.yml when source=docker-compose.' },
+        lines: { type: 'number', description: 'Line count, default 100, max 1000.' },
+      },
+      required: ['container', 'source'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'probe_lxc_port',
+    description: 'From inside an LXC guest, probe a host:port: TCP reachability, and for http/https the status code, server header, response time, and optionally whether a WebSocket upgrade completes. Never returns a response body. The one-call answer to "is the app up behind the proxy" — an in-guest 401 with an edge 502 means the proxy binding is broken, not the app (pair with test_route for the edge side).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        host: { type: 'string', description: 'Target host, default 127.0.0.1.' },
+        port: { type: 'number' },
+        scheme: { type: 'string', enum: ['tcp', 'http', 'https'], description: 'Default http.' },
+        path: { type: 'string', description: 'URL path for http/https probes, default /.' },
+        test_websocket: { type: 'boolean', description: 'Also attempt a WebSocket upgrade on the same path (default false).' },
+        timeout_seconds: { type: 'number', description: 'Default 10, max 60.' },
+      },
+      required: ['container', 'port'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_lxc_startup',
+    description: 'The registered startup script for an LXC guest: script path, working dir, full content, and the systemd unit\'s state — last exit code, last start/exit timestamps. Previously visible only as a side effect of inspect_lxc_zip. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: { container: { type: 'string' } },
+      required: ['container'],
       additionalProperties: false,
     },
   },
@@ -794,6 +938,82 @@ export const MCP_TOOLS = [
         timeout_seconds: { type: 'number', description: 'Kill the run after this many seconds (default 120, max 1800). A run that hits the deadline reports timed_out: true and may still be running inside the container.' },
       },
       required: ['container'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'create_static_site',
+    description: 'Register a new static site: name, domain, a docroot with a placeholder index, and TLS issuance through the same pipeline the UI uses. Creation-only — fails if the domain is already routed, never replaces. Returns the site id the zip-deploy and file tools take. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        domain: { type: 'string' },
+        tls: { type: 'boolean', description: 'HTTPS with automatic certificates. Default true.' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['name', 'domain', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_static_site',
+    description: 'Detail for one static site: routed domains, docroot path with file count / total bytes / newest mtime, TLS policy, and the issued certificate\'s validity when one is on disk. Counterpart of get_project. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: { site_id: { type: ['number', 'string'], description: 'From list_static_sites.' } },
+      required: ['site_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_static_site_files',
+    description: 'List the deployed files of a static site (path, size, mtime), optionally under one subdirectory. Capped at 2000 entries. The zip apply is no longer write-only. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        site_id: { type: ['number', 'string'] },
+        subdir: { type: 'string', description: 'Limit the listing to a subdirectory of the docroot.' },
+      },
+      required: ['site_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'read_static_site_file',
+    description: 'Read one text file from a static site\'s docroot (up to 512 KB, refuses binary) — same contract as read_lxc_file. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        site_id: { type: ['number', 'string'] },
+        path: { type: 'string', description: 'Path relative to the docroot.' },
+      },
+      required: ['site_id', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'write_static_site_file',
+    description: 'Write one text file into a static site\'s docroot with the write_lxc_file safety contract: existing files need confirm_overwrite: true and the previous version is kept as <path>.old. Single-file fixes (a typo, robots.txt, one stylesheet) without a full zip redeploy; changes serve immediately.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        site_id: { type: ['number', 'string'] },
+        path: { type: 'string', description: 'Path relative to the docroot.' },
+        content: { type: 'string' },
+        confirm_overwrite: { type: 'boolean', description: 'Required (true) when the file exists.' },
+      },
+      required: ['site_id', 'path', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_static_site_cert',
+    description: 'TLS certificate status for a static site\'s primary domain: policy (ACME vs manual), issuer, validity window, days until expiry, and status. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: { site_id: { type: ['number', 'string'] } },
+      required: ['site_id'],
       additionalProperties: false,
     },
   },

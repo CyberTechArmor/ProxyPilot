@@ -1766,7 +1766,9 @@ function normalizeLxcPathPrefix(value) {
 // `name` is the operator-facing LXC name (no `pp-` prefix); we store
 // it verbatim in `lxc_container_name` to match the convention every
 // other endpoint uses.
-function findOrCreateLxcService(db, name, ip) {
+// Exported for the MCP set_route tool, which binds domains to LXC upstreams
+// through the same per-container service rows this route uses.
+export function findOrCreateLxcService(db, name, ip) {
   const existing = db
     .prepare(`SELECT * FROM services WHERE lxc_container_name = ? AND is_admin = 0 LIMIT 1`)
     .get(name);

@@ -415,6 +415,82 @@ export function validImageAlias(s) {
   return v;
 }
 
+// ---- routing tools: domain/port validation + host-curl probe parsing ----
+//
+// test_route probes run as host `curl` (through the same nsenter seam every
+// other host command uses) so they see exactly what the edge proxy serves —
+// pinned to loopback with --resolve, so the test exercises THIS Caddy even
+// when public DNS points elsewhere. Bodies are never returned: the probe
+// keeps -o /dev/null and parses only a whitelisted set of header fields,
+// because response bodies (and cookies) can carry credentials echoed by
+// misconfigured apps.
+
+export function validDomainName(s) {
+  const v = String(s ?? '').trim().toLowerCase();
+  if (!v || v.length > 253) return null;
+  if (!/^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/.test(v)) return null;
+  return v;
+}
+
+export function normalizePort(p) {
+  const n = Number(p);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+}
+
+/**
+ * Parse a curl run that used `-o /dev/null -D -` plus a
+ * `PP_TIME:%{time_total}` / `PP_CODE:%{http_code}` write-out trailer.
+ * Returns fields from the LAST response block (redirect chains report their
+ * final hop) — and ONLY whitelisted headers; Set-Cookie and friends never
+ * leave this function.
+ */
+export function parseCurlProbeOutput(stdout) {
+  const src = String(stdout ?? '');
+  const statuses = [];
+  let server = null, location = null, contentType = null;
+  let sawStatusInBlock = false;
+  for (const line of src.split(/\r?\n/)) {
+    const st = /^HTTP\/([0-9.]+)\s+(\d{3})/.exec(line);
+    if (st) {
+      statuses.push(Number(st[2]));
+      sawStatusInBlock = true;
+      server = null; location = null; contentType = null;   // new block resets
+      continue;
+    }
+    if (!sawStatusInBlock) continue;
+    const h = /^([A-Za-z0-9-]+):\s*(.*)$/.exec(line);
+    if (!h) continue;
+    const key = h[1].toLowerCase();
+    if (key === 'server') server = h[2].trim().slice(0, 100);
+    else if (key === 'location') location = h[2].trim().slice(0, 300);
+    else if (key === 'content-type') contentType = h[2].trim().slice(0, 100);
+  }
+  const time = /PP_TIME:([\d.]+)/.exec(src);
+  const code = /PP_CODE:(\d+)/.exec(src);
+  return {
+    status_code: statuses.length ? statuses[statuses.length - 1] : (code ? Number(code[1]) || null : null),
+    status_chain: statuses,
+    server, location, content_type: contentType,
+    time_seconds: time ? Number(time[1]) : null,
+  };
+}
+
+/** Map a curl exit code to a failure class a caller can act on. */
+export function classifyCurlExit(code) {
+  const map = {
+    6: ['dns', 'the hostname did not resolve'],
+    7: ['connect_refused', 'TCP connection refused — nothing is listening there'],
+    28: ['timeout', 'the probe timed out'],
+    35: ['tls', 'TLS handshake failed'],
+    52: ['empty_reply', 'the server closed the connection without a response'],
+    56: ['reset', 'the connection was reset mid-transfer'],
+    60: ['tls_untrusted', 'the certificate could not be verified'],
+    127: ['curl_missing', 'curl is not installed'],
+  };
+  const [cls, hint] = map[Number(code)] || ['error', `curl exited ${code}`];
+  return { class: cls, hint };
+}
+
 // ---- write_lxc_file: the mode parameter ----
 
 /** Three octal permission digits, with or without a leading zero ("0755",
@@ -718,6 +794,55 @@ export const MCP_TOOLS = [
         timeout_seconds: { type: 'number', description: 'Kill the run after this many seconds (default 120, max 1800). A run that hits the deadline reports timed_out: true and may still be running inside the container.' },
       },
       required: ['container'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_routes',
+    description: 'List every hostname the edge proxy serves: domain, path prefix, upstream (container ip:port or static-site id), websocket flag, TLS stance — and flags orphaned routes whose upstream is unrecorded (they render but 502). Read-only.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'get_route',
+    description: 'Full detail for one hostname: every route on the domain with its upstream resolution, the TLS policy (ACME vs manual cert), and — when an issued certificate is on disk — its issuer, validity window, days until expiry, and status. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Fully qualified hostname, e.g. web.example.com.' },
+      },
+      required: ['domain'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'test_route',
+    description: 'Probe a hostname from the edge host\'s own vantage point, pinned to the local proxy (so the test exercises THIS Caddy even when public DNS points elsewhere): DNS resolution, HTTP status + timing through the full proxy path, a direct probe of the recorded upstream, and optionally a WebSocket upgrade handshake. Distinguishes in one call the three failure classes that look identical from outside — proxy down, proxy-to-upstream (stale binding), and app-level — and says which one it found. Never returns response bodies. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string' },
+        path: { type: 'string', description: 'URL path to probe, default /.' },
+        test_websocket: { type: 'boolean', description: 'Attempt a WS upgrade through the proxy (default: whatever the route has configured).' },
+      },
+      required: ['domain'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_route',
+    description: 'Create or update the root-path binding for one hostname: upstream container name + port (preferred — the container\'s current IP is resolved and recorded) or a literal ip:port, websocket upgrade on/off (default ON — modern upstreams break without it and the failure mode, page-loads-then-black-screen, is misleading), and TLS. Updating an existing binding requires confirm_overwrite: true and the result carries the previous binding, so the change is reversible by a second call. Refuses domains bound to static sites. No delete verb — removal stays a UI/host operation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string' },
+        upstream_container: { type: 'string', description: 'LXC guest name (without pp-); mutually exclusive with upstream_ip. Preferred: pairs with set_lxc_network so IP changes cannot silently break the route.' },
+        upstream_ip: { type: 'string', description: 'Literal upstream IPv4; mutually exclusive with upstream_container.' },
+        upstream_port: { type: 'number' },
+        websocket: { type: 'boolean', description: 'Pass Upgrade/Connection headers. Default true.' },
+        tls: { type: 'boolean', description: 'HTTPS with automatic certificates. Default true.' },
+        confirm_overwrite: { type: 'boolean', description: 'Required (true) when the domain already has a binding.' },
+      },
+      required: ['domain', 'upstream_port'],
       additionalProperties: false,
     },
   },

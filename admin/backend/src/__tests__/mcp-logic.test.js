@@ -861,3 +861,72 @@ test('validIpv4 and validImageAlias reject the confusing shapes', () => {
   assert.equal(validImageAlias('a b'), null);
   assert.equal(validImageAlias(''), null);
 });
+
+// ---- cycle 3: routing validation + probe parsing ----
+
+import {
+  validDomainName, normalizePort, parseCurlProbeOutput, classifyCurlExit,
+} from '../lib/mcp-logic.js';
+
+test('validDomainName: FQDNs (incl. wildcard) pass, everything confusing fails', () => {
+  assert.equal(validDomainName('web.example.com'), 'web.example.com');
+  assert.equal(validDomainName('Web.Example.COM'), 'web.example.com');
+  assert.equal(validDomainName('*.example.com'), '*.example.com');
+  assert.equal(validDomainName('a-b.example.co.uk'), 'a-b.example.co.uk');
+  assert.equal(validDomainName('localhost'), null);          // needs a dot
+  assert.equal(validDomainName('-bad.example.com'), null);
+  assert.equal(validDomainName('exa mple.com'), null);
+  assert.equal(validDomainName('example..com'), null);
+  assert.equal(validDomainName('http://example.com'), null);
+  assert.equal(validDomainName(''), null);
+});
+
+test('normalizePort clamps to real ports', () => {
+  assert.equal(normalizePort(443), 443);
+  assert.equal(normalizePort('3000'), 3000);
+  assert.equal(normalizePort(0), null);
+  assert.equal(normalizePort(65536), null);
+  assert.equal(normalizePort(3.5), null);
+  assert.equal(normalizePort('web'), null);
+});
+
+test('parseCurlProbeOutput: last response block wins, headers whitelisted, trailer parsed', () => {
+  const dump = [
+    'HTTP/1.1 301 Moved Permanently',
+    'Location: https://web.example.com/',
+    'Set-Cookie: session=SECRET; HttpOnly',
+    '',
+    'HTTP/2 200',
+    'server: Caddy',
+    'content-type: text/html; charset=utf-8',
+    'set-cookie: sid=ALSO_SECRET',
+    '',
+    'PP_TIME:0.042',
+    'PP_CODE:200',
+  ].join('\r\n');
+  const r = parseCurlProbeOutput(dump);
+  assert.equal(r.status_code, 200);
+  assert.deepEqual(r.status_chain, [301, 200]);
+  assert.equal(r.server, 'Caddy');
+  assert.equal(r.content_type, 'text/html; charset=utf-8');
+  assert.equal(r.location, null);              // reset by the second block
+  assert.equal(r.time_seconds, 0.042);
+  // Cookies never surface anywhere in the parsed result.
+  assert.ok(!JSON.stringify(r).includes('SECRET'));
+});
+
+test('parseCurlProbeOutput: a 101 upgrade block parses even with no trailer', () => {
+  const r = parseCurlProbeOutput('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n');
+  assert.equal(r.status_code, 101);
+  assert.equal(r.time_seconds, null);
+  assert.deepEqual(parseCurlProbeOutput('').status_chain, []);
+});
+
+test('classifyCurlExit maps the failure classes a caller acts on', () => {
+  assert.equal(classifyCurlExit(6).class, 'dns');
+  assert.equal(classifyCurlExit(7).class, 'connect_refused');
+  assert.equal(classifyCurlExit(28).class, 'timeout');
+  assert.equal(classifyCurlExit(35).class, 'tls');
+  assert.equal(classifyCurlExit(127).class, 'curl_missing');
+  assert.match(classifyCurlExit(99).hint, /99/);
+});

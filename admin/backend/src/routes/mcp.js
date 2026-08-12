@@ -22,8 +22,8 @@
 
 import express from 'express';
 import { randomBytes } from 'node:crypto';
-import { readFile, writeFile, rm, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { appendFile, readFile, writeFile, rm, mkdir, stat as fsStat, readdir, copyFile, open as fsOpen } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
 import { getDb, logAudit } from '../db.js';
@@ -34,6 +34,16 @@ import {
   RPC_PARSE_ERROR, RPC_INVALID_REQUEST, RPC_METHOD_NOT_FOUND, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR,
   mintMcpToken, hashMcpToken, tokenFromRequest,
   mintUploadTicket, looksLikeUploadTicket, UPLOAD_TICKET_TTL_MS, INLINE_ZIP_MAX_BYTES,
+  validSha256, sha256Hex, zipChecksumError,
+  normalizeChunkSeq, decodeChunkBase64,
+  parseLxcListJson, lxcContainerSummaries, validFileMode,
+  startupRunTimeoutMs, parseMarkedStreams,
+  parseLxcCommand, lxcCommandTimeoutMs, lxcContainerDetail,
+  validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
+  validIpv4, validImageAlias,
+  validDomainName, normalizePort, parseCurlProbeOutput, classifyCurlExit,
+  summarizeAccessLog, caddyAccessLogPath,
+  parseStatFileList, parseSystemctlShow, validUnitName, validProbeHost, validFileGlob, normalizeServiceId,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
   applyStringEdit, normalizeReadRange,
@@ -49,8 +59,16 @@ import { stageZipUpload, getZipUpload, discardZipUpload } from '../lib/zip-stagi
 import {
   checkContainerConflicts, readContainerStartup, applyTarToContainer,
   setupStartupScript, writeTarFromZip, runHostCapture, runInContainer,
+  STARTUP_UNIT_NAME,
 } from '../lib/lxc-zip.js';
 import { resolveMock2Gate } from '../mock2/gating.js';
+import { ensureNetworkNat, findOrCreateLxcService } from './lxc.js';
+import { regenerateDomainCaddyConfig, ensureCaddyStructure, assertRoutesShareSslStance, syncPrimaryRouteFromLegacy } from './services.js';
+import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
+import { resolveTlsForHost } from '../lib/tls-cert-store.js';
+import { resolveCertDir } from '../lib/caddy-cert.js';
+import { parseCertificate, daysUntil, expiryStatus } from '../lib/tls-certs.js';
+import { v4 as uuidv4 } from 'uuid';
 
 // The public base URL for links we hand to MCP clients (connector URL, upload
 // URLs). The backend sits behind Caddy, and without app-level trust-proxy
@@ -69,6 +87,17 @@ function publicBaseUrl(req) {
 
 const LXC_PREFIX = 'pp-';
 const LXC_NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
+
+// The exec allowlist — loaded once at module init. This JSON is the
+// enforcement source of truth (the run_lxc_command description only
+// summarizes it); it is also packaged verbatim in the mcp-lxc-sites-upgrades
+// component spec, and the two must be kept in sync.
+const LXC_CMD_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/lxc-command-allowlist.json', import.meta.url), 'utf8'),
+);
+const LXC_CFG_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/lxc-config-allowlist.json', import.meta.url), 'utf8'),
+);
 const DEFAULT_LXC_TARGET = '/opt/app';
 const MCP_TMP_DIR = process.env.ZIP_UPLOAD_TMP_DIR || join(os.tmpdir(), 'proxypilot-zip-uploads');
 
@@ -94,42 +123,59 @@ function findToken(rawToken) {
 }
 
 // ---- upload tickets (in-memory; single-use; TTL) ----
+//
+// rec: { createdAt, filePath|null, chunkPath|null, nextSeq, chunkBytes }.
+// filePath is set when the ticket holds a COMPLETE archive (PUT, or a
+// finished chunked upload); chunkPath is the in-progress chunk assembly.
 
-const uploadTickets = new Map(); // ticket -> { createdAt, filePath|null }
+const uploadTickets = new Map();
 
 function sweepTickets() {
   const cutoff = Date.now() - UPLOAD_TICKET_TTL_MS;
   for (const [t, rec] of uploadTickets) {
     if (rec.createdAt < cutoff) {
       if (rec.filePath) rm(rec.filePath, { force: true }).catch(() => {});
+      if (rec.chunkPath) rm(rec.chunkPath, { force: true }).catch(() => {});
       uploadTickets.delete(t);
     }
   }
 }
 
 // Resolve the zip bytes for an inspect tool: ticket (uploaded file) or inline
-// base64. Returns { buf, cleanup } or throws a user-facing Error.
+// base64. Returns { buf, tmpPath } or throws a user-facing Error. When the
+// caller declared a sha256, the bytes are verified HERE — before any parsing
+// or staging — so transport corruption reads as exactly that instead of as a
+// downstream extraction error (bugfix: inline base64 was observed corrupting
+// silently in the field).
 async function zipBytesFromArgs(args) {
+  let buf, tmpPath;
   if (args.ticket) {
     if (!looksLikeUploadTicket(args.ticket)) throw new Error('Invalid upload ticket');
     const rec = uploadTickets.get(args.ticket);
     if (!rec || !rec.filePath) throw new Error('Upload ticket unknown, expired, or no bytes were uploaded to it yet');
     uploadTickets.delete(args.ticket);
-    const buf = await readFile(rec.filePath);
-    return { buf, tmpPath: rec.filePath };
-  }
-  if (args.zip_base64) {
-    const buf = Buffer.from(String(args.zip_base64), 'base64');
+    buf = await readFile(rec.filePath);
+    tmpPath = rec.filePath;
+  } else if (args.zip_base64) {
+    buf = Buffer.from(String(args.zip_base64), 'base64');
     if (buf.length === 0) throw new Error('zip_base64 decoded to zero bytes');
     if (buf.length > INLINE_ZIP_MAX_BYTES) {
       throw new Error(`Inline zips are limited to ${Math.floor(INLINE_ZIP_MAX_BYTES / (1024 * 1024))} MB — use create_upload_ticket for this archive`);
     }
-    const tmpPath = join(MCP_TMP_DIR, `mcp-${randomBytes(12).toString('hex')}.zip`);
+    tmpPath = join(MCP_TMP_DIR, `mcp-${randomBytes(12).toString('hex')}.zip`);
     await mkdir(MCP_TMP_DIR, { recursive: true }).catch(() => {});
     await writeFile(tmpPath, buf);
-    return { buf, tmpPath };
+  } else {
+    throw new Error('Provide either an upload ticket or zip_base64');
   }
-  throw new Error('Provide either an upload ticket or zip_base64');
+  if (args.sha256 != null && String(args.sha256).trim() !== '') {
+    const mismatch = zipChecksumError(buf, args.sha256);
+    if (mismatch) {
+      await rm(tmpPath, { force: true }).catch(() => {});
+      throw new Error(mismatch);
+    }
+  }
+  return { buf, tmpPath };
 }
 
 // ---- mock2 (projects) access — gated exactly like the UI router ----
@@ -190,8 +236,36 @@ function projectSummary(project, m) {
 /* ------------------------------- tools ---------------------------------- */
 
 async function toolListStaticSites() {
-  const rows = getDb().prepare(`SELECT id, name, domain, type, enabled FROM services WHERE type = 'static' ORDER BY name`).all();
-  return toolResult({ sites: rows.map((r) => ({ id: r.id, name: r.name, domain: r.domain, enabled: !!r.enabled })) });
+  // `domain` moved off `services` and into `service_http_routes` (D.14 drops
+  // the legacy route-owned columns) — selecting it from services was throwing
+  // "no such column: domain" on every call, which made the whole static-site
+  // surface unreachable over MCP (the deploy tools need an id only this list
+  // can provide). `enabled` never existed on services at all (that column
+  // belongs to service_l4_forwards); the row state lives in `status`. The
+  // primary domain is the root-path route, oldest first.
+  let rows;
+  try {
+    rows = getDb().prepare(`
+      SELECT s.id, s.name, s.status,
+             (SELECT r.domain FROM service_http_routes r
+                WHERE r.service_id = s.id
+                ORDER BY (r.path_prefix = '/') DESC, r.created_at ASC, r.id ASC
+                LIMIT 1) AS domain
+      FROM services s
+      WHERE s.type = 'static'
+      ORDER BY s.name
+    `).all();
+  } catch (err) {
+    // Schema drift bit this tool once already — if it happens again, say so
+    // loudly instead of answering with an error the caller cannot act on.
+    return toolResult(`Could not list static sites (schema mismatch?): ${err?.message || err}`, { isError: true });
+  }
+  return toolResult({
+    sites: rows.map((r) => ({
+      id: r.id, name: r.name, domain: r.domain || null,
+      status: r.status || null, enabled: r.status === 'active',
+    })),
+  });
 }
 
 function toolCreateUploadTicket(req) {
@@ -208,8 +282,83 @@ function toolCreateUploadTicket(req) {
   });
 }
 
+// ---- chunked upload (the ticket path for clients that cannot PUT) ----
+//
+// The documented big-zip flow returns a PUT URL on the public edge host —
+// which egress-restricted agent sandboxes cannot reach (observed in the
+// field: CONNECT 403), closing the large-archive path to exactly the clients
+// most likely to drive these tools. These two tools deliver the same bytes
+// through the already-working MCP channel: ordered base64 chunks appended to
+// the ticket, sealed by a mandatory whole-file checksum.
+
+async function toolAppendUploadChunk(args) {
+  sweepTickets();
+  const ticket = String(args.ticket || '');
+  if (!looksLikeUploadTicket(ticket)) return toolResult('Invalid upload ticket', { isError: true });
+  const rec = uploadTickets.get(ticket);
+  if (!rec) return toolResult('Upload ticket unknown or expired — create a new one with create_upload_ticket', { isError: true });
+  if (rec.filePath) return toolResult('This ticket already holds a complete upload', { isError: true });
+  const seq = normalizeChunkSeq(args.seq);
+  if (seq === null) return toolResult('seq must be a whole number starting at 0', { isError: true });
+  const expected = rec.nextSeq || 0;
+  if (seq !== expected) {
+    return toolResult(`Out-of-order chunk: expected seq ${expected}, got ${seq}. Chunks must arrive in order, each exactly once — if a call failed mid-flight, re-send the expected seq.`, { isError: true });
+  }
+  const dec = decodeChunkBase64(args.chunk_base64);
+  if (dec.error) return toolResult(dec.error, { isError: true });
+  const total = (rec.chunkBytes || 0) + dec.buf.length;
+  if (total > ZIP_LIMITS.maxZipBytes) {
+    if (rec.chunkPath) await rm(rec.chunkPath, { force: true }).catch(() => {});
+    uploadTickets.delete(ticket);
+    return toolResult(`Upload exceeds the ${Math.floor(ZIP_LIMITS.maxZipBytes / (1024 * 1024))} MB zip limit — the ticket has been discarded`, { isError: true });
+  }
+  if (!rec.chunkPath) {
+    await mkdir(MCP_TMP_DIR, { recursive: true }).catch(() => {});
+    rec.chunkPath = join(MCP_TMP_DIR, `mcp-${randomBytes(12).toString('hex')}.zip.part`);
+  }
+  await appendFile(rec.chunkPath, dec.buf);
+  rec.nextSeq = expected + 1;
+  rec.chunkBytes = total;
+  return toolResult({
+    appended: true, seq, next_seq: rec.nextSeq, received_bytes: total,
+    next: 'Append the next chunk, or seal the upload with finish_upload (pass the sha256 of the complete zip).',
+  });
+}
+
+async function toolFinishUpload(args) {
+  sweepTickets();
+  const ticket = String(args.ticket || '');
+  if (!looksLikeUploadTicket(ticket)) return toolResult('Invalid upload ticket', { isError: true });
+  const rec = uploadTickets.get(ticket);
+  if (!rec) return toolResult('Upload ticket unknown or expired', { isError: true });
+  if (rec.filePath) return toolResult('This ticket already holds a complete upload', { isError: true });
+  if (!rec.chunkPath || !(rec.chunkBytes > 0)) {
+    return toolResult('No chunks have been appended to this ticket yet — send them with append_upload_chunk first', { isError: true });
+  }
+  const want = validSha256(args.sha256);
+  if (!want) return toolResult('sha256 is required: the 64-character hex SHA-256 of the complete zip file', { isError: true });
+  const buf = await readFile(rec.chunkPath);
+  const got = sha256Hex(buf);
+  if (got !== want) {
+    // Corrupted in transport — refuse to hand corrupted bytes to an inspect
+    // tool. The ticket dies with the bad bytes so a retry starts clean.
+    await rm(rec.chunkPath, { force: true }).catch(() => {});
+    uploadTickets.delete(ticket);
+    return toolResult(`Assembled upload does not match sha256 (declared ${want}, got ${got} over ${buf.length} bytes) — a chunk was corrupted in transport. Create a new ticket and re-send.`, { isError: true });
+  }
+  rec.filePath = rec.chunkPath;
+  rec.chunkPath = null;
+  return toolResult({
+    finished: true, bytes: buf.length, sha256: got,
+    next: 'Pass the ticket to inspect_static_site_zip or inspect_lxc_zip (the ticket stays single-use and expires on its original 30-minute clock).',
+  });
+}
+
 async function toolInspectStaticSiteZip(args, auth) {
-  const service = getDb().prepare(`SELECT id, name, data_dir, type FROM services WHERE id = ? AND type = 'static'`).get(Number(args.service_id));
+  // Ids are TEXT (uuid for UI-created sites, legacy integers as text) — the
+  // old Number() coercion NaN'd every uuid and reported "not found".
+  const siteId = normalizeServiceId(args.service_id);
+  const service = siteId ? getDb().prepare(`SELECT id, name, data_dir, type FROM services WHERE id = ? AND type = 'static'`).get(siteId) : null;
   if (!service || !service.data_dir) return toolResult('Static site not found — use list_static_sites for valid ids', { isError: true });
   const { buf, tmpPath } = await zipBytesFromArgs(args);
   let parsed;
@@ -239,7 +388,8 @@ async function toolInspectStaticSiteZip(args, auth) {
 }
 
 async function toolApplyStaticSiteZip(args, auth) {
-  const service = getDb().prepare(`SELECT id, name, data_dir, type FROM services WHERE id = ? AND type = 'static'`).get(Number(args.service_id));
+  const siteId = normalizeServiceId(args.service_id);
+  const service = siteId ? getDb().prepare(`SELECT id, name, data_dir, type FROM services WHERE id = ? AND type = 'static'`).get(siteId) : null;
   if (!service || !service.data_dir) return toolResult('Static site not found', { isError: true });
   const rec = getZipUpload(String(args.upload_id), 'service', String(service.id));
   if (!rec) return toolResult('Upload not found or expired — inspect the zip again', { isError: true });
@@ -291,17 +441,27 @@ async function lxcExistsKind(incusName, targetDir, variantEntries) {
 }
 
 async function toolListLxcContainers() {
-  const out = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000 });
-  let list = [];
-  try { list = JSON.parse(out.stdout || '[]'); } catch { /* fall through */ }
-  const containers = list
-    .filter((c) => String(c.name || '').startsWith(LXC_PREFIX))
-    .map((c) => ({
-      name: String(c.name).slice(LXC_PREFIX.length),
-      status: c.status || null,
-      ip: c.state?.network?.eth0?.addresses?.find((a) => a.family === 'inet')?.address || null,
-    }));
-  return toolResult({ containers });
+  // This tool used to swallow every failure mode — non-zero exit, and JSON
+  // made unparseable by the host-capture cap — and answer `{"containers":[]}`,
+  // which reads as "the host is empty" while name-addressed tools were happily
+  // operating on live guests. An agent then plans to CREATE a duplicate. A
+  // failed list must therefore be an error, never an empty success.
+  //
+  // --all-projects first, so a guest living outside the default Incus project
+  // still appears; older incus clients without the flag fall back cleanly.
+  let out = await runHostCapture('incus', ['list', '--all-projects', '--format', 'json'], { timeoutMs: 30000 });
+  if (out.status !== 0) {
+    out = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000 });
+  }
+  if (out.status !== 0) {
+    const why = out.timedOut ? 'timed out' : (out.stderr || '').trim().slice(-300) || out.error || 'unknown error';
+    return toolResult(`Could not list containers — incus list failed (${why}). This is a listing failure, not proof the host is empty; name-addressed tools (read_lxc_file, …) may still reach containers directly.`, { isError: true });
+  }
+  const parsed = parseLxcListJson(out.stdout);
+  if (parsed.error) {
+    return toolResult(`Could not list containers — incus list returned ${parsed.error}. This is a listing failure, not proof the host is empty.`, { isError: true });
+  }
+  return toolResult({ containers: lxcContainerSummaries(parsed.list, LXC_PREFIX) });
 }
 
 async function toolInspectLxcZip(args, auth) {
@@ -474,6 +634,13 @@ async function toolWriteLxcFile(args, auth) {
   if (Buffer.byteLength(content) > LXC_FILE_WRITE_CAP) {
     return toolResult(`Content exceeds the ${Math.floor(LXC_FILE_WRITE_CAP / (1024 * 1024))} MB single-file cap — use the zip flow for bigger payloads`, { isError: true });
   }
+  // Optional mode, so a script written here is actually runnable — without it
+  // the only way to deliver an executable file was a full zip apply.
+  let mode = null;
+  if (args.mode != null && String(args.mode).trim() !== '') {
+    mode = validFileMode(args.mode);
+    if (!mode) return toolResult('mode must be three octal permission digits, e.g. "0755" or "644"', { isError: true });
+  }
   const incusName = `${LXC_PREFIX}${name}`;
 
   // Ask-first when the file exists — same contract as every other overwrite.
@@ -496,21 +663,33 @@ async function toolWriteLxcFile(args, auth) {
     });
   }
 
+  // mode rides as $2 (validated three octal digits — never interpolated), so
+  // the chmod happens in the same exec as the write.
   const w = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; if [ -e "$p" ]; then rm -rf -- "$p.old"; cp -a -- "$p" "$p.old"; fi; mkdir -p "$(dirname -- "$p")"; cat > "$p"', 'sh', path],
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; m="$2"; if [ -e "$p" ]; then rm -rf -- "$p.old"; cp -a -- "$p" "$p.old"; fi; mkdir -p "$(dirname -- "$p")"; cat > "$p"; if [ -n "$m" ]; then chmod "$m" -- "$p"; fi', 'sh', path, mode || ''],
     { input: content, timeoutMs: 60000 },
   );
   if (w.status !== 0) {
     return toolResult(`Write failed: ${(w.stderr || '').trim().slice(-300)}`, { isError: true });
   }
-  logAudit(auth.created_by, 'LXC_FILE_WRITTEN', 'lxc', name, { via: 'mcp', path, bytes: Buffer.byteLength(content), replaced: exists }, null);
+  logAudit(auth.created_by, 'LXC_FILE_WRITTEN', 'lxc', name, { via: 'mcp', path, bytes: Buffer.byteLength(content), replaced: exists, ...(mode ? { mode } : {}) }, null);
   return toolResult({
     written: true, path, bytes: Buffer.byteLength(content),
     backup: exists ? `${path}.old` : null,
+    ...(mode ? { mode } : {}),
     next: 'If this container has a registered startup script, redeploy with rerun_startup.',
   });
 }
 
+// rerun_startup — now with a caller timeout and REAL output tails.
+//
+// A first-boot script was observed doing a full Docker engine install plus a
+// 910 MB image pull inside one blocking call: no timeout parameter, and the
+// old `.slice(-16 KB)` was the tail of the FIRST 256 KB the host capture
+// kept — the head of the run, not its end. Same recipe as
+// toolRunProjectCommand: each stream lands in a file inside the container and
+// is tail'd there, framed by nonce markers so output containing the marker
+// text cannot confuse the parse.
 async function toolRerunStartup(args, auth) {
   const name = String(args.container || '');
   if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
@@ -520,18 +699,1343 @@ async function toolRerunStartup(args, auth) {
     return toolResult('No startup script is registered for this container — deploy one via apply_lxc_zip (startup_script) first', { isError: true });
   }
   const wd = startup.workingDir || '/';
-  const r = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'cd "$1" && exec "$2"', 'sh', wd, startup.scriptPath],
-    { timeoutMs: parseInt(process.env.PROXYPILOT_STARTUP_RUN_TIMEOUT_MS || '120000', 10) },
+  const timeoutMs = startupRunTimeoutMs(
+    args.timeout_seconds,
+    parseInt(process.env.PROXYPILOT_STARTUP_RUN_TIMEOUT_MS || '120000', 10),
   );
-  logAudit(auth.created_by, 'LXC_STARTUP_RERUN', 'lxc', name, { via: 'mcp', script: startup.scriptPath, exit: r.status }, null);
+  const nonce = randomBytes(6).toString('hex');
+  const mark = (k) => `PP_${nonce}_${k}`;
+  const script = [
+    'cd "$1" || exit 97',
+    'o=$(mktemp) || exit 98; e=$(mktemp) || exit 98',
+    '"$2" >"$o" 2>"$e"; ec=$?',
+    `echo "${mark('EXIT')}:$ec"`,
+    `echo "${mark('OUT')}"`,
+    `tail -c ${PROJECT_COMMAND_OUTPUT_CAP} "$o"`,
+    'echo ""',
+    `echo "${mark('ERR')}"`,
+    `tail -c ${PROJECT_COMMAND_OUTPUT_CAP} "$e"`,
+    'rm -f "$o" "$e"',
+  ].join('\n');
+
+  const startedAt = Date.now();
+  const r = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', wd, startup.scriptPath],
+    { timeoutMs },
+  );
+  const durationMs = Date.now() - startedAt;
+  const streams = parseMarkedStreams(r.stdout, nonce);
+  logAudit(auth.created_by, 'LXC_STARTUP_RERUN', 'lxc', name, {
+    via: 'mcp', script: startup.scriptPath, exit: streams.found ? streams.exit_code : r.status, timed_out: !!r.timedOut,
+  }, null);
+
+  if (!streams.found) {
+    // The wrapper never reported — container down, incus refused, or we
+    // killed it at the deadline.
+    const why = r.timedOut
+      ? `Timed out after ${Math.round(timeoutMs / 1000)}s. NOTE: the deadline kills the incus client, so the script may still be running inside the container — check its effects (or the app's port) before re-running. Pass timeout_seconds (max 1800) for long first-boot installs.`
+      : r.status === 97
+        ? `The working directory ${wd} does not exist in the container.`
+        : r.status === 98
+          ? 'Could not create temporary files in the container (out of disk?).'
+          : (r.stderr || '').trim().slice(-500) || 'no output from the container';
+    return toolResult({
+      ran: false,
+      script: startup.scriptPath,
+      working_dir: wd,
+      timed_out: !!r.timedOut,
+      duration_ms: durationMs,
+      error: why,
+    }, { isError: true });
+  }
   return toolResult({
     script: startup.scriptPath,
     working_dir: wd,
-    exit_code: r.status,
+    exit_code: streams.exit_code,
     timed_out: !!r.timedOut,
-    stdout: r.stdout.slice(-16 * 1024),
-    stderr: r.stderr.slice(-16 * 1024),
+    duration_ms: durationMs,
+    stdout: streams.stdout,
+    stderr: streams.stderr,
+    output_truncated: streams.stdout.length >= PROJECT_COMMAND_OUTPUT_CAP || streams.stderr.length >= PROJECT_COMMAND_OUTPUT_CAP,
+  });
+}
+
+// ---- LXC observe + exec (spec cycle 2: the pair that would have collapsed
+// the field session from five redeploys to two calls) ----
+
+// Fetch one instance's full JSON (state + config + snapshots), across all
+// Incus projects when the client supports it. Exact-name match — incus treats
+// the CLI filter as a pattern, so pp-Web must not accidentally resolve pp-Web2.
+async function fetchLxcInstance(incusName) {
+  let out = await runHostCapture('incus', ['list', incusName, '--all-projects', '--format', 'json'], { timeoutMs: 30000 });
+  if (out.status !== 0) {
+    out = await runHostCapture('incus', ['list', incusName, '--format', 'json'], { timeoutMs: 30000 });
+  }
+  if (out.status !== 0) {
+    const why = out.timedOut ? 'timed out' : (out.stderr || '').trim().slice(-300) || out.error || 'unknown error';
+    return { error: `incus list failed (${why})` };
+  }
+  const parsed = parseLxcListJson(out.stdout);
+  if (parsed.error) return { error: `incus list returned ${parsed.error}` };
+  const instance = parsed.list.find((c) => c?.name === incusName);
+  if (!instance) return { notFound: true };
+  return { instance };
+}
+
+async function toolGetLxcContainer(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const incusName = `${LXC_PREFIX}${name}`;
+  const r = await fetchLxcInstance(incusName);
+  if (r.error) return toolResult(`Could not inspect ${name}: ${r.error}`, { isError: true });
+  if (r.notFound) return toolResult(`Container ${name} not found — use list_lxc_containers for valid names`, { isError: true });
+  const startup = await readContainerStartup(incusName).catch(() => null);
+  return toolResult({
+    name,
+    ...lxcContainerDetail(r.instance),
+    registered_startup: startup?.scriptPath
+      ? { script_path: startup.scriptPath, working_dir: startup.workingDir || null }
+      : null,
+  });
+}
+
+// run_lxc_command — one allowlisted command inside a guest, with the same
+// containment as run_project_command: whitespace-split argv handed to sh as
+// POSITIONAL PARAMETERS and invoked as "$@" (never re-parsed), output tails
+// captured inside the guest, policy loaded from lib/mcp-policy/. This single
+// tool eliminates the edit-boot-script-and-redeploy debugging loop the field
+// session was forced into.
+async function toolRunLxcCommand(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  let requestedWd = null;
+  if (args.working_dir != null && String(args.working_dir).trim() !== '') {
+    requestedWd = validTargetDir(args.working_dir);
+    if (!requestedWd) return toolResult('working_dir must be an absolute path inside the guest', { isError: true });
+  }
+  const startup = await readContainerStartup(incusName).catch(() => null);
+  const registeredWd = startup?.workingDir || null;
+  const workingDir = requestedWd || registeredWd || '/';
+
+  const parsed = parseLxcCommand(args.command, LXC_CMD_POLICY, { workingDir, registeredWorkingDir: registeredWd });
+  if (parsed.error) return toolResult(parsed.error, { isError: true });
+
+  const timeoutMs = lxcCommandTimeoutMs(args.timeout_seconds, LXC_CMD_POLICY);
+  const cap = Number(LXC_CMD_POLICY.output_cap_bytes) > 0 ? Number(LXC_CMD_POLICY.output_cap_bytes) : PROJECT_COMMAND_OUTPUT_CAP;
+  const nonce = randomBytes(6).toString('hex');
+  const mark = (k) => `PP_${nonce}_${k}`;
+  const script = [
+    'wd="$1"; shift',
+    'cd "$wd" || exit 97',
+    'o=$(mktemp) || exit 98; e=$(mktemp) || exit 98',
+    '"$@" >"$o" 2>"$e"; ec=$?',
+    `echo "${mark('EXIT')}:$ec"`,
+    `echo "${mark('OUT')}"`,
+    `tail -c ${cap} "$o"`,
+    'echo ""',
+    `echo "${mark('ERR')}"`,
+    `tail -c ${cap} "$e"`,
+    'rm -f "$o" "$e"',
+  ].join('\n');
+
+  const startedAt = Date.now();
+  const r = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', workingDir, ...parsed.argv],
+    { timeoutMs },
+  );
+  const durationMs = Date.now() - startedAt;
+  const streams = parseMarkedStreams(r.stdout, nonce);
+
+  logAudit(auth.created_by, 'LXC_COMMAND_RUN', 'lxc', name, {
+    via: 'mcp', command: parsed.argv.join(' '), scope: parsed.scope,
+    working_dir: workingDir, exit_code: streams.found ? streams.exit_code : null,
+    timed_out: !!r.timedOut, duration_ms: durationMs,
+  }, null);
+
+  if (!streams.found) {
+    const why = r.timedOut
+      ? `Timed out after ${Math.round(timeoutMs / 1000)}s. NOTE: the deadline kills the incus client, so the command may still be running inside the guest — check with a short read-only call before retrying. Pass timeout_seconds (max ${LXC_CMD_POLICY.max_timeout_seconds}) for long operations.`
+      : r.status === 97
+        ? `The working directory ${workingDir} does not exist in the guest.`
+        : r.status === 98
+          ? 'Could not create temporary files in the guest (out of disk?).'
+          : (r.stderr || '').trim().slice(-500) || 'no output from the guest — is the container running?';
+    return toolResult({
+      ran: false, command: parsed.argv.join(' '), working_dir: workingDir,
+      timed_out: !!r.timedOut, duration_ms: durationMs, error: why,
+    }, { isError: true });
+  }
+  return toolResult({
+    ran: true,
+    command: parsed.argv.join(' '),
+    scope: parsed.scope,
+    working_dir: workingDir,
+    exit_code: streams.exit_code,
+    ok: streams.exit_code === 0,
+    timed_out: !!r.timedOut,
+    duration_ms: durationMs,
+    stdout: streams.stdout,
+    stderr: streams.stderr,
+    output_truncated: streams.stdout.length >= cap || streams.stderr.length >= cap,
+  }, { isError: streams.exit_code !== 0 });
+}
+
+// ---- LXC observe, continued (spec cycle 5): file listing/search, logs,
+// port probes, startup detail — all read-only ----
+
+async function toolListLxcFiles(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const path = validTargetDir(args.path);
+  if (!path) return toolResult('path must be an absolute directory inside the guest, e.g. /opt/app', { isError: true });
+  const depth = args.recursive === true ? '' : '-maxdepth 1 ';
+  const script = `p="$1"; test -d "$p" || { echo PP_NOT_A_DIR >&2; exit 66; }; `
+    + `find "$p" -mindepth 1 ${depth}-exec stat -c '%A|%s|%Y|%N' {} + 2>/dev/null | head -n 2001`;
+  const r = await runHostCapture('incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c', script, 'sh', path], { timeoutMs: 60000 });
+  if (r.status === 66) return toolResult(`Not a directory: ${path}`, { isError: true });
+  if (r.status !== 0) return toolResult(`Could not list ${path} — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  const entries = parseStatFileList(r.stdout);
+  return toolResult({
+    path,
+    recursive: args.recursive === true,
+    entry_count: Math.min(entries.length, 2000),
+    truncated: entries.length > 2000,
+    entries: entries.slice(0, 2000),
+  });
+}
+
+async function toolSearchLxcFiles(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const path = validTargetDir(args.path);
+  if (!path) return toolResult('path must be an absolute directory inside the guest', { isError: true });
+  const pattern = validSearchPattern(args.pattern);
+  if (!pattern) return toolResult('pattern is required (an extended regular expression, up to 1000 characters)', { isError: true });
+  let glob = null;
+  if (args.glob != null && String(args.glob).trim() !== '') {
+    glob = validFileGlob(args.glob);
+    if (!glob) return toolResult('glob must be a simple filename glob, e.g. *.yml', { isError: true });
+  }
+  // Our own script text, so the pipe to head is fine — the caller's pattern
+  // and glob ride as positional parameters and never reach a parser.
+  const script = glob
+    ? 'grep -rnIE --include="$3" -e "$2" -- "$1" 2>/dev/null | head -n 201'
+    : 'grep -rnIE -e "$2" -- "$1" 2>/dev/null | head -n 201';
+  const r = await runHostCapture(
+    'incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c', script, 'sh', path, pattern, ...(glob ? [glob] : [])],
+    { timeoutMs: 60000 },
+  );
+  // grep exit 1 = no matches (head may also mask it) — a result, not a failure.
+  if (r.status !== 0 && r.status !== 1 && r.stdout.trim() === '') {
+    return toolResult(`Search failed: ${(r.stderr || '').trim().slice(-300) || 'is the container running?'}`, { isError: true });
+  }
+  const matches = parseGitGrepOutput(r.stdout, 200);
+  return toolResult({
+    path, pattern, glob,
+    match_count: matches.length,
+    truncated: r.stdout.split('\n').filter(Boolean).length > matches.length,
+    matches,
+  });
+}
+
+async function toolGetLxcLogs(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const source = String(args.source || '');
+  let lines = Number(args.lines);
+  lines = Number.isInteger(lines) && lines >= 1 ? Math.min(lines, 1000) : 100;
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  let argv;
+  if (source === 'startup') {
+    argv = ['exec', incusName, '--', 'journalctl', '-u', STARTUP_UNIT_NAME, '--no-pager', '-n', String(lines)];
+  } else if (source === 'journal') {
+    const unit = validUnitName(args.unit);
+    if (!unit) return toolResult('unit is required for source=journal, e.g. docker.service', { isError: true });
+    argv = ['exec', incusName, '--', 'journalctl', '-u', unit, '--no-pager', '-n', String(lines)];
+  } else if (source === 'docker-compose') {
+    const dir = validTargetDir(args.compose_dir);
+    if (!dir) return toolResult('compose_dir is required for source=docker-compose (absolute path containing docker-compose.yml)', { isError: true });
+    argv = ['exec', incusName, '--', 'sh', '-c', 'cd "$1" && docker compose logs --no-color --tail "$2"', 'sh', dir, String(lines)];
+  } else {
+    return toolResult("source must be 'startup' (the registered ProxyPilot startup service), 'journal' (a systemd unit — pass unit), or 'docker-compose' (pass compose_dir)", { isError: true });
+  }
+  const r = await runHostCapture('incus', argv, { timeoutMs: 60000 });
+  if (r.status !== 0) {
+    return toolResult(`Could not fetch logs: ${(r.stderr || '').trim().slice(-300) || 'is the container running?'}`, { isError: true });
+  }
+  return toolResult({
+    source, lines,
+    log: r.stdout.slice(-PROJECT_COMMAND_OUTPUT_CAP),
+    truncated: r.stdout.length > PROJECT_COMMAND_OUTPUT_CAP,
+  });
+}
+
+// probe_lxc_port — the one-call answer to "is the app up behind the proxy",
+// from INSIDE the guest. In the field, telling an edge 502 apart from an
+// in-guest 401 required rewriting the boot script to smuggle curl output
+// through startup stdout. Never returns response bodies.
+async function toolProbeLxcPort(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const port = normalizePort(args.port);
+  if (!port) return toolResult('port must be a port number (1–65535)', { isError: true });
+  const host = validProbeHost(args.host || '127.0.0.1');
+  if (!host) return toolResult('host must be an IP or hostname', { isError: true });
+  const scheme = String(args.scheme || 'http');
+  if (!['tcp', 'http', 'https'].includes(scheme)) return toolResult("scheme must be 'tcp', 'http', or 'https'", { isError: true });
+  let path = '/';
+  if (args.path != null && String(args.path).trim() !== '') {
+    path = String(args.path).trim();
+    if (!path.startsWith('/') || /[\u0000-\u001f\u007f\s]/.test(path)) return toolResult('path must be a URL path starting with /', { isError: true });
+  }
+  let timeout = Number(args.timeout_seconds);
+  timeout = Number.isFinite(timeout) && timeout > 0 ? Math.min(Math.round(timeout), 60) : 10;
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  const guestCurl = async (url, extraArgs = []) => {
+    const argv = ['exec', incusName, '--', 'curl', '-sS', '-o', '/dev/null', '-D', '-', '-k',
+      '--max-time', String(timeout), '-w', '\\nPP_TIME:%{time_total}\\nPP_CODE:%{http_code}', ...extraArgs, url];
+    const r = await runHostCapture('incus', argv, { timeoutMs: (timeout + 10) * 1000 });
+    return { r, parsed: parseCurlProbeOutput(r.stdout) };
+  };
+
+  if (scheme === 'tcp') {
+    // telnet:// makes curl connect and then wait for data — so a short
+    // timeout AFTER a successful connect (exit 28) means the port is OPEN,
+    // while refused/unreachable fail immediately.
+    const { r } = await guestCurl(`telnet://${host}:${port}`);
+    if (r.status === 127) return toolResult('curl is not installed in this guest — apt install curl (via the startup script) first', { isError: true });
+    const openish = r.status === 0 || r.status === 28 || r.status === 56;
+    return toolResult({
+      host, port, scheme: 'tcp',
+      tcp_connect: openish,
+      ...(openish ? {} : { failure: classifyCurlExit(r.status) }),
+    });
+  }
+
+  const url = `${scheme}://${host}:${port}${path}`;
+  const { r, parsed } = await guestCurl(url);
+  if (r.status === 127) return toolResult('curl is not installed in this guest — apt install curl (via the startup script) first', { isError: true });
+  const failed = r.status !== 0 && !parsed.status_code;
+  let websocket = null;
+  if (args.test_websocket === true && !failed) {
+    const key = randomBytes(16).toString('base64');
+    const w = await guestCurl(url, ['-H', 'Connection: Upgrade', '-H', 'Upgrade: websocket', '-H', `Sec-WebSocket-Key: ${key}`, '-H', 'Sec-WebSocket-Version: 13']);
+    websocket = { upgraded: w.parsed.status_code === 101, status_code: w.parsed.status_code };
+  }
+  return toolResult({
+    host, port, scheme, path,
+    ...(failed
+      ? { reachable: false, failure: classifyCurlExit(r.timedOut ? 28 : r.status) }
+      : {
+        reachable: true,
+        status_code: parsed.status_code,
+        server: parsed.server,
+        content_type: parsed.content_type,
+        time_seconds: parsed.time_seconds,
+        note: parsed.status_code === 401 || parsed.status_code === 403
+          ? 'An auth status means the app IS answering — if the public route fails, the problem is at the edge (see test_route).'
+          : undefined,
+      }),
+    websocket,
+  });
+}
+
+async function toolGetLxcStartup(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const incusName = `${LXC_PREFIX}${name}`;
+  const startup = await readContainerStartup(incusName).catch(() => null);
+  if (!startup?.scriptPath) {
+    return toolResult('No startup script is registered for this container — apply_lxc_zip with startup_script registers one', { isError: true });
+  }
+  const read = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'p="$1"; wc -c < "$p" 2>/dev/null || echo -1; head -c 524288 -- "$p" 2>/dev/null', 'sh', startup.scriptPath],
+    { timeoutMs: 30000 },
+  );
+  let content = null; let size = null;
+  if (read.status === 0) {
+    const nl = read.stdout.indexOf('\n');
+    size = Number(read.stdout.slice(0, nl).trim());
+    content = size >= 0 ? read.stdout.slice(nl + 1) : null;
+  }
+  const unitR = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'systemctl', 'show', STARTUP_UNIT_NAME,
+      '-p', 'ActiveState,SubState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp'],
+    { timeoutMs: 30000 },
+  );
+  const unit = unitR.status === 0 ? parseSystemctlShow(unitR.stdout) : {};
+  return toolResult({
+    script_path: startup.scriptPath,
+    working_dir: startup.workingDir || null,
+    size_bytes: size != null && size >= 0 ? size : null,
+    truncated: size != null && size > LXC_FILE_READ_CAP,
+    content,
+    unit: {
+      name: STARTUP_UNIT_NAME,
+      state: unit.ActiveState || null,
+      result: unit.Result || null,
+      last_exit_code: unit.ExecMainStatus != null && unit.ExecMainStatus !== '' ? Number(unit.ExecMainStatus) : null,
+      last_started_at: unit.ExecMainStartTimestamp || null,
+      last_exited_at: unit.ExecMainExitTimestamp || null,
+    },
+  });
+}
+
+// ---- LXC lifecycle/config (spec cycle 4: every mutation confirms and
+// snapshots first; deliberately NO delete verb — removal stays host-side) ----
+
+// The snapshot primitive every other mutating tool leans on. Returns
+// { name } or { error }.
+async function takeLxcSnapshot(incusName, snapName) {
+  const r = await runHostCapture('incus', ['snapshot', incusName, snapName], { timeoutMs: 120000 });
+  if (r.status !== 0) {
+    const why = r.timedOut ? 'timed out' : (r.stderr || '').trim().slice(-300) || 'unknown error';
+    return { error: `snapshot failed (${why})` };
+  }
+  return { name: snapName };
+}
+
+async function toolSnapshotLxcContainer(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  if (args.list === true) {
+    const r = await fetchLxcInstance(incusName);
+    if (r.error) return toolResult(`Could not list snapshots: ${r.error}`, { isError: true });
+    if (r.notFound) return toolResult(`Container ${name} not found`, { isError: true });
+    return toolResult({ container: name, snapshots: lxcContainerDetail(r.instance).snapshots });
+  }
+
+  let snapName = defaultSnapshotName(new Date());
+  if (args.name != null && String(args.name).trim() !== '') {
+    snapName = validSnapshotName(args.name);
+    if (!snapName) return toolResult('Snapshot name must be alphanumeric plus ._- (max 63 chars)', { isError: true });
+  }
+  const snap = await takeLxcSnapshot(incusName, snapName);
+  if (snap.error) return toolResult(`Could not snapshot ${name}: ${snap.error}`, { isError: true });
+  logAudit(auth.created_by, 'LXC_SNAPSHOT_TAKEN', 'lxc', name, { via: 'mcp', snapshot: snapName }, null);
+  return toolResult({
+    snapshotted: true, container: name, snapshot: snapName,
+    note: 'Restoring or deleting snapshots is a deliberate host-side act (incus restore / incus delete) — no MCP verb exists for either, by design.',
+  });
+}
+
+async function toolControlLxcContainer(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const action = String(args.action || '');
+  if (!['start', 'stop', 'restart'].includes(action)) {
+    return toolResult("action must be 'start', 'stop', or 'restart'", { isError: true });
+  }
+  if (args.confirm !== true) {
+    return toolResult(`Confirm with the user, then re-call with confirm: true to ${action} ${name}.`, { isError: true });
+  }
+  const incusName = `${LXC_PREFIX}${name}`;
+  // Clean shutdown only — no --force. A guest that will not stop cleanly is
+  // exactly the case a human should look at.
+  const r = await runHostCapture('incus', [action, incusName], { timeoutMs: 180000 });
+  logAudit(auth.created_by, 'LXC_CONTROL', 'lxc', name, { via: 'mcp', action, exit: r.status, timed_out: !!r.timedOut }, null);
+  if (r.status !== 0) {
+    const why = r.timedOut
+      ? `timed out — the guest did not ${action} cleanly within 180s (no force-kill is issued over MCP; check it with get_lxc_container)`
+      : (r.stderr || '').trim().slice(-300) || 'unknown error';
+    return toolResult(`Could not ${action} ${name}: ${why}`, { isError: true });
+  }
+  const detail = await fetchLxcInstance(incusName);
+  return toolResult({
+    done: true, action, container: name,
+    status: detail.instance?.status || null,
+  });
+}
+
+async function toolSetLxcConfig(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const change = validateLxcConfigChange(args.key, args.value, { acknowledgeRisk: args.acknowledge_risk === true }, LXC_CFG_POLICY);
+  if (change.error) return toolResult(change.error, { isError: true });
+  if (args.confirm !== true) {
+    return toolResult({
+      applied: false, needs_confirmation: true,
+      message: `Setting ${change.key}=${change.value} on ${name}${change.restartRequired ? ' (takes effect after a restart)' : ''}. Confirm with the user, then re-call with confirm: true.`,
+      ...(change.warning ? { warning: change.warning } : {}),
+    });
+  }
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  // Snapshot BEFORE the write — the undo path must exist before the change.
+  const snap = await takeLxcSnapshot(incusName, defaultSnapshotName(new Date(), `pp-mcp-pre-${change.key.replace(/[^A-Za-z0-9]/g, '_')}`));
+  if (snap.error) {
+    return toolResult(`Refusing to change config without a snapshot: ${snap.error}`, { isError: true });
+  }
+  const r = await runHostCapture('incus', ['config', 'set', incusName, change.key, change.value], { timeoutMs: 60000 });
+  if (r.status !== 0) {
+    return toolResult(`incus config set failed: ${(r.stderr || '').trim().slice(-300) || 'unknown error'} (pre-change snapshot ${snap.name} was taken)`, { isError: true });
+  }
+  logAudit(auth.created_by, 'LXC_CONFIG_SET', 'lxc', name, {
+    via: 'mcp', key: change.key, value: change.value, snapshot: snap.name,
+    ...(change.warning ? { acknowledged_risk: true } : {}),
+  }, null);
+  return toolResult({
+    applied: true, container: name, key: change.key, value: change.value,
+    snapshot: snap.name,
+    restart_required: change.restartRequired,
+    ...(change.restartRequired ? { next: `Apply it with control_lxc_container action=restart (confirm: true).` } : {}),
+    ...(change.warning ? { warning: change.warning } : {}),
+  });
+}
+
+// create_lxc_container — creation-only, so inherently non-destructive: it
+// fails if the name is taken, never replaces. Mirrors the UI route's launch
+// flags (routes/lxc.js POST /containers) so Docker-readiness is set correctly
+// at birth and the keyring/nesting failures seen in the field cannot occur on
+// new guests. Deliberately does NOT accept security.privileged — that flip
+// stays behind set_lxc_config's acknowledge_risk gate.
+async function toolCreateLxcContainer(args, auth) {
+  const name = String(args.name || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name (letters, digits, hyphens; must start alphanumeric)', { isError: true });
+  if (args.confirm !== true) {
+    return toolResult(`Confirm with the user, then re-call with confirm: true to create container ${name}.`, { isError: true });
+  }
+  const image = validImageAlias(args.image || 'images:debian/12');
+  if (!image) return toolResult('image must be an Incus image alias, e.g. "images:debian/12"', { isError: true });
+  const cpu = args.cpu == null ? 2 : Number(args.cpu);
+  if (!Number.isInteger(cpu) || cpu < 1 || cpu > 64) return toolResult('cpu must be a whole number of vCPUs (1–64)', { isError: true });
+  const memoryGb = args.memory_gb == null ? 4 : Number(args.memory_gb);
+  if (!Number.isFinite(memoryGb) || memoryGb < 0.5 || memoryGb > 512) return toolResult('memory_gb must be between 0.5 and 512', { isError: true });
+  const diskGb = args.disk_gb == null ? null : Number(args.disk_gb);
+  if (diskGb !== null && (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 2048)) return toolResult('disk_gb must be a whole number of GB (1–2048)', { isError: true });
+  const dockerReady = args.docker_ready !== false;
+  const autostart = args.autostart !== false;
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  const existing = await fetchLxcInstance(incusName);
+  if (existing.error) return toolResult(`Could not check for an existing container: ${existing.error}`, { isError: true });
+  if (existing.instance) {
+    return toolResult(`Container ${name} already exists (status ${existing.instance.status}) — creation never replaces. Use get_lxc_container to inspect it.`, { isError: true });
+  }
+
+  const argv = ['launch', image, incusName, '--profile', 'default',
+    '--config', `limits.cpu=${cpu}`,
+    '--config', `limits.memory=${memoryGb}GB`,
+    '--config', `boot.autostart=${autostart}`];
+  if (dockerReady) {
+    // Same flag set the UI creation route uses for Docker-in-LXC guests:
+    // nesting plus the syscall intercepts BuildKit and sysctl-touching
+    // images need. Privileged mode is NOT part of docker-ready.
+    argv.push(
+      '--config', 'security.nesting=true',
+      '--config', 'security.syscalls.intercept.mknod=true',
+      '--config', 'security.syscalls.intercept.setxattr=true',
+      '--config', 'security.syscalls.intercept.bpf=true',
+      '--config', 'security.syscalls.intercept.bpf.devices=true',
+    );
+  }
+  // Image download can dominate first-launch time.
+  const r = await runHostCapture('incus', argv, { timeoutMs: 300000 });
+  if (r.status !== 0) {
+    // Best-effort cleanup of a half-created instance, same as the UI route —
+    // but NEVER when the launch failed because the name is in use: that
+    // instance belongs to someone else (a create that raced this one), and
+    // "cleaning it up" would force-delete a live container we did not make.
+    const stderrTail = (r.stderr || '').trim();
+    if (!/already exists|already in use/i.test(stderrTail)) {
+      await runHostCapture('incus', ['delete', incusName, '--force'], { timeoutMs: 60000 }).catch(() => {});
+    }
+    const why = r.timedOut ? 'timed out after 300s (slow image download?)' : stderrTail.slice(-400) || 'unknown error';
+    return toolResult(`Launch failed: ${why}`, { isError: true });
+  }
+
+  const warnings = [];
+  await ensureNetworkNat().catch(() => {});
+  if (diskGb !== null) {
+    const d = await runHostCapture('incus', ['config', 'device', 'override', incusName, 'root', `size=${diskGb}GiB`], { timeoutMs: 30000 });
+    if (d.status !== 0) warnings.push(`root disk size could not be set (${(d.stderr || '').trim().slice(-200)}) — the profile default applies`);
+  }
+
+  // Give the guest a moment to pick up a DHCP lease so the result is usable.
+  let detail = null;
+  for (let i = 0; i < 15; i += 1) {
+    const probe = await fetchLxcInstance(incusName);
+    detail = probe.instance ? lxcContainerDetail(probe.instance) : null;
+    if (detail?.addresses?.some((a) => a.family === 'inet')) break;
+    await new Promise((resolve) => { setTimeout(resolve, 1000); });
+  }
+  logAudit(auth.created_by, 'LXC_CREATED', 'lxc', name, {
+    via: 'mcp', image, cpu, memory_gb: memoryGb, disk_gb: diskGb, docker_ready: dockerReady, autostart,
+  }, null);
+  return toolResult({
+    created: true,
+    container: name,
+    image,
+    ...(detail || {}),
+    ...(warnings.length ? { warnings } : {}),
+    next: 'Deploy content with inspect_lxc_zip/apply_lxc_zip (register a startup.sh), or write files directly with write_lxc_file.',
+  });
+}
+
+// set_lxc_network — pin a guest's addressing so the working deployment does
+// not sit on a dynamic lease whose next renewal silently reproduces the edge
+// 502 that was just debugged (the exact field scenario). The pin is an
+// instance-level eth0 ipv4.address, which Incus turns into a static DHCP
+// reservation on its managed bridge.
+async function toolSetLxcNetwork(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const mode = String(args.mode || '');
+  if (!['reserve-current', 'static'].includes(mode)) {
+    return toolResult("mode must be 'reserve-current' (recommended: pin the address the guest holds now) or 'static' (assign the ip given)", { isError: true });
+  }
+  const incusName = `${LXC_PREFIX}${name}`;
+  const probe = await fetchLxcInstance(incusName);
+  if (probe.error) return toolResult(`Could not inspect ${name}: ${probe.error}`, { isError: true });
+  if (probe.notFound) return toolResult(`Container ${name} not found`, { isError: true });
+  const detail = lxcContainerDetail(probe.instance);
+  const current = detail.addresses.find((a) => a.family === 'inet')?.address || null;
+
+  let ip;
+  if (mode === 'reserve-current') {
+    if (!current) return toolResult(`${name} holds no IPv4 address right now — is it running?`, { isError: true });
+    ip = current;
+  } else {
+    ip = validIpv4(args.ip);
+    if (!ip) return toolResult('ip is required for mode=static and must be a plain IPv4 address', { isError: true });
+  }
+
+  // Routes that point at an address this change would abandon keep "working"
+  // until the lease turns over, then 502 — say so before it happens.
+  let abandoned = [];
+  if (current && ip !== current) {
+    try {
+      abandoned = getDb().prepare(`
+        SELECT DISTINCT r.domain FROM service_http_routes r
+        INNER JOIN services s ON s.id = r.service_id
+        WHERE s.target_ip = ? OR s.lxc_container_name = ?
+      `).all(current, name).map((row) => row.domain);
+    } catch { /* advisory only */ }
+  }
+  if (args.confirm !== true) {
+    return toolResult({
+      applied: false, needs_confirmation: true,
+      message: `Pin ${name} to ${ip}${current ? ` (currently ${current})` : ''}. Confirm with the user, then re-call with confirm: true.`,
+      ...(abandoned.length ? { warning: `These routed domains currently target ${current}, which this change abandons: ${abandoned.join(', ')}. Update them with set_route after pinning.` } : {}),
+    });
+  }
+
+  const snap = await takeLxcSnapshot(incusName, defaultSnapshotName(new Date(), 'pp-mcp-pre-network'));
+  if (snap.error) return toolResult(`Refusing to change addressing without a snapshot: ${snap.error}`, { isError: true });
+
+  // Instance-level eth0 usually comes from the profile → override creates it;
+  // if a previous pin already made it instance-level, set updates it.
+  let w = await runHostCapture('incus', ['config', 'device', 'override', incusName, 'eth0', `ipv4.address=${ip}`], { timeoutMs: 30000 });
+  if (w.status !== 0 && /already exists/i.test(w.stderr || '')) {
+    w = await runHostCapture('incus', ['config', 'device', 'set', incusName, 'eth0', 'ipv4.address', ip], { timeoutMs: 30000 });
+  }
+  if (w.status !== 0) {
+    return toolResult(`Could not pin the address: ${(w.stderr || '').trim().slice(-300)} (pre-change snapshot ${snap.name} was taken). Note: pinning requires the guest's NIC to come from a managed Incus bridge.`, { isError: true });
+  }
+  logAudit(auth.created_by, 'LXC_NETWORK_PINNED', 'lxc', name, { via: 'mcp', mode, ip, previous: current, snapshot: snap.name }, null);
+  return toolResult({
+    applied: true, container: name, ip, mode,
+    previous_address: current,
+    snapshot: snap.name,
+    restart_recommended: ip !== current,
+    ...(abandoned.length ? { warning: `Routed domains still targeting ${current}: ${abandoned.join(', ')} — update them with set_route.` } : {}),
+    note: ip === current
+      ? 'The current address is now a static reservation — future lease renewals cannot move it.'
+      : `The reservation takes effect when the guest renews its lease — restart with control_lxc_container to apply it now.`,
+  });
+}
+
+// lxc_file_diff / restore_lxc_file — complete the .old backup story that
+// write_lxc_file and apply_lxc_zip start: today the backups are written but
+// nothing can show or restore them.
+
+async function toolLxcFileDiff(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const path = validLxcFilePath(args.path);
+  if (!path) return toolResult('path must be an absolute file path inside the container', { isError: true });
+  let against = `${path}.old`;
+  if (args.against != null && String(args.against).trim() !== '') {
+    against = validLxcFilePath(args.against);
+    if (!against) return toolResult('against must be an absolute file path inside the container', { isError: true });
+  }
+  const r = await runHostCapture(
+    'incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c',
+      'a="$1"; b="$2"; test -f "$a" || { echo "PP_MISSING:$a" >&2; exit 66; }; test -f "$b" || { echo "PP_MISSING:$b" >&2; exit 66; }; diff -u -- "$b" "$a"',
+      'sh', path, against],
+    { timeoutMs: 30000 },
+  );
+  if (r.status === 66) {
+    const missing = /PP_MISSING:(.*)/.exec(r.stderr || '')?.[1]?.trim() || 'a file';
+    return toolResult(`Not a file: ${missing}${missing.endsWith('.old') ? ' — no backup exists for this path (backups appear after an overwrite via write_lxc_file / apply_lxc_zip)' : ''}`, { isError: true });
+  }
+  if (r.status === 127) return toolResult('diff is not installed in this guest', { isError: true });
+  if (r.status !== 0 && r.status !== 1) {
+    return toolResult(`Diff failed: ${(r.stderr || '').trim().slice(-300) || 'is the container running?'}`, { isError: true });
+  }
+  const patch = capPatch(r.stdout);
+  return toolResult({
+    path, against,
+    identical: r.status === 0,
+    diff: patch.text,
+    truncated: patch.truncated,
+  });
+}
+
+async function toolRestoreLxcFile(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const path = validLxcFilePath(args.path);
+  if (!path) return toolResult('path must be an absolute file path inside the container', { isError: true });
+  if (args.confirm !== true) {
+    return toolResult(`Confirm with the user (lxc_file_diff shows what would change), then re-call with confirm: true to restore ${path} from ${path}.old.`, { isError: true });
+  }
+  // Swap live ↔ .old, so the restore is itself reversible by calling again.
+  const r = await runHostCapture(
+    'incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c',
+      'set -e; p="$1"; test -f "$p.old" || { echo PP_NO_BACKUP >&2; exit 66; }; t="$p.pp-swap.$$"; if [ -e "$p" ]; then mv -- "$p" "$t"; fi; mv -- "$p.old" "$p"; if [ -e "$t" ]; then mv -- "$t" "$p.old"; fi',
+      'sh', path],
+    { timeoutMs: 30000 },
+  );
+  if (r.status === 66) return toolResult(`No backup exists at ${path}.old — nothing to restore.`, { isError: true });
+  if (r.status !== 0) {
+    return toolResult(`Restore failed: ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  logAudit(auth.created_by, 'LXC_FILE_RESTORED', 'lxc', name, { via: 'mcp', path }, null);
+  return toolResult({
+    restored: true, path,
+    note: 'The previous live version now sits in the .old slot — calling restore again swaps back. If a startup script is registered, apply the restored file with rerun_startup.',
+  });
+}
+
+// ---- static sites (spec cycle 5): parity with the projects surface ----
+
+const SERVICES_DATA_DIR = process.env.SERVICES_DATA_DIR || '/data/services';
+const STATIC_FILE_READ_CAP = 512 * 1024;
+const STATIC_FILE_WRITE_CAP = 2 * 1024 * 1024;
+
+function getStaticSite(id) {
+  const siteId = normalizeServiceId(id);
+  if (!siteId) return null;
+  try {
+    return getDb().prepare(`SELECT * FROM services WHERE id = ? AND type = 'static'`).get(siteId) || null;
+  } catch { return null; }
+}
+
+function staticSiteDomains(siteId) {
+  try {
+    return getDb().prepare(`SELECT domain, path_prefix, ssl_enabled FROM service_http_routes WHERE service_id = ? ORDER BY (path_prefix = '/') DESC, created_at`).all(siteId);
+  } catch { return []; }
+}
+
+// Walk a docroot with a hard entry cap. Local fs — the backend owns
+// SERVICES_DATA_DIR directly (the UI file manager reads/writes it the same way).
+async function walkDocroot(root, subdir = '', cap = 2000) {
+  const base = subdir ? join(root, subdir) : root;
+  const out = [];
+  const stack = [''];
+  let truncated = false;
+  while (stack.length) {
+    const rel = stack.pop();
+    let entries;
+    try {
+      entries = await readdir(join(base, rel), { withFileTypes: true });
+    } catch { continue; }
+    for (const e of entries) {
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      if (out.length >= cap) { truncated = true; break; }
+      if (e.isDirectory()) {
+        stack.push(childRel);
+      } else if (e.isFile()) {
+        let st = null;
+        try { st = await fsStat(join(base, childRel)); } catch { /* raced */ }
+        out.push({ path: subdir ? `${subdir}/${childRel}` : childRel, size: st?.size ?? null, mtime: st ? st.mtime.toISOString() : null });
+      }
+    }
+    if (truncated) break;
+  }
+  return { files: out, truncated };
+}
+
+async function toolCreateStaticSite(args, auth) {
+  const siteName = String(args.name || '').trim().slice(0, 100);
+  if (!siteName) return toolResult('name is required', { isError: true });
+  const domain = validDomainName(args.domain);
+  if (!domain) return toolResult('domain must be a fully qualified hostname', { isError: true });
+  const tls = args.tls !== false;
+  if (args.confirm !== true) {
+    return toolResult(`Confirm with the user, then re-call with confirm: true to create static site "${siteName}" on ${domain}.`, { isError: true });
+  }
+  const db = getDb();
+  // Creation-only: the domain must not already be routed anywhere.
+  let taken = null;
+  try {
+    taken = db.prepare(`SELECT r.domain, s.name FROM service_http_routes r JOIN services s ON s.id = r.service_id WHERE r.domain = ? LIMIT 1`).get(domain);
+  } catch (err) {
+    return toolResult(`Could not check the domain: ${err?.message || err}`, { isError: true });
+  }
+  if (taken) return toolResult(`${domain} is already routed (service "${taken.name}") — creation never replaces. Pick another domain or manage the existing binding.`, { isError: true });
+
+  // Same derivation the UI uses: a filesystem-safe directory from the name.
+  const safeDir = siteName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  if (!safeDir) return toolResult('name must contain at least one letter or digit', { isError: true });
+  const dataDir = join(SERVICES_DATA_DIR, safeDir);
+  const dirTaken = db.prepare(`SELECT id, name FROM services WHERE data_dir = ? LIMIT 1`).get(dataDir);
+  if (dirTaken) return toolResult(`The derived directory ${dataDir} already belongs to service "${dirTaken.name}" — pick a different name.`, { isError: true });
+
+  try {
+    await mkdir(dataDir, { recursive: true });
+    if (!existsSync(join(dataDir, 'index.html'))) {
+      // The name is caller-supplied text landing in a served HTML page —
+      // escape it so a name like "<script>…" is content, not markup.
+      const escName = siteName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      await writeFile(join(dataDir, 'index.html'),
+        `<!doctype html>\n<html><head><meta charset="utf-8"><title>${escName}</title></head>\n<body><h1>${escName}</h1><p>Deployed by ProxyPilot — replace this page via the static-site tools.</p></body></html>\n`);
+    }
+  } catch (err) {
+    return toolResult(`Could not create the docroot: ${err?.message || err}`, { isError: true });
+  }
+
+  const id = uuidv4();
+  try {
+    db.prepare(`INSERT INTO services (id, name, kind, runtime, type, root_dir, data_dir, status)
+                VALUES (?, ?, 'static_site', NULL, 'static', ?, ?, 'active')`).run(id, siteName, dataDir, dataDir);
+    syncPrimaryRouteFromLegacy(db, id, {
+      domain, pathPrefix: '/', targetPort: null,
+      sslEnabled: tls, forceHttps: tls, websocketEnabled: false, maxUploadSize: '1G',
+    });
+  } catch (err) {
+    try { db.prepare(`DELETE FROM service_http_routes WHERE service_id = ?`).run(id); } catch { /* fk cascade */ }
+    try { db.prepare(`DELETE FROM services WHERE id = ?`).run(id); } catch { /* best effort */ }
+    return toolResult(`Could not register the site: ${err?.message || err}`, { isError: true });
+  }
+
+  const undo = async (stage, detail) => {
+    try { db.prepare(`DELETE FROM service_http_routes WHERE service_id = ?`).run(id); } catch { /* */ }
+    try { db.prepare(`DELETE FROM services WHERE id = ?`).run(id); } catch { /* */ }
+    try { await regenerateDomainCaddyConfig(db, domain); } catch { /* */ }
+    try { await caddyReload({}); } catch { /* */ }
+    return toolResult(`${stage}: ${detail} — the site registration was rolled back (the docroot directory was left in place).`, { isError: true });
+  };
+  try { await ensureCaddyStructure(); } catch { /* regenerate re-checks */ }
+  try { await regenerateDomainCaddyConfig(db, domain); } catch (err) { return undo('Failed to render the Caddy config', err?.message || err); }
+  try { await caddyAdapt({}); } catch (err) { return undo('Generated Caddy config failed validation', err?.stderr || err?.message || err); }
+  try { await caddyReload({}); } catch (err) { return undo('Caddy reload failed', err?.stderr || err?.message || err); }
+
+  logAudit(auth.created_by, 'SERVICE_CREATED', 'service', id, { via: 'mcp', name: siteName, domain, type: 'static' }, null);
+  return toolResult({
+    created: true,
+    site: { id, name: siteName, domain, docroot: dataDir, tls },
+    next: 'Deploy content with inspect_static_site_zip → apply_static_site_zip, or write files directly with write_static_site_file. Verify with test_route.',
+  });
+}
+
+async function toolGetStaticSite(args) {
+  const site = getStaticSite(args.site_id);
+  if (!site) return toolResult('Static site not found — use list_static_sites for valid ids', { isError: true });
+  const domains = staticSiteDomains(site.id);
+  const primary = domains[0]?.domain || null;
+  let docroot = null;
+  if (site.data_dir) {
+    const walked = await walkDocroot(site.data_dir, '', 5000);
+    const bytes = walked.files.reduce((sum, f) => sum + (f.size || 0), 0);
+    const newest = walked.files.reduce((max, f) => (f.mtime && f.mtime > max ? f.mtime : max), '');
+    docroot = {
+      path: site.data_dir,
+      file_count: walked.files.length,
+      approximate: walked.truncated,
+      total_bytes: bytes,
+      last_modified: newest || null,
+    };
+  }
+  return toolResult({
+    id: site.id,
+    name: site.name,
+    status: site.status || null,
+    domains: domains.map((d) => ({ domain: d.domain, path_prefix: d.path_prefix, tls: !!d.ssl_enabled })),
+    docroot,
+    ...(primary ? await certInfoForDomain(primary) : {}),
+    next: primary ? `test_route probes ${primary} end-to-end.` : 'No domain is routed to this site yet.',
+  });
+}
+
+async function toolListStaticSiteFiles(args) {
+  const site = getStaticSite(args.site_id);
+  if (!site?.data_dir) return toolResult('Static site not found — use list_static_sites for valid ids', { isError: true });
+  let subdir = '';
+  if (args.subdir != null && String(args.subdir).trim() !== '') {
+    subdir = validProjectFilePath(args.subdir);
+    if (!subdir) return toolResult('subdir must be a relative directory inside the docroot (no .., no leading /)', { isError: true });
+  }
+  const walked = await walkDocroot(site.data_dir, subdir);
+  return toolResult({
+    site: { id: site.id, name: site.name },
+    subdir: subdir || null,
+    file_count: walked.files.length,
+    truncated: walked.truncated,
+    files: walked.files,
+  });
+}
+
+async function toolReadStaticSiteFile(args) {
+  const site = getStaticSite(args.site_id);
+  if (!site?.data_dir) return toolResult('Static site not found', { isError: true });
+  const rel = validProjectFilePath(args.path);
+  if (!rel) return toolResult('path must be relative to the docroot, e.g. css/site.css', { isError: true });
+  const abs = join(site.data_dir, rel);
+  let st;
+  try { st = await fsStat(abs); } catch { return toolResult(`Not a file: ${rel} (list_static_site_files shows the deployed files)`, { isError: true }); }
+  if (!st.isFile()) return toolResult(`Not a file: ${rel}`, { isError: true });
+  let buf;
+  try {
+    const fh = await fsOpen(abs, 'r');
+    try {
+      buf = Buffer.alloc(Math.min(st.size, STATIC_FILE_READ_CAP));
+      await fh.read(buf, 0, buf.length, 0);
+    } finally { await fh.close(); }
+  } catch (err) {
+    return toolResult(`Could not read ${rel}: ${err?.message || err}`, { isError: true });
+  }
+  if (buf.includes(0)) return toolResult(`${rel} looks binary — this tool reads text files only`, { isError: true });
+  return toolResult({
+    path: rel,
+    size_bytes: st.size,
+    truncated: st.size > STATIC_FILE_READ_CAP,
+    content: buf.toString('utf8'),
+  });
+}
+
+async function toolWriteStaticSiteFile(args, auth) {
+  const site = getStaticSite(args.site_id);
+  if (!site?.data_dir) return toolResult('Static site not found', { isError: true });
+  const rel = validProjectFilePath(args.path);
+  if (!rel) return toolResult('path must be relative to the docroot, e.g. robots.txt', { isError: true });
+  const content = String(args.content ?? '');
+  if (Buffer.byteLength(content) > STATIC_FILE_WRITE_CAP) {
+    return toolResult(`Content exceeds the ${Math.floor(STATIC_FILE_WRITE_CAP / (1024 * 1024))} MB single-file cap — use the zip flow for bigger payloads`, { isError: true });
+  }
+  const abs = join(site.data_dir, rel);
+  const exists = existsSync(abs);
+  if (exists && args.confirm_overwrite !== true) {
+    let size = null;
+    try { size = (await fsStat(abs)).size; } catch { /* */ }
+    return toolResult({
+      written: false, needs_confirmation: true, path: rel,
+      existing_size_bytes: size,
+      message: `${rel} already exists${size != null ? ` (${size} bytes)` : ''}; it will be kept as ${rel}.old. Show the user your proposed change and re-call with confirm_overwrite: true after they approve.`,
+    });
+  }
+  try {
+    await mkdir(join(abs, '..'), { recursive: true });
+    if (exists) await copyFile(abs, `${abs}.old`);
+    await writeFile(abs, content);
+  } catch (err) {
+    return toolResult(`Write failed: ${err?.message || err}`, { isError: true });
+  }
+  logAudit(auth.created_by, 'STATIC_FILE_WRITTEN', 'service', site.id, { via: 'mcp', path: rel, bytes: Buffer.byteLength(content), replaced: exists }, null);
+  return toolResult({
+    written: true, path: rel, bytes: Buffer.byteLength(content),
+    backup: exists ? `${rel}.old` : null,
+    note: 'Static files serve immediately — no reload step.',
+  });
+}
+
+async function toolGetStaticSiteCert(args) {
+  const site = getStaticSite(args.site_id);
+  if (!site) return toolResult('Static site not found', { isError: true });
+  const domains = staticSiteDomains(site.id);
+  if (!domains.length) return toolResult(`Site "${site.name}" has no routed domain — nothing to hold a certificate.`, { isError: true });
+  const primary = domains[0].domain;
+  const info = await certInfoForDomain(primary);
+  return toolResult({
+    site: { id: site.id, name: site.name },
+    domain: primary,
+    tls_enabled: !!domains[0].ssl_enabled,
+    ...info,
+    ...(info.certificate == null && domains[0].ssl_enabled
+      ? { note: 'No issued certificate found on disk — issuance may be in flight (Caddy retries automatically), or the domain may not resolve to this host yet.' }
+      : {}),
+  });
+}
+
+// ---- edge routing (spec cycle 3: the layer where the field session's
+// actual failure lived, previously invisible over MCP) ----
+
+const ROUTE_SELECT = `
+  SELECT r.id AS route_id, r.domain, r.path_prefix, r.target_port,
+         r.websocket_enabled, r.ssl_enabled, r.force_https, r.service_id,
+         s.name AS service_name, s.kind, s.runtime, s.type, s.target_ip,
+         s.lxc_container_name, s.data_dir, s.status AS service_status
+  FROM service_http_routes r
+  INNER JOIN services s ON s.id = r.service_id
+  WHERE s.is_admin = 0`;
+
+function routeView(r) {
+  const isStatic = r.kind === 'static_site';
+  const orphaned = !isStatic && (!r.target_ip || !r.target_port);
+  return {
+    domain: r.domain,
+    path_prefix: r.path_prefix,
+    upstream: isStatic
+      ? { type: 'static_site', site_id: r.service_id, name: r.service_name, docroot: r.data_dir || null }
+      : {
+        type: 'container',
+        name: r.service_name,
+        container: r.lxc_container_name || null,
+        ip: r.target_ip || null,
+        port: r.target_port || null,
+      },
+    websocket: !!r.websocket_enabled,
+    tls: { ssl_enabled: !!r.ssl_enabled, force_https: !!r.force_https },
+    ...(orphaned ? { orphaned: true, orphan_reason: !r.target_ip ? 'no upstream IP recorded' : 'no upstream port recorded' } : {}),
+  };
+}
+
+async function toolListRoutes() {
+  let rows;
+  try {
+    rows = getDb().prepare(`${ROUTE_SELECT} ORDER BY r.domain, length(r.path_prefix) DESC`).all();
+  } catch (err) {
+    return toolResult(`Could not list routes: ${err?.message || err}`, { isError: true });
+  }
+  const routes = rows.map(routeView);
+  const orphaned = routes.filter((r) => r.orphaned).map((r) => `${r.domain}${r.path_prefix}`);
+  return toolResult({
+    route_count: routes.length,
+    routes,
+    ...(orphaned.length ? { orphaned_routes: orphaned, note: 'Orphaned routes render but their upstream is unrecorded — requests will 502. Fix with set_route.' } : {}),
+  });
+}
+
+// Cert detail for a domain: the manual-cert decision plus, for ACME domains,
+// the on-disk certificate parsed for expiry. Advisory — never fails the tool.
+async function certInfoForDomain(domain) {
+  const out = { tls_policy: null, certificate: null };
+  try {
+    const decision = resolveTlsForHost(domain);
+    out.tls_policy = decision === null
+      ? { mode: 'acme', note: 'Caddy manages issuance automatically' }
+      : { mode: decision.mode, ...(decision.certId ? { manual_cert_id: decision.certId } : {}) };
+  } catch { /* advisory */ }
+  try {
+    const dir = resolveCertDir(domain);
+    if (dir?.certFile) {
+      const pem = await runHostCapture('cat', [dir.certFile], { timeoutMs: 10000 });
+      const parsed = pem.status === 0 ? parseCertificate(pem.stdout) : null;
+      out.certificate = {
+        issuer_directory: dir.issuer,
+        ...(parsed ? {
+          common_name: parsed.commonName,
+          covered_names: parsed.coveredNames,
+          not_before: parsed.notBefore,
+          not_after: parsed.notAfter,
+          days_until_expiry: daysUntil(parsed.notAfter),
+          status: expiryStatus(parsed.notAfter),
+        } : { note: 'certificate file present but not readable/parseable' }),
+      };
+    }
+  } catch { /* advisory */ }
+  return out;
+}
+
+// Recent 5xx counts from the domain's Caddy access log — the signal that was
+// missing in the field, where a stale-upstream 502 was diagnosable only by
+// inference. Advisory: a missing/unreadable log yields null, never an error.
+async function recentErrorsForDomain(domain) {
+  const logPath = caddyAccessLogPath(domain);
+  // Last 512 KB is plenty for an hour on anything but a very hot site; the
+  // summary flags partial_window when the tail starts inside the window.
+  const r = await runHostCapture('tail', ['-c', '524288', logPath], { timeoutMs: 15000 });
+  if (r.status !== 0) return null;
+  return { log: logPath, ...summarizeAccessLog(r.stdout, Date.now()) };
+}
+
+async function toolGetRoute(args) {
+  const domain = validDomainName(args.domain);
+  if (!domain) return toolResult('domain must be a fully qualified hostname, e.g. web.example.com', { isError: true });
+  let rows;
+  try {
+    rows = getDb().prepare(`${ROUTE_SELECT} AND r.domain = ? ORDER BY length(r.path_prefix) DESC`).all(domain);
+  } catch (err) {
+    return toolResult(`Could not read routes: ${err?.message || err}`, { isError: true });
+  }
+  if (!rows.length) return toolResult(`No route exists for ${domain} — list_routes shows every served hostname; set_route creates one.`, { isError: true });
+  const recentErrors = await recentErrorsForDomain(domain);
+  return toolResult({
+    domain,
+    routes: rows.map(routeView),
+    ...(await certInfoForDomain(domain)),
+    recent_errors: recentErrors,
+    ...(recentErrors === null ? { recent_errors_note: 'No readable access log for this domain yet (the log appears after the first request to the merged site config).' } : {}),
+    ...(recentErrors?.errors_5xx ? { note: `${recentErrors.errors_5xx} server error(s) in the last hour — test_route says which failure class they are.` } : {}),
+    next: 'test_route probes this hostname end-to-end from the edge host.',
+  });
+}
+
+// One curl probe on the HOST. Returns { parsed, exitClass|null }.
+async function hostCurlProbe(url, { resolveTo = null, headers = [], maxTimeSeconds = 15 } = {}) {
+  const argv = ['-sS', '-o', '/dev/null', '-D', '-', '-k', '--max-time', String(maxTimeSeconds),
+    '-w', '\\nPP_TIME:%{time_total}\\nPP_CODE:%{http_code}'];
+  for (const r of resolveTo || []) argv.push('--resolve', r);
+  for (const h of headers) argv.push('-H', h);
+  argv.push(url);
+  const r = await runHostCapture('curl', argv, { timeoutMs: (maxTimeSeconds + 5) * 1000 });
+  const parsed = parseCurlProbeOutput(r.stdout);
+  // Exit 28 after a 101 upgrade is success that ran out the clock, not failure.
+  const failed = r.status !== 0 && !(r.status === 28 && parsed.status_code);
+  return { parsed, exitClass: failed ? classifyCurlExit(r.timedOut ? 28 : r.status) : null };
+}
+
+async function toolTestRoute(args, auth) {
+  const domain = validDomainName(args.domain);
+  if (!domain) return toolResult('domain must be a fully qualified hostname', { isError: true });
+  let path = '/';
+  if (args.path != null && String(args.path).trim() !== '') {
+    path = String(args.path).trim();
+    if (!path.startsWith('/') || /[\u0000-\u001f\u007f\s]/.test(path)) {
+      return toolResult('path must be a URL path starting with /', { isError: true });
+    }
+  }
+  let rows = [];
+  try {
+    rows = getDb().prepare(`${ROUTE_SELECT} AND r.domain = ? ORDER BY length(r.path_prefix) DESC`).all(domain);
+  } catch { /* still probe */ }
+  const root = rows.find((r) => r.path_prefix === '/') || rows[0] || null;
+  const ssl = root ? !!root.ssl_enabled : true;
+  const wantWs = args.test_websocket === true || (args.test_websocket == null && !!root?.websocket_enabled);
+
+  // DNS — informational: the edge probe below pins to loopback regardless.
+  let dns = { resolved: false, addresses: [] };
+  const g = await runHostCapture('getent', ['hosts', domain], { timeoutMs: 10000 });
+  if (g.status === 0) {
+    dns = {
+      resolved: true,
+      addresses: [...new Set(g.stdout.split('\n').filter(Boolean).map((l) => l.trim().split(/\s+/)[0]))].slice(0, 8),
+    };
+  }
+
+  // Edge probe, pinned to this host's proxy.
+  const scheme = ssl ? 'https' : 'http';
+  const edgeUrl = `${scheme}://${domain}${path}`;
+  const pin = [`${domain}:443:127.0.0.1`, `${domain}:80:127.0.0.1`];
+  const edge = await hostCurlProbe(edgeUrl, { resolveTo: pin });
+
+  // Upstream probe, direct from the host to the recorded target.
+  let upstream = null;
+  if (root && root.kind !== 'static_site' && root.target_ip && root.target_port) {
+    const u = await hostCurlProbe(`http://${root.target_ip}:${root.target_port}${path}`, { maxTimeSeconds: 10 });
+    upstream = {
+      target: `${root.target_ip}:${root.target_port}`,
+      ...(u.exitClass ? { reachable: false, failure: u.exitClass } : {
+        reachable: true, status_code: u.parsed.status_code, time_seconds: u.parsed.time_seconds,
+      }),
+    };
+  }
+
+  // WebSocket upgrade through the proxy.
+  let websocket = null;
+  if (wantWs) {
+    const key = randomBytes(16).toString('base64');
+    const w = await hostCurlProbe(edgeUrl, {
+      resolveTo: pin,
+      maxTimeSeconds: 8,
+      headers: ['Connection: Upgrade', 'Upgrade: websocket', `Sec-WebSocket-Key: ${key}`, 'Sec-WebSocket-Version: 13'],
+    });
+    websocket = {
+      upgraded: w.parsed.status_code === 101,
+      status_code: w.parsed.status_code,
+      ...(w.exitClass && w.parsed.status_code !== 101 ? { failure: w.exitClass } : {}),
+    };
+  }
+
+  // The one-line answer: which of the three look-alike failure classes is it.
+  let assessment;
+  if (edge.exitClass) {
+    assessment = `The edge proxy itself is unreachable on this host (${edge.exitClass.class}: ${edge.exitClass.hint}).`;
+  } else if ([502, 503, 504].includes(edge.parsed.status_code)) {
+    assessment = upstream?.reachable
+      ? `The proxy returns ${edge.parsed.status_code} but the recorded upstream answers directly — the proxy's upstream binding is stale or wrong. Fix with set_route.`
+      : upstream
+        ? `The proxy returns ${edge.parsed.status_code} and the recorded upstream ${upstream.target} is not answering — the app is down (or the guest's IP moved; see set_lxc_network).`
+        : `The proxy returns ${edge.parsed.status_code} and no upstream is recorded for this domain.`;
+  } else if (edge.parsed.status_code != null) {
+    assessment = `The route serves: ${edge.parsed.status_code} in ${edge.parsed.time_seconds}s.`
+      + (edge.parsed.status_code === 401 || edge.parsed.status_code === 403 ? ' (An auth status is the APP answering — the path through the proxy works.)' : '');
+  } else {
+    assessment = 'The probe produced no readable response.';
+  }
+
+  logAudit(auth.created_by, 'ROUTE_TESTED', 'route', domain, { via: 'mcp', path, edge_status: edge.parsed.status_code ?? null }, null);
+  return toolResult({
+    domain, path,
+    routed: !!root,
+    dns,
+    edge: edge.exitClass
+      ? { reachable: false, failure: edge.exitClass }
+      : {
+        reachable: true, scheme,
+        status_code: edge.parsed.status_code,
+        status_chain: edge.parsed.status_chain,
+        server: edge.parsed.server,
+        location: edge.parsed.location,
+        time_seconds: edge.parsed.time_seconds,
+      },
+    upstream,
+    websocket,
+    assessment,
+  });
+}
+
+// set_route — create or update the ROOT-PATH binding for one hostname.
+// Updating requires confirm_overwrite and returns the previous binding so the
+// change is reversible by a second call. No delete verb; no enable/disable
+// toggle either (the Caddy regenerator renders every stored route — parking a
+// hostname is a UI/host operation today).
+async function toolSetRoute(args, auth) {
+  const domain = validDomainName(args.domain);
+  if (!domain) return toolResult('domain must be a fully qualified hostname, e.g. web.example.com', { isError: true });
+  const port = normalizePort(args.upstream_port);
+  if (!port) return toolResult('upstream_port must be a port number (1–65535)', { isError: true });
+  const hasContainer = args.upstream_container != null && String(args.upstream_container).trim() !== '';
+  const hasIp = args.upstream_ip != null && String(args.upstream_ip).trim() !== '';
+  if (hasContainer === hasIp) {
+    return toolResult('Provide exactly one of upstream_container (preferred — survives IP changes) or upstream_ip.', { isError: true });
+  }
+  const websocket = args.websocket !== false;   // default TRUE: modern upstreams break without it and the failure mode is misleading
+  const tls = args.tls !== false;
+
+  // Resolve the upstream to (ip, containerShortName|null).
+  let ip = null; let containerName = null;
+  if (hasContainer) {
+    containerName = String(args.upstream_container).trim();
+    if (!LXC_NAME_REGEX.test(containerName)) return toolResult('Invalid container name', { isError: true });
+    const probe = await fetchLxcInstance(`${LXC_PREFIX}${containerName}`);
+    if (probe.error) return toolResult(`Could not resolve container ${containerName}: ${probe.error}`, { isError: true });
+    if (probe.notFound) return toolResult(`Container ${containerName} not found — list_lxc_containers shows valid names`, { isError: true });
+    ip = lxcContainerDetail(probe.instance).addresses.find((a) => a.family === 'inet')?.address || null;
+    if (!ip) return toolResult(`Container ${containerName} holds no IPv4 address — is it running? (Pin one with set_lxc_network once it does.)`, { isError: true });
+  } else {
+    ip = validIpv4(args.upstream_ip);
+    if (!ip) return toolResult('upstream_ip must be a plain IPv4 address', { isError: true });
+  }
+
+  const db = getDb();
+  let existing = null;
+  try {
+    existing = db.prepare(`${ROUTE_SELECT} AND r.domain = ? AND r.path_prefix = '/'`).get(domain);
+  } catch (err) {
+    return toolResult(`Could not read existing routes: ${err?.message || err}`, { isError: true });
+  }
+  if (existing?.kind === 'static_site') {
+    return toolResult(`${domain} is bound to the static site "${existing.service_name}" (id ${existing.service_id}) — set_route only manages container upstreams. Manage the site with the static-site tools instead.`, { isError: true });
+  }
+  const previous = existing ? {
+    upstream_container: existing.lxc_container_name || null,
+    upstream_ip: existing.target_ip || null,
+    upstream_port: existing.target_port || null,
+    websocket: !!existing.websocket_enabled,
+    tls: !!existing.ssl_enabled,
+  } : null;
+  if (existing && args.confirm_overwrite !== true) {
+    return toolResult({
+      applied: false, needs_confirmation: true, domain,
+      current_binding: previous,
+      proposed_binding: { upstream_container: containerName, upstream_ip: ip, upstream_port: port, websocket, tls },
+      message: `${domain} already has a binding. Show the user both bindings and re-call with confirm_overwrite: true after they approve.`,
+    });
+  }
+
+  // One site block per domain: every route on it must agree on TLS stance.
+  try {
+    assertRoutesShareSslStance(db, domain, { sslEnabled: tls, forceHttps: tls }, existing?.route_id || null);
+  } catch (err) {
+    return toolResult(err?.message || 'TLS stance conflicts with this domain\'s other routes', { isError: true });
+  }
+
+  // Service row: per-container when a container was named, else keyed by IP.
+  let service;
+  try {
+    if (containerName) {
+      service = findOrCreateLxcService(db, containerName, ip);
+    } else {
+      service = db.prepare(`SELECT * FROM services WHERE target_ip = ? AND lxc_container_name IS NULL AND is_admin = 0 LIMIT 1`).get(ip);
+      if (!service) {
+        const id = uuidv4();
+        db.prepare(`INSERT INTO services (id, name, kind, runtime, target_ip, type, status)
+                    VALUES (?, ?, 'container_service', NULL, ?, 'docker', 'active')`).run(id, domain, ip);
+        service = db.prepare(`SELECT * FROM services WHERE id = ?`).get(id);
+      } else if (service.target_ip !== ip) {
+        db.prepare(`UPDATE services SET target_ip = ? WHERE id = ?`).run(ip, service.id);
+      }
+    }
+  } catch (err) {
+    return toolResult(`Could not prepare the upstream service record: ${err?.message || err}`, { isError: true });
+  }
+
+  // Mutate the route row, keeping enough to roll back.
+  const rollback = [];
+  try {
+    if (existing) {
+      rollback.push(() => db.prepare(
+        `UPDATE service_http_routes SET service_id = ?, target_port = ?, websocket_enabled = ?, ssl_enabled = ?, force_https = ? WHERE id = ?`,
+      ).run(existing.service_id, existing.target_port, existing.websocket_enabled, existing.ssl_enabled, existing.force_https, existing.route_id));
+      db.prepare(
+        `UPDATE service_http_routes SET service_id = ?, target_port = ?, websocket_enabled = ?, ssl_enabled = ?, force_https = ? WHERE id = ?`,
+      ).run(service.id, port, websocket ? 1 : 0, tls ? 1 : 0, tls ? 1 : 0, existing.route_id);
+    } else {
+      const routeId = uuidv4();
+      rollback.push(() => db.prepare(`DELETE FROM service_http_routes WHERE id = ?`).run(routeId));
+      db.prepare(
+        `INSERT INTO service_http_routes
+           (id, service_id, domain, path_prefix, target_port, websocket_enabled, ssl_enabled, force_https, max_upload_size)
+         VALUES (?, ?, ?, '/', ?, ?, ?, ?, '1G')`,
+      ).run(routeId, service.id, domain, port, websocket ? 1 : 0, tls ? 1 : 0, tls ? 1 : 0);
+    }
+  } catch (err) {
+    return toolResult(`Could not write the route: ${err?.message || err}`, { isError: true });
+  }
+
+  // Render → validate → reload, rolling the DB back on any failure so a bad
+  // route never survives to poison the next reconcile.
+  const undo = async (stage, detail) => {
+    for (const fn of rollback.reverse()) { try { fn(); } catch { /* best effort */ } }
+    try { await regenerateDomainCaddyConfig(db, domain); } catch { /* best effort */ }
+    try { await caddyReload({}); } catch { /* best effort */ }
+    return toolResult(`${stage}: ${detail} — the route change was rolled back.`, { isError: true });
+  };
+  try { await ensureCaddyStructure(); } catch { /* regenerate re-checks */ }
+  try {
+    await regenerateDomainCaddyConfig(db, domain);
+  } catch (err) {
+    return undo('Failed to render the Caddy config', err?.message || err);
+  }
+  try {
+    await caddyAdapt({});
+  } catch (err) {
+    return undo('Generated Caddy config failed validation', err?.stderr || err?.message || err);
+  }
+  try {
+    await caddyReload({});
+  } catch (err) {
+    return undo('Caddy reload failed', err?.stderr || err?.message || err);
+  }
+
+  logAudit(auth.created_by, 'ROUTE_SET', 'route', domain, {
+    via: 'mcp', upstream: `${ip}:${port}`, container: containerName, websocket, tls, replaced: !!existing,
+  }, null);
+  return toolResult({
+    applied: true,
+    domain,
+    binding: { upstream_container: containerName, upstream_ip: ip, upstream_port: port, websocket, tls },
+    ...(previous ? { previous_binding: previous, note: 'Reversible: call set_route again with previous_binding to restore it.' } : {}),
+    ...(containerName ? { hint: `Upstream resolved from container ${containerName} (currently ${ip}). Pin that address with set_lxc_network so a lease renewal cannot break this route.` } : {}),
+    next: 'Verify end-to-end with test_route.',
   });
 }
 
@@ -1129,8 +2633,9 @@ async function toolRunProjectCommand(args, auth) {
     { timeoutMs },
   );
   const durationMs = Date.now() - startedAt;
+  const streams = parseMarkedStreams(r.stdout, nonce);
 
-  if (r.status !== 0 && !r.stdout.includes(mark('EXIT'))) {
+  if (r.status !== 0 && !streams.found) {
     // The wrapper itself never got to report — container down, incus refused,
     // or we killed it at the deadline.
     const why = r.timedOut
@@ -1146,15 +2651,8 @@ async function toolRunProjectCommand(args, auth) {
     }, { isError: true });
   }
 
-  const out = r.stdout;
-  const exitMatch = new RegExp(`${mark('EXIT')}:(-?\\d+)`).exec(out);
-  const exitCode = exitMatch ? Number(exitMatch[1]) : null;
-  const outAt = out.indexOf(`${mark('OUT')}\n`);
-  const errAt = out.indexOf(mark('ERR'));
-  const stdout = outAt >= 0 && errAt > outAt
-    ? out.slice(outAt + mark('OUT').length + 1, errAt).replace(/\n$/, '')
-    : '';
-  const stderr = errAt >= 0 ? out.slice(errAt + mark('ERR').length).replace(/^\n/, '') : '';
+  const exitCode = streams.found ? streams.exit_code : null;
+  const { stdout, stderr } = streams;
 
   // The commit the result belongs to — so a green run can be tied to an exact
   // checkout rather than to "whatever was there at the time".
@@ -1394,11 +2892,37 @@ async function toolAppendChangeRecord(args, auth) {
 const TOOL_HANDLERS = {
   list_static_sites: (args, auth, req) => toolListStaticSites(args, auth, req),
   create_upload_ticket: (_args, _auth, req) => toolCreateUploadTicket(req),
+  append_upload_chunk: toolAppendUploadChunk,
+  finish_upload: toolFinishUpload,
   inspect_static_site_zip: toolInspectStaticSiteZip,
   apply_static_site_zip: toolApplyStaticSiteZip,
   list_lxc_containers: toolListLxcContainers,
+  get_lxc_container: toolGetLxcContainer,
+  run_lxc_command: toolRunLxcCommand,
+  list_lxc_files: toolListLxcFiles,
+  search_lxc_files: toolSearchLxcFiles,
+  get_lxc_logs: toolGetLxcLogs,
+  probe_lxc_port: toolProbeLxcPort,
+  get_lxc_startup: toolGetLxcStartup,
+  create_lxc_container: toolCreateLxcContainer,
+  control_lxc_container: toolControlLxcContainer,
+  set_lxc_config: toolSetLxcConfig,
+  set_lxc_network: toolSetLxcNetwork,
+  snapshot_lxc_container: toolSnapshotLxcContainer,
+  lxc_file_diff: toolLxcFileDiff,
+  restore_lxc_file: toolRestoreLxcFile,
   inspect_lxc_zip: toolInspectLxcZip,
   apply_lxc_zip: toolApplyLxcZip,
+  create_static_site: toolCreateStaticSite,
+  get_static_site: toolGetStaticSite,
+  list_static_site_files: toolListStaticSiteFiles,
+  read_static_site_file: toolReadStaticSiteFile,
+  write_static_site_file: toolWriteStaticSiteFile,
+  get_static_site_cert: toolGetStaticSiteCert,
+  list_routes: toolListRoutes,
+  get_route: toolGetRoute,
+  test_route: toolTestRoute,
+  set_route: toolSetRoute,
   read_lxc_file: toolReadLxcFile,
   write_lxc_file: toolWriteLxcFile,
   rerun_startup: toolRerunStartup,
@@ -1446,7 +2970,9 @@ async function handleRpc(message, auth, req) {
           'ProxyPilot infrastructure control. Zip deploys are two-phase: inspect first, show the user',
           'any files that would be replaced, and only pass confirm_overwrite after they approve —',
           'replaced files are kept as <name>.old. For zips over ~2 MB use create_upload_ticket and PUT',
-          'the bytes to its upload_url instead of inlining base64.',
+          'the bytes to its upload_url instead of inlining base64; if you cannot reach the upload URL,',
+          'send the bytes over MCP with append_upload_chunk + finish_upload on the same ticket.',
+          'Pass sha256 to the inspect tools so transport corruption fails loudly.',
         ].join(' '),
       });
     }
@@ -1489,6 +3015,7 @@ export function createMcpRouter() {
     const rec = uploadTickets.get(req.params.ticket);
     if (!rec) return res.status(404).json({ error: 'Unknown or expired upload ticket' });
     if (rec.filePath) return res.status(409).json({ error: 'This ticket already received an upload' });
+    if (rec.chunkPath) return res.status(409).json({ error: 'This ticket is receiving a chunked upload (append_upload_chunk) — finish or abandon that instead of PUTting' });
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
       return res.status(400).json({ error: 'Send the raw zip bytes as the request body' });
     }

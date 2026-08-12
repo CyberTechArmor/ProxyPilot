@@ -91,9 +91,19 @@ function caddySiteFileExists(domain) {
 
 // One snapshot of everything that can already claim a hostname, so shaping a
 // whole domain list costs two queries rather than two per domain.
+//
+// Service domains live on service_http_routes (D.14 dropped services.domain —
+// selecting it here would throw on every migrated install and silently empty
+// the list), so the named service claims come from the join. The bare routes
+// list is kept as a belt-and-braces fallback: if the join ever fails, a raw
+// route row still blocks the hostname, just with a generic label.
 export function hostnameClaimSnapshot() {
   return {
-    services: safely(() => getDb().prepare(`SELECT id, name, domain FROM services`).all(), []),
+    services: safely(() => getDb().prepare(`
+      SELECT s.id AS id, s.name AS name, r.domain AS domain
+        FROM service_http_routes r
+        INNER JOIN services s ON s.id = r.service_id
+    `).all(), []),
     routes: safely(() => getDb().prepare(`SELECT id, service_id, domain FROM service_http_routes`).all(), []),
     projects: safely(() => getMock2Db().prepare(`
       SELECT id, name, custom_domain, lifecycle FROM mock2_projects

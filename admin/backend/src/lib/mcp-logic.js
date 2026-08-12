@@ -101,6 +101,547 @@ export function looksLikeUploadTicket(t) {
   return /^ppup_[0-9a-f]{48}$/.test(String(t || ''));
 }
 
+// ---- zip integrity (transport checksum) ----
+//
+// Inline base64 was observed corrupting in the field ("Zip entry size mismatch
+// (declared 3472, got 3460)") with nothing in the transport saying so — the
+// damage surfaced as a confusing EXTRACTION error. An optional sha256 on the
+// inspect tools (and a mandatory one on finish_upload) turns that into a
+// transport-corruption error BEFORE any bytes touch a target.
+
+export function validSha256(s) {
+  const v = String(s ?? '').trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(v) ? v : null;
+}
+
+export function sha256Hex(buf) {
+  return createHash('sha256').update(buf).digest('hex');
+}
+
+/** null when the bytes match the declared checksum; a caller-facing message
+ *  when they don't (or the declared value isn't a sha256 at all). */
+export function zipChecksumError(buf, declared) {
+  const want = validSha256(declared);
+  if (!want) return 'sha256 must be the 64-character hex SHA-256 of the zip bytes';
+  const got = sha256Hex(buf);
+  if (got === want) return null;
+  return `Zip bytes do not match the declared sha256 — the transfer corrupted them `
+    + `(declared ${want}, got ${got} over ${buf.length} bytes). Re-send the archive and inspect again.`;
+}
+
+// ---- chunked upload fallback ----
+//
+// The documented big-zip path (create_upload_ticket → PUT raw bytes) assumes
+// the client can reach the upload URL — egress-restricted agent sandboxes
+// often cannot (observed: CONNECT 403 to the edge host). These helpers back
+// append_upload_chunk/finish_upload, which deliver the same bytes through the
+// already-working MCP channel in ordered base64 chunks.
+
+// Decoded per-chunk cap. The MCP endpoint accepts 8 MB JSON bodies; 4 MB of
+// payload is ~5.4 MB as base64, leaving comfortable envelope headroom.
+export const UPLOAD_CHUNK_MAX_BYTES = 4 * 1024 * 1024;
+
+export function normalizeChunkSeq(seq) {
+  // Only a number or a digit string counts: Number()'s coercion quirks would
+  // otherwise read '' (and [] / true) as chunk 0 and silently misorder.
+  if (typeof seq !== 'number' && typeof seq !== 'string') return null;
+  const s = String(seq).trim();
+  if (!/^\d+$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+export function decodeChunkBase64(s, cap = UPLOAD_CHUNK_MAX_BYTES) {
+  const raw = String(s ?? '').replace(/\s+/g, '');
+  if (!raw) return { error: 'chunk_base64 is required and must not be empty' };
+  if (!/^[A-Za-z0-9+/]+=*$/.test(raw)) return { error: 'chunk_base64 is not valid base64' };
+  const buf = Buffer.from(raw, 'base64');
+  if (buf.length === 0) return { error: 'chunk_base64 decoded to zero bytes' };
+  if (buf.length > cap) {
+    return { error: `Chunks are limited to ${Math.floor(cap / (1024 * 1024))} MB decoded — split the archive into smaller chunks` };
+  }
+  return { buf };
+}
+
+// ---- LXC container listing ----
+//
+// Field defect: list_lxc_containers answered `[]` while a live, name-addressed
+// guest was serving traffic — the incus failure (non-zero exit, or JSON made
+// unparseable by the 256 KB host-capture cap) was swallowed and presented as
+// an empty host, and the caller planned to CREATE a duplicate container on the
+// strength of it. An empty list and a failed list are different answers; these
+// helpers keep them apart.
+
+export function parseLxcListJson(stdout) {
+  let list;
+  try {
+    list = JSON.parse(String(stdout || ''));
+  } catch {
+    return { error: 'unparseable JSON (output may have been truncated)' };
+  }
+  if (!Array.isArray(list)) return { error: 'a JSON value that is not an array' };
+  return { list };
+}
+
+/** First global IPv4 on an interface, preferring eth0 but not assuming it —
+ *  a guest with a renamed or macvlan NIC still has an address worth showing. */
+export function lxcContainerIp(state) {
+  const nets = state?.network || {};
+  const inet = (iface) => nets[iface]?.addresses
+    ?.find((a) => a.family === 'inet' && a.scope !== 'local')?.address || null;
+  const eth0 = inet('eth0');
+  if (eth0) return eth0;
+  for (const name of Object.keys(nets)) {
+    if (name === 'lo') continue;
+    const addr = inet(name);
+    if (addr) return addr;
+  }
+  return null;
+}
+
+export function lxcContainerSummaries(list, prefix) {
+  const seen = new Set();
+  const out = [];
+  for (const c of Array.isArray(list) ? list : []) {
+    const full = String(c?.name || '');
+    if (!full.startsWith(prefix)) continue;
+    const name = full.slice(prefix.length);
+    if (!name || seen.has(name)) continue;   // --all-projects can repeat a name
+    seen.add(name);
+    out.push({ name, status: c.status || null, ip: lxcContainerIp(c.state) });
+  }
+  return out;
+}
+
+// ---- run_lxc_command: the policy-driven allowlist ----
+//
+// Same posture as parseProjectCommand, generalized to a data-driven policy
+// (lib/mcp-policy/lxc-command-allowlist.json — the enforcement source of
+// truth; the tool description only summarizes it). Matching is on argv
+// prefix after whitespace-split; no shell ever sees the tokens. deny_always
+// wins over any allow rule. mutating_scoped commands are legal only when the
+// effective working dir IS the guest's registered startup working dir, so an
+// agent can manage the app it deployed and nothing else.
+
+function argvHasPrefix(argv, prefix) {
+  if (!Array.isArray(prefix) || prefix.length === 0 || prefix.length > argv.length) return false;
+  return prefix.every((tok, i) => argv[i] === tok);
+}
+
+// Deny entries also match LOOSELY: same head token + every remaining deny
+// token present anywhere in the argv. Strict prefix alone would let
+// `curl -sS -o /tmp/x` slip past the ["curl","-o"] entry by reordering
+// flags — and curl's output flags are denied precisely because writing
+// fetched bytes to disk is arbitrary code delivery.
+//
+// A deny token that is a single short option (`-o`) additionally matches the
+// clustered and attached spellings (`-sSo`, `-o/tmp/x`, `-fsSLo`) — anything
+// else lets the exact same flag through under a different byte sequence. A
+// long-option deny token (`--output`) also matches the joined `--output=/x`
+// form. Deny-side over-matching is the safe direction: a false positive costs
+// a retry with separated flags, a false negative is arbitrary file delivery.
+function tokenMatchesDenyToken(tok, denyTok) {
+  if (tok === denyTok) return true;
+  if (denyTok.startsWith('--')) return tok.startsWith(`${denyTok}=`);
+  if (/^-[A-Za-z]$/.test(denyTok) && /^-[A-Za-z]/.test(tok) && !tok.startsWith('--')) {
+    return tok.slice(1).includes(denyTok[1]);
+  }
+  return false;
+}
+
+function argvMatchesDeny(argv, prefix) {
+  if (argvHasPrefix(argv, prefix)) return true;
+  if (!Array.isArray(prefix) || prefix.length < 2) return false;
+  if (argv[0] !== prefix[0]) return false;
+  return prefix.slice(1).every((tok) => argv.some((a) => tokenMatchesDenyToken(a, tok)));
+}
+
+const LXC_SAFE_ARG = /^[A-Za-z0-9._/@:=+-]+$/;
+
+/**
+ * Validate a command against the LXC exec policy.
+ * Returns { argv, scope: 'read_only' | 'mutating_scoped' } or { error }.
+ * Every rejection says what IS allowed — a tool that only says "no" gets
+ * retried verbatim.
+ */
+export function parseLxcCommand(command, policy, { workingDir = null, registeredWorkingDir = null } = {}) {
+  const raw = String(command ?? '').trim();
+  if (!raw) return { error: 'command is required — e.g. "docker compose ps" or "ss -ltnp"' };
+  if (/[\u0000-\u001f\u007f]/.test(raw)) {
+    return { error: 'command must not contain control characters or newlines' };
+  }
+  const argv = raw.split(/\s+/);
+
+  const shellTokens = policy.shell_syntax_rejected || [];
+  const shellHit = argv.find((tok) => shellTokens.some((sym) => tok.includes(sym)));
+  if (shellHit) {
+    return { error: `"${shellHit}" is shell syntax. This tool runs ONE command without a shell — pipes, redirects, ;, && and $(…) are not supported. Run the steps as separate calls.` };
+  }
+  const badTok = argv.find((tok) => !LXC_SAFE_ARG.test(tok));
+  if (badTok) {
+    return { error: `"${badTok}" is not a plain argument (quotes and special characters are not supported — the command is split on whitespace and executed directly).` };
+  }
+
+  for (const deny of policy.deny_always?.commands || []) {
+    if (argvMatchesDeny(argv, deny)) {
+      return {
+        error: `"${deny.join(' ')}" is never allowed over MCP (removal and destructive operations stay host-side by design). `
+          + 'Allowed: read/observe commands (docker ps/logs, systemctl status, ip, ss, journalctl, curl probes, df, free, ls, stat, du) '
+          + 'and docker compose up/restart/stop/pull in the registered app directory.',
+      };
+    }
+  }
+  for (const allow of policy.read_only || []) {
+    if (argvHasPrefix(argv, allow)) return { argv, scope: 'read_only' };
+  }
+  for (const allow of policy.mutating_scoped?.commands || []) {
+    if (argvHasPrefix(argv, allow)) {
+      if (!registeredWorkingDir || workingDir !== registeredWorkingDir) {
+        return {
+          error: `"${allow.join(' ')}" is a mutating command, allowed only in the guest's registered startup working dir`
+            + (registeredWorkingDir ? ` (${registeredWorkingDir})` : ' — and this guest has no registered startup script')
+            + '. It manages the app that was deployed there, nothing else.',
+        };
+      }
+      return { argv, scope: 'mutating_scoped' };
+    }
+  }
+  return {
+    error: `"${argv[0]}" is not in the allowlist. Permitted: docker/compose status and logs, systemctl status/is-active/is-enabled, `
+      + 'journalctl, ip addr/route, ss, sysctl -n, curl (probe only), df, free, uname, cat /etc/os-release, ls, stat, du — '
+      + 'plus docker compose up/restart/stop/pull scoped to the registered app dir. No shells, no package managers, no deletion.',
+  };
+}
+
+/** Clamp a caller timeout to the policy window (defaults mirror the policy
+ *  file: 120s default, 1800s max). */
+export function lxcCommandTimeoutMs(seconds, policy = {}) {
+  const dflt = Number(policy.default_timeout_seconds) > 0 ? Number(policy.default_timeout_seconds) : 120;
+  const max = Number(policy.max_timeout_seconds) > 0 ? Number(policy.max_timeout_seconds) : 1800;
+  const n = Number(seconds);
+  if (!Number.isFinite(n) || n <= 0) return Math.min(dflt, max) * 1000;
+  return Math.min(Math.round(n), max) * 1000;
+}
+
+// ---- get_lxc_container: instance detail mapping ----
+
+/** Map one incus instance (list --format json shape) to the tool's detail
+ *  view: addresses on every non-lo NIC, the security/limits/boot config
+ *  subset, and snapshots. Pure so the shape is testable. */
+export function lxcContainerDetail(instance) {
+  const config = instance?.config || {};
+  const picked = {};
+  for (const key of Object.keys(config)) {
+    if (/^(security\.|limits\.|boot\.)/.test(key)) picked[key] = config[key];
+  }
+  const addresses = [];
+  const nets = instance?.state?.network || {};
+  for (const [iface, net] of Object.entries(nets)) {
+    if (iface === 'lo') continue;
+    for (const a of net?.addresses || []) {
+      // 'local' is loopback scope; 'link' is fe80:: noise — neither is an
+      // address anyone routes to.
+      if (a.scope === 'local' || a.scope === 'link') continue;
+      addresses.push({ interface: iface, address: a.address, family: a.family, netmask: a.netmask ?? null });
+    }
+  }
+  return {
+    status: instance?.status || null,
+    created_at: instance?.created_at || null,
+    ephemeral: !!instance?.ephemeral,
+    profiles: instance?.profiles || [],
+    addresses,
+    config: picked,
+    snapshots: (instance?.snapshots || []).map((s) => ({ name: s.name, created_at: s.created_at || null })),
+  };
+}
+
+// ---- LXC lifecycle: snapshots + gated config writes ----
+//
+// Snapshot-before-mutate is the safety primitive that makes the mutating LXC
+// tools safe to expose at all; the config allowlist
+// (lib/mcp-policy/lxc-config-allowlist.json) is the enforcement source of
+// truth for which Incus keys are writable and what each write requires.
+
+export function validSnapshotName(s) {
+  const v = String(s ?? '').trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(v)) return null;
+  return v;
+}
+
+/** Default snapshot name from a Date — filesystem/incus-safe, sortable. */
+export function defaultSnapshotName(date, prefix = 'pp-mcp') {
+  const d = date instanceof Date ? date : new Date(date);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${prefix}-${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
+}
+
+/**
+ * Validate a set_lxc_config request against the config policy.
+ * Returns { key, value, restartRequired, warning|null } or { error }.
+ *
+ * security.privileged=true additionally requires acknowledgeRisk — and the
+ * policy's warning text rides back on SUCCESS too, because the tool's job is
+ * to present the trade-off, not just apply the flip (a real operator chose
+ * this path in the field after being steered away; the warning exists for
+ * the next one).
+ */
+export function validateLxcConfigChange(key, value, { acknowledgeRisk = false } = {}, policy) {
+  const keys = policy?.keys || {};
+  const k = String(key ?? '').trim();
+  const rule = keys[k];
+  if (!rule) {
+    const blocked = policy?.explicitly_not_writable?.[k];
+    if (blocked) return { error: `"${k}" is deliberately not writable over MCP: ${blocked}` };
+    return { error: `"${k}" is not a writable config key. Writable: ${Object.keys(keys).join(', ')}.` };
+  }
+  const v = String(value ?? '').trim();
+  if (Array.isArray(rule.values)) {
+    if (!rule.values.includes(v)) return { error: `${k} accepts only: ${rule.values.join(', ')}` };
+  } else if (k === 'limits.cpu') {
+    if (!/^[1-9][0-9]*$/.test(v)) return { error: 'limits.cpu must be a positive whole number of vCPUs, e.g. "4"' };
+  } else if (k === 'limits.memory') {
+    if (!/^[1-9][0-9]*(\.[0-9]+)?(GB|GiB|MB|MiB)$/i.test(v)) return { error: 'limits.memory must be a size string, e.g. "4GB" or "512MiB"' };
+  }
+  if (k === 'security.privileged' && v === 'true' && acknowledgeRisk !== true) {
+    return {
+      error: `Setting security.privileged=true requires acknowledge_risk: true. ${rule.warning || ''}`.trim(),
+    };
+  }
+  return {
+    key: k,
+    value: v,
+    restartRequired: !!rule.restart_required,
+    warning: (k === 'security.privileged' && v === 'true') ? (rule.warning || null) : null,
+  };
+}
+
+export function validIpv4(s) {
+  const v = String(s ?? '').trim();
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v);
+  if (!m) return null;
+  for (let i = 1; i <= 4; i += 1) {
+    if (Number(m[i]) > 255 || (m[i].length > 1 && m[i].startsWith('0'))) return null;
+  }
+  return v;
+}
+
+/** An Incus image alias like images:debian/12 or ubuntu:24.04. Argv-passed
+ *  (never a shell), so this only rejects confusing shapes — most importantly
+ *  a leading '-' that incus would read as an option. */
+export function validImageAlias(s) {
+  const v = String(s ?? '').trim();
+  if (!v || v.length > 200 || v.startsWith('-')) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9:/._-]*$/.test(v)) return null;
+  return v;
+}
+
+// ---- routing tools: domain/port validation + host-curl probe parsing ----
+//
+// test_route probes run as host `curl` (through the same nsenter seam every
+// other host command uses) so they see exactly what the edge proxy serves —
+// pinned to loopback with --resolve, so the test exercises THIS Caddy even
+// when public DNS points elsewhere. Bodies are never returned: the probe
+// keeps -o /dev/null and parses only a whitelisted set of header fields,
+// because response bodies (and cookies) can carry credentials echoed by
+// misconfigured apps.
+
+export function validDomainName(s) {
+  const v = String(s ?? '').trim().toLowerCase();
+  if (!v || v.length > 253) return null;
+  if (!/^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/.test(v)) return null;
+  return v;
+}
+
+export function normalizePort(p) {
+  const n = Number(p);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+}
+
+/**
+ * Parse a curl run that used `-o /dev/null -D -` plus a
+ * `PP_TIME:%{time_total}` / `PP_CODE:%{http_code}` write-out trailer.
+ * Returns fields from the LAST response block (redirect chains report their
+ * final hop) — and ONLY whitelisted headers; Set-Cookie and friends never
+ * leave this function.
+ */
+export function parseCurlProbeOutput(stdout) {
+  const src = String(stdout ?? '');
+  const statuses = [];
+  let server = null, location = null, contentType = null;
+  let sawStatusInBlock = false;
+  for (const line of src.split(/\r?\n/)) {
+    const st = /^HTTP\/([0-9.]+)\s+(\d{3})/.exec(line);
+    if (st) {
+      statuses.push(Number(st[2]));
+      sawStatusInBlock = true;
+      server = null; location = null; contentType = null;   // new block resets
+      continue;
+    }
+    if (!sawStatusInBlock) continue;
+    const h = /^([A-Za-z0-9-]+):\s*(.*)$/.exec(line);
+    if (!h) continue;
+    const key = h[1].toLowerCase();
+    if (key === 'server') server = h[2].trim().slice(0, 100);
+    else if (key === 'location') location = h[2].trim().slice(0, 300);
+    else if (key === 'content-type') contentType = h[2].trim().slice(0, 100);
+  }
+  const time = /PP_TIME:([\d.]+)/.exec(src);
+  const code = /PP_CODE:(\d+)/.exec(src);
+  return {
+    status_code: statuses.length ? statuses[statuses.length - 1] : (code ? Number(code[1]) || null : null),
+    status_chain: statuses,
+    server, location, content_type: contentType,
+    time_seconds: time ? Number(time[1]) : null,
+  };
+}
+
+/**
+ * Summarize Caddy JSON access-log lines over a time window.
+ *
+ * Every merged site file logs to /var/log/caddy/<domain>.log in Caddy's
+ * default JSON encoding (`ts` = unix seconds). The caller tails the file and
+ * hands the text here; unparseable lines are skipped, entries outside the
+ * window ignored. Only counts leave — no URLs, no headers, no bodies — so
+ * nothing sensitive can ride out through an error summary.
+ */
+export function summarizeAccessLog(text, nowMs, windowSeconds = 3600) {
+  const windowStartMs = nowMs - windowSeconds * 1000;
+  let requests = 0;
+  let errors5xx = 0;
+  const byErrorStatus = {};
+  let oldestSeenMs = null;
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line) continue;
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    const ts = Number(e?.ts);
+    const status = Number(e?.status);
+    if (!Number.isFinite(ts) || !Number.isFinite(status)) continue;
+    const tsMs = ts * 1000;
+    if (oldestSeenMs === null || tsMs < oldestSeenMs) oldestSeenMs = tsMs;
+    if (tsMs < windowStartMs || tsMs > nowMs + 60000) continue;
+    requests += 1;
+    if (status >= 500 && status <= 599) {
+      errors5xx += 1;
+      byErrorStatus[status] = (byErrorStatus[status] || 0) + 1;
+    }
+  }
+  return {
+    window_seconds: windowSeconds,
+    requests,
+    errors_5xx: errors5xx,
+    by_error_status: byErrorStatus,
+    // When the tail we read starts INSIDE the window, older requests exist
+    // that we did not see — the counts are a floor, and the caller says so.
+    partial_window: oldestSeenMs !== null && oldestSeenMs > windowStartMs,
+  };
+}
+
+/** The access-log path the merged Caddy site file writes for a domain
+ *  (wildcards sanitized the same way caddyFileName does). */
+export function caddyAccessLogPath(domain) {
+  return `/var/log/caddy/${String(domain).replace(/\*/g, '_wildcard_')}.log`;
+}
+
+/** Map a curl exit code to a failure class a caller can act on. */
+export function classifyCurlExit(code) {
+  const map = {
+    6: ['dns', 'the hostname did not resolve'],
+    7: ['connect_refused', 'TCP connection refused — nothing is listening there'],
+    28: ['timeout', 'the probe timed out'],
+    35: ['tls', 'TLS handshake failed'],
+    52: ['empty_reply', 'the server closed the connection without a response'],
+    56: ['reset', 'the connection was reset mid-transfer'],
+    60: ['tls_untrusted', 'the certificate could not be verified'],
+    127: ['curl_missing', 'curl is not installed'],
+  };
+  const [cls, hint] = map[Number(code)] || ['error', `curl exited ${code}`];
+  return { class: cls, hint };
+}
+
+// ---- LXC observe: file listings, unit names, systemctl parsing ----
+
+/**
+ * Parse `stat -c '%A|%s|%Y|%N' …` lines into file entries. %N renders as
+ * 'name' or 'name' -> 'target' for symlinks; %A's first char gives the type.
+ */
+export function parseStatFileList(stdout) {
+  const entries = [];
+  for (const line of String(stdout ?? '').split('\n')) {
+    if (!line) continue;
+    const m = /^([A-Za-z-]{10,11})\|(\d+)\|(\d+)\|(.*)$/.exec(line);
+    if (!m) continue;
+    const mode = m[1];
+    const names = /^'(.*?)'(?: -> '(.*)')?$/.exec(m[4]);
+    const type = mode[0] === 'd' ? 'dir' : mode[0] === 'l' ? 'symlink' : 'file';
+    entries.push({
+      path: names ? names[1] : m[4],
+      type,
+      size: Number(m[2]),
+      mode: mode.slice(1, 10),
+      mtime: new Date(Number(m[3]) * 1000).toISOString(),
+      ...(type === 'symlink' && names?.[2] ? { target: names[2] } : {}),
+    });
+  }
+  return entries;
+}
+
+/** Parse `systemctl show -p A,B` key=value output. */
+export function parseSystemctlShow(stdout) {
+  const out = {};
+  for (const line of String(stdout ?? '').split('\n')) {
+    const eq = line.indexOf('=');
+    if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return out;
+}
+
+/** A systemd unit name safe to hand journalctl as an argv token. */
+export function validUnitName(s) {
+  const v = String(s ?? '').trim();
+  if (!v || v.length > 128 || v.startsWith('-')) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9@._-]*(\.(service|socket|timer|target|mount|path))?$/.test(v)) return null;
+  return v;
+}
+
+/** A probe target host: IPv4 or a DNS name label chain. */
+export function validProbeHost(s) {
+  const v = String(s ?? '').trim();
+  if (!v || v.length > 253 || v.startsWith('-')) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(v)) return null;
+  return v;
+}
+
+/** A simple filename glob for grep --include (no paths, no traversal). */
+export function validFileGlob(s) {
+  const v = String(s ?? '').trim();
+  if (!v || v.length > 100) return null;
+  if (!/^[A-Za-z0-9*?\[\]._-]+$/.test(v)) return null;
+  return v;
+}
+
+/** A static-site/service id: uuid or legacy integer, as stored (TEXT column).
+ *  The old Number() coercion turned every uuid id into NaN — which read as
+ *  "Static site not found" for every UI-created site. */
+export function normalizeServiceId(v) {
+  const s = String(v ?? '').trim();
+  if (!s || s.length > 64) return null;
+  if (!/^[A-Za-z0-9-]+$/.test(s)) return null;
+  return s;
+}
+
+// ---- write_lxc_file: the mode parameter ----
+
+/** Three octal permission digits, with or without a leading zero ("0755",
+ *  "644"). Returns them normalized for chmod, or null. Deliberately no
+ *  setuid/setgid/sticky digit: nothing the file tools deploy needs one. */
+export function validFileMode(m) {
+  const s = String(m ?? '').trim();
+  if (!/^0?[0-7]{3}$/.test(s)) return null;
+  return s.slice(-3);
+}
+
 // ---- tool catalog ----
 
 const uploadSourceProps = {
@@ -112,6 +653,10 @@ const uploadSourceProps = {
     type: 'string',
     description: 'The zip file base64-encoded, for small archives (≤ 2 MB decoded). Use an upload ticket for anything larger.',
   },
+  sha256: {
+    type: 'string',
+    description: 'Optional but recommended: hex SHA-256 of the raw zip bytes. Verified before anything is parsed or staged, so transport corruption fails loudly as a checksum mismatch instead of surfacing later as a confusing extraction error.',
+  },
 };
 
 export const MCP_TOOLS = [
@@ -122,8 +667,35 @@ export const MCP_TOOLS = [
   },
   {
     name: 'create_upload_ticket',
-    description: 'Create a short-lived upload slot for a zip file. Returns { ticket, upload_url, expires_in_seconds }. PUT the raw zip bytes to upload_url (Content-Type: application/zip, same auth not required — the ticket in the URL is the secret), then pass the ticket to an inspect tool. Tickets are single-use and expire in 30 minutes.',
+    description: 'Create a short-lived upload slot for a zip file. Returns { ticket, upload_url, expires_in_seconds }. PUT the raw zip bytes to upload_url (Content-Type: application/zip, same auth not required — the ticket in the URL is the secret), then pass the ticket to an inspect tool. If your environment cannot reach the upload URL (egress-restricted sandbox), deliver the bytes over MCP instead with append_upload_chunk + finish_upload on the same ticket. Tickets are single-use and expire in 30 minutes.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'append_upload_chunk',
+    description: 'Deliver part of a zip to an upload ticket through MCP itself — the fallback for clients that cannot reach the ticket\'s PUT upload_url. Send base64 chunks (≤ 4 MB decoded each) in order, seq starting at 0; out-of-order or repeated chunks are refused. Finish with finish_upload, then pass the ticket to an inspect tool as usual.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ticket: { type: 'string', description: 'From create_upload_ticket.' },
+        seq: { type: 'number', description: 'Chunk sequence number, starting at 0, incrementing by 1.' },
+        chunk_base64: { type: 'string', description: 'This chunk of the zip, base64-encoded (≤ 4 MB decoded).' },
+      },
+      required: ['ticket', 'seq', 'chunk_base64'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'finish_upload',
+    description: 'Seal a chunked upload: verifies the assembled bytes against the required sha256 (hex SHA-256 of the COMPLETE zip) and makes the ticket usable by the inspect tools. A checksum mismatch discards the ticket — create a new one and re-send, rather than extracting corrupted bytes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ticket: { type: 'string' },
+        sha256: { type: 'string', description: 'Hex SHA-256 of the complete zip file.' },
+      },
+      required: ['ticket', 'sha256'],
+      additionalProperties: false,
+    },
   },
   {
     name: 'inspect_static_site_zip',
@@ -131,7 +703,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        service_id: { type: 'number', description: 'Static site id from list_static_sites.' },
+        service_id: { type: ['number', 'string'], description: 'Static site id from list_static_sites (uuid string for UI-created sites, integer for legacy ones).' },
         ...uploadSourceProps,
       },
       required: ['service_id'],
@@ -144,7 +716,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        service_id: { type: 'number' },
+        service_id: { type: ['number', 'string'] },
         upload_id: { type: 'string', description: 'From inspect_static_site_zip.' },
         strip_wrapper: { type: 'boolean', description: 'Strip the single top-level wrapper folder (default true when one exists).' },
         confirm_overwrite: { type: 'boolean', description: 'Set true only after the user approved replacing the listed files.' },
@@ -157,6 +729,212 @@ export const MCP_TOOLS = [
     name: 'list_lxc_containers',
     description: 'List LXC/Incus containers ProxyPilot manages (name, status, IP). Use the name with inspect_lxc_zip / apply_lxc_zip.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'get_lxc_container',
+    description: 'Full detail for one LXC/Incus guest: status, every non-loopback IP address, the security/limits/boot config subset (security.nesting, security.privileged, limits.*, boot.autostart), profiles, snapshots, and the registered startup script (path + working dir). The LXC counterpart of get_project — use it before planning changes instead of probing with file reads.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string', description: 'Container name from list_lxc_containers (without the pp- prefix).' },
+      },
+      required: ['container'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'run_lxc_command',
+    description: 'Run one allowlisted command inside an LXC guest — the observe/debug loop without editing boot scripts or redeploying. Same contract as run_project_command: whitespace-split argv executed directly (no shell — pipes, redirects, ;, && and $() are rejected), last 64 KB of each stream returned, exit_code + timed_out reported. The allowlist is read-biased: docker/compose status+logs, systemctl status, journalctl, ip, ss, sysctl -n, curl (probe only — output-writing flags are denied), df, free, ls, stat, du; docker compose up/restart/stop/pull are allowed only in the registered startup working dir. No shells, no package managers, no deletion — those stay host-side by design.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        command: { type: 'string', description: 'e.g. "docker compose ps" or "ss -ltnp". Validated against the allowlist before execution.' },
+        working_dir: { type: 'string', description: 'Absolute directory to run in; default the registered startup working dir (or /).' },
+        timeout_seconds: { type: 'number', description: 'Kill after this many seconds. Default 120, max 1800.' },
+      },
+      required: ['container', 'command'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_lxc_files',
+    description: 'List files under a directory inside an LXC guest (path, type, size, mode, mtime, symlink target). Counterpart of list_project_files. Capped at 2000 entries. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        path: { type: 'string', description: 'Absolute directory inside the guest, e.g. /opt/app.' },
+        recursive: { type: 'boolean', description: 'Recurse into subdirectories (default false).' },
+      },
+      required: ['container', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'search_lxc_files',
+    description: 'Grep text files under a directory inside an LXC guest (extended regex, binary files skipped). Counterpart of search_project_files: returns path + line_number + the matching line, capped at 200 matches. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        path: { type: 'string', description: 'Absolute directory to search under.' },
+        pattern: { type: 'string', description: 'Extended regular expression.' },
+        glob: { type: 'string', description: 'Optional filename glob filter, e.g. *.yml.' },
+      },
+      required: ['container', 'path', 'pattern'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_lxc_logs',
+    description: 'Fetch recent log output from inside an LXC guest without redeploying anything: the registered ProxyPilot startup service (source=startup), any systemd unit (source=journal + unit), or docker compose logs (source=docker-compose + compose_dir). Last N lines (default 100, max 1000). Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        source: { type: 'string', enum: ['startup', 'journal', 'docker-compose'] },
+        unit: { type: 'string', description: 'systemd unit name when source=journal, e.g. docker.service.' },
+        compose_dir: { type: 'string', description: 'Directory containing docker-compose.yml when source=docker-compose.' },
+        lines: { type: 'number', description: 'Line count, default 100, max 1000.' },
+      },
+      required: ['container', 'source'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'probe_lxc_port',
+    description: 'From inside an LXC guest, probe a host:port: TCP reachability, and for http/https the status code, server header, response time, and optionally whether a WebSocket upgrade completes. Never returns a response body. The one-call answer to "is the app up behind the proxy" — an in-guest 401 with an edge 502 means the proxy binding is broken, not the app (pair with test_route for the edge side).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        host: { type: 'string', description: 'Target host, default 127.0.0.1.' },
+        port: { type: 'number' },
+        scheme: { type: 'string', enum: ['tcp', 'http', 'https'], description: 'Default http.' },
+        path: { type: 'string', description: 'URL path for http/https probes, default /.' },
+        test_websocket: { type: 'boolean', description: 'Also attempt a WebSocket upgrade on the same path (default false).' },
+        timeout_seconds: { type: 'number', description: 'Default 10, max 60.' },
+      },
+      required: ['container', 'port'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_lxc_startup',
+    description: 'The registered startup script for an LXC guest: script path, working dir, full content, and the systemd unit\'s state — last exit code, last start/exit timestamps. Previously visible only as a side effect of inspect_lxc_zip. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: { container: { type: 'string' } },
+      required: ['container'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'create_lxc_container',
+    description: 'Create a new LXC/Incus guest. Creation-only, so inherently non-destructive: fails if the name already exists, never replaces. docker_ready (default true) sets security.nesting plus the syscall intercepts Docker needs at birth, so the keyring/nesting failures do not occur on new guests — privileged mode is NOT included and stays behind set_lxc_config\'s risk gate. Waits briefly for a DHCP lease and returns the same detail as get_lxc_container. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Guest name (ProxyPilot adds its pp- prefix). Fails if taken.' },
+        image: { type: 'string', description: 'Incus image alias, default images:debian/12.' },
+        cpu: { type: 'number', description: 'vCPU limit, default 2.' },
+        memory_gb: { type: 'number', description: 'RAM limit in GB, default 4. Browser workloads need >= 4 — Chrome OOMs at 2.' },
+        disk_gb: { type: 'number', description: 'Root disk in GB (best-effort override of the profile default).' },
+        docker_ready: { type: 'boolean', description: 'Set nesting + syscall intercepts for running Docker inside. Default true.' },
+        autostart: { type: 'boolean', description: 'boot.autostart, default true.' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['name', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'control_lxc_container',
+    description: 'Start, stop (clean shutdown only — no force-kill), or restart an LXC guest. The step that applies restart-required config changes (set_lxc_config reports when one is needed). No delete verb exists, by design. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        action: { type: 'string', enum: ['start', 'stop', 'restart'] },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['container', 'action', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_lxc_config',
+    description: 'Set one allowlisted Incus config key on a guest: security.nesting, security.privileged, limits.cpu, limits.memory, boot.autostart (the allowlist in lib/mcp-policy/lxc-config-allowlist.json is the source of truth — anything else, notably raw.lxc and device passthrough, is rejected). Takes an automatic snapshot before every write and reports whether a restart is needed. security.privileged=true additionally requires acknowledge_risk: true and returns the warning that container root becomes host root — prefer raising kernel.keys.* sysctls on the host for Docker keyring failures. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        key: { type: 'string', enum: ['security.nesting', 'security.privileged', 'limits.cpu', 'limits.memory', 'boot.autostart'] },
+        value: { type: 'string', description: 'New value, e.g. "true", "4", "8GB".' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+        acknowledge_risk: { type: 'boolean', description: 'Required (true) only when setting security.privileged=true.' },
+      },
+      required: ['container', 'key', 'value', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_lxc_network',
+    description: 'Pin a guest\'s IPv4 address: reserve-current converts the address the guest holds now into a static reservation (recommended — a working deployment on a dynamic lease reproduces its edge 502 at the next renewal); static assigns a specific address. Snapshots first, warns when routed domains still target an address the change abandons, and says when a restart is needed for the lease to apply. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        mode: { type: 'string', enum: ['reserve-current', 'static'] },
+        ip: { type: 'string', description: 'IPv4 address, required when mode=static.' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['container', 'mode', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'snapshot_lxc_container',
+    description: 'Take a named snapshot of a guest — the safety primitive every mutating LXC tool leans on (they all snapshot before changing anything). With list: true it just returns the existing snapshots. No restore or delete verb over MCP: restoring is a deliberate host-side act (incus restore).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        name: { type: 'string', description: 'Snapshot name; default a timestamp.' },
+        list: { type: 'boolean', description: 'If true, just return existing snapshots and take none.' },
+      },
+      required: ['container'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'lxc_file_diff',
+    description: 'Diff a file inside a guest against its .old backup (written by write_lxc_file / apply_lxc_zip on overwrite), or against any other text file via `against`. Read-only; pairs with restore_lxc_file. Unified diff, truncated past 128 KB.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        path: { type: 'string', description: 'File to diff; compared against <path>.old unless against is set.' },
+        against: { type: 'string', description: 'Optional second absolute path to diff against instead of the .old backup.' },
+      },
+      required: ['container', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'restore_lxc_file',
+    description: 'Restore a file from its .old backup by SWAPPING the two — the previous live version lands in .old, so a restore is itself reversible by calling again. Check the change first with lxc_file_diff. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        path: { type: 'string', description: 'The live file path; its .old must exist.' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['container', 'path', 'confirm'],
+      additionalProperties: false,
+    },
   },
   {
     name: 'inspect_lxc_zip',
@@ -205,7 +983,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'write_lxc_file',
-    description: 'Write one text file inside an LXC container. If the file already exists and confirm_overwrite is not true, this returns the current file info instead of writing — show the user your proposed change and get their go-ahead first. On overwrite the previous version is kept as `<path>.old`. Parent directories are created. After config/code edits, redeploy with rerun_startup.',
+    description: 'Write one text file inside an LXC container. If the file already exists and confirm_overwrite is not true, this returns the current file info instead of writing — show the user your proposed change and get their go-ahead first. On overwrite the previous version is kept as `<path>.old`. Parent directories are created. Pass mode (e.g. "0755") to make a script executable in the same call. After config/code edits, redeploy with rerun_startup.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -213,6 +991,7 @@ export const MCP_TOOLS = [
         path: { type: 'string', description: 'Absolute file path inside the container.' },
         content: { type: 'string', description: 'The complete new file content (UTF-8).' },
         confirm_overwrite: { type: 'boolean', description: 'Set true only after the user approved replacing the existing file.' },
+        mode: { type: 'string', description: 'Optional file permissions as three octal digits, e.g. "0755" for an executable script or "644". Default: whatever the write leaves (existing files keep their mode).' },
       },
       required: ['container', 'path', 'content'],
       additionalProperties: false,
@@ -220,13 +999,139 @@ export const MCP_TOOLS = [
   },
   {
     name: 'rerun_startup',
-    description: 'Re-run the startup script registered for an LXC container (the redeploy step after write_lxc_file edits). Returns the run output and exit code. Fails if no startup script has been registered — register one via apply_lxc_zip.',
+    description: 'Re-run the startup script registered for an LXC container (the redeploy step after write_lxc_file edits). Returns the last 64 KB of stdout/stderr (the tail — a failure explains itself at the end), the exit code, and timed_out. Long first-boot installs should pass timeout_seconds (default 120, max 1800). Fails if no startup script has been registered — register one via apply_lxc_zip.',
     inputSchema: {
       type: 'object',
       properties: {
         container: { type: 'string' },
+        timeout_seconds: { type: 'number', description: 'Kill the run after this many seconds (default 120, max 1800). A run that hits the deadline reports timed_out: true and may still be running inside the container.' },
       },
       required: ['container'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'create_static_site',
+    description: 'Register a new static site: name, domain, a docroot with a placeholder index, and TLS issuance through the same pipeline the UI uses. Creation-only — fails if the domain is already routed, never replaces. Returns the site id the zip-deploy and file tools take. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        domain: { type: 'string' },
+        tls: { type: 'boolean', description: 'HTTPS with automatic certificates. Default true.' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['name', 'domain', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_static_site',
+    description: 'Detail for one static site: routed domains, docroot path with file count / total bytes / newest mtime, TLS policy, and the issued certificate\'s validity when one is on disk. Counterpart of get_project. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: { site_id: { type: ['number', 'string'], description: 'From list_static_sites.' } },
+      required: ['site_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_static_site_files',
+    description: 'List the deployed files of a static site (path, size, mtime), optionally under one subdirectory. Capped at 2000 entries. The zip apply is no longer write-only. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        site_id: { type: ['number', 'string'] },
+        subdir: { type: 'string', description: 'Limit the listing to a subdirectory of the docroot.' },
+      },
+      required: ['site_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'read_static_site_file',
+    description: 'Read one text file from a static site\'s docroot (up to 512 KB, refuses binary) — same contract as read_lxc_file. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        site_id: { type: ['number', 'string'] },
+        path: { type: 'string', description: 'Path relative to the docroot.' },
+      },
+      required: ['site_id', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'write_static_site_file',
+    description: 'Write one text file into a static site\'s docroot with the write_lxc_file safety contract: existing files need confirm_overwrite: true and the previous version is kept as <path>.old. Single-file fixes (a typo, robots.txt, one stylesheet) without a full zip redeploy; changes serve immediately.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        site_id: { type: ['number', 'string'] },
+        path: { type: 'string', description: 'Path relative to the docroot.' },
+        content: { type: 'string' },
+        confirm_overwrite: { type: 'boolean', description: 'Required (true) when the file exists.' },
+      },
+      required: ['site_id', 'path', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_static_site_cert',
+    description: 'TLS certificate status for a static site\'s primary domain: policy (ACME vs manual), issuer, validity window, days until expiry, and status. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: { site_id: { type: ['number', 'string'] } },
+      required: ['site_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_routes',
+    description: 'List every hostname the edge proxy serves: domain, path prefix, upstream (container ip:port or static-site id), websocket flag, TLS stance — and flags orphaned routes whose upstream is unrecorded (they render but 502). Read-only.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'get_route',
+    description: 'Full detail for one hostname: every route on the domain with its upstream resolution, the TLS policy (ACME vs manual cert), the issued certificate\'s validity when one is on disk, and recent error counts from the domain\'s access log (requests and 5xx totals over the last hour, by status — counts only, never URLs or headers). Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Fully qualified hostname, e.g. web.example.com.' },
+      },
+      required: ['domain'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'test_route',
+    description: 'Probe a hostname from the edge host\'s own vantage point, pinned to the local proxy (so the test exercises THIS Caddy even when public DNS points elsewhere): DNS resolution, HTTP status + timing through the full proxy path, a direct probe of the recorded upstream, and optionally a WebSocket upgrade handshake. Distinguishes in one call the three failure classes that look identical from outside — proxy down, proxy-to-upstream (stale binding), and app-level — and says which one it found. Never returns response bodies. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string' },
+        path: { type: 'string', description: 'URL path to probe, default /.' },
+        test_websocket: { type: 'boolean', description: 'Attempt a WS upgrade through the proxy (default: whatever the route has configured).' },
+      },
+      required: ['domain'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_route',
+    description: 'Create or update the root-path binding for one hostname: upstream container name + port (preferred — the container\'s current IP is resolved and recorded) or a literal ip:port, websocket upgrade on/off (default ON — modern upstreams break without it and the failure mode, page-loads-then-black-screen, is misleading), and TLS. Updating an existing binding requires confirm_overwrite: true and the result carries the previous binding, so the change is reversible by a second call. Refuses domains bound to static sites. No delete verb — removal stays a UI/host operation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string' },
+        upstream_container: { type: 'string', description: 'LXC guest name (without pp-); mutually exclusive with upstream_ip. Preferred: pairs with set_lxc_network so IP changes cannot silently break the route.' },
+        upstream_ip: { type: 'string', description: 'Literal upstream IPv4; mutually exclusive with upstream_container.' },
+        upstream_port: { type: 'number' },
+        websocket: { type: 'boolean', description: 'Pass Upgrade/Connection headers. Default true.' },
+        tls: { type: 'boolean', description: 'HTTPS with automatic certificates. Default true.' },
+        confirm_overwrite: { type: 'boolean', description: 'Required (true) when the domain already has a binding.' },
+      },
+      required: ['domain', 'upstream_port'],
       additionalProperties: false,
     },
   },
@@ -859,6 +1764,49 @@ export function projectCommandTimeoutMs(seconds) {
   const n = Number(seconds);
   if (!Number.isFinite(n) || n <= 0) return PROJECT_COMMAND_TIMEOUT_DEFAULT_S * 1000;
   return Math.min(Math.round(n), PROJECT_COMMAND_TIMEOUT_MAX_S) * 1000;
+}
+
+// ---- rerun_startup: timeout + tail capture ----
+//
+// A first-boot startup script was observed doing a full Docker engine install
+// plus a 910 MB image pull inside ONE blocking rerun_startup call — no timeout
+// parameter, no way to cancel, and the output slice was the tail of the FIRST
+// 256 KB the host capture kept (the head of the run, not its end). The fix is
+// run_project_command's own recipe: a caller-clamped deadline, and each stream
+// tail'd inside the container so the last 64 KB is what comes back.
+
+export const STARTUP_RUN_TIMEOUT_MAX_S = PROJECT_COMMAND_TIMEOUT_MAX_S;
+
+/** Caller timeout wins (clamped to the max); otherwise the operator's
+ *  configured default, itself clamped so an env var cannot exceed the cap. */
+export function startupRunTimeoutMs(seconds, envDefaultMs = 120000) {
+  const n = Number(seconds);
+  if (Number.isFinite(n) && n > 0) return Math.min(Math.round(n), STARTUP_RUN_TIMEOUT_MAX_S) * 1000;
+  const d = Number(envDefaultMs);
+  if (Number.isFinite(d) && d > 0) return Math.min(Math.round(d), STARTUP_RUN_TIMEOUT_MAX_S * 1000);
+  return 120000;
+}
+
+/**
+ * Parse the marker-framed wrapper output shared by run_project_command and
+ * rerun_startup: `PP_<nonce>_EXIT:<code>`, then the stdout tail after
+ * `PP_<nonce>_OUT`, then the stderr tail after `PP_<nonce>_ERR`. The nonce is
+ * per-call so output that happens to contain the marker text cannot confuse
+ * the parse. `found: false` means the wrapper never reported — container
+ * down, incus refused, or the deadline killed it.
+ */
+export function parseMarkedStreams(output, nonce) {
+  const mark = (k) => `PP_${nonce}_${k}`;
+  const src = String(output ?? '');
+  const exitMatch = new RegExp(`${mark('EXIT')}:(-?\\d+)`).exec(src);
+  if (!exitMatch) return { found: false, exit_code: null, stdout: '', stderr: '' };
+  const outAt = src.indexOf(`${mark('OUT')}\n`);
+  const errAt = src.indexOf(mark('ERR'));
+  const stdout = outAt >= 0 && errAt > outAt
+    ? src.slice(outAt + mark('OUT').length + 1, errAt).replace(/\n$/, '')
+    : '';
+  const stderr = errAt >= 0 ? src.slice(errAt + mark('ERR').length).replace(/^\n/, '') : '';
+  return { found: true, exit_code: Number(exitMatch[1]), stdout, stderr };
 }
 
 // Trivial but shared with the LXC UI semantics: candidate startup scripts are

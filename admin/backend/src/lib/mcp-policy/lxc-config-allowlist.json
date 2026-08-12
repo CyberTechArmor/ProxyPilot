@@ -1,0 +1,40 @@
+{
+  "$comment": "Writable Incus config keys for set_lxc_config. Any key not listed is rejected. Every write snapshots the guest first.",
+  "keys": {
+    "security.nesting": {
+      "values": ["true", "false"],
+      "restart_required": true,
+      "gate": "confirm",
+      "note": "Required true for Docker inside the guest. Low risk."
+    },
+    "security.privileged": {
+      "values": ["true", "false"],
+      "restart_required": true,
+      "gate": "confirm + acknowledge_risk when setting true",
+      "warning": "Privileged means container root IS host root: a compromise inside the guest is a host compromise. Prefer raising kernel.keys.* sysctls on the host, which fixes the Docker keyring failure with isolation intact. Also changes uid mapping — file ownership inside the guest shifts, so existing data directories may need re-chowning.",
+      "note": "This exact flip was the field session's blocker; the tool must present the warning, not just apply the change."
+    },
+    "limits.cpu": {
+      "values": "positive integer as string",
+      "restart_required": false,
+      "gate": "confirm"
+    },
+    "limits.memory": {
+      "values": "size string, e.g. 4GB",
+      "restart_required": false,
+      "gate": "confirm",
+      "note": "Browser workloads need >= 4GB; Chrome OOMs at 2GB."
+    },
+    "boot.autostart": {
+      "values": ["true", "false"],
+      "restart_required": false,
+      "gate": "confirm"
+    }
+  },
+  "explicitly_not_writable": {
+    "raw.lxc": "Arbitrary LXC config injection — equivalent to unrestricted host-level control.",
+    "raw.idmap": "uid-mapping changes can orphan every file in the guest.",
+    "security.syscalls.*": "Syscall filter changes are host-security-relevant and rare enough to stay manual.",
+    "devices (disk/nic passthrough)": "Device attachment reaches host resources; keep manual."
+  }
+}

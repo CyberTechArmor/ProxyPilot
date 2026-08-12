@@ -1,0 +1,67 @@
+{
+  "$comment": "Allowlist for run_lxc_command. Matching is on argv prefix after whitespace-split; no shell is ever invoked, so metacharacters are inert but rejected anyway for clarity. deny_always wins over any allow rule.",
+  "read_only": [
+    ["docker", "ps"],
+    ["docker", "inspect"],
+    ["docker", "logs"],
+    ["docker", "images"],
+    ["docker", "compose", "ps"],
+    ["docker", "compose", "logs"],
+    ["docker", "compose", "config"],
+    ["systemctl", "status"],
+    ["systemctl", "is-active"],
+    ["systemctl", "is-enabled"],
+    ["journalctl"],
+    ["ip", "addr"],
+    ["ip", "-4", "addr"],
+    ["ip", "route"],
+    ["ip", "-4", "route"],
+    ["ss"],
+    ["sysctl", "-n"],
+    ["curl"],
+    ["df"],
+    ["free"],
+    ["uname"],
+    ["cat", "/etc/os-release"],
+    ["ls"],
+    ["stat"],
+    ["du"]
+  ],
+  "mutating_scoped": {
+    "$comment": "Allowed only with working_dir equal to the registered startup working dir, so an agent can manage the app it deployed but nothing else.",
+    "commands": [
+      ["docker", "compose", "up", "-d"],
+      ["docker", "compose", "restart"],
+      ["docker", "compose", "stop"],
+      ["docker", "compose", "pull"],
+      ["docker", "restart"],
+      ["systemctl", "restart", "docker"]
+    ]
+  },
+  "deny_always": {
+    "$comment": "Never allowed regardless of other rules.",
+    "commands": [
+      ["rm"], ["rmdir"], ["mv"], ["dd"], ["mkfs"],
+      ["shutdown"], ["reboot"], ["halt"], ["poweroff"],
+      ["docker", "compose", "down"],
+      ["docker", "rm"], ["docker", "rmi"], ["docker", "system", "prune"], ["docker", "volume", "rm"],
+      ["apt"], ["apt-get"], ["dpkg"],
+      ["useradd"], ["userdel"], ["passwd"], ["chpasswd"],
+      ["iptables"], ["nft"],
+      ["sh"], ["bash"], ["dash"], ["zsh"], ["python"], ["python3"], ["perl"], ["node"],
+      ["chmod"], ["chown"],
+      ["ssh"], ["scp"], ["nc"], ["ncat"], ["socat"],
+      ["curl", "-o"], ["curl", "--output"], ["curl", "-O"], ["wget"]
+    ],
+    "rationale": {
+      "docker compose down": "Removes containers and networks; restart/stop cover every legitimate need without deletion.",
+      "apt/apt-get/dpkg": "Package changes belong in the startup script where they are recorded and re-runnable, not in ad-hoc exec.",
+      "shells and interpreters": "Would make the allowlist a formality.",
+      "curl with output flags / wget": "curl is allowed for probing only; writing fetched bytes to disk is arbitrary code delivery."
+    }
+  },
+  "shell_syntax_rejected": ["|", ">", ">>", "<", ";", "&&", "||", "$(", "`", "&"],
+  "output_cap_bytes": 65536,
+  "default_timeout_seconds": 120,
+  "max_timeout_seconds": 1800
+}

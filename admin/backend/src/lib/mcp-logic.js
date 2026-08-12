@@ -208,6 +208,133 @@ export function lxcContainerSummaries(list, prefix) {
   return out;
 }
 
+// ---- run_lxc_command: the policy-driven allowlist ----
+//
+// Same posture as parseProjectCommand, generalized to a data-driven policy
+// (lib/mcp-policy/lxc-command-allowlist.json — the enforcement source of
+// truth; the tool description only summarizes it). Matching is on argv
+// prefix after whitespace-split; no shell ever sees the tokens. deny_always
+// wins over any allow rule. mutating_scoped commands are legal only when the
+// effective working dir IS the guest's registered startup working dir, so an
+// agent can manage the app it deployed and nothing else.
+
+function argvHasPrefix(argv, prefix) {
+  if (!Array.isArray(prefix) || prefix.length === 0 || prefix.length > argv.length) return false;
+  return prefix.every((tok, i) => argv[i] === tok);
+}
+
+// Deny entries also match LOOSELY: same head token + every remaining deny
+// token present anywhere in the argv. Strict prefix alone would let
+// `curl -sS -o /tmp/x` slip past the ["curl","-o"] entry by reordering
+// flags — and curl's output flags are denied precisely because writing
+// fetched bytes to disk is arbitrary code delivery.
+function argvMatchesDeny(argv, prefix) {
+  if (argvHasPrefix(argv, prefix)) return true;
+  if (!Array.isArray(prefix) || prefix.length < 2) return false;
+  if (argv[0] !== prefix[0]) return false;
+  return prefix.slice(1).every((tok) => argv.includes(tok));
+}
+
+const LXC_SAFE_ARG = /^[A-Za-z0-9._/@:=+-]+$/;
+
+/**
+ * Validate a command against the LXC exec policy.
+ * Returns { argv, scope: 'read_only' | 'mutating_scoped' } or { error }.
+ * Every rejection says what IS allowed — a tool that only says "no" gets
+ * retried verbatim.
+ */
+export function parseLxcCommand(command, policy, { workingDir = null, registeredWorkingDir = null } = {}) {
+  const raw = String(command ?? '').trim();
+  if (!raw) return { error: 'command is required — e.g. "docker compose ps" or "ss -ltnp"' };
+  if (/[\u0000-\u001f\u007f]/.test(raw)) {
+    return { error: 'command must not contain control characters or newlines' };
+  }
+  const argv = raw.split(/\s+/);
+
+  const shellTokens = policy.shell_syntax_rejected || [];
+  const shellHit = argv.find((tok) => shellTokens.some((sym) => tok.includes(sym)));
+  if (shellHit) {
+    return { error: `"${shellHit}" is shell syntax. This tool runs ONE command without a shell — pipes, redirects, ;, && and $(…) are not supported. Run the steps as separate calls.` };
+  }
+  const badTok = argv.find((tok) => !LXC_SAFE_ARG.test(tok));
+  if (badTok) {
+    return { error: `"${badTok}" is not a plain argument (quotes and special characters are not supported — the command is split on whitespace and executed directly).` };
+  }
+
+  for (const deny of policy.deny_always?.commands || []) {
+    if (argvMatchesDeny(argv, deny)) {
+      return {
+        error: `"${deny.join(' ')}" is never allowed over MCP (removal and destructive operations stay host-side by design). `
+          + 'Allowed: read/observe commands (docker ps/logs, systemctl status, ip, ss, journalctl, curl probes, df, free, ls, stat, du) '
+          + 'and docker compose up/restart/stop/pull in the registered app directory.',
+      };
+    }
+  }
+  for (const allow of policy.read_only || []) {
+    if (argvHasPrefix(argv, allow)) return { argv, scope: 'read_only' };
+  }
+  for (const allow of policy.mutating_scoped?.commands || []) {
+    if (argvHasPrefix(argv, allow)) {
+      if (!registeredWorkingDir || workingDir !== registeredWorkingDir) {
+        return {
+          error: `"${allow.join(' ')}" is a mutating command, allowed only in the guest's registered startup working dir`
+            + (registeredWorkingDir ? ` (${registeredWorkingDir})` : ' — and this guest has no registered startup script')
+            + '. It manages the app that was deployed there, nothing else.',
+        };
+      }
+      return { argv, scope: 'mutating_scoped' };
+    }
+  }
+  return {
+    error: `"${argv[0]}" is not in the allowlist. Permitted: docker/compose status and logs, systemctl status/is-active/is-enabled, `
+      + 'journalctl, ip addr/route, ss, sysctl -n, curl (probe only), df, free, uname, cat /etc/os-release, ls, stat, du — '
+      + 'plus docker compose up/restart/stop/pull scoped to the registered app dir. No shells, no package managers, no deletion.',
+  };
+}
+
+/** Clamp a caller timeout to the policy window (defaults mirror the policy
+ *  file: 120s default, 1800s max). */
+export function lxcCommandTimeoutMs(seconds, policy = {}) {
+  const dflt = Number(policy.default_timeout_seconds) > 0 ? Number(policy.default_timeout_seconds) : 120;
+  const max = Number(policy.max_timeout_seconds) > 0 ? Number(policy.max_timeout_seconds) : 1800;
+  const n = Number(seconds);
+  if (!Number.isFinite(n) || n <= 0) return Math.min(dflt, max) * 1000;
+  return Math.min(Math.round(n), max) * 1000;
+}
+
+// ---- get_lxc_container: instance detail mapping ----
+
+/** Map one incus instance (list --format json shape) to the tool's detail
+ *  view: addresses on every non-lo NIC, the security/limits/boot config
+ *  subset, and snapshots. Pure so the shape is testable. */
+export function lxcContainerDetail(instance) {
+  const config = instance?.config || {};
+  const picked = {};
+  for (const key of Object.keys(config)) {
+    if (/^(security\.|limits\.|boot\.)/.test(key)) picked[key] = config[key];
+  }
+  const addresses = [];
+  const nets = instance?.state?.network || {};
+  for (const [iface, net] of Object.entries(nets)) {
+    if (iface === 'lo') continue;
+    for (const a of net?.addresses || []) {
+      // 'local' is loopback scope; 'link' is fe80:: noise — neither is an
+      // address anyone routes to.
+      if (a.scope === 'local' || a.scope === 'link') continue;
+      addresses.push({ interface: iface, address: a.address, family: a.family, netmask: a.netmask ?? null });
+    }
+  }
+  return {
+    status: instance?.status || null,
+    created_at: instance?.created_at || null,
+    ephemeral: !!instance?.ephemeral,
+    profiles: instance?.profiles || [],
+    addresses,
+    config: picked,
+    snapshots: (instance?.snapshots || []).map((s) => ({ name: s.name, created_at: s.created_at || null })),
+  };
+}
+
 // ---- write_lxc_file: the mode parameter ----
 
 /** Three octal permission digits, with or without a leading zero ("0755",
@@ -306,6 +433,33 @@ export const MCP_TOOLS = [
     name: 'list_lxc_containers',
     description: 'List LXC/Incus containers ProxyPilot manages (name, status, IP). Use the name with inspect_lxc_zip / apply_lxc_zip.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'get_lxc_container',
+    description: 'Full detail for one LXC/Incus guest: status, every non-loopback IP address, the security/limits/boot config subset (security.nesting, security.privileged, limits.*, boot.autostart), profiles, snapshots, and the registered startup script (path + working dir). The LXC counterpart of get_project — use it before planning changes instead of probing with file reads.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string', description: 'Container name from list_lxc_containers (without the pp- prefix).' },
+      },
+      required: ['container'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'run_lxc_command',
+    description: 'Run one allowlisted command inside an LXC guest — the observe/debug loop without editing boot scripts or redeploying. Same contract as run_project_command: whitespace-split argv executed directly (no shell — pipes, redirects, ;, && and $() are rejected), last 64 KB of each stream returned, exit_code + timed_out reported. The allowlist is read-biased: docker/compose status+logs, systemctl status, journalctl, ip, ss, sysctl -n, curl (probe only — output-writing flags are denied), df, free, ls, stat, du; docker compose up/restart/stop/pull are allowed only in the registered startup working dir. No shells, no package managers, no deletion — those stay host-side by design.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        command: { type: 'string', description: 'e.g. "docker compose ps" or "ss -ltnp". Validated against the allowlist before execution.' },
+        working_dir: { type: 'string', description: 'Absolute directory to run in; default the registered startup working dir (or /).' },
+        timeout_seconds: { type: 'number', description: 'Kill after this many seconds. Default 120, max 1800.' },
+      },
+      required: ['container', 'command'],
+      additionalProperties: false,
+    },
   },
   {
     name: 'inspect_lxc_zip',

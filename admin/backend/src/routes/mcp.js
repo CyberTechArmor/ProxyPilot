@@ -23,7 +23,7 @@
 import express from 'express';
 import { randomBytes } from 'node:crypto';
 import { appendFile, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
 import { getDb, logAudit } from '../db.js';
@@ -38,6 +38,7 @@ import {
   normalizeChunkSeq, decodeChunkBase64,
   parseLxcListJson, lxcContainerSummaries, validFileMode,
   startupRunTimeoutMs, parseMarkedStreams,
+  parseLxcCommand, lxcCommandTimeoutMs, lxcContainerDetail,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
   applyStringEdit, normalizeReadRange,
@@ -73,6 +74,14 @@ function publicBaseUrl(req) {
 
 const LXC_PREFIX = 'pp-';
 const LXC_NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
+
+// The exec allowlist — loaded once at module init. This JSON is the
+// enforcement source of truth (the run_lxc_command description only
+// summarizes it); it is also packaged verbatim in the mcp-lxc-sites-upgrades
+// component spec, and the two must be kept in sync.
+const LXC_CMD_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/lxc-command-allowlist.json', import.meta.url), 'utf8'),
+);
 const DEFAULT_LXC_TARGET = '/opt/app';
 const MCP_TMP_DIR = process.env.ZIP_UPLOAD_TMP_DIR || join(os.tmpdir(), 'proxypilot-zip-uploads');
 
@@ -729,6 +738,128 @@ async function toolRerunStartup(args, auth) {
     stderr: streams.stderr,
     output_truncated: streams.stdout.length >= PROJECT_COMMAND_OUTPUT_CAP || streams.stderr.length >= PROJECT_COMMAND_OUTPUT_CAP,
   });
+}
+
+// ---- LXC observe + exec (spec cycle 2: the pair that would have collapsed
+// the field session from five redeploys to two calls) ----
+
+// Fetch one instance's full JSON (state + config + snapshots), across all
+// Incus projects when the client supports it. Exact-name match — incus treats
+// the CLI filter as a pattern, so pp-Web must not accidentally resolve pp-Web2.
+async function fetchLxcInstance(incusName) {
+  let out = await runHostCapture('incus', ['list', incusName, '--all-projects', '--format', 'json'], { timeoutMs: 30000 });
+  if (out.status !== 0) {
+    out = await runHostCapture('incus', ['list', incusName, '--format', 'json'], { timeoutMs: 30000 });
+  }
+  if (out.status !== 0) {
+    const why = out.timedOut ? 'timed out' : (out.stderr || '').trim().slice(-300) || out.error || 'unknown error';
+    return { error: `incus list failed (${why})` };
+  }
+  const parsed = parseLxcListJson(out.stdout);
+  if (parsed.error) return { error: `incus list returned ${parsed.error}` };
+  const instance = parsed.list.find((c) => c?.name === incusName);
+  if (!instance) return { notFound: true };
+  return { instance };
+}
+
+async function toolGetLxcContainer(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const incusName = `${LXC_PREFIX}${name}`;
+  const r = await fetchLxcInstance(incusName);
+  if (r.error) return toolResult(`Could not inspect ${name}: ${r.error}`, { isError: true });
+  if (r.notFound) return toolResult(`Container ${name} not found — use list_lxc_containers for valid names`, { isError: true });
+  const startup = await readContainerStartup(incusName).catch(() => null);
+  return toolResult({
+    name,
+    ...lxcContainerDetail(r.instance),
+    registered_startup: startup?.scriptPath
+      ? { script_path: startup.scriptPath, working_dir: startup.workingDir || null }
+      : null,
+  });
+}
+
+// run_lxc_command — one allowlisted command inside a guest, with the same
+// containment as run_project_command: whitespace-split argv handed to sh as
+// POSITIONAL PARAMETERS and invoked as "$@" (never re-parsed), output tails
+// captured inside the guest, policy loaded from lib/mcp-policy/. This single
+// tool eliminates the edit-boot-script-and-redeploy debugging loop the field
+// session was forced into.
+async function toolRunLxcCommand(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  let requestedWd = null;
+  if (args.working_dir != null && String(args.working_dir).trim() !== '') {
+    requestedWd = validTargetDir(args.working_dir);
+    if (!requestedWd) return toolResult('working_dir must be an absolute path inside the guest', { isError: true });
+  }
+  const startup = await readContainerStartup(incusName).catch(() => null);
+  const registeredWd = startup?.workingDir || null;
+  const workingDir = requestedWd || registeredWd || '/';
+
+  const parsed = parseLxcCommand(args.command, LXC_CMD_POLICY, { workingDir, registeredWorkingDir: registeredWd });
+  if (parsed.error) return toolResult(parsed.error, { isError: true });
+
+  const timeoutMs = lxcCommandTimeoutMs(args.timeout_seconds, LXC_CMD_POLICY);
+  const cap = Number(LXC_CMD_POLICY.output_cap_bytes) > 0 ? Number(LXC_CMD_POLICY.output_cap_bytes) : PROJECT_COMMAND_OUTPUT_CAP;
+  const nonce = randomBytes(6).toString('hex');
+  const mark = (k) => `PP_${nonce}_${k}`;
+  const script = [
+    'wd="$1"; shift',
+    'cd "$wd" || exit 97',
+    'o=$(mktemp) || exit 98; e=$(mktemp) || exit 98',
+    '"$@" >"$o" 2>"$e"; ec=$?',
+    `echo "${mark('EXIT')}:$ec"`,
+    `echo "${mark('OUT')}"`,
+    `tail -c ${cap} "$o"`,
+    'echo ""',
+    `echo "${mark('ERR')}"`,
+    `tail -c ${cap} "$e"`,
+    'rm -f "$o" "$e"',
+  ].join('\n');
+
+  const startedAt = Date.now();
+  const r = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', workingDir, ...parsed.argv],
+    { timeoutMs },
+  );
+  const durationMs = Date.now() - startedAt;
+  const streams = parseMarkedStreams(r.stdout, nonce);
+
+  logAudit(auth.created_by, 'LXC_COMMAND_RUN', 'lxc', name, {
+    via: 'mcp', command: parsed.argv.join(' '), scope: parsed.scope,
+    working_dir: workingDir, exit_code: streams.found ? streams.exit_code : null,
+    timed_out: !!r.timedOut, duration_ms: durationMs,
+  }, null);
+
+  if (!streams.found) {
+    const why = r.timedOut
+      ? `Timed out after ${Math.round(timeoutMs / 1000)}s. NOTE: the deadline kills the incus client, so the command may still be running inside the guest — check with a short read-only call before retrying. Pass timeout_seconds (max ${LXC_CMD_POLICY.max_timeout_seconds}) for long operations.`
+      : r.status === 97
+        ? `The working directory ${workingDir} does not exist in the guest.`
+        : r.status === 98
+          ? 'Could not create temporary files in the guest (out of disk?).'
+          : (r.stderr || '').trim().slice(-500) || 'no output from the guest — is the container running?';
+    return toolResult({
+      ran: false, command: parsed.argv.join(' '), working_dir: workingDir,
+      timed_out: !!r.timedOut, duration_ms: durationMs, error: why,
+    }, { isError: true });
+  }
+  return toolResult({
+    ran: true,
+    command: parsed.argv.join(' '),
+    scope: parsed.scope,
+    working_dir: workingDir,
+    exit_code: streams.exit_code,
+    ok: streams.exit_code === 0,
+    timed_out: !!r.timedOut,
+    duration_ms: durationMs,
+    stdout: streams.stdout,
+    stderr: streams.stderr,
+    output_truncated: streams.stdout.length >= cap || streams.stderr.length >= cap,
+  }, { isError: streams.exit_code !== 0 });
 }
 
 async function toolListProjects() {
@@ -1589,6 +1720,8 @@ const TOOL_HANDLERS = {
   inspect_static_site_zip: toolInspectStaticSiteZip,
   apply_static_site_zip: toolApplyStaticSiteZip,
   list_lxc_containers: toolListLxcContainers,
+  get_lxc_container: toolGetLxcContainer,
+  run_lxc_command: toolRunLxcCommand,
   inspect_lxc_zip: toolInspectLxcZip,
   apply_lxc_zip: toolApplyLxcZip,
   read_lxc_file: toolReadLxcFile,

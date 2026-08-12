@@ -39,6 +39,8 @@ import {
   parseLxcListJson, lxcContainerSummaries, validFileMode,
   startupRunTimeoutMs, parseMarkedStreams,
   parseLxcCommand, lxcCommandTimeoutMs, lxcContainerDetail,
+  validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
+  validIpv4, validImageAlias,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
   applyStringEdit, normalizeReadRange,
@@ -56,6 +58,7 @@ import {
   setupStartupScript, writeTarFromZip, runHostCapture, runInContainer,
 } from '../lib/lxc-zip.js';
 import { resolveMock2Gate } from '../mock2/gating.js';
+import { ensureNetworkNat } from './lxc.js';
 
 // The public base URL for links we hand to MCP clients (connector URL, upload
 // URLs). The backend sits behind Caddy, and without app-level trust-proxy
@@ -81,6 +84,9 @@ const LXC_NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
 // component spec, and the two must be kept in sync.
 const LXC_CMD_POLICY = JSON.parse(
   readFileSync(new URL('../lib/mcp-policy/lxc-command-allowlist.json', import.meta.url), 'utf8'),
+);
+const LXC_CFG_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/lxc-config-allowlist.json', import.meta.url), 'utf8'),
 );
 const DEFAULT_LXC_TARGET = '/opt/app';
 const MCP_TMP_DIR = process.env.ZIP_UPLOAD_TMP_DIR || join(os.tmpdir(), 'proxypilot-zip-uploads');
@@ -860,6 +866,329 @@ async function toolRunLxcCommand(args, auth) {
     stderr: streams.stderr,
     output_truncated: streams.stdout.length >= cap || streams.stderr.length >= cap,
   }, { isError: streams.exit_code !== 0 });
+}
+
+// ---- LXC lifecycle/config (spec cycle 4: every mutation confirms and
+// snapshots first; deliberately NO delete verb — removal stays host-side) ----
+
+// The snapshot primitive every other mutating tool leans on. Returns
+// { name } or { error }.
+async function takeLxcSnapshot(incusName, snapName) {
+  const r = await runHostCapture('incus', ['snapshot', incusName, snapName], { timeoutMs: 120000 });
+  if (r.status !== 0) {
+    const why = r.timedOut ? 'timed out' : (r.stderr || '').trim().slice(-300) || 'unknown error';
+    return { error: `snapshot failed (${why})` };
+  }
+  return { name: snapName };
+}
+
+async function toolSnapshotLxcContainer(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  if (args.list === true) {
+    const r = await fetchLxcInstance(incusName);
+    if (r.error) return toolResult(`Could not list snapshots: ${r.error}`, { isError: true });
+    if (r.notFound) return toolResult(`Container ${name} not found`, { isError: true });
+    return toolResult({ container: name, snapshots: lxcContainerDetail(r.instance).snapshots });
+  }
+
+  let snapName = defaultSnapshotName(new Date());
+  if (args.name != null && String(args.name).trim() !== '') {
+    snapName = validSnapshotName(args.name);
+    if (!snapName) return toolResult('Snapshot name must be alphanumeric plus ._- (max 63 chars)', { isError: true });
+  }
+  const snap = await takeLxcSnapshot(incusName, snapName);
+  if (snap.error) return toolResult(`Could not snapshot ${name}: ${snap.error}`, { isError: true });
+  logAudit(auth.created_by, 'LXC_SNAPSHOT_TAKEN', 'lxc', name, { via: 'mcp', snapshot: snapName }, null);
+  return toolResult({
+    snapshotted: true, container: name, snapshot: snapName,
+    note: 'Restoring or deleting snapshots is a deliberate host-side act (incus restore / incus delete) — no MCP verb exists for either, by design.',
+  });
+}
+
+async function toolControlLxcContainer(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const action = String(args.action || '');
+  if (!['start', 'stop', 'restart'].includes(action)) {
+    return toolResult("action must be 'start', 'stop', or 'restart'", { isError: true });
+  }
+  if (args.confirm !== true) {
+    return toolResult(`Confirm with the user, then re-call with confirm: true to ${action} ${name}.`, { isError: true });
+  }
+  const incusName = `${LXC_PREFIX}${name}`;
+  // Clean shutdown only — no --force. A guest that will not stop cleanly is
+  // exactly the case a human should look at.
+  const r = await runHostCapture('incus', [action, incusName], { timeoutMs: 180000 });
+  logAudit(auth.created_by, 'LXC_CONTROL', 'lxc', name, { via: 'mcp', action, exit: r.status, timed_out: !!r.timedOut }, null);
+  if (r.status !== 0) {
+    const why = r.timedOut
+      ? `timed out — the guest did not ${action} cleanly within 180s (no force-kill is issued over MCP; check it with get_lxc_container)`
+      : (r.stderr || '').trim().slice(-300) || 'unknown error';
+    return toolResult(`Could not ${action} ${name}: ${why}`, { isError: true });
+  }
+  const detail = await fetchLxcInstance(incusName);
+  return toolResult({
+    done: true, action, container: name,
+    status: detail.instance?.status || null,
+  });
+}
+
+async function toolSetLxcConfig(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const change = validateLxcConfigChange(args.key, args.value, { acknowledgeRisk: args.acknowledge_risk === true }, LXC_CFG_POLICY);
+  if (change.error) return toolResult(change.error, { isError: true });
+  if (args.confirm !== true) {
+    return toolResult({
+      applied: false, needs_confirmation: true,
+      message: `Setting ${change.key}=${change.value} on ${name}${change.restartRequired ? ' (takes effect after a restart)' : ''}. Confirm with the user, then re-call with confirm: true.`,
+      ...(change.warning ? { warning: change.warning } : {}),
+    });
+  }
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  // Snapshot BEFORE the write — the undo path must exist before the change.
+  const snap = await takeLxcSnapshot(incusName, defaultSnapshotName(new Date(), `pp-mcp-pre-${change.key.replace(/[^A-Za-z0-9]/g, '_')}`));
+  if (snap.error) {
+    return toolResult(`Refusing to change config without a snapshot: ${snap.error}`, { isError: true });
+  }
+  const r = await runHostCapture('incus', ['config', 'set', incusName, change.key, change.value], { timeoutMs: 60000 });
+  if (r.status !== 0) {
+    return toolResult(`incus config set failed: ${(r.stderr || '').trim().slice(-300) || 'unknown error'} (pre-change snapshot ${snap.name} was taken)`, { isError: true });
+  }
+  logAudit(auth.created_by, 'LXC_CONFIG_SET', 'lxc', name, {
+    via: 'mcp', key: change.key, value: change.value, snapshot: snap.name,
+    ...(change.warning ? { acknowledged_risk: true } : {}),
+  }, null);
+  return toolResult({
+    applied: true, container: name, key: change.key, value: change.value,
+    snapshot: snap.name,
+    restart_required: change.restartRequired,
+    ...(change.restartRequired ? { next: `Apply it with control_lxc_container action=restart (confirm: true).` } : {}),
+    ...(change.warning ? { warning: change.warning } : {}),
+  });
+}
+
+// create_lxc_container — creation-only, so inherently non-destructive: it
+// fails if the name is taken, never replaces. Mirrors the UI route's launch
+// flags (routes/lxc.js POST /containers) so Docker-readiness is set correctly
+// at birth and the keyring/nesting failures seen in the field cannot occur on
+// new guests. Deliberately does NOT accept security.privileged — that flip
+// stays behind set_lxc_config's acknowledge_risk gate.
+async function toolCreateLxcContainer(args, auth) {
+  const name = String(args.name || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name (letters, digits, hyphens; must start alphanumeric)', { isError: true });
+  if (args.confirm !== true) {
+    return toolResult(`Confirm with the user, then re-call with confirm: true to create container ${name}.`, { isError: true });
+  }
+  const image = validImageAlias(args.image || 'images:debian/12');
+  if (!image) return toolResult('image must be an Incus image alias, e.g. "images:debian/12"', { isError: true });
+  const cpu = args.cpu == null ? 2 : Number(args.cpu);
+  if (!Number.isInteger(cpu) || cpu < 1 || cpu > 64) return toolResult('cpu must be a whole number of vCPUs (1–64)', { isError: true });
+  const memoryGb = args.memory_gb == null ? 4 : Number(args.memory_gb);
+  if (!Number.isFinite(memoryGb) || memoryGb < 0.5 || memoryGb > 512) return toolResult('memory_gb must be between 0.5 and 512', { isError: true });
+  const diskGb = args.disk_gb == null ? null : Number(args.disk_gb);
+  if (diskGb !== null && (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 2048)) return toolResult('disk_gb must be a whole number of GB (1–2048)', { isError: true });
+  const dockerReady = args.docker_ready !== false;
+  const autostart = args.autostart !== false;
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  const existing = await fetchLxcInstance(incusName);
+  if (existing.error) return toolResult(`Could not check for an existing container: ${existing.error}`, { isError: true });
+  if (existing.instance) {
+    return toolResult(`Container ${name} already exists (status ${existing.instance.status}) — creation never replaces. Use get_lxc_container to inspect it.`, { isError: true });
+  }
+
+  const argv = ['launch', image, incusName, '--profile', 'default',
+    '--config', `limits.cpu=${cpu}`,
+    '--config', `limits.memory=${memoryGb}GB`,
+    '--config', `boot.autostart=${autostart}`];
+  if (dockerReady) {
+    // Same flag set the UI creation route uses for Docker-in-LXC guests:
+    // nesting plus the syscall intercepts BuildKit and sysctl-touching
+    // images need. Privileged mode is NOT part of docker-ready.
+    argv.push(
+      '--config', 'security.nesting=true',
+      '--config', 'security.syscalls.intercept.mknod=true',
+      '--config', 'security.syscalls.intercept.setxattr=true',
+      '--config', 'security.syscalls.intercept.bpf=true',
+      '--config', 'security.syscalls.intercept.bpf.devices=true',
+    );
+  }
+  // Image download can dominate first-launch time.
+  const r = await runHostCapture('incus', argv, { timeoutMs: 300000 });
+  if (r.status !== 0) {
+    // Best-effort cleanup of a half-created instance, same as the UI route.
+    await runHostCapture('incus', ['delete', incusName, '--force'], { timeoutMs: 60000 }).catch(() => {});
+    const why = r.timedOut ? 'timed out after 300s (slow image download?)' : (r.stderr || '').trim().slice(-400) || 'unknown error';
+    return toolResult(`Launch failed: ${why}`, { isError: true });
+  }
+
+  const warnings = [];
+  await ensureNetworkNat().catch(() => {});
+  if (diskGb !== null) {
+    const d = await runHostCapture('incus', ['config', 'device', 'override', incusName, 'root', `size=${diskGb}GiB`], { timeoutMs: 30000 });
+    if (d.status !== 0) warnings.push(`root disk size could not be set (${(d.stderr || '').trim().slice(-200)}) — the profile default applies`);
+  }
+
+  // Give the guest a moment to pick up a DHCP lease so the result is usable.
+  let detail = null;
+  for (let i = 0; i < 15; i += 1) {
+    const probe = await fetchLxcInstance(incusName);
+    detail = probe.instance ? lxcContainerDetail(probe.instance) : null;
+    if (detail?.addresses?.some((a) => a.family === 'inet')) break;
+    await new Promise((resolve) => { setTimeout(resolve, 1000); });
+  }
+  logAudit(auth.created_by, 'LXC_CREATED', 'lxc', name, {
+    via: 'mcp', image, cpu, memory_gb: memoryGb, disk_gb: diskGb, docker_ready: dockerReady, autostart,
+  }, null);
+  return toolResult({
+    created: true,
+    container: name,
+    image,
+    ...(detail || {}),
+    ...(warnings.length ? { warnings } : {}),
+    next: 'Deploy content with inspect_lxc_zip/apply_lxc_zip (register a startup.sh), or write files directly with write_lxc_file.',
+  });
+}
+
+// set_lxc_network — pin a guest's addressing so the working deployment does
+// not sit on a dynamic lease whose next renewal silently reproduces the edge
+// 502 that was just debugged (the exact field scenario). The pin is an
+// instance-level eth0 ipv4.address, which Incus turns into a static DHCP
+// reservation on its managed bridge.
+async function toolSetLxcNetwork(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const mode = String(args.mode || '');
+  if (!['reserve-current', 'static'].includes(mode)) {
+    return toolResult("mode must be 'reserve-current' (recommended: pin the address the guest holds now) or 'static' (assign the ip given)", { isError: true });
+  }
+  const incusName = `${LXC_PREFIX}${name}`;
+  const probe = await fetchLxcInstance(incusName);
+  if (probe.error) return toolResult(`Could not inspect ${name}: ${probe.error}`, { isError: true });
+  if (probe.notFound) return toolResult(`Container ${name} not found`, { isError: true });
+  const detail = lxcContainerDetail(probe.instance);
+  const current = detail.addresses.find((a) => a.family === 'inet')?.address || null;
+
+  let ip;
+  if (mode === 'reserve-current') {
+    if (!current) return toolResult(`${name} holds no IPv4 address right now — is it running?`, { isError: true });
+    ip = current;
+  } else {
+    ip = validIpv4(args.ip);
+    if (!ip) return toolResult('ip is required for mode=static and must be a plain IPv4 address', { isError: true });
+  }
+
+  // Routes that point at an address this change would abandon keep "working"
+  // until the lease turns over, then 502 — say so before it happens.
+  let abandoned = [];
+  if (current && ip !== current) {
+    try {
+      abandoned = getDb().prepare(`
+        SELECT DISTINCT r.domain FROM service_http_routes r
+        INNER JOIN services s ON s.id = r.service_id
+        WHERE s.target_ip = ? OR s.lxc_container_name = ?
+      `).all(current, incusName).map((row) => row.domain);
+    } catch { /* advisory only */ }
+  }
+  if (args.confirm !== true) {
+    return toolResult({
+      applied: false, needs_confirmation: true,
+      message: `Pin ${name} to ${ip}${current ? ` (currently ${current})` : ''}. Confirm with the user, then re-call with confirm: true.`,
+      ...(abandoned.length ? { warning: `These routed domains currently target ${current}, which this change abandons: ${abandoned.join(', ')}. Update them with set_route after pinning.` } : {}),
+    });
+  }
+
+  const snap = await takeLxcSnapshot(incusName, defaultSnapshotName(new Date(), 'pp-mcp-pre-network'));
+  if (snap.error) return toolResult(`Refusing to change addressing without a snapshot: ${snap.error}`, { isError: true });
+
+  // Instance-level eth0 usually comes from the profile → override creates it;
+  // if a previous pin already made it instance-level, set updates it.
+  let w = await runHostCapture('incus', ['config', 'device', 'override', incusName, 'eth0', `ipv4.address=${ip}`], { timeoutMs: 30000 });
+  if (w.status !== 0 && /already exists/i.test(w.stderr || '')) {
+    w = await runHostCapture('incus', ['config', 'device', 'set', incusName, 'eth0', 'ipv4.address', ip], { timeoutMs: 30000 });
+  }
+  if (w.status !== 0) {
+    return toolResult(`Could not pin the address: ${(w.stderr || '').trim().slice(-300)} (pre-change snapshot ${snap.name} was taken). Note: pinning requires the guest's NIC to come from a managed Incus bridge.`, { isError: true });
+  }
+  logAudit(auth.created_by, 'LXC_NETWORK_PINNED', 'lxc', name, { via: 'mcp', mode, ip, previous: current, snapshot: snap.name }, null);
+  return toolResult({
+    applied: true, container: name, ip, mode,
+    previous_address: current,
+    snapshot: snap.name,
+    restart_recommended: ip !== current,
+    ...(abandoned.length ? { warning: `Routed domains still targeting ${current}: ${abandoned.join(', ')} — update them with set_route.` } : {}),
+    note: ip === current
+      ? 'The current address is now a static reservation — future lease renewals cannot move it.'
+      : `The reservation takes effect when the guest renews its lease — restart with control_lxc_container to apply it now.`,
+  });
+}
+
+// lxc_file_diff / restore_lxc_file — complete the .old backup story that
+// write_lxc_file and apply_lxc_zip start: today the backups are written but
+// nothing can show or restore them.
+
+async function toolLxcFileDiff(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const path = validLxcFilePath(args.path);
+  if (!path) return toolResult('path must be an absolute file path inside the container', { isError: true });
+  let against = `${path}.old`;
+  if (args.against != null && String(args.against).trim() !== '') {
+    against = validLxcFilePath(args.against);
+    if (!against) return toolResult('against must be an absolute file path inside the container', { isError: true });
+  }
+  const r = await runHostCapture(
+    'incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c',
+      'a="$1"; b="$2"; test -f "$a" || { echo "PP_MISSING:$a" >&2; exit 66; }; test -f "$b" || { echo "PP_MISSING:$b" >&2; exit 66; }; diff -u -- "$b" "$a"',
+      'sh', path, against],
+    { timeoutMs: 30000 },
+  );
+  if (r.status === 66) {
+    const missing = /PP_MISSING:(.*)/.exec(r.stderr || '')?.[1]?.trim() || 'a file';
+    return toolResult(`Not a file: ${missing}${missing.endsWith('.old') ? ' — no backup exists for this path (backups appear after an overwrite via write_lxc_file / apply_lxc_zip)' : ''}`, { isError: true });
+  }
+  if (r.status === 127) return toolResult('diff is not installed in this guest', { isError: true });
+  if (r.status !== 0 && r.status !== 1) {
+    return toolResult(`Diff failed: ${(r.stderr || '').trim().slice(-300) || 'is the container running?'}`, { isError: true });
+  }
+  const patch = capPatch(r.stdout);
+  return toolResult({
+    path, against,
+    identical: r.status === 0,
+    diff: patch.text,
+    truncated: patch.truncated,
+  });
+}
+
+async function toolRestoreLxcFile(args, auth) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const path = validLxcFilePath(args.path);
+  if (!path) return toolResult('path must be an absolute file path inside the container', { isError: true });
+  if (args.confirm !== true) {
+    return toolResult(`Confirm with the user (lxc_file_diff shows what would change), then re-call with confirm: true to restore ${path} from ${path}.old.`, { isError: true });
+  }
+  // Swap live ↔ .old, so the restore is itself reversible by calling again.
+  const r = await runHostCapture(
+    'incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c',
+      'set -e; p="$1"; test -f "$p.old" || { echo PP_NO_BACKUP >&2; exit 66; }; t="$p.pp-swap.$$"; if [ -e "$p" ]; then mv -- "$p" "$t"; fi; mv -- "$p.old" "$p"; if [ -e "$t" ]; then mv -- "$t" "$p.old"; fi',
+      'sh', path],
+    { timeoutMs: 30000 },
+  );
+  if (r.status === 66) return toolResult(`No backup exists at ${path}.old — nothing to restore.`, { isError: true });
+  if (r.status !== 0) {
+    return toolResult(`Restore failed: ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  logAudit(auth.created_by, 'LXC_FILE_RESTORED', 'lxc', name, { via: 'mcp', path }, null);
+  return toolResult({
+    restored: true, path,
+    note: 'The previous live version now sits in the .old slot — calling restore again swaps back. If a startup script is registered, apply the restored file with rerun_startup.',
+  });
 }
 
 async function toolListProjects() {
@@ -1722,6 +2051,13 @@ const TOOL_HANDLERS = {
   list_lxc_containers: toolListLxcContainers,
   get_lxc_container: toolGetLxcContainer,
   run_lxc_command: toolRunLxcCommand,
+  create_lxc_container: toolCreateLxcContainer,
+  control_lxc_container: toolControlLxcContainer,
+  set_lxc_config: toolSetLxcConfig,
+  set_lxc_network: toolSetLxcNetwork,
+  snapshot_lxc_container: toolSnapshotLxcContainer,
+  lxc_file_diff: toolLxcFileDiff,
+  restore_lxc_file: toolRestoreLxcFile,
   inspect_lxc_zip: toolInspectLxcZip,
   apply_lxc_zip: toolApplyLxcZip,
   read_lxc_file: toolReadLxcFile,

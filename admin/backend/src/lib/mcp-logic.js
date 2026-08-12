@@ -335,6 +335,86 @@ export function lxcContainerDetail(instance) {
   };
 }
 
+// ---- LXC lifecycle: snapshots + gated config writes ----
+//
+// Snapshot-before-mutate is the safety primitive that makes the mutating LXC
+// tools safe to expose at all; the config allowlist
+// (lib/mcp-policy/lxc-config-allowlist.json) is the enforcement source of
+// truth for which Incus keys are writable and what each write requires.
+
+export function validSnapshotName(s) {
+  const v = String(s ?? '').trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(v)) return null;
+  return v;
+}
+
+/** Default snapshot name from a Date — filesystem/incus-safe, sortable. */
+export function defaultSnapshotName(date, prefix = 'pp-mcp') {
+  const d = date instanceof Date ? date : new Date(date);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${prefix}-${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
+}
+
+/**
+ * Validate a set_lxc_config request against the config policy.
+ * Returns { key, value, restartRequired, warning|null } or { error }.
+ *
+ * security.privileged=true additionally requires acknowledgeRisk — and the
+ * policy's warning text rides back on SUCCESS too, because the tool's job is
+ * to present the trade-off, not just apply the flip (a real operator chose
+ * this path in the field after being steered away; the warning exists for
+ * the next one).
+ */
+export function validateLxcConfigChange(key, value, { acknowledgeRisk = false } = {}, policy) {
+  const keys = policy?.keys || {};
+  const k = String(key ?? '').trim();
+  const rule = keys[k];
+  if (!rule) {
+    const blocked = policy?.explicitly_not_writable?.[k];
+    if (blocked) return { error: `"${k}" is deliberately not writable over MCP: ${blocked}` };
+    return { error: `"${k}" is not a writable config key. Writable: ${Object.keys(keys).join(', ')}.` };
+  }
+  const v = String(value ?? '').trim();
+  if (Array.isArray(rule.values)) {
+    if (!rule.values.includes(v)) return { error: `${k} accepts only: ${rule.values.join(', ')}` };
+  } else if (k === 'limits.cpu') {
+    if (!/^[1-9][0-9]*$/.test(v)) return { error: 'limits.cpu must be a positive whole number of vCPUs, e.g. "4"' };
+  } else if (k === 'limits.memory') {
+    if (!/^[1-9][0-9]*(\.[0-9]+)?(GB|GiB|MB|MiB)$/i.test(v)) return { error: 'limits.memory must be a size string, e.g. "4GB" or "512MiB"' };
+  }
+  if (k === 'security.privileged' && v === 'true' && acknowledgeRisk !== true) {
+    return {
+      error: `Setting security.privileged=true requires acknowledge_risk: true. ${rule.warning || ''}`.trim(),
+    };
+  }
+  return {
+    key: k,
+    value: v,
+    restartRequired: !!rule.restart_required,
+    warning: (k === 'security.privileged' && v === 'true') ? (rule.warning || null) : null,
+  };
+}
+
+export function validIpv4(s) {
+  const v = String(s ?? '').trim();
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v);
+  if (!m) return null;
+  for (let i = 1; i <= 4; i += 1) {
+    if (Number(m[i]) > 255 || (m[i].length > 1 && m[i].startsWith('0'))) return null;
+  }
+  return v;
+}
+
+/** An Incus image alias like images:debian/12 or ubuntu:24.04. Argv-passed
+ *  (never a shell), so this only rejects confusing shapes — most importantly
+ *  a leading '-' that incus would read as an option. */
+export function validImageAlias(s) {
+  const v = String(s ?? '').trim();
+  if (!v || v.length > 200 || v.startsWith('-')) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9:/._-]*$/.test(v)) return null;
+  return v;
+}
+
 // ---- write_lxc_file: the mode parameter ----
 
 /** Three octal permission digits, with or without a leading zero ("0755",
@@ -458,6 +538,112 @@ export const MCP_TOOLS = [
         timeout_seconds: { type: 'number', description: 'Kill after this many seconds. Default 120, max 1800.' },
       },
       required: ['container', 'command'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'create_lxc_container',
+    description: 'Create a new LXC/Incus guest. Creation-only, so inherently non-destructive: fails if the name already exists, never replaces. docker_ready (default true) sets security.nesting plus the syscall intercepts Docker needs at birth, so the keyring/nesting failures do not occur on new guests — privileged mode is NOT included and stays behind set_lxc_config\'s risk gate. Waits briefly for a DHCP lease and returns the same detail as get_lxc_container. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Guest name (ProxyPilot adds its pp- prefix). Fails if taken.' },
+        image: { type: 'string', description: 'Incus image alias, default images:debian/12.' },
+        cpu: { type: 'number', description: 'vCPU limit, default 2.' },
+        memory_gb: { type: 'number', description: 'RAM limit in GB, default 4. Browser workloads need >= 4 — Chrome OOMs at 2.' },
+        disk_gb: { type: 'number', description: 'Root disk in GB (best-effort override of the profile default).' },
+        docker_ready: { type: 'boolean', description: 'Set nesting + syscall intercepts for running Docker inside. Default true.' },
+        autostart: { type: 'boolean', description: 'boot.autostart, default true.' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['name', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'control_lxc_container',
+    description: 'Start, stop (clean shutdown only — no force-kill), or restart an LXC guest. The step that applies restart-required config changes (set_lxc_config reports when one is needed). No delete verb exists, by design. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        action: { type: 'string', enum: ['start', 'stop', 'restart'] },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['container', 'action', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_lxc_config',
+    description: 'Set one allowlisted Incus config key on a guest: security.nesting, security.privileged, limits.cpu, limits.memory, boot.autostart (the allowlist in lib/mcp-policy/lxc-config-allowlist.json is the source of truth — anything else, notably raw.lxc and device passthrough, is rejected). Takes an automatic snapshot before every write and reports whether a restart is needed. security.privileged=true additionally requires acknowledge_risk: true and returns the warning that container root becomes host root — prefer raising kernel.keys.* sysctls on the host for Docker keyring failures. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        key: { type: 'string', enum: ['security.nesting', 'security.privileged', 'limits.cpu', 'limits.memory', 'boot.autostart'] },
+        value: { type: 'string', description: 'New value, e.g. "true", "4", "8GB".' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+        acknowledge_risk: { type: 'boolean', description: 'Required (true) only when setting security.privileged=true.' },
+      },
+      required: ['container', 'key', 'value', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_lxc_network',
+    description: 'Pin a guest\'s IPv4 address: reserve-current converts the address the guest holds now into a static reservation (recommended — a working deployment on a dynamic lease reproduces its edge 502 at the next renewal); static assigns a specific address. Snapshots first, warns when routed domains still target an address the change abandons, and says when a restart is needed for the lease to apply. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        mode: { type: 'string', enum: ['reserve-current', 'static'] },
+        ip: { type: 'string', description: 'IPv4 address, required when mode=static.' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['container', 'mode', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'snapshot_lxc_container',
+    description: 'Take a named snapshot of a guest — the safety primitive every mutating LXC tool leans on (they all snapshot before changing anything). With list: true it just returns the existing snapshots. No restore or delete verb over MCP: restoring is a deliberate host-side act (incus restore).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        name: { type: 'string', description: 'Snapshot name; default a timestamp.' },
+        list: { type: 'boolean', description: 'If true, just return existing snapshots and take none.' },
+      },
+      required: ['container'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'lxc_file_diff',
+    description: 'Diff a file inside a guest against its .old backup (written by write_lxc_file / apply_lxc_zip on overwrite), or against any other text file via `against`. Read-only; pairs with restore_lxc_file. Unified diff, truncated past 128 KB.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        path: { type: 'string', description: 'File to diff; compared against <path>.old unless against is set.' },
+        against: { type: 'string', description: 'Optional second absolute path to diff against instead of the .old backup.' },
+      },
+      required: ['container', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'restore_lxc_file',
+    description: 'Restore a file from its .old backup by SWAPPING the two — the previous live version lands in .old, so a restore is itself reversible by calling again. Check the change first with lxc_file_diff. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        path: { type: 'string', description: 'The live file path; its .old must exist.' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['container', 'path', 'confirm'],
       additionalProperties: false,
     },
   },

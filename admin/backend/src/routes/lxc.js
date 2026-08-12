@@ -119,8 +119,10 @@ async function ensureDns(incusName) {
   } catch {}
 }
 
-// Ensure NAT and IP forwarding are enabled so containers have internet
-async function ensureNetworkNat() {
+// Ensure NAT and IP forwarding are enabled so containers have internet.
+// Exported for the MCP create_lxc_container tool, which mirrors this route's
+// post-launch setup. Best-effort throughout — failures log, never throw.
+export async function ensureNetworkNat() {
   // Step 1: Enable IP forwarding on the host
   try {
     await execOnHost('sysctl -w net.ipv4.ip_forward=1', { timeout: 5000 });

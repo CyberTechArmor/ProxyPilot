@@ -787,3 +787,77 @@ test('lxcContainerDetail maps addresses, config subset, and snapshots', () => {
   // Nothing blows up on a minimal instance.
   assert.deepEqual(lxcContainerDetail({}).addresses, []);
 });
+
+// ---- cycle 4: lifecycle/config gating ----
+
+import {
+  validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
+  validIpv4, validImageAlias,
+} from '../lib/mcp-logic.js';
+
+const CFG_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/lxc-config-allowlist.json', import.meta.url), 'utf8'),
+);
+
+test('validateLxcConfigChange: allowlisted keys pass with their gates', () => {
+  const nest = validateLxcConfigChange('security.nesting', 'true', {}, CFG_POLICY);
+  assert.equal(nest.error, undefined);
+  assert.equal(nest.restartRequired, true);
+  assert.equal(nest.warning, null);
+
+  const cpu = validateLxcConfigChange('limits.cpu', '4', {}, CFG_POLICY);
+  assert.equal(cpu.restartRequired, false);
+  assert.ok(validateLxcConfigChange('limits.cpu', 'four', {}, CFG_POLICY).error);
+
+  assert.equal(validateLxcConfigChange('limits.memory', '8GB', {}, CFG_POLICY).error, undefined);
+  assert.equal(validateLxcConfigChange('limits.memory', '512MiB', {}, CFG_POLICY).error, undefined);
+  assert.ok(validateLxcConfigChange('limits.memory', 'lots', {}, CFG_POLICY).error);
+  assert.ok(validateLxcConfigChange('security.nesting', 'yes', {}, CFG_POLICY).error);
+});
+
+test('validateLxcConfigChange: privileged=true needs acknowledge_risk and carries the warning', () => {
+  const refused = validateLxcConfigChange('security.privileged', 'true', {}, CFG_POLICY);
+  assert.match(refused.error, /acknowledge_risk/);
+  assert.match(refused.error, /host root/);
+
+  const ok = validateLxcConfigChange('security.privileged', 'true', { acknowledgeRisk: true }, CFG_POLICY);
+  assert.equal(ok.error, undefined);
+  // The warning rides on SUCCESS too — the tool presents the trade-off, it
+  // does not just apply the flip.
+  assert.match(ok.warning, /host root/);
+  // Turning privileged OFF needs no acknowledgement.
+  const off = validateLxcConfigChange('security.privileged', 'false', {}, CFG_POLICY);
+  assert.equal(off.error, undefined);
+  assert.equal(off.warning, null);
+});
+
+test('validateLxcConfigChange: non-allowlisted keys are rejected, dangerous ones with their rationale', () => {
+  assert.match(validateLxcConfigChange('raw.lxc', 'x', {}, CFG_POLICY).error, /deliberately not writable.*host-level/i);
+  assert.match(validateLxcConfigChange('raw.idmap', 'x', {}, CFG_POLICY).error, /orphan/i);
+  const unknown = validateLxcConfigChange('user.foo', 'x', {}, CFG_POLICY);
+  assert.match(unknown.error, /not a writable config key/);
+  assert.match(unknown.error, /security\.nesting/);
+});
+
+test('snapshot names: custom validated, default sortable and deterministic', () => {
+  assert.equal(validSnapshotName('pre-upgrade_2'), 'pre-upgrade_2');
+  assert.equal(validSnapshotName('-bad'), null);
+  assert.equal(validSnapshotName('has space'), null);
+  assert.equal(validSnapshotName(''), null);
+  assert.equal(defaultSnapshotName(new Date(Date.UTC(2026, 7, 12, 9, 5, 3))), 'pp-mcp-20260812-090503');
+  assert.equal(defaultSnapshotName(new Date(Date.UTC(2026, 7, 12, 9, 5, 3)), 'pp-mcp-pre-security_privileged'),
+    'pp-mcp-pre-security_privileged-20260812-090503');
+});
+
+test('validIpv4 and validImageAlias reject the confusing shapes', () => {
+  assert.equal(validIpv4('10.167.1.20'), '10.167.1.20');
+  assert.equal(validIpv4('256.1.1.1'), null);
+  assert.equal(validIpv4('10.0.0.01'), null);
+  assert.equal(validIpv4('10.0.0'), null);
+  assert.equal(validIpv4('fe80::1'), null);
+  assert.equal(validImageAlias('images:debian/12'), 'images:debian/12');
+  assert.equal(validImageAlias('ubuntu:24.04'), 'ubuntu:24.04');
+  assert.equal(validImageAlias('--vm'), null);
+  assert.equal(validImageAlias('a b'), null);
+  assert.equal(validImageAlias(''), null);
+});

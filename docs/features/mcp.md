@@ -116,6 +116,20 @@ quietly stop being true.
 
 ## Limitations / follow-ups
 
+- The LXC and static-site surface is deploy-heavy and observe-poor: there is
+  no container detail/exec/lifecycle tooling, no route inspection or testing,
+  and no per-file static-site management. A field-derived upgrade spec for all
+  of this — six bugfixes to the existing tools plus 25 new tool definitions
+  (LXC observability, allowlisted in-guest exec, gated lifecycle/config with
+  snapshot-before-mutate, routing, static-site files) — is packaged as the
+  importable component
+  `docs/features/examples/mcp-lxc-sites-upgrades.component.json`
+  (key `mcp-lxc-sites-upgrades`). Its `docs/01-bugfixes.md` file also tracks
+  known defects in the *current* tools (`list_lxc_containers` returning `[]`
+  for live guests, `list_static_sites` failing with `no such column: domain`,
+  `rerun_startup` lacking a timeout/output cap, silent inline-zip corruption,
+  upload tickets unreachable from egress-restricted sandboxes,
+  `write_lxc_file` unable to set the execute bit).
 - Auth is token-based, not OAuth 2.1 with dynamic client registration.
   claude.ai connects fine via the tokenized URL; a full OAuth flow is a
   possible follow-up (see docs/known-issues.md).

@@ -169,6 +169,17 @@ curl -sS -X POST https://<host>/api/mock2/components/import \
 Re-importing after editing the document appends a new annotated version of the
 same component (matched by `key`).
 
+`docs/features/examples/mcp-lxc-sites-upgrades.component.json`
+(key `mcp-lxc-sites-upgrades`) is a different kind of component: a **design
+spec**, not runtime code. It carries the machine-readable MCP tool definitions
+(25 tools across LXC observability, allowlisted in-guest exec, gated
+lifecycle/config, edge routing, and static-site file management), two
+enforcement policy files (the exec command allowlist and the writable Incus
+config-key list), and the bugfix list for the existing MCP surface — packaged
+so a build cycle can implement the tools straight from the definitions. Its
+`usage_md` states the build order and the security invariants (no delete
+verbs, snapshot-before-mutate, prefix-matched argv exec — never a shell).
+
 ## UI
 
 `/projects/components` (`admin/frontend/src/pages/ComponentLibrary.jsx`),

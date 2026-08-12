@@ -22,7 +22,7 @@
 
 import express from 'express';
 import { randomBytes } from 'node:crypto';
-import { readFile, writeFile, rm, mkdir } from 'node:fs/promises';
+import { appendFile, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -34,6 +34,10 @@ import {
   RPC_PARSE_ERROR, RPC_INVALID_REQUEST, RPC_METHOD_NOT_FOUND, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR,
   mintMcpToken, hashMcpToken, tokenFromRequest,
   mintUploadTicket, looksLikeUploadTicket, UPLOAD_TICKET_TTL_MS, INLINE_ZIP_MAX_BYTES,
+  validSha256, sha256Hex, zipChecksumError,
+  normalizeChunkSeq, decodeChunkBase64,
+  parseLxcListJson, lxcContainerSummaries, validFileMode,
+  startupRunTimeoutMs, parseMarkedStreams,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
   applyStringEdit, normalizeReadRange,
@@ -94,42 +98,59 @@ function findToken(rawToken) {
 }
 
 // ---- upload tickets (in-memory; single-use; TTL) ----
+//
+// rec: { createdAt, filePath|null, chunkPath|null, nextSeq, chunkBytes }.
+// filePath is set when the ticket holds a COMPLETE archive (PUT, or a
+// finished chunked upload); chunkPath is the in-progress chunk assembly.
 
-const uploadTickets = new Map(); // ticket -> { createdAt, filePath|null }
+const uploadTickets = new Map();
 
 function sweepTickets() {
   const cutoff = Date.now() - UPLOAD_TICKET_TTL_MS;
   for (const [t, rec] of uploadTickets) {
     if (rec.createdAt < cutoff) {
       if (rec.filePath) rm(rec.filePath, { force: true }).catch(() => {});
+      if (rec.chunkPath) rm(rec.chunkPath, { force: true }).catch(() => {});
       uploadTickets.delete(t);
     }
   }
 }
 
 // Resolve the zip bytes for an inspect tool: ticket (uploaded file) or inline
-// base64. Returns { buf, cleanup } or throws a user-facing Error.
+// base64. Returns { buf, tmpPath } or throws a user-facing Error. When the
+// caller declared a sha256, the bytes are verified HERE — before any parsing
+// or staging — so transport corruption reads as exactly that instead of as a
+// downstream extraction error (bugfix: inline base64 was observed corrupting
+// silently in the field).
 async function zipBytesFromArgs(args) {
+  let buf, tmpPath;
   if (args.ticket) {
     if (!looksLikeUploadTicket(args.ticket)) throw new Error('Invalid upload ticket');
     const rec = uploadTickets.get(args.ticket);
     if (!rec || !rec.filePath) throw new Error('Upload ticket unknown, expired, or no bytes were uploaded to it yet');
     uploadTickets.delete(args.ticket);
-    const buf = await readFile(rec.filePath);
-    return { buf, tmpPath: rec.filePath };
-  }
-  if (args.zip_base64) {
-    const buf = Buffer.from(String(args.zip_base64), 'base64');
+    buf = await readFile(rec.filePath);
+    tmpPath = rec.filePath;
+  } else if (args.zip_base64) {
+    buf = Buffer.from(String(args.zip_base64), 'base64');
     if (buf.length === 0) throw new Error('zip_base64 decoded to zero bytes');
     if (buf.length > INLINE_ZIP_MAX_BYTES) {
       throw new Error(`Inline zips are limited to ${Math.floor(INLINE_ZIP_MAX_BYTES / (1024 * 1024))} MB — use create_upload_ticket for this archive`);
     }
-    const tmpPath = join(MCP_TMP_DIR, `mcp-${randomBytes(12).toString('hex')}.zip`);
+    tmpPath = join(MCP_TMP_DIR, `mcp-${randomBytes(12).toString('hex')}.zip`);
     await mkdir(MCP_TMP_DIR, { recursive: true }).catch(() => {});
     await writeFile(tmpPath, buf);
-    return { buf, tmpPath };
+  } else {
+    throw new Error('Provide either an upload ticket or zip_base64');
   }
-  throw new Error('Provide either an upload ticket or zip_base64');
+  if (args.sha256 != null && String(args.sha256).trim() !== '') {
+    const mismatch = zipChecksumError(buf, args.sha256);
+    if (mismatch) {
+      await rm(tmpPath, { force: true }).catch(() => {});
+      throw new Error(mismatch);
+    }
+  }
+  return { buf, tmpPath };
 }
 
 // ---- mock2 (projects) access — gated exactly like the UI router ----
@@ -190,8 +211,36 @@ function projectSummary(project, m) {
 /* ------------------------------- tools ---------------------------------- */
 
 async function toolListStaticSites() {
-  const rows = getDb().prepare(`SELECT id, name, domain, type, enabled FROM services WHERE type = 'static' ORDER BY name`).all();
-  return toolResult({ sites: rows.map((r) => ({ id: r.id, name: r.name, domain: r.domain, enabled: !!r.enabled })) });
+  // `domain` moved off `services` and into `service_http_routes` (D.14 drops
+  // the legacy route-owned columns) — selecting it from services was throwing
+  // "no such column: domain" on every call, which made the whole static-site
+  // surface unreachable over MCP (the deploy tools need an id only this list
+  // can provide). `enabled` never existed on services at all (that column
+  // belongs to service_l4_forwards); the row state lives in `status`. The
+  // primary domain is the root-path route, oldest first.
+  let rows;
+  try {
+    rows = getDb().prepare(`
+      SELECT s.id, s.name, s.status,
+             (SELECT r.domain FROM service_http_routes r
+                WHERE r.service_id = s.id
+                ORDER BY (r.path_prefix = '/') DESC, r.created_at ASC, r.id ASC
+                LIMIT 1) AS domain
+      FROM services s
+      WHERE s.type = 'static'
+      ORDER BY s.name
+    `).all();
+  } catch (err) {
+    // Schema drift bit this tool once already — if it happens again, say so
+    // loudly instead of answering with an error the caller cannot act on.
+    return toolResult(`Could not list static sites (schema mismatch?): ${err?.message || err}`, { isError: true });
+  }
+  return toolResult({
+    sites: rows.map((r) => ({
+      id: r.id, name: r.name, domain: r.domain || null,
+      status: r.status || null, enabled: r.status === 'active',
+    })),
+  });
 }
 
 function toolCreateUploadTicket(req) {
@@ -205,6 +254,78 @@ function toolCreateUploadTicket(req) {
     method: 'PUT',
     content_type: 'application/zip',
     expires_in_seconds: Math.floor(UPLOAD_TICKET_TTL_MS / 1000),
+  });
+}
+
+// ---- chunked upload (the ticket path for clients that cannot PUT) ----
+//
+// The documented big-zip flow returns a PUT URL on the public edge host —
+// which egress-restricted agent sandboxes cannot reach (observed in the
+// field: CONNECT 403), closing the large-archive path to exactly the clients
+// most likely to drive these tools. These two tools deliver the same bytes
+// through the already-working MCP channel: ordered base64 chunks appended to
+// the ticket, sealed by a mandatory whole-file checksum.
+
+async function toolAppendUploadChunk(args) {
+  sweepTickets();
+  const ticket = String(args.ticket || '');
+  if (!looksLikeUploadTicket(ticket)) return toolResult('Invalid upload ticket', { isError: true });
+  const rec = uploadTickets.get(ticket);
+  if (!rec) return toolResult('Upload ticket unknown or expired — create a new one with create_upload_ticket', { isError: true });
+  if (rec.filePath) return toolResult('This ticket already holds a complete upload', { isError: true });
+  const seq = normalizeChunkSeq(args.seq);
+  if (seq === null) return toolResult('seq must be a whole number starting at 0', { isError: true });
+  const expected = rec.nextSeq || 0;
+  if (seq !== expected) {
+    return toolResult(`Out-of-order chunk: expected seq ${expected}, got ${seq}. Chunks must arrive in order, each exactly once — if a call failed mid-flight, re-send the expected seq.`, { isError: true });
+  }
+  const dec = decodeChunkBase64(args.chunk_base64);
+  if (dec.error) return toolResult(dec.error, { isError: true });
+  const total = (rec.chunkBytes || 0) + dec.buf.length;
+  if (total > ZIP_LIMITS.maxZipBytes) {
+    if (rec.chunkPath) await rm(rec.chunkPath, { force: true }).catch(() => {});
+    uploadTickets.delete(ticket);
+    return toolResult(`Upload exceeds the ${Math.floor(ZIP_LIMITS.maxZipBytes / (1024 * 1024))} MB zip limit — the ticket has been discarded`, { isError: true });
+  }
+  if (!rec.chunkPath) {
+    await mkdir(MCP_TMP_DIR, { recursive: true }).catch(() => {});
+    rec.chunkPath = join(MCP_TMP_DIR, `mcp-${randomBytes(12).toString('hex')}.zip.part`);
+  }
+  await appendFile(rec.chunkPath, dec.buf);
+  rec.nextSeq = expected + 1;
+  rec.chunkBytes = total;
+  return toolResult({
+    appended: true, seq, next_seq: rec.nextSeq, received_bytes: total,
+    next: 'Append the next chunk, or seal the upload with finish_upload (pass the sha256 of the complete zip).',
+  });
+}
+
+async function toolFinishUpload(args) {
+  sweepTickets();
+  const ticket = String(args.ticket || '');
+  if (!looksLikeUploadTicket(ticket)) return toolResult('Invalid upload ticket', { isError: true });
+  const rec = uploadTickets.get(ticket);
+  if (!rec) return toolResult('Upload ticket unknown or expired', { isError: true });
+  if (rec.filePath) return toolResult('This ticket already holds a complete upload', { isError: true });
+  if (!rec.chunkPath || !(rec.chunkBytes > 0)) {
+    return toolResult('No chunks have been appended to this ticket yet — send them with append_upload_chunk first', { isError: true });
+  }
+  const want = validSha256(args.sha256);
+  if (!want) return toolResult('sha256 is required: the 64-character hex SHA-256 of the complete zip file', { isError: true });
+  const buf = await readFile(rec.chunkPath);
+  const got = sha256Hex(buf);
+  if (got !== want) {
+    // Corrupted in transport — refuse to hand corrupted bytes to an inspect
+    // tool. The ticket dies with the bad bytes so a retry starts clean.
+    await rm(rec.chunkPath, { force: true }).catch(() => {});
+    uploadTickets.delete(ticket);
+    return toolResult(`Assembled upload does not match sha256 (declared ${want}, got ${got} over ${buf.length} bytes) — a chunk was corrupted in transport. Create a new ticket and re-send.`, { isError: true });
+  }
+  rec.filePath = rec.chunkPath;
+  rec.chunkPath = null;
+  return toolResult({
+    finished: true, bytes: buf.length, sha256: got,
+    next: 'Pass the ticket to inspect_static_site_zip or inspect_lxc_zip (the ticket stays single-use and expires on its original 30-minute clock).',
   });
 }
 
@@ -291,17 +412,27 @@ async function lxcExistsKind(incusName, targetDir, variantEntries) {
 }
 
 async function toolListLxcContainers() {
-  const out = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000 });
-  let list = [];
-  try { list = JSON.parse(out.stdout || '[]'); } catch { /* fall through */ }
-  const containers = list
-    .filter((c) => String(c.name || '').startsWith(LXC_PREFIX))
-    .map((c) => ({
-      name: String(c.name).slice(LXC_PREFIX.length),
-      status: c.status || null,
-      ip: c.state?.network?.eth0?.addresses?.find((a) => a.family === 'inet')?.address || null,
-    }));
-  return toolResult({ containers });
+  // This tool used to swallow every failure mode — non-zero exit, and JSON
+  // made unparseable by the host-capture cap — and answer `{"containers":[]}`,
+  // which reads as "the host is empty" while name-addressed tools were happily
+  // operating on live guests. An agent then plans to CREATE a duplicate. A
+  // failed list must therefore be an error, never an empty success.
+  //
+  // --all-projects first, so a guest living outside the default Incus project
+  // still appears; older incus clients without the flag fall back cleanly.
+  let out = await runHostCapture('incus', ['list', '--all-projects', '--format', 'json'], { timeoutMs: 30000 });
+  if (out.status !== 0) {
+    out = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000 });
+  }
+  if (out.status !== 0) {
+    const why = out.timedOut ? 'timed out' : (out.stderr || '').trim().slice(-300) || out.error || 'unknown error';
+    return toolResult(`Could not list containers — incus list failed (${why}). This is a listing failure, not proof the host is empty; name-addressed tools (read_lxc_file, …) may still reach containers directly.`, { isError: true });
+  }
+  const parsed = parseLxcListJson(out.stdout);
+  if (parsed.error) {
+    return toolResult(`Could not list containers — incus list returned ${parsed.error}. This is a listing failure, not proof the host is empty.`, { isError: true });
+  }
+  return toolResult({ containers: lxcContainerSummaries(parsed.list, LXC_PREFIX) });
 }
 
 async function toolInspectLxcZip(args, auth) {
@@ -474,6 +605,13 @@ async function toolWriteLxcFile(args, auth) {
   if (Buffer.byteLength(content) > LXC_FILE_WRITE_CAP) {
     return toolResult(`Content exceeds the ${Math.floor(LXC_FILE_WRITE_CAP / (1024 * 1024))} MB single-file cap — use the zip flow for bigger payloads`, { isError: true });
   }
+  // Optional mode, so a script written here is actually runnable — without it
+  // the only way to deliver an executable file was a full zip apply.
+  let mode = null;
+  if (args.mode != null && String(args.mode).trim() !== '') {
+    mode = validFileMode(args.mode);
+    if (!mode) return toolResult('mode must be three octal permission digits, e.g. "0755" or "644"', { isError: true });
+  }
   const incusName = `${LXC_PREFIX}${name}`;
 
   // Ask-first when the file exists — same contract as every other overwrite.
@@ -496,21 +634,33 @@ async function toolWriteLxcFile(args, auth) {
     });
   }
 
+  // mode rides as $2 (validated three octal digits — never interpolated), so
+  // the chmod happens in the same exec as the write.
   const w = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; if [ -e "$p" ]; then rm -rf -- "$p.old"; cp -a -- "$p" "$p.old"; fi; mkdir -p "$(dirname -- "$p")"; cat > "$p"', 'sh', path],
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; m="$2"; if [ -e "$p" ]; then rm -rf -- "$p.old"; cp -a -- "$p" "$p.old"; fi; mkdir -p "$(dirname -- "$p")"; cat > "$p"; if [ -n "$m" ]; then chmod "$m" -- "$p"; fi', 'sh', path, mode || ''],
     { input: content, timeoutMs: 60000 },
   );
   if (w.status !== 0) {
     return toolResult(`Write failed: ${(w.stderr || '').trim().slice(-300)}`, { isError: true });
   }
-  logAudit(auth.created_by, 'LXC_FILE_WRITTEN', 'lxc', name, { via: 'mcp', path, bytes: Buffer.byteLength(content), replaced: exists }, null);
+  logAudit(auth.created_by, 'LXC_FILE_WRITTEN', 'lxc', name, { via: 'mcp', path, bytes: Buffer.byteLength(content), replaced: exists, ...(mode ? { mode } : {}) }, null);
   return toolResult({
     written: true, path, bytes: Buffer.byteLength(content),
     backup: exists ? `${path}.old` : null,
+    ...(mode ? { mode } : {}),
     next: 'If this container has a registered startup script, redeploy with rerun_startup.',
   });
 }
 
+// rerun_startup — now with a caller timeout and REAL output tails.
+//
+// A first-boot script was observed doing a full Docker engine install plus a
+// 910 MB image pull inside one blocking call: no timeout parameter, and the
+// old `.slice(-16 KB)` was the tail of the FIRST 256 KB the host capture
+// kept — the head of the run, not its end. Same recipe as
+// toolRunProjectCommand: each stream lands in a file inside the container and
+// is tail'd there, framed by nonce markers so output containing the marker
+// text cannot confuse the parse.
 async function toolRerunStartup(args, auth) {
   const name = String(args.container || '');
   if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
@@ -520,18 +670,64 @@ async function toolRerunStartup(args, auth) {
     return toolResult('No startup script is registered for this container — deploy one via apply_lxc_zip (startup_script) first', { isError: true });
   }
   const wd = startup.workingDir || '/';
-  const r = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'cd "$1" && exec "$2"', 'sh', wd, startup.scriptPath],
-    { timeoutMs: parseInt(process.env.PROXYPILOT_STARTUP_RUN_TIMEOUT_MS || '120000', 10) },
+  const timeoutMs = startupRunTimeoutMs(
+    args.timeout_seconds,
+    parseInt(process.env.PROXYPILOT_STARTUP_RUN_TIMEOUT_MS || '120000', 10),
   );
-  logAudit(auth.created_by, 'LXC_STARTUP_RERUN', 'lxc', name, { via: 'mcp', script: startup.scriptPath, exit: r.status }, null);
+  const nonce = randomBytes(6).toString('hex');
+  const mark = (k) => `PP_${nonce}_${k}`;
+  const script = [
+    'cd "$1" || exit 97',
+    'o=$(mktemp) || exit 98; e=$(mktemp) || exit 98',
+    '"$2" >"$o" 2>"$e"; ec=$?',
+    `echo "${mark('EXIT')}:$ec"`,
+    `echo "${mark('OUT')}"`,
+    `tail -c ${PROJECT_COMMAND_OUTPUT_CAP} "$o"`,
+    'echo ""',
+    `echo "${mark('ERR')}"`,
+    `tail -c ${PROJECT_COMMAND_OUTPUT_CAP} "$e"`,
+    'rm -f "$o" "$e"',
+  ].join('\n');
+
+  const startedAt = Date.now();
+  const r = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', wd, startup.scriptPath],
+    { timeoutMs },
+  );
+  const durationMs = Date.now() - startedAt;
+  const streams = parseMarkedStreams(r.stdout, nonce);
+  logAudit(auth.created_by, 'LXC_STARTUP_RERUN', 'lxc', name, {
+    via: 'mcp', script: startup.scriptPath, exit: streams.found ? streams.exit_code : r.status, timed_out: !!r.timedOut,
+  }, null);
+
+  if (!streams.found) {
+    // The wrapper never reported — container down, incus refused, or we
+    // killed it at the deadline.
+    const why = r.timedOut
+      ? `Timed out after ${Math.round(timeoutMs / 1000)}s. NOTE: the deadline kills the incus client, so the script may still be running inside the container — check its effects (or the app's port) before re-running. Pass timeout_seconds (max 1800) for long first-boot installs.`
+      : r.status === 97
+        ? `The working directory ${wd} does not exist in the container.`
+        : r.status === 98
+          ? 'Could not create temporary files in the container (out of disk?).'
+          : (r.stderr || '').trim().slice(-500) || 'no output from the container';
+    return toolResult({
+      ran: false,
+      script: startup.scriptPath,
+      working_dir: wd,
+      timed_out: !!r.timedOut,
+      duration_ms: durationMs,
+      error: why,
+    }, { isError: true });
+  }
   return toolResult({
     script: startup.scriptPath,
     working_dir: wd,
-    exit_code: r.status,
+    exit_code: streams.exit_code,
     timed_out: !!r.timedOut,
-    stdout: r.stdout.slice(-16 * 1024),
-    stderr: r.stderr.slice(-16 * 1024),
+    duration_ms: durationMs,
+    stdout: streams.stdout,
+    stderr: streams.stderr,
+    output_truncated: streams.stdout.length >= PROJECT_COMMAND_OUTPUT_CAP || streams.stderr.length >= PROJECT_COMMAND_OUTPUT_CAP,
   });
 }
 
@@ -1129,8 +1325,9 @@ async function toolRunProjectCommand(args, auth) {
     { timeoutMs },
   );
   const durationMs = Date.now() - startedAt;
+  const streams = parseMarkedStreams(r.stdout, nonce);
 
-  if (r.status !== 0 && !r.stdout.includes(mark('EXIT'))) {
+  if (r.status !== 0 && !streams.found) {
     // The wrapper itself never got to report — container down, incus refused,
     // or we killed it at the deadline.
     const why = r.timedOut
@@ -1146,15 +1343,8 @@ async function toolRunProjectCommand(args, auth) {
     }, { isError: true });
   }
 
-  const out = r.stdout;
-  const exitMatch = new RegExp(`${mark('EXIT')}:(-?\\d+)`).exec(out);
-  const exitCode = exitMatch ? Number(exitMatch[1]) : null;
-  const outAt = out.indexOf(`${mark('OUT')}\n`);
-  const errAt = out.indexOf(mark('ERR'));
-  const stdout = outAt >= 0 && errAt > outAt
-    ? out.slice(outAt + mark('OUT').length + 1, errAt).replace(/\n$/, '')
-    : '';
-  const stderr = errAt >= 0 ? out.slice(errAt + mark('ERR').length).replace(/^\n/, '') : '';
+  const exitCode = streams.found ? streams.exit_code : null;
+  const { stdout, stderr } = streams;
 
   // The commit the result belongs to — so a green run can be tied to an exact
   // checkout rather than to "whatever was there at the time".
@@ -1394,6 +1584,8 @@ async function toolAppendChangeRecord(args, auth) {
 const TOOL_HANDLERS = {
   list_static_sites: (args, auth, req) => toolListStaticSites(args, auth, req),
   create_upload_ticket: (_args, _auth, req) => toolCreateUploadTicket(req),
+  append_upload_chunk: toolAppendUploadChunk,
+  finish_upload: toolFinishUpload,
   inspect_static_site_zip: toolInspectStaticSiteZip,
   apply_static_site_zip: toolApplyStaticSiteZip,
   list_lxc_containers: toolListLxcContainers,
@@ -1446,7 +1638,9 @@ async function handleRpc(message, auth, req) {
           'ProxyPilot infrastructure control. Zip deploys are two-phase: inspect first, show the user',
           'any files that would be replaced, and only pass confirm_overwrite after they approve —',
           'replaced files are kept as <name>.old. For zips over ~2 MB use create_upload_ticket and PUT',
-          'the bytes to its upload_url instead of inlining base64.',
+          'the bytes to its upload_url instead of inlining base64; if you cannot reach the upload URL,',
+          'send the bytes over MCP with append_upload_chunk + finish_upload on the same ticket.',
+          'Pass sha256 to the inspect tools so transport corruption fails loudly.',
         ].join(' '),
       });
     }
@@ -1489,6 +1683,7 @@ export function createMcpRouter() {
     const rec = uploadTickets.get(req.params.ticket);
     if (!rec) return res.status(404).json({ error: 'Unknown or expired upload ticket' });
     if (rec.filePath) return res.status(409).json({ error: 'This ticket already received an upload' });
+    if (rec.chunkPath) return res.status(409).json({ error: 'This ticket is receiving a chunked upload (append_upload_chunk) — finish or abandon that instead of PUTting' });
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
       return res.status(400).json({ error: 'Send the raw zip bytes as the request body' });
     }

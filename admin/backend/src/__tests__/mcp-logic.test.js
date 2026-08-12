@@ -20,6 +20,11 @@ import {
   validGitRef, normalizeGitLogLimit, parseGitLogOutput, parseGitStatusPorcelain,
   capPatch, GIT_LOG_SEP, GIT_LOG_LIMIT_DEFAULT, GIT_LOG_LIMIT_MAX, GIT_PATCH_CAP,
   normalizeBuildLogLimit, buildLogFromEvents, BUILD_LOG_LIMIT_DEFAULT, BUILD_LOG_LIMIT_MAX,
+  validSha256, sha256Hex, zipChecksumError,
+  normalizeChunkSeq, decodeChunkBase64, UPLOAD_CHUNK_MAX_BYTES,
+  parseLxcListJson, lxcContainerIp, lxcContainerSummaries,
+  validFileMode, startupRunTimeoutMs, STARTUP_RUN_TIMEOUT_MAX_S, parseMarkedStreams,
+  PROJECT_COMMAND_OUTPUT_CAP,
 } from '../lib/mcp-logic.js';
 import { computeChangeHash, changePayload, canonicalJson } from '../mock2/change-logic.js';
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from '../mock2/clone-logic.js';
@@ -86,6 +91,7 @@ test('tool catalog: every tool has a name, description, and object schema', () =
     'list_lxc_containers', 'inspect_lxc_zip', 'apply_lxc_zip',
     'read_lxc_file', 'write_lxc_file', 'rerun_startup',
     'list_projects', 'send_project_build', 'clone_project', 'create_upload_ticket',
+    'append_upload_chunk', 'finish_upload',
     'interrupt_project_build', 'cancel_queued_build',
     'list_project_files', 'read_project_file', 'write_project_file', 'redeploy_project',
     'run_project_command', 'edit_project_file', 'search_project_files',
@@ -511,4 +517,149 @@ test('cloneSourceError: fresh works from archived; full needs the source active'
   assert.match(cloneSourceError({ ...base, lifecycle: 'provisioning' }, 'fresh'), /provisioning/);
   assert.match(cloneSourceError(null, 'fresh'), /not found/);
   assert.match(cloneSourceError({ lifecycle: 'active' }, 'fresh'), /repository/);
+});
+
+// ---- bugfix helpers: zip integrity, chunked upload, LXC list, mode, timeouts ----
+
+test('validSha256 normalizes hex and rejects everything else', () => {
+  const hex = 'A'.repeat(64);
+  assert.equal(validSha256(hex), 'a'.repeat(64));
+  assert.equal(validSha256(` ${'b'.repeat(64)} `), 'b'.repeat(64));
+  assert.equal(validSha256('b'.repeat(63)), null);
+  assert.equal(validSha256('g'.repeat(64)), null);
+  assert.equal(validSha256(''), null);
+  assert.equal(validSha256(null), null);
+});
+
+test('zipChecksumError: matching bytes pass; corruption names both hashes', () => {
+  const buf = Buffer.from('zip bytes');
+  const good = createHash('sha256').update(buf).digest('hex');
+  assert.equal(zipChecksumError(buf, good), null);
+  assert.equal(zipChecksumError(buf, good.toUpperCase()), null);
+  // A flipped byte is reported as TRANSPORT corruption, with declared vs got.
+  const err = zipChecksumError(Buffer.from('zip byteX'), good);
+  assert.match(err, /corrupted/);
+  assert.match(err, new RegExp(good));
+  assert.match(err, new RegExp(sha256Hex(Buffer.from('zip byteX'))));
+  // A malformed declared value is its own error, not a mismatch.
+  assert.match(zipChecksumError(buf, 'not-a-hash'), /64-character/);
+});
+
+test('normalizeChunkSeq takes whole numbers from 0, refuses the rest', () => {
+  assert.equal(normalizeChunkSeq(0), 0);
+  assert.equal(normalizeChunkSeq(7), 7);
+  assert.equal(normalizeChunkSeq('3'), 3);
+  assert.equal(normalizeChunkSeq(-1), null);
+  assert.equal(normalizeChunkSeq(1.5), null);
+  assert.equal(normalizeChunkSeq('x'), null);
+  assert.equal(normalizeChunkSeq(undefined), null);
+});
+
+test('decodeChunkBase64 round-trips, tolerates whitespace, enforces the cap', () => {
+  const payload = Buffer.from('chunk of a zip');
+  const ok = decodeChunkBase64(payload.toString('base64'));
+  assert.ok(!ok.error);
+  assert.deepEqual(ok.buf, payload);
+  // Whitespace (line-wrapped base64) is fine; garbage is not.
+  const wrapped = payload.toString('base64').replace(/(.{4})/g, '$1\n');
+  assert.deepEqual(decodeChunkBase64(wrapped).buf, payload);
+  assert.match(decodeChunkBase64('!!not base64!!').error, /base64/);
+  assert.match(decodeChunkBase64('').error, /required/);
+  assert.match(decodeChunkBase64(undefined).error, /required/);
+  // Over-cap chunks are refused with the split-it-up instruction.
+  const big = Buffer.alloc(UPLOAD_CHUNK_MAX_BYTES + 1).toString('base64');
+  assert.match(decodeChunkBase64(big).error, /split/);
+});
+
+test('parseLxcListJson: an unparseable or non-array answer is an ERROR, never []', () => {
+  assert.deepEqual(parseLxcListJson('[]').list, []);
+  assert.equal(parseLxcListJson(JSON.stringify([{ name: 'pp-Web' }])).list.length, 1);
+  // Truncated JSON (the 256 KB capture cap) must not read as an empty host —
+  // that is exactly the field failure that had an agent plan a duplicate
+  // container.
+  assert.match(parseLxcListJson('[{"name": "pp-W').error, /truncated/);
+  assert.match(parseLxcListJson('{"not": "an array"}').error, /not an array/);
+});
+
+test('lxcContainerIp prefers eth0 but falls back to any non-lo global inet', () => {
+  const addr = (address, family = 'inet', scope = 'global') => ({ address, family, scope });
+  assert.equal(lxcContainerIp({ network: { eth0: { addresses: [addr('10.0.0.5')] } } }), '10.0.0.5');
+  // Renamed NIC still yields the address; lo and link-local never do.
+  assert.equal(lxcContainerIp({
+    network: {
+      lo: { addresses: [addr('127.0.0.1', 'inet', 'local')] },
+      enp5s0: { addresses: [addr('fe80::1', 'inet6'), addr('192.168.1.9')] },
+    },
+  }), '192.168.1.9');
+  assert.equal(lxcContainerIp({ network: { eth0: { addresses: [addr('fd42::7', 'inet6')] } } }), null);
+  assert.equal(lxcContainerIp(null), null);
+});
+
+test('lxcContainerSummaries filters by prefix, strips it, and dedupes across projects', () => {
+  const list = [
+    { name: 'pp-Web', status: 'Running', state: { network: { eth0: { addresses: [{ address: '10.1.2.3', family: 'inet', scope: 'global' }] } } } },
+    { name: 'unrelated', status: 'Running' },
+    { name: 'pp-Web', status: 'Stopped' },      // same name from another project
+    { name: 'pp-db', status: 'Stopped', state: null },
+  ];
+  const rows = lxcContainerSummaries(list, 'pp-');
+  assert.deepEqual(rows, [
+    { name: 'Web', status: 'Running', ip: '10.1.2.3' },
+    { name: 'db', status: 'Stopped', ip: null },
+  ]);
+  // Case is preserved: the guest is pp-Web, not pp-web.
+  assert.equal(rows[0].name, 'Web');
+});
+
+test('validFileMode: three octal digits with or without the leading zero', () => {
+  assert.equal(validFileMode('0755'), '755');
+  assert.equal(validFileMode('755'), '755');
+  assert.equal(validFileMode('644'), '644');
+  assert.equal(validFileMode('0644'), '644');
+  // No setuid digit, no symbolic modes, no garbage.
+  assert.equal(validFileMode('4755'), null);
+  assert.equal(validFileMode('u+x'), null);
+  assert.equal(validFileMode('758'), null);
+  assert.equal(validFileMode(''), null);
+  assert.equal(validFileMode(755), '755');
+});
+
+test('startupRunTimeoutMs: caller wins clamped; env default is clamped too', () => {
+  assert.equal(startupRunTimeoutMs(300, 120000), 300000);
+  assert.equal(startupRunTimeoutMs(99999, 120000), STARTUP_RUN_TIMEOUT_MAX_S * 1000);
+  // No caller value → the operator's configured default…
+  assert.equal(startupRunTimeoutMs(undefined, 120000), 120000);
+  assert.equal(startupRunTimeoutMs(0, 90000), 90000);
+  // …which cannot itself exceed the cap, nor be nonsense.
+  assert.equal(startupRunTimeoutMs(undefined, 10 * 3600 * 1000), STARTUP_RUN_TIMEOUT_MAX_S * 1000);
+  assert.equal(startupRunTimeoutMs(undefined, NaN), 120000);
+});
+
+test('parseMarkedStreams recovers exit code and both tails; missing marker → found:false', () => {
+  const nonce = 'abc123';
+  const out = [
+    'noise the script printed before the wrapper reported',
+    `PP_${nonce}_EXIT:2`,
+    `PP_${nonce}_OUT`,
+    'stdout line 1',
+    'stdout line 2',
+    '',
+    `PP_${nonce}_ERR`,
+    'stderr tail',
+  ].join('\n');
+  const r = parseMarkedStreams(out, nonce);
+  assert.equal(r.found, true);
+  assert.equal(r.exit_code, 2);
+  // The blank separator line the wrapper echoes is stripped; the script's own
+  // trailing newline survives.
+  assert.equal(r.stdout, 'stdout line 1\nstdout line 2\n');
+  assert.equal(r.stderr, 'stderr tail');
+  // The wrapper never reporting (timeout, container down) is distinguishable
+  // from a reported empty run.
+  const dead = parseMarkedStreams('incus: instance not found', nonce);
+  assert.equal(dead.found, false);
+  assert.equal(dead.exit_code, null);
+  // A different nonce cannot be confused by lookalike markers in output.
+  assert.equal(parseMarkedStreams(out, 'ffffff').found, false);
+  assert.ok(PROJECT_COMMAND_OUTPUT_CAP >= 64 * 1024);
 });

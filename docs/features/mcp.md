@@ -24,7 +24,7 @@ Revoking the token (same card) immediately cuts the client off.
 |---|---|---|
 | Static sites | `list_static_sites`, `inspect_static_site_zip`, `apply_static_site_zip` | Two-phase: inspect reports conflicts; apply refuses to overwrite until `confirm_overwrite` — so the AI asks you in-conversation first. Replaced files are kept as `<name>.old`. |
 | LXC | `list_lxc_containers`, `inspect_lxc_zip`, `apply_lxc_zip` | Same conflict flow, plus optional startup-script registration (`startup.sh` convention) with run output + exit code returned. |
-| LXC file edits | `read_lxc_file`, `write_lxc_file`, `rerun_startup` | The chat-only update loop: read a file, propose the edit, write on approval (previous version kept as `<path>.old`), then re-run the registered startup script to redeploy — run output and exit code come back to the chat. Lets a Claude subscription do small container updates without any zip or shell. |
+| LXC file edits | `read_lxc_file`, `write_lxc_file`, `rerun_startup` | The chat-only update loop: read a file, propose the edit, write on approval (previous version kept as `<path>.old`), then re-run the registered startup script to redeploy — run output and exit code come back to the chat. `write_lxc_file` takes an optional `mode` ("0755") so a script lands executable without a zip apply. `rerun_startup` takes `timeout_seconds` (default 120, max 1800) and returns the **last** 64 KB of each stream — a first-boot Docker install no longer has to fit inside a fixed 2-minute window, and the failure summary (which prints last) is what comes back. Lets a Claude subscription do small container updates without any zip or shell. |
 | Projects | `list_projects`, `get_project`, `send_project_build`, `upload_project_reference`, `clone_project` | `send_project_build` queues a quick update on the project's own AI harness — **this lane spends the project's configured API budget**. `clone_project` mirrors the UI's Clone (fresh / full-with-database). |
 | Project build control | `interrupt_project_build`, `cancel_queued_build` | Stop a running build (checkpoint-and-stop by default, or abandon) and cancel not-yet-started queue entries — the "that build is burning tokens on the wrong thing" stop switch, from chat. |
 | Project file reads | `list_project_files`, `search_project_files`, `read_project_file` | Find first, read narrowly. `search_project_files` is `git grep -E` over the tracked files and returns `path` + `line_number` + the matching line; `read_project_file` then takes `offset`/`limit` to pull just that window (it always reports `total_lines`, so a ranged read can say what it left behind). Reading whole files to find one function is the expensive habit these two exist to break. |
@@ -33,7 +33,7 @@ Revoking the token (same card) immediately cuts the client off.
 | Build diagnosis | `get_build_log` | The recorded event stream of one cycle — status, error, and the steps it produced. A failed build otherwise surfaces as a status with no output, leaving nothing to diagnose from. Keeps the tail (a failure explains itself at the end). |
 | Audit trail | `append_change_record` | Appends a hash-chained record for chat-lane work, which otherwise writes none. ProxyPilot computes `seq`/`prev_hash`/`hash` server-side through the same code the build runner uses, and mirrors the record to `state/changes/<seq>.json` in the checkout. The chain is re-verified immediately after appending. **Never hand-compute these hashes** — see below. |
 | Project verification | `run_project_command` | Runs one allowlisted command in the project's checkout — `npm ci`, `npm run <script>`, `npx playwright …`, or a read-only `git` subcommand — so the chat lane can run the project's own gates instead of shipping unverified. Same container and environment `redeploy_project` builds in (`/etc/environment` sourced, cwd = the app dir), so a green result means what it says. Returns `exit_code` plus the **last** 64 KB of each stream (a failing test prints its summary last). Refused while a build is running. |
-| Transfer | `create_upload_ticket` | Big zips: the tool returns a one-shot `upload_url`; `curl -T site.zip -H 'Content-Type: application/zip' <url>` pushes the bytes, then the ticket is referenced in an inspect tool. Zips ≤ 2 MB may ride inline as `zip_base64`. |
+| Transfer | `create_upload_ticket`, `append_upload_chunk`, `finish_upload` | Big zips: the ticket tool returns a one-shot `upload_url`; `curl -T site.zip -H 'Content-Type: application/zip' <url>` pushes the bytes, then the ticket is referenced in an inspect tool. Clients that cannot reach the upload URL (egress-restricted agent sandboxes) instead send ordered base64 chunks over MCP with `append_upload_chunk` and seal them with `finish_upload`, whose mandatory `sha256` is verified before the ticket becomes usable. Zips ≤ 2 MB may ride inline as `zip_base64`. The inspect tools also accept an optional `sha256`, verified **before** parsing, so transport corruption fails as a checksum mismatch rather than a confusing extraction error. |
 
 ## The two AI lanes (how to phrase a request)
 
@@ -119,17 +119,19 @@ quietly stop being true.
 - The LXC and static-site surface is deploy-heavy and observe-poor: there is
   no container detail/exec/lifecycle tooling, no route inspection or testing,
   and no per-file static-site management. A field-derived upgrade spec for all
-  of this — six bugfixes to the existing tools plus 25 new tool definitions
-  (LXC observability, allowlisted in-guest exec, gated lifecycle/config with
-  snapshot-before-mutate, routing, static-site files) — is packaged as the
-  importable component
+  of this — 25 new tool definitions (LXC observability, allowlisted in-guest
+  exec, gated lifecycle/config with snapshot-before-mutate, routing,
+  static-site files) — is packaged as the importable component
   `docs/features/examples/mcp-lxc-sites-upgrades.component.json`
-  (key `mcp-lxc-sites-upgrades`). Its `docs/01-bugfixes.md` file also tracks
-  known defects in the *current* tools (`list_lxc_containers` returning `[]`
-  for live guests, `list_static_sites` failing with `no such column: domain`,
-  `rerun_startup` lacking a timeout/output cap, silent inline-zip corruption,
-  upload tickets unreachable from egress-restricted sandboxes,
-  `write_lxc_file` unable to set the execute bit).
+  (key `mcp-lxc-sites-upgrades`). The six defects its `docs/01-bugfixes.md`
+  catalogued in the *then-current* tools are fixed: `list_lxc_containers` now
+  reports listing failures as errors instead of an empty host (and covers all
+  Incus projects and non-eth0 NICs), `list_static_sites` reads `domain` from
+  `service_http_routes` (post-D.14 home), `rerun_startup` takes
+  `timeout_seconds` and returns real 64 KB output tails, the inspect tools
+  verify an optional `sha256` before extraction, chunked upload
+  (`append_upload_chunk`/`finish_upload`) replaces the PUT URL for sandboxed
+  clients, and `write_lxc_file` takes `mode`.
 - Auth is token-based, not OAuth 2.1 with dynamic client registration.
   claude.ai connects fine via the tokenized URL; a full OAuth flow is a
   possible follow-up (see docs/known-issues.md).

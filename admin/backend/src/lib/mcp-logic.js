@@ -101,6 +101,124 @@ export function looksLikeUploadTicket(t) {
   return /^ppup_[0-9a-f]{48}$/.test(String(t || ''));
 }
 
+// ---- zip integrity (transport checksum) ----
+//
+// Inline base64 was observed corrupting in the field ("Zip entry size mismatch
+// (declared 3472, got 3460)") with nothing in the transport saying so — the
+// damage surfaced as a confusing EXTRACTION error. An optional sha256 on the
+// inspect tools (and a mandatory one on finish_upload) turns that into a
+// transport-corruption error BEFORE any bytes touch a target.
+
+export function validSha256(s) {
+  const v = String(s ?? '').trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(v) ? v : null;
+}
+
+export function sha256Hex(buf) {
+  return createHash('sha256').update(buf).digest('hex');
+}
+
+/** null when the bytes match the declared checksum; a caller-facing message
+ *  when they don't (or the declared value isn't a sha256 at all). */
+export function zipChecksumError(buf, declared) {
+  const want = validSha256(declared);
+  if (!want) return 'sha256 must be the 64-character hex SHA-256 of the zip bytes';
+  const got = sha256Hex(buf);
+  if (got === want) return null;
+  return `Zip bytes do not match the declared sha256 — the transfer corrupted them `
+    + `(declared ${want}, got ${got} over ${buf.length} bytes). Re-send the archive and inspect again.`;
+}
+
+// ---- chunked upload fallback ----
+//
+// The documented big-zip path (create_upload_ticket → PUT raw bytes) assumes
+// the client can reach the upload URL — egress-restricted agent sandboxes
+// often cannot (observed: CONNECT 403 to the edge host). These helpers back
+// append_upload_chunk/finish_upload, which deliver the same bytes through the
+// already-working MCP channel in ordered base64 chunks.
+
+// Decoded per-chunk cap. The MCP endpoint accepts 8 MB JSON bodies; 4 MB of
+// payload is ~5.4 MB as base64, leaving comfortable envelope headroom.
+export const UPLOAD_CHUNK_MAX_BYTES = 4 * 1024 * 1024;
+
+export function normalizeChunkSeq(seq) {
+  const n = Number(seq);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+export function decodeChunkBase64(s, cap = UPLOAD_CHUNK_MAX_BYTES) {
+  const raw = String(s ?? '').replace(/\s+/g, '');
+  if (!raw) return { error: 'chunk_base64 is required and must not be empty' };
+  if (!/^[A-Za-z0-9+/]+=*$/.test(raw)) return { error: 'chunk_base64 is not valid base64' };
+  const buf = Buffer.from(raw, 'base64');
+  if (buf.length === 0) return { error: 'chunk_base64 decoded to zero bytes' };
+  if (buf.length > cap) {
+    return { error: `Chunks are limited to ${Math.floor(cap / (1024 * 1024))} MB decoded — split the archive into smaller chunks` };
+  }
+  return { buf };
+}
+
+// ---- LXC container listing ----
+//
+// Field defect: list_lxc_containers answered `[]` while a live, name-addressed
+// guest was serving traffic — the incus failure (non-zero exit, or JSON made
+// unparseable by the 256 KB host-capture cap) was swallowed and presented as
+// an empty host, and the caller planned to CREATE a duplicate container on the
+// strength of it. An empty list and a failed list are different answers; these
+// helpers keep them apart.
+
+export function parseLxcListJson(stdout) {
+  let list;
+  try {
+    list = JSON.parse(String(stdout || ''));
+  } catch {
+    return { error: 'unparseable JSON (output may have been truncated)' };
+  }
+  if (!Array.isArray(list)) return { error: 'a JSON value that is not an array' };
+  return { list };
+}
+
+/** First global IPv4 on an interface, preferring eth0 but not assuming it —
+ *  a guest with a renamed or macvlan NIC still has an address worth showing. */
+export function lxcContainerIp(state) {
+  const nets = state?.network || {};
+  const inet = (iface) => nets[iface]?.addresses
+    ?.find((a) => a.family === 'inet' && a.scope !== 'local')?.address || null;
+  const eth0 = inet('eth0');
+  if (eth0) return eth0;
+  for (const name of Object.keys(nets)) {
+    if (name === 'lo') continue;
+    const addr = inet(name);
+    if (addr) return addr;
+  }
+  return null;
+}
+
+export function lxcContainerSummaries(list, prefix) {
+  const seen = new Set();
+  const out = [];
+  for (const c of Array.isArray(list) ? list : []) {
+    const full = String(c?.name || '');
+    if (!full.startsWith(prefix)) continue;
+    const name = full.slice(prefix.length);
+    if (!name || seen.has(name)) continue;   // --all-projects can repeat a name
+    seen.add(name);
+    out.push({ name, status: c.status || null, ip: lxcContainerIp(c.state) });
+  }
+  return out;
+}
+
+// ---- write_lxc_file: the mode parameter ----
+
+/** Three octal permission digits, with or without a leading zero ("0755",
+ *  "644"). Returns them normalized for chmod, or null. Deliberately no
+ *  setuid/setgid/sticky digit: nothing the file tools deploy needs one. */
+export function validFileMode(m) {
+  const s = String(m ?? '').trim();
+  if (!/^0?[0-7]{3}$/.test(s)) return null;
+  return s.slice(-3);
+}
+
 // ---- tool catalog ----
 
 const uploadSourceProps = {
@@ -112,6 +230,10 @@ const uploadSourceProps = {
     type: 'string',
     description: 'The zip file base64-encoded, for small archives (≤ 2 MB decoded). Use an upload ticket for anything larger.',
   },
+  sha256: {
+    type: 'string',
+    description: 'Optional but recommended: hex SHA-256 of the raw zip bytes. Verified before anything is parsed or staged, so transport corruption fails loudly as a checksum mismatch instead of surfacing later as a confusing extraction error.',
+  },
 };
 
 export const MCP_TOOLS = [
@@ -122,8 +244,35 @@ export const MCP_TOOLS = [
   },
   {
     name: 'create_upload_ticket',
-    description: 'Create a short-lived upload slot for a zip file. Returns { ticket, upload_url, expires_in_seconds }. PUT the raw zip bytes to upload_url (Content-Type: application/zip, same auth not required — the ticket in the URL is the secret), then pass the ticket to an inspect tool. Tickets are single-use and expire in 30 minutes.',
+    description: 'Create a short-lived upload slot for a zip file. Returns { ticket, upload_url, expires_in_seconds }. PUT the raw zip bytes to upload_url (Content-Type: application/zip, same auth not required — the ticket in the URL is the secret), then pass the ticket to an inspect tool. If your environment cannot reach the upload URL (egress-restricted sandbox), deliver the bytes over MCP instead with append_upload_chunk + finish_upload on the same ticket. Tickets are single-use and expire in 30 minutes.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'append_upload_chunk',
+    description: 'Deliver part of a zip to an upload ticket through MCP itself — the fallback for clients that cannot reach the ticket\'s PUT upload_url. Send base64 chunks (≤ 4 MB decoded each) in order, seq starting at 0; out-of-order or repeated chunks are refused. Finish with finish_upload, then pass the ticket to an inspect tool as usual.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ticket: { type: 'string', description: 'From create_upload_ticket.' },
+        seq: { type: 'number', description: 'Chunk sequence number, starting at 0, incrementing by 1.' },
+        chunk_base64: { type: 'string', description: 'This chunk of the zip, base64-encoded (≤ 4 MB decoded).' },
+      },
+      required: ['ticket', 'seq', 'chunk_base64'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'finish_upload',
+    description: 'Seal a chunked upload: verifies the assembled bytes against the required sha256 (hex SHA-256 of the COMPLETE zip) and makes the ticket usable by the inspect tools. A checksum mismatch discards the ticket — create a new one and re-send, rather than extracting corrupted bytes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ticket: { type: 'string' },
+        sha256: { type: 'string', description: 'Hex SHA-256 of the complete zip file.' },
+      },
+      required: ['ticket', 'sha256'],
+      additionalProperties: false,
+    },
   },
   {
     name: 'inspect_static_site_zip',
@@ -205,7 +354,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'write_lxc_file',
-    description: 'Write one text file inside an LXC container. If the file already exists and confirm_overwrite is not true, this returns the current file info instead of writing — show the user your proposed change and get their go-ahead first. On overwrite the previous version is kept as `<path>.old`. Parent directories are created. After config/code edits, redeploy with rerun_startup.',
+    description: 'Write one text file inside an LXC container. If the file already exists and confirm_overwrite is not true, this returns the current file info instead of writing — show the user your proposed change and get their go-ahead first. On overwrite the previous version is kept as `<path>.old`. Parent directories are created. Pass mode (e.g. "0755") to make a script executable in the same call. After config/code edits, redeploy with rerun_startup.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -213,6 +362,7 @@ export const MCP_TOOLS = [
         path: { type: 'string', description: 'Absolute file path inside the container.' },
         content: { type: 'string', description: 'The complete new file content (UTF-8).' },
         confirm_overwrite: { type: 'boolean', description: 'Set true only after the user approved replacing the existing file.' },
+        mode: { type: 'string', description: 'Optional file permissions as three octal digits, e.g. "0755" for an executable script or "644". Default: whatever the write leaves (existing files keep their mode).' },
       },
       required: ['container', 'path', 'content'],
       additionalProperties: false,
@@ -220,11 +370,12 @@ export const MCP_TOOLS = [
   },
   {
     name: 'rerun_startup',
-    description: 'Re-run the startup script registered for an LXC container (the redeploy step after write_lxc_file edits). Returns the run output and exit code. Fails if no startup script has been registered — register one via apply_lxc_zip.',
+    description: 'Re-run the startup script registered for an LXC container (the redeploy step after write_lxc_file edits). Returns the last 64 KB of stdout/stderr (the tail — a failure explains itself at the end), the exit code, and timed_out. Long first-boot installs should pass timeout_seconds (default 120, max 1800). Fails if no startup script has been registered — register one via apply_lxc_zip.',
     inputSchema: {
       type: 'object',
       properties: {
         container: { type: 'string' },
+        timeout_seconds: { type: 'number', description: 'Kill the run after this many seconds (default 120, max 1800). A run that hits the deadline reports timed_out: true and may still be running inside the container.' },
       },
       required: ['container'],
       additionalProperties: false,
@@ -859,6 +1010,49 @@ export function projectCommandTimeoutMs(seconds) {
   const n = Number(seconds);
   if (!Number.isFinite(n) || n <= 0) return PROJECT_COMMAND_TIMEOUT_DEFAULT_S * 1000;
   return Math.min(Math.round(n), PROJECT_COMMAND_TIMEOUT_MAX_S) * 1000;
+}
+
+// ---- rerun_startup: timeout + tail capture ----
+//
+// A first-boot startup script was observed doing a full Docker engine install
+// plus a 910 MB image pull inside ONE blocking rerun_startup call — no timeout
+// parameter, no way to cancel, and the output slice was the tail of the FIRST
+// 256 KB the host capture kept (the head of the run, not its end). The fix is
+// run_project_command's own recipe: a caller-clamped deadline, and each stream
+// tail'd inside the container so the last 64 KB is what comes back.
+
+export const STARTUP_RUN_TIMEOUT_MAX_S = PROJECT_COMMAND_TIMEOUT_MAX_S;
+
+/** Caller timeout wins (clamped to the max); otherwise the operator's
+ *  configured default, itself clamped so an env var cannot exceed the cap. */
+export function startupRunTimeoutMs(seconds, envDefaultMs = 120000) {
+  const n = Number(seconds);
+  if (Number.isFinite(n) && n > 0) return Math.min(Math.round(n), STARTUP_RUN_TIMEOUT_MAX_S) * 1000;
+  const d = Number(envDefaultMs);
+  if (Number.isFinite(d) && d > 0) return Math.min(Math.round(d), STARTUP_RUN_TIMEOUT_MAX_S * 1000);
+  return 120000;
+}
+
+/**
+ * Parse the marker-framed wrapper output shared by run_project_command and
+ * rerun_startup: `PP_<nonce>_EXIT:<code>`, then the stdout tail after
+ * `PP_<nonce>_OUT`, then the stderr tail after `PP_<nonce>_ERR`. The nonce is
+ * per-call so output that happens to contain the marker text cannot confuse
+ * the parse. `found: false` means the wrapper never reported — container
+ * down, incus refused, or the deadline killed it.
+ */
+export function parseMarkedStreams(output, nonce) {
+  const mark = (k) => `PP_${nonce}_${k}`;
+  const src = String(output ?? '');
+  const exitMatch = new RegExp(`${mark('EXIT')}:(-?\\d+)`).exec(src);
+  if (!exitMatch) return { found: false, exit_code: null, stdout: '', stderr: '' };
+  const outAt = src.indexOf(`${mark('OUT')}\n`);
+  const errAt = src.indexOf(mark('ERR'));
+  const stdout = outAt >= 0 && errAt > outAt
+    ? src.slice(outAt + mark('OUT').length + 1, errAt).replace(/\n$/, '')
+    : '';
+  const stderr = errAt >= 0 ? src.slice(errAt + mark('ERR').length).replace(/^\n/, '') : '';
+  return { found: true, exit_code: Number(exitMatch[1]), stdout, stderr };
 }
 
 // Trivial but shared with the LXC UI semantics: candidate startup scripts are

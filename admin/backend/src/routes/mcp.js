@@ -42,6 +42,7 @@ import {
   validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
   validIpv4, validImageAlias,
   validDomainName, normalizePort, parseCurlProbeOutput, classifyCurlExit,
+  summarizeAccessLog, caddyAccessLogPath,
   parseStatFileList, parseSystemctlShow, validUnitName, validProbeHost, validFileGlob, normalizeServiceId,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
@@ -1743,6 +1744,18 @@ async function certInfoForDomain(domain) {
   return out;
 }
 
+// Recent 5xx counts from the domain's Caddy access log — the signal that was
+// missing in the field, where a stale-upstream 502 was diagnosable only by
+// inference. Advisory: a missing/unreadable log yields null, never an error.
+async function recentErrorsForDomain(domain) {
+  const logPath = caddyAccessLogPath(domain);
+  // Last 512 KB is plenty for an hour on anything but a very hot site; the
+  // summary flags partial_window when the tail starts inside the window.
+  const r = await runHostCapture('tail', ['-c', '524288', logPath], { timeoutMs: 15000 });
+  if (r.status !== 0) return null;
+  return { log: logPath, ...summarizeAccessLog(r.stdout, Date.now()) };
+}
+
 async function toolGetRoute(args) {
   const domain = validDomainName(args.domain);
   if (!domain) return toolResult('domain must be a fully qualified hostname, e.g. web.example.com', { isError: true });
@@ -1753,10 +1766,14 @@ async function toolGetRoute(args) {
     return toolResult(`Could not read routes: ${err?.message || err}`, { isError: true });
   }
   if (!rows.length) return toolResult(`No route exists for ${domain} — list_routes shows every served hostname; set_route creates one.`, { isError: true });
+  const recentErrors = await recentErrorsForDomain(domain);
   return toolResult({
     domain,
     routes: rows.map(routeView),
     ...(await certInfoForDomain(domain)),
+    recent_errors: recentErrors,
+    ...(recentErrors === null ? { recent_errors_note: 'No readable access log for this domain yet (the log appears after the first request to the merged site config).' } : {}),
+    ...(recentErrors?.errors_5xx ? { note: `${recentErrors.errors_5xx} server error(s) in the last hour — test_route says which failure class they are.` } : {}),
     next: 'test_route probes this hostname end-to-end from the edge host.',
   });
 }

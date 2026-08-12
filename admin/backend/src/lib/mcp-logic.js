@@ -496,6 +496,54 @@ export function parseCurlProbeOutput(stdout) {
   };
 }
 
+/**
+ * Summarize Caddy JSON access-log lines over a time window.
+ *
+ * Every merged site file logs to /var/log/caddy/<domain>.log in Caddy's
+ * default JSON encoding (`ts` = unix seconds). The caller tails the file and
+ * hands the text here; unparseable lines are skipped, entries outside the
+ * window ignored. Only counts leave — no URLs, no headers, no bodies — so
+ * nothing sensitive can ride out through an error summary.
+ */
+export function summarizeAccessLog(text, nowMs, windowSeconds = 3600) {
+  const windowStartMs = nowMs - windowSeconds * 1000;
+  let requests = 0;
+  let errors5xx = 0;
+  const byErrorStatus = {};
+  let oldestSeenMs = null;
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line) continue;
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    const ts = Number(e?.ts);
+    const status = Number(e?.status);
+    if (!Number.isFinite(ts) || !Number.isFinite(status)) continue;
+    const tsMs = ts * 1000;
+    if (oldestSeenMs === null || tsMs < oldestSeenMs) oldestSeenMs = tsMs;
+    if (tsMs < windowStartMs || tsMs > nowMs + 60000) continue;
+    requests += 1;
+    if (status >= 500 && status <= 599) {
+      errors5xx += 1;
+      byErrorStatus[status] = (byErrorStatus[status] || 0) + 1;
+    }
+  }
+  return {
+    window_seconds: windowSeconds,
+    requests,
+    errors_5xx: errors5xx,
+    by_error_status: byErrorStatus,
+    // When the tail we read starts INSIDE the window, older requests exist
+    // that we did not see — the counts are a floor, and the caller says so.
+    partial_window: oldestSeenMs !== null && oldestSeenMs > windowStartMs,
+  };
+}
+
+/** The access-log path the merged Caddy site file writes for a domain
+ *  (wildcards sanitized the same way caddyFileName does). */
+export function caddyAccessLogPath(domain) {
+  return `/var/log/caddy/${String(domain).replace(/\*/g, '_wildcard_')}.log`;
+}
+
 /** Map a curl exit code to a failure class a caller can act on. */
 export function classifyCurlExit(code) {
   const map = {
@@ -1045,7 +1093,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'get_route',
-    description: 'Full detail for one hostname: every route on the domain with its upstream resolution, the TLS policy (ACME vs manual cert), and — when an issued certificate is on disk — its issuer, validity window, days until expiry, and status. Read-only.',
+    description: 'Full detail for one hostname: every route on the domain with its upstream resolution, the TLS policy (ACME vs manual cert), the issued certificate\'s validity when one is on disk, and recent error counts from the domain\'s access log (requests and 5xx totals over the last hour, by status — counts only, never URLs or headers). Read-only.',
     inputSchema: {
       type: 'object',
       properties: {

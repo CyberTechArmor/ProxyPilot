@@ -1012,3 +1012,65 @@ test('tool catalog covers the full 25-tool upgrade surface', () => {
     assert.ok(names.has(required), `missing tool ${required}`);
   }
 });
+
+// ---- follow-ups: access-log error counts + policy drift guard ----
+
+import { summarizeAccessLog, caddyAccessLogPath } from '../lib/mcp-logic.js';
+
+test('summarizeAccessLog counts requests and 5xx inside the window, counts only', () => {
+  const now = 1_755_000_000_000;                    // fixed clock, ms
+  const at = (secAgo, status, extra = {}) =>
+    JSON.stringify({ ts: (now - secAgo * 1000) / 1000, status, request: { uri: '/secret?token=abc' }, ...extra });
+  const text = [
+    at(60, 200), at(120, 200), at(300, 301),
+    at(400, 502), at(500, 502), at(600, 504),
+    at(4000, 502),                                   // outside the hour
+    at(30, 200, { ts: undefined }),                  // no ts → skipped
+    'not json at all',
+    at(90, 404),
+  ].join('\n');
+  const r = summarizeAccessLog(text, now);
+  assert.equal(r.window_seconds, 3600);
+  assert.equal(r.requests, 7);                       // 4000s-ago and broken lines excluded
+  assert.equal(r.errors_5xx, 3);
+  assert.deepEqual(r.by_error_status, { 502: 2, 504: 1 });
+  // The tail reached back past the window start (the 4000s entry), so the
+  // window is fully covered.
+  assert.equal(r.partial_window, false);
+  // Nothing but counts leaves — no URI, no token, no headers.
+  assert.ok(!JSON.stringify(r).includes('secret'));
+  assert.ok(!JSON.stringify(r).includes('token'));
+});
+
+test('summarizeAccessLog flags a partial window when the tail starts inside it', () => {
+  const now = 1_755_000_000_000;
+  const text = JSON.stringify({ ts: (now - 600 * 1000) / 1000, status: 502 });
+  const r = summarizeAccessLog(text, now);
+  assert.equal(r.errors_5xx, 1);
+  assert.equal(r.partial_window, true);              // oldest entry is only 10 min back
+  assert.deepEqual(summarizeAccessLog('', now), {
+    window_seconds: 3600, requests: 0, errors_5xx: 0, by_error_status: {}, partial_window: false,
+  });
+});
+
+test('caddyAccessLogPath matches the merged config builder, wildcards sanitized', () => {
+  assert.equal(caddyAccessLogPath('web.example.com'), '/var/log/caddy/web.example.com.log');
+  assert.equal(caddyAccessLogPath('*.example.com'), '/var/log/caddy/_wildcard_.example.com.log');
+});
+
+// The two policy JSONs are vendored from the component spec, and the spec's
+// usage notes call them the enforcement source of truth. This guard makes the
+// keep-in-sync comments mechanical: edit one copy without the other and the
+// suite says so.
+test('drift guard: lib/mcp-policy matches the mcp-lxc-sites-upgrades component spec', () => {
+  const componentDoc = JSON.parse(readFileSync(
+    new URL('../../../../docs/features/examples/mcp-lxc-sites-upgrades.component.json', import.meta.url), 'utf8',
+  ));
+  for (const name of ['lxc-command-allowlist.json', 'lxc-config-allowlist.json']) {
+    const vendored = JSON.parse(readFileSync(new URL(`../lib/mcp-policy/${name}`, import.meta.url), 'utf8'));
+    const specFile = componentDoc.files.find((f) => f.path === `spec/mcp-upgrades/policy/${name}`);
+    assert.ok(specFile, `component spec no longer carries policy/${name}`);
+    assert.deepEqual(vendored, JSON.parse(specFile.content),
+      `${name} drifted between lib/mcp-policy/ and the component spec — update BOTH (the spec is the design record, lib/mcp-policy is what the server enforces)`);
+  }
+});

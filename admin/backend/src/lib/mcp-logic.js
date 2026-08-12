@@ -142,8 +142,13 @@ export function zipChecksumError(buf, declared) {
 export const UPLOAD_CHUNK_MAX_BYTES = 4 * 1024 * 1024;
 
 export function normalizeChunkSeq(seq) {
-  const n = Number(seq);
-  return Number.isInteger(n) && n >= 0 ? n : null;
+  // Only a number or a digit string counts: Number()'s coercion quirks would
+  // otherwise read '' (and [] / true) as chunk 0 and silently misorder.
+  if (typeof seq !== 'number' && typeof seq !== 'string') return null;
+  const s = String(seq).trim();
+  if (!/^\d+$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : null;
 }
 
 export function decodeChunkBase64(s, cap = UPLOAD_CHUNK_MAX_BYTES) {
@@ -228,11 +233,27 @@ function argvHasPrefix(argv, prefix) {
 // `curl -sS -o /tmp/x` slip past the ["curl","-o"] entry by reordering
 // flags — and curl's output flags are denied precisely because writing
 // fetched bytes to disk is arbitrary code delivery.
+//
+// A deny token that is a single short option (`-o`) additionally matches the
+// clustered and attached spellings (`-sSo`, `-o/tmp/x`, `-fsSLo`) — anything
+// else lets the exact same flag through under a different byte sequence. A
+// long-option deny token (`--output`) also matches the joined `--output=/x`
+// form. Deny-side over-matching is the safe direction: a false positive costs
+// a retry with separated flags, a false negative is arbitrary file delivery.
+function tokenMatchesDenyToken(tok, denyTok) {
+  if (tok === denyTok) return true;
+  if (denyTok.startsWith('--')) return tok.startsWith(`${denyTok}=`);
+  if (/^-[A-Za-z]$/.test(denyTok) && /^-[A-Za-z]/.test(tok) && !tok.startsWith('--')) {
+    return tok.slice(1).includes(denyTok[1]);
+  }
+  return false;
+}
+
 function argvMatchesDeny(argv, prefix) {
   if (argvHasPrefix(argv, prefix)) return true;
   if (!Array.isArray(prefix) || prefix.length < 2) return false;
   if (argv[0] !== prefix[0]) return false;
-  return prefix.slice(1).every((tok) => argv.includes(tok));
+  return prefix.slice(1).every((tok) => argv.some((a) => tokenMatchesDenyToken(a, tok)));
 }
 
 const LXC_SAFE_ARG = /^[A-Za-z0-9._/@:=+-]+$/;

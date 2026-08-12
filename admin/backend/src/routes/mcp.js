@@ -1237,9 +1237,15 @@ async function toolCreateLxcContainer(args, auth) {
   // Image download can dominate first-launch time.
   const r = await runHostCapture('incus', argv, { timeoutMs: 300000 });
   if (r.status !== 0) {
-    // Best-effort cleanup of a half-created instance, same as the UI route.
-    await runHostCapture('incus', ['delete', incusName, '--force'], { timeoutMs: 60000 }).catch(() => {});
-    const why = r.timedOut ? 'timed out after 300s (slow image download?)' : (r.stderr || '').trim().slice(-400) || 'unknown error';
+    // Best-effort cleanup of a half-created instance, same as the UI route —
+    // but NEVER when the launch failed because the name is in use: that
+    // instance belongs to someone else (a create that raced this one), and
+    // "cleaning it up" would force-delete a live container we did not make.
+    const stderrTail = (r.stderr || '').trim();
+    if (!/already exists|already in use/i.test(stderrTail)) {
+      await runHostCapture('incus', ['delete', incusName, '--force'], { timeoutMs: 60000 }).catch(() => {});
+    }
+    const why = r.timedOut ? 'timed out after 300s (slow image download?)' : stderrTail.slice(-400) || 'unknown error';
     return toolResult(`Launch failed: ${why}`, { isError: true });
   }
 
@@ -1485,8 +1491,11 @@ async function toolCreateStaticSite(args, auth) {
   try {
     await mkdir(dataDir, { recursive: true });
     if (!existsSync(join(dataDir, 'index.html'))) {
+      // The name is caller-supplied text landing in a served HTML page —
+      // escape it so a name like "<script>…" is content, not markup.
+      const escName = siteName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       await writeFile(join(dataDir, 'index.html'),
-        `<!doctype html>\n<html><head><meta charset="utf-8"><title>${siteName}</title></head>\n<body><h1>${siteName}</h1><p>Deployed by ProxyPilot — replace this page via the static-site tools.</p></body></html>\n`);
+        `<!doctype html>\n<html><head><meta charset="utf-8"><title>${escName}</title></head>\n<body><h1>${escName}</h1><p>Deployed by ProxyPilot — replace this page via the static-site tools.</p></body></html>\n`);
     }
   } catch (err) {
     return toolResult(`Could not create the docroot: ${err?.message || err}`, { isError: true });

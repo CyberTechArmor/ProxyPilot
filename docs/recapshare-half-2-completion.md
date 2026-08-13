@@ -133,6 +133,54 @@ Decision recorded in the sync architecture doc.
 
 Final state: 1397 tests green, deployed after each batch.
 
+## Second follow-up batch (operator reports, 2026-08-13)
+
+Diagnosed from the real artefacts first (`npm run diag:capture-import`
+dumps the latest capture rows, unzips the stored package, and ffprobes the
+newest audio masters):
+
+1. **Tab audio silent again — the batch-1 "fix" was the regression.**
+   Measured: both tab-audio masters at −91.0 dB mean AND max — pure digital
+   silence. Root cause: `RoutedAudioRecorder` recorded the WebAudio GRAPH's
+   output, and Chrome keeps a gesture-less page's AudioContext `suspended`
+   with `resume()` returning a promise that stays PENDING forever in a
+   background tab — so the suspended graph rendered silence and the "graph
+   will not run" guard never fired. Fixed by inverting the design:
+   **recorded bytes never depend on an AudioContext** — every kind records
+   its RAW track again (`TrackRecorder`), and a separate
+   `startTabAudioPump` graph handles the two side jobs: loopback
+   (source → speakers, tab audio only) with aggressive resume retries
+   (immediate + visibilitychange/focus/pointerdown/keydown + 2s interval),
+   and an AnalyserNode silence diagnosis that pushes session WARNINGS
+   ("blocked graph — recording unaffected", "track is producing pure
+   silence — check Share tab audio") instead of ever touching the bytes.
+   7 tests pin the new contract, including Chrome's pending-promise
+   behaviour.
+
+2. **Display capture said "nothing to import."** The stored 0.5.2
+   display-mode package genuinely contained no video, no screenshots and
+   zero events (`omitted: true`, `deliveryMode: client-sync`) — the
+   eligibility gate threw its truly-empty error at a package whose media
+   was DELIBERATELY left out pending separate delivery. Now such a package
+   imports its session track (so footage joins by session id when it
+   lands), and `describeImport` says exactly what happened — "no footage
+   was inside this package", the extension's own session warnings verbatim,
+   and where to get the video (extension's Download video). The missing
+   screenshots/steps for display captures are an extension-side export gap
+   (its review page detected steps that never entered the package) —
+   reported to the operator, not papered over.
+
+3. **"Unable to create a new project from the extension."** The v0.5.0
+   `POST /api/captures/projects` endpoint creates a server-only
+   `editor_projects` row, but the receiver's `projectExists` checked local
+   IndexedDB only → `DESTINATION_FORBIDDEN` ("The selected project is not
+   accessible here") for every project born in the Send-to dropdown. Now
+   local-first, then the owner-scoped server list (`/api/projects?mine=1`),
+   materializing a minimal local Project on match so the capture lands
+   somewhere visible on Home.
+
+Final state: 1400 tests green, deployed.
+
 ## Operator action needed
 
 **Hard-reload the app** (take the "Update now" banner) — the service worker

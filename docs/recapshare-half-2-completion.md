@@ -181,6 +181,40 @@ newest audio masters):
 
 Final state: 1400 tests green, deployed.
 
+## Third follow-up batch (operator: "nothing was fixed", 2026-08-13)
+
+Evidence first: the diag showed NO new capture artefacts since the previous
+deploy — the silent tab-audio masters are the same two pre-fix files. The
+operator's re-tests ran on the OLD bundle. Root causes, from reading the
+uploaded extension 0.5.2 source next to the app:
+
+1. **Stale receiver tabs recorded with old code.** The extension reuses (or
+   freshly opens) `/app/capture/receiver`, which the service worker serves
+   from the old bundle until "Update now" is taken. The receiver's
+   stale-build self-heal polled at 60s — by the first tick the recording had
+   started and the reload is (correctly) refused while busy, so a whole
+   deploy could stay invisible to captures. Fixed: the check now also runs
+   IMMEDIATELY at receiver install, before the first probe can arrive.
+
+2. **Bridge-delivered media vanished into a ghost project.** For
+   Screen/window captures the extension hands footage to the app over the
+   local bridge and files it under the Send-to project — which, when created
+   from the extension ("Create Test"), existed only on the server. Media
+   stamped with a project id that has no local Project row is listed
+   NOWHERE (not the platform library, not any project pane), so a fully
+   successful, byte-verified handoff looked like nothing arrived — while
+   the extension truthfully said "already sent". Fixed: shared
+   `ensureLocalProject` (localProjects.ts, tested) — the bridge host
+   materializes the destination before filing, and when the destination is
+   unreachable it files in the platform library and says so. Visible
+   somewhere always beats filed nowhere. The direct receiver uses the same
+   module (previously an inline copy).
+
+The operator's "lost" clips were never lost: they are in IndexedDB under
+the now-materialized Create Test project.
+
+Final state: 1404 tests green, deployed.
+
 ## Operator action needed
 
 **Hard-reload the app** (take the "Update now" banner) — the service worker

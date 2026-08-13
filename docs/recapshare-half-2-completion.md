@@ -96,7 +96,48 @@ Decision recorded in the sync architecture doc.
   whether it is preview or export. Task 4's pull + the undecodable-master
   handling is where the real fix now lands.
 
+## Same-day follow-up batch (operator request, 2026-08-13)
+
+1. **Storage quota reworked** — the fixed 50 GB default is gone; the default
+   is NO LIMIT. Admins set a global cap and/or per-account overrides from
+   the admin console's Users area (new Storage column + global control;
+   migration 0129). Enforcement at `/api/masters/finish` only when a cap
+   resolves, refusal names both numbers.
+2. **Capture extension v0.5.0 APIs** — `POST /api/captures/projects` (create
+   a project from the Send-to dropdown; 400 for validation, never
+   404/405/501; appears in targets immediately) and
+   `GET /api/captures/:id/video-status` + a tokenized, same-origin, ranged
+   `GET /api/captures/:id/stream` (30-min HMAC token, no auth header, plays
+   in a bare `<video>`). The app registers a finalized direct capture's
+   video hash (`video-ref`, migration 0130) and backs the bytes up as a
+   master — `available` flips true when the upload lands, honest at every
+   moment before that.
+3. **UI** — "On the platform" → "Synced to the Cloud", owner-scoped for
+   every role (`GET /api/projects?mine=1`; admins see their own projects on
+   Home, the console keeps the full list); AI-generated media cards wear an
+   "AI · ≈$" badge — narrations get an estimated cost from published TTS
+   rates (never $0.00 when unknown; tested).
+4. **Silent tab-audio fix** — audited against the five-point checklist.
+   Items 1/3/4 were already correct (explicit audio constraint, no muxing +
+   opus-first ladders, permission-gated mic with honest warnings). Item 2
+   was the bug: tab/mic audio recorded RAW off the capture track, and the
+   loopback context never called resume(). New `RoutedAudioRecorder`: one
+   WebAudio graph per audio track — source → speakers (tab audio only,
+   never the mic) and source → MediaStreamDestination → MediaRecorder —
+   with `resume()` on start and a LOUD failure (finalize-partial, with
+   reason) when the graph stays suspended instead of recording silence.
+   Unit tests pin all four behaviours; the in-app recorder's mix graph got
+   the same resume() guard. Item 5 (real-device acceptance: non-flat
+   waveform, audible playback, tab stays audible, fresh-tab worst case)
+   needs the operator's hands — it cannot be verified from this container.
+
+Final state: 1397 tests green, deployed after each batch.
+
 ## Operator action needed
 
 **Hard-reload the app** (take the "Update now" banner) — the service worker
-holds the old bundle until then, and none of this half is visible before it.
+holds the old bundle until then, and none of this is visible before it.
+Then please run the direct-capture acceptance check (item 5 above): a
+current-tab capture of a page playing audio, Mic on, speaking — the tab
+audio clip must show a real waveform and play audibly, and repeat once in a
+freshly loaded app tab that has received no clicks.

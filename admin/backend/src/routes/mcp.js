@@ -29,7 +29,7 @@ import os from 'node:os';
 import { getDb, logAudit } from '../db.js';
 import { requireAdmin } from '../middleware/auth.js';
 import {
-  MCP_PROTOCOL_VERSION, MCP_KNOWN_VERSIONS, MCP_SERVER_INFO, MCP_TOOLS,
+  MCP_PROTOCOL_VERSION, MCP_KNOWN_VERSIONS, MCP_SERVER_INFO, MCP_SERVER_INSTRUCTIONS, MCP_TOOLS,
   rpcResult, rpcError, toolResult,
   RPC_PARSE_ERROR, RPC_INVALID_REQUEST, RPC_METHOD_NOT_FOUND, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR,
   mintMcpToken, hashMcpToken, tokenFromRequest,
@@ -52,6 +52,14 @@ import {
   validSearchPattern, validPathspec, normalizeMaxResults, parseGitGrepOutput,
   validGitRef, normalizeGitLogLimit, GIT_LOG_FORMAT, parseGitLogOutput,
   parseGitStatusPorcelain, capPatch, normalizeBuildLogLimit, buildLogFromEvents,
+  PATCH_INLINE_MAX_BYTES, PATCH_MAX_BYTES, parseUnifiedDiffPaths, parseApplyNumstat,
+  parseGitApplyFailure, stripApplyNoise, normalizeExpectedShaMap, patchPreconditionError,
+  applyPatchScript, patchScriptBlock, parseBeforeBlock, parseAfterBlock, buildPatchFileReport,
+  BATCH_READ_MAX_FILES, normalizeBatchReadBudget, normalizeBatchReadRequest,
+  batchReadScript, parseBatchReadOutput,
+  normalizeContextLines, normalizeSearchByteBudget, parseGitGrepContext, parseGitGrepFileList,
+  PROJECT_MAP_MAX_FILES_DEFAULT, PROJECT_MAP_MAX_FILES_CAP, PROJECT_MAP_SYMBOLS_PER_FILE,
+  PROJECT_MAP_SYMBOL_PATTERN, buildProjectMap, parseLineCounts,
 } from '../lib/mcp-logic.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
@@ -60,7 +68,7 @@ import {
 import { stageZipUpload, getZipUpload, discardZipUpload } from '../lib/zip-staging.js';
 import {
   checkContainerConflicts, readContainerStartup, applyTarToContainer,
-  setupStartupScript, writeTarFromZip, runHostCapture, runInContainer,
+  setupStartupScript, writeTarFromZip, runHostCapture, runInContainer, CAPTURE_CAP,
   STARTUP_UNIT_NAME,
 } from '../lib/lxc-zip.js';
 import { resolveMock2Gate } from '../mock2/gating.js';
@@ -2802,18 +2810,61 @@ async function toolSearchProjectFiles(args) {
     if (!glob) return toolResult('glob must be a relative git pathspec, e.g. "src/**/*.ts" (no leading / and no ..)', { isError: true });
   }
   const maxResults = normalizeMaxResults(args.max_results);
+  const contextLines = normalizeContextLines(args.context_lines);
+  const filesOnly = args.files_with_matches === true;
+  const maxBytes = normalizeSearchByteBudget(args.max_bytes);
 
   const argv = ['exec', projectContainerName(m, project), '--',
-    'git', '-C', M2_APP_DIR, 'grep', '-n', '-I', '-E'];
+    'git', '-C', M2_APP_DIR, 'grep', '-I', '-E'];
+  // -l answers "where does this live" and has no lines to number; everything
+  // else is the line-oriented form the tool has always returned.
+  if (filesOnly) argv.push('-l');
+  else {
+    argv.push('-n');
+    if (contextLines > 0) argv.push(`-C${contextLines}`);
+  }
   if (args.ignore_case === true) argv.push('-i');
   argv.push('-e', pattern);
   if (glob) argv.push('--', glob);
 
-  const r = await runHostCapture('incus', argv, { timeoutMs: 60000 });
+  const r = await runHostCapture('incus', argv, {
+    timeoutMs: 60000,
+    // Context multiplies the output; never SHRINK the capture below what the
+    // tool used to allow, or a plain search would start losing hits.
+    maxCapture: Math.max(CAPTURE_CAP, maxBytes + 64 * 1024),
+  });
   // git grep exits 1 for "no matches" — a result, not a failure.
   if (r.status !== 0 && r.status !== 1) {
     return toolResult(`Search failed: ${(r.stderr || '').trim().slice(-300) || 'is the container running?'}`, { isError: true });
   }
+
+  if (filesOnly) {
+    const list = parseGitGrepFileList(r.stdout, maxResults);
+    return toolResult({
+      pattern, glob, mode: 'files_with_matches',
+      file_count: list.files.length, truncated: list.truncated || r.stdoutTruncated === true,
+      files: list.files,
+      next: list.files.length
+        ? 'Open them together with read_project_files, or re-run with context_lines to see the hits in place.'
+        : 'No file contains this pattern.',
+    });
+  }
+
+  if (contextLines > 0) {
+    const ctx = parseGitGrepContext(r.stdout, { maxResults, maxBytes });
+    return toolResult({
+      pattern, glob, context_lines: contextLines,
+      match_count: ctx.match_count, block_count: ctx.blocks.length,
+      truncated: ctx.truncated || r.stdoutTruncated === true,
+      bytes: ctx.bytes,
+      blocks: ctx.blocks,
+      next: ctx.match_count
+        ? 'Each block is the code around a hit — only read the file if this was not enough. To change what you found, send the whole edit as one apply_project_patch.'
+        : 'No matches. Check the pattern (it is an extended regex, not a glob) or widen the pathspec.',
+      ...(ctx.truncated ? { truncation_note: `Stopped at ${ctx.match_count} match(es) / ${ctx.bytes} bytes — narrow the pattern or lower context_lines to see the rest.` } : {}),
+    });
+  }
+
   const matches = parseGitGrepOutput(r.stdout, maxResults);
   const totalLines = r.stdout ? r.stdout.split('\n').filter(Boolean).length : 0;
   return toolResult({
@@ -2821,9 +2872,339 @@ async function toolSearchProjectFiles(args) {
     truncated: totalLines > matches.length,
     matches,
     next: matches.length
-      ? 'Read the surrounding code with read_project_file using offset/limit around a line_number.'
+      ? 'Re-run with context_lines (5-10) to get the surrounding code in this same call instead of paying a read per hit.'
       : 'No matches. Check the pattern (it is an extended regex, not a glob) or widen the pathspec.',
   });
+}
+
+// read_project_files — the batch read.
+//
+// Same guarantees as read_project_file, N files at a time: the container
+// hashes each file before it sends it, and the hash is checked here, so a
+// short transfer is an error against THAT file rather than a plausible-looking
+// prefix of it. Nothing is ever partially returned; a file that does not fit
+// is named in `dropped` with its size.
+async function toolReadProjectFiles(args) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const req = normalizeBatchReadRequest(args.files);
+  if (req.error) return toolResult(req.error, { isError: true });
+  const budget = normalizeBatchReadBudget(args.max_total_bytes);
+  const nonce = randomBytes(6).toString('hex');
+  const triples = req.items.flatMap((it) => [it.path, it.start, it.end]);
+
+  const r = await runHostCapture(
+    'incus', ['exec', projectContainerName(m, project), '--', 'sh', '-c', batchReadScript(),
+      'sh', nonce, String(LXC_FILE_READ_CAP), String(budget), ...triples],
+    // Headroom over the budget for the frame markers and the header lines.
+    { timeoutMs: 120000, maxCapture: budget + 128 * 1024 },
+  );
+  if (r.status !== 0) {
+    return toolResult(`Could not read the files — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+  const parsed = parseBatchReadOutput(r.stdout, nonce);
+
+  const files = [];
+  const dropped = [];
+  for (let i = 0; i < parsed.files.length; i += 1) {
+    const rec = parsed.files[i];
+    // The script emits one record per requested entry, in order — including
+    // the ones it skipped — so position is the join, not the path (the same
+    // path may legitimately appear twice with different ranges).
+    const item = req.items[i] || req.items.find((it) => it.path === rec.path);
+    if (rec.status === 'missing') {
+      dropped.push({ path: rec.path, reason: 'not a file in the checkout — check the path with project_map or list_project_files' });
+      continue;
+    }
+    if (rec.status === 'toobig') {
+      dropped.push({
+        path: rec.path, size_bytes: rec.size_bytes, total_lines: rec.total_lines,
+        reason: `over the ${Math.floor(LXC_FILE_READ_CAP / 1024)} KB per-file read cap — read a line range with offset/limit instead of the whole file`,
+      });
+      continue;
+    }
+    if (rec.status === 'budget') {
+      dropped.push({
+        path: rec.path, size_bytes: rec.size_bytes, total_lines: rec.total_lines,
+        reason: `would not fit in the ${budget}-byte response budget — request it in a second call, raise max_total_bytes, or narrow it with offset/limit`,
+      });
+      continue;
+    }
+    if (rec.status !== 'ok' || rec.content === undefined) {
+      dropped.push({ path: rec.path, reason: 'the response stream ended before this file was complete — nothing of it is included; retry the call' });
+      continue;
+    }
+    const body = Buffer.from(rec.content, 'utf8');
+    if (body.includes(0)) {
+      dropped.push({ path: rec.path, reason: 'looks binary — these tools read text files only' });
+      continue;
+    }
+    const ranged = Boolean(item && item.range.ranged);
+    if (!ranged) {
+      // Same lock as the single-file read: what arrived must BE the file.
+      const short = readIntegrityError(rec.path, rec.size_bytes, rec.sha256, body);
+      if (short) { dropped.push({ path: rec.path, reason: short }); continue; }
+    }
+    const out = {
+      path: rec.path,
+      size_bytes: rec.size_bytes,
+      total_lines: rec.total_lines,
+      sha256: rec.sha256,
+      content: rec.content,
+    };
+    if (ranged) {
+      out.offset = item.range.start;
+      out.limit = item.range.count;
+      out.returned_lines = rec.content === '' ? 0 : rec.content.replace(/\n$/, '').split('\n').length;
+      if (item.range.start > rec.total_lines && rec.total_lines > 0) {
+        out.note = `offset ${item.range.start} is past the end of the file (${rec.total_lines} lines).`;
+      }
+    }
+    files.push(out);
+  }
+  // Anything the stream never got to. Silence here would read as "that file
+  // does not exist", which is a different and much worse answer.
+  for (let i = parsed.files.length; i < req.items.length; i += 1) {
+    dropped.push({
+      path: req.items[i].path,
+      reason: parsed.complete
+        ? 'not reported by the container — retry the call'
+        : 'the response stopped before this file was reached (budget or capture limit) — request it in a second call',
+    });
+  }
+
+  return toolResult({
+    requested: req.items.length,
+    returned: files.length,
+    budget_bytes: budget,
+    used_bytes: parsed.used_bytes,
+    files,
+    ...(dropped.length ? { dropped } : {}),
+    ...(dropped.length ? { dropped_note: `${dropped.length} of ${req.items.length} requested file(s) are NOT in this result — see dropped. None of them is partially included.` } : {}),
+  });
+}
+
+// project_map — the orientation call.
+//
+// Three cheap git questions in one exec: what is tracked, how long is each
+// file, and which lines look like a top-level declaration. Joining them here
+// rather than in the caller is the point — an agent that has to ask three
+// times has paid three round trips to learn what one answer holds.
+async function toolProjectMap(args) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  let sub = '';
+  if (args.subdir != null && String(args.subdir).trim() !== '') {
+    sub = validPathspec(args.subdir);
+    if (!sub) return toolResult('subdir must be a relative directory or pathspec inside the app (no .., no leading /)', { isError: true });
+  }
+  const maxFiles = Number.isFinite(Number(args.max_files)) && Number(args.max_files) >= 1
+    ? Math.min(Math.floor(Number(args.max_files)), PROJECT_MAP_MAX_FILES_CAP)
+    : PROJECT_MAP_MAX_FILES_DEFAULT;
+  const maxSymbols = Number.isFinite(Number(args.max_symbols_per_file)) && Number(args.max_symbols_per_file) >= 1
+    ? Math.min(Math.floor(Number(args.max_symbols_per_file)), 200)
+    : PROJECT_MAP_SYMBOLS_PER_FILE;
+
+  // The pattern rides as $1 and the pathspec as "$@" — never interpolated
+  // into the script text, same convention as every other tool here.
+  const script = 'P="$1"; shift; cd /srv/app || { echo PP_NO_CHECKOUT >&2; exit 68; }; '
+    + 'echo PP_FILES_BEGIN; git ls-files -- "$@" | head -n 5000; echo PP_FILES_END; '
+    // `git grep -c -e ""` counts the lines of every tracked TEXT file in one
+    // pass: no `wc` total row to disambiguate, binaries skipped for free.
+    + 'echo PP_COUNTS_BEGIN; git grep -c -I -e "" -- "$@" 2>/dev/null | head -n 5000; echo PP_COUNTS_END; '
+    + 'echo PP_SYMS_BEGIN; git grep -n -I -E -e "$P" -- "$@" 2>/dev/null | head -n 20000; echo PP_SYMS_END';
+  const argv = ['exec', projectContainerName(m, project), '--', 'sh', '-c', script, 'sh', PROJECT_MAP_SYMBOL_PATTERN];
+  if (sub) argv.push(sub);
+  const r = await runHostCapture('incus', argv, { timeoutMs: 120000, maxCapture: 4 * 1024 * 1024 });
+  if (r.status !== 0) {
+    return toolResult(`Could not map the project — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
+  }
+
+  const fileList = patchScriptBlock(r.stdout, 'FILES');
+  const counts = parseLineCounts(patchScriptBlock(r.stdout, 'COUNTS').join('\n'));
+  const symbolHits = parseGitGrepOutput(patchScriptBlock(r.stdout, 'SYMS').join('\n'), 20000);
+  const map = buildProjectMap({ files: fileList, counts, symbolHits, maxFiles, maxSymbolsPerFile: maxSymbols });
+
+  return toolResult({
+    subdir: sub || null,
+    ...map,
+    total_lines: [...counts.values()].reduce((a, b) => a + b, 0),
+    approximate: true,
+    note: 'Symbols are extracted with a regular expression, not parsed — treat a missing symbol as "search for it", not as "it does not exist". Line counts cover tracked text files only.',
+    next: 'Search inside the interesting files with search_project_files (set context_lines), then open what is left with a single read_project_files call.',
+  });
+}
+
+// apply_project_patch — a whole change in one call.
+//
+// The failure mode that matters is not "the patch was rejected", it is "half
+// the patch landed and the tool said something vague". So the contract is
+// binary: the checkout is what it was, or it is the patch applied. See
+// applyPatchScript for how — a staged-and-hashed diff, a clean-tree
+// precondition scoped to the touched paths, and a rollback on every failure
+// path including the --3way "applied with conflicts" one, which git scores as
+// a SUCCESS in --check mode.
+async function toolApplyProjectPatch(args, auth) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  // A dry run is read-only, but a build is rewriting the very files it would
+  // report on, so its answer would be stale before it was read.
+  const guard = liveBuildGuard(m, project);
+  if (guard) return toolResult(guard, { isError: true });
+
+  let patchText;
+  try {
+    patchText = await patchTextFromArgs(args);
+  } catch (err) {
+    return toolResult(err.message, { isError: true });
+  }
+  const parsed = parseUnifiedDiffPaths(patchText);
+  if (parsed.error) return toolResult(parsed.error, { isError: true });
+  const pre = normalizeExpectedShaMap(args.expected_sha256);
+  if (pre.error) return toolResult(pre.error, { isError: true });
+
+  const dryRun = args.dry_run === true;
+  const bytes = Buffer.byteLength(patchText, 'utf8');
+  const incusName = projectContainerName(m, project);
+  // The preconditions travel INTO the container as "<sha> <path>" lines: they
+  // have to be checked before the apply, and only the far side can do that.
+  const preList = pre.map ? [...pre.map].map(([path, sha]) => `${sha} ${path}`).join('\n') : '';
+  const r = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', applyPatchScript(),
+      'sh', String(bytes), sha256Hex(Buffer.from(patchText, 'utf8')), dryRun ? 'check' : 'apply',
+      preList, ...parsed.paths],
+    { input: patchText, timeoutMs: 120000, maxCapture: 512 * 1024 },
+  );
+  const detail = stripApplyNoise(r.stderr);
+
+  if (r.status === 68) {
+    return toolResult(`The project container has no checkout at ${M2_APP_DIR} — nothing was applied.`, { isError: true });
+  }
+  if (r.status === 65) {
+    return toolResult(
+      `The patch did not arrive intact (${detail.slice(-200)}) — nothing was applied. Re-send it, and pass sha256 so a corrupt transfer is caught before git sees it.`,
+      { isError: true },
+    );
+  }
+  if (r.status === 64) {
+    return toolResult({
+      applied: false,
+      checkout_unchanged: true,
+      error: 'The checkout has uncommitted changes on the files this patch touches, so it was refused rather than applied on top of work that is not committed.',
+      dirty: detail.split('\n').filter((l) => l && !l.startsWith('PP_')).slice(0, 20),
+      next: 'Commit or discard that work first (project_git_diff shows it), then re-send the patch.',
+    }, { isError: true });
+  }
+  if (r.status === 69) {
+    const m = /PP_PRECONDITION (\S+) (\S+)/.exec(r.stderr || '');
+    const observed = new Map(m ? [[m[1], m[2] === 'ABSENT' ? null : m[2]]] : []);
+    return toolResult({
+      applied: false,
+      checkout_unchanged: true,
+      error: patchPreconditionError(pre.map, observed)
+        || 'One of the expected_sha256 preconditions no longer holds. Nothing was applied.',
+    }, { isError: true });
+  }
+  if (r.status === 66 || r.status === 67) {
+    const failure = parseGitApplyFailure(r.stderr);
+    return toolResult({
+      applied: false,
+      checkout_unchanged: true,
+      error: failure.conflicted
+        ? 'The patch could only be applied with conflicts, which would have left conflict markers in the files — it was refused and rolled back instead.'
+        : 'The patch does not apply to this checkout.',
+      rejected: failure.rejects.length ? failure.rejects : [{ reason: detail.slice(-300) || 'git apply rejected the patch' }],
+      files: parsed.files.map((f) => ({ path: f.path, change: f.change })),
+      next: 'Re-read the affected files (read_project_files returns their sha256) and rebuild the diff against what is actually there. Nothing was written — the checkout is byte-identical.',
+    }, { isError: true });
+  }
+  if (r.status !== 0) {
+    return toolResult(`Patch failed: ${detail.slice(-300) || 'is the container running?'} — nothing was applied.`, { isError: true });
+  }
+
+  const before = parseBeforeBlock(patchScriptBlock(r.stdout, 'BEFORE'));
+  const numstat = parseApplyNumstat(patchScriptBlock(r.stdout, 'NUMSTAT').join('\n'));
+  // Belt and braces. The container already refused a stale patch (exit 69,
+  // above) before it applied anything; this re-checks the same thing against
+  // the hashes it reported, so a future change to the script that dropped the
+  // far-side check would surface here rather than silently stop guarding.
+  const staleness = patchPreconditionError(pre.map, before);
+  if (staleness) {
+    return toolResult({ applied: false, checkout_unchanged: dryRun, error: staleness }, { isError: true });
+  }
+
+  if (dryRun) {
+    return toolResult({
+      applied: false,
+      dry_run: true,
+      would_apply: true,
+      files_changed: parsed.files.length,
+      files: buildPatchFileReport(parsed.files, numstat, null),
+      lines_added: numstat.reduce((a, x) => a + (x.lines_added || 0), 0),
+      lines_removed: numstat.reduce((a, x) => a + (x.lines_removed || 0), 0),
+      message: 'The patch applies cleanly. Nothing was written and nothing was committed.',
+      next: 'Re-send the same patch with dry_run omitted (or false) to apply and commit it.',
+    });
+  }
+
+  const after = parseAfterBlock(patchScriptBlock(r.stdout, 'AFTER'));
+  const files = buildPatchFileReport(parsed.files, numstat, after);
+  const git = await commitProjectPaths(incusName, parsed.paths, args.commit_message || `chat patch: ${parsed.files.length} file(s)`);
+  logAudit(auth.created_by, 'MOCK2_FILE_PATCHED', 'mock2_project', project.id, {
+    via: 'mcp', paths: parsed.paths, files: parsed.files.length, patch_bytes: bytes,
+  }, null);
+  return toolResult({
+    applied: true,
+    files_changed: files.length,
+    lines_added: numstat.reduce((a, x) => a + (x.lines_added || 0), 0),
+    lines_removed: numstat.reduce((a, x) => a + (x.lines_removed || 0), 0),
+    files,
+    verified: true,
+    ...git,
+    next: 'Verify with run_project_command (e.g. "npm run gates"), then apply with redeploy_project.',
+  });
+}
+
+/** The patch bytes: inline, or from an upload ticket for a large diff. The
+ *  ticket path is the same one the zip tools use, so a client that already
+ *  knows how to deliver bytes to ProxyPilot needs no new mechanism. */
+async function patchTextFromArgs(args) {
+  let buf;
+  if (args.ticket != null && String(args.ticket).trim() !== '') {
+    sweepTickets();
+    if (!looksLikeUploadTicket(args.ticket)) throw new Error('Invalid upload ticket');
+    const rec = uploadTickets.get(String(args.ticket));
+    if (!rec || !rec.filePath) {
+      throw new Error('Upload ticket unknown, expired, or no bytes were uploaded to it yet (chunked uploads must be sealed with finish_upload first)');
+    }
+    uploadTickets.delete(String(args.ticket));
+    buf = await readFile(rec.filePath);
+    await rm(rec.filePath, { force: true }).catch(() => {});
+  } else if (args.patch != null && String(args.patch) !== '') {
+    buf = Buffer.from(String(args.patch), 'utf8');
+    if (buf.length > PATCH_INLINE_MAX_BYTES) {
+      throw new Error(`Inline patches are limited to ${Math.floor(PATCH_INLINE_MAX_BYTES / 1024)} KB — deliver a bigger diff with create_upload_ticket and pass the ticket instead`);
+    }
+  } else {
+    throw new Error('Provide the unified diff as `patch`, or upload it and pass its `ticket`.');
+  }
+  if (buf.length === 0) throw new Error('The patch is empty — there is nothing to apply.');
+  if (buf.length > PATCH_MAX_BYTES) {
+    throw new Error(`Patches are limited to ${Math.floor(PATCH_MAX_BYTES / (1024 * 1024))} MB (got ${buf.length} bytes) — split the change.`);
+  }
+  if (args.sha256 != null && String(args.sha256).trim() !== '') {
+    const want = validSha256(args.sha256);
+    if (!want) throw new Error('sha256 must be the 64-character hex SHA-256 of the patch bytes');
+    const got = sha256Hex(buf);
+    if (got !== want) {
+      throw new Error(`The patch bytes do not match the declared sha256 — the transfer corrupted them (declared ${want}, got ${got} over ${buf.length} bytes). Nothing was applied; re-send the diff.`);
+    }
+  }
+  if (buf.includes(0)) throw new Error('The patch contains NUL bytes — a unified diff is text. Nothing was applied.');
+  return buf.toString('utf8');
 }
 
 async function toolDeleteProjectFile(args, auth) {
@@ -3280,6 +3661,9 @@ const TOOL_HANDLERS = {
   append_project_file: toolAppendProjectFile,
   insert_project_file_at_line: toolInsertProjectFileAtLine,
   search_project_files: toolSearchProjectFiles,
+  read_project_files: toolReadProjectFiles,
+  project_map: toolProjectMap,
+  apply_project_patch: toolApplyProjectPatch,
   delete_project_file: toolDeleteProjectFile,
   move_project_file: toolMoveProjectFile,
   run_project_command: toolRunProjectCommand,
@@ -3308,19 +3692,7 @@ async function handleRpc(message, auth, req) {
         protocolVersion: version,
         capabilities: { tools: {} },
         serverInfo: MCP_SERVER_INFO,
-        instructions: [
-          'ProxyPilot infrastructure control. Zip deploys are two-phase: inspect first, show the user',
-          'any files that would be replaced, and only pass confirm_overwrite after they approve —',
-          'replaced files are kept as <name>.old. For zips over ~2 MB use create_upload_ticket and PUT',
-          'the bytes to its upload_url instead of inlining base64; if you cannot reach the upload URL,',
-          'send the bytes over MCP with append_upload_chunk + finish_upload on the same ticket.',
-          'Pass sha256 to the inspect tools so transport corruption fails loudly.',
-          'File writes verify themselves: every read returns the file sha256, every write is staged,',
-          'hashed and read back, and a write that does not verify is refused with the previous file',
-          'left intact. Pass the sha256 you read back as expected_sha256 when something else may be',
-          'editing the same file. To ADD to a large file use append_project_file or',
-          'insert_project_file_at_line — neither moves the existing content, so neither can truncate it.',
-        ].join(' '),
+        instructions: MCP_SERVER_INSTRUCTIONS,
       });
     }
     case 'ping':

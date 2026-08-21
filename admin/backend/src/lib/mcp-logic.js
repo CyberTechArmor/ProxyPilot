@@ -26,6 +26,43 @@ export const MCP_KNOWN_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18'];
 
 export const MCP_SERVER_INFO = { name: 'proxypilot', version: '1.0.0' };
 
+// The `instructions` string handed to every client at initialize. It lives
+// here rather than inline in the router so it is one thing, testable, and
+// impossible to drift from the catalog it describes.
+//
+// The first paragraph is the expensive one. An MCP call is a full model turn
+// — 15-30 seconds whether it moved a megabyte or a line — so an agent that
+// orients one file at a time spends its whole budget before it writes
+// anything. The tools that fix that only help if the client reaches for them
+// FIRST, which is why the working order is stated as an order and not as a
+// list of capabilities.
+export const MCP_SERVER_INSTRUCTIONS = [
+  'ProxyPilot infrastructure control.',
+  'WORKING ON PROJECT FILES — follow this order; it is the difference between six calls and sixty.',
+  'Every tool call is a full round trip, so the count of calls is what costs you, not the bytes.',
+  '(1) ORIENT with project_map — tracked files, line counts and each file\'s exported symbols in one call.',
+  'Do not rebuild that picture with list_project_files plus a read per file.',
+  '(2) SEARCH with search_project_files and context_lines set (5-10 is usually right):',
+  'the surrounding code comes back with the hit, so do NOT follow a search with reads',
+  'unless the context genuinely was not enough. files_with_matches answers "does this exist" for almost nothing.',
+  '(3) READ what is left with ONE read_project_files call listing every file you need — not one call per file.',
+  '(4) WRITE with apply_project_patch: send the whole change as a unified diff, one call, one commit.',
+  'A sequence of edit_project_file calls for a multi-file change is the slow path; use the single-file tools',
+  'only for a genuinely single-file, single-place edit. dry_run: true checks a patch without touching anything.',
+  '(5) VERIFY with run_project_command (e.g. "npm run gates"), then apply with redeploy_project.',
+  'Zip deploys are two-phase: inspect first, show the user any files that would be replaced, and only pass',
+  'confirm_overwrite after they approve — replaced files are kept as <name>.old. For zips over ~2 MB use',
+  'create_upload_ticket and PUT the bytes to its upload_url instead of inlining base64; if you cannot reach',
+  'the upload URL, send the bytes over MCP with append_upload_chunk + finish_upload on the same ticket.',
+  'Pass sha256 to the inspect tools so transport corruption fails loudly.',
+  'File writes verify themselves: every read returns the file sha256, every write is staged, hashed and read',
+  'back, and a write that does not verify is refused with the previous file left intact. A patch that does not',
+  'apply cleanly leaves the checkout byte-identical. Pass the sha256 you read back as expected_sha256 (a',
+  '{ path: sha } map on apply_project_patch) when something else may be editing the same file.',
+  'To ADD to a large file use append_project_file or insert_project_file_at_line — neither moves the existing',
+  'content, so neither can truncate it.',
+].join(' ');
+
 // ---- JSON-RPC helpers ----
 
 export function rpcResult(id, result) {
@@ -1206,7 +1243,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'list_project_files',
-    description: 'List the tracked source files of an AI-dev project (git ls-files in its app checkout). Use this to find the files to read/edit with read_project_file / write_project_file. Optionally limit to a subdirectory.',
+    description: 'List the tracked source files of an AI-dev project (git ls-files in its app checkout) — paths only. To ORIENT in a repo you do not know, call project_map instead: the same listing plus line counts and each file\'s exported symbols, so you can choose what to open without reading anything first. Optionally limit to a subdirectory.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1219,7 +1256,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'read_project_file',
-    description: 'Read one text file from an AI-dev project\'s app checkout (path relative to the app root, e.g. src/server/routes.ts). Returns up to 512 KB; refuses binary files. Pass offset/limit to read a LINE RANGE instead of the whole file — pair it with search_project_files (which gives you path + line_number) to read just the part you need. total_lines always reports the file\'s real length, whether or not a range was requested. Also returns sha256, the file\'s hash as computed inside the container — pass it back as expected_sha256 on a later edit/write to be sure nothing changed underneath you. A read that arrives short of the file\'s real size is reported as an error rather than returned as if it were the file.',
+    description: 'Read one text file from an AI-dev project\'s app checkout (path relative to the app root, e.g. src/server/routes.ts). Returns up to 512 KB; refuses binary files. Pass offset/limit to read a LINE RANGE instead of the whole file — pair it with search_project_files (which gives you path + line_number) to read just the part you need. total_lines always reports the file\'s real length, whether or not a range was requested. Reading more than one file? Use read_project_files instead — same semantics, several files, one call. Also returns sha256, the file\'s hash as computed inside the container — pass it back as expected_sha256 on a later edit/write to be sure nothing changed underneath you. A read that arrives short of the file\'s real size is reported as an error rather than returned as if it were the file.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1234,7 +1271,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'search_project_files',
-    description: 'Search an AI-dev project\'s tracked files for a regular expression (git grep -E) and return path + line_number + the matching line. Use this instead of reading whole files to find something — then read_project_file with offset/limit for the surrounding code. Binary files are skipped; the search covers tracked files only.',
+    description: 'Search an AI-dev project\'s tracked files for a regular expression (git grep -E). SET context_lines — with it the result carries the surrounding code, which is the whole point: a search that returns bare line numbers costs a further read_project_file call per hit, and each of those is a full round trip. Default to context_lines 5-10 and only read a file afterwards if the context genuinely was not enough. Pass files_with_matches: true for a cheap "does this symbol exist anywhere" probe (paths only). Binary files are skipped; the search covers tracked files only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1243,14 +1280,81 @@ export const MCP_TOOLS = [
         glob: { type: 'string', description: 'Optional git pathspec to limit the search, e.g. "src/**/*.ts" or "apps/freshcut".' },
         max_results: { type: 'number', description: 'Cap on returned matches (default 200, max 1000).' },
         ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
+        context_lines: { type: 'number', description: 'Lines of context around each hit (git grep -C), 0-20, default 0. With this set the result is `blocks` — contiguous runs of { path, start_line, lines[], match_lines[] } — instead of bare matching lines, and you usually will not need to read the file at all.' },
+        files_with_matches: { type: 'boolean', description: 'Return only the paths that contain a match (git grep -l), not the lines. The cheapest way to ask whether something exists and where it lives.' },
+        max_bytes: { type: 'number', description: 'Byte budget for the returned text (default 128 KB, max 512 KB), so a wide context_lines cannot blow up the response. Anything cut is reported as truncated.' },
       },
       required: ['project_id', 'pattern'],
       additionalProperties: false,
     },
   },
   {
+    name: 'project_map',
+    description: 'One-call orientation in an AI-dev project: every tracked file with its line count, plus the top-level symbols each one declares (exported functions, classes, consts, types, default exports, and route registrations). Start here when you do not already know where the code lives — it replaces the list-then-read-a-bit-of-each loop that otherwise costs a round trip per file. The symbol index is REGEX-EXTRACTED and approximate: it is a map for deciding what to open, not a compiler, so treat a missing symbol as "look again", not as "it is not there". Narrow it with subdir on a big repo.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        subdir: { type: 'string', description: 'Relative directory to map, e.g. src/server. Omit for the whole checkout.' },
+        max_files: { type: 'number', description: 'Cap on files in the map (default 400, max 2000). Anything omitted is counted and reported, never silently dropped.' },
+        max_symbols_per_file: { type: 'number', description: 'Cap on symbols listed per file (default 40, max 200).' },
+      },
+      required: ['project_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'read_project_files',
+    description: 'Read SEVERAL text files (or line ranges) from an AI-dev project in ONE call — same semantics, same 512 KB per-file cap and same sha256 as read_project_file, up to 50 files at a time. Use this rather than a sequence of read_project_file calls whenever you already know which files you need: the round trip, not the bytes, is what costs you. Nothing is ever partially returned — a file over the per-file cap, or one that does not fit in what is left of the response budget, comes back in `dropped` with its size and the reason, so a short answer never reads like a complete one.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        files: {
+          type: 'array',
+          description: 'Up to 50 entries. Each is { path, offset?, limit? } with the same meaning as read_project_file — omit offset/limit for the whole file. The same path may appear more than once with different ranges.',
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: 'File path relative to the app root.' },
+              offset: { type: 'number', description: 'First line to return, 1-based (default 1).' },
+              limit: { type: 'number', description: 'How many lines to return from offset (default: the rest of the file).' },
+            },
+            required: ['path'],
+            additionalProperties: false,
+          },
+        },
+        max_total_bytes: { type: 'number', description: 'Response budget across all files (default 512 KB, max 1 MB). Files are read in the order given; anything that will not fit is listed in `dropped` rather than truncated.' },
+      },
+      required: ['project_id', 'files'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'apply_project_patch',
+    description: 'Apply a unified diff to an AI-dev project\'s checkout and commit it — ONE call for a change of any shape or size, instead of the 2-3 calls per file a sequence of edit_project_file/write_project_file costs. This is the right tool for any multi-file change, and for a multi-hunk change to a single file. Send exactly what `git diff` produces (paths as a/… and b/…); adds, deletes and renames are all supported. Applied with `git apply --3way --index`, ALL OR NOTHING: if any hunk does not fit, nothing is written, the checkout is left byte-identical, and the result names the rejected hunks and why. Set dry_run: true to check the same thing without touching anything. Pass expected_sha256 as a { path: sha } map to refuse the patch if any of those files changed since you read them. Refused while a build is running.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        patch: { type: 'string', description: 'The unified diff, verbatim (up to 1 MB inline). For anything larger use create_upload_ticket and pass the ticket instead.' },
+        ticket: { type: 'string', description: 'Upload ticket carrying the diff bytes, as an alternative to inline patch for large diffs — create_upload_ticket, then PUT the bytes to its upload_url (or append_upload_chunk + finish_upload), then pass the ticket here.' },
+        sha256: { type: 'string', description: 'Optional but recommended: hex SHA-256 of the patch bytes. Verified before git sees the diff, so a corrupted transfer fails as a checksum mismatch rather than as a confusing rejected hunk.' },
+        dry_run: { type: 'boolean', description: 'Report what the patch WOULD change (per-file paths, change types and line counts) and whether it applies cleanly, without writing anything. Nothing is committed and no file is touched.' },
+        commit_message: { type: 'string', description: 'Git commit message (a sensible default is used if omitted).' },
+        expected_sha256: {
+          type: 'object',
+          description: 'Optional precondition map, path → the SHA-256 that file had when you read it (read_project_file / read_project_files return it). The whole patch is refused if any of them has changed since — the guard against two agents editing the same files at once.',
+          additionalProperties: { type: 'string' },
+        },
+      },
+      required: ['project_id'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'edit_project_file',
-    description: 'Replace an exact string in one file of an AI-dev project and commit the change — the surgical alternative to write_project_file, which rewrites the whole file. Fails if old_string is absent, or if it matches a different number of times than expected (default: exactly once), so an edit can never land somewhere you did not mean. The result is also checked against arithmetic — a string replacement has exactly one possible byte length, and a write that misses it is refused with the file left untouched — then staged, hashed and read back before it counts as done. Refused while a build is running.',
+    description: 'Replace an exact string in ONE file of an AI-dev project and commit the change — the surgical alternative to write_project_file, which rewrites the whole file. Changing several files, or several places at once? Send a unified diff to apply_project_patch instead: one call, one commit, and it is refused as a whole rather than landing half a change. Fails if old_string is absent, or if it matches a different number of times than expected (default: exactly once), so an edit can never land somewhere you did not mean. The result is also checked against arithmetic — a string replacement has exactly one possible byte length, and a write that misses it is refused with the file left untouched — then staged, hashed and read back before it counts as done. Refused while a build is running.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2119,4 +2223,751 @@ export function startupCandidates(entries) {
     .map((e) => e.path)
     .slice(0, 100);
   return { scripts, defaultScript: scripts.includes('startup.sh') ? 'startup.sh' : null };
+}
+
+// ---- apply_project_patch ----
+//
+// The round-trip problem, stated plainly: a five-file change through
+// edit_project_file is ten to fifteen MCP calls, and every one of them is a
+// full model turn. A unified diff is the format the model already produces —
+// applying it in ONE call collapses that to one turn, and `git apply` is a
+// far better judge of whether the edit still fits the file than a string
+// match is.
+//
+// The write discipline does not relax for it. The patch itself is delivered
+// over stdin, staged to a temp file, byte-counted and hashed before git is
+// allowed near it; the checkout is refused if the touched paths are dirty;
+// and a failed apply is rolled back to the exact bytes that were there
+// before. See applyPatchScript.
+
+/** Inline `patch` cap. Bigger diffs ride an upload ticket — the MCP body
+ *  limit is 8 MB and a JSON string burns it fast on escaping. */
+export const PATCH_INLINE_MAX_BYTES = 1024 * 1024;
+/** Absolute cap on a patch from any source. */
+export const PATCH_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The paths a unified diff touches, read off its headers.
+ *
+ * Needed before anything runs: to check the expected_sha256 preconditions, to
+ * scope the dirty-tree guard and the rollback, and to commit exactly the paths
+ * the patch claimed. Reading them here rather than trusting git's output also
+ * means a diff that tries to escape the app root (../, /etc/passwd, .git/)
+ * is refused before it is ever handed to `git apply`.
+ *
+ * Both sides of a rename are returned, because both move.
+ */
+export function parseUnifiedDiffPaths(patch) {
+  const text = String(patch ?? '');
+  if (!text.trim()) return { error: 'patch is empty — there is nothing to apply.' };
+  const files = [];
+  let cur = null;
+  const push = () => { if (cur) files.push(cur); cur = null; };
+  // Strip a/ and b/ prefixes; /dev/null marks the absent side of an add or
+  // a delete. Quoted paths ("a/with space.ts") are unquoted by git only when
+  // the name needs it, so handle both.
+  const strip = (p, prefix) => {
+    let s = String(p ?? '').trim();
+    if (s === '/dev/null') return null;
+    if (s.startsWith('"') && s.endsWith('"') && s.length > 1) {
+      try { s = JSON.parse(s); } catch { return undefined; }
+    }
+    // Diffs made with -pN other than 1 are not something we can guess at.
+    if (prefix && (s.startsWith('a/') || s.startsWith('b/'))) s = s.slice(2);
+    return s;
+  };
+  for (const raw of text.split('\n')) {
+    if (raw.startsWith('diff --git ')) {
+      push();
+      cur = { change: 'modified', from: null, to: null };
+      // `diff --git a/x b/y` — split on " b/" is ambiguous for paths
+      // containing that string, so the ---/+++ lines below are authoritative
+      // and this only opens the record.
+      continue;
+    }
+    if (!cur) {
+      // A bare diff with no `diff --git` header (git diff --no-prefix, or a
+      // hand-written patch) still starts a file at its --- line.
+      if (raw.startsWith('--- ')) cur = { change: 'modified', from: null, to: null };
+      else continue;
+    }
+    if (raw.startsWith('new file mode')) cur.change = 'added';
+    else if (raw.startsWith('deleted file mode')) cur.change = 'deleted';
+    else if (raw.startsWith('rename from ')) { cur.change = 'renamed'; cur.from = strip(raw.slice(12), false); }
+    else if (raw.startsWith('rename to ')) { cur.change = 'renamed'; cur.to = strip(raw.slice(10), false); }
+    else if (raw.startsWith('--- ') && cur.from === null) cur.from = strip(raw.slice(4).split('\t')[0], true);
+    else if (raw.startsWith('+++ ') && cur.to === null) cur.to = strip(raw.slice(4).split('\t')[0], true);
+  }
+  push();
+  if (!files.length) {
+    return { error: 'No file headers found in the patch — it does not look like a unified diff (expected "diff --git a/… b/…" or "--- a/… / +++ b/…" lines).' };
+  }
+
+  const paths = [];
+  const out = [];
+  for (const f of files) {
+    if (f.from === undefined || f.to === undefined) {
+      return { error: 'A file header in the patch has an unreadable quoted path — re-generate the diff with `git diff` and send it verbatim.' };
+    }
+    if (f.from === null && f.to === null) {
+      return { error: 'A file header in the patch names /dev/null on both sides — the diff is malformed.' };
+    }
+    if (f.change === 'modified') {
+      if (f.from === null) f.change = 'added';
+      else if (f.to === null) f.change = 'deleted';
+      else if (f.from !== f.to) f.change = 'renamed';
+    }
+    for (const p of [f.from, f.to]) {
+      if (p === null) continue;
+      const rel = validProjectFilePath(p);
+      if (!rel) {
+        return { error: `The patch touches ${p}, which is not a path inside the app checkout. Patches may only change files under the app root (no absolute paths, no .., nothing under .git).` };
+      }
+      if (!paths.includes(rel)) paths.push(rel);
+    }
+    out.push({
+      path: validProjectFilePath(f.to ?? f.from),
+      ...(f.change === 'renamed' && f.from ? { from: validProjectFilePath(f.from) } : {}),
+      change: f.change,
+    });
+  }
+  return { files: out, paths };
+}
+
+/**
+ * `git apply --numstat` output → per-file line counts.
+ *
+ * Format is `added<TAB>removed<TAB>path`, with `-` for both on a binary file.
+ * A rename is reported with git's brace notation (`src/{old => new}.ts`), which
+ * is for humans; the path we report comes from the diff headers instead, so
+ * this only has to key off something stable. That is the LAST tab-field,
+ * normalized through the same brace expansion git uses.
+ */
+export function parseApplyNumstat(stdout) {
+  const rows = [];
+  for (const raw of String(stdout ?? '').split('\n')) {
+    if (!raw.trim()) continue;
+    const parts = raw.split('\t');
+    if (parts.length < 3) continue;
+    const [added, removed] = parts;
+    const pathField = parts.slice(2).join('\t').trim();
+    const binary = added === '-' && removed === '-';
+    rows.push({
+      path: expandRenameBraces(pathField),
+      lines_added: binary ? null : (Number(added) || 0),
+      lines_removed: binary ? null : (Number(removed) || 0),
+      binary,
+    });
+  }
+  return rows;
+}
+
+/** `src/{a => b}.ts` → `src/b.ts`; `a => b` → `b`. git's own rename shorthand,
+ *  resolved to the destination so the row can be matched to a file. */
+export function expandRenameBraces(p) {
+  const s = String(p ?? '').trim();
+  const brace = /^(.*)\{(.*) => (.*)\}(.*)$/.exec(s);
+  if (brace) return `${brace[1]}${brace[3]}${brace[4]}`.replace(/\/\//g, '/');
+  const plain = /^(.*) => (.*)$/.exec(s);
+  if (plain) return plain[2].trim();
+  return s;
+}
+
+/**
+ * Turn `git apply`'s stderr into per-hunk rejection detail.
+ *
+ * "failed" on its own is useless to a model: it cannot tell whether the file
+ * moved, the context drifted by two lines, or the file was never there. git
+ * says all of that, one line at a time, and this keeps the structure.
+ *
+ * `conflicted` is the case that matters most and reads least like a failure:
+ * with --3way git can APPLY a patch "with conflicts", leaving markers in the
+ * file and (in --check mode) still exiting 0. Treated as a rejection here.
+ */
+export function parseGitApplyFailure(stderr) {
+  const rejects = [];
+  let conflicted = false;
+  const conflictPaths = [];
+  for (const raw of String(stderr ?? '').split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    let m;
+    if ((m = /^Applied patch to '(.+)' with conflicts\.$/.exec(line))) {
+      conflicted = true;
+      conflictPaths.push(m[1]);
+      rejects.push({
+        path: m[1],
+        reason: 'applied with conflicts — the file has changed since the diff was made, and a 3-way merge could not resolve it cleanly',
+      });
+    } else if ((m = /^error: patch failed: (.+):(\d+)$/.exec(line))) {
+      rejects.push({ path: m[1], line: Number(m[2]), reason: 'hunk context does not match the file at this line' });
+    } else if ((m = /^error: (.+): patch does not apply$/.exec(line))) {
+      rejects.push({ path: m[1], reason: 'patch does not apply' });
+    } else if ((m = /^error: (.+): No such file or directory$/.exec(line))) {
+      rejects.push({ path: m[1], reason: 'file is not in the checkout' });
+    } else if ((m = /^error: (.+): already exists in working directory$/.exec(line))) {
+      rejects.push({ path: m[1], reason: 'the patch adds this file but it is already there' });
+    } else if ((m = /^error: (.+): does not exist in index$/.exec(line))) {
+      rejects.push({ path: m[1], reason: 'file is not tracked by git in this checkout' });
+    } else if (/^error: corrupt patch at line (\d+)$/.test(line) || /^fatal: /.test(line)) {
+      rejects.push({ reason: line.replace(/^(error|fatal): /, '') });
+    }
+  }
+  return { rejects, conflicted, conflict_paths: conflictPaths };
+}
+
+/** Noise git prints on a SUCCESSFUL 3-way attempt when the pre-image blob is
+ *  not in the repo. It is not an error and must not be shown as one. */
+export function stripApplyNoise(stderr) {
+  return String(stderr ?? '')
+    .split('\n')
+    .filter((l) => !/^error: repository lacks the necessary blob/.test(l.trim()))
+    .filter((l) => l.trim() !== 'Falling back to direct application...')
+    .join('\n')
+    .trim();
+}
+
+/** Validate the expected_sha256 precondition map (path → sha). Mirrors the
+ *  single-file guard on edit_project_file, one entry per file. */
+export function normalizeExpectedShaMap(v) {
+  if (v === undefined || v === null) return { map: null };
+  if (typeof v !== 'object' || Array.isArray(v)) {
+    return { error: 'expected_sha256 must be an object mapping each path to the SHA-256 you read for it, e.g. { "src/a.ts": "ab12…" }.' };
+  }
+  const map = new Map();
+  for (const [k, val] of Object.entries(v)) {
+    const rel = validProjectFilePath(k);
+    if (!rel) return { error: `expected_sha256 key ${k} is not a path relative to the app root.` };
+    const sha = validSha256(val);
+    if (!sha) return { error: `expected_sha256["${k}"] must be the 64-character hex SHA-256 read_project_file returned for it.` };
+    map.set(rel, sha);
+  }
+  return { map: map.size ? map : null };
+}
+
+/**
+ * Null when every declared precondition holds; a caller-facing message when
+ * one does not. `actual` maps path → sha, with null for a path that is absent
+ * from the checkout.
+ */
+export function patchPreconditionError(map, actual) {
+  if (!map) return null;
+  for (const [path, want] of map) {
+    const got = actual.get(path);
+    if (got === undefined || got === null) {
+      return `expected_sha256 names ${path}, but that file is not in the checkout. Nothing was applied — re-read the files and rebuild the patch.`;
+    }
+    if (got === NO_SHA) {
+      return `The container cannot hash ${path}, so the expected_sha256 precondition cannot be verified. Nothing was applied.`;
+    }
+    if (got !== want) {
+      return `${path} has changed since you read it (expected ${want}, found ${got}). Nothing was applied — someone else, or another agent, edited it. Re-read the file and rebuild your patch on the current content.`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Apply a unified diff, atomically, inside the project container.
+ *
+ * The shape of the guarantee: the checkout is either exactly what it was
+ * before the call, or exactly the patch applied — never half of one. Three
+ * things make that true.
+ *
+ *   1. The patch is staged and verified like any other write. Byte count and
+ *      SHA-256 are checked on the temp file before git reads it, so a
+ *      truncated transfer is a refusal rather than a half-diff that happens
+ *      to parse.
+ *   2. The touched paths must be clean. `git apply` is atomic for the paths
+ *      it owns, but --3way can leave conflict markers behind; scoping the
+ *      rollback to paths with no uncommitted work means restoring them is
+ *      exact (checkout from HEAD, or delete if HEAD never had them) and
+ *      cannot destroy anyone's in-flight edit.
+ *   3. Every failure path rolls back before it returns. Including the one
+ *      that looks like success: `--check --3way` exits 0 on a patch it could
+ *      only apply WITH CONFLICTS, so the caller has to read stderr, not just
+ *      the exit code — hence the markers below.
+ *
+ * Positional: $1 expected patch bytes, $2 expected patch sha (or empty to
+ * skip), $3 mode ("check" for a dry run, "apply"), $4 the expected_sha256
+ * preconditions as "<sha> <path>" lines (or empty), then the touched paths.
+ * The patch itself arrives on stdin.
+ *
+ * The preconditions are checked HERE rather than in the caller, because a
+ * caller-side check on hashes the script reported can only ever run after the
+ * apply — which would make expected_sha256 a report that a collision happened
+ * rather than the guard that stops one.
+ *
+ * Exit codes: 64 dirty checkout, 65 patch transfer bad, 66 patch does not
+ * apply (nothing touched), 67 apply failed and was rolled back,
+ * 69 an expected_sha256 precondition failed.
+ */
+export function applyPatchScript() {
+  return 'want_bytes="$1"; want_sha="$2"; mode="$3"; pre="$4"; shift 4; '
+    + PP_SHA_FN
+    + 'cd /srv/app || { echo PP_NO_CHECKOUT >&2; exit 68; }; '
+    + 'd="/tmp/pp-patch.$$"; rm -rf -- "$d"; mkdir -p "$d" || { echo PP_NO_TMP >&2; exit 68; }; '
+    + 'trap \'rm -rf -- "$d"\' EXIT INT TERM; '
+    + 'tmp="$d/p.diff"; ef="$d/err"; '
+    + 'cat > "$tmp"; '
+    // 1. the patch is a write like any other: counted, then hashed.
+    + 'got_bytes=$(wc -c < "$tmp" | tr -d " "); '
+    + 'if [ "$got_bytes" != "$want_bytes" ]; then echo "PP_PATCH_BYTES $got_bytes" >&2; exit 65; fi; '
+    + 'if [ -n "$want_sha" ]; then got_sha=$(pp_sha "$tmp"); '
+    + `if [ "$got_sha" != ${NO_SHA} ] && [ "$got_sha" != "$want_sha" ]; then echo "PP_PATCH_SHA $got_sha" >&2; exit 65; fi; fi; `
+    // 2. no uncommitted work on the paths we are about to own. This is what
+    //    makes the rollback below exact rather than best-effort.
+    + 'dirty=$(git status --porcelain -- "$@" 2>/dev/null); '
+    + 'if [ -n "$dirty" ]; then echo PP_DIRTY >&2; echo "$dirty" >&2; exit 64; fi; '
+    // 2b. the expected_sha256 preconditions, before anything is applied. Read
+    //     from a file rather than a pipe so the loop runs in THIS shell and
+    //     its exit is the script's exit.
+    + 'if [ -n "$pre" ]; then printf "%s\\n" "$pre" > "$d/pre"; '
+    +   'while IFS=" " read -r want_p_sha want_p_path; do '
+    +     '[ -n "$want_p_path" ] || continue; '
+    +     'if [ -f "$want_p_path" ]; then cur=$(pp_sha "$want_p_path"); else cur=ABSENT; fi; '
+    +     'if [ "$cur" != "$want_p_sha" ]; then echo "PP_PRECONDITION $want_p_path $cur" >&2; exit 69; fi; '
+    +   'done < "$d/pre"; fi; '
+    // 3. the before-state: hash every touched path, so the preconditions are
+    //    checked against what is actually on disk.
+    + 'echo PP_BEFORE_BEGIN; '
+    + 'for p in "$@"; do if [ -f "$p" ]; then echo "$(pp_sha "$p") $p"; else echo "ABSENT $p"; fi; done; '
+    + 'echo PP_BEFORE_END; '
+    // 4. numstat: what the patch claims it will do. Reads the diff only.
+    + 'echo PP_NUMSTAT_BEGIN; git apply --numstat -- "$tmp" 2>/dev/null || true; echo PP_NUMSTAT_END; '
+    // 5. --check: does it fit? stderr carries the per-hunk detail — and the
+    //    "with conflicts" line, which exits 0 while meaning no.
+    + 'if ! git apply --check --3way -- "$tmp" 2>"$ef"; then '
+    +   'cat "$ef" >&2; echo PP_CHECK_FAILED >&2; exit 66; fi; '
+    + 'cat "$ef" >&2; '
+    + 'if grep -q "with conflicts" "$ef" 2>/dev/null; then echo PP_CHECK_FAILED >&2; exit 66; fi; '
+    + 'if [ "$mode" = "check" ]; then echo PP_DRYRUN_OK; exit 0; fi; '
+    // 6. the apply. On any failure, put the touched paths back exactly:
+    //    they were clean, so HEAD is their previous content, and a path HEAD
+    //    never had is one the patch created.
+    + 'if ! git apply --3way --index -- "$tmp" 2>"$ef"; then '
+    +   'cat "$ef" >&2; '
+    +   'git reset -q -- "$@" 2>/dev/null || true; '
+    +   'for p in "$@"; do if git cat-file -e "HEAD:$p" 2>/dev/null; then '
+    +     'git checkout -f -q HEAD -- "$p" 2>/dev/null || true; '
+    +   'else git rm -q --cached --ignore-unmatch -- "$p" 2>/dev/null || true; rm -f -- "$p"; fi; done; '
+    +   'echo PP_APPLY_FAILED >&2; exit 67; fi; '
+    + 'cat "$ef" >&2; '
+    // 7. the after-state, read back off the files themselves rather than
+    //    taken from git's account of them.
+    + 'echo PP_AFTER_BEGIN; '
+    + 'for p in "$@"; do if [ -f "$p" ]; then '
+    +   'echo "$(pp_sha "$p") $(wc -c < "$p" | tr -d " ") $(wc -l < "$p" | tr -d " ") $p"; '
+    +   'else echo "ABSENT 0 0 $p"; fi; done; '
+    + 'echo PP_AFTER_END; '
+    + 'echo PP_OK';
+}
+
+/** Pull one `BEGIN…END` block out of the patch script's stdout. */
+export function patchScriptBlock(stdout, name) {
+  const text = String(stdout ?? '');
+  const begin = `PP_${name}_BEGIN`;
+  const end = `PP_${name}_END`;
+  const i = text.indexOf(begin);
+  if (i === -1) return [];
+  const j = text.indexOf(end, i);
+  return text.slice(i + begin.length, j === -1 ? undefined : j).split('\n').filter((l) => l.trim() !== '');
+}
+
+/** `<sha|ABSENT> <path>` → Map(path → sha | null). */
+export function parseBeforeBlock(lines) {
+  const map = new Map();
+  for (const line of lines) {
+    const sp = line.indexOf(' ');
+    if (sp === -1) continue;
+    const sha = line.slice(0, sp);
+    map.set(line.slice(sp + 1), sha === 'ABSENT' ? null : sha);
+  }
+  return map;
+}
+
+/** `<sha|ABSENT> <bytes> <newlines> <path>` → Map(path → {sha256,bytes,lines}). */
+export function parseAfterBlock(lines) {
+  const map = new Map();
+  for (const line of lines) {
+    const m = /^(\S+) (\d+) (\d+) ([\s\S]*)$/.exec(line);
+    if (!m) continue;
+    const bytes = Number(m[2]);
+    map.set(m[4], m[1] === 'ABSENT' ? null : {
+      sha256: m[1] === NO_SHA ? null : m[1],
+      size_bytes: bytes,
+      // wc -l counts newlines; an unterminated last line is still a line.
+      total_lines: bytes === 0 ? 0 : Math.max(Number(m[3]) || 0, 1),
+    });
+  }
+  return map;
+}
+
+/**
+ * Merge what the diff SAID it would do (parsed headers), what git said it
+ * would do (numstat) and what is actually on disk now (the after-block) into
+ * one row per file.
+ *
+ * The change type comes from the headers and is corrected against reality: a
+ * patch header claiming "modified" for a path that is now absent is reported
+ * as a delete, because the file is the fact and the header is the claim.
+ */
+export function buildPatchFileReport(files, numstat, after) {
+  const stats = new Map(numstat.map((r) => [r.path, r]));
+  return files.map((f) => {
+    const st = stats.get(f.path) || null;
+    const now = after ? after.get(f.path) : undefined;
+    let change = f.change;
+    if (after) {
+      if (now === null || now === undefined) change = 'deleted';
+      else if (change === 'deleted') change = 'modified';
+    }
+    return {
+      path: f.path,
+      ...(f.from ? { from: f.from } : {}),
+      change,
+      lines_added: st ? st.lines_added : null,
+      lines_removed: st ? st.lines_removed : null,
+      ...(st && st.binary ? { binary: true } : {}),
+      ...(now ? { size_bytes: now.size_bytes, total_lines: now.total_lines, sha256: now.sha256 } : {}),
+      ...(after && !now ? { sha256: null } : {}),
+    };
+  });
+}
+
+// ---- read_project_files: the batch read ----
+//
+// One file per call is one model turn per file. Orientation is where agents
+// spend their wall-clock, and it is almost never one file — it is the route,
+// the handler, the schema and the test. This reads them together.
+//
+// What it does NOT do is return part of a file. read_project_file errors
+// rather than handing back a short read, because a short read that looks
+// normal is how five files got truncated in the field. A batch has a second
+// way to lie — quietly dropping files off the end of a budget — so anything
+// that does not fit comes back in `dropped`, named, with the reason.
+
+export const BATCH_READ_MAX_FILES = 50;
+export const BATCH_READ_BUDGET_DEFAULT = 512 * 1024;
+export const BATCH_READ_BUDGET_CAP = 1024 * 1024;
+
+export function normalizeBatchReadBudget(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 1) return BATCH_READ_BUDGET_DEFAULT;
+  return Math.min(Math.floor(v), BATCH_READ_BUDGET_CAP);
+}
+
+/** Validate the `files` array into container-ready triples. Every entry is
+ *  checked before ANY of them is read, so a typo in the last path does not
+ *  cost a round trip that half-worked. */
+export function normalizeBatchReadRequest(files) {
+  if (!Array.isArray(files) || files.length === 0) {
+    return { error: 'files must be a non-empty array of { path, offset?, limit? } objects.' };
+  }
+  if (files.length > BATCH_READ_MAX_FILES) {
+    return { error: `files is capped at ${BATCH_READ_MAX_FILES} entries per call (got ${files.length}) — split the batch.` };
+  }
+  const items = [];
+  for (const entry of files) {
+    const spec = typeof entry === 'string' ? { path: entry } : entry;
+    if (!spec || typeof spec !== 'object') {
+      return { error: 'each entry of files must be an object like { "path": "src/a.ts" } (offset and limit optional).' };
+    }
+    const rel = validProjectFilePath(spec.path);
+    if (!rel) {
+      return { error: `${spec.path == null ? '(missing path)' : spec.path} is not a file path relative to the app root, e.g. src/server/routes.ts` };
+    }
+    const range = normalizeReadRange(spec.offset, spec.limit);
+    items.push({
+      path: rel,
+      range,
+      start: range.ranged ? String(range.start) : 'all',
+      end: range.ranged ? (range.end === null ? '$' : String(range.end)) : '0',
+    });
+  }
+  return { items };
+}
+
+/**
+ * Read many files in one container round trip.
+ *
+ * Each file is framed by a nonce marker so content — which is arbitrary text,
+ * including text that looks like a marker — cannot be confused with the
+ * protocol. Size, line count and SHA-256 are computed on the far side before
+ * the content is emitted, which is what lets the caller check that what
+ * arrived IS the file rather than a prefix of it.
+ *
+ * A file is emitted whole or not at all: over the per-file cap, or too big for
+ * what is left of the response budget, and it is announced with its size and
+ * skipped. There is deliberately no partial-content path.
+ *
+ * Positional: $1 nonce, $2 per-file cap, $3 total budget, then (path, start,
+ * end) triples — start is "all" for a whole-file read.
+ */
+export function batchReadScript() {
+  return 'n="$1"; cap="$2"; budget="$3"; shift 3; '
+    + PP_SHA_FN
+    + 'cd /srv/app || { echo PP_NO_CHECKOUT >&2; exit 68; }; '
+    + 'd="/tmp/pp-read.$$"; rm -rf -- "$d"; mkdir -p "$d" || exit 68; '
+    + 'trap \'rm -rf -- "$d"\' EXIT INT TERM; '
+    + 'used=0; '
+    + 'while [ $# -gt 2 ]; do '
+    +   'p="$1"; s="$2"; e="$3"; shift 3; '
+    +   'if [ ! -f "$p" ]; then printf "PP_%s_H missing 0 0 - 0 %s\\n" "$n" "$p"; continue; fi; '
+    +   'size=$(wc -c < "$p" | tr -d " "); nl=$(wc -l < "$p" | tr -d " "); sha=$(pp_sha "$p"); '
+    +   'if [ "$s" = "all" ]; then src="$p"; want="$size"; '
+    +   'else sed -n "$s,${e}p" "$p" > "$d/w"; src="$d/w"; want=$(wc -c < "$d/w" | tr -d " "); fi; '
+    +   'if [ "$want" -gt "$cap" ]; then printf "PP_%s_H toobig %s %s %s %s %s\\n" "$n" "$size" "$nl" "$sha" "$want" "$p"; continue; fi; '
+    +   'if [ $((used + want)) -gt "$budget" ]; then printf "PP_%s_H budget %s %s %s %s %s\\n" "$n" "$size" "$nl" "$sha" "$want" "$p"; continue; fi; '
+    +   'used=$((used + want)); '
+    +   'printf "PP_%s_H ok %s %s %s %s %s\\n" "$n" "$size" "$nl" "$sha" "$want" "$p"; '
+    +   'cat "$src"; printf "\\nPP_%s_E\\n" "$n"; '
+    + 'done; '
+    + 'printf "PP_%s_DONE %s\\n" "$n" "$used"';
+}
+
+/**
+ * Parse the framed batch-read stream.
+ *
+ * Header: `PP_<nonce>_H <status> <size> <lines> <sha> <bytes> <path>` — path
+ * last, because a path may contain spaces and nothing else may. Content runs
+ * from the end of that line to the `\nPP_<nonce>_E\n` terminator, and the
+ * newline the terminator carries is the one the script added, so the content
+ * is byte-exact whether or not the file ended with one.
+ *
+ * `complete: false` means the stream stopped mid-flight (a capture cap, a
+ * killed exec) — the caller must treat every file it did not see as dropped
+ * rather than as absent.
+ */
+export function parseBatchReadOutput(stdout, nonce) {
+  const text = String(stdout ?? '');
+  const H = `PP_${nonce}_H `;
+  const E = `\nPP_${nonce}_E\n`;
+  const files = [];
+  let i = text.indexOf(H);
+  while (i !== -1) {
+    const eol = text.indexOf('\n', i);
+    if (eol === -1) break;
+    const m = /^(\S+) (\d+) (\d+) (\S+) (\d+) ([\s\S]*)$/.exec(text.slice(i + H.length, eol));
+    if (!m) { i = text.indexOf(H, eol); continue; }
+    const rec = {
+      status: m[1],
+      size_bytes: Number(m[2]),
+      total_lines: Number(m[3]) === 0 && Number(m[2]) > 0 ? 1 : Number(m[3]),
+      sha256: m[4] === '-' || m[4] === NO_SHA ? null : m[4],
+      returned_bytes: Number(m[5]),
+      path: m[6],
+    };
+    if (rec.status !== 'ok') {
+      files.push(rec);
+      i = text.indexOf(H, eol);
+      continue;
+    }
+    const end = text.indexOf(E, eol);
+    if (end === -1) { rec.status = 'incomplete'; files.push(rec); break; }
+    rec.content = text.slice(eol + 1, end);
+    files.push(rec);
+    i = text.indexOf(H, end + E.length);
+  }
+  const done = new RegExp(`PP_${nonce}_DONE (\\d+)`).exec(text);
+  return { files, complete: Boolean(done), used_bytes: done ? Number(done[1]) : null };
+}
+
+// ---- search_project_files: context lines ----
+//
+// The search → read → read → read chain is the single most common shape in an
+// agent transcript, and every link in it is a full model turn. `git grep -C`
+// answers the follow-up questions in the same call the search was made in.
+
+export const SEARCH_CONTEXT_MAX = 20;
+export const SEARCH_BYTE_BUDGET_DEFAULT = 128 * 1024;
+export const SEARCH_BYTE_BUDGET_CAP = 512 * 1024;
+
+export function normalizeContextLines(n) {
+  if (n === undefined || n === null || n === '') return 0;
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return 0;
+  return Math.min(Math.floor(v), SEARCH_CONTEXT_MAX);
+}
+
+export function normalizeSearchByteBudget(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 1) return SEARCH_BYTE_BUDGET_DEFAULT;
+  return Math.min(Math.floor(v), SEARCH_BYTE_BUDGET_CAP);
+}
+
+/**
+ * Parse `git grep -n -C k` into contiguous blocks.
+ *
+ * git marks a matching line `path:line:text` and a context line
+ * `path-line-text`, and separates non-adjacent runs with a bare `--`. That is
+ * enough to rebuild each run as a block: a path, the line number it starts
+ * at, its lines in order, and which of those lines actually matched.
+ *
+ * Two budgets, both explicit in the result: `max_results` counts MATCHES (not
+ * context lines, which are free riders on someone else's hit), and
+ * `maxBytes` stops a wide -C from turning a 40-hit search into a megabyte.
+ */
+export function parseGitGrepContext(stdout, { maxResults = SEARCH_MAX_RESULTS_DEFAULT, maxBytes = SEARCH_BYTE_BUDGET_DEFAULT } = {}) {
+  const blocks = [];
+  let cur = null;
+  let matchCount = 0;
+  let bytes = 0;
+  let truncated = false;
+  const close = () => { if (cur && cur.lines.length) blocks.push(cur); cur = null; };
+
+  for (const raw of String(stdout ?? '').split('\n')) {
+    if (raw === '') continue;
+    if (raw === '--') { close(); continue; }
+    // path:line:text (a hit) or path-line-text (context). The path is greedy-
+    // free so a path containing a separator resolves at the FIRST one that is
+    // followed by digits and another separator, which is the line number.
+    const m = /^(.*?)([:-])(\d+)\2([\s\S]*)$/.exec(raw);
+    if (!m) continue;
+    const [, path, sep, lineNo, text] = m;
+    const isMatch = sep === ':';
+    const n = Number(lineNo);
+    if (isMatch && matchCount >= maxResults) { truncated = true; close(); break; }
+    const capped = text.slice(0, SEARCH_LINE_CAP);
+    bytes += capped.length + 1;
+    if (bytes > maxBytes) { truncated = true; close(); break; }
+    if (!cur || cur.path !== path || n !== cur.start_line + cur.lines.length) { close(); cur = { path, start_line: n, lines: [], match_lines: [] }; }
+    cur.lines.push(capped);
+    if (isMatch) { cur.match_lines.push(n); matchCount += 1; }
+  }
+  close();
+  return { blocks, match_count: matchCount, bytes, truncated };
+}
+
+/** `git grep -l` prints one path per line — nothing to parse, everything to
+ *  cap. */
+export function parseGitGrepFileList(stdout, maxResults = SEARCH_MAX_RESULTS_DEFAULT) {
+  const all = String(stdout ?? '').split('\n').filter((l) => l !== '');
+  return { files: all.slice(0, maxResults), truncated: all.length > maxResults, total: all.length };
+}
+
+// ---- project_map: one-call orientation ----
+//
+// Approximate BY DESIGN. This is a map for deciding what to open next, not an
+// index: the symbols come out of a regex, so a name inside a template literal
+// can show up and a clever re-export can go missing. That trade is worth one
+// call instead of twenty.
+
+export const PROJECT_MAP_MAX_FILES_DEFAULT = 400;
+export const PROJECT_MAP_MAX_FILES_CAP = 2000;
+export const PROJECT_MAP_SYMBOLS_PER_FILE = 40;
+
+/** The ERE handed to `git grep`. Deliberately generous — a line that reaches
+ *  Node and yields no name is dropped there, which is cheaper than trying to
+ *  be precise in a single POSIX regex across five languages. */
+export const PROJECT_MAP_SYMBOL_PATTERN =
+  '^(export[ \t{*]|exports\\.[A-Za-z_$]|module\\.exports|declare[ \t]|(async[ \t]+)?function[ \t*]'
+  + '|class[ \t]|const[ \t]|let[ \t]|var[ \t]|type[ \t]|interface[ \t]|enum[ \t]|def[ \t]|func[ \t]'
+  + '|struct[ \t]|impl[ \t]|CREATE[ \t]+(TABLE|INDEX|VIEW)[ \t])'
+  + '|^[ \t]*(app|router|api|server|r)\\.(get|post|put|patch|delete|use|all|options|head)[ \t]*\\(';
+
+const SYMBOL_RULES = [
+  [/^export\s+default\s+(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)?/, 'function', true],
+  [/^export\s+default\s+class\s+([A-Za-z_$][\w$]*)?/, 'class', true],
+  [/^export\s+default\b/, 'default', true],
+  [/^export\s+(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/, 'function', true],
+  [/^export\s+class\s+([A-Za-z_$][\w$]*)/, 'class', true],
+  [/^export\s+(?:abstract\s+)?interface\s+([A-Za-z_$][\w$]*)/, 'interface', true],
+  [/^export\s+type\s+([A-Za-z_$][\w$]*)/, 'type', true],
+  [/^export\s+enum\s+([A-Za-z_$][\w$]*)/, 'enum', true],
+  [/^export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)/, 'const', true],
+  [/^export\s*\{\s*([^}]*)\}/, 're-export', true],
+  [/^export\s*\*/, 're-export', true],
+  [/^exports\.([A-Za-z_$][\w$]*)/, 'const', true],
+  [/^module\.exports\b/, 'module.exports', true],
+  [/^(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/, 'function', false],
+  [/^class\s+([A-Za-z_$][\w$]*)/, 'class', false],
+  [/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/, 'const', false],
+  [/^(?:interface|type|enum)\s+([A-Za-z_$][\w$]*)/, 'type', false],
+  [/^def\s+([A-Za-z_][\w]*)/, 'function', false],
+  [/^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][\w]*)/, 'function', false],
+  [/^(?:struct|impl)\s+([A-Za-z_][\w]*)/, 'type', false],
+  [/^CREATE\s+(?:TABLE|INDEX|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?([A-Za-z_][\w]*)/i, 'table', false],
+];
+
+const ROUTE_RE = /^\s*(?:app|router|api|server|r)\.(get|post|put|patch|delete|use|all|options|head)\s*\(\s*['"`]([^'"`]*)['"`]/;
+
+/** One grepped line → { kind, name } or null. Regex-based and honest about
+ *  it: a line that does not resolve to a name is dropped rather than guessed
+ *  at. */
+export function extractSymbol(text) {
+  const line = String(text ?? '').replace(/\s+$/, '');
+  if (!line) return null;
+  const route = ROUTE_RE.exec(line);
+  if (route) return { kind: 'route', name: `${route[1].toUpperCase()} ${route[2]}` };
+  const trimmed = line.replace(/^\s+/, '');
+  for (const [re, kind, exported] of SYMBOL_RULES) {
+    const m = re.exec(trimmed);
+    if (!m) continue;
+    let name = (m[1] || '').trim();
+    if (kind === 're-export') name = name ? name.split(',').map((s) => s.trim()).filter(Boolean).join(', ') : '*';
+    if (!name && kind !== 'default' && kind !== 'module.exports') return { kind, name: '(anonymous)', exported };
+    return { kind, name: name || kind, ...(exported ? { exported: true } : {}) };
+  }
+  return null;
+}
+
+/**
+ * Join the three cheap container answers — the tracked file list, per-file
+ * line counts, and one grep for symbol-shaped lines — into a map.
+ *
+ * Everything that is cut is named: `truncated` for the file list,
+ * `symbols_truncated` for the per-file symbol cap. A map that quietly stops
+ * at 400 files reads as "that is the whole repo", which is worse than no map.
+ */
+export function buildProjectMap({
+  files = [], counts = new Map(), symbolHits = [],
+  maxFiles = PROJECT_MAP_MAX_FILES_DEFAULT,
+  maxSymbolsPerFile = PROJECT_MAP_SYMBOLS_PER_FILE,
+} = {}) {
+  const byPath = new Map();
+  for (const hit of symbolHits) {
+    const sym = extractSymbol(hit.line);
+    if (!sym) continue;
+    const list = byPath.get(hit.path) || [];
+    list.push({ line: hit.line_number, ...sym });
+    byPath.set(hit.path, list);
+  }
+  const shown = files.slice(0, maxFiles);
+  const symbolsTruncated = [];
+  const rows = shown.map((path) => {
+    const all = byPath.get(path) || [];
+    if (all.length > maxSymbolsPerFile) symbolsTruncated.push({ path, shown: maxSymbolsPerFile, total: all.length });
+    const lines = counts.has(path) ? counts.get(path) : null;
+    return {
+      path,
+      lines,
+      ...(lines === null ? { note: 'binary or unreadable — not counted' } : {}),
+      symbols: all.slice(0, maxSymbolsPerFile),
+    };
+  });
+  return {
+    file_count: files.length,
+    files: rows,
+    truncated: files.length > shown.length,
+    ...(files.length > shown.length
+      ? { omitted: files.length - shown.length, omitted_note: `${files.length - shown.length} tracked files are not in this map — narrow it with subdir, or raise max_files.` }
+      : {}),
+    ...(symbolsTruncated.length ? { symbols_truncated: symbolsTruncated } : {}),
+  };
+}
+
+/** `git grep -c -e ''` prints `path:<line count>` for every tracked TEXT file
+ *  — one command, no `wc` total row to disambiguate, binaries skipped. */
+export function parseLineCounts(stdout) {
+  const counts = new Map();
+  for (const raw of String(stdout ?? '').split('\n')) {
+    if (!raw) continue;
+    const i = raw.lastIndexOf(':');
+    if (i === -1) continue;
+    const n = Number(raw.slice(i + 1));
+    if (!Number.isFinite(n)) continue;
+    counts.set(raw.slice(0, i), n);
+  }
+  return counts;
 }

@@ -1183,6 +1183,10 @@ function runScript(script, argv, input) {
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
     child.on('exit', (status) => resolve({ status, out, err }));
+    // A script that refuses BEFORE it reads stdin (a precondition failure, a
+    // missing file) closes the pipe under us; that is the behaviour under
+    // test, not an error, so the EPIPE it races into must not fail the run.
+    child.stdin.on('error', () => {});
     child.stdin.end(input ?? '');
   });
 }
@@ -1387,4 +1391,624 @@ test('readIntegrityError separates a short read from a file that is not UTF-8 te
   const err = readIntegrityError('a.txt', latin1.length, null, decoded);
   assert.match(err, /not valid UTF-8/);
   assert.match(err, /nothing was written/i);
+});
+
+// ---- the round-trip reducers: apply_project_patch, read_project_files,
+//      search context, project_map ----
+//
+// These four exist to collapse the orient → search → read → write loop from
+// dozens of MCP calls into a handful. The tests that matter are the ones that
+// keep them honest while they do it: a patch is all-or-nothing, a batch read
+// never returns part of a file, and every budget that cuts something says so.
+
+import { execFileSync } from 'node:child_process';
+import {
+  MCP_SERVER_INSTRUCTIONS,
+  PATCH_INLINE_MAX_BYTES, PATCH_MAX_BYTES,
+  parseUnifiedDiffPaths, parseApplyNumstat, expandRenameBraces,
+  parseGitApplyFailure, stripApplyNoise, normalizeExpectedShaMap, patchPreconditionError,
+  applyPatchScript, patchScriptBlock, parseBeforeBlock, parseAfterBlock, buildPatchFileReport,
+  BATCH_READ_MAX_FILES, BATCH_READ_BUDGET_DEFAULT, BATCH_READ_BUDGET_CAP,
+  normalizeBatchReadBudget, normalizeBatchReadRequest, batchReadScript, parseBatchReadOutput,
+  SEARCH_CONTEXT_MAX, SEARCH_BYTE_BUDGET_DEFAULT, SEARCH_BYTE_BUDGET_CAP,
+  normalizeContextLines, normalizeSearchByteBudget, parseGitGrepContext, parseGitGrepFileList,
+  PROJECT_MAP_MAX_FILES_DEFAULT, PROJECT_MAP_SYMBOL_PATTERN,
+  extractSymbol, buildProjectMap, parseLineCounts,
+} from '../lib/mcp-logic.js';
+
+// ---- the catalog and the guidance ----
+
+test('the round-trip reducers are advertised, and the granular tools point at them', () => {
+  const byName = new Map(MCP_TOOLS.map((t) => [t.name, t]));
+  for (const n of ['apply_project_patch', 'read_project_files', 'project_map']) {
+    assert.ok(byName.has(n), `missing tool ${n}`);
+  }
+  // Each new tool must say when to use it INSTEAD of the granular one — a
+  // tool an agent does not know to reach for saves nothing.
+  assert.match(byName.get('apply_project_patch').description, /instead of the 2-3 calls per file/);
+  assert.match(byName.get('read_project_files').description, /rather than a sequence of read_project_file calls/);
+  assert.match(byName.get('project_map').description, /round trip per file/);
+  // ...and the granular ones must point the other way.
+  assert.match(byName.get('edit_project_file').description, /apply_project_patch/);
+  assert.match(byName.get('read_project_file').description, /read_project_files/);
+  assert.match(byName.get('list_project_files').description, /project_map/);
+  assert.match(byName.get('search_project_files').description, /context_lines/);
+});
+
+test('the new parameters are additive — every existing signature still stands', () => {
+  const byName = new Map(MCP_TOOLS.map((t) => [t.name, t]));
+  const search = byName.get('search_project_files');
+  for (const p of ['context_lines', 'files_with_matches', 'max_bytes']) {
+    assert.ok(search.inputSchema.properties[p], `search_project_files needs ${p}`);
+  }
+  // The required list is untouched: a caller that never heard of these keeps
+  // working exactly as before.
+  assert.deepEqual(search.inputSchema.required, ['project_id', 'pattern']);
+  assert.deepEqual(byName.get('read_project_file').inputSchema.required, ['project_id', 'path']);
+  // A patch needs only the project — patch OR ticket is checked at call time
+  // so the error can name both routes.
+  assert.deepEqual(byName.get('apply_project_patch').inputSchema.required, ['project_id']);
+  assert.deepEqual(byName.get('read_project_files').inputSchema.required, ['project_id', 'files']);
+  assert.deepEqual(byName.get('project_map').inputSchema.required, ['project_id']);
+  // The patch tool carries the same concurrent-editor guard as every other
+  // write, one entry per file.
+  assert.equal(byName.get('apply_project_patch').inputSchema.properties.expected_sha256.type, 'object');
+});
+
+test('the server instructions state the working order, not just the capabilities', () => {
+  for (const must of ['project_map', 'context_lines', 'read_project_files', 'apply_project_patch']) {
+    assert.ok(MCP_SERVER_INSTRUCTIONS.includes(must), `instructions must mention ${must}`);
+  }
+  // The order is the point: orient, search-with-context, batch read, patch.
+  const at = (s) => MCP_SERVER_INSTRUCTIONS.indexOf(s);
+  assert.ok(at('project_map') < at('context_lines'), 'orient before search');
+  assert.ok(at('context_lines') < at('read_project_files'), 'search before read');
+  assert.ok(at('read_project_files') < at('apply_project_patch'), 'read before write');
+  assert.match(MCP_SERVER_INSTRUCTIONS, /do NOT follow a search with reads/);
+});
+
+// ---- unified diff parsing ----
+
+const PATCH_MODIFY_AND_ADD = `diff --git a/a.ts b/a.ts
+--- a/a.ts
++++ b/a.ts
+@@ -1,3 +1,3 @@
+ one
+-two
++TWO
+ three
+diff --git a/c.ts b/c.ts
+new file mode 100644
+--- /dev/null
++++ b/c.ts
+@@ -0,0 +1,1 @@
++brand new
+`;
+
+test('parseUnifiedDiffPaths reads the touched paths and the change type off the headers', () => {
+  const p = parseUnifiedDiffPaths(PATCH_MODIFY_AND_ADD);
+  assert.equal(p.error, undefined);
+  assert.deepEqual(p.paths, ['a.ts', 'c.ts']);
+  assert.equal(p.files[0].change, 'modified');
+  assert.equal(p.files[1].change, 'added');
+});
+
+test('parseUnifiedDiffPaths handles deletes and renames, keeping BOTH sides of a rename', () => {
+  const del = parseUnifiedDiffPaths(`diff --git a/gone.ts b/gone.ts
+deleted file mode 100644
+--- a/gone.ts
++++ /dev/null
+@@ -1 +0,0 @@
+-bye
+`);
+  assert.equal(del.files[0].change, 'deleted');
+  assert.deepEqual(del.paths, ['gone.ts']);
+
+  const ren = parseUnifiedDiffPaths(`diff --git a/old.ts b/new.ts
+similarity index 90%
+rename from old.ts
+rename to new.ts
+--- a/old.ts
++++ b/new.ts
+@@ -1 +1 @@
+-a
++b
+`);
+  assert.equal(ren.files[0].change, 'renamed');
+  assert.equal(ren.files[0].path, 'new.ts');
+  assert.equal(ren.files[0].from, 'old.ts');
+  // Both move, so both are locked, rolled back and committed.
+  assert.deepEqual(ren.paths, ['old.ts', 'new.ts']);
+});
+
+test('parseUnifiedDiffPaths refuses a patch that reaches outside the app checkout', () => {
+  for (const escape of ['../../etc/passwd', '/etc/passwd', '.git/config']) {
+    const r = parseUnifiedDiffPaths(`diff --git a/${escape} b/${escape}\n--- a/${escape}\n+++ b/${escape}\n@@ -1 +1 @@\n-a\n+b\n`);
+    assert.ok(r.error, `${escape} must be refused`);
+    assert.match(r.error, /inside the app checkout/);
+  }
+});
+
+test('parseUnifiedDiffPaths refuses text that is not a diff at all', () => {
+  assert.match(parseUnifiedDiffPaths('').error, /empty/);
+  assert.match(parseUnifiedDiffPaths('here is my change: rename foo to bar').error, /does not look like a unified diff/);
+});
+
+test("parseApplyNumstat reads git's counts, including binary and rename rows", () => {
+  const rows = parseApplyNumstat('1\t2\tsrc/a.ts\n-\t-\tlogo.png\n3\t0\tsrc/{old => new}.ts\n');
+  assert.equal(rows[0].lines_added, 1);
+  assert.equal(rows[0].lines_removed, 2);
+  assert.equal(rows[1].binary, true);
+  assert.equal(rows[1].lines_added, null);
+  assert.equal(rows[2].path, 'src/new.ts', 'the rename shorthand resolves to the destination');
+  assert.equal(expandRenameBraces('a => b'), 'b');
+  assert.equal(expandRenameBraces('plain/path.ts'), 'plain/path.ts');
+});
+
+test('parseGitApplyFailure keeps the per-hunk detail rather than "it failed"', () => {
+  const f = parseGitApplyFailure([
+    'error: patch failed: src/a.ts:12',
+    'error: src/a.ts: patch does not apply',
+    'error: src/b.ts: No such file or directory',
+  ].join('\n'));
+  assert.equal(f.conflicted, false);
+  assert.equal(f.rejects.length, 3);
+  assert.equal(f.rejects[0].line, 12);
+  assert.match(f.rejects[0].reason, /context does not match/);
+  assert.match(f.rejects[2].reason, /not in the checkout/);
+});
+
+test('parseGitApplyFailure treats "applied with conflicts" as a rejection', () => {
+  // The trap: with --3way this is what git says while EXITING 0 under --check.
+  // Read as success it puts conflict markers in a source file.
+  const f = parseGitApplyFailure("Applied patch to 'src/a.ts' with conflicts.");
+  assert.equal(f.conflicted, true);
+  assert.deepEqual(f.conflict_paths, ['src/a.ts']);
+  assert.match(f.rejects[0].reason, /3-way merge could not resolve/);
+});
+
+test("stripApplyNoise drops git's successful-3way chatter, keeps real errors", () => {
+  const noisy = 'error: repository lacks the necessary blob to perform 3-way merge.\nFalling back to direct application...\nerror: src/a.ts: patch does not apply';
+  assert.equal(stripApplyNoise(noisy), 'error: src/a.ts: patch does not apply');
+});
+
+test('the expected_sha256 map is validated per entry and refuses a stale patch', () => {
+  const sha = 'a'.repeat(64);
+  assert.equal(normalizeExpectedShaMap(undefined).map, null);
+  assert.match(normalizeExpectedShaMap(['src/a.ts']).error, /object mapping/);
+  assert.match(normalizeExpectedShaMap({ '../x': sha }).error, /relative to the app root/);
+  assert.match(normalizeExpectedShaMap({ 'src/a.ts': 'nope' }).error, /64-character hex/);
+
+  const { map } = normalizeExpectedShaMap({ 'src/a.ts': sha });
+  assert.equal(patchPreconditionError(map, new Map([['src/a.ts', sha]])), null);
+  assert.match(patchPreconditionError(map, new Map([['src/a.ts', 'b'.repeat(64)]])), /has changed since you read it/);
+  assert.match(patchPreconditionError(map, new Map([['src/a.ts', null]])), /not in the checkout/);
+  assert.match(patchPreconditionError(map, new Map([['src/a.ts', NO_SHA]])), /cannot be verified/);
+  assert.equal(patchPreconditionError(null, new Map()), null);
+});
+
+test('buildPatchFileReport believes the filesystem over the diff header', () => {
+  const files = [{ path: 'a.ts', change: 'modified' }, { path: 'b.ts', change: 'deleted' }];
+  const numstat = [{ path: 'a.ts', lines_added: 2, lines_removed: 1, binary: false }];
+  const after = new Map([['a.ts', { sha256: 'x', size_bytes: 9, total_lines: 2 }], ['b.ts', null]]);
+  const rows = buildPatchFileReport(files, numstat, after);
+  assert.equal(rows[0].lines_added, 2);
+  assert.equal(rows[0].sha256, 'x');
+  assert.equal(rows[1].change, 'deleted');
+  assert.equal(rows[1].sha256, null, 'a deleted file reports no hash rather than a stale one');
+  // A dry run has no after-state: the header's claim stands, unverified.
+  assert.equal(buildPatchFileReport(files, numstat, null)[1].change, 'deleted');
+});
+
+test('patch size caps: inline is the small door, the ticket is the big one', () => {
+  assert.ok(PATCH_INLINE_MAX_BYTES < PATCH_MAX_BYTES);
+  assert.equal(PATCH_INLINE_MAX_BYTES, 1024 * 1024);
+});
+
+// ---- applyPatchScript, run for real against a git repo ----
+//
+// The contract is "byte-identical or fully applied", and a contract about a
+// filesystem is only worth what running it proves.
+
+function gitScratch() {
+  const dir = scratch();
+  const g = (...a) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
+  g('init', '-q', '.');
+  g('config', 'user.email', 'test@proxypilot');
+  g('config', 'user.name', 'test');
+  writeFileSync(join(dir, 'a.ts'), 'one\ntwo\nthree\n');
+  g('add', '-A');
+  g('commit', '-qm', 'init');
+  return { dir, g };
+}
+// The script hardcodes the container's checkout; point it at the scratch repo.
+const patchScriptFor = (dir) => applyPatchScript().replace('cd /srv/app', `cd ${dir}`);
+const patchArgs = (patch, mode, paths, pre = '') => [String(Buffer.byteLength(patch, 'utf8')), shaOf(patch), mode, pre, ...paths];
+const treeState = (dir) => readdirSync(dir).filter((f) => f !== '.git').sort()
+  .map((f) => `${f}:${shaOf(readFileSync(join(dir, f), 'utf8'))}`).join('|');
+
+test('applyPatchScript applies a multi-file patch and stages it, reporting the real hashes', async () => {
+  const { dir, g } = gitScratch();
+  const r = await runScript(patchScriptFor(dir), patchArgs(PATCH_MODIFY_AND_ADD, 'apply', ['a.ts', 'c.ts']), PATCH_MODIFY_AND_ADD);
+  assert.equal(r.status, 0, r.err);
+  assert.match(r.out, /PP_OK/);
+  assert.equal(readFileSync(join(dir, 'a.ts'), 'utf8'), 'one\nTWO\nthree\n');
+  assert.equal(readFileSync(join(dir, 'c.ts'), 'utf8'), 'brand new\n');
+  const after = parseAfterBlock(patchScriptBlock(r.out, 'AFTER'));
+  assert.equal(after.get('a.ts').sha256, shaOf('one\nTWO\nthree\n'), 'the hash is read back off the file');
+  assert.equal(after.get('a.ts').total_lines, 3);
+  assert.match(g('status', '--porcelain'), /A {2}c\.ts/, 'the change is staged for the commit');
+});
+
+test('applyPatchScript dry run reports the change and touches nothing', async () => {
+  const { dir } = gitScratch();
+  const before = treeState(dir);
+  const r = await runScript(patchScriptFor(dir), patchArgs(PATCH_MODIFY_AND_ADD, 'check', ['a.ts', 'c.ts']), PATCH_MODIFY_AND_ADD);
+  assert.equal(r.status, 0, r.err);
+  assert.match(r.out, /PP_DRYRUN_OK/);
+  assert.equal(treeState(dir), before, 'a dry run must not write');
+  assert.equal(existsSync(join(dir, 'c.ts')), false, 'a dry run must not create');
+  const ns = parseApplyNumstat(patchScriptBlock(r.out, 'NUMSTAT').join('\n'));
+  assert.deepEqual(ns.map((x) => x.path), ['a.ts', 'c.ts']);
+  const bef = parseBeforeBlock(patchScriptBlock(r.out, 'BEFORE'));
+  assert.equal(bef.get('a.ts'), shaOf('one\ntwo\nthree\n'));
+  assert.equal(bef.get('c.ts'), null, 'a file the patch would create reports as absent');
+});
+
+test('a partially-applicable patch leaves the checkout byte-identical', async () => {
+  const { dir } = gitScratch();
+  // Hunk one cannot apply (wrong context); the second file could. git apply is
+  // all-or-nothing, and this is the test that keeps it that way.
+  const patch = `diff --git a/a.ts b/a.ts
+--- a/a.ts
++++ b/a.ts
+@@ -1,3 +1,3 @@
+ one
+-NOT THIS LINE
++TWO
+ three
+diff --git a/c.ts b/c.ts
+new file mode 100644
+--- /dev/null
++++ b/c.ts
+@@ -0,0 +1,1 @@
++brand new
+`;
+  const before = treeState(dir);
+  const r = await runScript(patchScriptFor(dir), patchArgs(patch, 'apply', ['a.ts', 'c.ts']), patch);
+  assert.equal(r.status, 66, r.err);
+  assert.equal(treeState(dir), before, 'the checkout must be byte-identical after a refusal');
+  assert.equal(existsSync(join(dir, 'c.ts')), false, 'the applicable half must not have landed');
+  const failure = parseGitApplyFailure(r.err);
+  assert.ok(failure.rejects.some((x) => x.path === 'a.ts' && x.line === 1), JSON.stringify(failure.rejects));
+});
+
+test('a patch that would apply only "with conflicts" is refused, not merged', async () => {
+  const { dir, g } = gitScratch();
+  // A real 3-way: the pre-image blob IS in the repo, so git will happily
+  // produce a conflicted file. --check exits 0 on this. It must still refuse.
+  writeFileSync(join(dir, 'a.ts'), 'one\nMINE\nthree\n');
+  g('add', '-A');
+  g('commit', '-qm', 'local edit');
+  const patch = `diff --git a/a.ts b/a.ts
+index ${g('rev-parse', 'HEAD~1:a.ts').trim()}..${'0'.repeat(40)} 100644
+--- a/a.ts
++++ b/a.ts
+@@ -1,3 +1,3 @@
+ one
+-two
++THEIRS
+ three
+`;
+  const before = treeState(dir);
+  const r = await runScript(patchScriptFor(dir), patchArgs(patch, 'apply', ['a.ts']), patch);
+  assert.notEqual(r.status, 0, 'a conflicted apply is not a success');
+  assert.equal(treeState(dir), before);
+  assert.ok(!readFileSync(join(dir, 'a.ts'), 'utf8').includes('<<<<<<<'), 'no conflict markers may reach the file');
+});
+
+test('the expected_sha256 precondition is enforced BEFORE the apply, not after it', async () => {
+  // The point of the guard is that a stale patch never lands. A caller-side
+  // check on hashes the script reported could only ever run after the write,
+  // which would make it a post-mortem rather than a guard — so the check has
+  // to happen on the far side, and this is the test that says so.
+  const { dir } = gitScratch();
+  const current = shaOf('one\ntwo\nthree\n');
+  const stale = 'b'.repeat(64);
+  const before = treeState(dir);
+
+  let r = await runScript(patchScriptFor(dir),
+    patchArgs(PATCH_MODIFY_AND_ADD, 'apply', ['a.ts', 'c.ts'], `${stale} a.ts`), PATCH_MODIFY_AND_ADD);
+  assert.equal(r.status, 69);
+  assert.match(r.err, /PP_PRECONDITION a\.ts/);
+  assert.equal(treeState(dir), before, 'a stale precondition must stop the write, not describe it');
+  assert.equal(existsSync(join(dir, 'c.ts')), false);
+
+  // The real hash lets the same patch through.
+  r = await runScript(patchScriptFor(dir),
+    patchArgs(PATCH_MODIFY_AND_ADD, 'apply', ['a.ts', 'c.ts'], `${current} a.ts`), PATCH_MODIFY_AND_ADD);
+  assert.equal(r.status, 0, r.err);
+  assert.equal(readFileSync(join(dir, 'a.ts'), 'utf8'), 'one\nTWO\nthree\n');
+});
+
+test('a precondition naming a file that is not there is refused too', async () => {
+  const { dir } = gitScratch();
+  const r = await runScript(patchScriptFor(dir),
+    patchArgs(PATCH_MODIFY_AND_ADD, 'check', ['a.ts', 'c.ts'], `${'c'.repeat(64)} c.ts`), PATCH_MODIFY_AND_ADD);
+  assert.equal(r.status, 69);
+  assert.match(r.err, /PP_PRECONDITION c\.ts ABSENT/);
+});
+
+test('applyPatchScript refuses a truncated or corrupted patch before git sees it', async () => {
+  let { dir } = gitScratch();
+  // Declared 99999 bytes, a few hundred arrive: a truncated transfer.
+  let r = await runScript(patchScriptFor(dir), ['99999', shaOf(PATCH_MODIFY_AND_ADD), 'apply', '', 'a.ts', 'c.ts'], PATCH_MODIFY_AND_ADD);
+  assert.equal(r.status, 65);
+  assert.match(r.err, /PP_PATCH_BYTES/);
+  assert.equal(readFileSync(join(dir, 'a.ts'), 'utf8'), 'one\ntwo\nthree\n');
+
+  ({ dir } = gitScratch());
+  r = await runScript(patchScriptFor(dir),
+    [String(Buffer.byteLength(PATCH_MODIFY_AND_ADD)), shaOf('a different patch'), 'apply', '', 'a.ts', 'c.ts'], PATCH_MODIFY_AND_ADD);
+  assert.equal(r.status, 65);
+  assert.match(r.err, /PP_PATCH_SHA/);
+});
+
+test('applyPatchScript refuses to apply over uncommitted work', async () => {
+  const { dir } = gitScratch();
+  writeFileSync(join(dir, 'a.ts'), 'work in progress\n');
+  const r = await runScript(patchScriptFor(dir), patchArgs(PATCH_MODIFY_AND_ADD, 'apply', ['a.ts', 'c.ts']), PATCH_MODIFY_AND_ADD);
+  assert.equal(r.status, 64);
+  assert.match(r.err, /PP_DIRTY/);
+  assert.equal(readFileSync(join(dir, 'a.ts'), 'utf8'), 'work in progress\n',
+    "someone else's in-flight edit is never clobbered");
+});
+
+// ---- batchReadScript, run for real ----
+
+test('batchReadScript returns each file byte-exact, whatever its ending', async () => {
+  const dir = scratch();
+  const withNl = 'alpha\nbravo\ncharlie\n';
+  const withoutNl = 'no trailing newline';
+  writeFileSync(join(dir, 'a.txt'), withNl);
+  writeFileSync(join(dir, 'b.txt'), withoutNl);
+  writeFileSync(join(dir, 'empty.txt'), '');
+  const r = await runScript(batchReadScript().replace('cd /srv/app', `cd ${dir}`),
+    ['n0nce', '524288', '1048576', 'a.txt', 'all', '0', 'b.txt', 'all', '0', 'empty.txt', 'all', '0', 'a.txt', '2', '2']);
+  assert.equal(r.status, 0, r.err);
+  const p = parseBatchReadOutput(r.out, 'n0nce');
+  assert.equal(p.complete, true);
+  assert.equal(p.files.length, 4);
+  assert.equal(p.files[0].content, withNl);
+  assert.equal(p.files[0].sha256, shaOf(withNl), 'the hash is computed on the far side');
+  assert.equal(p.files[1].content, withoutNl, 'a file with no final newline is not "fixed"');
+  assert.equal(p.files[1].total_lines, 1, 'an unterminated last line is still a line');
+  assert.equal(p.files[2].content, '');
+  assert.equal(p.files[3].content, 'bravo\n', 'the same file can be requested again as a range');
+});
+
+test('batchReadScript never returns part of a file — it drops it and says which', async () => {
+  const dir = scratch();
+  writeFileSync(join(dir, 'small.txt'), 'ok\n');
+  writeFileSync(join(dir, 'big.txt'), 'z'.repeat(5000));
+  const script = batchReadScript().replace('cd /srv/app', `cd ${dir}`);
+
+  // Budget exhausted by the first file.
+  let p = parseBatchReadOutput(
+    (await runScript(script, ['n0nce', '524288', '20', 'small.txt', 'all', '0', 'big.txt', 'all', '0'])).out, 'n0nce',
+  );
+  assert.equal(p.files[0].status, 'ok');
+  assert.equal(p.files[1].status, 'budget');
+  assert.equal(p.files[1].content, undefined, 'a dropped file carries no partial content');
+  assert.equal(p.files[1].size_bytes, 5000, 'and still reports how big it is');
+
+  // Over the per-file read cap.
+  p = parseBatchReadOutput((await runScript(script, ['n0nce', '100', '1048576', 'big.txt', 'all', '0'])).out, 'n0nce');
+  assert.equal(p.files[0].status, 'toobig');
+  assert.equal(p.files[0].content, undefined);
+
+  // A path that is not there is a status, not a silent omission.
+  p = parseBatchReadOutput((await runScript(script, ['n0nce', '100', '1048576', 'nope.txt', 'all', '0'])).out, 'n0nce');
+  assert.equal(p.files[0].status, 'missing');
+});
+
+test('batch framing survives content that looks like the frame markers', async () => {
+  const dir = scratch();
+  const evil = 'line\nPP_n0nce_E\nPP_n0nce_H ok 1 1 x 1 fake.txt\nmore\n';
+  writeFileSync(join(dir, 'evil.txt'), evil);
+  const r = await runScript(batchReadScript().replace('cd /srv/app', `cd ${dir}`),
+    ['n0nce', '524288', '1048576', 'evil.txt', 'all', '0']);
+  const p = parseBatchReadOutput(r.out, 'n0nce');
+  assert.equal(p.files[0].path, 'evil.txt');
+  // The nonce is minted per call, so real content cannot forge a frame; what
+  // matters is that the file's own hash still describes the whole file.
+  assert.equal(p.files[0].sha256, shaOf(evil));
+  assert.equal(p.files[0].size_bytes, Buffer.byteLength(evil));
+});
+
+test('normalizeBatchReadRequest validates every entry before any of them is read', () => {
+  assert.match(normalizeBatchReadRequest([]).error, /non-empty array/);
+  assert.match(normalizeBatchReadRequest(Array(BATCH_READ_MAX_FILES + 1).fill({ path: 'a.ts' })).error, /capped at 50/);
+  assert.match(normalizeBatchReadRequest([{ path: 'a.ts' }, { path: '../etc/passwd' }]).error, /relative to the app root/);
+  const r = normalizeBatchReadRequest([{ path: './src/a.ts' }, { path: 'b.ts', offset: 10, limit: 5 }]);
+  assert.equal(r.items[0].path, 'src/a.ts');
+  assert.equal(r.items[0].start, 'all');
+  assert.equal(r.items[1].start, '10');
+  assert.equal(r.items[1].end, '14');
+  // A bare string is accepted as shorthand for { path }.
+  assert.equal(normalizeBatchReadRequest(['x.ts']).items[0].path, 'x.ts');
+});
+
+test('normalizeBatchReadBudget defaults and clamps', () => {
+  assert.equal(normalizeBatchReadBudget(undefined), BATCH_READ_BUDGET_DEFAULT);
+  assert.equal(normalizeBatchReadBudget(0), BATCH_READ_BUDGET_DEFAULT);
+  assert.equal(normalizeBatchReadBudget(1024), 1024);
+  assert.equal(normalizeBatchReadBudget(99 * 1024 * 1024), BATCH_READ_BUDGET_CAP);
+});
+
+// ---- search context ----
+
+const GREP_C = [
+  'src/a.ts-10-// before',
+  'src/a.ts:11:const x = 1',
+  'src/a.ts-12-// after',
+  '--',
+  'src/b.ts:40:const y = 2',
+  'src/b.ts-41-// tail',
+].join('\n');
+
+test('parseGitGrepContext rebuilds contiguous blocks and marks which lines matched', () => {
+  const c = parseGitGrepContext(GREP_C, {});
+  assert.equal(c.blocks.length, 2);
+  assert.equal(c.blocks[0].path, 'src/a.ts');
+  assert.equal(c.blocks[0].start_line, 10);
+  assert.deepEqual(c.blocks[0].lines, ['// before', 'const x = 1', '// after']);
+  assert.deepEqual(c.blocks[0].match_lines, [11]);
+  assert.equal(c.match_count, 2, 'context lines are not matches');
+  assert.equal(c.truncated, false);
+});
+
+test('parseGitGrepContext honours both budgets and says when it cut', () => {
+  const byResults = parseGitGrepContext(GREP_C, { maxResults: 1 });
+  assert.equal(byResults.match_count, 1);
+  assert.equal(byResults.truncated, true);
+  const byBytes = parseGitGrepContext(GREP_C, { maxBytes: 12 });
+  assert.equal(byBytes.truncated, true, 'a wide -C cannot blow up the response');
+});
+
+test('parseGitGrepContext starts a new block when the lines are not consecutive', () => {
+  // git normally emits `--`, but a run that jumps must not be glued together
+  // into a block whose start_line lies about what the lines are.
+  const c = parseGitGrepContext('a.ts:1:one\na.ts:50:fifty', {});
+  assert.equal(c.blocks.length, 2);
+  assert.equal(c.blocks[1].start_line, 50);
+});
+
+test('normalizeContextLines and the byte budget default off and clamp', () => {
+  assert.equal(normalizeContextLines(undefined), 0, 'existing callers see no context');
+  assert.equal(normalizeContextLines(5), 5);
+  assert.equal(normalizeContextLines(999), SEARCH_CONTEXT_MAX);
+  assert.equal(normalizeContextLines(-3), 0);
+  assert.equal(normalizeSearchByteBudget(undefined), SEARCH_BYTE_BUDGET_DEFAULT);
+  assert.equal(normalizeSearchByteBudget(10 * 1024 * 1024), SEARCH_BYTE_BUDGET_CAP);
+});
+
+test('parseGitGrepFileList caps the paths and reports the true total', () => {
+  const l = parseGitGrepFileList('a.ts\nb.ts\nc.ts\n', 2);
+  assert.deepEqual(l.files, ['a.ts', 'b.ts']);
+  assert.equal(l.truncated, true);
+  assert.equal(l.total, 3);
+});
+
+// ---- project_map ----
+
+test('extractSymbol names the declaration kinds a map is for', () => {
+  const cases = [
+    ['export function createRouter(app) {', 'function', 'createRouter'],
+    ['export default class Widget extends X {', 'class', 'Widget'],
+    ['export const MCP_TOOLS = [', 'const', 'MCP_TOOLS'],
+    ['export type ProjectId = number', 'type', 'ProjectId'],
+    ['export interface Options {', 'interface', 'Options'],
+    ['export { a, b } from "./x"', 're-export', 'a, b'],
+    ['module.exports = router', 'module.exports', 'module.exports'],
+    ['  router.post("/api/projects", handler)', 'route', 'POST /api/projects'],
+    ['def handler(request):', 'function', 'handler'],
+    ['func (s *Server) Start() error {', 'function', 'Start'],
+  ];
+  for (const [line, kind, name] of cases) {
+    const s = extractSymbol(line);
+    assert.ok(s, `no symbol from ${line}`);
+    assert.equal(s.kind, kind, line);
+    assert.equal(s.name, name, line);
+  }
+  assert.equal(extractSymbol('// just a comment'), null, 'prose yields nothing rather than a guess');
+  assert.equal(extractSymbol(''), null);
+  assert.equal(extractSymbol('export function foo() {').exported, true);
+});
+
+test("the map's grep pattern is a plain ERE — git takes it as an argument, not a script", () => {
+  // It rides as a positional argument to git grep, never through a shell, so
+  // the only thing to police is that it stays plain text: tabs belong to the
+  // whitespace classes, but nothing else in the control range belongs here.
+  const control = [...PROJECT_MAP_SYMBOL_PATTERN]
+    .filter((ch) => ch !== '\t' && (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f));
+  assert.deepEqual(control, []);
+  // And it must actually find the shapes the extractor knows about.
+  const re = new RegExp(PROJECT_MAP_SYMBOL_PATTERN);
+  for (const line of ['export function a() {', 'module.exports = x', '  app.get("/x", h)', 'def a():', 'class A {']) {
+    assert.ok(re.test(line), `pattern should match ${JSON.stringify(line)}`);
+  }
+});
+
+test('parseLineCounts reads git grep -c output, colons in paths and all', () => {
+  const c = parseLineCounts('src/a.ts:120\nsrc/od:d/b.ts:7\n');
+  assert.equal(c.get('src/a.ts'), 120);
+  assert.equal(c.get('src/od:d/b.ts'), 7, 'the LAST colon is the separator');
+});
+
+test('buildProjectMap joins the three answers and names everything it cut', () => {
+  const map = buildProjectMap({
+    files: ['a.ts', 'b.ts', 'logo.png'],
+    counts: parseLineCounts('a.ts:10\nb.ts:20\n'),
+    symbolHits: [
+      { path: 'a.ts', line_number: 3, line: 'export function foo() {' },
+      { path: 'a.ts', line_number: 9, line: 'not a declaration at all' },
+    ],
+    maxFiles: 2,
+  });
+  assert.equal(map.file_count, 3);
+  assert.equal(map.files.length, 2);
+  assert.equal(map.truncated, true);
+  assert.equal(map.omitted, 1);
+  assert.match(map.omitted_note, /not in this map/);
+  assert.equal(map.files[0].symbols.length, 1, 'a line the extractor cannot name is dropped, not guessed');
+  assert.equal(map.files[0].symbols[0].line, 3);
+  assert.equal(map.files[1].lines, 20);
+  assert.equal(PROJECT_MAP_MAX_FILES_DEFAULT, 400);
+});
+
+test('buildProjectMap reports a binary file as uncounted rather than as empty', () => {
+  const map = buildProjectMap({ files: ['logo.png'], counts: new Map() });
+  assert.equal(map.files[0].lines, null);
+  assert.match(map.files[0].note, /binary or unreadable/);
+});
+
+test('buildProjectMap caps symbols per file and says so', () => {
+  const hits = Array.from({ length: 50 }, (_, i) => ({ path: 'a.ts', line_number: i + 1, line: `export const s${i} = 1` }));
+  const map = buildProjectMap({ files: ['a.ts'], counts: new Map([['a.ts', 50]]), symbolHits: hits, maxSymbolsPerFile: 10 });
+  assert.equal(map.files[0].symbols.length, 10);
+  assert.deepEqual(map.symbols_truncated, [{ path: 'a.ts', shown: 10, total: 50 }]);
+});
+
+// ---- the write-verification ratchet, extended to the patch tool ----
+
+test('apply_project_patch inherits the staged-and-verified write discipline', () => {
+  const script = applyPatchScript();
+  // The patch is a payload like any other: counted, then hashed, before git
+  // is allowed to read it.
+  assert.match(script, /PP_PATCH_BYTES/);
+  assert.match(script, /PP_PATCH_SHA/);
+  // It refuses to apply over uncommitted work...
+  assert.match(script, /git status --porcelain/);
+  assert.match(script, /PP_DIRTY/);
+  // ...checks before it writes...
+  assert.match(script, /git apply --check --3way/);
+  // ...enforces expected_sha256 on the far side, where it can still stop a write...
+  assert.match(script, /PP_PRECONDITION/);
+  // ...and rolls the touched paths back on every failure path.
+  assert.match(script, /git checkout -f -q HEAD/);
+  assert.match(script, /PP_APPLY_FAILED/);
+  // The read-back: hashes come off the files afterwards, not out of git.
+  assert.match(script, /PP_AFTER_BEGIN/);
+  // And it never takes the shortcut the truncation bug shipped through.
+  assert.equal(/cat > "\$p"/.test(script), false);
+});
+
+test('the batch read hashes on the far side, so a short transfer cannot pass', () => {
+  const script = batchReadScript();
+  assert.match(script, /pp_sha "\$p"/);
+  // Over-cap and over-budget are announced, never silently trimmed.
+  assert.match(script, /toobig/);
+  assert.match(script, /budget/);
+  assert.equal(/head -c/.test(script), false, 'a batch read must not truncate a file to fit');
 });

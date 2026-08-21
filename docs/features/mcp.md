@@ -32,13 +32,100 @@ Revoking the token (same card) immediately cuts the client off.
 | LXC file edits | `read_lxc_file`, `write_lxc_file`, `rerun_startup` | The chat-only update loop: read a file, propose the edit, write on approval (previous version kept as `<path>.old`), then re-run the registered startup script to redeploy — run output and exit code come back to the chat. `write_lxc_file` takes an optional `mode` ("0755") so a script lands executable without a zip apply. `rerun_startup` takes `timeout_seconds` (default 120, max 1800) and returns the **last** 64 KB of each stream — a first-boot Docker install no longer has to fit inside a fixed 2-minute window, and the failure summary (which prints last) is what comes back. Lets a Claude subscription do small container updates without any zip or shell. |
 | Projects | `list_projects`, `get_project`, `send_project_build`, `upload_project_reference`, `clone_project` | `send_project_build` queues a quick update on the project's own AI harness — **this lane spends the project's configured API budget**. `clone_project` mirrors the UI's Clone (fresh / full-with-database). |
 | Project build control | `interrupt_project_build`, `cancel_queued_build` | Stop a running build (checkpoint-and-stop by default, or abandon) and cancel not-yet-started queue entries — the "that build is burning tokens on the wrong thing" stop switch, from chat. |
-| Project file reads | `list_project_files`, `search_project_files`, `read_project_file` | Find first, read narrowly. `search_project_files` is `git grep -E` over the tracked files and returns `path` + `line_number` + the matching line; `read_project_file` then takes `offset`/`limit` to pull just that window (it always reports `total_lines`, so a ranged read can say what it left behind). Reading whole files to find one function is the expensive habit these two exist to break. |
-| Project file edits | `write_project_file`, `edit_project_file`, `append_project_file`, `insert_project_file_at_line`, `delete_project_file`, `move_project_file`, `redeploy_project` | The subscription lane for Projects: the chat does the thinking, ProxyPilot only executes file ops — no build tokens spent. `edit_project_file` replaces an exact string and refuses unless the match count is what the caller expected, which is the one to reach for on a large file — `write_project_file` rewrites the whole thing and gets riskier the bigger the file. `append_project_file` and `insert_project_file_at_line` add to a file without moving its existing content anywhere, which is the safe way to extend a big one. Every write is staged, hashed and read back before it counts as done, and every writing tool takes an optional `expected_sha256` precondition. `move_project_file` uses `git mv` so history follows. All are git-committed and pushed, and all are refused while a build is running. `redeploy_project` then installs/migrates/builds/restarts and health-checks the live app. |
+| Project orientation | `project_map`, `read_project_files`, `search_project_files` (`context_lines`) | The round-trip reducers — see *One call, not twenty* below. `project_map` returns every tracked file with its line count and its top-level symbols in one call; `read_project_files` reads up to 50 files (or ranges) at once; `search_project_files` with `context_lines` returns the code **around** each hit, which is what removes the search → read → read → read chain. |
+| Project file reads | `list_project_files`, `search_project_files`, `read_project_file` | The granular forms, for when you genuinely want one thing. `search_project_files` is `git grep -E` over the tracked files and returns `path` + `line_number` + the matching line (add `context_lines` for the surrounding code, or `files_with_matches` for paths only); `read_project_file` takes `offset`/`limit` to pull one window (it always reports `total_lines`, so a ranged read can say what it left behind). Reading whole files to find one function is the expensive habit these exist to break. |
+| Project file edits | `apply_project_patch`, `write_project_file`, `edit_project_file`, `append_project_file`, `insert_project_file_at_line`, `delete_project_file`, `move_project_file`, `redeploy_project` | The subscription lane for Projects: the chat does the thinking, ProxyPilot only executes file ops — no build tokens spent. `edit_project_file` replaces an exact string and refuses unless the match count is what the caller expected, which is the one to reach for on a large file — `write_project_file` rewrites the whole thing and gets riskier the bigger the file. `append_project_file` and `insert_project_file_at_line` add to a file without moving its existing content anywhere, which is the safe way to extend a big one. Every write is staged, hashed and read back before it counts as done, and every writing tool takes an optional `expected_sha256` precondition. `move_project_file` uses `git mv` so history follows. For a change that spans **more than one file or one hunk**, `apply_project_patch` does the whole thing in one call — see below. All are git-committed and pushed, and all are refused while a build is running. `redeploy_project` then installs/migrates/builds/restarts and health-checks the live app. |
 | Project history | `project_git_log`, `project_git_diff`, `project_git_show` | Read-only history as structured data: `project_git_log` returns parsed commit rows rather than raw text. `project_git_diff` with no `ref` shows uncommitted work **and lists untracked files** — that is how you catch a build that wrote a file and never committed it, which is invisible to `git log` and to reviewers but still on disk and still running. Raw git is also reachable via `run_project_command` when you want a specific format. |
 | Build diagnosis | `get_build_log` | The recorded event stream of one cycle — status, error, and the steps it produced. A failed build otherwise surfaces as a status with no output, leaving nothing to diagnose from. Keeps the tail (a failure explains itself at the end). |
 | Audit trail | `append_change_record` | Appends a hash-chained record for chat-lane work, which otherwise writes none. ProxyPilot computes `seq`/`prev_hash`/`hash` server-side through the same code the build runner uses, and mirrors the record to `state/changes/<seq>.json` in the checkout. The chain is re-verified immediately after appending. **Never hand-compute these hashes** — see below. |
 | Project verification | `run_project_command` | Runs one allowlisted command in the project's checkout — `npm ci`, `npm run <script>`, `npx playwright …`, or a read-only `git` subcommand — so the chat lane can run the project's own gates instead of shipping unverified. Same container and environment `redeploy_project` builds in (`/etc/environment` sourced, cwd = the app dir), so a green result means what it says. Returns `exit_code` plus the **last** 64 KB of each stream (a failing test prints its summary last). Refused while a build is running. |
 | Transfer | `create_upload_ticket`, `append_upload_chunk`, `finish_upload` | Big zips: the ticket tool returns a one-shot `upload_url`; `curl -T site.zip -H 'Content-Type: application/zip' <url>` pushes the bytes, then the ticket is referenced in an inspect tool. Clients that cannot reach the upload URL (egress-restricted agent sandboxes) instead send ordered base64 chunks over MCP with `append_upload_chunk` and seal them with `finish_upload`, whose mandatory `sha256` is verified before the ticket becomes usable. Zips ≤ 2 MB may ride inline as `zip_base64`. The inspect tools also accept an optional `sha256`, verified **before** parsing, so transport corruption fails as a checksum mismatch rather than a confusing extraction error. |
+
+## One call, not twenty (working on project files)
+
+Every MCP tool call is a full model turn — roughly 15–30 seconds whether it
+moved a megabyte or a single line. So the cost of an agent editing a project
+through this server is the **number of calls**, not the bytes. A recent
+single-feature change took 39 minutes across 116 + 49 agent steps, and the
+great majority of those steps were "find the code" and "read a bit more of
+this file" rather than "write the change".
+
+Four tools exist to collapse that. The intended sequence, which the server
+also states in its `initialize` instructions:
+
+1. **Orient** — `project_map`. Every tracked file with its line count and its
+   top-level symbols (exported functions, classes, consts, types, default
+   exports, route registrations) in one call. Do not rebuild this picture with
+   `list_project_files` plus a read per file. The symbol index is
+   **regex-extracted and approximate**: a map for deciding what to open, not a
+   compiler. Narrow a big repo with `subdir`.
+2. **Search** — `search_project_files` with `context_lines` set (5–10 is
+   usually right). The result is then `blocks` — contiguous runs of
+   `{ path, start_line, lines[], match_lines[] }` — so the surrounding code
+   arrives *with* the hit. Do not follow a search with reads unless the
+   context genuinely was not enough. `files_with_matches: true` answers "does
+   this symbol exist anywhere" for almost nothing.
+3. **Read** — one `read_project_files` call listing every file you still need
+   (up to 50, ranges allowed), not one call per file.
+4. **Write** — `apply_project_patch`. Send the whole change as a unified diff:
+   one call, one commit. A sequence of `edit_project_file` calls for a
+   multi-file change is the slow path; the single-file tools are for a
+   genuinely single-file, single-place edit.
+5. **Verify** — `run_project_command` (`npm run gates`), then
+   `redeploy_project`.
+
+A representative five-file feature change is six calls end to end: map →
+search-with-context → batch read → `apply_project_patch` with `dry_run: true`
+→ apply → `run_project_command`.
+
+### `apply_project_patch` is all-or-nothing
+
+The tool is only worth having if a rejected patch is *exactly* as harmless as
+never calling it. It is applied with `git apply --3way --index` inside the
+project container, and four things hold that line:
+
+- **The patch is a verified write like any other.** It is delivered over
+  stdin, staged to a temp file, byte-counted and hashed *before* git is
+  allowed to read it. Pass `sha256` and a corrupt transfer fails as a checksum
+  mismatch rather than as a confusing rejected hunk.
+- **The touched paths must be clean.** If any file the diff names has
+  uncommitted work, the patch is refused rather than applied on top of it —
+  which is also what makes the rollback exact rather than best-effort.
+- **Every failure path rolls back**, including the one that looks like
+  success: with `--3way`, `git apply --check` **exits 0** for a patch it could
+  only apply *with conflicts*, and applying it would leave conflict markers in
+  a source file. That case is detected and refused.
+- **The report is per-hunk.** A rejection names the file, the line, and why
+  ("hunk context does not match the file at this line", "file is not in the
+  checkout", "applied with conflicts"), because "failed" tells a model nothing
+  it can act on.
+
+`dry_run: true` runs the same checks and returns the per-file change types and
+line counts without writing anything. `expected_sha256` takes a
+`{ path: sha }` map — the concurrent-editor guard `edit_project_file` has,
+one entry per file — and refuses the whole patch if any of them moved. Diffs
+over 1 MB go through `create_upload_ticket` and are passed as `ticket`.
+
+Patches may only touch paths inside the app checkout: absolute paths, `..`
+and anything under `.git` are refused before git ever sees the diff.
+
+### Nothing is ever partially returned
+
+`read_project_files` inherits the property that matters from
+`read_project_file`: a file comes back whole or not at all. Each file is
+hashed **inside the container** and the hash is checked here, so a truncated
+transfer is an error against that file rather than a plausible-looking prefix
+of it. A file over the 512 KB per-file cap, or one that will not fit in what
+is left of the response budget (`max_total_bytes`, default 512 KB), is listed
+in `dropped` with its size and the reason. The same holds for the search
+budgets: anything cut is reported as `truncated`, never silently trimmed.
+
+### What deliberately did not change
+
+`run_project_command` is still not a shell. No pipes, no redirects, no `$()`,
+no `;` or `&&` — the `npm run <script>` escape hatch already covers legitimate
+repo-side tooling, and those scripts are committed and reviewable. The
+batching above is the answer to round trips; a shell is not.
 
 ## The two AI lanes (how to phrase a request)
 
@@ -50,8 +137,9 @@ words you use pick the lane:
   key configured in ProxyPilot (estimates, gates, change records — and API
   token spend).
 - **"Edit the files directly" / "use the MCP file tools, don't queue a
-  build"** → `search_project_files` → `read_project_file` →
-  `edit_project_file` → `run_project_command` → `redeploy_project`: the chat itself (your Claude
+  build"** → `project_map` → `search_project_files`
+  (with `context_lines`) → `read_project_files` → `apply_project_patch` →
+  `run_project_command` → `redeploy_project`: the chat itself (your Claude
   subscription) does the thinking; ProxyPilot only reads/writes files, runs
   the project's own checks, and redeploys. No build tokens are spent. The
   harness's own gates still don't run in this lane, but `run_project_command`
@@ -183,9 +271,21 @@ checks now stand between a bad read and a written file, cheapest first:
    and re-hashed at its real path. A write that does not verify leaves the
    previous file exactly where it was, and says so.
 
+`apply_project_patch` inherits all four rather than opting out of them: the
+diff itself is staged, byte-counted and hashed before git reads it (check 1
+and 2); `git apply --check --3way` is the equivalent of check 3, run before
+anything is written, with the `--3way` "applied with conflicts" case — which
+git scores as exit 0 — treated as a rejection; and the resulting files are
+re-hashed off disk afterwards rather than taken from git's account of them
+(check 4). A patch that does not apply leaves the checkout byte-identical,
+and every failure path rolls the touched paths back explicitly.
+`read_project_files` carries check 2 per file: each file is hashed inside the
+container, checked here, and dropped by name rather than returned short.
+
 On top of those, `expected_sha256` is an optional precondition on
 `edit_project_file`, `write_project_file`, `write_lxc_file`,
-`append_project_file` and `insert_project_file_at_line`: pass the `sha256`
+`append_project_file`, `insert_project_file_at_line` and — as a
+`{ path: sha }` map — `apply_project_patch`: pass the `sha256`
 that came back from the matching read tool and the call is refused if the
 file has changed since — the guard for two agents editing one file. Every
 write returns `bytes`, `total_lines` and `sha256` of what actually landed, so

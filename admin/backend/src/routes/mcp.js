@@ -22,7 +22,7 @@
 
 import express from 'express';
 import { randomBytes } from 'node:crypto';
-import { appendFile, readFile, writeFile, rm, mkdir, stat as fsStat, readdir, copyFile, open as fsOpen } from 'node:fs/promises';
+import { appendFile, readFile, writeFile, rename, rm, mkdir, stat as fsStat, readdir, copyFile, open as fsOpen } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -47,6 +47,8 @@ import {
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
   applyStringEdit, normalizeReadRange,
+  editByteInvariantError, expectedSha256Error, readIntegrityError, normalizeInsertLine,
+  verifiedWriteScript, appendScript, insertAtLineScript, parseWriteOk, PP_SHA_FN, NO_SHA,
   validSearchPattern, validPathspec, normalizeMaxResults, parseGitGrepOutput,
   validGitRef, normalizeGitLogLimit, GIT_LOG_FORMAT, parseGitLogOutput,
   parseGitStatusPorcelain, capPatch, normalizeBuildLogLimit, buildLogFromEvents,
@@ -592,6 +594,109 @@ async function toolApplyLxcZip(args, auth) {
 const LXC_FILE_READ_CAP = 512 * 1024;
 const LXC_FILE_WRITE_CAP = 2 * 1024 * 1024;
 
+// How much stdout a file read is allowed to bring back. This MUST exceed
+// LXC_FILE_READ_CAP plus the header lines, or the transport silently returns
+// less than the tool promises — which is exactly the bug that corrupted five
+// files: runHostCapture defaulted to 256 KB while these tools advertised
+// 512 KB, so any file in between came back cut at a chunk boundary (~267 KB,
+// ~299 KB, ~327 KB — the variance was the chunk, not a limit) and the edit
+// wrote the stump back over the original.
+const FILE_READ_CAPTURE = LXC_FILE_READ_CAP + 64 * 1024;
+
+// The header every file read prints before the content: byte count, line
+// count, and the file's SHA-256 as computed INSIDE the container. The hash is
+// what makes the read checkable — it is a statement about the file, not about
+// the bytes that happened to arrive.
+//
+// The script using this must set `p` (the path) and `cap` (the read cap in
+// bytes) first. Files over the cap are not hashed: the read cannot return
+// them whole, so the hash would be neither a precondition token nor a check
+// on the transfer — just a full pass over a file nobody asked to read.
+const FILE_READ_HEADER = `${PP_SHA_FN}sz=$(wc -c < "$p"); echo "$sz"; wc -l < "$p"; `
+  + `if [ "$sz" -le "$cap" ]; then pp_sha "$p"; else echo ${NO_SHA}; fi; `;
+
+/** Split the three header lines off a file read. Returns null if the header
+ *  is not intact — a read that lost its own header lost content too. */
+function parseReadHeader(stdout) {
+  const nl1 = stdout.indexOf('\n');
+  const nl2 = stdout.indexOf('\n', nl1 + 1);
+  const nl3 = stdout.indexOf('\n', nl2 + 1);
+  if (nl1 < 0 || nl2 < 0 || nl3 < 0) return null;
+  const size = Number(stdout.slice(0, nl1).trim());
+  if (!Number.isInteger(size)) return null;
+  const sha = stdout.slice(nl2 + 1, nl3).trim();
+  return {
+    size,
+    // `wc -l` counts newlines, so a file with no trailing newline reads one
+    // short — the max with 1 keeps a single unterminated line from being 0.
+    totalLines: size === 0 ? 0 : Math.max(Number(stdout.slice(nl1 + 1, nl2).trim()) || 0, 1),
+    sha256: sha === NO_SHA ? null : sha,
+    body: stdout.slice(nl3 + 1),
+  };
+}
+
+/** A capture that hit its cap, or was still open when the child exited, is a
+ *  short read. Never treat it as the file. */
+function captureTruncationError(rel, r) {
+  if (r.stdoutTruncated) {
+    return `Read of ${rel} exceeded the ${Math.floor(FILE_READ_CAPTURE / 1024)} KB transport budget and came back `
+      + 'incomplete. Nothing was written. Read a line range with offset/limit instead.';
+  }
+  if (r.stdoutComplete === false) {
+    return `Read of ${rel} ended before the container closed its output, so the tail may be missing. `
+      + 'Nothing was written. Retry the call.';
+  }
+  return null;
+}
+
+/**
+ * Run a verified write inside a container: content is staged next to the
+ * target, checked for byte count and SHA-256, and only then moved into place,
+ * after which the file at the path is re-read and re-hashed. Returns either
+ * `{ error }` (nothing was written — the original is untouched) or the
+ * `{ bytes, sha256, total_lines }` the far side confirmed.
+ */
+async function verifiedContainerWrite(incusName, absPath, content, {
+  mode = null, keepOld = false, expectedSha = null, label = absPath,
+} = {}) {
+  const bytes = Buffer.byteLength(content, 'utf8');
+  const wantSha = sha256Hex(Buffer.from(content, 'utf8'));
+  const w = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', verifiedWriteScript(),
+      'sh', absPath, String(bytes), wantSha, mode || '', keepOld ? '1' : '0', expectedSha || ''],
+    { input: content, timeoutMs: 60000 },
+  );
+  const detail = (w.stderr || '').trim().slice(-300);
+  if (w.status === 64) {
+    const found = detail.split(' ')[1] || 'unknown';
+    return {
+      error: found === 'ABSENT'
+        ? `${label} no longer exists, so expected_sha256 could not match. Nothing was written.`
+        : `${label} has changed since you read it (expected ${expectedSha}, found ${found}). `
+          + 'Nothing was written — re-read the file and rebuild your change on its current content.',
+    };
+  }
+  if (w.status === 65) {
+    return {
+      error: `The content that reached the container did not match what was sent (${detail}). `
+        + `${label} is untouched — nothing was written. Retry the call.`,
+    };
+  }
+  if (w.status === 66) {
+    return {
+      error: `Write of ${label} did not verify on read-back (${detail}). The file may be in an unexpected `
+        + 'state — read it before writing again.',
+    };
+  }
+  if (w.status !== 0) return { error: `Write failed: ${detail || 'is the container running?'}` };
+  const ok = parseWriteOk(w.stdout);
+  if (!ok) return { error: `Write of ${label} did not report a verified result — treat it as unconfirmed and read the file back.` };
+  if (ok.bytes !== bytes) {
+    return { error: `Write of ${label} landed ${ok.bytes} bytes, not the ${bytes} sent. Read the file back before doing anything else.` };
+  }
+  return ok;
+}
+
 // Absolute path inside the container. Executed via argv (no shell string for
 // the path itself), so spaces are fine — only control chars and traversal
 // dots are rejected as nonsense.
@@ -607,20 +712,32 @@ async function toolReadLxcFile(args) {
   const path = validLxcFilePath(args.path);
   if (!path) return toolResult('path must be an absolute file path inside the container', { isError: true });
   const r = await runHostCapture(
-    'incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c', 'p="$1"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; wc -c < "$p"; head -c 524288 -- "$p"', 'sh', path],
-    { timeoutMs: 30000 },
+    'incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c',
+      `p="$1"; cap="$2"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; ${FILE_READ_HEADER}head -c "$cap" -- "$p"`,
+      'sh', path, String(LXC_FILE_READ_CAP)],
+    { timeoutMs: 30000, maxCapture: FILE_READ_CAPTURE },
   );
   if (r.status === 66) return toolResult(`Not a file: ${path}`, { isError: true });
   if (r.status !== 0) {
     return toolResult(`Could not read ${path} — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
   }
-  const nl = r.stdout.indexOf('\n');
-  const size = Number(String(r.stdout.slice(0, nl)).trim()) || 0;
-  const body = Buffer.from(r.stdout.slice(nl + 1), 'utf8');
+  const capped = captureTruncationError(path, r);
+  if (capped) return toolResult(capped, { isError: true });
+  const head = parseReadHeader(r.stdout);
+  if (!head) return toolResult(`Read of ${path} came back malformed — retry the call.`, { isError: true });
+  const body = Buffer.from(head.body, 'utf8');
   if (body.includes(0)) return toolResult(`${path} looks binary — this tool reads text files only`, { isError: true });
+  const overCap = head.size > LXC_FILE_READ_CAP;
+  // Below the cap the read is provably whole or it is an error — never a
+  // silently short copy that a later write_lxc_file would make permanent.
+  if (!overCap) {
+    const short = readIntegrityError(path, head.size, head.sha256, body);
+    if (short) return toolResult(short, { isError: true });
+  }
   return toolResult({
-    path, size_bytes: size,
-    truncated: size > LXC_FILE_READ_CAP,
+    path, size_bytes: head.size, total_lines: head.totalLines, sha256: head.sha256,
+    truncated: overCap,
+    ...(overCap ? { note: `Only the first ${Math.floor(LXC_FILE_READ_CAP / 1024)} KB of ${head.size} bytes is here — do NOT write this back as the whole file.` } : {}),
     content: body.toString('utf8'),
   });
 }
@@ -642,39 +759,46 @@ async function toolWriteLxcFile(args, auth) {
     if (!mode) return toolResult('mode must be three octal permission digits, e.g. "0755" or "644"', { isError: true });
   }
   const incusName = `${LXC_PREFIX}${name}`;
+  const expectedSha = validSha256(args.expected_sha256);
+  if (args.expected_sha256 != null && String(args.expected_sha256).trim() !== '' && !expectedSha) {
+    return toolResult('expected_sha256 must be the 64-character hex SHA-256 of the file you read (read_lxc_file returns it).', { isError: true });
+  }
 
   // Ask-first when the file exists — same contract as every other overwrite.
   const probe = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'p="$1"; if [ -e "$p" ]; then echo EXISTS; wc -c < "$p"; else echo ABSENT; fi', 'sh', path],
+    'incus', ['exec', incusName, '--', 'sh', '-c',
+      `${PP_SHA_FN}p="$1"; if [ -e "$p" ]; then echo EXISTS; wc -c < "$p"; pp_sha "$p"; else echo ABSENT; fi`, 'sh', path],
     { timeoutMs: 30000 },
   );
   if (probe.status !== 0) {
     return toolResult(`Cannot inspect ${name} — is it running? ${(probe.stderr || '').trim().slice(-300)}`, { isError: true });
   }
+  const probeLines = probe.stdout.split('\n');
   const exists = probe.stdout.startsWith('EXISTS');
   if (exists && args.confirm_overwrite !== true) {
-    const size = Number(String(probe.stdout.split('\n')[1] || '').trim()) || 0;
+    const size = Number(String(probeLines[1] || '').trim()) || 0;
+    const cur = String(probeLines[2] || '').trim();
     return toolResult({
       written: false,
       needs_confirmation: true,
       path,
       existing_size_bytes: size,
+      sha256: cur === NO_SHA ? null : cur,
       message: `${path} already exists (${size} bytes; it will be kept as ${path}.old). Show the user your proposed change and re-call with confirm_overwrite: true after they approve.`,
     });
   }
 
-  // mode rides as $2 (validated three octal digits — never interpolated), so
-  // the chmod happens in the same exec as the write.
-  const w = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; m="$2"; if [ -e "$p" ]; then rm -rf -- "$p.old"; cp -a -- "$p" "$p.old"; fi; mkdir -p "$(dirname -- "$p")"; cat > "$p"; if [ -n "$m" ]; then chmod "$m" -- "$p"; fi', 'sh', path, mode || ''],
-    { input: content, timeoutMs: 60000 },
-  );
-  if (w.status !== 0) {
-    return toolResult(`Write failed: ${(w.stderr || '').trim().slice(-300)}`, { isError: true });
-  }
-  logAudit(auth.created_by, 'LXC_FILE_WRITTEN', 'lxc', name, { via: 'mcp', path, bytes: Buffer.byteLength(content), replaced: exists, ...(mode ? { mode } : {}) }, null);
+  // Staged, hashed, moved into place, then read back — a write that does not
+  // verify leaves the previous file exactly where it was.
+  const written = await verifiedContainerWrite(incusName, path, content, {
+    mode, keepOld: true, expectedSha: expectedSha || null, label: path,
+  });
+  if (written.error) return toolResult(written.error, { isError: true });
+  logAudit(auth.created_by, 'LXC_FILE_WRITTEN', 'lxc', name, { via: 'mcp', path, bytes: written.bytes, replaced: exists, ...(mode ? { mode } : {}) }, null);
   return toolResult({
-    written: true, path, bytes: Buffer.byteLength(content),
+    written: true, path,
+    bytes: written.bytes, total_lines: written.total_lines, sha256: written.sha256,
+    verified: true,
     backup: exists ? `${path}.old` : null,
     ...(mode ? { mode } : {}),
     next: 'If this container has a registered startup script, redeploy with rerun_startup.',
@@ -1053,8 +1177,9 @@ async function toolGetLxcStartup(args) {
     return toolResult('No startup script is registered for this container — apply_lxc_zip with startup_script registers one', { isError: true });
   }
   const read = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'p="$1"; wc -c < "$p" 2>/dev/null || echo -1; head -c 524288 -- "$p" 2>/dev/null', 'sh', startup.scriptPath],
-    { timeoutMs: 30000 },
+    'incus', ['exec', incusName, '--', 'sh', '-c', 'p="$1"; wc -c < "$p" 2>/dev/null || echo -1; head -c $2 -- "$p" 2>/dev/null',
+      'sh', startup.scriptPath, String(LXC_FILE_READ_CAP)],
+    { timeoutMs: 30000, maxCapture: FILE_READ_CAPTURE },
   );
   let content = null; let size = null;
   if (read.status === 0) {
@@ -1072,7 +1197,9 @@ async function toolGetLxcStartup(args) {
     script_path: startup.scriptPath,
     working_dir: startup.workingDir || null,
     size_bytes: size != null && size >= 0 ? size : null,
-    truncated: size != null && size > LXC_FILE_READ_CAP,
+    // Either cap can cut this: the file cap in the container, or the transport
+    // budget on the way back. Both are the same fact to a caller.
+    truncated: (size != null && size > LXC_FILE_READ_CAP) || read.stdoutTruncated === true,
     content,
     unit: {
       name: STARTUP_UNIT_NAME,
@@ -1603,10 +1730,15 @@ async function toolReadStaticSiteFile(args) {
     return toolResult(`Could not read ${rel}: ${err?.message || err}`, { isError: true });
   }
   if (buf.includes(0)) return toolResult(`${rel} looks binary — this tool reads text files only`, { isError: true });
+  const whole = st.size <= STATIC_FILE_READ_CAP;
   return toolResult({
     path: rel,
     size_bytes: st.size,
-    truncated: st.size > STATIC_FILE_READ_CAP,
+    // Only a whole-file read can carry a hash of the file; a windowed one
+    // would be a hash of the window, which is a trap dressed as a guarantee.
+    sha256: whole ? sha256Hex(buf) : null,
+    truncated: !whole,
+    ...(whole ? {} : { note: `Only the first ${Math.floor(STATIC_FILE_READ_CAP / 1024)} KB of ${st.size} bytes is here — do NOT write this back as the whole file.` }),
     content: buf.toString('utf8'),
   });
 }
@@ -1631,16 +1763,38 @@ async function toolWriteStaticSiteFile(args, auth) {
       message: `${rel} already exists${size != null ? ` (${size} bytes)` : ''}; it will be kept as ${rel}.old. Show the user your proposed change and re-call with confirm_overwrite: true after they approve.`,
     });
   }
+  const wantSha = sha256Hex(Buffer.from(content, 'utf8'));
+  const wantBytes = Buffer.byteLength(content, 'utf8');
   try {
     await mkdir(join(abs, '..'), { recursive: true });
     if (exists) await copyFile(abs, `${abs}.old`);
-    await writeFile(abs, content);
+    // Stage, verify, then rename into place: a docroot is live, so a
+    // half-written file is a half-served page. The rename is atomic, and a
+    // failed verification never reaches the served path.
+    const staged = `${abs}.pp-write-${randomBytes(6).toString('hex')}`;
+    try {
+      await writeFile(staged, content);
+      const back = await readFile(staged);
+      if (back.length !== wantBytes || sha256Hex(back) !== wantSha) {
+        await rm(staged, { force: true });
+        return toolResult(
+          `Write of ${rel} did not verify on read-back (${back.length} bytes vs ${wantBytes}). Nothing was published — retry the call.`,
+          { isError: true },
+        );
+      }
+      await rename(staged, abs);
+    } catch (err) {
+      await rm(staged, { force: true }).catch(() => {});
+      throw err;
+    }
   } catch (err) {
     return toolResult(`Write failed: ${err?.message || err}`, { isError: true });
   }
-  logAudit(auth.created_by, 'STATIC_FILE_WRITTEN', 'service', site.id, { via: 'mcp', path: rel, bytes: Buffer.byteLength(content), replaced: exists }, null);
+  logAudit(auth.created_by, 'STATIC_FILE_WRITTEN', 'service', site.id, { via: 'mcp', path: rel, bytes: wantBytes, replaced: exists }, null);
   return toolResult({
-    written: true, path: rel, bytes: Buffer.byteLength(content),
+    written: true, path: rel, bytes: wantBytes,
+    total_lines: content === '' ? 0 : content.replace(/\n$/, '').split('\n').length,
+    sha256: wantSha, verified: true,
     backup: exists ? `${rel}.old` : null,
     note: 'Static files serve immediately — no reload step.',
   });
@@ -2272,8 +2426,8 @@ async function toolReadProjectFile(args) {
   // that is what lets a ranged read say how much it did not return. The window
   // is cut with sed INSIDE the container, so a 20-line read of a 2,000-line
   // file moves 20 lines over the wire, which is the whole point.
-  const script = 'p="$1"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; '
-    + 'wc -c < "$p"; wc -l < "$p"; '
+  const script = 'p="$1"; cap="$4"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; '
+    + FILE_READ_HEADER
     + 'if [ "$2" = "all" ]; then head -c "$4" -- "$p"; else sed -n "$2,$3p" "$p" | head -c "$4"; fi';
   const startArg = range.ranged ? String(range.start) : 'all';
   const endArg = range.ranged ? (range.end === null ? '$' : String(range.end)) : '0';
@@ -2281,20 +2435,18 @@ async function toolReadProjectFile(args) {
     'incus',
     ['exec', projectContainerName(m, project), '--', 'sh', '-c', script,
       'sh', abs, startArg, endArg, String(LXC_FILE_READ_CAP)],
-    { timeoutMs: 30000 },
+    { timeoutMs: 30000, maxCapture: FILE_READ_CAPTURE },
   );
   if (r.status === 66) return toolResult(`Not a file: ${rel} (use list_project_files to see the tracked files)`, { isError: true });
   if (r.status !== 0) {
     return toolResult(`Could not read ${rel} — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
   }
-  const nl1 = r.stdout.indexOf('\n');
-  const nl2 = r.stdout.indexOf('\n', nl1 + 1);
-  const size = Number(r.stdout.slice(0, nl1).trim()) || 0;
-  // `wc -l` counts newlines, so a file with no trailing newline reads one
-  // short — the max with 1 keeps a single unterminated line from being 0.
-  const newlines = Number(r.stdout.slice(nl1 + 1, nl2).trim()) || 0;
-  const totalLines = size === 0 ? 0 : Math.max(newlines, 1);
-  const body = Buffer.from(r.stdout.slice(nl2 + 1), 'utf8');
+  const capped = captureTruncationError(rel, r);
+  if (capped) return toolResult(capped, { isError: true });
+  const head = parseReadHeader(r.stdout);
+  if (!head) return toolResult(`Read of ${rel} came back malformed — retry the call.`, { isError: true });
+  const { size, totalLines } = head;
+  const body = Buffer.from(head.body, 'utf8');
   if (body.includes(0)) return toolResult(`${rel} looks binary — this tool reads text files only`, { isError: true });
   const content = body.toString('utf8');
   const returnedLines = content === '' ? 0 : content.replace(/\n$/, '').split('\n').length;
@@ -2303,6 +2455,10 @@ async function toolReadProjectFile(args) {
     path: rel,
     size_bytes: size,
     total_lines: totalLines,
+    // The file's hash, computed in the container. Pass it back as
+    // expected_sha256 on a later edit/write and the change is refused if
+    // anything moved underneath you in the meantime.
+    sha256: head.sha256,
     content,
   };
   if (range.ranged) {
@@ -2314,7 +2470,15 @@ async function toolReadProjectFile(args) {
       out.note = `offset ${range.start} is past the end of the file (${totalLines} lines).`;
     }
   } else {
+    // A whole-file read that matches the file's own size and hash is provably
+    // complete; anything else says so out loud rather than looking normal.
+    const short = readIntegrityError(rel, size, head.sha256, body);
     out.truncated = size > LXC_FILE_READ_CAP;
+    if (short && !out.truncated) return toolResult(short, { isError: true });
+    if (out.truncated) {
+      out.note = `Only the first ${Math.floor(LXC_FILE_READ_CAP / 1024)} KB of ${size} bytes is here. `
+        + 'Do NOT write this back as the whole file — use edit_project_file, or read a line range with offset/limit.';
+    }
   }
   return toolResult(out);
 }
@@ -2333,43 +2497,52 @@ async function toolWriteProjectFile(args, auth) {
   }
   const incusName = projectContainerName(m, project);
   const abs = `${M2_APP_DIR}/${rel}`;
+  const expectedSha = validSha256(args.expected_sha256);
+  if (args.expected_sha256 != null && String(args.expected_sha256).trim() !== '' && !expectedSha) {
+    return toolResult('expected_sha256 must be the 64-character hex SHA-256 of the file you read (read_project_file returns it).', { isError: true });
+  }
 
   // Ask-first when the file exists — same contract as every other overwrite.
   // git history (not a .old copy) is the backup here: a stray .old inside the
   // checkout would ride into the next build's diff.
   const probe = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'p="$1"; if [ -e "$p" ]; then echo EXISTS; wc -c < "$p"; else echo ABSENT; fi', 'sh', abs],
+    'incus', ['exec', incusName, '--', 'sh', '-c',
+      `${PP_SHA_FN}p="$1"; if [ -e "$p" ]; then echo EXISTS; wc -c < "$p"; pp_sha "$p"; else echo ABSENT; fi`, 'sh', abs],
     { timeoutMs: 30000 },
   );
   if (probe.status !== 0) {
     return toolResult(`Cannot inspect the project container — is it running? ${(probe.stderr || '').trim().slice(-300)}`, { isError: true });
   }
+  const probeLines = probe.stdout.split('\n');
   const exists = probe.stdout.startsWith('EXISTS');
   if (exists && args.confirm_overwrite !== true) {
-    const size = Number(String(probe.stdout.split('\n')[1] || '').trim()) || 0;
+    const size = Number(String(probeLines[1] || '').trim()) || 0;
+    const cur = String(probeLines[2] || '').trim();
     return toolResult({
       written: false,
       needs_confirmation: true,
       path: rel,
       existing_size_bytes: size,
+      sha256: cur === NO_SHA ? null : cur,
       message: `${rel} already exists (${size} bytes; the previous version stays in git history). Show the user your proposed change and re-call with confirm_overwrite: true after they approve.`,
     });
   }
 
-  const w = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; mkdir -p "$(dirname -- "$p")"; cat > "$p"', 'sh', abs],
-    { input: content, timeoutMs: 60000 },
-  );
-  if (w.status !== 0) {
-    return toolResult(`Write failed: ${(w.stderr || '').trim().slice(-300)}`, { isError: true });
-  }
+  // Staged, hashed, moved into place, then read back — see
+  // verifiedContainerWrite. A failure here means the file was NOT touched.
+  const written = await verifiedContainerWrite(incusName, abs, content, {
+    expectedSha: expectedSha || null, label: rel,
+  });
+  if (written.error) return toolResult(written.error, { isError: true });
 
   // Commit the edit and push to the project's bare repo, so it survives
   // rehydrate and shows in the project's history like any other change.
   const git = await commitProjectPaths(incusName, [rel], args.commit_message || `chat edit: ${rel}`);
-  logAudit(auth.created_by, 'MOCK2_FILE_WRITTEN', 'mock2_project', project.id, { via: 'mcp', path: rel, bytes: Buffer.byteLength(content), replaced: exists }, null);
+  logAudit(auth.created_by, 'MOCK2_FILE_WRITTEN', 'mock2_project', project.id, { via: 'mcp', path: rel, bytes: written.bytes, replaced: exists }, null);
   return toolResult({
-    written: true, path: rel, bytes: Buffer.byteLength(content),
+    written: true, path: rel,
+    bytes: written.bytes, total_lines: written.total_lines, sha256: written.sha256,
+    verified: true,
     ...git,
     next: 'When your edits are complete, apply them with redeploy_project.',
   });
@@ -2383,9 +2556,22 @@ async function toolWriteProjectFile(args, auth) {
 // everywhere else in this file exists to avoid. Doing it here also means the
 // occurrence count is exact rather than whatever a regex engine thought.
 //
-// THE TRUNCATION TRAP: read_project_file caps at 512 KB. Replacing inside a
-// truncated copy and writing it back would silently DELETE everything past the
-// cap, so a file over the cap is refused outright rather than edited.
+// THE TRUNCATION TRAP, and the four locks on it. Because this tool is a
+// read-modify-write, a short read is a data-destroying bug: the replacement
+// lands in a partial copy and the partial copy goes back over the file. That
+// happened — five times, cutting at ~267 KB, ~299 KB and ~327 KB, because the
+// transport capped at 256 KB while this tool believed it could read 512 KB.
+// So, in order:
+//   1. a file over the read cap is refused outright rather than edited;
+//   2. the read is checked against the file's own size and SHA-256, computed
+//      in the container, so a short or mangled transfer cannot pass as the
+//      file;
+//   3. the edited buffer is checked against arithmetic — original − old×n +
+//      new×n is the exact byte length the result must have, and a short read
+//      misses it by tens of thousands of bytes;
+//   4. the write itself stages, verifies and reads back (see
+//      verifiedContainerWrite), so even a corrupted transfer OUT cannot land.
+// Any of these failing means nothing is written and the file is untouched.
 async function toolEditProjectFile(args, auth) {
   const m = await mock2Modules();
   const { project, error } = requireActiveProject(m, args);
@@ -2397,48 +2583,202 @@ async function toolEditProjectFile(args, auth) {
 
   const incusName = projectContainerName(m, project);
   const abs = `${M2_APP_DIR}/${rel}`;
+  const expectedSha = validSha256(args.expected_sha256);
+  if (args.expected_sha256 != null && String(args.expected_sha256).trim() !== '' && !expectedSha) {
+    return toolResult('expected_sha256 must be the 64-character hex SHA-256 of the file you read (read_project_file returns it).', { isError: true });
+  }
   const r = await runHostCapture(
     'incus', ['exec', incusName, '--', 'sh', '-c',
-      'p="$1"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; wc -c < "$p"; cat -- "$p"', 'sh', abs],
-    { timeoutMs: 30000 },
+      `p="$1"; cap="$2"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; ${FILE_READ_HEADER}head -c "$cap" -- "$p"`,
+      'sh', abs, String(LXC_FILE_READ_CAP)],
+    { timeoutMs: 30000, maxCapture: FILE_READ_CAPTURE },
   );
   if (r.status === 66) return toolResult(`Not a file: ${rel} (use list_project_files to see the tracked files)`, { isError: true });
   if (r.status !== 0) {
     return toolResult(`Could not read ${rel} — is the container running? ${(r.stderr || '').trim().slice(-300)}`, { isError: true });
   }
-  const nl = r.stdout.indexOf('\n');
-  const size = Number(r.stdout.slice(0, nl).trim()) || 0;
+  const capped = captureTruncationError(rel, r);
+  if (capped) return toolResult(capped, { isError: true });
+  const head = parseReadHeader(r.stdout);
+  if (!head) return toolResult(`Read of ${rel} came back malformed — nothing was written. Retry the call.`, { isError: true });
+  const size = head.size;
   if (size > LXC_FILE_READ_CAP) {
     return toolResult(
       `${rel} is ${size} bytes, over the ${Math.floor(LXC_FILE_READ_CAP / 1024)} KB limit this tool can edit safely — editing it would risk truncating the part it cannot see. Use write_project_file with the complete new content instead.`,
       { isError: true },
     );
   }
-  const before = r.stdout.slice(nl + 1);
-  if (Buffer.from(before, 'utf8').includes(0)) {
+  const before = head.body;
+  const beforeBuf = Buffer.from(before, 'utf8');
+  if (beforeBuf.includes(0)) {
     return toolResult(`${rel} looks binary — this tool edits text files only`, { isError: true });
   }
+  // Lock 2: what arrived must BE the file — same length, same hash. Checked
+  // before the replacement, so a short read never becomes a write.
+  const shortRead = readIntegrityError(rel, size, head.sha256, beforeBuf);
+  if (shortRead) return toolResult(shortRead, { isError: true });
+  // Lock 3 (precondition): refuse an edit built against a version of the file
+  // that is no longer there — the concurrent-editor case.
+  const stale = expectedSha256Error(rel, args.expected_sha256, head.sha256);
+  if (stale) return toolResult(stale, { isError: true });
 
   const edited = applyStringEdit(before, args.old_string, args.new_string, args.expect_occurrences);
   if (edited.error) return toolResult(edited.error, { isError: true });
 
-  const w = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; cat > "$p"', 'sh', abs],
-    { input: edited.content, timeoutMs: 60000 },
-  );
-  if (w.status !== 0) {
-    return toolResult(`Write failed: ${(w.stderr || '').trim().slice(-300)}`, { isError: true });
-  }
+  // Lock 4: arithmetic. `size` is the file's length on disk (wc -c), never the
+  // length of what we read, so this compares the buffer about to be written
+  // against the size the file MUST have — three lines that turn a silent
+  // truncation into a clean refusal.
+  const shortWrite = editByteInvariantError({
+    path: rel, originalBytes: size, oldString: args.old_string,
+    newString: args.new_string, replaced: edited.replaced, content: edited.content,
+  });
+  if (shortWrite) return toolResult(shortWrite, { isError: true });
+
+  const written = await verifiedContainerWrite(incusName, abs, edited.content, {
+    // The file was just read; hand its hash back as the precondition so the
+    // window between our read and our write is closed too.
+    expectedSha: head.sha256, label: rel,
+  });
+  if (written.error) return toolResult(written.error, { isError: true });
 
   const git = await commitProjectPaths(incusName, [rel], args.commit_message || `chat edit: ${rel}`);
   logAudit(auth.created_by, 'MOCK2_FILE_EDITED', 'mock2_project', project.id, {
-    via: 'mcp', path: rel, replaced: edited.replaced,
+    via: 'mcp', path: rel, replaced: edited.replaced, bytes: written.bytes,
   }, null);
   return toolResult({
     edited: true,
     path: rel,
     replaced_count: edited.replaced,
-    bytes: Buffer.byteLength(edited.content),
+    bytes: written.bytes,
+    total_lines: written.total_lines,
+    sha256: written.sha256,
+    verified: true,
+    ...git,
+    next: 'When your edits are complete, apply them with redeploy_project.',
+  });
+}
+
+// append_project_file / insert_project_file_at_line — additions that never
+// move the file.
+//
+// Adding a route to a 400 KB router should not require reading 400 KB out and
+// writing 400 KB back: every byte of that round trip is a chance to corrupt
+// the file, and above the read cap it is not possible at all. These do the
+// work inside the container — `cat >>` for an append, head/tail for an
+// insert — and check the one invariant that matters: the file must end up
+// exactly `before + added` bytes long. An append that misses it is truncated
+// back to `before`; an insert that misses it never leaves the staging file.
+async function toolAppendProjectFile(args, auth) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const guard = liveBuildGuard(m, project);
+  if (guard) return toolResult(guard, { isError: true });
+  const rel = validProjectFilePath(args.path);
+  if (!rel) return toolResult('path must be a file path relative to the app root, e.g. src/server/routes.ts', { isError: true });
+  const content = String(args.content ?? '');
+  if (content === '') return toolResult('content is required — there is nothing to append.', { isError: true });
+  if (Buffer.byteLength(content) > LXC_FILE_WRITE_CAP) {
+    return toolResult(`Content exceeds the ${Math.floor(LXC_FILE_WRITE_CAP / (1024 * 1024))} MB single-call cap`, { isError: true });
+  }
+  const expectedSha = validSha256(args.expected_sha256);
+  if (args.expected_sha256 != null && String(args.expected_sha256).trim() !== '' && !expectedSha) {
+    return toolResult('expected_sha256 must be the 64-character hex SHA-256 of the file you read.', { isError: true });
+  }
+  const incusName = projectContainerName(m, project);
+  const abs = `${M2_APP_DIR}/${rel}`;
+  const added = Buffer.byteLength(content, 'utf8');
+  const mustExist = args.create !== true;
+
+  const w = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', appendScript(),
+      'sh', abs, String(added), mustExist ? '1' : '0', expectedSha || ''],
+    { input: content, timeoutMs: 60000 },
+  );
+  const detail = (w.stderr || '').trim().slice(-300);
+  if (w.status === 67) {
+    return toolResult(`${rel} does not exist in the checkout — pass create: true to start it, or use write_project_file.`, { isError: true });
+  }
+  if (w.status === 64) {
+    return toolResult(`${rel} has changed since you read it (${detail}). Nothing was appended — re-read it first.`, { isError: true });
+  }
+  if (w.status === 66) {
+    return toolResult(
+      `Append to ${rel} did not land the expected number of bytes (${detail}); the file was rolled back to its previous length. Nothing was appended — retry the call.`,
+      { isError: true },
+    );
+  }
+  if (w.status !== 0) return toolResult(`Append failed: ${detail || 'is the container running?'}`, { isError: true });
+  const ok = parseWriteOk(w.stdout);
+  if (!ok) return toolResult(`Append to ${rel} did not report a verified result — read the file back before doing anything else.`, { isError: true });
+
+  const git = await commitProjectPaths(incusName, [rel], args.commit_message || `chat append: ${rel}`);
+  logAudit(auth.created_by, 'MOCK2_FILE_EDITED', 'mock2_project', project.id, {
+    via: 'mcp', path: rel, appended_bytes: added,
+  }, null);
+  return toolResult({
+    appended: true, path: rel, appended_bytes: added,
+    bytes: ok.bytes, total_lines: ok.total_lines, sha256: ok.sha256, verified: true,
+    ...git,
+    next: 'When your edits are complete, apply them with redeploy_project.',
+  });
+}
+
+async function toolInsertProjectFileAtLine(args, auth) {
+  const m = await mock2Modules();
+  const { project, error } = requireActiveProject(m, args);
+  if (error) return toolResult(error, { isError: true });
+  const guard = liveBuildGuard(m, project);
+  if (guard) return toolResult(guard, { isError: true });
+  const rel = validProjectFilePath(args.path);
+  if (!rel) return toolResult('path must be a file path relative to the app root, e.g. src/server/routes.ts', { isError: true });
+  const line = normalizeInsertLine(args.line);
+  if (line === null) return toolResult('line must be a whole number ≥ 1 — the text is inserted BEFORE that line.', { isError: true });
+  let content = String(args.content ?? '');
+  if (content === '') return toolResult('content is required — there is nothing to insert.', { isError: true });
+  // Inserting a fragment without a trailing newline would weld the caller's
+  // last line onto the line it was inserted before.
+  if (!content.endsWith('\n')) content += '\n';
+  if (Buffer.byteLength(content) > LXC_FILE_WRITE_CAP) {
+    return toolResult(`Content exceeds the ${Math.floor(LXC_FILE_WRITE_CAP / (1024 * 1024))} MB single-call cap`, { isError: true });
+  }
+  const expectedSha = validSha256(args.expected_sha256);
+  if (args.expected_sha256 != null && String(args.expected_sha256).trim() !== '' && !expectedSha) {
+    return toolResult('expected_sha256 must be the 64-character hex SHA-256 of the file you read.', { isError: true });
+  }
+  const incusName = projectContainerName(m, project);
+  const abs = `${M2_APP_DIR}/${rel}`;
+  const added = Buffer.byteLength(content, 'utf8');
+
+  const w = await runHostCapture(
+    'incus', ['exec', incusName, '--', 'sh', '-c', insertAtLineScript(),
+      'sh', abs, String(line), String(added), expectedSha || ''],
+    { input: content, timeoutMs: 60000 },
+  );
+  const detail = (w.stderr || '').trim().slice(-300);
+  if (w.status === 67) return toolResult(`Not a file: ${rel} (use list_project_files to see the tracked files)`, { isError: true });
+  if (w.status === 68) {
+    const total = detail.split(' ')[1] || '?';
+    return toolResult(`line ${line} is past the end of ${rel} (${total} lines). Insert at ${Number(total) + 1} to add at the end, or use append_project_file.`, { isError: true });
+  }
+  if (w.status === 64) {
+    return toolResult(`${rel} has changed since you read it (${detail}). Nothing was inserted — re-read it first.`, { isError: true });
+  }
+  if (w.status === 65 || w.status === 66) {
+    return toolResult(`Insert into ${rel} did not produce the expected byte count (${detail}); the file is untouched. Retry the call.`, { isError: true });
+  }
+  if (w.status !== 0) return toolResult(`Insert failed: ${detail || 'is the container running?'}`, { isError: true });
+  const ok = parseWriteOk(w.stdout);
+  if (!ok) return toolResult(`Insert into ${rel} did not report a verified result — read the file back before doing anything else.`, { isError: true });
+
+  const git = await commitProjectPaths(incusName, [rel], args.commit_message || `chat insert: ${rel}`);
+  logAudit(auth.created_by, 'MOCK2_FILE_EDITED', 'mock2_project', project.id, {
+    via: 'mcp', path: rel, inserted_at_line: line, inserted_bytes: added,
+  }, null);
+  return toolResult({
+    inserted: true, path: rel, line, inserted_bytes: added,
+    bytes: ok.bytes, total_lines: ok.total_lines, sha256: ok.sha256, verified: true,
     ...git,
     next: 'When your edits are complete, apply them with redeploy_project.',
   });
@@ -2859,12 +3199,11 @@ async function toolAppendChangeRecord(args, auth) {
   const incusName = projectContainerName(m, project);
   const rel = `state/changes/${record.seq}.json`;
   const mirror = JSON.stringify(m.changeRecords.changeRecordMirror(record), null, 2);
-  const w = await runHostCapture(
-    'incus', ['exec', incusName, '--', 'sh', '-c', 'set -e; p="$1"; mkdir -p "$(dirname -- "$p")"; cat > "$p"', 'sh', `${M2_APP_DIR}/${rel}`],
-    { input: mirror, timeoutMs: 30000 },
-  );
+  // Verified like every other write: a mirror of the audit trail that landed
+  // half-written would be worse than one that failed loudly.
+  const w = await verifiedContainerWrite(incusName, `${M2_APP_DIR}/${rel}`, mirror, { label: rel });
   let git = { committed: false, unchanged: false, commit: null, push_failed: false };
-  if (w.status === 0) {
+  if (!w.error) {
     git = await commitProjectPaths(incusName, [rel], `mock2: change record ${record.seq}`);
   }
 
@@ -2880,7 +3219,8 @@ async function toolAppendChangeRecord(args, auth) {
     prev_hash: record.prev_hash,
     created_at: record.created_at,
     mirror_path: rel,
-    mirror_written: w.status === 0,
+    mirror_written: !w.error,
+    ...(w.error ? { mirror_error: w.error } : {}),
     ...git,
     // Verified right after appending, because a record that broke the chain is
     // worth hearing about now rather than at the next audit.
@@ -2937,6 +3277,8 @@ const TOOL_HANDLERS = {
   read_project_file: toolReadProjectFile,
   write_project_file: toolWriteProjectFile,
   edit_project_file: toolEditProjectFile,
+  append_project_file: toolAppendProjectFile,
+  insert_project_file_at_line: toolInsertProjectFileAtLine,
   search_project_files: toolSearchProjectFiles,
   delete_project_file: toolDeleteProjectFile,
   move_project_file: toolMoveProjectFile,
@@ -2973,6 +3315,11 @@ async function handleRpc(message, auth, req) {
           'the bytes to its upload_url instead of inlining base64; if you cannot reach the upload URL,',
           'send the bytes over MCP with append_upload_chunk + finish_upload on the same ticket.',
           'Pass sha256 to the inspect tools so transport corruption fails loudly.',
+          'File writes verify themselves: every read returns the file sha256, every write is staged,',
+          'hashed and read back, and a write that does not verify is refused with the previous file',
+          'left intact. Pass the sha256 you read back as expected_sha256 when something else may be',
+          'editing the same file. To ADD to a large file use append_project_file or',
+          'insert_project_file_at_line — neither moves the existing content, so neither can truncate it.',
         ].join(' '),
       });
     }

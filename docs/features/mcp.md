@@ -33,7 +33,7 @@ Revoking the token (same card) immediately cuts the client off.
 | Projects | `list_projects`, `get_project`, `send_project_build`, `upload_project_reference`, `clone_project` | `send_project_build` queues a quick update on the project's own AI harness — **this lane spends the project's configured API budget**. `clone_project` mirrors the UI's Clone (fresh / full-with-database). |
 | Project build control | `interrupt_project_build`, `cancel_queued_build` | Stop a running build (checkpoint-and-stop by default, or abandon) and cancel not-yet-started queue entries — the "that build is burning tokens on the wrong thing" stop switch, from chat. |
 | Project file reads | `list_project_files`, `search_project_files`, `read_project_file` | Find first, read narrowly. `search_project_files` is `git grep -E` over the tracked files and returns `path` + `line_number` + the matching line; `read_project_file` then takes `offset`/`limit` to pull just that window (it always reports `total_lines`, so a ranged read can say what it left behind). Reading whole files to find one function is the expensive habit these two exist to break. |
-| Project file edits | `write_project_file`, `edit_project_file`, `delete_project_file`, `move_project_file`, `redeploy_project` | The subscription lane for Projects: the chat does the thinking, ProxyPilot only executes file ops — no build tokens spent. `edit_project_file` replaces an exact string and refuses unless the match count is what the caller expected, which is the one to reach for on a large file — `write_project_file` rewrites the whole thing and gets riskier the bigger the file. `move_project_file` uses `git mv` so history follows. All are git-committed and pushed, and all are refused while a build is running. `redeploy_project` then installs/migrates/builds/restarts and health-checks the live app. |
+| Project file edits | `write_project_file`, `edit_project_file`, `append_project_file`, `insert_project_file_at_line`, `delete_project_file`, `move_project_file`, `redeploy_project` | The subscription lane for Projects: the chat does the thinking, ProxyPilot only executes file ops — no build tokens spent. `edit_project_file` replaces an exact string and refuses unless the match count is what the caller expected, which is the one to reach for on a large file — `write_project_file` rewrites the whole thing and gets riskier the bigger the file. `append_project_file` and `insert_project_file_at_line` add to a file without moving its existing content anywhere, which is the safe way to extend a big one. Every write is staged, hashed and read back before it counts as done, and every writing tool takes an optional `expected_sha256` precondition. `move_project_file` uses `git mv` so history follows. All are git-committed and pushed, and all are refused while a build is running. `redeploy_project` then installs/migrates/builds/restarts and health-checks the live app. |
 | Project history | `project_git_log`, `project_git_diff`, `project_git_show` | Read-only history as structured data: `project_git_log` returns parsed commit rows rather than raw text. `project_git_diff` with no `ref` shows uncommitted work **and lists untracked files** — that is how you catch a build that wrote a file and never committed it, which is invisible to `git log` and to reviewers but still on disk and still running. Raw git is also reachable via `run_project_command` when you want a specific format. |
 | Build diagnosis | `get_build_log` | The recorded event stream of one cycle — status, error, and the steps it produced. A failed build otherwise surfaces as a status with no output, leaving nothing to diagnose from. Keeps the tail (a failure explains itself at the end). |
 | Audit trail | `append_change_record` | Appends a hash-chained record for chat-lane work, which otherwise writes none. ProxyPilot computes `seq`/`prev_hash`/`hash` server-side through the same code the build runner uses, and mirrors the record to `state/changes/<seq>.json` in the checkout. The chain is re-verified immediately after appending. **Never hand-compute these hashes** — see below. |
@@ -142,8 +142,10 @@ quietly stop being true.
   `create_upload_ticket` and the PUT invalidates the ticket (re-create it).
 - `edit_project_file` refuses files over 512 KB. It reads the file out,
   replaces in the backend and writes it back, and the reader caps at 512 KB —
-  so editing a larger file would silently drop everything past the cap. Use
-  `write_project_file` with the complete content for those.
+  so editing a larger file would drop everything past the cap. Use
+  `append_project_file` / `insert_project_file_at_line` to ADD to such a file
+  (neither moves the existing content), or `write_project_file` with the
+  complete content to replace it.
 - `search_project_files` returns matching lines, not surrounding context. Pair
   it with `read_project_file`'s `offset`/`limit` to pull the lines around a
   hit; that composes better than a fixed context window and costs one extra
@@ -154,6 +156,40 @@ quietly stop being true.
   has the same property and reaps orphans via a marker in the command line;
   this tool deliberately does *not* carry that marker, so a later deploy will
   not kill a test run that is still going.
+
+## Write integrity
+
+A read-modify-write tool is only as trustworthy as its read. This one was
+not, once: the host capture wrapper stopped at 256 KB while the file tools
+advertised 512 KB, so files in between came back cut at a chunk boundary and
+`edit_project_file` wrote the stump back over the original — five files, no
+error, cut points varying with the chunk (~267 KB, ~299 KB, ~327 KB). Four
+checks now stand between a bad read and a written file, cheapest first:
+
+1. **The transport reports its cap.** `runHostCapture` returns
+   `stdoutTruncated` and `stdoutComplete`, file reads run with a budget above
+   the 512 KB read cap, and a capped or unflushed read is an error rather
+   than a short string that looks like a file.
+2. **Reads are checked against the file.** Every read carries the file's byte
+   count and its SHA-256 as computed *inside* the container. What arrives
+   must match both, or the call fails before anything is written.
+3. **The byte-count invariant.** A literal string replacement has exactly one
+   possible result length: `original − len(old)×n + len(new)×n`, in bytes,
+   against the file's on-disk size. `edit_project_file` refuses to write
+   anything else. Each of the five truncations missed it by tens of
+   thousands of bytes.
+4. **Read-back on every write.** Content is staged next to the target,
+   verified there by byte count and SHA-256, renamed into place, then re-read
+   and re-hashed at its real path. A write that does not verify leaves the
+   previous file exactly where it was, and says so.
+
+On top of those, `expected_sha256` is an optional precondition on
+`edit_project_file`, `write_project_file`, `write_lxc_file`,
+`append_project_file` and `insert_project_file_at_line`: pass the `sha256`
+that came back from the matching read tool and the call is refused if the
+file has changed since — the guard for two agents editing one file. Every
+write returns `bytes`, `total_lines` and `sha256` of what actually landed, so
+a caller can assert without a second round trip.
 
 ## Troubleshooting
 

@@ -1074,3 +1074,317 @@ test('drift guard: lib/mcp-policy matches the mcp-lxc-sites-upgrades component s
       `${name} drifted between lib/mcp-policy/ and the component spec — update BOTH (the spec is the design record, lib/mcp-policy is what the server enforces)`);
   }
 });
+
+// ---- write integrity: the guard that turns a short read into an error ----
+//
+// The bug these exist for: edit_project_file read a file, replaced a string in
+// memory, and wrote the whole thing back — but the read came back short (the
+// host capture wrapper stopped at 256 KB while the tool advertised 512 KB), so
+// what got written was a stump. It happened five times, cutting at ~267 KB,
+// ~299 KB and ~327 KB. Nothing errored, because nothing checked.
+
+import {
+  expectedEditBytes, editByteInvariantError, expectedSha256Error, readIntegrityError,
+  normalizeInsertLine, parseWriteOk, verifiedWriteScript, appendScript, insertAtLineScript,
+  NO_SHA,
+} from '../lib/mcp-logic.js';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, writeFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+test('expectedEditBytes is arithmetic, not an estimate — including multi-byte text', () => {
+  // 100 bytes, two 2-byte matches replaced by 4-byte text → 100 - 4 + 8.
+  assert.equal(expectedEditBytes(100, 'ab', 'cdef', 2), 104);
+  // "é" is two BYTES and one character; the invariant counts bytes.
+  assert.equal(expectedEditBytes(50, 'e', 'é', 1), 51);
+  assert.equal(expectedEditBytes(50, 'x', '', 3), 47);
+});
+
+test('editByteInvariantError passes a correct edit and names the shortfall on a truncated one', () => {
+  const original = 'aaa\nHELLO\nbbb\n';
+  const edited = original.replace('HELLO', 'WORLD!');
+  assert.equal(editByteInvariantError({
+    path: 'src/a.ts', originalBytes: Buffer.byteLength(original),
+    oldString: 'HELLO', newString: 'WORLD!', replaced: 1, content: edited,
+  }), null);
+
+  // The real failure, scaled down: a 300 KB file read back at 267 KB, edited,
+  // and about to be written over the original.
+  const whole = 'x'.repeat(300_000) + 'HELLO' + 'y'.repeat(1000);
+  const shortRead = whole.slice(0, 267_000).replace('HELLO', 'WORLD');
+  const err = editByteInvariantError({
+    path: 'src/big.ts', originalBytes: Buffer.byteLength(whole),
+    oldString: 'HELLO', newString: 'WORLD', replaced: 1, content: shortRead,
+  });
+  assert.ok(err, 'a 34 KB shortfall must not pass');
+  assert.match(err, /267000 bytes/);
+  assert.match(err, /bytes short/);
+  assert.match(err, /untouched/);
+});
+
+test('editByteInvariantError also catches an edit that is too LONG', () => {
+  const err = editByteInvariantError({
+    path: 'a.ts', originalBytes: 10, oldString: 'a', newString: 'b', replaced: 1, content: 'x'.repeat(40),
+  });
+  assert.match(err, /30 bytes over/);
+});
+
+test('expectedSha256Error: absent is fine, malformed is not, mismatch names both hashes', () => {
+  const mine = 'a'.repeat(64);
+  assert.equal(expectedSha256Error('a.ts', undefined, mine), null);
+  assert.equal(expectedSha256Error('a.ts', '', mine), null);
+  assert.equal(expectedSha256Error('a.ts', mine, mine), null);
+  assert.match(expectedSha256Error('a.ts', 'nope', mine), /64-character hex/);
+  const drift = expectedSha256Error('a.ts', mine, 'b'.repeat(64));
+  assert.match(drift, /has changed since you read it/);
+  assert.match(drift, /another agent/);
+  // A container that cannot hash must not silently "pass" the precondition.
+  assert.match(expectedSha256Error('a.ts', mine, NO_SHA), /cannot be verified/);
+});
+
+test('readIntegrityError catches a short transfer and a corrupted one', () => {
+  const body = Buffer.from('hello world\n');
+  const sha = createHash('sha256').update(body).digest('hex');
+  assert.equal(readIntegrityError('a.ts', body.length, sha, body), null);
+  assert.match(readIntegrityError('a.ts', 999, sha, body), /came back short/);
+  assert.match(readIntegrityError('a.ts', body.length, 'c'.repeat(64), body), /does not match the file's own SHA-256/);
+  // No hasher on the far side still leaves the byte count doing its job.
+  assert.equal(readIntegrityError('a.ts', body.length, NO_SHA, body), null);
+});
+
+test('normalizeInsertLine takes 1-based whole numbers only', () => {
+  assert.equal(normalizeInsertLine(1), 1);
+  assert.equal(normalizeInsertLine('12'), 12);
+  assert.equal(normalizeInsertLine(0), null);
+  assert.equal(normalizeInsertLine(-3), null);
+  assert.equal(normalizeInsertLine(2.5), null);
+  assert.equal(normalizeInsertLine(undefined), null);
+});
+
+test('parseWriteOk reads the verified trailer, and refuses anything else', () => {
+  assert.deepEqual(parseWriteOk('PP_OK 120 abc 4\n'), { bytes: 120, sha256: 'abc', total_lines: 4 });
+  // An unterminated single line is one line, not zero.
+  assert.equal(parseWriteOk(`PP_OK 5 ${NO_SHA} 0\n`).total_lines, 1);
+  assert.equal(parseWriteOk(`PP_OK 5 ${NO_SHA} 0\n`).sha256, null);
+  assert.equal(parseWriteOk(''), null);
+  assert.equal(parseWriteOk('something else\n'), null);
+});
+
+// ---- the in-container scripts, run for real against a temp directory ----
+//
+// These are POSIX sh and the whole point of them is what they do on a
+// filesystem, so they are executed rather than string-matched.
+
+function runScript(script, argv, input) {
+  return new Promise((resolve) => {
+    const child = spawn('sh', ['-c', script, 'sh', ...argv], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = ''; let err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('exit', (status) => resolve({ status, out, err }));
+    child.stdin.end(input ?? '');
+  });
+}
+
+const shaOf = (s) => createHash('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
+const scratch = () => mkdtempSync(join(tmpdir(), 'pp-write-'));
+
+test('verifiedWriteScript writes, verifies, and reports what landed', async () => {
+  const dir = scratch();
+  const f = join(dir, 'a.txt');
+  writeFileSync(f, 'old\n');
+  const next = 'one\ntwo\n';
+  const r = await runScript(verifiedWriteScript(), [f, String(Buffer.byteLength(next)), shaOf(next), '', '1', ''], next);
+  assert.equal(r.status, 0, r.err);
+  assert.deepEqual(parseWriteOk(r.out), { bytes: 8, sha256: shaOf(next), total_lines: 2 });
+  assert.equal(readFileSync(f, 'utf8'), next);
+  assert.equal(readFileSync(`${f}.old`, 'utf8'), 'old\n', 'the replaced file is kept');
+});
+
+test('verifiedWriteScript refuses a short transfer and leaves the original alone', async () => {
+  const dir = scratch();
+  const f = join(dir, 'a.txt');
+  writeFileSync(f, 'ORIGINAL\n');
+  // Declare 500 bytes, send 8: exactly what a truncated stream looks like.
+  const r = await runScript(verifiedWriteScript(), [f, '500', shaOf('x'.repeat(500)), '', '0', ''], 'partial\n');
+  assert.equal(r.status, 65);
+  assert.match(r.err, /PP_STAGE_BYTES 8/);
+  assert.equal(readFileSync(f, 'utf8'), 'ORIGINAL\n', 'a failed write must not touch the target');
+  assert.deepEqual(
+    readdirSync(dir).sort(), ['a.txt'],
+    'the staging file is cleaned up, not left behind in the checkout',
+  );
+});
+
+test('verifiedWriteScript refuses content whose hash does not match the declared one', async () => {
+  const dir = scratch();
+  const f = join(dir, 'a.txt');
+  writeFileSync(f, 'ORIGINAL\n');
+  const body = 'hello\n';
+  const r = await runScript(verifiedWriteScript(), [f, String(body.length), shaOf('something else'), '', '0', ''], body);
+  assert.equal(r.status, 65);
+  assert.match(r.err, /PP_STAGE_SHA/);
+  assert.equal(readFileSync(f, 'utf8'), 'ORIGINAL\n');
+});
+
+test('verifiedWriteScript honours the expected_sha256 precondition', async () => {
+  const dir = scratch();
+  const f = join(dir, 'a.txt');
+  writeFileSync(f, 'v1\n');
+  const body = 'v2\n';
+  const args = [f, String(body.length), shaOf(body), '', '0'];
+  // Somebody else's hash → refused, file untouched.
+  let r = await runScript(verifiedWriteScript(), [...args, shaOf('other\n')], body);
+  assert.equal(r.status, 64);
+  assert.match(r.err, /PP_PRECONDITION/);
+  assert.equal(readFileSync(f, 'utf8'), 'v1\n');
+  // The real hash → allowed.
+  r = await runScript(verifiedWriteScript(), [...args, shaOf('v1\n')], body);
+  assert.equal(r.status, 0, r.err);
+  assert.equal(readFileSync(f, 'utf8'), 'v2\n');
+});
+
+test('verifiedWriteScript keeps the target mode across an edit, and applies an explicit one', async () => {
+  const dir = scratch();
+  const f = join(dir, 'run.sh');
+  writeFileSync(f, '#!/bin/sh\n', { mode: 0o755 });
+  const body = '#!/bin/sh\necho hi\n';
+  let r = await runScript(verifiedWriteScript(), [f, String(body.length), shaOf(body), '', '0', ''], body);
+  assert.equal(r.status, 0, r.err);
+  assert.equal(statSync(f).mode & 0o777, 0o755, 'an executable script stays executable');
+  const body2 = 'plain\n';
+  r = await runScript(verifiedWriteScript(), [f, String(body2.length), shaOf(body2), '0600', '0', ''], body2);
+  assert.equal(r.status, 0, r.err);
+  assert.equal(statSync(f).mode & 0o777, 0o600);
+});
+
+test('appendScript adds bytes without moving the file, and rolls back a short append', async () => {
+  const dir = scratch();
+  const f = join(dir, 'log.txt');
+  writeFileSync(f, 'a\nb\n');
+  const add = 'c\n';
+  let r = await runScript(appendScript(), [f, String(add.length), '1', ''], add);
+  assert.equal(r.status, 0, r.err);
+  assert.equal(readFileSync(f, 'utf8'), 'a\nb\nc\n');
+  assert.equal(parseWriteOk(r.out).bytes, 6);
+  assert.equal(parseWriteOk(r.out).total_lines, 3);
+
+  // Claim more bytes than arrive: the file must come back to its old length.
+  r = await runScript(appendScript(), [f, '900', '1', ''], 'd\n');
+  assert.equal(r.status, 66);
+  assert.equal(readFileSync(f, 'utf8'), 'a\nb\nc\n', 'a bad append is rolled back');
+});
+
+test('appendScript refuses a missing file unless asked to create it', async () => {
+  const dir = scratch();
+  const f = join(dir, 'nested/new.txt');
+  let r = await runScript(appendScript(), [f, '2', '1', ''], 'x\n');
+  assert.equal(r.status, 67);
+  assert.equal(existsSync(f), false);
+  r = await runScript(appendScript(), [f, '2', '0', ''], 'x\n');
+  assert.equal(r.status, 0, r.err);
+  assert.equal(readFileSync(f, 'utf8'), 'x\n');
+});
+
+test('insertAtLineScript inserts before the given line and keeps the rest intact', async () => {
+  const dir = scratch();
+  const f = join(dir, 'a.txt');
+  writeFileSync(f, 'a\nb\nc\n');
+  const add = 'X\n';
+  const r = await runScript(insertAtLineScript(), [f, '2', String(add.length), ''], add);
+  assert.equal(r.status, 0, r.err);
+  assert.equal(readFileSync(f, 'utf8'), 'a\nX\nb\nc\n');
+  assert.equal(parseWriteOk(r.out).total_lines, 4);
+});
+
+test('insertAtLineScript allows total_lines + 1 (the end) and refuses past it', async () => {
+  const dir = scratch();
+  const f = join(dir, 'a.txt');
+  writeFileSync(f, 'a\nb\n');
+  let r = await runScript(insertAtLineScript(), [f, '3', '2', ''], 'Z\n');
+  assert.equal(r.status, 0, r.err);
+  assert.equal(readFileSync(f, 'utf8'), 'a\nb\nZ\n');
+  r = await runScript(insertAtLineScript(), [f, '99', '2', ''], 'Z\n');
+  assert.equal(r.status, 68);
+  assert.match(r.err, /PP_PAST_END 3/);
+  assert.equal(readFileSync(f, 'utf8'), 'a\nb\nZ\n', 'a refused insert changes nothing');
+});
+
+test('insertAtLineScript refuses a short transfer and honours the precondition', async () => {
+  const dir = scratch();
+  const f = join(dir, 'a.txt');
+  writeFileSync(f, 'a\nb\n');
+  let r = await runScript(insertAtLineScript(), [f, '1', '900', ''], 'Z\n');
+  assert.equal(r.status, 65);
+  assert.match(r.err, /PP_INSERT_BYTES/);
+  assert.equal(readFileSync(f, 'utf8'), 'a\nb\n');
+  r = await runScript(insertAtLineScript(), [f, '1', '2', shaOf('different\n')], 'Z\n');
+  assert.equal(r.status, 64);
+  assert.equal(readFileSync(f, 'utf8'), 'a\nb\n');
+});
+
+test('the additive tools and the sha precondition are in the catalog', () => {
+  const byName = new Map(MCP_TOOLS.map((t) => [t.name, t]));
+  for (const n of ['append_project_file', 'insert_project_file_at_line']) {
+    assert.ok(byName.has(n), `missing tool ${n}`);
+  }
+  // Every tool that overwrites or extends a file offers the precondition.
+  for (const n of ['edit_project_file', 'write_project_file', 'write_lxc_file',
+    'append_project_file', 'insert_project_file_at_line']) {
+    assert.ok(byName.get(n).inputSchema.properties.expected_sha256, `${n} needs expected_sha256`);
+    // ...and never demands it: existing callers keep working.
+    assert.ok(!byName.get(n).inputSchema.required.includes('expected_sha256'));
+  }
+  assert.deepEqual(byName.get('insert_project_file_at_line').inputSchema.required,
+    ['project_id', 'path', 'line', 'content']);
+});
+
+// ---- catalog ⇄ dispatch parity (source-level: routes/mcp.js pulls in the
+//      native DB, so it cannot be imported here) ----
+
+test('every advertised tool has a handler, and every file write goes through the verified path', () => {
+  const routeSrc = readFileSync(new URL('../routes/mcp.js', import.meta.url), 'utf8');
+  const table = routeSrc.slice(routeSrc.indexOf('const TOOL_HANDLERS = {'));
+  const body = table.slice(0, table.indexOf('\n};'));
+  for (const t of MCP_TOOLS) {
+    assert.ok(new RegExp(`\\n  ${t.name}:`).test(body), `${t.name} is advertised but not dispatched`);
+  }
+  // The ratchet: a raw `cat > "$p"` in a file tool is how the truncation bug
+  // shipped. New writes go through verifiedContainerWrite / the script
+  // builders, which check bytes and hash before anything replaces a file.
+  const rawWrites = routeSrc.match(/cat > "\$p"/g) || [];
+  assert.equal(rawWrites.length, 0,
+    'file writes must go through verifiedContainerWrite (staged, hashed, read back), not a bare cat >');
+});
+
+test('a staged write keeps the target mode AND owner (the inode is replaced)', async () => {
+  const dir = scratch();
+  const f = join(dir, 'startup.sh');
+  writeFileSync(f, '#!/bin/sh\n', { mode: 0o750 });
+  const before = statSync(f);
+  const body = '#!/bin/sh\ntrue\n';
+  const r = await runScript(verifiedWriteScript(), [f, String(body.length), shaOf(body), '', '0', ''], body);
+  assert.equal(r.status, 0, r.err);
+  const after = statSync(f);
+  assert.equal(after.mode & 0o777, 0o750);
+  assert.equal(after.uid, before.uid);
+  assert.equal(after.gid, before.gid);
+});
+
+test('an insert keeps the target mode too', async () => {
+  const dir = scratch();
+  const f = join(dir, 'run.sh');
+  writeFileSync(f, 'a\nb\n', { mode: 0o755 });
+  const r = await runScript(insertAtLineScript(), [f, '1', '2', ''], 'Z\n');
+  assert.equal(r.status, 0, r.err);
+  assert.equal(statSync(f).mode & 0o777, 0o755);
+});
+
+test('readIntegrityError separates a short read from a file that is not UTF-8 text', () => {
+  const latin1 = Buffer.from([0x68, 0xe9, 0x0a]);            // "h<0xe9>\n", not UTF-8
+  const decoded = Buffer.from(latin1.toString('utf8'), 'utf8');
+  const err = readIntegrityError('a.txt', latin1.length, null, decoded);
+  assert.match(err, /not valid UTF-8/);
+  assert.match(err, /nothing was written/i);
+});

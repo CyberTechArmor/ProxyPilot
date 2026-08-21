@@ -284,3 +284,69 @@ test('setupStartupScript: failed registration throws with stderr', async () => {
     /systemctl: not found/,
   );
 });
+
+// ---- runHostCapture: the transport that silently ate 40 KB ----
+//
+// This wrapper is what every file read in the MCP server goes through. It used
+// to concatenate `chunk.toString('utf-8')` until 256 KB and then quietly stop,
+// while the tools built on it advertised a 512 KB read. A ~300 KB file
+// therefore came back cut at whatever chunk boundary crossed the cap — the
+// caller could not tell, and edit_project_file wrote the stump back over the
+// real file. Five files were corrupted that way before anyone noticed.
+
+import { runHostCapture, CAPTURE_CAP } from '../lib/lxc-zip.js';
+
+// `sh` is the binary under every incus exec in this file; using it directly
+// keeps the test honest about real pipe behaviour without an Incus daemon.
+const bigOutput = (bytes) => ['-c', `head -c ${bytes} /dev/zero | tr "\\0" a`];
+
+test('runHostCapture reports the cap instead of hiding it', async () => {
+  const r = await runHostCapture('sh', bigOutput(CAPTURE_CAP + 80_000));
+  assert.equal(r.status, 0);
+  assert.equal(r.stdoutBytes, CAPTURE_CAP);
+  assert.equal(r.stdoutTruncated, true, 'a capped capture MUST announce itself');
+  // Exactly the cap, not "the cap plus whatever the last chunk carried" — the
+  // ragged cut points (~267 KB, ~299 KB, ~327 KB) were that overshoot.
+  assert.equal(r.stdout.length, CAPTURE_CAP);
+});
+
+test('runHostCapture returns the whole stream when the budget covers it', async () => {
+  const want = CAPTURE_CAP + 80_000;
+  const r = await runHostCapture('sh', bigOutput(want), { maxCapture: want + 4096 });
+  assert.equal(r.stdoutBytes, want);
+  assert.equal(r.stdoutTruncated, false);
+  assert.equal(r.stdoutComplete, true);
+  assert.equal(r.stdout.length, want);
+});
+
+test('runHostCapture decodes UTF-8 across chunk boundaries', async () => {
+  // Multi-byte characters spread through 300 KB: decoding per chunk turns any
+  // that straddle a boundary into U+FFFD, which is silent corruption in a
+  // read-modify-write.
+  const unit = `${'x'.repeat(511)}é`;
+  const reps = 600;
+  const r = await runHostCapture(
+    'sh', ['-c', `i=0; while [ $i -lt ${reps} ]; do printf '%s' '${unit}'; i=$((i+1)); done`],
+    { maxCapture: 1024 * 1024 },
+  );
+  assert.equal(r.status, 0);
+  assert.equal(r.stdoutTruncated, false);
+  assert.equal(r.stdout.includes('�'), false, 'no replacement characters');
+  assert.equal(r.stdout, unit.repeat(reps));
+});
+
+test('runHostCapture still surfaces exit status and stderr', async () => {
+  const r = await runHostCapture('sh', ['-c', 'printf oops >&2; exit 3']);
+  assert.equal(r.status, 3);
+  assert.equal(r.stderr, 'oops');
+  assert.equal(r.timedOut, false);
+});
+
+test('runHostCapture waits for stdout to flush after the child exits', async () => {
+  // A last write immediately before exit: settling on 'exit' alone can drop it.
+  for (let i = 0; i < 20; i += 1) {
+    const r = await runHostCapture('sh', ['-c', 'printf "%s" tail-marker']);
+    assert.equal(r.stdout, 'tail-marker', `iteration ${i} lost the tail`);
+    assert.equal(r.stdoutComplete, true);
+  }
+});

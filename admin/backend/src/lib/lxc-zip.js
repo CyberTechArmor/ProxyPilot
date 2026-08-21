@@ -251,25 +251,55 @@ export function parseStartupUnit(text) {
   };
 }
 
-// ── Host exec with capture ──────────────────────────────────────────
+// ── Host exec with capture ────────────────────────────
 //
 // Promise wrapper over spawnHost for the zip flow's incus calls:
 // argv-based (no shell string for the outer command), optional stdin
 // from a Buffer/string or a file path (tar streams), bounded capture,
-// wall-clock timeout with kill. Resolves on 'exit' (not 'close') for
-// the same reason mock2/host.js does — Incus can hold pipes open.
-const CAPTURE_CAP = 256 * 1024;
+// wall-clock timeout with kill.
+//
+// THREE THINGS THIS GETS RIGHT, each of which was once a silent corruption:
+//
+// 1. The cap is REPORTED, not hidden. Capture stops at `maxCapture`, and
+//    `stdoutTruncated` says so. A caller that reads a file through this
+//    wrapper (read_project_file, edit_project_file) MUST check that flag:
+//    the default cap is smaller than the 512 KB those tools advertise, so a
+//    ~300 KB file used to come back short with nothing to distinguish it
+//    from the real thing. Whatever the caller then wrote back was a
+//    truncated copy of the file it meant to edit.
+// 2. Chunks are kept as Buffers and decoded ONCE. Decoding each chunk
+//    separately splits any multi-byte UTF-8 sequence that straddles a chunk
+//    boundary into replacement characters — rare, silent, and fatal in a
+//    read-modify-write.
+// 3. Exit does not mean end-of-output. We still resolve on 'exit' rather
+//    than 'close' (Incus can hold pipes open indefinitely), but we give
+//    stdout a short grace period to flush what the kernel already has;
+//    settling before that drops the tail of the output as a pure race.
+//    If the grace expires with the stream still open, `stdoutComplete` is
+//    false — which, like the cap, is a fact the caller can act on.
+export const CAPTURE_CAP = 256 * 1024;
 
-export function runHostCapture(bin, args, { input = null, inputFile = null, timeoutMs = 120000 } = {}) {
+// How long to wait after exit for stdout/stderr to end. Normally the streams
+// end in the same tick the child exits; this only costs wall-clock when the
+// child left a pipe open behind it.
+export const CAPTURE_FLUSH_GRACE_MS = 500;
+
+export function runHostCapture(bin, args, {
+  input = null, inputFile = null, timeoutMs = 120000,
+  maxCapture = CAPTURE_CAP, flushGraceMs = CAPTURE_FLUSH_GRACE_MS,
+} = {}) {
   return new Promise((resolvePromise) => {
     const wantStdin = input !== null || inputFile !== null;
     const child = spawnHost(bin, args, {
       stdio: [wantStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
-    let stdout = '';
-    let stderr = '';
+    const out = { chunks: [], bytes: 0, truncated: false, ended: false };
+    const err = { chunks: [], bytes: 0, truncated: false, ended: false };
     let settled = false;
     let timedOut = false;
+    let exitCode;
+    let exited = false;
+    let flushTimer = null;
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -280,17 +310,50 @@ export function runHostCapture(bin, args, { input = null, inputFile = null, time
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolvePromise({ status, stdout, stderr, timedOut, error });
+      if (flushTimer) clearTimeout(flushTimer);
+      resolvePromise({
+        status,
+        stdout: Buffer.concat(out.chunks).toString('utf-8'),
+        stderr: Buffer.concat(err.chunks).toString('utf-8'),
+        stdoutBytes: out.bytes,
+        stderrBytes: err.bytes,
+        stdoutTruncated: out.truncated,
+        stderrTruncated: err.truncated,
+        // False when the child exited but its stdout was still open when the
+        // flush grace ran out — the captured output may be missing its tail.
+        stdoutComplete: out.ended,
+        timedOut,
+        error,
+      });
     };
 
-    child.stdout.on('data', (d) => {
-      if (stdout.length < CAPTURE_CAP) stdout += d.toString('utf-8');
-    });
-    child.stderr.on('data', (d) => {
-      if (stderr.length < CAPTURE_CAP) stderr += d.toString('utf-8');
-    });
-    child.on('error', (err) => finish(null, err.message));
-    child.on('exit', (code) => finish(code));
+    // Settle once the child is gone AND stdout has ended (or the grace ran
+    // out). stderr is best-effort: it is diagnostics, never file content.
+    const settleIfReady = () => {
+      if (!exited || settled) return;
+      if (out.ended) finish(exitCode);
+      else if (!flushTimer) flushTimer = setTimeout(() => finish(exitCode), flushGraceMs);
+    };
+
+    const collect = (acc) => (d) => {
+      const room = maxCapture - acc.bytes;
+      if (room <= 0) { acc.truncated = true; return; }
+      if (d.length > room) {
+        acc.chunks.push(d.subarray(0, room));
+        acc.bytes += room;
+        acc.truncated = true;
+        return;
+      }
+      acc.chunks.push(d);
+      acc.bytes += d.length;
+    };
+
+    child.stdout.on('data', collect(out));
+    child.stderr.on('data', collect(err));
+    child.stdout.on('end', () => { out.ended = true; settleIfReady(); });
+    child.stderr.on('end', () => { err.ended = true; });
+    child.on('error', (e) => { exited = true; exitCode = null; finish(null, e.message); });
+    child.on('exit', (code) => { exited = true; exitCode = code; settleIfReady(); });
 
     if (wantStdin) {
       // EPIPE if the child dies before consuming stdin — swallow it,

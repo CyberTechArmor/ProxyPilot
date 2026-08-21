@@ -970,7 +970,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'read_lxc_file',
-    description: 'Read a text file from inside an LXC container (e.g. /opt/app/config.json). Use this to see the current content before proposing an edit with write_lxc_file. Returns up to 512 KB; refuses binary files.',
+    description: 'Read a text file from inside an LXC container (e.g. /opt/app/config.json). Use this to see the current content before proposing an edit with write_lxc_file. Returns up to 512 KB, plus the file\'s sha256 and total_lines; refuses binary files. A read that came back short of the file\'s real size is an error, never a silently partial result — so what you get is either the whole file or an explicit truncated: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -983,7 +983,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'write_lxc_file',
-    description: 'Write one text file inside an LXC container. If the file already exists and confirm_overwrite is not true, this returns the current file info instead of writing — show the user your proposed change and get their go-ahead first. On overwrite the previous version is kept as `<path>.old`. Parent directories are created. Pass mode (e.g. "0755") to make a script executable in the same call. After config/code edits, redeploy with rerun_startup.',
+    description: 'Write one text file inside an LXC container. If the file already exists and confirm_overwrite is not true, this returns the current file info instead of writing — show the user your proposed change and get their go-ahead first. On overwrite the previous version is kept as `<path>.old`. Parent directories are created. The write is staged, hashed and read back before it counts as done, so a partial or corrupted write is reported as an error with the previous file left intact — it never lands silently. Pass mode (e.g. "0755") to make a script executable in the same call. After config/code edits, redeploy with rerun_startup.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -991,7 +991,8 @@ export const MCP_TOOLS = [
         path: { type: 'string', description: 'Absolute file path inside the container.' },
         content: { type: 'string', description: 'The complete new file content (UTF-8).' },
         confirm_overwrite: { type: 'boolean', description: 'Set true only after the user approved replacing the existing file.' },
-        mode: { type: 'string', description: 'Optional file permissions as three octal digits, e.g. "0755" for an executable script or "644". Default: whatever the write leaves (existing files keep their mode).' },
+        mode: { type: 'string', description: 'Optional file permissions as three octal digits, e.g. "0755" for an executable script or "644". Default: the existing file\'s mode, which is preserved across the write.' },
+        expected_sha256: { type: 'string', description: 'Optional precondition: the SHA-256 the file had when you read it (read_lxc_file returns it as sha256). The call is refused if the file has changed since — the guard against two agents editing the same file at once.' },
       },
       required: ['container', 'path', 'content'],
       additionalProperties: false,
@@ -1218,7 +1219,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'read_project_file',
-    description: 'Read one text file from an AI-dev project\'s app checkout (path relative to the app root, e.g. src/server/routes.ts). Returns up to 512 KB; refuses binary files. Pass offset/limit to read a LINE RANGE instead of the whole file — pair it with search_project_files (which gives you path + line_number) to read just the part you need. total_lines always reports the file\'s real length, whether or not a range was requested.',
+    description: 'Read one text file from an AI-dev project\'s app checkout (path relative to the app root, e.g. src/server/routes.ts). Returns up to 512 KB; refuses binary files. Pass offset/limit to read a LINE RANGE instead of the whole file — pair it with search_project_files (which gives you path + line_number) to read just the part you need. total_lines always reports the file\'s real length, whether or not a range was requested. Also returns sha256, the file\'s hash as computed inside the container — pass it back as expected_sha256 on a later edit/write to be sure nothing changed underneath you. A read that arrives short of the file\'s real size is reported as an error rather than returned as if it were the file.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1249,7 +1250,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'edit_project_file',
-    description: 'Replace an exact string in one file of an AI-dev project and commit the change — the surgical alternative to write_project_file, which rewrites the whole file. Fails if old_string is absent, or if it matches a different number of times than expected (default: exactly once), so an edit can never land somewhere you did not mean. Refused while a build is running.',
+    description: 'Replace an exact string in one file of an AI-dev project and commit the change — the surgical alternative to write_project_file, which rewrites the whole file. Fails if old_string is absent, or if it matches a different number of times than expected (default: exactly once), so an edit can never land somewhere you did not mean. The result is also checked against arithmetic — a string replacement has exactly one possible byte length, and a write that misses it is refused with the file left untouched — then staged, hashed and read back before it counts as done. Refused while a build is running.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1258,9 +1259,44 @@ export const MCP_TOOLS = [
         old_string: { type: 'string', description: 'The exact text to replace, copied from read_project_file. Include enough surrounding lines to make it unique.' },
         new_string: { type: 'string', description: 'What to put in its place. May be empty to delete the text.' },
         expect_occurrences: { type: 'number', description: 'How many times old_string should appear. Default 1. The edit is refused unless the real count matches exactly.' },
+        expected_sha256: { type: 'string', description: 'Optional precondition: the SHA-256 the file had when you read it (read_project_file returns it as sha256). The call is refused if the file has changed since — the guard against two agents editing the same file at once.' },
         commit_message: { type: 'string', description: 'Git commit message (a sensible default is used if omitted).' },
       },
       required: ['project_id', 'path', 'old_string', 'new_string'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'append_project_file',
+    description: 'Append text to the end of one file in an AI-dev project and commit it. Unlike write_project_file this never moves the existing content anywhere — the file stays where it is and only the new bytes travel — so it works on files of any size, including ones too large for edit_project_file. The file must end up exactly its previous length plus what you sent; if it does not, the append is rolled back and reported as an error. Refused while a build is running.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        path: { type: 'string', description: 'File path relative to the app root.' },
+        content: { type: 'string', description: 'Text to append verbatim. Include your own leading/trailing newlines — nothing is added.' },
+        create: { type: 'boolean', description: 'Create the file if it does not exist yet (default false: appending to a missing file is an error).' },
+        expected_sha256: { type: 'string', description: 'Optional precondition: the SHA-256 the file had when you read it (read_project_file returns it as sha256). The call is refused if the file has changed since — the guard against two agents editing the same file at once.' },
+        commit_message: { type: 'string', description: 'Git commit message (a sensible default is used if omitted).' },
+      },
+      required: ['project_id', 'path', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'insert_project_file_at_line',
+    description: 'Insert text into one file of an AI-dev project BEFORE a given 1-based line, and commit it. Like append_project_file, the existing content never leaves the container, so this is the way to add an import, a route or a block to a file too big to read whole. Use search_project_files or read_project_file (offset/limit) to find the line first. A trailing newline is added if you leave it off; line = total_lines + 1 inserts at the end. The result must be exactly the old size plus what you sent, or nothing is written. Refused while a build is running.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        path: { type: 'string', description: 'File path relative to the app root.' },
+        line: { type: 'number', description: '1-based line number to insert BEFORE. 1 puts the text at the top of the file.' },
+        content: { type: 'string', description: 'Text to insert. A trailing newline is added if missing so the following line is not welded onto yours.' },
+        expected_sha256: { type: 'string', description: 'Optional precondition: the SHA-256 the file had when you read it (read_project_file returns it as sha256). The call is refused if the file has changed since — the guard against two agents editing the same file at once.' },
+        commit_message: { type: 'string', description: 'Git commit message (a sensible default is used if omitted).' },
+      },
+      required: ['project_id', 'path', 'line', 'content'],
       additionalProperties: false,
     },
   },
@@ -1295,7 +1331,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'write_project_file',
-    description: 'Write one text file in an AI-dev project\'s app checkout and commit it to the project\'s git history (the previous version stays recoverable via git — no build tokens are spent). If the file exists and confirm_overwrite is not true, returns the current file info instead of writing — show the user the proposed change first. Refused while a build is running (interrupt it first). After your edits, apply them with redeploy_project.',
+    description: 'Write one text file in an AI-dev project\'s app checkout and commit it to the project\'s git history (the previous version stays recoverable via git — no build tokens are spent). If the file exists and confirm_overwrite is not true, returns the current file info instead of writing — show the user the proposed change first. The write is staged, hashed and read back before it counts as done, so a partial write is an error with the previous file intact rather than a silent truncation. Returns bytes, total_lines and sha256 of what actually landed. Refused while a build is running (interrupt it first). After your edits, apply them with redeploy_project.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1304,6 +1340,7 @@ export const MCP_TOOLS = [
         content: { type: 'string', description: 'The complete new file content (UTF-8).' },
         commit_message: { type: 'string', description: 'Git commit message for this edit (a sensible default is used if omitted).' },
         confirm_overwrite: { type: 'boolean', description: 'Set true only after the user approved replacing the existing file.' },
+        expected_sha256: { type: 'string', description: 'Optional precondition: the SHA-256 the file had when you read it (read_project_file returns it as sha256). The call is refused if the file has changed since — the guard against two agents editing the same file at once.' },
       },
       required: ['project_id', 'path', 'content'],
       additionalProperties: false,
@@ -1485,6 +1522,270 @@ export function applyStringEdit(content, oldString, newString, expectOccurrences
     };
   }
   return { content: src.split(from).join(to), replaced: count };
+}
+
+// ---- write integrity: the byte-count invariant, the read-back, the
+//      precondition ----
+//
+// Five silent file corruptions came out of one shape of bug: a read that came
+// back short (the host capture wrapper stopped at 256 KB while the tool
+// advertised 512 KB), a replacement applied to that partial copy, and the
+// partial copy written back over the real file. Nothing errored. The cut
+// points varied with the chunk boundary, so it read as a race rather than a
+// limit, which is exactly why eyeballing the result never caught it.
+//
+// The defence is three layers, cheapest first:
+//
+//   1. expectedEditBytes — for a literal string replacement the size of the
+//      result is not an estimate, it is arithmetic. If the buffer about to be
+//      written is not exactly that many bytes, the read was short. Refuse.
+//   2. a read-back after every write — the file that landed is hashed on the
+//      far side and compared to what we meant to write. Structural, not
+//      probabilistic.
+//   3. expected_sha256 — an optional caller-supplied precondition, so an edit
+//      built against a file someone else has since changed is refused instead
+//      of silently clobbering their work.
+
+/** The exact byte length a literal replacement must produce. Not a heuristic:
+ *  original − (old × n) + (new × n), in BYTES, because a multi-byte character
+ *  makes string length and file length different numbers. */
+export function expectedEditBytes(originalBytes, oldString, newString, occurrences) {
+  const n = Number(occurrences) || 0;
+  return Number(originalBytes)
+    - (Buffer.byteLength(String(oldString ?? ''), 'utf8') * n)
+    + (Buffer.byteLength(String(newString ?? ''), 'utf8') * n);
+}
+
+/**
+ * Null when the edited content is exactly the size it must be; a caller-facing
+ * message when it isn't. `originalBytes` MUST come from the file on disk
+ * (wc -c), never from the length of what was read — comparing a short read
+ * against itself proves nothing.
+ */
+export function editByteInvariantError({ path, originalBytes, oldString, newString, replaced, content }) {
+  const want = expectedEditBytes(originalBytes, oldString, newString, replaced);
+  const got = Buffer.byteLength(String(content ?? ''), 'utf8');
+  if (got === want) return null;
+  const missing = want - got;
+  return `Refusing to write ${path}: the edited content is ${got} bytes but a `
+    + `${replaced}-occurrence replacement on a ${originalBytes}-byte file must produce exactly ${want} `
+    + `(${missing > 0 ? `${missing} bytes short` : `${-missing} bytes over`}). `
+    + 'That means the copy this edit was applied to was not the whole file, so nothing was written — '
+    + 'the file on disk is untouched. Re-read the file and try again.';
+}
+
+/** Null when the file's current hash satisfies the caller's precondition; a
+ *  message when it doesn't. An absent precondition is not an error — but an
+ *  ill-formed one is, rather than being ignored. */
+export function expectedSha256Error(path, declared, actualSha) {
+  if (declared === undefined || declared === null || String(declared).trim() === '') return null;
+  const want = validSha256(declared);
+  if (!want) return 'expected_sha256 must be the 64-character hex SHA-256 of the file you read.';
+  if (!actualSha || actualSha === NO_SHA) {
+    return `Cannot check expected_sha256 for ${path}: the container has neither sha256sum nor openssl, `
+      + 'so the precondition cannot be verified. Re-call without expected_sha256 to proceed unchecked.';
+  }
+  if (actualSha === want) return null;
+  return `${path} has changed since you read it (expected ${want}, found ${actualSha}). `
+    + 'Someone else — or another agent — edited it. Re-read the file and rebuild your edit on the current content.';
+}
+
+/** Null when the bytes we received are the whole file; a message when the
+ *  container's own hash of the file disagrees with what arrived. This is the
+ *  read-side twin of the read-back: it catches a truncated or mangled
+ *  transfer BEFORE the content is used as the basis for a write. */
+export function readIntegrityError(path, expectedBytes, containerSha, received) {
+  const buf = Buffer.isBuffer(received) ? received : Buffer.from(String(received ?? ''), 'utf8');
+  const want = Number(expectedBytes);
+  if (buf.length < want) {
+    return `Read of ${path} came back short: the file is ${want} bytes but ${buf.length} arrived. `
+      + 'Nothing was written. This is a transport truncation, not a file change — retry the call.';
+  }
+  if (buf.length > want) {
+    // Re-encoding grew the content, which means the decode replaced bytes it
+    // could not read. Writing that back would rewrite every one of them.
+    return `${path} is ${want} bytes on disk but ${buf.length} after decoding, so it is not valid UTF-8 text. `
+      + 'These tools edit text files only — nothing was written.';
+  }
+  if (containerSha && containerSha !== NO_SHA && sha256Hex(buf) !== containerSha) {
+    return `Read of ${path} does not match the file's own SHA-256 (${containerSha}). `
+      + 'The transfer corrupted it; nothing was written. Retry the call.';
+  }
+  return null;
+}
+
+/** What the in-container sha helper prints when the container has no way to
+ *  hash. Byte counts still apply; the hash checks degrade to skipped. */
+export const NO_SHA = 'NOSHA';
+
+/** POSIX-sh definition of pp_sha(), used by every script below. Kept in one
+ *  place so "how do we hash in there" has a single answer. */
+export const PP_SHA_FN =
+  'pp_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | cut -d" " -f1; '
+  + 'elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 < "$1" | sed "s/.*= *//"; '
+  + `else echo ${NO_SHA}; fi; }; `;
+
+/** Copy a file's mode and ownership onto its replacement.
+ *
+ *  A staged write replaces the inode, so without this an 0755 startup script
+ *  comes back 0644 and a file owned by the app user comes back owned by root —
+ *  both silent, both breaking. `--reference` is GNU; busybox containers fall
+ *  back to `stat -c`, and a container with neither keeps the defaults rather
+ *  than failing the write. */
+export const PP_CLONE_META_FN =
+  'pp_clone_meta() { src="$1"; dst="$2"; if [ ! -e "$src" ]; then return 0; fi; '
+  + 'if ! chmod --reference="$src" -- "$dst" 2>/dev/null; then '
+  +   'om=$(stat -c %a -- "$src" 2>/dev/null || echo ""); '
+  +   'if [ -n "$om" ]; then chmod "$om" -- "$dst" 2>/dev/null || true; fi; fi; '
+  + 'if ! chown --reference="$src" -- "$dst" 2>/dev/null; then '
+  +   'ow=$(stat -c %u:%g -- "$src" 2>/dev/null || echo ""); '
+  +   'if [ -n "$ow" ]; then chown "$ow" -- "$dst" 2>/dev/null || true; fi; fi; '
+  + 'return 0; }; ';
+
+/** Header the read scripts print before the content: byte count, line count
+ *  (optional), then the file's SHA-256 — the hash is computed on the far side,
+ *  which is what makes it a check on the transfer rather than a restatement
+ *  of it. */
+export const READ_HEADER_LINES_WITH_COUNT = 3;
+
+/**
+ * A write that cannot silently corrupt the target.
+ *
+ * Content goes to a sibling temp file, is verified there (bytes, then hash),
+ * and only then replaces the target — so a failed verification leaves the
+ * original exactly as it was and there is no rollback to get wrong. After the
+ * rename the target itself is re-read and re-hashed, because "the temp file
+ * was right" and "the file at this path is right" are different claims.
+ *
+ * Positional: $1 path, $2 expected bytes, $3 expected sha (or NOSHA to skip),
+ * $4 chmod mode or empty, $5 "1" to keep a .old copy of what was replaced,
+ * $6 expected CURRENT sha of the target (precondition) or empty to skip.
+ *
+ * Exit codes: 64 precondition failed, 65 staged content bad, 66 read-back bad.
+ */
+export function verifiedWriteScript() {
+  return 'set -e; p="$1"; want_bytes="$2"; want_sha="$3"; m="$4"; keep_old="$5"; pre_sha="$6"; '
+    + PP_SHA_FN + PP_CLONE_META_FN
+    + 'if [ -n "$pre_sha" ]; then '
+    +   'if [ -e "$p" ]; then cur=$(pp_sha "$p"); else cur=ABSENT; fi; '
+    +   'if [ "$cur" != "$pre_sha" ]; then echo "PP_PRECONDITION $cur" >&2; exit 64; fi; '
+    + 'fi; '
+    + 'mkdir -p -- "$(dirname -- "$p")"; '
+    + 'tmp="$p.pp-write.$$"; '
+    + 'trap \'rm -f -- "$tmp"\' EXIT; '
+    + 'cat > "$tmp"; '
+    + 'got_bytes=$(wc -c < "$tmp" | tr -d " "); '
+    + 'if [ "$got_bytes" != "$want_bytes" ]; then echo "PP_STAGE_BYTES $got_bytes" >&2; exit 65; fi; '
+    + 'got_sha=$(pp_sha "$tmp"); '
+    + `if [ "$got_sha" != ${NO_SHA} ] && [ "$got_sha" != "$want_sha" ]; then echo "PP_STAGE_SHA $got_sha" >&2; exit 65; fi; `
+    // Keep the target's mode and owner: the temp file is a new inode, so
+    // without this a 0755 script silently becomes a root-owned 0644 one.
+    + 'pp_clone_meta "$p" "$tmp"; '
+    + 'if [ -n "$m" ]; then chmod "$m" -- "$tmp"; fi; '
+    + 'if [ "$keep_old" = "1" ] && [ -e "$p" ]; then rm -rf -- "$p.old"; cp -a -- "$p" "$p.old"; fi; '
+    + 'mv -f -- "$tmp" "$p"; '
+    + 'trap - EXIT; '
+    + 'final_bytes=$(wc -c < "$p" | tr -d " "); final_sha=$(pp_sha "$p"); '
+    + 'if [ "$final_bytes" != "$want_bytes" ]; then echo "PP_READBACK_BYTES $final_bytes" >&2; exit 66; fi; '
+    + `if [ "$final_sha" != ${NO_SHA} ] && [ "$final_sha" != "$want_sha" ]; then echo "PP_READBACK_SHA $final_sha" >&2; exit 66; fi; `
+    + 'nl=$(wc -l < "$p" | tr -d " "); '
+    + 'echo "PP_OK $final_bytes $final_sha $nl"';
+}
+
+/**
+ * Append to a file without moving it over the wire.
+ *
+ * The size invariant here is the same arithmetic as an edit, one term
+ * shorter: after == before + appended. On mismatch the file is truncated back
+ * to its original length, which is an exact undo for an append.
+ *
+ * Positional: $1 path, $2 appended byte count, $3 "1" to require the file to
+ * already exist, $4 expected current sha (precondition) or empty.
+ * Exit codes: 64 precondition failed, 66 size invariant violated, 67 absent.
+ */
+export function appendScript() {
+  return 'set -e; p="$1"; add_bytes="$2"; must_exist="$3"; pre_sha="$4"; '
+    + PP_SHA_FN + PP_CLONE_META_FN
+    + 'if [ ! -e "$p" ]; then '
+    +   'if [ "$must_exist" = "1" ]; then echo PP_ABSENT >&2; exit 67; fi; '
+    +   'mkdir -p -- "$(dirname -- "$p")"; : > "$p"; '
+    + 'fi; '
+    + 'test -f "$p" || { echo PP_NOT_A_FILE >&2; exit 67; }; '
+    + 'if [ -n "$pre_sha" ]; then cur=$(pp_sha "$p"); '
+    +   'if [ "$cur" != "$pre_sha" ]; then echo "PP_PRECONDITION $cur" >&2; exit 64; fi; fi; '
+    + 'before=$(wc -c < "$p" | tr -d " "); '
+    + 'cat >> "$p"; '
+    + 'after=$(wc -c < "$p" | tr -d " "); '
+    + 'want=$((before + add_bytes)); '
+    // Roll back to the pre-append length. truncate(1) where it exists; a
+    // head -c rewrite where it does not, so the rollback is not best-effort.
+    + 'if [ "$after" != "$want" ]; then '
+    +   'if ! truncate -s "$before" -- "$p" 2>/dev/null; then '
+    +     'back="$p.pp-rollback.$$"; { head -c "$before" -- "$p" > "$back" && pp_clone_meta "$p" "$back" && mv -f -- "$back" "$p"; } || true; '
+    +     'rm -f -- "$back"; fi; '
+    +   'echo "PP_APPEND_BYTES $after $want" >&2; exit 66; fi; '
+    + 'final_sha=$(pp_sha "$p"); nl=$(wc -l < "$p" | tr -d " "); '
+    + 'echo "PP_OK $after $final_sha $nl"';
+}
+
+/**
+ * Insert text before a given 1-based line, again without shipping the file
+ * anywhere. head/tail build the new file next to the old one; the size
+ * invariant (before + inserted) is checked on the staged copy, so a bad
+ * insert never reaches the target.
+ *
+ * Positional: $1 path, $2 line number, $3 inserted byte count,
+ * $4 expected current sha (precondition) or empty.
+ * Exit codes: 64 precondition failed, 65 size invariant violated,
+ * 66 read-back bad, 67 not a file, 68 line past end of file.
+ */
+export function insertAtLineScript() {
+  return 'set -e; p="$1"; ln="$2"; add_bytes="$3"; pre_sha="$4"; '
+    + PP_SHA_FN + PP_CLONE_META_FN
+    + 'test -f "$p" || { echo PP_NOT_A_FILE >&2; exit 67; }; '
+    + 'if [ -n "$pre_sha" ]; then cur=$(pp_sha "$p"); '
+    +   'if [ "$cur" != "$pre_sha" ]; then echo "PP_PRECONDITION $cur" >&2; exit 64; fi; fi; '
+    + 'before=$(wc -c < "$p" | tr -d " "); total=$(wc -l < "$p" | tr -d " "); '
+    + 'if [ "$ln" -gt "$((total + 1))" ]; then echo "PP_PAST_END $total" >&2; exit 68; fi; '
+    + 'tmp="$p.pp-insert.$$"; stage="$p.pp-stage.$$"; '
+    + 'trap \'rm -f -- "$tmp" "$stage"\' EXIT; '
+    + 'cat > "$stage"; '
+    + 'head -n "$((ln - 1))" -- "$p" > "$tmp"; '
+    + 'cat -- "$stage" >> "$tmp"; '
+    + 'tail -n "+$ln" -- "$p" >> "$tmp"; '
+    + 'got=$(wc -c < "$tmp" | tr -d " "); want=$((before + add_bytes)); '
+    + 'if [ "$got" != "$want" ]; then echo "PP_INSERT_BYTES $got $want" >&2; exit 65; fi; '
+    + 'pp_clone_meta "$p" "$tmp"; '
+    + 'mv -f -- "$tmp" "$p"; rm -f -- "$stage"; trap - EXIT; '
+    + 'final=$(wc -c < "$p" | tr -d " "); '
+    + 'if [ "$final" != "$want" ]; then echo "PP_READBACK_BYTES $final" >&2; exit 66; fi; '
+    + 'final_sha=$(pp_sha "$p"); nl=$(wc -l < "$p" | tr -d " "); '
+    + 'echo "PP_OK $final $final_sha $nl"';
+}
+
+/** Parse the `PP_OK <bytes> <sha> <newlines>` trailer every verified write
+ *  prints. Returns null when the trailer isn't there — which is itself a
+ *  failure, since the script only reaches it after every check passed. */
+export function parseWriteOk(stdout) {
+  const line = String(stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean).pop();
+  if (!line || !line.startsWith('PP_OK ')) return null;
+  const [, bytes, sha, newlines] = line.split(' ');
+  const n = Number(bytes);
+  if (!Number.isInteger(n)) return null;
+  return {
+    bytes: n,
+    sha256: sha === NO_SHA ? null : sha,
+    // wc -l counts newlines; an unterminated last line still counts as a line.
+    total_lines: n === 0 ? 0 : Math.max(Number(newlines) || 0, 1),
+  };
+}
+
+/** A 1-based line number for insert_project_file_at_line. Rejects 0, negatives
+ *  and fractions rather than rounding them into a wrong-place insert. */
+export function normalizeInsertLine(n) {
+  const v = Number(n);
+  if (!Number.isInteger(v) || v < 1) return null;
+  return v;
 }
 
 // ---- search_project_files ----

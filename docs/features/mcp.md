@@ -23,11 +23,12 @@ Revoking the token (same card) immediately cuts the client off.
 | Area | Tools | Notes |
 |---|---|---|
 | Static sites | `list_static_sites`, `inspect_static_site_zip`, `apply_static_site_zip` | Two-phase: inspect reports conflicts; apply refuses to overwrite until `confirm_overwrite` — so the AI asks you in-conversation first. Replaced files are kept as `<name>.old`. |
-| LXC | `list_lxc_containers`, `inspect_lxc_zip`, `apply_lxc_zip` | Same conflict flow, plus optional startup-script registration (`startup.sh` convention) with run output + exit code returned. |
+| LXC | `list_lxc_containers`, `inspect_lxc_zip`, `apply_lxc_zip` | Same conflict flow, plus optional startup-script registration (`startup.sh` convention) with run output + exit code returned. `list_lxc_containers` captures up to 16 MB of `incus list` output (the whole instance record ships per guest, so a busy host overran the old 256 KB cap and the truncated JSON surfaced as an unexplained parse failure) and reports bytes received + the output tail when a parse does fail. |
 | LXC observe | `get_lxc_container`, `list_lxc_files`, `search_lxc_files`, `get_lxc_logs`, `probe_lxc_port`, `get_lxc_startup` | All read-only. Container detail (addresses, security/limits config, snapshots, registered startup), file listing/grep inside a guest, journald / startup-service / docker-compose logs without redeploying, and an in-guest port probe that reports status metadata but **never response bodies**. `probe_lxc_port` + `test_route` together separate "app down" from "edge misrouted" in two calls. |
-| LXC exec | `run_lxc_command` | One allowlisted command inside a guest, same containment as `run_project_command` (argv → positional parameters, no shell, 64 KB tails, clamped timeout). The allowlist is `lib/mcp-policy/lxc-command-allowlist.json`: read-biased (docker/compose status+logs, systemctl status, journalctl, ip, ss, curl probes, df, free, ls, stat, du), `docker compose up/restart/stop/pull` only in the registered startup working dir, `deny_always` wins over everything — no shells, no package managers, no deletion. |
+| LXC exec | `run_lxc_command` | One allowlisted command inside a guest, same containment as `run_project_command` (argv → positional parameters, no shell, 64 KB tails, clamped timeout). Pass `command` for the simple case or `args: [...]` for an argv array used verbatim — the only way to send an argument containing a space (`-H`, `Connection: Upgrade`). The allowlist is `lib/mcp-policy/lxc-command-allowlist.json`: read-biased (docker/compose status+logs, systemctl status, journalctl, ip, ss, curl probes, df, free, ls, stat, du), `systemctl restart/reload` of an existing unit anywhere in the guest, `docker compose up/restart/stop/pull` only in the registered startup working dir, `deny_always` wins over everything — no shells, no package managers, no deletion. curl's output flags are matched as exact flag tokens and short-flag clusters (`-sSo` is denied), never against a flag's value. **This allowlist is an ergonomics boundary, not a security one** — `write_lxc_file` + `rerun_startup` already runs an arbitrary root script in the same guest; see *Security model*. |
 | LXC lifecycle | `create_lxc_container`, `control_lxc_container`, `set_lxc_config`, `set_lxc_network`, `snapshot_lxc_container`, `lxc_file_diff`, `restore_lxc_file` | Every mutation requires `confirm: true` and snapshots first; there is deliberately **no delete verb** and no force-kill. `set_lxc_config` writes only the keys in `lib/mcp-policy/lxc-config-allowlist.json`; `security.privileged=true` additionally demands `acknowledge_risk: true` and carries the container-root-is-host-root warning. `set_lxc_network` pins a guest's IPv4 (static DHCP reservation) so a lease renewal can't silently 502 a route. `lxc_file_diff`/`restore_lxc_file` complete the `.old` backup story (restore swaps, so it's reversible). |
-| Routing | `list_routes`, `get_route`, `test_route`, `set_route` | Inspect every served hostname (orphaned upstreams flagged), per-domain TLS/cert detail, and an edge-vantage probe pinned to the local proxy that names which failure class it found — proxy down, stale proxy→upstream binding, or app-level. `set_route` binds a hostname to a container (preferred) or ip:port through the same DB → regenerate → adapt → reload pipeline the UI uses, with rollback on failure; overwrites need `confirm_overwrite` and return the previous binding. |
+| Routing | `list_routes`, `get_route`, `test_route`, `set_route`, `delete_route` | Inspect every served hostname (orphaned upstreams flagged), per-domain TLS/cert detail, and an edge-vantage probe pinned to the local proxy that names which failure class it found — proxy down, stale proxy→upstream binding, or an upstream returning its own error (`test_route` weighs the upstream's status code, not just its reachability, so a 502 relayed faithfully from the app is not misreported as a stale binding). `set_route` binds a hostname — optionally per `path_prefix`, optionally with a `health_path` — to a container (preferred) or ip:port through the same DB → regenerate → adapt → reload pipeline the UI uses, with rollback on failure; overwrites need `confirm_overwrite` and return the previous binding. Container resolution skips container-runtime bridges (`docker0`, `br-*`, `veth*`, `wg*` …), prefers the address inside the guest's managed Incus bridge subnet, refuses to guess when several candidates survive, and reports what it chose and what it rejected. `delete_route` removes one binding behind `confirm: true`, echoing the deleted binding so `set_route` can restore it. |
+| Host diagnostics | `get_host_diagnostics` | Read-only host facts no guest can see: incus version, kernel version, `kernel.keys.*` limits with `/proc/key-users` headroom and an assessment, the managed bridge + its IPv4 subnet, and free disk under the Incus storage path. Reach for it when a failure looks environmental — "unable to join session keyring: disk quota exceeded" inside a guest is a keyring quota, not disk. |
 | Static-site management | `create_static_site`, `get_static_site`, `list_static_site_files`, `read_static_site_file`, `write_static_site_file`, `get_static_site_cert` | Site creation (creation-only — refuses an already-routed domain), docroot inspection, single-file read/write with the `.old` + `confirm_overwrite` contract, and certificate status. Site ids are uuid strings for UI-created sites; the zip tools accept both uuid and legacy integer ids. |
 | LXC file edits | `read_lxc_file`, `write_lxc_file`, `rerun_startup` | The chat-only update loop: read a file, propose the edit, write on approval (previous version kept as `<path>.old`), then re-run the registered startup script to redeploy — run output and exit code come back to the chat. `write_lxc_file` takes an optional `mode` ("0755") so a script lands executable without a zip apply. `rerun_startup` takes `timeout_seconds` (default 120, max 1800) and returns the **last** 64 KB of each stream — a first-boot Docker install no longer has to fit inside a fixed 2-minute window, and the failure summary (which prints last) is what comes back. Lets a Claude subscription do small container updates without any zip or shell. |
 | Projects | `list_projects`, `get_project`, `send_project_build`, `upload_project_reference`, `clone_project` | `send_project_build` queues a quick update on the project's own AI harness — **this lane spends the project's configured API budget**. `clone_project` mirrors the UI's Clone (fresh / full-with-database). |
@@ -202,10 +203,23 @@ quietly stop being true.
   invoking it. That is accepted rather than overlooked — the same token
   already drives `redeploy_project`, which builds and runs the checkout. Treat
   an MCP token as equivalent to deploy access to every project.
+- **`run_lxc_command`'s allowlist is the same kind of boundary, and the same
+  honesty applies.** `write_lxc_file` + `rerun_startup` executes an arbitrary
+  root script inside the same guest — that is how Docker gets installed, how
+  `/etc/docker/daemon.json` gets rewritten, how services get restarted. So
+  denying `systemctl restart` never constrained what a token holder could do;
+  it constrained how conveniently and how auditably they could do it, and it
+  pushed every mutation through a slower redeploy. `systemctl
+  restart/reload` of an existing unit is therefore allowed directly. Package
+  installation and unit creation still belong in the startup script, where
+  they are recorded and re-runnable — that is a maintainability rule, not a
+  security one. Treat an MCP token as root in every guest.
 - The caller's command never reaches a shell: the argv is passed to `sh` as
   positional parameters (`sh -c '… exec "$@"' sh npm run gates`), so no token
-  is ever re-parsed. Shell syntax (`;`, `&&`, `|`, `>`, `$(…)`) is refused
-  with a message telling the caller to make separate calls.
+  is ever re-parsed. Shell syntax (`;`, `&&`, `|`, `>`, `$(…)`) is refused in
+  a `command` string with a message telling the caller to make separate calls;
+  `args: [...]` skips that screening because its entries are positional
+  parameters, never syntax.
 
 ## Limitations / follow-ups
 
@@ -221,8 +235,12 @@ quietly stop being true.
   `rerun_startup_v2`; `dry_run` is covered by `get_lxc_startup`), and
   `set_route` has no `enabled` toggle because the Caddy regenerator renders
   every stored route — parking a hostname stays a UI/host operation.
-- `set_route` manages root-path bindings only; path-prefixed fan-out routes
-  (e.g. `/api` → a second port) are still UI-only over MCP.
+- Path-prefixed fan-out (`/api` → a second port) and the route health path are
+  now settable over MCP (`set_route`'s `path_prefix` / `health_path`). The
+  health path is stored on `service_http_routes` (migration 106) and emitted
+  into the generated site file as the `# proxypilot: healthpath=` marker the
+  LXC page reads — before that it lived only in the file, so any DB-driven
+  regeneration silently dropped it.
 - Auth is token-based, not OAuth 2.1 with dynamic client registration.
   claude.ai connects fine via the tokenized URL; a full OAuth flow is a
   possible follow-up (see docs/known-issues.md).

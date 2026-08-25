@@ -1008,8 +1008,21 @@ test('tool catalog covers the full 25-tool upgrade surface', () => {
     'list_lxc_files', 'search_lxc_files', 'get_lxc_logs', 'probe_lxc_port', 'get_lxc_startup',
     'create_static_site', 'get_static_site', 'list_static_site_files',
     'read_static_site_file', 'write_static_site_file', 'get_static_site_cert',
+    // the 2026-08-25 field session
+    'delete_route', 'get_host_diagnostics',
   ]) {
     assert.ok(names.has(required), `missing tool ${required}`);
+  }
+});
+
+test('every declared tool is actually wired to a handler', () => {
+  // A tool that exists in the catalog but not in the dispatch table advertises
+  // a capability that answers "unknown tool" — the catalog is what a client
+  // reads, so the two have to be checked against each other mechanically.
+  const routeSrc = readFileSync(new URL('../routes/mcp.js', import.meta.url), 'utf8');
+  const table = routeSrc.slice(routeSrc.indexOf('const TOOL_HANDLERS'));
+  for (const t of MCP_TOOLS) {
+    assert.ok(new RegExp(`\\n  ${t.name}: `).test(table), `tool ${t.name} is declared but not dispatched`);
   }
 });
 
@@ -2011,4 +2024,217 @@ test('the batch read hashes on the far side, so a short transfer cannot pass', (
   assert.match(script, /toobig/);
   assert.match(script, /budget/);
   assert.equal(/head -c/.test(script), false, 'a batch read must not truncate a file to fit');
+});
+
+// ---- the 2026-08-25 field session: every defect it surfaced, pinned ----
+
+import {
+  LXC_LIST_CAPTURE_CAP, captureEvidence,
+  pickUpstreamAddress, isNonRoutableIface, ipv4InCidr, instanceNicParent,
+  validRoutePathPrefix, validRouteHealthPath, shortFlagCluster,
+} from '../lib/mcp-logic.js';
+import {
+  parseProcKeyUsers, keyringAssessment, parseIncusVersion,
+  parseNetworkIpv4Cidr, parseDfKb, KERNEL_KEYS_DEFAULT_MAXKEYS,
+} from '../lib/host-facts.js';
+
+test('a listing bigger than the old cap survives, and a truncated one says so with evidence', () => {
+  // `incus list --format json` carries the whole instance record per guest, so
+  // a busy host blows straight past the 256 KB default capture cap and the
+  // JSON arrives cut mid-object. The cap for listings has to clear any
+  // plausible inventory...
+  const guest = (i) => ({
+    name: `pp-guest${i}`,
+    status: 'Running',
+    config: Object.fromEntries(Array.from({ length: 40 }, (_, k) => [`limits.k${k}`, 'x'.repeat(120)])),
+    state: { network: { eth0: { addresses: [{ address: `10.0.${i % 255}.5`, family: 'inet', scope: 'global' }] } } },
+  });
+  const payload = JSON.stringify(Array.from({ length: 200 }, (_, i) => guest(i)));
+  assert.ok(payload.length > 1024 * 1024, 'fixture must exceed the 1 MiB the old cap could not hold');
+  assert.ok(LXC_LIST_CAPTURE_CAP > payload.length, 'the listing cap must clear a >1 MiB inventory');
+  assert.equal(parseLxcListJson(payload).list.length, 200);
+
+  // ...and when a parse DOES fail, the answer names bytes and tail, because
+  // "unparseable JSON" with no evidence cost real debugging time.
+  const cut = payload.slice(0, 260000);
+  assert.ok(parseLxcListJson(cut).error);
+  const evidence = captureEvidence({
+    stdout: cut, stdoutBytes: 260000, stdoutTruncated: true, stdoutComplete: true,
+  });
+  assert.match(evidence, /260000 bytes received/);
+  assert.match(evidence, /capture cap/);
+  assert.match(evidence, /output ends: /);
+  // An unflushed stream is a different fact and reads differently.
+  assert.match(captureEvidence({ stdout: '[', stdoutBytes: 1, stdoutComplete: false }), /tail may be missing/);
+});
+
+test('a Docker guest resolves to its bridge address, never to docker0', () => {
+  // The field failure: set_route recorded 172.17.0.1 — the guest's own docker0
+  // — reported "applied": true, and produced a 502 read as an app fault.
+  const addresses = [
+    { interface: 'docker0', address: '172.17.0.1', family: 'inet' },
+    { interface: 'eth0', address: '10.185.17.14', family: 'inet' },
+    { interface: 'eth0', address: 'fd42::1', family: 'inet6' },
+  ];
+  const picked = pickUpstreamAddress(addresses, { subnetCidr: '10.185.17.1/24' });
+  assert.equal(picked.ip, '10.185.17.14');
+  assert.equal(picked.chosen.interface, 'eth0');
+  // The rejection is auditable, not silent.
+  assert.deepEqual(picked.rejected.map((r) => r.address), ['172.17.0.1']);
+  // Interface naming is a heuristic; the subnet is authoritative. A guest whose
+  // managed NIC is NOT called eth0 still resolves correctly.
+  assert.equal(pickUpstreamAddress([
+    { interface: 'br-9f2', address: '172.18.0.1', family: 'inet' },
+    { interface: 'enp5s0', address: '10.185.17.20', family: 'inet' },
+  ], { subnetCidr: '10.185.17.1/24' }).ip, '10.185.17.20');
+});
+
+test('an upstream that cannot be resolved unambiguously is an error, never a guess', () => {
+  // Two routable candidates and no subnet to decide between them.
+  const ambiguous = pickUpstreamAddress([
+    { interface: 'eth0', address: '10.185.17.14', family: 'inet' },
+    { interface: 'eth1', address: '192.168.9.4', family: 'inet' },
+  ]);
+  assert.equal(ambiguous.ip, null);
+  assert.equal(ambiguous.error, 'ambiguous');
+  assert.equal(ambiguous.candidates.length, 2);
+  // Only virtual interfaces present → also an error, with the rejects shown.
+  const filtered = pickUpstreamAddress([
+    { interface: 'docker0', address: '172.17.0.1', family: 'inet' },
+    { interface: 'veth3a', address: '172.19.0.1', family: 'inet' },
+  ]);
+  assert.equal(filtered.error, 'all_filtered');
+  assert.equal(filtered.rejected.length, 2);
+  // No IPv4 at all is its own answer.
+  assert.equal(pickUpstreamAddress([{ interface: 'eth0', address: 'fd42::1', family: 'inet6' }]).error, 'no_ipv4');
+  assert.equal(pickUpstreamAddress([]).error, 'no_ipv4');
+
+  for (const n of ['lo', 'docker0', 'br-1a2b', 'veth7', 'cni0', 'flannel.1', 'tailscale0', 'wg0', 'virbr0']) {
+    assert.equal(isNonRoutableIface(n), true, n);
+  }
+  for (const n of ['eth0', 'enp5s0', 'eno1', 'ens18']) {
+    assert.equal(isNonRoutableIface(n), false, n);
+  }
+  assert.equal(ipv4InCidr('10.185.17.14', '10.185.17.1/24'), true);
+  assert.equal(ipv4InCidr('10.185.18.14', '10.185.17.1/24'), false);
+  assert.equal(ipv4InCidr('10.185.17.14', 'nonsense'), false);
+  // The NIC's parent network is where the authoritative subnet comes from.
+  assert.equal(instanceNicParent({ expanded_devices: { eth0: { type: 'nic', network: 'incusbr0' } } }), 'incusbr0');
+  assert.equal(instanceNicParent({ devices: { eth0: { type: 'nic', parent: 'br1' } } }), 'br1');
+  assert.equal(instanceNicParent({ devices: { root: { type: 'disk' } } }), null);
+});
+
+test('a curl header value is not an output flag', () => {
+  // The field failure, verbatim: a WebSocket probe rejected as `"curl -o" is
+  // never allowed` — the matcher had found the "o" in "Connection".
+  const probe = parseLxcCommand(
+    'curl -sSi --http1.1 --max-time 6 -HConnection:Upgrade -HUpgrade:websocket '
+    + '-HSec-WebSocket-Version:13 http://127.0.0.1:21118/ws/id',
+    LXC_POLICY, WD,
+  );
+  assert.equal(probe.error, undefined, probe.error);
+  assert.equal(probe.scope, 'read_only');
+
+  // The clustered spellings that DO write to disk stay denied...
+  for (const cmd of ['curl -sSo /tmp/x http://e/', 'curl -O http://e/x', 'curl --output=/tmp/x http://e/',
+    'curl -sSD /tmp/h http://e/', 'curl --trace-ascii /tmp/t http://e/', 'curl -K /tmp/cfg']) {
+    assert.ok(parseLxcCommand(cmd, LXC_POLICY, WD).error, `should deny: ${cmd}`);
+  }
+  // ...and the refusal names the token that actually matched.
+  const denied = parseLxcCommand('curl -sSo /tmp/x http://e/', LXC_POLICY, WD);
+  assert.match(denied.error, /-sSo/);
+
+  // A value-taking flag ends the cluster: everything after it is data.
+  assert.deepEqual(shortFlagCluster('-sSi'), ['s', 'S', 'i']);
+  assert.deepEqual(shortFlagCluster('-HConnection:Upgrade'), ['H']);
+  assert.deepEqual(shortFlagCluster('-sSo'), ['s', 'S', 'o']);
+  assert.equal(shortFlagCluster('--output'), null);
+  assert.equal(shortFlagCluster('http://x/'), null);
+});
+
+test('args[] carries what whitespace-splitting cannot', () => {
+  // `-H "Connection: Upgrade"` is unrepresentable in a whitespace-split
+  // string, which is what forced the smuggled spelling that then tripped the
+  // deny matcher.
+  const ok = parseLxcCommand(null, LXC_POLICY, {
+    ...WD,
+    args: ['curl', '-sS', '-H', 'Connection: Upgrade', '-H', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', 'http://127.0.0.1:21118/'],
+  });
+  assert.equal(ok.error, undefined, ok.error);
+  assert.deepEqual(ok.argv[3], 'Connection: Upgrade');
+  // The allowlist still applies to argv, whichever way it arrived.
+  assert.ok(parseLxcCommand(null, LXC_POLICY, { ...WD, args: ['curl', '-o', '/tmp/x', 'http://e/'] }).error);
+  assert.ok(parseLxcCommand(null, LXC_POLICY, { ...WD, args: ['rm', '-rf', '/opt/app'] }).error);
+  // Ambiguity between the two spellings is refused rather than resolved.
+  assert.match(parseLxcCommand('ls', LXC_POLICY, { ...WD, args: ['ls'] }).error, /not both/);
+  assert.match(parseLxcCommand(null, LXC_POLICY, { ...WD, args: ['ls', 'a\nb'] }).error, /control characters/);
+  assert.match(parseLxcCommand(null, LXC_POLICY, { ...WD, args: ['ls', 5] }).error, /array of strings/);
+  // The old error for a quoted `command` now points at the way out.
+  assert.match(parseLxcCommand('ls "a b"', LXC_POLICY, WD).error, /args/);
+});
+
+test('systemctl restart is allowed anywhere, and needs a unit', () => {
+  // Design decision: rerun_startup already runs an arbitrary root script in
+  // this guest, so denying a restart constrained convenience, not capability.
+  const r = parseLxcCommand('systemctl restart docker.service', LXC_POLICY, { workingDir: '/', registeredWorkingDir: null });
+  assert.equal(r.error, undefined, r.error);
+  assert.equal(r.scope, 'mutating_service');
+  assert.deepEqual(r.units, ['docker.service']);
+  assert.equal(parseLxcCommand('systemctl reload caddy', LXC_POLICY, WD).scope, 'mutating_service');
+  assert.match(parseLxcCommand('systemctl restart', LXC_POLICY, WD).error, /unit name/);
+  // Package managers and unit creation still belong in the startup script.
+  assert.ok(parseLxcCommand('apt-get install -y docker.io', LXC_POLICY, WD).error);
+});
+
+test('route bindings accept a path prefix and a health path, normalized like the UI', () => {
+  assert.equal(validRoutePathPrefix(undefined), '/');
+  assert.equal(validRoutePathPrefix('/livekit'), '/livekit');
+  assert.equal(validRoutePathPrefix('/api/'), '/api');
+  assert.equal(validRoutePathPrefix('/ws/*'), '/ws');       // migration 103's normalization
+  assert.equal(validRoutePathPrefix('api'), null);          // must be absolute
+  assert.equal(validRoutePathPrefix('/a/../../etc'), null);
+  assert.deepEqual(validRouteHealthPath('/healthz'), { value: '/healthz' });
+  assert.deepEqual(validRouteHealthPath(''), { value: null });
+  assert.ok(validRouteHealthPath('healthz').error);
+  assert.ok(validRouteHealthPath(`/${'x'.repeat(300)}`).error);
+});
+
+test('the keyring quota that reads as "disk quota exceeded" is diagnosable from host facts', () => {
+  const rows = parseProcKeyUsers([
+    '    0:   200 200/200  200/200   4778/20000',
+    '  101:   104 104/104  104/200   1352/20000',
+    '  997:    56  56/56    56/200    308/20000',
+  ].join('\n'));
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows[0], {
+    uid: 0, usage: 200, nkeys: 200, nikeys: 200, qnkeys: 200, maxkeys: 200,
+    qnbytes: 4778, maxbytes: 20000, free_keys: 0,
+  });
+  // A uid at its ceiling is the condition that fails the NEXT container start.
+  const exhausted = keyringAssessment({ maxkeys: 200, rows });
+  assert.equal(exhausted.ok, false);
+  assert.match(exhausted.warning, /uid 0 holds 200\/200/);
+  assert.match(exhausted.warning, /kernel\.keys\.maxkeys=20000/);
+  assert.equal(exhausted.tightest.uid, 0);
+  // Even with headroom everywhere, the kernel default is itself the warning:
+  // every unprivileged guest shares that one budget.
+  const roomy = [{ uid: 1000000, usage: 10, nkeys: 10, nikeys: 10, qnkeys: 10, maxkeys: KERNEL_KEYS_DEFAULT_MAXKEYS, qnbytes: 10, maxbytes: 20000, free_keys: 190 }];
+  assert.equal(keyringAssessment({ maxkeys: KERNEL_KEYS_DEFAULT_MAXKEYS, rows: roomy }).ok, false);
+  // Raised limits with headroom: nothing to say.
+  const raised = [{ uid: 1000000, usage: 10, nkeys: 10, nikeys: 10, qnkeys: 10, maxkeys: 20000, qnbytes: 10, maxbytes: 2000000, free_keys: 19990 }];
+  assert.deepEqual(keyringAssessment({ maxkeys: 20000, rows: raised }), {
+    ok: true, tightest: raised[0], warning: null,
+  });
+});
+
+test('host fact parsers read what the tools actually print', () => {
+  assert.equal(parseIncusVersion('6.0.2\n'), '6.0.2');
+  assert.equal(parseIncusVersion('Client version: 6.14\n'), '6.14');
+  assert.equal(parseIncusVersion('command not found'), null);
+  assert.equal(parseNetworkIpv4Cidr('config:\n  ipv4.address: 10.185.17.1/24\n  ipv4.nat: "true"\n'), '10.185.17.1/24');
+  assert.equal(parseNetworkIpv4Cidr('config:\n  ipv4.address: none\n'), null);
+  const df = parseDfKb('Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 103080224 41258256 56553736 43% /var/lib/incus\n');
+  assert.equal(df.available_kb, 56553736);
+  assert.equal(df.mounted_on, '/var/lib/incus');
+  assert.equal(parseDfKb(''), null);
 });

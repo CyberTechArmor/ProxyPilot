@@ -713,6 +713,21 @@ server.listen(PORT, '0.0.0.0', () => {
   // port (most commonly the WebRTC range vs. WG's IANA 51820 default)
   // can reconcile cleanly afterwards.
   setImmediate(async () => {
+    // Host version self-check. `incus snapshot <instance> <name>` was valid
+    // LXD syntax and is not valid Incus syntax; the failure surfaced as
+    // "unknown command" in the middle of a guest mutation. Log what the host
+    // actually runs, and whether it can still start Docker containers inside
+    // an unprivileged guest, so drift is a boot-log line instead of an
+    // incident.
+    try {
+      const { hostIncusVersion, hostKeyringFacts } = await import('./lib/host-facts.js');
+      const version = await hostIncusVersion();
+      console.log(`[host-check] incus ${version || 'not reachable from this container'}`);
+      const keyring = await hostKeyringFacts();
+      if (keyring.assessment?.warning) console.warn(`[host-check] ${keyring.assessment.warning}`);
+    } catch (err) {
+      console.error('[host-check] failed:', err.message || err);
+    }
     try {
       const vpn = await autoHealVpnListenPort();
       // Log every outcome so silent runs are debuggable. Previously

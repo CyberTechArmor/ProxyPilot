@@ -263,6 +263,18 @@ REPOEOF
         log_success "Incus is already initialized"
     fi
 
+    # Docker-in-LXC needs more kernel keys than the default 200 per UID —
+    # unprivileged guests share one idmapped host UID, and runc joins a
+    # session keyring per container. Without this, a guest fails its first
+    # `docker compose up` with "unable to join session keyring: disk quota
+    # exceeded". Idempotent; safe to re-run.
+    # SCRIPT_DIR is not set this early in the run, so resolve the checkout here.
+    local src_dir; src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -x "${src_dir}/scripts/patch-lxc-keyring.sh" ]; then
+        bash "${src_dir}/scripts/patch-lxc-keyring.sh" || \
+            log_warn "Could not raise kernel.keys limits — Docker inside guests may hit 'disk quota exceeded'"
+    fi
+
     # Verify Incus is running
     if incus version &> /dev/null; then
         log_success "Incus is running ($(incus version))"

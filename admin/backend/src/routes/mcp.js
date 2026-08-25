@@ -37,6 +37,8 @@ import {
   validSha256, sha256Hex, zipChecksumError,
   normalizeChunkSeq, decodeChunkBase64,
   parseLxcListJson, lxcContainerSummaries, validFileMode,
+  LXC_LIST_CAPTURE_CAP, captureEvidence,
+  pickUpstreamAddress, instanceNicParent, validRoutePathPrefix, validRouteHealthPath,
   startupRunTimeoutMs, parseMarkedStreams,
   parseLxcCommand, lxcCommandTimeoutMs, lxcContainerDetail,
   validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
@@ -66,6 +68,9 @@ import {
   collectCandidatePaths, extractToStaging, applyStagingToTarget, ZIP_LIMITS, ZipError,
 } from '../lib/zip-extract.js';
 import { stageZipUpload, getZipUpload, discardZipUpload } from '../lib/zip-staging.js';
+import {
+  parseNetworkIpv4Cidr, collectHostDiagnostics, hostKeyringFacts,
+} from '../lib/host-facts.js';
 import {
   checkContainerConflicts, readContainerStartup, applyTarToContainer,
   setupStartupScript, writeTarFromZip, runHostCapture, runInContainer, CAPTURE_CAP,
@@ -459,9 +464,11 @@ async function toolListLxcContainers() {
   //
   // --all-projects first, so a guest living outside the default Incus project
   // still appears; older incus clients without the flag fall back cleanly.
-  let out = await runHostCapture('incus', ['list', '--all-projects', '--format', 'json'], { timeoutMs: 30000 });
+  let out = await runHostCapture('incus', ['list', '--all-projects', '--format', 'json'],
+    { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });
   if (out.status !== 0) {
-    out = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000 });
+    out = await runHostCapture('incus', ['list', '--format', 'json'],
+      { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });
   }
   if (out.status !== 0) {
     const why = out.timedOut ? 'timed out' : (out.stderr || '').trim().slice(-300) || out.error || 'unknown error';
@@ -469,7 +476,7 @@ async function toolListLxcContainers() {
   }
   const parsed = parseLxcListJson(out.stdout);
   if (parsed.error) {
-    return toolResult(`Could not list containers — incus list returned ${parsed.error}. This is a listing failure, not proof the host is empty.`, { isError: true });
+    return toolResult(`Could not list containers — incus list returned ${parsed.error} (${captureEvidence(out)}). This is a listing failure, not proof the host is empty.`, { isError: true });
   }
   return toolResult({ containers: lxcContainerSummaries(parsed.list, LXC_PREFIX) });
 }
@@ -899,16 +906,18 @@ async function toolRerunStartup(args, auth) {
 // Incus projects when the client supports it. Exact-name match — incus treats
 // the CLI filter as a pattern, so pp-Web must not accidentally resolve pp-Web2.
 async function fetchLxcInstance(incusName) {
-  let out = await runHostCapture('incus', ['list', incusName, '--all-projects', '--format', 'json'], { timeoutMs: 30000 });
+  let out = await runHostCapture('incus', ['list', incusName, '--all-projects', '--format', 'json'],
+    { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });
   if (out.status !== 0) {
-    out = await runHostCapture('incus', ['list', incusName, '--format', 'json'], { timeoutMs: 30000 });
+    out = await runHostCapture('incus', ['list', incusName, '--format', 'json'],
+      { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });
   }
   if (out.status !== 0) {
     const why = out.timedOut ? 'timed out' : (out.stderr || '').trim().slice(-300) || out.error || 'unknown error';
     return { error: `incus list failed (${why})` };
   }
   const parsed = parseLxcListJson(out.stdout);
-  if (parsed.error) return { error: `incus list returned ${parsed.error}` };
+  if (parsed.error) return { error: `incus list returned ${parsed.error} (${captureEvidence(out)})` };
   const instance = parsed.list.find((c) => c?.name === incusName);
   if (!instance) return { notFound: true };
   return { instance };
@@ -951,7 +960,13 @@ async function toolRunLxcCommand(args, auth) {
   const registeredWd = startup?.workingDir || null;
   const workingDir = requestedWd || registeredWd || '/';
 
-  const parsed = parseLxcCommand(args.command, LXC_CMD_POLICY, { workingDir, registeredWorkingDir: registeredWd });
+  const parsed = parseLxcCommand(args.command, LXC_CMD_POLICY, {
+    workingDir,
+    registeredWorkingDir: registeredWd,
+    // argv verbatim — the only way to express an argument containing a space
+    // (`-H`, `Connection: Upgrade`), which `command` cannot survive.
+    args: Array.isArray(args.args) ? args.args : null,
+  });
   if (parsed.error) return toolResult(parsed.error, { isError: true });
 
   const timeoutMs = lxcCommandTimeoutMs(args.timeout_seconds, LXC_CMD_POLICY);
@@ -1002,6 +1017,7 @@ async function toolRunLxcCommand(args, auth) {
   return toolResult({
     ran: true,
     command: parsed.argv.join(' '),
+    argv: parsed.argv,
     scope: parsed.scope,
     working_dir: workingDir,
     exit_code: streams.exit_code,
@@ -1152,26 +1168,46 @@ async function toolProbeLxcPort(args) {
   const { r, parsed } = await guestCurl(url);
   if (r.status === 127) return toolResult('curl is not installed in this guest — apt install curl (via the startup script) first', { isError: true });
   const failed = r.status !== 0 && !parsed.status_code;
+
+  // The handshake runs whatever the plain HTTP probe did. A server that
+  // speaks ONLY WebSocket (RustDesk hbbs, plenty of RPC and game backends)
+  // closes any non-handshake connection, so `empty_reply` here is the
+  // EXPECTED signature of a healthy WS-only listener — precisely the case
+  // where skipping the upgrade test hid the answer.
   let websocket = null;
-  if (args.test_websocket === true && !failed) {
+  if (args.test_websocket === true) {
     const key = randomBytes(16).toString('base64');
     const w = await guestCurl(url, ['-H', 'Connection: Upgrade', '-H', 'Upgrade: websocket', '-H', `Sec-WebSocket-Key: ${key}`, '-H', 'Sec-WebSocket-Version: 13']);
-    websocket = { upgraded: w.parsed.status_code === 101, status_code: w.parsed.status_code };
+    const wsFailed = w.r.status !== 0 && !w.parsed.status_code;
+    websocket = {
+      upgraded: w.parsed.status_code === 101,
+      status_code: w.parsed.status_code ?? null,
+      ...(wsFailed ? { failure: classifyCurlExit(w.r.timedOut ? 28 : w.r.status) } : {}),
+    };
   }
+  const wsOnly = failed && websocket?.upgraded === true;
+
   return toolResult({
     host, port, scheme, path,
-    ...(failed
-      ? { reachable: false, failure: classifyCurlExit(r.timedOut ? 28 : r.status) }
-      : {
+    ...(wsOnly
+      ? {
         reachable: true,
-        status_code: parsed.status_code,
-        server: parsed.server,
-        content_type: parsed.content_type,
-        time_seconds: parsed.time_seconds,
-        note: parsed.status_code === 401 || parsed.status_code === 403
-          ? 'An auth status means the app IS answering — if the public route fails, the problem is at the edge (see test_route).'
-          : undefined,
-      }),
+        ws_only: true,
+        http_probe: { reachable: false, failure: classifyCurlExit(r.timedOut ? 28 : r.status) },
+        note: 'WS-only listener: the plain HTTP probe was closed without a response and the WebSocket upgrade succeeded. That is a healthy server, not an outage.',
+      }
+      : failed
+        ? { reachable: false, failure: classifyCurlExit(r.timedOut ? 28 : r.status) }
+        : {
+          reachable: true,
+          status_code: parsed.status_code,
+          server: parsed.server,
+          content_type: parsed.content_type,
+          time_seconds: parsed.time_seconds,
+          note: parsed.status_code === 401 || parsed.status_code === 403
+            ? 'An auth status means the app IS answering — if the public route fails, the problem is at the edge (see test_route).'
+            : undefined,
+        }),
     websocket,
   });
 }
@@ -1226,7 +1262,12 @@ async function toolGetLxcStartup(args) {
 // The snapshot primitive every other mutating tool leans on. Returns
 // { name } or { error }.
 async function takeLxcSnapshot(incusName, snapName) {
-  const r = await runHostCapture('incus', ['snapshot', incusName, snapName], { timeoutMs: 120000 });
+  // `incus snapshot <instance> <name>` is LXD-era syntax. Incus moved snapshots
+  // into a subcommand group, so the bare form now resolves the instance name as
+  // a subcommand: `unknown command "pp-Foo" for "incus snapshot"`. Every
+  // mutating LXC tool snapshots first, so this one word took out
+  // snapshot_lxc_container, set_lxc_config AND set_lxc_network at once.
+  const r = await runHostCapture('incus', ['snapshot', 'create', incusName, snapName], { timeoutMs: 120000 });
   if (r.status !== 0) {
     const why = r.timedOut ? 'timed out' : (r.stderr || '').trim().slice(-300) || 'unknown error';
     return { error: `snapshot failed (${why})` };
@@ -1256,7 +1297,7 @@ async function toolSnapshotLxcContainer(args, auth) {
   logAudit(auth.created_by, 'LXC_SNAPSHOT_TAKEN', 'lxc', name, { via: 'mcp', snapshot: snapName }, null);
   return toolResult({
     snapshotted: true, container: name, snapshot: snapName,
-    note: 'Restoring or deleting snapshots is a deliberate host-side act (incus restore / incus delete) — no MCP verb exists for either, by design.',
+    note: 'Restoring or deleting snapshots is a deliberate host-side act (incus snapshot restore / incus snapshot delete) — no MCP verb exists for either, by design.',
   });
 }
 
@@ -1326,10 +1367,19 @@ async function toolSetLxcConfig(args, auth) {
 
 // create_lxc_container — creation-only, so inherently non-destructive: it
 // fails if the name is taken, never replaces. Mirrors the UI route's launch
-// flags (routes/lxc.js POST /containers) so Docker-readiness is set correctly
-// at birth and the keyring/nesting failures seen in the field cannot occur on
-// new guests. Deliberately does NOT accept security.privileged — that flip
-// stays behind set_lxc_config's acknowledge_risk gate.
+// flags (routes/lxc.js POST /containers) so nesting and the syscall intercepts
+// are set at birth. Deliberately does NOT accept security.privileged — that
+// flip stays behind set_lxc_config's acknowledge_risk gate.
+//
+// What docker_ready does NOT do — and used to claim it did — is prevent
+// keyring failures. Those are a HOST condition: unprivileged guests map
+// container-root to a non-root host uid, so they get kernel.keys.maxkeys (200
+// by default) instead of root's million, and every ProxyPilot guest shares one
+// idmap and therefore one budget. A brand-new guest can fail its very first
+// `docker compose up` with "unable to join session keyring: disk quota
+// exceeded" because OTHER guests spent the keys. So a docker_ready create
+// checks the host's headroom and says so up front, rather than letting an
+// agent meet it as an opaque EDQUOT twenty minutes into a deploy.
 async function toolCreateLxcContainer(args, auth) {
   const name = String(args.name || '');
   if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name (letters, digits, hyphens; must start alphanumeric)', { isError: true });
@@ -1386,6 +1436,12 @@ async function toolCreateLxcContainer(args, auth) {
   }
 
   const warnings = [];
+  if (dockerReady) {
+    try {
+      const keyring = await hostKeyringFacts();
+      if (keyring.assessment?.warning) warnings.push(keyring.assessment.warning);
+    } catch { /* a diagnostic must never fail a create */ }
+  }
   await ensureNetworkNat().catch(() => {});
   if (diskGb !== null) {
     const d = await runHostCapture('incus', ['config', 'device', 'override', incusName, 'root', `size=${diskGb}GiB`], { timeoutMs: 30000 });
@@ -1831,7 +1887,7 @@ async function toolGetStaticSiteCert(args) {
 
 const ROUTE_SELECT = `
   SELECT r.id AS route_id, r.domain, r.path_prefix, r.target_port,
-         r.websocket_enabled, r.ssl_enabled, r.force_https, r.service_id,
+         r.websocket_enabled, r.ssl_enabled, r.force_https, r.health_path, r.service_id,
          s.name AS service_name, s.kind, s.runtime, s.type, s.target_ip,
          s.lxc_container_name, s.data_dir, s.status AS service_status
   FROM service_http_routes r
@@ -1854,6 +1910,7 @@ function routeView(r) {
         port: r.target_port || null,
       },
     websocket: !!r.websocket_enabled,
+    health_path: r.health_path || null,
     tls: { ssl_enabled: !!r.ssl_enabled, force_https: !!r.force_https },
     ...(orphaned ? { orphaned: true, orphan_reason: !r.target_ip ? 'no upstream IP recorded' : 'no upstream port recorded' } : {}),
   };
@@ -2021,11 +2078,22 @@ async function toolTestRoute(args, auth) {
   if (edge.exitClass) {
     assessment = `The edge proxy itself is unreachable on this host (${edge.exitClass.class}: ${edge.exitClass.hint}).`;
   } else if ([502, 503, 504].includes(edge.parsed.status_code)) {
-    assessment = upstream?.reachable
-      ? `The proxy returns ${edge.parsed.status_code} but the recorded upstream answers directly — the proxy's upstream binding is stale or wrong. Fix with set_route.`
-      : upstream
-        ? `The proxy returns ${edge.parsed.status_code} and the recorded upstream ${upstream.target} is not answering — the app is down (or the guest's IP moved; see set_lxc_network).`
-        : `The proxy returns ${edge.parsed.status_code} and no upstream is recorded for this domain.`;
+    // Three signals, not two. Reachability alone said "binding is stale" for
+    // an upstream that was reachable AND returning its own 502 — the binding
+    // was correct, the app was broken, and "Fix with set_route" would have
+    // made it worse. An upstream that answers with the SAME status the edge
+    // shows is a faithfully relayed application error.
+    if (!upstream) {
+      assessment = `The proxy returns ${edge.parsed.status_code} and no upstream is recorded for this domain.`;
+    } else if (!upstream.reachable) {
+      assessment = `The proxy returns ${edge.parsed.status_code} and the recorded upstream ${upstream.target} is not answering — the app is down (or the guest's IP moved; see set_lxc_network).`;
+    } else if (upstream.status_code === edge.parsed.status_code) {
+      assessment = `The proxy is relaying the upstream's own ${upstream.status_code}: ${upstream.target} returns the same status when probed directly. The binding is correct — this is an application-level error, so look inside the guest (get_lxc_logs, probe_lxc_port), not at the route.`;
+    } else if (upstream.status_code >= 500) {
+      assessment = `The proxy returns ${edge.parsed.status_code} and the upstream ${upstream.target} answers ${upstream.status_code} — both are erroring, and the upstream's own failure is the one to fix first.`;
+    } else {
+      assessment = `The proxy returns ${edge.parsed.status_code} but the recorded upstream answers ${upstream.status_code} directly — the proxy's upstream binding is stale or wrong. Fix with set_route.`;
+    }
   } else if (edge.parsed.status_code != null) {
     assessment = `The route serves: ${edge.parsed.status_code} in ${edge.parsed.time_seconds}s.`
       + (edge.parsed.status_code === 401 || edge.parsed.status_code === 403 ? ' (An auth status is the APP answering — the path through the proxy works.)' : '');
@@ -2054,11 +2122,11 @@ async function toolTestRoute(args, auth) {
   });
 }
 
-// set_route — create or update the ROOT-PATH binding for one hostname.
+// set_route — create or update one (domain, path_prefix) binding.
 // Updating requires confirm_overwrite and returns the previous binding so the
-// change is reversible by a second call. No delete verb; no enable/disable
-// toggle either (the Caddy regenerator renders every stored route — parking a
-// hostname is a UI/host operation today).
+// change is reversible by a second call. Removal is delete_route; there is
+// still no enable/disable toggle (the Caddy regenerator renders every stored
+// route — parking a hostname is a UI/host operation today).
 async function toolSetRoute(args, auth) {
   const domain = validDomainName(args.domain);
   if (!domain) return toolResult('domain must be a fully qualified hostname, e.g. web.example.com', { isError: true });
@@ -2069,19 +2137,54 @@ async function toolSetRoute(args, auth) {
   if (hasContainer === hasIp) {
     return toolResult('Provide exactly one of upstream_container (preferred — survives IP changes) or upstream_ip.', { isError: true });
   }
+  const pathPrefix = validRoutePathPrefix(args.path_prefix);
+  if (!pathPrefix) return toolResult('path_prefix must be an absolute URL path, e.g. /api (default "/")', { isError: true });
+  const health = validRouteHealthPath(args.health_path);
+  if (health.error) return toolResult(health.error, { isError: true });
+  const healthPath = health.value;
   const websocket = args.websocket !== false;   // default TRUE: modern upstreams break without it and the failure mode is misleading
   const tls = args.tls !== false;
 
   // Resolve the upstream to (ip, containerShortName|null).
-  let ip = null; let containerName = null;
+  let ip = null; let containerName = null; let upstreamSelection = null;
   if (hasContainer) {
     containerName = String(args.upstream_container).trim();
     if (!LXC_NAME_REGEX.test(containerName)) return toolResult('Invalid container name', { isError: true });
     const probe = await fetchLxcInstance(`${LXC_PREFIX}${containerName}`);
     if (probe.error) return toolResult(`Could not resolve container ${containerName}: ${probe.error}`, { isError: true });
     if (probe.notFound) return toolResult(`Container ${containerName} not found — list_lxc_containers shows valid names`, { isError: true });
-    ip = lxcContainerDetail(probe.instance).addresses.find((a) => a.family === 'inet')?.address || null;
-    if (!ip) return toolResult(`Container ${containerName} holds no IPv4 address — is it running? (Pin one with set_lxc_network once it does.)`, { isError: true });
+
+    // The guest's managed NIC decides which address the edge can reach —
+    // ask Incus for the bridge subnet rather than trusting interface names.
+    const bridgeName = instanceNicParent(probe.instance);
+    let subnetCidr = null;
+    if (bridgeName) {
+      const net = await runHostCapture('incus', ['network', 'show', bridgeName], { timeoutMs: 15000 });
+      if (net.status === 0) subnetCidr = parseNetworkIpv4Cidr(net.stdout);
+    }
+    const detail = lxcContainerDetail(probe.instance);
+    const pick = pickUpstreamAddress(detail.addresses, { subnetCidr });
+    if (pick.error === 'no_ipv4') {
+      return toolResult(`Container ${containerName} holds no IPv4 address — is it running? (Pin one with set_lxc_network once it does.)`, { isError: true });
+    }
+    if (pick.error === 'all_filtered') {
+      const shown = pick.rejected.map((a) => `${a.interface} ${a.address} (${a.why})`).join('; ');
+      return toolResult(`Container ${containerName} has no edge-reachable IPv4 — every address belongs to a virtual interface: ${shown}. `
+        + 'Is its managed NIC up? Pass upstream_ip explicitly to override.', { isError: true });
+    }
+    if (pick.error === 'ambiguous') {
+      const shown = pick.candidates.map((a) => `${a.interface} ${a.address}`).join(', ');
+      return toolResult(`Container ${containerName} has more than one routable IPv4 (${shown})`
+        + (subnetCidr ? ` and the managed bridge subnet ${subnetCidr} does not separate them` : ' and no managed bridge subnet was readable to separate them')
+        + '. Refusing to guess — re-call with upstream_ip set to the one the edge should dial.', { isError: true });
+    }
+    ip = pick.ip;
+    upstreamSelection = {
+      chosen: pick.chosen,
+      rejected: pick.rejected,
+      bridge: bridgeName || null,
+      bridge_subnet: subnetCidr,
+    };
   } else {
     ip = validIpv4(args.upstream_ip);
     if (!ip) return toolResult('upstream_ip must be a plain IPv4 address', { isError: true });
@@ -2090,7 +2193,7 @@ async function toolSetRoute(args, auth) {
   const db = getDb();
   let existing = null;
   try {
-    existing = db.prepare(`${ROUTE_SELECT} AND r.domain = ? AND r.path_prefix = '/'`).get(domain);
+    existing = db.prepare(`${ROUTE_SELECT} AND r.domain = ? AND r.path_prefix = ?`).get(domain, pathPrefix);
   } catch (err) {
     return toolResult(`Could not read existing routes: ${err?.message || err}`, { isError: true });
   }
@@ -2098,18 +2201,29 @@ async function toolSetRoute(args, auth) {
     return toolResult(`${domain} is bound to the static site "${existing.service_name}" (id ${existing.service_id}) — set_route only manages container upstreams. Manage the site with the static-site tools instead.`, { isError: true });
   }
   const previous = existing ? {
+    path_prefix: existing.path_prefix,
     upstream_container: existing.lxc_container_name || null,
     upstream_ip: existing.target_ip || null,
     upstream_port: existing.target_port || null,
     websocket: !!existing.websocket_enabled,
+    health_path: existing.health_path || null,
     tls: !!existing.ssl_enabled,
   } : null;
+  const proposed = {
+    path_prefix: pathPrefix,
+    upstream_container: containerName,
+    upstream_ip: ip,
+    upstream_port: port,
+    websocket,
+    health_path: healthPath,
+    tls,
+  };
   if (existing && args.confirm_overwrite !== true) {
     return toolResult({
       applied: false, needs_confirmation: true, domain,
       current_binding: previous,
-      proposed_binding: { upstream_container: containerName, upstream_ip: ip, upstream_port: port, websocket, tls },
-      message: `${domain} already has a binding. Show the user both bindings and re-call with confirm_overwrite: true after they approve.`,
+      proposed_binding: proposed,
+      message: `${domain}${pathPrefix} already has a binding. Show the user both bindings and re-call with confirm_overwrite: true after they approve.`,
     });
   }
 
@@ -2145,19 +2259,19 @@ async function toolSetRoute(args, auth) {
   try {
     if (existing) {
       rollback.push(() => db.prepare(
-        `UPDATE service_http_routes SET service_id = ?, target_port = ?, websocket_enabled = ?, ssl_enabled = ?, force_https = ? WHERE id = ?`,
-      ).run(existing.service_id, existing.target_port, existing.websocket_enabled, existing.ssl_enabled, existing.force_https, existing.route_id));
+        `UPDATE service_http_routes SET service_id = ?, target_port = ?, websocket_enabled = ?, ssl_enabled = ?, force_https = ?, health_path = ? WHERE id = ?`,
+      ).run(existing.service_id, existing.target_port, existing.websocket_enabled, existing.ssl_enabled, existing.force_https, existing.health_path ?? null, existing.route_id));
       db.prepare(
-        `UPDATE service_http_routes SET service_id = ?, target_port = ?, websocket_enabled = ?, ssl_enabled = ?, force_https = ? WHERE id = ?`,
-      ).run(service.id, port, websocket ? 1 : 0, tls ? 1 : 0, tls ? 1 : 0, existing.route_id);
+        `UPDATE service_http_routes SET service_id = ?, target_port = ?, websocket_enabled = ?, ssl_enabled = ?, force_https = ?, health_path = ? WHERE id = ?`,
+      ).run(service.id, port, websocket ? 1 : 0, tls ? 1 : 0, tls ? 1 : 0, healthPath, existing.route_id);
     } else {
       const routeId = uuidv4();
       rollback.push(() => db.prepare(`DELETE FROM service_http_routes WHERE id = ?`).run(routeId));
       db.prepare(
         `INSERT INTO service_http_routes
-           (id, service_id, domain, path_prefix, target_port, websocket_enabled, ssl_enabled, force_https, max_upload_size)
-         VALUES (?, ?, ?, '/', ?, ?, ?, ?, '1G')`,
-      ).run(routeId, service.id, domain, port, websocket ? 1 : 0, tls ? 1 : 0, tls ? 1 : 0);
+           (id, service_id, domain, path_prefix, target_port, websocket_enabled, ssl_enabled, force_https, max_upload_size, health_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '1G', ?)`,
+      ).run(routeId, service.id, domain, pathPrefix, port, websocket ? 1 : 0, tls ? 1 : 0, tls ? 1 : 0, healthPath);
     }
   } catch (err) {
     return toolResult(`Could not write the route: ${err?.message || err}`, { isError: true });
@@ -2189,16 +2303,129 @@ async function toolSetRoute(args, auth) {
   }
 
   logAudit(auth.created_by, 'ROUTE_SET', 'route', domain, {
-    via: 'mcp', upstream: `${ip}:${port}`, container: containerName, websocket, tls, replaced: !!existing,
+    via: 'mcp', path_prefix: pathPrefix, upstream: `${ip}:${port}`, container: containerName,
+    websocket, tls, health_path: healthPath, replaced: !!existing,
   }, null);
   return toolResult({
     applied: true,
     domain,
-    binding: { upstream_container: containerName, upstream_ip: ip, upstream_port: port, websocket, tls },
+    binding: proposed,
+    // The address was CHOSEN, not read off the top of a list — show the work
+    // so a wrong upstream is visible here instead of as a later 502.
+    ...(upstreamSelection ? { upstream_selection: upstreamSelection } : {}),
     ...(previous ? { previous_binding: previous, note: 'Reversible: call set_route again with previous_binding to restore it.' } : {}),
     ...(containerName ? { hint: `Upstream resolved from container ${containerName} (currently ${ip}). Pin that address with set_lxc_network so a lease renewal cannot break this route.` } : {}),
     next: 'Verify end-to-end with test_route.',
   });
+}
+
+// delete_route — the counterpart set_route never had. An agent that can
+// create a binding but not remove one leaves orphans behind and has to ask a
+// human to finish. Two-phase, like every other destructive verb here: the
+// unconfirmed call shows exactly what would go, the confirmed one echoes what
+// went so set_route can restore it verbatim.
+async function toolDeleteRoute(args, auth) {
+  const domain = validDomainName(args.domain);
+  if (!domain) return toolResult('domain must be a fully qualified hostname, e.g. web.example.com', { isError: true });
+  const pathPrefix = validRoutePathPrefix(args.path_prefix);
+  if (!pathPrefix) return toolResult('path_prefix must be an absolute URL path, e.g. /api (default "/")', { isError: true });
+
+  const db = getDb();
+  let row = null;
+  try {
+    row = db.prepare(`${ROUTE_SELECT} AND r.domain = ? AND r.path_prefix = ?`).get(domain, pathPrefix);
+  } catch (err) {
+    return toolResult(`Could not read existing routes: ${err?.message || err}`, { isError: true });
+  }
+  if (!row) {
+    return toolResult(`No route is bound to ${domain}${pathPrefix} — list_routes shows what exists.`, { isError: true });
+  }
+  if (row.kind === 'static_site') {
+    return toolResult(`${domain}${pathPrefix} belongs to the static site "${row.service_name}" (id ${row.service_id}) — delete_route only removes container bindings. Manage the site with the static-site tools instead.`, { isError: true });
+  }
+
+  const binding = {
+    path_prefix: row.path_prefix,
+    upstream_container: row.lxc_container_name || null,
+    upstream_ip: row.target_ip || null,
+    upstream_port: row.target_port || null,
+    websocket: !!row.websocket_enabled,
+    health_path: row.health_path || null,
+    tls: !!row.ssl_enabled,
+  };
+  if (args.confirm !== true) {
+    return toolResult({
+      deleted: false, needs_confirmation: true, domain,
+      binding_to_delete: binding,
+      message: `Show the user this binding and re-call with confirm: true to remove ${domain}${pathPrefix}. The container and its files are not touched.`,
+    });
+  }
+
+  const full = db.prepare(`SELECT * FROM service_http_routes WHERE id = ?`).get(row.route_id);
+  try {
+    db.prepare(`DELETE FROM service_http_routes WHERE id = ?`).run(row.route_id);
+  } catch (err) {
+    return toolResult(`Could not delete the route: ${err?.message || err}`, { isError: true });
+  }
+  // Put the row back if the render/reload cycle rejects the result — a
+  // half-applied delete would leave Caddy serving what the DB says is gone.
+  const restore = () => {
+    try {
+      const cols = Object.keys(full);
+      db.prepare(
+        `INSERT INTO service_http_routes (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
+      ).run(...cols.map((c) => full[c]));
+    } catch { /* best effort */ }
+  };
+  const undo = async (stage, detail) => {
+    restore();
+    try { await regenerateDomainCaddyConfig(db, domain); } catch { /* best effort */ }
+    try { await caddyReload({}); } catch { /* best effort */ }
+    return toolResult(`${stage}: ${detail} — the deletion was rolled back.`, { isError: true });
+  };
+  try { await ensureCaddyStructure(); } catch { /* regenerate re-checks */ }
+  try {
+    await regenerateDomainCaddyConfig(db, domain);
+  } catch (err) {
+    return undo('Failed to render the Caddy config', err?.message || err);
+  }
+  try {
+    await caddyAdapt({});
+  } catch (err) {
+    return undo('Generated Caddy config failed validation', err?.stderr || err?.message || err);
+  }
+  try {
+    await caddyReload({});
+  } catch (err) {
+    return undo('Caddy reload failed', err?.stderr || err?.message || err);
+  }
+
+  logAudit(auth.created_by, 'ROUTE_DELETED', 'route', domain, {
+    via: 'mcp', path_prefix: pathPrefix, upstream: `${binding.upstream_ip}:${binding.upstream_port}`,
+    container: binding.upstream_container,
+  }, null);
+  return toolResult({
+    deleted: true,
+    domain,
+    deleted_binding: binding,
+    note: 'Reversible: set_route with these values restores it. The container, its files and its service record were not touched.',
+  });
+}
+
+// get_host_diagnostics — the read-only host view. Several failures in the
+// field were host conditions invisible from inside a guest (keyring quota,
+// incus version, bridge subnet) and cost an hour of indirect probing each.
+async function toolGetHostDiagnostics() {
+  try {
+    const facts = await collectHostDiagnostics();
+    return toolResult({
+      ...facts,
+      note: facts.keyring?.assessment?.warning
+        || 'Nothing here is blocking: incus is reachable, the keyring has headroom, and the managed bridge subnet is the one an upstream address must fall inside.',
+    });
+  } catch (err) {
+    return toolResult(`Could not read host diagnostics: ${err?.message || err}`, { isError: true });
+  }
 }
 
 async function toolListProjects() {
@@ -3644,6 +3871,8 @@ const TOOL_HANDLERS = {
   get_route: toolGetRoute,
   test_route: toolTestRoute,
   set_route: toolSetRoute,
+  delete_route: toolDeleteRoute,
+  get_host_diagnostics: toolGetHostDiagnostics,
   read_lxc_file: toolReadLxcFile,
   write_lxc_file: toolWriteLxcFile,
   rerun_startup: toolRerunStartup,

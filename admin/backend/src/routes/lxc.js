@@ -2339,15 +2339,16 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
               `INSERT INTO service_http_routes
                  (id, service_id, domain, path_prefix, target_port,
                   websocket_enabled, ssl_enabled, force_https, max_upload_size,
-                  strip_prefix)
-               VALUES (?, ?, ?, '/', ?, 0, ?, ?, '1G', 0)`
+                  strip_prefix, health_path)
+               VALUES (?, ?, ?, '/', ?, 0, ?, ?, '1G', 0, ?)`
             ).run(
               uuidv4(),
               svc.id,
               cleanDomain,
               legacyPort,
               tlsInternal ? 0 : 1,
-              tlsInternal ? 0 : 1
+              tlsInternal ? 0 : 1,
+              cleanHealthPath
             );
             // Surface the migration so the operator can spot the
             // auto-created root row in the list and decide whether
@@ -2376,8 +2377,8 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
         `INSERT INTO service_http_routes
            (id, service_id, domain, path_prefix, target_port,
             websocket_enabled, ssl_enabled, force_https, max_upload_size,
-            strip_prefix)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '1G', ?)`
+            strip_prefix, health_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '1G', ?, ?)`
       ).run(
         routeId,
         svc.id,
@@ -2387,7 +2388,12 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
         wsEnabled ? 1 : 0,
         cert ? 1 : 0,
         cert ? 1 : 0,
-        wantStrip ? 1 : 0
+        wantStrip ? 1 : 0,
+        // Migration 106: the health path is stored, not only written into the
+        // generated site file — otherwise the next DB-driven regeneration
+        // (a service edit, an MCP set_route) drops the marker and the
+        // container's health column silently falls back to a TCP probe.
+        cleanHealthPath
       );
     } catch (e) {
       if (/UNIQUE constraint/i.test(e.message || '')) {
@@ -2556,7 +2562,7 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
         `UPDATE service_http_routes SET
            domain = ?, path_prefix = ?, target_port = ?,
            websocket_enabled = ?, ssl_enabled = ?, force_https = ?,
-           strip_prefix = ?,
+           strip_prefix = ?, health_path = ?,
            allow_framing = COALESCE(?, allow_framing),
            frame_ancestors = CASE WHEN ? THEN ? ELSE frame_ancestors END
          WHERE id = ?`
@@ -2568,6 +2574,9 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
         cert ? 1 : 0,
         cert ? 1 : 0,
         wantStrip ? 1 : 0,
+        // Stored (migration 106) so the `# proxypilot: healthpath=` marker is
+        // regenerated from DB state instead of living only in the site file.
+        cleanHealthPath,
         setFraming ? framingValue : null,
         setAncestors ? 1 : 0,
         ancestorsValue,

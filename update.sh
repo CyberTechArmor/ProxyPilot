@@ -955,6 +955,15 @@ retrofit_admin_tls_snippet
 # site file using `dns cloudflare` proves it is load-bearing even without the
 # marker (e.g. a restore onto a fresh host).
 ensure_caddy_cloudflare_plugin
+# Kernel keyring headroom for Docker-in-LXC. Hosts installed before this
+# landed still carry the kernel's default 200 keys per UID, which every
+# unprivileged guest shares — the failure looks like "disk quota exceeded"
+# at container start and has nothing to do with disk. Idempotent no-op once
+# the drop-in is in place.
+if [ -x "${SCRIPT_DIR}/scripts/patch-lxc-keyring.sh" ]; then
+    bash "${SCRIPT_DIR}/scripts/patch-lxc-keyring.sh" >>"$LOG_FILE" 2>&1 || \
+        log "${YELLOW}Could not raise kernel.keys limits — Docker inside guests may fail with 'disk quota exceeded'. See scripts/patch-lxc-keyring.sh${NC}"
+fi
 
 # Get new version
 NEW_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")

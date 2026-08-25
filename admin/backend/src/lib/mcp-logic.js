@@ -61,6 +61,12 @@ export const MCP_SERVER_INSTRUCTIONS = [
   '{ path: sha } map on apply_project_patch) when something else may be editing the same file.',
   'To ADD to a large file use append_project_file or insert_project_file_at_line — neither moves the existing',
   'content, so neither can truncate it.',
+  'WORKING ON GUESTS AND ROUTES — when something looks environmental rather than app-level, call',
+  'get_host_diagnostics before probing indirectly: incus version, keyring headroom (the "disk quota exceeded"',
+  'that stops Docker inside a guest is a kernel.keys limit, not disk), and the managed bridge subnet that',
+  'decides which of a guest\'s addresses the edge can actually reach. A guest running Docker has several IPv4',
+  'addresses and only one of them is routable; set_route resolves that itself and refuses to guess when it',
+  'cannot tell. run_lxc_command takes args: [...] when an argument contains a space.',
 ].join(' ');
 
 // ---- JSON-RPC helpers ----
@@ -209,6 +215,31 @@ export function decodeChunkBase64(s, cap = UPLOAD_CHUNK_MAX_BYTES) {
 // strength of it. An empty list and a failed list are different answers; these
 // helpers keep them apart.
 
+// `incus list --format json` emits the ENTIRE instance record per guest —
+// config, expanded_config, devices, state (every interface, every counter),
+// snapshots. Against the 256 KB default capture cap that truncates mid-object
+// on a host with a few dozen guests, and the truncation reaches the parser as
+// nothing more identifiable than "unparseable JSON". Listing calls therefore
+// capture well above any plausible inventory, and a parse failure hands back
+// the evidence instead of an adjective.
+export const LXC_LIST_CAPTURE_CAP = 16 * 1024 * 1024;
+
+export const CAPTURE_TAIL_CHARS = 200;
+
+/** Evidence for output that failed to parse: how many bytes arrived, whether
+ *  the capture cap or an unflushed stream cut them off, and the last 200
+ *  characters — a truncation is unmistakable from its tail. */
+export function captureEvidence(out) {
+  const text = String(out?.stdout || '');
+  const bytes = Number.isFinite(Number(out?.stdoutBytes))
+    ? Number(out.stdoutBytes)
+    : Buffer.byteLength(text);
+  const parts = [`${bytes} bytes received`];
+  if (out?.stdoutTruncated) parts.push('cut by the capture cap');
+  else if (out?.stdoutComplete === false) parts.push('stdout still open at exit, so the tail may be missing');
+  return `${parts.join(', ')}; output ends: ${JSON.stringify(text.slice(-CAPTURE_TAIL_CHARS))}`;
+}
+
 export function parseLxcListJson(stdout) {
   let list;
   try {
@@ -275,22 +306,56 @@ function argvHasPrefix(argv, prefix) {
 // clustered and attached spellings (`-sSo`, `-o/tmp/x`, `-fsSLo`) — anything
 // else lets the exact same flag through under a different byte sequence. A
 // long-option deny token (`--output`) also matches the joined `--output=/x`
-// form. Deny-side over-matching is the safe direction: a false positive costs
-// a retry with separated flags, a false negative is arbitrary file delivery.
+// form.
+//
+// What it must NOT do is match the VALUE of a flag. The field failure:
+//
+//   curl -sSi --http1.1 -HConnection:Upgrade … http://127.0.0.1:21118/ws/id
+//   → '"curl -o" is never allowed over MCP'
+//
+// There is no -o in that command. The cluster scan walked the whole token
+// after the dash and found the "o" in "Connection". A short flag that takes a
+// value ends the cluster — everything after it is data — so the scan stops
+// there, and a matched token is now named in the error instead of being
+// asserted.
+const SHORT_FLAGS_WITH_VALUE = new Set('AbcCdDeEFHJKmoOTuUwxXyYz'.split(''));
+
+/** The flag letters in a bundled short-option token, or null if it isn't one.
+ *  Stops after the first value-taking flag: `-HConnection:Upgrade` is the
+ *  single flag H carrying data, not eleven flags. */
+export function shortFlagCluster(tok) {
+  if (typeof tok !== 'string' || !/^-[A-Za-z]/.test(tok) || tok.startsWith('--')) return null;
+  const flags = [];
+  for (const ch of tok.slice(1)) {
+    if (!/[A-Za-z]/.test(ch)) break;              // a digit or punctuation: value, not flag
+    flags.push(ch);
+    if (SHORT_FLAGS_WITH_VALUE.has(ch)) break;    // the remainder is this flag's value
+  }
+  return flags;
+}
+
 function tokenMatchesDenyToken(tok, denyTok) {
   if (tok === denyTok) return true;
   if (denyTok.startsWith('--')) return tok.startsWith(`${denyTok}=`);
-  if (/^-[A-Za-z]$/.test(denyTok) && /^-[A-Za-z]/.test(tok) && !tok.startsWith('--')) {
-    return tok.slice(1).includes(denyTok[1]);
+  if (/^-[A-Za-z]$/.test(denyTok)) {
+    const cluster = shortFlagCluster(tok);
+    return !!cluster && cluster.includes(denyTok[1]);
   }
   return false;
 }
 
+/** null when the argv is clean, else the token that actually matched. */
 function argvMatchesDeny(argv, prefix) {
-  if (argvHasPrefix(argv, prefix)) return true;
-  if (!Array.isArray(prefix) || prefix.length < 2) return false;
-  if (argv[0] !== prefix[0]) return false;
-  return prefix.slice(1).every((tok) => argv.some((a) => tokenMatchesDenyToken(a, tok)));
+  if (argvHasPrefix(argv, prefix)) return prefix.join(' ');
+  if (!Array.isArray(prefix) || prefix.length < 2) return null;
+  if (argv[0] !== prefix[0]) return null;
+  const hits = [];
+  for (const tok of prefix.slice(1)) {
+    const hit = argv.find((a) => tokenMatchesDenyToken(a, tok));
+    if (!hit) return null;
+    hits.push(hit);
+  }
+  return `${argv[0]} ${hits.join(' ')}`;
 }
 
 const LXC_SAFE_ARG = /^[A-Za-z0-9._/@:=+-]+$/;
@@ -301,35 +366,79 @@ const LXC_SAFE_ARG = /^[A-Za-z0-9._/@:=+-]+$/;
  * Every rejection says what IS allowed — a tool that only says "no" gets
  * retried verbatim.
  */
-export function parseLxcCommand(command, policy, { workingDir = null, registeredWorkingDir = null } = {}) {
-  const raw = String(command ?? '').trim();
-  if (!raw) return { error: 'command is required — e.g. "docker compose ps" or "ss -ltnp"' };
-  if (/[\u0000-\u001f\u007f]/.test(raw)) {
-    return { error: 'command must not contain control characters or newlines' };
+export function parseLxcCommand(command, policy, { workingDir = null, registeredWorkingDir = null, args = null } = {}) {
+  // `command` is whitespace-split, so an argument containing a space is
+  // unrepresentable — a WebSocket handshake (`-H "Connection: Upgrade"`)
+  // could not be probed at all, and smuggling it past the splitter as
+  // `-HConnection:Upgrade` then tripped the deny matcher. `args` is the
+  // escape hatch: an argv array taken verbatim, never split, never re-parsed.
+  const hasArgs = Array.isArray(args) && args.length > 0;
+  const hasCommand = command != null && String(command).trim() !== '';
+  if (hasArgs && hasCommand) {
+    return { error: 'Provide either command (whitespace-split) or args (an argv array taken verbatim) — not both.' };
   }
-  const argv = raw.split(/\s+/);
 
-  const shellTokens = policy.shell_syntax_rejected || [];
-  const shellHit = argv.find((tok) => shellTokens.some((sym) => tok.includes(sym)));
-  if (shellHit) {
-    return { error: `"${shellHit}" is shell syntax. This tool runs ONE command without a shell — pipes, redirects, ;, && and $(…) are not supported. Run the steps as separate calls.` };
-  }
-  const badTok = argv.find((tok) => !LXC_SAFE_ARG.test(tok));
-  if (badTok) {
-    return { error: `"${badTok}" is not a plain argument (quotes and special characters are not supported — the command is split on whitespace and executed directly).` };
+  let argv;
+  if (hasArgs) {
+    if (!args.every((a) => typeof a === 'string')) return { error: 'args must be an array of strings' };
+    if (args.some((a) => /[\u0000-\u001f\u007f]/.test(a))) {
+      return { error: 'args must not contain control characters or newlines' };
+    }
+    // No shell-syntax or safe-character screening here: these tokens are
+    // handed to `"$@"` as positional parameters, so a space, a quote or a
+    // semicolon inside one is inert data, not syntax.
+    argv = args.slice();
+  } else {
+    const raw = String(command ?? '').trim();
+    if (!raw) return { error: 'command is required — e.g. "docker compose ps" or "ss -ltnp" (or pass args: [...] for arguments containing spaces)' };
+    if (/[\u0000-\u001f\u007f]/.test(raw)) {
+      return { error: 'command must not contain control characters or newlines' };
+    }
+    argv = raw.split(/\s+/);
+
+    const shellTokens = policy.shell_syntax_rejected || [];
+    const shellHit = argv.find((tok) => shellTokens.some((sym) => tok.includes(sym)));
+    if (shellHit) {
+      return { error: `"${shellHit}" is shell syntax. This tool runs ONE command without a shell — pipes, redirects, ;, && and $(…) are not supported. Run the steps as separate calls.` };
+    }
+    const badTok = argv.find((tok) => !LXC_SAFE_ARG.test(tok));
+    if (badTok) {
+      return { error: `"${badTok}" is not a plain argument — \`command\` is split on whitespace, so quotes and spaces cannot survive it. Pass args: [...] instead, whose entries are used verbatim.` };
+    }
   }
 
   for (const deny of policy.deny_always?.commands || []) {
-    if (argvMatchesDeny(argv, deny)) {
+    const matched = argvMatchesDeny(argv, deny);
+    if (matched) {
       return {
-        error: `"${deny.join(' ')}" is never allowed over MCP (removal and destructive operations stay host-side by design). `
-          + 'Allowed: read/observe commands (docker ps/logs, systemctl status, ip, ss, journalctl, curl probes, df, free, ls, stat, du) '
+        error: `"${matched}" is never allowed over MCP (it matches the denied "${deny.join(' ')}"; removal and destructive operations stay host-side by design). `
+          + 'Allowed: read/observe commands (docker ps/logs, systemctl status, ip, ss, journalctl, curl probes, df, free, ls, stat, du), '
+          + 'systemctl restart/reload of a unit the guest already has, '
           + 'and docker compose up/restart/stop/pull in the registered app directory.',
       };
     }
   }
   for (const allow of policy.read_only || []) {
     if (argvHasPrefix(argv, allow)) return { argv, scope: 'read_only' };
+  }
+  // Service control. Design decision, 2026-08: write_lxc_file + rerun_startup
+  // already runs an arbitrary root script in this same guest, so denying
+  // `systemctl restart` never constrained capability — it constrained
+  // convenience, and pushed every mutation through a slower, less auditable
+  // redeploy. Restarting a unit the guest already has is allowed directly and
+  // the tool description says so, rather than implying a boundary that isn't
+  // one. Unit creation, enablement and package installation still belong in
+  // the startup script, where they are recorded and re-runnable.
+  for (const allow of policy.mutating_service?.commands || []) {
+    if (argvHasPrefix(argv, allow)) {
+      const units = argv.slice(allow.length).filter((t) => !t.startsWith('-'));
+      if (!units.length) {
+        return { error: `"${allow.join(' ')}" needs a unit name, e.g. "${allow.join(' ')} docker.service".` };
+      }
+      const bad = units.find((u) => !validUnitName(u));
+      if (bad) return { error: `"${bad}" is not a valid systemd unit name.` };
+      return { argv, scope: 'mutating_service', units };
+    }
   }
   for (const allow of policy.mutating_scoped?.commands || []) {
     if (argvHasPrefix(argv, allow)) {
@@ -391,6 +500,136 @@ export function lxcContainerDetail(instance) {
     config: picked,
     snapshots: (instance?.snapshots || []).map((s) => ({ name: s.name, created_at: s.created_at || null })),
   };
+}
+
+// ---- upstream address resolution ----
+//
+// Field defect: set_route(upstream_container="RustDesk") recorded 172.17.0.1 —
+// the guest's own docker0 bridge, unreachable from the edge — and reported
+// success. The resolver took the first IPv4 in an interface-ordered list, and
+// `docker0` sorts before `eth0`, so ANY guest running Docker got a broken
+// route plus an "applied": true. The resulting 502 then reads as an
+// application fault. Interface naming is not authoritative; the managed bridge
+// subnet is, so that decides when it is known, and anything still ambiguous is
+// an error rather than a guess.
+
+export const NON_ROUTABLE_IFACE_PATTERNS = [
+  /^lo$/, /^docker[0-9]*$/, /^br-/, /^veth/, /^virbr/, /^cni/, /^flannel/,
+  /^podman[0-9]*$/, /^cali/, /^tailscale[0-9]*$/, /^wg[0-9]*$/, /^zt/,
+  /^tun[0-9]*$/, /^tap[0-9]*$/, /^kube/, /^weave/, /^ovs-/, /^dummy[0-9]*$/,
+  /^nerdctl/, /^cbr[0-9]+$/,
+];
+
+export function isNonRoutableIface(name) {
+  const n = String(name || '');
+  return NON_ROUTABLE_IFACE_PATTERNS.some((re) => re.test(n));
+}
+
+function ipv4ToInt(ip) {
+  const parts = String(ip || '').split('.');
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const p of parts) {
+    if (!/^\d{1,3}$/.test(p)) return null;
+    const v = Number(p);
+    if (v > 255) return null;
+    n = (n * 256) + v;
+  }
+  return n;
+}
+
+/** Is `ip` inside `cidr` (e.g. '10.185.17.1/24')? False on anything unparseable. */
+export function ipv4InCidr(ip, cidr) {
+  const [base, bitsRaw] = String(cidr || '').split('/');
+  const bits = Number(bitsRaw);
+  const a = ipv4ToInt(ip); const b = ipv4ToInt(base);
+  if (a === null || b === null || !Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+  if (bits === 0) return true;
+  const mask = bits === 32 ? 0xffffffff : ((0xffffffff << (32 - bits)) >>> 0);
+  return ((a & mask) >>> 0) === ((b & mask) >>> 0);
+}
+
+/**
+ * Choose the address an edge proxy should dial for a guest.
+ * Returns { ip, chosen, rejected } on success, or { ip: null, error, ... }
+ * where error is 'no_ipv4' | 'all_filtered' | 'ambiguous'. Never guesses
+ * between survivors — a wrong upstream is silent until it is a 502.
+ */
+export function pickUpstreamAddress(addresses, { subnetCidr = null } = {}) {
+  const inet = (Array.isArray(addresses) ? addresses : []).filter((a) => a?.family === 'inet');
+  if (!inet.length) return { ip: null, error: 'no_ipv4', rejected: [], candidates: [] };
+
+  const rejected = [];
+  let candidates = [];
+  for (const a of inet) {
+    if (isNonRoutableIface(a.interface)) {
+      rejected.push({ interface: a.interface, address: a.address, why: 'container-runtime or virtual interface — not reachable from the edge' });
+    } else {
+      candidates.push(a);
+    }
+  }
+  if (subnetCidr) {
+    const inSubnet = candidates.filter((a) => ipv4InCidr(a.address, subnetCidr));
+    if (inSubnet.length) {
+      for (const a of candidates) {
+        if (!inSubnet.includes(a)) {
+          rejected.push({ interface: a.interface, address: a.address, why: `outside the managed bridge subnet ${subnetCidr}` });
+        }
+      }
+      candidates = inSubnet;
+    }
+  }
+  const shape = (a) => ({ interface: a.interface, address: a.address });
+  if (!candidates.length) return { ip: null, error: 'all_filtered', rejected, candidates: [] };
+  if (candidates.length > 1) return { ip: null, error: 'ambiguous', rejected, candidates: candidates.map(shape) };
+  return { ip: candidates[0].address, chosen: shape(candidates[0]), rejected, candidates: candidates.map(shape) };
+}
+
+// Route addressing. The UI has always been able to bind several paths on one
+// hostname (meet.example.com serving /livekit, /api, /ws and / from four
+// ports) and to set a health-probe path; MCP could only ever bind the root
+// with no health path, so any multi-service guest needed manual UI work to
+// finish. Same validation as the UI: routes/lxc.js's HEALTH_PATH_REGEX and
+// routes/services.js's normalizePathPrefix.
+
+export const HEALTH_PATH_MAX = 256;
+
+/** Normalize a route path prefix, or null when it is not a usable path. */
+export function validRoutePathPrefix(value) {
+  if (value === undefined || value === null || value === '') return '/';
+  if (typeof value !== 'string') return null;
+  let p = value.trim();
+  if (!p.startsWith('/')) return null;
+  if (p.length > 200) return null;
+  // Migration 103 normalized stored prefixes away from a trailing `/*`;
+  // accept the Caddy-flavoured spelling and store the normalized form.
+  p = p.replace(/\/\*$/, '');
+  if (p.length > 1) p = p.replace(/\/+$/, '');
+  if (p === '') p = '/';
+  if (p.includes('..') || !/^\/[A-Za-z0-9._~\-/]*$/.test(p)) return null;
+  return p;
+}
+
+/** { value } | { error } — null means "no health probe", which is valid. */
+export function validRouteHealthPath(value) {
+  if (value === undefined || value === null || value === '') return { value: null };
+  if (typeof value !== 'string') return { error: 'health_path must be a string' };
+  if (value.length > HEALTH_PATH_MAX) return { error: `health_path exceeds ${HEALTH_PATH_MAX} characters` };
+  if (!/^\/[A-Za-z0-9._~\-/?=&%]*$/.test(value)) {
+    return { error: 'health_path must start with / and contain only URL-safe characters' };
+  }
+  return { value };
+}
+
+/** The managed network a guest's NIC hangs off — authoritative for its subnet. */
+export function instanceNicParent(instance) {
+  const devs = { ...(instance?.expanded_devices || {}), ...(instance?.devices || {}) };
+  for (const d of Object.values(devs)) {
+    if (d?.type !== 'nic') continue;
+    const parent = d.network || d.parent;
+    if (parent) return String(parent);
+  }
+  return null;
 }
 
 // ---- LXC lifecycle: snapshots + gated config writes ----
@@ -764,7 +1003,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'list_lxc_containers',
-    description: 'List LXC/Incus containers ProxyPilot manages (name, status, IP). Use the name with inspect_lxc_zip / apply_lxc_zip.',
+    description: 'List LXC/Incus containers ProxyPilot manages (name, status, IP). Use the name with inspect_lxc_zip / apply_lxc_zip. A failure is reported as a failure, never as an empty host, and a listing that could not be parsed reports the bytes received and the tail of the output so a truncation is recognisable on sight.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -781,16 +1020,17 @@ export const MCP_TOOLS = [
   },
   {
     name: 'run_lxc_command',
-    description: 'Run one allowlisted command inside an LXC guest — the observe/debug loop without editing boot scripts or redeploying. Same contract as run_project_command: whitespace-split argv executed directly (no shell — pipes, redirects, ;, && and $() are rejected), last 64 KB of each stream returned, exit_code + timed_out reported. The allowlist is read-biased: docker/compose status+logs, systemctl status, journalctl, ip, ss, sysctl -n, curl (probe only — output-writing flags are denied), df, free, ls, stat, du; docker compose up/restart/stop/pull are allowed only in the registered startup working dir. No shells, no package managers, no deletion — those stay host-side by design.',
+    description: 'Run one allowlisted command inside an LXC guest — the observe/debug loop without editing boot scripts or redeploying. argv is executed directly, never through a shell (so pipes, redirects, ;, && and $() do nothing); last 64 KB of each stream returned, exit_code + timed_out reported. Pass `command` for the simple case (whitespace-split) or `args` for an argv array used verbatim — `args` is the only way to send an argument containing a space, e.g. ["curl","-sSi","-H","Connection: Upgrade","http://127.0.0.1:21118/"]. The allowlist covers docker/compose status+logs, systemctl status, journalctl, ip, ss, sysctl -n, curl (probe only — output-writing flags such as -o/-O/--output/-D/--trace/-K are denied by exact flag token, so a header value that merely contains those letters is fine), df, free, ls, stat, du; systemctl restart/reload of a unit the guest already has; and docker compose up/restart/stop/pull in the registered startup working dir. This allowlist is an ergonomics boundary, not a security one — write_lxc_file + rerun_startup already runs an arbitrary root script in the same guest. Package installation and unit creation belong there, where they are recorded and re-runnable.',
     inputSchema: {
       type: 'object',
       properties: {
         container: { type: 'string' },
-        command: { type: 'string', description: 'e.g. "docker compose ps" or "ss -ltnp". Validated against the allowlist before execution.' },
+        command: { type: 'string', description: 'e.g. "docker compose ps" or "ss -ltnp". Split on whitespace, so it cannot carry an argument containing a space — use args for that. Mutually exclusive with args.' },
+        args: { type: 'array', items: { type: 'string' }, description: 'argv used verbatim, e.g. ["curl","-sS","-H","Connection: Upgrade","http://127.0.0.1:8080/"]. Entries are never re-split or re-parsed. Mutually exclusive with command.' },
         working_dir: { type: 'string', description: 'Absolute directory to run in; default the registered startup working dir (or /).' },
         timeout_seconds: { type: 'number', description: 'Kill after this many seconds. Default 120, max 1800.' },
       },
-      required: ['container', 'command'],
+      required: ['container'],
       additionalProperties: false,
     },
   },
@@ -841,7 +1081,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'probe_lxc_port',
-    description: 'From inside an LXC guest, probe a host:port: TCP reachability, and for http/https the status code, server header, response time, and optionally whether a WebSocket upgrade completes. Never returns a response body. The one-call answer to "is the app up behind the proxy" — an in-guest 401 with an edge 502 means the proxy binding is broken, not the app (pair with test_route for the edge side).',
+    description: 'From inside an LXC guest, probe a host:port: TCP reachability, and for http/https the status code, server header, response time, and optionally whether a WebSocket upgrade completes. Never returns a response body. The one-call answer to "is the app up behind the proxy" — an in-guest 401 with an edge 502 means the proxy binding is broken, not the app (pair with test_route for the edge side). test_websocket runs INDEPENDENTLY of the HTTP probe: a WS-only listener (RustDesk hbbs, many RPC and game backends) closes any non-handshake connection, so an HTTP probe failing with empty_reply while the upgrade succeeds is a healthy server — reported as ws_only, not as an outage.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -869,7 +1109,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'create_lxc_container',
-    description: 'Create a new LXC/Incus guest. Creation-only, so inherently non-destructive: fails if the name already exists, never replaces. docker_ready (default true) sets security.nesting plus the syscall intercepts Docker needs at birth, so the keyring/nesting failures do not occur on new guests — privileged mode is NOT included and stays behind set_lxc_config\'s risk gate. Waits briefly for a DHCP lease and returns the same detail as get_lxc_container. Requires confirm: true.',
+    description: 'Create a new LXC/Incus guest. Creation-only, so inherently non-destructive: fails if the name already exists, never replaces. docker_ready (default true) sets security.nesting plus the syscall intercepts Docker needs at birth — privileged mode is NOT included and stays behind set_lxc_config\'s risk gate. It does NOT prevent keyring exhaustion: that is a host condition governed by kernel.keys.maxkeys (200 by default, shared by every unprivileged guest through one idmap), it surfaces as "unable to join session keyring: disk quota exceeded" at first container start, and the remedy is a host sysctl (kernel.keys.maxkeys=20000 in /etc/sysctl.d, or scripts/patch-lxc-keyring.sh). A docker_ready create reads the host\'s headroom and returns a warning when it is low. Waits briefly for a DHCP lease and returns the same detail as get_lxc_container. Requires confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -878,7 +1118,7 @@ export const MCP_TOOLS = [
         cpu: { type: 'number', description: 'vCPU limit, default 2.' },
         memory_gb: { type: 'number', description: 'RAM limit in GB, default 4. Browser workloads need >= 4 — Chrome OOMs at 2.' },
         disk_gb: { type: 'number', description: 'Root disk in GB (best-effort override of the profile default).' },
-        docker_ready: { type: 'boolean', description: 'Set nesting + syscall intercepts for running Docker inside. Default true.' },
+        docker_ready: { type: 'boolean', description: 'Set nesting + syscall intercepts for running Docker inside, and check the host keyring headroom. Default true. Does not affect kernel.keys.maxkeys, which is host-level.' },
         autostart: { type: 'boolean', description: 'boot.autostart, default true.' },
         confirm: { type: 'boolean', description: 'Must be true.' },
       },
@@ -933,7 +1173,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'snapshot_lxc_container',
-    description: 'Take a named snapshot of a guest — the safety primitive every mutating LXC tool leans on (they all snapshot before changing anything). With list: true it just returns the existing snapshots. No restore or delete verb over MCP: restoring is a deliberate host-side act (incus restore).',
+    description: 'Take a named snapshot of a guest — the safety primitive every mutating LXC tool leans on (they all snapshot before changing anything). With list: true it just returns the existing snapshots. No restore or delete verb over MCP: restoring is a deliberate host-side act (incus snapshot restore).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1143,7 +1383,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'test_route',
-    description: 'Probe a hostname from the edge host\'s own vantage point, pinned to the local proxy (so the test exercises THIS Caddy even when public DNS points elsewhere): DNS resolution, HTTP status + timing through the full proxy path, a direct probe of the recorded upstream, and optionally a WebSocket upgrade handshake. Distinguishes in one call the three failure classes that look identical from outside — proxy down, proxy-to-upstream (stale binding), and app-level — and says which one it found. Never returns response bodies. Read-only.',
+    description: 'Probe a hostname from the edge host\'s own vantage point, pinned to the local proxy (so the test exercises THIS Caddy even when public DNS points elsewhere): DNS resolution, HTTP status + timing through the full proxy path, a direct probe of the recorded upstream, and optionally a WebSocket upgrade handshake. Distinguishes in one call the three failure classes that look identical from outside — the proxy being down, a stale/wrong upstream binding, and the upstream returning its own error — by weighing the edge status, upstream reachability AND the upstream\'s own status code: an upstream that answers the same 5xx directly means the proxy is faithfully relaying an application error, so the fix is inside the guest, not in set_route. Never returns response bodies. Read-only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1157,21 +1397,42 @@ export const MCP_TOOLS = [
   },
   {
     name: 'set_route',
-    description: 'Create or update the root-path binding for one hostname: upstream container name + port (preferred — the container\'s current IP is resolved and recorded) or a literal ip:port, websocket upgrade on/off (default ON — modern upstreams break without it and the failure mode, page-loads-then-black-screen, is misleading), and TLS. Updating an existing binding requires confirm_overwrite: true and the result carries the previous binding, so the change is reversible by a second call. Refuses domains bound to static sites. No delete verb — removal stays a UI/host operation.',
+    description: 'Create or update one binding on a hostname: upstream container name + port (preferred — the container\'s current IP is resolved and recorded) or a literal ip:port, an optional path_prefix so several services can share a hostname (/, /api, /ws …), an optional health_path for the container health probe, websocket upgrade on/off (default ON — modern upstreams break without it and the failure mode, page-loads-then-black-screen, is misleading), and TLS. upstream_container resolution IGNORES container-runtime bridges (docker0, br-*, veth*, cni*, wg* …) and prefers the address inside the guest\'s managed Incus bridge subnet; anything still ambiguous is an error rather than a guess, and the result reports the address chosen plus every candidate rejected. Updating an existing binding requires confirm_overwrite: true and the result carries the previous binding, so the change is reversible by a second call. Refuses domains bound to static sites. Remove a binding with delete_route.',
     inputSchema: {
       type: 'object',
       properties: {
         domain: { type: 'string' },
+        path_prefix: { type: 'string', description: 'URL path this binding serves, e.g. /api. Default "/". Each (domain, path_prefix) is its own binding, so a multi-service guest can be finished without the UI.' },
         upstream_container: { type: 'string', description: 'LXC guest name (without pp-); mutually exclusive with upstream_ip. Preferred: pairs with set_lxc_network so IP changes cannot silently break the route.' },
-        upstream_ip: { type: 'string', description: 'Literal upstream IPv4; mutually exclusive with upstream_container.' },
+        upstream_ip: { type: 'string', description: 'Literal upstream IPv4; mutually exclusive with upstream_container. Use this to settle an ambiguous container resolution.' },
         upstream_port: { type: 'number' },
+        health_path: { type: 'string', description: 'Path for the HTTP health probe, e.g. /healthz. Omit for a plain TCP check. Stored on the route and emitted into the generated site file, so it survives regeneration.' },
         websocket: { type: 'boolean', description: 'Pass Upgrade/Connection headers. Default true.' },
         tls: { type: 'boolean', description: 'HTTPS with automatic certificates. Default true.' },
-        confirm_overwrite: { type: 'boolean', description: 'Required (true) when the domain already has a binding.' },
+        confirm_overwrite: { type: 'boolean', description: 'Required (true) when this (domain, path_prefix) already has a binding.' },
       },
       required: ['domain', 'upstream_port'],
       additionalProperties: false,
     },
+  },
+  {
+    name: 'delete_route',
+    description: 'Remove one binding (domain + path_prefix) so an agent can clean up after itself instead of leaving an orphaned route behind. Two-phase like every other destructive verb: without confirm: true it returns the binding that WOULD be deleted and changes nothing; with confirm it deletes the row, regenerates the site config and reloads Caddy, and echoes the deleted binding so set_route can put it straight back. Deletes the route only — the container, its files and its service record are untouched. Refuses bindings owned by static sites.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string' },
+        path_prefix: { type: 'string', description: 'Which binding on the hostname. Default "/".' },
+        confirm: { type: 'boolean', description: 'Required (true) to actually delete.' },
+      },
+      required: ['domain'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_host_diagnostics',
+    description: 'Read-only host facts that no guest can see, in one call: incus version (a client/CLI generation gap is a mid-operation failure otherwise), kernel version, kernel.keys.* limits with /proc/key-users headroom and an assessment (the "unable to join session keyring: disk quota exceeded" that stops Docker inside unprivileged guests is THIS, not disk), the managed bridge and its IPv4 subnet (which decides the reachable upstream address), and free disk under the Incus storage path. Check it first when a failure looks environmental rather than app-level.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'list_projects',

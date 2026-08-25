@@ -6183,6 +6183,10 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null) {
     const stripPrefix =
       stripExplicit != null ? !!stripExplicit : pathPrefix !== '/';
     return {
+      // Health-probe path (migration 106). Emitted as the
+      // `# proxypilot: healthpath=` marker the LXC page reads back, so a
+      // DB-driven regeneration no longer silently drops it.
+      healthPath: (s.healthPath !== undefined ? s.healthPath : s.health_path) || null,
       // Branch selector for generateServiceHandlerBody. kind wins over type
       // when both are set (the A.3 backfill state: legacy rows carry both).
       kind: s.kind,
@@ -6335,6 +6339,12 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null) {
       .join(', ')}`
   );
   lines.push(`# Generated: ${new Date().toISOString()}`);
+  // Health-probe marker. The LXC page reads this back out of the generated
+  // file to decide between an HTTP probe and a bare TCP connect, so it has to
+  // survive every regeneration — one marker per site, root path preferred.
+  const healthEntry = normalized.find((s) => s.pathPrefix === '/' && s.healthPath)
+    || normalized.find((s) => s.healthPath);
+  if (healthEntry) lines.push(`# proxypilot: healthpath=${healthEntry.healthPath}`);
   lines.push(``);
   lines.push(`${siteAddress} {`);
 
@@ -6476,6 +6486,7 @@ async function regenerateDomainCaddyConfig(db, domain) {
               r.host_header_override,
               r.allow_framing,
               r.frame_ancestors,
+              r.health_path,
               s.name         AS name,
               s.kind         AS kind,
               s.runtime      AS runtime,

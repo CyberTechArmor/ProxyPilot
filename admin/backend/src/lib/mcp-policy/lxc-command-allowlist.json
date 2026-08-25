@@ -1,5 +1,5 @@
 {
-  "$comment": "Allowlist for run_lxc_command. Matching is on argv prefix after whitespace-split; no shell is ever invoked, so metacharacters are inert but rejected anyway for clarity. deny_always wins over any allow rule.",
+  "$comment": "Allowlist for run_lxc_command. Matching is on argv prefix; argv comes from whitespace-splitting `command`, or verbatim from the `args` array. No shell is ever invoked, so metacharacters are inert — the `command` path still rejects them for clarity, the `args` path does not, which is what it is for. deny_always wins over any allow rule.",
   "read_only": [
     ["docker", "ps"],
     ["docker", "inspect"],
@@ -34,8 +34,16 @@
       ["docker", "compose", "restart"],
       ["docker", "compose", "stop"],
       ["docker", "compose", "pull"],
-      ["docker", "restart"],
-      ["systemctl", "restart", "docker"]
+      ["docker", "restart"]
+    ]
+  },
+  "mutating_service": {
+    "$comment": "Service control, allowed anywhere in the guest (no working-dir gate). write_lxc_file + rerun_startup already executes an arbitrary root script in this same guest, so denying these never constrained capability — only convenience, at the cost of pushing every mutation through a slower and less auditable redeploy. Unit creation, enablement and package installation still belong in the startup script, where they are recorded and re-runnable.",
+    "commands": [
+      ["systemctl", "restart"],
+      ["systemctl", "reload"],
+      ["systemctl", "reload-or-restart"],
+      ["systemctl", "try-restart"]
     ]
   },
   "deny_always": {
@@ -51,13 +59,17 @@
       ["sh"], ["bash"], ["dash"], ["zsh"], ["python"], ["python3"], ["perl"], ["node"],
       ["chmod"], ["chown"],
       ["ssh"], ["scp"], ["nc"], ["ncat"], ["socat"],
-      ["curl", "-o"], ["curl", "--output"], ["curl", "-O"], ["wget"]
+      ["curl", "-o"], ["curl", "--output"], ["curl", "-O"], ["curl", "--remote-name"],
+      ["curl", "--create-dirs"], ["curl", "-D"], ["curl", "--dump-header"],
+      ["curl", "--trace"], ["curl", "--trace-ascii"], ["curl", "--trace-config"],
+      ["curl", "-K"], ["curl", "--config"], ["wget"]
     ],
     "rationale": {
       "docker compose down": "Removes containers and networks; restart/stop cover every legitimate need without deletion.",
       "apt/apt-get/dpkg": "Package changes belong in the startup script where they are recorded and re-runnable, not in ad-hoc exec.",
       "shells and interpreters": "Would make the allowlist a formality.",
-      "curl with output flags / wget": "curl is allowed for probing only; writing fetched bytes to disk is arbitrary code delivery."
+      "curl with output flags / wget": "curl is allowed for probing only; writing fetched bytes to disk is arbitrary code delivery. Flag matching is on exact tokens and bundled short-flag clusters (-sSo is denied), never on a flag's VALUE — -HConnection:Upgrade is a header, not an output flag.",
+      "systemctl restart/reload": "NOT denied — see mutating_service. Restarting a unit the guest already has is allowed directly, because rerun_startup can already do it with more steps and less audit."
     }
   },
   "shell_syntax_rejected": ["|", ">", ">>", "<", ";", "&&", "||", "$(", "`", "&"],

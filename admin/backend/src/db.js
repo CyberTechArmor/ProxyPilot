@@ -72,6 +72,12 @@ export function getDb() {
 //   103 Phase 2c hotfix — strip trailing `/*` from service_http_routes.path_prefix
 //   104 Phase 2c — allow_framing + frame_ancestors columns
 //   105 P  — cve_pins (per-user CVE pinning + note)
+//   106 Phase 2c — service_http_routes.health_path (the health-probe path
+//                  the LXC page has always offered; it used to live only as
+//                  a `# proxypilot: healthpath=` comment in the generated
+//                  site file, so any DB-driven regeneration silently dropped
+//                  it. Storing it makes the marker survive and lets set_route
+//                  set it over MCP.)
 //   200 Backups — backup_destinations (S3-compatible storage settings)
 //   201 Backups — backups (one row per packed artifact uploaded to S3)
 //   202 Backups — backup_schedules + restore_runs (PR 2)
@@ -838,6 +844,25 @@ export function initDatabase() {
     }
     if (!cols.includes('frame_ancestors')) {
       d.exec(`ALTER TABLE service_http_routes ADD COLUMN frame_ancestors TEXT`);
+    }
+  });
+
+  // Health-probe path per route.
+  //
+  // The LXC page has offered a health path since containers shipped, but it
+  // was only ever written into the generated site file as a
+  // `# proxypilot: healthpath=/x` comment and read back by parsing that file.
+  // Anything that regenerated the file from DB state — a service edit, an
+  // MCP set_route — dropped the marker, and the container's health column
+  // silently fell back to a bare TCP probe. The column is the source of
+  // truth now; the marker is emitted from it.
+  runMigration(db, 106, 'phase2c_route_health_path', (d) => {
+    const cols = d
+      .prepare(`PRAGMA table_info(service_http_routes)`)
+      .all()
+      .map((c) => c.name);
+    if (!cols.includes('health_path')) {
+      d.exec(`ALTER TABLE service_http_routes ADD COLUMN health_path TEXT`);
     }
   });
 

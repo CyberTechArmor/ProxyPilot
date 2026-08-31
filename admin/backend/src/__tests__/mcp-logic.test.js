@@ -90,7 +90,7 @@ test('tool catalog: every tool has a name, description, and object schema', () =
     'list_static_sites', 'inspect_static_site_zip', 'apply_static_site_zip',
     'list_lxc_containers', 'inspect_lxc_zip', 'apply_lxc_zip',
     'read_lxc_file', 'write_lxc_file', 'rerun_startup',
-    'list_projects', 'send_project_build', 'clone_project', 'create_upload_ticket',
+    'list_projects', 'create_project', 'clone_project', 'create_upload_ticket',
     'append_upload_chunk', 'finish_upload',
     'interrupt_project_build', 'cancel_queued_build',
     'list_project_files', 'read_project_file', 'write_project_file', 'redeploy_project',
@@ -2011,4 +2011,76 @@ test('the batch read hashes on the far side, so a short transfer cannot pass', (
   assert.match(script, /toobig/);
   assert.match(script, /budget/);
   assert.equal(/head -c/.test(script), false, 'a batch read must not truncate a file to fit');
+});
+
+// ---- the no-API-spend contract ----
+//
+// This surface is the free lane: the chat does the thinking on the operator's
+// subscription and ProxyPilot only executes. The build-queueing tool that
+// spent the project's own configured API budget was removed, and these tests
+// are the ratchet that keeps it removed — a re-added enqueue is how the spend
+// comes back.
+
+test('no advertised tool starts work that spends the project API budget', () => {
+  const names = new Set(MCP_TOOLS.map((t) => t.name));
+  assert.equal(names.has('send_project_build'), false,
+    'send_project_build spends the project API budget — builds are started from the UI');
+  // The stop switches stay: they only ever REDUCE spend.
+  for (const keep of ['interrupt_project_build', 'cancel_queued_build', 'get_build_log']) {
+    assert.ok(names.has(keep), `missing tool ${keep}`);
+  }
+});
+
+test('the router neither enqueues a build nor triggers the paid summary pass', () => {
+  const routeSrc = readFileSync(new URL('../routes/mcp.js', import.meta.url), 'utf8');
+  for (const banned of ['enqueueBuild', 'drainBuildQueue', 'asset-summary.js', 'queueDocumentSummaries']) {
+    assert.equal(routeSrc.includes(banned), false,
+      `routes/mcp.js must not reach for ${banned} — it spends the project's API budget`);
+  }
+  // Reading and cancelling the queue is the whole of what remains.
+  assert.match(routeSrc, /listBuildQueue/);
+  assert.match(routeSrc, /cancelQueuedBuild/);
+});
+
+test('the server instructions state that no tool spends the API budget', () => {
+  assert.match(MCP_SERVER_INSTRUCTIONS, /NO TOOL HERE SPENDS THE PROJECT'S API BUDGET/);
+  assert.match(MCP_SERVER_INSTRUCTIONS, /cannot queue a build/);
+});
+
+// ---- create_project ----
+
+test('create_project needs only a name, and offers the parent-domain routes', () => {
+  const t = MCP_TOOLS.find((x) => x.name === 'create_project');
+  assert.ok(t, 'missing tool create_project');
+  // Only the name is required: the parent domain is resolved when the install
+  // has exactly one, and an ambiguous call answers with the choices.
+  assert.deepEqual(t.inputSchema.required, ['name']);
+  for (const p of ['name', 'description', 'parent_domain_id', 'parent_domain', 'use_base_domain']) {
+    assert.ok(t.inputSchema.properties[p], `create_project needs ${p}`);
+  }
+  assert.equal(t.inputSchema.properties.parent_domain_id.type, 'number');
+  assert.equal(t.inputSchema.properties.use_base_domain.type, 'boolean');
+  assert.equal(t.inputSchema.additionalProperties, false);
+  // It must say it costs nothing — the whole point of removing the queue.
+  assert.match(t.description, /no API budget|Spends no API budget/i);
+});
+
+test('create_project mirrors the UI create: same gate, same slug, same membership', () => {
+  const routeSrc = readFileSync(new URL('../routes/mcp.js', import.meta.url), 'utf8');
+  const fn = routeSrc.slice(routeSrc.indexOf('async function toolCreateProject'),
+    routeSrc.indexOf('async function toolCloneProject'));
+  assert.ok(fn.length > 500, 'toolCreateProject not found');
+  // The selectable-parent gate, never skipped for an id passed in by a caller.
+  assert.match(fn, /resolveParentDomain/);
+  // The slug is derived from the name, so a duplicate is refused not renamed.
+  assert.match(fn, /deriveProjectSlug/);
+  // Born with an owner, and on the board, exactly like the UI's create.
+  assert.match(fn, /upsertMember/);
+  assert.match(fn, /createCardForMock2Project/);
+  // Deterministic look: the 'ai' preset would be a model call.
+  assert.match(fn, /DEFAULT_DESIGN_PRESET/);
+  assert.equal(fn.includes('DESIGN_PRESET_AI'), false,
+    'create_project must not offer the model-picked design preset');
+  // Provisioning is what makes it real; no build is started.
+  assert.match(fn, /startProvision/);
 });

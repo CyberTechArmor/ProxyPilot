@@ -61,6 +61,9 @@ export const MCP_SERVER_INSTRUCTIONS = [
   '{ path: sha } map on apply_project_patch) when something else may be editing the same file.',
   'To ADD to a large file use append_project_file or insert_project_file_at_line — neither moves the existing',
   'content, so neither can truncate it.',
+  'NO TOOL HERE SPENDS THE PROJECT\'S API BUDGET: this server cannot queue a build, so an app change is',
+  'yours to make with the file tools above. create_project and clone_project provision new projects',
+  'deterministically; interrupt_project_build and cancel_queued_build stop harness builds started from the UI.',
 ].join(' ');
 
 // ---- JSON-RPC helpers ----
@@ -1180,7 +1183,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'get_project',
-    description: 'Details for one AI-dev project: lifecycle, live URL, latest build cycle status, build queue, and shipped builds still awaiting operator verification. Check pending_verification before queuing a build — re-requesting already-shipped work pays for it twice.',
+    description: 'Details for one AI-dev project: lifecycle, live URL, latest build cycle status, the build queue, and shipped builds still awaiting operator verification. This server cannot start a build — the queue is reported so you can see, cancel or stop harness work that was started from the UI.',
     inputSchema: {
       type: 'object',
       properties: { project_id: { type: 'number' } },
@@ -1189,21 +1192,8 @@ export const MCP_TOOLS = [
     },
   },
   {
-    name: 'send_project_build',
-    description: 'Queue a build instruction (quick update) on an AI-dev project — e.g. "Add a CSV export to the reports page". The project builds it with its own AI harness; poll get_project for status. If a build is already running the instruction queues behind it.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project_id: { type: 'number' },
-        instruction: { type: 'string', description: 'What to build or change, in plain language.' },
-      },
-      required: ['project_id', 'instruction'],
-      additionalProperties: false,
-    },
-  },
-  {
     name: 'upload_project_reference',
-    description: 'Add a text reference file (spec, notes, exported page) to a project\'s asset library. The project\'s builds see a summary of it and can read the full content.',
+    description: 'Add a text reference file (spec, notes, exported page) to a project\'s asset library. Stored as-is: this server never runs the paid summary pass, so the project reads the full file rather than a brief (summarize it from the UI if a brief is wanted).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1217,7 +1207,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'interrupt_project_build',
-    description: 'Stop the build currently running on an AI-dev project. Default action stop_after_step checkpoints at the next step boundary (resumable from the UI); abandon discards the in-progress cycle. Use this when a build was queued by mistake or is burning API budget on the wrong thing.',
+    description: 'Stop the build currently running on an AI-dev project (builds are started from the UI — this server cannot start one). Default action stop_after_step checkpoints at the next step boundary (resumable from the UI); abandon discards the in-progress cycle. Use this when a build was queued by mistake or is burning API budget on the wrong thing.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1230,7 +1220,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'cancel_queued_build',
-    description: 'Cancel a queued (not yet started) build on an AI-dev project. get_project lists queued builds with their ids. A build that has already started must be stopped with interrupt_project_build instead.',
+    description: 'Cancel a queued (not yet started) build on an AI-dev project — one queued from the UI, since this server cannot start builds. get_project lists queued builds with their ids. A build that has already started must be stopped with interrupt_project_build instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1552,6 +1542,22 @@ export const MCP_TOOLS = [
         cycle_id: { type: 'number', description: 'Associate the record with a build cycle. Omit for chat-lane work, which has none.' },
       },
       required: ['project_id', 'summary'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'create_project',
+    description: 'Create a new AI-dev project from scratch (the counterpart to clone_project): mints <slug>.<parent domain> from the name, provisions the container and seeds the base app. Returns immediately — poll get_project on the new id until lifecycle is active. parent_domain_id is optional when the install has exactly one usable parent domain; otherwise pass it (or parent_domain by name) and an ambiguous call answers with the choices. Spends no API budget: provisioning is deterministic and no build is started.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Project name; the subdomain is derived from it ("My App" -> my-app.<domain>). A duplicate name is refused, not disambiguated.' },
+        description: { type: 'string', description: 'Optional one-line description.' },
+        parent_domain_id: { type: 'number', description: 'Parent domain to mint the subdomain under. Optional when exactly one is usable.' },
+        parent_domain: { type: 'string', description: 'Parent domain by name (e.g. example.com), instead of parent_domain_id.' },
+        use_base_domain: { type: 'boolean', description: 'Also serve on the parent domain itself (example.com), not just the minted subdomain. Refused when another service already answers there.' },
+      },
+      required: ['name'],
       additionalProperties: false,
     },
   },

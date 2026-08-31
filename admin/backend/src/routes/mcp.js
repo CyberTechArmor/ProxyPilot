@@ -196,23 +196,27 @@ function mock2Enabled() {
 
 async function mock2Modules() {
   if (!mock2Enabled()) throw new Error('The Projects module is not enabled on this ProxyPilot install');
-  const [projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic, requests,
-    cycleEvents, changeRecords, framework] = await Promise.all([
+  // No chats.js: the build chat was only ever written to by the build-queueing
+  // tool, which this surface no longer has.
+  const [projects, cycles, queue, domains, provision, cloneLogic, assets, projectLogic, requests,
+    cycleEvents, changeRecords, framework, domainLogic, designPresets] = await Promise.all([
     import('../mock2/projects.js'), import('../mock2/cycles.js'), import('../mock2/build-queue.js'),
-    import('../mock2/chats.js'), import('../mock2/domains.js'), import('../mock2/provision.js'),
+    import('../mock2/domains.js'), import('../mock2/provision.js'),
     import('../mock2/clone-logic.js'), import('../mock2/project-assets.js'), import('../mock2/project-logic.js'),
     import('../mock2/requests.js'),
     import('../mock2/cycle-events.js'), import('../mock2/change-records.js'), import('../mock2/framework.js'),
+    import('../mock2/domain-logic.js'), import('../mock2/design-presets.js'),
   ]);
-  return { projects, cycles, queue, chats, domains, provision, cloneLogic, assets, projectLogic, requests,
-    cycleEvents, changeRecords, framework };
+  return { projects, cycles, queue, domains, provision, cloneLogic, assets, projectLogic, requests,
+    cycleEvents, changeRecords, framework, domainLogic, designPresets };
 }
 
 // Builds that SHIPPED but still await the operator's verification checks.
-// Surfaced on get_project and echoed by send_project_build because re-sending
-// an instruction that already shipped is paid for twice: the operator's export
-// showed a $1.71 build re-queued in full because nothing at queue time said
-// "that one is done — it's waiting for you to verify it".
+// Surfaced on get_project so the queue this server can only READ still reads
+// honestly: the operator's export showed a $1.71 build re-queued in full
+// because nothing at queue time said "that one is done — it's waiting for you
+// to verify it". This server no longer queues builds at all, but the same
+// state is what tells an operator whether the UI needs to.
 function pendingVerification(m, projectId) {
   return m.cycles.listCyclesForProject(projectId, { limit: 50 })
     .filter((c) => c.verification_state === 'pending')
@@ -2221,35 +2225,7 @@ async function toolGetProject(args) {
     provisioning: provisionStatus ? { phase: provisionStatus.phase, message: provisionStatus.message, error: provisionStatus.error || null } : null,
     queued_builds: queueRows.map((r) => ({ id: r.id, instruction: String(r.instruction || '').slice(0, 200) })),
     pending_verification: pending,
-    ...(pending.length ? { note: `${pending.length} shipped build(s) await the operator's verification checks in the build chat — check them before queuing an instruction that may repeat one.` } : {}),
-  });
-}
-
-async function toolSendProjectBuild(args, auth) {
-  const m = await mock2Modules();
-  const project = m.projects.getProject(Number(args.project_id));
-  if (!project) return toolResult('Project not found', { isError: true });
-  if (project.lifecycle !== 'active') {
-    return toolResult(`Project is ${project.lifecycle} — it must be active (wake/rehydrate it from the UI first)`, { isError: true });
-  }
-  const instruction = String(args.instruction || '').trim();
-  if (!instruction) return toolResult('An instruction is required', { isError: true });
-  const row = m.queue.enqueueBuild({ projectId: project.id, instruction, buildMode: 'quick', initiatedBy: auth.created_by });
-  try {
-    m.chats.insertMessage({ projectId: project.id, authorUserId: auth.created_by, kind: 'user', body: instruction });
-  } catch { /* chat echo is best-effort */ }
-  // If the project is idle the drain starts it immediately; otherwise it runs
-  // when the current build finishes.
-  m.queue.drainBuildQueue(project.id).catch(() => {});
-  logAudit(auth.created_by, 'MOCK2_BUILD_QUEUED', 'mock2_project', project.id, { via: 'mcp', queue_id: row.id }, null);
-  const pending = pendingVerification(m, project.id);
-  return toolResult({
-    queued: true, queue_id: row.id,
-    message: 'Build queued — it starts immediately if the project is idle. Poll get_project for status.',
-    ...(pending.length ? {
-      pending_verification: pending,
-      warning: `${pending.length} earlier shipped build(s) still await operator verification — if this instruction repeats one of them, cancel it (cancel_queued_build) and verify instead of paying to rebuild.`,
-    } : {}),
+    ...(pending.length ? { note: `${pending.length} shipped build(s) await the operator's verification checks in the build chat.` } : {}),
   });
 }
 
@@ -2265,12 +2241,157 @@ async function toolUploadProjectReference(args, auth) {
     buffer: Buffer.from(content, 'utf8'),
     createdBy: auth.created_by,
   });
-  // Kick the async summary pass so builds see a brief, not a pending note.
+  // Deliberately NOT queueing the document summary pass here: it is a model
+  // call against the project's configured connector, and no MCP tool spends
+  // the project's API budget. The asset context renders "(summary pending —
+  // read the file if needed)", which is the honest state; the UI's own upload
+  // still summarizes.
+  return toolResult({
+    added: true, asset_id: asset.id, name: asset.name,
+    note: 'Stored without a generated summary (this server spends no API budget) — the project reads the full file.',
+  });
+}
+
+// ---- create_project: the from-scratch counterpart to clone_project ----
+//
+// Mirrors POST /api/mock2/projects (mock2/routes.js) step for step — the same
+// selectable-parent gate, the same name-derived slug, the same first-editor
+// membership, the same board card — because a project created here has to be
+// indistinguishable from one created in the UI. The one deliberate difference:
+// the design preset is never the 'ai' one, which would have the mockup model
+// pick a look. Nothing on this path spends the project's API budget.
+
+// Resolve the parent domain a new project is minted under: an explicit id, a
+// name, or — when the install has exactly one usable domain — that one. An
+// ambiguous or empty resolution answers WITH the choices, so discovering the
+// domains does not cost the caller a round trip of its own.
+function resolveParentDomain(m, args) {
+  const selectable = m.domains.listParentDomains().filter((d) => m.domainLogic.isSelectable(d));
+  const choices = selectable.map((d) => ({ id: d.id, domain: d.domain }));
+  const notSelectable = (parent) =>
+    `Parent domain "${parent.domain}" is not verified and enabled — it cannot host a project yet`;
+
+  if (args.parent_domain_id != null && String(args.parent_domain_id).trim() !== '') {
+    const parent = m.domains.getParentDomain(Number(args.parent_domain_id));
+    if (!parent) return { error: `No parent domain with id ${args.parent_domain_id}`, choices };
+    if (!m.domainLogic.isSelectable(parent)) return { error: notSelectable(parent), choices };
+    return { parent };
+  }
+  const byName = String(args.parent_domain || '').trim().toLowerCase().replace(/\.$/, '');
+  if (byName) {
+    const parent = m.domains.getParentDomainByName(byName);
+    if (!parent) return { error: `No parent domain named "${byName}"`, choices };
+    if (!m.domainLogic.isSelectable(parent)) return { error: notSelectable(parent), choices };
+    return { parent };
+  }
+  if (selectable.length === 1) return { parent: selectable[0] };
+  if (!selectable.length) {
+    return { error: 'No parent domain is verified and enabled — add and verify one under Projects → Domains before creating a project', choices };
+  }
+  return { error: 'Several parent domains are available — pass parent_domain_id (or parent_domain) to pick one', choices };
+}
+
+async function toolCreateProject(args, auth) {
+  const m = await mock2Modules();
+  const name = String(args.name || '').trim();
+  if (!name) return toolResult('A project name is required', { isError: true });
+  if (name.length > 120) return toolResult('name must be 120 characters or fewer', { isError: true });
+  const description = args.description == null
+    ? undefined
+    : String(args.description).trim().slice(0, 2000) || undefined;
+
+  const resolved = resolveParentDomain(m, args);
+  if (resolved.error) {
+    return toolResult({ error: resolved.error, parent_domains: resolved.choices }, { isError: true });
+  }
+  const parent = resolved.parent;
+
+  // Re-checked here rather than trusted from the caller: taking a hostname
+  // another service already answers on would break that service.
+  const useBaseDomain = args.use_base_domain === true;
+  if (useBaseDomain) {
+    const base = m.domains.baseDomainStatus(parent.domain);
+    if (!base.available) {
+      return toolResult(
+        `The base domain "${parent.domain}" cannot be used — it is already served by ${base.claimed_by?.label || 'another service'}. Create the project on a subdomain instead.`,
+        { isError: true },
+      );
+    }
+  }
+
+  // The subdomain comes from the NAME (e.g. "My App" → my-app.<domain>); a
+  // duplicate is refused, not disambiguated.
+  let slug;
   try {
-    const { queueDocumentSummaries } = await import('../mock2/asset-summary.js');
-    queueDocumentSummaries(project.id, [asset.id]);
-  } catch { /* advisory */ }
-  return toolResult({ added: true, asset_id: asset.id, name: asset.name });
+    slug = m.projects.deriveProjectSlug(parent.id, name);
+  } catch (err) {
+    return toolResult(err.message, { isError: true });
+  }
+
+  let project;
+  try {
+    project = m.projects.createProject({
+      name,
+      description,
+      parentDomainId: parent.id,
+      slug,
+      // The base domain rides the custom-domain column, as in the UI: it
+      // publishes its own Caddy block and becomes the primary URL, while the
+      // minted subdomain keeps working alongside it.
+      customDomain: useBaseDomain ? parent.domain : null,
+      repoPathFor: m.provision.repoPathForProject,
+      containerNameFor: m.provision.containerNameForProject,
+      createdBy: auth.created_by,
+    });
+    // First editor, so the project is not born orphaned.
+    if (auth.created_by) {
+      m.projects.upsertMember({ projectId: project.id, userId: auth.created_by, role: 'editor', invitedBy: auth.created_by });
+    }
+  } catch (err) {
+    console.error('[mcp] project create failed:', err?.message);
+    return toolResult(`Could not create project: ${err?.message || 'unknown error'}`, { isError: true });
+  }
+
+  // Set BEFORE provisioning starts — the seed files read the preset off the
+  // project row to style the base app. Its reference images seed the asset
+  // library the same way the UI's create does, so the look arrives with the
+  // pictures it was built from.
+  const presetKey = m.designPresets.DEFAULT_DESIGN_PRESET;
+  project = m.projects.updateProject(project.id, { design_preset: presetKey });
+  try {
+    const preset = m.designPresets.getDesignPreset(presetKey);
+    if (preset?.references?.length) {
+      const { applyPresetReferences } = await import('../mock2/design-preset-refs.js');
+      applyPresetReferences(project.id, preset, { createdBy: auth.created_by });
+    }
+  } catch (err) {
+    console.warn('[mcp] preset reference seeding failed:', err?.message);
+  }
+
+  logAudit(auth.created_by, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, {
+    via: 'mcp', name, slug: project.slug, domain: parent.domain, design_preset: presetKey,
+    base_domain: useBaseDomain ? parent.domain : null,
+  }, null);
+
+  // Every LXC AI-dev project gets a card on the innovation board, as in the
+  // UI. Best-effort: a failure here must never break provisioning.
+  try {
+    const lbp = await import('../lib/lean-beaf-store.js');
+    lbp.createCardForMock2Project({
+      mock2ProjectId: project.id, name, description: description ?? null, createdBy: auth.created_by,
+    });
+  } catch (err) {
+    console.warn('[mcp] LBP card create failed (non-fatal):', err?.message);
+  }
+
+  m.provision.startProvision(project);
+  return toolResult({
+    created: true,
+    project: { id: project.id, name: project.name, url: projectUrl(project, m.domains), lifecycle: project.lifecycle },
+    parent_domain: parent.domain,
+    ...(useBaseDomain ? { base_domain: parent.domain } : {}),
+    message: 'Provisioning started — poll get_project on the new id until lifecycle is active. No build was started: make the first change yourself with the project file tools.',
+  });
 }
 
 async function toolCloneProject(args, auth) {
@@ -2316,12 +2437,17 @@ async function toolCloneProject(args, auth) {
 
 // ---- project build control + chat-only project file editing ----
 //
-// The two AI lanes, made explicit: send_project_build spends the project's own
-// configured API budget (harness, gates, change records); the tools below let
-// the CHAT do the thinking on the operator's subscription while ProxyPilot
-// only executes file ops — read → propose → write (git-committed) → redeploy.
-// Writes and redeploys are refused while a build cycle is live, so the chat
-// lane never fights the harness for the checkout (ADR-004 spirit).
+// There is exactly ONE lane here, and it is the free one: the CHAT does the
+// thinking on the operator's subscription while ProxyPilot only executes file
+// ops — read → propose → write (git-committed) → redeploy. The build-queueing
+// tool that spent the project's own configured API budget is deliberately gone
+// from this surface; the harness lane is started from the UI, where the person
+// paying for it can see the estimate. What remains of it here only STOPS
+// spend: interrupt_project_build and cancel_queued_build.
+//
+// Writes and redeploys are still refused while a build cycle is live, so the
+// chat lane never fights a UI-started harness run for the checkout (ADR-004
+// spirit).
 
 const M2_APP_DIR = '/srv/app';
 const LIVE_CYCLE_STATUSES = ['queued', 'estimating', 'running'];
@@ -3649,8 +3775,8 @@ const TOOL_HANDLERS = {
   rerun_startup: toolRerunStartup,
   list_projects: toolListProjects,
   get_project: toolGetProject,
-  send_project_build: toolSendProjectBuild,
   upload_project_reference: toolUploadProjectReference,
+  create_project: toolCreateProject,
   clone_project: toolCloneProject,
   interrupt_project_build: toolInterruptProjectBuild,
   cancel_queued_build: toolCancelQueuedBuild,
@@ -3674,6 +3800,63 @@ const TOOL_HANDLERS = {
   append_change_record: toolAppendChangeRecord,
   redeploy_project: toolRedeployProject,
 };
+
+/* ------------------- the delegated-editing adapter ----------------------- */
+//
+// routes/mcp-editor.js is a SECOND MCP endpoint whose credentials each edit
+// one directory of one container (see lib/editor-keys-logic.js for why). It
+// reuses the eight LXC content handlers below rather than reimplementing them,
+// so a delegated write goes through exactly the same staged-and-verified path,
+// the same confirm-before-overwrite contract and the same .old backups as an
+// admin write does.
+//
+// The allowlist is a frozen literal, not a filter over TOOL_HANDLERS: the
+// restricted endpoint can only ever reach a handler that is named here, so a
+// tool added to the main server tomorrow does not silently become delegable.
+const DELEGABLE_LXC_TOOLS = Object.freeze([
+  'list_lxc_files', 'read_lxc_file', 'search_lxc_files', 'write_lxc_file',
+  'lxc_file_diff', 'restore_lxc_file', 'inspect_lxc_zip', 'apply_lxc_zip',
+]);
+
+export const LXC_CONTAINER_PREFIX = LXC_PREFIX;
+
+/**
+ * Run ONE allowlisted LXC content handler. `args` is built from scratch by the
+ * caller — container name and absolute paths included — never spread from
+ * anything the delegated client sent.
+ */
+export async function runDelegableLxcTool(name, args, auth) {
+  if (!DELEGABLE_LXC_TOOLS.includes(name)) {
+    throw new Error(`Not a delegable tool: ${name}`);
+  }
+  return TOOL_HANDLERS[name](args, auth, null);
+}
+
+/**
+ * Does this container exist on the host right now? true / false / null.
+ *
+ * null means the host could not be asked, which is deliberately NOT false: a
+ * key must never be minted for a container we could not confirm, and a live
+ * key must never be told its container was deleted just because incus was
+ * busy. Callers refuse on null rather than guessing either way.
+ *
+ * A filtered `list` rather than `info`, because it separates the two answers
+ * cleanly: exit 0 with an empty array is "no such container", full stop, while
+ * a non-zero exit is a host problem and never gets read as absence. Parsing an
+ * error message for the word "not found" would have made a wording change in
+ * incus into a silent orphaning of every key.
+ */
+export async function lxcContainerExists(name) {
+  if (!LXC_NAME_REGEX.test(String(name || ''))) return false;
+  const target = `${LXC_PREFIX}${name}`;
+  const r = await runHostCapture('incus', ['list', target, '--format', 'json'], { timeoutMs: 20000 });
+  if (r.status !== 0) return null;
+  const parsed = parseLxcListJson(r.stdout);
+  if (parsed.error) return null;
+  // `incus list <name>` filters by prefix, so the match has to be exact:
+  // pp-web1x must never answer for pp-web1.
+  return parsed.list.some((c) => c?.name === target);
+}
 
 /* ---------------------------- JSON-RPC core ------------------------------ */
 

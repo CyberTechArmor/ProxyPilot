@@ -42,6 +42,12 @@ const CSRF_EXEMPT_PREFIXES = [
   // '/api/mcp' prefix would also exempt /api/mcp-tokens (cookie-session
   // admin endpoints that MUST keep double-submit protection).
   '/api/mcp/',
+  // Delegated editing endpoint — same rationale, same shape: a per-key bearer
+  // secret in a header or a tokenized URL, no ambient cookies. '/api/mcp-editor/'
+  // with the trailing slash covers /t/<token>; the bare path is handled by the
+  // exact-match check below, so '/api/lxc-editor' (cookie-session admin) keeps
+  // full double-submit protection.
+  '/api/mcp-editor/',
 ];
 
 export function csrfProtection(req, res, next) {
@@ -60,6 +66,9 @@ export function csrfProtection(req, res, next) {
   // The MCP endpoint itself (POST /api/mcp with a Bearer token, no trailing
   // path) — exact match, so /api/mcp-tokens stays protected.
   if (req.originalUrl === '/api/mcp' || req.originalUrl.startsWith('/api/mcp?')) {
+    return next();
+  }
+  if (req.originalUrl === '/api/mcp-editor' || req.originalUrl.startsWith('/api/mcp-editor?')) {
     return next();
   }
 

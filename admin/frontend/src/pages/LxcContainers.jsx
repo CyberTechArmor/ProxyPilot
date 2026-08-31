@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import LxcCertMounts from '@/components/LxcCertMounts';
+import DelegatedEditing from '@/components/lxc/DelegatedEditing';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -2791,10 +2792,13 @@ export default function LxcContainers() {
           </DialogHeader>
           {selectedContainer && (
             <Tabs value={infoDefaultTab} onValueChange={setInfoDefaultTab} className="w-full flex-1 flex flex-col min-h-0 overflow-hidden">
-              <TabsList className="w-full grid grid-cols-3 shrink-0 h-auto">
+              {/* Four triggers: two rows on a phone, one from sm up
+                  (MOBILE_FIRST rule 7 — never squash a label to 60px). */}
+              <TabsList className="w-full grid grid-cols-2 sm:grid-cols-4 shrink-0 h-auto">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
                 <TabsTrigger value="files">Files</TabsTrigger>
+                <TabsTrigger value="delegated">Sharing</TabsTrigger>
               </TabsList>
 
               {/* Details Tab */}
@@ -3979,6 +3983,14 @@ export default function LxcContainers() {
                     setInfoDefaultTab('terminal');
                   }}
                 />
+              </TabsContent>
+
+              {/* Delegated editing — hand one directory of this container to
+                  somebody else's AI, with a revocable key. Not force-mounted:
+                  it fetches its own state on open, which is also what keeps the
+                  key list honest after a revoke elsewhere. */}
+              <TabsContent value="delegated" className="flex-1 min-h-0 overflow-y-auto">
+                <DelegatedEditing containerName={selectedContainer.name} />
               </TabsContent>
             </Tabs>
           )}

@@ -30,8 +30,8 @@ Revoking the token (same card) immediately cuts the client off.
 | Routing | `list_routes`, `get_route`, `test_route`, `set_route` | Inspect every served hostname (orphaned upstreams flagged), per-domain TLS/cert detail, and an edge-vantage probe pinned to the local proxy that names which failure class it found — proxy down, stale proxy→upstream binding, or app-level. `set_route` binds a hostname to a container (preferred) or ip:port through the same DB → regenerate → adapt → reload pipeline the UI uses, with rollback on failure; overwrites need `confirm_overwrite` and return the previous binding. |
 | Static-site management | `create_static_site`, `get_static_site`, `list_static_site_files`, `read_static_site_file`, `write_static_site_file`, `get_static_site_cert` | Site creation (creation-only — refuses an already-routed domain), docroot inspection, single-file read/write with the `.old` + `confirm_overwrite` contract, and certificate status. Site ids are uuid strings for UI-created sites; the zip tools accept both uuid and legacy integer ids. |
 | LXC file edits | `read_lxc_file`, `write_lxc_file`, `rerun_startup` | The chat-only update loop: read a file, propose the edit, write on approval (previous version kept as `<path>.old`), then re-run the registered startup script to redeploy — run output and exit code come back to the chat. `write_lxc_file` takes an optional `mode` ("0755") so a script lands executable without a zip apply. `rerun_startup` takes `timeout_seconds` (default 120, max 1800) and returns the **last** 64 KB of each stream — a first-boot Docker install no longer has to fit inside a fixed 2-minute window, and the failure summary (which prints last) is what comes back. Lets a Claude subscription do small container updates without any zip or shell. |
-| Projects | `list_projects`, `get_project`, `send_project_build`, `upload_project_reference`, `clone_project` | `send_project_build` queues a quick update on the project's own AI harness — **this lane spends the project's configured API budget**. `clone_project` mirrors the UI's Clone (fresh / full-with-database). |
-| Project build control | `interrupt_project_build`, `cancel_queued_build` | Stop a running build (checkpoint-and-stop by default, or abandon) and cancel not-yet-started queue entries — the "that build is burning tokens on the wrong thing" stop switch, from chat. |
+| Projects | `list_projects`, `get_project`, `create_project`, `clone_project`, `upload_project_reference` | `create_project` mints `<slug>.<parent domain>` from the name and provisions the container — the same path as the UI's Create, minus the model-picked design preset. `clone_project` mirrors the UI's Clone (fresh / full-with-database). Both return immediately; poll `get_project` until `lifecycle` is `active`. `upload_project_reference` stores the file as-is (no generated brief — that pass is a model call). **No tool here queues a build**: see *The one lane* below. |
+| Project build control | `interrupt_project_build`, `cancel_queued_build` | Stop a running build (checkpoint-and-stop by default, or abandon) and cancel not-yet-started queue entries — the "that build is burning tokens on the wrong thing" stop switch, from chat. These only ever *reduce* spend; the builds they stop are started from the UI. |
 | Project orientation | `project_map`, `read_project_files`, `search_project_files` (`context_lines`) | The round-trip reducers — see *One call, not twenty* below. `project_map` returns every tracked file with its line count and its top-level symbols in one call; `read_project_files` reads up to 50 files (or ranges) at once; `search_project_files` with `context_lines` returns the code **around** each hit, which is what removes the search → read → read → read chain. |
 | Project file reads | `list_project_files`, `search_project_files`, `read_project_file` | The granular forms, for when you genuinely want one thing. `search_project_files` is `git grep -E` over the tracked files and returns `path` + `line_number` + the matching line (add `context_lines` for the surrounding code, or `files_with_matches` for paths only); `read_project_file` takes `offset`/`limit` to pull one window (it always reports `total_lines`, so a ranged read can say what it left behind). Reading whole files to find one function is the expensive habit these exist to break. |
 | Project file edits | `apply_project_patch`, `write_project_file`, `edit_project_file`, `append_project_file`, `insert_project_file_at_line`, `delete_project_file`, `move_project_file`, `redeploy_project` | The subscription lane for Projects: the chat does the thinking, ProxyPilot only executes file ops — no build tokens spent. `edit_project_file` replaces an exact string and refuses unless the match count is what the caller expected, which is the one to reach for on a large file — `write_project_file` rewrites the whole thing and gets riskier the bigger the file. `append_project_file` and `insert_project_file_at_line` add to a file without moving its existing content anywhere, which is the safe way to extend a big one. Every write is staged, hashed and read back before it counts as done, and every writing tool takes an optional `expected_sha256` precondition. `move_project_file` uses `git mv` so history follows. For a change that spans **more than one file or one hunk**, `apply_project_patch` does the whole thing in one call — see below. All are git-committed and pushed, and all are refused while a build is running. `redeploy_project` then installs/migrates/builds/restarts and health-checks the live app. |
@@ -40,6 +40,16 @@ Revoking the token (same card) immediately cuts the client off.
 | Audit trail | `append_change_record` | Appends a hash-chained record for chat-lane work, which otherwise writes none. ProxyPilot computes `seq`/`prev_hash`/`hash` server-side through the same code the build runner uses, and mirrors the record to `state/changes/<seq>.json` in the checkout. The chain is re-verified immediately after appending. **Never hand-compute these hashes** — see below. |
 | Project verification | `run_project_command` | Runs one allowlisted command in the project's checkout — `npm ci`, `npm run <script>`, `npx playwright …`, or a read-only `git` subcommand — so the chat lane can run the project's own gates instead of shipping unverified. Same container and environment `redeploy_project` builds in (`/etc/environment` sourced, cwd = the app dir), so a green result means what it says. Returns `exit_code` plus the **last** 64 KB of each stream (a failing test prints its summary last). Refused while a build is running. |
 | Transfer | `create_upload_ticket`, `append_upload_chunk`, `finish_upload` | Big zips: the ticket tool returns a one-shot `upload_url`; `curl -T site.zip -H 'Content-Type: application/zip' <url>` pushes the bytes, then the ticket is referenced in an inspect tool. Clients that cannot reach the upload URL (egress-restricted agent sandboxes) instead send ordered base64 chunks over MCP with `append_upload_chunk` and seal them with `finish_upload`, whose mandatory `sha256` is verified before the ticket becomes usable. Zips ≤ 2 MB may ride inline as `zip_base64`. The inspect tools also accept an optional `sha256`, verified **before** parsing, so transport corruption fails as a checksum mismatch rather than a confusing extraction error. |
+
+## The restricted sibling: delegated editing
+
+A second, separate MCP endpoint (`/api/mcp-editor`) exists for handing somebody
+*outside* ProxyPilot the ability to edit one directory of one container — an
+agency fixing their own site's CSS, without containers, routes, projects or a
+shell. Its credentials are pinned to one container server-side, its catalog is
+eight content tools and is a different object entirely from `MCP_TOOLS`, and its
+paths are confined to a docroot. Nothing in this document's tool surface changes
+because of it. See `docs/features/delegated-editing.md`.
 
 ## One call, not twenty (working on project files)
 
@@ -127,25 +137,33 @@ no `;` or `&&` — the `npm run <script>` escape hatch already covers legitimate
 repo-side tooling, and those scripts are committed and reviewable. The
 batching above is the answer to round trips; a shell is not.
 
-## The two AI lanes (how to phrase a request)
+## The one lane (this server spends no API budget)
 
-A Claude chat connected to this server can update a Project two ways, and the
-words you use pick the lane:
+There used to be two lanes here and the words you chose picked one. The
+budget-spending one is gone: `send_project_build` — the tool that queued work
+onto the project's own AI harness, on the API key configured in ProxyPilot —
+is no longer part of this surface. The harness lane still exists, but it is
+started from the **UI**, where the person paying for it sees the estimate
+first. Nothing a chat can call over MCP bills the project's connector.
 
-- **"Queue a build on X" / "have the project build …"** →
-  `send_project_build`: the project's own harness does the work on the API
-  key configured in ProxyPilot (estimates, gates, change records — and API
-  token spend).
-- **"Edit the files directly" / "use the MCP file tools, don't queue a
-  build"** → `project_map` → `search_project_files`
-  (with `context_lines`) → `read_project_files` → `apply_project_patch` →
-  `run_project_command` → `redeploy_project`: the chat itself (your Claude
-  subscription) does the thinking; ProxyPilot only reads/writes files, runs
-  the project's own checks, and redeploys. No build tokens are spent. The
-  harness's own gates still don't run in this lane, but `run_project_command`
-  closes the gap that mattered most — the chat can run `npm run gates` itself
-  and show you the exit code before you approve a deploy. Review the diffs
-  either way.
+What that leaves is the lane that was already the cheap one:
+
+- `project_map` → `search_project_files` (with `context_lines`) →
+  `read_project_files` → `apply_project_patch` → `run_project_command` →
+  `redeploy_project`: the chat itself (your Claude subscription) does the
+  thinking; ProxyPilot only reads/writes files, runs the project's own checks,
+  and redeploys. The harness's own gates still don't run in this lane, but
+  `run_project_command` closes the gap that mattered most — the chat can run
+  `npm run gates` itself and show you the exit code before you approve a
+  deploy. Review the diffs either way.
+
+Two other paths that used to spend were closed with it:
+`upload_project_reference` no longer queues the document-summary model call
+(the file is stored and read in full instead of as a brief), and
+`create_project` always seeds the built-in design preset rather than the `ai`
+one, which would have a model pick the look. `interrupt_project_build`,
+`cancel_queued_build` and `get_build_log` remain, because reading and stopping
+a UI-started build is how you *stop* paying for it.
 
   Note that `redeploy_project` runs the project's **build**, not its tests: a
   green deploy proves the checkout compiles and boots, never that it passes.

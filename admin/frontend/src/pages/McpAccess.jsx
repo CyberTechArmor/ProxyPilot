@@ -2,7 +2,9 @@
 //
 // ProxyPilot exposes a remote MCP server (routes/mcp.js): static-site & LXC
 // zip deploys with the same ask-before-replace flow as the UI, and Projects
-// (list, build instruction, reference upload, clone). This page mints and
+// (list, create, clone, file editing, reference upload). No tool on that
+// surface queues a build, so a connected chat never spends the project's
+// configured API budget — the harness lane stays in the UI. This page mints and
 // revokes the access tokens. The raw token — and the ready-to-paste claude.ai
 // connector URL — is shown exactly once at mint time; only a hash is stored.
 //
@@ -87,7 +89,8 @@ export default function McpAccess() {
       <p className="text-xs text-muted-foreground max-w-2xl">
         Connect a Claude subscription (or any MCP client) to ProxyPilot. The tools cover
         static-site &amp; LXC zip deploys — with the same ask-before-replace confirmation the UI
-        uses — and Projects: build instructions, reference uploads, status, and cloning.
+        uses — and Projects: create, clone, status, file editing and reference uploads. Connected
+        chats cannot queue builds, so they never spend a project&apos;s API budget.
       </p>
 
       <Card>

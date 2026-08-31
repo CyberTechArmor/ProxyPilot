@@ -24,6 +24,7 @@ import { notificationsRouter } from './routes/notifications.js';
 import { ldapRouter } from './routes/ldap.js';
 import { domainsRouter } from './routes/domains.js';
 import { createMcpRouter, createMcpAdminRouter } from './routes/mcp.js';
+import { createEditorMcpRouter, createEditorAdminRouter } from './routes/mcp-editor.js';
 import { tlsCertsRouter } from './routes/tls-certs.js';
 import { brandingRouter } from './routes/branding.js';
 import { createLeanBeafRouter } from './routes/lean-beaf.js';
@@ -235,7 +236,10 @@ for (const p of ['/api/mock2/projects/:id/chat', '/api/mock2/projects/:id/ask', 
 // decoded ⇒ ~2.7MB encoded). The raw-bytes upload path (/api/mcp/upload/…)
 // uses its own express.raw parser inside the router and ignores this.
 const mcpJson = express.json({ limit: '8mb' });
-for (const p of ['/api/mcp', '/api/mcp/t/:token']) {
+for (const p of ['/api/mcp', '/api/mcp/t/:token',
+  // Delegated editing carries inline zips too, and nothing else — it has no
+  // upload-ticket path, so the inline limit is the only way files arrive.
+  '/api/mcp-editor', '/api/mcp-editor/t/:token']) {
   app.use(p, mcpJson);
 }
 app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
@@ -492,6 +496,13 @@ app.use('/api/tls-certs', tlsCertsRouter);
 // have no session cookie). Token management IS cookie-session + admin.
 app.use('/api/mcp', createMcpRouter());
 app.use('/api/mcp-tokens', authenticateToken, blockPendingRole, createMcpAdminRouter());
+// Delegated editing: a SECOND, restricted MCP endpoint whose ppedit_ keys are
+// each pinned to one LXC container and one directory inside it (see
+// routes/mcp-editor.js). Same auth posture as the main endpoint — its own
+// bearer token per request, no session cookie — and the same split: the key
+// administration router IS cookie-session + admin.
+app.use('/api/mcp-editor', createEditorMcpRouter());
+app.use('/api/lxc-editor', authenticateToken, blockPendingRole, createEditorAdminRouter());
 // Platform branding: GET is public (the login page shows the name/logo before
 // a session exists); the PUT applies the cookie-session admin middleware itself.
 app.use('/api/branding', brandingRouter);

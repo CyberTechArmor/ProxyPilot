@@ -1248,6 +1248,24 @@ export const api = {
   mcpListTokens: () => request('/mcp-tokens'),
   mcpCreateToken: (name) => request('/mcp-tokens', { method: 'POST', body: JSON.stringify({ name }) }),
   mcpRevokeToken: (id) => request(`/mcp-tokens/${id}`, { method: 'DELETE' }),
+  // ---- Delegated editing (per-container editor keys) ----
+  // A key is scoped to one container and one directory inside it, server-side.
+  // The plaintext key comes back from lxcEditorCreateKey and from nowhere else,
+  // so the caller must show it before it forgets it.
+  lxcEditorActivations: () => request('/lxc-editor/activations'),
+  lxcEditorGet: (container) => request(`/lxc-editor/${encodeURIComponent(container)}`),
+  lxcEditorSetActivation: (container, { active, docroot }) =>
+    request(`/lxc-editor/${encodeURIComponent(container)}/activation`, {
+      method: 'PUT',
+      body: JSON.stringify({ active, docroot }),
+    }),
+  lxcEditorCreateKey: (container, label) =>
+    request(`/lxc-editor/${encodeURIComponent(container)}/keys`, {
+      method: 'POST',
+      body: JSON.stringify({ label }),
+    }),
+  lxcEditorRevokeKey: (container, id) =>
+    request(`/lxc-editor/${encodeURIComponent(container)}/keys/${id}`, { method: 'DELETE' }),
   // Pin/unpin a project for the current user — a personal favourite that floats
   // the card to the top of the Projects list, not a shared flag.
   mock2PinProject: (id, pinned) =>

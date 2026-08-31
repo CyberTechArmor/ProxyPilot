@@ -41,6 +41,16 @@ Revoking the token (same card) immediately cuts the client off.
 | Project verification | `run_project_command` | Runs one allowlisted command in the project's checkout — `npm ci`, `npm run <script>`, `npx playwright …`, or a read-only `git` subcommand — so the chat lane can run the project's own gates instead of shipping unverified. Same container and environment `redeploy_project` builds in (`/etc/environment` sourced, cwd = the app dir), so a green result means what it says. Returns `exit_code` plus the **last** 64 KB of each stream (a failing test prints its summary last). Refused while a build is running. |
 | Transfer | `create_upload_ticket`, `append_upload_chunk`, `finish_upload` | Big zips: the ticket tool returns a one-shot `upload_url`; `curl -T site.zip -H 'Content-Type: application/zip' <url>` pushes the bytes, then the ticket is referenced in an inspect tool. Clients that cannot reach the upload URL (egress-restricted agent sandboxes) instead send ordered base64 chunks over MCP with `append_upload_chunk` and seal them with `finish_upload`, whose mandatory `sha256` is verified before the ticket becomes usable. Zips ≤ 2 MB may ride inline as `zip_base64`. The inspect tools also accept an optional `sha256`, verified **before** parsing, so transport corruption fails as a checksum mismatch rather than a confusing extraction error. |
 
+## The restricted sibling: delegated editing
+
+A second, separate MCP endpoint (`/api/mcp-editor`) exists for handing somebody
+*outside* ProxyPilot the ability to edit one directory of one container — an
+agency fixing their own site's CSS, without containers, routes, projects or a
+shell. Its credentials are pinned to one container server-side, its catalog is
+eight content tools and is a different object entirely from `MCP_TOOLS`, and its
+paths are confined to a docroot. Nothing in this document's tool surface changes
+because of it. See `docs/features/delegated-editing.md`.
+
 ## One call, not twenty (working on project files)
 
 Every MCP tool call is a full model turn — roughly 15–30 seconds whether it

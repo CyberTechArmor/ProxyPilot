@@ -3801,6 +3801,63 @@ const TOOL_HANDLERS = {
   redeploy_project: toolRedeployProject,
 };
 
+/* ------------------- the delegated-editing adapter ----------------------- */
+//
+// routes/mcp-editor.js is a SECOND MCP endpoint whose credentials each edit
+// one directory of one container (see lib/editor-keys-logic.js for why). It
+// reuses the eight LXC content handlers below rather than reimplementing them,
+// so a delegated write goes through exactly the same staged-and-verified path,
+// the same confirm-before-overwrite contract and the same .old backups as an
+// admin write does.
+//
+// The allowlist is a frozen literal, not a filter over TOOL_HANDLERS: the
+// restricted endpoint can only ever reach a handler that is named here, so a
+// tool added to the main server tomorrow does not silently become delegable.
+const DELEGABLE_LXC_TOOLS = Object.freeze([
+  'list_lxc_files', 'read_lxc_file', 'search_lxc_files', 'write_lxc_file',
+  'lxc_file_diff', 'restore_lxc_file', 'inspect_lxc_zip', 'apply_lxc_zip',
+]);
+
+export const LXC_CONTAINER_PREFIX = LXC_PREFIX;
+
+/**
+ * Run ONE allowlisted LXC content handler. `args` is built from scratch by the
+ * caller — container name and absolute paths included — never spread from
+ * anything the delegated client sent.
+ */
+export async function runDelegableLxcTool(name, args, auth) {
+  if (!DELEGABLE_LXC_TOOLS.includes(name)) {
+    throw new Error(`Not a delegable tool: ${name}`);
+  }
+  return TOOL_HANDLERS[name](args, auth, null);
+}
+
+/**
+ * Does this container exist on the host right now? true / false / null.
+ *
+ * null means the host could not be asked, which is deliberately NOT false: a
+ * key must never be minted for a container we could not confirm, and a live
+ * key must never be told its container was deleted just because incus was
+ * busy. Callers refuse on null rather than guessing either way.
+ *
+ * A filtered `list` rather than `info`, because it separates the two answers
+ * cleanly: exit 0 with an empty array is "no such container", full stop, while
+ * a non-zero exit is a host problem and never gets read as absence. Parsing an
+ * error message for the word "not found" would have made a wording change in
+ * incus into a silent orphaning of every key.
+ */
+export async function lxcContainerExists(name) {
+  if (!LXC_NAME_REGEX.test(String(name || ''))) return false;
+  const target = `${LXC_PREFIX}${name}`;
+  const r = await runHostCapture('incus', ['list', target, '--format', 'json'], { timeoutMs: 20000 });
+  if (r.status !== 0) return null;
+  const parsed = parseLxcListJson(r.stdout);
+  if (parsed.error) return null;
+  // `incus list <name>` filters by prefix, so the match has to be exact:
+  // pp-web1x must never answer for pp-web1.
+  return parsed.list.some((c) => c?.name === target);
+}
+
 /* ---------------------------- JSON-RPC core ------------------------------ */
 
 async function handleRpc(message, auth, req) {

@@ -120,6 +120,13 @@ export function getDb() {
 //               PEM cert + encrypted key for ACME-blocked networks; the private
 //               key is encrypted at rest, covered names/fingerprint/validity are
 //               parsed metadata). Global tls_mode lives in app_settings.
+//   900 MCP access tokens — bearer secrets for the remote MCP server
+//               (routes/mcp.js); sha256 hashes only, soft revocation.
+//   901 Delegated editing — lxc_editor_activations (per-container switch +
+//               the single editable docroot all its keys share).
+//   902 Delegated editing — lxc_editor_keys (per-key bearer secrets pinned to
+//               one container; hash + display prefix only, soft revocation,
+//               scope_type reserved for later non-LXC scopes).
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -1922,6 +1929,55 @@ export function initDatabase() {
         revoked_at TEXT
       )
     `);
+  });
+
+  // Delegated editing (901/902): a SECOND, restricted MCP endpoint
+  // (routes/mcp-editor.js) whose credentials each edit files in exactly one
+  // container, under exactly one directory. Two tables because the two things
+  // have different lifetimes: the activation is the admin's per-container
+  // switch and editable root, and it outlives the keys; a key is a bearer
+  // secret that is minted, used, and eventually revoked forever.
+  //
+  // The docroot lives on the ACTIVATION, not the key, so all of a container's
+  // keys share it and changing it takes effect on the next request for every
+  // one of them.
+  runMigration(db, 901, 'lxc_editor_activations', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS lxc_editor_activations (
+        container_name TEXT PRIMARY KEY,
+        docroot TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+  });
+
+  // Only the sha256 hash is stored — the raw ppedit_… token is shown once, at
+  // creation. token_prefix is the first 14 characters, kept purely so an admin
+  // can match a key in hand to a row. Revocation is a soft flag and is never
+  // cleared: a revoked key stays in the list as its own audit trail.
+  //
+  // scope_type exists from day one and only ever holds 'lxc' today. It is a
+  // plain column with a default rather than a CHECK so a later scope (a static
+  // site, a project) is an insert, not a table rebuild.
+  runMigration(db, 902, 'lxc_editor_keys', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS lxc_editor_keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope_type TEXT NOT NULL DEFAULT 'lxc',
+        container_name TEXT NOT NULL,
+        label TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        token_prefix TEXT NOT NULL,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT,
+        revoked_at TEXT
+      )
+    `);
+    d.exec('CREATE INDEX IF NOT EXISTS idx_lxc_editor_keys_container ON lxc_editor_keys(container_name)');
   });
 
   // Seed the global TLS mode from the install-time env (.env is authoritative on

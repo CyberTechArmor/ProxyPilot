@@ -309,6 +309,45 @@ file has changed since — the guard for two agents editing one file. Every
 write returns `bytes`, `total_lines` and `sha256` of what actually landed, so
 a caller can assert without a second round trip.
 
+## Talking to the host (Incus CLI, guest addressing, listing budget)
+
+Three field-found defects, all fixed in the shared helpers rather than in the
+tools that surfaced them (mailcow migration, current Incus release):
+
+- **Snapshots use the subcommand CLI.** Current Incus spells snapshot
+  management `incus snapshot create|list|delete|restore <instance> …`; the
+  legacy LXD-style `incus snapshot <instance> <name>` fails with
+  `unknown command "<instance>" for "incus snapshot"`. Because every mutating
+  LXC tool snapshots before it changes anything — and `set_lxc_network`
+  refuses to run without its snapshot — the stale spelling blocked IP pinning
+  outright. `takeLxcSnapshot` (routes/mcp.js) now renders argv through
+  `snapshotArgv()` and detects the host's spelling ONCE by probing
+  `incus snapshot create --help`, caching the answer for the process; a
+  shape-mismatch stderr (and only that) is retried once in the other form.
+- **A guest's upstream is its bridge address.** `incus list` reports a
+  docker-ready guest's `docker0` / `br-*` / `veth*` interfaces alongside its
+  NIC, and taking "the first non-loopback address" bound a route to
+  `172.22.1.1` — a Docker gateway inside the guest, unreachable from the host,
+  so every request 502'd. Address resolution now goes through the NIC device
+  attached to a host network (`network:` / `parent:`): `get_lxc_container`
+  returns addresses host-reachable-first, each tagged `bridge` / `internal`,
+  with `primary_address` naming the one to bind to, and `set_route` /
+  `set_lxc_network` / `list_lxc_containers` all read that. A guest holding
+  only internal addresses is an explaining refusal, never a silent 502.
+  `set_route` additionally probes `ip route get <upstream>` before writing: no
+  route at all refuses a container-resolved upstream (nothing is left to wait
+  for) and warns on a literal `upstream_ip` (which an operator may bind ahead
+  of the network that serves it), a via-a-gateway route is applied with a
+  warning, and an unreadable probe changes nothing.
+- **`incus list --format json` gets its own capture budget.** Each guest entry
+  is 10–20 KB of state/config/devices/snapshots, so on a ~15-guest host the
+  listing crossed the 256 KB default host-capture budget and arrived cut —
+  reported as "incus list returned unparseable JSON", which pointed the
+  diagnosis at incus instead of at our own transport. Every `incus list`
+  shell-out now runs on `LXC_LIST_CAPTURE_CAP` (16 MB), and a listing that
+  still fails reports the byte count, whether the budget or an early stdout
+  close cut it, and incus's stderr.
+
 ## Troubleshooting
 
 - **"Couldn't register with ProxyPilot's sign-in service" on claude.ai** —

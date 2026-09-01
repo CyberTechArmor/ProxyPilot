@@ -784,7 +784,15 @@ test('lxcContainerDetail maps addresses, config subset, and snapshots', () => {
     snapshots: [{ name: 'pre-privilege-flip', created_at: '2026-08-10T00:00:00Z' }],
   });
   assert.equal(d.status, 'Running');
-  assert.deepEqual(d.addresses, [{ interface: 'eth0', address: '10.167.1.20', family: 'inet', netmask: '24' }]);
+  // Each address now carries WHERE it lives: `bridge` (on the guest's
+  // host-attached NIC) and `internal` (on an interface the guest's own
+  // runtime created, which the host cannot route to). This instance reports
+  // no devices, so eth0 is the address by convention rather than by device.
+  assert.deepEqual(d.addresses, [{
+    interface: 'eth0', address: '10.167.1.20', family: 'inet', netmask: '24',
+    bridge: false, internal: false,
+  }]);
+  assert.equal(d.primary_address, '10.167.1.20');
   // Only security./limits./boot. keys — image and volatile noise excluded.
   assert.deepEqual(Object.keys(d.config).sort(),
     ['boot.autostart', 'limits.memory', 'security.nesting', 'security.privileged']);
@@ -2083,4 +2091,363 @@ test('create_project mirrors the UI create: same gate, same slug, same membershi
     'create_project must not offer the model-picked design preset');
   // Provisioning is what makes it real; no build is started.
   assert.match(fn, /startProvision/);
+});
+
+// ============================================================================
+// The three LXC/Incus defects found during the mailcow migration (real host,
+// current Incus release). Each test below reproduces one observed failure.
+// ============================================================================
+
+import { rmSync } from 'node:fs';
+import {
+  LXC_LIST_CAPTURE_CAP, lxcListFailureDetail,
+  lxcBridgeInterfaces, lxcContainerAddresses, lxcReachableAddress, lxcInternalAddresses,
+  isGuestInternalInterface,
+  parseIpRouteGet, upstreamRoutability,
+  snapshotArgv, snapshotCliFormFromProbe, isSnapshotCliShapeError,
+  SNAPSHOT_CLI_SUBCOMMAND, SNAPSHOT_CLI_LEGACY,
+} from '../lib/mcp-logic.js';
+import { runHostCapture, CAPTURE_CAP } from '../lib/lxc-zip.js';
+
+const MCP_ROUTE_SRC = readFileSync(new URL('../routes/mcp.js', import.meta.url), 'utf8');
+
+// ---- Defect 1: `incus snapshot <instance> <name>` is not a command any more.
+//
+// Observed on the host, from snapshot_lxc_container AND from every mutating
+// tool's automatic pre-change snapshot:
+//     Error: unknown command "pp-mailcow" for "incus snapshot"
+// set_lxc_network refused to run at all because its snapshot failed, so a
+// stale CLI spelling blocked IP pinning outright.
+
+test('snapshotArgv renders the CURRENT incus spelling by default', () => {
+  assert.deepEqual(snapshotArgv('create', 'pp-mailcow', 'pp-mcp-pre-network'),
+    ['snapshot', 'create', 'pp-mailcow', 'pp-mcp-pre-network']);
+  // The legacy LXD-style client took the instance positionally.
+  assert.deepEqual(snapshotArgv('create', 'pp-mailcow', 'snap1', SNAPSHOT_CLI_LEGACY),
+    ['snapshot', 'pp-mailcow', 'snap1']);
+  // list/delete/restore are subcommands in both clients that matter.
+  assert.deepEqual(snapshotArgv('list', 'pp-mailcow', null, SNAPSHOT_CLI_LEGACY),
+    ['snapshot', 'list', 'pp-mailcow']);
+  assert.deepEqual(snapshotArgv('restore', 'pp-mailcow', 'snap1'),
+    ['snapshot', 'restore', 'pp-mailcow', 'snap1']);
+  assert.deepEqual(snapshotArgv('delete', 'pp-mailcow', 'snap1'),
+    ['snapshot', 'delete', 'pp-mailcow', 'snap1']);
+});
+
+test('the snapshot CLI form is detected once, from a --help probe', () => {
+  // Current Incus: the subcommand exists and its help says so.
+  assert.equal(snapshotCliFormFromProbe({
+    status: 0,
+    stdout: 'Description:\n  Create instance snapshots\n\nUsage:\n  incus snapshot create [<remote>:]<instance> [<snapshot name>] [flags]\n',
+    stderr: '',
+  }), SNAPSHOT_CLI_SUBCOMMAND);
+  // A client without the subcommand says so in as many words.
+  assert.equal(snapshotCliFormFromProbe({
+    status: 1, stdout: '', stderr: 'Error: unknown command "create" for "incus snapshot"\n',
+  }), SNAPSHOT_CLI_LEGACY);
+  // Legacy help text: a positional usage line, no "snapshot create".
+  assert.equal(snapshotCliFormFromProbe({
+    status: 0, stdout: 'Usage:\n  incus snapshot [<remote>:]<instance> [<snapshot name>]\n', stderr: '',
+  }), SNAPSHOT_CLI_LEGACY);
+  // Unaskable host → null, so the caller uses the current spelling rather
+  // than guessing legacy.
+  assert.equal(snapshotCliFormFromProbe({ status: null, error: 'spawn incus ENOENT' }), null);
+  assert.equal(snapshotCliFormFromProbe({ status: 124, stdout: '', stderr: '' }), null);
+  assert.equal(snapshotCliFormFromProbe(null), null);
+});
+
+test('only a CLI-shape failure justifies re-trying a snapshot in the other form', () => {
+  // The exact stderr from the field.
+  assert.equal(isSnapshotCliShapeError('Error: unknown command "pp-mailcow" for "incus snapshot"'), true);
+  assert.equal(isSnapshotCliShapeError('Error: unknown command "create" for "incus snapshot"'), true);
+  // Real snapshot failures must surface as themselves, never be retried into
+  // a second, stranger error.
+  assert.equal(isSnapshotCliShapeError('Error: Snapshot "snap1" already exists'), false);
+  assert.equal(isSnapshotCliShapeError('Error: Instance not found'), false);
+  assert.equal(isSnapshotCliShapeError('Error: unknown command "foo" for "incus config"'), false);
+  assert.equal(isSnapshotCliShapeError(''), false);
+  assert.equal(isSnapshotCliShapeError(null), false);
+});
+
+test('routes/mcp.js takes every snapshot through the shared helper, in the new form', () => {
+  // The legacy spelling must not survive anywhere in the server.
+  assert.equal(/runHostCapture\('incus', \['snapshot', [A-Za-z]/.test(MCP_ROUTE_SRC), false,
+    'a bare `incus snapshot <instance> <name>` shell-out is back');
+  assert.match(MCP_ROUTE_SRC, /snapshotArgv\('create', incusName, snapName, form\)/);
+  // Every pre-change snapshot goes through the one helper, so fixing it once
+  // fixes set_lxc_config, set_lxc_network and snapshot_lxc_container together.
+  const callers = MCP_ROUTE_SRC.match(/takeLxcSnapshot\(/g) || [];
+  assert.ok(callers.length >= 4, `expected the shared helper plus its callers, saw ${callers.length}`);
+  // The probe is cached, not re-run per snapshot.
+  assert.match(MCP_ROUTE_SRC, /if \(snapshotCliForm\) return snapshotCliForm;/);
+});
+
+// ---- Defect 2: the upstream resolved to a Docker bridge INSIDE the guest.
+//
+// Observed: a docker-ready guest whose eth0 (incus bridge) address was
+// 10.185.17.145 and which ran a Docker network internally. set_route resolved
+// and bound upstream_ip 172.22.1.1 — the guest's internal Docker gateway,
+// unreachable from the host — producing a guaranteed 502.
+
+// The guest as `incus list --format json` actually reports it: the Docker
+// interfaces come FIRST in the network map, which is what the old
+// "first non-loopback address" resolver tripped over.
+const MAILCOW_GUEST = {
+  name: 'pp-mailcow',
+  status: 'Running',
+  devices: {},
+  expanded_devices: {
+    eth0: { type: 'nic', network: 'incusbr0', name: 'eth0' },
+    root: { type: 'disk', path: '/', pool: 'default' },
+  },
+  state: {
+    network: {
+      'br-1a2b3c4d5e6f': { addresses: [{ family: 'inet', address: '172.23.0.1', netmask: '16', scope: 'global' }] },
+      docker0: { addresses: [{ family: 'inet', address: '172.22.1.1', netmask: '16', scope: 'global' }] },
+      eth0: {
+        addresses: [
+          { family: 'inet', address: '10.185.17.145', netmask: '24', scope: 'global' },
+          { family: 'inet6', address: 'fe80::216:3eff:fe4a:1', netmask: '64', scope: 'link' },
+        ],
+      },
+      lo: { addresses: [{ family: 'inet', address: '127.0.0.1', netmask: '8', scope: 'local' }] },
+      veth7f21a9c: { addresses: [] },
+    },
+  },
+};
+
+test('the upstream of a docker-ready guest is its bridge address, not its Docker gateway', () => {
+  const hit = lxcReachableAddress(MAILCOW_GUEST);
+  assert.equal(hit.address, '10.185.17.145', 'the field 502: 172.22.1.1 was bound instead');
+  assert.equal(hit.interface, 'eth0');
+  assert.equal(hit.bridge, true);
+  // And the rejected addresses are nameable, so the error can say WHY a
+  // running guest looks address-less.
+  assert.deepEqual(lxcInternalAddresses(MAILCOW_GUEST).map((a) => a.address).sort(),
+    ['172.22.1.1', '172.23.0.1']);
+  // Same answer through the summary path list_lxc_containers uses.
+  assert.deepEqual(lxcContainerSummaries([MAILCOW_GUEST], 'pp-'),
+    [{ name: 'mailcow', status: 'Running', ip: '10.185.17.145' }]);
+});
+
+test('get_lxc_container orders addresses host-reachable-first and marks them', () => {
+  const detail = lxcContainerDetail(MAILCOW_GUEST);
+  assert.equal(detail.primary_address, '10.185.17.145');
+  assert.equal(detail.primary_interface, 'eth0');
+  // Every address is still reported — the docker ones are marked, not hidden.
+  assert.deepEqual(detail.addresses.map((a) => a.address),
+    ['10.185.17.145', '172.23.0.1', '172.22.1.1']);
+  // The bridge address first; the guest's own bridges after it, in the order
+  // incus reported them, each marked internal.
+  assert.deepEqual(detail.addresses.map((a) => [a.interface, a.bridge, a.internal]), [
+    ['eth0', true, false],
+    ['br-1a2b3c4d5e6f', false, true],
+    ['docker0', false, true],
+  ]);
+  // fe80:: link-local is still dropped as before.
+  assert.equal(detail.addresses.some((a) => a.family === 'inet6'), false);
+});
+
+test('the bridge NIC is read off the guest\'s devices, instance overriding profile', () => {
+  assert.deepEqual(lxcBridgeInterfaces(MAILCOW_GUEST),
+    [{ interface: 'eth0', network: 'incusbr0', parent: null, managed: true }]);
+  // A guest whose NIC is renamed, or attached to an unmanaged bridge, still
+  // resolves — the device names the interface, we do not assume eth0.
+  const renamed = {
+    devices: { net1: { type: 'nic', nictype: 'bridged', parent: 'br0', name: 'enp5s0' } },
+    state: {
+      network: {
+        docker0: { addresses: [{ family: 'inet', address: '172.17.0.1', scope: 'global' }] },
+        enp5s0: { addresses: [{ family: 'inet', address: '192.168.50.12', scope: 'global' }] },
+      },
+    },
+  };
+  assert.equal(lxcReachableAddress(renamed).address, '192.168.50.12');
+  // Instance-level devices win over the profile's (how a pinned eth0 is kept).
+  const pinned = {
+    expanded_devices: { eth0: { type: 'nic', network: 'incusbr0' } },
+    devices: { eth0: { type: 'nic', network: 'incusbr1', name: 'eth0' } },
+    state: { network: { eth0: { addresses: [{ family: 'inet', address: '10.0.9.9', scope: 'global' }] } } },
+  };
+  assert.deepEqual(lxcBridgeInterfaces(pinned),
+    [{ interface: 'eth0', network: 'incusbr1', parent: null, managed: true }]);
+});
+
+test('guests without Docker resolve exactly as they did before', () => {
+  // The plain case must not move: eth0 wins, with or without a devices map.
+  const plain = {
+    expanded_devices: { eth0: { type: 'nic', network: 'incusbr0' } },
+    state: { network: { eth0: { addresses: [{ family: 'inet', address: '10.1.2.3', scope: 'global' }] } } },
+  };
+  assert.equal(lxcReachableAddress(plain).address, '10.1.2.3');
+  assert.equal(lxcContainerIp(plain), '10.1.2.3');
+  // No devices reported at all (older incus, or a stopped-then-listed guest):
+  // eth0 by convention, any other non-internal NIC after it.
+  assert.equal(lxcContainerIp({ state: { network: { eth0: { addresses: [{ family: 'inet', address: '10.4.5.6', scope: 'global' }] } } } }), '10.4.5.6');
+  assert.equal(lxcContainerIp({ state: { network: { enp1s0: { addresses: [{ family: 'inet', address: '10.7.8.9', scope: 'global' }] } } } }), '10.7.8.9');
+  // A guest holding ONLY internal addresses has no upstream — null, never the
+  // Docker gateway. set_route turns this into an explaining refusal.
+  const dockerOnly = {
+    expanded_devices: { eth0: { type: 'nic', network: 'incusbr0' } },
+    state: { network: { docker0: { addresses: [{ family: 'inet', address: '172.17.0.1', scope: 'global' }] } } },
+  };
+  assert.equal(lxcReachableAddress(dockerOnly), null);
+  assert.equal(lxcContainerIp(dockerOnly), null);
+});
+
+test('isGuestInternalInterface names the runtime-created interfaces only', () => {
+  for (const i of ['docker0', 'docker1', 'br-1a2b3c4d5e6f', 'veth7f21a9c', 'virbr0', 'lo', 'podman0', 'cni0', 'flannel.1', 'wg0', 'tailscale0']) {
+    assert.equal(isGuestInternalInterface(i), true, i);
+  }
+  for (const i of ['eth0', 'eth1', 'enp5s0', 'ens18', 'wlan0']) {
+    assert.equal(isGuestInternalInterface(i), false, i);
+  }
+});
+
+test('set_route refuses an upstream the host has no route to, warns on an indirect one', () => {
+  // Directly connected: the normal case, nothing to say.
+  const direct = parseIpRouteGet('10.185.17.145 dev incusbr0 src 10.185.17.1 uid 0 \n    cache \n');
+  assert.deepEqual(direct, { dev: 'incusbr0', via: null, src: '10.185.17.1', direct: true });
+  assert.deepEqual(upstreamRoutability('10.185.17.145', direct), {});
+
+  // Only via a gateway: applied, but the operator hears about it.
+  const indirect = parseIpRouteGet('172.22.1.1 via 192.168.1.1 dev eno1 src 192.168.1.50 uid 0');
+  assert.equal(indirect.via, '192.168.1.1');
+  assert.match(upstreamRoutability('172.22.1.1', indirect).warning, /not on a directly connected network/);
+
+  // No route at all: refused — that binding 502s on every request.
+  const dead = parseIpRouteGet('', 'RTNETLINK answers: Network is unreachable');
+  assert.equal(dead.unreachable, true);
+  assert.equal(upstreamRoutability('10.9.9.9', dead).blocked, true);
+
+  // An unreadable probe is never a refusal: it is a diagnostic, not an
+  // authority, and a host where `ip` answers oddly must keep working.
+  assert.deepEqual(upstreamRoutability('10.0.0.1', parseIpRouteGet('', '')), {});
+  assert.deepEqual(upstreamRoutability('10.0.0.1', parseIpRouteGet('some unexpected output')), {});
+  assert.deepEqual(upstreamRoutability('10.0.0.1', null), {});
+});
+
+test('set_route resolves its upstream through the bridge-aware helper', () => {
+  const fn = MCP_ROUTE_SRC.slice(MCP_ROUTE_SRC.indexOf('async function toolSetRoute'),
+    MCP_ROUTE_SRC.indexOf('async function toolListProjects'));
+  assert.ok(fn.length > 500, 'toolSetRoute not found');
+  assert.match(fn, /lxcReachableAddress\(probe\.instance\)/);
+  // The defect verbatim: the first inet address in the list.
+  assert.equal(/addresses\.find\(\(a\) => a\.family === 'inet'\)/.test(fn), false,
+    'set_route is back to taking the first non-loopback address');
+  // And the routability guard runs before anything is written — refusing a
+  // container-resolved upstream the host cannot reach, warning (never
+  // refusing) on a literal upstream_ip an operator may be binding ahead of
+  // the network that will serve it.
+  assert.ok(fn.indexOf('upstreamRoutability') < fn.indexOf('findOrCreateLxcService'),
+    'the routability guard must run before the route is written');
+  assert.match(fn, /verdict\.blocked && hasContainer/);
+});
+
+// ---- Defect 3: `incus list --format json` was cut by OUR capture budget.
+//
+// Observed on a host with ~15 guests: list_lxc_containers failed
+// intermittently with "incus list returned unparseable JSON (output may have
+// been truncated)". Each guest's entry is 10–20 KB of state/config/devices, so
+// the listing crossed the 256 KB default budget and arrived cut mid-object.
+
+/** A realistic `incus list --format json` payload for n guests. */
+function fakeIncusList(n) {
+  return JSON.stringify(Array.from({ length: n }, (_, i) => ({
+    name: `pp-guest${i}`,
+    status: 'Running',
+    type: 'container',
+    architecture: 'x86_64',
+    created_at: '2026-05-01T10:00:00Z',
+    profiles: ['default'],
+    config: Object.fromEntries([
+      ['image.description', `Debian bookworm amd64 (release) (2026050${i % 10})`],
+      ['security.nesting', 'true'],
+      ['limits.cpu', '4'],
+      ['limits.memory', '8GB'],
+      ['volatile.uuid', `1a2b3c4d-0000-0000-0000-00000000${String(i).padStart(4, '0')}`],
+      // Cloud-init and volatile keys are what make a real entry this big.
+      ['user.user-data', `#cloud-config\n${'# padding of the kind a real guest carries in its config\n'.repeat(340)}`],
+    ]),
+    devices: {},
+    expanded_devices: {
+      eth0: { type: 'nic', network: 'incusbr0', name: 'eth0' },
+      root: { type: 'disk', path: '/', pool: 'default' },
+    },
+    state: {
+      status: 'Running',
+      network: {
+        eth0: { addresses: [{ family: 'inet', address: `10.185.17.${10 + i}`, netmask: '24', scope: 'global' }], counters: { bytes_received: 12345, bytes_sent: 54321 } },
+        lo: { addresses: [{ family: 'inet', address: '127.0.0.1', netmask: '8', scope: 'local' }] },
+      },
+    },
+    snapshots: Array.from({ length: 6 }, (_, k) => ({
+      name: `pp-mcp-2026050${k}-120000`,
+      created_at: '2026-05-01T12:00:00Z',
+      config: { 'volatile.base_image': 'a'.repeat(64) },
+      expanded_devices: { root: { type: 'disk', path: '/', pool: 'default' } },
+    })),
+  })));
+}
+
+test('a 15-guest incus list is captured whole, not cut into unparseable JSON', async () => {
+  const payload = fakeIncusList(15);
+  assert.ok(payload.length > CAPTURE_CAP,
+    `the regression needs a payload over the default budget, got ${payload.length}`);
+  const dir = mkdtempSync(join(tmpdir(), 'pp-incus-list-'));
+  const file = join(dir, 'list.json');
+  try {
+    writeFileSync(file, payload);
+
+    // The bug, reproduced: the DEFAULT budget cuts the JSON mid-object, and
+    // the old message blamed incus for our own truncation.
+    const capped = await runHostCapture('cat', [file]);
+    assert.equal(capped.status, 0);
+    assert.equal(capped.stdoutTruncated, true);
+    const cut = parseLxcListJson(capped.stdout, capped);
+    assert.match(cut.error, /truncated/);
+    // The diagnosis now points at the budget, and carries the byte count.
+    assert.match(lxcListFailureDetail(capped, cut.error), /capture budget exhausted/);
+    assert.match(lxcListFailureDetail(capped, cut.error), new RegExp(`${CAPTURE_CAP} bytes captured`));
+
+    // The fix: the listing's own budget reads the whole stream.
+    const full = await runHostCapture('cat', [file], { maxCapture: LXC_LIST_CAPTURE_CAP });
+    assert.equal(full.stdoutTruncated, false);
+    assert.equal(full.stdoutComplete, true);
+    assert.equal(full.stdoutBytes, Buffer.byteLength(payload));
+    const parsed = parseLxcListJson(full.stdout, full);
+    assert.equal(parsed.error, undefined);
+    assert.equal(parsed.list.length, 15);
+    assert.deepEqual(lxcContainerSummaries(parsed.list, 'pp-')[0],
+      { name: 'guest0', status: 'Running', ip: '10.185.17.10' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failed listing reports stderr and the transport state, not just "bad JSON"', () => {
+  // stderr used to be dropped entirely on the parse path.
+  const capture = {
+    status: 0, stdout: '[{"name": "pp-W', stderr: 'Error: some instances could not be listed\n',
+    stdoutBytes: 15, stdoutTruncated: false, stdoutComplete: false, timedOut: false,
+  };
+  const parsed = parseLxcListJson(capture.stdout, capture);
+  assert.match(parsed.error, /stdout was still open/);
+  const detail = lxcListFailureDetail(capture, parsed.error);
+  assert.match(detail, /stderr: Error: some instances could not be listed/);
+  assert.match(detail, /stdout still open at exit/);
+  // A timed-out or non-zero capture says so too.
+  assert.match(lxcListFailureDetail({ status: 1, timedOut: true, stderr: '' }), /timed out/);
+  assert.match(lxcListFailureDetail({ status: 1, stderr: 'incus: command not found' }), /exit 1/);
+  // Single-argument callers keep the old wording.
+  assert.match(parseLxcListJson('[{"name": "pp-W').error, /output may have been truncated/);
+});
+
+test('every incus list shell-out uses the listing capture budget', () => {
+  const calls = MCP_ROUTE_SRC.match(/runHostCapture\('incus', \['list'[^\n]*\n?[^\n]*/g) || [];
+  assert.ok(calls.length >= 5, `expected every incus list call site, saw ${calls.length}`);
+  for (const call of calls) {
+    assert.match(call, /LXC_LIST_CAPTURE_CAP/,
+      `an incus list still runs on the default 256 KB budget: ${call.trim()}`);
+  }
 });

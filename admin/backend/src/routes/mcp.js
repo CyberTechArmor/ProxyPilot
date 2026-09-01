@@ -37,6 +37,11 @@ import {
   validSha256, sha256Hex, zipChecksumError,
   normalizeChunkSeq, decodeChunkBase64,
   parseLxcListJson, lxcContainerSummaries, validFileMode,
+  LXC_LIST_CAPTURE_CAP, lxcListFailureDetail,
+  lxcReachableAddress, lxcInternalAddresses,
+  parseIpRouteGet, upstreamRoutability,
+  snapshotArgv, snapshotCliFormFromProbe, isSnapshotCliShapeError,
+  SNAPSHOT_CLI_SUBCOMMAND, SNAPSHOT_CLI_LEGACY,
   startupRunTimeoutMs, parseMarkedStreams,
   parseLxcCommand, lxcCommandTimeoutMs, lxcContainerDetail,
   validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
@@ -463,17 +468,24 @@ async function toolListLxcContainers() {
   //
   // --all-projects first, so a guest living outside the default Incus project
   // still appears; older incus clients without the flag fall back cleanly.
-  let out = await runHostCapture('incus', ['list', '--all-projects', '--format', 'json'], { timeoutMs: 30000 });
+  //
+  // The capture budget is the listing's own (LXC_LIST_CAPTURE_CAP), not the
+  // 256 KB default: `incus list --format json` carries every guest's full
+  // state, config, devices and snapshots, so a fifteen-guest host overran the
+  // default and the JSON came back cut mid-object — which surfaced as
+  // "incus list returned unparseable JSON" and sent the diagnosis at incus
+  // instead of at our own transport.
+  let out = await runHostCapture('incus', ['list', '--all-projects', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });
   if (out.status !== 0) {
-    out = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000 });
+    out = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });
   }
   if (out.status !== 0) {
     const why = out.timedOut ? 'timed out' : (out.stderr || '').trim().slice(-300) || out.error || 'unknown error';
     return toolResult(`Could not list containers — incus list failed (${why}). This is a listing failure, not proof the host is empty; name-addressed tools (read_lxc_file, …) may still reach containers directly.`, { isError: true });
   }
-  const parsed = parseLxcListJson(out.stdout);
+  const parsed = parseLxcListJson(out.stdout, out);
   if (parsed.error) {
-    return toolResult(`Could not list containers — incus list returned ${parsed.error}. This is a listing failure, not proof the host is empty.`, { isError: true });
+    return toolResult(`Could not list containers — incus list returned ${lxcListFailureDetail(out, parsed.error)}. This is a listing failure, not proof the host is empty.`, { isError: true });
   }
   return toolResult({ containers: lxcContainerSummaries(parsed.list, LXC_PREFIX) });
 }
@@ -903,16 +915,16 @@ async function toolRerunStartup(args, auth) {
 // Incus projects when the client supports it. Exact-name match — incus treats
 // the CLI filter as a pattern, so pp-Web must not accidentally resolve pp-Web2.
 async function fetchLxcInstance(incusName) {
-  let out = await runHostCapture('incus', ['list', incusName, '--all-projects', '--format', 'json'], { timeoutMs: 30000 });
+  let out = await runHostCapture('incus', ['list', incusName, '--all-projects', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });
   if (out.status !== 0) {
-    out = await runHostCapture('incus', ['list', incusName, '--format', 'json'], { timeoutMs: 30000 });
+    out = await runHostCapture('incus', ['list', incusName, '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });
   }
   if (out.status !== 0) {
     const why = out.timedOut ? 'timed out' : (out.stderr || '').trim().slice(-300) || out.error || 'unknown error';
     return { error: `incus list failed (${why})` };
   }
-  const parsed = parseLxcListJson(out.stdout);
-  if (parsed.error) return { error: `incus list returned ${parsed.error}` };
+  const parsed = parseLxcListJson(out.stdout, out);
+  if (parsed.error) return { error: `incus list returned ${lxcListFailureDetail(out, parsed.error)}` };
   const instance = parsed.list.find((c) => c?.name === incusName);
   if (!instance) return { notFound: true };
   return { instance };
@@ -1227,10 +1239,55 @@ async function toolGetLxcStartup(args) {
 // ---- LXC lifecycle/config (spec cycle 4: every mutation confirms and
 // snapshots first; deliberately NO delete verb — removal stays host-side) ----
 
+// Which `incus snapshot` spelling this host's client speaks, detected once.
+// Current Incus takes subcommands (`incus snapshot create <instance> <name>`);
+// the legacy LXD-style client took the instance positionally. Shipping the
+// legacy spelling made EVERY mutating LXC tool fail on a current host —
+//     Error: unknown command "pp-mailcow" for "incus snapshot"
+// — because they all snapshot before they change anything, and
+// set_lxc_network refuses to run without its snapshot at all.
+//
+// One probe, cached for the life of the process: the client cannot change
+// under a running daemon, so paying a guaranteed-failed call per snapshot to
+// rediscover it would be pure waste. The probe never blocks a snapshot — an
+// unreadable probe just means we use the current spelling and let the
+// one-shot shape fallback below correct it.
+let snapshotCliForm = null;
+let snapshotCliProbe = null;
+
+async function resolveSnapshotCliForm() {
+  if (snapshotCliForm) return snapshotCliForm;
+  if (!snapshotCliProbe) {
+    snapshotCliProbe = runHostCapture('incus', ['snapshot', 'create', '--help'], { timeoutMs: 15000 })
+      .then((r) => snapshotCliFormFromProbe(r))
+      .catch(() => null);
+  }
+  const form = await snapshotCliProbe;
+  if (form) snapshotCliForm = form;
+  return form || SNAPSHOT_CLI_SUBCOMMAND;
+}
+
 // The snapshot primitive every other mutating tool leans on. Returns
 // { name } or { error }.
 async function takeLxcSnapshot(incusName, snapName) {
-  const r = await runHostCapture('incus', ['snapshot', incusName, snapName], { timeoutMs: 120000 });
+  const form = await resolveSnapshotCliForm();
+  let r = await runHostCapture('incus', snapshotArgv('create', incusName, snapName, form), { timeoutMs: 120000 });
+
+  // The probe can only be wrong about the CLI SHAPE, and the client says so in
+  // as many words when it is. Retry once in the other spelling and remember
+  // the answer; every other failure (name taken, guest gone, pool full) is
+  // returned as itself rather than retried into a second, stranger error.
+  if (r.status !== 0 && !r.timedOut && isSnapshotCliShapeError(r.stderr)) {
+    const other = form === SNAPSHOT_CLI_SUBCOMMAND ? SNAPSHOT_CLI_LEGACY : SNAPSHOT_CLI_SUBCOMMAND;
+    const retry = await runHostCapture('incus', snapshotArgv('create', incusName, snapName, other), { timeoutMs: 120000 });
+    if (retry.status === 0) {
+      snapshotCliForm = other;
+      return { name: snapName };
+    }
+    // Keep the FIRST error: it is the one taken in the form the host advertised.
+    r = isSnapshotCliShapeError(retry.stderr) ? r : retry;
+  }
+
   if (r.status !== 0) {
     const why = r.timedOut ? 'timed out' : (r.stderr || '').trim().slice(-300) || 'unknown error';
     return { error: `snapshot failed (${why})` };
@@ -1401,7 +1458,7 @@ async function toolCreateLxcContainer(args, auth) {
   for (let i = 0; i < 15; i += 1) {
     const probe = await fetchLxcInstance(incusName);
     detail = probe.instance ? lxcContainerDetail(probe.instance) : null;
-    if (detail?.addresses?.some((a) => a.family === 'inet')) break;
+    if (detail?.primary_address) break;   // a HOST-reachable v4, not a guest-internal one
     await new Promise((resolve) => { setTimeout(resolve, 1000); });
   }
   logAudit(auth.created_by, 'LXC_CREATED', 'lxc', name, {
@@ -1434,11 +1491,23 @@ async function toolSetLxcNetwork(args, auth) {
   if (probe.error) return toolResult(`Could not inspect ${name}: ${probe.error}`, { isError: true });
   if (probe.notFound) return toolResult(`Container ${name} not found`, { isError: true });
   const detail = lxcContainerDetail(probe.instance);
-  const current = detail.addresses.find((a) => a.family === 'inet')?.address || null;
+  // The bridge address, never a docker0/br-* address the guest's own runtime
+  // owns: reserving one of those would pin the guest to an address Incus does
+  // not manage, and the write would be refused (or worse, accepted) for
+  // reasons no one could read off the error.
+  const current = detail.primary_address;
 
   let ip;
   if (mode === 'reserve-current') {
-    if (!current) return toolResult(`${name} holds no IPv4 address right now — is it running?`, { isError: true });
+    if (!current) {
+      const internal = lxcInternalAddresses(probe.instance);
+      return toolResult(
+        internal.length
+          ? `${name} holds no address on its Incus bridge — the only addresses it has are internal to the guest (${internal.map((a) => `${a.address} on ${a.interface}`).join(', ')}). Those belong to a container runtime inside the guest and cannot be reserved. Check the guest's eth0 with get_lxc_container.`
+          : `${name} holds no IPv4 address right now — is it running?`,
+        { isError: true },
+      );
+    }
     ip = current;
   } else {
     ip = validIpv4(args.ip);
@@ -2077,18 +2146,65 @@ async function toolSetRoute(args, auth) {
   const tls = args.tls !== false;
 
   // Resolve the upstream to (ip, containerShortName|null).
-  let ip = null; let containerName = null;
+  //
+  // Field defect this guards: for a docker-ready guest the resolver took the
+  // FIRST non-loopback address `incus list` reported, which was 172.22.1.1 —
+  // the gateway of a Docker bridge inside the guest — while the guest's
+  // incus-bridge address (10.185.17.145) sat further down the same list. The
+  // host cannot route to the former, so the domain 502'd from the first
+  // request with a binding that read correctly everywhere. lxcReachableAddress
+  // resolves the NIC attached to the host bridge and never a docker0/br-*/
+  // veth* address.
+  let ip = null; let containerName = null; let upstreamIface = null;
   if (hasContainer) {
     containerName = String(args.upstream_container).trim();
     if (!LXC_NAME_REGEX.test(containerName)) return toolResult('Invalid container name', { isError: true });
     const probe = await fetchLxcInstance(`${LXC_PREFIX}${containerName}`);
     if (probe.error) return toolResult(`Could not resolve container ${containerName}: ${probe.error}`, { isError: true });
     if (probe.notFound) return toolResult(`Container ${containerName} not found — list_lxc_containers shows valid names`, { isError: true });
-    ip = lxcContainerDetail(probe.instance).addresses.find((a) => a.family === 'inet')?.address || null;
-    if (!ip) return toolResult(`Container ${containerName} holds no IPv4 address — is it running? (Pin one with set_lxc_network once it does.)`, { isError: true });
+    const resolved = lxcReachableAddress(probe.instance);
+    ip = resolved?.address || null;
+    upstreamIface = resolved?.interface || null;
+    if (!ip) {
+      const internal = lxcInternalAddresses(probe.instance);
+      return toolResult(
+        internal.length
+          ? `Container ${containerName} has no address on its Incus bridge — the only addresses it holds are internal to the guest (${internal.map((a) => `${a.address} on ${a.interface}`).join(', ')}), which this host cannot route to. Binding a route to one of those 502s on every request. Check the guest's eth0 with get_lxc_container.`
+          : `Container ${containerName} holds no IPv4 address — is it running? (Pin one with set_lxc_network once it does.)`,
+        { isError: true },
+      );
+    }
   } else {
     ip = validIpv4(args.upstream_ip);
     if (!ip) return toolResult('upstream_ip must be a plain IPv4 address', { isError: true });
+  }
+
+  // Second guard, for what interface filtering cannot judge (an exotic NIC, a
+  // literal upstream_ip): ask the host whether it can reach the address at all.
+  //
+  // A definite "no route" REFUSES a container-resolved upstream — we just read
+  // that address off a running guest, so there is nothing left to wait for and
+  // the binding would answer nothing — but only WARNS for a literal
+  // upstream_ip, which an operator may legitimately bind ahead of the network
+  // that serves it. A via-a-gateway answer is always applied with a warning,
+  // and a probe we cannot read changes nothing at all: the probe is a
+  // diagnostic, not an authority, and a host where `ip` answers differently
+  // must keep behaving exactly as it did.
+  let routeWarning = null;
+  const routeProbe = await runHostCapture('ip', ['route', 'get', ip], { timeoutMs: 10000 }).catch(() => null);
+  if (routeProbe) {
+    const verdict = upstreamRoutability(ip, parseIpRouteGet(routeProbe.stdout, routeProbe.stderr));
+    if (verdict.blocked && hasContainer) {
+      return toolResult(
+        `Refusing to bind ${domain} to ${ip}:${port} — ${verdict.reason}. `
+        + `Resolved from container ${containerName}${upstreamIface ? ` (${upstreamIface})` : ''}. `
+        + 'Check the guest with get_lxc_container, or pass upstream_ip explicitly if you know better than this host\'s routing table.',
+        { isError: true },
+      );
+    }
+    routeWarning = verdict.blocked
+      ? `${verdict.reason} — the route was written anyway because you gave a literal upstream_ip, but it will 502 until the host can reach ${ip}.`
+      : (verdict.warning || null);
   }
 
   const db = getDb();
@@ -2199,8 +2315,10 @@ async function toolSetRoute(args, auth) {
     applied: true,
     domain,
     binding: { upstream_container: containerName, upstream_ip: ip, upstream_port: port, websocket, tls },
+    ...(upstreamIface ? { upstream_interface: upstreamIface } : {}),
     ...(previous ? { previous_binding: previous, note: 'Reversible: call set_route again with previous_binding to restore it.' } : {}),
-    ...(containerName ? { hint: `Upstream resolved from container ${containerName} (currently ${ip}). Pin that address with set_lxc_network so a lease renewal cannot break this route.` } : {}),
+    ...(containerName ? { hint: `Upstream resolved from container ${containerName} (currently ${ip}${upstreamIface ? ` on ${upstreamIface}` : ''}). Pin that address with set_lxc_network so a lease renewal cannot break this route.` } : {}),
+    ...(routeWarning ? { warning: routeWarning } : {}),
     next: 'Verify end-to-end with test_route.',
   });
 }
@@ -3849,9 +3967,9 @@ export async function runDelegableLxcTool(name, args, auth) {
 export async function lxcContainerExists(name) {
   if (!LXC_NAME_REGEX.test(String(name || ''))) return false;
   const target = `${LXC_PREFIX}${name}`;
-  const r = await runHostCapture('incus', ['list', target, '--format', 'json'], { timeoutMs: 20000 });
+  const r = await runHostCapture('incus', ['list', target, '--format', 'json'], { timeoutMs: 20000, maxCapture: LXC_LIST_CAPTURE_CAP });
   if (r.status !== 0) return null;
-  const parsed = parseLxcListJson(r.stdout);
+  const parsed = parseLxcListJson(r.stdout, r);
   if (parsed.error) return null;
   // `incus list <name>` filters by prefix, so the match has to be exact:
   // pp-web1x must never answer for pp-web1.

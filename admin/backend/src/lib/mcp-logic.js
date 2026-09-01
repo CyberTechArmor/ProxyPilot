@@ -211,32 +211,188 @@ export function decodeChunkBase64(s, cap = UPLOAD_CHUNK_MAX_BYTES) {
 // an empty host, and the caller planned to CREATE a duplicate container on the
 // strength of it. An empty list and a failed list are different answers; these
 // helpers keep them apart.
+//
+// Second field defect, same tool, on a host with ~15 guests: the listing began
+// failing intermittently with "unparseable JSON (output may have been
+// truncated)". `incus list --format json` carries every instance's full state,
+// config, devices and snapshot list — roughly 10–20 KB per guest — so a
+// fifteen-guest host crosses the 256 KB DEFAULT capture budget and the JSON
+// arrives cut mid-object. Incus was never at fault: our own transport budget
+// was. Listings therefore get their own, much larger budget, and a capped or
+// short capture now SAYS so (with incus's stderr) instead of being reported as
+// "incus returned bad JSON", which sent the diagnosis in the wrong direction.
 
-export function parseLxcListJson(stdout) {
+// 16 MB — several hundred guests at the observed per-guest cost. The budget
+// exists to stop a runaway, not to size the answer.
+export const LXC_LIST_CAPTURE_CAP = 16 * 1024 * 1024;
+
+/** Parse `incus list --format json`. Pass the runHostCapture result as the
+ *  second argument and a truncated capture names itself in the error. */
+export function parseLxcListJson(stdout, capture = null) {
   let list;
   try {
     list = JSON.parse(String(stdout || ''));
   } catch {
+    if (capture?.stdoutTruncated) {
+      return {
+        error: `unparseable JSON — the output was cut at the ${capture.stdoutBytes ?? '?'}-byte capture budget, so it was truncated`,
+      };
+    }
+    if (capture && capture.stdoutComplete === false) {
+      return { error: 'unparseable JSON — stdout was still open when the incus client exited, so the output may have been truncated' };
+    }
     return { error: 'unparseable JSON (output may have been truncated)' };
   }
   if (!Array.isArray(list)) return { error: 'a JSON value that is not an array' };
   return { list };
 }
 
-/** First global IPv4 on an interface, preferring eth0 but not assuming it —
- *  a guest with a renamed or macvlan NIC still has an address worth showing. */
-export function lxcContainerIp(state) {
-  const nets = state?.network || {};
-  const inet = (iface) => nets[iface]?.addresses
-    ?.find((a) => a.family === 'inet' && a.scope !== 'local')?.address || null;
-  const eth0 = inet('eth0');
-  if (eth0) return eth0;
-  for (const name of Object.keys(nets)) {
-    if (name === 'lo') continue;
-    const addr = inet(name);
-    if (addr) return addr;
+/** Everything known about why a listing did not come back usable, in one
+ *  string: the parse verdict, how many bytes were actually captured, whether
+ *  the budget or an early stdout close cut it, and incus's own stderr — which
+ *  the old message dropped entirely on the parse path. */
+export function lxcListFailureDetail(capture, parseError = null) {
+  const bits = [];
+  if (parseError) bits.push(parseError);
+  if (capture?.timedOut) bits.push('the incus client timed out');
+  if (capture?.error) bits.push(`spawn error: ${capture.error}`);
+  if (capture?.status != null && capture.status !== 0) bits.push(`exit ${capture.status}`);
+  if (capture?.stdoutBytes != null) bits.push(`${capture.stdoutBytes} bytes captured`);
+  if (capture?.stdoutTruncated) bits.push('capture budget exhausted');
+  else if (capture && capture.stdoutComplete === false) bits.push('stdout still open at exit');
+  const err = String(capture?.stderr || '').trim();
+  if (err) bits.push(`stderr: ${err.slice(-300)}`);
+  return bits.length ? bits.join('; ') : 'unknown error';
+}
+
+// ---- guest addressing: which address is the one the HOST can reach ----
+//
+// Field defect (mailcow migration): set_route resolved a docker-ready guest's
+// upstream to 172.22.1.1 — the gateway of a Docker bridge INSIDE the guest —
+// and bound the route to it. The host has no route to that address, so the
+// domain 502'd on every request while the binding looked perfectly correct.
+// The guest's real address, on the incus-managed bridge, was 10.185.17.145 and
+// sat further down the very same list: the resolver took the first non-
+// loopback entry, and `incus list` reports a guest's docker0/br-*/veth*
+// interfaces right alongside its NIC.
+//
+// The fix is to stop guessing. The guest's NIC device says which interface is
+// attached to a host network (`network:` for an Incus-managed bridge,
+// `parent:` for a manual one), that interface carries the address the host can
+// reach, and interfaces created by a container runtime inside the guest are
+// never it.
+//
+// The UI path (routes/lxc.js `pickIp`) has filtered docker interfaces since
+// the LXC tab shipped — the MCP resolver was the one place that did not, which
+// is why the same host served the same guest correctly from the dashboard and
+// bound the wrong address over MCP. Reading the device goes one step further
+// than `pickIp`'s eth0-first convention: a renamed NIC still resolves.
+
+/** Interfaces a guest's own container/overlay runtime creates. Addresses on
+ *  these live in the guest's private topology — routable from inside the guest
+ *  and from nowhere else. */
+export const GUEST_INTERNAL_IFACE = /^(lo|docker\d*|br-|br\d+|veth|virbr\d*|podman\d*|cni\d*|flannel|cali|kube|tun\d*|tap\d*|wg\d*|tailscale\d*|zt)/i;
+
+export function isGuestInternalInterface(iface) {
+  const name = String(iface || '').trim();
+  if (!name) return true;
+  return GUEST_INTERNAL_IFACE.test(name);
+}
+
+/** Guest-side interface names that come from a NIC device attached to a host
+ *  network. Instance-level devices override profile-expanded ones — that is
+ *  how a pinned eth0 (set_lxc_network) is recorded — and a device's `name` is
+ *  the in-guest interface, falling back to the device key when unset, which is
+ *  how Incus itself resolves it. */
+export function lxcBridgeInterfaces(instance) {
+  const devices = { ...(instance?.expanded_devices || {}), ...(instance?.devices || {}) };
+  const out = [];
+  for (const [key, dev] of Object.entries(devices)) {
+    if (!dev || dev.type !== 'nic') continue;
+    const network = dev.network || null;
+    const parent = dev.parent || null;
+    // routed/p2p NICs name no host bridge; nothing to prefer them by.
+    if (!network && !parent) continue;
+    const iface = String(dev.name || key || '').trim();
+    if (!iface) continue;
+    out.push({ interface: iface, network, parent, managed: !!network });
   }
-  return null;
+  // Managed-network NICs first, then by name, so a multi-NIC guest resolves
+  // deterministically rather than by object key order.
+  out.sort((a, b) => (Number(b.managed) - Number(a.managed)) || a.interface.localeCompare(b.interface));
+  return out;
+}
+
+// 0 = on a NIC attached to a host network — what the host can reach.
+// 1 = eth0 by convention, for an instance whose devices we were not given.
+// 2 = some other interface: unusual, but not provably internal.
+// 3 = an interface the guest's own runtime created (docker0, br-*, veth*).
+function addressRank(iface, bridgeIfaces) {
+  if (bridgeIfaces.includes(iface)) return 0;
+  if (iface === 'eth0') return 1;
+  if (isGuestInternalInterface(iface)) return 3;
+  return 2;
+}
+
+/** Every routable address on a guest, ordered so the address the HOST can
+ *  reach comes first, each tagged with where it lives: `bridge` marks the
+ *  host-attached NIC's address, `internal` marks a guest-runtime interface the
+ *  host cannot route to. Consumers that need exactly one address take the
+ *  first non-internal entry (lxcReachableAddress). */
+export function lxcContainerAddresses(instance) {
+  const bridge = lxcBridgeInterfaces(instance).map((d) => d.interface);
+  const nets = instance?.state?.network || {};
+  const rows = [];
+  for (const [iface, net] of Object.entries(nets)) {
+    if (iface === 'lo') continue;
+    for (const a of net?.addresses || []) {
+      // 'local' is loopback scope; 'link' is fe80:: noise — neither is an
+      // address anyone routes to.
+      if (a.scope === 'local' || a.scope === 'link') continue;
+      const onBridge = bridge.includes(iface);
+      rows.push({
+        interface: iface,
+        address: a.address,
+        family: a.family,
+        netmask: a.netmask ?? null,
+        bridge: onBridge,
+        internal: !onBridge && isGuestInternalInterface(iface),
+      });
+    }
+  }
+  // IPv4 before IPv6 within a rank: a Caddy upstream and an Incus static
+  // reservation both want the v4 address.
+  const rank = (r) => addressRank(r.interface, bridge) * 2 + (r.family === 'inet' ? 0 : 1);
+  return rows
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => (rank(a.r) - rank(b.r)) || (a.i - b.i))
+    .map((x) => x.r);
+}
+
+/** The address the host can actually reach, or null. Returns the whole row so
+ *  callers can report WHERE the answer came from — and refuse when the only
+ *  candidates are internal to the guest. */
+export function lxcReachableAddress(instance, { family = 'inet' } = {}) {
+  return lxcContainerAddresses(instance)
+    .find((r) => !r.internal && (!family || r.family === family)) || null;
+}
+
+/** The addresses deliberately passed over, for the error message that has to
+ *  explain why a running guest "has no address". */
+export function lxcInternalAddresses(instance, { family = 'inet' } = {}) {
+  return lxcContainerAddresses(instance)
+    .filter((r) => r.internal && (!family || r.family === family));
+}
+
+/** First reachable global IPv4 — the host-attached NIC's address when the
+ *  instance JSON carries its devices, eth0 by convention otherwise, and never
+ *  a docker0/br-* address. Accepts a whole instance (preferred) or the bare
+ *  state object earlier callers passed. */
+export function lxcContainerIp(stateOrInstance) {
+  const o = stateOrInstance;
+  const looksLikeInstance = !!o && typeof o === 'object'
+    && ('state' in o || 'devices' in o || 'expanded_devices' in o || 'name' in o || 'status' in o);
+  return lxcReachableAddress(looksLikeInstance ? o : { state: o })?.address || null;
 }
 
 export function lxcContainerSummaries(list, prefix) {
@@ -248,9 +404,111 @@ export function lxcContainerSummaries(list, prefix) {
     const name = full.slice(prefix.length);
     if (!name || seen.has(name)) continue;   // --all-projects can repeat a name
     seen.add(name);
-    out.push({ name, status: c.status || null, ip: lxcContainerIp(c.state) });
+    // The whole instance, not just its state: the devices are what tell a
+    // docker-ready guest's bridge address from its internal Docker gateway.
+    out.push({ name, status: c.status || null, ip: lxcContainerIp(c) });
   }
   return out;
+}
+
+// ---- host-side routability of a resolved upstream ----
+//
+// The interface filtering above makes the docker-bridge mis-resolution
+// impossible, but a literal upstream_ip (or an exotic NIC) can still name an
+// address this host has no route to, and the symptom — every request 502s
+// while the binding reads correctly everywhere — costs an hour to diagnose.
+// One `ip route get` before the route is written turns that into a sentence.
+// Parsing only; the probe itself lives in routes/mcp.js.
+
+/** Parse `ip route get <ip>`:
+ *    10.185.17.145 dev incusbr0 src 10.185.17.1 uid 0    → directly connected
+ *    172.22.1.1 via 192.168.1.1 dev eth0 src 192.168.1.5 → only via a gateway
+ *    RTNETLINK answers: Network is unreachable           → no route at all
+ */
+export function parseIpRouteGet(stdout, stderr = '') {
+  const text = `${String(stdout || '')}\n${String(stderr || '')}`.trim();
+  if (!text) return { unknown: true };
+  if (/unreachable|no route to host|network is down/i.test(text)) return { unreachable: true };
+  const dev = text.match(/\bdev\s+(\S+)/);
+  const via = text.match(/\bvia\s+(\S+)/);
+  const src = text.match(/\bsrc\s+(\S+)/);
+  if (!dev && !via) return { unknown: true };
+  return { dev: dev?.[1] || null, via: via?.[1] || null, src: src?.[1] || null, direct: !via };
+}
+
+/** Operator-facing verdict on a resolved upstream:
+ *    { blocked, reason } — refuse; a route bound here answers nothing.
+ *    { warning }         — apply, but say what looks wrong.
+ *    {}                  — nothing to say.
+ *  An unknown or unparsed probe is NEVER a refusal: the probe is a diagnostic,
+ *  not an authority, and a host where `ip` answers differently must keep
+ *  working exactly as it did. */
+export function upstreamRoutability(ip, route) {
+  if (!route || route.unknown) return {};
+  if (route.unreachable) {
+    return {
+      blocked: true,
+      reason: `the host has no route to ${ip}, so a route bound to it would 502 on every request`,
+    };
+  }
+  if (route.via) {
+    return {
+      warning: `${ip} is not on a directly connected network — this host reaches it via ${route.via} on ${route.dev || 'an unknown device'}. `
+        + 'For an LXC guest that usually means the address belongs to a network INSIDE the guest (a Docker bridge) rather than to its Incus bridge.',
+    };
+  }
+  return {};
+}
+
+// ---- incus snapshot: the CLI shape changed under us ----
+//
+// Field defect: every mutating LXC tool takes a pre-change snapshot first, and
+// on a current Incus every one of them failed with
+//     Error: unknown command "pp-mailcow" for "incus snapshot"
+// because the shared helper shelled out the legacy LXD spelling
+// `incus snapshot <instance> <name>`. Current Incus moved snapshot management
+// into subcommands: `incus snapshot create|list|delete|restore <instance> …`.
+// set_lxc_network refuses to run at all without its pre-change snapshot, so a
+// stale CLI spelling blocked IP pinning outright.
+//
+// We prefer the subcommand form and detect the host's spelling ONCE, by
+// probing `incus snapshot create --help` — rather than paying a guaranteed
+// failed call on every snapshot to rediscover something that cannot change
+// under a running daemon.
+
+export const SNAPSHOT_CLI_SUBCOMMAND = 'subcommand';   // incus snapshot create <instance> <name>
+export const SNAPSHOT_CLI_LEGACY = 'legacy';           // incus snapshot <instance> <name>
+
+/** argv for one snapshot verb in the given CLI form. Only `create` ever had a
+ *  positional spelling; list/delete/restore are subcommand-only in both
+ *  clients that matter, so they always render as subcommands. */
+export function snapshotArgv(verb, instance, snapName = null, form = SNAPSHOT_CLI_SUBCOMMAND) {
+  const tail = snapName ? [instance, snapName] : [instance];
+  if (verb === 'create' && form === SNAPSHOT_CLI_LEGACY) return ['snapshot', ...tail];
+  return ['snapshot', verb, ...tail];
+}
+
+/** Read the CLI form off a probe of `incus snapshot create --help`.
+ *  null = could not tell (client missing, timed out, unexpected output) — the
+ *  caller then uses the CURRENT spelling and lets the one-shot fallback
+ *  correct it, which is the right way round: the legacy client is the rare
+ *  one. */
+export function snapshotCliFormFromProbe(probe) {
+  if (!probe || probe.error) return null;
+  const text = `${probe.stdout || ''}\n${probe.stderr || ''}`;
+  // A client without the subcommand says so in as many words.
+  if (/unknown command/i.test(text)) return SNAPSHOT_CLI_LEGACY;
+  if (probe.status !== 0) return null;
+  return /snapshot\s+create/i.test(text) ? SNAPSHOT_CLI_SUBCOMMAND : SNAPSHOT_CLI_LEGACY;
+}
+
+/** Is this failure the OTHER CLI shape talking? `unknown command "X" for
+ *  "incus snapshot"` is the only stderr that justifies re-trying a snapshot in
+ *  the other spelling — every other failure (name taken, guest gone, pool
+ *  full) must surface as itself instead of being retried into a second,
+ *  more confusing error. */
+export function isSnapshotCliShapeError(stderr) {
+  return /unknown command\s+"[^"]*"\s+for\s+"incus snapshot"/i.test(String(stderr || ''));
 }
 
 // ---- run_lxc_command: the policy-driven allowlist ----
@@ -374,23 +632,23 @@ export function lxcContainerDetail(instance) {
   for (const key of Object.keys(config)) {
     if (/^(security\.|limits\.|boot\.)/.test(key)) picked[key] = config[key];
   }
-  const addresses = [];
-  const nets = instance?.state?.network || {};
-  for (const [iface, net] of Object.entries(nets)) {
-    if (iface === 'lo') continue;
-    for (const a of net?.addresses || []) {
-      // 'local' is loopback scope; 'link' is fe80:: noise — neither is an
-      // address anyone routes to.
-      if (a.scope === 'local' || a.scope === 'link') continue;
-      addresses.push({ interface: iface, address: a.address, family: a.family, netmask: a.netmask ?? null });
-    }
-  }
+  // Ordered host-reachable-first and tagged (bridge / internal), because
+  // every consumer of this list — set_route's upstream, set_lxc_network's
+  // "current" address, the agent reading the tool output — wants the address
+  // the HOST can reach, and a docker-ready guest reports its internal Docker
+  // gateway in exactly the same list.
+  const addresses = lxcContainerAddresses(instance);
+  const primary = addresses.find((a) => !a.internal && a.family === 'inet') || null;
   return {
     status: instance?.status || null,
     created_at: instance?.created_at || null,
     ephemeral: !!instance?.ephemeral,
     profiles: instance?.profiles || [],
     addresses,
+    // The one address other tools should bind to. Null with a non-empty
+    // `addresses` means every address the guest holds is internal to it.
+    primary_address: primary?.address || null,
+    primary_interface: primary?.interface || null,
     config: picked,
     snapshots: (instance?.snapshots || []).map((s) => ({ name: s.name, created_at: s.created_at || null })),
   };
@@ -772,7 +1030,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'get_lxc_container',
-    description: 'Full detail for one LXC/Incus guest: status, every non-loopback IP address, the security/limits/boot config subset (security.nesting, security.privileged, limits.*, boot.autostart), profiles, snapshots, and the registered startup script (path + working dir). The LXC counterpart of get_project — use it before planning changes instead of probing with file reads.',
+    description: 'Full detail for one LXC/Incus guest: status, every non-loopback IP address (host-reachable first, each tagged bridge/internal, with primary_address naming the one on the guest\'s Incus bridge — addresses tagged internal belong to a Docker/overlay network INSIDE the guest and the host cannot route to them), the security/limits/boot config subset (security.nesting, security.privileged, limits.*, boot.autostart), profiles, snapshots, and the registered startup script (path + working dir). The LXC counterpart of get_project — use it before planning changes instead of probing with file reads.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1165,7 +1423,7 @@ export const MCP_TOOLS = [
       type: 'object',
       properties: {
         domain: { type: 'string' },
-        upstream_container: { type: 'string', description: 'LXC guest name (without pp-); mutually exclusive with upstream_ip. Preferred: pairs with set_lxc_network so IP changes cannot silently break the route.' },
+        upstream_container: { type: 'string', description: 'LXC guest name (without pp-); mutually exclusive with upstream_ip. Preferred: the address is resolved from the guest\'s Incus-bridge NIC (never a Docker bridge inside the guest) and it pairs with set_lxc_network so IP changes cannot silently break the route.' },
         upstream_ip: { type: 'string', description: 'Literal upstream IPv4; mutually exclusive with upstream_container.' },
         upstream_port: { type: 'number' },
         websocket: { type: 'boolean', description: 'Pass Upgrade/Connection headers. Default true.' },

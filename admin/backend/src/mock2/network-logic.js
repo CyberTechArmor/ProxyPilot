@@ -89,10 +89,21 @@ export function gatewayForCidr(cidr) {
 // resolved `ip`) the firewall shell attached before reconcile. They ride along on
 // the entry so `renderMock2Nft` can punch scoped allow-holes; a project with no
 // approved grants simply gets an empty list and the default deny-private applies.
+// A project is fenced while its guest is UP: every active project, plus an
+// archived one whose guest was deliberately left running (set_project_lifecycle
+// with stop_container:false keeps container_ip for exactly this reason — a
+// running guest that dropped out of the fence would be unfenced, which is
+// worse than not archiving). Stopped / UI-archived rows have no container_ip.
+export function isFencedProject(p) {
+  if (!p) return false;
+  if (p.lifecycle === 'active') return true;
+  return p.lifecycle === 'archived' && !!p.container_ip;
+}
+
 export function buildFenceEntries(projects = []) {
   const entries = [];
   for (const p of projects) {
-    if (!p || p.lifecycle !== 'active') continue;
+    if (!isFencedProject(p)) continue;
     const cidr = p.bridge_cidr || (p.id ? bridgeCidrForProject(p.id) : null);
     const gateway = cidr ? gatewayForCidr(cidr) : null;
     if (!cidr || !gateway || !p.container_ip || !p.web_port) continue;

@@ -150,6 +150,9 @@ const WRITABLE = new Set([
   // ('anthropic' | 'openai' | 'hybrid'; NULL = not chosen), and when the
   // design chat's mandatory design choice (preset or AI) was made.
   'provider_preference', 'design_choice_at',
+  // Migration 557: what an MCP archive needs to reverse itself (JSON; NULL
+  // unless the project was archived through set_project_lifecycle).
+  'archive_state_json',
 ]);
 export function updateProject(id, patch = {}) {
   const cols = Object.keys(patch).filter((k) => WRITABLE.has(k));
@@ -374,6 +377,34 @@ export function listPinnedProjectIds(userId) {
       .all(String(userId))
       .map((r) => r.project_id),
   );
+}
+
+// Every project ANY user has pinned — the project-wide reading of the
+// per-user favourite that the MCP surface exposes as `pinned`. A project one
+// person has starred is one somebody cares about, so bulk operations driven
+// through MCP (set_project_lifecycle) treat it as protected.
+export function pinnedProjectIdSet() {
+  return new Set(
+    getMock2Db()
+      .prepare(`SELECT DISTINCT project_id FROM mock2_project_pins`)
+      .all()
+      .map((r) => r.project_id),
+  );
+}
+
+// Who has pinned one project (user ids, as stored).
+export function listProjectPinUserIds(projectId) {
+  return getMock2Db()
+    .prepare(`SELECT user_id FROM mock2_project_pins WHERE project_id = ? ORDER BY created_at ASC`)
+    .all(projectId)
+    .map((r) => r.user_id);
+}
+
+// Remove EVERY user's pin on a project (set_project_pinned pinned:false —
+// the project-wide flag must actually read false afterwards). Returns how
+// many pins were removed.
+export function clearProjectPins(projectId) {
+  return getMock2Db().prepare(`DELETE FROM mock2_project_pins WHERE project_id = ?`).run(projectId).changes;
 }
 
 // Pin/unpin for ONE user. Idempotent in both directions; returns the new state.

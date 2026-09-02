@@ -17,6 +17,7 @@ import {
   bridgeCidrForProject,
   gatewayForCidr,
   buildFenceEntries,
+  isFencedProject,
   renderMock2Nft,
   subnetPrefixForCidr,
   parseNftEgressLog,
@@ -74,19 +75,27 @@ const activeProject = (over = {}) => ({
   container_ip: '10.200.6.15', web_port: 3000, ...over,
 });
 
-test('buildFenceEntries: only active projects with a full upstream are fenced', () => {
+test('buildFenceEntries: only projects whose guest is up, with a full upstream, are fenced', () => {
   const rows = [
     activeProject(),                                       // in
     activeProject({ id: 8, lifecycle: 'provisioning' }),  // out (not active)
     activeProject({ id: 9, container_ip: null }),         // out (no IP)
     activeProject({ id: 10, web_port: null }),            // out (no web port)
-    activeProject({ id: 11, lifecycle: 'archived' }),     // out
+    activeProject({ id: 11, lifecycle: 'archived', container_ip: null }),  // out (UI archive: guest destroyed)
+    activeProject({ id: 12, lifecycle: 'stopped', container_ip: null }),   // out (idle-stopped)
+    // An MCP archive with stop_container:false leaves the guest RUNNING and
+    // keeps container_ip — it must stay fenced; an archived label never
+    // unfences a live guest.
+    activeProject({ id: 13, lifecycle: 'archived', bridge_cidr: '10.200.7.0/24', container_ip: '10.200.7.15' }),
   ];
   const entries = buildFenceEntries(rows);
-  assert.equal(entries.length, 1);
+  assert.deepEqual(entries.map((e) => e.id), [7, 13]);
   assert.deepEqual(entries[0], {
     id: 7, cidr: '10.200.6.0/24', gateway: '10.200.6.1', containerIp: '10.200.6.15', webPort: 3000, egress: [],
   });
+  assert.equal(isFencedProject({ lifecycle: 'archived', container_ip: null }), false);
+  assert.equal(isFencedProject({ lifecycle: 'archived', container_ip: '10.200.7.15' }), true);
+  assert.equal(isFencedProject(null), false);
 });
 
 test('buildFenceEntries: derives the subnet when bridge_cidr is not stored', () => {

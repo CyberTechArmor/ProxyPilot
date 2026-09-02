@@ -1,0 +1,78 @@
+{
+  "$comment": "Policy for the project archive / pin / host-usage MCP tools. Same gate semantics as control_lxc_container: every mutating verb requires confirm: true, nothing here deletes, and each archive is ONE project per call so every project shows up individually in the audit trail and the pinned check runs per project. This JSON is the enforcement source of truth for the lifecycle transition table (routes/mcp.js loads it); the tool descriptions only summarize it.",
+  "tools": {
+    "set_project_lifecycle": {
+      "gate": "confirm",
+      "mutating": true,
+      "snapshot_first": true,
+      "actions": {
+        "archive": {
+          "from": [
+            "active",
+            "stopped"
+          ],
+          "refuse_when": [
+            "pinned",
+            "build_live"
+          ],
+          "sets_lifecycle": "archived",
+          "stops_container": "when stop_container is true (default). With stop_container:false the guest keeps running AND stays in the egress fence (mock2/network-logic.js isFencedProject keys on the kept container_ip) — an archived label never unfences a live guest.",
+          "guest_config": {
+            "boot.autostart": "false"
+          },
+          "keeps": [
+            "routes",
+            "DNS",
+            "checkout",
+            "database",
+            "bare repo",
+            "bridge",
+            "container"
+          ],
+          "note": "Reversible: unarchive is a pure reversal. The UI's Archive destroys the guest and rebuilds it from the bare repo on Rehydrate; this verb only STOPS it. A checkpoint commit is pushed to the bare repo first so a UI Rehydrate of an MCP-archived project loses nothing."
+        },
+        "unarchive": {
+          "from": [
+            "archived"
+          ],
+          "refuse_when": [
+            "container_missing"
+          ],
+          "sets_lifecycle": "previous lifecycle (active, or stopped for a project that was idle-stopped before the archive)",
+          "guest_config": {
+            "boot.autostart": "restored to its pre-archive value"
+          },
+          "note": "Starts the container only when the archive step was the one that stopped it, then republishes the route and re-verifies it with test_route."
+        }
+      }
+    },
+    "set_project_pinned": {
+      "gate": "confirm",
+      "mutating": true,
+      "note": "The pin is the same per-user star the Projects page shows. pinned:true stars the project for the token's owner; pinned:false removes EVERY user's star so the project-wide flag really reads false. Pinning an archived project is allowed — it only protects it from bulk operations."
+    },
+    "get_host_usage": {
+      "gate": "none",
+      "mutating": false,
+      "sources": [
+        "/proc/loadavg",
+        "/proc/meminfo",
+        "nproc",
+        "df -kP",
+        "incus storage list/info",
+        "incus list --format json"
+      ],
+      "note": "Host numbers only — never read from inside a guest."
+    },
+    "reclaim_report": {
+      "gate": "none",
+      "mutating": false,
+      "note": "Pure arithmetic over two get_host_usage snapshots; takes a fresh one when `after` is omitted."
+    }
+  },
+  "explicitly_absent": {
+    "archive_all_unpinned": "Bulk behaviour is the agent's job: one set_project_lifecycle call per project, so each archive is its own audit row and its own pinned check.",
+    "delete_project": "No delete verb over MCP, by design (same stance as the LXC tools).",
+    "force_stop": "Archive uses a clean `incus stop`; a guest that will not stop cleanly is exactly the case a human should look at."
+  }
+}

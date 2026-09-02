@@ -1848,4 +1848,19 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // MCP archive/unarchive (set_project_lifecycle). The UI's archive destroys
+    // the container and rebuilds it from the bare repo on rehydrate; the MCP
+    // verb instead STOPS the guest and keeps everything, so its unarchive is a
+    // pure reversal. That reversal needs what the archive found: the guest's
+    // boot.autostart before it was forced off, whether the archive step was
+    // the one that stopped the container, the pre-archive lifecycle and the
+    // safety snapshot's name. One JSON column, NULL for every project not
+    // archived over MCP (a UI-archived row stays recognisable by its absence).
+    version: 557,
+    name: 'mock2_projects_archive_state',
+    up: (d) => {
+      d.exec(`ALTER TABLE mock2_projects ADD COLUMN archive_state_json TEXT;`);
+    },
+  },
 ];

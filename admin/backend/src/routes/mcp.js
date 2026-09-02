@@ -65,7 +65,12 @@ import {
   normalizeContextLines, normalizeSearchByteBudget, parseGitGrepContext, parseGitGrepFileList,
   PROJECT_MAP_MAX_FILES_DEFAULT, PROJECT_MAP_MAX_FILES_CAP, PROJECT_MAP_SYMBOLS_PER_FILE,
   PROJECT_MAP_SYMBOL_PATTERN, buildProjectMap, parseLineCounts,
+  normalizeProjectFilters, filterProjectSummaries, containerStatusWord,
+  parseProcLoadavg, parseProcMeminfo, parseDfOutput, pickStoragePool, parseProfileRootPool,
+  parsePoolResources, parseStorageInfoText, summarizeContainers, buildHostUsage, perProjectUsage,
+  validateHostUsage, reclaimDelta,
 } from '../lib/mcp-logic.js';
+import { archiveProject, unarchiveProject } from '../lib/project-lifecycle.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
   collectCandidatePaths, extractToStaging, applyStagingToTarget, ZIP_LIMITS, ZipError,
@@ -112,6 +117,11 @@ const LXC_CMD_POLICY = JSON.parse(
 );
 const LXC_CFG_POLICY = JSON.parse(
   readFileSync(new URL('../lib/mcp-policy/lxc-config-allowlist.json', import.meta.url), 'utf8'),
+);
+// The archive/unarchive transition table + refusal rules for
+// set_project_lifecycle. Enforcement source of truth, like the two above.
+const PROJECT_LIFECYCLE_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/project-lifecycle-allowlist.json', import.meta.url), 'utf8'),
 );
 const DEFAULT_LXC_TARGET = '/opt/app';
 const MCP_TMP_DIR = process.env.ZIP_UPLOAD_TMP_DIR || join(os.tmpdir(), 'proxypilot-zip-uploads');
@@ -204,16 +214,17 @@ async function mock2Modules() {
   // No chats.js: the build chat was only ever written to by the build-queueing
   // tool, which this surface no longer has.
   const [projects, cycles, queue, domains, provision, cloneLogic, assets, projectLogic, requests,
-    cycleEvents, changeRecords, framework, domainLogic, designPresets] = await Promise.all([
+    cycleEvents, changeRecords, framework, domainLogic, designPresets, template] = await Promise.all([
     import('../mock2/projects.js'), import('../mock2/cycles.js'), import('../mock2/build-queue.js'),
     import('../mock2/domains.js'), import('../mock2/provision.js'),
     import('../mock2/clone-logic.js'), import('../mock2/project-assets.js'), import('../mock2/project-logic.js'),
     import('../mock2/requests.js'),
     import('../mock2/cycle-events.js'), import('../mock2/change-records.js'), import('../mock2/framework.js'),
     import('../mock2/domain-logic.js'), import('../mock2/design-presets.js'),
+    import('../mock2/template.js'),
   ]);
   return { projects, cycles, queue, domains, provision, cloneLogic, assets, projectLogic, requests,
-    cycleEvents, changeRecords, framework, domainLogic, designPresets };
+    cycleEvents, changeRecords, framework, domainLogic, designPresets, template };
 }
 
 // Builds that SHIPPED but still await the operator's verification checks.
@@ -241,13 +252,17 @@ function projectUrl(project, domains) {
   return parent ? `https://${project.slug}.${parent.domain}` : null;
 }
 
-function projectSummary(project, m) {
+// `pinnedIds` is the project-wide pin set (projects.pinnedProjectIdSet) —
+// passed in so a listing computes it once, not per row.
+function projectSummary(project, m, pinnedIds = null) {
   const cycle = m.cycles.latestCycle(project.id);
+  const pins = pinnedIds || m.projects.pinnedProjectIdSet();
   return {
     id: project.id,
     name: project.name,
     url: projectUrl(project, m.domains),
     lifecycle: project.lifecycle,
+    pinned: pins.has(project.id),
     latest_build: cycle ? { id: cycle.id, status: cycle.status, mode: cycle.build_mode || null, updated_at: cycle.updated_at || null } : null,
   };
 }
@@ -2323,10 +2338,30 @@ async function toolSetRoute(args, auth) {
   });
 }
 
-async function toolListProjects() {
+async function toolListProjects(args = {}) {
+  const filters = normalizeProjectFilters(args || {});
+  if (filters.error) return toolResult(filters.error, { isError: true });
   const m = await mock2Modules();
+  const pins = m.projects.pinnedProjectIdSet();
   const rows = m.projects.listProjects().filter((p) => p.lifecycle !== 'failed_provisioning');
-  return toolResult({ projects: rows.map((p) => projectSummary(p, m)) });
+  const summaries = filterProjectSummaries(rows.map((p) => projectSummary(p, m, pins)), filters);
+  return toolResult({
+    projects: summaries,
+    ...(filters.lifecycle !== 'all' || filters.pinned !== null
+      ? { filters: { lifecycle: filters.lifecycle, ...(filters.pinned === null ? {} : { pinned: filters.pinned }) }, total_unfiltered: rows.length }
+      : {}),
+  });
+}
+
+// 'running' | 'stopped' | 'none' for a project's guest, or null when the host
+// could not be asked (deliberately not 'none': an unreachable incus must never
+// read as "the container is gone").
+async function projectContainerStatus(incusName) {
+  if (!incusName) return 'none';
+  const r = await fetchLxcInstance(incusName);
+  if (r.error) return null;
+  if (r.notFound) return 'none';
+  return containerStatusWord(r.instance?.status);
 }
 
 async function toolGetProject(args) {
@@ -2337,14 +2372,315 @@ async function toolGetProject(args) {
   const provisionStatus = m.provision.getProvisionStatus(project.id);
   const queueRows = m.queue.listBuildQueue(project.id).filter((r) => r.status === 'queued');
   const pending = pendingVerification(m, project.id);
+  const container = project.container_name || null;
+  const containerStatus = await projectContainerStatus(container);
   return toolResult({
     ...summary,
+    container,
+    container_status: containerStatus,
+    ...(containerStatus === null ? { container_status_note: 'incus could not be queried — unknown, not absent' } : {}),
+    archived_at: project.archived_at || null,
     description: project.description || null,
     provisioning: provisionStatus ? { phase: provisionStatus.phase, message: provisionStatus.message, error: provisionStatus.error || null } : null,
     queued_builds: queueRows.map((r) => ({ id: r.id, instruction: String(r.instruction || '').slice(0, 200) })),
     pending_verification: pending,
     ...(pending.length ? { note: `${pending.length} shipped build(s) await the operator's verification checks in the build chat.` } : {}),
   });
+}
+
+// ---- archive / pin / host usage (one project per call, by design) ----
+
+// Host effects for lib/project-lifecycle.js, bound to this process's runners.
+function lifecycleDeps(m) {
+  return {
+    incus: (argv, opts) => runHostCapture('incus', argv, opts),
+    snapshot: (containerName, snapName) => takeLxcSnapshot(containerName, snapName),
+    checkpoint: async (containerName) => {
+      // The same checkpoint the UI's archive pushes, so a later UI Rehydrate
+      // (which rebuilds from the bare repo) loses nothing. Best effort.
+      const script = m.template.buildCheckpointScript({ appDir: M2_APP_DIR, message: 'checkpoint: pre-archive (mcp)' });
+      const r = await runInContainer(containerName, script, { timeoutMs: 120000 });
+      return { ok: r.status === 0, detail: (r.stdout || r.stderr || '').trim().slice(-300) || null };
+    },
+    containerStatus: (containerName) => projectContainerStatus(containerName),
+    waitForIp: async (containerName) => {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const r = await fetchLxcInstance(containerName);
+        const ip = r.instance ? lxcContainerDetail(r.instance).primary_address : null;
+        if (ip) return ip;
+      }
+      return null;
+    },
+    updateProject: (id, patch) => m.projects.updateProject(id, patch),
+    now: () => new Date().toISOString(),
+  };
+}
+
+// Append the audit-trail record for a lifecycle change. Reuses
+// insertChangeRecord exactly as append_change_record does, but tolerates the
+// container being stopped (no mirror file can be written into a stopped
+// guest — the DB row is the record; the mirror lands on the next chat-lane
+// record). Never lets a record failure undo an archive that already happened.
+function appendLifecycleChangeRecord(m, project, auth, summary) {
+  try {
+    const framework = m.framework.getCurrentFrameworkVersion();
+    if (!framework) return { appended: false, reason: 'no framework version recorded' };
+    const record = m.changeRecords.insertChangeRecord({
+      projectId: project.id,
+      cycleId: null,
+      initiatedBy: auth.created_by,
+      actingAsAdmin: 1,
+      frameworkVersion: framework.version,
+      frameworkVersionId: framework.id,
+      rulesTouched: null,
+      gatesRun: null,
+      commitSha: null,
+      summary,
+    });
+    return { appended: true, seq: record.seq, hash: record.hash };
+  } catch (e) {
+    return { appended: false, reason: e?.message || String(e) };
+  }
+}
+
+async function toolSetProjectLifecycle(args, auth) {
+  const action = String(args.action || '');
+  if (!['archive', 'unarchive'].includes(action)) {
+    return toolResult("action must be 'archive' or 'unarchive'", { isError: true });
+  }
+  const m = await mock2Modules();
+  const project = m.projects.getProject(Number(args.project_id));
+  if (!project) return toolResult('Project not found', { isError: true });
+  const pinned = m.projects.pinnedProjectIdSet().has(project.id);
+  if (args.confirm !== true) {
+    return toolResult(`Confirm with the user, then re-call with confirm: true to ${action} ${project.name} (project ${project.id}, currently ${project.lifecycle}${pinned ? ', PINNED — the archive will be refused until it is unpinned' : ''}).`, { isError: true });
+  }
+  const containerName = projectContainerName(m, project);
+  const deps = lifecycleDeps(m);
+
+  let out;
+  if (action === 'archive') {
+    out = await archiveProject({
+      project, pinned,
+      latestCycle: m.cycles.latestCycle(project.id),
+      queuedBuilds: m.queue.listBuildQueue(project.id).filter((r) => r.status === 'queued').length,
+      stopContainer: args.stop_container !== false,
+      policy: PROJECT_LIFECYCLE_POLICY, containerName, deps,
+    });
+  } else {
+    out = await unarchiveProject({ project, policy: PROJECT_LIFECYCLE_POLICY, containerName, deps });
+  }
+  if (out.error) {
+    logAudit(auth.created_by, 'MOCK2_PROJECT_LIFECYCLE_REFUSED', 'mock2_project', project.id, { via: 'mcp', action, reason: out.error }, null);
+    return toolResult(out.error, { isError: true });
+  }
+
+  // The fence plan is derived from lifecycle (archived projects leave it,
+  // active ones re-enter with their address), so reconcile after either
+  // direction. Routes are deliberately NOT republished on archive (they are
+  // part of what unarchive reverses); unarchive republishes and re-verifies.
+  const side = {};
+  try {
+    const fw = await import('../mock2/firewall.js');
+    await fw.reconcileMock2Firewall();
+    side.firewall_reconciled = true;
+  } catch (e) {
+    side.firewall_reconciled = false;
+    side.firewall_error = e?.message || String(e);
+  }
+  if (action === 'unarchive') {
+    try {
+      const pub = await import('../mock2/publish.js');
+      if (project.parent_domain_id) {
+        const caddy = await pub.publishDomain(project.parent_domain_id);
+        side.route_republished = !!caddy?.ok;
+        if (caddy && caddy.ok === false) side.route_error = caddy.error || caddy.message || 'publish failed';
+      }
+    } catch (e) {
+      side.route_republished = false;
+      side.route_error = e?.message || String(e);
+    }
+    const url = projectUrl(project, m.domains);
+    if (url && out.container_status === 'running') {
+      try {
+        const probe = await toolTestRoute({ domain: new URL(url).hostname }, auth);
+        const text = probe?.content?.[0]?.text || '';
+        let parsed = null;
+        try { parsed = JSON.parse(text); } catch { /* error string */ }
+        side.route_check = parsed
+          ? { ok: !probe.isError, edge_status: parsed.edge?.status_code ?? null, edge_failure: parsed.edge?.failure ?? null, assessment: parsed.assessment ?? null }
+          : { ok: !probe.isError, detail: text.slice(0, 300) };
+      } catch (e) {
+        side.route_check = { ok: false, detail: e?.message || String(e) };
+      }
+    }
+  }
+
+  const record = appendLifecycleChangeRecord(m, project, auth, out.change_summary);
+  logAudit(auth.created_by, action === 'archive' ? 'MOCK2_PROJECT_ARCHIVE' : 'MOCK2_PROJECT_UNARCHIVE', 'mock2_project', project.id, {
+    via: 'mcp', name: project.name, previous_lifecycle: out.previous_lifecycle, lifecycle: out.lifecycle,
+    container: out.container, container_status: out.container_status, snapshot: out.snapshot,
+  }, null);
+
+  const { change_summary, ...payload } = out;
+  return toolResult({
+    ...payload,
+    ...side,
+    change_record: record,
+    reverse_with: action === 'archive'
+      ? `set_project_lifecycle({ project_id: ${project.id}, action: "unarchive", confirm: true })`
+      : `set_project_lifecycle({ project_id: ${project.id}, action: "archive", confirm: true })`,
+    ...(action === 'archive'
+      ? { note: 'Nothing was freed but memory and CPU: the container, its checkout, database, routes and DNS are kept. The UI\'s Rehydrate would rebuild this guest from the bare repo (the checkpoint above makes that lossless); unarchive over MCP simply restarts it.' }
+      : {}),
+  });
+}
+
+async function toolSetProjectPinned(args, auth) {
+  if (typeof args.pinned !== 'boolean') return toolResult('pinned must be a boolean', { isError: true });
+  const m = await mock2Modules();
+  const project = m.projects.getProject(Number(args.project_id));
+  if (!project) return toolResult('Project not found', { isError: true });
+  if (args.confirm !== true) {
+    return toolResult(`Confirm with the user, then re-call with confirm: true to ${args.pinned ? 'pin' : 'unpin'} ${project.name} (project ${project.id}).`, { isError: true });
+  }
+  const before = m.projects.listProjectPinUserIds(project.id);
+  const previousPinned = before.length > 0;
+  let detail = {};
+  if (args.pinned) {
+    // The pin is the token owner's star, so it shows (and can be undone) on
+    // their Projects page. A token with no recorded owner pins as 'mcp'.
+    const userId = auth.created_by || 'mcp';
+    m.projects.setProjectPin(project.id, userId, true);
+    detail = { pinned_by: String(userId) };
+  } else {
+    const removed = m.projects.clearProjectPins(project.id);
+    detail = { pins_removed: removed, ...(removed > 1 ? { note: `${removed} users had pinned this project; every pin was removed so the project-wide flag reads false.` } : {}) };
+  }
+  logAudit(auth.created_by, 'MOCK2_PROJECT_PIN', 'mock2_project', project.id, { via: 'mcp', pinned: args.pinned, previous_pinned: previousPinned, ...detail }, null);
+  return toolResult({
+    project_id: project.id,
+    name: project.name,
+    previous_pinned: previousPinned,
+    pinned: args.pinned,
+    lifecycle: project.lifecycle,
+    ...detail,
+  });
+}
+
+// Every number from the HOST (nsenter-aware runner), never from inside a guest.
+async function collectHostUsage({ perProject = false } = {}) {
+  const takenAt = new Date().toISOString();
+  const errors = [];
+  const cap = async (bin, argv, opts = {}) => {
+    const r = await runHostCapture(bin, argv, { timeoutMs: 30000, ...opts });
+    if (r.status !== 0) errors.push(`${bin} ${argv.join(' ')}: ${r.timedOut ? 'timed out' : (r.stderr || r.error || '').trim().slice(-200) || 'failed'}`);
+    return r;
+  };
+
+  const [load, mem, nproc, dfRoot] = await Promise.all([
+    cap('cat', ['/proc/loadavg']),
+    cap('cat', ['/proc/meminfo']),
+    cap('nproc', []),
+    cap('df', ['-kP', '/']),
+  ]);
+
+  // Incus: pool + every guest's state in two listings.
+  let pool = null;
+  let poolDisk = null;
+  const poolList = await runHostCapture('incus', ['storage', 'list', '--format', 'json'], { timeoutMs: 30000 });
+  if (poolList.status === 0) {
+    let parsedPools = null;
+    try { parsedPools = JSON.parse(poolList.stdout || '[]'); } catch { errors.push('incus storage list: unparseable JSON'); }
+    const profile = await runHostCapture('incus', ['profile', 'show', 'default'], { timeoutMs: 30000 });
+    const picked = pickStoragePool(parsedPools, profile.status === 0 ? parseProfileRootPool(profile.stdout) : null);
+    if (picked) {
+      let usage = null;
+      const q = await runHostCapture('incus', ['query', `/1.0/storage-pools/${picked.name}/resources`], { timeoutMs: 30000 });
+      if (q.status === 0) usage = parsePoolResources(q.stdout);
+      if (!usage) {
+        const info = await runHostCapture('incus', ['storage', 'info', picked.name, '--bytes'], { timeoutMs: 30000 });
+        if (info.status === 0) usage = parseStorageInfoText(info.stdout);
+      }
+      pool = { name: picked.name, driver: picked.driver, total_gb: usage?.total_gb ?? null, used_gb: usage?.used_gb ?? null };
+      if (!usage) errors.push(`incus storage pool ${picked.name}: usage unavailable`);
+      // A dir/btrfs pool lives on a host path — report the filesystem under it.
+      if (picked.source && picked.source.startsWith('/')) {
+        const d = await runHostCapture('df', ['-kP', picked.source], { timeoutMs: 30000 });
+        if (d.status === 0) poolDisk = parseDfOutput(d.stdout);
+      }
+    }
+  } else {
+    errors.push(`incus storage list: ${(poolList.stderr || poolList.error || '').trim().slice(-200) || 'failed'}`);
+  }
+
+  let list = await runHostCapture('incus', ['list', '--all-projects', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });
+  if (list.status !== 0) {
+    list = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });
+  }
+  let containers = summarizeContainers([]);
+  if (list.status === 0) {
+    const parsed = parseLxcListJson(list.stdout, list);
+    if (parsed.error) errors.push(`incus list: ${lxcListFailureDetail(list, parsed.error)}`);
+    else containers = summarizeContainers(parsed.list);
+  } else {
+    errors.push(`incus list: ${(list.stderr || list.error || '').trim().slice(-200) || 'failed'}`);
+  }
+
+  const rootDisk = dfRoot.status === 0 ? parseDfOutput(dfRoot.stdout) : null;
+  const disks = [rootDisk];
+  if (poolDisk && (!rootDisk || poolDisk.mount !== rootDisk.mount)) disks.push(poolDisk);
+
+  let per = null;
+  if (perProject) {
+    const m = await mock2Modules();
+    const pins = m.projects.pinnedProjectIdSet();
+    const rows = m.projects.listProjects()
+      .filter((p) => p.lifecycle !== 'failed_provisioning')
+      .map((p) => ({ ...p, pinned: pins.has(p.id) }));
+    per = perProjectUsage(rows, containers._rows);
+  }
+
+  const usage = buildHostUsage({
+    takenAt,
+    cores: nproc.status === 0 ? Number(String(nproc.stdout).trim()) : null,
+    loadavg: load.status === 0 ? parseProcLoadavg(load.stdout) : null,
+    meminfo: mem.status === 0 ? parseProcMeminfo(mem.stdout) : null,
+    disks,
+    pool,
+    containers,
+    perProject: per,
+  });
+  if (errors.length) usage.partial = errors;
+  return usage;
+}
+
+async function toolGetHostUsage(args = {}) {
+  const usage = await collectHostUsage({ perProject: args?.per_project === true });
+  const problems = validateHostUsage(usage);
+  if (problems.length) usage.schema_problems = problems;
+  return toolResult(usage);
+}
+
+async function toolReclaimReport(args = {}) {
+  const before = args?.before;
+  const beforeProblems = validateHostUsage(before);
+  if (beforeProblems.length) {
+    return toolResult(`before is not a get_host_usage snapshot: ${beforeProblems.slice(0, 3).join('; ')}`, { isError: true });
+  }
+  let after = args?.after;
+  let fresh = false;
+  if (after == null) {
+    after = await collectHostUsage({ perProject: false });
+    fresh = true;
+  } else {
+    const afterProblems = validateHostUsage(after);
+    if (afterProblems.length) {
+      return toolResult(`after is not a get_host_usage snapshot: ${afterProblems.slice(0, 3).join('; ')}`, { isError: true });
+    }
+  }
+  return toolResult({ ...reclaimDelta(before, after), after_is_fresh: fresh, ...(fresh ? { after } : {}) });
 }
 
 async function toolUploadProjectReference(args, auth) {
@@ -3893,6 +4229,10 @@ const TOOL_HANDLERS = {
   rerun_startup: toolRerunStartup,
   list_projects: toolListProjects,
   get_project: toolGetProject,
+  set_project_lifecycle: toolSetProjectLifecycle,
+  set_project_pinned: toolSetProjectPinned,
+  get_host_usage: toolGetHostUsage,
+  reclaim_report: toolReclaimReport,
   upload_project_reference: toolUploadProjectReference,
   create_project: toolCreateProject,
   clone_project: toolCloneProject,

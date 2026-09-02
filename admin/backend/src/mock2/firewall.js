@@ -41,7 +41,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { dirname } from 'path';
 import { sh, runHost } from './host.js';
 import { listProjects } from './projects.js';
-import { buildFenceEntries, renderMock2Nft } from './network-logic.js';
+import { buildFenceEntries, renderMock2Nft, isFencedProject } from './network-logic.js';
 import { ensureHostEgress, resolveEgressHost } from './network.js';
 import { listApprovedEgressGrants } from './egress-grants.js';
 
@@ -54,7 +54,7 @@ import { listApprovedEgressGrants } from './egress-grants.js';
 // Best-effort per project: a DB read failure just yields an empty egress list.
 async function attachApprovedEgress(projects) {
   for (const p of projects) {
-    if (!p || p.lifecycle !== 'active' || !p.id) { if (p) p.egress = []; continue; }
+    if (!isFencedProject(p) || !p.id) { if (p) p.egress = []; continue; }
     let grants = [];
     try { grants = listApprovedEgressGrants(p.id); } catch { grants = []; }
     const wired = [];

@@ -64,6 +64,12 @@ export const MCP_SERVER_INSTRUCTIONS = [
   'NO TOOL HERE SPENDS THE PROJECT\'S API BUDGET: this server cannot queue a build, so an app change is',
   'yours to make with the file tools above. create_project and clone_project provision new projects',
   'deterministically; interrupt_project_build and cancel_queued_build stop harness builds started from the UI.',
+  'RECLAIMING HOST RESOURCES (archiving idle projects): get_host_usage first (per_project: true says what each',
+  'guest holds), then list_projects({ lifecycle: "active", pinned: false }) for the candidates, then ONE',
+  'set_project_lifecycle({ action: "archive", confirm: true }) call per project — there is no archive-all verb,',
+  'so each project is its own audit row and a pinned project refuses individually rather than being skipped',
+  'silently — then get_host_usage again, or reclaim_report with the first snapshot as before, for the delta.',
+  'Archive stops the guest and keeps everything; action: "unarchive" reverses it.',
 ].join(' ');
 
 // ---- JSON-RPC helpers ----
@@ -1436,16 +1442,76 @@ export const MCP_TOOLS = [
   },
   {
     name: 'list_projects',
-    description: 'List ProxyPilot AI-dev projects (id, name, url, lifecycle, latest build status).',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    description: 'List ProxyPilot AI-dev projects (id, name, url, lifecycle, pinned, latest build status). Optional filters: lifecycle (active | stopped | archived | all, default all — matched exactly, so a stopped project is neither active nor archived) and pinned (boolean). pinned is the Projects-page star, read project-wide: true when ANY user has pinned it, and set_project_lifecycle refuses to archive a pinned project. The archive flow starts here: list_projects({ lifecycle: "active", pinned: false }) is the set of candidates.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        lifecycle: { type: 'string', enum: ['active', 'stopped', 'archived', 'all'], description: 'Keep only projects in this lifecycle. Default all.' },
+        pinned: { type: 'boolean', description: 'Keep only pinned (true) or unpinned (false) projects. Omit for both.' },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: 'get_project',
-    description: 'Details for one AI-dev project: lifecycle, live URL, latest build cycle status, the build queue, and shipped builds still awaiting operator verification. This server cannot start a build — the queue is reported so you can see, cancel or stop harness work that was started from the UI.',
+    description: 'Details for one AI-dev project: lifecycle, pinned, live URL, container (the Incus instance name — project guests are named m2-<id> and carry no pp- prefix) and container_status (running | stopped | none), latest build cycle status, the build queue, and shipped builds still awaiting operator verification. This server cannot start a build — the queue is reported so you can see, cancel or stop harness work that was started from the UI.',
     inputSchema: {
       type: 'object',
       properties: { project_id: { type: 'number' } },
       required: ['project_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_project_lifecycle',
+    description: 'Archive or unarchive ONE AI-dev project, reversibly. archive: refused while the project is pinned (unpin it in the UI or with set_project_pinned first — never silently skipped) or while a build is running or queued (interrupt_project_build / cancel_queued_build). Otherwise it checkpoints the working tree into the bare repo, snapshots the guest (same auto-snapshot set_lxc_config takes), cleanly stops the container when stop_container is true (default), sets boot.autostart=false so it stays down across a host reboot, and marks lifecycle archived. Routes, DNS, the checkout, the database and the container itself are all KEPT — nothing is freed except memory and CPU — so unarchive is a pure reversal: previous lifecycle back, boot.autostart restored, the container started if the archive stopped it, the route republished and re-verified with test_route. The result carries previous_lifecycle plus the snapshot name so a second call undoes it, and a change record is appended. There is deliberately no archive-all verb: one project per call, so every archive is its own audit row. Requires confirm: true. Policy: lib/mcp-policy/project-lifecycle-allowlist.json.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        action: { type: 'string', enum: ['archive', 'unarchive'] },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+        stop_container: { type: 'boolean', description: 'archive only: cleanly stop the guest (default true). false keeps it running (and fenced) — useful to archive the project record while a long job finishes. Ignored on unarchive.' },
+      },
+      required: ['project_id', 'action', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_project_pinned',
+    description: 'Pin or unpin an AI-dev project — the same star the Projects page shows, which set_project_lifecycle treats as "do not archive". pinned:true stars it for the token\'s owner; pinned:false removes every user\'s star so the project-wide flag reads false afterwards. Pinning an archived project is allowed (it just protects it from bulk operations). Returns previous_pinned so the change can be reversed. Requires confirm: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        pinned: { type: 'boolean' },
+        confirm: { type: 'boolean', description: 'Must be true.' },
+      },
+      required: ['project_id', 'pinned', 'confirm'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_host_usage',
+    description: 'Snapshot of the ProxyPilot HOST\'s resources, read from the host itself (never from inside a guest): CPU cores + load averages, memory, swap, disk for / plus the Incus storage pool, the pool\'s own usage, and container counts with the top running guests by memory (from incus list). per_project: true adds one row per AI-dev project (container, status, memory_mb, disk_gb) so you can say what archiving a project would reclaim before doing it. Read-only, no confirm. Take one before and one after a batch of set_project_lifecycle calls and hand both to reclaim_report.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        per_project: { type: 'boolean', description: 'Add per-project container usage (default false).' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'reclaim_report',
+    description: 'Deterministic before/after comparison of two get_host_usage snapshots: memory_freed_mb, containers_stopped, load_delta, disk_freed_gb and a one-paragraph summary. Pass the earlier snapshot as before; omit after to have the server take a fresh snapshot now. Pure arithmetic — it exists so the comparison is not left to the agent. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        before: { type: 'object', description: 'A get_host_usage result taken earlier.' },
+        after: { type: 'object', description: 'A later get_host_usage result. Omitted: a fresh snapshot is taken.' },
+      },
+      required: ['before'],
       additionalProperties: false,
     },
   },
@@ -3234,4 +3300,419 @@ export function parseLineCounts(stdout) {
     counts.set(raw.slice(0, i), n);
   }
   return counts;
+}
+
+// ---- project archive / pin / host usage (set_project_lifecycle & co.) ----
+//
+// Pure decision + parsing layer for the reclaim tools. Everything that touches
+// Incus or the DB lives in lib/project-lifecycle.js (injected deps) and
+// routes/mcp.js; this section is what the unit tests exercise.
+
+export const LIFECYCLE_FILTERS = Object.freeze(['active', 'stopped', 'archived', 'all']);
+
+/** list_projects filter arguments → { lifecycle, pinned } or { error }. */
+export function normalizeProjectFilters(args = {}) {
+  let lifecycle = 'all';
+  if (args.lifecycle != null) {
+    lifecycle = String(args.lifecycle).trim().toLowerCase();
+    if (!LIFECYCLE_FILTERS.includes(lifecycle)) {
+      return { error: `lifecycle must be one of ${LIFECYCLE_FILTERS.join(', ')}` };
+    }
+  }
+  let pinned = null;
+  if (args.pinned != null) {
+    if (typeof args.pinned !== 'boolean') return { error: 'pinned must be a boolean' };
+    pinned = args.pinned;
+  }
+  return { lifecycle, pinned };
+}
+
+/**
+ * Apply list_projects filters to summary rows (each row carries `lifecycle`
+ * and `pinned`). No filter = every row, unchanged.
+ */
+export function filterProjectSummaries(rows, { lifecycle = 'all', pinned = null } = {}) {
+  return (Array.isArray(rows) ? rows : []).filter((r) => {
+    if (lifecycle !== 'all' && r.lifecycle !== lifecycle) return false;
+    if (pinned !== null && !!r.pinned !== pinned) return false;
+    return true;
+  });
+}
+
+// Container status as the tools report it — three words, never a raw Incus
+// state string, so an agent can branch on it.
+export function containerStatusWord(status) {
+  if (status === null || status === undefined) return 'none';
+  const s = String(status).toLowerCase();
+  if (s === 'running') return 'running';
+  if (s === 'stopped' || s === 'frozen') return 'stopped';
+  if (s === 'none' || s === '') return 'none';
+  return s;
+}
+
+// Cycle statuses that mean a build is live (mirrors LIVE_CYCLE_STATUSES in
+// routes/mcp.js — a queued row counts too, the prompt is "running or queued").
+export const LIVE_BUILD_STATUSES = Object.freeze(['queued', 'estimating', 'running']);
+
+/**
+ * Why a set_project_lifecycle call must be refused, or null when it may
+ * proceed. `policy` is lib/mcp-policy/project-lifecycle-allowlist.json (the
+ * transition table is read from it, not hard-coded here).
+ *
+ *   project      — the DB row ({ id, name, lifecycle })
+ *   action       — 'archive' | 'unarchive'
+ *   pinned       — project-wide pin flag
+ *   latestCycle  — the project's latest build cycle row (or null)
+ *   queuedBuilds — count of queued build-queue rows
+ *   containerStatus — 'running' | 'stopped' | 'none' | null (null = unknown)
+ */
+export function lifecycleRefusal({ project, action, pinned = false, latestCycle = null, queuedBuilds = 0, containerStatus = null }, policy) {
+  if (!project) return 'Project not found';
+  const rule = policy?.tools?.set_project_lifecycle?.actions?.[action];
+  if (!rule) return "action must be 'archive' or 'unarchive'";
+  const name = project.name || `#${project.id}`;
+  if (!rule.from.includes(project.lifecycle)) {
+    if (action === 'archive' && project.lifecycle === 'archived') return `${name} is already archived`;
+    if (action === 'unarchive' && project.lifecycle !== 'archived') return `${name} is ${project.lifecycle}, not archived — nothing to unarchive`;
+    return `Cannot ${action} ${name} while it is ${project.lifecycle} (allowed from: ${rule.from.join(', ')})`;
+  }
+  const refuse = rule.refuse_when || [];
+  if (refuse.includes('pinned') && pinned) {
+    return `${name} (project ${project.id}) is pinned — unpin it in the UI (or with set_project_pinned) first. Pinned projects are never archived silently.`;
+  }
+  if (refuse.includes('build_live')) {
+    if (latestCycle && LIVE_BUILD_STATUSES.includes(latestCycle.status)) {
+      return `A build is ${latestCycle.status} on ${name} — stop it first with interrupt_project_build (cycle ${latestCycle.id}).`;
+    }
+    if (Number(queuedBuilds) > 0) {
+      return `${queuedBuilds} build(s) are queued on ${name} — cancel them first with cancel_queued_build.`;
+    }
+  }
+  if (refuse.includes('container_missing') && containerStatus === 'none') {
+    return `${name} has no container on this host — it was archived from the UI (which destroys the guest), so rehydrate it from the UI instead.`;
+  }
+  return null;
+}
+
+/** The JSON stored in mock2_projects.archive_state_json, or null. */
+export function parseArchiveState(json) {
+  if (json == null || json === '') return null;
+  try {
+    const v = JSON.parse(String(json));
+    return v && typeof v === 'object' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---- host usage parsing ----
+
+const MB = 1024 * 1024;
+const GB = 1024 * 1024 * 1024;
+const round1 = (n) => Math.round(n * 10) / 10;
+const round2 = (n) => Math.round(n * 100) / 100;
+
+/** `/proc/loadavg` → { load_1m, load_5m, load_15m } (null fields when unreadable). */
+export function parseProcLoadavg(text) {
+  const parts = String(text ?? '').trim().split(/\s+/).filter(Boolean);
+  const num = (i) => (parts[i] !== undefined && Number.isFinite(Number(parts[i])) ? Number(parts[i]) : null);
+  return { load_1m: num(0), load_5m: num(1), load_15m: num(2) };
+}
+
+/** `/proc/meminfo` → { memory: {...mb}, swap: {...mb} }. Values in kB in the file. */
+export function parseProcMeminfo(text) {
+  const kb = {};
+  for (const line of String(text ?? '').split('\n')) {
+    const m = /^([A-Za-z_()]+):\s+(\d+)/.exec(line);
+    if (m) kb[m[1]] = Number(m[2]);
+  }
+  const toMb = (k) => (Number.isFinite(kb[k]) ? Math.round(kb[k] / 1024) : null);
+  const total = toMb('MemTotal');
+  // MemAvailable is the kernel's own "how much can be claimed without
+  // swapping" — the number that matters; "used" is total minus it.
+  const available = toMb('MemAvailable') ?? (toMb('MemFree') != null ? toMb('MemFree') + (toMb('Buffers') || 0) + (toMb('Cached') || 0) : null);
+  const used = total != null && available != null ? total - available : null;
+  const swapTotal = toMb('SwapTotal');
+  const swapFree = toMb('SwapFree');
+  return {
+    memory: {
+      total_mb: total,
+      used_mb: used,
+      available_mb: available,
+      percent_used: total ? round1((used / total) * 100) : null,
+    },
+    swap: {
+      total_mb: swapTotal,
+      used_mb: swapTotal != null && swapFree != null ? swapTotal - swapFree : null,
+    },
+  };
+}
+
+/**
+ * `df -kP <path>` output → { mount, filesystem, total_gb, used_gb,
+ * available_gb, percent_used } or null. POSIX format keeps every entry on one
+ * line: filesystem 1024-blocks used available capacity mounted-on.
+ */
+export function parseDfOutput(text) {
+  const lines = String(text ?? '').trim().split('\n').filter(Boolean);
+  const data = lines.find((l, i) => i > 0 || !/^Filesystem/i.test(l));
+  if (!data) return null;
+  const parts = data.trim().split(/\s+/);
+  if (parts.length < 6) return null;
+  const [filesystem, total, used, avail, cap, ...mount] = parts;
+  const k = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+  if (k(total) === null) return null;
+  return {
+    mount: mount.join(' '),
+    filesystem,
+    total_gb: round2((k(total) * 1024) / GB),
+    used_gb: round2((k(used) * 1024) / GB),
+    available_gb: round2((k(avail) * 1024) / GB),
+    percent_used: Number.isFinite(parseFloat(cap)) ? parseFloat(cap) : null,
+  };
+}
+
+/**
+ * Pick the Incus storage pool the host actually uses from `incus storage list
+ * --format json`: the default profile's root pool when known, else `default`,
+ * else the only/first pool. Returns { name, driver, source } or null.
+ */
+export function pickStoragePool(list, defaultProfileRootPool = null) {
+  const pools = (Array.isArray(list) ? list : []).filter((p) => p && p.name);
+  if (pools.length === 0) return null;
+  const pick = (defaultProfileRootPool && pools.find((p) => p.name === defaultProfileRootPool))
+    || pools.find((p) => p.name === 'default')
+    || pools[0];
+  return { name: pick.name, driver: pick.driver || null, source: pick.config?.source || null };
+}
+
+/** `incus profile show default` (YAML) → the root disk device's pool name, or null. */
+export function parseProfileRootPool(yaml) {
+  const lines = String(yaml ?? '').split('\n');
+  let inRoot = false;
+  for (const line of lines) {
+    if (/^\s{2}root:\s*$/.test(line)) { inRoot = true; continue; }
+    if (inRoot) {
+      if (/^\s{2}\S/.test(line)) inRoot = false;
+      const m = /^\s{4}pool:\s*(\S+)/.exec(line);
+      if (m) return m[1];
+    }
+  }
+  return null;
+}
+
+/** `incus query /1.0/storage-pools/<pool>/resources` JSON → { total_gb, used_gb } or null. */
+export function parsePoolResources(json) {
+  let v = json;
+  if (typeof json === 'string') {
+    try { v = JSON.parse(json); } catch { return null; }
+  }
+  const space = v?.space;
+  if (!space || !Number.isFinite(Number(space.total))) return null;
+  return {
+    total_gb: round2(Number(space.total) / GB),
+    used_gb: Number.isFinite(Number(space.used)) ? round2(Number(space.used) / GB) : null,
+  };
+}
+
+/** `incus storage info <pool> --bytes` text → { total_gb, used_gb } or null. */
+export function parseStorageInfoText(text) {
+  const grab = (label) => {
+    const m = new RegExp(`^\\s*${label}:\\s*([0-9.]+)\\s*([KMGT]i?B)?`, 'mi').exec(String(text ?? ''));
+    if (!m) return null;
+    const n = Number(m[1]);
+    if (!Number.isFinite(n)) return null;
+    const unit = (m[2] || '').toUpperCase();
+    const mult = unit.startsWith('K') ? 1024 : unit.startsWith('M') ? MB : unit.startsWith('G') ? GB : unit.startsWith('T') ? GB * 1024 : 1;
+    return n * mult;
+  };
+  const total = grab('total space');
+  if (total === null) return null;
+  const used = grab('space used');
+  return { total_gb: round2(total / GB), used_gb: used === null ? null : round2(used / GB) };
+}
+
+/** One `incus list --format json` instance → its usage row. */
+export function containerUsageRow(instance) {
+  const state = instance?.state || {};
+  const mem = Number(state.memory?.usage);
+  const cpuNs = Number(state.cpu?.usage);
+  const disk = Number(state.disk?.root?.usage);
+  return {
+    name: String(instance?.name || ''),
+    status: containerStatusWord(instance?.status),
+    memory_mb: Number.isFinite(mem) ? round1(mem / MB) : 0,
+    cpu_seconds: Number.isFinite(cpuNs) ? Math.round(cpuNs / 1e9) : 0,
+    disk_gb: Number.isFinite(disk) ? round2(disk / GB) : null,
+  };
+}
+
+/** Container counts + the top running guests by memory from `incus list` JSON. */
+export function summarizeContainers(list, { top = 10 } = {}) {
+  const seen = new Set();
+  const rows = [];
+  for (const c of Array.isArray(list) ? list : []) {
+    const name = String(c?.name || '');
+    if (!name || seen.has(name)) continue;   // --all-projects can repeat a name
+    seen.add(name);
+    rows.push(containerUsageRow(c));
+  }
+  const running = rows.filter((r) => r.status === 'running');
+  return {
+    running: running.length,
+    stopped: rows.filter((r) => r.status === 'stopped').length,
+    total: rows.length,
+    top_by_memory: running
+      .slice()
+      .sort((a, b) => b.memory_mb - a.memory_mb)
+      .slice(0, top)
+      .map(({ name, memory_mb, cpu_seconds, disk_gb }) => ({ name, memory_mb, cpu_seconds, disk_gb })),
+    _rows: rows,
+  };
+}
+
+/**
+ * Assemble the get_host_usage payload from already-parsed pieces. Pure so the
+ * shape is testable; the host reads happen in routes/mcp.js.
+ */
+export function buildHostUsage({ takenAt, cores, loadavg, meminfo, disks, pool, containers, perProject = null }) {
+  const { _rows, ...counts } = containers || summarizeContainers([]);
+  return {
+    taken_at: takenAt,
+    cpu: { cores: Number.isFinite(Number(cores)) ? Number(cores) : null, ...(loadavg || parseProcLoadavg('')) },
+    memory: (meminfo || parseProcMeminfo('')).memory,
+    swap: (meminfo || parseProcMeminfo('')).swap,
+    disk: (disks || []).filter(Boolean),
+    incus_pool: pool || null,
+    containers: counts,
+    ...(perProject ? { per_project: perProject } : {}),
+  };
+}
+
+/** Per-project usage rows: project rows joined to the parsed container rows. */
+export function perProjectUsage(projects, containerRows) {
+  const byName = new Map((containerRows || []).map((r) => [r.name, r]));
+  return (projects || []).map((p) => {
+    const row = p.container_name ? byName.get(p.container_name) : null;
+    return {
+      project_id: p.id,
+      name: p.name,
+      lifecycle: p.lifecycle,
+      pinned: !!p.pinned,
+      container: p.container_name || null,
+      container_status: row ? row.status : 'none',
+      memory_mb: row ? row.memory_mb : 0,
+      disk_gb: row ? row.disk_gb : null,
+    };
+  });
+}
+
+/** Schema check for a get_host_usage payload → array of problems (empty = valid). */
+export function validateHostUsage(u) {
+  const problems = [];
+  if (!u || typeof u !== 'object') return ['not an object'];
+  if (typeof u.taken_at !== 'string' || Number.isNaN(Date.parse(u.taken_at))) problems.push('taken_at must be an ISO-8601 timestamp');
+  const numOrNull = (v) => v === null || Number.isFinite(v);
+  for (const k of ['cores', 'load_1m', 'load_5m', 'load_15m']) {
+    if (!u.cpu || !numOrNull(u.cpu[k])) problems.push(`cpu.${k} must be a number`);
+  }
+  for (const k of ['total_mb', 'used_mb', 'available_mb', 'percent_used']) {
+    if (!u.memory || !numOrNull(u.memory[k])) problems.push(`memory.${k} must be a number`);
+  }
+  for (const k of ['total_mb', 'used_mb']) {
+    if (!u.swap || !numOrNull(u.swap[k])) problems.push(`swap.${k} must be a number`);
+  }
+  if (!Array.isArray(u.disk)) problems.push('disk must be an array');
+  else u.disk.forEach((d, i) => {
+    if (!d || typeof d.mount !== 'string') problems.push(`disk[${i}].mount must be a string`);
+    for (const k of ['total_gb', 'used_gb', 'available_gb', 'percent_used']) {
+      if (!d || !numOrNull(d[k])) problems.push(`disk[${i}].${k} must be a number`);
+    }
+  });
+  if (u.incus_pool !== null && u.incus_pool !== undefined) {
+    if (typeof u.incus_pool !== 'object' || typeof u.incus_pool.name !== 'string') problems.push('incus_pool must be null or { name, total_gb, used_gb }');
+    else for (const k of ['total_gb', 'used_gb']) if (!numOrNull(u.incus_pool[k])) problems.push(`incus_pool.${k} must be a number`);
+  } else if (u.incus_pool === undefined) problems.push('incus_pool must be present (null when unknown)');
+  const c = u.containers;
+  if (!c || typeof c !== 'object') problems.push('containers must be an object');
+  else {
+    for (const k of ['running', 'stopped', 'total']) if (!Number.isInteger(c[k])) problems.push(`containers.${k} must be an integer`);
+    if (!Array.isArray(c.top_by_memory)) problems.push('containers.top_by_memory must be an array');
+    else if (c.top_by_memory.length > 10) problems.push('containers.top_by_memory holds at most 10 rows');
+    else c.top_by_memory.forEach((r, i) => {
+      if (!r || typeof r.name !== 'string') problems.push(`containers.top_by_memory[${i}].name must be a string`);
+      if (!r || !Number.isFinite(r.memory_mb)) problems.push(`containers.top_by_memory[${i}].memory_mb must be a number`);
+    });
+  }
+  if (u.per_project !== undefined) {
+    if (!Array.isArray(u.per_project)) problems.push('per_project must be an array');
+    else u.per_project.forEach((r, i) => {
+      if (!r || !Number.isInteger(r.project_id)) problems.push(`per_project[${i}].project_id must be an integer`);
+      if (!r || !['running', 'stopped', 'none'].includes(r.container_status)) problems.push(`per_project[${i}].container_status must be running|stopped|none`);
+    });
+  }
+  return problems;
+}
+
+/**
+ * reclaim_report arithmetic: before − after, matched by disk mount. Positive
+ * numbers mean resources came back. Pure.
+ */
+export function reclaimDelta(before, after) {
+  const d = (a, b) => (Number.isFinite(a) && Number.isFinite(b) ? round2(a - b) : null);
+  const beforeMounts = new Map((before.disk || []).map((x) => [x.mount, x]));
+  let diskFreed = 0;
+  let diskMatched = false;
+  for (const x of after.disk || []) {
+    const b = beforeMounts.get(x.mount);
+    if (b && Number.isFinite(b.used_gb) && Number.isFinite(x.used_gb)) {
+      diskFreed += b.used_gb - x.used_gb;
+      diskMatched = true;
+    }
+  }
+  const memoryFreed = d(before.memory?.used_mb, after.memory?.used_mb);
+  const containersStopped = Number.isInteger(before.containers?.running) && Number.isInteger(after.containers?.running)
+    ? before.containers.running - after.containers.running
+    : null;
+  const loadDelta = {
+    load_1m: d(before.cpu?.load_1m, after.cpu?.load_1m),
+    load_5m: d(before.cpu?.load_5m, after.cpu?.load_5m),
+    load_15m: d(before.cpu?.load_15m, after.cpu?.load_15m),
+  };
+  const poolFreed = d(before.incus_pool?.used_gb, after.incus_pool?.used_gb);
+  const out = {
+    before_taken_at: before.taken_at || null,
+    after_taken_at: after.taken_at || null,
+    memory_freed_mb: memoryFreed,
+    containers_stopped: containersStopped,
+    load_delta: loadDelta,
+    disk_freed_gb: diskMatched ? round2(diskFreed) : null,
+    incus_pool_freed_gb: poolFreed,
+  };
+  out.summary = reclaimSummary(out, before, after);
+  return out;
+}
+
+function reclaimSummary(delta, before, after) {
+  const parts = [];
+  const mem = delta.memory_freed_mb;
+  if (mem === null) parts.push('Memory could not be compared.');
+  else if (mem > 0) parts.push(`Memory in use fell by ${mem} MB (${before.memory.used_mb} MB → ${after.memory.used_mb} MB, ${after.memory.percent_used}% of ${after.memory.total_mb} MB now used).`);
+  else if (mem < 0) parts.push(`Memory in use ROSE by ${Math.abs(mem)} MB (${before.memory.used_mb} MB → ${after.memory.used_mb} MB) — nothing was reclaimed, or something else started meanwhile.`);
+  else parts.push('Memory in use did not change.');
+  const cs = delta.containers_stopped;
+  if (cs === null) parts.push('Container counts could not be compared.');
+  else if (cs > 0) parts.push(`${cs} container${cs === 1 ? '' : 's'} stopped running (${before.containers.running} → ${after.containers.running} running of ${after.containers.total}).`);
+  else if (cs < 0) parts.push(`${Math.abs(cs)} more container${cs === -1 ? '' : 's'} are running than before (${before.containers.running} → ${after.containers.running}).`);
+  else parts.push(`The running-container count is unchanged at ${after.containers.running}.`);
+  const l1 = delta.load_delta.load_1m;
+  if (l1 !== null) {
+    parts.push(l1 > 0
+      ? `1-minute load dropped by ${l1} (${before.cpu.load_1m} → ${after.cpu.load_1m}).`
+      : l1 < 0 ? `1-minute load rose by ${Math.abs(l1)} (${before.cpu.load_1m} → ${after.cpu.load_1m}).` : '1-minute load is unchanged.');
+  }
+  if (delta.disk_freed_gb === null) parts.push('Disk was not compared (no matching mounts).');
+  else if (Math.abs(delta.disk_freed_gb) < 0.01) parts.push('Disk usage did not change — archiving stops guests but frees no disk by design.');
+  else parts.push(`Disk usage ${delta.disk_freed_gb > 0 ? 'fell' : 'rose'} by ${Math.abs(delta.disk_freed_gb)} GB across matched mounts.`);
+  return parts.join(' ');
 }

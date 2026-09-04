@@ -6254,6 +6254,15 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null) {
         s.frameAncestors !== undefined
           ? s.frameAncestors
           : s.frame_ancestors ?? null,
+      // Health path is metadata, not a Caddy directive: it rides along as a
+      // `# proxypilot:` marker comment so the LXC page can probe the upstream's
+      // health endpoint. It used to live ONLY in the hand-written legacy site
+      // files, which is what kept those writers alive; sourcing it from the
+      // route row is what lets them be retired.
+      healthPath:
+        s.healthPath !== undefined && s.healthPath !== null
+          ? s.healthPath
+          : s.health_path ?? null,
     };
   });
 
@@ -6326,7 +6335,18 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null) {
   // the comment stays informative once legacy `type` is gone (D.14).
   const entryLabel = (s) => s.kind || s.type || 'unknown';
 
+  // The health-path marker must precede the site address line: the LXC page's
+  // parser reads it as file-level metadata, and it is a comment either way so
+  // Caddy ignores it. Take the root route's value — health is a per-upstream
+  // property and the root route is the one the page probes.
+  const healthEntry =
+    normalized.find((s) => s.pathPrefix === '/' && s.healthPath) ||
+    normalized.find((s) => s.healthPath);
+
   const lines = [];
+  if (healthEntry?.healthPath) {
+    lines.push(`# proxypilot: healthpath=${healthEntry.healthPath}`);
+  }
   lines.push(`# ProxyPilot Managed Configuration`);
   lines.push(`# Domain: ${domain}`);
   lines.push(
@@ -6476,6 +6496,7 @@ async function regenerateDomainCaddyConfig(db, domain) {
               r.host_header_override,
               r.allow_framing,
               r.frame_ancestors,
+              r.health_path,
               s.name         AS name,
               s.kind         AS kind,
               s.runtime      AS runtime,
@@ -7533,4 +7554,20 @@ function rowToMountResponse(row, outcome) {
 // this module at the call-site level but exported so integration tests and
 // the Phase 2 verification pass can invoke them directly without spinning
 // up the full HTTP router.
+// The dependency bundle lib/route-render.js needs to render, validate and
+// reload Caddy. Exported as one object so every caller — services.js, lxc.js,
+// the MCP set_route tool — drives the same code path with the same validation
+// and the same rollback, rather than each assembling its own.
+//
+// See docs/incidents/2026-09-04-route-config-drift.md for why a second write
+// path is a bug rather than a convenience.
+export const caddyRenderDeps = {
+  regenerate: regenerateDomainCaddyConfig,
+  adapt: () => caddyAdapt({ configPath: CADDY_CONFIG_FILE }),
+  reload: () => caddyReload({ configPath: CADDY_CONFIG_FILE }),
+  caddyFilePath,
+  writeConfig: writeCaddyConfig,
+  removeConfig: (path) => unlink(path).catch(() => {}),
+};
+
 export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody, syncPrimaryRouteFromLegacy, ensureCaddyStructure };

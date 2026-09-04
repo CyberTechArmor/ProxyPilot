@@ -16,13 +16,16 @@ import { requireSudo, requireAdminOrPermission } from '../middleware/auth.js';
 const requireProxyAccess = requireAdminOrPermission('proxy');
 import { getDb, logAudit } from '../db.js';
 import { v4 as uuidv4 } from 'uuid';
-import { ensureCaddyStructure, regenerateDomainCaddyConfig } from './services.js';
+import { ensureCaddyStructure, regenerateDomainCaddyConfig, caddyRenderDeps } from './services.js';
+import { applyServiceUpstream, renderDomains, domainsForService } from '../lib/route-render.js';
+import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 import { resolveCertDir } from '../lib/caddy-cert.js';
 import { inspectIncusDevice } from '../lib/cert-mount-reconciler.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
+import { parseCaddySiteFile, sameHost } from '../lib/caddy-site-file.js';
 import {
   fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
   cancelSnapshotExport, sweepOrphanTempInstances, importSnapshotFromS3,
@@ -1114,31 +1117,56 @@ lxcRouter.post('/containers', async (req, res) => {
         creation.phase = 'caddy';
         creation.message = `Configuring reverse proxy for ${services.length} service${services.length > 1 ? 's' : ''}...`;
 
+        // Routes created at container-create time used to be written straight
+        // to disk with no database row at all. That made them permanently
+        // invisible to every name-based lookup — the only way to associate one
+        // with its container was to read the file back and match its upstream
+        // address, which is the attribution path that misfiled hostnames under
+        // the wrong container. They are ordinary routes now, and the renderer
+        // derives the site file from them like any other.
+        const db = getDb();
+        const svcRow = findOrCreateLxcService(db, name, ip);
+        // A container recreated under an existing name reuses its service row,
+        // which may still hold the previous instance's address. Move it (and
+        // re-render whatever it already served) before adding these routes.
+        await syncLxcServiceUpstream(db, svcRow, ip);
+        const createdDomains = new Set();
         for (const svc of services) {
-          // A pasted cert covering this host serves it (and disables ACME) via
-          // `tls <cert> <key>`; global manual mode with no covering cert uses
-          // `tls internal`. Otherwise the original obtainCert logic stands.
-          let tlsDirective;
-          let tlsHit = null;
-          try { tlsHit = resolveTlsForHost(svc.domain); } catch { tlsHit = null; }
-          if (tlsHit && tlsHit.mode === 'manual') {
-            tlsDirective = `\n${manualTlsDirective(tlsHit.certFile, tlsHit.keyFile)}`;
-          } else if (tlsHit && tlsHit.mode === 'internal') {
-            tlsDirective = '\n    tls internal';
-          } else {
-            tlsDirective = svc.obtainCert ? '' : '\n    tls internal';
+          try {
+            const health =
+              svc.healthPath && validateHealthPath(svc.healthPath).ok ? svc.healthPath : null;
+            db.prepare(
+              `INSERT INTO service_http_routes
+                 (id, service_id, domain, path_prefix, target_port,
+                  websocket_enabled, ssl_enabled, force_https, max_upload_size,
+                  strip_prefix, health_path)
+               VALUES (?, ?, ?, '/', ?, 0, ?, ?, '1G', 0, ?)`
+            ).run(
+              uuidv4(),
+              svcRow.id,
+              svc.domain,
+              svc.port,
+              svc.obtainCert ? 1 : 0,
+              svc.obtainCert ? 1 : 0,
+              health
+            );
+            createdDomains.add(svc.domain);
+          } catch (e) {
+            // UNIQUE(domain, path_prefix) — the domain is already routed
+            // somewhere. Don't clobber it; the operator gets the existing
+            // route and a log line rather than a silent takeover.
+            console.error(`[LXC] could not add route ${svc.domain}: ${e?.message || e}`);
+            creation.caddyWarning =
+              `${svc.domain} is already routed elsewhere and was not added.`;
           }
-          const healthMarker = svc.healthPath ? `# proxypilot: healthpath=${svc.healthPath}\n` : '';
-          const caddyConfig = `${healthMarker}${svc.domain} {${tlsDirective}\n    reverse_proxy ${ip}:${svc.port}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${svc.domain}.log\n    }\n}\n`;
-          const configPath = join(CADDY_SITES_DIR, svc.domain);
-          await writeFile(configPath, caddyConfig);
-          console.log(`[LXC] Wrote Caddy config for ${svc.domain} -> ${ip}:${svc.port} (cert: ${svc.obtainCert})`);
         }
 
         try {
-          await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
-        } catch (reloadError) {
-          console.error('[LXC] Caddy reload failed:', reloadError.stderr || reloadError.message);
+          await renderDomains({ db, domains: [...createdDomains], ...caddyRenderDeps });
+          console.log(`[LXC] Rendered ${createdDomains.size} route(s) for ${incusName} -> ${ip}`);
+        } catch (e) {
+          console.error('[LXC] Caddy render failed:', e?.message || e);
+          creation.caddyWarning = `Routes were recorded but Caddy was not updated: ${e?.message || e}`;
         }
       }
 
@@ -1604,7 +1632,7 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
         .prepare(
           `SELECT r.id AS route_id, r.domain, r.path_prefix, r.target_port,
                   r.ssl_enabled, r.websocket_enabled, r.strip_prefix,
-                  r.allow_framing, r.frame_ancestors,
+                  r.allow_framing, r.frame_ancestors, r.health_path,
                   s.id AS service_id, s.target_ip
              FROM service_http_routes r
              JOIN services s ON r.service_id = s.id
@@ -1626,7 +1654,7 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
           stripPrefix: !!r.strip_prefix,
           allowFraming: !!r.allow_framing,
           frameAncestors: r.frame_ancestors ?? null,
-          healthPath: null,
+          healthPath: r.health_path ?? null,
           source: 'db',
         });
       }
@@ -1634,46 +1662,67 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
       console.warn('[LXC] DB routes fetch failed:', e?.message || e);
     }
 
-    // Now scan the per-domain Caddy files. Skip any file whose
-    // domain is already covered by the routes table — a merged
-    // multi-route Caddyfile (written by the routes pipeline)
-    // contains multiple `reverse_proxy` lines, and the regex below
-    // grabs only the FIRST, which would surface a phantom legacy
-    // entry pointing at whichever upstream happens to sort first.
-    // The routes-table view is authoritative for any domain it
-    // owns; only legacy single-route domains belong in the file
-    // scan.
+    // Now scan the per-domain Caddy files for genuinely UNMANAGED routes —
+    // site files with no row in service_http_routes at all. Anything the
+    // routes table owns has already been listed above, attributed by
+    // `lxc_container_name`.
+    //
+    // Attribution here is by NAME first and address only as a last resort:
+    //
+    //   - A domain owned by ANY route row belongs to that row's container,
+    //     never to whoever currently holds the address the file happens to
+    //     name. Filtering only against *this* container's domains is what let
+    //     mock2's hostnames surface on the unlimited-lighting page after a
+    //     recycled DHCP lease, where deleting them took down live routes.
+    //   - When there is no row to name an owner, the file's upstream is
+    //     compared to this container's address EXACTLY. The previous
+    //     `content.includes(ip)` matched on prefixes, so a guest on
+    //     10.185.17.22 claimed every file dialing 10.185.17.224.
+    //
+    // See docs/incidents/2026-09-04-route-config-drift.md.
+    let managedDomains = new Set();
     try {
-      const files = await readdir(CADDY_SITES_DIR);
-      for (const file of files) {
-        const filePath = join(CADDY_SITES_DIR, file);
-        const content = await readFile(filePath, 'utf-8');
-        if (!content.includes(ip)) continue;
-        const domainMatch = content.match(/^(\S+)\s*\{/m);
-        if (!domainMatch) continue;
-        // Strip optional `http://` / `https://` prefix from the site
-        // address so the dedupe set lookup matches the bare domain
-        // the routes table stores.
-        const fileDomain = domainMatch[1].replace(/^https?:\/\//, '');
-        if (dbDomains.has(fileDomain)) continue;
-        const upstreamMatch = content.match(/reverse_proxy\s+([\d.]+):(\d+)/);
-        const hasTlsInternal = content.includes('tls internal');
-        const healthMatch = content.match(/^#\s*proxypilot:\s*healthpath=(\S+)/m);
-        const healthPath = healthMatch
-          ? (validateHealthPath(healthMatch[1]).ok ? healthMatch[1] : null)
-          : null;
-        services.push({
-          domain: fileDomain,
-          pathPrefix: '/',
-          port: upstreamMatch ? parseInt(upstreamMatch[2], 10) : null,
-          upstreamIp: upstreamMatch ? upstreamMatch[1] : null,
-          obtainCert: !hasTlsInternal,
-          healthPath,
-          source: 'file',
-        });
+      managedDomains = new Set(
+        getDb().prepare(`SELECT DISTINCT domain FROM service_http_routes`).all().map((r) => r.domain)
+      );
+    } catch (e) {
+      // Without the managed-domain set we cannot prove a file is unmanaged, so
+      // list nothing from the file scan rather than risk misattributing a live
+      // route to this container.
+      console.warn('[LXC] managed-domain lookup failed; skipping file scan:', e?.message || e);
+      managedDomains = null;
+    }
+    if (managedDomains) {
+      try {
+        const files = await readdir(CADDY_SITES_DIR);
+        for (const file of files) {
+          const filePath = join(CADDY_SITES_DIR, file);
+          const content = await readFile(filePath, 'utf-8');
+          const parsed = parseCaddySiteFile(content);
+          const fileDomain = parsed.primaryDomain;
+          if (!fileDomain) continue;
+          // Owned by the routes table — either this container's (already
+          // listed) or another container's (not ours to show).
+          if (dbDomains.has(fileDomain) || managedDomains.has(fileDomain)) continue;
+          // Unmanaged file: claim it only on an exact upstream match.
+          const upstream = parsed.upstreams.find((u) => sameHost(u.host, ip));
+          if (!upstream) continue;
+          const healthPath = parsed.healthPath
+            ? (validateHealthPath(parsed.healthPath).ok ? parsed.healthPath : null)
+            : null;
+          services.push({
+            domain: fileDomain,
+            pathPrefix: '/',
+            port: upstream.port ?? null,
+            upstreamIp: upstream.host,
+            obtainCert: !parsed.tlsInternal,
+            healthPath,
+            source: 'file',
+          });
+        }
+      } catch {
+        // CADDY_SITES_DIR may not exist yet
       }
-    } catch {
-      // CADDY_SITES_DIR may not exist yet
     }
 
     // Probe each upstream in parallel so a slow/unreachable host doesn't
@@ -1691,10 +1740,17 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
           svc.httpError = null;
           return;
         }
-        svc.reachable = await probeTcp(ip, svc.port, 2000);
-        svc.staleIp = svc.upstreamIp && svc.upstreamIp !== ip;
+        // Probe the address the edge ACTUALLY dials, not the container's
+        // current address. Probing `ip` while the UI displayed
+        // `svc.upstreamIp` is what produced the incident's contradictory
+        // banner: an address parsed from one guest's Caddy file next to a
+        // port inventory scanned from another guest. If the two disagree,
+        // `staleIp` below is the signal — the probe must not paper over it.
+        const dialHost = svc.upstreamIp || ip;
+        svc.reachable = await probeTcp(dialHost, svc.port, 2000);
+        svc.staleIp = !!(svc.upstreamIp && !sameHost(svc.upstreamIp, ip));
         if (svc.reachable && svc.healthPath) {
-          const result = await probeHttp(ip, svc.port, svc.domain, svc.healthPath, 2000);
+          const result = await probeHttp(dialHost, svc.port, svc.domain, svc.healthPath, 2000);
           svc.httpHealthy = result.healthy;
           svc.httpStatus = result.status;
           svc.httpError = result.error;
@@ -1711,12 +1767,18 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
     // ("nothing on :3000 — these ports are open: 22, 80") instead of
     // a generic 502. One ss call per refresh is cheap; skip it when
     // every probe succeeded.
-    const anyUnreachable = services.some((s) => s.reachable === false);
+    //
+    // Only routes that actually dial THIS container get the port inventory
+    // layered on. For a route whose upstream has drifted elsewhere, this
+    // container's listening ports say nothing about why it fails — pairing
+    // them produced the incident's misleading banner, which described
+    // unlimited-lighting's open ports under an address belonging to mock2.
+    const anyUnreachable = services.some((s) => s.reachable === false && !s.staleIp);
     let listening = null;
     if (anyUnreachable) {
       listening = await listListeningPorts(incusName);
       for (const svc of services) {
-        if (svc.reachable !== false || !svc.port) continue;
+        if (svc.reachable !== false || !svc.port || svc.staleIp) continue;
         svc.boundLoopbackOnly = listening.loopbackOnly.includes(svc.port);
       }
     }
@@ -1773,17 +1835,17 @@ export function findOrCreateLxcService(db, name, ip) {
     .prepare(`SELECT * FROM services WHERE lxc_container_name = ? AND is_admin = 0 LIMIT 1`)
     .get(name);
   if (existing) {
-    // Update the cached IP if it has drifted — same logic the
-    // refresh-ip endpoint applies, but inline so the operator
-    // doesn't have to click a separate button after a container
-    // restart. Only writes when actually changed so updated_at
-    // doesn't churn on every quick-add.
-    if (ip && existing.target_ip !== ip) {
-      db.prepare(
-        `UPDATE services SET target_ip = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-      ).run(ip, existing.id);
-      existing.target_ip = ip;
-    }
+    // Deliberately does NOT write target_ip here.
+    //
+    // One services row owns every route on the container, so writing the new
+    // address makes it live for ALL of them — while the caller goes on to
+    // re-render only the single domain it is editing. That is exactly how
+    // git.fractionate.ai ended up stranded on an address a lease had since
+    // reassigned to another project's guest: the row said .224, its site file
+    // still said .22, and nothing ever reconciled them.
+    //
+    // Callers use syncLxcServiceUpstream() below, which moves the address and
+    // re-renders every affected domain together, or leaves both stores alone.
     return existing;
   }
   const id = uuidv4();
@@ -1793,6 +1855,59 @@ export function findOrCreateLxcService(db, name, ip) {
      VALUES (?, ?, 'container_service', 'lxc', ?, ?, 'docker', 'active')`
   ).run(id, name, ip, name);
   return db.prepare(`SELECT * FROM services WHERE id = ?`).get(id);
+}
+
+/**
+ * Move a per-LXC service row onto the guest's current address, bringing every
+ * domain it serves with it.
+ *
+ * Call this on any path that has a fresh address in hand and is about to write
+ * a route. It no-ops when the address is unchanged (the common case), so it is
+ * safe to call unconditionally.
+ *
+ * Never throws: a failure here means the address did not move and both stores
+ * were left as they were, which is a warning on an otherwise-successful route
+ * write rather than a reason to fail it. The returned warning is surfaced to
+ * the operator, and the drift report (lib/route-drift.js) will keep flagging
+ * the mismatch until it is resolved.
+ *
+ * @param {object} db
+ * @param {object} service  row from findOrCreateLxcService
+ * @param {string} ip       the guest's current address
+ * @returns {Promise<{changed: boolean, domains: string[], warning: string|null}>}
+ */
+export async function syncLxcServiceUpstream(db, service, ip) {
+  if (!service || !ip || service.target_ip === ip) {
+    return { changed: false, domains: [], warning: null };
+  }
+  try {
+    const result = await applyServiceUpstream({
+      db,
+      serviceId: service.id,
+      ip,
+      render: caddyRenderDeps,
+    });
+    if (result.changed) {
+      service.target_ip = ip;
+      if (result.domains.length) {
+        console.log(
+          `[LXC] ${service.lxc_container_name}: upstream ${result.oldIp} -> ${ip}, ` +
+          `re-rendered ${result.domains.length} domain(s): ${result.domains.join(', ')}`
+        );
+      }
+    }
+    return { changed: result.changed, domains: result.domains, warning: null };
+  } catch (e) {
+    const detail = e?.message || String(e);
+    console.error(`[LXC] upstream sync failed for ${service.lxc_container_name}:`, detail);
+    return {
+      changed: false,
+      domains: [],
+      warning:
+        `Container address moved to ${ip} but the existing routes could not be ` +
+        `re-rendered (${detail}). Those routes still point at ${service.target_ip || 'an unrecorded address'}.`,
+    };
+  }
 }
 
 // MEET reference layout. Source: deploy/external-proxy/caddy/single-domain.Caddyfile
@@ -1966,6 +2081,10 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
     }
 
     const svc = findOrCreateLxcService(db, name, ip);
+    // Bring any routes this container already serves onto its current address
+    // before adding more. Without this the row's address would advance under
+    // them while their site files stayed frozen at the old one.
+    const upstreamSync = await syncLxcServiceUpstream(db, svc, ip);
     const insertedRouteIds = [];
     const insertedForwardIds = [];
 
@@ -2121,7 +2240,14 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
         routes: { added: routesAdded, skipped: routesSkipped, normalized: routesNormalized },
         forwards: { added: forwardsAdded, skipped: forwardsSkipped },
         l4: l4Result,
-        ...(reloadWarning && { warning: reloadWarning }),
+        ...(reloadWarning
+          ? { warning: reloadWarning }
+          : upstreamSync.warning
+          ? { warning: upstreamSync.warning }
+          : {}),
+        ...(upstreamSync.changed
+          ? { upstream_resynced: { ip, domains: upstreamSync.domains } }
+          : {}),
       });
     } catch (e) {
       await rollback();
@@ -2269,46 +2395,19 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
       console.warn('[LXC] sibling lookup failed:', e?.message || e);
     }
 
-    // Decide write path. Legacy fast path only when:
-    //   - root path (/), and
-    //   - no existing per-domain Caddy site file, and
-    //   - no existing routes-table sibling, and
-    //   - no advanced flags (strip_prefix override, websocket).
-    const useRoutesPipeline =
-      cleanPath !== '/' ||
-      fileExists ||
-      dbSibling ||
-      stripPrefix !== undefined ||
-      wsEnabled;
-
-    if (!useRoutesPipeline) {
-      // ---- Legacy fast path: single-domain Caddyfile ------------------
-      const tlsDirective = cert ? '' : '\n    tls internal';
-      const healthMarker = cleanHealthPath ? `# proxypilot: healthpath=${cleanHealthPath}\n` : '';
-      const caddyConfig = `${healthMarker}${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
-      // Defensive: ensureCaddyStructure swallows mkdir errors with
-      // .catch(() => {}) so a missing /etc/caddy/sites surfaces here
-      // as ENOENT instead of being self-healed.  Recursive mkdir is
-      // a no-op when the dir exists.
-      await mkdir(CADDY_SITES_DIR, { recursive: true });
-      await writeFile(configPath, caddyConfig);
-
-      let reloadWarning = null;
-      try {
-        await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
-      } catch (reloadError) {
-        const detail = (reloadError.stderr || reloadError.stdout || reloadError.message || '').trim();
-        console.error('[LXC] Caddy reload failed:', detail);
-        reloadWarning = `Config saved but Caddy reload failed: ${detail || 'unknown error'}`;
-      }
-
-      console.log(`[LXC] Added service ${cleanDomain} -> ${ip}:${svcPort} (file path)`);
-      return res.json({
-        success: true,
-        service: { domain: cleanDomain, port: svcPort, obtainCert: cert, healthPath: cleanHealthPath, pathPrefix: '/', source: 'file' },
-        ...(reloadWarning && { warning: reloadWarning }),
-      });
-    }
+    // Every route goes through the routes table. There is no longer a
+    // "legacy fast path" that hand-writes a single-domain site file.
+    //
+    // That path was the last writer producing Caddy config from something
+    // other than the database. The routes it created had no row anywhere, so
+    // they could only be identified by reading the file back and matching its
+    // upstream address — which is how hostnames ended up attributed to
+    // whichever container happened to hold a colliding address, and deleted
+    // from the wrong page. Its one unique capability, the health-path marker,
+    // is now a column (`service_http_routes.health_path`, migration 106) that
+    // the merged renderer emits, so nothing is lost by removing it.
+    //
+    // See docs/incidents/2026-09-04-route-config-drift.md.
 
     // ---- Routes pipeline: write into service_http_routes -------------
     //
@@ -2322,11 +2421,22 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
     if (fileExists) {
       try {
         const existing = await readFile(configPath, 'utf-8');
-        const m = existing.match(/reverse_proxy\s+([\d.]+):(\d+)/);
-        const tlsInternal = existing.includes('tls internal');
-        if (m) {
-          const legacyPort = parseInt(m[2], 10);
-          const svc = findOrCreateLxcService(db, name, m[1]);
+        const legacy = parseCaddySiteFile(existing);
+        const legacyUpstream = legacy.upstreams[0] || null;
+        const tlsInternal = legacy.tlsInternal;
+        if (legacyUpstream && legacyUpstream.port != null) {
+          const legacyPort = legacyUpstream.port;
+          // The file's health marker is the only place this value lived before
+          // migration 106; carry it into the row so the renderer keeps emitting
+          // it and the LXC page keeps probing the endpoint.
+          const legacyHealth =
+            legacy.healthPath && validateHealthPath(legacy.healthPath).ok
+              ? legacy.healthPath
+              : null;
+          // Adopt against the container's CURRENT address, not the address
+          // frozen in the legacy file — adopting the stale value would carry
+          // the drift into the routes table and re-render it right back out.
+          const svc = findOrCreateLxcService(db, name, ip);
           // Legacy entries are always at path '/'. Insert only if
           // the routes table doesn't already cover it (defensive
           // double-check; the dbSibling lookup above is per-domain
@@ -2339,15 +2449,16 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
               `INSERT INTO service_http_routes
                  (id, service_id, domain, path_prefix, target_port,
                   websocket_enabled, ssl_enabled, force_https, max_upload_size,
-                  strip_prefix)
-               VALUES (?, ?, ?, '/', ?, 0, ?, ?, '1G', 0)`
+                  strip_prefix, health_path)
+               VALUES (?, ?, ?, '/', ?, 0, ?, ?, '1G', 0, ?)`
             ).run(
               uuidv4(),
               svc.id,
               cleanDomain,
               legacyPort,
               tlsInternal ? 0 : 1,
-              tlsInternal ? 0 : 1
+              tlsInternal ? 0 : 1,
+              legacyHealth
             );
             // Surface the migration so the operator can spot the
             // auto-created root row in the list and decide whether
@@ -2370,14 +2481,17 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
     // gives us a clean 409 when the operator tries to add the
     // exact same tuple twice.
     const svc = findOrCreateLxcService(db, name, ip);
+    // Same reason as the MEET path: re-render this container's existing
+    // domains onto the current address before adding one more to the set.
+    const upstreamSync = await syncLxcServiceUpstream(db, svc, ip);
     const routeId = uuidv4();
     try {
       db.prepare(
         `INSERT INTO service_http_routes
            (id, service_id, domain, path_prefix, target_port,
             websocket_enabled, ssl_enabled, force_https, max_upload_size,
-            strip_prefix)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '1G', ?)`
+            strip_prefix, health_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '1G', ?, ?)`
       ).run(
         routeId,
         svc.id,
@@ -2387,7 +2501,8 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
         wsEnabled ? 1 : 0,
         cert ? 1 : 0,
         cert ? 1 : 0,
-        wantStrip ? 1 : 0
+        wantStrip ? 1 : 0,
+        cleanHealthPath || null
       );
     } catch (e) {
       if (/UNIQUE constraint/i.test(e.message || '')) {
@@ -2441,8 +2556,13 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
       // there's no reload error to crowd it out.
       ...(reloadWarning
         ? { warning: reloadWarning }
+        : upstreamSync.warning
+        ? { warning: upstreamSync.warning }
         : migrationWarning
         ? { warning: migrationWarning }
+        : {}),
+      ...(upstreamSync.changed
+        ? { upstream_resynced: { ip, domains: upstreamSync.domains } }
         : {}),
     });
   } catch (error) {
@@ -2557,6 +2677,7 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
            domain = ?, path_prefix = ?, target_port = ?,
            websocket_enabled = ?, ssl_enabled = ?, force_https = ?,
            strip_prefix = ?,
+           health_path = ?,
            allow_framing = COALESCE(?, allow_framing),
            frame_ancestors = CASE WHEN ? THEN ? ELSE frame_ancestors END
          WHERE id = ?`
@@ -2568,6 +2689,7 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
         cert ? 1 : 0,
         cert ? 1 : 0,
         wantStrip ? 1 : 0,
+        cleanHealthPath || null,
         setFraming ? framingValue : null,
         setAncestors ? 1 : 0,
         ancestorsValue,
@@ -2632,38 +2754,65 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
       }
     }
 
-    // Remove old config
+    // Editing a route that has no row yet — a leftover unmanaged site file.
+    //
+    // Rather than rewriting the file by hand (the last writer that produced
+    // Caddy config from something other than the database), adopt it into the
+    // routes table and let the renderer emit it. After this the route is
+    // ordinary: attributable by name, deletable atomically, and visible to the
+    // drift check. The old file is removed because the renderer owns the
+    // filename from here on.
+    const cleanDomain = (newDomain || oldDomain).trim();
+    const svcPort = parseInt(port, 10) || 80;
+    const cert = obtainCert !== false;
+    const db = getDb();
+
+    const conflict = db
+      .prepare(`SELECT id FROM service_http_routes WHERE domain = ? AND path_prefix = '/' LIMIT 1`)
+      .get(cleanDomain);
+    if (conflict) {
+      return res.status(409).json({
+        success: false,
+        error: `'${cleanDomain}' is already routed. Edit it from the container that owns it.`,
+      });
+    }
+
+    const svcRow = findOrCreateLxcService(db, name, ip);
+    const upstreamSync = await syncLxcServiceUpstream(db, svcRow, ip);
+    db.prepare(
+      `INSERT INTO service_http_routes
+         (id, service_id, domain, path_prefix, target_port,
+          websocket_enabled, ssl_enabled, force_https, max_upload_size,
+          strip_prefix, health_path)
+       VALUES (?, ?, ?, '/', ?, 0, ?, ?, '1G', 0, ?)`
+    ).run(uuidv4(), svcRow.id, cleanDomain, svcPort, cert ? 1 : 0, cert ? 1 : 0, cleanHealthPath || null);
+
     const oldConfigPath = join(CADDY_SITES_DIR, oldDomain);
     if (existsSync(oldConfigPath)) {
       await unlink(oldConfigPath);
     }
 
-    // Write new config. healthPath persists as a leading comment line
-    // (Caddy ignores it; the GET parser recovers it). Empty/missing
-    // healthPath in the request → no marker line, TCP-only behavior.
-    const cleanDomain = (newDomain || oldDomain).trim();
-    const svcPort = parseInt(port, 10) || 80;
-    const cert = obtainCert !== false;
-    const tlsDirective = cert ? '' : '\n    tls internal';
-    const healthMarker = cleanHealthPath ? `# proxypilot: healthpath=${cleanHealthPath}\n` : '';
-    const caddyConfig = `${healthMarker}${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
-    const newConfigPath = join(CADDY_SITES_DIR, cleanDomain);
-    await writeFile(newConfigPath, caddyConfig);
-
     let reloadWarning = null;
     try {
-      await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
-    } catch (reloadError) {
-      const detail = (reloadError.stderr || reloadError.stdout || reloadError.message || '').trim();
-      console.error('[LXC] Caddy reload failed:', detail);
-      reloadWarning = `Config saved but Caddy reload failed: ${detail || 'unknown error'}`;
+      await renderDomains({
+        db,
+        domains: cleanDomain === oldDomain ? [cleanDomain] : [cleanDomain, oldDomain],
+        ...caddyRenderDeps,
+      });
+    } catch (e) {
+      reloadWarning = `Route saved but Caddy was not updated: ${e?.message || e}`;
+      console.error('[LXC] render after legacy adopt failed:', e?.message || e);
     }
 
-    console.log(`[LXC] Updated service ${oldDomain} -> ${cleanDomain}:${svcPort} for container ${name}`);
+    console.log(`[LXC] Adopted service ${oldDomain} -> ${cleanDomain}:${svcPort} for container ${name}`);
     res.json({
       success: true,
-      service: { domain: cleanDomain, port: svcPort, obtainCert: cert, healthPath: cleanHealthPath, source: 'file' },
-      ...(reloadWarning && { warning: reloadWarning }),
+      service: { domain: cleanDomain, port: svcPort, obtainCert: cert, healthPath: cleanHealthPath, pathPrefix: '/', source: 'db' },
+      ...(reloadWarning
+        ? { warning: reloadWarning }
+        : upstreamSync.warning
+        ? { warning: upstreamSync.warning }
+        : {}),
     });
   } catch (error) {
     res.status(500).json({
@@ -2675,14 +2824,26 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
 
 // DELETE /containers/:name/services/:domain - Remove a service/domain mapping
 //
-// Phase 2c: the GET endpoint now merges legacy single-domain Caddy
-// files with rows from service_http_routes. The frontend tags each
-// entry with its source so the DELETE call can target the right
-// pipeline:
-//   - source='db' → ?routeId=<id>: drop the route row + regenerate
-//     the merged Caddyfile for the domain (or unlink it when the
-//     last sibling goes away).
-//   - source='file' (no routeId): unlink the per-domain Caddyfile.
+// Ownership is resolved from the DATABASE, never from the shape of the request.
+//
+// This endpoint used to pick its pipeline from the presence of a `?routeId=`
+// query param: with one it deleted the row and re-rendered; without one it
+// unlinked the site file and left the database alone. That made the client's
+// view of the world authoritative over what actually exists — and the client's
+// view was wrong, because the listing endpoint attributed site files to
+// containers by IP substring. A hostname belonging to another container was
+// therefore rendered as a file-only entry, and deleting it took the "unlink,
+// don't touch the DB" branch against a live, DB-backed route. Caddy lost the
+// site block (and with it the ability to complete a TLS handshake) while
+// list_routes still reported the route as present and healthy.
+//
+// Now: the domain is looked up first, and what comes back decides.
+//   - Rows owned by THIS container → delete them, re-render, validate, reload.
+//   - Rows owned by ANOTHER container → refuse, and name the real owner.
+//   - No rows at all → genuinely unmanaged file; unlink only when its upstream
+//     matches this container exactly.
+//
+// See docs/incidents/2026-09-04-route-config-drift.md.
 lxcRouter.delete('/containers/:name/services/:domain', async (req, res) => {
   const { name, domain } = req.params;
   const { routeId } = req.query;
@@ -2692,65 +2853,113 @@ lxcRouter.delete('/containers/:name/services/:domain', async (req, res) => {
   }
 
   try {
-    if (routeId) {
-      // Routes-table delete. The merged regenerator handles both the
-      // shrink case (siblings remain → rewrite file with the
-      // remaining handle blocks) and the empty case (last route on
-      // the domain → unlink the file).
-      const db = getDb();
-      const row = db
-        .prepare(
-          `SELECT r.id, r.domain
-             FROM service_http_routes r
-             JOIN services s ON s.id = r.service_id
-            WHERE r.id = ? AND s.lxc_container_name = ?`
-        )
-        .get(routeId, name);
-      if (!row) {
+    const db = getDb();
+
+    // Who actually owns this domain? Ask the database, not the caller.
+    const owners = db
+      .prepare(
+        `SELECT r.id AS route_id, r.domain, r.path_prefix,
+                s.lxc_container_name AS owner
+           FROM service_http_routes r
+           JOIN services s ON s.id = r.service_id
+          WHERE r.domain = ?`
+      )
+      .all(domain);
+
+    if (owners.length > 0) {
+      const foreign = owners.filter((o) => o.owner !== name);
+      if (foreign.length === owners.length) {
+        // Every row on this domain belongs elsewhere. This is the exact
+        // situation that caused the outage; refuse it and say why.
+        const ownerNames = [...new Set(foreign.map((o) => o.owner || 'an unnamed service'))];
+        return res.status(409).json({
+          success: false,
+          error:
+            `'${domain}' is not routed to '${name}'. It belongs to ` +
+            `${ownerNames.map((o) => `'${o}'`).join(', ')}. ` +
+            `Delete it from that container's page if you meant to remove it.`,
+          owned_by: ownerNames,
+        });
+      }
+
+      // Rows we own. A routeId narrows the delete to one route on the domain
+      // (the multi-path case); without one, every route this container has on
+      // the domain goes.
+      const mine = owners.filter((o) => o.owner === name);
+      const targets = routeId ? mine.filter((o) => o.route_id === routeId) : mine;
+      if (targets.length === 0) {
         return res.status(404).json({ success: false, error: 'Route not found.' });
       }
-      db.prepare(`DELETE FROM service_http_routes WHERE id = ?`).run(routeId);
-      try {
-        await regenerateDomainCaddyConfig(db, row.domain);
-      } catch (genErr) {
-        // If regenerate fails the row is already gone — the next
-        // reconcile will rebuild. Log and proceed.
-        console.warn('[LXC] regenerate after route delete failed:', genErr.message);
-      }
+
+      const del = db.prepare(`DELETE FROM service_http_routes WHERE id = ?`);
+      db.transaction((ids) => { for (const id of ids) del.run(id); })(targets.map((t) => t.route_id));
+
+      // Re-render → validate → reload as one unit. A delete must not be able to
+      // leave Caddy running a config nobody validated.
       let reloadWarning = null;
       try {
-        await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
-      } catch (reloadError) {
-        const detail = (reloadError.stderr || reloadError.stdout || reloadError.message || '').trim();
-        reloadWarning = `Route removed but Caddy reload failed: ${detail || 'unknown error'}`;
+        await renderDomains({ db, domains: [domain], ...caddyRenderDeps });
+      } catch (e) {
+        reloadWarning = `Route removed from ProxyPilot but Caddy was not updated: ${e?.message || e}`;
+        console.error('[LXC] render after route delete failed:', e?.message || e);
       }
+
+      console.log(`[LXC] Removed ${targets.length} route(s) for ${domain} on ${name}`);
       return res.json({
         success: true,
-        message: `Route ${row.domain} removed.`,
+        removed: targets.length,
+        message: `Route ${domain} removed.`,
         ...(reloadWarning && { warning: reloadWarning }),
       });
     }
 
-    // Legacy fast-path: domain-only delete unlinks the per-domain
-    // Caddyfile. Only valid when no routes-table sibling claims the
-    // same domain — that case should always go through the routeId
-    // path so we don't half-clear it.
+    // No DB rows anywhere — an unmanaged site file (hand-written, or left by a
+    // pre-routes-table install). Unlink it only if it actually dials this
+    // container: an exact upstream match, never a substring one.
     const configPath = join(CADDY_SITES_DIR, domain);
     if (!existsSync(configPath)) {
       return res.status(404).json({ success: false, error: `No Caddy config found for '${domain}'.` });
     }
+
+    let containerIp = null;
+    try {
+      const listResult = await execOnHost(
+        `incus list ${INSTANCE_PREFIX}${name} --format json 2>/dev/null`,
+        { timeout: 5000 },
+      );
+      const list = JSON.parse(listResult.stdout || '[]');
+      if (list[0]) containerIp = extractIPv4(list[0]);
+    } catch { /* tolerated — checked below */ }
+
+    const parsed = parseCaddySiteFile(await readFile(configPath, 'utf-8'));
+    const dialsThisContainer =
+      containerIp && parsed.upstreams.some((u) => sameHost(u.host, containerIp));
+    // A static-site block names no upstream; there is nothing to attribute, so
+    // it is not this container's to delete either.
+    if (!dialsThisContainer) {
+      const dialed = parsed.upstreams.map((u) => u.host).join(', ') || 'no upstream';
+      return res.status(409).json({
+        success: false,
+        error:
+          `'${domain}' does not point at '${name}'. Its Caddy config dials ${dialed}` +
+          `${containerIp ? `, and this container is ${containerIp}` : ''}. ` +
+          `Refusing to delete another host's config.`,
+      });
+    }
+
     await unlink(configPath);
 
     let reloadWarning = null;
     try {
-      await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
+      await caddyAdapt({});
+      await caddyReload({});
     } catch (reloadError) {
       const detail = (reloadError.stderr || reloadError.stdout || reloadError.message || '').trim();
       console.error('[LXC] Caddy reload failed:', detail);
       reloadWarning = `Config removed but Caddy reload failed: ${detail || 'unknown error'}`;
     }
 
-    console.log(`[LXC] Removed service ${domain} for container ${name}`);
+    console.log(`[LXC] Removed unmanaged service ${domain} for container ${name}`);
     res.json({
       success: true,
       message: `Service '${domain}' removed.`,
@@ -3571,10 +3780,43 @@ lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
            updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`
     );
+    // Collect the affected domains BEFORE the update: after it, these rows
+    // name the target container and we would no longer be able to tell which
+    // site files the move invalidated.
+    const movedDomains = new Set();
+    for (const r of rows) {
+      for (const d of domainsForService(db, r.id)) movedDomains.add(d);
+    }
+
     const tx = db.transaction((targetName, targetIpVal, ids) => {
       for (const id of ids) update.run(targetName, targetIpVal, id);
     });
     tx(toName, targetIp, rows.map((r) => r.id));
+
+    // Re-render every moved domain. This used to be missing entirely: the
+    // rows moved to the new container and its address, while every site file
+    // kept dialing the OLD container indefinitely — the same two-store
+    // divergence as the stale-upstream incident, just reached by a different
+    // door. Non-fatal: the transfer itself has committed, so a render failure
+    // is reported as a warning and left for the drift report to keep flagging.
+    let renderWarning = null;
+    try {
+      await renderDomains({
+        db,
+        domains: [...movedDomains],
+        ...caddyRenderDeps,
+      });
+      if (movedDomains.size) {
+        console.log(
+          `[LXC] transfer-routes ${name} -> ${toName}: re-rendered ${movedDomains.size} domain(s)`
+        );
+      }
+    } catch (e) {
+      renderWarning =
+        `Routes were transferred to ${toName} but Caddy could not be updated ` +
+        `(${e?.message || e}). The edge still points at ${name}.`;
+      console.error('[LXC] transfer-routes render failed:', e?.message || e);
+    }
 
     try {
       logAudit(req.user?.id || null, 'LXC_TRANSFER_ROUTES', 'lxc_container', name, {
@@ -3664,6 +3906,7 @@ lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
       message: `Moved ${rows.length} service${rows.length === 1 ? '' : 's'}` +
         ` (${totalRoutes} HTTP route${totalRoutes === 1 ? '' : 's'}, ${totalL4} L4 forward${totalL4 === 1 ? '' : 's'})` +
         ` from '${name}' to '${toName}'.${targetSkippedReason}`,
+      ...(renderWarning ? { warning: renderWarning } : {}),
     });
   } catch (err) {
     if (res.headersSent) return;
@@ -3815,29 +4058,88 @@ lxcRouter.delete('/containers/:name', requireSudo, async (req, res) => {
     // Delete container
     await execOnHost(`incus delete ${incusName} --force 2>&1`);
 
-    // Remove ALL associated Caddy configs if the container had an IP (supports multi-service)
+    // Tear down this container's routes across BOTH stores.
+    //
+    // This used to unlink every site file whose text contained the deleted
+    // container's IP as a substring, and never touch the database. Two
+    // separate failures came out of that:
+    //
+    //   - Other projects' hostnames were deleted. The match was unanchored, so
+    //     deleting the guest on 10.185.17.14 also unlinked the site file of the
+    //     guest on 10.185.17.145 — in the field, a production mail server.
+    //   - The DB rows always survived, leaving routes that list_routes reports
+    //     as healthy with no site block behind them.
+    //
+    // Ownership is by name now: rows carrying this container's
+    // lxc_container_name are deleted (service_http_routes cascades from
+    // services), and every domain they touched is re-rendered from what
+    // remains. A site file is only unlinked outright when NO row anywhere
+    // claims its domain and its upstream matches this container exactly.
+    let removedAny = false;
+    try {
+      const db = getDb();
+      const ownedDomains = db
+        .prepare(
+          `SELECT DISTINCT r.domain AS domain
+             FROM service_http_routes r
+             JOIN services s ON s.id = r.service_id
+            WHERE s.lxc_container_name = ?`
+        )
+        .all(name)
+        .map((r) => r.domain);
+
+      db.prepare(`DELETE FROM services WHERE lxc_container_name = ?`).run(name);
+
+      for (const domain of ownedDomains) {
+        try {
+          await regenerateDomainCaddyConfig(db, domain);
+          removedAny = true;
+        } catch (e) {
+          console.error(`[LXC] regenerate after container delete failed for ${domain}:`, e?.message || e);
+        }
+      }
+    } catch (e) {
+      console.error('[LXC] DB route cleanup on container delete failed:', e?.message || e);
+    }
+
     if (containerIp) {
       try {
-        const files = await readdir(CADDY_SITES_DIR);
-        let removedAny = false;
-        for (const file of files) {
-          const filePath = join(CADDY_SITES_DIR, file);
-          const content = await readFile(filePath, 'utf-8');
-          if (content.includes(containerIp)) {
-            await unlink(filePath);
-            console.log(`[LXC] Removed Caddy config: ${file} (contained IP ${containerIp})`);
-            removedAny = true;
-          }
+        let managedDomains = new Set();
+        try {
+          managedDomains = new Set(
+            getDb().prepare(`SELECT DISTINCT domain FROM service_http_routes`).all().map((r) => r.domain)
+          );
+        } catch (e) {
+          // Can't prove a file is unmanaged → don't unlink anything by address.
+          console.warn('[LXC] managed-domain lookup failed; skipping unmanaged sweep:', e?.message || e);
+          managedDomains = null;
         }
-        if (removedAny) {
-          try {
-            await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
-          } catch {
-            // Ignore reload errors
+        if (managedDomains) {
+          const files = await readdir(CADDY_SITES_DIR);
+          for (const file of files) {
+            const filePath = join(CADDY_SITES_DIR, file);
+            const content = await readFile(filePath, 'utf-8');
+            const parsed = parseCaddySiteFile(content);
+            if (!parsed.primaryDomain) continue;
+            // Still claimed by a route row — belongs to some other container.
+            if (parsed.domains.some((d) => managedDomains.has(d))) continue;
+            // Exact upstream match only. A prefix is a different host.
+            if (!parsed.upstreams.some((u) => sameHost(u.host, containerIp))) continue;
+            await unlink(filePath);
+            console.log(`[LXC] Removed unmanaged Caddy config: ${file} (dialed ${containerIp})`);
+            removedAny = true;
           }
         }
       } catch {
         // Ignore Caddy cleanup errors
+      }
+    }
+
+    if (removedAny) {
+      try {
+        await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
+      } catch {
+        // Ignore reload errors
       }
     }
 

@@ -48,7 +48,7 @@ export function shapeGitConnector(row) {
   return publicGitConnectorShape(row, { secretDecryptable: isGitSecretDecryptable(row) });
 }
 
-function decryptGitCredential(row) {
+export function decryptGitCredential(row) {
   if (!row?.credential_enc) return null;
   try { return decryptSecret(row.credential_enc); } catch { return null; }
 }
@@ -165,9 +165,15 @@ export function clearProjectRemote(projectId) {
 // (host.js), and the token/key is injected into the transport here. Records
 // last_push_at / last_push_error on the mock2_project_remotes row. Always
 // resolves — a push failure is a status column, never a cycle failure.
-export async function pushProjectRemote(project) {
+export async function pushProjectRemote(project, { force = false } = {}) {
   const remote = getProjectRemote(project.id);
-  if (!remote || !remote.push_on_checkpoint) return { ok: true, skipped: true };
+  if (!remote) return { ok: true, skipped: true, reason: 'no remote configured' };
+  // push_on_checkpoint gates the AUTOMATIC push after a build checkpoint. A
+  // manual "push now" (the route and the MCP tool) passes force so an operator
+  // can publish on demand without turning on push-on-every-checkpoint.
+  if (!remote.push_on_checkpoint && !force) {
+    return { ok: true, skipped: true, reason: 'push_on_checkpoint is off — pass force to push anyway' };
+  }
   const conn = getGitConnector(remote.git_connector_id);
   if (!conn) return recordPush(project.id, { ok: false, error: 'git connector missing' });
   const repoPath = project.repo_path;

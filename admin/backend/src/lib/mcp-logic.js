@@ -1899,6 +1899,96 @@ export const MCP_TOOLS = [
       additionalProperties: false,
     },
   },
+
+  // ---- Publishing to an external git host (Gitea / GitHub) ----
+  //
+  // Connectors are configured in the UI (Projects → Connectors), never here:
+  // creating one takes an access token, and a token that passes through an
+  // agent's context has been disclosed to everything that can read that
+  // context. These tools reference an existing connector by id and never
+  // return, accept or echo the credential.
+  {
+    name: 'list_git_connectors',
+    description: 'List the configured external git connectors (id, name, provider, base URL, last credential test verdict). Never returns the access token. Connectors are created and rotated in the UI under Projects → Connectors — deliberately not over this server, because a token that transits an agent context is a disclosed token. Use the id from here with the publish tools below.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'get_project_remote',
+    description: "Show the external git remote configured for one AI-dev project: which connector, which repository, whether it pushes automatically after each build checkpoint, and the last push's time or error. Read-only.",
+    inputSchema: {
+      type: 'object',
+      properties: { project_id: { type: 'number' } },
+      required: ['project_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_project_remote',
+    description: "Bind an AI-dev project to a repository on an external git host, so its bare repo can be pushed there. push_on_checkpoint makes every build checkpoint publish automatically; leave it off and publish on demand with push_project_to_git. Does not push — call push_project_to_git for that. Overwrites any existing binding for the project; get_project_remote first if you need to report what it replaces.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        connector_id: { type: 'number', description: 'From list_git_connectors.' },
+        remote_repo: { type: 'string', description: 'owner/name on the connector\'s host, or a full https:// URL.' },
+        push_on_checkpoint: { type: 'boolean', description: 'Push automatically after every build checkpoint. Default false.' },
+      },
+      required: ['project_id', 'connector_id', 'remote_repo'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'push_project_to_git',
+    description: "Push an AI-dev project's git history to its configured remote now, regardless of the push_on_checkpoint setting. The project's repo is already a real git repo, so this pushes its actual commit history — not a snapshot. Set the remote first with set_project_remote.",
+    inputSchema: {
+      type: 'object',
+      properties: { project_id: { type: 'number' } },
+      required: ['project_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'push_static_site_to_git',
+    description: "Publish a static site's docroot to a repository on an external git host as a commit. Unlike a project, a static site is not a git repo, so this snapshots its current files: the remote is cloned, its content replaced with the docroot, and the difference committed and pushed — history is preserved and a file deleted locally is deleted in the commit. Never force-pushes. Files that look like secrets or local state (.env, keys, node_modules, .git) are held back by default and every excluded path is listed in the result. ALWAYS call with dry_run: true first and show the user the file list and the exclusions before publishing for real.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        site_id: { type: 'string', description: 'From list_static_sites.' },
+        connector_id: { type: 'number', description: 'From list_git_connectors.' },
+        remote_repo: { type: 'string', description: 'owner/name on the connector\'s host, or a full https:// URL. Created private if it does not exist.' },
+        branch: { type: 'string', description: 'Default main.' },
+        subdir: { type: 'string', description: 'Publish into this path inside the repository instead of its root. Everything else in the repo is left untouched.' },
+        message: { type: 'string', description: 'Note folded into the commit subject.' },
+        exclude: { type: 'array', items: { type: 'string' }, description: 'Extra glob patterns to hold back, added to the defaults.' },
+        include_secrets: { type: 'boolean', description: 'Disable the default secret filter. Off by default; only ever pass true when the user has asked for it explicitly, having seen what a dry run says would be sent.' },
+        dry_run: { type: 'boolean', description: 'Report exactly what would be published and what would be held back, without contacting the remote.' },
+      },
+      required: ['site_id', 'connector_id', 'remote_repo'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'push_lxc_to_git',
+    description: "Publish an LXC guest's application directory to a repository on an external git host as a commit, with the same snapshot semantics as push_static_site_to_git. Scope defaults to the container's REGISTERED STARTUP WORKING DIRECTORY — the app directory ProxyPilot already tracks. Publishing any other path needs both `path` and `confirm_path: true`, because a container filesystem holds credentials, keys and system state that must never be pushed anywhere; check what is in a directory (list_lxc_files) before confirming one. The credential never enters the container: files are copied out first and the git work happens host-side. ALWAYS call with dry_run: true first and show the user the file list and the exclusions before publishing for real.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string', description: 'Container name from list_lxc_containers (without the pp- prefix).' },
+        connector_id: { type: 'number', description: 'From list_git_connectors.' },
+        remote_repo: { type: 'string', description: 'owner/name on the connector\'s host, or a full https:// URL. Created private if it does not exist.' },
+        path: { type: 'string', description: 'Absolute path inside the guest to publish instead of the registered startup working directory. Requires confirm_path.' },
+        confirm_path: { type: 'boolean', description: 'Required when `path` is set — an acknowledgement that the directory has been checked for credentials.' },
+        branch: { type: 'string', description: 'Default main.' },
+        subdir: { type: 'string', description: 'Publish into this path inside the repository instead of its root.' },
+        message: { type: 'string', description: 'Note folded into the commit subject.' },
+        exclude: { type: 'array', items: { type: 'string' }, description: 'Extra glob patterns to hold back, added to the defaults.' },
+        include_secrets: { type: 'boolean', description: 'Disable the default secret filter. Off by default; only ever pass true when the user has asked for it explicitly, having seen a dry run.' },
+        dry_run: { type: 'boolean', description: 'Report exactly what would be published and what would be held back, without contacting the remote.' },
+      },
+      required: ['container', 'connector_id', 'remote_repo'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 // A file path RELATIVE to a project's app root, as accepted by the project

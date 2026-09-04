@@ -2828,6 +2828,24 @@ export function createMock2Router() {
     res.json({ ok: true, cleared });
   });
 
+  // Push a project's bare repo to its configured remote NOW.
+  //
+  // pushProjectRemote's automatic path only fires after a build checkpoint and
+  // only when push_on_checkpoint is set, so a project with a remote configured
+  // but that flag off had no way to publish at all. This is that way: an
+  // explicit, audited, operator-initiated push.
+  router.post('/projects/:id/remote/push', requireAdmin, requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const remote = getProjectRemote(project.id);
+    if (!remote) return res.status(400).json({ error: 'This project has no git remote configured' });
+    const result = await pushProjectRemote(project, { force: true });
+    logAudit(req.user.id, 'MOCK2_PROJECT_REMOTE_PUSH', 'mock2_project', project.id, {
+      remote_repo: remote.remote_repo, ok: !!result.ok,
+    }, req.ip);
+    if (!result.ok) return res.status(502).json({ error: result.error || 'push failed' });
+    res.json({ ok: true, remote_repo: remote.remote_repo, ...result });
+  });
+
   // ---- Quick connect (VS Code / git over smart HTTP) ----
   // Mint/list/revoke the per-user connect tokens the /api/mock2/git router
   // authenticates with. The clone URL + a vscode:// deep link come back with a

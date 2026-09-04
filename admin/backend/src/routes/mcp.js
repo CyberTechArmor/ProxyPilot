@@ -82,6 +82,8 @@ import {
   STARTUP_UNIT_NAME,
 } from '../lib/lxc-zip.js';
 import { resolveMock2Gate } from '../mock2/gating.js';
+import { publishDirToGit, stageLxcDir, cleanupStagedDir } from '../lib/git-publish.js';
+import { validateRemoteRepo } from '../lib/git-publish-logic.js';
 import { ensureNetworkNat, findOrCreateLxcService, syncLxcServiceUpstream } from './lxc.js';
 import { regenerateDomainCaddyConfig, ensureCaddyStructure, assertRoutesShareSslStance, syncPrimaryRouteFromLegacy, caddyRenderDeps } from './services.js';
 import { applyServiceUpstream } from '../lib/route-render.js';
@@ -4202,6 +4204,203 @@ async function toolAppendChangeRecord(args, auth) {
   }, { isError: !chain.ok });
 }
 
+// ---- Publishing to an external git host --------------------------------
+//
+// Connectors themselves are NOT manageable here: creating or rotating one
+// takes an access token, and a token passed through an agent's context has
+// been disclosed to everything able to read that context. These tools name an
+// existing connector by id, and no code path below returns the credential.
+
+async function gitConnectorModule() {
+  return import('../mock2/git-connectors.js');
+}
+
+// Resolve a connector id to { connector, token }, or a toolResult error.
+async function resolveGitConnector(connectorId) {
+  const { getGitConnector, decryptGitCredential } = await gitConnectorModule();
+  const connector = getGitConnector(connectorId);
+  if (!connector) {
+    return { error: toolResult('No such git connector — list_git_connectors shows the configured ones', { isError: true }) };
+  }
+  if (connector.auth_kind !== 'token') {
+    return { error: toolResult(`Connector "${connector.name}" authenticates with ${connector.auth_kind}; publishing supports token connectors only`, { isError: true }) };
+  }
+  const token = decryptGitCredential(connector);
+  if (!token) {
+    return { error: toolResult(`The credential for "${connector.name}" cannot be decrypted — an operator needs to re-enter it in Projects → Connectors`, { isError: true }) };
+  }
+  return { connector, token };
+}
+
+async function toolListGitConnectors() {
+  try {
+    const { listGitConnectors, shapeGitConnector } = await gitConnectorModule();
+    const rows = listGitConnectors().map(shapeGitConnector);
+    if (!rows.length) {
+      return toolResult({
+        connectors: [],
+        note: 'No git connectors are configured. An operator adds one under Projects → Connectors — it needs the host URL and an access token, which is why it is not settable from here.',
+      });
+    }
+    return toolResult({ connectors: rows });
+  } catch (err) {
+    return toolResult(`Could not read git connectors: ${err?.message || err}`, { isError: true });
+  }
+}
+
+async function toolGetProjectRemote(args) {
+  const m = await mock2Modules();
+  const project = m.projects.getProject(Number(args.project_id));
+  if (!project) return toolResult('Project not found', { isError: true });
+  const { getProjectRemote, shapeProjectRemote } = await gitConnectorModule();
+  const remote = getProjectRemote(project.id);
+  if (!remote) {
+    return toolResult({ project_id: project.id, remote: null, note: 'No external remote is bound to this project — set_project_remote binds one.' });
+  }
+  return toolResult({ project_id: project.id, remote: shapeProjectRemote(remote) });
+}
+
+async function toolSetProjectRemote(args) {
+  const m = await mock2Modules();
+  const project = m.projects.getProject(Number(args.project_id));
+  if (!project) return toolResult('Project not found', { isError: true });
+  const repoErr = validateRemoteRepo(args.remote_repo);
+  if (repoErr) return toolResult(repoErr, { isError: true });
+  const resolved = await resolveGitConnector(args.connector_id);
+  if (resolved.error) return resolved.error;
+
+  const { setProjectRemote, shapeProjectRemote } = await gitConnectorModule();
+  const remote = setProjectRemote({
+    projectId: project.id,
+    gitConnectorId: resolved.connector.id,
+    remoteRepo: args.remote_repo,
+    pushOnCheckpoint: args.push_on_checkpoint ? 1 : 0,
+  });
+  logAudit(null, 'MOCK2_PROJECT_REMOTE_SET', 'mock2_project', project.id, {
+    via: 'mcp', connector: resolved.connector.name, remote_repo: args.remote_repo,
+    push_on_checkpoint: !!args.push_on_checkpoint,
+  }, null);
+  return toolResult({
+    project_id: project.id,
+    remote: shapeProjectRemote(remote),
+    next: 'push_project_to_git publishes the project now.',
+  });
+}
+
+async function toolPushProjectToGit(args) {
+  const m = await mock2Modules();
+  const project = m.projects.getProject(Number(args.project_id));
+  if (!project) return toolResult('Project not found', { isError: true });
+  const { getProjectRemote, pushProjectRemote } = await gitConnectorModule();
+  const remote = getProjectRemote(project.id);
+  if (!remote) {
+    return toolResult('This project has no external git remote — bind one with set_project_remote first', { isError: true });
+  }
+  const result = await pushProjectRemote(project, { force: true });
+  logAudit(null, 'MOCK2_PROJECT_REMOTE_PUSH', 'mock2_project', project.id, {
+    via: 'mcp', remote_repo: remote.remote_repo, ok: !!result.ok,
+  }, null);
+  if (!result.ok) return toolResult(`Push failed: ${result.error || 'unknown error'}`, { isError: true });
+  return toolResult({ pushed: true, project_id: project.id, remote_repo: remote.remote_repo });
+}
+
+// Shared body for the two snapshot publishers.
+async function publishSnapshot({ args, sourceDir, label, audit }) {
+  const resolved = await resolveGitConnector(args.connector_id);
+  if (resolved.error) return resolved.error;
+  const result = await publishDirToGit({
+    sourceDir,
+    connector: resolved.connector,
+    token: resolved.token,
+    remoteRepo: args.remote_repo,
+    branch: args.branch || 'main',
+    subdir: args.subdir || '',
+    message: args.message || '',
+    sourceLabel: label,
+    extraExcludes: Array.isArray(args.exclude) ? args.exclude : [],
+    includeSecrets: !!args.include_secrets,
+    dryRun: !!args.dry_run,
+  });
+  if (!args.dry_run) {
+    logAudit(null, audit.action, audit.type, audit.id, {
+      via: 'mcp', connector: resolved.connector.name, remote_repo: args.remote_repo,
+      branch: args.branch || 'main', ok: !!result.ok, files: result.file_count ?? null,
+      include_secrets: !!args.include_secrets,
+    }, null);
+  }
+  if (!result.ok) return toolResult(result.error || 'Publish failed', { isError: true });
+  return toolResult({
+    ...result,
+    ...(result.dry_run
+      ? { next: 'Show the user the file list and the exclusions, then call again without dry_run to publish.' }
+      : {}),
+  });
+}
+
+async function toolPushStaticSiteToGit(args) {
+  const site = getStaticSite(args.site_id);
+  if (!site) return toolResult('Static site not found — list_static_sites shows valid ids', { isError: true });
+  if (!site.data_dir) return toolResult(`"${site.name}" has no docroot on disk to publish`, { isError: true });
+  return publishSnapshot({
+    args,
+    sourceDir: site.data_dir,
+    label: `static site "${site.name}"`,
+    audit: { action: 'GIT_PUBLISH_STATIC_SITE', type: 'service', id: site.id },
+  });
+}
+
+async function toolPushLxcToGit(args) {
+  const name = String(args.container || '');
+  if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name', { isError: true });
+  const incusName = `${LXC_PREFIX}${name}`;
+
+  // Default scope is the registered startup working directory. Anything else
+  // is an explicit, acknowledged choice — a container filesystem holds
+  // credentials and system state, and a publish is a one-way egress.
+  let sourcePath = null;
+  const requested = typeof args.path === 'string' ? args.path.trim() : '';
+  if (requested) {
+    if (args.confirm_path !== true) {
+      return toolResult(
+        'Publishing a path other than the container\'s registered startup working directory requires ' +
+        'confirm_path: true. Inspect the directory first (list_lxc_files) and show the user what is in it — ' +
+        'container filesystems hold credentials and system state.',
+        { isError: true },
+      );
+    }
+    if (!requested.startsWith('/') || requested.includes('..')) {
+      return toolResult('path must be absolute and may not contain ".."', { isError: true });
+    }
+    sourcePath = requested;
+  } else {
+    const startup = await readContainerStartup(incusName).catch(() => null);
+    if (!startup?.workingDir) {
+      return toolResult(
+        `No startup working directory is registered for "${name}", so there is no default application ` +
+        `directory to publish. Either register one (apply_lxc_zip with a startup_script) or pass an ` +
+        `explicit path with confirm_path: true.`,
+        { isError: true },
+      );
+    }
+    sourcePath = startup.workingDir;
+  }
+
+  let staged = null;
+  try {
+    const stage = await stageLxcDir(incusName, sourcePath);
+    if (!stage.ok) return toolResult(stage.error, { isError: true });
+    staged = stage.dir;
+    return await publishSnapshot({
+      args,
+      sourceDir: staged,
+      label: `LXC ${name}:${sourcePath}`,
+      audit: { action: 'GIT_PUBLISH_LXC', type: 'lxc_container', id: name },
+    });
+  } finally {
+    if (staged) await cleanupStagedDir(staged);
+  }
+}
+
 const TOOL_HANDLERS = {
   list_static_sites: (args, auth, req) => toolListStaticSites(args, auth, req),
   create_upload_ticket: (_args, _auth, req) => toolCreateUploadTicket(req),
@@ -4248,6 +4447,12 @@ const TOOL_HANDLERS = {
   upload_project_reference: toolUploadProjectReference,
   create_project: toolCreateProject,
   clone_project: toolCloneProject,
+  list_git_connectors: toolListGitConnectors,
+  get_project_remote: toolGetProjectRemote,
+  set_project_remote: toolSetProjectRemote,
+  push_project_to_git: toolPushProjectToGit,
+  push_static_site_to_git: toolPushStaticSiteToGit,
+  push_lxc_to_git: toolPushLxcToGit,
   interrupt_project_build: toolInterruptProjectBuild,
   cancel_queued_build: toolCancelQueuedBuild,
   list_project_files: toolListProjectFiles,

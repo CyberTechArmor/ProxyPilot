@@ -26,6 +26,7 @@ import { domainsRouter } from './routes/domains.js';
 import { createMcpRouter, createMcpAdminRouter } from './routes/mcp.js';
 import { createEditorMcpRouter, createEditorAdminRouter } from './routes/mcp-editor.js';
 import { tlsCertsRouter } from './routes/tls-certs.js';
+import { gitPublishRouter } from './routes/git-publish.js';
 import { brandingRouter } from './routes/branding.js';
 import { createLeanBeafRouter } from './routes/lean-beaf.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
@@ -491,6 +492,7 @@ app.use('/api/ldap', authenticateToken, ldapRouter);
 // cookie-session middleware themselves.
 app.use('/api/domains', domainsRouter);
 app.use('/api/tls-certs', tlsCertsRouter);
+app.use('/api/git-publish', authenticateToken, blockPendingRole, gitPublishRouter);
 // Remote MCP server (Model Context Protocol): NOT behind authenticateToken —
 // it authenticates with its own bearer tokens per-request (Claude clients
 // have no session cookie). Token management IS cookie-session + admin.

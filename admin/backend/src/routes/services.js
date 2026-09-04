@@ -22,6 +22,7 @@ import { decryptSecret } from '../lib/secrets.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
+import { checkRouteDrift } from '../lib/route-drift.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { detectServicePorts } from '../lib/port-detector.js';
@@ -5502,6 +5503,59 @@ servicesRouter.post('/system/secure', async (req, res) => {
     }
     console.error('Error securing system:', error);
     res.status(500).json({ error: 'Failed to secure system' });
+  }
+});
+
+// ==================== ROUTE DRIFT ====================
+//
+// Does the running edge match declared intent? Compares the route table
+// against both the on-disk site files and Caddy's running config, and resolves
+// every upstream back to the guest that actually holds the address.
+//
+// Reporting only — it never rewrites anything. Repair stays the explicit
+// POST /services/caddy/regenerate-all. This mirrors the cert-mount
+// reconciler's stated position that operator edits beat ProxyPilot intent, and
+// keeps a diagnostic from becoming yet another writer.
+//
+// See docs/incidents/2026-09-04-route-config-drift.md.
+
+// Every managed guest as { name, ip }, with the `pp-` instance prefix stripped
+// so names line up with services.lxc_container_name. Only host-reachable
+// bridge addresses count: a Docker/CNI address inside a guest is not something
+// Caddy could ever dial, so including it would invent cross-tenant reports.
+export async function listManagedGuests() {
+  try {
+    const r = await execOnHost('incus list --format json 2>/dev/null', { timeout: 5000 });
+    const containers = JSON.parse(r.stdout || '[]');
+    const out = [];
+    for (const c of containers) {
+      const networks = (c.state && c.state.network) || {};
+      for (const [iface, net] of Object.entries(networks)) {
+        if (iface === 'lo' || !net || !Array.isArray(net.addresses)) continue;
+        if (/^(docker\d+|docker_gwbridge|br-[0-9a-f]+|veth.*|cni\d*)$/.test(iface)) continue;
+        for (const addr of net.addresses) {
+          if (addr && addr.family === 'inet' && addr.scope === 'global' && addr.address) {
+            out.push({ name: String(c.name || '').replace(/^pp-/, ''), ip: addr.address });
+          }
+        }
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+servicesRouter.get('/route-drift', async (req, res) => {
+  try {
+    const report = await checkRouteDrift({
+      db: getDb(),
+      listGuests: listManagedGuests,
+    });
+    res.json(report);
+  } catch (error) {
+    console.error('Route drift check failed:', error);
+    res.status(500).json({ error: `Drift check failed: ${error?.message || error}` });
   }
 });
 

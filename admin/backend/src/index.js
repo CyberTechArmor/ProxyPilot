@@ -778,6 +778,53 @@ server.listen(PORT, '0.0.0.0', () => {
     } catch (err) {
       console.error('[cert-mount] boot reconcile failed:', err.message || err);
     }
+    // Route-drift sweep. Reports only — it never rewrites config.
+    //
+    // Two caches sit downstream of the route table (the per-domain site files,
+    // and Caddy's running config) and nothing used to compare either against
+    // it. A stale upstream is still syntactically valid, so drift was
+    // invisible until a request happened to fail — and when the address it had
+    // drifted onto belonged to another guest that DID listen on the port, it
+    // never failed at all, it just served the wrong tenant's app under the
+    // right certificate.
+    //
+    // Cross-tenant findings notify at error level; plain drift at warning.
+    // Repair stays operator-initiated, matching the cert-mount reconciler's
+    // position that operator edits beat ProxyPilot intent at boot.
+    //
+    // See docs/incidents/2026-09-04-route-config-drift.md.
+    try {
+      const { checkRouteDrift, driftNotifications } = await import('./lib/route-drift.js');
+      const { listManagedGuests } = await import('./routes/services.js');
+      const report = await checkRouteDrift({ db: getDb(), listGuests: listManagedGuests });
+      if (report.clean) {
+        console.log(`[route-drift] clean — ${report.checked} route(s) match declared intent`);
+      } else {
+        const s = report.summary;
+        console.warn(
+          `[route-drift] ${report.checked} route(s) checked — drift=${s.drift}, ` +
+          `missing=${s.missing_in_caddy}, unmanaged=${s.unmanaged_in_caddy}, ` +
+          `cross-tenant=${report.cross_tenant.length}` +
+          (report.caddy_admin_reachable ? '' : ' (Caddy admin API unreachable; compared against site files only)')
+        );
+        for (const d of report.domains) {
+          if (d.status === 'match') continue;
+          console.warn(`[route-drift]   ${d.domain}: ${d.status} — ${(d.differences || []).join('; ')}`);
+        }
+        for (const x of report.cross_tenant) {
+          console.error(`[route-drift]   CROSS-TENANT ${x.detail}`);
+        }
+        try {
+          const { postNotification } = await import('./lib/notifications.js');
+          for (const n of driftNotifications(report)) postNotification(n);
+        } catch (err) {
+          console.error('[route-drift] could not post notifications:', err?.message || err);
+        }
+      }
+    } catch (err) {
+      console.error('[route-drift] boot sweep failed:', err?.message || err);
+    }
+
     try {
       // Hydrate the backup-schedule cron worker.  Each enabled
       // row in backup_schedules registers a node-cron task; the

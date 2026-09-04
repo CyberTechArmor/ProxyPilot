@@ -22,6 +22,8 @@ import { decryptSecret } from '../lib/secrets.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
+import { checkRouteDrift } from '../lib/route-drift.js';
+import { parseCaddySiteFile } from '../lib/caddy-site-file.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { detectServicePorts } from '../lib/port-detector.js';
@@ -303,9 +305,12 @@ async function detectLxcManagedSiteFile(configPath, lxcIps) {
   if (!existsSync(configPath)) return null;
   try {
     const content = await readFile(configPath, 'utf-8');
-    const m = content.match(/reverse_proxy\s+([\d.]+):\d+/);
-    if (!m) return null;
-    return lxcIps.has(m[1]) ? m[1] : null;
+    // Every upstream, not just the first: a merged multi-route file can name
+    // several, and checking only one would miss the LXC-managed case whenever
+    // the LXC's own route did not happen to sort first.
+    const parsed = parseCaddySiteFile(content);
+    const hit = parsed.upstreams.find((u) => lxcIps.has(u.host));
+    return hit ? hit.host : null;
   } catch {
     return null;
   }
@@ -5505,6 +5510,65 @@ servicesRouter.post('/system/secure', async (req, res) => {
   }
 });
 
+// ==================== ROUTE DRIFT ====================
+//
+// Does the running edge match declared intent? Compares the route table
+// against both the on-disk site files and Caddy's running config, and resolves
+// every upstream back to the guest that actually holds the address.
+//
+// Reporting only — it never rewrites anything. Repair stays the explicit
+// POST /services/caddy/regenerate-all. This mirrors the cert-mount
+// reconciler's stated position that operator edits beat ProxyPilot intent, and
+// keeps a diagnostic from becoming yet another writer.
+//
+// See docs/incidents/2026-09-04-route-config-drift.md.
+
+// Every managed guest as { name, ip }, with the `pp-` instance prefix stripped
+// so names line up with services.lxc_container_name. Only host-reachable
+// bridge addresses count: a Docker/CNI address inside a guest is not something
+// Caddy could ever dial, so including it would invent cross-tenant reports.
+export async function listManagedGuests() {
+  try {
+    const r = await execOnHost('incus list --format json 2>/dev/null', { timeout: 5000 });
+    const containers = JSON.parse(r.stdout || '[]');
+    const out = [];
+    for (const c of containers) {
+      const networks = (c.state && c.state.network) || {};
+      // A pinned eth0 ipv4.address is Incus's static DHCP reservation — the
+      // thing that stops a lease renewal from moving a guest out from under
+      // its routes. Reported so the drift check can name the routes that are
+      // still exposed to exactly the failure that caused the incident.
+      const devices = c.expanded_devices || c.devices || {};
+      const reserved = !!(devices.eth0 && devices.eth0['ipv4.address']);
+      for (const [iface, net] of Object.entries(networks)) {
+        if (iface === 'lo' || !net || !Array.isArray(net.addresses)) continue;
+        if (/^(docker\d+|docker_gwbridge|br-[0-9a-f]+|veth.*|cni\d*)$/.test(iface)) continue;
+        for (const addr of net.addresses) {
+          if (addr && addr.family === 'inet' && addr.scope === 'global' && addr.address) {
+            out.push({ name: String(c.name || '').replace(/^pp-/, ''), ip: addr.address, reserved });
+          }
+        }
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+servicesRouter.get('/route-drift', async (req, res) => {
+  try {
+    const report = await checkRouteDrift({
+      db: getDb(),
+      listGuests: listManagedGuests,
+    });
+    res.json(report);
+  } catch (error) {
+    console.error('Route drift check failed:', error);
+    res.status(500).json({ error: `Drift check failed: ${error?.message || error}` });
+  }
+});
+
 // ==================== DISCOVER EXISTING SITES ====================
 
 // Discover existing Caddy sites from sites directory
@@ -6254,6 +6318,15 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null) {
         s.frameAncestors !== undefined
           ? s.frameAncestors
           : s.frame_ancestors ?? null,
+      // Health path is metadata, not a Caddy directive: it rides along as a
+      // `# proxypilot:` marker comment so the LXC page can probe the upstream's
+      // health endpoint. It used to live ONLY in the hand-written legacy site
+      // files, which is what kept those writers alive; sourcing it from the
+      // route row is what lets them be retired.
+      healthPath:
+        s.healthPath !== undefined && s.healthPath !== null
+          ? s.healthPath
+          : s.health_path ?? null,
     };
   });
 
@@ -6326,7 +6399,18 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null) {
   // the comment stays informative once legacy `type` is gone (D.14).
   const entryLabel = (s) => s.kind || s.type || 'unknown';
 
+  // The health-path marker must precede the site address line: the LXC page's
+  // parser reads it as file-level metadata, and it is a comment either way so
+  // Caddy ignores it. Take the root route's value — health is a per-upstream
+  // property and the root route is the one the page probes.
+  const healthEntry =
+    normalized.find((s) => s.pathPrefix === '/' && s.healthPath) ||
+    normalized.find((s) => s.healthPath);
+
   const lines = [];
+  if (healthEntry?.healthPath) {
+    lines.push(`# proxypilot: healthpath=${healthEntry.healthPath}`);
+  }
   lines.push(`# ProxyPilot Managed Configuration`);
   lines.push(`# Domain: ${domain}`);
   lines.push(
@@ -6476,6 +6560,7 @@ async function regenerateDomainCaddyConfig(db, domain) {
               r.host_header_override,
               r.allow_framing,
               r.frame_ancestors,
+              r.health_path,
               s.name         AS name,
               s.kind         AS kind,
               s.runtime      AS runtime,
@@ -7533,4 +7618,20 @@ function rowToMountResponse(row, outcome) {
 // this module at the call-site level but exported so integration tests and
 // the Phase 2 verification pass can invoke them directly without spinning
 // up the full HTTP router.
+// The dependency bundle lib/route-render.js needs to render, validate and
+// reload Caddy. Exported as one object so every caller — services.js, lxc.js,
+// the MCP set_route tool — drives the same code path with the same validation
+// and the same rollback, rather than each assembling its own.
+//
+// See docs/incidents/2026-09-04-route-config-drift.md for why a second write
+// path is a bug rather than a convenience.
+export const caddyRenderDeps = {
+  regenerate: regenerateDomainCaddyConfig,
+  adapt: () => caddyAdapt({ configPath: CADDY_CONFIG_FILE }),
+  reload: () => caddyReload({ configPath: CADDY_CONFIG_FILE }),
+  caddyFilePath,
+  writeConfig: writeCaddyConfig,
+  removeConfig: (path) => unlink(path).catch(() => {}),
+};
+
 export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody, syncPrimaryRouteFromLegacy, ensureCaddyStructure };

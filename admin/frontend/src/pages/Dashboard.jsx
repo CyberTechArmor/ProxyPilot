@@ -71,6 +71,8 @@ import {
   Edit3,
   ShieldAlert,
   ShieldCheck,
+  AlertTriangle,
+  Info,
   RefreshCcw,
   Terminal,
   Play,
@@ -175,6 +177,9 @@ export default function Dashboard() {
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
 
   const [services, setServices] = useState([]);
+  // Route drift: the route table vs. what the edge is actually serving.
+  // Reporting only — the banner points at the existing "Regenerate All" action.
+  const [routeDrift, setRouteDrift] = useState(null);
   const [loading, setLoading] = useState(true);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -708,6 +713,15 @@ export default function Dashboard() {
     }
   };
 
+  const fetchRouteDrift = async () => {
+    try {
+      setRouteDrift(await api.getRouteDrift());
+    } catch (error) {
+      // Advisory: a failed drift check must never block the services list.
+      console.error('Failed to fetch route drift:', error);
+    }
+  };
+
   const fetchComposeServices = async () => {
     try {
       const { services: compose } = await api.getDockerComposeServices();
@@ -720,6 +734,7 @@ export default function Dashboard() {
   useEffect(() => {
     fetchServices();
     fetchComposeServices();
+    fetchRouteDrift();
   }, []);
 
   // Fetch system stats for resource utilization
@@ -3704,6 +3719,98 @@ volumes:
 
   return (
     <div className="space-y-6">
+      {/* Route drift banner. Cross-tenant findings are their own, louder block:
+          a hostname served from another project's guest is a containment
+          problem, not a availability one, and must not be mixed in with
+          ordinary staleness. */}
+      {routeDrift && (!routeDrift.clean || routeDrift.unreserved?.length > 0) && (
+        <div className="space-y-3">
+          {routeDrift.cross_tenant?.length > 0 && (
+            <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 font-semibold text-red-400">
+                    <ShieldAlert className="h-4 w-4 shrink-0" />
+                    <span>
+                      {routeDrift.cross_tenant.length} route
+                      {routeDrift.cross_tenant.length === 1 ? '' : 's'} served from another container
+                    </span>
+                  </div>
+                  <ul className="mt-2 space-y-1 text-sm text-muted-foreground">
+                    {routeDrift.cross_tenant.map((x) => (
+                      <li key={x.domain} className="break-words">
+                        <span className="font-mono">{x.domain}</span> is declared against{' '}
+                        <span className="font-mono">{x.declared_container}</span> but the edge dials{' '}
+                        <span className="font-mono">{x.upstream}</span>, which belongs to{' '}
+                        <span className="font-mono">{x.serving_container}</span>.
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <Button
+                  variant="outline"
+                  className="min-h-[44px] shrink-0"
+                  onClick={handleRegenerateAllConfigs}
+                  disabled={regeneratingAll}
+                >
+                  {regeneratingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Regenerate configs'}
+                </Button>
+              </div>
+            </div>
+          )}
+          {(routeDrift.summary?.drift > 0 || routeDrift.summary?.missing_in_caddy > 0) && (
+            <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 font-semibold text-yellow-500">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span>Caddy does not match the route table</span>
+                  </div>
+                  <ul className="mt-2 space-y-1 text-sm text-muted-foreground">
+                    {routeDrift.domains
+                      .filter((d) => d.status === 'drift' || d.status === 'missing_in_caddy')
+                      .map((d) => (
+                        <li key={d.domain} className="break-words">
+                          <span className="font-mono">{d.domain}</span> — {(d.differences || []).join('; ')}
+                        </li>
+                      ))}
+                  </ul>
+                  {!routeDrift.caddy_admin_reachable && (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Caddy's admin API was unreachable; compared against the site files only.
+                    </p>
+                  )}
+                </div>
+                <Button
+                  variant="outline"
+                  className="min-h-[44px] shrink-0"
+                  onClick={handleRegenerateAllConfigs}
+                  disabled={regeneratingAll}
+                >
+                  {regeneratingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Regenerate configs'}
+                </Button>
+              </div>
+            </div>
+          )}
+          {routeDrift.unreserved?.length > 0 && (
+            <div className="rounded-lg border border-border bg-muted/40 p-4">
+              <div className="flex items-start gap-2 text-sm">
+                <Info className="h-4 w-4 shrink-0 mt-0.5 text-muted-foreground" />
+                <p className="text-muted-foreground break-words">
+                  {routeDrift.unreserved.length} route
+                  {routeDrift.unreserved.length === 1 ? '' : 's'} point at a container with no
+                  static address reservation, so a DHCP lease renewal can move it:{' '}
+                  <span className="font-mono">
+                    {[...new Set(routeDrift.unreserved.map((u) => u.container))].join(', ')}
+                  </span>
+                  . Pin the address on the container's network settings to remove the risk.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>

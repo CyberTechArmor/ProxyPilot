@@ -234,6 +234,10 @@ export const api = {
   // `checkSslStatus(domain)` (a fire-and-forget GET, no cache). Nothing in
   // this client keys any cache on domain.
   getServices: () => request('/services'),
+  // Drift report: route table vs. the on-disk site files vs. Caddy's running
+  // config, plus any route whose upstream resolves to a different guest than
+  // the route names. Read-only — repair is regenerateAllCaddyConfigs().
+  getRouteDrift: () => request('/services/route-drift'),
 
   getService: (id) => request(`/services/${id}`),
 

@@ -848,6 +848,32 @@ export function initDatabase() {
     }
   });
 
+  // Version 106: health_path on service_http_routes.
+  //
+  // The operator-supplied health path used to live ONLY in a
+  // `# proxypilot: healthpath=/x` marker comment at the top of the legacy
+  // single-domain Caddy site files that routes/lxc.js hand-wrote. That made it
+  // unrepresentable in the routes table, which is why the legacy writer could
+  // not simply be retired: doing so would have silently dropped the feature.
+  //
+  // With the column in place the merged renderer emits the same marker from DB
+  // state, the file stops being the system of record for anything, and Caddy
+  // config becomes a pure function of the route table. Backfilled from the
+  // on-disk markers at boot by lib/route-drift.js — there is no DB source to
+  // backfill from here, so existing rows start NULL and adopt their marker the
+  // first time the domain is migrated into the routes table.
+  //
+  // See docs/incidents/2026-09-04-route-config-drift.md.
+  runMigration(db, 106, 'route_health_path', (d) => {
+    const cols = d
+      .prepare(`PRAGMA table_info(service_http_routes)`)
+      .all()
+      .map((c) => c.name);
+    if (!cols.includes('health_path')) {
+      d.exec(`ALTER TABLE service_http_routes ADD COLUMN health_path TEXT`);
+    }
+  });
+
   // CVE pins — per-operator "starred" flags for inbox entries the
   // operator wants to come back to. Lives in the dashboard DB
   // rather than the YAML so:

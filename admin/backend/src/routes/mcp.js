@@ -82,8 +82,9 @@ import {
   STARTUP_UNIT_NAME,
 } from '../lib/lxc-zip.js';
 import { resolveMock2Gate } from '../mock2/gating.js';
-import { ensureNetworkNat, findOrCreateLxcService } from './lxc.js';
-import { regenerateDomainCaddyConfig, ensureCaddyStructure, assertRoutesShareSslStance, syncPrimaryRouteFromLegacy } from './services.js';
+import { ensureNetworkNat, findOrCreateLxcService, syncLxcServiceUpstream } from './lxc.js';
+import { regenerateDomainCaddyConfig, ensureCaddyStructure, assertRoutesShareSslStance, syncPrimaryRouteFromLegacy, caddyRenderDeps } from './services.js';
+import { applyServiceUpstream } from '../lib/route-render.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { resolveCertDir } from '../lib/caddy-cert.js';
@@ -2256,10 +2257,19 @@ async function toolSetRoute(args, auth) {
   }
 
   // Service row: per-container when a container was named, else keyed by IP.
+  //
+  // A service row owns every route on its container, so moving its address
+  // moves ALL of them. Both branches below therefore re-render every domain
+  // the row already serves before this call adds one more — previously they
+  // updated target_ip in place and re-rendered only `domain`, silently
+  // stranding the row's other hostnames on the old address.
   let service;
+  let upstreamSyncWarning = null;
   try {
     if (containerName) {
       service = findOrCreateLxcService(db, containerName, ip);
+      const sync = await syncLxcServiceUpstream(db, service, ip);
+      upstreamSyncWarning = sync.warning;
     } else {
       service = db.prepare(`SELECT * FROM services WHERE target_ip = ? AND lxc_container_name IS NULL AND is_admin = 0 LIMIT 1`).get(ip);
       if (!service) {
@@ -2268,7 +2278,8 @@ async function toolSetRoute(args, auth) {
                     VALUES (?, ?, 'container_service', NULL, ?, 'docker', 'active')`).run(id, domain, ip);
         service = db.prepare(`SELECT * FROM services WHERE id = ?`).get(id);
       } else if (service.target_ip !== ip) {
-        db.prepare(`UPDATE services SET target_ip = ? WHERE id = ?`).run(ip, service.id);
+        await applyServiceUpstream({ db, serviceId: service.id, ip, render: caddyRenderDeps });
+        service.target_ip = ip;
       }
     }
   } catch (err) {
@@ -2334,6 +2345,7 @@ async function toolSetRoute(args, auth) {
     ...(previous ? { previous_binding: previous, note: 'Reversible: call set_route again with previous_binding to restore it.' } : {}),
     ...(containerName ? { hint: `Upstream resolved from container ${containerName} (currently ${ip}${upstreamIface ? ` on ${upstreamIface}` : ''}). Pin that address with set_lxc_network so a lease renewal cannot break this route.` } : {}),
     ...(routeWarning ? { warning: routeWarning } : {}),
+    ...(upstreamSyncWarning ? { upstream_sync_warning: upstreamSyncWarning } : {}),
     next: 'Verify end-to-end with test_route.',
   });
 }

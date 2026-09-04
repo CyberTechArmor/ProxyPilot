@@ -1,0 +1,40 @@
+{
+  "captured_at": "2026-09-04",
+  "captured_by": "list_routes + list_lxc_containers via ProxyPilot MCP (read-only)",
+  "purpose": "Pre-change baseline. Every hostname here must still serve after any fix.",
+  "route_count": 14,
+  "routes": [
+    { "domain": "Freshcut.fractionate.ai", "path_prefix": "/", "upstream": { "type": "static_site", "site_id": "4d10bffc-eb9d-4b29-846e-bece2b510860", "name": "FreshCut", "docroot": "/data/services/freshcut" } },
+    { "domain": "docview.fractionate.ai", "path_prefix": "/", "upstream": { "type": "container", "container": "docview", "ip": "10.185.17.190", "port": 8080 } },
+    { "domain": "git.fractionate.ai", "path_prefix": "/", "upstream": { "type": "container", "container": "mock2", "ip": "10.185.17.224", "port": 3000 } },
+    { "domain": "mail.techmations.com", "path_prefix": "/", "upstream": { "type": "container", "container": null, "ip": "10.185.17.145", "port": 80 }, "do_not_touch": true },
+    { "domain": "meet.fractionate.ai", "path_prefix": "/livekit", "upstream": { "type": "container", "container": "MEET", "ip": "10.185.17.131", "port": 7880 } },
+    { "domain": "meet.fractionate.ai", "path_prefix": "/api", "upstream": { "type": "container", "container": "MEET", "ip": "10.185.17.131", "port": 8080 } },
+    { "domain": "meet.fractionate.ai", "path_prefix": "/ws", "upstream": { "type": "container", "container": "MEET", "ip": "10.185.17.131", "port": 8080 } },
+    { "domain": "meet.fractionate.ai", "path_prefix": "/", "upstream": { "type": "container", "container": "MEET", "ip": "10.185.17.131", "port": 3000 } },
+    { "domain": "mock2.fractionate.ai", "path_prefix": "/", "upstream": { "type": "container", "container": "mock2", "ip": "10.185.17.224", "port": 80 } },
+    { "domain": "privacy-policy.recapshare.com", "path_prefix": "/", "upstream": { "type": "static_site", "site_id": "189395d6-c8b1-4202-8b29-dfc51373b45f", "name": "RecapShare Privacy Policy", "docroot": "/data/services/recapshare-privacy-policy" } },
+    { "domain": "rd.fractionate.ai", "path_prefix": "/", "upstream": { "type": "container", "container": null, "ip": "10.185.17.14", "port": 8080 } },
+    { "domain": "scan.fractionate.ai", "path_prefix": "/", "upstream": { "type": "static_site", "site_id": "cb0ce6a7-967e-4bc9-b29f-cf18c238da7e", "name": "scan", "docroot": "/data/services/scan" } },
+    { "domain": "starter.fractionate.ai", "path_prefix": "/", "upstream": { "type": "container", "container": "cpr-starter", "ip": "10.185.17.170", "port": 3000 } },
+    { "domain": "unlimited.lighting", "path_prefix": "/", "upstream": { "type": "container", "container": "unlimited-lighting", "ip": "10.185.17.22", "port": 80 }, "do_not_touch": true }
+  ],
+  "guests": [
+    { "name": "MEET", "ip": "10.185.17.131" },
+    { "name": "Postgres", "ip": "10.185.17.248" },
+    { "name": "RustDesk", "ip": "10.185.17.14" },
+    { "name": "Web", "ip": "10.185.17.236" },
+    { "name": "cpr-starter", "ip": "10.185.17.170" },
+    { "name": "docview", "ip": "10.185.17.190" },
+    { "name": "mailcow", "ip": "10.185.17.145" },
+    { "name": "mock2", "ip": "10.185.17.224" },
+    { "name": "n8n", "ip": "10.185.17.249" },
+    { "name": "outreach-v2", "ip": "10.185.17.237" },
+    { "name": "unlimited-lighting", "ip": "10.185.17.22" },
+    { "name": "verdaccio", "ip": "10.185.17.239" }
+  ],
+  "known_prefix_collisions": [
+    { "shorter": "10.185.17.22", "longer": "10.185.17.224", "guests": ["unlimited-lighting", "mock2"], "note": "substring match at lxc.js:1651 and lxc.js:3826 fires on this pair in both directions" },
+    { "shorter": "10.185.17.14", "longer": "10.185.17.145", "guests": ["RustDesk", "mailcow"], "note": "second live collision pair: rd.fractionate.ai vs mail.techmations.com" }
+  ]
+}

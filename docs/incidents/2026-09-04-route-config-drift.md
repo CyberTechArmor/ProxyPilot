@@ -1,6 +1,14 @@
 # Route-config drift — investigation report (2026-09-04)
 
-Status: **Stage 1 + 2 complete. No code changed. Awaiting approval to implement.**
+Status: **Implemented.** Stages 1–3 complete; the fix is on
+`claude/proxypilot-route-config-drift-fcgurp` and has NOT been deployed to the
+host. See §9 for what shipped and §10 for what is verified versus what still
+needs a deployed environment.
+
+One severity claim in §3.1a is corrected by §10 — `mail.techmations.com` turns
+out not to be served by this edge at all, so the defect there destroyed a config
+file and orphaned a row rather than taking down a mail server. Details in
+`2026-09-04-verification-baseline.md`.
 
 ---
 
@@ -617,3 +625,111 @@ sudo systemctl start proxypilot-admin
 Every generated config passes `caddy validate` before going live; reload only,
 never restart. No step in §6 requires a Caddy or guest restart — if that changes
 during implementation, I will stop and ask first.
+
+
+---
+
+## 9. What shipped
+
+Two commits on `claude/proxypilot-route-config-drift-fcgurp`.
+
+**Step 1 — attribution by name; exact-match addresses.**
+New `lib/caddy-site-file.js` parses generated site files properly (every
+upstream, not just the first) and compares addresses exactly. Both attribution
+sites now ask the database who owns a domain:
+- `lxc.js` GET `/containers/:name/services` lists a file-scan entry only when no
+  route row anywhere claims its domain, then only on an exact upstream match.
+- `lxc.js` DELETE `/containers/:name` deletes the rows it owns and re-renders,
+  instead of unlinking every file containing its address as a substring.
+- The 502 diagnostic probes the address the edge actually dials, and no longer
+  pairs an address from one guest with a port scan of another.
+
+**Step 2 — an address change re-renders every domain that depends on it.**
+New `lib/route-render.js`. `applyServiceUpstream()` moves `services.target_ip`
+and re-renders every domain on that service, validating before reload and
+restoring both stores on any failure. `findOrCreateLxcService` no longer writes
+`target_ip` as a side effect. Wired into LXC quick-add, container create, the
+MEET preset, MCP `set_route`, and `transfer-routes` (which never re-rendered at
+all).
+
+**Step 3 — one delete path, one writer.**
+DELETE `/containers/:name/services/:domain` resolves ownership from the
+database rather than from the presence of `?routeId`. Rows owned by this
+container are deleted and re-rendered; rows owned by another container are
+refused with the real owner named; a file with no rows is unlinked only on an
+exact upstream match. All four hand-rolled Caddy templates are gone — every
+write goes through `regenerateDomainCaddyConfig`. This needed migration 106
+(`service_http_routes.health_path`), because the operator's health path
+previously existed only as a marker comment in the hand-written files and the
+merged renderer had no way to represent it.
+
+**Steps 4 + 5 — drift detection and the cross-tenant alarm.**
+New `lib/route-drift.js` compares the route table against the on-disk site
+files and against Caddy's running config from `GET /config/` on the admin API.
+Reports `match` / `drift` / `missing_in_caddy` / `unmanaged_in_caddy`, and
+raises an error-level finding for any route whose upstream resolves to a
+different managed guest than the route names. Reporting only, never repair,
+matching the cert-mount reconciler's stated position. Surfaced at
+`GET /api/services/route-drift`, in a boot sweep that logs and notifies, and in
+a Dashboard banner that keeps cross-tenant findings visually separate from
+ordinary staleness.
+
+**Step 6 — reservation awareness, warn-only.**
+The drift report marks routes whose guest has no static address reservation
+(`expanded_devices.eth0["ipv4.address"]`), and the banner names those
+containers. Deliberately does not affect `clean`, does not notify, and does not
+refuse route creation: an unreserved guest is a standing risk, not an event, and
+a permanently-red dashboard trains people to ignore it. No dial-time or guest
+networking change was made — `dynamic a` upstreams remain unimplemented, as
+planned.
+
+---
+
+## 10. Verification status — what is proven and what is not
+
+**Proven here.**
+- 56 new unit tests, all passing. They cover the prefix collision directly
+  (`'10.185.17.224:3000'.includes('10.185.17.22') === true` is the bug; the
+  replacement returns false), a regression test asserting that moving an address
+  re-renders *every* domain on the service, rollback of both stores on render /
+  validate / reload failure, the incident state reported with both addresses and
+  the tenant it leaked to, the silent 200-with-wrong-tenant case, and the
+  prefix-collision pair NOT raising a false alarm.
+- Backend suite unchanged from `main`: the same 7 failures before and after —
+  the 6 documented in CLAUDE.md as missing native deps, plus one subtest from
+  `mock2-ui-checks.test.js`, already recorded in `docs/known-issues.md` as
+  flaking under full-suite parallelism. Confirmed by running the suite on a
+  stashed tree: byte-identical failure set with and without this branch.
+- Frontend builds clean with the new banner.
+- Live route baseline captured for before/after diffing
+  (`2026-09-04-verification-baseline.md`), including three pre-existing
+  conditions that would otherwise be misread as regressions.
+
+**NOT verified — needs a deployed environment.**
+This work was done in an ephemeral container with no access to the host
+(§0). The following items from the plan's verification list require the code to
+be running on the edge, and none of them have been performed:
+
+1. Re-probing all 14 routes after deployment and diffing against the baseline.
+2. Deliberately moving a scratch guest's address and confirming the route
+   follows with no manual step. This is the headline claim of Step 2; the unit
+   test proves the logic, not the integration.
+3. Deleting a scratch route and confirming both stores agree afterwards.
+4. Confirming the drift check reports clean against a good state and names the
+   specific difference against an injected bad one.
+5. An end-to-end create → serve → delete on a scratch hostname.
+6. `caddy validate` against real generated output. The code calls `caddyAdapt()`
+   before every reload and restores on failure, but that path has not been
+   exercised against a real Caddy binary.
+
+Item 2 is the one I would not skip. Suggested sequence on the host, after
+taking the backups in §8: deploy, run the drift check (`GET
+/api/services/route-drift`) and confirm it is clean apart from the known
+`starter.fractionate.ai` app-down case, then create a scratch hostname against a
+throwaway guest, move that guest's address with `set_lxc_network`, touch a
+second route on the same guest, and confirm the scratch hostname follows.
+
+**Also unresolved:** Q8 (§4) — whether `mock2.fractionate.ai` was serving
+`unlimited-lighting`'s nginx before the incident. The three host-side commands
+that settle it are in §4. The nginx access-log grep is the one that matters:
+non-zero means a confirmed cross-tenant data path, not a near miss.

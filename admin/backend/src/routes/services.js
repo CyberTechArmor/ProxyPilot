@@ -23,6 +23,7 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { checkRouteDrift } from '../lib/route-drift.js';
+import { parseCaddySiteFile } from '../lib/caddy-site-file.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { detectServicePorts } from '../lib/port-detector.js';
@@ -304,9 +305,12 @@ async function detectLxcManagedSiteFile(configPath, lxcIps) {
   if (!existsSync(configPath)) return null;
   try {
     const content = await readFile(configPath, 'utf-8');
-    const m = content.match(/reverse_proxy\s+([\d.]+):\d+/);
-    if (!m) return null;
-    return lxcIps.has(m[1]) ? m[1] : null;
+    // Every upstream, not just the first: a merged multi-route file can name
+    // several, and checking only one would miss the LXC-managed case whenever
+    // the LXC's own route did not happen to sort first.
+    const parsed = parseCaddySiteFile(content);
+    const hit = parsed.upstreams.find((u) => lxcIps.has(u.host));
+    return hit ? hit.host : null;
   } catch {
     return null;
   }
@@ -5530,12 +5534,18 @@ export async function listManagedGuests() {
     const out = [];
     for (const c of containers) {
       const networks = (c.state && c.state.network) || {};
+      // A pinned eth0 ipv4.address is Incus's static DHCP reservation — the
+      // thing that stops a lease renewal from moving a guest out from under
+      // its routes. Reported so the drift check can name the routes that are
+      // still exposed to exactly the failure that caused the incident.
+      const devices = c.expanded_devices || c.devices || {};
+      const reserved = !!(devices.eth0 && devices.eth0['ipv4.address']);
       for (const [iface, net] of Object.entries(networks)) {
         if (iface === 'lo' || !net || !Array.isArray(net.addresses)) continue;
         if (/^(docker\d+|docker_gwbridge|br-[0-9a-f]+|veth.*|cni\d*)$/.test(iface)) continue;
         for (const addr of net.addresses) {
           if (addr && addr.family === 'inet' && addr.scope === 'global' && addr.address) {
-            out.push({ name: String(c.name || '').replace(/^pp-/, ''), ip: addr.address });
+            out.push({ name: String(c.name || '').replace(/^pp-/, ''), ip: addr.address, reserved });
           }
         }
       }

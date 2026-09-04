@@ -227,6 +227,25 @@ export function indexGuestsByIp(guests) {
 }
 
 /**
+ * Guest name → whether its address is pinned with a static reservation.
+ *
+ * An unreserved guest can be moved by a lease renewal at any time, which is
+ * the upstream cause of the whole drift class. Reported, not enforced: the
+ * repair (`set_lxc_network`) touches guest networking and is the operator's
+ * call, not something a diagnostic should do on its own.
+ *
+ * @param {Array<{name: string, reserved?: boolean}>} guests
+ * @returns {Map<string, boolean>}
+ */
+export function indexReservations(guests) {
+  const m = new Map();
+  for (const g of guests || []) {
+    if (g && g.name) m.set(g.name, !!g.reserved);
+  }
+  return m;
+}
+
+/**
  * Compare declared intent against the site files and Caddy's running config.
  *
  * Pure given its inputs — the callers do the I/O — so the comparison logic is
@@ -240,9 +259,16 @@ export function indexGuestsByIp(guests) {
  * @returns {{clean: boolean, checked: number, caddy_admin_reachable: boolean,
  *           domains: object[], cross_tenant: object[], summary: object}}
  */
-export function compareRoutes({ intended, siteFiles, running, guestsByIp = new Map() }) {
+export function compareRoutes({
+  intended,
+  siteFiles,
+  running,
+  guestsByIp = new Map(),
+  reservations = new Map(),
+}) {
   const domains = [];
   const crossTenant = [];
+  const unreserved = [];
   const summary = { match: 0, drift: 0, missing_in_caddy: 0, unmanaged_in_caddy: 0 };
 
   for (const [domain, want] of intended) {
@@ -300,11 +326,20 @@ export function compareRoutes({ intended, siteFiles, running, guestsByIp = new M
       }
     }
 
+    // Reservation state is orthogonal to drift: an unreserved guest may be
+    // perfectly in sync today and moved tomorrow. It never changes `status` or
+    // `clean` — it is a standing risk note, not a present-tense defect.
+    const isReserved = want.container ? reservations.get(want.container) : undefined;
+    if (want.container && isReserved === false) {
+      unreserved.push({ domain, container: want.container });
+    }
+
     summary[status] += 1;
     domains.push({
       domain,
       status,
       container: want.container,
+      ...(isReserved === undefined ? {} : { upstream_reserved: isReserved }),
       expected: [...want.expected],
       on_disk: [...onDisk],
       ...(inCaddy !== null ? { in_caddy: [...inCaddy] } : {}),
@@ -334,6 +369,7 @@ export function compareRoutes({ intended, siteFiles, running, guestsByIp = new M
     caddy_admin_reachable: running !== null,
     domains,
     cross_tenant: crossTenant,
+    unreserved,
     summary,
   };
 }
@@ -355,15 +391,18 @@ export async function checkRouteDrift({ db, listGuests = null, sitesDir = CADDY_
   const running = config ? extractCaddyUpstreams(config) : null;
 
   let guestsByIp = new Map();
+  let reservations = new Map();
   if (listGuests) {
     try {
-      guestsByIp = indexGuestsByIp(await listGuests());
+      const guests = await listGuests();
+      guestsByIp = indexGuestsByIp(guests);
+      reservations = indexReservations(guests);
     } catch (e) {
       console.warn('[route-drift] guest enumeration failed:', e?.message || e);
     }
   }
 
-  return compareRoutes({ intended, siteFiles, running, guestsByIp });
+  return compareRoutes({ intended, siteFiles, running, guestsByIp, reservations });
 }
 
 /**
@@ -388,6 +427,10 @@ export function driftNotifications(report) {
       dedupe_key: `route-drift:cross-tenant:${x.domain}`,
     });
   }
+  // Deliberately NOT notified: an unreserved guest is a standing risk, not an
+  // event, and a notification that fires every sweep for a condition the
+  // operator has already seen trains people to ignore the channel. It rides in
+  // the report (and the UI banner) instead.
   const drifted = (report.domains || []).filter((d) => d.status === STATUS.DRIFT);
   const missing = (report.domains || []).filter((d) => d.status === STATUS.MISSING);
   if (drifted.length) {

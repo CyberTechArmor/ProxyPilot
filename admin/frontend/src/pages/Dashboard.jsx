@@ -72,6 +72,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   AlertTriangle,
+  Info,
   RefreshCcw,
   Terminal,
   Play,
@@ -3722,7 +3723,7 @@ volumes:
           a hostname served from another project's guest is a containment
           problem, not a availability one, and must not be mixed in with
           ordinary staleness. */}
-      {routeDrift && !routeDrift.clean && (
+      {routeDrift && (!routeDrift.clean || routeDrift.unreserved?.length > 0) && (
         <div className="space-y-3">
           {routeDrift.cross_tenant?.length > 0 && (
             <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-4">
@@ -3788,6 +3789,22 @@ volumes:
                 >
                   {regeneratingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Regenerate configs'}
                 </Button>
+              </div>
+            </div>
+          )}
+          {routeDrift.unreserved?.length > 0 && (
+            <div className="rounded-lg border border-border bg-muted/40 p-4">
+              <div className="flex items-start gap-2 text-sm">
+                <Info className="h-4 w-4 shrink-0 mt-0.5 text-muted-foreground" />
+                <p className="text-muted-foreground break-words">
+                  {routeDrift.unreserved.length} route
+                  {routeDrift.unreserved.length === 1 ? '' : 's'} point at a container with no
+                  static address reservation, so a DHCP lease renewal can move it:{' '}
+                  <span className="font-mono">
+                    {[...new Set(routeDrift.unreserved.map((u) => u.container))].join(', ')}
+                  </span>
+                  . Pin the address on the container's network settings to remove the risk.
+                </p>
               </div>
             </div>
           )}

@@ -2870,14 +2870,19 @@ lxcRouter.delete('/containers/:name/services/:domain', async (req, res) => {
       const foreign = owners.filter((o) => o.owner !== name);
       if (foreign.length === owners.length) {
         // Every row on this domain belongs elsewhere. This is the exact
-        // situation that caused the outage; refuse it and say why.
-        const ownerNames = [...new Set(foreign.map((o) => o.owner || 'an unnamed service'))];
+        // situation that caused the outage; refuse it and say where to go.
+        const ownerNames = [...new Set(foreign.map((o) => o.owner).filter(Boolean))];
+        // A row with no lxc_container_name was created from the Services
+        // dashboard against a bare address rather than from any container's
+        // page, so pointing at "that container" would send the operator
+        // somewhere that does not exist.
+        const where = ownerNames.length
+          ? `It belongs to ${ownerNames.map((o) => `'${o}'`).join(', ')} — ` +
+            `delete it from that container's page if you meant to remove it.`
+          : `It is managed from the Services dashboard, not from a container page.`;
         return res.status(409).json({
           success: false,
-          error:
-            `'${domain}' is not routed to '${name}'. It belongs to ` +
-            `${ownerNames.map((o) => `'${o}'`).join(', ')}. ` +
-            `Delete it from that container's page if you meant to remove it.`,
+          error: `'${domain}' is not routed to '${name}'. ${where}`,
           owned_by: ownerNames,
         });
       }

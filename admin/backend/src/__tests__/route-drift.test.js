@@ -6,6 +6,7 @@ import {
   extractCaddyUpstreams,
   intendedUpstreams,
   indexGuestsByIp,
+  indexReservations,
   compareRoutes,
   driftNotifications,
 } from '../lib/route-drift.js';
@@ -287,5 +288,65 @@ describe('driftNotifications', () => {
     const first = driftNotifications(report).map((n) => n.dedupe_key);
     const second = driftNotifications(report).map((n) => n.dedupe_key);
     assert.deepEqual(first, second);
+  });
+});
+
+describe('reservation awareness (step 6, warn-only)', () => {
+  const guests = [
+    { name: 'mock2', ip: '10.185.17.224', reserved: false },
+    { name: 'mailcow', ip: '10.185.17.145', reserved: true },
+  ];
+  const byIp = indexGuestsByIp(guests);
+  const res = indexReservations(guests);
+
+  test('flags a route whose guest has no static reservation', () => {
+    const report = compareRoutes({
+      intended: intent([{ domain: 'git.fractionate.ai', container: 'mock2', expected: ['10.185.17.224:3000'] }]),
+      siteFiles: files([{ domain: 'git.fractionate.ai', upstreams: ['10.185.17.224:3000'] }]),
+      running: new Map([['git.fractionate.ai', new Set(['10.185.17.224:3000'])]]),
+      guestsByIp: byIp,
+      reservations: res,
+    });
+    assert.deepEqual(report.unreserved, [{ domain: 'git.fractionate.ai', container: 'mock2' }]);
+    assert.equal(report.domains[0].upstream_reserved, false);
+  });
+
+  test('an unreserved guest does NOT make an in-sync report dirty', () => {
+    // It is a standing risk, not a present-tense defect. Conflating the two
+    // would leave the dashboard permanently red and train people to ignore it.
+    const report = compareRoutes({
+      intended: intent([{ domain: 'git.fractionate.ai', container: 'mock2', expected: ['10.185.17.224:3000'] }]),
+      siteFiles: files([{ domain: 'git.fractionate.ai', upstreams: ['10.185.17.224:3000'] }]),
+      running: new Map([['git.fractionate.ai', new Set(['10.185.17.224:3000'])]]),
+      guestsByIp: byIp,
+      reservations: res,
+    });
+    assert.equal(report.clean, true);
+    assert.equal(report.summary.match, 1);
+    assert.deepEqual(driftNotifications(report), []);
+  });
+
+  test('a reserved guest is not flagged', () => {
+    const report = compareRoutes({
+      intended: intent([{ domain: 'mail.techmations.com', container: 'mailcow', expected: ['10.185.17.145:80'] }]),
+      siteFiles: files([{ domain: 'mail.techmations.com', upstreams: ['10.185.17.145:80'] }]),
+      running: new Map([['mail.techmations.com', new Set(['10.185.17.145:80'])]]),
+      guestsByIp: byIp,
+      reservations: res,
+    });
+    assert.deepEqual(report.unreserved, []);
+    assert.equal(report.domains[0].upstream_reserved, true);
+  });
+
+  test('omits the field entirely when reservation state is unknown', () => {
+    const report = compareRoutes({
+      intended: intent([{ domain: 'a.example.com', container: 'unknown-guest', expected: ['10.0.0.5:80'] }]),
+      siteFiles: files([{ domain: 'a.example.com', upstreams: ['10.0.0.5:80'] }]),
+      running: new Map([['a.example.com', new Set(['10.0.0.5:80'])]]),
+      guestsByIp: byIp,
+      reservations: res,
+    });
+    assert.equal('upstream_reserved' in report.domains[0], false);
+    assert.deepEqual(report.unreserved, []);
   });
 });

@@ -1,0 +1,33 @@
+{
+  "manifestVersion": "1",
+  "id": "example-feature",
+  "name": "Example feature",
+  "version": "0.1.0",
+  "description": "A worked feature.manifest.json — copy, rename, and keep every field honest (CPR v1.1 Appendix B).",
+  "hostContract": "^0.1.0",
+  "entry": { "module": "src/features/example-feature/index.ts", "export": "default" },
+  "hostCapabilities": [
+    { "capability": "db", "reason": "owns the example_items table" },
+    { "capability": "audit", "reason": "records create/update/delete on example items" },
+    { "capability": "log", "reason": "structured diagnostics" }
+  ],
+  "permissions": [
+    { "id": "example-feature.items.manage", "grants": "create, edit and archive example items" }
+  ],
+  "featureDependencies": [],
+  "database": {
+    "migrations": [
+      { "file": "migrations/0100_example_feature.sql", "tables": ["example_items"], "adoptsExisting": [] }
+    ],
+    "notableColumns": [
+      { "column": "example_items.archived_at", "why": "deletes archive; rows are never erased (rule R-00x)" }
+    ]
+  },
+  "jobs": [],
+  "outboundHosts": [],
+  "excludedDeliberately": [],
+  "installActions": ["run migrations", "grant example-feature.items.manage to the roles that manage items"],
+  "uninstallActions": ["disable the feature; do NOT drop example_items — data retention is a separate, explicit decision"],
+  "portability": { "blockers": [], "risks": [] },
+  "compatibility": { "node": ">=20", "postgres": ">=14" }
+}

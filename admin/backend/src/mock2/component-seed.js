@@ -31,16 +31,17 @@
 
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
-import { dirname, resolve } from 'path';
-import { fileURLToPath } from 'url';
 import {
   getComponentByKey, getCurrentComponentVersion, insertComponent, insertComponentVersion,
 } from './components.js';
 import { parseComponentImport, parseContractJson } from './component-logic.js';
 import { componentWiresBootstrap } from './scaffold-auth.js';
+import { SEED_DOCS } from './component-seed-docs.js';
 
-const __dir = dirname(fileURLToPath(import.meta.url));
-const SEED_DOC = resolve(__dir, 'framework-seed', 'proxypilot-auth.component.json');
+// Every document the platform bundles lives in the pure component-seed-docs.js
+// (paths + the `wires` flag) so tests can read the list without this module's
+// native DB imports.
+export { SEED_DOCS } from './component-seed-docs.js';
 
 // A stored version wires when its contract + file list satisfy the detector.
 function versionWires(versionRow) {
@@ -87,17 +88,22 @@ export function seedBuiltinComponents(createdBy = null) {
   const actor = Number.isInteger(createdBy) ? createdBy : 0;
   const seeded = [];
   const skipped = [];
+  for (const spec of SEED_DOCS) seedOneDocument(spec, actor, seeded, skipped);
+  return { seeded, skipped };
+}
+
+function seedOneDocument({ file, wires }, actor, seeded, skipped) {
   let doc;
   try {
-    doc = JSON.parse(readFileSync(SEED_DOC, 'utf8'));
+    doc = JSON.parse(readFileSync(file, 'utf8'));
   } catch (e) {
     console.warn('[mock2] component seed unreadable:', e?.message);
-    return { seeded, skipped };
+    return;
   }
   const check = parseComponentImport(doc);
   if (!check.ok) {
     console.warn('[mock2] component seed invalid:', check.error);
-    return { seeded, skipped };
+    return;
   }
   const d = check.data;
   try {
@@ -111,23 +117,25 @@ export function seedBuiltinComponents(createdBy = null) {
       });
       seeded.push({ key: d.key, as: 'new_component' });
       console.log(`[mock2] seeded built-in component ${d.key}`);
-      return { seeded, skipped };
+      return;
     }
     const current = getCurrentComponentVersion(existing);
-    const seedWires = componentWiresBootstrap(d.contract, d.files);
-    if (!seedWires) {
-      // The bundle itself could not wire — never replace working content with it.
-      skipped.push({ key: d.key, reason: 'the bundled document would not wire' });
-      return { seeded, skipped };
+    if (wires) {
+      const seedWires = componentWiresBootstrap(d.contract, d.files);
+      if (!seedWires) {
+        // The bundle itself could not wire — never replace working content with it.
+        skipped.push({ key: d.key, reason: 'the bundled document would not wire' });
+        return;
+      }
     }
 
     const bundledHash = componentContentHash(d);
     const same = storedContentHash(current) === bundledHash;
-    const broken = !versionWires(current);
+    const broken = wires && !versionWires(current);
 
     if (same) {
       skipped.push({ key: d.key, reason: 'the stored version is the bundled one' });
-      return { seeded, skipped };
+      return;
     }
     // Content HAS moved on. Only the platform's own versions are replaced.
     if (!broken && !isPlatformOwned(current)) {
@@ -140,7 +148,7 @@ export function seedBuiltinComponents(createdBy = null) {
         + 'platform fixes (the auth component\'s @fixture.invalid exclusion is one of them).',
       );
       skipped.push({ key: d.key, reason: 'operator-owned version differs from the bundle — not replaced' });
-      return { seeded, skipped };
+      return;
     }
     const version = insertComponentVersion(existing.id, {
       files: d.files, usage_md: d.usage_md, contract: d.contract,
@@ -154,5 +162,4 @@ export function seedBuiltinComponents(createdBy = null) {
   } catch (e) {
     console.warn(`[mock2] component seed failed for ${d.key}:`, e?.message);
   }
-  return { seeded, skipped };
 }

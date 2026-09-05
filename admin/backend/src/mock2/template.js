@@ -244,6 +244,125 @@ link + install script in every page head.
 `;
 }
 
+// mock2StandardsSeedFiles — the per-repo files the Mock2 standards expect
+// (mock2-core v0.2.0 `core/mock2/templates/repo/`, plus CPR v1.1's decision
+// ledger). Pure. Content mirrors the standards site; the platform-specific lines
+// say where ProxyPilot's own machinery (hash-chained records, the gate battery)
+// sits relative to the standard's files.
+export function mock2StandardsSeedFiles(project) {
+  const name = String(project?.name || 'Project').trim() || 'Project';
+  return [
+    {
+      path: 'CLAUDE.md',
+      content: `# ${name} — repository constitution
+
+This repository follows the **Mock2 standards** (https://mock2.fractionate.ai — the
+constitution and rules installed at user level on every developer machine) and
+**Continuous Production Readiness (CPR) v1.1**. This file only says what is specific
+to this project. Nothing in it blocks building or testing (constitution rule 0);
+production decisions live in \`state/production-checklist.md\`.
+
+## Project
+- Purpose: <one sentence>
+- Owner / reviewer: <name>
+- Compliance mode: standard | hipaa
+
+## Stack
+- TypeScript, Express, Drizzle, Zod, Vitest, PostgreSQL (Mock2 default)
+- Deviations from the default, with reason: <none>
+
+## Commands
+- Install: \`npm install\` · Dev: \`npm run dev\` · Migrate: \`npm run migrate\`
+- Checks: \`npm run check\` (lint, types, test, audit, secrets — each reports; none blocks)
+
+## Layout
+- \`src/routes/\` HTTP, \`src/services/\` logic, \`src/db/\` schema and migrations
+- \`state/\` Mock2 state — inventory, rules, production checklist, decision ledger,
+  change records (\`state/changes/\` is the platform's hash-chained audit spine;
+  \`state/change-records/\` holds human-readable records) — always committed
+- \`state/mockups/\` disposable Stage 1 mockups · \`.mock2/\` project-local overrides
+
+## Explicit implementation requirements
+<!-- The only things that change what gets built. Everything else is a checklist item or a recommendation. -->
+- <none>
+
+## Project-specific rules
+- <anything the user-level standards do not cover>
+`,
+    },
+    {
+      path: '.github/copilot-instructions.md',
+      content: `# ${name} — repository constitution (GitHub Copilot)
+
+Same content as \`CLAUDE.md\` at the repo root; keep the two in sync. This repository
+follows the Mock2 standards installed at user level (https://mock2.fractionate.ai)
+and CPR v1.1. Nothing here blocks building or testing; production decisions live in
+\`state/production-checklist.md\`.
+`,
+    },
+    {
+      path: 'state/production-checklist.md',
+      content: `# Production checklist
+
+Run after the developer confirms a change works (\`/mock2-check\`, or the platform's
+Check stage). Reminders to verify, each with a recorded result — never a
+precondition for building, testing or committing. Items that do not apply are
+marked \`n/a\` with a reason. Add items as they come up during work (constitution
+rule 0).
+
+## Baseline
+See the user-level rule "Mock2 production checklist" for the baseline items
+(verification scripts, behavior, data, security, review, release). On this
+platform the deterministic half runs automatically at finish and its results
+land in the change record.
+
+## Repo-specific items
+- <none yet>
+
+## Decisions for the owner
+<!-- Production-policy questions that came up during work, classified as checklist items.
+     Example: "Quiet hours for reminder emails — configurable, default off; owner to decide before promotion." -->
+- <none yet>
+`,
+    },
+    {
+      path: 'state/decisions.md',
+      content: `# Decision ledger
+
+Material architectural decisions, durably recorded (CPR v1.1 §17.2, Appendix G).
+An ACTIVE decision is followed or explicitly proposed for supersession — never
+silently replaced by new code or by runtime evidence.
+
+| ID | Date | Status | Decision | Rationale | Ownership boundary | Supersedes | Affected artifacts | Revisit trigger |
+|---|---|---|---|---|---|---|---|---|
+| DEC-001 | <date> | ACTIVE | <concise statement> | <why> | <who owns what> | — | <files / packages> | <condition> |
+`,
+    },
+    {
+      path: 'state/change-records/README.md',
+      content: `# Change records
+
+One human-readable file per unit of work: \`YYYY-MM-DD-<slug>.md\`, in the format of
+the user-level rule "Mock2 change record" (summary, rules, files, checklist
+results, review findings, open items, proposals). The platform's hash-chained
+records in \`state/changes/\` are the audit spine; never delete either.
+`,
+    },
+    {
+      path: '.mock2/README.md',
+      content: `# .mock2
+
+Project-local framework files. Stage guidance and the production checklist
+baseline live at user level (installed from https://mock2.fractionate.ai); put only
+project overrides here.
+
+- \`checks/\` — extra verification scripts specific to this repo (optional; they report, they do not block)
+- \`interview.md\` — answers captured during Stage 2 (optional, for audit)
+`,
+    },
+  ];
+}
+
 export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
   return [
     { path: 'mock2.yaml', content: defaultManifest({ webPort }) },
@@ -299,10 +418,17 @@ export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
     },
     {
       // state/ is where later phases append rules.md and change records
-      // (03-data-model.md); seed an empty rules file so the path exists.
+      // (03-data-model.md); seed an empty rules file so the path exists. Status
+      // tags follow the Mock2 standards (mock2-core v0.2.0 repo template).
       path: 'state/rules.md',
-      content: `# Project rules\n\nRule answers append here (Phase M8).\n`,
+      content: `# Rules\n\nNumbered, testable, plain language. Status tags: \`[draft]\`, \`[confirmed]\`, \`[observed]\` (adopt mode).\nThe Define interview appends confirmed rules here; a build that starts before the interview is finished writes the rules it implements as \`[draft]\`.\n\n<!-- Example:\nR-001 [confirmed] A visitor who is not signed in sees only the public landing page.\n-->\n`,
     },
+    // The Mock2 standards' repo template (mock2-core v0.2.0, installed on every
+    // developer machine from https://mock2.fractionate.ai and used by /mock2-init)
+    // — seeded here so a project checkout looks the same whether it was created by
+    // the platform or by a developer from the template repo, and so a chat client
+    // working through the MCP server finds the constitution pointer in the tree.
+    ...mock2StandardsSeedFiles(project),
     {
       // Integration manifest (B.2): the versioned declaration of every external
       // capability (API, directory, webhook). Define appends confirmed entries;

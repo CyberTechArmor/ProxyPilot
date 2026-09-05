@@ -147,3 +147,31 @@ each its own serialised context (`test('…', { concurrency: 1 })` or a
 per-file `--test-concurrency=1`), or drop the subprocess where a pure
 assertion would do. Until then, re-run a single failing file in isolation
 before believing it.
+
+## Mock2 standards are vendored, not linked
+
+2026-09-05: the framework seed (`admin/backend/src/mock2/framework-seed/`) was
+brought up to the Mock2 standards site v0.2.0/0.3.0 and CPR v1.1 by hand. There is
+no sync from git.fractionate.ai/mock2/mock2-core; a site change reaches projects
+only when someone updates the seed and the backend boots. The design for a live
+link (settings key, boot/timer sync into `insertFrameworkVersion`, Gitea as the
+default project remote) is in `docs/mock2/standards-and-cpr.md` §4.
+
+## The MCP chat lane does not carry the framework content
+
+2026-09-05: builds started from the UI are prompted with the pinned framework
+version; an MCP client on the operator's subscription is not. It gets the
+STANDARDS pointer in the server instructions and the per-repo `CLAUDE.md` /
+`state/*` files the scaffold now seeds, nothing more. Follow-up: an MCP resource
+or `get_standards` tool served from `getCurrentFrameworkVersion()` — see
+`docs/mock2/standards-and-cpr.md` §5.
+
+## `npm audit` findings no longer red the security-scan check
+
+2026-09-05, by design (mock2-core v0.2.0 `check:audit`; CPR §10.2): a high or
+critical advisory is printed as `security-scan: WARNING …` and the item passes;
+a committed secret still fails the check. Operators reading a battery report
+should look for the WARNING line, not only the colour. If a project needs the
+audit to block promotion, that is a per-project decision recorded in
+`state/decisions.md`, not a seed change.
+

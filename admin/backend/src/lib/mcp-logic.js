@@ -70,6 +70,12 @@ export const MCP_SERVER_INSTRUCTIONS = [
   'so each project is its own audit row and a pinned project refuses individually rather than being skipped',
   'silently — then get_host_usage again, or reclaim_report with the first snapshot as before, for the delta.',
   'Archive stops the guest and keeps everything; action: "unarchive" reverses it.',
+  'STANDARDS: every AI-dev project follows the Mock2 standards (https://mock2.fractionate.ai, source',
+  'git.fractionate.ai/mock2/mock2-core) and Continuous Production Readiness (CPR) v1.1. This server does not',
+  'inject them — the harness lane does; over MCP they reach you only through the project tree, so before',
+  'changing an app read its CLAUDE.md, state/rules.md, state/production-checklist.md and state/decisions.md',
+  '(project_map lists them). Rule 0 applies to you too: never invent a gate, flag, allowlist or approval step',
+  'the operator did not ask for; classify production-policy questions as a checklist item and keep building.',
 ].join(' ');
 
 // ---- JSON-RPC helpers ----

@@ -67,6 +67,14 @@ tabled at the end of `docs/features/self-update.md`; run them on a
 disposable VM and record the results there. Until then, treat "Update now"
 as verified by construction, not by observation.
 
+The repo's GitHub releases are stale and mis-numbered: the latest is
+`v1.21.0` (2025-12-29, evidently meant to be v1.2.1, on a commit that is not
+on `main`) while the code's version is 1.4.0. The dashboard no longer
+believes the tag (the commit sha decides, see the feature doc), but the
+release list itself is wrong until someone with release permissions deletes
+or renames `v1.21.0` (and its tag) or publishes a `v1.4.0` release at
+`main`. The "View release notes" link points at that stale release until then.
+
 Also fixed in passing: `Profile.jsx` called `api.checkForUpdates`,
 `api.updateGithubRepo` and `api.resetDismissUpdate`, none of which existed
 in `lib/api.js` — the old update badge could never render, and saving the

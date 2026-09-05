@@ -147,21 +147,24 @@ function stubFetch(routes) {
   return { fetchImpl, calls };
 }
 
-test('fetchLatestFromGitHub: release + commit + compare; 404 release → package.json; failures are fields', async () => {
+test('fetchLatestFromGitHub: release + branch package.json + commit + compare; failures are fields', async () => {
   const { fetchImpl, calls } = stubFetch([
     ['/releases/latest', { body: { tag_name: 'v1.5.0', html_url: 'https://gh/rel', body: 'notes', published_at: '2026-09-01T00:00:00Z' } }],
+    ['raw.githubusercontent.com/o/r/main/admin/backend/package.json', { body: { version: '1.5.0' } }],
     ['/commits/main', { body: { sha: 'newsha', commit: { committer: { date: '2026-09-04T00:00:00Z' }, message: 'subject\n\nbody' } } }],
     ['/compare/oldsha...main', { body: { ahead_by: 4 } }],
   ]);
   const r = await fetchLatestFromGitHub({ repo: 'o/r', installedSha: 'oldsha', fetchImpl });
   assert.equal(r.release.version, '1.5.0');
   assert.equal(r.release.tag, 'v1.5.0');
+  assert.equal(r.branchVersion, '1.5.0', 'the branch package.json is always read — it is what an update installs');
   assert.equal(r.mainCommit.sha, 'newsha');
   assert.equal(r.mainCommit.message, 'subject');
   assert.equal(r.commitsBehind, 4);
   assert.equal(r.error, null);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
 
+  // No releases at all (404) is not an error; same sha → 0 behind without a compare call.
   const noRel = stubFetch([
     ['/releases/latest', { status: 404, body: {} }],
     ['raw.githubusercontent.com/o/r/main/admin/backend/package.json', { body: { version: '1.4.2' } }],
@@ -169,13 +172,15 @@ test('fetchLatestFromGitHub: release + commit + compare; 404 release → package
   ]);
   const r2 = await fetchLatestFromGitHub({ repo: 'o/r', installedSha: 'oldsha', fetchImpl: noRel.fetchImpl });
   assert.equal(r2.release, null);
-  assert.equal(r2.fallbackVersion, '1.4.2');
-  assert.equal(r2.commitsBehind, 0, 'same sha → 0 behind without a compare call');
+  assert.equal(r2.branchVersion, '1.4.2');
+  assert.equal(r2.commitsBehind, 0);
+  assert.equal(r2.error, null);
   assert.ok(!noRel.calls.some((u) => u.includes('/compare/')));
 
-  const broken = stubFetch([['api.github.com', new Error('ENOTFOUND api.github.com')]]);
+  const broken = stubFetch([['github', new Error('ENOTFOUND api.github.com')]]);
   const r3 = await fetchLatestFromGitHub({ repo: 'o/r', fetchImpl: broken.fetchImpl });
   assert.equal(r3.release, null);
+  assert.equal(r3.branchVersion, null);
   assert.equal(r3.mainCommit, null);
   assert.match(r3.error, /ENOTFOUND/);
   assert.match((await fetchLatestFromGitHub({ repo: '', fetchImpl: broken.fetchImpl })).error, /no GitHub repository/);
@@ -197,6 +202,7 @@ test('checkForUpdates: composes, caches network results for 10 min, force bypass
   clearUpdateCheckCache();
   const { fetchImpl, calls } = stubFetch([
     ['/releases/latest', { body: { tag_name: 'v1.5.0', html_url: 'https://gh/rel', body: null } }],
+    ['raw.githubusercontent.com/o/r/main/admin/backend/package.json', { body: { version: '1.5.0' } }],
     ['/commits/main', { body: { sha: 'newsha', commit: { committer: { date: '2026-09-04T00:00:00Z' } } } }],
     ['/compare/', { body: { ahead_by: 2 } }],
     ['manifest.json', { body: { version: '0.4.0' } }],
@@ -206,6 +212,7 @@ test('checkForUpdates: composes, caches network results for 10 min, force bypass
   await withAgent((req) => ({ id: req.id, result: { configured: true, branch: 'main', head_sha: 'oldsha', dirty: false } }), async (call) => {
     const a = await checkForUpdates({ repo: 'o/r', currentVersion: '1.4.0', fetchImpl, call, now });
     assert.equal(a.updateAvailable, true);
+    assert.equal(a.updateReason, 'newer_version');
     assert.equal(a.latestVersion, '1.5.0');
     assert.equal(a.commits_behind, 2);
     assert.equal(a.standards.update_available, true);

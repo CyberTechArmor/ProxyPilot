@@ -176,15 +176,30 @@ export default function SelfUpdatePanel({ updateInfo, checking, onRefresh }) {
           </p>
         )}
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <span className="text-muted-foreground">Latest</span>
+          <span className="text-muted-foreground">Latest code</span>
           <span className="font-medium break-all">
             v{info?.latestVersion || '…'}
             {info?.latest_sha_short && <span className="font-mono text-xs text-muted-foreground"> · {info.latest_sha_short}</span>}
+            {info?.latest_branch && <span className="text-xs text-muted-foreground"> · {info.latest_branch}</span>}
             {Number.isFinite(info?.commits_behind) && info.commits_behind > 0 && (
               <span className="text-xs text-muted-foreground"> · {info.commits_behind} commit{info.commits_behind === 1 ? '' : 's'} behind</span>
             )}
           </span>
         </div>
+        {info?.release && (
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+            <span className="text-muted-foreground">Latest release</span>
+            <span className="font-medium break-all text-right">
+              {info.release.tag || `v${info.release.version}`}
+              {info.release.published_at && <span className="text-xs text-muted-foreground"> · {fmtWhen(info.release.published_at).split(',')[0]}</span>}
+              {info.release.ahead_of_code && (
+                <span className="block text-xs font-normal text-muted-foreground">
+                  tag is numbered ahead of the code's version (v{info.latestCodeVersion || info.currentVersion}); the commit decides, not the tag
+                </span>
+              )}
+            </span>
+          </div>
+        )}
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
           <span className="text-muted-foreground">Status</span>
           <span className={`font-medium ${info?.updateAvailable ? 'text-primary' : 'text-green-500'}`}>

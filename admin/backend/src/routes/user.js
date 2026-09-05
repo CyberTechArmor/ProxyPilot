@@ -24,45 +24,12 @@ import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import { checkForUpdates, installedState, startUpdate, updateStatus } from '../lib/self-update.js';
+import { flagsFromOptions, isUpdateId, mapAgentErrorToHttp, sanitizeRequestedBy, updateStartRefusal } from '../lib/self-update-logic.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = join(__dirname, '..', '..', '..', '..');
-
-// Check if running in Docker container
-const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
-
-// Host project root path (for when running in Docker and executing on host)
-// Can be set via environment variable HOST_PROJECT_ROOT
-// Default assumes ~/ProxyPilot on the host
-const HOST_PROJECT_ROOT = process.env.HOST_PROJECT_ROOT || '/root/ProxyPilot';
-
-// Execute command on host (uses nsenter when in Docker, direct exec otherwise)
-function execOnHost(command, options = {}) {
-  const timeout = options.timeout || 30000;
-  const cwd = options.cwd || PROJECT_ROOT;
-
-  if (isInDocker) {
-    // Use nsenter to execute on the host's namespace
-    // Include standard PATH and source profile for proper environment
-    // When running in Docker, replace container paths with host paths
-    let hostCwd = cwd;
-    if (cwd.startsWith('/app')) {
-      // Map /app (container) to host project root
-      hostCwd = cwd.replace('/app', HOST_PROJECT_ROOT);
-    } else if (cwd === PROJECT_ROOT) {
-      // Use host project root for PROJECT_ROOT
-      hostCwd = HOST_PROJECT_ROOT;
-    }
-    const pathSetup = 'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"';
-    const fullCommand = `${pathSetup} && cd ${JSON.stringify(hostCwd)} && ${command}`;
-    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(fullCommand)}`;
-    return execSync(hostCommand, { encoding: 'utf8', timeout });
-  } else {
-    // Not in Docker, execute directly
-    return execSync(command, { encoding: 'utf8', timeout, cwd });
-  }
-}
 
 // Default GitHub repo
 const DEFAULT_GITHUB_REPO = 'CyberTechArmor/ProxyPilot';
@@ -93,7 +60,7 @@ function getPackageVersion() {
 }
 
 // Get current installed version from database (or initialize from package.json)
-function getCurrentVersion() {
+export function getCurrentVersion() {
   // Try to get from database first
   const savedVersion = getSetting('installed_version');
   if (savedVersion) {
@@ -104,14 +71,6 @@ function getCurrentVersion() {
   const packageVersion = getPackageVersion();
   setSetting('installed_version', packageVersion);
   console.log(`Initialized installed version in database: v${packageVersion}`);
-  return packageVersion;
-}
-
-// Update the installed version in database (called after successful update)
-function updateInstalledVersion() {
-  const packageVersion = getPackageVersion();
-  setSetting('installed_version', packageVersion);
-  console.log(`Updated installed version in database: v${packageVersion}`);
   return packageVersion;
 }
 
@@ -141,7 +100,7 @@ function syncVersionOnStartup() {
 syncVersionOnStartup();
 
 // Get GitHub repo from git remote or settings
-function getGitHubRepo() {
+export function getGitHubRepo() {
   // First check settings
   const savedRepo = getSetting('github_repo');
   if (savedRepo) return savedRepo;
@@ -1304,77 +1263,20 @@ userRouter.get('/version', (req, res) => {
   }
 });
 
-// Check for updates
-userRouter.get('/version/check', async (req, res) => {
+// Check for updates. GitHub (latest release + latest commit on the installed
+// branch, cached 10 min — ?force=1 bypasses), the Mock2 standards site
+// manifest, and the host checkout facts via the agent. A network failure is a
+// field in the answer, not a 500; lib/self-update.js owns the shape.
+userRouter.get('/version/check', requireAdmin, async (req, res) => {
   try {
-    const currentVersion = getCurrentVersion();
-    const githubRepo = getGitHubRepo();
-
-    // Fetch latest release from GitHub API
-    const response = await fetch(`https://api.github.com/repos/${githubRepo}/releases/latest`, {
-      headers: {
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'ProxyPilot-Update-Checker',
-      },
-    });
-
-    if (!response.ok) {
-      // If no releases, check the package.json in the main branch
-      const pkgResponse = await fetch(`https://raw.githubusercontent.com/${githubRepo}/main/admin/backend/package.json`, {
-        headers: { 'User-Agent': 'ProxyPilot-Update-Checker' },
-      });
-
-      if (pkgResponse.ok) {
-        const pkg = await pkgResponse.json();
-        const latestVersion = pkg.version || currentVersion;
-
-        return res.json({
-          currentVersion,
-          latestVersion,
-          updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
-          releaseUrl: `https://github.com/${githubRepo}`,
-          releaseNotes: null,
-        });
-      }
-
-      return res.json({
-        currentVersion,
-        latestVersion: currentVersion,
-        updateAvailable: false,
-        releaseUrl: null,
-        releaseNotes: null,
-      });
-    }
-
-    const release = await response.json();
-    const latestVersion = release.tag_name.replace(/^v/, '');
-
-    res.json({
-      currentVersion,
-      latestVersion,
-      updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
-      releaseUrl: release.html_url,
-      releaseNotes: release.body,
-    });
+    const force = req.query.force === '1' || req.query.force === 'true';
+    const data = await checkForUpdates({ repo: getGitHubRepo(), currentVersion: getCurrentVersion(), force });
+    res.json(data);
   } catch (error) {
     console.error('Error checking for updates:', error);
     res.status(500).json({ error: 'Failed to check for updates' });
   }
 });
-
-// Compare semantic versions
-function compareVersions(v1, v2) {
-  const parts1 = v1.split('.').map(Number);
-  const parts2 = v2.split('.').map(Number);
-
-  for (let i = 0; i < 3; i++) {
-    const a = parts1[i] || 0;
-    const b = parts2[i] || 0;
-    if (a > b) return 1;
-    if (a < b) return -1;
-  }
-  return 0;
-}
 
 // Update GitHub repo setting (Admin only)
 userRouter.put('/settings/github-repo', requireAdmin, (req, res) => {
@@ -1425,242 +1327,70 @@ userRouter.post('/version/reset-dismiss', (req, res) => {
   }
 });
 
-// Store for tracking update progress
-const updateProgress = {
-  status: 'idle', // idle, running, success, error
-  message: '',
-  logs: [],
-};
+// ==========================================
+// Self-update (docs/features/self-update.md)
+//
+// The backend never runs update.sh: it lives in Docker and dies at the
+// `docker compose down` update.sh performs. POST /version/update asks the
+// host agent to drop a request file; the root-owned proxypilot-update
+// systemd oneshot validates it and runs `update.sh --yes`. Progress lives in
+// state.json on the host, so GET /version/update/progress answers before,
+// during and after this process is replaced.
+// ==========================================
 
-// Find git executable (on host if in Docker)
-function findGit() {
-  // Allow override via environment variable
-  if (process.env.GIT_PATH) {
-    try {
-      execOnHost(`${process.env.GIT_PATH} --version`, { timeout: 5000 });
-      return process.env.GIT_PATH;
-    } catch (e) {
-      console.error(`GIT_PATH env var set to ${process.env.GIT_PATH} but git not found there`);
-    }
-  }
-
-  // Try using 'which' first to find git in PATH
-  try {
-    const result = execOnHost('which git', { timeout: 5000 });
-    const foundPath = result.trim();
-    if (foundPath) {
-      execOnHost(`${foundPath} --version`, { timeout: 5000 });
-      return foundPath;
-    }
-  } catch (e) {
-    // which failed, try common paths
-  }
-
-  // Common git installation paths (including nvm, homebrew, snap, etc.)
-  const gitPaths = [
-    '/usr/bin/git',
-    '/usr/local/bin/git',
-    '/opt/homebrew/bin/git',
-    '/snap/bin/git',
-    '/home/linuxbrew/.linuxbrew/bin/git',
-  ];
-
-  for (const gitPath of gitPaths) {
-    try {
-      execOnHost(`${gitPath} --version`, { timeout: 5000 });
-      return gitPath;
-    } catch (e) {
-      // Try next path
-    }
-  }
-  return null;
-}
-
-// Find npm executable (on host if in Docker)
-function findNpm() {
-  // Allow override via environment variable
-  if (process.env.NPM_PATH) {
-    try {
-      execOnHost(`${process.env.NPM_PATH} --version`, { timeout: 5000 });
-      return process.env.NPM_PATH;
-    } catch (e) {
-      console.error(`NPM_PATH env var set to ${process.env.NPM_PATH} but npm not found there`);
-    }
-  }
-
-  // Try using 'which' first to find npm in PATH
-  try {
-    const result = execOnHost('which npm', { timeout: 5000 });
-    const foundPath = result.trim();
-    if (foundPath) {
-      execOnHost(`${foundPath} --version`, { timeout: 5000 });
-      return foundPath;
-    }
-  } catch (e) {
-    // which failed, try common paths
-  }
-
-  // Common npm installation paths (including nvm, homebrew, snap, etc.)
-  const npmPaths = [
-    '/usr/bin/npm',
-    '/usr/local/bin/npm',
-    '/opt/homebrew/bin/npm',
-    '/snap/bin/npm',
-    '/home/linuxbrew/.linuxbrew/bin/npm',
-  ];
-
-  for (const npmPath of npmPaths) {
-    try {
-      execOnHost(`${npmPath} --version`, { timeout: 5000 });
-      return npmPath;
-    } catch (e) {
-      // Try next path
-    }
-  }
-  return null;
-}
-
-// Perform update (Admin only)
+// Request an update (Admin + sudo). 202 with the run id; 409 when it cannot
+// run right now (agent unreachable, uncommitted changes on the host, a run
+// already live) with the reason the UI shows verbatim.
 userRouter.post('/version/update', requireAdmin, requireSudo, async (req, res) => {
   try {
-    // Check if update is already running
-    if (updateProgress.status === 'running') {
-      return res.status(409).json({ error: 'Update already in progress' });
+    const { rebuild } = z.object({ rebuild: z.boolean().optional() }).parse(req.body || {});
+    const [installed, progress] = await Promise.all([installedState({ force: true }), updateStatus({ logTailBytes: 0 })]);
+    const refusal = updateStartRefusal({ installed, progress });
+    if (refusal) {
+      logAudit(req.user.id, 'SELF_UPDATE_REFUSED', 'system', 'self-update', { via: 'dashboard', reason: refusal }, req.ip);
+      return res.status(409).json({ error: refusal, installed, progress });
     }
-
-    updateProgress.status = 'running';
-    updateProgress.message = 'Starting update...';
-    updateProgress.logs = [];
-
-    // Find git and npm
-    const gitCmd = findGit();
-    const npmCmd = findNpm();
-
-    if (!gitCmd) {
-      updateProgress.status = 'error';
-      updateProgress.message = 'Git not found on host. See logs for setup instructions.';
-      updateProgress.logs.push('Error: Git not found in PATH or common locations on the host system');
-      updateProgress.logs.push('');
-      updateProgress.logs.push('To fix this issue:');
-      updateProgress.logs.push('1. Install git on the HOST system (not inside Docker):');
-      updateProgress.logs.push('   Ubuntu/Debian: sudo apt-get install git');
-      updateProgress.logs.push('   CentOS/RHEL: sudo yum install git');
-      updateProgress.logs.push('');
-      updateProgress.logs.push('2. Or specify the git path in docker-compose.yml:');
-      updateProgress.logs.push('   environment:');
-      updateProgress.logs.push('     - GIT_PATH=/path/to/git');
-      updateProgress.logs.push('');
-      updateProgress.logs.push(`Running in Docker: ${isInDocker}`);
-      updateProgress.logs.push(`Host project root: ${HOST_PROJECT_ROOT}`);
-      return res.status(400).json({ error: 'Git not found on host system' });
-    }
-
-    if (!npmCmd) {
-      updateProgress.status = 'error';
-      updateProgress.message = 'NPM not found on host. See logs for setup instructions.';
-      updateProgress.logs.push('Error: NPM not found in PATH or common locations on the host system');
-      updateProgress.logs.push('');
-      updateProgress.logs.push('To fix this issue:');
-      updateProgress.logs.push('1. Install Node.js/NPM on the HOST system (not inside Docker):');
-      updateProgress.logs.push('   Ubuntu/Debian: sudo apt-get install nodejs npm');
-      updateProgress.logs.push('   Or use nvm: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash');
-      updateProgress.logs.push('');
-      updateProgress.logs.push('2. Or specify the npm path in docker-compose.yml:');
-      updateProgress.logs.push('   environment:');
-      updateProgress.logs.push('     - NPM_PATH=/path/to/npm');
-      return res.status(400).json({ error: 'NPM not found on host system' });
-    }
-
-    // Send immediate response
-    res.json({ success: true, message: 'Update started' });
-
-    // Run update in background
-    try {
-      updateProgress.logs.push(`Running in Docker: ${isInDocker}`);
-      updateProgress.logs.push(`Using git: ${gitCmd}`);
-      updateProgress.logs.push(`Using npm: ${npmCmd}`);
-      updateProgress.logs.push('Fetching latest changes...');
-      updateProgress.message = 'Fetching latest changes...';
-
-      // Git fetch and pull (on host)
-      execOnHost(`${gitCmd} fetch origin main`, {
-        cwd: PROJECT_ROOT,
-        timeout: 60000,
-      });
-
-      updateProgress.logs.push('Pulling latest code...');
-      updateProgress.message = 'Pulling latest code...';
-
-      execOnHost(`${gitCmd} pull origin main`, {
-        cwd: PROJECT_ROOT,
-        timeout: 120000,
-      });
-
-      updateProgress.logs.push('Installing backend dependencies...');
-      updateProgress.message = 'Installing backend dependencies...';
-
-      // Install backend dependencies (on host)
-      execOnHost(`${npmCmd} install`, {
-        cwd: join(PROJECT_ROOT, 'admin', 'backend'),
-        timeout: 300000,
-      });
-
-      updateProgress.logs.push('Installing frontend dependencies...');
-      updateProgress.message = 'Installing frontend dependencies...';
-
-      // Install frontend dependencies (on host)
-      execOnHost(`${npmCmd} install`, {
-        cwd: join(PROJECT_ROOT, 'admin', 'frontend'),
-        timeout: 300000,
-      });
-
-      updateProgress.logs.push('Building frontend...');
-      updateProgress.message = 'Building frontend...';
-
-      // Build frontend (on host)
-      execOnHost(`${npmCmd} run build`, {
-        cwd: join(PROJECT_ROOT, 'admin', 'frontend'),
-        timeout: 300000,
-      });
-
-      updateProgress.logs.push('Update completed successfully!');
-      updateProgress.message = 'Update completed successfully! Please restart the application.';
-      updateProgress.status = 'success';
-
-      // Update the installed version in the database
-      const newVersion = updateInstalledVersion();
-      updateProgress.logs.push(`Version updated to v${newVersion}`);
-
-      // Clear dismissed update since we just updated
-      setSetting('update_dismissed', 'false');
-      setSetting('dismissed_version', '');
-
-    } catch (updateError) {
-      console.error('Update error:', updateError);
-      updateProgress.status = 'error';
-      updateProgress.message = `Update failed: ${updateError.message}`;
-      updateProgress.logs.push(`Error: ${updateError.message}`);
-    }
-
+    const requestedBy = sanitizeRequestedBy(req.user.username || req.user.email || req.user.id);
+    const started = await startUpdate({ requestedBy, flags: flagsFromOptions({ rebuild: !!rebuild }) });
+    logAudit(req.user.id, 'SELF_UPDATE_REQUESTED', 'system', started.id, {
+      via: 'dashboard', flags: started.flags, from_sha: installed.sha, branch: installed.branch, rebuild: !!rebuild,
+    }, req.ip);
+    res.status(202).json({ id: started.id, flags: started.flags, requested_at: started.requested_at, log_path: started.log_path });
   } catch (error) {
-    console.error('Error starting update:', error);
-    updateProgress.status = 'error';
-    updateProgress.message = error.message;
-    res.status(500).json({ error: 'Failed to start update' });
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    const status = mapAgentErrorToHttp(error.code);
+    if (status !== 502) {
+      return res.status(status).json({ error: error.message, code: error.code });
+    }
+    console.error('Error requesting update:', error);
+    res.status(502).json({ error: error.message || 'Failed to request update', code: error.code || 'agent_unreachable' });
   }
 });
 
-// Get update progress
-userRouter.get('/version/update/progress', requireAdmin, (req, res) => {
-  res.json(updateProgress);
+// Progress of the latest run (or ?id=<uuid> for a specific one), with the
+// ANSI-stripped tail of its log (?tail=<bytes>, default 16 KiB, max 48 KiB).
+userRouter.get('/version/update/progress', requireAdmin, async (req, res) => {
+  try {
+    const id = isUpdateId(req.query.id) ? req.query.id : undefined;
+    const tail = req.query.tail === undefined ? undefined : Number(req.query.tail);
+    const progress = await updateStatus({ id, logTailBytes: Number.isFinite(tail) ? tail : undefined });
+    res.json(progress);
+  } catch (error) {
+    console.error('Error reading update progress:', error);
+    res.status(500).json({ error: 'Failed to read update progress' });
+  }
 });
 
-// Reset update status (after viewing result)
-userRouter.post('/version/update/reset', requireAdmin, (req, res) => {
-  updateProgress.status = 'idle';
-  updateProgress.message = '';
-  updateProgress.logs = [];
-  res.json({ success: true });
+// Kept for API compatibility with the old in-process flow: there is no
+// in-memory state to reset any more, so this just returns the current state.
+userRouter.post('/version/update/reset', requireAdmin, async (req, res) => {
+  try {
+    res.json({ success: true, ...(await updateStatus({ logTailBytes: 0 })) });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to read update progress' });
+  }
 });
 
 // Restart the application (Admin only)

@@ -1,0 +1,27 @@
+{
+  "$comment": "Policy for the ProxyPilot self-update MCP tools. `enabled: false` turns the run tool off without touching code (the two read-only tools keep working) — an operator who wants updates to be dashboard-only flips it here. run_proxypilot_update is confirm-gated like every other mutating verb, never takes --discard-local (the runner refuses it anyway), and refuses on its own when the host checkout has uncommitted changes, when a run is already live, when the host agent cannot be reached, or when no checkout was ever recorded. This JSON is the enforcement source of truth (routes/mcp.js loads it); the tool descriptions only summarize it.",
+  "enabled": true,
+  "tools": {
+    "check_proxypilot_update": {
+      "gate": "none",
+      "mutating": false,
+      "note": "GitHub latest release + latest main commit, the Mock2 standards manifest, and the host checkout facts. Cached for 10 minutes; force: true bypasses the cache."
+    },
+    "get_proxypilot_update_status": {
+      "gate": "none",
+      "mutating": false,
+      "note": "The runner's state.json plus a bounded log tail. Answers before, during and after the container rebuild because the state lives on the host."
+    },
+    "run_proxypilot_update": {
+      "gate": "confirm",
+      "mutating": true,
+      "flags": ["--rebuild"],
+      "refuse_when": ["not_configured", "agent_unreachable", "dirty", "running", "pending"],
+      "note": "Writes one request for the root-owned runner (deploy/proxypilot-update.service). What runs is `update.sh --yes` with at most --rebuild — the same thing the dashboard's Update now button does."
+    }
+  },
+  "explicitly_absent": {
+    "discard_local": "Throwing away the operator's uncommitted changes on the host is a hands-on decision: `update.sh --yes --discard-local` at a shell, never over MCP.",
+    "auto_update": "No tool schedules or repeats updates; every run is one explicit confirm: true call."
+  }
+}

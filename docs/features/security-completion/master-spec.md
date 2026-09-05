@@ -455,6 +455,19 @@ When D.V1-V6 pass, mark Phase D ✅.
 
 ## Phase E — Host-side agent: misc methods (git / npm / systemd)
 
+> **Superseded for the self-update flow (2026-09-05).** The dashboard's
+> "Update now" does not drive `git.pull` / `npm.install` /
+> `systemd.restart` over RPC. The update is ONE `update.sh --yes` run by a
+> root systemd oneshot (`deploy/proxypilot-update.service`, triggered by
+> `deploy/proxypilot-update.path` when the agent drops a request file), so
+> it survives the `docker compose down` that kills the backend and needs no
+> privilege on the agent. The agent's part is `update.check` /
+> `update.request` / `update.status` (`cmd/agent/methods/update.go`) — file
+> exchange only. See `docs/features/self-update.md`. E.V1/E.V2 below are
+> therefore not acceptance tests for the update flow any more; the method
+> table stays as written for any other nsenter call that still needs
+> migrating.
+
 **Goal.** Cover the remaining nsenter calls. Mostly used by the
 self-update flow in the dashboard's "Settings → Update" page.
 

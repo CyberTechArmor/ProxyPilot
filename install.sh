@@ -662,12 +662,18 @@ install_proxypilot_agent() {
     #    that re-running on an unchanged source tree is fast (cache
     #    hit), so we don't bother gating on mtime.
     log_info "Building proxypilot-agent binary..."
+    # Stamp the checkout's commit into the binary (methods.AgentVersion) so
+    # the dashboard's Update block can say which agent build is running.
+    local agent_build_sha
+    agent_build_sha=$(git -C "$script_dir" rev-parse --short=10 HEAD 2>/dev/null || echo unknown)
     (
         cd "$agent_src"
         # GOFLAGS=-mod=mod so the build doesn't fail under a missing
         # vendor/ tree; the module has zero external deps so this is
         # equivalent to `-mod=readonly` in practice.
-        GOFLAGS=-mod=mod "$go_bin" build -o /usr/local/bin/proxypilot-agent .
+        GOFLAGS=-mod=mod "$go_bin" build \
+            -ldflags "-X github.com/cybertecharmor/proxypilot/cmd/agent/methods.AgentVersion=${agent_build_sha}" \
+            -o /usr/local/bin/proxypilot-agent .
     )
     chmod 0755 /usr/local/bin/proxypilot-agent
     log_success "Agent binary installed at /usr/local/bin/proxypilot-agent"
@@ -694,6 +700,54 @@ install_proxypilot_agent() {
     fi
     systemctl restart proxypilot-agent
     log_success "proxypilot-agent service started"
+}
+
+# Self-update runner (docs/features/self-update.md): a root systemd oneshot
+# (deploy/proxypilot-update.service) started by a path unit
+# (deploy/proxypilot-update.path) whenever the agent drops a request at
+# /run/proxypilot-update/request.json. It runs `update.sh --yes` from the
+# checkout recorded here — the only privileged path behind the dashboard's
+# "Update now"; no sudoers, no polkit. update.sh re-installs all three when
+# they change, the same way it does for the agent unit.
+install_update_runner() {
+    local script_dir=$1
+    local runner_src="${script_dir}/scripts/update-runner.sh"
+    local runner_dst="/usr/local/sbin/proxypilot-update-runner"
+    local unit changed=false
+    if [[ ! -f "$runner_src" ]]; then
+        log_warn "scripts/update-runner.sh missing; the dashboard's Update button will report the runner as unavailable"
+        return 0
+    fi
+    log_info "Installing self-update runner..."
+    if ! cmp -s "$runner_src" "$runner_dst" 2>/dev/null; then
+        install -m 0755 "$runner_src" "${runner_dst}.tmp" && mv -f "${runner_dst}.tmp" "$runner_dst"
+    fi
+    for unit in proxypilot-update.service proxypilot-update.path; do
+        if [[ ! -f "${script_dir}/deploy/${unit}" ]]; then
+            log_error "Missing systemd unit at ${script_dir}/deploy/${unit}"
+            exit 1
+        fi
+        if ! cmp -s "${script_dir}/deploy/${unit}" "/etc/systemd/system/${unit}"; then
+            cp "${script_dir}/deploy/${unit}" "/etc/systemd/system/${unit}"
+            chmod 0644 "/etc/systemd/system/${unit}"
+            changed=true
+        fi
+    done
+    # State + logs the dashboard reads back (root writes, world reads).
+    install -d -m 0755 /var/lib/proxypilot/update
+    # Record THIS checkout as the one update.sh lives in, and take the first
+    # snapshot of its facts (branch, commit, dirty) for the Update block.
+    "$runner_dst" record-source "$script_dir" || log_warn "could not record the source checkout for the self-update runner"
+    "$runner_dst" check >/dev/null 2>&1 || true
+    if [[ "$changed" == true ]]; then
+        systemctl daemon-reload
+    fi
+    if ! systemctl is-enabled --quiet proxypilot-update.path 2>/dev/null; then
+        systemctl enable proxypilot-update.path
+    fi
+    systemctl reset-failed proxypilot-update.path 2>/dev/null || true
+    systemctl restart proxypilot-update.path
+    log_success "Self-update runner installed (proxypilot-update.path enabled)"
 }
 
 # Create secure landing page for when ProxyPilot is secured/stopped
@@ -1546,6 +1600,10 @@ main() {
     # already-existing socket path + group. Dual-tracked: nsenter
     # path stays the production code path until Phases B-E migrate.
     install_proxypilot_agent "$SCRIPT_DIR"
+
+    # Self-update runner (root oneshot + path unit) — after the agent, whose
+    # unit creates the /run/proxypilot-update request directory.
+    install_update_runner "$SCRIPT_DIR"
 
     # Create configuration files
     ACME_EMAIL="$EMAIL"

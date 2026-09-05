@@ -72,6 +72,9 @@ import {
   validateHostUsage, reclaimDelta,
 } from '../lib/mcp-logic.js';
 import { archiveProject, unarchiveProject } from '../lib/project-lifecycle.js';
+import { checkForUpdates as selfUpdateCheck, installedState as selfUpdateInstalled, startUpdate as selfUpdateStart, updateStatus as selfUpdateStatus } from '../lib/self-update.js';
+import { MCP_RUN_CONFIRM_MESSAGE, flagsFromOptions, isUpdateId, updateStartRefusal } from '../lib/self-update-logic.js';
+import { getGitHubRepo, getCurrentVersion } from './user.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
   collectCandidatePaths, extractToStaging, applyStagingToTarget, ZIP_LIMITS, ZipError,
@@ -124,6 +127,11 @@ const LXC_CFG_POLICY = JSON.parse(
 // set_project_lifecycle. Enforcement source of truth, like the two above.
 const PROJECT_LIFECYCLE_POLICY = JSON.parse(
   readFileSync(new URL('../lib/mcp-policy/project-lifecycle-allowlist.json', import.meta.url), 'utf8'),
+);
+// The self-update tools' policy: `enabled: false` turns run_proxypilot_update
+// off without a code change (the read-only check/status tools stay on).
+const SELF_UPDATE_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/self-update-allowlist.json', import.meta.url), 'utf8'),
 );
 const DEFAULT_LXC_TARGET = '/opt/app';
 const MCP_TMP_DIR = process.env.ZIP_UPLOAD_TMP_DIR || join(os.tmpdir(), 'proxypilot-zip-uploads');
@@ -4292,6 +4300,55 @@ async function toolPushGitRemote(args, auth) {
   return toolResult({ kind, target, ...r }, { isError: !r.ok });
 }
 
+/* ------------------------------ self-update ------------------------------ */
+// docs/features/self-update.md. The backend never runs update.sh: the run
+// tool drops a request for the root-owned runner through the host agent,
+// exactly like the dashboard's Update now button.
+
+async function toolCheckProxypilotUpdate(args) {
+  const out = await selfUpdateCheck({ repo: getGitHubRepo(), currentVersion: getCurrentVersion(), force: args.force === true });
+  return toolResult(out);
+}
+
+async function toolGetProxypilotUpdateStatus(args) {
+  const id = isUpdateId(args.id) ? args.id : undefined;
+  const tail = args.log_tail_bytes === undefined ? undefined : Number(args.log_tail_bytes);
+  const out = await selfUpdateStatus({ id, logTailBytes: Number.isFinite(tail) ? tail : undefined });
+  return toolResult(out);
+}
+
+async function toolRunProxypilotUpdate(args, auth) {
+  if (SELF_UPDATE_POLICY.enabled !== true) {
+    return toolResult(updateStartRefusal({ installed: null, policyEnabled: false }), { isError: true });
+  }
+  if (args.confirm !== true) {
+    return toolResult(MCP_RUN_CONFIRM_MESSAGE, { isError: true });
+  }
+  const [installed, progress] = await Promise.all([selfUpdateInstalled({ force: true }), selfUpdateStatus({ logTailBytes: 0 })]);
+  const refusal = updateStartRefusal({ installed, progress, policyEnabled: true });
+  if (refusal) {
+    logAudit(auth.created_by, 'SELF_UPDATE_REFUSED', 'system', 'self-update', { via: 'mcp', reason: refusal }, null);
+    return toolResult({ refused: true, reason: refusal, installed: { branch: installed.branch, sha: installed.sha, dirty: installed.dirty, dirty_files: installed.dirty_files }, status: progress.status, phase: progress.phase }, { isError: true });
+  }
+  const flags = flagsFromOptions({ rebuild: args.rebuild === true });
+  let started;
+  try {
+    started = await selfUpdateStart({ requestedBy: `mcp:${auth.created_by}`, flags });
+  } catch (err) {
+    logAudit(auth.created_by, 'SELF_UPDATE_REFUSED', 'system', 'self-update', { via: 'mcp', reason: `${err.code || 'error'}: ${err.message}` }, null);
+    return toolResult(`Update not started (${err.code || 'error'}): ${err.message}`, { isError: true });
+  }
+  logAudit(auth.created_by, 'SELF_UPDATE_REQUESTED', 'system', started.id, { via: 'mcp', flags: started.flags, from_sha: installed.sha, branch: installed.branch, rebuild: args.rebuild === true }, null);
+  return toolResult({
+    id: started.id,
+    requested_at: started.requested_at,
+    flags: started.flags,
+    from_sha: installed.sha,
+    branch: installed.branch,
+    next: `poll get_proxypilot_update_status({ id: "${started.id}" }); the API will be unreachable for ~1–2 minutes while the container rebuilds — keep polling until status is success, failed or refused`,
+  });
+}
+
 const TOOL_HANDLERS = {
   list_git_connectors: toolListGitConnectors,
   set_git_remote: toolSetGitRemote,
@@ -4362,6 +4419,9 @@ const TOOL_HANDLERS = {
   get_build_log: toolGetBuildLog,
   append_change_record: toolAppendChangeRecord,
   redeploy_project: toolRedeployProject,
+  check_proxypilot_update: toolCheckProxypilotUpdate,
+  get_proxypilot_update_status: toolGetProxypilotUpdateStatus,
+  run_proxypilot_update: toolRunProxypilotUpdate,
 };
 
 /* ------------------- the delegated-editing adapter ----------------------- */

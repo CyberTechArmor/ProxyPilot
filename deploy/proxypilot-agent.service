@@ -55,7 +55,15 @@ RestartSec=2
 # RuntimeDirectoryPreserve=yes keeps the directory across systemctl
 # stop/start cycles so Docker's bind-mount of the directory inode
 # never goes stale.
-RuntimeDirectory=proxypilot-agent
+#
+# The second directory, /run/proxypilot-update/, is the self-update
+# request drop box: the agent's update.request / update.check methods
+# write request.json + a nonce file there (it is the only place the
+# agent may write under ProtectSystem=strict besides /etc/caddy), and
+# the root-owned proxypilot-update.path/.service pair picks the
+# request up. 0750 + group proxypilot-agent means nothing else on the
+# host can author a request. See docs/features/self-update.md.
+RuntimeDirectory=proxypilot-agent proxypilot-update
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 

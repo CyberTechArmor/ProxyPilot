@@ -58,9 +58,16 @@ no-build rollback are CPR Base Platform responsibilities — see §5).
 2. Fold the change into `constitution.md` / `skills.json` / `gates.json` (the
    runner's contract strings — `phase-routing@1`, `cite file:line from the diff` —
    must survive; `mock2-framework.test.js` checks the bundle validates).
-3. Record the new site version in `framework-seed/README.md` and here.
+3. Record the new site version in `framework-seed/README.md`, in
+   `framework-seed/standards-version.json` (`version` + `synced` — this is what the
+   dashboard's Update block and `check_proxypilot_update` compare with the live
+   `manifest.json`; `mock2-standards-seed.test.js` fails if the two disagree), and
+   here.
 4. Boot the backend: `upgradeFrameworkFromSeed` publishes the new version; projects
-   adopt it (auto-adopt sweep, or a manual update cycle).
+   adopt it (auto-adopt sweep, or a manual update cycle). Deployed hosts get there
+   by updating ProxyPilot — Profile → Application Settings → Update now, or
+   `run_proxypilot_update` over MCP (`docs/features/self-update.md`); the Update
+   block says "site X available — update ProxyPilot to pick it up" until they do.
 
 Publishing site changes *from* ProxyPilot: edit the seed under `/opt/app/site` on
 the `mock2` guest (`write_lxc_file`), write `/opt/app/site/.publish` with the commit

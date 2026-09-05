@@ -182,6 +182,10 @@ export default function Layout() {
   // CVE inbox unread count for the sidebar badge.
   const [cveUnread, setCveUnread] = useState(0);
 
+  // Self-update dot on the version label (admins). One check per shell
+  // mount; the backend caches the GitHub/standards lookups for 10 minutes.
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+
   // Check admin status from user context and localStorage fallback
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
@@ -221,6 +225,15 @@ export default function Layout() {
       .then(v => setVersion(v.version))
       .catch(e => console.error('Error fetching version:', e));
   }, []);
+
+  useEffect(() => {
+    if (!isAdmin) return undefined;
+    let cancelled = false;
+    api.checkForUpdates()
+      .then((d) => { if (!cancelled) setUpdateAvailable(!!d?.updateAvailable); })
+      .catch(() => { /* offline or no agent: no dot */ });
+    return () => { cancelled = true; };
+  }, [isAdmin]);
 
   // Poll the CVE inbox for unread count (entries with
   // state.operator_seen=false). Badge clears when the operator opens
@@ -385,6 +398,16 @@ export default function Layout() {
                     ? ` · ${__PP_BUILD_TIME__.slice(5, 16)}`
                     : ''}
                 </span>
+                {isAdmin && updateAvailable && (
+                  <Link
+                    to="/profile"
+                    title="Update available — open Application Settings"
+                    aria-label="Update available: open Application Settings"
+                    className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full hover:bg-accent"
+                  >
+                    <span className="h-2 w-2 rounded-full bg-primary" aria-hidden="true" />
+                  </Link>
+                )}
               </div>
             </div>
             {/* Collapse (md+ only — mobile closes via the backdrop/route change). */}

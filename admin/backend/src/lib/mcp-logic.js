@@ -78,6 +78,10 @@ export const MCP_SERVER_INSTRUCTIONS = [
   'the operator did not ask for; classify production-policy questions as a checklist item and keep building.',
   'GIT REMOTES: projects, static sites and LXC containers can be submitted to Gitea/GitHub — list_git_connectors,',
   'then set_git_remote (create_repo makes the repo) and push_git_remote; auto mode pushes after each change.',
+  'SELF-UPDATE: check_proxypilot_update says whether a newer ProxyPilot (GitHub) or newer Mock2 standards (the',
+  'site) exist and whether the host can update; run_proxypilot_update({ confirm: true }) runs update.sh on the',
+  'host — backup, pull, rebuild, ~1–2 min of API downtime — so ask the operator first, then poll',
+  'get_proxypilot_update_status through the restart. Never an automatic update: every run is one confirmed call.',
 ].join(' ');
 
 // ---- JSON-RPC helpers ----
@@ -1942,6 +1946,42 @@ export const MCP_TOOLS = [
         mode: { type: 'string', enum: ['fresh', 'full'] },
       },
       required: ['project_id', 'name'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'check_proxypilot_update',
+    description: 'Is a newer ProxyPilot available, and can this host update? Reports the running version, the latest GitHub release and the latest commit on the installed branch (commits_behind when GitHub knows the installed sha), the Mock2 standards versions (the seed this build renders vs the live site manifest — a newer site version is picked up by updating ProxyPilot, which republishes the framework on boot), the host checkout facts from the agent (branch, sha, dirty = uncommitted local changes, which block an update), and canUpdate / cannotUpdateReason. Read-only, no confirm. Network results are cached for 10 minutes; force: true bypasses the cache. A GitHub or standards-site failure is a field (github.error / standards.error), not a tool error.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        force: { type: 'boolean', description: 'Bypass the 10-minute cache of the GitHub / standards lookups (default false).' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_proxypilot_update_status',
+    description: 'Progress of the latest self-update run (or of `id`): status idle | queued | running | success | failed | refused, the update.sh phase ([n/7] markers: backup, fetch, pull, incus, agent, deps, build, restart), from_sha → to_sha, exit_code, reason on failure or refusal, and the ANSI-stripped tail of the run log. The state lives on the host, so this answers before, during and after the container rebuild — expect the API itself to be unreachable for ~1–2 minutes mid-run and simply retry. Read-only, no confirm.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'A run id from run_proxypilot_update. Omitted: the latest run.' },
+        log_tail_bytes: { type: 'number', description: 'How much of the log tail to return (default 16384, max 49152).' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'run_proxypilot_update',
+    description: 'Update ProxyPilot itself: asks the host to run update.sh — database backup, git pull, dependency install, frontend build, docker compose rebuild and restart — through the root-owned self-update runner (deploy/proxypilot-update.service). The dashboard and this API are unreachable for about 1–2 minutes while the container rebuilds, so confirm with the user first; without confirm: true the call refuses and returns the exact message to relay. Also refused, with the reason, when the host checkout has uncommitted local changes (the operator must resolve them on the host; nothing here discards them), when an update is already running or queued, when the host agent is unreachable, or when no checkout is recorded. rebuild: true forces a rebuild when the checkout is already up to date. Returns the run id and the next step: poll get_proxypilot_update_status. Policy: lib/mcp-policy/self-update-allowlist.json (enabled: false turns this tool off).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        confirm: { type: 'boolean', description: 'Must be true.' },
+        rebuild: { type: 'boolean', description: 'Force a rebuild even when the checkout is already up to date (default false).' },
+      },
+      required: ['confirm'],
       additionalProperties: false,
     },
   },

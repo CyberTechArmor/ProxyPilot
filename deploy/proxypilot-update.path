@@ -1,0 +1,24 @@
+# proxypilot-update.path — watches for a self-update request.
+#
+# The host-side agent (proxypilot-agent, unprivileged) writes
+# /run/proxypilot-update/request.json when an admin presses "Update now" in
+# the dashboard or an MCP client calls run_proxypilot_update. systemd sees
+# the file appear and starts proxypilot-update.service, the root oneshot
+# that validates the request and runs update.sh. The runner renames the
+# request away immediately, so the path unit re-arms for the next one.
+#
+# PathExists (not PathChanged) so a request that lands while the runner is
+# busy, or before this unit is active, is still picked up as soon as the
+# runner is free. /run/proxypilot-update is the agent unit's second
+# RuntimeDirectory; systemd watches the nearest existing parent until it
+# appears, so ordering against the agent does not matter.
+
+[Unit]
+Description=ProxyPilot self-update request watcher
+
+[Path]
+PathExists=/run/proxypilot-update/request.json
+Unit=proxypilot-update.service
+
+[Install]
+WantedBy=multi-user.target

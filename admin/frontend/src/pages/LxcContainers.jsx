@@ -33,6 +33,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
 import ZipUploadDialog from '@/components/ZipUploadDialog';
+import GitRemoteCard, { EMPTY_REMOTE_DRAFT } from '@/components/mock2/GitRemoteCard';
 import { useSnapshotExports } from '@/context/SnapshotExportContext';
 
 const STATUS_COLORS = {
@@ -622,6 +623,15 @@ export default function LxcContainers() {
     dockerSupport: true, dockerPrivileged: true,
     services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }],
   });
+  // Optional git remote for a NEW container (mock2 target remotes): the app
+  // directory inside the guest is snapshotted and pushed to Gitea / GitHub.
+  // Admin-only connector list; empty (module off / not admin) hides the section.
+  const [gitConnectors, setGitConnectors] = useState([]);
+  const [lxcRemoteOn, setLxcRemoteOn] = useState(false);
+  const [lxcRemoteDraft, setLxcRemoteDraft] = useState({ ...EMPTY_REMOTE_DRAFT, source_dir: '/opt/app' });
+  useEffect(() => {
+    api.mock2ListGitConnectors().then((g) => setGitConnectors(g.connectors || [])).catch(() => setGitConnectors([]));
+  }, []);
   const [templateSelection, setTemplateSelection] = useState('');
   const [creating, setCreating] = useState(false);
   const [createProgress, setCreateProgress] = useState(null); // { phase, message, elapsed, error, ip }
@@ -798,6 +808,24 @@ export default function LxcContainers() {
         ...(!isVm && createForm.dockerSupport && createForm.dockerPrivileged && { dockerPrivileged: true }),
       };
       await api.createLxcContainer(data);
+
+      // Optional git remote, bound now so the first deploy into the guest can
+      // be pushed (auto) or pushed on demand from the Details tab.
+      if (lxcRemoteOn && lxcRemoteDraft.git_connector_id && lxcRemoteDraft.remote_repo.trim()) {
+        try {
+          await api.mock2SetTargetRemote('lxc', createForm.name, {
+            git_connector_id: Number(lxcRemoteDraft.git_connector_id),
+            remote_repo: lxcRemoteDraft.remote_repo.trim(),
+            push_mode: lxcRemoteDraft.push_mode,
+            source_dir: lxcRemoteDraft.source_dir.trim() || null,
+            create_repo: !!lxcRemoteDraft.create_repo,
+          });
+        } catch (remoteErr) {
+          toast({ variant: 'destructive', title: 'Container creating, git remote not set', description: remoteErr.message });
+        }
+        setLxcRemoteOn(false);
+        setLxcRemoteDraft({ ...EMPTY_REMOTE_DRAFT, source_dir: '/opt/app' });
+      }
 
       // Start polling for progress
       const containerName = createForm.name;
@@ -2644,6 +2672,17 @@ export default function LxcContainers() {
                     )}
                   </div>
                 </div>
+                {gitConnectors.length > 0 && (
+                  <div className="space-y-2 rounded-md border p-3">
+                    <label className="flex items-center gap-2 text-sm min-h-[44px] sm:min-h-0">
+                      <input type="checkbox" className="h-4 w-4" checked={lxcRemoteOn} onChange={(e) => setLxcRemoteOn(e.target.checked)} />
+                      Also push this container's app directory to a git remote (Gitea / GitHub)
+                    </label>
+                    {lxcRemoteOn && (
+                      <GitRemoteCard.Fields kind="lxc" value={lxcRemoteDraft} onChange={setLxcRemoteDraft} connectors={gitConnectors} idPrefix="lxc-remote" />
+                    )}
+                  </div>
+                )}
                 <div className="space-y-2">
                   <Label>Init Template</Label>
                   <Select
@@ -3960,6 +3999,13 @@ export default function LxcContainers() {
                     )}
                   </div>
                 </div>
+                {/* Git remote (optional): push the app directory inside the guest to Gitea / GitHub. */}
+                <GitRemoteCard
+                  kind="lxc"
+                  target={selectedContainer.name}
+                  title="Git remote"
+                  description="Optional. Snapshot a directory inside this container (default: the registered startup directory) into a repository on Gitea or GitHub — automatically after every change made through ProxyPilot, or only when you press Push now."
+                />
               </TabsContent>
 
               {/* Terminal Tab — live PTY via WebSocket. forceMount keeps

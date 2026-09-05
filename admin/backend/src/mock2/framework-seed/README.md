@@ -1,48 +1,46 @@
-# Mock2 framework seed — version 1
+# Mock2 framework seed — vendored framework content
 
-This directory is the **vendored source** for framework version 1, inserted into
-`mock2_framework_versions` on the first *enabled* boot (idempotent — see
-`framework.js` → `seedFrameworkV1()`). It is inert source on disk: on a disabled
-or production-pinned host nothing here is read, imported, or installed (ADR-001).
+This directory is the **vendored source** of the framework version ProxyPilot
+publishes. On the first *enabled* boot it is inserted as version 1
+(`framework.js` → `seedFrameworkV1()`); on every later boot where any file here
+differs from the latest published version, `upgradeFrameworkFromSeed()` publishes a
+**new** version and projects adopt it through the drift → update-cycle path
+(automatically when `framework_auto_adopt` is on). It is inert source on disk: on a
+disabled or production-pinned host nothing here is read, imported, or installed
+(ADR-001). The registry is append-only and content rows are immutable (ADR-003).
 
-## Status (risk R8): framework content is real; the runtime scaffold is the last piece
+## Where the content comes from (2026-09-05)
 
-The framework **content** artifacts below are now authored from the operator's
-*The Mock2 Framework* specification (v1.1, Fractionate LLC, July 2026), closing
-most of risk R8. The one remaining piece is the **runtime scaffold** — the actual
-TypeScript/Express/Drizzle/Zod/Vitest project code the container is seeded from,
-which today is still ProxyPilot's M2 placeholder (`mock2/template.js`, a static
-placeholder app). Upgrading that scaffold is a separate infra deliverable, not
-framework content.
+| Source | Version | What it governs here |
+|---|---|---|
+| **Mock2 standards** — `mock2/mock2-core` on git.fractionate.ai, served at https://mock2.fractionate.ai | **0.2.0** (2026-09-02) → **0.3.0** (2026-09-05, adds CPR) | Rule 0 (no gates; classify production-policy questions), the five-stage pipeline (Concept → Define → Build → Check → Run), rule status tags, the production checklist, the change-record format, `npm run check` scripts, the per-repo template files. |
+| **Continuous Production Readiness (CPR)** — `cpr/CPR-v1.1.md` | **1.1** | Development first / no invented gates, host contract + host SDK, feature manifests, versioning, assurance outcomes (PASS / WARNING / BLOCK), readiness stages, decision ledger, roles. Shipped to projects as the `cpr-host` component. |
+| *The Mock2 Framework* (Fractionate LLC, July 2026) | 1.1 | The fixed stack, the scaffold conventions, the auth pattern, the locked design system. |
+
+The standards site is the newer, human-edited source; this seed is ProxyPilot's
+**runtime rendering** of it (the platform needs the constitution as one document
+the runner is prompted with, the checks as executable scripts, and the skills as
+prompt templates). When the site changes, update the seed to match and publish —
+see `docs/mock2/standards-and-cpr.md` for the procedure and for what a live link
+to the Gitea repo would take.
 
 | File | Field | State |
 |---|---|---|
-| `constitution.md` | `constitution_md` | **real** — the org constitution (stack, scaffold, auth, security, the four stages) per framework §3/§6/§9 |
-| `skills.json` | `skills_json` | **real** — the four stage skills (concept, define, build, review) as prompt templates, a JSON array |
-| `gates.json` | `gates_json` | **real** — the deterministic Tier-1 gate battery (typecheck, constitution-lint, rule-coverage, security-scan, test) per framework §6.3 |
-| `design-system.md` | `design_system_md` | **real (locked)** — the design system Stage-1 mockups must obey, from the operator's design reference |
-| `project-template.ref` | `project_template_ref` | names the intended scaffold (`builtin:mock2-ts-express-drizzle-v1`); the runtime `template.js` implementation is still the placeholder |
+| `constitution.md` | `constitution_md` | **v2** — rule 0, the stages, CPR §13, change records + production checklist §14, on top of the hardened v1 sections (§4 identity, §5 gated shells, §7 end-to-end done, §7a no silent simulation, §9 deviations, §11–12 acceptance) |
+| `skills.json` | `skills_json` | the four stage skills (concept, define, build, review) as prompt templates — v0.2.0 posture: `[draft]` rules, checks between changes, reviewer never blocks, phase-routing@1 contract kept |
+| `gates.json` | `gates_json` | the deterministic check battery (typecheck, constitution-lint, rule-coverage, security-scan, test, ui-interaction, acceptance, component-reuse). The platform still calls them "gates" in report rows; read as production-checklist items. `security-scan`: committed secret = hard stop, dependency audit = recorded WARNING |
+| `design-system.md` | `design_system_md` | **locked** — the design system Stage-1 mockups must obey (unchanged) |
+| `project-template.ref` | `project_template_ref` | names the scaffold (`builtin:mock2-ts-express-drizzle-v1`); the runtime is `scaffold.js` |
+| `cpr/` | — | the CPR v1.1 standard, a worked `feature.manifest.json`, and notes |
+| `cpr-host.component.json` | component library | the CPR Host component, seeded at boot by `component-seed.js` |
+| `proxypilot-auth.component.json` | component library | the auth component, seeded at boot |
 
-### Why the gates are self-adapting
+### Why the checks are self-adapting
 
-The gate scripts are ordinary POSIX-sh checks that run identically in the runner
-container and ad hoc (framework §10.2). Because the runtime scaffold is still the
-M2 placeholder, each gate **detects whether its toolchain is present**: a project
+The check scripts are ordinary POSIX-sh and run identically in the runner
+container and ad hoc. Each **detects whether its toolchain is present**: a project
 without a TypeScript app is skipped green (typecheck/lint/test), while a real
-scaffold is enforced for real. The security-scan (committed secrets) and
-rule-coverage ("rules exist but no tests") checks run on any stack. This keeps
-M6's verify checklist green against the placeholder template *and* enforces the
-constitution the moment the real scaffold lands — no gate edit required.
-
-## When new content arrives (revisions)
-
-Editing these files changes only what a **fresh** install seeds as v1 (the insert
-is guarded to run once, when the versions table is empty). On a host that already
-seeded v1, replacing these files does nothing until someone **publishes a new
-version through the admin editor** — the registry is append-only and content rows
-are immutable (ADR-003); a revision is a new monotonic version, never an in-place
-edit of the v1 row. To ship this content to an already-seeded host, publish it as
-v2 with a changelog that says so.
+scaffold is checked for real. `skipped` is reported as such — never as `passed`.
 
 ## Base application template + default design brief
 
@@ -61,35 +59,26 @@ v2 with a changelog that says so.
   (security fixes, the keep-alive robustness fix, new features), so an existing
   project can be diffed against it.
 
-Editing any seed file publishes a NEW framework version on the next boot
-(`upgradeFrameworkFromSeed`); projects adopt it through the normal
-drift → update-cycle path, never automatically.
-
-
 ## What a new project is provisioned with
 
 Every project starts as a **TypeScript / Express / Drizzle / PostgreSQL** app —
-`mock2/scaffold.js` — with two things wired in automatically before the AI ever
+`mock2/scaffold.js` — with these wired in automatically before the AI ever
 builds anything:
 
 1. **The auth component** (`proxypilot-auth.component.json`): local + LDAPS
    sign-in, JWT access tokens with rotating refresh, DB-driven RBAC with
    per-role permission overrides, and the first-administrator bootstrap.
-2. **The platform module** (`mock2/scaffold-platform.js`):
-   - light/dark theme applied before first paint, and mobile-responsive styles
-     with 44px touch targets;
-   - editable **Privacy** and **Terms** pages that ship with real generic copy,
-     reachable signed-out, with a copyright notice that is always the current
-     year;
-   - **branding**: organisation name, logo, favicon (falling back to the logo),
-     a shared asset library, and an `appContext` blurb each build is expected to
-     keep current;
-   - **API keys** carrying the same permissions people hold, so other
-     applications can use this one through the same endpoints and the same
-     checks;
-   - **read-only SQL**: a SELECT-only PostgreSQL credential over curated views
-     in an `api_read` schema, for the questions that are far cheaper as a join
-     than as N+1 API calls.
+2. **The platform module** (`mock2/scaffold-platform.js`): theme, mobile
+   styles, editable Privacy/Terms pages, branding, API keys, read-only SQL.
+3. **The Mock2 standards' repo files** (`mock2/template.js` →
+   `mock2StandardsSeedFiles`): `CLAUDE.md` / `.github/copilot-instructions.md`
+   (the per-repo constitution pointing at the standards site), `state/rules.md`
+   with status tags, `state/production-checklist.md`, `state/decisions.md` (the
+   CPR decision ledger), `state/change-records/README.md`, `.mock2/README.md`;
+   and `npm run check` + `check:*` scripts in `package.json`.
+4. **The CPR Host component** is in the library (not pre-installed): a build
+   adopts it with `materialize_component` when the first feature needs the host
+   seam.
 
 The AI builds *on top of* all of this. It adds feature tables beside the
 platform tables and screens behind the auth gate; it does not re-implement any
@@ -99,7 +88,7 @@ of it.
 
 `framework-seed/base-app/` is a **reference implementation** of the same
 capabilities in plain CommonJS with no build step. It is deliberately NOT what
-gets installed: the constitution, the gate battery and the build skills all
+gets installed: the constitution, the check battery and the build skills all
 require TypeScript/Drizzle/Zod/Vitest, so shipping a different stack would break
 every build that followed. Read it to see a capability end to end; change
 `scaffold-platform.js` to change what projects actually get.

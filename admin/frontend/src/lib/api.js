@@ -1233,10 +1233,10 @@ export const api = {
   // use_base_domain: serve the project on the parent domain itself
   // (example.com) as well as its minted subdomain. The backend refuses it when
   // another service already answers on that hostname.
-  mock2CreateProject: ({ name, description, parent_domain_id, use_base_domain, design_preset, lbp_project_id }) =>
+  mock2CreateProject: ({ name, description, parent_domain_id, use_base_domain, design_preset, lbp_project_id, remote }) =>
     request('/mock2/projects', {
       method: 'POST',
-      body: JSON.stringify({ name, description, parent_domain_id, use_base_domain, design_preset, lbp_project_id }),
+      body: JSON.stringify({ name, description, parent_domain_id, use_base_domain, design_preset, lbp_project_id, remote }),
     }),
   mock2ProjectProvisionStatus: (id) => request(`/mock2/projects/${id}/provision-status`),
   // Clone a project under a new name/domain. mode 'fresh' = app + git history
@@ -1411,6 +1411,16 @@ export const api = {
   mock2SetProjectRemote: (id, body) =>
     request(`/mock2/projects/${id}/remote`, { method: 'POST', body: JSON.stringify(body) }),
   mock2ClearProjectRemote: (id) => request(`/mock2/projects/${id}/remote`, { method: 'DELETE' }),
+  mock2PushProjectRemote: (id) => request(`/mock2/projects/${id}/remote/push`, { method: 'POST' }),
+  // Git remotes for static sites and LXC containers (mock2_target_remotes). kind is
+  // 'static_site' (target = service id) or 'lxc' (target = container name).
+  mock2GetTargetRemote: (kind, target) => request(`/mock2/remotes/${kind}/${encodeURIComponent(target)}`),
+  mock2SetTargetRemote: (kind, target, body) =>
+    request(`/mock2/remotes/${kind}/${encodeURIComponent(target)}`, { method: 'POST', body: JSON.stringify(body) }),
+  mock2ClearTargetRemote: (kind, target) =>
+    request(`/mock2/remotes/${kind}/${encodeURIComponent(target)}`, { method: 'DELETE' }),
+  mock2PushTargetRemote: (kind, target) =>
+    request(`/mock2/remotes/${kind}/${encodeURIComponent(target)}/push`, { method: 'POST' }),
   // Zip export is a binary GET — link to it directly (cookie auth rides along).
   mock2ProjectExportZipUrl: (id) => `/api/mock2/projects/${id}/export.zip`,
   // Full git repository (git bundle with history) — clone with `git clone <file>.bundle`.

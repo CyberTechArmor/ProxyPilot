@@ -54,6 +54,7 @@ Any change under `admin/frontend/src/pages/` or `admin/frontend/src/components/`
 ## Gotchas
 
 - `docs/known-issues.md` is the punch list of parked follow-ups; check it before diagnosing "broken" behavior.
+- `admin/backend/src/mock2/framework-seed/` is ProxyPilot's rendering of the **Mock2 standards** (git.fractionate.ai/mock2/mock2-core, served at mock2.fractionate.ai) and **CPR v1.1** (`framework-seed/cpr/`). The site is the human-edited source; a seed edit publishes a new framework version on the next boot. Procedure and the standards ↔ platform mapping: `docs/mock2/standards-and-cpr.md`.
 - `LEARNINGS.md` is the harness ratchet registry: every human-caught defect in generated output must be triaged into a template, a rule, or a machine check and recorded there (see its triage guidance). `HARNESS-INVESTIGATION.md` holds the evidence method.
 - Operator scripts (`install.sh`, `update.sh`) are large and load-bearing — `update.sh` handles DB backup/restore guards and retro-fits config (e.g., WireGuard MTU via `scripts/patch-wg-mtu.sh`). Generated WireGuard configs pin MTU 1280, overridable via `PROXYPILOT_VPN_MTU`.
 - `var/lib/` in the repo mirrors runtime state layout (`/var/lib/proxypilot/` on a real install: backups, inventory, CVE inbox).

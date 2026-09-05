@@ -102,6 +102,7 @@ import {
 import { cn } from '@/lib/utils';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
 import ZipUploadDialog from '@/components/ZipUploadDialog';
+import GitRemoteCard, { EMPTY_REMOTE_DRAFT } from '@/components/mock2/GitRemoteCard';
 
 // Language detection based on file extension
 const getLanguageFromFile = (filename) => {
@@ -195,6 +196,15 @@ export default function Dashboard() {
   // Service settings dialog state
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [settingsService, setSettingsService] = useState(null);
+  // Optional git remote for a NEW static site (mock2 target remotes). The
+  // connector list is admin-only and only present when the Projects module is
+  // on; an empty list hides the section, so the wizard is unchanged otherwise.
+  const [gitConnectors, setGitConnectors] = useState([]);
+  const [siteRemoteOn, setSiteRemoteOn] = useState(false);
+  const [siteRemoteDraft, setSiteRemoteDraft] = useState(EMPTY_REMOTE_DRAFT);
+  useEffect(() => {
+    api.mock2ListGitConnectors().then((g) => setGitConnectors(g.connectors || [])).catch(() => setGitConnectors([]));
+  }, []);
   const [settingsForm, setSettingsForm] = useState({
     target: '127.0.0.1',
     port: '',
@@ -1425,6 +1435,23 @@ export default function Dashboard() {
       const createdServiceId = createRes?.service?.id;
       if (!createdServiceId) {
         throw new Error('Service create did not return an id');
+      }
+
+      // Optional git remote for a static site, set right after creation so
+      // the first content that lands can be pushed (auto) or pushed on demand.
+      if (formData.kind === 'static_site' && siteRemoteOn && siteRemoteDraft.git_connector_id && siteRemoteDraft.remote_repo.trim()) {
+        try {
+          await api.mock2SetTargetRemote('static_site', createdServiceId, {
+            git_connector_id: Number(siteRemoteDraft.git_connector_id),
+            remote_repo: siteRemoteDraft.remote_repo.trim(),
+            push_mode: siteRemoteDraft.push_mode,
+            create_repo: !!siteRemoteDraft.create_repo,
+          });
+        } catch (remoteErr) {
+          toast({ variant: 'destructive', title: 'Site created, git remote not set', description: remoteErr.message });
+        }
+        setSiteRemoteOn(false);
+        setSiteRemoteDraft(EMPTY_REMOTE_DRAFT);
       }
 
       // Fan out additional routes one at a time. If any fails, stop
@@ -4214,6 +4241,17 @@ volumes:
                       </p>
                     </div>
                   )}
+                  {formData.kind === 'static_site' && gitConnectors.length > 0 && (
+                    <div className="space-y-2 rounded-md border p-3">
+                      <label className="flex items-center gap-2 text-sm min-h-[44px] sm:min-h-0">
+                        <input type="checkbox" className="h-4 w-4" checked={siteRemoteOn} onChange={(e) => setSiteRemoteOn(e.target.checked)} />
+                        Also push this site to a git remote (Gitea / GitHub)
+                      </label>
+                      {siteRemoteOn && (
+                        <GitRemoteCard.Fields kind="static_site" value={siteRemoteDraft} onChange={setSiteRemoteDraft} connectors={gitConnectors} idPrefix="site-remote" />
+                      )}
+                    </div>
+                  )}
 
                   {/*
                    * Phase 2b H.3: routes builder. Each row carries its own
@@ -6741,6 +6779,16 @@ volumes:
                 </Button>
               )}
             </div>
+
+            {/* Git remote (optional): push the docroot to Gitea / GitHub. */}
+            {settingsService?.type === 'static' && (
+              <GitRemoteCard
+                kind="static_site"
+                target={settingsService.id}
+                title="Git remote"
+                description="Optional. Snapshot this site's files into a repository on Gitea or GitHub — automatically after every change made through ProxyPilot, or only when you press Push now."
+              />
+            )}
 
             {/* File Path Settings (for static sites) */}
             {settingsService?.type === 'static' && (

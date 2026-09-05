@@ -521,7 +521,7 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, createMock2GitRouter, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, loadCustomDesignPresets, sweepMock2Locks, mock2TerminalAuthorize, sweepFrameworkAutoAdopt, sweepStalledBuilds } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, createMock2GitRouter, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, loadCustomDesignPresets, sweepMock2Locks, mock2TerminalAuthorize, sweepFrameworkAutoAdopt, sweepStalledBuilds, registerGitPushHooks } = await import('./mock2/index.js');
     initMock2Db();
     // Register the project-terminal authorizer into the core streaming-terminal
     // route now that the module is enabled (ADR-001: the core never imports mock2
@@ -544,6 +544,9 @@ if (mock2Gate.enabled) {
     // upgraded to the bundled version. Idempotent; never stomps a stored
     // version that already wires.
     try { seedBuiltinComponents(null); } catch (err) { console.error('[mock2] component seed failed:', err?.message || err); }
+    // Git remotes for static sites / LXC containers: push their mirror after a
+    // content change when the remote is in auto mode (lib/change-events.js seam).
+    registerGitPushHooks().catch((err) => console.error('[mock2] git push hooks failed:', err?.message || err));
     // Custom design presets (operator uploads / AI adjustments) into the pure
     // preset registry overlay — before any request reads the picker.
     try { loadCustomDesignPresets(); } catch (err) { console.error('[mock2] design preset load failed:', err?.message || err); }

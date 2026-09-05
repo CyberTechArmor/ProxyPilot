@@ -30,6 +30,7 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { Navigate, Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
+import GitRemoteCardImport from '@/components/mock2/GitRemoteCard';
 import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -206,6 +207,22 @@ export default function Projects() {
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({ name: '', parent_domain_id: '', use_base_domain: false });
+  // Optional git remote chosen at creation ("submit to Gitea from the start").
+  // Connectors load when the dialog opens; with none configured the section is
+  // a one-line pointer to Projects → Connectors.
+  const [gitConnectors, setGitConnectors] = useState([]);
+  const [remoteOn, setRemoteOn] = useState(false);
+  const [remoteDraft, setRemoteDraft] = useState({ git_connector_id: '', remote_repo: '', push_mode: 'auto', source_dir: '', create_repo: true });
+  useEffect(() => {
+    if (!createOpen) return;
+    api.mock2ListGitConnectors().then((g) => setGitConnectors(g.connectors || [])).catch(() => setGitConnectors([]));
+  }, [createOpen]);
+  useEffect(() => {
+    if (!remoteOn || remoteDraft.remote_repo || !form.name.trim()) return;
+    // Suggest a repo name from the project name; the operator can change it.
+    const slug = form.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (slug) setRemoteDraft((d) => ({ ...d, remote_repo: d.remote_repo || slug }));
+  }, [remoteOn, form.name, remoteDraft.remote_repo]);
   const [creating, setCreating] = useState(false);
   const [cloneTarget, setCloneTarget] = useState(null); // project being cloned, or null
 
@@ -268,15 +285,29 @@ export default function Projects() {
     if (!form.name.trim() || !form.parent_domain_id) return;
     setCreating(true);
     try {
+      const wantRemote = remoteOn && remoteDraft.git_connector_id && remoteDraft.remote_repo.trim();
       const res = await api.mock2CreateProject({
         name: form.name.trim(),
         parent_domain_id: Number(form.parent_domain_id),
         // Only ever sent when the chosen domain's apex is actually free — the
         // backend re-checks, so a stale flag is refused rather than obeyed.
         use_base_domain: baseDomainOn,
+        ...(wantRemote ? {
+          remote: {
+            git_connector_id: Number(remoteDraft.git_connector_id),
+            remote_repo: remoteDraft.remote_repo.trim(),
+            push_on_checkpoint: remoteDraft.push_mode === 'auto',
+            create_repo: !!remoteDraft.create_repo,
+          },
+        } : {}),
       });
+      if (res.remote && res.remote.ok === false) {
+        toast({ variant: 'destructive', title: 'Project created, remote not set', description: res.remote.error });
+      }
       setCreateOpen(false);
       setForm({ name: '', parent_domain_id: '', use_base_domain: false });
+      setRemoteOn(false);
+      setRemoteDraft({ git_connector_id: '', remote_repo: '', push_mode: 'auto', source_dir: '', create_repo: true });
       toast({ title: 'Project creating', description: 'Provisioning the container and repo — this takes a minute.' });
       if (res.project?.id) navigate(`/projects/${res.project.id}`);
       else load();
@@ -560,6 +591,23 @@ export default function Projects() {
               checked={baseDomainOn}
               onChange={(v) => setForm((f) => ({ ...f, use_base_domain: v }))}
             />
+
+            {/* Optional: submit the project to a git remote from the start. */}
+            {gitConnectors.length > 0 ? (
+              <div className="space-y-2 rounded-md border p-3">
+                <label className="flex items-center gap-2 text-sm min-h-[44px] sm:min-h-0">
+                  <input type="checkbox" className="h-4 w-4" checked={remoteOn} onChange={(e) => setRemoteOn(e.target.checked)} />
+                  Also push this project to a git remote (Gitea / GitHub)
+                </label>
+                {remoteOn && (
+                  <GitRemoteCardImport.Fields kind="project" value={remoteDraft} onChange={setRemoteDraft} connectors={gitConnectors} idPrefix="proj-remote" />
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                To push projects to Gitea or GitHub, add a git connector under <Link to="/projects/connectors" className="underline">Projects → Connectors</Link>.
+              </p>
+            )}
             <p className="text-xs text-muted-foreground">
               The project starts on the built-in base design. In the design chat you can keep
               that look or let the AI explore a new one per message.

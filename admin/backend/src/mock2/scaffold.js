@@ -61,6 +61,21 @@ export const SCAFFOLD_DEPENDENCIES = {
   },
 };
 
+// The Mock2 standards' verification scripts (mock2-core v0.2.0, "Mock2 production
+// checklist" rule): `npm run check` runs every check and REPORTS — the `;`
+// chaining is deliberate, a red item never stops the next one, because a check is
+// a production-checklist item, not a gate (constitution rule 0). Each result line
+// is what the change record quotes verbatim. eslint is not part of the scaffold's
+// dependency set, so check:lint says so instead of failing on a missing binary.
+export const CHECK_SCRIPTS = Object.freeze({
+  check: 'npm run check:lint; npm run check:types; npm run check:test; npm run check:audit; npm run check:secrets',
+  'check:lint': 'if [ -x node_modules/.bin/eslint ]; then eslint .; else echo "check:lint: n/a (no eslint configured)"; fi',
+  'check:types': 'tsc --noEmit',
+  'check:test': 'vitest run',
+  'check:audit': 'npm audit --audit-level=high || echo "check:audit: WARNING - high/critical advisories (production-checklist item; not blocking)"',
+  'check:secrets': 'if git diff --cached --quiet 2>/dev/null; then git diff HEAD~1 -U0 2>/dev/null; else git diff --cached -U0; fi | grep -nE "AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY-----.{0,10}[A-Za-z0-9+/=]{80,}" && echo "check:secrets: FAIL - secret pattern in the diff" || echo "check:secrets: OK"',
+});
+
 // package.json — the run scripts the mock2.yaml run contract points at
 // (declared, not discovered — ADR-005). `dev` is the tsx watch server used
 // during interactive editing; `start` is what the deployed systemd unit runs.
@@ -78,6 +93,7 @@ function packageJson(project) {
         start: 'node dist/server.js',
         migrate: 'node scripts/migrate.mjs',
         test: 'vitest run',
+        ...CHECK_SCRIPTS,
         ...E2E_SCRIPTS,
       },
       dependencies: { ...SCAFFOLD_DEPENDENCIES.dependencies },

@@ -15,6 +15,7 @@ import { requireSudo, requireAdminOrPermission } from '../middleware/auth.js';
 // the Users page access dialog, effective in realtime).
 const requireProxyAccess = requireAdminOrPermission('proxy');
 import { getDb, logAudit } from '../db.js';
+import { emitContentChanged } from '../lib/change-events.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure, regenerateDomainCaddyConfig, caddyRenderDeps } from './services.js';
 import { applyServiceUpstream, renderDomains, domainsForService } from '../lib/route-render.js';
@@ -3519,6 +3520,7 @@ lxcRouter.post('/containers/:name/zip-upload/:uploadId/apply', async (req, res) 
       startupScript,
       stripWrapper,
     }, req.ip);
+    emitContentChanged({ kind: 'lxc', id: name, reason: 'zip applied', actor: req.user?.username || req.user?.id });
 
     res.json({
       success: true,

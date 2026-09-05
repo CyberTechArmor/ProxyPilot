@@ -207,12 +207,13 @@ async function fetchJson(fetchImpl, url, { timeoutMs, headers = {} } = {}) {
 }
 
 /**
- * Latest release + latest commit on `branch` from GitHub, and how many
- * commits the installed sha is behind (when GitHub knows the sha). Every
- * failure is reported in `error`, never thrown.
+ * From GitHub: the latest release, the version in the branch's package.json
+ * (what an update would actually install), the latest commit on `branch`,
+ * and how many commits the installed sha is behind (when GitHub knows the
+ * sha). Every failure is reported in `error`, never thrown.
  */
 export async function fetchLatestFromGitHub({ repo, branch = 'main', installedSha = null, fetchImpl = fetch } = {}) {
-  const out = { release: null, mainCommit: null, commitsBehind: null, fallbackVersion: null, error: null };
+  const out = { release: null, branchVersion: null, mainCommit: null, commitsBehind: null, error: null };
   if (!repo) {
     out.error = 'no GitHub repository configured';
     return out;
@@ -220,33 +221,33 @@ export async function fetchLatestFromGitHub({ repo, branch = 'main', installedSh
   const api = `https://api.github.com/repos/${repo}`;
   const gh = { Accept: 'application/vnd.github+json' };
   const errors = [];
-  try {
-    const rel = await fetchJson(fetchImpl, `${api}/releases/latest`, { timeoutMs: GITHUB_TIMEOUT_MS, headers: gh });
+  const [rel, pkg, commit] = await Promise.allSettled([
+    fetchJson(fetchImpl, `${api}/releases/latest`, { timeoutMs: GITHUB_TIMEOUT_MS, headers: gh }),
+    fetchJson(fetchImpl, `https://raw.githubusercontent.com/${repo}/${branch}/admin/backend/package.json`, { timeoutMs: GITHUB_TIMEOUT_MS }),
+    fetchJson(fetchImpl, `${api}/commits/${encodeURIComponent(branch)}`, { timeoutMs: GITHUB_TIMEOUT_MS, headers: gh }),
+  ]);
+  if (rel.status === 'fulfilled') {
     out.release = {
-      version: normalizeVersion(rel.tag_name) || null,
-      tag: rel.tag_name || null,
-      url: rel.html_url || null,
-      notes: typeof rel.body === 'string' ? rel.body : null,
-      published_at: rel.published_at || null,
+      version: normalizeVersion(rel.value.tag_name) || null,
+      tag: rel.value.tag_name || null,
+      url: rel.value.html_url || null,
+      notes: typeof rel.value.body === 'string' ? rel.value.body : null,
+      published_at: rel.value.published_at || null,
     };
-  } catch (err) {
-    if (err.status === 404) {
-      // No releases on the repo: the package.json on the branch names the version.
-      try {
-        const pkg = await fetchJson(fetchImpl, `https://raw.githubusercontent.com/${repo}/${branch}/admin/backend/package.json`, { timeoutMs: GITHUB_TIMEOUT_MS });
-        out.fallbackVersion = normalizeVersion(pkg.version) || null;
-      } catch (err2) {
-        errors.push(`package.json: ${err2.message}`);
-      }
-    } else {
-      errors.push(`releases: ${err.message}`);
-    }
+  } else if (rel.reason?.status !== 404) {
+    // 404 = the repo has no releases, which is fine; anything else is reported.
+    errors.push(`releases: ${rel.reason?.message || rel.reason}`);
   }
-  try {
-    const c = await fetchJson(fetchImpl, `${api}/commits/${encodeURIComponent(branch)}`, { timeoutMs: GITHUB_TIMEOUT_MS, headers: gh });
+  if (pkg.status === 'fulfilled') {
+    out.branchVersion = normalizeVersion(pkg.value?.version) || null;
+  } else {
+    errors.push(`package.json on ${branch}: ${pkg.reason?.message || pkg.reason}`);
+  }
+  if (commit.status === 'fulfilled') {
+    const c = commit.value;
     out.mainCommit = { sha: c.sha || null, date: c.commit?.committer?.date || c.commit?.author?.date || null, branch, message: (c.commit?.message || '').split('\n')[0] || null };
-  } catch (err) {
-    errors.push(`commits/${branch}: ${err.message}`);
+  } else {
+    errors.push(`commits/${branch}: ${commit.reason?.message || commit.reason}`);
   }
   if (installedSha && out.mainCommit?.sha && out.mainCommit.sha !== installedSha) {
     try {
@@ -309,6 +310,7 @@ export async function checkForUpdates({ repo, currentVersion, force = false, fet
     currentVersion,
     repo,
     release: net.github.release,
+    branchVersion: net.github.branchVersion,
     mainCommit: net.github.mainCommit,
     commitsBehind: net.github.commitsBehind,
     installed,
@@ -321,7 +323,7 @@ export async function checkForUpdates({ repo, currentVersion, force = false, fet
       synced: net.seed.synced,
       error: net.manifest.error || net.seed.error || null,
     },
-    github: { error: net.github.error, fallbackVersion: net.github.fallbackVersion },
+    github: { error: net.github.error },
     checkedAt: new Date(net.at).toISOString(),
     cached,
   });

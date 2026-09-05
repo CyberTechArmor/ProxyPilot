@@ -158,11 +158,27 @@ already up to date" and the sha did not move.
   agent_version, error}, standards: {seed_version, site_version,
   update_available, site, changelog, error}, agent: {reachable, version},
   canUpdate, cannotUpdateReason, github: {repo, error}, checkedAt, cached }`.
-  GitHub: `releases/latest` (falling back to `main`'s `package.json` when the
-  repo has no releases), `commits/<branch>`, `compare/<sha>...<branch>` for
-  `commits_behind`; 10 s timeouts; results cached 10 minutes per repo,
-  `?force=1` bypasses. Standards: the site manifest, 5 s, best-effort. Host
-  facts: cached 60 s. **A network failure is a field, not a 500.**
+  GitHub: `releases/latest`, the branch's `admin/backend/package.json`
+  (`latestVersion` — the version an update would actually install),
+  `commits/<branch>`, `compare/<sha>...<branch>` for `commits_behind`; 10 s
+  timeouts; results cached 10 minutes per repo, `?force=1` bypasses.
+  Standards: the site manifest, 5 s, best-effort. Host facts: cached 60 s.
+  **A network failure is a field, not a 500.**
+
+  **What decides "update available"** (`decideUpdate`): the commit sha when
+  both sides are known — `update.sh` pulls the installed branch, so sitting
+  on its head *is* up to date whatever a release tag says. Without shas the
+  branch's `package.json` version decides; only when that is unknown too
+  does the latest release's tag. The release is reported separately
+  (`release: {version, tag, url, published_at, ahead_of_code}`); a tag
+  numbered ahead of the code's own version is flagged, not believed. This
+  is the fix for the first thing an operator saw after merging: GitHub's
+  latest release is `v1.21.0` from 2025-12-29 — a mis-numbered tag (v0.2.0
+  → v1.2.0 → v1.21.0 in one day) whose commit is not on `main` — while the
+  code is 1.4.0, so a host on main's head read "Update available".
+  Cleaning up the release on GitHub (delete/rename the `v1.21.0` release and
+  tag, or publish a `v1.4.0` release) needs the repo's release permissions
+  and is the operator's; the dashboard is correct either way.
 * `POST /api/user/version/update` (admin + sudo, body `{rebuild?}`) → `202
   {id}`; `409 {error}` with the refusal reason (agent unreachable, no
   checkout recorded, dirty checkout, run live, request pending); `400` on a

@@ -148,25 +148,37 @@ export function shapeInstalled(raw, { reachable = true, error = null } = {}) {
 }
 
 // Is there something newer than what is installed?
-//   installed: { version, sha }   latest: { version, sha }
+//
+// The commit sha is the ground truth whenever both sides are known:
+// update.sh pulls the installed branch, so sitting on its head IS up to
+// date, whatever a release tag says. This matters because a stale or
+// mis-numbered GitHub release (the repo carries a v1.21.0 tag from 2025
+// that is not on main, while the code's own version is 1.4.x) must never
+// make an up-to-date host say "update available". Without shas the version
+// in the branch's package.json decides; only when that is unknown too does
+// the latest release's tag.
+//   installed: { version, sha }
+//   latest:    { sha, code_version (branch package.json), release_version }
 //   standards: { seed_version, site_version }
 export function decideUpdate({ installed = {}, latest = {}, standards = {} } = {}) {
   const iv = normalizeVersion(installed.version);
-  const lv = normalizeVersion(latest.version);
+  const cv = normalizeVersion(latest.code_version);
+  const rv = normalizeVersion(latest.release_version);
   let reason = 'unknown';
   let available = false;
-  if (lv && iv && compareVersions(lv, iv) > 0) {
-    available = true;
-    reason = 'newer_release';
-  } else if (latest.sha && installed.sha) {
-    if (latest.sha !== installed.sha) {
-      available = true;
-      reason = 'newer_commit';
-    } else {
+  if (latest.sha && installed.sha) {
+    if (latest.sha === installed.sha) {
       reason = 'up_to_date';
+    } else {
+      available = true;
+      reason = cv && iv && compareVersions(cv, iv) > 0 ? 'newer_version' : 'newer_commit';
     }
-  } else if (lv && iv) {
-    reason = 'up_to_date';
+  } else if (cv && iv) {
+    available = compareVersions(cv, iv) > 0;
+    reason = available ? 'newer_version' : 'up_to_date';
+  } else if (rv && iv) {
+    available = compareVersions(rv, iv) > 0;
+    reason = available ? 'newer_release' : 'up_to_date';
   }
   const seed = normalizeVersion(standards.seed_version);
   const site = normalizeVersion(standards.site_version);
@@ -174,6 +186,9 @@ export function decideUpdate({ installed = {}, latest = {}, standards = {} } = {
   return {
     updateAvailable: available,
     code: { available, reason },
+    // A release tag numerically ahead of the code it is supposed to describe
+    // is a tagging mistake, not a newer version — surfaced so the UI can say so.
+    release: { ahead_of_code: !!(rv && cv && compareVersions(rv, cv) > 0) },
     standards: { available: standardsAvailable, seed_version: seed || null, site_version: site || null },
   };
 }
@@ -282,6 +297,7 @@ export function buildVersionCheck({
   currentVersion,
   repo,
   release = null,
+  branchVersion = null,
   mainCommit = null,
   commitsBehind = null,
   installed,
@@ -291,18 +307,30 @@ export function buildVersionCheck({
   cached = false,
 } = {}) {
   const inst = installed || shapeInstalled(null, { reachable: false });
-  const latestVersion = normalizeVersion(release?.version) || normalizeVersion(github.fallbackVersion) || normalizeVersion(currentVersion);
+  const codeVersion = normalizeVersion(branchVersion) || null;
+  const releaseVersion = normalizeVersion(release?.version) || null;
+  // "Latest" is the version an update would install: the branch's
+  // package.json. The release tag is a fallback for when that is unknown.
+  const latestVersion = codeVersion || releaseVersion || normalizeVersion(currentVersion);
   const decision = decideUpdate({
     installed: { version: currentVersion, sha: inst.sha },
-    latest: { version: latestVersion, sha: mainCommit?.sha || null },
+    latest: { sha: mainCommit?.sha || null, code_version: codeVersion, release_version: releaseVersion },
     standards: { seed_version: standards.seed_version, site_version: standards.site_version },
   });
   const refusal = updateStartRefusal({ installed: inst });
   return {
     currentVersion: normalizeVersion(currentVersion) || null,
     latestVersion: latestVersion || null,
+    latestCodeVersion: codeVersion,
     updateAvailable: decision.updateAvailable,
     updateReason: decision.code.reason,
+    release: release ? {
+      version: releaseVersion,
+      tag: release.tag || null,
+      url: release.url || null,
+      published_at: release.published_at || null,
+      ahead_of_code: decision.release.ahead_of_code,
+    } : null,
     releaseUrl: release?.url || (repo ? `https://github.com/${repo}` : null),
     releaseNotes: release?.notes ?? null,
     releaseTag: release?.tag || null,

@@ -78,14 +78,25 @@ test('shapeInstalled: agent facts → the dashboard shape; unreachable → empty
   assert.equal(down.error, 'ECONNREFUSED');
 });
 
-test('decideUpdate: release, commit, up to date, unknown; standards by version', () => {
-  assert.deepEqual(decideUpdate({ installed: { version: '1.4.0', sha: 'a' }, latest: { version: '1.5.0', sha: 'b' } }).code, { available: true, reason: 'newer_release' });
-  assert.deepEqual(decideUpdate({ installed: { version: '1.4.0', sha: 'a' }, latest: { version: '1.4.0', sha: 'b' } }).code, { available: true, reason: 'newer_commit' });
-  assert.deepEqual(decideUpdate({ installed: { version: '1.4.0', sha: 'a' }, latest: { version: '1.4.0', sha: 'a' } }).code, { available: false, reason: 'up_to_date' });
-  assert.deepEqual(decideUpdate({ installed: { version: '1.4.0' }, latest: { version: '1.4.0' } }).code, { available: false, reason: 'up_to_date' });
+test('decideUpdate: the sha is the ground truth; then the branch version; the release tag last', () => {
+  // The regression that shipped: an old, mis-numbered v1.21.0 release tag on
+  // GitHub while the code is 1.4.0 and the host sits on main's head commit.
+  const atHead = decideUpdate({ installed: { version: '1.4.0', sha: 'head' }, latest: { sha: 'head', code_version: '1.4.0', release_version: '1.21.0' } });
+  assert.deepEqual(atHead.code, { available: false, reason: 'up_to_date' });
+  assert.equal(atHead.updateAvailable, false);
+  assert.equal(atHead.release.ahead_of_code, true);
+  // Behind main: a higher branch version says "newer version", the same version says "newer commit".
+  assert.deepEqual(decideUpdate({ installed: { version: '1.4.0', sha: 'a' }, latest: { sha: 'b', code_version: '1.5.0', release_version: '1.21.0' } }).code, { available: true, reason: 'newer_version' });
+  assert.deepEqual(decideUpdate({ installed: { version: '1.4.0', sha: 'a' }, latest: { sha: 'b', code_version: '1.4.0' } }).code, { available: true, reason: 'newer_commit' });
+  assert.deepEqual(decideUpdate({ installed: { version: '1.4.0', sha: 'a' }, latest: { sha: 'b' } }).code, { available: true, reason: 'newer_commit' });
+  // No shas: the branch package.json decides.
+  assert.deepEqual(decideUpdate({ installed: { version: '1.4.0' }, latest: { code_version: '1.4.1', release_version: '1.21.0' } }).code, { available: true, reason: 'newer_version' });
+  assert.deepEqual(decideUpdate({ installed: { version: '1.4.0' }, latest: { code_version: '1.4.0', release_version: '1.21.0' } }).code, { available: false, reason: 'up_to_date' });
+  // No shas and no branch version: only then does the release tag count.
+  assert.deepEqual(decideUpdate({ installed: { version: '1.4.0' }, latest: { release_version: '1.5.0' } }).code, { available: true, reason: 'newer_release' });
+  assert.deepEqual(decideUpdate({ installed: { version: '1.5.0' }, latest: { release_version: '1.4.0' } }).code, { available: false, reason: 'up_to_date' });
   assert.deepEqual(decideUpdate({ installed: { version: '1.4.0' }, latest: {} }).code, { available: false, reason: 'unknown' });
-  // A newer local version than the release is not "behind".
-  assert.equal(decideUpdate({ installed: { version: '1.5.0' }, latest: { version: '1.4.0' } }).updateAvailable, false);
+  assert.equal(decideUpdate({ latest: { release_version: '1.4.0', code_version: '1.4.0' } }).release.ahead_of_code, false);
   const st = decideUpdate({ standards: { seed_version: '0.3.0', site_version: '0.4.0' } }).standards;
   assert.deepEqual(st, { available: true, seed_version: '0.3.0', site_version: '0.4.0' });
   assert.equal(decideUpdate({ standards: { seed_version: '0.3.0', site_version: '0.3.0' } }).standards.available, false);
@@ -170,15 +181,18 @@ test('buildVersionCheck composes the /version/check payload', () => {
   const out = buildVersionCheck({
     currentVersion: '1.4.0', repo: 'CyberTechArmor/ProxyPilot',
     release: { version: '1.5.0', tag: 'v1.5.0', url: 'https://github.com/x/releases/v1.5.0', notes: 'notes', published_at: '2026-09-01T00:00:00Z' },
+    branchVersion: '1.5.0',
     mainCommit: { sha: 'bbbbbbbbbb2222', date: '2026-09-04T00:00:00Z', branch: 'main' }, commitsBehind: 3,
     installed, standards: { seed_version: '0.3.0', site_version: '0.4.0', changelog: [{ v: '0.4.0' }] },
     github: { error: null }, checkedAt: '2026-09-05T00:00:00Z', cached: true,
   });
   assert.equal(out.currentVersion, '1.4.0');
   assert.equal(out.latestVersion, '1.5.0');
+  assert.equal(out.latestCodeVersion, '1.5.0');
   assert.equal(out.updateAvailable, true);
-  assert.equal(out.updateReason, 'newer_release');
+  assert.equal(out.updateReason, 'newer_version');
   assert.equal(out.releaseNotes, 'notes');
+  assert.deepEqual(out.release, { version: '1.5.0', tag: 'v1.5.0', url: 'https://github.com/x/releases/v1.5.0', published_at: '2026-09-01T00:00:00Z', ahead_of_code: false });
   assert.equal(out.latest_sha_short, 'bbbbbbbbbb');
   assert.equal(out.commits_behind, 3);
   assert.equal(out.installed.sha, 'aaaaaaaaaa1111');
@@ -189,11 +203,27 @@ test('buildVersionCheck composes the /version/check payload', () => {
   assert.equal(out.cannotUpdateReason, null);
   assert.equal(out.cached, true);
 
-  // No release → package.json fallback version; dirty → cannot update; GitHub error is a field.
+  // The shipped regression: host on main's head, code 1.4.0, a stale v1.21.0
+  // release tag → up to date, "Latest" names the code version, the tag is flagged.
+  const atHead = buildVersionCheck({
+    currentVersion: '1.4.0', repo: 'o/r',
+    release: { version: '1.21.0', tag: 'v1.21.0', url: 'https://gh/rel', published_at: '2025-12-29T00:18:44Z' },
+    branchVersion: '1.4.0', mainCommit: { sha: 'aaaaaaaaaa1111', branch: 'main' }, commitsBehind: 0, installed,
+  });
+  assert.equal(atHead.updateAvailable, false);
+  assert.equal(atHead.updateReason, 'up_to_date');
+  assert.equal(atHead.latestVersion, '1.4.0');
+  assert.equal(atHead.release.version, '1.21.0');
+  assert.equal(atHead.release.ahead_of_code, true);
+  assert.equal(atHead.releaseUrl, 'https://gh/rel', 'the release notes link is still offered');
+
+  // No release → branch version; dirty → cannot update; GitHub error is a field.
   const dirty = shapeInstalled({ configured: true, head_sha: 'a', dirty: true, dirty_count: 1, dirty_files: [' M x'] });
-  const out2 = buildVersionCheck({ currentVersion: '1.4.0', repo: 'o/r', installed: dirty, github: { error: 'releases: HTTP 500', fallbackVersion: '1.4.1' } });
+  const out2 = buildVersionCheck({ currentVersion: '1.4.0', repo: 'o/r', installed: dirty, branchVersion: '1.4.1', github: { error: 'releases: HTTP 500' } });
   assert.equal(out2.latestVersion, '1.4.1');
   assert.equal(out2.updateAvailable, true);
+  assert.equal(out2.updateReason, 'newer_version');
+  assert.equal(out2.release, null);
   assert.equal(out2.canUpdate, false);
   assert.match(out2.cannotUpdateReason, /uncommitted local change/);
   assert.equal(out2.github.error, 'releases: HTTP 500');
@@ -202,6 +232,7 @@ test('buildVersionCheck composes the /version/check payload', () => {
   const out3 = buildVersionCheck({ currentVersion: '1.4.0', repo: null, installed: shapeInstalled(null, { reachable: false }) });
   assert.equal(out3.latestVersion, '1.4.0');
   assert.equal(out3.updateAvailable, false);
+  assert.equal(out3.updateReason, 'unknown');
   assert.equal(out3.canUpdate, false);
   assert.match(out3.cannotUpdateReason, /unreachable/);
 });

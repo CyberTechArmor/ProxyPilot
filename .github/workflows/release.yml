@@ -1,0 +1,82 @@
+# Publish a GitHub Release for a version tag.
+#
+# Why: the dashboard's Update block and the check_proxypilot_update MCP tool
+# show the repo's latest GitHub Release next to the latest commit
+# (docs/features/self-update.md). Releases used to be made by hand and
+# drifted (a mis-numbered v1.21.0 from 2025 sat as "latest" while the code
+# was 1.4.x). With this workflow a release is one action:
+#
+#   * push a tag:   git tag -a v1.5.0 -m "ProxyPilot v1.5.0" && git push origin v1.5.0
+#   * or no git:    Actions → Release → Run workflow → tag: v1.5.0 (target: main)
+#                   — the tag is created at the target if it does not exist.
+#
+# Notes are generated from the merged pull requests since the previous tag,
+# and the release is marked as the latest.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.4.0); created at target if it does not exist'
+        required: true
+        type: string
+      target:
+        description: 'Branch or commit to tag when the tag does not exist yet'
+        required: false
+        default: 'main'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag and ref
+        id: rel
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+            ref="${{ inputs.target }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+            ref="$tag"
+          fi
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::tag must look like vX.Y.Z, got '$tag'"; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.rel.outputs.ref }}
+          fetch-depth: 0
+      - name: Compare the tag with the backend version
+        run: |
+          tag="${{ steps.rel.outputs.tag }}"
+          pkg=$(node -p "require('./admin/backend/package.json').version")
+          if [ "${tag#v}" != "$pkg" ]; then
+            echo "::warning::tag $tag does not match admin/backend/package.json version $pkg — the dashboard shows both; bump package.json in the same release next time"
+          fi
+      - name: Create or refresh the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.rel.outputs.tag }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $tag already exists; marking it latest"
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --latest
+          else
+            # --target creates the tag at that commit when the tag does not exist
+            # (the workflow_dispatch path); for a pushed tag it is the tag itself.
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --target "$(git rev-parse HEAD)" \
+              --title "ProxyPilot $tag" --generate-notes --latest
+          fi

@@ -76,6 +76,8 @@ export const MCP_SERVER_INSTRUCTIONS = [
   'changing an app read its CLAUDE.md, state/rules.md, state/production-checklist.md and state/decisions.md',
   '(project_map lists them). Rule 0 applies to you too: never invent a gate, flag, allowlist or approval step',
   'the operator did not ask for; classify production-policy questions as a checklist item and keep building.',
+  'GIT REMOTES: projects, static sites and LXC containers can be submitted to Gitea/GitHub — list_git_connectors,',
+  'then set_git_remote (create_repo makes the repo) and push_git_remote; auto mode pushes after each change.',
 ].join(' ');
 
 // ---- JSON-RPC helpers ----
@@ -1888,6 +1890,44 @@ export const MCP_TOOLS = [
         use_base_domain: { type: 'boolean', description: 'Also serve on the parent domain itself (example.com), not just the minted subdomain. Refused when another service already answers there.' },
       },
       required: ['name'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_git_connectors',
+    description: 'List the git connectors an admin configured under Projects → Connectors → Git connectors (Gitea base URL + API token, GitHub token, generic HTTPS/SSH). Read-only; credentials are never returned. Use a connector name or id with set_git_remote.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'set_git_remote',
+    description: 'Bind a git remote to something ProxyPilot hosts so it can be submitted to Gitea (or GitHub): kind "project" (target = project id; the bare repo is pushed), "static_site" (target = site id; the docroot is snapshotted into a mirror and pushed) or "lxc" (target = container name; the directory inside the guest — source_dir, default the registered startup directory — is snapshotted and pushed). Optional at any time: before the first content lands or after. create_repo (default true) creates the repository on a Gitea/GitHub token connector when it does not exist. push_mode "auto" pushes after every checkpoint (project) or every content change ProxyPilot makes (static_site/lxc); "manual" (default) only on push_git_remote. Credentials stay on the connector and never enter a container.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['project', 'static_site', 'lxc'] },
+        target: { type: ['string', 'number'], description: 'Project id, static site id, or container name (no pp- prefix).' },
+        connector: { type: 'string', description: 'Git connector name (or id as text). Optional when exactly one connector exists.' },
+        connector_id: { type: 'number' },
+        remote_repo: { type: 'string', description: 'owner/name on the connector\'s host (e.g. fractionate/my-site), or a full https/ssh URL.' },
+        push_mode: { type: 'string', enum: ['manual', 'auto'] },
+        source_dir: { type: 'string', description: 'lxc only: absolute directory inside the container to mirror. Default: the registered startup working dir.' },
+        create_repo: { type: 'boolean', description: 'Create the repository on the remote if missing (Gitea/GitHub token connectors). Default true.' },
+      },
+      required: ['kind', 'target', 'remote_repo'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'push_git_remote',
+    description: 'Push a project, static site or LXC container to the git remote set with set_git_remote, now. For static_site/lxc this snapshots the current content into the mirror (one commit, message carries `reason`) and pushes main; unchanged content answers unchanged: true and pushes nothing. The outcome is recorded on the remote (last_push_at / last_push_error).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['project', 'static_site', 'lxc'] },
+        target: { type: ['string', 'number'] },
+        reason: { type: 'string', description: 'Short note for the commit message (static_site/lxc), e.g. "before startup change".' },
+      },
+      required: ['kind', 'target'],
       additionalProperties: false,
     },
   },

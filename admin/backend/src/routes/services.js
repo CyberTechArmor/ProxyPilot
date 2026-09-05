@@ -18,6 +18,7 @@ import {
   stageZipUpload, getZipUpload, discardZipUpload,
 } from '../lib/zip-staging.js';
 import { getDb, logAudit, getAdminDomain } from '../db.js';
+import { emitContentChanged } from '../lib/change-events.js';
 import { decryptSecret } from '../lib/secrets.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
@@ -3851,6 +3852,7 @@ servicesRouter.put('/:id/files/*', async (req, res) => {
     await writeFile(fullPath, content);
 
     logAudit(req.user.id, 'FILE_UPDATED', 'service', req.params.id, { path: filePath }, req.ip);
+    if (service.type === 'static') emitContentChanged({ kind: 'static_site', id: req.params.id, reason: 'file saved', actor: req.user?.username || req.user?.id });
 
     // Auto-reload Caddy for static sites
     let caddyReloaded = false;
@@ -4007,6 +4009,7 @@ servicesRouter.post('/:id/revert/:versionId', async (req, res) => {
       path: version.file_path,
       toVersion: version.version,
     }, req.ip);
+    if (version.type === 'static') emitContentChanged({ kind: 'static_site', id: req.params.id, reason: 'file reverted', actor: req.user?.username || req.user?.id });
 
     // Reload Caddy for static sites
     let caddyReloaded = false;
@@ -4320,6 +4323,7 @@ servicesRouter.post('/:id/zip-upload/:uploadId/apply', async (req, res) => {
       replaced: conflicts.length,
       stripWrapper,
     }, req.ip);
+    if (service.type === 'static') emitContentChanged({ kind: 'static_site', id: req.params.id, reason: 'zip applied', actor: req.user?.username || req.user?.id });
 
     // Same auto-reload the single-file editor does for static sites.
     let caddyReloaded = false;
@@ -4419,6 +4423,7 @@ servicesRouter.post('/:id/import-files', async (req, res) => {
     }
 
     logAudit(req.user.id, 'FILES_IMPORTED', 'service', req.params.id, results, req.ip);
+    if (service.type === 'static' && results.imported.length > 0) emitContentChanged({ kind: 'static_site', id: req.params.id, reason: 'files imported', actor: req.user?.username || req.user?.id });
 
     // Reload Caddy for static sites
     if (service.type === 'static' && results.imported.length > 0) {

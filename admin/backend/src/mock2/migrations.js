@@ -1863,4 +1863,36 @@ export const MOCK2_MIGRATIONS = [
       d.exec(`ALTER TABLE mock2_projects ADD COLUMN archive_state_json TEXT;`);
     },
   },
+  {
+    // Git remotes for the two kinds of thing ProxyPilot hosts that are NOT
+    // AI-dev projects: static sites (services.kind = 'static_site', keyed by the
+    // service id) and LXC containers (keyed by the container name). Same shape
+    // as mock2_project_remotes plus a push mode ('manual' | 'auto' — auto pushes
+    // after every content change ProxyPilot itself made) and, for containers,
+    // the directory inside the guest that is mirrored (defaults to the
+    // registered startup working dir). Credentials stay on the connector row;
+    // the mirror repo lives host-side under MOCK2_DATA_DIR/git-mirrors and the
+    // content is snapshotted into it, so nothing git-related is written into
+    // a served docroot or a guest (ADR-006).
+    version: 558,
+    name: 'mock2_target_remotes',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_target_remotes (
+          kind              TEXT NOT NULL CHECK (kind IN ('static_site', 'lxc')),
+          target_id         TEXT NOT NULL,
+          git_connector_id  INTEGER NOT NULL,
+          remote_repo       TEXT NOT NULL,
+          push_mode         TEXT NOT NULL DEFAULT 'manual' CHECK (push_mode IN ('manual', 'auto')),
+          source_dir        TEXT,
+          last_push_at      TEXT,
+          last_push_error   TEXT,
+          last_pushed_commit TEXT,
+          created_by        INTEGER,
+          created_at        TEXT,
+          PRIMARY KEY (kind, target_id)
+        );
+      `);
+    },
+  },
 ];

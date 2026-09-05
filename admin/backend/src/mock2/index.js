@@ -42,3 +42,7 @@ export { loadCustomDesignPresets } from './design-presets-store.js';
 // streaming-terminal route (setMock2TerminalAuthorizer) on enabled boot so the
 // core file never statically imports mock2/db.js (ADR-001).
 export { mock2TerminalAuthorize } from './terminal.js';
+// Git remotes for static sites + LXC containers: the auto-push subscriber on
+// the core's content-change seam (lib/change-events.js). Registered on enabled
+// boot; the core emits, this module pushes (ADR-001 direction preserved).
+export { registerGitPushHooks } from './git-push-hooks.js';

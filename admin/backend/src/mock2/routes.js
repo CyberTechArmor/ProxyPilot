@@ -174,9 +174,13 @@ import {
   listGitConnectors, getGitConnector, getGitConnectorByName, insertGitConnector,
   updateGitConnector, deleteGitConnector, testGitConnector, shapeGitConnector,
   getProjectRemote, setProjectRemote, clearProjectRemote, shapeProjectRemote, exportProjectZip,
-  exportProjectRepoBundle, pushProjectRemote,
+  exportProjectRepoBundle, pushProjectRemote, pushProjectRemoteNow, ensureRemoteRepo,
+  getTargetRemote, setTargetRemote, clearTargetRemote, shapeTargetRemote, pushTargetRemote,
 } from './git-connectors.js';
-import { GIT_PROVIDERS, GIT_AUTH_KINDS, validateGitConnectorInput } from './git-logic.js';
+import {
+  GIT_PROVIDERS, GIT_AUTH_KINDS, validateGitConnectorInput, MIRROR_TARGET_KINDS, PUSH_MODES,
+  validateTargetRef, validateSourceDir, remoteRepoWebUrl,
+} from './git-logic.js';
 import {
   listFrameworkVersions, getFrameworkVersion,
   getCurrentFrameworkVersion, insertFrameworkVersion,
@@ -380,6 +384,14 @@ const createProjectSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(2000).optional(),
   parent_domain_id: z.union([z.number().int(), z.string()]),
+  // Optional git remote set at creation ("submit this project to Gitea from the
+  // start"): the first checkpoint pushes when push_on_checkpoint is on.
+  remote: z.object({
+    git_connector_id: z.union([z.number().int(), z.string()]),
+    remote_repo: z.string().trim().min(1).max(500),
+    push_on_checkpoint: z.boolean().optional(),
+    create_repo: z.boolean().optional(),
+  }).optional(),
   // Serve on the parent domain ITSELF (example.com) instead of only the minted
   // subdomain. Refused when another service already answers on that hostname.
   use_base_domain: z.boolean().optional(),
@@ -470,6 +482,17 @@ const projectRemoteSchema = z.object({
   git_connector_id: z.union([z.number().int(), z.string()]),
   remote_repo: z.string().trim().min(1).max(500),
   push_on_checkpoint: z.boolean().optional(),
+  // Create the repository on the remote (Gitea / GitHub token connectors) when
+  // it does not exist yet — "submit to Gitea" as one action.
+  create_repo: z.boolean().optional(),
+});
+// Remotes for static sites + LXC containers (mock2_target_remotes, migration 558).
+const targetRemoteSchema = z.object({
+  git_connector_id: z.union([z.number().int(), z.string()]),
+  remote_repo: z.string().trim().min(1).max(500),
+  push_mode: z.enum(PUSH_MODES).optional(),
+  source_dir: z.string().trim().max(300).nullable().optional(),
+  create_repo: z.boolean().optional(),
 });
 // ---- M6 Zod schemas ----
 // The instruction ceiling is the same operator-configurable chat_max_chars the
@@ -1029,6 +1052,26 @@ export function createMock2Router() {
       return res.status(500).json({ error: `Could not create project: ${err?.message || 'unknown error'}` });
     }
 
+    // Optional remote from the create dialog. A bad connector id is reported,
+    // never fatal — the project exists; the remote can be set from its page.
+    let remoteResult = null;
+    if (parsed.data.remote) {
+      const rd = parsed.data.remote;
+      const conn = getGitConnector(rd.git_connector_id);
+      if (!conn) {
+        remoteResult = { ok: false, error: 'No such git connector — set the remote from the project page' };
+      } else {
+        const repo = rd.create_repo ? await ensureRemoteRepo(conn, rd.remote_repo) : { ok: true, skipped: true };
+        if (!repo.ok) {
+          remoteResult = { ok: false, error: `Remote repository: ${repo.error} — set the remote from the project page` };
+        } else {
+          const row = setProjectRemote({ projectId: project.id, gitConnectorId: conn.id, remoteRepo: rd.remote_repo, pushOnCheckpoint: rd.push_on_checkpoint === false ? 0 : 1 });
+          logAudit(req.user.id, 'MOCK2_PROJECT_REMOTE_SET', 'mock2_project', project.id, { git_connector_id: conn.id, remote_repo: rd.remote_repo, at_create: true, repo_created: !!repo.created }, req.ip);
+          remoteResult = { ok: true, remote: shapeProjectRemote(row), repo };
+        }
+      }
+    }
+
     // Persist the design preset BEFORE provisioning starts — the seed files
     // (template.js) read it off the project row to style the base app. Create
     // no longer offers a picker: an omitted preset means "the built-in base
@@ -1082,7 +1125,7 @@ export function createMock2Router() {
     }
 
     startProvision(project);
-    res.status(202).json({ project: shapeProject(project, { isAdmin: true }) });
+    res.status(202).json({ project: shapeProject(project, { isAdmin: true }), remote: remoteResult });
   });
 
   // Clone a project under a new name (and optionally a different parent
@@ -2804,21 +2847,102 @@ export function createMock2Router() {
   // Project remote config (which git connector + remote repo a project pushes
   // to). Read is viewer; mutate is admin (a push target is a security-relevant
   // egress). refuseIfArchived on the mutators.
+  const withWebUrl = (shaped, conn) => (shaped ? { ...shaped, web_url: remoteRepoWebUrl(conn, shaped.remote_repo) } : null);
+
   router.get('/projects/:id/remote', requireMock2Role('viewer'), (req, res) => {
     const remote = getProjectRemote(req.mock2Project.id);
-    res.json({ remote: remote ? shapeProjectRemote(remote) : null, editable: isReqAdmin(req) });
+    res.json({ remote: remote ? withWebUrl(shapeProjectRemote(remote), getGitConnector(remote.git_connector_id)) : null, editable: isReqAdmin(req) });
   });
 
-  router.post('/projects/:id/remote', requireAdmin, requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+  // ---- remotes for static sites + LXC containers (mock2_target_remotes) ----
+  // Admin only: a push target is a security-relevant egress, and static sites /
+  // containers have no per-object membership. kind ∈ static_site | lxc; the
+  // target is the service id / the container name (no pp- prefix).
+  const targetRef = (req, res) => {
+    const kind = String(req.params.kind || '');
+    const target = String(req.params.target || '');
+    const bad = validateTargetRef(kind, target);
+    if (bad) { res.status(400).json({ error: bad }); return null; }
+    return { kind, target };
+  };
+
+  router.get('/remotes/:kind/:target', requireAdmin, (req, res) => {
+    const ref = targetRef(req, res); if (!ref) return;
+    const row = getTargetRemote(ref.kind, ref.target);
+    res.json({ remote: row ? withWebUrl(shapeTargetRemote(row), getGitConnector(row.git_connector_id)) : null, kinds: MIRROR_TARGET_KINDS });
+  });
+
+  router.post('/remotes/:kind/:target', requireAdmin, async (req, res) => {
+    const ref = targetRef(req, res); if (!ref) return;
+    const parsed = targetRemoteSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid remote' });
+    const d = parsed.data;
+    const conn = getGitConnector(d.git_connector_id);
+    if (!conn) return res.status(400).json({ error: 'No such git connector' });
+    if (ref.kind === 'lxc') {
+      const badDir = validateSourceDir(d.source_dir);
+      if (badDir) return res.status(400).json({ error: badDir });
+    }
+    let repo = { ok: true, skipped: true };
+    if (d.create_repo) {
+      repo = await ensureRemoteRepo(conn, d.remote_repo);
+      if (!repo.ok) return res.status(400).json({ error: `Remote repository: ${repo.error}` });
+    }
+    const row = setTargetRemote({
+      kind: ref.kind, targetId: ref.target, gitConnectorId: conn.id, remoteRepo: d.remote_repo,
+      pushMode: d.push_mode || 'manual', sourceDir: ref.kind === 'lxc' ? (d.source_dir || null) : null, createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_TARGET_REMOTE_SET', `mock2_remote_${ref.kind}`, ref.target, { git_connector_id: conn.id, remote_repo: d.remote_repo, push_mode: d.push_mode || 'manual', repo_created: !!repo.created }, req.ip);
+    res.json({ remote: withWebUrl(shapeTargetRemote(row), conn), repo });
+  });
+
+  router.delete('/remotes/:kind/:target', requireAdmin, (req, res) => {
+    const ref = targetRef(req, res); if (!ref) return;
+    const { cleared } = clearTargetRemote(ref.kind, ref.target);
+    logAudit(req.user.id, 'MOCK2_TARGET_REMOTE_CLEAR', `mock2_remote_${ref.kind}`, ref.target, {}, req.ip);
+    res.json({ ok: true, cleared });
+  });
+
+  // Snapshot the docroot / guest directory into the mirror and push it now.
+  router.post('/remotes/:kind/:target/push', requireAdmin, async (req, res) => {
+    const ref = targetRef(req, res); if (!ref) return;
+    const row = getTargetRemote(ref.kind, ref.target);
+    if (!row) return res.status(404).json({ error: 'No remote configured' });
+    const r = await pushTargetRemote(ref.kind, ref.target, { reason: 'manual push', actor: req.user?.username || req.user?.id });
+    logAudit(req.user.id, 'MOCK2_TARGET_REMOTE_PUSH', `mock2_remote_${ref.kind}`, ref.target, { ok: r.ok, error: r.error || null, commit: r.commit || null }, req.ip);
+    const after = getTargetRemote(ref.kind, ref.target);
+    res.json({ ...r, remote: after ? withWebUrl(shapeTargetRemote(after), getGitConnector(after.git_connector_id)) : null });
+  });
+
+  router.post('/projects/:id/remote', requireAdmin, requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const project = req.mock2Project;
     const parsed = projectRemoteSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid remote' });
     const d = parsed.data;
     const conn = getGitConnector(d.git_connector_id);
     if (!conn) return res.status(400).json({ error: 'No such git connector' });
+    // Create-if-missing BEFORE saving, so a repo that cannot be created (bad
+    // owner, no permission) is an error the operator sees now, not a failed
+    // push later.
+    let repo = { ok: true, skipped: true };
+    if (d.create_repo) {
+      repo = await ensureRemoteRepo(conn, d.remote_repo);
+      if (!repo.ok) return res.status(400).json({ error: `Remote repository: ${repo.error}` });
+    }
     const remote = setProjectRemote({ projectId: project.id, gitConnectorId: conn.id, remoteRepo: d.remote_repo, pushOnCheckpoint: d.push_on_checkpoint ? 1 : 0 });
-    logAudit(req.user.id, 'MOCK2_PROJECT_REMOTE_SET', 'mock2_project', project.id, { git_connector_id: conn.id, remote_repo: d.remote_repo }, req.ip);
-    res.json({ remote: shapeProjectRemote(remote) });
+    logAudit(req.user.id, 'MOCK2_PROJECT_REMOTE_SET', 'mock2_project', project.id, { git_connector_id: conn.id, remote_repo: d.remote_repo, repo_created: !!repo.created }, req.ip);
+    res.json({ remote: withWebUrl(shapeProjectRemote(remote), conn), repo });
+  });
+
+  // Push the project's bare repo to its remote now, regardless of the
+  // push-on-checkpoint setting. The outcome is also written to the remote row.
+  router.post('/projects/:id/remote/push', requireAdmin, requireMock2Role('editor'), async (req, res) => {
+    const project = req.mock2Project;
+    const remote = getProjectRemote(project.id);
+    if (!remote) return res.status(404).json({ error: 'No remote configured for this project' });
+    const r = await pushProjectRemoteNow(project, remote);
+    logAudit(req.user.id, 'MOCK2_PROJECT_REMOTE_PUSH', 'mock2_project', project.id, { ok: r.ok, error: r.error || null }, req.ip);
+    res.json({ ...r, remote: withWebUrl(shapeProjectRemote(getProjectRemote(project.id)), getGitConnector(remote.git_connector_id)) });
   });
 
   router.delete('/projects/:id/remote', requireAdmin, requireMock2Role('editor'), refuseIfArchived, (req, res) => {

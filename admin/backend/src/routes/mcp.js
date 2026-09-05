@@ -27,6 +27,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
 import { getDb, logAudit } from '../db.js';
+import { emitContentChanged } from '../lib/change-events.js';
 import { requireAdmin } from '../middleware/auth.js';
 import {
   MCP_PROTOCOL_VERSION, MCP_KNOWN_VERSIONS, MCP_SERVER_INFO, MCP_SERVER_INSTRUCTIONS, MCP_TOOLS,
@@ -224,8 +225,9 @@ async function mock2Modules() {
     import('../mock2/domain-logic.js'), import('../mock2/design-presets.js'),
     import('../mock2/template.js'),
   ]);
+  const [gitConnectors, gitLogic] = await Promise.all([import('../mock2/git-connectors.js'), import('../mock2/git-logic.js')]);
   return { projects, cycles, queue, domains, provision, cloneLogic, assets, projectLogic, requests,
-    cycleEvents, changeRecords, framework, domainLogic, designPresets, template };
+    cycleEvents, changeRecords, framework, domainLogic, designPresets, template, gitConnectors, gitLogic };
 }
 
 // Builds that SHIPPED but still await the operator's verification checks.
@@ -453,6 +455,7 @@ async function toolApplyStaticSiteZip(args, auth) {
     await discardZipUpload(rec.id);
   }
   logAudit(auth.created_by, 'ZIP_UPLOAD_APPLIED', 'service', service.id, { via: 'mcp', files: entries.filter((e) => !e.isDirectory).length, replaced: conflicts.length }, null);
+  emitContentChanged({ kind: 'static_site', id: service.id, reason: 'zip applied', actor: 'mcp' });
   return toolResult({
     applied: true,
     files_written: entries.filter((e) => !e.isDirectory).length,
@@ -619,6 +622,7 @@ async function toolApplyLxcZip(args, auth) {
   logAudit(auth.created_by, 'LXC_ZIP_UPLOAD_APPLIED', 'lxc', name, {
     via: 'mcp', files: entries.filter((e) => !e.isDirectory).length, replaced: conflicts.length, startupScript,
   }, null);
+  emitContentChanged({ kind: 'lxc', id: name, reason: 'zip applied', actor: 'mcp' });
   return toolResult({
     applied: true,
     files_written: entries.filter((e) => !e.isDirectory).length,
@@ -835,6 +839,7 @@ async function toolWriteLxcFile(args, auth) {
   });
   if (written.error) return toolResult(written.error, { isError: true });
   logAudit(auth.created_by, 'LXC_FILE_WRITTEN', 'lxc', name, { via: 'mcp', path, bytes: written.bytes, replaced: exists, ...(mode ? { mode } : {}) }, null);
+  emitContentChanged({ kind: 'lxc', id: name, reason: `file written (${path})`, actor: 'mcp' });
   return toolResult({
     written: true, path,
     bytes: written.bytes, total_lines: written.total_lines, sha256: written.sha256,
@@ -892,6 +897,7 @@ async function toolRerunStartup(args, auth) {
   logAudit(auth.created_by, 'LXC_STARTUP_RERUN', 'lxc', name, {
     via: 'mcp', script: startup.scriptPath, exit: streams.found ? streams.exit_code : r.status, timed_out: !!r.timedOut,
   }, null);
+  emitContentChanged({ kind: 'lxc', id: name, reason: 'startup re-run', actor: 'mcp' });
 
   if (!streams.found) {
     // The wrapper never reported — container down, incus refused, or we
@@ -1888,6 +1894,7 @@ async function toolWriteStaticSiteFile(args, auth) {
     return toolResult(`Write failed: ${err?.message || err}`, { isError: true });
   }
   logAudit(auth.created_by, 'STATIC_FILE_WRITTEN', 'service', site.id, { via: 'mcp', path: rel, bytes: wantBytes, replaced: exists }, null);
+  emitContentChanged({ kind: 'static_site', id: site.id, reason: `file written (${rel})`, actor: 'mcp' });
   return toolResult({
     written: true, path: rel, bytes: wantBytes,
     total_lines: content === '' ? 0 : content.replace(/\n$/, '').split('\n').length,
@@ -4202,7 +4209,93 @@ async function toolAppendChangeRecord(args, auth) {
   }, { isError: !chain.ok });
 }
 
+// ---- git remotes (Gitea / GitHub / generic) for projects, static sites, LXC ----
+//
+// The connection to a Gitea instance (base URL + API token) is a git CONNECTOR,
+// configured by an admin under Projects → Connectors → Git connectors. These
+// tools only bind an existing connector to a target and push; they never mint
+// or reveal credentials.
+
+function resolveGitConnector(m, args) {
+  if (args.connector_id != null) return m.gitConnectors.getGitConnector(args.connector_id) || null;
+  if (args.connector) {
+    const byName = m.gitConnectors.getGitConnectorByName(String(args.connector));
+    if (byName) return byName;
+    const n = Number(args.connector);
+    if (Number.isInteger(n)) return m.gitConnectors.getGitConnector(n) || null;
+  }
+  const all = m.gitConnectors.listGitConnectors();
+  return all.length === 1 ? all[0] : null;
+}
+
+async function toolListGitConnectors(_args, _auth) {
+  const m = await mock2Modules();
+  const rows = m.gitConnectors.listGitConnectors().map((r) => m.gitConnectors.shapeGitConnector(r));
+  return toolResult({
+    connectors: rows.map((c) => ({ id: c.id, name: c.name, provider: c.provider, base_url: c.base_url, auth_kind: c.auth_kind, test: c.test })),
+    note: rows.length ? 'Pass connector (name) or connector_id to set_git_remote.' : 'No git connectors configured. An admin adds one (Gitea base URL + API token) under Projects → Connectors → Git connectors.',
+  });
+}
+
+async function toolSetGitRemote(args, auth) {
+  const m = await mock2Modules();
+  const kind = String(args.kind || '');
+  const target = String(args.target ?? '');
+  const remoteRepo = String(args.remote_repo || '').trim();
+  if (!remoteRepo) return toolResult('remote_repo is required (owner/name, or a full URL)', { isError: true });
+  const conn = resolveGitConnector(m, args);
+  if (!conn) return toolResult({ error: 'Name a git connector (connector or connector_id). list_git_connectors shows them.', connectors: m.gitConnectors.listGitConnectors().map((c) => ({ id: c.id, name: c.name, provider: c.provider })) }, { isError: true });
+  const createRepo = args.create_repo !== false;
+  let repo = { ok: true, skipped: true };
+  if (createRepo) {
+    repo = await m.gitConnectors.ensureRemoteRepo(conn, remoteRepo);
+    if (!repo.ok) return toolResult(`Remote repository: ${repo.error}`, { isError: true });
+  }
+  const mode = args.push_mode === 'auto' ? 'auto' : 'manual';
+  if (kind === 'project') {
+    const project = m.projects.getProject(Number(target));
+    if (!project) return toolResult('Project not found', { isError: true });
+    const row = m.gitConnectors.setProjectRemote({ projectId: project.id, gitConnectorId: conn.id, remoteRepo, pushOnCheckpoint: mode === 'auto' ? 1 : 0 });
+    logAudit(auth.created_by, 'MOCK2_PROJECT_REMOTE_SET', 'mock2_project', project.id, { via: 'mcp', git_connector_id: conn.id, remote_repo: remoteRepo, repo_created: !!repo.created }, null);
+    return toolResult({ set: true, kind, target: project.id, remote: { ...m.gitConnectors.shapeProjectRemote(row), web_url: m.gitLogic.remoteRepoWebUrl(conn, remoteRepo) }, repo, next: mode === 'auto' ? 'Every checkpoint pushes. push_git_remote pushes now.' : 'push_git_remote pushes the bare repo now.' });
+  }
+  const bad = m.gitLogic.validateTargetRef(kind, target);
+  if (bad) return toolResult(bad, { isError: true });
+  if (kind === 'static_site' && !getStaticSite(target)) return toolResult('Static site not found', { isError: true });
+  if (kind === 'lxc') {
+    const badDir = m.gitLogic.validateSourceDir(args.source_dir);
+    if (badDir) return toolResult(badDir, { isError: true });
+  }
+  const row = m.gitConnectors.setTargetRemote({ kind, targetId: target, gitConnectorId: conn.id, remoteRepo, pushMode: mode, sourceDir: kind === 'lxc' ? (args.source_dir || null) : null, createdBy: auth.created_by });
+  logAudit(auth.created_by, 'MOCK2_TARGET_REMOTE_SET', `mock2_remote_${kind}`, target, { via: 'mcp', git_connector_id: conn.id, remote_repo: remoteRepo, push_mode: mode, repo_created: !!repo.created }, null);
+  return toolResult({ set: true, kind, target, remote: { ...m.gitConnectors.shapeTargetRemote(row), web_url: m.gitLogic.remoteRepoWebUrl(conn, remoteRepo) }, repo, next: mode === 'auto' ? 'Every content change ProxyPilot makes is pushed (debounced). push_git_remote pushes now.' : 'push_git_remote snapshots the content and pushes it.' });
+}
+
+async function toolPushGitRemote(args, auth) {
+  const m = await mock2Modules();
+  const kind = String(args.kind || '');
+  const target = String(args.target ?? '');
+  if (kind === 'project') {
+    const project = m.projects.getProject(Number(target));
+    if (!project) return toolResult('Project not found', { isError: true });
+    const remote = m.gitConnectors.getProjectRemote(project.id);
+    if (!remote) return toolResult('No remote configured for this project — set_git_remote first', { isError: true });
+    const r = await m.gitConnectors.pushProjectRemoteNow(project, remote);
+    logAudit(auth.created_by, 'MOCK2_PROJECT_REMOTE_PUSH', 'mock2_project', project.id, { via: 'mcp', ok: r.ok, error: r.error || null }, null);
+    return toolResult({ kind, target: project.id, ...r }, { isError: !r.ok });
+  }
+  const bad = m.gitLogic.validateTargetRef(kind, target);
+  if (bad) return toolResult(bad, { isError: true });
+  if (!m.gitConnectors.getTargetRemote(kind, target)) return toolResult('No remote configured — set_git_remote first', { isError: true });
+  const r = await m.gitConnectors.pushTargetRemote(kind, target, { reason: String(args.reason || 'push requested over MCP').slice(0, 120), actor: 'mcp' });
+  logAudit(auth.created_by, 'MOCK2_TARGET_REMOTE_PUSH', `mock2_remote_${kind}`, target, { via: 'mcp', ok: r.ok, error: r.error || null, commit: r.commit || null }, null);
+  return toolResult({ kind, target, ...r }, { isError: !r.ok });
+}
+
 const TOOL_HANDLERS = {
+  list_git_connectors: toolListGitConnectors,
+  set_git_remote: toolSetGitRemote,
+  push_git_remote: toolPushGitRemote,
   list_static_sites: (args, auth, req) => toolListStaticSites(args, auth, req),
   create_upload_ticket: (_args, _auth, req) => toolCreateUploadTicket(req),
   append_upload_chunk: toolAppendUploadChunk,

@@ -86,12 +86,12 @@ modest:
    call `insertFrameworkVersion({ source: 'git', sourceGitCommit })`. The registry
    already has the `source` and `source_git_commit` columns (migration 501) for
    exactly this. Projects then adopt through the existing drift → update path.
-3. **Project remotes on Gitea by default** — the `gitea` git connector already
-   exists (`git-logic.js`, `ModelConnectors.jsx`); `bootstrap.py` on the guest
-   already creates a `fractionate` org. Make a Gitea connector the default
-   `push_on_checkpoint` remote for new projects (one row in `mock2_project_remotes`
-   at `create_project`), so every project's history is on git.fractionate.ai and
-   the site, the template repo and the project repos share one host.
+3. **Project remotes on Gitea by default** — done per object (2026-09-05, see
+   `docs/features/git-remotes.md`): the New project dialog, the static-site
+   wizard and the LXC create dialog all take an optional Gitea remote, with the
+   repository created on the remote when missing; existing objects get the same
+   card on their page. What is still missing is a `default_git_connector` setting
+   that pre-fills it for every new object.
 
 Constraints to keep: the site's rendering is *derived* content, so the sync must
 never overwrite the platform's hardened constitution sections silently — render

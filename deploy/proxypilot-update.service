@@ -1,0 +1,42 @@
+# proxypilot-update.service — the root-owned self-update runner.
+#
+# Started only by proxypilot-update.path (there is no [Install] section:
+# nobody should enable this unit on its own). One start handles one
+# request file: validate (owner, nonce, freshness, flag allowlist), then
+# either refresh the recorded checkout facts (a "check" request) or run
+# `update.sh --yes` end to end (an "update" request) — DB backup, git pull,
+# self re-exec, dependency install, frontend build, docker compose
+# down/build/up, health check.
+#
+# It runs as root under systemd rather than under the agent or the
+# dashboard container because it has to SURVIVE the update it performs:
+# the container is torn down at `docker compose down`, and the agent is an
+# unprivileged NoNewPrivileges service that must not run update.sh.
+# State + logs for the dashboard land in /var/lib/proxypilot/update
+# (world-readable, root-written), which the agent reads back for the UI.
+#
+# KillMode=process: update.sh re-execs itself in place after the pull and
+# leaves short-lived children (git's background maintenance) behind; only
+# the main process is ours to reap, the rest exit on their own.
+#
+# Start limit: a "check" request is also a start, and the dashboard makes
+# one every ten minutes at most (the backend caches the result), so the
+# limit is loose enough for checks plus an update and tight enough to stop
+# a re-trigger loop if the request file ever failed to be consumed.
+
+[Unit]
+Description=ProxyPilot self-update runner (one request)
+After=network-online.target docker.service proxypilot-agent.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/proxypilot-update-runner
+TimeoutStartSec=3600
+KillMode=process
+Environment=HOME=/root
+Environment=TERM=dumb
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/go/bin:/snap/bin
+StandardOutput=journal
+StandardError=journal

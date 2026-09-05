@@ -684,9 +684,35 @@ export const api = {
 
   getVolumeBackups: () => request('/services/docker/volumes/backups'),
 
-  // Version (display-only). The auto-update flow was removed —
-  // operators update via their own deploy mechanism.
+  // Version + self-update (docs/features/self-update.md). getVersion is
+  // display-only (any user); the rest is admin: the check compares the
+  // running build with GitHub and the Mock2 standards site (cached 10 min,
+  // force bypasses), startUpdate asks the host runner to run update.sh and
+  // resolves with the run id, getUpdateProgress reads the host-side state
+  // + log tail — it keeps answering across the container rebuild once the
+  // new backend is up, and fails while it is down (the panel tolerates that).
   getVersion: () => request('/user/version'),
+  checkForUpdates: ({ force = false } = {}) => request(`/user/version/check${force ? '?force=1' : ''}`),
+  startUpdate: ({ rebuild = false } = {}) => request('/user/version/update', {
+    method: 'POST',
+    body: JSON.stringify({ rebuild }),
+  }),
+  getUpdateProgress: (id, { tail } = {}) => {
+    const q = new URLSearchParams();
+    if (id) q.set('id', id);
+    if (tail !== undefined) q.set('tail', String(tail));
+    const qs = q.toString();
+    return request(`/user/version/update/progress${qs ? `?${qs}` : ''}`);
+  },
+  updateGithubRepo: (githubRepo) => request('/user/settings/github-repo', {
+    method: 'PUT',
+    body: JSON.stringify({ githubRepo }),
+  }),
+  dismissUpdate: (version) => request('/user/version/dismiss', {
+    method: 'POST',
+    body: JSON.stringify({ version }),
+  }),
+  resetDismissUpdate: () => request('/user/version/reset-dismiss', { method: 'POST' }),
   // Platform branding (name / logo / favicon). GET is public; PUT is admin.
   // Images travel as data URIs; '' clears a field back to the default.
   getBranding: () => request('/branding'),

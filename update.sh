@@ -69,6 +69,14 @@ FORCE_REBUILD=false
 SKIP_RESTART=false
 VERBOSE=false
 ENABLE_MOCK2=false
+# Non-interactive mode (the dashboard's "Update now" runs this script through
+# the root oneshot in deploy/proxypilot-update.service, with no terminal).
+# --yes answers every prompt with its SAFE default: the uncommitted-changes
+# question is answered "no" (the run is refused) unless --discard-local is
+# also given, and "rebuild anyway?" on an up-to-date checkout is answered
+# "no" unless --rebuild is given. The runner never passes --discard-local.
+ASSUME_YES=false
+DISCARD_LOCAL=false
 for arg in "$@"; do
     case $arg in
         --rebuild|--force|-f)
@@ -83,6 +91,12 @@ for arg in "$@"; do
         --enable-mock2)
             ENABLE_MOCK2=true
             ;;
+        --yes|-y)
+            ASSUME_YES=true
+            ;;
+        --discard-local)
+            DISCARD_LOCAL=true
+            ;;
         --help|-h)
             echo "ProxyPilot Update Script"
             echo ""
@@ -95,6 +109,16 @@ for arg in "$@"; do
             echo "                           MOCK2_ENABLED=true in the deployed .env). The"
             echo "                           'Projects' section appears for admins after"
             echo "                           the restart. A production pin still forces it off."
+            echo "  --yes, -y                Non-interactive: answer every prompt with its safe"
+            echo "                           default. Refuses to run over uncommitted local"
+            echo "                           changes unless --discard-local is also given; an"
+            echo "                           up-to-date checkout exits 0 without rebuilding"
+            echo "                           unless --rebuild is also given. This is what the"
+            echo "                           dashboard's Update button uses."
+            echo "  --discard-local          With --yes: throw away uncommitted changes and"
+            echo "                           untracked files in the checkout (git reset --hard"
+            echo "                           + git clean -fd; ignored files such as .env are kept)"
+            echo "                           instead of refusing. Never passed by the dashboard."
             echo "  --verbose, -v            Show verbose output"
             echo "  --help, -h               Show this help message"
             exit 0
@@ -824,11 +848,27 @@ if [ -n "$($GIT_CMD status --porcelain 2>/dev/null)" ]; then
     log "These files have local modifications:"
     $GIT_CMD status --short
     log ""
-    read -p "Do you want to continue? This may cause merge conflicts. (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log "${RED}Update cancelled${NC}"
-        exit 1
+    if [ "$ASSUME_YES" = true ]; then
+        if [ "$DISCARD_LOCAL" = true ]; then
+            # Explicit operator choice (never the dashboard's): drop tracked
+            # edits and untracked files. Ignored files (.env, data/) are
+            # untouched — no -x.
+            log "${YELLOW}--discard-local: resetting the checkout to HEAD and removing untracked files${NC}"
+            $GIT_CMD reset --hard HEAD 2>&1 | tee -a "$LOG_FILE"
+            $GIT_CMD clean -fd 2>&1 | tee -a "$LOG_FILE"
+        else
+            # Non-interactive runs take the prompt's safe default: no.
+            log "${RED}Update cancelled: uncommitted local changes in $SCRIPT_DIR and --yes was given.${NC}"
+            log "Commit or stash them on the host, or re-run with --discard-local to throw them away."
+            exit 1
+        fi
+    else
+        read -p "Do you want to continue? This may cause merge conflicts. (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log "${RED}Update cancelled${NC}"
+            exit 1
+        fi
     fi
 fi
 
@@ -874,6 +914,11 @@ if [ "$LOCAL" = "$REMOTE" ]; then
         # verifiable against GitHub instead of taken on faith.
         log "Local and origin/main are both at: $($GIT_CMD log -1 --format='%h (%ad) %s' --date=short origin/main 2>/dev/null || echo "$REMOTE")"
         log ""
+        if [ "$ASSUME_YES" = true ]; then
+            # Non-interactive: the prompt's safe default is "no".
+            log "${BLUE}No changes made (--yes). Use --rebuild to force rebuild.${NC}"
+            exit 0
+        fi
         read -p "Do you want to rebuild anyway? (y/N) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -1140,9 +1185,14 @@ if [[ ! -d "$AGENT_SRC" ]]; then
     log "${YELLOW}cmd/agent not found at ${AGENT_SRC}; this build of update.sh predates Phase A — skipping agent install${NC}"
 else
     log "Building proxypilot-agent..."
+    # Stamp the checkout's commit into the binary so update.check can report
+    # which agent build is running (methods.AgentVersion, "dev" when unstamped).
+    AGENT_BUILD_SHA=$($GIT_CMD -C "$SCRIPT_DIR" rev-parse --short=10 HEAD 2>/dev/null || echo unknown)
     (
         cd "$AGENT_SRC"
-        GOFLAGS=-mod=mod "$GO_BIN" build -o /usr/local/bin/proxypilot-agent .
+        GOFLAGS=-mod=mod "$GO_BIN" build \
+            -ldflags "-X github.com/cybertecharmor/proxypilot/cmd/agent/methods.AgentVersion=${AGENT_BUILD_SHA}" \
+            -o /usr/local/bin/proxypilot-agent .
     )
     chmod 0755 /usr/local/bin/proxypilot-agent
     log "${GREEN}Agent binary at /usr/local/bin/proxypilot-agent${NC}"
@@ -1167,6 +1217,56 @@ else
         log "${GREEN}proxypilot-agent service running${NC}"
     fi
 fi
+log ""
+
+# Self-update runner — the root oneshot + path unit behind the dashboard's
+# "Update now" (docs/features/self-update.md). Installed right after the
+# agent, and re-installed whenever the source changed, exactly like the agent
+# unit above. Records THIS checkout as the one the runner should update, and
+# refreshes the checkout facts the dashboard shows (branch, commit, dirty).
+install_update_runner() {
+    local runner_src="${SCRIPT_DIR}/scripts/update-runner.sh"
+    local runner_dst="/usr/local/sbin/proxypilot-update-runner"
+    local unit changed=false
+    if [[ ! -f "$runner_src" ]]; then
+        log "${YELLOW}scripts/update-runner.sh not found; skipping self-update runner install${NC}"
+        return 0
+    fi
+    if [ "$EUID" -ne 0 ]; then
+        log "${YELLOW}Not root; skipping self-update runner install (run update.sh with sudo to enable the dashboard's Update button)${NC}"
+        return 0
+    fi
+    if ! cmp -s "$runner_src" "$runner_dst" 2>/dev/null; then
+        # Atomic replace: when this update was started from the dashboard,
+        # the runner is the process running us — a new inode keeps the
+        # running copy intact while the path points at the new script.
+        install -m 0755 "$runner_src" "${runner_dst}.tmp" && mv -f "${runner_dst}.tmp" "$runner_dst"
+        log "Installed self-update runner: ${runner_dst}"
+    fi
+    for unit in proxypilot-update.service proxypilot-update.path; do
+        if [[ -f "${SCRIPT_DIR}/deploy/${unit}" ]] && ! cmp -s "${SCRIPT_DIR}/deploy/${unit}" "/etc/systemd/system/${unit}" 2>/dev/null; then
+            cp "${SCRIPT_DIR}/deploy/${unit}" "/etc/systemd/system/${unit}"
+            chmod 0644 "/etc/systemd/system/${unit}"
+            changed=true
+        fi
+    done
+    install -d -m 0755 /var/lib/proxypilot/update
+    "$runner_dst" record-source "$SCRIPT_DIR" 2>&1 | tee -a "$LOG_FILE" || true
+    "$runner_dst" check >/dev/null 2>&1 || true
+    if [ "$changed" = true ]; then
+        systemctl daemon-reload
+        log "Installed self-update units: proxypilot-update.service, proxypilot-update.path"
+    fi
+    if ! systemctl is-enabled --quiet proxypilot-update.path 2>/dev/null; then
+        systemctl enable proxypilot-update.path 2>&1 | tee -a "$LOG_FILE"
+    fi
+    # Re-arm the watcher (a tripped start limit or a changed unit). The
+    # service is left alone: on a dashboard-started update it is running us.
+    systemctl reset-failed proxypilot-update.path 2>/dev/null || true
+    systemctl restart proxypilot-update.path 2>/dev/null || true
+    log "${GREEN}Self-update runner ready (proxypilot-update.path enabled)${NC}"
+}
+install_update_runner
 log ""
 
 # Detect Docker deployment so we can skip the host-side backend npm

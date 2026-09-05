@@ -22,7 +22,12 @@ The standards site is the newer, human-edited source; this seed is ProxyPilot's
 the runner is prompted with, the checks as executable scripts, and the skills as
 prompt templates). When the site changes, update the seed to match and publish —
 see `docs/mock2/standards-and-cpr.md` for the procedure and for what a live link
-to the Gitea repo would take.
+to the Gitea repo would take. **Bump `standards-version.json` with the seed**:
+it records the site version this seed renders (`0.3.0`, synced 2026-09-05), and
+the dashboard's Update block and the `check_proxypilot_update` MCP tool compare
+it with the live `manifest.json` to say "site X available — update ProxyPilot to
+pick it up" (`mock2-standards-seed.test.js` checks it stays in step with the
+table above).
 
 | File | Field | State |
 |---|---|---|
@@ -31,6 +36,7 @@ to the Gitea repo would take.
 | `gates.json` | `gates_json` | the deterministic check battery (typecheck, constitution-lint, rule-coverage, security-scan, test, ui-interaction, acceptance, component-reuse). The platform still calls them "gates" in report rows; read as production-checklist items. `security-scan`: committed secret = hard stop, dependency audit = recorded WARNING |
 | `design-system.md` | `design_system_md` | **locked** — the design system Stage-1 mockups must obey (unchanged) |
 | `project-template.ref` | `project_template_ref` | names the scaffold (`builtin:mock2-ts-express-drizzle-v1`); the runtime is `scaffold.js` |
+| `standards-version.json` | — | the standards site version this seed renders (`version`, `synced`); compared with the live manifest by the self-update check |
 | `cpr/` | — | the CPR v1.1 standard, a worked `feature.manifest.json`, and notes |
 | `cpr-host.component.json` | component library | the CPR Host component, seeded at boot by `component-seed.js` |
 | `proxypilot-auth.component.json` | component library | the auth component, seeded at boot |

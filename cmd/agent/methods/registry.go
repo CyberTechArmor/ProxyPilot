@@ -84,5 +84,8 @@ func DefaultRegistry() *Registry {
 	r.Register("caddy.version", CaddyVersion)
 	r.Register("security.cve_2026_31431.check", SecurityCVE202631431Check)
 	r.Register("security.cve_2026_31431.patch", SecurityCVE202631431Patch)
+	r.Register("update.check", UpdateCheck)
+	r.Register("update.request", UpdateRequest)
+	r.Register("update.status", UpdateStatus)
 	return r
 }

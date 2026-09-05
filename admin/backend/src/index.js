@@ -8,7 +8,8 @@ import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { existsSync, statSync } from 'fs';
-import { initDatabase, getDb } from './db.js';
+import { initDatabase, getDb, getSetting, setSetting, logAudit } from './db.js';
+import { noteCompletedUpdateOnBoot } from './lib/self-update.js';
 import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
@@ -721,6 +722,19 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`ProxyPilot backend running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`Frontend path: ${FRONTEND_PATH}`);
+
+  // Self-update bookkeeping (docs/features/self-update.md): the backend that
+  // asked for an update died in the container rebuild, so the NEW one records
+  // the outcome — the SELF_UPDATE_COMPLETED audit row and the last_update_*
+  // settings the Update block shows. Delayed a few seconds so the host agent,
+  // which update.sh may have just restarted, is back on its socket.
+  setTimeout(() => {
+    noteCompletedUpdateOnBoot({ getSetting, setSetting, logAudit })
+      .then((r) => {
+        if (r) console.log(`[self-update] recorded completed update ${r.id}: v${r.from_version || '?'} -> v${r.to_version || '?'}`);
+      })
+      .catch((err) => console.error('[self-update] boot bookkeeping failed:', err?.message || err));
+  }, 5000);
 
   // Async background work post-listen. Order matters: migrate the WG
   // listen port FIRST so any L4 forwards that conflict with the old

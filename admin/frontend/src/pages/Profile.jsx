@@ -26,6 +26,7 @@ import { Loader2, Key, Shield, QrCode, Trash2, RefreshCw, Copy, Check, Settings,
 import QRCode from 'qrcode';
 import { registerPasskey, defaultPasskeyLabel, isPasskeySupported } from '@/lib/passkey';
 import { applyBranding, DEFAULT_BRANDING } from '@/lib/branding';
+import SelfUpdatePanel from '@/components/SelfUpdatePanel';
 
 // Platform branding (admin) — the dashboard's OWN name, logo, and favicon.
 // Self-contained: loads the current values, previews picked files, saves them
@@ -254,10 +255,12 @@ export default function Profile() {
     }
   };
 
-  const checkForUpdates = async () => {
+  // force=true bypasses the backend's 10-minute cache of the GitHub /
+  // standards lookups (the refresh icon, and the panel after a run finishes).
+  const checkForUpdates = async (force = false) => {
     setCheckingUpdate(true);
     try {
-      const data = await api.checkForUpdates();
+      const data = await api.checkForUpdates({ force: force === true });
       setUpdateInfo(data);
     } catch (error) {
       console.error('Error checking for updates:', error);
@@ -1368,8 +1371,11 @@ export default function Profile() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={checkForUpdates}
+                  className="min-h-[44px] min-w-[44px]"
+                  onClick={() => checkForUpdates(true)}
                   disabled={checkingUpdate}
+                  aria-label="Check for updates now"
+                  title="Check for updates now"
                 >
                   <RefreshCw className={`h-4 w-4 ${checkingUpdate ? 'animate-spin' : ''}`} />
                 </Button>
@@ -1453,38 +1459,16 @@ export default function Profile() {
               </div>
             )}
 
-            {/* Update Info */}
-            {updateInfo && (
-              <div className="p-4 bg-muted rounded-lg space-y-2">
-                <div className="flex justify-between">
-                  <span className="text-sm text-muted-foreground">Current Version</span>
-                  <span className="font-medium">v{updateInfo.currentVersion}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-sm text-muted-foreground">Latest Version</span>
-                  <span className="font-medium">v{updateInfo.latestVersion}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Status</span>
-                  <span className={`text-sm font-medium ${updateInfo.updateAvailable ? 'text-primary' : 'text-green-500'}`}>
-                    {updateInfo.updateAvailable ? 'Update Available' : 'Up to Date'}
-                  </span>
-                </div>
-                {updateInfo.releaseUrl && (
-                  <div className="pt-2 border-t">
-                    <a
-                      href={updateInfo.releaseUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-sm text-primary hover:underline flex items-center gap-1"
-                    >
-                      <Download className="h-4 w-4" />
-                      View Release Notes
-                    </a>
-                  </div>
-                )}
-              </div>
-            )}
+            {/* Update: installed vs latest, standards line, Update now + progress
+                (docs/features/self-update.md). */}
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">Update</Label>
+              <SelfUpdatePanel
+                updateInfo={updateInfo}
+                checking={checkingUpdate}
+                onRefresh={() => checkForUpdates(true)}
+              />
+            </div>
           </CardContent>
         </Card>
       )}

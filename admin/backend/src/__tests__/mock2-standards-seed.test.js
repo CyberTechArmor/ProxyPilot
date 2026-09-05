@@ -132,3 +132,14 @@ test('the CPR standard is vendored and the MCP instructions point clients at the
   // The working-order sentences stay first (mcp-logic.test.js pins their order).
   assert.ok(MCP_SERVER_INSTRUCTIONS.indexOf('apply_project_patch') < MCP_SERVER_INSTRUCTIONS.indexOf('STANDARDS:'));
 });
+
+test('standards-version.json records the site version the seed renders, and the README points at it', async () => {
+  const sv = JSON.parse(await seed('standards-version.json'));
+  assert.match(sv.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(sv.manifest, 'https://mock2.fractionate.ai/manifest.json');
+  assert.equal(sv.source, 'https://git.fractionate.ai/mock2/mock2-core');
+  assert.match(sv.synced, /^\d{4}-\d{2}-\d{2}$/);
+  const readme = await seed('README.md');
+  assert.ok(readme.includes(`**${sv.version}**`), `README's Mock2 standards row must carry ${sv.version}`);
+  assert.match(readme, /standards-version\.json/);
+});

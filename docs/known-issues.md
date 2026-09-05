@@ -52,6 +52,26 @@ node --test 'src/__tests__/*.test.js'
 
 and confirm `pass 76 / fail 0`.
 
+## Self-update: operator proof U.V1–U.V6 not yet run on a VM
+
+Added 2026-09-05 with the self-update feature (`docs/features/self-update.md`).
+The runner contract, the agent methods, the backend logic/driver and the MCP
+tools are covered by machine checks that run in the sandbox
+(`self-update-runner.test.js` drives the real `scripts/update-runner.sh`
+against a fake `update.sh`; `cmd/agent/methods/update_test.go` covers the
+agent). What the sandbox cannot do is the end-to-end proof on a real host:
+systemd path-unit triggering, `update.sh --yes` through a real
+`docker compose` rebuild, the dashboard reconnecting on the new build, and
+the MCP status tool polled through the restart. The six scenarios are
+tabled at the end of `docs/features/self-update.md`; run them on a
+disposable VM and record the results there. Until then, treat "Update now"
+as verified by construction, not by observation.
+
+Also fixed in passing: `Profile.jsx` called `api.checkForUpdates`,
+`api.updateGithubRepo` and `api.resetDismissUpdate`, none of which existed
+in `lib/api.js` — the old update badge could never render, and saving the
+GitHub repo from the profile page threw. All three exist now.
+
 ## Smoke UI checks fail (rather than skip) on an app with no first administrator
 
 **Half closed** (fix 1 below is done; fix 2 is not needed for the declared-user

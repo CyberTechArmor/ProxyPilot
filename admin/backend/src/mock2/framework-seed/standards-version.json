@@ -1,0 +1,8 @@
+{
+  "$comment": "The Mock2 standards version this seed renders. Bump `version` and `synced` whenever the seed is updated from the site (docs/mock2/standards-and-cpr.md §3); the dashboard's Update block and the check_proxypilot_update MCP tool compare it with the live manifest to say whether the site has moved on.",
+  "source": "https://git.fractionate.ai/mock2/mock2-core",
+  "manifest": "https://mock2.fractionate.ai/manifest.json",
+  "version": "0.3.0",
+  "synced": "2026-09-05",
+  "cpr_version": "1.1"
+}

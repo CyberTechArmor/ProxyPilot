@@ -221,6 +221,30 @@ export function installHint() {
       steps: ['In Safari, choose File → "Add to Dock…", then click "Add".'],
     };
   }
+  // Edge on Android is Chromium but NEVER fires beforeinstallprompt and never
+  // shows an install banner (report: healthy site, every check green, no
+  // prompt). Its only install path is the menu, where the item is called
+  // "Add to phone" — not "Install app", which is what people go looking for.
+  if (/EdgA\//.test(ua)) {
+    return {
+      platform: 'edge-android',
+      neverPrompts: true,
+      steps: [
+        'Tap the menu button (≡ or ⋯) in the bottom bar.',
+        'Tap "Add to phone" — swipe the row of icons sideways if it is not visible.',
+        'Tap "Install". The app appears on the Home Screen with the ProxyPilot icon.',
+      ],
+    };
+  }
+  if (/SamsungBrowser\//.test(ua)) {
+    return {
+      platform: 'samsung',
+      steps: [
+        'Tap the install icon (a down-arrow) at the right end of the address bar, if one is showing.',
+        'Otherwise open the menu (≡), tap "Add page to", then "Home screen".',
+      ],
+    };
+  }
   if (/Android/.test(ua)) {
     return {
       platform: 'android',
@@ -289,6 +313,32 @@ export async function checkInstallability() {
     out.push({ ok: bigEnough, label: 'An app icon of at least 192px' });
     out.push({ ok: ['standalone', 'fullscreen', 'minimal-ui'].includes(manifest.display), label: 'Opens in its own window (display mode)' });
     out.push({ ok: !!(manifest.name || manifest.short_name), label: 'Has an app name' });
+    const icon = (manifest.icons || []).find((i) => (i.purpose || 'any').split(/\s+/).includes('any') && (px(i) >= 192 || i.sizes === 'any'));
+    if (icon) {
+      let iconOk = false;
+      // What Chromium actually needs is an icon that DECODES; a content-type
+      // header is only a hint, and a static server that omits it is fine.
+      try {
+        const r = await fetch(new URL(icon.src, link.href).href, { cache: 'no-cache' });
+        if (r.ok) {
+          const blob = await r.blob();
+          if (typeof createImageBitmap === 'function') {
+            const bmp = await createImageBitmap(blob);
+            iconOk = bmp.width >= 144 && bmp.height >= 144;
+            bmp.close?.();
+          } else {
+            iconOk = blob.size > 0;
+          }
+        }
+      } catch { iconOk = false; }
+      out.push({ ok: iconOk, label: 'The app icon downloads' });
+    }
+    let startOk = false;
+    try {
+      const r = await fetch(new URL(manifest.start_url || '/', link.href).href, { cache: 'no-cache', credentials: 'same-origin' });
+      startOk = r.ok;
+    } catch { startOk = false; }
+    out.push({ ok: startOk, label: 'The start page loads' });
   }
   return out;
 }

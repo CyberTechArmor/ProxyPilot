@@ -143,13 +143,15 @@ export default function InstallApp() {
               <p className="mb-2 font-medium">
                 {hint.platform === 'firefox-desktop'
                   ? 'This browser cannot install apps'
-                  : 'Install it from the browser itself:'}
+                  : hint.neverPrompts
+                    ? 'This browser never shows an install button on the page — install it from its menu:'
+                    : 'Install it from the browser itself:'}
               </p>
               <ol className="list-decimal space-y-1 pl-5 text-muted-foreground">
                 {hint.steps.map((step) => <li key={step}>{step}</li>)}
               </ol>
             </div>
-            {hint.platform !== 'firefox-desktop' && hint.platform !== 'ios' ? (
+            {hint.platform !== 'firefox-desktop' && hint.platform !== 'ios' && !hint.neverPrompts ? (
               <p className="flex items-start gap-2 text-xs text-muted-foreground">
                 <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 <span>
@@ -159,7 +161,7 @@ export default function InstallApp() {
                 </span>
               </p>
             ) : null}
-            {checks && checks.some((c) => !c.ok) ? (
+            {!hint.neverPrompts && checks && checks.some((c) => !c.ok) ? (
               <div className="rounded-md border border-destructive/40 p-3 text-sm">
                 <p className="mb-1 font-medium">The browser is withholding its install prompt because:</p>
                 <ul className="space-y-1">

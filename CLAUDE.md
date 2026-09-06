@@ -49,7 +49,7 @@ npm run build      # production build (parallelism deliberately limited for low-
 
 **Sidebar naming (2026-09):** the sidebar entry **"Projects"** is Lean BEAF Pro (`/lean-beaf`, `pages/LeanBeafPro.jsx`, `routes/lean-beaf.js`); the Mock2 dev/build module (`/projects`, `pages/Projects.jsx`, `src/mock2/`) is labelled **"Flightdeck"** in the UI. Routes, file names, and API paths kept their old names — only user-facing labels changed. Older docs under `docs/` that say "Projects → Components" or "Projects → Connectors" mean Flightdeck.
 
-**PWA:** the dashboard is installable (`public/manifest.webmanifest`, `src/sw-template.js` emitted as `/sw.js` by `vite.config.js`, helpers in `src/lib/pwa.js`). The install prompt is captured at startup in `main.jsx` and offered from Profile → Install app (`components/InstallApp.jsx`).
+**PWA:** the dashboard is installable (`public/manifest.webmanifest`, `src/sw-template.js` emitted as `/sw.js` by `vite.config.js`, helpers in `src/lib/pwa.js`). The install prompt is captured at startup in `main.jsx` and offered from Profile → Install app (`components/InstallApp.jsx`). The app icon is `public/logo.svg` (the sidebar rocket, primary green on navy); the `icon-*.png` set is rasterised from it, so change the SVG and re-render the PNGs together. Under custom branding the backend rewrites `/manifest.webmanifest` (name + icons → `/api/branding/icon`) so an installed app carries the operator's mark.
 
 ## Mandatory UI rule
 

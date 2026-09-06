@@ -57,3 +57,46 @@ export function publicBranding({ name, logo, favicon } = {}) {
     favicon: String(favicon || '').trim() || null,
   };
 }
+
+// decodeDataUri(uri) → { mime, buffer } or null. The stored branding is a
+// validated image data URI; this turns it back into bytes so it can be served
+// at a real URL (manifest icons and apple-touch-icon cannot be inline data).
+export function decodeDataUri(uri) {
+  const m = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(String(uri || '').trim());
+  if (!m) return null;
+  try {
+    return { mime: m[1].toLowerCase(), buffer: Buffer.from(m[2], 'base64') };
+  } catch {
+    return null;
+  }
+}
+
+// brandedManifest(base, branding, iconUrl) → the web-app manifest to serve.
+// With no custom branding the base (the built file) is returned untouched, so
+// a stock install is byte-for-byte the shipped manifest. With a custom name
+// the app installs under that name; with a custom favicon (or, failing that,
+// logo) the installed icon IS the operator's mark: the shipped rocket icons
+// are dropped, because an installer picks the "best" icon by size and would
+// otherwise prefer the 512px rocket over the custom one.
+export function brandedManifest(base, branding = {}, iconUrl = '/api/branding/icon') {
+  const name = String(branding.name || '').trim();
+  const mark = decodeDataUri(branding.favicon) || decodeDataUri(branding.logo);
+  if (!name && !mark) return base;
+  const out = { ...base };
+  if (name) {
+    out.name = name;
+    // short_name is what sits under the icon; 12 characters is the common cap
+    // before launchers truncate.
+    out.short_name = name.length > 12 ? name.slice(0, 12).trim() : name;
+  }
+  if (mark) {
+    // "any" is the only honest size for an operator-uploaded file; SVG scales
+    // and a raster is whatever it is. Chrome accepts it; the sizes attribute
+    // is a hint, not a promise.
+    out.icons = [
+      { src: iconUrl, sizes: 'any', type: mark.mime, purpose: 'any' },
+      { src: iconUrl, sizes: 'any', type: mark.mime, purpose: 'maskable' },
+    ];
+  }
+  return out;
+}

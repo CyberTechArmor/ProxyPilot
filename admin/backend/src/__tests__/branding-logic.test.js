@@ -66,3 +66,65 @@ test('publicBranding: unset/blank fields come back null for clean fallbacks', ()
   assert.deepEqual(publicBranding({ name: ' Edge ', logo: '', favicon: null }),
     { name: 'Edge', logo: null, favicon: null });
 });
+
+// ---- the installed-app icon ----
+//
+// A PWA installer reads icons from the manifest and apple-touch-icon, neither
+// of which can carry inline data, so the stored data URI has to become bytes
+// at a URL and the manifest has to point there — and ONLY there, or the
+// installer picks the bigger stock rocket over the operator's mark.
+
+import { decodeDataUri, brandedManifest } from '../lib/branding-logic.js';
+
+const BASE = Object.freeze({
+  name: 'ProxyPilot Admin', short_name: 'ProxyPilot', start_url: '/',
+  icons: [{ src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' }],
+});
+const realPng = `data:image/png;base64,${Buffer.from('not really a png').toString('base64')}`;
+
+test('decodeDataUri turns a stored image back into typed bytes', () => {
+  const r = decodeDataUri(realPng);
+  assert.equal(r.mime, 'image/png');
+  assert.equal(r.buffer.toString(), 'not really a png');
+  assert.equal(decodeDataUri('data:image/svg+xml;base64,PHN2Zz4=').mime, 'image/svg+xml');
+});
+
+test('decodeDataUri rejects anything that is not an image data URI', () => {
+  assert.equal(decodeDataUri(''), null);
+  assert.equal(decodeDataUri(null), null);
+  assert.equal(decodeDataUri('https://example.com/logo.png'), null);
+  assert.equal(decodeDataUri('data:text/html;base64,PGI+'), null);
+});
+
+test('stock branding serves the built manifest untouched', () => {
+  assert.equal(brandedManifest(BASE, { name: null, logo: null, favicon: null }), BASE);
+  assert.equal(brandedManifest(BASE, {}), BASE);
+});
+
+test('a custom name installs under that name, with a launcher-length short_name', () => {
+  const m = brandedManifest(BASE, { name: 'TagArmor Edge Console' });
+  assert.equal(m.name, 'TagArmor Edge Console');
+  assert.equal(m.short_name, 'TagArmor Edg');
+  assert.deepEqual(m.icons, BASE.icons, 'no custom mark → stock icons stay');
+  assert.equal(brandedManifest(BASE, { name: 'Edge' }).short_name, 'Edge');
+});
+
+test('a custom favicon replaces the stock icons entirely', () => {
+  const m = brandedManifest(BASE, { favicon: realPng }, '/api/branding/icon');
+  assert.equal(m.name, BASE.name, 'name untouched when only the mark is set');
+  assert.deepEqual(m.icons.map((i) => i.src), ['/api/branding/icon', '/api/branding/icon']);
+  assert.deepEqual(m.icons.map((i) => i.purpose), ['any', 'maskable']);
+  assert.ok(m.icons.every((i) => i.type === 'image/png' && i.sizes === 'any'));
+});
+
+test('the logo stands in for the icon when no favicon was uploaded', () => {
+  const m = brandedManifest(BASE, { logo: 'data:image/svg+xml;base64,PHN2Zz4=' });
+  assert.equal(m.icons[0].type, 'image/svg+xml');
+  assert.notEqual(m, BASE);
+});
+
+test('brandedManifest never mutates the base it was given', () => {
+  const before = JSON.stringify(BASE);
+  brandedManifest(BASE, { name: 'X', favicon: realPng });
+  assert.equal(JSON.stringify(BASE), before);
+});

@@ -11,7 +11,8 @@
 import { Router } from 'express';
 import { logAudit, getSetting, setSetting } from '../db.js';
 import { authenticateToken, requireAdmin } from '../middleware/auth.js';
-import { validateBrandingPatch, publicBranding } from '../lib/branding-logic.js';
+import { createHash } from 'crypto';
+import { validateBrandingPatch, publicBranding, decodeDataUri } from '../lib/branding-logic.js';
 
 export const brandingRouter = Router();
 
@@ -25,6 +26,24 @@ function currentBranding() {
 
 brandingRouter.get('/', (_req, res) => {
   res.json(currentBranding());
+});
+
+// The custom mark as a fetchable file — the favicon, or the logo when only a
+// logo was set. This is what the branded manifest and the apple-touch-icon
+// link point at, because neither can carry inline data. Public like the GET:
+// it is the icon on the front door. 404 under stock branding, so the shipped
+// PNG set stays the only icon then.
+brandingRouter.get('/icon', (req, res) => {
+  const mark = decodeDataUri(getSetting('branding_favicon')) || decodeDataUri(getSetting('branding_logo'));
+  if (!mark) return res.status(404).json({ error: 'No custom branding icon is set' });
+  // Revalidate every time (a changed logo must show up on the next install),
+  // but let an unchanged one be a cheap 304.
+  const etag = `"${createHash('sha1').update(mark.buffer).digest('hex')}"`;
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'no-cache');
+  if (req.headers['if-none-match'] === etag) return res.status(304).end();
+  res.setHeader('Content-Type', mark.mime);
+  res.send(mark.buffer);
 });
 
 brandingRouter.put('/', authenticateToken, requireAdmin, (req, res) => {

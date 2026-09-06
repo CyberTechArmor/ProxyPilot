@@ -100,3 +100,20 @@ export function brandedManifest(base, branding = {}, iconUrl = '/api/branding/ic
   }
   return out;
 }
+
+// withInstalledAppHint(manifest, manifestUrl) → the manifest plus a
+// related_applications entry naming ITSELF. That is the hook
+// navigator.getInstalledRelatedApps() needs: with it, the page can tell "this
+// browser already has ProxyPilot installed" — which is the one case where
+// Chromium silently withholds the install prompt — and say so instead of
+// showing steps that lead nowhere. The URL must be absolute and match the
+// manifest URL the installed app was created from. prefer_related_applications
+// stays false: the entry is for detection, never a redirect to a store.
+export function withInstalledAppHint(manifest, manifestUrl) {
+  if (!manifestUrl) return manifest;
+  return {
+    ...manifest,
+    prefer_related_applications: false,
+    related_applications: [{ platform: 'webapp', url: manifestUrl }],
+  };
+}

@@ -32,7 +32,7 @@ import { createLeanBeafRouter } from './routes/lean-beaf.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { cacheControlFor, NO_CACHE } from './lib/static-cache-logic.js';
-import { brandedManifest, publicBranding } from './lib/branding-logic.js';
+import { brandedManifest, publicBranding, withInstalledAppHint } from './lib/branding-logic.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
 import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
@@ -664,7 +664,7 @@ if (process.env.NODE_ENV === 'production') {
   // Platform branding) so an INSTALLED ProxyPilot carries their name and icon,
   // not the stock rocket. Must sit before express.static or the built file
   // wins. Stock branding serves the built file unchanged.
-  app.get('/manifest.webmanifest', (_req, res) => {
+  app.get('/manifest.webmanifest', (req, res) => {
     const manifestPath = join(FRONTEND_PATH, 'manifest.webmanifest');
     let base;
     try {
@@ -678,9 +678,15 @@ if (process.env.NODE_ENV === 'production') {
       logo: getSetting('branding_logo'),
       favicon: getSetting('branding_favicon'),
     });
+    // Absolute self-URL for getInstalledRelatedApps(). Caddy fronts the
+    // backend over plain HTTP, so the scheme comes from X-Forwarded-Proto
+    // (https on every real install); a wrong scheme only disables detection.
+    const proto = String(req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+    const host = req.get('x-forwarded-host') || req.get('host');
+    const selfUrl = host ? `${proto}://${host}/manifest.webmanifest` : null;
     res.setHeader('Content-Type', 'application/manifest+json');
     res.setHeader('Cache-Control', NO_CACHE);
-    res.json(brandedManifest(base, branding));
+    res.json(withInstalledAppHint(brandedManifest(base, branding), selfUrl));
   });
 
   app.use(express.static(FRONTEND_PATH, {

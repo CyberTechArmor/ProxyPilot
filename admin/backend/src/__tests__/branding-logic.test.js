@@ -74,7 +74,7 @@ test('publicBranding: unset/blank fields come back null for clean fallbacks', ()
 // at a URL and the manifest has to point there — and ONLY there, or the
 // installer picks the bigger stock rocket over the operator's mark.
 
-import { decodeDataUri, brandedManifest } from '../lib/branding-logic.js';
+import { decodeDataUri, brandedManifest, withInstalledAppHint } from '../lib/branding-logic.js';
 
 const BASE = Object.freeze({
   name: 'ProxyPilot Admin', short_name: 'ProxyPilot', start_url: '/',
@@ -127,4 +127,12 @@ test('brandedManifest never mutates the base it was given', () => {
   const before = JSON.stringify(BASE);
   brandedManifest(BASE, { name: 'X', favicon: realPng });
   assert.equal(JSON.stringify(BASE), before);
+});
+
+test('the served manifest names itself as a related webapp for install detection', () => {
+  const m = withInstalledAppHint(BASE, 'https://edge.example.com/manifest.webmanifest');
+  assert.equal(m.prefer_related_applications, false);
+  assert.deepEqual(m.related_applications, [{ platform: 'webapp', url: 'https://edge.example.com/manifest.webmanifest' }]);
+  assert.equal(m.name, BASE.name);
+  assert.equal(withInstalledAppHint(BASE, null), BASE, 'no host known → untouched');
 });

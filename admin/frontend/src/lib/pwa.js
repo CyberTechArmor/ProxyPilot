@@ -235,6 +235,64 @@ export function installHint() {
   };
 }
 
+// isInstalledHere() → true when this browser already has the app installed
+// (Chromium Android/desktop: navigator.getInstalledRelatedApps, matched
+// against the related_applications entry the server puts in the manifest).
+// This is THE reason a healthy site shows no install prompt: Chromium fires
+// beforeinstallprompt only while the app is not installed. Resolves false
+// wherever the API is missing (Safari, Firefox) — unknown is treated as
+// "not installed" so the steps still show.
+export async function isInstalledHere() {
+  if (typeof navigator === 'undefined' || typeof navigator.getInstalledRelatedApps !== 'function') return false;
+  try {
+    const apps = await navigator.getInstalledRelatedApps();
+    return apps.some((a) => a.platform === 'webapp');
+  } catch {
+    return false;
+  }
+}
+
+// checkInstallability() → [{ ok, label }] — the criteria Chromium applies
+// before it will fire beforeinstallprompt, as far as a page can verify them
+// itself. When the button is missing, this turns "nothing happens" into a
+// named reason (a manifest that 404s behind a proxy, a service worker that
+// never took control, a plain-HTTP origin).
+export async function checkInstallability() {
+  const out = [];
+  if (typeof window === 'undefined') return out;
+  out.push({ ok: window.isSecureContext === true, label: 'Served over HTTPS' });
+
+  const swSupported = 'serviceWorker' in navigator;
+  let controlled = false;
+  if (swSupported) {
+    try {
+      const reg = await navigator.serviceWorker.getRegistration('/');
+      controlled = !!reg && !!navigator.serviceWorker.controller;
+    } catch { controlled = false; }
+  }
+  out.push({ ok: swSupported && controlled, label: 'Service worker installed and in control of this page' });
+
+  let manifest = null;
+  let manifestOk = false;
+  const link = document.querySelector('link[rel="manifest"]');
+  if (link?.href) {
+    try {
+      const res = await fetch(link.href, { credentials: 'same-origin', cache: 'no-cache' });
+      manifestOk = res.ok;
+      if (res.ok) manifest = await res.json();
+    } catch { manifestOk = false; }
+  }
+  out.push({ ok: manifestOk, label: 'Web app manifest loads' });
+  if (manifest) {
+    const px = (icon) => Math.max(0, ...String(icon.sizes || '').split(/\s+/).map((s) => parseInt(s, 10) || 0));
+    const bigEnough = (manifest.icons || []).some((i) => (i.purpose || 'any').split(/\s+/).includes('any') && (px(i) >= 192 || i.sizes === 'any'));
+    out.push({ ok: bigEnough, label: 'An app icon of at least 192px' });
+    out.push({ ok: ['standalone', 'fullscreen', 'minimal-ui'].includes(manifest.display), label: 'Opens in its own window (display mode)' });
+    out.push({ ok: !!(manifest.name || manifest.short_name), label: 'Has an app name' });
+  }
+  return out;
+}
+
 // ---- Web Push ----
 //
 // Three things must all be true before a notification can arrive, and they fail

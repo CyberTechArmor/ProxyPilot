@@ -133,6 +133,11 @@ function PlatformBrandingCard() {
             </div>
             {imageRow('logo', 'Logo', 400000, 'Shown beside the name in the sidebar and on the sign-in page. Square works best; SVG or PNG, under ~300 KB.')}
             {imageRow('favicon', 'Favicon', 200000, 'The browser-tab icon. SVG, PNG, or ICO, under ~150 KB — small squares (32–64px) look sharpest.')}
+            <p className="text-xs text-muted-foreground">
+              Installed app icon: the favicon (or, if none, the logo) is used when it is a PNG or WebP of at
+              least 144×144, or an SVG. Other formats — GIF, JPEG, ICO — or smaller images keep the built-in
+              rocket as the app icon; a bigger PNG is the safe choice.
+            </p>
             <div className="flex flex-wrap gap-2">
               <Button
                 className="min-h-[44px]"

@@ -48,13 +48,17 @@ export function applyBranding(b = {}) {
     } else {
       links.forEach((link) => { link.href = current.favicon; link.removeAttribute('type'); link.removeAttribute('sizes'); });
     }
-    let apple = document.querySelector('link[rel="apple-touch-icon"]');
-    if (!apple) {
-      apple = document.createElement('link');
-      apple.rel = 'apple-touch-icon';
-      document.head.appendChild(apple);
+    // iOS composes the Home Screen tile from a raster only; an SVG/ICO/GIF
+    // here yields a blank tile, so those keep the shipped PNG.
+    if (/^data:image\/(png|jpeg);/i.test(current.favicon)) {
+      let apple = document.querySelector('link[rel="apple-touch-icon"]');
+      if (!apple) {
+        apple = document.createElement('link');
+        apple.rel = 'apple-touch-icon';
+        document.head.appendChild(apple);
+      }
+      apple.href = BRANDING_ICON_URL;
     }
-    apple.href = BRANDING_ICON_URL;
   }
   for (const cb of subscribers) cb();
 }

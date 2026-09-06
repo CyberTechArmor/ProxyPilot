@@ -71,17 +71,61 @@ export function decodeDataUri(uri) {
   }
 }
 
+// imageDimensions(mime, buffer) → { width, height } for PNG and WebP (the two
+// raster formats an installable manifest icon may use), null otherwise. Reads
+// the header only — no decoder, no native module.
+export function imageDimensions(mime, buffer) {
+  if (!buffer || buffer.length < 30) return null;
+  if (mime === 'image/png') {
+    if (buffer.readUInt32BE(0) !== 0x89504e47 || buffer.toString('ascii', 12, 16) !== 'IHDR') return null;
+    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  }
+  if (mime === 'image/webp') {
+    if (buffer.toString('ascii', 0, 4) !== 'RIFF' || buffer.toString('ascii', 8, 12) !== 'WEBP') return null;
+    const chunk = buffer.toString('ascii', 12, 16);
+    if (chunk === 'VP8X') return { width: 1 + buffer.readUIntLE(24, 3), height: 1 + buffer.readUIntLE(27, 3) };
+    if (chunk === 'VP8L') {
+      const b = buffer.readUInt32LE(21);
+      return { width: 1 + (b & 0x3fff), height: 1 + ((b >> 14) & 0x3fff) };
+    }
+    if (chunk === 'VP8 ') return { width: buffer.readUInt16LE(26) & 0x3fff, height: buffer.readUInt16LE(28) & 0x3fff };
+  }
+  return null;
+}
+
+// Chromium's installability rule for the manifest icon, verbatim from its
+// diagnostic: "PNG, SVG or WebP format of at least 144px is required, the
+// sizes attribute must be set, and the purpose attribute, if set, must include
+// 'any'." A GIF, JPEG or ICO — or a raster declared as sizes "any" — does not
+// count, and a manifest whose ONLY icons fail this is simply not installable.
+// That is exactly what happened when a GIF logo replaced the stock icons.
+export const MIN_INSTALL_ICON_PX = 144;
+
+// installableIcon(mark, iconUrl) → a manifest icon entry for the operator's
+// mark, or null when it cannot serve as the installed-app icon.
+export function installableIcon(mark, iconUrl) {
+  if (!mark) return null;
+  if (mark.mime === 'image/svg+xml') return { src: iconUrl, sizes: 'any', type: mark.mime, purpose: 'any maskable' };
+  const dims = imageDimensions(mark.mime, mark.buffer);
+  if (!dims || dims.width < MIN_INSTALL_ICON_PX || dims.height < MIN_INSTALL_ICON_PX) return null;
+  return { src: iconUrl, sizes: `${dims.width}x${dims.height}`, type: mark.mime, purpose: 'any maskable' };
+}
+
 // brandedManifest(base, branding, iconUrl) → the web-app manifest to serve.
 // With no custom branding the base (the built file) is returned untouched, so
 // a stock install is byte-for-byte the shipped manifest. With a custom name
-// the app installs under that name; with a custom favicon (or, failing that,
-// logo) the installed icon IS the operator's mark: the shipped rocket icons
-// are dropped, because an installer picks the "best" icon by size and would
-// otherwise prefer the 512px rocket over the custom one.
+// the app installs under that name. With a custom favicon (or, failing that,
+// logo) that Chromium can accept as an icon (see installableIcon), it is
+// listed FIRST, as both the normal and the maskable icon, ahead of the stock
+// rocket PNGs — which stay, so the manifest never loses a valid icon. The
+// stock maskable entry is dropped so Android launchers that prefer maskable
+// do not fall back to the rocket over the operator's mark. A mark Chromium
+// would reject leaves the icons exactly as built.
 export function brandedManifest(base, branding = {}, iconUrl = '/api/branding/icon') {
   const name = String(branding.name || '').trim();
   const mark = decodeDataUri(branding.favicon) || decodeDataUri(branding.logo);
-  if (!name && !mark) return base;
+  const custom = installableIcon(mark, iconUrl);
+  if (!name && !custom) return base;
   const out = { ...base };
   if (name) {
     out.name = name;
@@ -89,14 +133,9 @@ export function brandedManifest(base, branding = {}, iconUrl = '/api/branding/ic
     // before launchers truncate.
     out.short_name = name.length > 12 ? name.slice(0, 12).trim() : name;
   }
-  if (mark) {
-    // "any" is the only honest size for an operator-uploaded file; SVG scales
-    // and a raster is whatever it is. Chrome accepts it; the sizes attribute
-    // is a hint, not a promise.
-    out.icons = [
-      { src: iconUrl, sizes: 'any', type: mark.mime, purpose: 'any' },
-      { src: iconUrl, sizes: 'any', type: mark.mime, purpose: 'maskable' },
-    ];
+  if (custom) {
+    const stock = (base.icons || []).filter((i) => !String(i.purpose || '').split(/\s+/).includes('maskable'));
+    out.icons = [custom, ...stock];
   }
   return out;
 }

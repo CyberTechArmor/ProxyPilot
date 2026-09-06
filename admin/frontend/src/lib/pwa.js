@@ -221,18 +221,17 @@ export function installHint() {
       steps: ['In Safari, choose File → "Add to Dock…", then click "Add".'],
     };
   }
-  // Edge on Android is Chromium but NEVER fires beforeinstallprompt and never
-  // shows an install banner (report: healthy site, every check green, no
-  // prompt). Its only install path is the menu, where the item is called
-  // "Add to phone" — not "Install app", which is what people go looking for.
+  // Edge on Android does fire beforeinstallprompt when the site passes, so the
+  // button normally shows; these are its menu steps for when it does not. The
+  // menu item is "Add to phone" — not "Install app", which is what people go
+  // looking for.
   if (/EdgA\//.test(ua)) {
     return {
       platform: 'edge-android',
-      neverPrompts: true,
       steps: [
         'Tap the menu button (≡ or ⋯) in the bottom bar.',
         'Tap "Add to phone" — swipe the row of icons sideways if it is not visible.',
-        'Tap "Install". The app appears on the Home Screen with the ProxyPilot icon.',
+        'Tap "Install".',
       ],
     };
   }
@@ -308,12 +307,23 @@ export async function checkInstallability() {
   }
   out.push({ ok: manifestOk, label: 'Web app manifest loads' });
   if (manifest) {
+    // Chromium's rule, verbatim from its diagnostic: PNG, SVG or WebP, at
+    // least 144px, sizes set ("any" only for SVG), purpose including "any".
+    // A GIF/JPEG/ICO or an "any"-sized raster does not count, however large.
     const px = (icon) => Math.max(0, ...String(icon.sizes || '').split(/\s+/).map((s) => parseInt(s, 10) || 0));
-    const bigEnough = (manifest.icons || []).some((i) => (i.purpose || 'any').split(/\s+/).includes('any') && (px(i) >= 192 || i.sizes === 'any'));
-    out.push({ ok: bigEnough, label: 'An app icon of at least 192px' });
+    const typeOf = (icon) => (icon.type || (/\.svg(\?|$)/i.test(icon.src) ? 'image/svg+xml' : /\.webp(\?|$)/i.test(icon.src) ? 'image/webp' : /\.png(\?|$)/i.test(icon.src) ? 'image/png' : '')).toLowerCase();
+    const suitable = (icon) => {
+      const type = typeOf(icon);
+      if (!(icon.purpose || 'any').split(/\s+/).includes('any')) return false;
+      if (type === 'image/svg+xml') return icon.sizes === 'any' || px(icon) >= 144;
+      if (type === 'image/png' || type === 'image/webp') return px(icon) >= 144;
+      return false;
+    };
+    const good = (manifest.icons || []).find(suitable);
+    out.push({ ok: !!good, label: 'A PNG, SVG or WebP app icon of at least 144px with a declared size' });
     out.push({ ok: ['standalone', 'fullscreen', 'minimal-ui'].includes(manifest.display), label: 'Opens in its own window (display mode)' });
     out.push({ ok: !!(manifest.name || manifest.short_name), label: 'Has an app name' });
-    const icon = (manifest.icons || []).find((i) => (i.purpose || 'any').split(/\s+/).includes('any') && (px(i) >= 192 || i.sizes === 'any'));
+    const icon = good;
     if (icon) {
       let iconOk = false;
       // What Chromium actually needs is an icon that DECODES; a content-type

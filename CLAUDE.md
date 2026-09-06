@@ -47,6 +47,10 @@ npm run build      # production build (parallelism deliberately limited for low-
 
 **CVE engine:** Python engine maintains an inventory and polls feeds via systemd timers; CVE entries land as YAMLs in `/var/lib/proxypilot/inbox/`, the backend reads/acts on them and can invoke `run-one`. A state machine classifies remediation as AUTO_PATCH vs. operator-driven.
 
+**Sidebar naming (2026-09):** the sidebar entry **"Projects"** is Lean BEAF Pro (`/lean-beaf`, `pages/LeanBeafPro.jsx`, `routes/lean-beaf.js`); the Mock2 dev/build module (`/projects`, `pages/Projects.jsx`, `src/mock2/`) is labelled **"Flightdeck"** in the UI. Routes, file names, and API paths kept their old names — only user-facing labels changed. Older docs under `docs/` that say "Projects → Components" or "Projects → Connectors" mean Flightdeck.
+
+**PWA:** the dashboard is installable (`public/manifest.webmanifest`, `src/sw-template.js` emitted as `/sw.js` by `vite.config.js`, helpers in `src/lib/pwa.js`). The install prompt is captured at startup in `main.jsx` and offered from Profile → Install app (`components/InstallApp.jsx`).
+
 ## Mandatory UI rule
 
 Any change under `admin/frontend/src/pages/` or `admin/frontend/src/components/` must comply with `admin/frontend/MOBILE_FIRST.md` — it is a merge gate, not a suggestion. Key rules: default Tailwind breakpoints only; grids collapse to one column on mobile (`grid-cols-1 sm:grid-cols-2 …`); touch targets ≥44×44px; dialogs must be completable on a 360px screen (full-screen on `<sm`); no fixed-width desktop-only layouts. Complete its pre-merge checklist (render at 360/375/768, horizontal-scroll audit). Reference implementations: `Dashboard.jsx`, `LxcContainers.jsx`, `Users.jsx`, `Profile.jsx`, `Login.jsx`.

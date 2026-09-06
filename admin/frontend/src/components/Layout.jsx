@@ -271,9 +271,9 @@ export default function Layout() {
 
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
-    // Lean BEAF Pro — team-shared innovation projects. No adminOnly flag:
+    // Projects (Lean BEAF Pro) — team-shared innovation projects. No adminOnly flag:
     // every non-pending user is a workspace member (R01).
-    { name: 'Lean BEAF Pro', href: '/lean-beaf', icon: Rocket },
+    { name: 'Projects', href: '/lean-beaf', icon: Rocket },
     { name: 'Incus', href: '/incus', icon: Server, adminOnly: true, permission: 'proxy' },
     { name: 'Host Shell', href: '/admin/shell', icon: TerminalSquare, adminOnly: true },
     { name: 'SSH Access', href: '/ssh-access', icon: KeyRound, adminOnly: true },
@@ -289,14 +289,14 @@ export default function Layout() {
     { name: 'MCP Access', href: '/mcp-access', icon: Plug, adminOnly: true },
     // Mock2 dev/build module — only present when the backend reports it
     // enabled (ADR-001). Hidden entirely on disabled/pinned hosts.
-    ...(mock2Enabled ? [{ name: 'Projects', href: '/projects', icon: FolderGit2, adminOnly: true, permission: 'developer' }] : []),
+    ...(mock2Enabled ? [{ name: 'Flightdeck', href: '/projects', icon: FolderGit2, adminOnly: true, permission: 'developer' }] : []),
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];
 
   // Accounts still waiting for a role (LDAP sign-ins) only see Profile.
   // Admin-only entries also open up to users holding the entry's
-  // feature permission (Incus → 'proxy', Projects → 'developer').
+  // feature permission (Incus → 'proxy', Flightdeck → 'developer').
   const isPending = (user?.role ?? storedUser?.role) === 'pending';
   const filteredNavigation = navigation.filter(item =>
     isPending
@@ -464,7 +464,7 @@ export default function Layout() {
                 <FolderGit2 className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-medium text-foreground">
-                    Projects / AI dev flow available
+                    Flightdeck / AI dev flow available
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
                     The Mock2 dev/build module ships with this version but is

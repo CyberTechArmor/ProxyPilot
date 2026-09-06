@@ -27,6 +27,7 @@ import QRCode from 'qrcode';
 import { registerPasskey, defaultPasskeyLabel, isPasskeySupported } from '@/lib/passkey';
 import { applyBranding, DEFAULT_BRANDING } from '@/lib/branding';
 import SelfUpdatePanel from '@/components/SelfUpdatePanel';
+import InstallApp from '@/components/InstallApp';
 
 // Platform branding (admin) — the dashboard's OWN name, logo, and favicon.
 // Self-contained: loads the current values, previews picked files, saves them
@@ -1344,6 +1345,9 @@ export default function Profile() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Install as an app (PWA) — every user, per device. */}
+      <InstallApp />
 
       {/* App Settings (Admin Only) */}
       {isAdmin && (

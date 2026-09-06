@@ -296,7 +296,7 @@ export default function DesignSpecs() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <Button asChild variant="ghost" size="sm" className="h-11 sm:h-9">
-          <Link to="/projects"><ArrowLeft className="h-4 w-4 mr-1" /> Projects</Link>
+          <Link to="/projects"><ArrowLeft className="h-4 w-4 mr-1" /> Flightdeck</Link>
         </Button>
         <h1 className="text-2xl font-semibold flex items-center gap-2"><Palette className="h-6 w-6" /> Design specifications</h1>
         {isAdmin ? (
@@ -334,7 +334,7 @@ export default function DesignSpecs() {
               <code className="text-xs">table.list</code>, <code className="text-xs">.prog</code> and the app header/nav — all
               token-driven, shown per preset under “Fonts &amp; full component library”. The auth component adds the
               ready-made sign-in, first-administrator, and app-shell pages. Larger reusable blocks (whole feature
-              modules) live in <span className="font-medium text-foreground">Projects → Components</span>.
+              modules) live in <span className="font-medium text-foreground">Flightdeck → Components</span>.
             </span>
           </CardDescription>
         </CardHeader>

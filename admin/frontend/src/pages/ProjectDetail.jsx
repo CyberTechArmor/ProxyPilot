@@ -453,7 +453,7 @@ export default function ProjectDetail() {
           </div>
         </div>
         <Button asChild variant="ghost" size="sm" className="shrink-0">
-          <Link to="/projects"><ArrowLeft className="h-4 w-4 mr-1" />Projects</Link>
+          <Link to="/projects"><ArrowLeft className="h-4 w-4 mr-1" />Flightdeck</Link>
         </Button>
       </div>
 

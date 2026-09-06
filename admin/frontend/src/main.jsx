@@ -8,12 +8,15 @@ import { Toaster } from './components/ui/toaster'
 import SudoProvider from './components/SudoModal'
 import UpdateBanner from './components/UpdateBanner'
 import './index.css'
-import { registerServiceWorker } from './lib/pwa'
+import { registerServiceWorker, initInstallPrompt } from './lib/pwa'
 import { loadBranding } from './lib/branding'
 
 // Registered before React mounts so an update that is already waiting is seen
 // on the first frame rather than a minute later.
 registerServiceWorker()
+// Capture the browser's one-shot install prompt before it fires (it often
+// does before React mounts) so Profile → Install app can offer it later.
+initInstallPrompt()
 // Platform branding (name / logo / favicon) — fetched once, applied to the
 // document, readable everywhere via useBranding(). Public endpoint, so it
 // also brands the login page.

@@ -94,39 +94,145 @@ export function registerServiceWorker() {
 
 // ---- installability ----
 //
-// Chrome fires beforeinstallprompt and lets the page defer it; iOS has no such
-// event (Safari installs via Share → Add to Home Screen only). isStandalone
-// covers both so the UI can stop offering an install that already happened.
+// Chrome/Edge (desktop and Android) fire beforeinstallprompt ONCE, early — often
+// before React has mounted, and always before the operator has navigated to
+// Profile. If nothing is listening at that moment the event is gone and the
+// page can never show its own Install button. So the listener is attached at
+// startup (initInstallPrompt, called from main.jsx) and the captured event is
+// held here; any component asks canInstall() and subscribes for changes.
+//
+// iOS/iPadOS Safari has no such event (install is Share → Add to Home Screen
+// only), Firefox desktop has no install at all, and Safari on macOS installs
+// via File → Add to Dock. installHint() names the right path for each so the
+// UI can give real instructions instead of a button that never appears.
+// isStandalone covers every platform so the UI stops offering an install that
+// already happened.
 
 let deferredPrompt = null;
+let installListenersAttached = false;
+const installSubscribers = new Set();
 
-export function watchInstallPrompt(onAvailable) {
-  if (typeof window === 'undefined') return;
+function notifyInstall() {
+  const available = !!deferredPrompt;
+  installSubscribers.forEach((fn) => { try { fn(available); } catch { /* subscriber's problem */ } });
+}
+
+export function initInstallPrompt() {
+  if (typeof window === 'undefined' || installListenersAttached) return;
+  installListenersAttached = true;
   window.addEventListener('beforeinstallprompt', (e) => {
+    // Suppress the browser's own mini-infobar; the Profile page offers it
+    // instead, where the operator can read what installing means.
     e.preventDefault();
     deferredPrompt = e;
-    if (typeof onAvailable === 'function') onAvailable(true);
+    notifyInstall();
   });
   window.addEventListener('appinstalled', () => {
     deferredPrompt = null;
-    if (typeof onAvailable === 'function') onAvailable(false);
+    notifyInstall();
   });
+}
+
+// Kept for callers that attach their own listener; new code should use
+// initInstallPrompt + subscribeInstallPrompt.
+export function watchInstallPrompt(onAvailable) {
+  initInstallPrompt();
+  return subscribeInstallPrompt(onAvailable);
+}
+
+// subscribeInstallPrompt(fn) → unsubscribe. fn(available: boolean) fires on
+// every change; the current state is readable synchronously via canInstall().
+export function subscribeInstallPrompt(fn) {
+  if (typeof fn !== 'function') return () => undefined;
+  installSubscribers.add(fn);
+  return () => { installSubscribers.delete(fn); };
+}
+
+export function canInstall() {
+  return !!deferredPrompt;
 }
 
 export async function promptInstall() {
   if (!deferredPrompt) return { ok: false, reason: 'not_available' };
-  deferredPrompt.prompt();
-  const choice = await deferredPrompt.userChoice.catch(() => null);
+  const evt = deferredPrompt;
+  let choice = null;
+  try {
+    await evt.prompt();
+    choice = await evt.userChoice;
+  } catch {
+    choice = null;
+  }
+  // The event is single-use whatever the outcome; a dismissed prompt cannot be
+  // re-shown until the browser fires a fresh beforeinstallprompt.
   deferredPrompt = null;
+  notifyInstall();
   return { ok: choice?.outcome === 'accepted', outcome: choice?.outcome || 'dismissed' };
 }
 
 export function isStandalone() {
   if (typeof window === 'undefined') return false;
   return window.matchMedia('(display-mode: standalone)').matches
+    || window.matchMedia('(display-mode: window-controls-overlay)').matches
     // iOS Safari's own flag — it does not implement display-mode: standalone
     // on older versions.
     || window.navigator.standalone === true;
+}
+
+export function isIOS() {
+  if (typeof navigator === 'undefined') return false;
+  return /iP(hone|ad|od)/.test(navigator.userAgent)
+    // iPadOS 13+ reports itself as a Mac; the touch points give it away.
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+// installHint() → { platform, steps: string[] } describing how THIS browser
+// installs the app when it offers no programmatic prompt. Best-effort UA
+// sniffing: it only chooses wording, never gates a feature.
+export function installHint() {
+  if (typeof navigator === 'undefined') return { platform: 'unknown', steps: [] };
+  const ua = navigator.userAgent;
+  if (isIOS()) {
+    return {
+      platform: 'ios',
+      steps: [
+        'Open this page in Safari (other iPhone browsers cannot install apps).',
+        'Tap the Share button, then "Add to Home Screen".',
+        'Tap "Add". The app opens full-screen from that icon, and can receive notifications.',
+      ],
+    };
+  }
+  if (/Firefox\//.test(ua) && !/Android/.test(ua)) {
+    return {
+      platform: 'firefox-desktop',
+      steps: [
+        'Firefox on the desktop does not install web apps. Open ProxyPilot in Chrome, Edge, or Safari to install it.',
+      ],
+    };
+  }
+  if (/Firefox\//.test(ua) && /Android/.test(ua)) {
+    return {
+      platform: 'firefox-android',
+      steps: ['Open the browser menu (⋮), then tap "Install" or "Add to Home screen".'],
+    };
+  }
+  if (/Safari\//.test(ua) && !/Chrome|Chromium|Edg\//.test(ua)) {
+    return {
+      platform: 'safari-mac',
+      steps: ['In Safari, choose File → "Add to Dock…", then click "Add".'],
+    };
+  }
+  if (/Android/.test(ua)) {
+    return {
+      platform: 'android',
+      steps: ['Open the browser menu (⋮), then tap "Install app" or "Add to Home screen".'],
+    };
+  }
+  return {
+    platform: 'desktop',
+    steps: [
+      'Click the install icon at the right end of the address bar, or open the browser menu and choose "Install ProxyPilot…".',
+    ],
+  };
 }
 
 // ---- Web Push ----

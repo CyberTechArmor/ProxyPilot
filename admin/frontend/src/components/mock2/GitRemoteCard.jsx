@@ -164,7 +164,7 @@ export default function GitRemoteCard({ kind, target, title = 'Git remote', desc
     <div className="space-y-3">
       {connectors.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No git connector yet. <Link to="/projects/connectors" className="underline">Add a Gitea or GitHub connector</Link> (URL + token) under Projects → Connectors, then come back here.
+          No git connector yet. <Link to="/projects/connectors" className="underline">Add a Gitea or GitHub connector</Link> (URL + token) under Flightdeck → Connectors, then come back here.
         </p>
       ) : (
         <>

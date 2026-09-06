@@ -55,7 +55,7 @@ function AiUsageDialog({ user, open, onOpenChange }) {
         setData(d);
         if (d.projects?.length) setSelected(d.projects[0].project_id);
       })
-      .catch((e) => setErr(e?.message || 'Could not load AI usage (is the Projects module enabled on this host?)'));
+      .catch((e) => setErr(e?.message || 'Could not load AI usage (is the Flightdeck module enabled on this host?)'));
   }, [open, user]);
 
   useEffect(() => {
@@ -980,7 +980,7 @@ export default function UsersPage() {
                     <div className="min-w-0">
                       <p className="font-medium text-sm">Developer</p>
                       <p className="text-xs text-muted-foreground">
-                        Projects page (dev/build module)
+                        Flightdeck page (dev/build module)
                       </p>
                     </div>
                     <Switch
@@ -1048,7 +1048,7 @@ export default function UsersPage() {
                   )}
                   <p className="text-xs text-muted-foreground pt-1">
                     Editors can run builds and manage the project; viewers can watch. The Developer
-                    feature permission above controls whether the Projects page shows at all.
+                    feature permission above controls whether the Flightdeck page shows at all.
                   </p>
                 </div>
               ) : accessTab === 'services' ? (

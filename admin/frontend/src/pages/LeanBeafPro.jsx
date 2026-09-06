@@ -98,7 +98,7 @@ export default function LeanBeafPro() {
             <Rocket className="h-4 w-4" />
           </span>
           <div>
-            <h1 className="text-lg font-bold leading-tight">Lean BEAF Pro</h1>
+            <h1 className="text-lg font-bold leading-tight">Projects</h1>
             <p className="text-xs text-muted-foreground">Spec Ops · innovation projects</p>
           </div>
         </div>
@@ -441,7 +441,7 @@ function ImpactCard({ onOpenList }) {
           <TrendingUp className="h-4 w-4" />
         </span>
         <div>
-          <b className="text-base">Impact from Lean BEAF projects</b>
+          <b className="text-base">Impact from projects</b>
           <p className="text-xs text-muted-foreground">{data.headline} · {data.sub}</p>
         </div>
         <div className="ml-auto w-full sm:w-52">
@@ -799,7 +799,7 @@ function ProjectDetailPage({ project, onBack, onAdvance, onSetStage, onBreakBarr
     <div className="mx-auto w-full max-w-4xl space-y-4">
       {/* breadcrumb */}
       <button type="button" onClick={onBack} className="inline-flex items-center gap-1 text-sm font-semibold text-primary">
-        <ArrowLeft className="h-4 w-4" /> Lean BEAF Pro <span className="text-muted-foreground">/ {project.name}</span>
+        <ArrowLeft className="h-4 w-4" /> Projects <span className="text-muted-foreground">/ {project.name}</span>
       </button>
 
       {/* title + actions */}

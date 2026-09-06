@@ -7,7 +7,7 @@ import cookieParser from 'cookie-parser';
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { existsSync, statSync } from 'fs';
+import { existsSync, statSync, readFileSync } from 'fs';
 import { initDatabase, getDb, getSetting, setSetting, logAudit } from './db.js';
 import { noteCompletedUpdateOnBoot } from './lib/self-update.js';
 import { authRouter } from './routes/auth.js';
@@ -32,6 +32,7 @@ import { createLeanBeafRouter } from './routes/lean-beaf.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { cacheControlFor, NO_CACHE } from './lib/static-cache-logic.js';
+import { brandedManifest, publicBranding } from './lib/branding-logic.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
 import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
@@ -659,6 +660,29 @@ if (process.env.NODE_ENV === 'production') {
   //
   // no-cache does NOT mean "do not store" — it means "revalidate before use",
   // so a 304 is still cheap when nothing changed.
+  // The web-app manifest is rewritten with the operator's branding (Profile →
+  // Platform branding) so an INSTALLED ProxyPilot carries their name and icon,
+  // not the stock rocket. Must sit before express.static or the built file
+  // wins. Stock branding serves the built file unchanged.
+  app.get('/manifest.webmanifest', (_req, res) => {
+    const manifestPath = join(FRONTEND_PATH, 'manifest.webmanifest');
+    let base;
+    try {
+      base = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    } catch (err) {
+      console.error('manifest.webmanifest unreadable:', err.message);
+      return res.status(404).end();
+    }
+    const branding = publicBranding({
+      name: getSetting('branding_name'),
+      logo: getSetting('branding_logo'),
+      favicon: getSetting('branding_favicon'),
+    });
+    res.setHeader('Content-Type', 'application/manifest+json');
+    res.setHeader('Cache-Control', NO_CACHE);
+    res.json(brandedManifest(base, branding));
+  });
+
   app.use(express.static(FRONTEND_PATH, {
     etag: true,
     lastModified: true,

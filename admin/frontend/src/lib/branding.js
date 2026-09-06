@@ -12,6 +12,9 @@ import { useSyncExternalStore } from 'react';
 import { api } from './api';
 
 export const DEFAULT_BRANDING = Object.freeze({ name: 'ProxyPilot', logo: null, favicon: null });
+// The custom mark as a real URL (the backend decodes the stored data URI):
+// apple-touch-icon and manifest icons need a fetchable file, not inline data.
+export const BRANDING_ICON_URL = '/api/branding/icon';
 
 let current = DEFAULT_BRANDING;
 const subscribers = new Set();
@@ -31,13 +34,27 @@ export function applyBranding(b = {}) {
   // The tab title: the custom platform name plain, or the stock title.
   document.title = current.name === DEFAULT_BRANDING.name ? 'ProxyPilot Admin' : current.name;
   if (current.favicon) {
-    let link = document.querySelector('link[rel="icon"]');
-    if (!link) {
-      link = document.createElement('link');
+    // Every <link rel="icon"> (the SVG and the PNG fallback) points at the
+    // custom mark, and so does apple-touch-icon: iOS reads that from the DOM
+    // when "Add to Home Screen" is tapped, so swapping it here is what puts
+    // the custom logo on the phone. The served manifest is branded server-side
+    // (GET /manifest.webmanifest) for every other installer.
+    const links = document.querySelectorAll('link[rel="icon"]');
+    if (links.length === 0) {
+      const link = document.createElement('link');
       link.rel = 'icon';
       document.head.appendChild(link);
+      link.href = current.favicon;
+    } else {
+      links.forEach((link) => { link.href = current.favicon; link.removeAttribute('type'); link.removeAttribute('sizes'); });
     }
-    link.href = current.favicon;
+    let apple = document.querySelector('link[rel="apple-touch-icon"]');
+    if (!apple) {
+      apple = document.createElement('link');
+      apple.rel = 'apple-touch-icon';
+      document.head.appendChild(apple);
+    }
+    apple.href = BRANDING_ICON_URL;
   }
   for (const cb of subscribers) cb();
 }

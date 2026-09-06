@@ -65,8 +65,12 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
+// Not the manifest: the backend rewrites it with the admin's branding (name,
+// icon), so a cache-first copy would pin the install icon to a stale look for
+// the life of a build. Browsers fetch it rarely, so letting it hit the network
+// costs nothing.
 const isAsset = (url) => url.pathname.startsWith('/assets/')
-  || /\.(?:png|svg|ico|webmanifest|woff2?)$/i.test(url.pathname);
+  || /\.(?:png|svg|ico|woff2?)$/i.test(url.pathname);
 
 async function networkFirst(event) {
   try {

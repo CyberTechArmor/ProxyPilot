@@ -116,7 +116,7 @@ export default function AiAssistant({ open, onOpen, onClose }) {
           type="button"
           onClick={onOpen}
           className="fixed bottom-5 right-5 z-30 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-purple-600 to-indigo-600 px-4 py-3 text-sm font-semibold text-white shadow-lg transition-transform hover:scale-[1.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-          title="Ask the Lean BEAF Pro assistant"
+          title="Ask the Projects assistant"
         >
           <Sparkles className="h-4 w-4" /> <span className="hidden sm:inline">Ask AI</span>
         </button>

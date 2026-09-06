@@ -82,7 +82,7 @@ export default function Quotas() {
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-4 sm:p-6">
       <div className="space-y-1">
-        <Link to="/projects" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="h-4 w-4" /> Projects</Link>
+        <Link to="/projects" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="h-4 w-4" /> Flightdeck</Link>
         <h1 className="flex items-center gap-2 text-2xl font-semibold"><Wallet className="h-6 w-6" /> Quotas</h1>
         <p className="text-sm text-muted-foreground">Spend budgets and self-hosted caps. A cycle is refused before it starts if its buffered estimate exceeds the remaining budget (enforced in M6).</p>
       </div>

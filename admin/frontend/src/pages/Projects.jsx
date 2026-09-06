@@ -374,7 +374,7 @@ export default function Projects() {
       <div className="flex items-center gap-3">
         <FolderGit2 className="h-6 w-6 shrink-0 text-primary" />
         <div className="min-w-0 flex-1">
-          <h1 className="text-2xl font-bold tracking-tight truncate">Projects</h1>
+          <h1 className="text-2xl font-bold tracking-tight truncate">Flightdeck</h1>
           <p className="text-sm text-muted-foreground">Mock2 dev/build module</p>
         </div>
         {isAdmin ? (

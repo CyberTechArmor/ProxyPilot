@@ -21,7 +21,7 @@ blockers are captured as activity/comments, not a field.
   `lean-beaf-ai.js` (AI brief writer — settings, model call, run recording),
   `lean-beaf-metrics.js` (dummy business-metrics band + data-source
   connections placeholder), `routes/lean-beaf.js` mounted at `/api/lbp`.
-- Frontend: nav tab "Lean BEAF Pro" (`/lean-beaf`), pages
+- Frontend: nav tab "Projects" (`/lean-beaf`; the sidebar label was "Lean BEAF Pro" until 2026-09), pages
   `LeanBeafPro.jsx` (Dashboard / List / Board / Archive),
   `LbpProjectDetail.jsx`, `LbpConnections.jsx` (`/lean-beaf/connections`),
   shared pieces in `components/lbp/shared.jsx`,

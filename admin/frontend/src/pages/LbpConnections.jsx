@@ -124,7 +124,7 @@ export default function LbpConnections() {
     <div className="mx-auto w-full max-w-3xl space-y-4">
       <div>
         <button type="button" onClick={() => navigate('/lean-beaf')} className="mb-2 inline-flex items-center gap-1 text-sm font-semibold text-muted-foreground">
-          <ArrowLeft className="h-4 w-4" /> Lean BEAF Pro
+          <ArrowLeft className="h-4 w-4" /> Projects
         </button>
         <div className="flex items-center gap-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">

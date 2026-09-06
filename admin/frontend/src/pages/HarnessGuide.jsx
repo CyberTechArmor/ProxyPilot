@@ -412,7 +412,7 @@ export default function HarnessGuide() {
     <div className="space-y-4">
       <div className="min-w-0">
         <Button asChild variant="ghost" size="sm" className="h-11 sm:h-9 -ml-2 mb-1">
-          <Link to="/projects"><ArrowLeft className="h-4 w-4 mr-1" /> Projects</Link>
+          <Link to="/projects"><ArrowLeft className="h-4 w-4 mr-1" /> Flightdeck</Link>
         </Button>
         <h1 className="text-xl font-bold sm:text-2xl">Harness</h1>
         <p className="text-sm text-muted-foreground">
@@ -433,7 +433,7 @@ export default function HarnessGuide() {
             </div>
           ) : stepsDoc.error ? (
             <Card><CardContent className="p-6 text-sm text-muted-foreground">
-              The harness steps could not be loaded. Check that this host has the Projects module enabled and that you are an admin.
+              The harness steps could not be loaded. Check that this host has the Flightdeck module enabled and that you are an admin.
             </CardContent></Card>
           ) : (
             <>
@@ -532,7 +532,7 @@ export default function HarnessGuide() {
           ) : doc.error ? (
             <Card>
               <CardContent className="p-6 text-sm text-muted-foreground">
-                The harness guide could not be loaded. Check that this host has the Projects module enabled and that you are an admin.
+                The harness guide could not be loaded. Check that this host has the Flightdeck module enabled and that you are an admin.
               </CardContent>
             </Card>
           ) : (

@@ -104,7 +104,7 @@ export default function LbpProjectDetail() {
       {/* header */}
       <div>
         <button type="button" onClick={() => navigate('/lean-beaf')} className="mb-2 inline-flex items-center gap-1 text-sm font-semibold text-muted-foreground">
-          <ArrowLeft className="h-4 w-4" /> Lean BEAF Pro
+          <ArrowLeft className="h-4 w-4" /> Projects
         </button>
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="min-w-0 flex-1 truncate text-xl font-bold">{project.name}</h1>

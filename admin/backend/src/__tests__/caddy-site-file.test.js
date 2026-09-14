@@ -196,3 +196,53 @@ describe('siteFileTargetsHost', () => {
     assert.equal(siteFileTargetsHost('', '10.185.17.224'), false);
   });
 });
+
+// ---- Site security headers (siteSecurityHeaderLines) ----
+import { siteSecurityHeaderLines, dashboardFrameAncestor, CADDY_SITE_RENDER_CONTRACT } from '../lib/caddy-site-file.js';
+
+describe('siteSecurityHeaderLines', () => {
+  test('default (no admin domain): SAMEORIGIN, unchanged', () => {
+    const lines = siteSecurityHeaderLines({});
+    assert.equal(lines[0], '    header {');
+    assert.ok(lines.includes('        X-Frame-Options "SAMEORIGIN"'));
+    assert.ok(!lines.some((l) => l.includes('frame-ancestors')));
+    assert.ok(lines.includes('        X-Content-Type-Options "nosniff"'));
+    assert.equal(lines[lines.length - 1], '    }');
+  });
+
+  test('admin domain known: dashboard-only framing, deferred, rewrite + add', () => {
+    const lines = siteSecurityHeaderLines({ frameAncestor: 'https://edge.example.com' });
+    assert.ok(lines.includes('        defer'));
+    assert.ok(lines.includes('        -X-Frame-Options'));
+    assert.ok(lines.includes(`        Content-Security-Policy "frame-ancestors[^;]*" "frame-ancestors 'self' https://edge.example.com"`));
+    assert.ok(lines.includes(`        +Content-Security-Policy "frame-ancestors 'self' https://edge.example.com"`));
+    assert.ok(!lines.some((l) => l.includes('SAMEORIGIN')));
+    // Nothing else changed.
+    assert.ok(lines.includes('        Referrer-Policy "strict-origin-when-cross-origin"'));
+  });
+
+  test('a malformed frame ancestor falls back to SAMEORIGIN', () => {
+    for (const bad of ['edge.example.com', 'https://edge.example.com/path', 'javascript:alert(1)', 'https://a b']) {
+      const lines = siteSecurityHeaderLines({ frameAncestor: bad });
+      assert.ok(lines.includes('        X-Frame-Options "SAMEORIGIN"'), bad);
+    }
+  });
+
+  test('operator allowFraming wins over the dashboard default', () => {
+    const lines = siteSecurityHeaderLines({ allowFramingRoute: { frameAncestors: 'https://a.example, https://b.example' }, frameAncestor: 'https://edge.example.com' });
+    assert.ok(lines.includes('        -X-Frame-Options'));
+    assert.ok(lines.includes('        Content-Security-Policy "frame-ancestors https://a.example https://b.example"'));
+    assert.ok(!lines.some((l) => l.includes('defer') || l.startsWith('        +')));
+    const open = siteSecurityHeaderLines({ allowFramingRoute: { frameAncestors: null } });
+    assert.ok(open.includes('        Content-Security-Policy "frame-ancestors *"'));
+  });
+
+  test('dashboardFrameAncestor: https origin from a hostname, null otherwise', () => {
+    assert.equal(dashboardFrameAncestor('Edge.Example.com'), 'https://edge.example.com');
+    assert.equal(dashboardFrameAncestor(''), null);
+    assert.equal(dashboardFrameAncestor(null), null);
+    assert.equal(dashboardFrameAncestor('bad host'), null);
+    assert.equal(dashboardFrameAncestor('https://x'), null);
+    assert.equal(typeof CADDY_SITE_RENDER_CONTRACT, 'string');
+  });
+});

@@ -24,7 +24,7 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { checkRouteDrift } from '../lib/route-drift.js';
-import { parseCaddySiteFile } from '../lib/caddy-site-file.js';
+import { parseCaddySiteFile, siteSecurityHeaderLines, dashboardFrameAncestor, CADDY_SITE_RENDER_CONTRACT } from '../lib/caddy-site-file.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { detectServicePorts } from '../lib/port-detector.js';
@@ -930,161 +930,193 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
 });
 
 // Regenerate all Caddy configs with backup/revert capability
+// Re-render EVERY managed domain's site file from the route table, validate,
+// reload — and put the previous files back if either step fails. Shared by
+// POST /caddy/regenerate-all (operator-initiated repair) and the boot-time
+// render-contract upgrade in index.js (a renderer change every existing file
+// must pick up). Returns { ok, results, testPassed, reloadResult, reverted,
+// error }; never throws for a per-domain failure (those land in results.failed).
+export async function regenerateAllSiteConfigs() {
+  const db = getDb();
+  const results = { success: [], failed: [] };
+  const backups = {}; // Store backups of original configs
+
+  // Ensure Caddy structure exists
+  await ensureCaddyStructure();
+
+  // First, backup ALL existing site configs
+  try {
+    let configFiles = [];
+    if (existsSync(CADDY_SITES_DIR)) {
+      configFiles = await readdir(CADDY_SITES_DIR);
+    }
+
+    for (const file of configFiles) {
+      if (file === '.' || file === '..') continue;
+      try {
+        const configPath = `${CADDY_SITES_DIR}/${file}`;
+        if (existsSync(configPath)) {
+          backups[file] = await readFile(configPath, 'utf-8');
+        }
+      } catch (e) {
+        console.log(`Could not backup config ${file}:`, e.message);
+      }
+    }
+    console.log(`Backed up ${Object.keys(backups).length} Caddy site configs`);
+  } catch (e) {
+    console.error('Error backing up configs:', e);
+  }
+
+  // Phase 2b D.7: rebuild the unique-domain set from the JOIN of
+  // service_http_routes to services (routes-side, the post-D.14 source
+  // of truth) UNION'd with the legacy services.domain column (transitional
+  // fallback). Admin service domains are skipped outright so the
+  // installer-owned Caddyfile never gets clobbered. The legacy query is
+  // wrapped in a try/catch so post-D.14 (legacy column dropped) the
+  // helper collapses to a routes-only scan without further edits.
+  const uniqueDomainsSet = new Set();
+  try {
+    const routeDomainRows = db
+      .prepare(
+        `SELECT DISTINCT r.domain AS domain
+           FROM service_http_routes r
+           INNER JOIN services s ON s.id = r.service_id
+          WHERE s.is_admin = 0`
+      )
+      .all();
+    for (const row of routeDomainRows) {
+      if (row.domain) uniqueDomainsSet.add(row.domain);
+    }
+  } catch (e) {
+    console.error('Failed to read routes-side domain set', e);
+  }
+  try {
+    const legacyDomainRows = db
+      .prepare(
+        `SELECT DISTINCT domain
+           FROM services
+          WHERE is_admin = 0 AND domain IS NOT NULL`
+      )
+      .all();
+    for (const row of legacyDomainRows) {
+      if (row.domain) uniqueDomainsSet.add(row.domain);
+    }
+  } catch (e) {
+    // Post-D.14 — legacy `domain` column dropped. Routes-side scan is
+    // the only source now; nothing to merge.
+  }
+  const uniqueDomains = [...uniqueDomainsSet];
+
+  // Admin domains are sourced via getAdminDomain(), which falls back
+  // through services.domain (pre-D.14) → app_settings.admin_domain
+  // (post-D.14 snapshot) → process.env.DOMAIN. Admin services never get
+  // route rows, so this fallback is the only thing keeping the admin
+  // dashboard reachable after D.14 dropped services.domain.
+  const adminDomainRaw = getAdminDomain();
+  const adminDomains = adminDomainRaw ? [adminDomainRaw] : [];
+  for (const adminDomain of new Set(adminDomains)) {
+    console.log(`Skipping admin domain: ${adminDomain}`);
+    results.success.push(`${adminDomain} (skipped - admin)`);
+  }
+
+  for (const domain of uniqueDomains) {
+    try {
+      await regenerateDomainCaddyConfig(db, domain);
+      results.success.push(domain);
+    } catch (err) {
+      console.error(`Failed to regenerate merged config for ${domain}:`, err);
+      results.failed.push({ domain, error: err.message });
+    }
+  }
+
+  // Validate Caddy config before reload
+  let testPassed = false;
+  let testError = null;
+  try {
+    await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
+    testPassed = true;
+  } catch (err) {
+    testError = err;
+    console.error('Caddy config validation failed:', err.stderr || err.message);
+  }
+
+  // Helper function to revert all configs from backup
+  const revertAllConfigs = async () => {
+    console.log('Reverting all configs from backup...');
+    for (const [filename, content] of Object.entries(backups)) {
+      const configPath = `${CADDY_SITES_DIR}/${filename}`;
+      try {
+        await writeCaddyConfig(configPath, content);
+        console.log(`Reverted config: ${filename}`);
+      } catch (e) {
+        console.error(`Failed to revert config for ${filename}:`, e);
+      }
+    }
+  };
+
+  if (!testPassed) {
+    await revertAllConfigs();
+    return {
+      ok: false, results, testPassed, reloadResult: null, reverted: true,
+      error: 'Caddy config validation failed - all configs reverted to previous versions',
+      details: testError?.stderr || testError?.message || null,
+    };
+  }
+
+  // Validation passed, reload Caddy
+  const reloadResult = await reloadCaddy();
+
+  if (!reloadResult.success) {
+    await revertAllConfigs();
+    await reloadCaddy().catch(() => {});
+    return {
+      ok: false, results, testPassed, reloadResult, reverted: true,
+      error: 'Caddy reload failed - all configs reverted to previous versions',
+      details: reloadResult.error,
+    };
+  }
+
+  return { ok: true, results, testPassed, reloadResult, reverted: false, error: null };
+}
+
+// Once per renderer change: bring every existing site file up to the current
+// shape (CADDY_SITE_RENDER_CONTRACT). Site files are a cache of the route
+// table; a change to how they are rendered (e.g. 2026-09: the dashboard may
+// frame proxied apps for the LXC Workspace preview) otherwise reaches only the
+// domains an operator happens to edit next. Records the contract in
+// app_settings on success so it runs exactly once; a failure (validation /
+// reload) reverts the files and leaves the setting alone, so the next boot
+// tries again and the log says why.
+export async function upgradeSiteRenderContract() {
+  const { getSetting, setSetting } = await import('../db.js');
+  const have = getSetting('caddy_site_render_contract');
+  if (have === CADDY_SITE_RENDER_CONTRACT) return { upgraded: false, skipped: true, contract: have };
+  const r = await regenerateAllSiteConfigs();
+  if (!r.ok) return { upgraded: false, skipped: false, from: have, to: CADDY_SITE_RENDER_CONTRACT, error: r.error, details: r.details, results: r.results };
+  setSetting('caddy_site_render_contract', CADDY_SITE_RENDER_CONTRACT);
+  return { upgraded: true, skipped: false, from: have, to: CADDY_SITE_RENDER_CONTRACT, results: r.results };
+}
+
 servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
   try {
-    const db = getDb();
-    const services = db.prepare('SELECT * FROM services').all();
-
-    const results = { success: [], failed: [] };
-    const backups = {}; // Store backups of original configs
-
-    // Ensure Caddy structure exists
-    await ensureCaddyStructure();
-
-    // First, backup ALL existing site configs
-    try {
-      let configFiles = [];
-      if (existsSync(CADDY_SITES_DIR)) {
-        configFiles = await readdir(CADDY_SITES_DIR);
-      }
-
-      for (const file of configFiles) {
-        if (file === '.' || file === '..') continue;
-        try {
-          const configPath = `${CADDY_SITES_DIR}/${file}`;
-          if (existsSync(configPath)) {
-            backups[file] = await readFile(configPath, 'utf-8');
-          }
-        } catch (e) {
-          console.log(`Could not backup config ${file}:`, e.message);
-        }
-      }
-      console.log(`Backed up ${Object.keys(backups).length} Caddy site configs`);
-    } catch (e) {
-      console.error('Error backing up configs:', e);
-    }
-
-    // Phase 2b D.7: rebuild the unique-domain set from the JOIN of
-    // service_http_routes to services (routes-side, the post-D.14 source
-    // of truth) UNION'd with the legacy services.domain column (transitional
-    // fallback). Admin service domains are skipped outright so the
-    // installer-owned Caddyfile never gets clobbered. The legacy query is
-    // wrapped in a try/catch so post-D.14 (legacy column dropped) the
-    // helper collapses to a routes-only scan without further edits.
-    const uniqueDomainsSet = new Set();
-    try {
-      const routeDomainRows = db
-        .prepare(
-          `SELECT DISTINCT r.domain AS domain
-             FROM service_http_routes r
-             INNER JOIN services s ON s.id = r.service_id
-            WHERE s.is_admin = 0`
-        )
-        .all();
-      for (const row of routeDomainRows) {
-        if (row.domain) uniqueDomainsSet.add(row.domain);
-      }
-    } catch (e) {
-      console.error('Failed to read routes-side domain set', e);
-    }
-    try {
-      const legacyDomainRows = db
-        .prepare(
-          `SELECT DISTINCT domain
-             FROM services
-            WHERE is_admin = 0 AND domain IS NOT NULL`
-        )
-        .all();
-      for (const row of legacyDomainRows) {
-        if (row.domain) uniqueDomainsSet.add(row.domain);
-      }
-    } catch (e) {
-      // Post-D.14 — legacy `domain` column dropped. Routes-side scan is
-      // the only source now; nothing to merge.
-    }
-    const uniqueDomains = [...uniqueDomainsSet];
-
-    // Admin domains are sourced via getAdminDomain(), which falls back
-    // through services.domain (pre-D.14) → app_settings.admin_domain
-    // (post-D.14 snapshot) → process.env.DOMAIN. Admin services never get
-    // route rows, so this fallback is the only thing keeping the admin
-    // dashboard reachable after D.14 dropped services.domain.
-    const adminDomainRaw = getAdminDomain();
-    const adminDomains = adminDomainRaw ? [adminDomainRaw] : [];
-    for (const adminDomain of new Set(adminDomains)) {
-      console.log(`Skipping admin domain: ${adminDomain}`);
-      results.success.push(`${adminDomain} (skipped - admin)`);
-    }
-
-    for (const domain of uniqueDomains) {
-      try {
-        await regenerateDomainCaddyConfig(db, domain);
-        results.success.push(domain);
-      } catch (err) {
-        console.error(`Failed to regenerate merged config for ${domain}:`, err);
-        results.failed.push({ domain, error: err.message });
-      }
-    }
-
-    // Validate Caddy config before reload
-    let testPassed = false;
-    try {
-      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
-      testPassed = true;
-    } catch (testError) {
-      console.error('Caddy config validation failed:', testError.stderr || testError.message);
-    }
-
-    // Helper function to revert all configs from backup
-    const revertAllConfigs = async () => {
-      console.log('Reverting all configs from backup...');
-      for (const [filename, content] of Object.entries(backups)) {
-        const configPath = `${CADDY_SITES_DIR}/${filename}`;
-        try {
-          await writeCaddyConfig(configPath, content);
-          console.log(`Reverted config: ${filename}`);
-        } catch (e) {
-          console.error(`Failed to revert config for ${filename}:`, e);
-        }
-      }
-    };
-
-    if (!testPassed) {
-      await revertAllConfigs();
-
-      logAudit(req.user.id, 'CADDY_CONFIGS_REGENERATE_FAILED', 'system', null, { reason: 'Config validation failed, reverted' }, req.ip);
-
+    const r = await regenerateAllSiteConfigs();
+    if (!r.ok) {
+      logAudit(req.user.id, 'CADDY_CONFIGS_REGENERATE_FAILED', 'system', null, { reason: r.testPassed ? 'Reload failed, reverted' : 'Config validation failed, reverted' }, req.ip);
       return res.status(400).json({
         success: false,
-        error: 'Caddy config validation failed - all configs reverted to previous versions',
-        results,
+        error: r.error,
+        ...(r.details ? { details: r.details } : {}),
+        results: r.results,
       });
     }
 
-    // Validation passed, reload Caddy
-    const reloadResult = await reloadCaddy();
-
-    if (!reloadResult.success) {
-      await revertAllConfigs();
-      await reloadCaddy().catch(() => {});
-
-      logAudit(req.user.id, 'CADDY_CONFIGS_REGENERATE_FAILED', 'system', null, { reason: 'Reload failed, reverted' }, req.ip);
-
-      return res.status(400).json({
-        success: false,
-        error: 'Caddy reload failed - all configs reverted to previous versions',
-        details: reloadResult.error,
-        results,
-      });
-    }
-
-    logAudit(req.user.id, 'CADDY_CONFIGS_REGENERATED', 'system', null, results, req.ip);
+    logAudit(req.user.id, 'CADDY_CONFIGS_REGENERATED', 'system', null, r.results, req.ip);
 
     res.json({
       success: true,
-      results,
-      caddyReloaded: reloadResult.success,
-      caddyError: reloadResult.error,
+      results: r.results,
+      caddyReloaded: r.reloadResult.success,
+      caddyError: r.reloadResult.error,
     });
   } catch (error) {
     console.error('Error regenerating all configs:', error);
@@ -6221,7 +6253,11 @@ function parseUploadSizeMB(size) {
 //   { mode:'internal' } → global manual mode, host uncovered → `tls internal`
 //     (self-signed), never an ACME attempt.
 //   null → unchanged behavior (Caddy automatic HTTPS / ACME).
-function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null) {
+// frameAncestor (optional, "https://<admin-domain>"): when set and no route on
+// the domain asks for open framing, the site allows the ProxyPilot dashboard —
+// and only it — to embed the app (LXC Workspace preview). See
+// siteSecurityHeaderLines in lib/caddy-site-file.js.
+function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frameAncestor = null } = {}) {
   if (!entriesList || entriesList.length === 0) return null;
 
   // Normalize each entry into a consistent shape. Handles:
@@ -6484,24 +6520,12 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null) {
   // case for self-hosted MEET. Operators who want to lock down to a
   // specific embedder can list origins explicitly:
   //   `https://app.example.com https://other.example.com`.
+  //
+  // With neither, and the admin domain known (frameAncestor), the site still
+  // refuses every third-party embedder but lets the ProxyPilot dashboard
+  // frame it — the LXC Workspace preview (lib/caddy-site-file.js).
   const allowFramingRoute = normalized.find((s) => !!s.allowFraming);
-  lines.push(`    header {`);
-  if (allowFramingRoute) {
-    lines.push(`        -X-Frame-Options`);
-    const raw = allowFramingRoute.frameAncestors;
-    const ancestors = (raw || '')
-      .split(',')
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .join(' ') || '*';
-    lines.push(`        Content-Security-Policy "frame-ancestors ${ancestors}"`);
-  } else {
-    lines.push(`        X-Frame-Options "SAMEORIGIN"`);
-  }
-  lines.push(`        X-Content-Type-Options "nosniff"`);
-  lines.push(`        X-XSS-Protection "1; mode=block"`);
-  lines.push(`        Referrer-Policy "strict-origin-when-cross-origin"`);
-  lines.push(`    }`);
+  lines.push(...siteSecurityHeaderLines({ allowFramingRoute, frameAncestor, indent: '    ' }));
   lines.push(``);
 
   // Single log file keyed on the sanitized domain so wildcard * does not
@@ -6646,7 +6670,10 @@ async function regenerateDomainCaddyConfig(db, domain) {
   // subsystem hiccup can never break service config generation.
   let tlsDecision = null;
   try { tlsDecision = resolveTlsForHost(domain); } catch (e) { console.warn('[tls] resolve failed for', domain, e?.message); }
-  const merged = buildDomainCaddyConfig(allRows, domain, tlsDecision);
+  // The dashboard's own origin — the one embedder every site may allow.
+  let frameAncestor = null;
+  try { frameAncestor = dashboardFrameAncestor(getAdminDomain()); } catch { frameAncestor = null; }
+  const merged = buildDomainCaddyConfig(allRows, domain, tlsDecision, { frameAncestor });
   if (merged === null) {
     await unlink(configPath).catch(() => {});
     return;

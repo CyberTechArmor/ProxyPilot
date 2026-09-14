@@ -72,7 +72,31 @@ touch screen) expose them.
 - "Open terminal here" on a folder reconnects the shell in that directory.
 - Saving a file bumps the preview's reload key.
 
-A route that sends `X-Frame-Options`/`frame-ancestors` refuses to be framed;
-the preview then shows the browser's blank frame and **Open App** still works.
-Per-route `allowFraming` / `frameAncestors` (Services) is the operator's
-switch for that.
+## Preview framing
+
+Every rendered site file used to pin `X-Frame-Options: SAMEORIGIN`, so the
+dashboard itself was refused ("<domain> refused to connect"). Since 2026-09
+the site header block, when the admin domain is known, allows exactly one
+extra embedder — the ProxyPilot dashboard (`siteSecurityHeaderLines` in
+`lib/caddy-site-file.js`): `X-Frame-Options` is dropped, an app's own
+`frame-ancestors` is rewritten to `'self' https://<admin-domain>`, and a
+`Content-Security-Policy: frame-ancestors 'self' https://<admin-domain>`
+header is always added (multiple CSP headers intersect, so an app without one
+is still fenced). No third-party site can frame the app; this is the same
+scoped allowance the Mock2 module gives project apps for the Flightdeck
+preview. The operator's per-route `allowFraming` / `frameAncestors` escape
+hatch still wins when set.
+
+Site files are a cache of the route table, so a renderer change reaches
+existing files through the **render contract**: `CADDY_SITE_RENDER_CONTRACT`
+is compared with `app_settings.caddy_site_render_contract` at boot and, when
+different, every managed domain is regenerated once (validated, reloaded,
+reverted on failure) via `regenerateAllSiteConfigs` — the same function behind
+`POST /api/services/caddy/regenerate-all`.
+
+## Terminal working directory
+
+The LXC shell's starting directory is a guest path, so it is applied inside
+the guest (`lib/pty-logic.js` → `sh -c 'cd "$1" …' sh <dir>`), never as the
+host-side pty `cwd` — that spelling made bash fail on the host with
+`chdir(2) failed: No such file or directory` before the shell ever started.

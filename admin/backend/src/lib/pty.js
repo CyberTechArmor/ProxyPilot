@@ -1,5 +1,6 @@
 import * as pty from 'node-pty';
 import { existsSync } from 'fs';
+import { guestShellArgv } from './pty-logic.js';
 
 // Match the convention used by routes/lxc.js so we run incus on the host
 // rather than inside the admin container's namespace.
@@ -78,10 +79,9 @@ export function spawnTerminalPty({ kind, target, mode = 'exec', cols = 80, rows 
     // serial console. Resize works (limited) and there is no shell
     // shortcut equivalent — operators land at the guest's getty / boot
     // prompt. No `--` form because the console subcommand takes no
-    // post-`--` argv.
-    const incusArgs = mode === 'console'
-      ? ['console', incusName]
-      : ['exec', '-t', incusName, '--', 'bash'];
+    // post-`--` argv. Exec mode applies `cwd` INSIDE the guest (it is a
+    // guest path); the host-side pty cwd is never set for this kind.
+    const incusArgs = guestShellArgv({ incusName, mode, cwd });
     if (isInDocker) {
       cmd = 'nsenter';
       args = ['-t', '1', '-m', '-u', '-n', '-i', 'incus', ...incusArgs];
@@ -124,9 +124,12 @@ export function spawnTerminalPty({ kind, target, mode = 'exec', cols = 80, rows 
   // container-view path (file browser → "Open terminal here") which
   // we translate to its host equivalent so nsenter'd bash finds it.
   // Empty / falsy cwd → fall back to HOME.
+  // Guest kinds (lxc, mock2) cd inside the container instead — a guest path
+  // is meaningless as a host cwd and makes the spawn fail before the shell
+  // ever runs.
   let startCwd = process.env.HOME || '/';
-  if (cwd && typeof cwd === 'string') {
-    const translated = kind === 'host' ? translateContainerPathToHost(cwd) : cwd;
+  if (kind === 'host' && cwd && typeof cwd === 'string') {
+    const translated = translateContainerPathToHost(cwd);
     if (translated) startCwd = translated;
   }
 

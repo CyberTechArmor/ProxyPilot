@@ -872,6 +872,24 @@ server.listen(PORT, '0.0.0.0', () => {
       console.error('[route-drift] boot sweep failed:', err?.message || err);
     }
 
+    // Site-file render contract. The drift sweep above deliberately never
+    // rewrites files — but a change to the RENDERER itself (not the route
+    // table) is ProxyPilot's own intent, not an operator edit, and every
+    // existing site file must pick it up. Runs once per contract bump; the
+    // files come back if validation or reload fails (see
+    // regenerateAllSiteConfigs), and the setting is only written on success.
+    try {
+      const { upgradeSiteRenderContract } = await import('./routes/services.js');
+      const r = await upgradeSiteRenderContract();
+      if (r.upgraded) {
+        console.log(`[caddy-render] site files regenerated for render contract ${r.to} (was ${r.from ?? 'unset'}): ${r.results.success.length} ok, ${r.results.failed.length} failed`);
+      } else if (!r.skipped) {
+        console.error(`[caddy-render] render-contract upgrade to ${r.to} failed and was reverted: ${r.error}${r.details ? ` — ${String(r.details).slice(0, 300)}` : ''}`);
+      }
+    } catch (err) {
+      console.error('[caddy-render] render-contract upgrade threw:', err?.message || err);
+    }
+
     try {
       // Hydrate the backup-schedule cron worker.  Each enabled
       // row in backup_schedules registers a node-cron task; the

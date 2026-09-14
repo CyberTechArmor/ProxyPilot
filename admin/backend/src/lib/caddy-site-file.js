@@ -166,3 +166,62 @@ export function siteFileTargetsHost(content, host) {
   const parsed = parseCaddySiteFile(content);
   return parsed.upstreams.some((u) => sameHost(u.host, host));
 }
+
+// ---- Site security headers (the `header { … }` block of a rendered site) ----
+//
+// The dashboard origin that may embed a proxied app in an iframe: the LXC
+// Workspace preview. "https://<admin-domain>" or null when the admin domain is
+// unknown/invalid (null = the classic SAMEORIGIN posture, preview stays blocked).
+export function dashboardFrameAncestor(adminHost) {
+  const clean = adminHost ? String(adminHost).trim().toLowerCase() : '';
+  if (!clean || !/^[a-z0-9.-]+$/.test(clean)) return null;
+  return `https://${clean}`;
+}
+
+// Lines for the site-level header block. Three postures:
+//   * allowFramingRoute — the operator's per-route escape hatch (MEET, OAuth
+//     popups): X-Frame-Options dropped, frame-ancestors = their list or '*'.
+//   * frameAncestor     — the default once the admin domain is known: the app
+//     may be framed by ITSELF and the ProxyPilot dashboard, nothing else. This
+//     is the same scoped allowance the Mock2 module gives project apps for the
+//     Flightdeck preview, expressed on the site's own header block so it also
+//     covers static sites and apps that send no CSP at all:
+//       -X-Frame-Options                      (can't express a cross-origin allowance)
+//       Content-Security-Policy <re> <value>  (rewrite an app's own frame-ancestors)
+//       +Content-Security-Policy <value>      (and always add one — several CSP
+//                                              headers intersect, so an app with no
+//                                              frame-ancestors is still fenced)
+//     `defer` because these rewrite the UPSTREAM's response headers.
+//   * neither           — X-Frame-Options "SAMEORIGIN" (pre-2026-09 behaviour).
+export function siteSecurityHeaderLines({ allowFramingRoute = null, frameAncestor = null, indent = '    ' } = {}) {
+  const i2 = `${indent}    `;
+  const lines = [`${indent}header {`];
+  if (allowFramingRoute) {
+    lines.push(`${i2}-X-Frame-Options`);
+    const ancestors = String(allowFramingRoute.frameAncestors || '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .join(' ') || '*';
+    lines.push(`${i2}Content-Security-Policy "frame-ancestors ${ancestors}"`);
+  } else if (frameAncestor && /^https?:\/\/[a-z0-9.-]+(:\d{1,5})?$/i.test(frameAncestor)) {
+    const value = `frame-ancestors 'self' ${frameAncestor}`;
+    lines.push(`${i2}defer`);
+    lines.push(`${i2}-X-Frame-Options`);
+    lines.push(`${i2}Content-Security-Policy "frame-ancestors[^;]*" "${value}"`);
+    lines.push(`${i2}+Content-Security-Policy "${value}"`);
+  } else {
+    lines.push(`${i2}X-Frame-Options "SAMEORIGIN"`);
+  }
+  lines.push(`${i2}X-Content-Type-Options "nosniff"`);
+  lines.push(`${i2}X-XSS-Protection "1; mode=block"`);
+  lines.push(`${i2}Referrer-Policy "strict-origin-when-cross-origin"`);
+  lines.push(`${indent}}`);
+  return lines;
+}
+
+// Bump when the rendered site-file shape changes in a way every existing file
+// must pick up. The backend compares it with app_settings.caddy_site_render_contract
+// at boot and regenerates all site files once (index.js).
+export const CADDY_SITE_RENDER_CONTRACT = '2';
+

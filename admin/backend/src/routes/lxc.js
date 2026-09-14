@@ -22,6 +22,7 @@ import { applyServiceUpstream, renderDomains, domainsForService } from '../lib/r
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
+import { registerLxcWorkspaceRoutes } from './lxc-workspace.js';
 import { resolveCertDir } from '../lib/caddy-cert.js';
 import { inspectIncusDevice } from '../lib/cert-mount-reconciler.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
@@ -5374,3 +5375,8 @@ lxcRouter.post('/cleanup/execute', requireSudo, async (req, res) => {
 
   res.json({ success: true, results });
 });
+
+// Workspace tab (Flightdeck explorer/editor/terminal/preview over this
+// container): tree/read/save/create/rename/delete under an operator-chosen
+// root. Registered last so lxcRouter.use(requireProxyAccess) above applies.
+registerLxcWorkspaceRoutes(lxcRouter);

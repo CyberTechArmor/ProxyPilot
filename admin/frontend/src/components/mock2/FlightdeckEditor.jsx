@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { javascript } from '@codemirror/lang-javascript';
@@ -9,7 +9,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { xml } from '@codemirror/lang-xml';
 import { yaml } from '@codemirror/lang-yaml';
-import { api } from '@/lib/api';
+import { mock2FlightdeckFs } from '@/lib/flightdeck';
 import { X, Loader2, Save, FileWarning } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
@@ -39,13 +39,25 @@ function codemirrorLanguage(language) {
 // External-change reconciliation: when a build cycle touches files (bumped via
 // `externalNonce`), unmodified open tabs reload; modified tabs show a
 // non-destructive banner so the user never loses edits silently.
+//
+// Files come through an `fs` adapter (lib/flightdeck.js) — the Mock2 project
+// sandbox by default (`projectId`), or an LXC workspace root; when the adapter's
+// identity changes (another root) every tab closes, since the paths mean
+// something else now.
 
-export default function FlightdeckEditor({ projectId, openRequest, canEdit, externalNonce = 0, onDirtyChange, onActivePathChange }) {
+export default function FlightdeckEditor({ projectId, fs: fsProp = null, openRequest, canEdit, externalNonce = 0, onDirtyChange, onActivePathChange, onSaved, placeholder = 'Flightdeck editor' }) {
   const { toast } = useToast();
+  const fs = useMemo(() => fsProp || mock2FlightdeckFs(projectId), [fsProp, projectId]);
   const [tabs, setTabs] = useState([]); // { path, language, content, saved, dirty, conflict }
   const [activePath, setActivePath] = useState(null);
   const [loading, setLoading] = useState(false);
   const lastOpenNonce = useRef(0);
+  const fsKeyRef = useRef(fs.key);
+  useEffect(() => {
+    if (fsKeyRef.current === fs.key) return;
+    fsKeyRef.current = fs.key;
+    setTabs([]); setActivePath(null);
+  }, [fs.key]);
 
   const active = tabs.find((t) => t.path === activePath) || null;
 
@@ -58,13 +70,13 @@ export default function FlightdeckEditor({ projectId, openRequest, canEdit, exte
     if (existing) { setActivePath(path); return; }
     setLoading(true);
     try {
-      const r = await api.mock2FlightdeckReadFile(projectId, path);
+      const r = await fs.read(path);
       setTabs((prev) => [...prev, { path, language: r.language, content: r.content, saved: r.content, dirty: false, conflict: false }]);
       setActivePath(path);
     } catch (e) {
       toast({ variant: 'destructive', title: 'Could not open file', description: e?.message || String(e) });
     } finally { setLoading(false); }
-  }, [projectId, tabs, toast]);
+  }, [fs, tabs, toast]);
 
   // React to open requests from the tree / chat.
   useEffect(() => {
@@ -81,7 +93,7 @@ export default function FlightdeckEditor({ projectId, openRequest, canEdit, exte
     (async () => {
       for (const t of tabs) {
         try {
-          const r = await api.mock2FlightdeckReadFile(projectId, t.path);
+          const r = await fs.read(t.path);
           if (cancelled) return;
           if (r.content === t.saved) continue; // unchanged on disk
           setTabs((prev) => prev.map((x) => {
@@ -103,12 +115,13 @@ export default function FlightdeckEditor({ projectId, openRequest, canEdit, exte
   const save = useCallback(async () => {
     if (!active || !active.dirty || !canEdit) return;
     try {
-      await api.mock2FlightdeckSaveFile(projectId, active.path, active.content);
+      await fs.save(active.path, active.content);
       setTabs((prev) => prev.map((t) => (t.path === active.path ? { ...t, saved: t.content, dirty: false, conflict: false } : t)));
+      onSaved?.(active.path);
     } catch (e) {
       toast({ variant: 'destructive', title: 'Save failed', description: e?.message || String(e) });
     }
-  }, [active, canEdit, projectId, toast]);
+  }, [active, canEdit, fs, toast, onSaved]);
 
   const closeTab = (path) => {
     const t = tabs.find((x) => x.path === path);
@@ -173,7 +186,7 @@ export default function FlightdeckEditor({ projectId, openRequest, canEdit, exte
             style={{ height: '100%', fontSize: '13px' }}
           />
         ) : (
-          <div className="flex items-center justify-center h-full text-white/30 text-sm">Flightdeck editor</div>
+          <div className="flex items-center justify-center h-full text-white/30 text-sm">{placeholder}</div>
         )}
       </div>
     </div>

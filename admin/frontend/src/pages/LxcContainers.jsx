@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import LxcCertMounts from '@/components/LxcCertMounts';
@@ -27,12 +27,10 @@ import {
   Server, Play, Square, RefreshCw, RotateCw, Trash2, Plus, Info,
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
-  Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote,
-  X, Shield, Copy, Sparkles, Pencil, MoveRight, FileArchive
+  Terminal, Upload, ChevronRight, ChevronDown, MessageSquare, StickyNote,
+  X, Shield, Copy, Sparkles, Pencil, MoveRight
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
-import InteractiveTerminal from '@/components/InteractiveTerminal';
-import ZipUploadDialog from '@/components/ZipUploadDialog';
 import GitRemoteCard, { EMPTY_REMOTE_DRAFT } from '@/components/mock2/GitRemoteCard';
 import { useSnapshotExports } from '@/context/SnapshotExportContext';
 
@@ -166,240 +164,10 @@ function PendingSnapshotExportRow({
 }
 
 
-// LxcTerminalPanel wraps InteractiveTerminal for an LXC.
-// The legacy "Run install script" toolbar was removed once dedicated
-// install scripts (XRay, n8n, …) replaced the apt one-liner — the
-// button was a footgun on Alpine/CentOS and added no value for
-// operators running real install scripts.
-function LxcTerminalPanel({ containerName, initialCwd, instanceType }) {
-  // Pass `?type=vm` to the WS upgrade when the selected instance is a
-  // virtual machine. The backend uses that hint to run a guest-agent
-  // probe and falls back to `incus console` when no agent is talking.
-  const wsPath = instanceType === 'virtual-machine'
-    ? `/api/terminal/lxc/${containerName}?type=vm`
-    : `/api/terminal/lxc/${containerName}`;
-  return (
-    <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-      {instanceType === 'virtual-machine' && (
-        <div className="px-3 py-2 text-xs bg-purple-500/10 border-b border-purple-500/30 text-purple-300">
-          VM console — agent shortcuts disabled. Resize is supported but limited.
-        </div>
-      )}
-      <InteractiveTerminal
-        wsPath={wsPath}
-        initialCwd={initialCwd}
-      />
-    </div>
-  );
-}
-
-// File manager component for browsing, uploading, and downloading files
-function ContainerFiles({ containerName, onOpenTerminal }) {
-  const { toast } = useToast();
-  const [currentPath, setCurrentPath] = useState('/root');
-  const [files, setFiles] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [zipUploadOpen, setZipUploadOpen] = useState(false);
-  const fileInputRef = useRef(null);
-
-  const fetchFiles = useCallback(async (path) => {
-    setLoading(true);
-    try {
-      const res = await api.listContainerFiles(containerName, path);
-      setFiles(res.files || []);
-      setCurrentPath(path);
-    } catch (err) {
-      toast({ title: 'Error', description: `Failed to list files: ${err.message}`, variant: 'destructive' });
-    } finally {
-      setLoading(false);
-    }
-  }, [containerName, toast]);
-
-  useEffect(() => {
-    fetchFiles('/root');
-  }, [fetchFiles]);
-
-  const navigateTo = (path) => {
-    fetchFiles(path);
-  };
-
-  const goUp = () => {
-    const parent = currentPath.split('/').slice(0, -1).join('/') || '/';
-    fetchFiles(parent);
-  };
-
-  const handleDownload = (filePath) => {
-    const url = api.getContainerFileDownloadUrl(containerName, filePath);
-    // Fetch with auth via the httpOnly cookie and trigger download.
-    fetch(url, { credentials: 'include' })
-      .then(res => res.blob())
-      .then(blob => {
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = filePath.split('/').pop();
-        a.click();
-        URL.revokeObjectURL(a.href);
-      })
-      .catch(err => toast({ title: 'Download failed', description: err.message, variant: 'destructive' }));
-  };
-
-  const handleUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploading(true);
-    try {
-      await api.uploadFileToContainer(containerName, currentPath + '/', file);
-      toast({ title: 'Uploaded', description: `${file.name} uploaded to ${currentPath}` });
-      fetchFiles(currentPath);
-    } catch (err) {
-      toast({ title: 'Upload failed', description: err.message, variant: 'destructive' });
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
-
-  const breadcrumbs = currentPath.split('/').filter(Boolean);
-
-  return (
-    <div className="space-y-3">
-      {/* Breadcrumb navigation */}
-      <div className="flex items-center gap-1 text-xs flex-wrap">
-        <Button variant="ghost" size="sm" className="h-6 px-1" onClick={() => navigateTo('/')}>
-          /
-        </Button>
-        {breadcrumbs.map((part, i) => {
-          const path = '/' + breadcrumbs.slice(0, i + 1).join('/');
-          return (
-            <span key={path} className="flex items-center gap-1">
-              <ChevronRight className="h-3 w-3 text-muted-foreground" />
-              <Button variant="ghost" size="sm" className="h-6 px-1 text-xs" onClick={() => navigateTo(path)}>
-                {part}
-              </Button>
-            </span>
-          );
-        })}
-      </div>
-
-      {/* Toolbar */}
-      <div className="flex items-center gap-2">
-        <Button variant="outline" size="sm" className="h-7 text-xs" onClick={goUp} disabled={currentPath === '/'}>
-          <ArrowLeft className="h-3 w-3 mr-1" />Up
-        </Button>
-        <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => fetchFiles(currentPath)}>
-          <RefreshCw className="h-3 w-3 mr-1" />Refresh
-        </Button>
-        {onOpenTerminal && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 text-xs"
-            onClick={() => onOpenTerminal(currentPath)}
-            title={`Open terminal in ${currentPath}`}
-          >
-            <Terminal className="h-3 w-3 mr-1" />Open terminal here
-          </Button>
-        )}
-        <div className="flex-1" />
-        <input ref={fileInputRef} type="file" onChange={handleUpload} className="hidden" />
-        <Button
-          size="sm"
-          className="h-7 text-xs"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-        >
-          {uploading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Upload className="h-3 w-3 mr-1" />}
-          Upload
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 text-xs"
-          onClick={() => setZipUploadOpen(true)}
-          title="Extract a zip into the container (optional startup script)"
-        >
-          <FileArchive className="h-3 w-3 mr-1" />
-          Upload ZIP
-        </Button>
-      </div>
-
-      {/* Zip app-drop upload — two-phase confirm flow; conflicts are
-          listed and only replaced (as .old) after confirmation */}
-      <ZipUploadDialog
-        mode="lxc"
-        open={zipUploadOpen}
-        onOpenChange={setZipUploadOpen}
-        subjectName={containerName}
-        defaultTargetDir="/opt/app"
-        upload={(file, targetDir, onProgress) => api.uploadLxcZip(containerName, file, targetDir, onProgress)}
-        apply={(uploadId, options) => api.applyLxcZip(containerName, uploadId, options)}
-        cancel={(uploadId) => api.cancelLxcZip(containerName, uploadId)}
-        onApplied={() => fetchFiles(currentPath)}
-      />
-
-      {/* File list */}
-      <div className="border rounded-lg overflow-hidden">
-        <div className="grid grid-cols-[1fr_80px_120px_40px] gap-2 px-3 py-1.5 bg-muted text-xs font-medium text-muted-foreground">
-          <span>Name</span>
-          <span className="text-right">Size</span>
-          <span>Modified</span>
-          <span></span>
-        </div>
-        {loading ? (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-          </div>
-        ) : files.length === 0 ? (
-          <div className="text-center py-8 text-xs text-muted-foreground">
-            Empty directory
-          </div>
-        ) : (
-          <div className="overflow-y-auto divide-y">
-            {files
-              .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1))
-              .map((file) => (
-                <div
-                  key={file.name}
-                  className={`grid grid-cols-[1fr_80px_120px_40px] gap-2 px-3 py-1.5 text-xs items-center hover:bg-muted/50 ${
-                    file.isDir ? 'cursor-pointer' : ''
-                  }`}
-                  onClick={() => file.isDir && navigateTo(file.path)}
-                >
-                  <span className="flex items-center gap-1.5 truncate">
-                    {file.isDir ? (
-                      <FolderOpen className="h-3.5 w-3.5 text-cyan-500 shrink-0" />
-                    ) : (
-                      <File className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                    )}
-                    <span className={`truncate ${file.isDir ? 'font-medium text-cyan-500' : ''}`}>
-                      {file.name}
-                    </span>
-                  </span>
-                  <span className="text-right text-muted-foreground">
-                    {file.isDir ? '-' : formatSize(file.size)}
-                  </span>
-                  <span className="text-muted-foreground truncate">{file.modified}</span>
-                  <span>
-                    {!file.isDir && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 w-6 p-0"
-                        onClick={(e) => { e.stopPropagation(); handleDownload(file.path); }}
-                      >
-                        <Download className="h-3 w-3" />
-                      </Button>
-                    )}
-                  </span>
-                </div>
-              ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+// The Workspace tab (files + editor + preview + terminal) is the Flightdeck
+// workspace over this container. Lazy: it pulls in CodeMirror + xterm, which
+// have no business in the page bundle for someone who only starts/stops LXCs.
+const LxcWorkspace = lazy(() => import('@/components/lxc/LxcWorkspace'));
 
 export default function LxcContainers() {
   const { toast } = useToast();
@@ -439,7 +207,9 @@ export default function LxcContainers() {
   const [createOpen, setCreateOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [infoDefaultTab, setInfoDefaultTab] = useState('details');
-  const [terminalCwd, setTerminalCwd] = useState('');
+  // The Workspace tab mounts on first visit and then stays mounted (its PTY
+  // must survive a trip to Details), so the dialog tracks whether it was seen.
+  const [workspaceVisited, setWorkspaceVisited] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [resizeOpen, setResizeOpen] = useState(false);
 
@@ -942,8 +712,11 @@ export default function LxcContainers() {
       websocketEnabled: false,
     });
     setEditingService(null);
-    setInfoDefaultTab(tab);
-    setTerminalCwd('');
+    // The old Terminal and Files tabs are one Workspace tab now; callers that
+    // still ask for either land there.
+    const infoTab = tab === 'terminal' || tab === 'files' ? 'workspace' : tab;
+    setInfoDefaultTab(infoTab);
+    setWorkspaceVisited(infoTab === 'workspace');
     setInfoOpen(true);
     try {
       const [stateRes, snapRes, expRes, destRes] = await Promise.all([
@@ -2830,13 +2603,15 @@ export default function LxcContainers() {
             </DialogDescription>
           </DialogHeader>
           {selectedContainer && (
-            <Tabs value={infoDefaultTab} onValueChange={setInfoDefaultTab} className="w-full flex-1 flex flex-col min-h-0 overflow-hidden">
-              {/* Four triggers: two rows on a phone, one from sm up
-                  (MOBILE_FIRST rule 7 — never squash a label to 60px). */}
-              <TabsList className="w-full grid grid-cols-2 sm:grid-cols-4 shrink-0 h-auto">
+            <Tabs
+              value={infoDefaultTab}
+              onValueChange={(v) => { setInfoDefaultTab(v); if (v === 'workspace') setWorkspaceVisited(true); }}
+              className="w-full flex-1 flex flex-col min-h-0 overflow-hidden"
+            >
+              {/* Three triggers fit one row even at 360px (MOBILE_FIRST rule 7). */}
+              <TabsList className="w-full grid grid-cols-3 shrink-0 h-auto">
                 <TabsTrigger value="details">Details</TabsTrigger>
-                <TabsTrigger value="terminal">Terminal</TabsTrigger>
-                <TabsTrigger value="files">Files</TabsTrigger>
+                <TabsTrigger value="workspace">Workspace</TabsTrigger>
                 <TabsTrigger value="delegated">Sharing</TabsTrigger>
               </TabsList>
 
@@ -4008,27 +3783,23 @@ export default function LxcContainers() {
                 />
               </TabsContent>
 
-              {/* Terminal Tab — live PTY via WebSocket. forceMount keeps
-                  the InteractiveTerminal mounted (just CSS-hidden) when
-                  the user clicks Details/Files; without it, Radix unmounts
-                  inactive tab content and tears down the PTY/WebSocket. */}
-              <TabsContent forceMount value="terminal" className="flex-1 flex flex-col min-h-0 overflow-hidden data-[state=inactive]:hidden">
-                <LxcTerminalPanel
-                  containerName={selectedContainer.name}
-                  initialCwd={terminalCwd}
-                  instanceType={selectedContainer.type}
-                />
-              </TabsContent>
-
-              {/* Files Tab */}
-              <TabsContent value="files" className="flex-1 flex flex-col min-h-0 overflow-y-auto">
-                <ContainerFiles
-                  containerName={selectedContainer.name}
-                  onOpenTerminal={(path) => {
-                    setTerminalCwd(path);
-                    setInfoDefaultTab('terminal');
-                  }}
-                />
+              {/* Workspace Tab — the Flightdeck explorer/editor/preview/terminal
+                  over this container (it replaced the Terminal and Files tabs).
+                  forceMount + CSS-hidden keeps the workspace (and its PTY)
+                  alive while the operator visits Details; Radix would otherwise
+                  unmount it and drop the shell. It mounts lazily on the first
+                  visit so opening the dialog for Details never dials a PTY. */}
+              <TabsContent forceMount value="workspace" className="flex-1 flex flex-col min-h-0 overflow-hidden data-[state=inactive]:hidden">
+                {workspaceVisited ? (
+                  <Suspense fallback={<div className="flex flex-1 items-center justify-center text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin mr-2" /> Loading the workspace…</div>}>
+                    <LxcWorkspace
+                      containerName={selectedContainer.name}
+                      instanceType={selectedContainer.type}
+                      running={selectedContainer.status?.toLowerCase() === 'running'}
+                      services={containerServices}
+                    />
+                  </Suspense>
+                ) : null}
               </TabsContent>
 
               {/* Delegated editing — hand one directory of this container to

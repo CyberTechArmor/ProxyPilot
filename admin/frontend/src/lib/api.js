@@ -1062,6 +1062,23 @@ export const api = {
 
   getContainerFileDownloadUrl: (name, path) => `${API_BASE}/lxc/containers/${name}/files/download?path=${encodeURIComponent(path)}`,
 
+  // ---- LXC workspace (the Flightdeck explorer/editor over one container,
+  // /api/lxc/containers/:name/workspace). `root` is an absolute directory in
+  // the guest; omit it on the tree call to get the container's default root
+  // back (startup working dir → /opt/app → /srv/app → /var/www → /root).
+  lxcWorkspaceTree: (name, root) =>
+    request(`/lxc/containers/${name}/workspace/tree${root ? `?root=${encodeURIComponent(root)}` : ''}`),
+  lxcWorkspaceReadFile: (name, root, path) =>
+    request(`/lxc/containers/${name}/workspace/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`),
+  lxcWorkspaceSaveFile: (name, root, path, content) =>
+    request(`/lxc/containers/${name}/workspace/file`, { method: 'PUT', body: JSON.stringify({ root, path, content }) }),
+  lxcWorkspaceCreate: (name, root, path, type = 'file', content) =>
+    request(`/lxc/containers/${name}/workspace/create`, { method: 'POST', body: JSON.stringify({ root, path, type, content }) }),
+  lxcWorkspaceRename: (name, root, from, to) =>
+    request(`/lxc/containers/${name}/workspace/rename`, { method: 'POST', body: JSON.stringify({ root, from, to }) }),
+  lxcWorkspaceDelete: (name, root, path) =>
+    request(`/lxc/containers/${name}/workspace/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
+
   // ── SSH access (per-device authorized_keys ledger) ─────────────────────
   listSshAccess: (filter = 'active') =>
     request(`/ssh-access?filter=${encodeURIComponent(filter)}`),

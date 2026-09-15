@@ -26,7 +26,26 @@ import '@xterm/xterm/css/xterm.css';
 //               ws.send {type:'resize',cols,rows}.
 //   - message : binary or string PTY output → term.write.
 //   - close   : ws.close(), term.dispose(), observer.disconnect().
-const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, initialCwd }, ref) {
+// Keys a phone keyboard has no way to type. Each sends raw bytes to the PTY;
+// the button's pointerdown is cancelled so the on-screen keyboard stays up and
+// xterm keeps focus. Tab sends TWO tabs: readline completes a unique prefix on
+// the first and LISTS the candidates on the second, so one tap both completes
+// and shows suggestions — the double-tab an operator would have typed.
+const MOBILE_KEYS = [
+  { label: 'Tab', data: '\t\t', title: 'Complete, and list suggestions' },
+  { label: 'Esc', data: '\x1b', title: 'Escape' },
+  { label: '^C', data: '\x03', title: 'Ctrl+C — interrupt' },
+  { label: '^D', data: '\x04', title: 'Ctrl+D — end of input' },
+  { label: '↑', data: '\x1b[A', title: 'Previous command' },
+  { label: '↓', data: '\x1b[B', title: 'Next command' },
+  { label: '←', data: '\x1b[D', title: 'Cursor left' },
+  { label: '→', data: '\x1b[C', title: 'Cursor right' },
+];
+
+//   mobileKeys — render the key bar (Tab / Esc / ^C / ^D / arrows) under the
+//                terminal on narrow screens (<lg). Off by default so surfaces
+//                that never asked for it are unchanged.
+const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, initialCwd, mobileKeys = false }, ref) {
   const containerRef = useRef(null);
   const termRef = useRef(null);
   const fitRef = useRef(null);
@@ -55,6 +74,9 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
     },
     isConnected() {
       return wsRef.current?.readyState === WebSocket.OPEN;
+    },
+    focus() {
+      try { termRef.current?.focus(); } catch { /* not mounted */ }
     },
   }), []);
 
@@ -210,9 +232,29 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
           clientHeight to FitAddon. With padding on the same element
           that holds the xterm, the fit calc rounds rows up and the
           bottom line gets clipped. */}
-      <div className="flex-1 min-h-0 overflow-hidden bg-black rounded-b-lg p-1.5">
+      <div className={`flex-1 min-h-0 overflow-hidden bg-black p-1.5 ${mobileKeys ? 'rounded-b-none lg:rounded-b-lg' : 'rounded-b-lg'}`}>
         <div ref={containerRef} className="h-full w-full" />
       </div>
+      {mobileKeys ? (
+        <div className="grid grid-cols-4 sm:grid-cols-8 gap-1 p-1 bg-black border-t border-white/10 shrink-0 lg:hidden" role="toolbar" aria-label="Terminal keys">
+          {MOBILE_KEYS.map((k) => (
+            <button
+              key={k.label} type="button" title={k.title} aria-label={k.title}
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => {
+                const ws = wsRef.current;
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  try { ws.send(JSON.stringify({ type: 'input', data: k.data })); } catch { /* closed */ }
+                }
+                try { termRef.current?.focus(); } catch { /* not mounted */ }
+              }}
+              className="min-h-[44px] rounded bg-white/10 text-white text-sm font-mono hover:bg-white/20 active:bg-white/30"
+            >
+              {k.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 });

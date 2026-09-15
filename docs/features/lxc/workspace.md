@@ -71,6 +71,18 @@ touch screen) expose them.
   (CodeMirror + xterm stay out of the page bundle).
 - "Open terminal here" on a folder reconnects the shell in that directory.
 - Saving a file bumps the preview's reload key.
+- The explorer header has **up one directory** (parent of the root) and
+  **open another directory**, which is a dialog (full-screen below `sm`) with
+  the conventional roots as one-tap suggestions — not the browser's `prompt`.
+- Below `lg` the terminal carries a key bar (`InteractiveTerminal
+  mobileKeys`): Tab, Esc, ^C, ^D and the arrows — keys a phone keyboard cannot
+  type. Tab sends two tabs, so one tap completes a unique prefix and lists
+  the candidates (readline's double-tab), i.e. it shows suggestions. The
+  buttons cancel `pointerdown` so the on-screen keyboard stays up.
+- The preview iframe delegates device permissions (`allow="camera;
+  microphone; display-capture; …"` + `allowFullScreen`), so an app that asks
+  for the camera — a video meeting — gets the browser's prompt instead of an
+  automatic denial. The user still decides at the prompt.
 
 ## Preview framing
 

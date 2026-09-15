@@ -560,6 +560,13 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0, fullHeight =
                 pointerEvents: id === frontId && (!overlayActive || scrollMode) ? 'auto' : 'none',
               }}
               sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-modals"
+              // Delegate the device/media permissions a real app asks for
+              // (a video meeting: camera + microphone + screen share). Without
+              // an `allow` list an iframe's permission requests are auto-denied
+              // before the user ever sees a prompt; the browser still prompts
+              // the user for each one, this only makes the prompt possible.
+              allow="camera; microphone; display-capture; autoplay; fullscreen; picture-in-picture; clipboard-read; clipboard-write; geolocation; screen-wake-lock; web-share; encrypted-media"
+              allowFullScreen
             />
           );
         })}

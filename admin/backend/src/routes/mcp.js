@@ -2984,10 +2984,28 @@ async function toolInterruptProjectBuild(args, auth) {
   const project = m.projects.getProject(Number(args.project_id));
   if (!project) return toolResult('Project not found', { isError: true });
   const cycle = m.cycles.latestCycle(project.id);
+  const action = args.action === 'abandon' ? 'abandon' : 'stop_after_step';
+  // A build parked on an admin decision (awaiting_admin) has no runner to
+  // honour an interrupt flag — it is WAITING, not running. Abandoning it is
+  // what the blocked card's Abandon button does (mock2/routes.js, the retry
+  // route with { abandon: true }): close the cycle, its umbrella request and
+  // the admin-queue items it raised. stop_after_step has nothing to stop.
+  if (cycle && cycle.status === 'awaiting_admin') {
+    if (action !== 'abandon') {
+      return toolResult(`The build on ${project.name} is not running — it is waiting on an admin decision (cycle ${cycle.id}). Resume it from the build chat, or call again with action: "abandon" to discard it.`, { isError: true });
+    }
+    const [{ closeRequest }, { resolveQueueItem }] = await Promise.all([import('../mock2/requests.js'), import('../mock2/queue.js')]);
+    m.cycles.finishCycle(cycle.id, { status: 'abandoned', error: 'abandoned by operator (via MCP)' });
+    try { if (cycle.request_id) closeRequest(cycle.request_id, 'abandoned'); } catch { /* best effort */ }
+    for (const key of [`mock2-blocked:${cycle.id}`, `mock2-retries:${cycle.id}`, `mock2-requeue:${cycle.id}`]) {
+      try { resolveQueueItem(key, { resolution: 'abandoned by operator', resolvedBy: auth.created_by }); } catch { /* best effort */ }
+    }
+    logAudit(auth.created_by, 'MOCK2_CYCLE_ABANDON', 'mock2_cycle', cycle.id, { via: 'mcp', direct: true, from_status: 'awaiting_admin' }, null);
+    return toolResult({ abandoned: true, cycle_id: cycle.id, message: 'The blocked build was discarded; the project is free for a new build.' });
+  }
   if (!cycle || !LIVE_CYCLE_STATUSES.includes(cycle.status)) {
     return toolResult(`No build is running on ${project.name}${cycle ? ` (latest cycle is ${cycle.status})` : ''}`, { isError: true });
   }
-  const action = args.action === 'abandon' ? 'abandon' : 'stop_after_step';
   m.cycles.setInterrupt(cycle.id, action);
   logAudit(auth.created_by, 'MOCK2_CYCLE_INTERRUPT', 'mock2_cycle', cycle.id, { via: 'mcp', action }, null);
   return toolResult({

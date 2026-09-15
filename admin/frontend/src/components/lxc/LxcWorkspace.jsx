@@ -8,13 +8,30 @@ import FlightdeckFileTree from '@/components/mock2/FlightdeckFileTree';
 import FlightdeckEditor from '@/components/mock2/FlightdeckEditor';
 import MobilePanelBar from '@/components/mock2/MobilePanelBar';
 import { PreviewPanel } from '@/components/mock2/ProjectPreview';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog';
 import {
   lxcWorkspaceFs, lxcWorkspaceLayoutKey, lxcWorkspaceRootKey, readJsonPref, writeJsonPref, readPref, writePref,
 } from '@/lib/flightdeck';
 import {
   Files, TerminalSquare, Code2, Eye, PanelLeftClose, PanelBottom, Maximize2, Minimize2,
-  Upload, FileArchive, FolderInput, Loader2, Globe,
+  Upload, FileArchive, FolderInput, FolderUp, Loader2, Globe,
 } from 'lucide-react';
+
+// Directories worth one tap in the change-directory dialog: the roots the
+// backend itself tries, in its order.
+const ROOT_SUGGESTIONS = ['/opt/app', '/srv/app', '/var/www', '/root', '/'];
+
+// Parent of an absolute directory ('/' stays '/').
+function parentDir(p) {
+  if (!p || p === '/') return '/';
+  const cut = p.replace(/\/+$/, '').lastIndexOf('/');
+  return cut <= 0 ? '/' : p.slice(0, cut);
+}
 
 // LxcWorkspace — the Flightdeck workspace (explorer + editor + preview +
 // terminal, everything but the build chat) on one operator container. It is an
@@ -61,7 +78,7 @@ export function LxcTerminalPanel({ containerName, initialCwd, instanceType }) {
           VM console — agent shortcuts disabled. Resize is supported but limited.
         </div>
       )}
-      <InteractiveTerminal wsPath={wsPath} initialCwd={initialCwd} />
+      <InteractiveTerminal wsPath={wsPath} initialCwd={initialCwd} mobileKeys />
     </div>
   );
 }
@@ -91,16 +108,21 @@ export default function LxcWorkspace({
     if (r?.root && r.root !== root) setRoot(r.root);
   }, [root]);
   useEffect(() => { if (root) writePref(lxcWorkspaceRootKey(containerName), root); }, [root, containerName]);
-  const changeRoot = () => {
-    const next = window.prompt('Directory to open (absolute path inside the container):', root || '/opt/app');
-    if (!next) return;
-    const clean = next.trim().replace(/\/+$/, '') || '/';
+  // Change directory: a dialog (not the browser's prompt — it is unstyled,
+  // easy to miss and useless on a phone) with the conventional roots as one-tap
+  // suggestions, plus an "up one level" button in the explorer header.
+  const [rootDialog, setRootDialog] = useState(null); // { value, error } | null
+  const openRootDialog = () => setRootDialog({ value: root || '/opt/app', error: null });
+  const applyRoot = (raw) => {
+    const clean = String(raw || '').trim().replace(/\/+$/, '') || '/';
     if (!clean.startsWith('/') || clean.split('/').includes('..')) {
-      toast({ variant: 'destructive', title: 'Not a directory path', description: 'Enter an absolute path such as /opt/app.' });
+      setRootDialog((d) => (d ? { ...d, error: 'Enter an absolute path inside the container, such as /opt/app.' } : d));
       return;
     }
+    setRootDialog(null);
     setRoot(clean);
   };
+  const goUp = () => { if (root && root !== '/') setRoot(parentDir(root)); };
 
   // ---- editor / tree coordination ----
   const [openRequest, setOpenRequest] = useState(null);
@@ -197,16 +219,66 @@ export default function LxcWorkspace({
     );
   }
 
+  const rootButtons = (
+    <>
+      <button className="p-1 rounded hover:bg-muted disabled:opacity-40" title="Up one directory" aria-label="Up one directory" onClick={goUp} disabled={!root || root === '/'}><FolderUp className="h-3.5 w-3.5" /></button>
+      <button className="p-1 rounded hover:bg-muted" title="Open another directory" aria-label="Open another directory" onClick={openRootDialog}><FolderInput className="h-3.5 w-3.5" /></button>
+    </>
+  );
   const headerActions = canEdit ? (
     <>
-      <button className="p-1 rounded hover:bg-muted" title="Open another directory" onClick={changeRoot}><FolderInput className="h-3.5 w-3.5" /></button>
+      {rootButtons}
       <button className="p-1 rounded hover:bg-muted" title={`Upload a file into ${root || 'the root'}`} onClick={() => startUpload(root)} disabled={uploading}>
         {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
       </button>
       <button className="p-1 rounded hover:bg-muted" title="Upload a ZIP and extract it (optional startup script)" onClick={() => setZipOpen(true)}><FileArchive className="h-3.5 w-3.5" /></button>
     </>
-  ) : (
-    <button className="p-1 rounded hover:bg-muted" title="Open another directory" onClick={changeRoot}><FolderInput className="h-3.5 w-3.5" /></button>
+  ) : rootButtons;
+
+  // Change-directory dialog. Full-screen below sm (MOBILE_FIRST rule 3).
+  const rootDialogEl = (
+    <Dialog open={!!rootDialog} onOpenChange={(o) => { if (!o) setRootDialog(null); }}>
+      <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg flex flex-col">
+        <DialogHeader>
+          <DialogTitle>Open a directory</DialogTitle>
+          <DialogDescription>
+            The explorer, editor and terminal work inside this directory of <span className="font-mono">{containerName}</span>.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="flex flex-col gap-4 flex-1"
+          onSubmit={(e) => { e.preventDefault(); applyRoot(rootDialog?.value); }}
+        >
+          <div className="space-y-2">
+            <Label htmlFor="lxc-workspace-root">Absolute path inside the container</Label>
+            <Input
+              id="lxc-workspace-root" autoFocus className="h-11 sm:h-10 font-mono" placeholder="/opt/app"
+              value={rootDialog?.value ?? ''}
+              onChange={(e) => setRootDialog((d) => (d ? { ...d, value: e.target.value, error: null } : d))}
+              autoCapitalize="none" autoCorrect="off" spellCheck={false}
+            />
+            {rootDialog?.error ? <p className="text-xs text-red-500">{rootDialog.error}</p> : null}
+          </div>
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">Common places</p>
+            <div className="flex flex-wrap gap-2">
+              {ROOT_SUGGESTIONS.map((p) => (
+                <Button key={p} type="button" variant={rootDialog?.value === p ? 'default' : 'outline'} size="sm" className="h-11 sm:h-9 font-mono" onClick={() => applyRoot(p)}>{p}</Button>
+              ))}
+              {root && root !== '/' ? (
+                <Button type="button" variant="outline" size="sm" className="h-11 sm:h-9 font-mono" onClick={() => applyRoot(parentDir(root))} title="Parent of the current directory">
+                  <FolderUp className="h-3.5 w-3.5 mr-1" />{parentDir(root)}
+                </Button>
+              ) : null}
+            </div>
+          </div>
+          <DialogFooter className="mt-auto gap-2">
+            <Button type="button" variant="outline" className="h-11 sm:h-10" onClick={() => setRootDialog(null)}>Cancel</Button>
+            <Button type="submit" className="h-11 sm:h-10">Open</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 
   const filesPane = (
@@ -277,6 +349,7 @@ export default function LxcWorkspace({
         <MobilePanelBar panels={NARROW_PANELS} current={narrowPanel} onSelect={setNarrowPanel} />
         {uploadInput}
         {zipDialog}
+        {rootDialogEl}
       </div>
     );
   }
@@ -332,6 +405,7 @@ export default function LxcWorkspace({
       </div>
       {uploadInput}
       {zipDialog}
+      {rootDialogEl}
     </div>
   );
 }

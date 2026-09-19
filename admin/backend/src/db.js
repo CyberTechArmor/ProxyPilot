@@ -136,6 +136,13 @@ export function getDb() {
 //               (REST or MCP): op, subject, the sha256 plan token, the plan,
 //               outcome, per-step detail. Feeds the Storage page history and
 //               export_grc_evidence (lib/storage/service.js).
+//   909 Migration — migrations + migration_events: one row per attempt to
+//               move a source host or application onto a ProxyPilot guest.
+//               Holds the target spec, the single-use agent token (hash
+//               only), the source inventory manifest (paths and key names,
+//               never values), the observed-egress decisions and the cutover
+//               checklist; the events table is the agent's progress and log
+//               stream (lib/migration/service.js).
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -2118,6 +2125,62 @@ export function initDatabase() {
       );
       CREATE INDEX IF NOT EXISTS idx_storage_ops_ts ON storage_ops(ts);
       CREATE INDEX IF NOT EXISTS idx_storage_ops_op ON storage_ops(op, ts);
+    `);
+  });
+
+  // 909: the migration agent — one row per migration, plus its event stream.
+  // The token is stored as a sha256 hash (a database copy cannot be replayed
+  // against a source host) and the manifest is the redacted inventory: env
+  // file PATHS and KEY NAMES, never values (lib/migration/manifest.js
+  // refuses a manifest that carries one).
+  runMigration(db, 909, 'migrations', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS migrations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        updated_at TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        transport TEXT NOT NULL,
+        status TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        spec_json TEXT NOT NULL,
+        target_name TEXT NOT NULL,
+        source_label TEXT,
+        token_id TEXT NOT NULL UNIQUE,
+        token_hash TEXT NOT NULL,
+        token_expires_at TEXT NOT NULL,
+        token_claimed_by TEXT,
+        token_claimed_at TEXT,
+        token_last_seen_at TEXT,
+        token_source_ip TEXT,
+        tls_pin TEXT,
+        manifest_json TEXT,
+        manifest_at TEXT,
+        approved_at TEXT,
+        approved_by TEXT,
+        checklist_json TEXT,
+        egress_json TEXT,
+        bytes_total INTEGER,
+        bytes_done INTEGER,
+        error TEXT,
+        finished_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_migrations_status ON migrations(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_migrations_target ON migrations(target_name);
+
+      CREATE TABLE IF NOT EXISTS migration_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        migration_id INTEGER NOT NULL,
+        at TEXT NOT NULL,
+        phase TEXT,
+        kind TEXT NOT NULL,
+        bytes INTEGER,
+        message TEXT,
+        detail_json TEXT,
+        FOREIGN KEY (migration_id) REFERENCES migrations(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_migration_events_mig ON migration_events(migration_id, id);
     `);
   });
 

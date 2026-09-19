@@ -33,6 +33,11 @@ const CSRF_EXEMPT_PREFIXES = [
   // double-submit check has nothing to protect (git clients also cannot
   // echo a CSRF header).
   '/api/mock2/git/',
+  // The migration agent: a source host holds one single-use migration token
+  // in its URL and no cookie at all, so a cross-site request cannot ride a
+  // session here and the double-submit check has nothing to protect (a `sh`
+  // one-liner on a server being migrated also cannot echo a CSRF header).
+  '/api/migrations/agent/',
   // Remote MCP server: auth is a per-token bearer secret (header or
   // tokenized URL) — no ambient cookies are involved, so a cross-site
   // request can't ride a session and the double-submit check has nothing

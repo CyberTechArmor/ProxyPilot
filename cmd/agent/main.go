@@ -29,6 +29,7 @@ import (
 	"syscall"
 
 	"github.com/cybertecharmor/proxypilot/cmd/agent/methods"
+	"github.com/cybertecharmor/proxypilot/cmd/agent/migrate"
 )
 
 const (
@@ -40,6 +41,18 @@ const (
 )
 
 func main() {
+	// `proxypilot-agent migrate …` is the SAME binary run on a source host
+	// that is being copied into this Incus: it speaks HTTP to the ProxyPilot
+	// API instead of listening on a socket, holds one single-use migration
+	// token, and removes itself when it is done. Everything else below is
+	// the host-side RPC bridge and is untouched by it.
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if err := migrate.Run(os.Args[2:]); err != nil {
+			log.Fatalf("migrate: %v", err)
+		}
+		return
+	}
+
 	socketPath := flag.String("socket", defaultSocket, "Unix socket path to listen on")
 	flag.Parse()
 

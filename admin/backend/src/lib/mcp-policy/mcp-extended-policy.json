@@ -9,9 +9,27 @@
     "mcp.security_scans": { "default": true, "description": "run_lynis / run_trivy (host binaries must be installed)." },
     "mcp.dns": { "default": true, "description": "Cloudflare DNS record tools (need the DNS-01 Cloudflare token)." },
     "mcp.webhooks": { "default": true, "description": "Outbound webhook notifications (list_webhooks / set_webhook and their dispatch)." },
-    "mcp.storage": { "default": true, "description": "The storage family's mutating verbs (create_zpool, datasets, snapshots, replace_disk, scrub, import/export, the Incus binding, sanoid/syncoid policy and replication). destroy_dataset, zfs_rollback, destroy_zfs_snapshot and rollback_guest_dataset are additionally behind mcp.destructive. Readers (list_disks, zpool_status, zfs_list, …) are never gated." }
+    "mcp.storage": { "default": true, "description": "The storage family's mutating verbs (create_zpool, datasets, snapshots, replace_disk, scrub, import/export, the Incus binding, sanoid/syncoid policy and replication). destroy_dataset, zfs_rollback, destroy_zfs_snapshot and rollback_guest_dataset are additionally behind mcp.destructive. Readers (list_disks, zpool_status, zfs_list, …) are never gated." },
+    "mcp.migration": { "default": true, "description": "The migration family's mutating verbs (create_migration, approve_migration, migration_cutover, cancel_migration). Turning it off leaves the readers (get_migration, list_migrations) working and stops any new migration token from being minted." }
   },
   "exports_dir": "/var/lib/proxypilot/mcp-exports",
+  "migration": {
+    "$comment": "Adopting a source host (lib/migration). The agent holds ONE single-use, scoped, expiring token and pins TLS to this ProxyPilot's certificate. The inventory manifest carries .env PATHS and KEY NAMES only — the server REFUSES a manifest that carries a value, so a tampered agent cannot put a secret in the database. Nothing is copied until an operator approves the inventory; the imported guest comes up with the default-deny egress fence and no route.",
+    "token_ttl_seconds": { "default": 7200, "min": 300, "max": 86400 },
+    "agent_dir": "/var/lib/proxypilot/agent",
+    "work_dir": "/var/lib/proxypilot/migration",
+    "arches": ["amd64", "arm64"],
+    "transports": {
+      "incus-migrate": "whole-machine: wraps the official incus-migrate with a server-supplied answer script and a single-use Incus trust token",
+      "rootfs-tar": "whole-machine on a Proxmox/nested LXC, where incus-migrate cannot run inside the guest: tar the rootfs, PUT it here, import it as a split image",
+      "rsync": "application mode: the app directories plus a logical database dump restored inside the new guest"
+    },
+    "never": [
+      "read or transmit the VALUE of an environment variable, a database password or a private key",
+      "start copying before an operator approved the inventory (unless auto_transfer was explicitly set)",
+      "publish a route or lift the egress fence on an imported guest as part of the import"
+    ]
+  },
   "storage": {
     "$comment": "ZFS storage management (lib/storage). Devices are addressed by /dev/disk/by-id only; the OS device (backing / and /boot, resolved through findmnt + lsblk holders) is refused with no override; a mounted device, an md/LVM/LUKS holder, or a member of an imported pool is refused too; any other signature needs wipe: true. Every mutation is plan/confirm: dry_run returns the plan and its sha256 token, the real call carries confirm + token, a changed plan invalidates it. The managed layout is <pool>/incus (Incus storage pool source), <pool>/backups, <pool>/exports.",
     "pool_defaults": { "ashift": 12, "compression": "zstd", "atime": "off", "xattr": "sa", "acltype": "posixacl" },

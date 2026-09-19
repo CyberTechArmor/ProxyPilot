@@ -77,6 +77,7 @@ import { MCP_RUN_CONFIRM_MESSAGE, flagsFromOptions, isUpdateId, updateStartRefus
 import { getGitHubRepo, getCurrentVersion } from './user.js';
 import { agentCall } from '../lib/agent.js';
 import { storageService } from '../lib/storage/index.js';
+import { migrationService } from '../lib/migration/index.js';
 import { createExtendedHandlers } from './mcp-tools/index.js';
 import { createConfirmationStore, parseTokenScope, scopeRefusal, filterCatalogForScope } from '../lib/mcp-ext/logic.js';
 import {
@@ -4448,6 +4449,7 @@ const extended = createExtendedHandlers({
   dbPath: databasePath(),
   listBackupsRunning: null,
   storage: storageService,
+  migration: migrationService,
 });
 export const EXTENDED_TOOL_NAMES = Object.freeze(Object.keys(extended.handlers));
 

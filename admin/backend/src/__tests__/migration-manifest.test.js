@@ -1,0 +1,131 @@
+// lib/migration/manifest.js — the inventory document and everything derived
+// from it. The load-bearing test here is the refusal: a manifest that
+// carries a secret VALUE must never enter ProxyPilot, whatever the agent
+// sending it believes.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  MANIFEST_SCHEMA, validateManifest, suggestedRoutes, observedEgress, databasePlan,
+  manifestSummary, manifestConcerns, routableName, upstreamPort, appDirectories, DEFAULT_RSYNC_EXCLUDES,
+} from '../lib/migration/manifest.js';
+
+const base = (over = {}) => ({
+  schema: MANIFEST_SCHEMA,
+  collected_at: '2026-09-19T10:00:00Z',
+  agent_version: 'test',
+  source: { hostname: 'old-web01', kind: 'vm', arch: 'amd64', cpus: 4, memory_bytes: 8 * 1024 ** 3, addresses: ['10.0.0.5', '203.0.113.9'], root_used_bytes: 12 * 1024 ** 3 },
+  os: { id: 'debian', version_id: '12', pretty_name: 'Debian GNU/Linux 12 (bookworm)', kernel: '6.1.0', init: 'systemd' },
+  units: [{ name: 'myapp.service', state: 'running', exec: '/usr/bin/node /srv/myapp/server.js', working_directory: '/srv/myapp', ports: [{ proto: 'tcp', port: 3000 }] }],
+  listening: [{ proto: 'tcp', address: '127.0.0.1', port: 3000, process: 'node', unit: 'myapp.service' }, { proto: 'tcp', address: '0.0.0.0', port: 443, process: 'nginx' }],
+  vhosts: [{ server: 'nginx', file: '/etc/nginx/sites-enabled/app', tls: true, server_names: ['app.example.com', 'www.app.example.com'], listen: ['443 ssl'], upstreams: ['http://127.0.0.1:3000'] }],
+  databases: [{ engine: 'postgres', version: '15.6', port: 5432, running: true, databases: [{ name: 'appdb', size_bytes: 1024 ** 3 }, { name: 'postgres', size_bytes: 8 }] }],
+  cron: [{ source: '/etc/cron.d/app', user: 'root', schedule: '0 3 * * *', command: '/srv/myapp/bin/nightly' }],
+  env_files: [{ path: '/srv/myapp/.env', keys: ['DATABASE_URL', 'STRIPE_SECRET_KEY'], size_bytes: 210 }],
+  outbound: [
+    { host: 'api.stripe.com', port: 443, proto: 'tcp', evidence: 'conntrack' },
+    { host: 'api.stripe.com', port: 443, proto: 'tcp', evidence: 'unit' },
+    { host: '10.0.0.7', port: 5432, proto: 'tcp', evidence: 'conntrack' },
+    { host: '8.8.8.8', port: 53, proto: 'udp', evidence: 'resolv' },
+  ],
+  app_dirs: [{ path: '/srv/myapp', size_bytes: 400 * 1024 ** 2, kind: 'node', unit: 'myapp.service' }, { path: '/var/www/static', size_bytes: 900 * 1024 ** 2, kind: 'static' }],
+  ...over,
+});
+
+test('validateManifest: the schema is pinned, and a manifest carrying a VALUE is refused wherever it hides it', () => {
+  assert.match(validateManifest('{').error, /not JSON/);
+  assert.match(validateManifest({ schema: 'other' }).error, /schema must be proxypilot-migration-manifest@1/);
+  assert.ok(validateManifest(base()).manifest);
+  assert.ok(validateManifest(JSON.stringify(base())).manifest, 'a JSON string is accepted too');
+
+  // The forbidden-key sweep, at every depth and inside arrays.
+  for (const bad of [
+    { ...base(), env_files: [{ path: '/srv/.env', keys: ['A'], values: ['sk_live_1'] }] },
+    { ...base(), env_files: [{ path: '/srv/.env', keys: ['A'], value: 'sk_live_1' }] },
+    { ...base(), databases: [{ engine: 'postgres', password: 'hunter2' }] },
+    { ...base(), units: [{ name: 'a.service', detail: { nested: { secret: 'x' } } }] },
+    { ...base(), notes: [], contents: 'the whole file' },
+  ]) {
+    const r = validateManifest(bad);
+    assert.match(r.error, /never accepts secret VALUES|only path, keys/, `should have been refused: ${JSON.stringify(bad).slice(0, 80)}`);
+  }
+
+  // A key that is really a KEY=value line is a value in disguise.
+  assert.match(validateManifest({ ...base(), env_files: [{ path: '/srv/.env', keys: ['DATABASE_URL=postgres://u:p@h/db'] }] }).error, /not a bare KEY name/);
+  // An unexpected property on an env_files entry is refused by name.
+  assert.match(validateManifest({ ...base(), env_files: [{ path: '/a', keys: [], sample: 'x' }] }).error, /carries sample/);
+  // A well-formed entry survives normalization intact.
+  assert.deepEqual(validateManifest(base()).manifest.env_files[0].keys, ['DATABASE_URL', 'STRIPE_SECRET_KEY']);
+});
+
+test('validateManifest: normalization fills every field, clamps the unbounded and keeps the shape stable', () => {
+  const { manifest } = validateManifest({ schema: MANIFEST_SCHEMA });
+  for (const k of ['disks', 'mounts', 'units', 'listening', 'vhosts', 'databases', 'cron', 'tls', 'env_files', 'outbound', 'app_dirs', 'warnings', 'notes']) {
+    assert.deepEqual(manifest[k], [], `${k} defaults to an empty array`);
+  }
+  assert.equal(manifest.docker.present, false);
+  assert.equal(manifest.source.kind, 'unknown');
+  const many = validateManifest({ schema: MANIFEST_SCHEMA, outbound: Array.from({ length: 900 }, (_, i) => ({ host: `h${i}.example.com`, port: 443 })) });
+  assert.equal(many.manifest.outbound.length, 512, 'a hostile payload cannot grow the row without bound');
+});
+
+test('derivations: routes from vhosts, egress without the internal noise, the database plan, the app dirs', () => {
+  const { manifest } = validateManifest(base());
+
+  const routes = suggestedRoutes(manifest);
+  assert.deepEqual(routes.map((r) => r.domain), ['app.example.com', 'www.app.example.com']);
+  assert.equal(routes[0].upstream_port, 3000, 'the proxy target is the port the app will listen on in the guest');
+  assert.equal(routes[0].tls, true);
+  assert.equal(routableName('_'), null);
+  assert.equal(routableName('localhost'), null);
+  assert.equal(routableName('203.0.113.4'), null);
+  assert.equal(routableName('*.example.com'), 'example.com');
+  assert.equal(upstreamPort({ upstreams: ['http://unix:/run/app.sock'] }), null);
+
+  const egress = observedEgress(manifest);
+  const stripe = egress.find((e) => e.host === 'api.stripe.com');
+  assert.deepEqual(stripe.evidence, ['conntrack', 'unit']);
+  assert.equal(stripe.service, 'https');
+  assert.equal(stripe.internal, false);
+  assert.equal(egress[0].host, 'api.stripe.com', 'the most-corroborated host sorts first');
+  assert.equal(egress.find((e) => e.host === '10.0.0.7').internal, true, 'RFC1918 peers are inside the old machine');
+  assert.equal(egress.find((e) => e.host === '8.8.8.8').service, 'dns');
+
+  const dbs = databasePlan(manifest);
+  assert.equal(dbs.length, 1);
+  assert.deepEqual(dbs[0].databases, ['appdb'], 'template and system databases are not dumped');
+  assert.match(dbs[0].dump, /pg_dump --format=custom/);
+  const sqlite = databasePlan(validateManifest({ schema: MANIFEST_SCHEMA, databases: [{ engine: 'sqlite', paths: ['/srv/app/app.db'] }] }).manifest);
+  assert.equal(sqlite[0].kind, 'file');
+
+  assert.deepEqual(appDirectories(manifest).map((d) => d.path), ['/var/www/static', '/srv/myapp'], 'biggest first');
+  assert.ok(DEFAULT_RSYNC_EXCLUDES.includes('node_modules/'));
+});
+
+test('manifestSummary and manifestConcerns: the short read, and what stops an approval', () => {
+  const { manifest } = validateManifest(base());
+  const s = manifestSummary(manifest);
+  assert.equal(s.hostname, 'old-web01');
+  assert.equal(s.counts.env_keys, 2);
+  assert.equal(s.counts.routes, 2);
+  assert.equal(s.counts.egress, 2, 'internal peers are not offered as egress grants');
+  assert.equal(s.dockerized, false);
+  assert.deepEqual(s.top_ports.map((p) => p.port), [3000, 443]);
+
+  assert.deepEqual(manifestConcerns(manifest, { mode: 'whole-machine' }), [], 'a clean source raises nothing');
+
+  const noDirs = validateManifest({ ...base(), app_dirs: [] }).manifest;
+  const c = manifestConcerns(noDirs, { mode: 'application' });
+  assert.equal(c.find((x) => x.id === 'no-app-dirs').level, 'block');
+
+  const dockerized = validateManifest({ ...base(), docker: { present: true, containers: [{ name: 'web', image: 'nginx' }] } }).manifest;
+  assert.match(manifestConcerns(dockerized, { mode: 'application' }).find((x) => x.id === 'dockerized').text, /nested guest is the faster path/);
+
+  const noVhost = validateManifest({ ...base(), vhosts: [] }).manifest;
+  assert.ok(manifestConcerns(noVhost, { mode: 'whole-machine' }).some((x) => x.id === 'no-vhost'));
+
+  const sysv = validateManifest({ ...base(), os: { id: 'alpine', init: 'openrc' } }).manifest;
+  assert.ok(manifestConcerns(sysv, { mode: 'whole-machine' }).some((x) => x.id === 'init'));
+
+  const big = validateManifest({ ...base(), mounts: [{ target: '/data', used_bytes: 900 * 1024 ** 3 }] }).manifest;
+  assert.match(manifestConcerns(big, { mode: 'whole-machine' }).find((x) => x.id === 'big-mount:/data').text, /900 GiB/);
+});

@@ -70,6 +70,7 @@ export function fakeHost({ script = () => null, managedSettings = null } = {}) {
     async runnerState() { return { present: true, enabled: true, source_dir: '/root/ProxyPilot', script_present: true }; },
     async agentPing() { return true; },
     async aptCandidate() { return '2.2.2-1'; },
+    async kernelState() { return { running: '6.12.107+deb13-amd64', built_for: ['6.12.107+deb13-amd64'], built_for_running: true, reboot_target: null, secure_boot: false }; },
     async toolchain() { return { zpool: true, zfs: true, smartctl: true, sanoid: true, syncoid: true, wipefs: true, lsblk: true, incus: true, zfs_module_loaded: true }; },
     agentReachable: () => false,
   };

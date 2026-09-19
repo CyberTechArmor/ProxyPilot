@@ -181,7 +181,7 @@ export function parseOsRelease(text) {
  *   agent      bool
  *   apt        bool
  */
-export function installPreflight({ toolchain = {}, os = {}, runner = {}, agent = false, apt = false, zfsCandidate = undefined } = {}) {
+export function installPreflight({ toolchain = {}, os = {}, runner = {}, agent = false, apt = false, zfsCandidate = undefined, kernel = null } = {}) {
   const checks = [];
   const distroOk = SUPPORTED_DISTROS.includes(os.id) || SUPPORTED_DISTROS.some((d) => (os.id_like || '').includes(d));
   const component = ZFS_COMPONENT[os.id] || (String(os.id_like || '').includes('ubuntu') ? 'universe' : String(os.id_like || '').includes('debian') ? 'contrib' : null);
@@ -229,10 +229,25 @@ export function installPreflight({ toolchain = {}, os = {}, runner = {}, agent =
     ? check('zfs.tools', 'ZFS user tools', PASS, toolchain.zfs_version || 'zpool and zfs found')
     : check('zfs.tools', 'ZFS user tools', FAIL, 'zpool and zfs are not installed', 'Install the storage toolchain. Nothing on this page can create or read a pool until they are present.'));
 
-  checks.push(toolchain.zfs_module_loaded
-    ? check('zfs.module', 'ZFS kernel module', PASS, 'the zfs module is loaded')
-    : check('zfs.module', 'ZFS kernel module', zfsReady ? FAIL : WARN, 'the zfs module is not loaded',
-      'The installer loads it. On a distribution kernel that needs DKMS the build runs at install time, and a reboot may be required before the module appears.'));
+  if (toolchain.zfs_module_loaded) {
+    checks.push(check('zfs.module', 'ZFS kernel module', PASS, `the zfs module is loaded${kernel?.running ? ` on ${kernel.running}` : ''}`));
+  } else if (kernel?.reboot_target) {
+    // The common Debian case: DKMS built against the current kernel while an
+    // older one is still booted. Nothing is broken and nothing needs
+    // reinstalling — the host has to boot the kernel the module belongs to.
+    checks.push(check('zfs.module', 'ZFS kernel module', FAIL,
+      `a module is built for ${kernel.built_for.join(', ')}, but this host is running ${kernel.running}`,
+      `A module only loads into the kernel it was built for. Reboot into ${kernel.reboot_target}, which is already installed, and the module loads. Re-installing will not help.`));
+  } else if (kernel && kernel.secure_boot === true && !kernel.built_for.length) {
+    checks.push(check('zfs.module', 'ZFS kernel module', FAIL, 'Secure Boot is enabled and no signed ZFS module is present',
+      'The kernel refuses an unsigned DKMS module. Enrol a MOK signing key for DKMS, or turn Secure Boot off in firmware, then install again.'));
+  } else if (kernel && kernel.running && !kernel.built_for.length && zfsReady) {
+    checks.push(check('zfs.module', 'ZFS kernel module', FAIL, `no ZFS module is built for any installed kernel (running ${kernel.running})`,
+      'The DKMS build did not produce a module. Its reason is in /var/lib/dkms/zfs/*/build/make.log; check that headers matching a bootable kernel are installed, then install again.'));
+  } else {
+    checks.push(check('zfs.module', 'ZFS kernel module', zfsReady ? FAIL : WARN, 'the zfs module is not loaded',
+      'The installer builds and loads it. On a distribution kernel that needs DKMS the build runs at install time, and a reboot may be required before the module appears.'));
+  }
 
   checks.push(toolchain.smartctl
     ? check('tools.smartctl', 'SMART tools', PASS, 'smartctl found, drive health is collected')
@@ -266,7 +281,10 @@ export function installPreflight({ toolchain = {}, os = {}, runner = {}, agent =
   // installer runs modprobe, and a DKMS build may simply not have finished.
   // Leaving it out of install_needed contradicted `ready`, which requires it.
   const moduleLoaded = !!toolchain.zfs_module_loaded;
-  const needed = missing.length > 0 || !unitsOk || !helpersOk || !moduleLoaded;
+  // A module built for another kernel is a reboot, not an install: offering
+  // the installer again would waste minutes and change nothing.
+  const rebootPending = !moduleLoaded && !!kernel?.reboot_target;
+  const needed = missing.length > 0 || !unitsOk || !helpersOk || (!moduleLoaded && !rebootPending);
 
   return {
     checks,
@@ -278,6 +296,8 @@ export function installPreflight({ toolchain = {}, os = {}, runner = {}, agent =
     missing_packages: missing,
     reinstall_only: missing.length === 0 && needed,
     module_loaded: moduleLoaded,
+    kernel: kernel || null,
+    reboot_required: !toolchain.zfs_module_loaded && !!kernel?.reboot_target,
     zfs_candidate: zfsCandidate === undefined ? null : zfsCandidate,
     component_to_enable: zfsCandidate === undefined || zfsCandidate ? null : component,
     script: 'scripts/install-storage.sh',

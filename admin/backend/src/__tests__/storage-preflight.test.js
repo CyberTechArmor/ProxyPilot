@@ -301,3 +301,70 @@ test('the apt candidate check catches the Debian contrib case before an install 
   assert.equal(noApt.checks.find((x) => x.id === 'packages.candidate'), undefined);
   assert.equal(noApt.zfs_candidate, null);
 });
+
+test('a module built for another kernel is a reboot, not an install, and is named as such', () => {
+  const ready = { zpool: true, zfs: true, smartctl: true, sanoid: true, syncoid: true, zfs_module_loaded: false, scrub_timer_installed: true, syncoid_unit_installed: true, replicate_helper: true, restore_helper: true };
+  const runner = { present: true, enabled: true, source_dir: '/root/ProxyPilot', script_present: true };
+  const os = parseOsRelease('ID=debian\nPRETTY_NAME="Debian GNU/Linux 13 (trixie)"\n');
+
+  // exactly the operator's host: DKMS built against the current kernel while
+  // an older one is still booted
+  const stale = installPreflight({
+    toolchain: ready, os, runner, agent: true, apt: true, zfsCandidate: '2.3.9-0+deb13u1',
+    kernel: { running: '6.12.85+deb13-amd64', built_for: ['6.12.107+deb13-amd64'], built_for_running: false, reboot_target: '6.12.107+deb13-amd64', secure_boot: false },
+  });
+  const c = stale.checks.find((x) => x.id === 'zfs.module');
+  assert.equal(c.status, 'fail');
+  assert.match(c.detail, /built for 6\.12\.107\+deb13-amd64/);
+  assert.match(c.detail, /running 6\.12\.85\+deb13-amd64/);
+  assert.match(c.remedy, /Reboot into 6\.12\.107\+deb13-amd64/);
+  assert.match(c.remedy, /Re-installing will not help/);
+  assert.equal(stale.reboot_required, true);
+  assert.equal(stale.ready, false);
+  assert.equal(stale.install_needed, false, 'running the installer again would change nothing');
+
+  // no module for any kernel is a failed build, which IS worth another run
+  const failedBuild = installPreflight({
+    toolchain: ready, os, runner, agent: true, apt: true, zfsCandidate: '2.3.9',
+    kernel: { running: '6.12.85+deb13-amd64', built_for: [], built_for_running: false, reboot_target: null, secure_boot: false },
+  });
+  const f = failedBuild.checks.find((x) => x.id === 'zfs.module');
+  assert.match(f.detail, /no ZFS module is built for any installed kernel/);
+  assert.match(f.remedy, /make\.log/);
+  assert.equal(failedBuild.reboot_required, false);
+  assert.equal(failedBuild.install_needed, true);
+
+  // secure boot gets its own words rather than "the build failed"
+  const sb = installPreflight({
+    toolchain: ready, os, runner, agent: true, apt: true, zfsCandidate: '2.3.9',
+    kernel: { running: '6.12.85+deb13-amd64', built_for: [], built_for_running: false, reboot_target: null, secure_boot: true },
+  });
+  assert.match(sb.checks.find((x) => x.id === 'zfs.module').detail, /Secure Boot is enabled/);
+  assert.match(sb.checks.find((x) => x.id === 'zfs.module').remedy, /MOK signing key/);
+
+  // loaded is a pass naming the kernel it is loaded on
+  const okk = installPreflight({
+    toolchain: { ...ready, zfs_module_loaded: true }, os, runner, agent: true, apt: true, zfsCandidate: '2.3.9',
+    kernel: { running: '6.12.107+deb13-amd64', built_for: ['6.12.107+deb13-amd64'], built_for_running: true, reboot_target: null, secure_boot: false },
+  });
+  assert.equal(okk.checks.find((x) => x.id === 'zfs.module').status, 'pass');
+  assert.equal(okk.ready, true);
+  assert.equal(okk.reboot_required, false);
+});
+
+test('the install refuses a pointless re-run when the host only needs a reboot', async () => {
+  const { createStorageService } = await import('../lib/storage/service.js');
+  const { fakeHost, fakeSettings } = await import('./fixtures/storage/load.js');
+  const host = fakeHost();
+  host.toolchain = async () => ({ zpool: true, zfs: true, smartctl: true, sanoid: true, syncoid: true, zfs_module_loaded: false, scrub_timer_installed: true, syncoid_unit_installed: true, replicate_helper: true, restore_helper: true });
+  host.kernelState = async () => ({ running: '6.12.85+deb13-amd64', built_for: ['6.12.107+deb13-amd64'], built_for_running: false, reboot_target: '6.12.107+deb13-amd64', secure_boot: false });
+  const st = fakeSettings();
+  const svc = createStorageService({ host, getSetting: st.getSetting, setSetting: st.setSetting });
+
+  const r = await svc.installToolchain({ actor: 'admin', via: 'test' });
+  assert.equal(r.refused, true);
+  assert.equal(r.reboot_required, true);
+  assert.match(r.error, /reboot into 6\.12\.107\+deb13-amd64/);
+  assert.match(r.error, /Re-running the installer changes nothing/);
+  assert.ok(!host.calls.some((c) => c.argv?.[0] === 'systemctl'), 'nothing was started');
+});

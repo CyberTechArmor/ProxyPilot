@@ -242,7 +242,7 @@ export function createMigrationService({
     const addr = await exec('incus', ['config', 'get', 'core.https_address'], { timeoutMs: 20000 });
     const listen = String(addr.stdout || '').trim();
     if (addr.status !== 0) return { error: `could not read Incus config: ${tail(addr.stderr) || `exit ${addr.status}`}` };
-    if (!listen) return { error: 'Incus is not listening on the network, so nothing can migrate INTO it. On the host: `incus config set core.https_address :8443` (then re-open the migration).' };
+    if (!listen) return { error: 'Incus is not listening on the network, so incus-migrate has nothing to connect to. Turn it on from Migrations → Preflight (or enable_incus_listener), which proposes the bridge gateway rather than every interface; by hand it is `incus config set core.https_address <addr>:8443`.' };
     const name = `pp-migrate-${row.id}`;
     const mk = await exec('incus', ['config', 'trust', 'add', '--name', name, '--quiet'], { timeoutMs: 30000 });
     let token = String(mk.stdout || '').trim().split('\n').filter(Boolean).pop() || '';
@@ -286,6 +286,112 @@ export function createMigrationService({
       chunk_bytes: 8 * 1024 * 1024,
       since: row.approved_at && row.phase === 'cutover' ? row.approved_at : null,
       note: 'Each directory is tarred and PUT to /artifact; ProxyPilot unpacks it into the guest. The database dump travels the same way.',
+    };
+  }
+
+  /* --------------------------- the Incus listener ------------------------ */
+
+  /**
+   * Can a source host reach this Incus at all?
+   *
+   * `incus-migrate` connects to the Incus API DIRECTLY from the source, so a
+   * whole-machine migration of a physical host or a VM needs
+   * `core.https_address` set. Incus does not listen on the network by
+   * default, and turning that on is an operator decision about exposure —
+   * so ProxyPilot reads the state, proposes the NARROWEST address that
+   * works, and never flips it on its own.
+   */
+  async function incusListener() {
+    const cfg = await exec('incus', ['config', 'get', 'core.https_address'], { timeoutMs: 20000 });
+    if (cfg.status !== 0) return { error: `could not read the Incus config: ${tail(cfg.stderr) || `exit ${cfg.status}`}` };
+    const address = String(cfg.stdout || '').trim() || null;
+    const bridge = await incusBridge();
+    const suggested = bridge.gateway ? `${bridge.gateway}:8443` : null;
+    return {
+      address, listening: !!address, bridge: bridge.name, bridge_gateway: bridge.gateway, suggested,
+      scope: address ? addressScope(address) : null,
+      note: address
+        ? `Incus is listening on ${address}. A source host must be able to reach that address.`
+        : 'Incus is not listening on the network. A whole-machine migration of a physical host or a VM cannot reach it until it is (a container source can still use the rootfs-tar transport, which goes through ProxyPilot).',
+    };
+  }
+
+  /** The Incus bridge the default profile puts guests on, and its gateway. */
+  async function incusBridge() {
+    const prof = await exec('incus', ['query', '/1.0/profiles/default'], { timeoutMs: 20000 });
+    let name = null;
+    try {
+      const devices = JSON.parse(prof.stdout || '{}')?.devices || {};
+      const nic = Object.values(devices).find((d) => d && d.type === 'nic' && (d.network || d.parent));
+      name = nic?.network || nic?.parent || null;
+    } catch { name = null; }
+    if (!name) return { name: null, gateway: null };
+    const addr = await exec('incus', ['network', 'get', name, 'ipv4.address'], { timeoutMs: 20000 });
+    const gateway = (String(addr.stdout || '').trim().split('/')[0]) || null;
+    return { name, gateway: /^\d+\.\d+\.\d+\.\d+$/.test(gateway || '') ? gateway : null };
+  }
+
+  /** How exposed is an address Incus would listen on? */
+  function addressScope(address) {
+    const a = String(address).trim();
+    const host = a.startsWith('[') ? a.slice(1, a.indexOf(']')) : a.split(':').slice(0, -1).join(':') || '';
+    if (!host || host === '0.0.0.0' || host === '::' || host === '*') return 'every interface, including any public one';
+    if (/^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return 'a private address';
+    return 'a specific address (check whether it is public)';
+  }
+
+  /**
+   * Turn the listener on at an address the operator chose. Refuses a
+   * public-facing bind unless it is asked for explicitly: the default is the
+   * Incus bridge gateway, which every guest can reach and nothing outside
+   * the host can.
+   */
+  async function enableIncusListener({ address = null, allowPublic = false, actor = null, ip = null } = {}) {
+    const state = await incusListener();
+    if (state.error) return state;
+    const want = String(address || state.suggested || '').trim();
+    if (!want) return { error: 'no address to listen on: pass one (host:port), or set up the Incus bridge first' };
+    if (!/^(\[[0-9a-fA-F:]+\]|[0-9a-zA-Z.-]*):\d{2,5}$/.test(want)) return { error: `address must be host:port (e.g. ${state.suggested || '10.0.0.1:8443'})` };
+    const scope = addressScope(want);
+    if (scope.startsWith('every interface') && !allowPublic) {
+      return { error: `refused: ${want} listens on ${scope}. A source host on your LAN can use ${state.suggested || 'the bridge gateway'}; pass allow_public: true only if the source really is on the internet, and put the Incus port behind your firewall.` };
+    }
+    if (state.address === want) return { already: true, ...state };
+    const r = await exec('incus', ['config', 'set', 'core.https_address', want], { timeoutMs: 30000 });
+    if (r.status !== 0) return { error: `incus config set core.https_address ${want} failed: ${tail(r.stderr) || `exit ${r.status}`}` };
+    const after = await incusListener();
+    if (after.address !== want) return { error: `Incus did not take the address (it reports ${after.address || 'nothing'})` };
+    try { logAudit(actor, 'MIGRATION_INCUS_LISTENER', 'host', 'core.https_address', { address: want, scope, previous: state.address }, ip); } catch { /* best effort */ }
+    return { ...after, changed: true, previous: state.address, reverse_with: state.address ? `incus config set core.https_address ${state.address}` : 'incus config unset core.https_address' };
+  }
+
+  /** Everything an operator needs before starting a migration. Read-only. */
+  async function preflight() {
+    const [builds, listener, pin] = await Promise.all([agentBinaries(), incusListener(), tlsPin()]);
+    const base = String(publicBaseUrl?.() || publicBaseUrl || '');
+    const checks = [];
+    const add = (id, status, detail, remedy = null) => checks.push({ id, status, detail, remedy });
+
+    const haveBuilds = Object.entries(builds).filter(([, b]) => b?.sha256).map(([a]) => a);
+    add('agent_builds', haveBuilds.length ? 'pass' : 'fail',
+      haveBuilds.length ? `agent built for ${haveBuilds.join(', ')}` : 'no agent build is present, so a source host has nothing to download',
+      haveBuilds.length ? null : 'run scripts/build-migration-agent.sh on this host (install.sh and update.sh do it for you)');
+    add('public_url', base ? 'pass' : 'fail', base ? `sources will be told to call ${base}` : 'no public URL is known, so the pasted command would have nowhere to point',
+      base ? null : 'set PROXYPILOT_PUBLIC_URL, or record the admin domain in settings');
+    add('tls_pin', pin ? 'pass' : 'warn', pin ? `agents will pin ${pin.slice(0, 20)}…` : 'no certificate could be read, so the agent falls back to the system trust store',
+      pin ? null : 'fine on a private network; worth fixing before migrating over the internet');
+    add('incus_listener', listener.listening ? 'pass' : 'warn',
+      listener.listening ? `Incus listens on ${listener.address} (${listener.scope})` : 'Incus does not listen on the network',
+      listener.listening ? null : `a container source can still use rootfs-tar; a physical host or a VM needs incus-migrate, which connects directly — enable it on ${listener.suggested || 'the bridge gateway'}`);
+
+    return {
+      at: nowIso(now()), base_url: base, tls_pin: pin, agent_builds: builds, incus: listener, checks,
+      ready_for: {
+        'rootfs-tar': haveBuilds.length > 0 && !!base,
+        'file-sync': haveBuilds.length > 0 && !!base,
+        'incus-migrate': haveBuilds.length > 0 && !!base && listener.listening,
+      },
+      summary: { pass: checks.filter((c) => c.status === 'pass').length, warn: checks.filter((c) => c.status === 'warn').length, fail: checks.filter((c) => c.status === 'fail').length },
     };
   }
 
@@ -789,6 +895,6 @@ export function createMigrationService({
   return {
     createMigration, authenticate, agentJob, recordManifest, approveTransfer, recordEvent, receiveArtifact,
     importRootfsTar, agentFinish, cancelMigration, setChecklistStep, decideEgress, listMigrations, listEvents,
-    view, rowById, rowByTokenId, agentBinaries, tlsPin, fenceGuest, CHECKLIST,
+    view, rowById, rowByTokenId, agentBinaries, tlsPin, fenceGuest, preflight, incusListener, enableIncusListener, CHECKLIST,
   };
 }

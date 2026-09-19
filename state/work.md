@@ -42,6 +42,8 @@ fingerprint in the token payload. No session cookie, no MCP key.
 | 12 | End-to-end on throwaway guests on the operator's host | done for BOTH modes against a throwaway LXC source (whole-machine -> pp-mig-dst-lxc, application -> pp-mig-dst-app). The VM / incus-migrate path is unverified: it needs `incus config set core.https_address :8443` on the host, an outward-facing change I did not make unasked - handoff.md |
 | 13 | Docs, change record, handoff.md, run-ledger row | done |
 | 14 | Five defects found by RUNNING it, fixed, pinned and re-verified live (LEARNINGS 175, 176, 179, 180/182, 181) | done |
+| 15 | Readiness: `migration_preflight` + `enable_incus_listener` (MCP), `GET /preflight` + `POST /incus-listener` (REST, sudo), the Readiness panel on the page | done — the manual `incus config set core.https_address` step is now a product capability that proposes the bridge gateway and refuses a public bind without being asked |
+| 16 | `incus-migrate` end to end from the throwaway LXC source, with the listener on | in progress |
 
 ## Decisions
 

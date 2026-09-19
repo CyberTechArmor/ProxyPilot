@@ -118,6 +118,23 @@ marked internal and not proposed), the database dump/restore plan, and the
 **concerns** — a blocking concern refuses the approval until it is overridden
 deliberately.
 
+## Readiness
+
+Four things decide whether the command you are about to paste can work, and
+**Migrations → Readiness** reports all four before you paste it:
+
+| Check | Why it blocks |
+|---|---|
+| `agent_builds` | a source host has nothing to download (run `scripts/build-migration-agent.sh`; install.sh and update.sh do) |
+| `public_url` | the pasted command would point nowhere |
+| `tls_pin` | a warning, not a block: without a readable certificate the agent falls back to the system trust store |
+| `incus_listener` | a warning, not a block: only `incus-migrate` needs it — a container source uses `rootfs-tar` |
+
+`ready_for` turns those into the answer an operator actually wants: which of
+the three transports can run right now. The listener is the one check with a
+fix the product can perform, so it has a button (see **Operator
+prerequisites**).
+
 ## The gate
 
 Nothing is copied until a human approves. The agent posts the manifest and
@@ -175,11 +192,15 @@ project's own egress grants — `list_egress_requests` / `approve_egress`.)
 - **REST** `/api/migrations/agent/:token/…` — no session, no cookies,
   CSRF-exempt by design: `install.sh`, `binary/:arch`, `job`, `inventory`,
   `event`, `artifact`, `finish`.
+- **REST** `GET /api/migrations/preflight` (readiness) and
+  `POST /api/migrations/incus-listener` (sudo).
 - **MCP** `create_migration`, `get_migration`, `list_migrations`,
-  `approve_migration`, `migration_cutover`, `cancel_migration` — behind the
+  `approve_migration`, `migration_cutover`, `cancel_migration`,
+  `migration_preflight`, `enable_incus_listener` — behind the
   `mcp.migration` feature flag (the readers stay available when it is off).
-- **Page** Migrations (`pages/Migrations.jsx`): the list, the phase rail and
-  live transfer rate, the inventory review, the checklist and the agent's log.
+- **Page** Migrations (`pages/Migrations.jsx`): readiness, the list, the phase
+  rail and live transfer rate, the inventory review, the checklist and the
+  agent's log.
 - **Tables** `migrations` + `migration_events` (migration 909). The token is
   stored as a sha256 hash only.
 - **Code** `lib/migration/{manifest,plan,token,service,index}.js`,
@@ -188,11 +209,18 @@ project's own egress grants — `list_egress_requests` / `approve_egress`.)
 
 ## Operator prerequisites
 
-- **Whole-machine via incus-migrate** needs Incus listening on the network
-  (`incus config set core.https_address :8443`) — the source connects to it
-  directly. ProxyPilot mints a single-use trust token per migration and
-  revokes it on cancel. Without the listener the job refuses with exactly
-  that instruction rather than half-starting.
+- **Whole-machine via incus-migrate** needs Incus listening on the network —
+  the source connects to it *directly*, not through ProxyPilot. **Migrations →
+  Readiness** says whether it does and turns it on for you
+  (`enable_incus_listener` over MCP, `POST /api/migrations/incus-listener`
+  under sudo). The address it proposes is the **Incus bridge gateway**, which
+  guests and LAN hosts can reach and the internet cannot; a bind on every
+  interface (`:8443`, `0.0.0.0:8443`) is **refused** unless `allow_public`
+  says the source really is out there, and the answer carries the one-line
+  command that reverses it. By hand it is
+  `incus config set core.https_address <addr>:8443`. ProxyPilot mints a
+  single-use trust token per migration and revokes it on cancel. Without the
+  listener the job refuses and says how to fix it rather than half-starting.
 - **The source** needs `curl` and, per transport: `incus-migrate` (the
   `incus-tools` package) or `tar`, plus the database client for a dump.
 - **Application mode** needs nothing in the guest: the copy arrives through

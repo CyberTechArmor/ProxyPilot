@@ -2120,6 +2120,16 @@ export const api = {
       request(`/migrations/${encodeURIComponent(id)}/checklist`, { method: 'POST', body: JSON.stringify({ step, done, ...(note ? { note } : {}) }) }),
     egress: (id, { host, port, decision }) =>
       request(`/migrations/${encodeURIComponent(id)}/egress`, { method: 'POST', body: JSON.stringify({ host, port: port ?? null, decision }) }),
+    // Readiness: the agent builds, the URL a source is told to call, the TLS
+    // pin and whether Incus listens on the network. Read-only.
+    preflight: () => request('/migrations/preflight'),
+    // Turn the Incus listener on. Sudo; the server refuses a bind on every
+    // interface unless allow_public says the source really is on the internet.
+    incusListener: ({ address, allowPublic = false } = {}) =>
+      request('/migrations/incus-listener', {
+        method: 'POST',
+        body: JSON.stringify({ ...(address ? { address } : {}), ...(allowPublic ? { allow_public: true } : {}) }),
+      }),
   },
 
   // Backups → Storage tab. CRUD on S3-compatible destinations + a

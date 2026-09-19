@@ -20,6 +20,7 @@ import { ArrowLeft, ClipboardList, Loader2, MoveRight, Plus, RefreshCw, ScrollTe
 import NewMigrationDialog from '@/components/migration/NewMigrationDialog';
 import InventoryReview from '@/components/migration/InventoryReview';
 import CutoverChecklist from '@/components/migration/CutoverChecklist';
+import MigrationPreflight from '@/components/migration/MigrationPreflight';
 import { BTN, Chip, EmptyState, KV, MigrationStatus, Notice, PhaseRail, TransferBar, fmtDate } from '@/components/migration/shared';
 
 const LIVE = ['created', 'running', 'awaiting_review'];
@@ -204,8 +205,6 @@ export default function Migrations() {
   if (user && user.role !== 'admin') return <Navigate to="/" replace />;
 
   const rows = data?.migrations || [];
-  const builds = data?.agent_builds || {};
-  const missingBuilds = Object.entries(builds).filter(([, b]) => !b?.sha256).map(([a]) => a);
 
   if (openId) return <div className="space-y-4 p-1"><Detail id={openId} onBack={() => { setOpenId(null); load(); }} onChanged={load} /></div>;
 
@@ -224,12 +223,11 @@ export default function Migrations() {
       </div>
 
       {error && <Notice level="error"><p className="break-words">{error}</p></Notice>}
-      {missingBuilds.length > 0 && (
-        <Notice level="warn">
-          <p className="font-medium">No {missingBuilds.join(' / ')} agent build is present</p>
-          <p>A source host on {missingBuilds.join(' or ')} has nothing to download. Run <code className="font-mono">scripts/build-migration-agent.sh</code> on this host — install.sh and update.sh do it for you.</p>
-        </Notice>
-      )}
+
+      {/* Readiness sits above the list: the agent build, the callback URL, the
+          TLS pin and the Incus listener are what decide whether the command
+          you are about to paste on a source host can work at all. */}
+      <MigrationPreflight onChanged={load} />
 
       {loading && !data ? (
         <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground py-12"><Loader2 className="h-4 w-4 animate-spin" />Loading…</div>

@@ -42,6 +42,13 @@ export const MIGRATION_TOOLS = Object.freeze([
   tool('list_migrations', 'Every migration, newest first: mode, transport, status, phase, target guest, transfer progress and checklist progress.',
     { status: { type: 'string', enum: ['created', 'running', 'awaiting_review', 'ready', 'completed', 'failed', 'cancelled'] }, limit: P.limit }),
 
+  tool('migration_preflight',
+    'Can this ProxyPilot take a migration, and which transports are available? Every check with its status and remedy: the cross-built agents and their hashes, the public URL a source will be told to call, the TLS certificate agents pin, and whether Incus listens on the network (which only incus-migrate needs — a container source goes through ProxyPilot). Read-only.', {}),
+
+  tool('enable_incus_listener',
+    'Make the Incus API listen on the network, which is what a whole-machine migration of a physical host or a VM needs: incus-migrate connects to Incus DIRECTLY from the source. The default address is the Incus bridge gateway — reachable by guests and by your LAN, not from the internet. A bind on every interface (":8443") is refused unless allow_public is set, because that is a public port on a public host.',
+    { address: { type: 'string', description: 'host:port. Default: the bridge gateway on 8443.' }, allow_public: { type: 'boolean', description: 'Required to bind every interface.' }, dry_run: P.dry_run, confirm: P.confirm }, ['confirm']),
+
   tool('approve_migration',
     'Approve the transfer after a human has read the inventory. THIS is the gate that lets bytes leave the source. In application mode it also creates the target guest — stopped where it can be, with the default-deny egress fence up and no route. A blocking concern refuses the approval unless override_blocking is set.',
     { id, override_blocking: { type: 'boolean', description: 'Approve despite a blocking concern. Only after reading it.' }, dry_run: P.dry_run, confirm: P.confirm }, ['id', 'confirm']),

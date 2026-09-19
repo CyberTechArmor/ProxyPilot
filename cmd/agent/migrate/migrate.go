@@ -112,8 +112,8 @@ func (a *Agent) run(inventoryOnly bool) error {
 		moved, err = a.RunIncusMigrate(job)
 	case "rootfs-tar":
 		moved, err = a.RunRootfsTar(job)
-	case "rsync":
-		moved, err = a.RunRsync(job)
+	case "file-sync":
+		moved, err = a.RunFileSync(job)
 	default:
 		err = fmt.Errorf("unknown transport %q", job.Transport)
 	}

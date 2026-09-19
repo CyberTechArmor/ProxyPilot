@@ -195,7 +195,7 @@ func (a *Agent) RunRootfsTar(job *Job) (int64, error) {
 	hash := sha256.New()
 	tee := io.TeeReader(stdout, hash)
 	counted := &countingReader{r: tee}
-	uploadErr := a.client.UploadArtifact(counted, "", func(n int64) {
+	uploadErr := a.client.UploadArtifact(counted, "rootfs", "", "", func(n int64) {
 		_ = a.client.Send(Event{Kind: "progress", Phase: "transfer", Bytes: n, Message: fmt.Sprintf("rootfs: %s sent", human(n))})
 	})
 	waitErr := cmd.Wait()
@@ -226,46 +226,35 @@ func (c *countingReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-/* --------------------------------- rsync -------------------------------- */
+/* ------------------------------- file sync ------------------------------- */
 
-var rsyncTotalRe = regexp.MustCompile(`([\d,]+)\s+\d+%`)
-
-// RunRsync copies the application directories into the new guest and then
-// moves the database logically. The env VALUES are not touched: the
-// operator types them into ProxyPilot, which is the whole point of carrying
-// only key names in the manifest.
-func (a *Agent) RunRsync(job *Job) (int64, error) {
-	if job.Rsync == nil {
-		return 0, errors.New("the server did not supply an rsync target")
+// RunFileSync copies the application directories and the database into the
+// new guest — through ProxyPilot, not through the guest.
+//
+// The brief said rsync. rsync would need a reachable sshd and an authorized
+// key inside the target guest: a package and an open port ProxyPilot would be
+// ADDING to a guest that did not ask for either, when `incus exec` already
+// reaches it from the host. So each directory is tarred and PUT to the same
+// artifact endpoint the rootfs path uses, and ProxyPilot unpacks it into the
+// guest. The final delta sync keeps its meaning: on the second pass the
+// server sets `since`, and tar carries only what changed after it.
+func (a *Agent) RunFileSync(job *Job) (int64, error) {
+	if job.Sync == nil {
+		return 0, errors.New("the server did not supply the directories to copy")
 	}
-	if _, err := exec.LookPath("rsync"); err != nil {
-		return 0, errors.New("rsync is not installed on this source (apt install rsync)")
+	if _, err := exec.LookPath("tar"); err != nil {
+		return 0, errors.New("tar is not installed on this source")
 	}
 	var total int64
-	ssh := fmt.Sprintf("ssh -p %d -o StrictHostKeyChecking=accept-new -o BatchMode=yes", pick(job.Rsync.Port, 22))
-	for _, dir := range job.Rsync.Dirs {
-		args := []string{"-aHAX", "--delete", "--numeric-ids", "--info=progress2", "-e", ssh}
-		for _, ex := range job.Rsync.Excludes {
-			args = append(args, "--exclude", ex)
-		}
-		// A trailing slash on the source copies the CONTENTS; without it
-		// rsync nests the directory inside itself on a second run.
-		args = append(args, strings.TrimRight(dir, "/")+"/", fmt.Sprintf("%s@%s:%s/", pickStr(job.Rsync.User, "root"), job.Rsync.Host, strings.TrimRight(dir, "/")))
-		a.client.Log("rsync %s → %s:%s", dir, job.Rsync.Host, dir)
-		n, err := a.streamCommand("rsync", args, func(line string) int64 {
-			if m := rsyncTotalRe.FindStringSubmatch(line); m != nil {
-				v, _ := strconv.ParseInt(strings.ReplaceAll(m[1], ",", ""), 10, 64)
-				return v
-			}
-			return 0
-		})
+	for _, dir := range job.Sync.Dirs {
+		n, err := a.sendDirectory(dir, job.Sync.Excludes, job.Sync.Since)
 		if err != nil {
-			return total, fmt.Errorf("rsync of %s failed: %w", dir, err)
+			return total, err
 		}
 		total += n
 	}
-	if job.Rsync.Database != "" && job.Rsync.Database != "none" {
-		n, err := a.moveDatabase(job)
+	if job.Sync.Database != "" && job.Sync.Database != "none" {
+		n, err := a.sendDatabase(job.Sync.Database)
 		if err != nil {
 			return total, err
 		}
@@ -274,12 +263,68 @@ func (a *Agent) RunRsync(job *Job) (int64, error) {
 	return total, nil
 }
 
-// moveDatabase dumps on the source and restores inside the guest, over the
-// same SSH channel — the dump never lands on either disk.
-func (a *Agent) moveDatabase(job *Job) (int64, error) {
-	host := fmt.Sprintf("%s@%s", pickStr(job.Rsync.User, "root"), job.Rsync.Host)
-	sshArgs := []string{"-p", strconv.Itoa(pick(job.Rsync.Port, 22)), "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes", host}
-	switch job.Rsync.Database {
+// sendDirectory tars one directory (absolute paths preserved) straight into
+// the upload, so nothing is staged on a source that may be short of disk.
+func (a *Agent) sendDirectory(dir string, excludes []string, since string) (int64, error) {
+	// Tar from / with the path RELATIVE to /, so the member names are
+	// `srv/myapp/…` and an extract with `-C /` in the guest puts the tree
+	// back where it came from. Tarring from the parent would name the
+	// members `myapp/…` and restore the app to /myapp.
+	base := strings.TrimPrefix(strings.TrimRight(dir, "/"), "/")
+	if base == "" {
+		return 0, errors.New("refusing to copy / as an application directory")
+	}
+	args := []string{"-czf", "-", "-C", "/", "--warning=no-file-changed", "--warning=no-file-ignored"}
+	for _, e := range excludes {
+		args = append(args, "--exclude="+e)
+	}
+	if since != "" {
+		// The delta pass. tar takes an ISO date directly; a source whose tar
+		// refuses it fails loudly here rather than silently copying nothing.
+		args = append(args, "--newer-mtime="+since)
+	}
+	args = append(args, base)
+
+	cmd := exec.Command("tar", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return 0, err
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	if since != "" {
+		a.client.Log("delta pass: %s (only files changed since %s)", dir, since)
+	} else {
+		a.client.Log("copying %s", dir)
+	}
+	counted := &countingReader{r: stdout}
+	upErr := a.client.UploadArtifact(counted, "dir", dir, "", func(n int64) {
+		_ = a.client.Send(Event{Kind: "progress", Phase: "transfer", Bytes: n, Message: fmt.Sprintf("%s: %s sent", dir, human(n))})
+	})
+	waitErr := cmd.Wait()
+	if upErr != nil {
+		return counted.n, fmt.Errorf("uploading %s: %w", dir, upErr)
+	}
+	if waitErr != nil {
+		var ee *exec.ExitError
+		if errors.As(waitErr, &ee) && ee.ExitCode() == 1 {
+			a.client.Log("tar reported files that changed while being read (normal on a running app): %s", tailStr(stderr.String(), 200))
+		} else {
+			return counted.n, fmt.Errorf("tar of %s failed: %w: %s", dir, waitErr, tailStr(stderr.String(), 300))
+		}
+	}
+	a.client.Log("%s copied (%s)", dir, human(counted.n))
+	return counted.n, nil
+}
+
+// sendDatabase dumps logically and streams the dump to ProxyPilot, which
+// restores it with the guest's own engine. The dump never lands on a disk at
+// either end.
+func (a *Agent) sendDatabase(engine string) (int64, error) {
+	switch engine {
 	case "postgres":
 		dbs := a.postgresDatabases()
 		if len(dbs) == 0 {
@@ -287,11 +332,10 @@ func (a *Agent) moveDatabase(job *Job) (int64, error) {
 		}
 		var total int64
 		for _, db := range dbs {
-			a.client.Log("dumping postgres database %s into the guest", db)
-			n, err := a.pipeThroughSSH(
+			a.client.Log("dumping postgres database %s", db)
+			n, err := a.streamToArtifact(
 				exec.Command("su", "-s", "/bin/sh", "-c", shellJoin([]string{"pg_dump", "--format=custom", "--no-owner", "--no-acl", db}), "postgres"),
-				append(sshArgs, shellJoin([]string{"sh", "-c", fmt.Sprintf("createdb -U postgres %s 2>/dev/null; pg_restore -U postgres --no-owner --no-acl -d %s", db, db)})),
-			)
+				"dbdump", "postgres:"+db)
 			if err != nil {
 				return total, fmt.Errorf("postgres %s: %w", db, err)
 			}
@@ -299,41 +343,35 @@ func (a *Agent) moveDatabase(job *Job) (int64, error) {
 		}
 		return total, nil
 	case "mysql":
-		a.client.Log("dumping every MySQL database into the guest")
-		return a.pipeThroughSSH(
-			exec.Command("mysqldump", "--single-transaction", "--routines", "--triggers", "--all-databases"),
-			append(sshArgs, "mysql"),
-		)
+		a.client.Log("dumping every MySQL database")
+		return a.streamToArtifact(exec.Command("mysqldump", "--single-transaction", "--routines", "--triggers", "--all-databases"), "dbdump", "mysql:all")
 	case "sqlite":
 		a.client.Log("sqlite travels with the application directory — nothing separate to dump")
 		return 0, nil
 	}
-	return 0, fmt.Errorf("unknown database engine %q", job.Rsync.Database)
+	return 0, fmt.Errorf("unknown database engine %q", engine)
 }
 
-// pipeThroughSSH runs `dump | ssh host restore` without a temporary file.
-func (a *Agent) pipeThroughSSH(dump *exec.Cmd, sshArgs []string) (int64, error) {
-	ssh := exec.Command("ssh", sshArgs...)
-	pr, pw := io.Pipe()
-	counted := &countingReader{r: pr}
-	dump.Stdout = pw
-	ssh.Stdin = counted
-	var dumpErr, sshErr strings.Builder
-	dump.Stderr = &dumpErr
-	ssh.Stderr = &sshErr
-	if err := ssh.Start(); err != nil {
+func (a *Agent) streamToArtifact(cmd *exec.Cmd, kind, name string) (int64, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
 		return 0, err
 	}
-	if err := dump.Start(); err != nil {
-		_ = pw.CloseWithError(err)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
-	go func() {
-		err := dump.Wait()
-		_ = pw.CloseWithError(err)
-	}()
-	if err := ssh.Wait(); err != nil {
-		return counted.n, fmt.Errorf("%w: %s%s", err, tailStr(dumpErr.String(), 200), tailStr(sshErr.String(), 200))
+	counted := &countingReader{r: stdout}
+	upErr := a.client.UploadArtifact(counted, kind, name, "", func(n int64) {
+		_ = a.client.Send(Event{Kind: "progress", Phase: "transfer", Bytes: n, Message: fmt.Sprintf("%s: %s sent", name, human(n))})
+	})
+	waitErr := cmd.Wait()
+	if upErr != nil {
+		return counted.n, upErr
+	}
+	if waitErr != nil {
+		return counted.n, fmt.Errorf("%w: %s", waitErr, tailStr(stderr.String(), 300))
 	}
 	return counted.n, nil
 }
@@ -350,60 +388,6 @@ func (a *Agent) postgresDatabases() []string {
 		}
 	}
 	return dbs
-}
-
-// streamCommand runs a command, forwards every line as a log event, and
-// reports the largest byte count any line yielded.
-func (a *Agent) streamCommand(name string, args []string, bytesOf func(string) int64) (int64, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return 0, err
-	}
-	cmd.Stderr = cmd.Stdout
-	if err := cmd.Start(); err != nil {
-		return 0, err
-	}
-	var max int64
-	var lastSent time.Time
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	// rsync's progress2 rewrites one line with \r; split on both.
-	sc.Split(scanLinesCR)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		if b := bytesOf(line); b > 0 {
-			if b > max {
-				max = b
-			}
-			if time.Since(lastSent) > 5*time.Second {
-				lastSent = time.Now()
-				_ = a.client.Send(Event{Kind: "progress", Phase: "transfer", Bytes: max, Message: line})
-			}
-			continue
-		}
-		a.client.Log("%s", line)
-	}
-	return max, cmd.Wait()
-}
-
-func scanLinesCR(data []byte, atEOF bool) (int, []byte, error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
-	for i, b := range data {
-		if b == '\n' || b == '\r' {
-			return i + 1, data[:i], nil
-		}
-	}
-	if atEOF {
-		return len(data), data, nil
-	}
-	return 0, nil, nil
 }
 
 /* -------------------------------- freezing ------------------------------ */
@@ -432,13 +416,6 @@ func (a *Agent) FreezeSource(unit string, mode string) error {
 
 func pick(v, def int) int {
 	if v > 0 {
-		return v
-	}
-	return def
-}
-
-func pickStr(v, def string) string {
-	if v != "" {
 		return v
 	}
 	return def

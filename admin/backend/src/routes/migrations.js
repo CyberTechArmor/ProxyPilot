@@ -113,14 +113,24 @@ migrationAgentRouter.post('/:token/event', wrap(async (req, res) => {
   res.json(a.svc.recordEvent(a.row, body.data));
 }));
 
-/** The rootfs tarball (Proxmox-LXC path), streamed. Nothing is executed from it. */
+/**
+ * An artifact, streamed: the rootfs tarball (whole-machine on a nested LXC),
+ * one application directory, or a database dump. Nothing is ever executed
+ * from one — a tarball is fed to tar, a dump to the guest's own engine.
+ */
 migrationAgentRouter.put('/:token/artifact', wrap(async (req, res) => {
   const a = agentAuth(req, res); if (!a) return;
-  if (a.row.transport !== 'rootfs-tar') return res.status(409).json({ error: `this migration transports with ${a.row.transport}; it accepts no artifact upload` });
+  const kind = ['rootfs', 'dir', 'dbdump'].includes(String(req.query.kind || 'rootfs')) ? String(req.query.kind || 'rootfs') : null;
+  if (!kind) return res.status(400).json({ error: 'kind must be rootfs, dir or dbdump' });
+  const allowed = a.row.transport === 'rootfs-tar' ? ['rootfs'] : a.row.transport === 'file-sync' ? ['dir', 'dbdump'] : [];
+  if (!allowed.includes(kind)) return res.status(409).json({ error: `this migration transports with ${a.row.transport}; it accepts no ${kind} upload` });
   const expected = String(req.get('x-content-sha256') || '').toLowerCase() || null;
-  const r = await a.svc.receiveArtifact(a.row, req, { expectedSha256: expected && /^[0-9a-f]{64}$/.test(expected) ? expected : null });
+  const r = await a.svc.receiveArtifact(a.row, req, {
+    expectedSha256: expected && /^[0-9a-f]{64}$/.test(expected) ? expected : null,
+    kind, name: req.query.name ? String(req.query.name).slice(0, 128) : null,
+  });
   if (r.error) return res.status(422).json({ error: r.error });
-  res.json({ received: true, bytes: r.bytes, sha256: r.sha256 });
+  res.json({ received: true, bytes: r.bytes, sha256: r.sha256, kind: r.kind });
 }));
 
 migrationAgentRouter.post('/:token/finish', wrap(async (req, res) => {
@@ -140,7 +150,7 @@ const CreateBody = z.object({
   mode: z.enum(['whole-machine', 'application']),
   name: z.string().min(1).max(63),
   type: z.enum(['container', 'virtual-machine']).optional(),
-  transport: z.enum(['incus-migrate', 'rootfs-tar', 'rsync']).optional(),
+  transport: z.enum(['incus-migrate', 'rootfs-tar', 'file-sync']).optional(),
   source_kind: z.string().max(32).optional(),
   source_label: z.string().max(200).optional(),
   cpu: z.number().int().optional(),

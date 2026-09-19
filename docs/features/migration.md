@@ -13,7 +13,8 @@ source host ──(1) curl …/install.sh | sudo sh ─────────�
         │                                              (the operator reviews and approves)
         └──(4) incus-migrate ───────────────────────►  Incus            (whole-machine)
             or  tar rootfs ────────────────────────►  PUT …/artifact   (Proxmox LXC)
-            or  rsync + pg_dump ───────────────────►  the new guest     (application)
+            or  tar + pg_dump ─────────────────────►  PUT …/artifact   (application)
+                                                     └─► incus exec → the new guest
 ```
 
 ## The two modes
@@ -21,7 +22,7 @@ source host ──(1) curl …/install.sh | sudo sh ─────────�
 | | whole-machine | application (adopt) |
 |---|---|---|
 | The source | is the thing being moved | keeps running |
-| Transport | `incus-migrate` (physical, VM, LXC) or a rootfs tarball (Proxmox LXC) | `rsync` + a logical database dump |
+| Transport | `incus-migrate` (physical, VM, LXC) or a rootfs tarball (Proxmox LXC) | tarballs through ProxyPilot + a logical database dump |
 | The guest | arrives by being streamed into Incus | is created first, from a base image |
 | Good for | lift-and-shift, including a stack you do not want to unpick | turning an old server into a ProxyPilot-shaped guest |
 
@@ -31,7 +32,22 @@ source host ──(1) curl …/install.sh | sudo sh ─────────�
 rootfs lives on) — those take `rootfs-tar`, which tars the rootfs, streams it
 to ProxyPilot, and imports it as a split image (`incus image import
 metadata.tar.xz rootfs.tar.gz`). ProxyPilot supplies the metadata the agent
-cannot know.
+cannot know. Application mode uses `file-sync`.
+
+### Why application mode is not rsync
+
+The brief asked for rsync. rsync needs a reachable `sshd` and an authorized
+key inside the target guest — a package and an open port ProxyPilot would be
+**adding** to a guest that asked for neither, when `incus exec` already
+reaches it from the host. So each application directory is tarred on the
+source, PUT to the same artifact endpoint the rootfs path uses, and unpacked
+into the guest by ProxyPilot; the database dump travels the same way and is
+restored by the guest's own engine. The agent ends up talking to exactly one
+place, and the guest needs nothing installed in it.
+
+The **final delta sync** keeps its meaning: on the second pass the server
+sets `since`, and tar carries only what changed after it
+(`--newer-mtime`).
 
 ## The one line
 
@@ -159,9 +175,10 @@ The migration is `completed` when every required step is marked.
   revokes it on cancel. Without the listener the job refuses with exactly
   that instruction rather than half-starting.
 - **The source** needs `curl` and, per transport: `incus-migrate` (the
-  `incus-tools` package), `tar`, or `rsync` + the database client.
-- **Application mode** pushes over SSH into the new guest; the guest must
-  accept the host's key.
+  `incus-tools` package) or `tar`, plus the database client for a dump.
+- **Application mode** needs nothing in the guest: the copy arrives through
+  `incus exec`. The guest does need the database engine installed if a dump
+  is being restored into it (the restore says so plainly when it is missing).
 
 ## Things this deliberately does not do
 

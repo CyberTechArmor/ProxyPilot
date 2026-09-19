@@ -244,12 +244,12 @@ const SYSTEM_DBS = Object.freeze({
   mysql: ['mysql', 'information_schema', 'performance_schema', 'sys'],
 });
 
-/** Directories the application lives in, biggest first — what rsync will carry. */
+/** Directories the application lives in, biggest first — what the copy will carry. */
 export function appDirectories(manifest) {
   return [...(manifest.app_dirs || [])].sort((a, b) => (b.size_bytes || 0) - (a.size_bytes || 0));
 }
 
-/** The rsync excludes every adopt run starts from (the operator can add more). */
+/** The exclude set every adopt run starts from (the operator can add more). */
 export const DEFAULT_RSYNC_EXCLUDES = Object.freeze([
   '.git/', 'node_modules/', 'vendor/', '.venv/', 'venv/', '__pycache__/', '*.pyc',
   '.next/cache/', '.nuxt/', 'dist/cache/', '.cache/', '.parcel-cache/',

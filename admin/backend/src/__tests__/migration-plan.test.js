@@ -21,10 +21,10 @@ test('validateTarget: the transport follows from the mode and the source, and ev
   assert.equal(validateTarget({ mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' }).spec.transport, 'rootfs-tar');
   assert.equal(validateTarget({ mode: 'whole-machine', name: 'web', source_kind: 'lxc' }).spec.transport, 'rootfs-tar');
   assert.equal(validateTarget({ mode: 'whole-machine', name: 'web', source_kind: 'physical' }).spec.transport, 'incus-migrate');
-  // application is always rsync, and a caller cannot mix them up.
-  assert.equal(validateTarget({ mode: 'application', name: 'web', app_dirs: ['/srv/a'] }).spec.transport, 'rsync');
-  assert.match(validateTarget({ mode: 'application', name: 'web', transport: 'incus-migrate' }).error, /always transports with rsync/);
-  assert.match(validateTarget({ mode: 'whole-machine', name: 'web', transport: 'rsync' }).error, /incus-migrate, or rootfs-tar/);
+  // application is always file-sync, and a caller cannot mix them up.
+  assert.equal(validateTarget({ mode: 'application', name: 'web', app_dirs: ['/srv/a'] }).spec.transport, 'file-sync');
+  assert.match(validateTarget({ mode: 'application', name: 'web', transport: 'incus-migrate' }).error, /always transports with file-sync/);
+  assert.match(validateTarget({ mode: 'whole-machine', name: 'web', transport: 'file-sync' }).error, /incus-migrate, or rootfs-tar/);
   assert.match(validateTarget({ mode: 'whole-machine', name: 'web', type: 'virtual-machine', transport: 'rootfs-tar', disk_gb: 40 }).error, /rootfs-tar imports a container/);
 
   // A VM needs a disk up front — the disk is created before the stream starts.

@@ -187,22 +187,20 @@ import → guest). What is untested is the Proxmox-specific texture:
   will try to mount things that do not exist in the guest. Look at the
   manifest's `mounts` before starting the imported guest.
 
-## Throwaway guests still on the host
+## The throwaway guests are gone
 
-All stopped, none deleted, in case you want to look at them:
+All five (`pp-mig-src-lxc`, `pp-mig-dst-lxc`, `pp-mig-dst-app`,
+`pp-mig-im-lxc`, `pp-mig-im2`) were removed on the host at ~22:28 on
+2026-09-19 — the migrations were cancelled from the dashboard and the guests
+deleted with `incus delete` directly, so there is no `LXC_DELETE` in the audit
+log and nothing of theirs is left in Incus.
 
-- `pp-mig-src-lxc` — the sample source (its `.env` holds a FAKE secret; it also
-  carries the `/opt/app/mig2*.sh` scripts used to drive the tests)
-- `pp-mig-dst-lxc` — the whole-machine (`rootfs-tar`) result
-- `pp-mig-dst-app` — the application-mode (`file-sync`) result
-- `pp-mig-im-lxc` — the `incus-migrate` result that proved the app and data
-- `pp-mig-im2` — the `incus-migrate` result that proved the byte counter
-
-Migrations 1–6 in the Migrations page are those runs (3 and 4 are the two
-failures, kept deliberately: their event logs are the evidence). To remove a
-guest: snapshot it (the delete guard requires one) and `delete_lxc_container`,
-or say the word and I will. Both throwaway MCP keys minted to drive the tests
-are revoked, which also makes the token inside those copied scripts inert.
+Migrations 1–6 are still in the table, now pointing at guests that do not
+exist. **Clean up** on each removes the record and its event log (it reports
+the guest as already gone rather than failing); 3 and 4 are the two
+`incus-migrate` failures whose event logs are the evidence for LEARNINGS 183
+and the prompt-rule design, so they are worth reading before they go. Both
+throwaway MCP keys are revoked.
 
 ## Where the parts are
 

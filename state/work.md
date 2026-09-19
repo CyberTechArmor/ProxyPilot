@@ -45,6 +45,8 @@ fingerprint in the token payload. No session cookie, no MCP key.
 | 15 | Readiness: `migration_preflight` + `enable_incus_listener` (MCP), `GET /preflight` + `POST /incus-listener` (REST, sudo), the Readiness panel on the page | done — the manual `incus config set core.https_address` step is now a product capability that proposes the bridge gateway and refuses a public bind without being asked |
 | 16 | `incus-migrate` end to end from the throwaway LXC source, with the listener on | done — `Instance pp-mig-im2 successfully created`, 434.7 MiB moved, guest fenced and stopped; the migrated app serves its own vhost and all four rows survived. Three defects found by running it (LEARNINGS 183, 184, 185), all fixed, pinned and re-verified |
 | 17 | All three transports now proven on real hardware; only a VM source, a real Proxmox host and arm64 remain unverified (handoff) | done |
+| 18 | Token lifecycle: no clock by default, revocable, every token listed with its state (migration 910, `list_migration_tokens`, `revoke_migration_token`, the Agent tokens panel) | done |
+| 19 | `cleanup_migration` + the Clean up button: delete the guest a finished migration created, its record, or both — refusing a live migration, an adopted guest, a published one, and an unreadable route table | done |
 
 ## Decisions
 

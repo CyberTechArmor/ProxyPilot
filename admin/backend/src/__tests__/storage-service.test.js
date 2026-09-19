@@ -62,6 +62,36 @@ test('service: plan → token → apply runs the exact argv; missing / stale tok
   assert.equal(audit.at(-1)[1], 'STORAGE_ZFS_SNAPSHOT');
 });
 
+test('a missing binary refuses BEFORE the plan exists: create_zpool never wipes a disk it cannot then make a pool on', async () => {
+  // The host has no ZFS yet. The old behaviour handed out a plan whose step 1
+  // was `wipefs -a` and whose step 2 was `zpool create`: apply blanked the
+  // disk and then failed. A missing tool is now a refusal.
+  const { host, svc, db } = setup();
+  host.hasBinary = async (bin) => bin !== 'zpool';
+  const p = await svc.plan('create_zpool', { name: 'p1', devices: [SDC] });
+  assert.equal(p.plan, undefined);
+  assert.match(p.error, /zpool is not installed/);
+  assert.match(p.error, /install-storage\.sh/);
+  assert.match(p.error, /Nothing was touched/);
+  assert.equal(host.calls.length, 0, 'not a single command ran');
+
+  // apply re-plans, so it is refused on the same grounds and never wipes.
+  const r = await svc.apply('create_zpool', { name: 'p1', devices: [SDC] }, { confirm: true, plan_token: 'a'.repeat(64) });
+  assert.equal(r.refused, true);
+  assert.match(r.error, /zpool is not installed/);
+  assert.ok(!host.calls.some((c) => c.argv[0] === 'wipefs'), 'the disk was never wiped');
+  assert.equal(db.ops.at(-1)[7], 'refused');
+
+  // the zfs-only verbs are refused on their own binary, and incus verbs on theirs
+  host.hasBinary = async (bin) => bin !== 'zfs';
+  assert.match((await svc.plan('zfs_snapshot', { dataset: 'tank/exports' })).error, /zfs is not installed/);
+  host.hasBinary = async (bin) => bin !== 'incus';
+  assert.match((await svc.plan('move_guest_storage', { guests: ['pp-legacy'], pool: 'zfs', stop: true })).error, /incus is not installed/);
+  // with everything present the plan is produced as before
+  host.hasBinary = async () => true;
+  assert.ok((await svc.plan('create_zpool', { name: 'p1', devices: [SDC] })).plan);
+});
+
 test('service: {{stamp}} is substituted at apply time, a failing step stops the plan and reports it, ignore_failure steps continue', async () => {
   const { host, svc } = setup({ script: (argv) => (argv[0] === 'zpool' && argv[1] === 'labelclear' ? { status: 1, stderr: 'no labels' } : argv[0] === 'wipefs' ? { status: 2, stderr: 'wipefs: sdd busy' } : null) });
   const p = await svc.plan('destroy_dataset', { dataset: 'tank/exports' });

@@ -224,6 +224,25 @@ The install is refused when a blocking check fails, when an update or install
 is already running, and when nothing is missing unless `force` is set.
 `dry_run: true` reports what would be installed without requesting anything.
 
+### What the installer has to work around
+
+Neither distribution ships ZFS in a component that is enabled by default:
+Debian keeps it in `contrib`, Ubuntu in `universe`. On a stock host
+`apt-cache policy zfsutils-linux` reports no installation candidate and an
+install would die at the first `apt-get` with *"Package 'zfsutils-linux' has
+no installation candidate"*. The preflight checks the candidate up front and
+says which component is missing; the installer then enables it by adding the
+component to the **existing** apt stanza, keeping a `.proxypilot.bak` beside
+it, so the archive URI and signing key stay exactly as the operator has them.
+`deb-src` lines are left alone and a second run changes nothing.
+
+On Debian there is also no in-tree module: `zfs-dkms` builds it against the
+running kernel, so the installer adds the matching `linux-headers` package and
+the build takes a few minutes. If the module still will not load afterwards,
+the installer finishes the units and helpers and exits 3 saying a reboot is
+likely needed, rather than reporting success. Its other distinct exits are 4
+for a package that cannot be made available and 5 for a failed `apt-get`.
+
 ## Host preparation by hand
 
 The dashboard path above is the normal route. The same script can be run

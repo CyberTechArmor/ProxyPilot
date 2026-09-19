@@ -152,6 +152,15 @@ export function deviceRisks({ devices = [], fstab = [], mdstat = [], raid = {}, 
 /* ---------------------------- install preflight --------------------------- */
 
 export const REQUIRED_PACKAGES = Object.freeze(['zfsutils-linux', 'smartmontools', 'sanoid']);
+/** The component each distribution keeps ZFS in, which is not enabled by default. */
+export const ZFS_COMPONENT = Object.freeze({ debian: 'contrib', ubuntu: 'universe' });
+
+/** `apt-cache policy <pkg>` → the candidate version, or null when there is none. */
+export function parseAptCandidate(text) {
+  const m = String(text || '').match(/^\s*Candidate:\s*(\S+)/m);
+  if (!m || m[1] === '(none)') return null;
+  return m[1];
+}
 export const SUPPORTED_DISTROS = Object.freeze(['debian', 'ubuntu']);
 
 /** /etc/os-release → { id, id_like, version_id, pretty_name }. */
@@ -172,9 +181,10 @@ export function parseOsRelease(text) {
  *   agent      bool
  *   apt        bool
  */
-export function installPreflight({ toolchain = {}, os = {}, runner = {}, agent = false, apt = false } = {}) {
+export function installPreflight({ toolchain = {}, os = {}, runner = {}, agent = false, apt = false, zfsCandidate = undefined } = {}) {
   const checks = [];
   const distroOk = SUPPORTED_DISTROS.includes(os.id) || SUPPORTED_DISTROS.some((d) => (os.id_like || '').includes(d));
+  const component = ZFS_COMPONENT[os.id] || (String(os.id_like || '').includes('ubuntu') ? 'universe' : String(os.id_like || '').includes('debian') ? 'contrib' : null);
 
   checks.push(apt
     ? check('platform.apt', 'apt is available', PASS, 'apt-get found on the host')
@@ -197,6 +207,22 @@ export function installPreflight({ toolchain = {}, os = {}, runner = {}, agent =
     ? check('platform.script', 'Installer script present', PASS, `${runner.source_dir || 'the recorded checkout'}/scripts/install-storage.sh`)
     : check('platform.script', 'Installer script present', FAIL, runner.source_dir ? `scripts/install-storage.sh not found under ${runner.source_dir}` : 'no ProxyPilot checkout is recorded',
       'Update ProxyPilot so the checkout carries scripts/install-storage.sh, then re-run the preflight.', true));
+
+  // Neither distribution ships ZFS in its default component: Debian keeps it in
+  // contrib, Ubuntu in universe. Without it apt reports no installation
+  // candidate and the install dies before it starts, which is a check, not a
+  // surprise. `undefined` means it was not looked up, e.g. apt is absent.
+  if (zfsCandidate !== undefined) {
+    if (zfsCandidate) {
+      checks.push(check('packages.candidate', 'ZFS packages available', PASS, `apt offers zfsutils-linux ${zfsCandidate}`));
+    } else if (component) {
+      checks.push(check('packages.candidate', 'ZFS packages available', WARN, `apt has no installation candidate for zfsutils-linux; ZFS is in the '${component}' component on ${os.id || 'this distribution'}`,
+        `The installer enables '${component}' for you, adding it to the existing apt source and keeping a backup. Nothing else in your sources changes.`));
+    } else {
+      checks.push(check('packages.candidate', 'ZFS packages available', FAIL, 'apt has no installation candidate for zfsutils-linux, and this is not a Debian or Ubuntu host',
+        'Install the ZFS user tools with this distribution\'s package manager, then re-run the preflight.', true));
+    }
+  }
 
   const zfsReady = !!toolchain.zpool && !!toolchain.zfs;
   checks.push(zfsReady
@@ -252,6 +278,8 @@ export function installPreflight({ toolchain = {}, os = {}, runner = {}, agent =
     missing_packages: missing,
     reinstall_only: missing.length === 0 && needed,
     module_loaded: moduleLoaded,
+    zfs_candidate: zfsCandidate === undefined ? null : zfsCandidate,
+    component_to_enable: zfsCandidate === undefined || zfsCandidate ? null : component,
     script: 'scripts/install-storage.sh',
   };
 }

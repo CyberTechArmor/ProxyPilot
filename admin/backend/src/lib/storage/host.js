@@ -11,7 +11,7 @@
 // scanning). Mutations always run through runHostCapture: the agent unit is
 // unprivileged by design.
 
-import { parseFstab, parseMdstat, parseEfiBootEntries, parseOsRelease, hasRaidSuperblock, deviceRisks } from './preflight.js';
+import { parseFstab, parseMdstat, parseEfiBootEntries, parseOsRelease, hasRaidSuperblock, deviceRisks, parseAptCandidate } from './preflight.js';
 import {
   LSBLK_COLUMNS, ZPOOL_LIST_COLUMNS, ZFS_LIST_COLUMNS, ZFS_SNAPSHOT_COLUMNS,
   parseLsblk, parseSmartctl, parseFindmnt, parseByIdMap, parseZpoolList, parseZpoolStatus, parseZpoolStatusJson, parseZpoolImport,
@@ -294,6 +294,17 @@ export function createStorageHost({ runHostCapture, agentCall = null, useAgent =
     try { await agentCall('agent.ping', {}, { timeoutMs: 5000 }); agentKnown = true; return true; } catch { return false; }
   }
 
+  /**
+   * Does apt offer this package at all? On Debian and Ubuntu the ZFS packages
+   * live in a component that is not enabled by default, so the answer is no on
+   * a stock host and the install would die at the first apt-get.
+   */
+  async function aptCandidate(pkg) {
+    const r = await exec(['apt-cache', 'policy', pkg], { timeoutMs: 20000 });
+    if (r.status !== 0) return null;
+    return parseAptCandidate(r.stdout);
+  }
+
   async function osRelease() {
     return parseOsRelease(await readFile('/etc/os-release', { maxBytes: 16 * 1024 }) || '');
   }
@@ -313,7 +324,7 @@ export function createStorageHost({ runHostCapture, agentCall = null, useAgent =
 
   return {
     exec, sh, hasBinary, listDisks, pools, datasets, zfsSnapshots, zpoolImportScan, smartFor,
-    safetyFacts, risksFor, osRelease, runnerState, agentPing,
+    safetyFacts, risksFor, osRelease, runnerState, agentPing, aptCandidate,
     incusStoragePools, incusInstances, incusDefaultProfileRoot, incusSnapshotForm,
     readFile, listDir, unitState, toolchain, agentReachable: () => agentKnown,
   };

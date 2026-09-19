@@ -1,7 +1,9 @@
-# ZFS storage management — unit tests, the host agent's Go tests, and the
-# loop-device integration test (4 × 512 MB files → losetup → real zpool/zfs/
-# sanoid/syncoid through lib/storage/service.js). No real device is touched.
-name: Storage (ZFS) tests
+# ZFS storage management and the migration agent — unit tests, the host
+# agent's Go tests (both the RPC methods and the migration collectors), and
+# the loop-device integration test (4 × 512 MB files → losetup → real
+# zpool/zfs/sanoid/syncoid through lib/storage/service.js). No real device is
+# touched, and no migration is ever run against a host from CI.
+name: Storage (ZFS) and migration tests
 
 on:
   push:
@@ -13,6 +15,11 @@ on:
       - 'admin/backend/src/lib/mcp-ext/catalog/storage.js'
       - 'admin/backend/src/__tests__/storage-*.test.js'
       - 'admin/backend/src/__tests__/fixtures/storage/**'
+      - 'admin/backend/src/lib/migration/**'
+      - 'admin/backend/src/routes/migrations.js'
+      - 'admin/backend/src/routes/mcp-tools/migration.js'
+      - 'admin/backend/src/lib/mcp-ext/catalog/migration.js'
+      - 'admin/backend/src/__tests__/migration-*.test.js'
       - 'cmd/agent/**'
       - 'scripts/storage-*.sh'
       - 'scripts/install-storage.sh'
@@ -25,13 +32,16 @@ on:
       - 'admin/backend/src/routes/storage.js'
       - 'admin/backend/src/routes/mcp-tools/storage.js'
       - 'admin/backend/src/__tests__/storage-*.test.js'
+      - 'admin/backend/src/lib/migration/**'
+      - 'admin/backend/src/__tests__/migration-*.test.js'
       - 'cmd/agent/**'
       - 'scripts/storage-*.sh'
+      - 'scripts/build-migration-agent.sh'
   workflow_dispatch:
 
 jobs:
   unit:
-    name: Backend unit tests (storage + MCP)
+    name: Backend unit tests (storage, migration, MCP)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +51,9 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: admin/backend
       - run: node --test src/__tests__/storage-parse.test.js src/__tests__/storage-planner.test.js src/__tests__/storage-policy.test.js src/__tests__/storage-service.test.js src/__tests__/storage-replicate.test.js src/__tests__/storage-preflight.test.js src/__tests__/storage-install-script.test.js src/__tests__/mcp-extended.test.js
+        working-directory: admin/backend
+      - name: Migration (manifest, plan, token, service, agent routes)
+        run: node --test src/__tests__/migration-manifest.test.js src/__tests__/migration-plan.test.js src/__tests__/migration-service.test.js src/__tests__/migration-routes.test.js
         working-directory: admin/backend
 
   agent:
@@ -76,4 +89,4 @@ jobs:
         run: sudo -E env "PATH=$PATH" PROXYPILOT_STORAGE_INTEGRATION=1 PROXYPILOT_DISABLE_CRONS=1 node --test src/__tests__/storage-loop.integration.test.js
         working-directory: admin/backend
       - name: Shell syntax of the host helpers
-        run: bash -n scripts/storage-replicate.sh && bash -n scripts/storage-restore-guest.sh && bash -n scripts/install-storage.sh
+        run: bash -n scripts/storage-replicate.sh && bash -n scripts/storage-restore-guest.sh && bash -n scripts/install-storage.sh && bash -n scripts/build-migration-agent.sh

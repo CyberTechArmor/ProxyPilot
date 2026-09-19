@@ -71,14 +71,34 @@ all re-verified live: LEARNINGS 175 (token split), 176 (Incus URL), 179
 (the fence), 180 + 182 (what the fence actually governs), 181 (a finished
 run reported as stalled).
 
+**`incus-migrate` → `pp-mig-im-lxc` and `pp-mig-im2`, ~28 seconds each:**
+
+The third transport, run from the same throwaway source with
+`transport: "incus-migrate"` forced (a container source would otherwise take
+`rootfs-tar`). Three attempts, because the first two found real defects:
+
+| Step | Result |
+|---|---|
+| readiness | `migration_preflight` read the bridge gateway (10.185.17.1), both agent builds with their hashes, the TLS pin, and said `incus-migrate: false` because Incus was not listening |
+| listener | `enable_incus_listener` REFUSED `:8443` ("listens on every interface… a source host on your LAN can use 10.185.17.1:8443"), then enabled the bridge gateway and returned `incus config unset core.https_address` as the reverse |
+| prerequisite | `apt install incus-extra` on the source — **not `incus-tools`**, which does not exist on Debian 13 (LEARNINGS 184) |
+| attempt 1 | FAILED: the positional answer script fed the trust token into 6.0.4's authentication menu (LEARNINGS 183) → rewritten to answer by prompt |
+| attempt 2 | FAILED, and failed WELL: "incus-migrate asked something this ProxyPilot has no answer for: \"Please provide the path to a root filesystem:\"" — 6.0.4 says "a", the rule said "the". One pattern, not a new agent |
+| attempt 3 | `Instance pp-mig-im-lxc successfully created`, guest stopped and fenced, checklist open — but "0 B moved" while the tool said 469.71MB: decimal units (LEARNINGS 185) |
+| attempt 4 | clean: 455.79 MB streamed at ~46 MB/s, **"transfer finished: 434.7 MiB moved"**, guest fenced and stopped |
+| **proof** | started `pp-mig-im-lxc`: `nginx`, `postgresql`, `sampleapp`, `cron` all active; `curl --resolve sample.example.com:80:127.0.0.1` returns the app; all four database rows present; `.env` still 0600 with its original mtime; the cron entry intact |
+
+Note what a whole-machine copy means: the guest keeps the SOURCE's identity —
+`/etc/hostname` still says `pp-mig-src-lxc`. incus-migrate does not rewrite it
+and neither does ProxyPilot; rename it yourself if you want to.
+
 ### Verified by test, not on real hardware
 
-- **`incus-migrate` (whole-machine on a physical host or a VM).** The job
-  document, the trust-token minting, the answer script and the refusal when
-  Incus is not listening are covered by `migration-service.test.js`; the
-  agent's wrapper (answer piping, progress parsing, `/dev/sdaN → /dev/sda`)
-  by `parse_test.go`. **Nobody has run it against a real VM yet** — see
-  "what the operator must do once by hand".
+- **A VM source.** `incus-migrate` itself is now proven against this host, but
+  with a CONTAINER source: the VM path differs only in two answers (`2` for the
+  type and the root block device instead of `/`, with `/dev/sdaN → /dev/sda`),
+  both covered by `parse_test.go` and `answers_test.go`. No VM has been
+  migrated.
 - The Go collectors against recorded fixtures (`parse_test.go`: nginx with
   nested locations and a named upstream, apache, a Caddyfile with a global
   options block, `ss`, `systemctl` including a `●`-marked failed unit,
@@ -94,6 +114,11 @@ run reported as stalled).
 
 ### Not verified
 
+- **The `big-mount` concern inside a container.** On `pp-mig-src-lxc` the
+  inventory warns "/ holds 420 GiB" because `df` inside a container reports the
+  HOST filesystem it lives on, not the container's own usage. It is a warning,
+  not a blocker, and it was right to be loud on a physical host — but on a
+  container source it overstates. Parked in `docs/known-issues.md`.
 - **A Proxmox source.** The `rootfs-tar` path was exercised against a nested
   Incus LXC, which is the same code path and the same `container=lxc`
   detection, but no actual Proxmox host was involved.
@@ -108,20 +133,29 @@ run reported as stalled).
   full-screen dialogs under `sm`, the phase rail wraps instead of scrolling)
   but not opened in a browser at that width.
 
+## The Incus listener is now ON on this host
+
+`incus-migrate` connects to Incus **directly** from the source, so verifying
+that path meant turning the listener on. It is on, at the Incus bridge
+gateway:
+
+```
+core.https_address = 10.185.17.1:8443      # private: guests and your LAN, not the internet
+```
+
+Turn it off with `incus config unset core.https_address` (the tool returned
+that line when it made the change), or from **Migrations → Readiness**, which
+is also where it goes back on. A bind on every interface (`:8443`) is refused
+unless `allow_public: true` says the source really is on the internet.
+`rootfs-tar` and `file-sync` need none of this.
+
 ## What the operator must do once, by hand
 
-1. **For `incus-migrate` (a physical host or a VM source), open the Incus
-   listener on this host:**
-   ```
-   incus config set core.https_address :8443
-   ```
-   Without it the job refuses with exactly that instruction rather than
-   half-starting. ProxyPilot mints a single-use trust token per migration
-   and revokes it when the migration is cancelled.
-2. **On the source host**, per transport: `curl` always; `incus-migrate`
-   (Debian/Ubuntu: `apt install incus-tools`) for a whole-machine VM or
-   physical source; `tar` for a container source; the database client
-   (`pg_dump` / `mysqldump`) if a dump is being carried.
+1. **On the source host**, per transport: `curl` always; `incus-migrate` for a
+   whole-machine VM or physical source — **Debian/Ubuntu: `apt install
+   incus-extra`** (the Zabbly packages call it `incus-tools`); `tar` for a
+   container source; the database client (`pg_dump` / `mysqldump`) if a dump is
+   being carried.
 3. **In application mode, prepare the target guest** with whatever the app
    needs at runtime — most importantly the database engine, or the restore
    stops with "postgresql is not installed in the guest". ProxyPilot will
@@ -155,22 +189,27 @@ import → guest). What is untested is the Proxmox-specific texture:
 
 ## Throwaway guests still on the host
 
-Stopped, not deleted, in case you want to look at them:
+All stopped, none deleted, in case you want to look at them:
 
-- `pp-mig-src-lxc` — the sample source (its `.env` holds a FAKE secret)
-- `pp-mig-dst-lxc` — the whole-machine result
-- `pp-mig-dst-app` — the application-mode result
+- `pp-mig-src-lxc` — the sample source (its `.env` holds a FAKE secret; it also
+  carries the `/opt/app/mig2*.sh` scripts used to drive the tests)
+- `pp-mig-dst-lxc` — the whole-machine (`rootfs-tar`) result
+- `pp-mig-dst-app` — the application-mode (`file-sync`) result
+- `pp-mig-im-lxc` — the `incus-migrate` result that proved the app and data
+- `pp-mig-im2` — the `incus-migrate` result that proved the byte counter
 
-Migrations 1 and 2 in the Migrations page are those two runs. To remove:
-snapshot each (the delete guard requires it) and `delete_lxc_container`, or
-say the word and I will. The throwaway MCP key minted to drive the test is
-already revoked.
+Migrations 1–6 in the Migrations page are those runs (3 and 4 are the two
+failures, kept deliberately: their event logs are the evidence). To remove a
+guest: snapshot it (the delete guard requires one) and `delete_lxc_container`,
+or say the word and I will. Both throwaway MCP keys minted to drive the tests
+are revoked, which also makes the token inside those copied scripts inert.
 
 ## Where the parts are
 
 | | |
 |---|---|
 | Pure | `admin/backend/src/lib/migration/{manifest,plan,token}.js` |
+| Readiness | `preflight()` + `enableIncusListener()` in `lib/migration/service.js`; `GET /api/migrations/preflight`, `POST /api/migrations/incus-listener`; MCP `migration_preflight`, `enable_incus_listener`; `components/migration/MigrationPreflight.jsx` |
 | Service | `admin/backend/src/lib/migration/service.js` (+ `index.js` singleton) |
 | REST | `admin/backend/src/routes/migrations.js` — operator router (sudo) + agent router (token only) |
 | MCP | `routes/mcp-tools/migration.js`, `lib/mcp-ext/catalog/migration.js`, flag `mcp.migration` |

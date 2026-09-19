@@ -279,3 +279,19 @@ the framework seed, and editing the seed publishes a new framework version on
 the next boot (see `docs/mock2/standards-and-cpr.md`), so it belongs in a
 change of its own rather than riding along with unrelated work. Pre-existing;
 not caused by the storage feature.
+
+## The migration inventory's size concern overstates on a container source
+
+`manifestConcerns` warns when a mount holds a lot ("/ holds 420 GiB — the
+transfer will take a while and the guest's disk must be at least that big").
+Inside a container, `df` and `findmnt` report the HOST filesystem the guest
+lives on, so the number is the host's usage, not the container's — on the
+throwaway `pp-mig-src-lxc` (a ~1.3 GB guest) it read 420 GiB.
+
+It is a `warn`, never blocking, and on a physical or VM source it is correct
+and worth saying. Fixing it properly means asking the guest what its own
+subtree costs (`du -xs /`, which is slow on a large rootfs) or reading the
+storage quota, and choosing between them per source kind — a change of its
+own. Until then, read that concern as "the filesystem / lives on", and judge a
+container source's real size from the transfer itself, which reports actual
+bytes.

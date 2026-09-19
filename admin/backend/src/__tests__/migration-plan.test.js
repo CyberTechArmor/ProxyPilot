@@ -7,7 +7,7 @@ import {
   checklistFor, checklistComplete, checklistProgress, transferProgress, canAdvance, nextStatus, PHASE_IDS,
 } from '../lib/migration/plan.js';
 import {
-  mintMigrationToken, parseToken, verifyToken, formatPin, parsePin, sha256,
+  mintMigrationToken, parseToken, verifyToken, tokenState, formatPin, parsePin, sha256,
   DEFAULT_TTL_SECONDS, MIN_TTL_SECONDS, MAX_TTL_SECONDS,
 } from '../lib/migration/token.js';
 
@@ -124,12 +124,16 @@ test('the phase machine only moves forward, and status follows the phase', () =>
   assert.equal(nextStatus({ status: 'cancelled', phase: 'transfer' }), 'cancelled', 'a terminal status is terminal');
 });
 
-test('tokens: single-use, scoped, expiring — and only the hash is storable', () => {
+test('tokens: single-use, scoped, ended by use rather than by a clock — and only the hash is storable', () => {
   const now = Date.parse('2026-09-19T10:00:00Z');
   const m = mintMigrationToken({ now });
   assert.match(m.token, /^pmig_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/);
-  assert.equal(m.ttl_seconds, DEFAULT_TTL_SECONDS);
-  assert.equal(m.expires_at, new Date(now + DEFAULT_TTL_SECONDS * 1000).toISOString());
+  // The default is NO expiry: a migration is planned work, and a token that
+  // dies while the operator is still reading the inventory buys nothing. What
+  // ends it is the migration finishing, or a revoke.
+  assert.equal(DEFAULT_TTL_SECONDS, null);
+  assert.equal(m.ttl_seconds, null);
+  assert.equal(m.expires_at, null);
   assert.notEqual(m.token_hash, m.token, 'the stored hash is not the token');
   assert.equal(m.token_hash, sha256(parseToken(m.token).secret), 'the secret is base64url and may contain an underscore — parse it, never split it');
   assert.equal(mintMigrationToken({ ttlSeconds: 5, now }).ttl_seconds, MIN_TTL_SECONDS, 'a too-short TTL is clamped, not accepted');
@@ -138,6 +142,8 @@ test('tokens: single-use, scoped, expiring — and only the hash is storable', (
   assert.equal(parseToken(m.token).token_id, m.token_id);
 
   const row = { token_id: m.token_id, token_hash: m.token_hash, token_expires_at: m.expires_at, status: 'created', token_claimed_by: null };
+  // No expiry means no expiry: a year on, the migration is what decides.
+  assert.ok(verifyToken(row, m.token, { now: now + 365 * 24 * 3600 * 1000 }).ok);
   assert.equal(verifyToken(row, m.token, { now, claimant: 'run-1' }).first_use, true);
   assert.match(verifyToken(row, 'pmig_deadbeefcafe_' + 'a'.repeat(43), { now }).error, /unknown migration token/);
   assert.match(verifyToken(null, m.token, { now }).error, /unknown migration token/);
@@ -148,10 +154,30 @@ test('tokens: single-use, scoped, expiring — and only the hash is storable', (
   assert.ok(verifyToken(claimed, m.token, { now, claimant: 'run-1' }).ok);
   assert.match(verifyToken(claimed, m.token, { now, claimant: 'run-2' }).error, /already been claimed/);
 
-  assert.match(verifyToken(row, m.token, { now: now + (DEFAULT_TTL_SECONDS + 1) * 1000 }).error, /expired/);
+  // An expiry is available for anyone who wants one, and it is enforced.
+  const ttl = mintMigrationToken({ ttlSeconds: 3600, now });
+  assert.equal(ttl.expires_at, new Date(now + 3600_000).toISOString());
+  const ttlRow = { ...row, token_id: ttl.token_id, token_hash: ttl.token_hash, token_expires_at: ttl.expires_at };
+  assert.ok(verifyToken(ttlRow, ttl.token, { now: now + 3599_000 }).ok);
+  assert.match(verifyToken(ttlRow, ttl.token, { now: now + 3601_000 }).error, /expired/);
+
+  // Revoked beats everything short of a bad secret.
+  assert.match(verifyToken({ ...row, token_revoked_at: '2026-09-19T10:05:00Z' }, m.token, { now }).error, /revoked/);
+  assert.equal(verifyToken({ ...row, token_revoked_at: '2026-09-19T10:05:00Z' }, 'garbage', { now }).code, 'bad_token');
+
   for (const status of ['completed', 'failed', 'cancelled']) {
     assert.match(verifyToken({ ...row, status }, m.token, { now }).error, new RegExp(`is ${status}`));
   }
+
+  // tokenState is what the operator's list reads.
+  assert.equal(tokenState({ ...row, status: 'created' }, { now }).state, 'unclaimed');
+  assert.equal(tokenState({ ...row, status: 'created' }, { now }).usable, true);
+  assert.equal(tokenState({ ...row, status: 'running', token_claimed_by: 'run-1' }, { now }).state, 'active');
+  assert.equal(tokenState({ ...row, status: 'completed' }, { now }).state, 'spent');
+  assert.equal(tokenState({ ...row, token_revoked_at: '2026-09-19T10:05:00Z', token_revoked_by: 'admin-1' }, { now }).state, 'revoked');
+  assert.match(tokenState({ ...row, token_revoked_at: '2026-09-19T10:05:00Z', token_revoked_by: 'admin-1' }, { now }).reason, /admin-1/);
+  assert.equal(tokenState({ ...ttlRow, status: 'created' }, { now: now + 3601_000 }).state, 'expired');
+  assert.equal(tokenState({ ...row, status: 'created' }, { now }).expires_at, null, 'an absent expiry is null, never an Invalid Date');
 
   assert.equal(formatPin('AB'.repeat(32)), `sha256:${'ab'.repeat(32)}`);
   assert.equal(formatPin('short'), null);

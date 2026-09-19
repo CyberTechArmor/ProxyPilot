@@ -31,7 +31,7 @@ export const MIGRATION_TOOLS = Object.freeze([
       freeze: { type: 'string', enum: ['stop', 'read-only', 'none'], description: 'What the cutover does to the source service (default stop).' },
       auto_transfer: { type: 'boolean', description: 'Skip the inventory review and start copying as soon as the manifest lands. Default false, and false is the right answer for production.' },
       keep_agent: { type: 'boolean', description: 'Leave the agent binary on the source afterwards (default false — it removes itself).' },
-      ttl_seconds: { type: 'number', description: 'Token lifetime, 300–86400 (default 7200).' },
+      ttl_seconds: { type: 'number', description: 'Optional wall-clock lifetime for the token, 300–2592000. Omitted (the default) the token has NO clock: it lives until the migration ends or someone revokes it.' },
       dry_run: P.dry_run, confirm: P.confirm,
     }, ['mode', 'name', 'confirm']),
 
@@ -70,4 +70,23 @@ export const MIGRATION_TOOLS = Object.freeze([
   tool('cancel_migration',
     'Stop a migration and kill its token immediately. A guest that was already created is left exactly as it is — cancelling never deletes data, and the Incus trust token minted for the transfer is revoked.',
     { id, reason: { type: 'string' }, dry_run: P.dry_run, confirm: P.confirm }, ['id', 'confirm']),
+
+  tool('list_migration_tokens',
+    'Every agent token and what it is doing — the answer to "what is still out there". One token per migration, for its whole life: `unclaimed` (minted, never used — the one still on somebody\'s clipboard), `active` (claimed by the agent run doing the migration), `spent` (the migration finished, so it is dead), `revoked`, `expired` (only when a ttl_seconds was asked for). Shows when it was claimed, from which address, and when it was last seen. Never returns a secret — only the token id.',
+    { state: { type: 'string', enum: ['unclaimed', 'active', 'spent', 'revoked', 'expired'], description: 'Only tokens in this state.' }, limit: P.limit }),
+
+  tool('revoke_migration_token',
+    'Kill one migration\'s agent token now. Every later call presenting it is refused, whatever state the migration is in — this is the undo for a command that was pasted somewhere it should not have been. The migration itself is untouched: cancel_migration as well if the run should stop.',
+    { id, dry_run: P.dry_run, confirm: P.confirm }, ['id', 'confirm']),
+
+  tool('cleanup_migration',
+    'Throw away what a FINISHED migration left behind: the guest it created (delete_guest), the migration record and its event log (remove_record), or both. Deliberately narrow — it refuses a migration that is still running (cancel it first), a guest that this migration did not create but adopted, and a guest that is serving a route (use delete_lxc_container, which unpublishes as it goes). A running guest is stopped cleanly first; force stops it hard. No export is taken unless export is set, because a migration guest that failed never ran. Nothing here can be undone.',
+    {
+      id,
+      delete_guest: { type: 'boolean', description: 'Delete the Incus guest this migration created.' },
+      remove_record: { type: 'boolean', description: 'Delete the migration row and its event log.' },
+      export: { type: 'boolean', description: 'Export the guest to a tarball before deleting it.' },
+      force: { type: 'boolean', description: 'Stop the guest hard if it will not stop cleanly.' },
+      dry_run: P.dry_run, confirm: P.confirm,
+    }, ['id', 'confirm']),
 ]);

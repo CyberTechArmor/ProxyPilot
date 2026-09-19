@@ -18,7 +18,7 @@ import {
   validateTarget, guestConfig, installCommand, installCommandTwoStep, checklistFor, checklistComplete,
   checklistProgress, transferProgress, PHASES, PHASE_IDS, canAdvance, TERMINAL, CHECKLIST,
 } from './plan.js';
-import { mintMigrationToken, verifyToken, parseToken, formatPin, DEFAULT_TTL_SECONDS } from './token.js';
+import { mintMigrationToken, verifyToken, parseToken, formatPin, tokenState, DEFAULT_TTL_SECONDS } from './token.js';
 
 export const ARCHES = Object.freeze(['amd64', 'arm64']);
 /** Where install.sh / update.sh drop the cross-built agents (scripts/build-migration-agent.sh). */
@@ -77,11 +77,7 @@ export function createMigrationService({
       phases: PHASES.map((p) => ({ ...p, state: phaseState(p.id, row) })),
       target: { name: row.target_name, ...guestConfig(spec, { prefix: '' }), incus_name: row.target_name },
       spec, source_label: row.source_label,
-      token: {
-        id: row.token_id, expires_at: row.token_expires_at, claimed: !!row.token_claimed_by,
-        claimed_at: row.token_claimed_at, last_seen_at: row.token_last_seen_at, source_ip: row.token_source_ip,
-        tls_pin: row.tls_pin,
-      },
+      token: { ...tokenState(row, { now: now() }), id: row.token_id, tls_pin: row.tls_pin },
       manifest: man, manifest_at: row.manifest_at,
       summary: man ? manifestSummary(man) : null,
       concerns: man ? manifestConcerns(man, { mode: row.mode }) : [],
@@ -131,11 +127,14 @@ export function createMigrationService({
     const pin = await tlsPin();
     const base = String(publicBaseUrl?.() || publicBaseUrl || '').replace(/\/+$/, '');
     const ts = nowIso(now());
+    // token_expires_at is NOT NULL from migration 909 and an expiry is now
+    // optional, so "no expiry" is the empty string — which every reader
+    // already treats as absent (Date.parse('') is NaN).
     const info = db().prepare(`
       INSERT INTO migrations (created_at, created_by, updated_at, mode, transport, status, phase, spec_json, target_name, source_label,
                               token_id, token_hash, token_expires_at, tls_pin, checklist_json, bytes_done)
       VALUES (?, ?, ?, ?, ?, 'created', 'inventory', ?, ?, ?, ?, ?, ?, ?, '{}', 0)
-    `).run(ts, actor, ts, spec.mode, spec.transport, JSON.stringify(spec), incusName, spec.source_label, minted.token_id, minted.token_hash, minted.expires_at, pin);
+    `).run(ts, actor, ts, spec.mode, spec.transport, JSON.stringify(spec), incusName, spec.source_label, minted.token_id, minted.token_hash, minted.expires_at || '', pin);
 
     const id = Number(info.lastInsertRowid);
     event(id, { kind: 'state', phase: 'inventory', message: `migration created (${spec.mode}, ${spec.transport}) → ${incusName}` });
@@ -148,7 +147,7 @@ export function createMigrationService({
       command_steps: installCommandTwoStep({ baseUrl: base, token: minted.token }),
       expires_at: minted.expires_at,
       tls_pin: pin,
-      note: 'Run the command on the SOURCE host as root. The token is single-use, scoped to this migration and expires; nothing is copied until you approve the inventory.',
+      note: `Run the command on the SOURCE host as root. The token is single-use and scoped to this migration; ${minted.expires_at ? `it expires at ${minted.expires_at}, and it ` : 'it does not expire on a clock — it '}dies when the migration finishes and can be revoked at any time (Migrations → Agent tokens, or revoke_migration_token). Nothing is copied until you approve the inventory.`,
     };
   }
 
@@ -462,7 +461,11 @@ export function createMigrationService({
   /** Create the empty guest an application-mode migration copies into. */
   async function ensureApplicationGuest(row, spec) {
     const existing = await exec('incus', ['config', 'show', row.target_name], { timeoutMs: 30000 });
-    if (existing.status === 0) { event(row.id, { kind: 'log', message: `guest ${row.target_name} already exists — reusing it` }); return { existed: true }; }
+    if (existing.status === 0) {
+      event(row.id, { kind: 'log', message: `guest ${row.target_name} already exists — reusing it` });
+      db().prepare('UPDATE migrations SET guest_created = 0 WHERE id = ?').run(row.id);
+      return { existed: true };
+    }
     const cfg = guestConfig(spec, { prefix: '' });
     const argv = ['launch', spec.app?.image || 'images:debian/13', row.target_name];
     if (spec.pool) argv.push('--storage', spec.pool);
@@ -472,6 +475,7 @@ export function createMigrationService({
     const r = await exec('incus', argv, { timeoutMs: 600000 });
     if (r.status !== 0) return { error: `could not create ${row.target_name}: ${tail(r.stderr) || `exit ${r.status}`}` };
     event(row.id, { kind: 'log', message: `created guest ${row.target_name} (${spec.app?.image})` });
+    db().prepare('UPDATE migrations SET guest_created = 1 WHERE id = ?').run(row.id);
     await fenceGuest(row);
     return { created: true };
   }
@@ -705,7 +709,7 @@ export function createMigrationService({
 
     await fenceGuest(row);
     const ts = nowIso(now());
-    db().prepare('UPDATE migrations SET phase = ?, status = ?, updated_at = ? WHERE id = ?').run('post-import', 'ready', ts, row.id);
+    db().prepare('UPDATE migrations SET phase = ?, status = ?, updated_at = ?, guest_created = 1 WHERE id = ?').run('post-import', 'ready', ts, row.id);
     event(row.id, { kind: 'state', phase: 'post-import', message: `guest ${row.target_name} created from the imported rootfs, stopped and fenced` });
     return { imported: true, guest: row.target_name };
   }
@@ -731,7 +735,10 @@ export function createMigrationService({
     if (chk.status !== 0) return fail(row.id, `the transfer reported success but ${row.target_name} does not exist on this host`);
     await fenceGuest(rowById(row.id));
     const ts = nowIso(now());
-    db().prepare('UPDATE migrations SET phase = ?, status = ?, updated_at = ? WHERE id = ?').run('post-import', 'ready', ts, row.id);
+    // A whole-machine transport lands the guest itself; file-sync unpacked
+    // into a guest whose origin ensureApplicationGuest already recorded.
+    const madeIt = row.transport === 'file-sync' ? row.guest_created : 1;
+    db().prepare('UPDATE migrations SET phase = ?, status = ?, updated_at = ?, guest_created = ? WHERE id = ?').run('post-import', 'ready', ts, madeIt, row.id);
     event(row.id, { kind: 'state', phase: 'post-import', message: `guest ${row.target_name} is present, stopped and fenced — the checklist is open` });
     return { imported: true, guest: row.target_name };
   }
@@ -754,6 +761,172 @@ export function createMigrationService({
     await revokeTrust(row);
     try { logAudit(actor, 'MIGRATION_CANCEL', 'migration', String(id), { target: row.target_name, reason }, ip); } catch { /* best effort */ }
     return { migration: view(rowById(id)), note: 'The guest (if one was created) is left exactly as it is — cancelling never deletes data.' };
+  }
+
+  /**
+   * Kill one migration's agent token without touching the migration.
+   *
+   * A token now lives until the migration ends, which is the right default
+   * for planned work and the wrong one for a command that got pasted into a
+   * chat window. This is the undo: the next call presenting it is refused
+   * (code `revoked`), whatever state the migration is in. The migration
+   * itself is untouched — cancel it too if the run should stop.
+   */
+  function revokeToken(id, { actor = null, ip = null } = {}) {
+    const row = rowById(id);
+    if (!row) return { error: 'no such migration' };
+    if (row.token_revoked_at) return { error: `migration ${id}'s token was already revoked at ${row.token_revoked_at}` };
+    const ts = nowIso(now());
+    db().prepare('UPDATE migrations SET token_revoked_at = ?, token_revoked_by = ?, updated_at = ? WHERE id = ?')
+      .run(ts, actor ? String(actor).slice(0, 120) : null, ts, id);
+    event(id, { kind: 'state', message: `agent token revoked by ${actor || 'operator'} — a source host presenting it is refused from now on` });
+    try { logAudit(actor, 'MIGRATION_TOKEN_REVOKE', 'migration', String(id), { target: row.target_name, token_id: row.token_id }, ip); } catch { /* best effort */ }
+    const after = rowById(id);
+    return {
+      revoked: true, migration_id: id, token: tokenState(after, { now: now() }),
+      note: TERMINAL.includes(row.status)
+        ? 'That token was already dead (the migration has finished); this makes it explicit.'
+        : 'The migration is untouched — cancel it as well if the run should stop.',
+    };
+  }
+
+  /**
+   * Every agent token and what it is doing, newest first. This is the answer
+   * to "what is still out there": one row per migration, because a migration
+   * has exactly one token for its whole life.
+   */
+  function listTokens({ state = null, limit = 200 } = {}) {
+    const rows = db().prepare('SELECT * FROM migrations ORDER BY id DESC LIMIT ?')
+      .all(Math.max(1, Math.min(500, Number(limit) || 200)));
+    const out = rows.map((r) => ({
+      migration_id: r.id,
+      target: r.target_name,
+      mode: r.mode,
+      transport: r.transport,
+      migration_status: r.status,
+      created_at: r.created_at,
+      source_label: r.source_label,
+      ...tokenState(r, { now: now() }),
+    })).filter((t) => !state || t.state === String(state));
+    const counts = {};
+    for (const t of out) counts[t.state] = (counts[t.state] || 0) + 1;
+    return { tokens: out, counts, usable: out.filter((t) => t.usable).length };
+  }
+
+  /* ------------------------------- cleanup ------------------------------- */
+
+  /**
+   * Throw away what a finished migration left behind: the guest it created,
+   * the record, or both.
+   *
+   * Deliberately narrow, because "delete the guest" is the most destructive
+   * verb in this feature:
+   *
+   *   - only a FINISHED migration (cancel a live one first);
+   *   - only the guest THIS migration created — a guest that was already
+   *     there and got adopted is refused, because the operator's own guest is
+   *     not ours to delete;
+   *   - a guest with a route or a service row is refused, and points at
+   *     `delete_lxc_container`, which knows how to unpublish it;
+   *   - a running guest is stopped cleanly first (`force` for a hard stop).
+   *
+   * The guest is deleted WITHOUT an export by default: a migration guest that
+   * failed never ran, and the source it came from is still standing. Pass
+   * `export: true` for a tarball in the usual place first.
+   */
+  async function cleanupMigration(id, {
+    deleteGuest = false, removeRecord = false, exportFirst = false, force = false,
+    dryRun = false, actor = null, ip = null,
+  } = {}) {
+    const row = rowById(id);
+    if (!row) return { error: 'no such migration' };
+    if (!deleteGuest && !removeRecord) return { error: 'nothing to do: pass delete_guest, remove_record, or both' };
+    if (!TERMINAL.includes(row.status) && row.status !== 'ready') {
+      return { error: `migration ${id} is ${row.status} — cancel it first (cancel_migration), then clean up` };
+    }
+
+    const plan = {
+      migration: id, target: row.target_name, status: row.status,
+      delete_guest: false, remove_record: !!removeRecord, export: null, guest: null,
+    };
+
+    if (deleteGuest) {
+      const show = await exec('incus', ['config', 'show', row.target_name], { timeoutMs: 30000 });
+      if (show.status !== 0) {
+        plan.guest = { present: false };
+        if (!removeRecord) return { error: `the guest ${row.target_name} does not exist on this host — nothing to delete` };
+      } else {
+        if (row.guest_created === 0) {
+          return { error: `${row.target_name} was NOT created by this migration — it already existed and was adopted, so ProxyPilot will not delete it. Remove it yourself with delete_lxc_container if that is really what you want.` };
+        }
+        const bare = row.target_name.startsWith(lxcPrefix) ? row.target_name.slice(lxcPrefix.length) : row.target_name;
+        // Fails CLOSED: if the route tables cannot be read, we do not know
+        // whether this guest is serving traffic, and that is not a question
+        // to guess at before an `incus delete`.
+        let bound;
+        try {
+          bound = db().prepare(`SELECT DISTINCT r.domain FROM service_http_routes r JOIN services s ON s.id = r.service_id WHERE s.lxc_container_name IN (?, ?)`)
+            .all(row.target_name, bare).map((r) => r.domain);
+        } catch (e) {
+          return { error: `could not check whether a route points at ${row.target_name} (${e?.message || e}) — refusing to delete a guest that might be serving traffic` };
+        }
+        if (bound.length) {
+          return { error: `${row.target_name} is published at ${bound.join(', ')} — this button will not delete a guest that is serving traffic. Delete the route first, or use delete_lxc_container, which unpublishes as it goes.` };
+        }
+        const state = await exec('incus', ['list', row.target_name, '--format', 'csv', '-c', 's'], { timeoutMs: 30000 });
+        plan.guest = { present: true, status: String(state.stdout || '').trim() || 'unknown', created_by_migration: row.guest_created !== 0 };
+        plan.delete_guest = true;
+        plan.export = exportFirst ? `${workDir}/exports/${row.target_name}-<timestamp>.tar.gz` : null;
+      }
+    }
+
+    if (dryRun) return { dry_run: true, would: plan, note: 'Nothing has been touched. Re-run with confirm to apply.' };
+
+    const done = { migration: id, guest_deleted: false, record_removed: false, export: null, warnings: [] };
+
+    if (plan.delete_guest) {
+      if (exportFirst) {
+        await mkdir(join(workDir, 'exports'), { recursive: true });
+        const file = join(workDir, 'exports', `${row.target_name}-${Date.now()}.tar.gz`);
+        const ex = await exec('incus', ['export', row.target_name, file, '--instance-only'], { timeoutMs: 60 * 60 * 1000 });
+        if (ex.status !== 0) return { error: `nothing was deleted: the export failed (${tail(ex.stderr) || `exit ${ex.status}`})` };
+        done.export = file;
+      }
+      if (/running/i.test(plan.guest?.status || '')) {
+        const stop = await exec('incus', ['stop', row.target_name, ...(force ? ['--force'] : [])], { timeoutMs: 180000 });
+        if (stop.status !== 0) {
+          return { error: `could not stop ${row.target_name} cleanly (${tail(stop.stderr) || 'timed out'}) — pass force: true to stop it hard.${done.export ? ` The export is at ${done.export}.` : ''}` };
+        }
+      }
+      const del = await exec('incus', ['delete', row.target_name], { timeoutMs: 300000 });
+      if (del.status !== 0) return { error: `incus delete failed: ${tail(del.stderr) || `exit ${del.status}`}${done.export ? ` The export is at ${done.export}.` : ''}` };
+      done.guest_deleted = true;
+      try { db().prepare('DELETE FROM lxc_command_allowlists WHERE container_name IN (?, ?)').run(row.target_name, row.target_name.replace(new RegExp(`^${lxcPrefix}`), '')); } catch { /* optional table */ }
+      event(id, { kind: 'state', message: `guest ${row.target_name} deleted by ${actor || 'operator'}${done.export ? ` (exported to ${done.export} first)` : ''}` });
+    }
+
+    // Anything still on disk from the transfer goes with it either way.
+    try { await rm(join(workDir, String(id)), { recursive: true, force: true }); } catch { /* best effort */ }
+
+    if (removeRecord) {
+      if (!row.token_revoked_at && !TERMINAL.includes(row.status)) revokeToken(id, { actor, ip });
+      await revokeTrust(row);
+      db().prepare('DELETE FROM migration_events WHERE migration_id = ?').run(id);
+      db().prepare('DELETE FROM migrations WHERE id = ?').run(id);
+      done.record_removed = true;
+    }
+
+    try {
+      logAudit(actor, 'MIGRATION_CLEANUP', 'migration', String(id),
+        { target: row.target_name, guest_deleted: done.guest_deleted, record_removed: done.record_removed, export: done.export }, ip);
+    } catch { /* best effort */ }
+
+    return {
+      ...done,
+      note: done.record_removed
+        ? `Migration ${id} and its event log are gone${done.guest_deleted ? `, and so is ${row.target_name}` : ''}.`
+        : `${row.target_name} is deleted; migration ${id} stays as the record of it.`,
+    };
   }
 
   async function revokeTrust(row) {
@@ -912,6 +1085,7 @@ export function createMigrationService({
   return {
     createMigration, authenticate, agentJob, recordManifest, approveTransfer, recordEvent, receiveArtifact,
     importRootfsTar, agentFinish, cancelMigration, setChecklistStep, decideEgress, listMigrations, listEvents,
-    view, rowById, rowByTokenId, agentBinaries, tlsPin, fenceGuest, preflight, incusListener, enableIncusListener, CHECKLIST,
+    view, rowById, rowByTokenId, agentBinaries, tlsPin, fenceGuest, preflight, incusListener, enableIncusListener,
+    revokeToken, listTokens, cleanupMigration, CHECKLIST,
   };
 }

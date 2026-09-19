@@ -136,6 +136,11 @@ export function getDb() {
 //               (REST or MCP): op, subject, the sha256 plan token, the plan,
 //               outcome, per-step detail. Feeds the Storage page history and
 //               export_grc_evidence (lib/storage/service.js).
+//   910 Migration token lifecycle — revocation columns on `migrations`, plus
+//               `guest_created`: tokens end when the migration does (or when
+//               an operator revokes them) rather than on a clock, and the
+//               cleanup verb needs to know whether ProxyPilot created the
+//               guest it is offering to delete.
 //   909 Migration — migrations + migration_events: one row per attempt to
 //               move a source host or application onto a ProxyPilot guest.
 //               Holds the target spec, the single-use agent token (hash
@@ -2182,6 +2187,21 @@ export function initDatabase() {
       );
       CREATE INDEX IF NOT EXISTS idx_migration_events_mig ON migration_events(migration_id, id);
     `);
+  });
+
+  // 910: a migration token ends by USE, not by a clock. It lives until the
+  // migration finishes or an operator revokes it, so the row records the
+  // revocation, and `token_expires_at` becomes optional — an empty string is
+  // "no expiry" (the column is NOT NULL from 909 and SQLite cannot drop that
+  // without rebuilding the table, which is not worth it for a sentinel the
+  // reader already treats as absent). `guest_created` remembers whether
+  // ProxyPilot made the guest or adopted one that was already there, which is
+  // what the cleanup button needs to know before offering to delete it.
+  runMigration(db, 910, 'migration_token_lifecycle', (d) => {
+    const cols = d.prepare(`PRAGMA table_info(migrations)`).all().map((c) => c.name);
+    for (const [col, type] of [['token_revoked_at', 'TEXT'], ['token_revoked_by', 'TEXT'], ['guest_created', 'INTEGER']]) {
+      if (!cols.includes(col)) d.exec(`ALTER TABLE migrations ADD COLUMN ${col} ${type}`);
+    }
   });
 
   runMigration(db, 907, 'route_edge_options', (d) => {

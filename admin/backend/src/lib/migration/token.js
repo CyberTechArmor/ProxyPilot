@@ -12,8 +12,13 @@
 //   single-use — the first call CLAIMS it, binding it to that caller. A
 //                second claimant is refused even with the right secret, so a
 //                token read off a terminal cannot be taken over.
-//   expiring   — a TTL from mint (default 2 h, the operator can shorten it),
-//                and it dies with the migration: any terminal state ends it.
+//   ended by USE, not by a clock — it dies when the migration reaches a
+//                terminal state, and an operator can revoke it at any moment.
+//                A wall-clock TTL is optional (`ttl_seconds`) and off by
+//                default: a migration is planned work, and a token that
+//                expires while the operator is still reading the inventory
+//                buys nothing — the claim binding and the revoke button are
+//                what actually limit it.
 //
 // The agent also pins TLS to the certificate fingerprint carried in the
 // bootstrap script, so a token presented to the wrong endpoint never leaves
@@ -22,23 +27,31 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 export const TOKEN_PREFIX = 'pmig';
-export const DEFAULT_TTL_SECONDS = 2 * 3600;
-export const MAX_TTL_SECONDS = 24 * 3600;
+/** No wall-clock expiry by default: the token ends when the migration does. */
+export const DEFAULT_TTL_SECONDS = null;
+export const MAX_TTL_SECONDS = 30 * 24 * 3600;
 export const MIN_TTL_SECONDS = 300;
 
 const TOKEN_RE = /^pmig_([0-9a-f]{12})_([A-Za-z0-9_-]{43})$/;
 
 export const sha256 = (s) => createHash('sha256').update(String(s)).digest('hex');
 
-/** A fresh token. The plaintext is returned ONCE; only the hash is storable. */
+/**
+ * A fresh token. The plaintext is returned ONCE; only the hash is storable.
+ * `ttlSeconds` null / 0 / absent → no wall-clock expiry (the default): the
+ * token lives until the migration finishes or someone revokes it.
+ */
 export function mintMigrationToken({ ttlSeconds = DEFAULT_TTL_SECONDS, now = Date.now() } = {}) {
-  const ttl = Math.max(MIN_TTL_SECONDS, Math.min(MAX_TTL_SECONDS, Number(ttlSeconds) || DEFAULT_TTL_SECONDS));
+  const asked = Number(ttlSeconds);
+  const ttl = Number.isFinite(asked) && asked > 0
+    ? Math.max(MIN_TTL_SECONDS, Math.min(MAX_TTL_SECONDS, asked))
+    : null;
   const id = randomBytes(6).toString('hex');
   const secret = randomBytes(32).toString('base64url');
   const token = `${TOKEN_PREFIX}_${id}_${secret}`;
   return {
     token, token_id: id, token_hash: sha256(secret),
-    expires_at: new Date(now + ttl * 1000).toISOString(), ttl_seconds: ttl,
+    expires_at: ttl ? new Date(now + ttl * 1000).toISOString() : null, ttl_seconds: ttl,
   };
 }
 
@@ -69,7 +82,10 @@ export function verifyToken(row, presented, { now = Date.now(), claimant = null 
   if (!row) return { error: 'unknown migration token', code: 'bad_token' };
   if (parsed.token_id !== row.token_id) return { error: 'unknown migration token', code: 'bad_token' };
   if (!secretMatches(parsed.secret, row.token_hash)) return { error: 'unknown migration token', code: 'bad_token' };
+  if (row.token_revoked_at) return { error: 'this migration token was revoked', code: 'revoked' };
   if (TERMINAL_STATUSES.includes(row.status)) return { error: `this migration is ${row.status}; its token no longer works`, code: 'finished' };
+  // An expiry is optional. No date (or an unparseable one) means the token
+  // lives until the migration ends or someone revokes it.
   const exp = Date.parse(row.token_expires_at || '');
   if (Number.isFinite(exp) && now > exp) return { error: 'this migration token has expired — create a new migration to get a fresh command', code: 'expired' };
   const already = row.token_claimed_by || null;
@@ -80,6 +96,40 @@ export function verifyToken(row, presented, { now = Date.now(), claimant = null 
 }
 
 export const TERMINAL_STATUSES = Object.freeze(['completed', 'failed', 'cancelled']);
+
+/**
+ * What a token is doing right now, for the operator's list. One of:
+ *
+ *   unclaimed  minted, never used — this is the one still on someone's
+ *              clipboard, and the one worth revoking if it should not be
+ *   active     claimed by an agent run, migration still going
+ *   spent      the migration reached a terminal state, so the token is dead
+ *   revoked    an operator killed it
+ *   expired    an optional TTL was set and has passed
+ *
+ * `usable` is the single question the agent router asks; the rest is for the
+ * person reading the table.
+ */
+export function tokenState(row, { now = Date.now() } = {}) {
+  if (!row) return { state: 'unknown', usable: false, reason: 'no such token' };
+  const exp = Date.parse(row.token_expires_at || '');
+  const expires = Number.isFinite(exp) ? new Date(exp).toISOString() : null;
+  const base = {
+    token_id: row.token_id,
+    claimed: !!row.token_claimed_by,
+    claimed_at: row.token_claimed_at || null,
+    last_seen_at: row.token_last_seen_at || null,
+    source_ip: row.token_source_ip || null,
+    expires_at: expires,
+    revoked_at: row.token_revoked_at || null,
+    revoked_by: row.token_revoked_by || null,
+  };
+  if (row.token_revoked_at) return { ...base, state: 'revoked', usable: false, reason: `revoked${row.token_revoked_by ? ` by ${row.token_revoked_by}` : ''}` };
+  if (TERMINAL_STATUSES.includes(row.status)) return { ...base, state: 'spent', usable: false, reason: `the migration is ${row.status}` };
+  if (expires && now > exp) return { ...base, state: 'expired', usable: false, reason: 'the TTL set at creation has passed' };
+  if (row.token_claimed_by) return { ...base, state: 'active', usable: true, reason: 'claimed by the agent run that is doing this migration' };
+  return { ...base, state: 'unclaimed', usable: true, reason: expires ? `usable until ${expires}, or until the migration ends` : 'usable until the migration ends or it is revoked' };
+}
 
 /**
  * The payload the bootstrap script bakes into the source host's command.

@@ -2120,6 +2120,20 @@ export const api = {
       request(`/migrations/${encodeURIComponent(id)}/checklist`, { method: 'POST', body: JSON.stringify({ step, done, ...(note ? { note } : {}) }) }),
     egress: (id, { host, port, decision }) =>
       request(`/migrations/${encodeURIComponent(id)}/egress`, { method: 'POST', body: JSON.stringify({ host, port: port ?? null, decision }) }),
+    // Every agent token and its state (unclaimed / active / spent / revoked /
+    // expired). A token has no clock by default: it dies with the migration.
+    tokens: ({ state } = {}) => request(`/migrations/tokens${state ? `?state=${encodeURIComponent(state)}` : ''}`),
+    revokeToken: (id) => request(`/migrations/${encodeURIComponent(id)}/token/revoke`, { method: 'POST', body: '{}' }),
+    // Throw away what a finished migration left behind. Call it with
+    // dry_run first: the answer is the plan, or the reason it is refused.
+    cleanup: (id, { deleteGuest = false, removeRecord = false, exportFirst = false, force = false, dryRun = false } = {}) =>
+      request(`/migrations/${encodeURIComponent(id)}/cleanup`, {
+        method: 'POST',
+        body: JSON.stringify({
+          delete_guest: deleteGuest, remove_record: removeRecord,
+          ...(exportFirst ? { export: true } : {}), ...(force ? { force: true } : {}), ...(dryRun ? { dry_run: true } : {}),
+        }),
+      }),
     // Readiness: the agent builds, the URL a source is told to call, the TLS
     // pin and whether Incus listens on the network. Read-only.
     preflight: () => request('/migrations/preflight'),

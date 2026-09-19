@@ -37,6 +37,31 @@ function schema909() {
   return ddl;
 }
 
+/**
+ * Migration 910's columns, read out of db.js the same way, so the test runs
+ * the shipped list rather than a copy that can drift. 910 is JS (a PRAGMA
+ * loop), so what is lifted is its column table.
+ */
+function schema910() {
+  const src = readFileSync(new URL('../db.js', import.meta.url), 'utf8');
+  const start = src.indexOf("runMigration(db, 910, 'migration_token_lifecycle'");
+  assert.ok(start > 0, 'migration 910 must exist in db.js');
+  const open = src.indexOf('for (const [col, type] of [', start);
+  const close = src.indexOf(']]', open) + 2;
+  const cols = [...src.slice(open, close).matchAll(/\['([a-z_]+)', '([A-Z]+)'\]/g)].map((m) => [m[1], m[2]]);
+  assert.ok(cols.length >= 3, 'migration 910 must add its columns');
+  return cols.map(([col, type]) => `ALTER TABLE migrations ADD COLUMN ${col} ${type};`).join('\n');
+}
+
+/**
+ * The two route tables cleanup consults before it will delete a guest. They
+ * live in other migrations; only the shape this query needs is recreated.
+ */
+const ROUTE_TABLES = `
+  CREATE TABLE IF NOT EXISTS services (id INTEGER PRIMARY KEY, lxc_container_name TEXT);
+  CREATE TABLE IF NOT EXISTS service_http_routes (id INTEGER PRIMARY KEY, service_id INTEGER, domain TEXT);
+`;
+
 const MANIFEST = {
   schema: MANIFEST_SCHEMA,
   collected_at: '2026-09-19T09:59:00Z',
@@ -54,6 +79,8 @@ const MANIFEST = {
 function setup({ script = () => ({ status: 0, stdout: '', stderr: '' }) } = {}) {
   const db = new DatabaseSync(':memory:');
   db.exec(schema909());
+  db.exec(schema910());
+  db.exec(ROUTE_TABLES);
   const calls = [];
   const audit = [];
   const runHostCapture = async (bin, args) => {
@@ -557,6 +584,153 @@ test('the Incus listener: the bridge gateway by default, every interface refused
   assert.ok(sets.includes(':8443'), 'allow_public lets the public bind through');
 });
 
+/* --------------------------- tokens and cleanup -------------------------- */
+
+// `incus config show` must FAIL for a whole-machine create: a guest that
+// already exists is refused, and the default script succeeds at everything.
+const NO_GUEST = { script: (bin, args) => (bin === 'incus' && args[0] === 'config' && args[1] === 'show' ? { status: 1 } : { status: 0 }) };
+
+test('the token has no clock by default: it ends with the migration, or when it is revoked', async () => {
+  const { svc, db } = setup(NO_GUEST);
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  const id = r.migration.id;
+  assert.equal(r.expires_at, null, 'no TTL was asked for, so there is no expiry date');
+  assert.match(r.note, /does not expire on a clock/);
+
+  // A year later it still works: what ends it is the migration, not the wall.
+  const far = { ...svc.rowById(id) };
+  assert.equal(svc.authenticate(r.token, { claimant: 'run-1' }).error, undefined);
+  assert.equal(svc.view(svc.rowById(id)).token.state, 'active');
+
+  // An operator can still ask for one, and it is honoured.
+  const ttl = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web2', source_kind: 'proxmox-lxc' }, ttlSeconds: 900 });
+  assert.equal(ttl.expires_at, new Date(NOW + 900_000).toISOString());
+  assert.match(ttl.note, /it expires at/);
+  assert.equal(svc.view(svc.rowById(ttl.migration.id)).token.state, 'unclaimed');
+  // …and a TTL in the past is what "expired" means.
+  db.prepare('UPDATE migrations SET token_expires_at = ? WHERE id = ?').run(new Date(NOW - 1000).toISOString(), ttl.migration.id);
+  assert.equal(svc.view(svc.rowById(ttl.migration.id)).token.state, 'expired');
+  assert.match(svc.authenticate(ttl.token, { claimant: 'x' }).error, /expired/);
+  assert.ok(far);
+});
+
+test('revoking a token kills it without touching the migration, and the list says which are still out there', async () => {
+  const { svc } = setup(NO_GUEST);
+  const a = await svc.createMigration({ input: { mode: 'whole-machine', name: 'one', source_kind: 'proxmox-lxc' } });
+  const b = await svc.createMigration({ input: { mode: 'whole-machine', name: 'two', source_kind: 'proxmox-lxc' } });
+  svc.authenticate(b.token, { claimant: 'run-b', ip: '10.0.0.9' });
+
+  let list = svc.listTokens();
+  assert.equal(list.tokens.length, 2);
+  assert.equal(list.usable, 2, 'both are live');
+  assert.deepEqual(list.counts, { unclaimed: 1, active: 1 });
+  const bRow = list.tokens.find((t) => t.migration_id === b.migration.id);
+  assert.equal(bRow.source_ip, '10.0.0.9');
+  assert.ok(list.tokens.every((t) => !JSON.stringify(t).includes(a.token)), 'a listing never carries a secret');
+
+  const out = svc.revokeToken(a.migration.id, { actor: 'admin-1' });
+  assert.equal(out.revoked, true);
+  assert.equal(out.token.state, 'revoked');
+  assert.match(out.note, /migration is untouched/);
+  assert.equal(svc.rowById(a.migration.id).status, 'created', 'the migration itself carries on');
+  assert.match(svc.authenticate(a.token, { claimant: 'run-a' }).error, /revoked/);
+  assert.match(svc.revokeToken(a.migration.id, {}).error, /already revoked/);
+
+  list = svc.listTokens();
+  assert.equal(list.usable, 1);
+  assert.equal(list.tokens.find((t) => t.migration_id === a.migration.id).state, 'revoked');
+  assert.equal(svc.listTokens({ state: 'revoked' }).tokens.length, 1);
+
+  // A finished migration's token is spent, whether or not anyone revoked it.
+  await svc.cancelMigration(b.migration.id, { actor: 'admin-1' });
+  assert.equal(svc.listTokens().tokens.find((t) => t.migration_id === b.migration.id).state, 'spent');
+  assert.equal(svc.listTokens().usable, 0);
+});
+
+test('cleanup: refuses a live migration, an adopted guest and a published one; deletes what this migration made', async () => {
+  const seen = [];
+  // The guest must NOT exist when the migration is created and must exist
+  // when it is cleaned up — which is the real sequence.
+  let guestExists = false;
+  const { svc, db, audit } = setup({ script: (bin, args) => {
+    seen.push([bin, ...args].join(' '));
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return guestExists ? { status: 0, stdout: 'config: {}' } : { status: 1 };
+    if (bin === 'incus' && args[0] === 'list') return { status: 0, stdout: 'RUNNING\n' };
+    return { status: 0 };
+  } });
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  const id = r.migration.id;
+  guestExists = true;
+
+  // Still running: cancel it first.
+  assert.match((await svc.cleanupMigration(id, { deleteGuest: true })).error, /cancel it first/);
+  await svc.cancelMigration(id, { actor: 'admin-1' });
+
+  assert.match((await svc.cleanupMigration(id, {})).error, /nothing to do/);
+
+  // A guest ProxyPilot adopted rather than created is never ours to delete.
+  db.prepare('UPDATE migrations SET guest_created = 0 WHERE id = ?').run(id);
+  assert.match((await svc.cleanupMigration(id, { deleteGuest: true })).error, /NOT created by this migration/);
+  db.prepare('UPDATE migrations SET guest_created = 1 WHERE id = ?').run(id);
+
+  // A guest serving traffic goes through delete_lxc_container, which unpublishes.
+  db.prepare('INSERT INTO services (id, lxc_container_name) VALUES (1, ?)').run('pp-web');
+  db.prepare('INSERT INTO service_http_routes (id, service_id, domain) VALUES (1, 1, ?)').run('app.example.com');
+  const published = await svc.cleanupMigration(id, { deleteGuest: true });
+  assert.match(published.error, /app\.example\.com/);
+  assert.match(published.error, /delete_lxc_container/);
+  db.prepare('DELETE FROM service_http_routes').run();
+
+  // The dry run is the dialog's preview and touches nothing.
+  const before = seen.length;
+  const plan = await svc.cleanupMigration(id, { deleteGuest: true, removeRecord: true, dryRun: true });
+  assert.equal(plan.dry_run, true);
+  assert.equal(plan.would.delete_guest, true);
+  assert.equal(plan.would.remove_record, true);
+  assert.equal(plan.would.guest.status, 'RUNNING');
+  assert.ok(!seen.slice(before).some((c) => /incus delete/.test(c)), 'a dry run deletes nothing');
+
+  const done = await svc.cleanupMigration(id, { deleteGuest: true, removeRecord: true, force: true, actor: 'admin-1' });
+  assert.equal(done.guest_deleted, true);
+  assert.equal(done.record_removed, true);
+  assert.equal(done.export, null, 'no export unless asked — the source is still standing');
+  assert.ok(seen.includes('incus stop pp-web --force'), 'a running guest is stopped first');
+  assert.ok(seen.includes('incus delete pp-web'));
+  assert.equal(svc.rowById(id), null, 'the record is gone');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM migration_events WHERE migration_id = ?').get(id).n, 0, 'and so is its log');
+  assert.ok(audit.some((a) => a[1] === 'MIGRATION_CLEANUP'));
+});
+
+test('cleanup: deleting the guest can leave the record, and a missing guest is not a silent success', async () => {
+  const { svc, db } = setup({ script: (bin, args) => {
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return { status: 1, stderr: 'not found' };
+    return { status: 0 };
+  } });
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'gone', source_kind: 'proxmox-lxc' } });
+  await svc.cancelMigration(r.migration.id, { actor: 'a' });
+  db.prepare('UPDATE migrations SET guest_created = 1 WHERE id = ?').run(r.migration.id);
+  assert.match((await svc.cleanupMigration(r.migration.id, { deleteGuest: true })).error, /does not exist/);
+
+  // …but asked to remove the record as well, a vanished guest is no obstacle.
+  const done = await svc.cleanupMigration(r.migration.id, { deleteGuest: true, removeRecord: true });
+  assert.equal(done.guest_deleted, false);
+  assert.equal(done.record_removed, true);
+  assert.equal(svc.rowById(r.migration.id), null);
+});
+
+test('cleanup refuses when it cannot tell whether a route points at the guest', async () => {
+  let guestExists = false;
+  const { svc, db } = setup({ script: (bin, args) => (bin === 'incus' && args[0] === 'config' && args[1] === 'show' && !guestExists ? { status: 1 } : { status: 0, stdout: 'config: {}' }) });
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  await svc.cancelMigration(r.migration.id, { actor: 'a' });
+  db.prepare('UPDATE migrations SET guest_created = 1 WHERE id = ?').run(r.migration.id);
+  guestExists = true;
+  db.exec('DROP TABLE service_http_routes');
+  const out = await svc.cleanupMigration(r.migration.id, { deleteGuest: true });
+  assert.match(out.error, /could not check whether a route points at/);
+  assert.match(out.error, /refusing/);
+});
+
 /* ---------------------------------- MCP ---------------------------------- */
 
 test('MCP: the same rules through the tool surface — confirm gates, dry_run touches nothing, blocking concerns refuse approval', async () => {
@@ -604,4 +778,54 @@ test('MCP: the same rules through the tool surface — confirm gates, dry_run to
 
   const cancelled = parse(await handlers.cancel_migration({ id, confirm: true, reason: 'test' }, AUTH));
   assert.equal(cancelled.migration.status, 'cancelled');
+});
+
+test('MCP: cleanup is confirm-gated and dry-runnable, and the token tools carry no secret', async () => {
+  let guestExists = false;
+  const seen = [];
+  const { svc, handlers } = setup({ script: (bin, args) => {
+    seen.push([bin, ...args].join(' '));
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return guestExists ? { status: 0, stdout: 'config: {}' } : { status: 1 };
+    if (bin === 'incus' && args[0] === 'list') return { status: 0, stdout: 'STOPPED\n' };
+    return { status: 0 };
+  } });
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  const id = r.migration.id;
+  guestExists = true;
+
+  // The tokens reader shows state, never a secret.
+  const tokens = parse(await handlers.list_migration_tokens({}, AUTH));
+  assert.equal(tokens.tokens.length, 1);
+  assert.equal(tokens.tokens[0].state, 'unclaimed');
+  assert.ok(!JSON.stringify(tokens).includes(r.token), 'the plaintext token is never returned again');
+
+  // Revoking is gated, and the dry run says what it would do.
+  const unconfirmed = await handlers.revoke_migration_token({ id }, AUTH);
+  assert.equal(unconfirmed.isError, true);
+  assert.match(unconfirmed.content[0].text, /Confirm with the user/);
+  assert.equal(parse(await handlers.revoke_migration_token({ id, dry_run: true }, AUTH)).would.would, 'refuse every later call presenting this token');
+  assert.equal(svc.view(svc.rowById(id)).token.state, 'unclaimed', 'the dry run changed nothing');
+  assert.equal(parse(await handlers.revoke_migration_token({ id, confirm: true }, AUTH)).token.state, 'revoked');
+
+  // Cleanup refuses a live migration through the tool surface too.
+  const live = await handlers.cleanup_migration({ id, delete_guest: true, confirm: true }, AUTH);
+  assert.equal(live.isError, true);
+  assert.match(live.content[0].text, /cancel it first/);
+
+  await svc.cancelMigration(id, { actor: 'admin-1' });
+  const before = seen.length;
+  const preview = parse(await handlers.cleanup_migration({ id, delete_guest: true, dry_run: true }, AUTH));
+  assert.equal(preview.dry_run, true);
+  assert.equal(preview.would.target, 'pp-web');
+  assert.ok(!seen.slice(before).some((c) => /incus delete/.test(c)));
+
+  const gated = await handlers.cleanup_migration({ id, delete_guest: true }, AUTH);
+  assert.equal(gated.isError, true);
+  assert.match(gated.content[0].text, /DELETES the guest pp-web/);
+
+  const done = parse(await handlers.cleanup_migration({ id, delete_guest: true, confirm: true }, AUTH));
+  assert.equal(done.guest_deleted, true);
+  assert.equal(done.record_removed, false, 'the record is only removed when asked');
+  assert.ok(seen.includes('incus delete pp-web'));
+  assert.ok(svc.rowById(id), 'the migration stays as the record of what happened');
 });

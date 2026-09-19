@@ -89,6 +89,7 @@ func DefaultRegistry() *Registry {
 	r.Register("security.cve_2026_31431.patch", SecurityCVE202631431Patch)
 	r.Register("update.check", UpdateCheck)
 	r.Register("update.request", UpdateRequest)
+	r.Register("storage.install_request", StorageInstallRequest)
 	r.Register("update.status", UpdateStatus)
 	return r
 }

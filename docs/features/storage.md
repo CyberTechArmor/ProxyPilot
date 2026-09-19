@@ -183,7 +183,51 @@ read devices), so `smartctl` results it reports as `permission_denied` are
 filled in by the backend as root. Mutations always run through the backend's
 root path.
 
-## Host preparation (once, by hand)
+## Preflight, and installing the toolchain from the dashboard
+
+`storage_preflight` and `GET /api/storage/preflight` answer two questions
+before anything is changed.
+
+**Can this host install and run the stack?** Every check carries a status and
+a remedy: apt present, a Debian-like distribution, the host agent reachable,
+the root update runner installed and enabled, `scripts/install-storage.sh`
+present in the recorded checkout, the ZFS tools and kernel module, smartctl,
+sanoid, syncoid, the ProxyPilot units and the two helpers. Only the first five
+block an install, because without them nothing can run; the rest are what the
+install fixes.
+
+**Is a given disk safe to take?** The block layer cannot answer this, so the
+preflight reads what it cannot see: `/proc/mdstat` for assembled arrays,
+`mdadm --examine` per disk and partition for a superblock belonging to an
+array that is merely stopped, `/etc/fstab` for a reference by device path,
+UUID, PARTUUID or LABEL, `efibootmgr -v` for a boot entry whose PARTUUID
+lives on the disk, and `swapon` for active swap. An fstab reference, a RAID
+superblock and active swap are **hard refusals** that `wipe: true` does not
+override, because wiping any of them breaks the next boot. An EFI boot entry
+is a warning carried into the plan. These become `device.risk` on the
+inventory, which `deviceEligibility` folds into its hard and warning lists,
+so no plan can ever take such a disk.
+
+`install_storage_toolchain` and `POST /api/storage/install` then run the
+installer. The backend is in a container and the agent is unprivileged, so
+neither can install anything; the request goes through the **root update
+runner**, the same privilege path as a self-update. The agent writes a
+request with `action: "storage-install"`, the runner validates owner, nonce,
+freshness and action exactly as it does for an update, **refuses any flags**,
+resolves the script from its own recorded `source-dir` rather than from the
+request, and runs it with no arguments. Progress is the ordinary self-update
+status, since one runner writes one state file for every action:
+`get_storage_install_status` or `GET /api/storage/install/status`. Nothing in
+this path touches a block device.
+
+The install is refused when a blocking check fails, when an update or install
+is already running, and when nothing is missing unless `force` is set.
+`dry_run: true` reports what would be installed without requesting anything.
+
+## Host preparation by hand
+
+The dashboard path above is the normal route. The same script can be run
+directly:
 
 ```bash
 sudo bash scripts/install-storage.sh

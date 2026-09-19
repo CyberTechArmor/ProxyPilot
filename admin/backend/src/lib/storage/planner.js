@@ -116,6 +116,11 @@ export function validateDatasetProps(input, { allowMountpoint = true } = {}) {
 export function deviceEligibility(device, { wipe = false } = {}) {
   const hard = []; const soft = []; const warnings = [];
   if (!device) return { eligible: false, hard: ['device not found'], soft: [], warnings: [] };
+  // Host-wide risks the block layer cannot show: an unassembled mdadm
+  // superblock, an /etc/fstab line, an EFI boot entry, active swap.
+  // lib/storage/preflight.js attaches them as device.risk.
+  for (const r of device.risk?.hard || []) hard.push(r);
+  for (const w of device.risk?.warnings || []) warnings.push(w);
   if (device.os) hard.push(`OS device (${device.os_reason || 'backs the root filesystem'})`);
   if (device.mounted) hard.push(`has a mounted filesystem (${device.mounted_at.join(', ')}) — unmount it first`);
   if (device.in_pool) hard.push(`is a member of the imported ZFS pool ${device.in_pool}`);

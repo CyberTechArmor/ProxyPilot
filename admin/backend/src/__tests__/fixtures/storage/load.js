@@ -64,6 +64,11 @@ export function fakeHost({ script = () => null, managedSettings = null } = {}) {
     async readFile() { return null; },
     async listDir() { return []; },
     async unitState(unit) { return { unit, present: false }; },
+    async safetyFacts() { return { fstab: [], mdstat: [], efi: [], raid: {}, swaps: [], mdadm_checked: false, efi_checked: false }; },
+    async risksFor(devs) { return { risks: Object.fromEntries((devs || []).map((d) => [d.name, { hard: [], warnings: [] }])), facts: null }; },
+    async osRelease() { return { id: 'ubuntu', id_like: 'debian', version_id: '24.04', pretty_name: 'Ubuntu 24.04 LTS' }; },
+    async runnerState() { return { present: true, enabled: true, source_dir: '/root/ProxyPilot', script_present: true }; },
+    async agentPing() { return true; },
     async toolchain() { return { zpool: true, zfs: true, smartctl: true, sanoid: true, syncoid: true, wipefs: true, lsblk: true, incus: true, zfs_module_loaded: true }; },
     agentReachable: () => false,
   };

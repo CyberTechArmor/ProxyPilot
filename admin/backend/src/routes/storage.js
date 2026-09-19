@@ -67,6 +67,20 @@ storageRouter.get('/replication', wrap(async (req, res) => { const svc = storage
 storageRouter.get('/freshness', wrap(async (req, res) => res.json(await storageService().freshness())));
 storageRouter.get('/alerts', wrap(async (req, res) => { const a = await storageService().alerts(); res.json({ alerts: a.alerts, at: a.freshness.at }); }));
 storageRouter.get('/ops', wrap(async (req, res) => res.json({ ops: storageService().listOps({ limit: Math.max(1, Math.min(500, Number(req.query.limit) || 100)), op: req.query.op ? String(req.query.op) : null }) })));
+// Preflight: can this host install and run the storage stack, what is
+// already present, and which disks are safe to take. Read-only.
+storageRouter.get('/preflight', wrap(async (req, res) => res.json(await storageService().preflight({ devices: req.query.devices !== '0' }))));
+
+// Install or re-install the toolchain through the root runner. Sudo-gated
+// like every other privileged action; the runner refuses anything but the
+// checkout's own install-storage.sh.
+storageRouter.post('/install', requireSudo, wrap(async (req, res) => {
+  const r = await storageService().installToolchain({ actor: req.user?.id || null, via: 'dashboard', ip: req.ip, force: req.body?.force === true });
+  res.status(r.refused ? 409 : 202).json(r);
+}));
+
+storageRouter.get('/install/status', wrap(async (req, res) => res.json(await storageService().installStatus({ id: req.query.id ? String(req.query.id) : null, logTailBytes: Math.min(49152, Number(req.query.log_tail_bytes) || 8192) }))));
+
 storageRouter.get('/toolchain', wrap(async (req, res) => res.json({ toolchain: await storageService().toolchain(), agent: storageService().host.agentReachable() })));
 
 const PlanBody = z.object({ op: z.string().min(1).max(64), params: z.record(z.any()).optional().default({}) });

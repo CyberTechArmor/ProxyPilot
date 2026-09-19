@@ -20,6 +20,13 @@
     "replication_state_dir": "/var/lib/proxypilot/storage",
     "units": ["sanoid.timer", "proxypilot-zfs-scrub@<pool>.timer", "proxypilot-syncoid@<name>.timer"],
     "helpers": ["/usr/local/sbin/proxypilot-storage-replicate", "/usr/local/sbin/proxypilot-storage-restore-guest"],
+    "install": {
+      "$comment": "install_storage_toolchain runs the checkout's scripts/install-storage.sh through the ROOT update runner (deploy/proxypilot-update.service), the same privilege path as a self-update. The caller supplies nothing: the action name is fixed, flags are refused, and the script path is resolved from the runner's recorded source-dir, never from the request. It installs packages, systemd units and helper scripts and touches no block device. storage_preflight must pass its blocking checks first.",
+      "action": "storage-install",
+      "script": "scripts/install-storage.sh",
+      "packages": ["zfsutils-linux", "smartmontools", "sanoid"],
+      "arguments_from_caller": "none"
+    },
     "explicitly_absent": { "mdadm_under_zfs": "Never: create_zpool takes whole disks only and refuses active md members.", "zpool_destroy": "Not offered: export_pool is the reversible verb; destroying a pool stays a hands-on host operation.", "os_device_override": "None exists." }
   },
   "self_edit": {

@@ -76,6 +76,25 @@ export function createStorageHandlers(kit) {
     return ok(await svc().freshness());
   });
 
+  const storage_preflight = reader('storage_preflight', async (args) => ok(await svc().preflight({ devices: args.devices !== false })));
+
+  const get_storage_install_status = reader('get_storage_install_status', async (args) => ok(await svc().installStatus({ id: args.id ? String(args.id) : null, logTailBytes: Math.min(49152, Number(args.log_tail_bytes) || 8192) })));
+
+  const install_storage_toolchain = mutation('install_storage_toolchain', { subjectType: 'host', flag: 'mcp.storage', audit: 'STORAGE_INSTALL_TOOLCHAIN' }, async (args, auth, req, note) => {
+    note.subject_id = 'host';
+    if (args.dry_run === true) {
+      const pf = await svc().preflight();
+      return ok({ dry_run: true, would: { script: pf.script, install_packages: pf.missing_packages, units: ['proxypilot-zfs-scrub@.service', 'proxypilot-zfs-scrub@.timer', 'proxypilot-syncoid@.service', 'proxypilot-syncoid@.timer'], helpers: ['/usr/local/sbin/proxypilot-storage-replicate', '/usr/local/sbin/proxypilot-storage-restore-guest'], enables: ['sanoid.timer'] }, can_install: pf.can_install, install_needed: pf.install_needed, blocked_by: pf.blocked_by, note: 'Nothing was requested. No block device is touched by the installer.' });
+    }
+    const gate = kit.confirmFlag(args, note, 'This installs zfsutils-linux, smartmontools and sanoid on the HOST, plus the ProxyPilot units and helpers. It touches no disk.');
+    if (gate) return gate;
+    const r = await svc().installToolchain({ actor: auth?.created_by ?? null, via: 'mcp', force: args.force === true });
+    if (r.refused) { note.refused = true; return err(r.error, { preflight: r.preflight }); }
+    note.summary = `requested the storage toolchain install (${r.preflight.missing_packages.join(', ') || 're-install'})`;
+    note.detail = { id: r.id, missing_packages: r.preflight.missing_packages };
+    return ok(r);
+  });
+
   const storage_toolchain = reader('storage_toolchain', async (args) => {
     const tc = await svc().toolchain();
     return ok({ toolchain: tc, agent: svc().host.agentReachable(), managed: svc().managed(), ops: svc().listOps({ limit: Math.max(1, Math.min(500, Number(args.ops_limit) || 50)) }), install: 'scripts/install-storage.sh installs zfsutils-linux, smartmontools, sanoid and the ProxyPilot units.' });
@@ -112,6 +131,7 @@ export function createStorageHandlers(kit) {
 
   const handlers = {
     list_disks, zpool_status, zfs_list, list_zfs_snapshots, get_backup_policy, replication_status, storage_freshness, storage_toolchain,
+    storage_preflight, install_storage_toolchain, get_storage_install_status,
     create_zpool: planned('create_zpool', { subjectType: 'zpool' }),
     set_managed_pool: planned('set_managed_pool', { subjectType: 'zpool' }),
     create_dataset: planned('create_dataset', { subjectType: 'zfs' }),

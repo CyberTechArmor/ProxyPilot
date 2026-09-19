@@ -132,6 +132,10 @@ export function getDb() {
 //   902 Delegated editing — lxc_editor_keys (per-key bearer secrets pinned to
 //               one container; hash + display prefix only, soft revocation,
 //               scope_type reserved for later non-LXC scopes).
+//   908 Storage — storage_ops: every ZFS/Incus storage plan that was applied
+//               (REST or MCP): op, subject, the sha256 plan token, the plan,
+//               outcome, per-step detail. Feeds the Storage page history and
+//               export_grc_evidence (lib/storage/service.js).
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -2097,6 +2101,26 @@ export function initDatabase() {
   // headers, a Content-Security-Policy, basic auth (bcrypt hashes), an IP
   // allowlist and a rate limit (rendered only when Caddy carries the
   // rate_limit module). NULL everywhere keeps the site file byte-identical.
+  runMigration(db, 908, 'storage_ops', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS storage_ops (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        actor TEXT,
+        via TEXT,
+        op TEXT NOT NULL,
+        subject TEXT,
+        plan_token TEXT,
+        plan_json TEXT,
+        outcome TEXT NOT NULL,
+        detail_json TEXT,
+        duration_ms INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_storage_ops_ts ON storage_ops(ts);
+      CREATE INDEX IF NOT EXISTS idx_storage_ops_op ON storage_ops(op, ts);
+    `);
+  });
+
   runMigration(db, 907, 'route_edge_options', (d) => {
     const cols = d.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);
     for (const col of ['extra_headers_json', 'csp', 'basic_auth_json', 'ip_allowlist_json', 'rate_limit_json']) {

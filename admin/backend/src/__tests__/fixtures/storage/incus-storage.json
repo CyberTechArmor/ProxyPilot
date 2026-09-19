@@ -1,0 +1,1 @@
+[{"name":"default","driver":"dir","status":"Created","config":{"source":"/var/lib/incus/storage-pools/default"},"used_by":["/1.0/instances/pp-legacy","/1.0/profiles/default"]},{"name":"zfs","driver":"zfs","status":"Created","config":{"source":"tank/incus","zfs.pool_name":"tank/incus"},"used_by":["/1.0/instances/pp-web","/1.0/instances/pp-db"]}]

@@ -1,0 +1,35 @@
+  pool: tank
+ state: ONLINE
+  scan: scrub repaired 0B in 01:12:33 with 0 errors on Sun Sep 14 00:24:03 2026
+config:
+
+	NAME                                                  STATE     READ WRITE CKSUM
+	tank                                                  ONLINE       0     0     0
+	  mirror-0                                            ONLINE       0     0     0
+	    /dev/disk/by-id/ata-WDC_WD40EFRX-68N32N0_WD-WCC7K1AAAAAA-part1  ONLINE       0     0     0
+	    /dev/disk/by-id/ata-WDC_WD40EFRX-68N32N0_WD-WCC7K1BBBBBB-part1  ONLINE       0     0     0
+
+errors: No known data errors
+
+  pool: data
+ state: DEGRADED
+status: One or more devices could not be used because the label is missing or
+	invalid.  Sufficient replicas exist for the pool to continue
+	functioning in a degraded state.
+action: Replace the device using 'zpool replace'.
+   see: https://openzfs.github.io/openzfs-docs/msg/ZFS-8000-4J
+  scan: scrub in progress since Thu Sep 18 22:00:00 2026
+	1.20T scanned at 1.10G/s, 900G issued at 820M/s, 6.50T total
+	0B repaired, 13.85% done, 01:59:12 to go
+config:
+
+	NAME                        STATE     READ WRITE CKSUM
+	data                        DEGRADED     0     0     0
+	  raidz1-0                  DEGRADED     0     0     0
+	    /dev/disk/by-id/ata-ST4000VN008-2DR166_ZDH1XXXX  ONLINE       0     0     0
+	    /dev/disk/by-id/ata-ST4000VN008-2DR166_ZDH1YYYY  ONLINE       0     0     2
+	    17915845734211201414    FAULTED      0     0     0  was /dev/disk/by-id/ata-ST4000VN008-2DR166_ZDH1ZZZZ-part1
+	logs
+	  /dev/disk/by-id/nvme-eui.000000000000001  ONLINE       0     0     0
+
+errors: 3 data errors, use '-v' for a list

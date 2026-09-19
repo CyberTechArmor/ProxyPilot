@@ -1,0 +1,12 @@
+# ProxyPilot — monthly scrub timer for pool %i (see the matching .service).
+[Unit]
+Description=ProxyPilot monthly ZFS scrub of pool %i
+
+[Timer]
+OnCalendar=*-*-01 03:00:00
+RandomizedDelaySec=6h
+AccuracySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

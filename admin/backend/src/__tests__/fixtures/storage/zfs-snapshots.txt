@@ -1,0 +1,8 @@
+tank/incus/containers/pp-web@autosnap_2026-09-18_00:00:01_daily	1758153601	1048576	390000000000	-	off	0
+tank/incus/containers/pp-web@snapshot-before-upgrade	1758200000	2097152	390000000000	-	off	0
+tank/incus/containers/pp-web@autosnap_2026-09-19_09:00:01_hourly	1758272401	1048576	390000000000	-	off	0
+tank/incus/containers/pp-web@autosnap_2026-09-19_09:45:01_frequently	1758275101	524288	390000000000	-	off	0
+tank/incus/containers/pp-db@autosnap_2026-09-17_00:00:01_daily	1758067201	1048576	390000000000	tank/incus/containers/pp-db-clone	off	0
+tank/backups@pp-mcp-20260918T010000Z	1758157200	0	300000000000	-	off	0
+tank/backups@syncoid_pp-host_2026-09-19:08:00:00-GMT00:00	1758268800	0	300000000000	-	off	0
+tank/exports@manual-keep	1758000000	0	30000000000	-	off	1

@@ -1,0 +1,121 @@
+{
+   "blockdevices": [
+      {
+         "name": "loop0", "kname": "loop0", "path": "/dev/loop0", "type": "loop", "size": 73400320,
+         "model": null, "serial": null, "wwn": null, "vendor": null, "tran": null, "rota": false, "rm": false, "hotplug": false, "ro": true,
+         "fstype": "squashfs", "label": null, "uuid": null, "mountpoint": "/snap/core22/1", "mountpoints": ["/snap/core22/1"],
+         "pkname": null, "parttype": null, "partlabel": null, "partuuid": null, "pttype": null
+      },
+      {
+         "name": "nvme0n1", "kname": "nvme0n1", "path": "/dev/nvme0n1", "type": "disk", "size": 1000204886016,
+         "model": "Samsung SSD 980 PRO 1TB", "serial": "S5GXNX0R123456", "wwn": "eui.0025385b21b4a1c2", "vendor": null, "tran": "nvme",
+         "rota": false, "rm": false, "hotplug": false, "ro": false,
+         "fstype": null, "label": null, "uuid": null, "mountpoint": null, "mountpoints": [null],
+         "pkname": null, "parttype": null, "partlabel": null, "partuuid": null, "pttype": "gpt",
+         "children": [
+            {
+               "name": "nvme0n1p1", "kname": "nvme0n1p1", "path": "/dev/nvme0n1p1", "type": "part", "size": 1127219200,
+               "model": null, "serial": null, "wwn": "eui.0025385b21b4a1c2", "vendor": null, "tran": "nvme", "rota": false, "rm": false, "hotplug": false, "ro": false,
+               "fstype": "vfat", "label": null, "uuid": "1A2B-3C4D", "mountpoint": "/boot/efi", "mountpoints": ["/boot/efi"],
+               "pkname": "nvme0n1", "parttype": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "EFI System Partition", "partuuid": "0b2d8f7a-1111-4a3c-9e9b-000000000001", "pttype": "gpt"
+            },
+            {
+               "name": "nvme0n1p2", "kname": "nvme0n1p2", "path": "/dev/nvme0n1p2", "type": "part", "size": 2147483648,
+               "model": null, "serial": null, "wwn": "eui.0025385b21b4a1c2", "vendor": null, "tran": "nvme", "rota": false, "rm": false, "hotplug": false, "ro": false,
+               "fstype": "ext4", "label": "boot", "uuid": "8d0f1c3e-2222-4f2b-9b1a-000000000002", "mountpoint": "/boot", "mountpoints": ["/boot"],
+               "pkname": "nvme0n1", "parttype": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": null, "partuuid": "0b2d8f7a-1111-4a3c-9e9b-000000000002", "pttype": "gpt"
+            },
+            {
+               "name": "nvme0n1p3", "kname": "nvme0n1p3", "path": "/dev/nvme0n1p3", "type": "part", "size": 996930182144,
+               "model": null, "serial": null, "wwn": "eui.0025385b21b4a1c2", "vendor": null, "tran": "nvme", "rota": false, "rm": false, "hotplug": false, "ro": false,
+               "fstype": "LVM2_member", "label": null, "uuid": "Qx3Yzp-3333-aaaa-bbbb-cccc-dddd-000003", "mountpoint": null, "mountpoints": [null],
+               "pkname": "nvme0n1", "parttype": "e6d6d379-f507-44c2-a23c-238f2a3df928", "partlabel": null, "partuuid": "0b2d8f7a-1111-4a3c-9e9b-000000000003", "pttype": "gpt",
+               "children": [
+                  {
+                     "name": "vg0-root", "kname": "dm-0", "path": "/dev/mapper/vg0-root", "type": "lvm", "size": 979252543488,
+                     "model": null, "serial": null, "wwn": null, "vendor": null, "tran": null, "rota": false, "rm": false, "hotplug": false, "ro": false,
+                     "fstype": "ext4", "label": null, "uuid": "5e7a9c11-4444-4d1e-8a2b-000000000004", "mountpoint": "/", "mountpoints": ["/"],
+                     "pkname": "nvme0n1p3", "parttype": null, "partlabel": null, "partuuid": null, "pttype": null
+                  },
+                  {
+                     "name": "vg0-swap", "kname": "dm-1", "path": "/dev/mapper/vg0-swap", "type": "lvm", "size": 17179869184,
+                     "model": null, "serial": null, "wwn": null, "vendor": null, "tran": null, "rota": false, "rm": false, "hotplug": false, "ro": false,
+                     "fstype": "swap", "label": null, "uuid": "9f1b2d33-5555-4c0a-b0d1-000000000005", "mountpoint": "[SWAP]", "mountpoints": ["[SWAP]"],
+                     "pkname": "nvme0n1p3", "parttype": null, "partlabel": null, "partuuid": null, "pttype": null
+                  }
+               ]
+            }
+         ]
+      },
+      {
+         "name": "sda", "kname": "sda", "path": "/dev/sda", "type": "disk", "size": 4000787030016,
+         "model": "WDC WD40EFRX-68N32N0", "serial": "WD-WCC7K1234567", "wwn": "0x50014ee2b1234567", "vendor": "ATA     ", "tran": "sata",
+         "rota": true, "rm": false, "hotplug": false, "ro": false,
+         "fstype": null, "label": null, "uuid": null, "mountpoint": null, "mountpoints": [null],
+         "pkname": null, "parttype": null, "partlabel": null, "partuuid": null, "pttype": "gpt",
+         "children": [
+            {
+               "name": "sda1", "kname": "sda1", "path": "/dev/sda1", "type": "part", "size": 4000776519680,
+               "model": null, "serial": null, "wwn": "0x50014ee2b1234567", "vendor": null, "tran": "sata", "rota": true, "rm": false, "hotplug": false, "ro": false,
+               "fstype": "zfs_member", "label": "tank", "uuid": "12345678901234567890", "mountpoint": null, "mountpoints": [null],
+               "pkname": "sda", "parttype": "6a898cc3-1dd2-11b2-99a6-080020736631", "partlabel": "zfs-a1b2c3d4e5f60001", "partuuid": "7c1e2f3a-6666-4b8c-a2d3-000000000006", "pttype": "gpt"
+            },
+            {
+               "name": "sda9", "kname": "sda9", "path": "/dev/sda9", "type": "part", "size": 8388608,
+               "model": null, "serial": null, "wwn": "0x50014ee2b1234567", "vendor": null, "tran": "sata", "rota": true, "rm": false, "hotplug": false, "ro": false,
+               "fstype": null, "label": null, "uuid": null, "mountpoint": null, "mountpoints": [null],
+               "pkname": "sda", "parttype": "6a945a3b-1dd2-11b2-99a6-080020736631", "partlabel": null, "partuuid": "7c1e2f3a-6666-4b8c-a2d3-000000000009", "pttype": "gpt"
+            }
+         ]
+      },
+      {
+         "name": "sdb", "kname": "sdb", "path": "/dev/sdb", "type": "disk", "size": 4000787030016,
+         "model": "WDC WD40EFRX-68N32N0", "serial": "WD-WCC7K7654321", "wwn": "0x50014ee2b7654321", "vendor": "ATA     ", "tran": "sata",
+         "rota": true, "rm": false, "hotplug": false, "ro": false,
+         "fstype": null, "label": null, "uuid": null, "mountpoint": null, "mountpoints": [null],
+         "pkname": null, "parttype": null, "partlabel": null, "partuuid": null, "pttype": "gpt",
+         "children": [
+            {
+               "name": "sdb1", "kname": "sdb1", "path": "/dev/sdb1", "type": "part", "size": 4000776519680,
+               "model": null, "serial": null, "wwn": "0x50014ee2b7654321", "vendor": null, "tran": "sata", "rota": true, "rm": false, "hotplug": false, "ro": false,
+               "fstype": "zfs_member", "label": "tank", "uuid": "12345678901234567890", "mountpoint": null, "mountpoints": [null],
+               "pkname": "sdb", "parttype": "6a898cc3-1dd2-11b2-99a6-080020736631", "partlabel": "zfs-a1b2c3d4e5f60002", "partuuid": "7c1e2f3a-7777-4b8c-a2d3-000000000006", "pttype": "gpt"
+            },
+            {
+               "name": "sdb9", "kname": "sdb9", "path": "/dev/sdb9", "type": "part", "size": 8388608,
+               "model": null, "serial": null, "wwn": "0x50014ee2b7654321", "vendor": null, "tran": "sata", "rota": true, "rm": false, "hotplug": false, "ro": false,
+               "fstype": null, "label": null, "uuid": null, "mountpoint": null, "mountpoints": [null],
+               "pkname": "sdb", "parttype": "6a945a3b-1dd2-11b2-99a6-080020736631", "partlabel": null, "partuuid": "7c1e2f3a-7777-4b8c-a2d3-000000000009", "pttype": "gpt"
+            }
+         ]
+      },
+      {
+         "name": "sdc", "kname": "sdc", "path": "/dev/sdc", "type": "disk", "size": 2000398934016,
+         "model": "ST2000DM008-2FR102", "serial": "ZFL1ABCD", "wwn": "0x5000c500c1234567", "vendor": "ATA     ", "tran": "sata",
+         "rota": true, "rm": false, "hotplug": false, "ro": false,
+         "fstype": null, "label": null, "uuid": null, "mountpoint": null, "mountpoints": [null],
+         "pkname": null, "parttype": null, "partlabel": null, "partuuid": null, "pttype": null
+      },
+      {
+         "name": "sdd", "kname": "sdd", "path": "/dev/sdd", "type": "disk", "size": 61530439680,
+         "model": "Ultra", "serial": "4C530001230405111111", "wwn": null, "vendor": "SanDisk ", "tran": "usb",
+         "rota": true, "rm": true, "hotplug": true, "ro": false,
+         "fstype": null, "label": null, "uuid": null, "mountpoint": null, "mountpoints": [null],
+         "pkname": null, "parttype": null, "partlabel": null, "partuuid": null, "pttype": "dos",
+         "children": [
+            {
+               "name": "sdd1", "kname": "sdd1", "path": "/dev/sdd1", "type": "part", "size": 61529391104,
+               "model": null, "serial": null, "wwn": null, "vendor": null, "tran": "usb", "rota": true, "rm": true, "hotplug": true, "ro": false,
+               "fstype": "ext4", "label": "usbdata", "uuid": "c0ffee00-8888-4e4e-9a9a-000000000008", "mountpoint": "/mnt/usb", "mountpoints": ["/mnt/usb"],
+               "pkname": "sdd", "parttype": "0x83", "partlabel": null, "partuuid": "0a1b2c3d-01", "pttype": "dos"
+            }
+         ]
+      },
+      {
+         "name": "sr0", "kname": "sr0", "path": "/dev/sr0", "type": "rom", "size": 1073741312,
+         "model": "DVD-ROM", "serial": null, "wwn": null, "vendor": "HL-DT-ST", "tran": "sata", "rota": true, "rm": true, "hotplug": true, "ro": false,
+         "fstype": null, "label": null, "uuid": null, "mountpoint": null, "mountpoints": [null],
+         "pkname": null, "parttype": null, "partlabel": null, "partuuid": null, "pttype": null
+      }
+   ]
+}

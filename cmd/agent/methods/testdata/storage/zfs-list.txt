@@ -1,0 +1,5 @@
+tank	filesystem	1234567890123	2700000000000	98304	0	0	0	lz4	1.45	off	-	none	/tank	yes	on	131072	off	sa	-	1789344243	off	-
+tank/incus	filesystem	900000000000	2700000000000	98304	0	0	0	lz4	1.52	off	-	none	/var/lib/incus/storage-pools/tank	yes	on	131072	off	sa	-	1789344300	off	-
+tank/incus/containers/web	filesystem	5000000000	2700000000000	4900000000	21474836480	0	0	lz4	1.60	off	-	none	/var/lib/incus/storage-pools/tank/containers/web	yes	noauto	131072	off	sa	tank/incus/images/abc@readonly	1789436000	off	-
+tank/vault	filesystem	12345	2700000000000	12345	0	0	0	zstd	1.00	aes-256-gcm	available	prompt	/tank/vault	yes	on	131072	on	sa	-	1789436500	off	-
+tank/vm-disk	volume	10737418240	2700000000000	10737418240	-	-	10737418240	lz4	1.00	off	-	none	-	-	-	-	-	-	-	1789437000	off	10737418240

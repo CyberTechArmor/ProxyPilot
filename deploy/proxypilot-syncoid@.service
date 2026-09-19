@@ -1,0 +1,18 @@
+# ProxyPilot — one syncoid replication job (instance name = job name).
+# The job's config lives in /etc/proxypilot/storage/replication-<name>.conf,
+# written by the Storage page / set_replication_target; the wrapper runs
+# syncoid and records /var/lib/proxypilot/storage/replication/<name>.json,
+# which replication_status and the freshness monitor read.
+[Unit]
+Description=ProxyPilot ZFS replication job %i (syncoid)
+After=network-online.target zfs-import.target
+Wants=network-online.target
+ConditionPathExists=/etc/proxypilot/storage/replication-%i.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/proxypilot-storage-replicate %i
+TimeoutStartSec=12h
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

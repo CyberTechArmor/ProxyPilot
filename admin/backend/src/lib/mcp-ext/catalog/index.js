@@ -6,6 +6,7 @@ import { LXC_ADMIN_TOOLS } from './lxc.js';
 import { EDGE_TOOLS, STATIC_ADMIN_TOOLS } from './edge.js';
 import { ADMIN_TOOLS, SELF_EDIT_CATALOG } from './admin.js';
 import { BUILD_TOOLS, PROJECT_CONFIG_TOOLS } from './builds.js';
+import { STORAGE_TOOLS } from './storage.js';
 
 export const MCP_EXT_TOOL_GROUPS = Object.freeze({
   builds: BUILD_TOOLS,
@@ -15,6 +16,7 @@ export const MCP_EXT_TOOL_GROUPS = Object.freeze({
   static_admin: STATIC_ADMIN_TOOLS,
   admin: ADMIN_TOOLS,
   self_edit: SELF_EDIT_CATALOG,
+  storage: STORAGE_TOOLS,
 });
 
 export const MCP_EXT_TOOLS = Object.freeze(Object.values(MCP_EXT_TOOL_GROUPS).flat());
@@ -38,4 +40,8 @@ export const MCP_EXT_INSTRUCTIONS = [
   'the mcp.builds flag; the chat lane above stays free. SELF-EDITING (read_self_file → apply_self_patch →',
   'run_self_checks → promote_self / rollback_self) works on a candidate clone and needs a key minted with',
   'scope.self_edit (create_scoped_key); the live checkout is only ever fast-forwarded or reset, never patched.',
+  'STORAGE (list_disks, zpool_status, zfs_list, create_zpool, …, restore_guest_from_snapshot): every mutating verb is',
+  'plan/confirm — dry_run: true returns the exact command plan and a plan_token (sha256 of the plan); the real call',
+  'carries confirm: true and that token, and a changed plan invalidates it. The OS device is refused with no override;',
+  'other signatures need wipe: true. Devices are named by /dev/disk/by-id path only.',
 ].join(' ');

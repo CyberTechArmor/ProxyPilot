@@ -1,0 +1,8 @@
+   pool: oldpool
+     id: 5555555555555555555
+  state: ONLINE
+ action: The pool can be imported using its name or numeric identifier.
+ config:
+
+	oldpool                                   ONLINE
+	  ata-ST4000VN008-2DR166_ZDH1DDDD         ONLINE

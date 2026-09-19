@@ -1,0 +1,14 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {
+    "version": [7, 4],
+    "platform_info": "x86_64-linux-6.8.0",
+    "build_info": "(local build)",
+    "argv": ["smartctl", "-j", "-a", "/dev/sdb"],
+    "exit_status": 2,
+    "messages": [
+      {"string": "Smartctl open device: /dev/sdb failed: Permission denied", "severity": "error"}
+    ]
+  },
+  "local_time": {"time_t": 1758240000, "asctime": "Fri Sep 18 22:40:00 2026 UTC"}
+}

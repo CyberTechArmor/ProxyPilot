@@ -1,0 +1,9 @@
+tank	filesystem	1234567890123	2700000000000	98304	0	0	0	zstd	1.61x	off	-	none	/tank	yes	on	131072	off	sa	-	1757800000	off	-
+tank/incus	filesystem	900000000000	2700000000000	98304	0	0	0	zstd	1.70x	off	-	none	legacy	no	noauto	131072	off	sa	-	1757800100	off	-
+tank/incus/containers	filesystem	800000000000	2700000000000	98304	0	0	0	zstd	1.70x	off	-	none	legacy	no	noauto	131072	off	sa	-	1757800200	off	-
+tank/incus/containers/pp-web	filesystem	400000000000	2700000000000	390000000000	0	0	0	zstd	1.80x	off	-	none	/var/lib/incus/storage-pools/zfs/containers/pp-web	yes	noauto	131072	off	sa	-	1757800300	off	-
+tank/incus/containers/pp-db	filesystem	400000000000	2700000000000	390000000000	107374182400	0	0	zstd	1.50x	off	-	none	/var/lib/incus/storage-pools/zfs/containers/pp-db	yes	noauto	16384	off	sa	-	1757800400	off	-
+tank/backups	filesystem	300000000000	2700000000000	300000000000	0	0	0	zstd	1.20x	off	-	none	/tank/backups	yes	on	1048576	off	sa	-	1757800500	off	-
+tank/exports	filesystem	30000000000	2700000000000	30000000000	0	0	0	zstd	1.05x	off	-	none	/tank/exports	yes	on	1048576	off	sa	-	1757800600	off	-
+tank/secure	filesystem	1000000	2700000000000	98304	0	0	0	zstd	1.00x	aes-256-gcm	available	prompt	/tank/secure	yes	on	131072	off	sa	-	1757800700	off	-
+tank/vol1	volume	10737418240	2700000000000	10737418240	-	-	10737418240	zstd	1.00x	off	-	none	-	-	-	-	-	-	-	1757800800	off	10737418240

@@ -187,6 +187,35 @@ link (settings key, boot/timer sync into `insertFrameworkVersion`) is in
 containers TO Gitea exists (`docs/features/git-remotes.md`); a default connector
 applied to every new object is the remaining piece.
 
+## Storage (ZFS): verified on loop devices in CI, not yet on real hardware
+
+`docs/features/storage.md`. The unit tests and the loop-device integration
+test (`storage-loop.integration.test.js`, run by
+`.github/workflows/storage-integration.yml` as root on ubuntu-latest with
+`zfsutils-linux` + `sanoid`) cover create / snapshot / rollback / policy /
+syncoid replication to a second pool / destroy-with-stream / scrub /
+export-import / replace-resilver. Not yet exercised on a real host:
+
+- **`smartctl` through the nsenter path** on real SATA/NVMe devices (the
+  parser is tested on captured output; the agent reports `permission_denied`
+  and the backend fills it in as root).
+- **The Incus half**: `set_incus_storage_pool`, `move_guest_storage`,
+  `restore_guest_from_snapshot` (the `proxypilot-storage-restore-guest`
+  helper builds an Incus backup tarball from a ZFS clone — the
+  `backup/index.yaml` layout follows `incus export`; verify `incus import`
+  accepts it on the installed Incus version before relying on it),
+  `rollback_guest_dataset`. CI has no Incus.
+- **Remote (SSH) replication** end to end; the wrapper and the config file
+  are tested locally only.
+- **`zpool status -j --json-int`** on OpenZFS ≥ 2.3 (the JSON normaliser is
+  tested on a synthetic document; the text parser is the primary path).
+- **The alert fan-out** to real webhook / SMTP channels (unit: the alert set
+  and its keys).
+
+Operator steps that remain by hand: `sudo bash scripts/install-storage.sh`
+(packages, units, helpers, sanoid seed), the SSH key for remote replication,
+and `zfs allow` / sudo on the replication target.
+
 ## Extended MCP surface: what is verified by construction only
 
 2026-09-19: the 133-tool extended surface (`docs/features/mcp.md` § "The

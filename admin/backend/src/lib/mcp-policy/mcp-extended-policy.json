@@ -8,9 +8,20 @@
     "mcp.self_edit": { "default": true, "description": "The self-editing family (still requires a key minted with scope.self_edit)." },
     "mcp.security_scans": { "default": true, "description": "run_lynis / run_trivy (host binaries must be installed)." },
     "mcp.dns": { "default": true, "description": "Cloudflare DNS record tools (need the DNS-01 Cloudflare token)." },
-    "mcp.webhooks": { "default": true, "description": "Outbound webhook notifications (list_webhooks / set_webhook and their dispatch)." }
+    "mcp.webhooks": { "default": true, "description": "Outbound webhook notifications (list_webhooks / set_webhook and their dispatch)." },
+    "mcp.storage": { "default": true, "description": "The storage family's mutating verbs (create_zpool, datasets, snapshots, replace_disk, scrub, import/export, the Incus binding, sanoid/syncoid policy and replication). destroy_dataset, zfs_rollback, destroy_zfs_snapshot and rollback_guest_dataset are additionally behind mcp.destructive. Readers (list_disks, zpool_status, zfs_list, …) are never gated." }
   },
   "exports_dir": "/var/lib/proxypilot/mcp-exports",
+  "storage": {
+    "$comment": "ZFS storage management (lib/storage). Devices are addressed by /dev/disk/by-id only; the OS device (backing / and /boot, resolved through findmnt + lsblk holders) is refused with no override; a mounted device, an md/LVM/LUKS holder, or a member of an imported pool is refused too; any other signature needs wipe: true. Every mutation is plan/confirm: dry_run returns the plan and its sha256 token, the real call carries confirm + token, a changed plan invalidates it. The managed layout is <pool>/incus (Incus storage pool source), <pool>/backups, <pool>/exports.",
+    "pool_defaults": { "ashift": 12, "compression": "zstd", "atime": "off", "xattr": "sa", "acltype": "posixacl" },
+    "sanoid_conf": "/etc/sanoid/sanoid.conf",
+    "replication_conf_dir": "/etc/proxypilot/storage",
+    "replication_state_dir": "/var/lib/proxypilot/storage",
+    "units": ["sanoid.timer", "proxypilot-zfs-scrub@<pool>.timer", "proxypilot-syncoid@<name>.timer"],
+    "helpers": ["/usr/local/sbin/proxypilot-storage-replicate", "/usr/local/sbin/proxypilot-storage-restore-guest"],
+    "explicitly_absent": { "mdadm_under_zfs": "Never: create_zpool takes whole disks only and refuses active md members.", "zpool_destroy": "Not offered: export_pool is the reversible verb; destroying a pool stays a hands-on host operation.", "os_device_override": "None exists." }
+  },
   "self_edit": {
     "candidate_dir": "/var/lib/proxypilot/self/candidate",
     "state_file": "/var/lib/proxypilot/self/state.json",

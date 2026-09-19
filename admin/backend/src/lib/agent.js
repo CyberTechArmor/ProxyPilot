@@ -33,6 +33,7 @@ let nextId = 1;
  * @param {object} [opts]
  * @param {string} [opts.socketPath]  Override the default socket path.
  * @param {number} [opts.timeoutMs]  End-to-end timeout in ms (default 30s).
+ * @param {number} [opts.maxResponseBytes]  Response ceiling (default 64 KiB; storage.* methods pass more).
  * @returns {Promise<any>}  The `result` field on success.
  * @throws {AgentError}  On a structured method error.
  * @throws {Error}  On transport or protocol failure.
@@ -43,6 +44,7 @@ export function agentCall(method, params = {}, opts = {}) {
     process.env.PROXYPILOT_AGENT_SOCKET ||
     DEFAULT_SOCKET;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const maxResponseBytes = opts.maxResponseBytes ?? MAX_RESPONSE_BYTES;
   const id = nextId++;
 
   return new Promise((resolve, reject) => {
@@ -79,8 +81,8 @@ export function agentCall(method, params = {}, opts = {}) {
       // bug on the agent side — we ignore them.
       buffers.push(chunk);
       totalBytes += chunk.length;
-      if (totalBytes > MAX_RESPONSE_BYTES) {
-        finish(new Error(`agent response exceeds ${MAX_RESPONSE_BYTES} bytes`));
+      if (totalBytes > maxResponseBytes) {
+        finish(new Error(`agent response exceeds ${maxResponseBytes} bytes`));
       }
     });
 

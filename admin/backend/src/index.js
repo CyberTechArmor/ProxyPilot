@@ -38,6 +38,8 @@ import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
 import { hydrate as hydrateCveResearch } from './lib/cve-research-scheduler.js';
 import { hydrate as hydrateCertExpiry } from './lib/cert-expiry-scheduler.js';
+import { hydrate as hydrateStorageMonitor } from './lib/storage-monitor.js';
+import { storageRouter } from './routes/storage.js';
 import { seedTlsCertFromInstall } from './lib/tls-cert-seed.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer, setMock2TerminalAuthorizer } from './routes/terminal-ws.js';
@@ -482,6 +484,7 @@ app.use('/api/security', authenticateToken, blockPendingRole, securityRouter);
 app.use('/api/cves', authenticateToken, blockPendingRole, cvesRouter);
 app.use('/api/housekeeping', authenticateToken, blockPendingRole, housekeepingRouter);
 app.use('/api/backups', authenticateToken, blockPendingRole, backupsRouter);
+app.use('/api/storage', authenticateToken, blockPendingRole, storageRouter);
 app.use('/api/notifications', authenticateToken, blockPendingRole, notificationsRouter);
 // Lean BEAF Pro — team-shared innovation project management. Deliberately
 // NOT admin-gated: every non-pending user is a workspace member (R01).
@@ -921,6 +924,13 @@ server.listen(PORT, '0.0.0.0', () => {
       hydrateCertExpiry();
     } catch (err) {
       console.error('[cert-expiry] hydrate threw:', err.message || err);
+    }
+    try {
+      // Storage alert monitor — every 15 minutes: pool health, SMART, scrub,
+      // snapshot/replication freshness → bell + webhooks (no-op without zfs).
+      hydrateStorageMonitor();
+    } catch (err) {
+      console.error('[storage-monitor] hydrate threw:', err.message || err);
     }
     try {
       // Install-time cert seeding: if the operator provided a cert+key at

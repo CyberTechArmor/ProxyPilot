@@ -1,0 +1,12 @@
+# ProxyPilot — monthly ZFS scrub of one pool (instance name = pool name).
+# Enabled per pool by the Storage page / zpool_scrub { timer: true }:
+#   systemctl enable --now proxypilot-zfs-scrub@<pool>.timer
+[Unit]
+Description=ProxyPilot ZFS scrub of pool %i
+ConditionPathExists=/sys/module/zfs
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/zpool scrub %i
+# A scrub already running is not a failure.
+SuccessExitStatus=0 1

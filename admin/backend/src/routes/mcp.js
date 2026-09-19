@@ -76,6 +76,7 @@ import { checkForUpdates as selfUpdateCheck, installedState as selfUpdateInstall
 import { MCP_RUN_CONFIRM_MESSAGE, flagsFromOptions, isUpdateId, updateStartRefusal } from '../lib/self-update-logic.js';
 import { getGitHubRepo, getCurrentVersion } from './user.js';
 import { agentCall } from '../lib/agent.js';
+import { storageService } from '../lib/storage/index.js';
 import { createExtendedHandlers } from './mcp-tools/index.js';
 import { createConfirmationStore, parseTokenScope, scopeRefusal, filterCatalogForScope } from '../lib/mcp-ext/logic.js';
 import {
@@ -4446,6 +4447,7 @@ const extended = createExtendedHandlers({
   mintMcpToken, hashMcpToken, MCP_TOOL_NAMES: () => MCP_TOOLS.map((t) => t.name),
   dbPath: databasePath(),
   listBackupsRunning: null,
+  storage: storageService,
 });
 export const EXTENDED_TOOL_NAMES = Object.freeze(Object.keys(extended.handlers));
 

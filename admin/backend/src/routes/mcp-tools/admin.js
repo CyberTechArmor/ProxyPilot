@@ -355,6 +355,9 @@ export function createAdminHandlers(kit) {
     try { evidence.security_reports = (await readdir(REPORTS_DIR)).filter((f) => /^(lynis|trivy)-/.test(f)).sort().slice(-20); } catch { /* none */ }
     let update = null; try { update = await selfUpdateStatus({ logTailBytes: 0 }); } catch { update = null; }
     evidence.last_update = update ? { status: update.status, id: update.id || null, finished_at: update.finished_at || null } : null;
+    // Storage freshness: pool health + last scrub, per-guest snapshot age, replication, SMART, the storage ops ledger.
+    const ms = managedStorage();
+    evidence.storage = ms ? await ms.svc.evidence() : null;
     const body = JSON.stringify(evidence, null, 2);
     const plan = { since, sections: Object.keys(evidence), bytes: Buffer.byteLength(body), into: `${GRC_DIR}/evidence-<timestamp>.json` };
     const d = dry(args, plan); if (d) return d;
@@ -441,6 +444,12 @@ export function createAdminHandlers(kit) {
 
   /* ------------------------------ host snapshots -------------------------- */
 
+  // The managed ZFS pool (Storage page / create_zpool), when one is recorded:
+  // host snapshots then mean its datasets, not the root filesystem.
+  function managedStorage() {
+    try { const svc = typeof ctx.storage === 'function' ? ctx.storage() : ctx.storage; return svc ? { svc, managed: svc.managed() } : null; } catch { return null; }
+  }
+
   async function hostFs() {
     const r = await hostSh('findmnt -no FSTYPE,SOURCE / ; findmnt -no FSTYPE,SOURCE /var/lib/proxypilot 2>/dev/null || true', [], { timeoutMs: 10000 });
     const [root, data] = (r.stdout || '').trim().split('\n');
@@ -451,6 +460,15 @@ export function createAdminHandlers(kit) {
   const list_host_snapshots = reader('list_host_snapshots', async () => {
     const fs = await hostFs();
     const out = { filesystems: fs, snapshots: [] };
+    const ms = managedStorage();
+    if (ms?.managed) {
+      const d = await ms.svc.host.datasets();
+      const roots = Object.values(ms.managed.datasets);
+      out.managed_pool = ms.managed;
+      out.snapshots = d.snapshots.filter((s) => roots.some((r) => s.dataset === r || s.dataset.startsWith(`${r}/`))).map((s) => ({ kind: 'zfs', name: s.name, dataset: s.dataset, creation: s.created_at, used: s.used_bytes, made_by: s.kind }));
+      out.note = `Snapshots of the managed pool ${ms.managed.pool} (incus, backups, exports datasets). list_zfs_snapshots filters by guest; create_host_snapshot snapshots the backups dataset.`;
+      return ok(out);
+    }
     if (fs.root.fs === 'btrfs' || fs.data.fs === 'btrfs') {
       const r = await hostSh('btrfs subvolume list -s / 2>/dev/null || true', [], { timeoutMs: 20000 });
       out.snapshots = (r.stdout || '').trim().split('\n').filter(Boolean).map((l) => ({ kind: 'btrfs', line: l, path: (l.match(/path (\S+)$/) || [])[1] || null }));
@@ -470,7 +488,13 @@ export function createAdminHandlers(kit) {
     const label = String(args.label || 'mcp').replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 40);
     const name = `pp-${label}-${stamp()}`;
     let plan;
-    if (fs.data.fs === 'zfs' && fs.data.source) plan = { kind: 'zfs', command: `zfs snapshot ${fs.data.source}@${name}`, dataset: fs.data.source };
+    const ms = managedStorage();
+    const target = args.dataset ? String(args.dataset) : null;
+    if (ms?.managed && (!target || Object.values(ms.managed.datasets).some((r) => target === r || target.startsWith(`${r}/`)))) {
+      const ds = target || ms.managed.datasets.backups;
+      plan = { kind: 'zfs', command: `zfs snapshot -r ${ds}@${name}`, dataset: ds, recursive: true, managed_pool: ms.managed.pool };
+    } else if (target) return err(`dataset ${target} is not under the managed pool — use zfs_snapshot for arbitrary datasets`);
+    else if (fs.data.fs === 'zfs' && fs.data.source) plan = { kind: 'zfs', command: `zfs snapshot ${fs.data.source}@${name}`, dataset: fs.data.source };
     else if (fs.root.fs === 'zfs' && fs.root.source) plan = { kind: 'zfs', command: `zfs snapshot ${fs.root.source}@${name}`, dataset: fs.root.source };
     else if (fs.root.fs === 'btrfs' || fs.data.fs === 'btrfs') {
       const subvol = fs.data.fs === 'btrfs' ? '/var/lib/proxypilot' : '/';
@@ -479,13 +503,13 @@ export function createAdminHandlers(kit) {
     const d = dry(args, { name, ...plan }); if (d) return d;
     const gate = confirmFlag(args, note, `Take a read-only ${plan.kind} snapshot ${name}.`); if (gate) return gate;
     const r = plan.kind === 'zfs'
-      ? await runHostCapture('zfs', ['snapshot', `${plan.dataset}@${name}`], { timeoutMs: 60000 })
+      ? await runHostCapture('zfs', ['snapshot', ...(plan.recursive ? ['-r'] : []), `${plan.dataset}@${name}`], { timeoutMs: 60000 })
       : await hostSh('mkdir -p /.proxypilot-snapshots && btrfs subvolume snapshot -r "$1" "/.proxypilot-snapshots/$2"', [plan.subvolume, name], { timeoutMs: 120000 });
     if (r.status !== 0) return err(`${plan.kind} snapshot failed: ${tail(r.stderr)}`);
     note.snapshot = name;
     note.summary = `host snapshot ${name}`;
     note.detail = plan;
-    return ok({ created: true, name, ...plan, note: 'Restoring a host snapshot is a hands-on host operation (zfs rollback / btrfs subvolume swap) — deliberately not offered over MCP.' });
+    return ok({ created: true, name, ...plan, note: plan.managed_pool ? 'Roll back with zfs_rollback (datasets) or rollback_guest_dataset (guests); restore_guest_from_snapshot clones a guest out of it.' : 'Restoring a host snapshot is a hands-on host operation (zfs rollback / btrfs subvolume swap) — deliberately not offered over MCP.' });
   });
 
   /* ------------------------------- host control --------------------------- */

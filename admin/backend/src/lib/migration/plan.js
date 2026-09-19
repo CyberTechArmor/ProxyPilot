@@ -131,9 +131,12 @@ export function validateTarget(input = {}) {
 function resolveTransport({ mode, type, sourceKind, requested }) {
   if (requested) return TRANSPORTS.includes(String(requested)) ? String(requested) : null;
   if (mode === 'application') return 'file-sync';
-  // A Proxmox (or any nested) LXC cannot run incus-migrate inside itself:
-  // it needs to read the block device the rootfs lives on, which the guest
-  // does not have. Tar the rootfs and import it on our side instead.
+  // A container source defaults to the tarball, not incus-migrate: tar is on
+  // every machine, incus-migrate is a package a Proxmox host does not have
+  // (and may not be able to install), and incus-migrate needs the source to
+  // reach the Incus API directly while the tar goes through ProxyPilot, which
+  // the source is already talking to. Asking for incus-migrate explicitly
+  // still works for a container — it just asks more of the source.
   if (type === 'container' && ['proxmox-lxc', 'lxc'].includes(sourceKind)) return 'rootfs-tar';
   return 'incus-migrate';
 }

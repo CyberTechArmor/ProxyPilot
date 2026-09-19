@@ -127,6 +127,17 @@ func firstLine(s string) string {
 }
 
 // Job is the server's instruction document, polled until it says go.
+// AnswerRule answers one incus-migrate prompt. When the tool's output ends
+// with something matching When (a Go regexp, case-insensitive), the agent
+// writes Send. Secret: true keeps the value out of every log line.
+type AnswerRule struct {
+	When   string `json:"when"`
+	Send   string `json:"send"`
+	Max    int    `json:"max"`
+	Secret bool   `json:"secret"`
+	Label  string `json:"label"`
+}
+
 type Job struct {
 	MigrationID int    `json:"migration_id"`
 	Status      string `json:"status"`
@@ -160,7 +171,15 @@ type Job struct {
 		Token       string `json:"token"`
 		Fingerprint string `json:"fingerprint"`
 		Answers     struct {
+			// Lines is the answer sequence in order — what an operator would
+			// type by hand, and the fallback when the server is older than
+			// this agent.
 			Lines []string `json:"lines"`
+			// Rules answer by PROMPT instead of by position, which is what
+			// actually survives an incus-migrate version bump: 6.0.4 asks for
+			// the authentication mechanism between the fingerprint and the
+			// token, and a positional script feeds the token into a menu.
+			Rules []AnswerRule `json:"rules"`
 		} `json:"answers"`
 	} `json:"incus"`
 	Artifact *struct {

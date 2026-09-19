@@ -24,40 +24,6 @@ import HistoryTab from '@/components/storage/HistoryTab';
 import PreflightPanel, { PreflightBanner, usePreflight } from '@/components/storage/PreflightPanel';
 import { BTN, CapacityBar, Chip, HealthChip, KV, Notice, fmtBytes, fmtDate } from '@/components/storage/shared';
 
-/**
- * Active alerts, the same conditions lib/storage/freshness.js storageAlerts
- * raises (pool health / errors / scrub overdue / capacity, SMART, stale
- * snapshots, replication), computed from the overview so the page does not
- * trigger a second SMART scan through GET /alerts on every refresh.
- */
-function computeAlerts(data) {
-  const out = [];
-  const f = data?.freshness || {};
-  for (const p of f.pools || []) {
-    if (!p.healthy) out.push({ key: `pool-health:${p.name}`, level: 'error', title: `Pool ${p.name} is ${p.health}`, body: p.status_text });
-    if (p.scrub?.errors > 0 || p.data_errors || p.device_errors > 0) out.push({ key: `pool-errors:${p.name}`, level: 'error', title: `Pool ${p.name} reports errors`, body: `${p.scrub?.errors > 0 ? `scrub found ${p.scrub.errors} error(s). ` : ''}${p.device_errors > 0 ? `${p.device_errors} device error(s). ` : ''}${p.data_errors || ''}`.trim() });
-    if (p.scrub?.status === 'overdue') out.push({ key: `scrub:${p.name}`, level: 'warning', title: `Pool ${p.name} not scrubbed for ${p.scrub.age}`, body: 'Enable the monthly scrub timer on the Pools tab.' });
-    if (p.capacity_pct != null && p.capacity_pct >= 90) out.push({ key: `capacity:${p.name}`, level: 'warning', title: `Pool ${p.name} is ${p.capacity_pct}% full`, body: 'Prune snapshots or add capacity.' });
-  }
-  for (const d of data?.devices || []) {
-    const v = d.smart_verdict;
-    if (v?.level === 'fail') out.push({ key: `smart:${d.path}`, level: 'error', title: `SMART failure on ${d.path}`, body: `${v.reason}${d.in_pool ? ` — member of ${d.in_pool}` : ''}` });
-    else if (v?.level === 'warn') out.push({ key: `smart:${d.path}`, level: 'warning', title: `SMART warning on ${d.path}`, body: v.reason });
-  }
-  for (const g of f.guests || []) {
-    if (g.on_managed_pool && (g.snapshot_status === 'stale' || g.snapshot_status === 'none')) out.push({ key: `snap:${g.dataset}`, level: 'warning', title: `No recent snapshot of guest ${g.name}`, body: `last ${g.snapshot_age === 'never' ? 'never' : `${g.snapshot_age} ago`}` });
-  }
-  for (const d of f.datasets || []) {
-    if (d.guest) continue;
-    if (d.status === 'stale' || d.status === 'none') out.push({ key: `snap:${d.name}`, level: 'warning', title: `No recent snapshot of ${d.name}`, body: `last ${d.age === 'never' ? 'never' : `${d.age} ago`} (class ${d.class})` });
-  }
-  for (const r of f.replication || []) {
-    if (r.status === 'failed') out.push({ key: `repl:${r.name}`, level: 'error', title: `Replication ${r.name} failed`, body: r.last_error || 'syncoid reported an error' });
-    else if (r.status === 'stale' || r.status === 'never') out.push({ key: `repl:${r.name}`, level: 'warning', title: `Replication ${r.name} is ${r.status === 'never' ? 'yet to succeed' : `${r.age} old`}`, body: `target ${r.target}` });
-  }
-  return out;
-}
-
 function ToolBadge({ name, ok, title }) {
   return <Chip level={ok == null ? 'muted' : ok ? 'ok' : 'fail'} title={title}>{name} {ok == null ? '?' : ok ? 'installed' : 'missing'}</Chip>;
 }
@@ -83,7 +49,7 @@ function AlertsStrip({ alerts }) {
   return (
     <div className="flex flex-wrap gap-1.5">
       {alerts.map((a) => (
-        <Chip key={a.key} level={a.level === 'error' ? 'fail' : 'warn'} title={a.body || undefined} className="whitespace-normal text-left">{a.title}</Chip>
+        <Chip key={a.key} level={a.level === 'error' ? 'fail' : a.level === 'info' ? 'info' : 'warn'} title={a.body || undefined} className="whitespace-normal text-left">{a.title}</Chip>
       ))}
     </div>
   );
@@ -138,6 +104,8 @@ export default function Storage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [tab, setTab] = useState('devices');
+  // Bumped by the header banner to open the install dialog down in the panel.
+  const [installSignal, setInstallSignal] = useState(0);
   const [planReq, setPlanReq] = useState(null);
   const dataRef = useRef(null);
 
@@ -171,7 +139,10 @@ export default function Storage() {
   // Preflight & install: one fetch feeds both the header banner and the
   // panel at the top of the Devices tab.
   const preflight = usePreflight({ enabled: isAdmin });
-  const alerts = useMemo(() => computeAlerts(data), [data]);
+  // GET /overview carries the alert set the backend monitor raises (same
+  // lib/storage/freshness.js storageAlerts), so the page shows exactly what the
+  // bell and webhooks show.
+  const alerts = useMemo(() => data?.alerts || [], [data]);
   const onPlan = useCallback((req) => setPlanReq({ ...req, _t: Date.now() }), []);
   const onDone = useCallback(() => { load({ smart: false, quiet: true }); }, [load]);
 
@@ -200,7 +171,7 @@ export default function Storage() {
       </div>
 
       <ToolchainStrip toolchain={data?.toolchain} agent={data?.agent} />
-      <PreflightBanner state={preflight} onGoDevices={() => setTab('devices')} />
+      <PreflightBanner state={preflight} onInstall={() => { setTab('devices'); setInstallSignal((n) => n + 1); }} />
       {data?.toolchain?.zfs === false && !preflight.pf?.can_install && (
         <Notice level="warn"><p>ZFS is not installed on the host. Run <code className="font-mono">scripts/install-storage.sh</code> on the host to install zfs, smartmontools, sanoid and syncoid. Disks are still listed below.</p></Notice>
       )}
@@ -226,7 +197,7 @@ export default function Storage() {
               ))}
             </TabsList>
             <TabsContent value="devices" className="space-y-4">
-              <PreflightPanel state={preflight} onInstalled={() => load()} />
+              <PreflightPanel state={preflight} onInstalled={() => load()} openSignal={installSignal} />
               <DevicesTab data={data} onPlan={onPlan} />
             </TabsContent>
             <TabsContent value="pools"><PoolsTab data={data} onPlan={onPlan} /></TabsContent>
@@ -240,7 +211,7 @@ export default function Storage() {
         <>
           {/* The inventory failed, so the tabs are gone. The install panel is
               exactly what an operator needs here, so keep it reachable. */}
-          <PreflightPanel state={preflight} onInstalled={() => load()} />
+          <PreflightPanel state={preflight} onInstalled={() => load()} openSignal={installSignal} />
           <Card><CardContent className="p-6 text-center text-sm text-muted-foreground">Inventory unavailable. <Button variant="link" className="px-1" onClick={() => load()}>Try again</Button></CardContent></Card>
         </>
       )}

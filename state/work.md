@@ -42,3 +42,14 @@ warns when no storage pool exists. This cycle adds `/storage`.
 ## Verification log
 
 See handoff.md § Verified / § Verified on loop devices / § Not yet verified. Delegated parts (Go agent, Storage page) re-verified here: go vet/test ok, npm run build ok.
+
+## Follow-up round (operator review, 2026-09-19)
+
+| # | Task | Status |
+|---|---|---|
+| 8 | Incus binding pins instances that inherit the default profile's root disk before repointing it (LEARNINGS 171) | done |
+| 9 | `zpool status -j` `error_count: 0` is not a fault; the page renders the backend's alert set instead of its own copy (LEARNINGS 169) | done |
+| 10 | Snapshot staleness gated on a policy actually being applied and sanoid running; Incus structural datasets never alert (LEARNINGS 170) | done |
+| 11 | The header banner's install button opens the install dialog instead of re-selecting the tab it is already on; wording distinguishes units from toolchain (LEARNINGS 172) | done |
+| 12 | The recovered `zpool import` scan no longer leaves the agent's warning on the page (LEARNINGS 173) | done |
+| 13 | Template units are detected by file, not by `systemctl show` — an installed host said the toolchain was missing forever (LEARNINGS 174) | done |

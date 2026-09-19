@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { storageService } from '../lib/storage/index.js';
 import { deviceEligibility } from '../lib/storage/planner.js';
+import { storageAlerts } from '../lib/storage/freshness.js';
 
 export const storageRouter = Router();
 storageRouter.use(requireAdmin);
@@ -35,6 +36,10 @@ storageRouter.get('/overview', wrap(async (req, res) => {
     importable: inv.importable, pools: inv.pools.map((p) => ({ ...p, status: inv.poolStatus.find((s) => s.name === p.name) || null })),
     datasets: inv.datasets, snapshots: inv.snapshots, incus: { pools: inv.incusPools, instances: inv.instances, default_profile_root: inv.defaultProfileRoot },
     policy: svc.policyView(inv), replication: fresh.replication, freshness: fresh, ops: svc.listOps({ limit: 30 }),
+    // The same alert set GET /alerts returns, computed from what we already
+    // collected (no second SMART scan) so the page never has to re-derive the
+    // conditions itself and drift from lib/storage/freshness.js.
+    alerts: storageAlerts(fresh, inv.devices),
   });
 }));
 

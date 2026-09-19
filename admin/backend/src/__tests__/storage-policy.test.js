@@ -7,7 +7,7 @@ import {
   resolvePolicy, applyPolicyUpdate, classForDataset, effectiveRetention, renderSanoidConf, validateReplication, renderReplicationConf, renderTimerDropIn,
   snapshotMaxAgeMs, replicationMaxAgeMs, DEFAULT_CLASSES,
 } from '../lib/storage/policy.js';
-import { computeFreshness, storageAlerts, humanAge } from '../lib/storage/freshness.js';
+import { computeFreshness, storageAlerts, humanAge, backupPosture } from '../lib/storage/freshness.js';
 import { fixtureInventory } from './fixtures/storage/load.js';
 
 const MANAGED = { incus: 'tank/incus', backups: 'tank/backups', exports: 'tank/exports' };
@@ -93,6 +93,12 @@ test('freshness: pools (health, scrub age), guests (snapshot age vs policy), rep
   assert.equal(alerts.find((a) => a.key === 'storage:smart:WD-WCC7K1BBBBBB').level, 'warning');
   assert.ok(keys.includes('storage:snapshot-stale:tank/incus/containers/pp-db'));
   assert.ok(keys.includes('storage:snapshot-stale:tank/exports'));
+  // Incus's own bookkeeping datasets are not operator data: no row of their own
+  // (guests are reported per guest, above).
+  assert.ok(!keys.includes('storage:snapshot-stale:tank/incus'));
+  assert.ok(!keys.includes('storage:snapshot-stale:tank/incus/containers'));
+  assert.equal(f.datasets.find((d) => d.name === 'tank/incus/containers').structural, true);
+  assert.equal(f.datasets.find((d) => d.name === 'tank/exports').structural, false);
   assert.equal(alerts.find((a) => a.key === 'storage:replication:broken').event, 'storage.replication_failed');
   assert.ok(!keys.includes('storage:replication:offsite'));
   assert.ok(!keys.includes('storage:pool-health:tank'));
@@ -102,4 +108,42 @@ test('freshness: pools (health, scrub age), guests (snapshot age vs policy), rep
   const later = computeFreshness({ pools: inv.pools, poolStatus: inv.poolStatus, datasets: inv.datasets, snapshots: inv.snapshots, instances: inv.instances, managed: MANAGED, policy: resolvePolicy(null), replication: repl, now: now + 500 * 86400000 });
   assert.equal(later.pools[0].scrub.status, 'overdue');
   assert.ok(storageAlerts(later, []).some((a) => a.key === 'storage:scrub-overdue:tank'));
+});
+
+test('freshness: snapshots are only overdue where they were promised — no policy, or sanoid down, is one alert and not one per dataset', () => {
+  const inv = fixtureInventory();
+  const now = Date.parse('2025-09-19T10:00:00Z');
+  const base = { pools: inv.pools, poolStatus: inv.poolStatus, datasets: inv.datasets, snapshots: inv.snapshots, instances: inv.instances, managed: MANAGED, policy: resolvePolicy(null), replication: [], now };
+
+  // Nothing applied yet: the pool was just created, so nothing is "stale".
+  const fresh = computeFreshness({ ...base, backup: { pool: 'tank', policy_applied: false, sanoid_installed: false, timer_present: false } });
+  assert.equal(fresh.backup.expect_snapshots, false); assert.equal(fresh.backup.reason, 'not_configured');
+  assert.equal(fresh.datasets.find((d) => d.name === 'tank/exports').status, 'not_configured');
+  assert.equal(fresh.guests.find((g) => g.name === 'pp-db').snapshot_status, 'not_configured');
+  assert.equal(fresh.guests.find((g) => g.name === 'pp-web').snapshot_status, 'ok'); // a snapshot that IS fresh still reads ok
+  assert.equal(fresh.summary.datasets_stale, 0); assert.equal(fresh.summary.guests_stale, 0);
+  const a1 = storageAlerts(fresh, []);
+  assert.deepEqual(a1.filter((a) => a.key.startsWith('storage:snapshot-stale:')), []);
+  const unconf = a1.find((a) => a.key === 'storage:backups-unconfigured:tank');
+  assert.equal(unconf.level, 'info'); assert.equal(unconf.event, 'storage.backups_unconfigured');
+  assert.ok(a1.some((a) => a.key === 'storage:pool-health:data')); // real faults still report through
+  // A policy is set but sanoid is not installed: one error, still not 14 rows.
+  const missing = computeFreshness({ ...base, backup: { pool: 'tank', policy_applied: true, sanoid_installed: false, timer_present: false } });
+  assert.equal(missing.backup.reason, 'sanoid_missing');
+  const a2 = storageAlerts(missing, []);
+  assert.equal(a2.filter((a) => a.key.startsWith('storage:snapshot-stale:')).length, 0);
+  assert.equal(a2.find((a) => a.key === 'storage:snapshots-not-running:tank').level, 'error');
+  // A policy is set and the timer is down: same shape, timer wording.
+  const down = computeFreshness({ ...base, backup: { pool: 'tank', policy_applied: true, sanoid_installed: true, timer_present: true, timer_state: 'inactive' } });
+  assert.equal(down.backup.reason, 'timer_inactive');
+  assert.match(storageAlerts(down, []).find((a) => a.key === 'storage:snapshots-not-running:tank').body, /sanoid\.timer is inactive/);
+  // Policy applied and the timer running: staleness is a real fault again.
+  const running = computeFreshness({ ...base, backup: { pool: 'tank', policy_applied: true, sanoid_installed: true, timer_present: true, timer_state: 'active' } });
+  assert.equal(running.backup.expect_snapshots, true);
+  assert.ok(storageAlerts(running, []).some((a) => a.key === 'storage:snapshot-stale:tank/exports'));
+  // No posture at all (a caller that cannot tell) keeps the strict behaviour.
+  assert.deepEqual(backupPosture(null), { known: false, expect_snapshots: true, reason: null });
+  assert.equal(computeFreshness({ ...base }).datasets.find((d) => d.name === 'tank/exports').status, 'stale');
+  // The pool name is derived from the managed layout when the caller omits it.
+  assert.equal(computeFreshness({ ...base, backup: { policy_applied: false } }).backup.pool, 'tank');
 });

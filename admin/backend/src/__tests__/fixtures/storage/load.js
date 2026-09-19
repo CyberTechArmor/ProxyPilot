@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs';
 import {
   parseLsblk, parseSmartctl, parseFindmnt, parseByIdMap, parseZpoolList, parseZpoolStatus, parseZpoolImport, parseZfsList, parseZfsSnapshots,
-  buildDeviceInventory, parseIncusStoragePools, parseIncusInstances,
+  buildDeviceInventory, parseIncusStoragePools, parseIncusInstances, parseIncusProfileRoot,
 } from '../../../lib/storage/parse.js';
 
 export const fx = (name) => readFileSync(new URL(`./${name}`, import.meta.url), 'utf8');
@@ -31,7 +31,7 @@ export function fixtureInventory(overrides = {}) {
   return {
     collected_at: '2026-09-19T10:00:00.000Z', source: { disks: 'nsenter', pools: 'nsenter', datasets: 'nsenter' },
     devices: d.devices, importable: d.importable, pools: parseZpoolList(fx('zpool-list.txt')), poolStatus: d.pools, datasets, snapshots,
-    incusPools, instances, defaultProfileRoot: { name: 'root', pool: 'default' }, incusSnapshotForm: 'sub', incusSources: ['tank/incus'],
+    incusPools, instances, defaultProfileRoot: { device: 'root', name: 'root', pool: 'default', used_by: [{ name: 'pp-web', project: 'default' }, { name: 'pp-db', project: 'default' }, { name: 'pp-legacy', project: 'default' }] }, incusSnapshotForm: 'sub', incusSources: ['tank/incus'],
     managed: { pool: 'tank', incus_pool: 'zfs', datasets: { incus: 'tank/incus', backups: 'tank/backups', exports: 'tank/exports' }, mountpoints: { backups: '/tank/backups', exports: '/tank/exports', incus: 'legacy' }, present: true },
     backupsDir: '/tank/backups', restoreHelper: '/usr/local/sbin/proxypilot-storage-restore-guest', warnings: [],
     ...overrides,
@@ -59,7 +59,7 @@ export function fakeHost({ script = () => null, managedSettings = null } = {}) {
     async smartFor() { return {}; },
     async incusStoragePools() { return parseIncusStoragePools(fx('incus-storage.json')); },
     async incusInstances() { return parseIncusInstances(fx('incus-list.json')); },
-    async incusDefaultProfileRoot() { return { name: 'root', pool: 'default' }; },
+    async incusDefaultProfileRoot() { return parseIncusProfileRoot({ devices: { root: { type: 'disk', path: '/', pool: 'default' } }, used_by: ['/1.0/instances/pp-web', '/1.0/instances/pp-db', '/1.0/instances/pp-legacy'] }); },
     async incusSnapshotForm() { return 'sub'; },
     async readFile() { return null; },
     async listDir() { return []; },

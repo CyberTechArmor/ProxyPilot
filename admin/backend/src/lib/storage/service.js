@@ -46,6 +46,9 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
     return { pool: m.pool, incus_pool: m.incus_pool || null, datasets: { incus: m.datasets?.incus || `${m.pool}/${MANAGED_DATASETS.incus}`, backups: m.datasets?.backups || `${m.pool}/${MANAGED_DATASETS.backups}`, exports: m.datasets?.exports || `${m.pool}/${MANAGED_DATASETS.exports}` } };
   };
   const storedPolicy = () => jsonSetting(getSetting, SETTING_POLICY, {});
+  // Has an operator actually applied a backup policy? (An empty setting means
+  // no: freshness must not report snapshots as overdue that nobody asked for.)
+  const policyApplied = () => { try { return !!getSetting(SETTING_POLICY); } catch { return false; } };
   const storedReplication = () => jsonSetting(getSetting, SETTING_REPLICATION, {});
 
   /* ------------------------------ inventory ------------------------------ */
@@ -314,10 +317,25 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
     return jobs;
   }
 
+  /** What the host can actually deliver in the way of snapshots, for freshness. */
+  async function backupPosture() {
+    const applied = policyApplied();
+    let tc = null;
+    try { tc = await host.toolchain(); } catch { tc = null; }
+    const timer = tc?.sanoid_timer || null;
+    return {
+      pool: managed()?.pool || null, policy_applied: applied,
+      sanoid_installed: tc ? !!tc.sanoid : true,
+      timer_present: timer ? !!timer.present : true,
+      timer_state: timer?.ActiveState || null, timer_enabled: timer?.UnitFileState || null,
+    };
+  }
+
   async function freshness({ inv = null, replication = null } = {}) {
     const inventoryNow = inv || await inventory({ smart: false });
     const jobs = replication || await replicationStatus();
-    const f = computeFreshness({ pools: inventoryNow.pools, poolStatus: inventoryNow.poolStatus, datasets: inventoryNow.datasets, snapshots: inventoryNow.snapshots, instances: inventoryNow.instances, managed: inventoryNow.managed?.datasets || null, policy: resolvePolicy(storedPolicy()), replication: jobs, now: now() });
+    const backup = await backupPosture();
+    const f = computeFreshness({ pools: inventoryNow.pools, poolStatus: inventoryNow.poolStatus, datasets: inventoryNow.datasets, snapshots: inventoryNow.snapshots, instances: inventoryNow.instances, managed: inventoryNow.managed?.datasets || null, policy: resolvePolicy(storedPolicy()), replication: jobs, backup, now: now() });
     return { ...f, managed: inventoryNow.managed, warnings: inventoryNow.warnings };
   }
 

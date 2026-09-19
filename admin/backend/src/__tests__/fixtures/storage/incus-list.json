@@ -1,1 +1,64 @@
-[{"name":"pp-web","type":"container","status":"Running","project":"default","expanded_devices":{"root":{"path":"/","pool":"zfs","type":"disk"}},"snapshots":[{"name":"before-upgrade"}]},{"name":"pp-db","type":"container","status":"Stopped","project":"default","expanded_devices":{"root":{"path":"/","pool":"zfs","type":"disk"}},"snapshots":[]},{"name":"pp-legacy","type":"container","status":"Running","project":"default","expanded_devices":{"root":{"path":"/","pool":"default","type":"disk"}},"snapshots":[]}]
+[
+  {
+    "name": "pp-web",
+    "type": "container",
+    "status": "Running",
+    "project": "default",
+    "expanded_devices": {
+      "root": {
+        "path": "/",
+        "pool": "zfs",
+        "type": "disk"
+      }
+    },
+    "snapshots": [
+      {
+        "name": "before-upgrade"
+      }
+    ],
+    "profiles": [
+      "default"
+    ],
+    "devices": {
+      "root": {
+        "path": "/",
+        "pool": "zfs",
+        "type": "disk"
+      }
+    }
+  },
+  {
+    "name": "pp-db",
+    "type": "container",
+    "status": "Stopped",
+    "project": "default",
+    "expanded_devices": {
+      "root": {
+        "path": "/",
+        "pool": "zfs",
+        "type": "disk"
+      }
+    },
+    "snapshots": [],
+    "profiles": [
+      "default"
+    ]
+  },
+  {
+    "name": "pp-legacy",
+    "type": "container",
+    "status": "Running",
+    "project": "default",
+    "expanded_devices": {
+      "root": {
+        "path": "/",
+        "pool": "default",
+        "type": "disk"
+      }
+    },
+    "snapshots": [],
+    "profiles": [
+      "default"
+    ]
+  }
+]

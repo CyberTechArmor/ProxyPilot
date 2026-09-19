@@ -92,7 +92,22 @@ clears the setting). `zpool destroy` is deliberately not offered.
 `set_incus_storage_pool` runs `incus storage create <name> zfs
 source=<pool>/incus` (skipped when it already exists on that dataset) and
 points the default profile's root disk at it (or adds one). The plan lists
-the existing Incus pools. `move_guest_storage` moves one guest or a batch:
+the existing Incus pools.
+
+Incus refuses to change the pool of a profile's root disk while instances
+inherit it (*"At least one instance relies on this profile's root disk
+device"*), so the plan first pins every such instance to the pool it is
+**already** on — `incus config device override <guest> root pool=<current>`,
+taken from the profile's own `used_by` list, with `--project` where the guest
+lives in another project. Nothing is moved and no guest changes pool; the
+effect is that existing guests stay where they are and only guests created
+from then on land on the new pool (`move_guest_storage` moves an existing
+one). The plan's `pins` lists them and the reversal removes them again;
+`pin_existing: false` refuses the operation instead of touching any instance.
+
+This is the only place ProxyPilot chooses where a new container's disk lives:
+`incus launch` is run without `--storage`, so a guest inherits the default
+profile's root pool. `move_guest_storage` moves one guest or a batch:
 stop (only with `stop: true`), `incus snapshot create <guest>
 pp-premove-<stamp>`, `incus move <guest> --storage <pool>`, start, and a
 verification step that the guest is `Running`.
@@ -118,6 +133,15 @@ backups, exports) plus per-dataset and per-guest overrides.
 | guests (`<pool>/incus/…`) | 4 | 24 | 14 | 3 |
 | backups | 0 | 0 | 30 | 6 |
 | exports | 0 | 0 | 7 | 1 |
+
+Nothing is snapshotted until a policy is applied: until then freshness
+reports every dataset as `not_configured` and raises one info alert per pool
+("No snapshot policy on <pool> yet") instead of calling datasets overdue. Once
+a policy IS applied, a missing sanoid or a stopped `sanoid.timer` is one error
+alert for the pool rather than one stale row per dataset, and Incus's
+structural datasets (`containers`, `virtual-machines`, `images`, `custom`,
+`buckets`, `deleted/*`) never alert on their own — guests are reported per
+guest.
 
 `get_backup_policy` shows the policy, the effective retention of every dataset
 and the rendered file; `set_backup_policy` changes a class, a dataset or a

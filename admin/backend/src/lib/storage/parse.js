@@ -277,12 +277,19 @@ const VDEV_GROUP_RE = /^(mirror|raidz1|raidz2|raidz3|draid\d?|spare|replacing|in
  * leaf device (a leaf directly under the pool is a single-device vdev).
  * Sections `logs`, `cache`, `spares`, `special`, `dedup` become classes.
  */
+function errorCountFromText(errors) {
+  if (!errors) return null;
+  if (/no known data errors/i.test(errors)) return 0;
+  const m = errors.match(/(\d+)\s+data errors?/i);
+  return m ? Number(m[1]) : null;
+}
+
 export function parseZpoolStatus(text) {
   const pools = [];
   const chunks = String(text || '').split(/\n(?=\s*pool:)/);
   for (const chunk of chunks) {
     if (!/^\s*pool:/.test(chunk)) continue;
-    const pool = { name: null, state: null, status: null, action: null, see: null, scan: null, errors: null, vdevs: [], config_text: null, checkpoint: null };
+    const pool = { name: null, state: null, status: null, action: null, see: null, scan: null, error_count: null, errors: null, vdevs: [], config_text: null, checkpoint: null };
     const lines = chunk.split('\n');
     let section = null; const sec = {};
     for (const raw of lines) {
@@ -295,6 +302,7 @@ export function parseZpoolStatus(text) {
     for (const k of ['status', 'action', 'see', 'checkpoint']) if (sec[k]) pool[k] = sec[k].map((l) => l.trim()).filter(Boolean).join(' ');
     pool.scan = parseScan(sec.scan || sec.scrub || []);
     pool.errors = sec.errors ? sec.errors.map((l) => l.trim()).filter(Boolean).join(' ') : null;
+    pool.error_count = errorCountFromText(pool.errors);
     const cfg = (sec.config || []).filter((l) => l.trim() !== '');
     pool.config_text = cfg.join('\n');
     pool.vdevs = parseConfigTree(cfg, pool.name);
@@ -359,7 +367,11 @@ export function parseZpoolStatusJson(json) {
         vdevs.push({ name: v.name, type: 'single', state: v.state, read_errors: num(v.read_errors), write_errors: num(v.write_errors), cksum_errors: num(v.checksum_errors), class: cls === 'normal' ? 'data' : cls, devices: [leafOf(v, cls)] });
       }
     }
-    pools.push({ name: p.name, state: p.state, status: p.status || null, action: p.action || null, see: null, scan, errors: p.error_count != null ? `${p.error_count} data errors` : null, vdevs, config_text: null, checkpoint: null });
+    // `error_count: 0` is the healthy case: report it the way the text form
+    // does ("No known data errors") so both parsers agree and nothing
+    // downstream reads a truthy "0 data errors" as a fault.
+    const errorCount = p.error_count != null ? num(p.error_count) : null;
+    pools.push({ name: p.name, state: p.state, status: p.status || null, action: p.action || null, see: null, scan, error_count: errorCount, errors: errorCount == null ? null : errorCount > 0 ? `${errorCount} data errors` : 'No known data errors', vdevs, config_text: null, checkpoint: null });
   }
   return pools;
 }
@@ -551,15 +563,53 @@ export function parseIncusStoragePools(json) {
   return j.map((p) => ({ name: p.name, driver: p.driver, source: p.config?.source || null, status: p.status || null, used_by: Array.isArray(p.used_by) ? p.used_by : [], used_by_count: Array.isArray(p.used_by) ? p.used_by.length : 0, config: p.config || {} }));
 }
 
-/** `incus list --format json` → [{ name, type, status, pool, project }] where pool comes from the root disk device. */
+const rootDiskOf = (devices) => Object.entries(devices || {}).find(([, d]) => d && d.type === 'disk' && d.path === '/') || null;
+
+/**
+ * `incus list --all-projects --format json` →
+ * [{ name, type, status, pool, project, has_own_root, root_device }].
+ *
+ * `pool` is the effective pool (from `expanded_devices`, i.e. profile +
+ * instance). `has_own_root` says whether the instance carries its own root
+ * disk device: when it does not, it inherits one from a profile, and Incus
+ * refuses to change that profile's root pool while the instance relies on it
+ * — which is what planSetIncusStoragePool pins around.
+ */
 export function parseIncusInstances(json) {
   let j; try { j = typeof json === 'string' ? JSON.parse(json) : json; } catch { return []; }
   if (!Array.isArray(j)) return [];
   return j.map((i) => {
-    const devices = i.expanded_devices || i.devices || {};
-    const root = Object.values(devices).find((d) => d && d.type === 'disk' && d.path === '/');
-    return { name: i.name, type: i.type || 'container', status: i.status || null, pool: root?.pool || null, project: i.project || 'default', snapshots: Array.isArray(i.snapshots) ? i.snapshots.map((s) => s.name) : [] };
+    const own = rootDiskOf(i.devices);
+    const expanded = rootDiskOf(i.expanded_devices) || own;
+    return {
+      name: i.name, type: i.type || 'container', status: i.status || null, pool: expanded?.[1]?.pool || null,
+      project: i.project || 'default', has_own_root: !!own, root_device: (expanded || own)?.[0] || null,
+      profiles: Array.isArray(i.profiles) ? i.profiles.map(String) : [],
+      snapshots: Array.isArray(i.snapshots) ? i.snapshots.map((s) => s.name) : [],
+    };
   });
+}
+
+/**
+ * `incus query /1.0/profiles/default` → { device, pool, used_by } where
+ * used_by is [{ name, project }] parsed from the profile's own used_by URLs
+ * (`/1.0/instances/web-1`, `/1.0/instances/web-1?project=p`). That list is
+ * authoritative about which instances the profile applies to, across
+ * projects, so we never have to guess from project feature flags.
+ */
+export function parseIncusProfileRoot(json) {
+  let j; try { j = typeof json === 'string' ? JSON.parse(json) : json; } catch { return null; }
+  if (!j || typeof j !== 'object') return null;
+  const root = rootDiskOf(j.devices);
+  const used_by = [];
+  for (const u of Array.isArray(j.used_by) ? j.used_by : []) {
+    const m = String(u).match(/^\/1\.0\/instances\/([^/?]+)(?:\?(.*))?$/);
+    if (!m) continue;
+    const params = new URLSearchParams(m[2] || '');
+    used_by.push({ name: decodeURIComponent(m[1]), project: params.get('project') || 'default' });
+  }
+  if (!root) return { device: null, pool: null, used_by };
+  return { device: root[0], name: root[0], pool: root[1].pool || null, used_by };
 }
 
 /** The ZFS dataset an Incus instance lives on, for a pool whose source is <dataset>. */

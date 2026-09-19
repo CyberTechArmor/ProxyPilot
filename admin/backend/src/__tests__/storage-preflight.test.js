@@ -368,3 +368,34 @@ test('the install refuses a pointless re-run when the host only needs a reboot',
   assert.match(r.error, /Re-running the installer changes nothing/);
   assert.ok(!host.calls.some((c) => c.argv?.[0] === 'systemctl'), 'nothing was started');
 });
+
+test('toolchain: a TEMPLATE unit is detected by its file, not by systemctl (which has no state for an instance-less template)', async () => {
+  const { createStorageHost } = await import('../lib/storage/host.js');
+  const seen = [];
+  // Real systemd: `systemctl show proxypilot-zfs-scrub@.timer -p UnitFileState`
+  // answers with an EMPTY UnitFileState for a template that is installed, so
+  // asking it is indistinguishable from the unit not being there at all.
+  const runHostCapture = async (bin, args) => {
+    seen.push([bin, ...args].join(' '));
+    if (bin === 'systemctl') {
+      const unit = args[1];
+      if (unit === 'sanoid.timer') return { status: 0, stdout: 'ActiveState=active\nUnitFileState=enabled\n' };
+      return { status: 0, stdout: 'ActiveState=inactive\nUnitFileState=\n' };
+    }
+    if (bin === 'sh') {
+      const script = args[1];
+      const arg = args[3];
+      if (/systemd\/system/.test(script)) return { status: /proxypilot-(zfs-scrub|syncoid)@/.test(arg) ? 0 : 1, stdout: '' };
+      if (/sys\/module\/zfs/.test(script)) return { status: 0, stdout: '' };
+      return { status: 0, stdout: '' };            // the helper binaries
+    }
+    if (bin === 'command') return { status: 0, stdout: `/usr/sbin/${args[args.length - 1]}\n` };
+    if (bin === 'zfs' && args[0] === 'version') return { status: 0, stdout: 'zfs-2.3.9-0+deb13u1\n' };
+    return { status: 0, stdout: '' };
+  };
+  const tc = await createStorageHost({ runHostCapture, useAgent: false }).toolchain();
+  assert.equal(tc.scrub_timer_installed, true, 'the scrub timer template is installed and must read as installed');
+  assert.equal(tc.syncoid_unit_installed, true);
+  assert.equal(tc.sanoid_timer.UnitFileState, 'enabled', 'a real (non-template) unit still goes through systemctl');
+  assert.ok(!seen.some((c) => /^systemctl show proxypilot-/.test(c)), 'no systemctl query for a template unit');
+});

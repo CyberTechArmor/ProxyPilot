@@ -237,6 +237,7 @@ type zpoolPool struct {
 	Action     *string          `json:"action"`
 	See        *string          `json:"see"`
 	Scan       *zpoolScan       `json:"scan"`
+	ErrorCount *float64         `json:"error_count"`
 	Errors     *string          `json:"errors"`
 	Vdevs      []zpoolVdevGroup `json:"vdevs"`
 	ConfigText *string          `json:"config_text"`
@@ -383,6 +384,8 @@ func strP(s string) *string {
 }
 
 func strVal(s string) *string { return &s }
+
+func f64Val(n float64) *float64 { return &n }
 
 // numP is parse.js num(): ”, '-' and non-numbers → null.
 func numP(s string) *float64 {
@@ -1297,6 +1300,7 @@ func parseZpoolStatus(text string) []zpoolPool {
 		pool.Scan = parseScan(scanLines)
 		if v, ok := sec["errors"]; ok {
 			pool.Errors = strVal(joinTrimmed(v, " "))
+			pool.ErrorCount = errorCountFromText(*pool.Errors)
 		}
 		cfg := []string{}
 		for _, l := range sec["config"] {
@@ -1423,6 +1427,28 @@ func jsonLeaf(d *zpoolJSONVdev, cls string) zpoolVdevLeaf {
 	return leaf
 }
 
+// errorCountFromText is parse.js errorCountFromText: the numeric count behind
+// zpool status's "errors:" line, so both forms answer the same question.
+func errorCountFromText(errors string) *float64 {
+	if errors == "" {
+		return nil
+	}
+	if strings.Contains(strings.ToLower(errors), "no known data errors") {
+		return f64Val(0)
+	}
+	m := dataErrorsRe.FindStringSubmatch(errors)
+	if m == nil {
+		return nil
+	}
+	n, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return nil
+	}
+	return f64Val(n)
+}
+
+var dataErrorsRe = regexp.MustCompile(`(?i)(\d+)\s+data errors?`)
+
 // parseZpoolStatusJSON is parse.js parseZpoolStatusJson.
 func parseZpoolStatusJSON(raw []byte) ([]zpoolPool, error) {
 	var j struct {
@@ -1489,8 +1515,17 @@ func parseZpoolStatusJSON(raw []byte) ([]zpoolPool, error) {
 			vdevs = append(vdevs, g)
 		}
 		pool := zpoolPool{Name: name, State: p.State.str(), Status: p.Status.str(), Action: p.Action.str(), Scan: scan, Vdevs: vdevs}
-		if ec := p.ErrorCount.str(); ec != nil {
-			pool.Errors = strVal(*ec + " data errors")
+		// error_count: 0 is the healthy case. Saying "0 data errors" here made
+		// every consumer read a healthy pool as faulted (it is a non-empty
+		// string and does not match /no known data errors/), so word it the
+		// way the text form does and carry the number alongside it.
+		if ec := p.ErrorCount.num(); ec != nil {
+			pool.ErrorCount = ec
+			if *ec > 0 {
+				pool.Errors = strVal(strconv.FormatFloat(*ec, 'f', -1, 64) + " data errors")
+			} else {
+				pool.Errors = strVal("No known data errors")
+			}
 		}
 		pools = append(pools, pool)
 	}

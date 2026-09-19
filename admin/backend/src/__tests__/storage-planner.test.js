@@ -200,8 +200,38 @@ test('pools: replace_disk, scrub with timer, import (force for non-ONLINE), expo
 
 test('incus binding: set_incus_storage_pool (create vs keep, profile root), move_guest_storage batch with snapshots and verification', () => {
   const keep = planSetIncusStoragePool(inv(), { name: 'zfs', dataset: 'tank/incus' });
-  assert.deepEqual(keep.plan.steps.map((s) => s.argv), [['incus', 'profile', 'device', 'set', 'default', 'root', 'pool=zfs'], ['incus', 'storage', 'show', 'zfs']]);
+  // Incus refuses to repoint the default profile's root disk while instances
+  // inherit it, so each of those is first pinned to the pool it is already on
+  // (pp-web has its own root device already and is left alone).
+  assert.deepEqual(keep.plan.steps.map((s) => s.argv), [
+    ['incus', 'config', 'device', 'override', 'pp-db', 'root', 'pool=zfs'],
+    ['incus', 'config', 'device', 'override', 'pp-legacy', 'root', 'pool=default'],
+    ['incus', 'profile', 'device', 'set', 'default', 'root', 'pool=zfs'],
+    ['incus', 'storage', 'show', 'zfs'],
+  ]);
+  assert.deepEqual(keep.plan.pins.map((p) => [p.name, p.pool]), [['pp-db', 'zfs'], ['pp-legacy', 'default']]);
+  assert.match(keep.plan.warnings[0], /2 existing guest\(s\) stay on/);
+  assert.match(keep.plan.reversal, /incus profile device set default root pool=default; incus config device remove pp-db root; incus config device remove pp-legacy root; incus storage delete zfs/);
   assert.equal(keep.plan.existing_pools.length, 2);
+  // pin_existing: false refuses rather than touching the instances.
+  assert.match(planSetIncusStoragePool(inv(), { name: 'zfs', dataset: 'tank/incus', pin_existing: false }).error, /2 instance\(s\) rely on the default profile's root disk \(pp-db, pp-legacy\)/);
+  // set_default: false leaves the profile (and every instance) alone.
+  assert.deepEqual(planSetIncusStoragePool(inv(), { name: 'zfs', dataset: 'tank/incus', set_default: false }).plan.steps.map((s) => s.argv), [['incus', 'storage', 'show', 'zfs']]);
+  // An instance in another project keeps its scope in the pin command.
+  const otherProject = inv();
+  otherProject.instances = otherProject.instances.map((i) => (i.name === 'pp-db' ? { ...i, project: 'staging' } : i));
+  otherProject.defaultProfileRoot = { ...otherProject.defaultProfileRoot, used_by: [{ name: 'pp-db', project: 'staging' }] };
+  assert.deepEqual(planSetIncusStoragePool(otherProject, { name: 'zfs', dataset: 'tank/incus' }).plan.steps[0].argv, ['incus', 'config', 'device', 'override', '--project', 'staging', 'pp-db', 'root', 'pool=zfs']);
+  // An instance the list did not cover is reported, never guessed at.
+  const unknown = inv();
+  unknown.defaultProfileRoot = { ...unknown.defaultProfileRoot, used_by: [{ name: 'ghost', project: 'default' }] };
+  const un = planSetIncusStoragePool(unknown, { name: 'zfs', dataset: 'tank/incus' });
+  assert.deepEqual(un.plan.pins, []);
+  assert.match(un.plan.warnings[0], /could not check whether ghost has its own root disk/);
+  // No used_by at all (older Incus): fall back to instances on the profile's pool without their own root.
+  const noUsedBy = inv();
+  noUsedBy.defaultProfileRoot = { device: 'root', pool: 'default' };
+  assert.deepEqual(planSetIncusStoragePool(noUsedBy, { name: 'zfs', dataset: 'tank/incus' }).plan.pins.map((p) => p.name), ['pp-legacy']);
   assert.match(planSetIncusStoragePool(inv(), { name: 'default', dataset: 'tank/backups' }).error, /already has a storage pool default \(dir/);
   assert.match(planSetIncusStoragePool(inv(), { name: 'zfs2', dataset: 'tank/incus' }).error, /already backs the Incus pool zfs/);
   const fresh = inv(); fresh.incusPools = []; fresh.defaultProfileRoot = null;

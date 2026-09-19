@@ -33,7 +33,7 @@ with the same plan/confirm contract.
 - Shell: `bash -n` on the three scripts; the Incus backup `index.yaml`
   field set was checked against Incus's `backup_info.go` (`Info` struct).
 
-## Verified on loop devices — by CI, not in this sandbox
+## Verified on loop devices — green in CI (run 3), not in this sandbox
 
 `storage-loop.integration.test.js` (skips here: the sandbox cannot load the
 zfs module) runs in `.github/workflows/storage-integration.yml` on
@@ -58,9 +58,19 @@ devices with pre-created by-id links:
    disk refused → `import_pool`
 9. `replace_disk` onto the fourth loop, resilver completes
 
-**First CI run of that workflow has not happened yet** (it triggers on push
-of this branch). If it fails, the most likely spot is the whole-disk
-partitioning wait (`-part1` links) — see the comment in the test.
+**What the first CI runs found** (the job is doing real ZFS work on the
+runner, so it earns its keep):
+
+| Run | Result | Cause |
+|---|---|---|
+| 1 | 1/9 | test bug: the pool device list picked up the test's own `-partN` symlinks, which the planner correctly refuses |
+| 2 | 6/9 | one test bug (`zfs list -r` sorts by name) and **two product bugs**: the syncoid wrapper captured `rc=$?` inside `if ! cmd` (always 0, so a failed replication recorded success) and wrote invalid JSON on every success; the rollback guard ordered snapshots by `creation`, which is whole seconds, so a snapshot taken in the same second was destroyed without warning |
+| 3 | **9/9 green** | after both product fixes + `createtxg` ordering in Node and the Go agent — https://github.com/CyberTechArmor/ProxyPilot/actions/runs/35449823223 |
+
+Both product bugs now have unit coverage that runs everywhere:
+`storage-replicate.test.js` (stub syncoid: success, failure, reason,
+previous success preserved, config guard) and the same-second `createtxg`
+case in `storage-planner.test.js`.
 
 ## Not yet verified on real hardware / a real host
 

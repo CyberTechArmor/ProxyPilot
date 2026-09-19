@@ -67,6 +67,10 @@ export function createMigrationService({
     const egress = parse(row.egress_json, null);
     const samples = progressSamples(row.id);
     const prog = transferProgress({ samples, total_bytes: row.bytes_total ?? null, now: now() });
+    // "Stalled" is a statement about a transfer in flight. On a finished or
+    // waiting migration the last sample is always old, and saying stalled
+    // there is just wrong.
+    if (row.status !== 'running' || row.phase !== 'transfer') prog.stalled = false;
     return {
       id: row.id, created_at: row.created_at, created_by: row.created_by, updated_at: row.updated_at,
       mode: row.mode, transport: row.transport, status: row.status, phase: row.phase,
@@ -662,7 +666,16 @@ export function createMigrationService({
     return { migration: view(rowById(id)), complete };
   }
 
-  /** Record the operator's decision on one observed outbound host. */
+  /**
+   * Record the operator's decision on one observed outbound host.
+   *
+   * The service argument must be something THIS firewall knows. Its named
+   * services are installation-specific (a stock host knows only the ones it
+   * was taught), so the name from the manifest is a hint: use it only when
+   * the CLI lists it, and otherwise fall back to `proto:port`, which the CLI
+   * always accepts. (The first version always sent the name and the first
+   * real approval failed with `unknown service 'https'. Known: pgbouncer`.)
+   */
   async function decideEgress(id, { host, port = null, decision = 'approve', by = null } = {}) {
     const row = rowById(id);
     if (!row) return { error: 'no such migration' };
@@ -672,11 +685,11 @@ export function createMigrationService({
     const entry = rows[idx];
     if (decision === 'approve') {
       const bare = row.target_name.startsWith(lxcPrefix) ? row.target_name.slice(lxcPrefix.length) : row.target_name;
-      const service = entry.service || (entry.port ? `tcp:${entry.port}` : null);
+      const service = await egressServiceArg(entry);
       if (!service) return { error: `${entry.host} has no port, so there is no egress service to allow` };
       const r = await exec('proxypilot', ['--json', 'firewall', 'egress', 'allow', bare, service, '--reason', `migration ${row.id}: ${entry.host}`], { timeoutMs: 60000 });
-      if (r.status !== 0) return { error: `egress allow failed: ${tail(r.stderr) || tail(r.stdout) || `exit ${r.status}`}` };
-      entry.decision = 'approved'; entry.applied_at = nowIso(now()); entry.applied_by = by;
+      if (r.status !== 0) return { error: `egress allow ${service} failed: ${tail(r.stderr) || tail(r.stdout) || `exit ${r.status}`}` };
+      entry.decision = 'approved'; entry.applied_at = nowIso(now()); entry.applied_by = by; entry.applied_as = service;
     } else {
       entry.decision = 'denied'; entry.applied_at = nowIso(now()); entry.applied_by = by;
     }
@@ -684,6 +697,16 @@ export function createMigrationService({
     db().prepare('UPDATE migrations SET egress_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(rows), nowIso(now()), id);
     event(id, { kind: 'state', message: `egress ${entry.decision}: ${entry.host}${entry.port ? `:${entry.port}` : ''}`, detail: { by } });
     return { egress: rows, entry };
+  }
+
+  /** What to call this destination when talking to the firewall CLI. */
+  async function egressServiceArg(entry) {
+    const proto = entry.proto === 'udp' ? 'udp' : 'tcp';
+    if (!entry.port) return entry.service || null;
+    const list = await exec('proxypilot', ['--json', 'firewall', 'egress', 'list'], { timeoutMs: 60000 });
+    const known = Object.keys(parse(list.stdout, {})?.services || {});
+    if (entry.service && known.includes(entry.service)) return entry.service;
+    return `${proto}:${entry.port}`;
   }
 
   /* ------------------------------- listing ------------------------------- */

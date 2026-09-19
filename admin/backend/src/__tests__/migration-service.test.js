@@ -389,8 +389,14 @@ test('the cutover checklist is state: marked with who and when, reopenable, and 
   assert.ok(svc.listEvents(id).some((e) => /migration complete/.test(e.message || '')));
 });
 
-test('egress decisions apply a real allow to the fence, and a deny applies nothing', async () => {
-  const { svc, calls } = setup({ script: (bin, args) => (bin === 'incus' && args[0] === 'config' && args[1] === 'show' ? { status: 1 } : { status: 0 }) });
+test('egress decisions speak the firewall\'s OWN vocabulary, and a deny applies nothing', async () => {
+  // This host knows no named services beyond pgbouncer — the common case,
+  // and the one the first real approval failed on.
+  const { svc, calls } = setup({ script: (bin, args) => {
+    if (bin === 'proxypilot' && args[3] === 'list') return { status: 0, stdout: JSON.stringify({ entries: [], services: { pgbouncer: { port: 6432 } } }) };
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return { status: 1 };
+    return { status: 0 };
+  } });
   const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
   const id = r.migration.id;
   svc.recordManifest(svc.rowById(id), MANIFEST);
@@ -399,13 +405,46 @@ test('egress decisions apply a real allow to the fence, and a deny applies nothi
   const approved = await svc.decideEgress(id, { host: 'api.stripe.com', port: 443, decision: 'approve', by: 'admin-1' });
   assert.equal(approved.entry.decision, 'approved');
   assert.equal(approved.entry.applied_by, 'admin-1');
-  assert.ok(argvOf(calls).some((c) => c.startsWith('proxypilot --json firewall egress allow web https --reason')), 'the named service is used, not a raw port');
+  assert.equal(approved.entry.applied_as, 'tcp:443');
+  assert.ok(argvOf(calls).some((c) => c.startsWith('proxypilot --json firewall egress allow web tcp:443 --reason')), 'an unknown service name falls back to proto:port');
+  assert.ok(!argvOf(calls).some((c) => c.includes('egress allow web https')), 'the manifest\'s service name is a hint, not a command');
+
+  // A host whose service name the firewall DOES know is called by that name.
+  const known = setup({ script: (bin, args) => {
+    if (bin === 'proxypilot' && args[3] === 'list') return { status: 0, stdout: JSON.stringify({ entries: [], services: { https: { port: 443 }, pgbouncer: { port: 6432 } } }) };
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return { status: 1 };
+    return { status: 0 };
+  } });
+  const r2 = await known.svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  known.svc.recordManifest(known.svc.rowById(r2.migration.id), MANIFEST);
+  await known.svc.decideEgress(r2.migration.id, { host: 'api.stripe.com', port: 443, decision: 'approve' });
+  assert.ok(argvOf(known.calls).some((c) => c.startsWith('proxypilot --json firewall egress allow web https --reason')));
 
   const before = calls.length;
   const denied = await svc.decideEgress(id, { host: 'api.stripe.com', port: 443, decision: 'deny', by: 'admin-1' });
   assert.equal(denied.entry.decision, 'denied');
   assert.equal(calls.length, before, 'a denial touches the host not at all');
 });
+
+test('"stalled" is only ever said about a transfer that is actually in flight', async () => {
+  const { svc } = setup({ script: () => ({ status: 1 }) });
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  const id = r.migration.id;
+  svc.recordManifest(svc.rowById(id), MANIFEST);
+  await svc.approveTransfer(id, { actor: 'a' });
+  svc.recordEvent(svc.rowById(id), { kind: 'progress', phase: 'transfer', bytes: 1024 });
+  // The clock is frozen at NOW, so the sample is fresh and the run is live.
+  assert.equal(svc.view(svc.rowById(id)).progress.stalled, false);
+  // Once it is over, an old last sample is not a stall.
+  svc.recordEvent(svc.rowById(id), { kind: 'phase', phase: 'post-import' });
+  db_touch(svc, id);
+  assert.equal(svc.view(svc.rowById(id)).progress.stalled, false);
+});
+
+/** Move a migration to a finished state the way agentFinish would. */
+function db_touch(svc, id) {
+  svc.setChecklistStep(id, { step: 'inventory_reviewed', by: 'test' });
+}
 
 test('cancel: the token dies, the Incus trust certificate is revoked, and no guest is deleted', async () => {
   const { svc, calls } = setup({ script: (bin, args) => {

@@ -188,7 +188,12 @@ function listenPort(vhost) {
   return null;
 }
 
-/** The firewall's named service for a port, where one exists (set_lxc_egress takes names). */
+/**
+ * A HINT at the firewall's named service for a well-known port. The
+ * firewall's real vocabulary is installation-specific, so the service layer
+ * checks this name against `firewall egress list` and falls back to
+ * proto:port; nothing here may be handed to the CLI unchecked.
+ */
 export const EGRESS_SERVICES = Object.freeze({ 53: 'dns', 80: 'http', 443: 'https', 25: 'smtp', 587: 'submission', 465: 'smtps', 993: 'imaps', 22: 'ssh', 123: 'ntp', 5432: 'postgres', 3306: 'mysql', 6379: 'redis', 11211: 'memcached', 27017: 'mongodb' });
 
 /**

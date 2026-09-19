@@ -373,11 +373,33 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
     return { started: true, id: started.id, requested_at: started.requested_at, preflight: pf, next: 'poll the install status; the host installs packages and units, which takes a minute or two. Nothing touches a block device.' };
   }
 
-  /** Progress of an install run, from the same state the self-update page reads. */
+  /**
+   * Progress of an install run. The runner writes one state file per action,
+   * so this is the self-update state — but its phase LIST and 7-phase total
+   * describe update.sh, not an install, so they are dropped rather than shown
+   * as a meaningless "3 of 7". An id whose state has not appeared yet is
+   * reported as queued while the request is still sitting in the run
+   * directory, so a run waiting on the path unit is not mistaken for a lost
+   * one and left to time out.
+   */
   async function installStatus({ id = null, logTailBytes = 8192 } = {}) {
     const { updateStatus } = await import('../self-update.js');
     const st = await updateStatus({ id: id || undefined, logTailBytes });
-    return { ...st, is_storage_install: st.action === 'storage-install' };
+    const mine = !id || st.id === id;
+    const isInstall = st.action === 'storage-install';
+    if (id && !mine) {
+      let pending = false;
+      try { pending = (await host.readFile('/run/proxypilot-update/request.json', { maxBytes: 4096 })) != null; } catch { pending = false; }
+      return {
+        id, action: 'storage-install', is_storage_install: true,
+        status: pending ? 'queued' : 'unknown',
+        phase: pending ? 'Waiting for the host runner to pick the request up' : 'No state was recorded for this run',
+        phase_index: null, phase_total: null, phases: [], terminal: !pending, exit_code: null,
+        reason: pending ? null : 'the runner never recorded this id; check the host journal for proxypilot-update.service',
+        log_tail: '', started_at: null, finished_at: null,
+      };
+    }
+    return { ...st, is_storage_install: isInstall, ...(isInstall ? { phases: [], phase_index: null, phase_total: null } : {}) };
   }
 
   /** The block export_grc_evidence embeds. */

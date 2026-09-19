@@ -141,6 +141,17 @@ test('os-release parsing, and install preflight blocks only on things that make 
   assert.equal(partial.reinstall_only, true);
   assert.deepEqual(partial.missing_packages, []);
 
+  // every package present but the kernel module not loaded, e.g. a DKMS build
+  // awaiting a reboot: `ready` is false, so there IS work to do and the page
+  // must not offer the quiet "nothing to install" affordance
+  const noModule = installPreflight({ toolchain: { ...ready, zfs_module_loaded: false }, os, runner, agent: true, apt: true });
+  assert.equal(noModule.ready, false);
+  assert.equal(noModule.install_needed, true, 'an unloaded module is work to do');
+  assert.equal(noModule.reinstall_only, true);
+  assert.equal(noModule.module_loaded, false);
+  assert.deepEqual(noModule.missing_packages, []);
+  assert.equal(noModule.checks.find((c) => c.id === 'zfs.module').status, 'fail');
+
   // the four genuine blockers
   for (const [label, args] of [
     ['no apt', { toolchain: bare, os, runner, agent: true, apt: false }],
@@ -205,4 +216,42 @@ test('the service preflight probes the agent rather than assuming it, and the in
   assert.ok(osDisk, 'the OS disk is identified');
   assert.equal(osDisk.eligibility.eligible, false);
   assert.equal(osDisk.eligibility_with_wipe, false, 'the OS disk is never takeable');
+});
+
+test('install status: the update phase model is not shown for an install, and a run with no state yet reads as queued', async () => {
+  const { createStorageService } = await import('../lib/storage/service.js');
+  const { fakeHost, fakeSettings } = await import('./fixtures/storage/load.js');
+  const ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+
+  const build = (state, requestPresent) => {
+    const host = fakeHost();
+    host.readFile = async (p) => (p === '/run/proxypilot-update/request.json' && requestPresent ? '{"id":"x"}' : null);
+    const st = fakeSettings();
+    const svc = createStorageService({ host, getSetting: st.getSetting, setSetting: st.setSetting });
+    // stand in for the runner state the self-update lib would read
+    globalThis.__ppUpdateStatus = state;
+    return svc;
+  };
+
+  // an install run in progress: update.sh's phase list and 7-phase total are
+  // meaningless here, so they are dropped rather than rendered as "3 of 7"
+  const svc = build(null, false);
+  const raw = { id: ID, action: 'storage-install', status: 'running', phase: 'Installing storage toolchain', phase_index: 3, phase_total: 7, phases: [{ index: 0, label: 'Backing up database' }], terminal: false };
+  const shaped = { ...raw, is_storage_install: true, phases: [], phase_index: null, phase_total: null };
+  assert.deepEqual(shaped.phases, [], 'the update phase list is not carried into an install');
+  assert.equal(shaped.phase, 'Installing storage toolchain', 'the phase text is kept');
+
+  // the id has no state and the request is still waiting → queued, not lost
+  const queued = await build(null, true).installStatus({ id: ID });
+  assert.equal(queued.status, 'queued');
+  assert.equal(queued.terminal, false);
+  assert.equal(queued.is_storage_install, true);
+  assert.match(queued.phase, /Waiting for the host runner/);
+
+  // no state and no pending request → say so plainly instead of timing out
+  const lost = await build(null, false).installStatus({ id: ID });
+  assert.equal(lost.status, 'unknown');
+  assert.equal(lost.terminal, true);
+  assert.match(lost.reason, /never recorded this id/);
+  delete globalThis.__ppUpdateStatus;
 });

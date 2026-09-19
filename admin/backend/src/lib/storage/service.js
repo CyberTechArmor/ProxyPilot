@@ -21,6 +21,7 @@ import {
 } from './planner.js';
 import { resolvePolicy, applyPolicyUpdate, renderSanoidConf, validateReplication, renderReplicationConf, renderTimerDropIn, effectiveRetention } from './policy.js';
 import { computeFreshness, storageAlerts } from './freshness.js';
+import { installPreflight } from './preflight.js';
 import { incusInstanceDataset } from './parse.js';
 import { REPLICATION_CONF_DIR, REPLICATION_STATE_DIR, SANOID_CONF, REPLICATE_BIN, RESTORE_HELPER } from './host.js';
 
@@ -54,6 +55,11 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
     const p = await host.pools();
     if (p.error) warnings.push(`zpool list: ${p.error}`);
     const [disks, ds] = await Promise.all([host.listDisks({ smart, poolStatus: p.status }), host.datasets()]);
+    // The safety facts lsblk cannot see. Attached to each device so
+    // deviceEligibility refuses an fstab-referenced or RAID-member disk.
+    let safety = { risks: {}, facts: null };
+    try { safety = await host.risksFor(disks.devices); } catch (e) { warnings.push(`device safety checks failed: ${e?.message || e}`); }
+    for (const d of disks.devices) d.risk = safety.risks[d.name] || { hard: [], warnings: [] };
     if (ds.error) warnings.push(`zfs list: ${ds.error}`);
     for (const w of disks.warnings || []) warnings.push(w);
     let incusPools = []; let instances = []; let defaultProfileRoot = null; let incusSnapshotForm = 'sub';
@@ -72,6 +78,7 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
       collected_at: new Date(now()).toISOString(), source: { disks: disks.source, pools: p.source, datasets: ds.source },
       devices: disks.devices, importable: disks.importable, pools: p.list, poolStatus: p.status, datasets: ds.datasets, snapshots: ds.snapshots,
       incusPools, instances, defaultProfileRoot, incusSnapshotForm, incusSources: zfsPools.map((x) => x.source),
+      safety: safety.facts,
       managed: m ? { ...m, mountpoints: { backups: mountOf(m.datasets.backups), exports: mountOf(m.datasets.exports), incus: mountOf(m.datasets.incus) }, present: ds.datasets.some((d) => d.name === m.pool) } : null,
       backupsDir: m ? (mountOf(m.datasets.backups) && mountOf(m.datasets.backups) !== 'none' && mountOf(m.datasets.backups) !== 'legacy' ? mountOf(m.datasets.backups) : null) : null,
       restoreHelper: RESTORE_HELPER, warnings,
@@ -320,6 +327,59 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
     return { freshness: f, alerts: storageAlerts(f, inventoryNow.devices), devices: inventoryNow.devices };
   }
 
+  /* ------------------------- preflight and install ------------------------ */
+
+  /**
+   * Can this host install and run the storage stack, and what is already in
+   * place? Read-only. `devices: true` also returns the per-device safety
+   * verdict, so the page can show why a disk is or is not takeable without a
+   * second round trip.
+   */
+  async function preflight({ devices = false } = {}) {
+    const [toolchain, os, runner, agent] = await Promise.all([host.toolchain(), host.osRelease(), host.runnerState(), host.agentPing()]);
+    const apt = await host.hasBinary('apt-get');
+    const report = installPreflight({ toolchain, os, runner, agent, apt });
+    const out = { at: new Date(now()).toISOString(), ...report, toolchain, os, runner, agent, managed: managed() };
+    if (devices) {
+      const inv = await inventory({ smart: false, incus: false });
+      const { deviceEligibility } = await import('./planner.js');
+      out.devices = inv.devices.map((d) => ({
+        name: d.name, path: d.path, model: d.model, serial: d.serial, size_bytes: d.size_bytes, os: d.os, os_reason: d.os_reason,
+        by_id: d.by_id, risk: d.risk, eligibility: deviceEligibility(d), eligibility_with_wipe: deviceEligibility(d, { wipe: true }).eligible,
+      }));
+      out.safety_checked = inv.safety || null;
+    }
+    return out;
+  }
+
+  /**
+   * Request the install. Refuses when the preflight is blocked, so the caller
+   * never waits on a runner that cannot succeed. Returns the run id; progress
+   * is the ordinary self-update status, since one runner serves both.
+   */
+  async function installToolchain({ actor = null, via = 'api', ip = null, force = false } = {}) {
+    const pf = await preflight();
+    if (!pf.can_install) return { refused: true, error: `preflight is blocked: ${pf.blocked_by.map((b) => b.detail).join('; ')}`, preflight: pf };
+    if (!pf.install_needed && !force) return { refused: true, already_installed: true, error: 'the storage toolchain is already installed and current; pass force: true to run the installer again', preflight: pf };
+    const { startStorageInstall } = await import('../self-update.js');
+    let started;
+    try {
+      started = await startStorageInstall({ requestedBy: `${via}:${actor || 'unknown'}` });
+    } catch (e) {
+      return { refused: true, error: `${e.code || 'error'}: ${e.message}`, preflight: pf };
+    }
+    recordOp({ ts: new Date(now()).toISOString(), actor, via, op: 'install_storage_toolchain', subject: 'host', plan_token: null, plan: null, outcome: 'ok', detail: { id: started.id, missing_packages: pf.missing_packages, reinstall_only: pf.reinstall_only }, duration_ms: null });
+    try { logAudit(actor, 'STORAGE_INSTALL_TOOLCHAIN', 'storage', 'host', { via, id: started.id, missing_packages: pf.missing_packages }, ip); } catch { /* best effort */ }
+    return { started: true, id: started.id, requested_at: started.requested_at, preflight: pf, next: 'poll the install status; the host installs packages and units, which takes a minute or two. Nothing touches a block device.' };
+  }
+
+  /** Progress of an install run, from the same state the self-update page reads. */
+  async function installStatus({ id = null, logTailBytes = 8192 } = {}) {
+    const { updateStatus } = await import('../self-update.js');
+    const st = await updateStatus({ id: id || undefined, logTailBytes });
+    return { ...st, is_storage_install: st.action === 'storage-install' };
+  }
+
   /** The block export_grc_evidence embeds. */
   async function evidence() {
     try {
@@ -333,5 +393,5 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
     } catch (e) { return { error: e?.message || String(e) }; }
   }
 
-  return { inventory, plan, apply, listOps, managed, policyView, storedPolicy, replicationStatus, freshness, alerts, evidence, OP_NAMES, toolchain: () => host.toolchain(), host };
+  return { inventory, plan, apply, listOps, managed, policyView, storedPolicy, replicationStatus, freshness, alerts, evidence, preflight, installToolchain, installStatus, OP_NAMES, toolchain: () => host.toolchain(), host };
 }

@@ -323,6 +323,55 @@ type updateRequestResult struct {
 	LogPath     string `json:"log_path"`
 }
 
+// storageInstallRequestParams is what storage.install_request accepts: a
+// requester and nothing else. No flags, no script path, no package list —
+// the runner fixes all of that, so a caller cannot widen what runs as root.
+type storageInstallRequestParams struct {
+	RequestedBy string `json:"requested_by"`
+}
+
+// StorageInstallRequest is the storage.install_request RPC handler. It drops a
+// request{action:"storage-install"} for the root runner, which runs the
+// checkout's scripts/install-storage.sh: packages, systemd units and helper
+// scripts. It touches no block device. Same refusals as update.request, since
+// both share one runner and one state file.
+func StorageInstallRequest(params json.RawMessage) (any, *Error) {
+	var p storageInstallRequestParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &Error{Code: "invalid_params", Message: "storage.install_request params must be {requested_by:string}: " + err.Error()}
+		}
+	}
+	if !updateRequestedByRe.MatchString(p.RequestedBy) {
+		return nil, &Error{Code: "invalid_params", Message: "requested_by is required and must match ^[A-Za-z0-9._@:+-]{1,80}$"}
+	}
+	st, err := readJSONObject(filepath.Join(updateStateDir, "state.json"))
+	if err != nil {
+		return nil, &Error{Code: "state_unreadable", Message: err.Error()}
+	}
+	if updateRunLive(st, updateNow()) {
+		return nil, &Error{
+			Code:    "update_in_progress",
+			Message: fmt.Sprintf("%s %s is %s (%s); wait for it to finish", stringField(st, "action"), stringField(st, "id"), stringField(st, "status"), stringField(st, "phase")),
+		}
+	}
+	if updateRequestPending() {
+		return nil, &Error{Code: "update_pending", Message: "a request is already waiting for the update runner"}
+	}
+	id, at, werr := writeUpdateRequest("storage-install", p.RequestedBy, "")
+	if werr != nil {
+		return nil, &Error{Code: "request_write_failed", Message: werr.Error()}
+	}
+	return updateRequestResult{
+		ID:          id,
+		RequestedAt: at.Format(time.RFC3339),
+		Flags:       "",
+		RequestPath: updateRequestPath(),
+		StatePath:   filepath.Join(updateStateDir, "state."+id+".json"),
+		LogPath:     filepath.Join(updateStateDir, id+".log"),
+	}, nil
+}
+
 // UpdateRequest is the update.request RPC handler. It validates the caller's
 // input against the allowlist, refuses while a run is live or a request is
 // already waiting, and drops the request file. Everything after that is the

@@ -11,6 +11,7 @@
 // scanning). Mutations always run through runHostCapture: the agent unit is
 // unprivileged by design.
 
+import { parseFstab, parseMdstat, parseEfiBootEntries, parseOsRelease, hasRaidSuperblock, deviceRisks } from './preflight.js';
 import {
   LSBLK_COLUMNS, ZPOOL_LIST_COLUMNS, ZFS_LIST_COLUMNS, ZFS_SNAPSHOT_COLUMNS,
   parseLsblk, parseSmartctl, parseFindmnt, parseByIdMap, parseZpoolList, parseZpoolStatus, parseZpoolStatusJson, parseZpoolImport,
@@ -239,8 +240,80 @@ export function createStorageHost({ runHostCapture, agentCall = null, useAgent =
     return out;
   }
 
+  /* ---------------------------- host preflight --------------------------- */
+
+  /**
+   * The host-wide facts that decide whether a disk is safe to take. lsblk
+   * cannot answer any of them: a stopped md array still has a superblock, an
+   * fstab line for a disk that failed to mount leaves no trace in the mount
+   * table, and an EFI boot entry lives in NVRAM.
+   */
+  async function safetyFacts(devices = []) {
+    const [fstabTxt, mdstatTxt, efiRes, swapRes] = await Promise.all([
+      readFile('/etc/fstab', { maxBytes: 64 * 1024 }),
+      readFile('/proc/mdstat', { maxBytes: 64 * 1024 }),
+      exec(['efibootmgr', '-v'], { timeoutMs: 15000 }),
+      exec(['swapon', '--noheadings', '--raw', '--show=NAME'], { timeoutMs: 10000 }),
+    ]);
+    // mdadm --examine per whole disk and partition: the only way to see a
+    // superblock belonging to an array that is not currently assembled.
+    const raid = {};
+    if (await hasBinary('mdadm')) {
+      const targets = devices.flatMap((d) => [d.path, ...(d.partitions || []).map((p) => p.path)]);
+      for (const t of targets) {
+        // eslint-disable-next-line no-await-in-loop
+        const r = await exec(['mdadm', '--examine', t], { timeoutMs: 15000 });
+        raid[t] = hasRaidSuperblock(r.stdout, r.status);
+      }
+    }
+    const swaps = (swapRes.status === 0 ? swapRes.stdout : '').split('\n').map((s) => s.trim()).filter((s) => s.startsWith('/dev/'));
+    return {
+      fstab: parseFstab(fstabTxt || ''),
+      mdstat: parseMdstat(mdstatTxt || ''),
+      efi: efiRes.status === 0 ? parseEfiBootEntries(efiRes.stdout) : [],
+      raid, swaps,
+      mdadm_checked: Object.keys(raid).length > 0,
+      efi_checked: efiRes.status === 0,
+    };
+  }
+
+  /** Per-device hard reasons and warnings from safetyFacts. */
+  async function risksFor(devices) {
+    const facts = await safetyFacts(devices);
+    return { risks: deviceRisks({ devices, ...facts }), facts };
+  }
+
+  /**
+   * A real ping, not an inference: agentReachable() is null until something
+   * has called the agent, and the preflight's other reads go through nsenter.
+   * The agent writes the install request, so a wrong answer here either
+   * blocks a valid install or lets a doomed request through.
+   */
+  async function agentPing() {
+    if (typeof agentCall !== 'function') return false;
+    try { await agentCall('agent.ping', {}, { timeoutMs: 5000 }); agentKnown = true; return true; } catch { return false; }
+  }
+
+  async function osRelease() {
+    return parseOsRelease(await readFile('/etc/os-release', { maxBytes: 16 * 1024 }) || '');
+  }
+
+  /** Is the root update runner in place? Privileged work is requested through it. */
+  async function runnerState() {
+    const [pathUnit, svc] = await Promise.all([unitState('proxypilot-update.path'), unitState('proxypilot-update.service')]);
+    const sourceDir = (await readFile('/var/lib/proxypilot/update/source-dir', { maxBytes: 4096 }) || '').trim() || null;
+    let scriptPresent = false;
+    if (sourceDir) scriptPresent = (await sh('test -f "$1/scripts/install-storage.sh"', [sourceDir], { timeoutMs: 10000 })).status === 0;
+    return {
+      present: !!pathUnit.present && !!svc.present,
+      enabled: /enabled/.test(pathUnit.UnitFileState || '') || /active|waiting/.test(pathUnit.ActiveState || ''),
+      source_dir: sourceDir, script_present: scriptPresent,
+    };
+  }
+
   return {
     exec, sh, hasBinary, listDisks, pools, datasets, zfsSnapshots, zpoolImportScan, smartFor,
+    safetyFacts, risksFor, osRelease, runnerState, agentPing,
     incusStoragePools, incusInstances, incusDefaultProfileRoot, incusSnapshotForm,
     readFile, listDir, unitState, toolchain, agentReachable: () => agentKnown,
   };

@@ -2070,6 +2070,20 @@ export const api = {
     ops: ({ limit = 100, op } = {}) =>
       request(`/storage/ops?limit=${encodeURIComponent(limit)}${op ? `&op=${encodeURIComponent(op)}` : ''}`),
     toolchain: () => request('/storage/toolchain'),
+    // Preflight & install. `preflight` is the read-only readiness report
+    // (devices=1 also carries the per-disk safety verdict); `install` is
+    // sudo-gated and returns 202 { started, id } or 409 { refused, ... };
+    // `installStatus` is the update runner's state, polled until terminal.
+    preflight: ({ devices = true } = {}) => request(`/storage/preflight?devices=${devices ? 1 : 0}`),
+    install: ({ force } = {}) =>
+      request('/storage/install', { method: 'POST', body: JSON.stringify(force ? { force: true } : {}) }),
+    installStatus: ({ id, log_tail_bytes } = {}) => {
+      const q = new URLSearchParams();
+      if (id) q.set('id', id);
+      if (log_tail_bytes) q.set('log_tail_bytes', String(log_tail_bytes));
+      const qs = q.toString();
+      return request(`/storage/install/status${qs ? `?${qs}` : ''}`);
+    },
     plan: (op, params = {}) =>
       request('/storage/plan', { method: 'POST', body: JSON.stringify({ op, params }) }),
     // `passphrase` only travels here (never to /plan) and only for plans

@@ -21,6 +21,7 @@ import DatasetsTab from '@/components/storage/DatasetsTab';
 import SnapshotsTab from '@/components/storage/SnapshotsTab';
 import BackupTab from '@/components/storage/BackupTab';
 import HistoryTab from '@/components/storage/HistoryTab';
+import PreflightPanel, { PreflightBanner, usePreflight } from '@/components/storage/PreflightPanel';
 import { BTN, CapacityBar, Chip, HealthChip, KV, Notice, fmtBytes, fmtDate } from '@/components/storage/shared';
 
 /**
@@ -167,6 +168,9 @@ export default function Storage() {
 
   useEffect(() => { if (isAdmin) load(); }, [isAdmin, load]);
 
+  // Preflight & install: one fetch feeds both the header banner and the
+  // panel at the top of the Devices tab.
+  const preflight = usePreflight({ enabled: isAdmin });
   const alerts = useMemo(() => computeAlerts(data), [data]);
   const onPlan = useCallback((req) => setPlanReq({ ...req, _t: Date.now() }), []);
   const onDone = useCallback(() => { load({ smart: false, quiet: true }); }, [load]);
@@ -196,8 +200,9 @@ export default function Storage() {
       </div>
 
       <ToolchainStrip toolchain={data?.toolchain} agent={data?.agent} />
-      {data?.toolchain?.zfs === false && (
-        <Notice level="warn"><p>ZFS is not installed on the host — run <code className="font-mono">scripts/install-storage.sh</code> on the host to install zfs, smartmontools, sanoid and syncoid. Disks are still listed below.</p></Notice>
+      <PreflightBanner state={preflight} onGoDevices={() => setTab('devices')} />
+      {data?.toolchain?.zfs === false && !preflight.pf?.can_install && (
+        <Notice level="warn"><p>ZFS is not installed on the host. Run <code className="font-mono">scripts/install-storage.sh</code> on the host to install zfs, smartmontools, sanoid and syncoid. Disks are still listed below.</p></Notice>
       )}
       {error && <Notice level="error"><p>{error}</p></Notice>}
       {data?.warnings?.length > 0 && (
@@ -220,7 +225,10 @@ export default function Storage() {
                 </TabsTrigger>
               ))}
             </TabsList>
-            <TabsContent value="devices"><DevicesTab data={data} onPlan={onPlan} /></TabsContent>
+            <TabsContent value="devices" className="space-y-4">
+              <PreflightPanel state={preflight} onInstalled={() => load()} />
+              <DevicesTab data={data} onPlan={onPlan} />
+            </TabsContent>
             <TabsContent value="pools"><PoolsTab data={data} onPlan={onPlan} /></TabsContent>
             <TabsContent value="datasets"><DatasetsTab data={data} onPlan={onPlan} /></TabsContent>
             <TabsContent value="snapshots"><SnapshotsTab data={data} onPlan={onPlan} /></TabsContent>
@@ -229,7 +237,12 @@ export default function Storage() {
           </Tabs>
         </>
       ) : (
-        <Card><CardContent className="p-6 text-center text-sm text-muted-foreground">Inventory unavailable. <Button variant="link" className="px-1" onClick={() => load()}>Try again</Button></CardContent></Card>
+        <>
+          {/* The inventory failed, so the tabs are gone. The install panel is
+              exactly what an operator needs here, so keep it reachable. */}
+          <PreflightPanel state={preflight} onInstalled={() => load()} />
+          <Card><CardContent className="p-6 text-center text-sm text-muted-foreground">Inventory unavailable. <Button variant="link" className="px-1" onClick={() => load()}>Try again</Button></CardContent></Card>
+        </>
       )}
 
       <PlanDialog request={planReq} onClose={() => setPlanReq(null)} onDone={onDone} />

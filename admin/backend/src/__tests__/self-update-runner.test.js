@@ -61,6 +61,84 @@ function setup() {
   return { root, run, state, src, git, runner, readJson, request, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
+test('storage-install: runs the checkout\'s installer, records state, and takes no arguments from the caller', (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+
+  // the installer the runner will find, writing a marker so we can prove the
+  // runner executed THAT file and not something the request named
+  mkdirSync(join(s.src, 'scripts'), { recursive: true });
+  writeFileSync(join(s.src, 'scripts', 'install-storage.sh'),
+    `#!/bin/bash\necho "installing zfsutils-linux smartmontools sanoid"\necho "args:[$*]"\ntouch "${join(s.root, 'INSTALLER_RAN')}"\nif [ "\${FAKE_INSTALL_FAIL:-}" = 1 ]; then echo "apt failed"; exit 5; fi\necho "Done."\n`,
+    { mode: 0o755 });
+
+  const id = s.request({ action: 'storage-install' });
+  assert.equal(s.runner().status, 0);
+  assert.ok(existsSync(join(s.root, 'INSTALLER_RAN')), 'the checkout installer ran');
+  const st = s.readJson(`state.${id}.json`);
+  assert.equal(st.action, 'storage-install');
+  assert.equal(st.status, 'success');
+  assert.equal(st.exit_code, 0);
+  assert.match(st.phase, /installed/i);
+  const log = readFileSync(join(s.state, `${id}.log`), 'utf8');
+  assert.match(log, /installing zfsutils-linux/);
+  assert.match(log, /args:\[\]/, 'the installer is called with no arguments at all');
+  assert.ok(!existsSync(join(s.run, 'request.json')), 'the request was consumed');
+  assert.ok(!existsSync(join(s.run, `nonce.${id}`)), 'the nonce was burned');
+});
+
+test('storage-install: flags are refused outright, and a missing installer refuses instead of running anything', (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+
+  // no caller-supplied argument may reach root
+  const bad = s.request({ action: 'storage-install', flags: '--rebuild' });
+  s.runner();
+  let st = s.readJson(`state.${bad}.json`);
+  assert.equal(st.status, 'refused');
+  assert.match(st.reason, /storage-install takes no flags/);
+  assert.ok(!existsSync(join(s.root, 'INSTALLER_RAN')));
+
+  // the script simply is not there yet: refuse, do not half-run
+  const missing = s.request({ action: 'storage-install' });
+  s.runner();
+  st = s.readJson(`state.${missing}.json`);
+  assert.equal(st.status, 'refused');
+  assert.match(st.reason, /install-storage\.sh not found/);
+
+  // a failing installer is reported with its exit code, not swallowed
+  mkdirSync(join(s.src, 'scripts'), { recursive: true });
+  writeFileSync(join(s.src, 'scripts', 'install-storage.sh'), '#!/bin/bash\necho "apt-get failed" >&2\nexit 5\n', { mode: 0o755 });
+  const failing = s.request({ action: 'storage-install' });
+  assert.notEqual(s.runner().status, 0);
+  st = s.readJson(`state.${failing}.json`);
+  assert.equal(st.status, 'failed');
+  assert.equal(st.exit_code, 5);
+  assert.match(st.reason, /exited 5/);
+});
+
+test('storage-install: the same forgery guards as update — unknown action, bad nonce, stale, wrong owner', (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+  mkdirSync(join(s.src, 'scripts'), { recursive: true });
+  writeFileSync(join(s.src, 'scripts', 'install-storage.sh'), `#!/bin/bash\ntouch "${join(s.root, 'INSTALLER_RAN')}"\n`, { mode: 0o755 });
+
+  for (const [label, req] of [
+    ['unknown action', { action: 'storage-install-please' }],
+    ['no nonce file', { action: 'storage-install', writeNonce: false }],
+    ['stale request', { action: 'storage-install', ageSec: 4000 }],
+  ]) {
+    const id = s.request(req);
+    s.runner();
+    const st = s.readJson(existsSync(join(s.state, `state.${id}.json`)) ? `state.${id}.json` : 'state.json');
+    assert.equal(st.status, 'refused', label);
+    assert.ok(!existsSync(join(s.root, 'INSTALLER_RAN')), `${label}: nothing ran`);
+  }
+});
+
 test('record-source + check record the checkout facts, including dirtiness', (t) => {
   const s = setup();
   t.after(s.cleanup);

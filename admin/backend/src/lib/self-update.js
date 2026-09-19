@@ -193,6 +193,24 @@ export async function startUpdate({ requestedBy, flags = [], rebuild, call = age
   }
 }
 
+/**
+ * Ask the root runner to install the ZFS storage toolchain. Same privilege
+ * boundary as an update: the agent drops a request file, the root oneshot
+ * runs the checkout's scripts/install-storage.sh. The caller supplies nothing
+ * but its own name, and progress is read back with updateStatus, because the
+ * runner writes one state file for every action it performs.
+ */
+export async function startStorageInstall({ requestedBy, call = agentCall, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  try {
+    const r = await call('storage.install_request', { requested_by: sanitizeRequestedBy(requestedBy) }, { timeoutMs });
+    return { id: r.id, requested_at: r.requested_at || null, state_path: r.state_path || null, log_path: r.log_path || null };
+  } catch (err) {
+    const e = new Error(err.message || 'agent unreachable');
+    e.code = errorCode(err);
+    throw e;
+  }
+}
+
 async function fetchJson(fetchImpl, url, { timeoutMs, headers = {} } = {}) {
   const res = await fetchImpl(url, {
     headers: { 'User-Agent': USER_AGENT, Accept: 'application/json', ...headers },

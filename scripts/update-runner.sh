@@ -19,7 +19,7 @@
 # — never --discard-local, never an arbitrary command.
 #
 # Contract (docs/features/self-update.md):
-#   request.json    {"id","action":"update|check","requested_by",
+#   request.json    {"id","action":"update|check|storage-install","requested_by",
 #                    "requested_at","requested_at_unix","nonce","flags"}
 #   nonce.<id>      the same nonce, written by the agent next to the request
 #   state.json      the latest run; state.<id>.json one file per run
@@ -368,6 +368,15 @@ handle_request() {
     fi
     case "$action" in
         update|check) ;;
+        storage-install)
+            # No caller-supplied arguments reach the installer. The script name
+            # is fixed here, inside the checkout the runner already trusts.
+            if [ -n "$flags" ]; then
+                rm -f "$nonce_file"
+                refuse invalid_flags "storage-install takes no flags"
+                return 1
+            fi
+            ;;
         *) rm -f "$nonce_file"; refuse malformed "unknown action '$action'"; return 1 ;;
     esac
     if ! [[ "$requested_by" =~ ^[A-Za-z0-9._@:+-]{1,80}$ ]]; then
@@ -423,7 +432,66 @@ handle_request() {
         update)
             run_update
             ;;
+        storage-install)
+            run_storage_install
+            ;;
     esac
+}
+
+# run_storage_install — install the ZFS storage toolchain on the host.
+#
+# The dashboard and MCP cannot run this themselves: the backend is in a
+# container and the agent is unprivileged. Same shape as run_update, so the
+# existing state file, log file and phase tracking serve the Storage page's
+# progress without a second mechanism. The script is fixed, takes no
+# arguments, and touches no block device: it installs packages, units and
+# helpers only. Pools are still only ever created through the plan and
+# confirm flow.
+run_storage_install() {
+    S_ACTION=storage-install
+    S_STATUS=queued
+    S_PHASE="Queued"
+    S_PHASE_INDEX=0
+    S_STARTED_AT=$(now_iso); S_STARTED_UNIX=$(now_unix)
+    S_LOG="$STATE_DIR/$S_ID.log"
+    : > "$S_LOG"; chmod 0644 "$S_LOG"
+
+    if ! resolve_source_dir; then
+        refuse source_dir_missing "no ProxyPilot git checkout recorded; run update.sh by hand once"
+        return 1
+    fi
+    local script="$SOURCE_DIR/scripts/install-storage.sh"
+    if [ ! -f "$script" ]; then
+        refuse script_missing "scripts/install-storage.sh not found in $SOURCE_DIR; update ProxyPilot first"
+        return 1
+    fi
+    write_state
+
+    S_STATUS=running
+    S_PHASE="Installing storage toolchain"
+    write_state
+    log "run $S_ID: bash $script (requested by $S_REQUESTED_BY)"
+
+    (
+        cd "$SOURCE_DIR" || exit 97
+        export TERM="${TERM:-dumb}" DEBIAN_FRONTEND=noninteractive
+        exec bash "./scripts/install-storage.sh"
+    ) 2>&1 | track_output
+    local rc=${PIPESTATUS[0]}
+
+    S_FINISHED_AT=$(now_iso)
+    S_EXIT="$rc"
+    if [ "$rc" -eq 0 ]; then
+        S_STATUS=success
+        S_PHASE="Storage toolchain installed"
+    else
+        S_STATUS=failed
+        S_PHASE="Install failed"
+        S_REASON="install-storage.sh exited $rc"
+    fi
+    write_state
+    log "storage-install $S_ID finished with exit $rc"
+    return "$rc"
 }
 
 usage() {

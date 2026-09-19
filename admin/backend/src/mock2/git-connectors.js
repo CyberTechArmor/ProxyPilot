@@ -67,6 +67,15 @@ function decryptGitCredential(row) {
   try { return decryptSecret(row.credential_enc); } catch { return null; }
 }
 
+// The one caller outside this module that needs the plaintext credential:
+// pull_git_remote (routes/mcp-tools/project-config.js) injects it into a
+// host-side `git fetch` for exactly one invocation, the same way pushGitDir
+// does. Named for what it is so a grep finds every place a credential leaves
+// this module.
+export function decryptGitCredentialForMcp(row) {
+  return decryptGitCredential(row);
+}
+
 export function insertGitConnector({ name, provider, baseUrl, authKind, credential, createdBy = null }) {
   const info = getMock2Db()
     .prepare(

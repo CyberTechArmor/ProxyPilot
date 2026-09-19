@@ -24,7 +24,7 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { checkRouteDrift } from '../lib/route-drift.js';
-import { parseCaddySiteFile, siteSecurityHeaderLines, dashboardFrameAncestor, CADDY_SITE_RENDER_CONTRACT } from '../lib/caddy-site-file.js';
+import { parseCaddySiteFile, siteSecurityHeaderLines, dashboardFrameAncestor, CADDY_SITE_RENDER_CONTRACT, parseRouteEdgeOptions, routeEdgeOptionLines, wrapRouteBody } from '../lib/caddy-site-file.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { detectServicePorts } from '../lib/port-detector.js';
@@ -6368,6 +6368,11 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frame
         s.healthPath !== undefined && s.healthPath !== null
           ? s.healthPath
           : s.health_path ?? null,
+      // Migration 907 (set_route_options over MCP): headers / CSP / basic
+      // auth / IP allowlist / rate limit. null when the row carries none, so
+      // the rendered body is unchanged for every pre-907 route.
+      edgeOptions: parseRouteEdgeOptions(s),
+      routeId: s.route_id ?? s.routeId ?? s.id ?? null,
     };
   });
 
@@ -6487,7 +6492,11 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frame
   for (const s of prefixedServices) {
     const directive = s.stripPrefix ? 'handle_path' : 'handle';
     lines.push(`    ${directive} ${s.pathPrefix}* {`);
-    lines.push(...generateServiceHandlerBody(s, '        '));
+    lines.push(...wrapRouteBody(
+      routeEdgeOptionLines(s.edgeOptions, '        ', { routeId: s.routeId }),
+      generateServiceHandlerBody(s, '        '),
+      s.edgeOptions,
+    ));
     lines.push(`    }`);
     lines.push(``);
   }
@@ -6498,7 +6507,11 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frame
   // multiple services coexist.
   if (rootService) {
     lines.push(`    handle {`);
-    lines.push(...generateServiceHandlerBody(rootService, '        '));
+    lines.push(...wrapRouteBody(
+      routeEdgeOptionLines(rootService.edgeOptions, '        ', { routeId: rootService.routeId }),
+      generateServiceHandlerBody(rootService, '        '),
+      rootService.edgeOptions,
+    ));
     lines.push(`    }`);
     lines.push(``);
   }
@@ -6566,6 +6579,22 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frame
 // Post-D.14 the legacy query will return zero rows (columns dropped), so
 // this helper collapses cleanly to a single routes-only read path at that
 // point without any further code change.
+// The migration-907 option columns, or nothing on a database that predates
+// them (a regenerate must never fail because a column is missing).
+let routeEdgeColumnsCache = null;
+function routeEdgeOptionColumns(db) {
+  if (routeEdgeColumnsCache !== null) return routeEdgeColumnsCache;
+  try {
+    const cols = db.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);
+    routeEdgeColumnsCache = cols.includes('rate_limit_json')
+      ? 'r.extra_headers_json, r.csp, r.basic_auth_json, r.ip_allowlist_json, r.rate_limit_json,'
+      : '';
+  } catch {
+    routeEdgeColumnsCache = '';
+  }
+  return routeEdgeColumnsCache;
+}
+
 async function regenerateDomainCaddyConfig(db, domain) {
   // (1) Phase 2b routes path — join service_http_routes to services so the
   // emitted entries carry both the route-owned fields (path_prefix,
@@ -6590,6 +6619,7 @@ async function regenerateDomainCaddyConfig(db, domain) {
               r.allow_framing,
               r.frame_ancestors,
               r.health_path,
+              ${routeEdgeOptionColumns(db)}
               s.name         AS name,
               s.kind         AS kind,
               s.runtime      AS runtime,
@@ -7666,4 +7696,4 @@ export const caddyRenderDeps = {
   removeConfig: (path) => unlink(path).catch(() => {}),
 };
 
-export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody, syncPrimaryRouteFromLegacy, ensureCaddyStructure };
+export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody, syncPrimaryRouteFromLegacy, ensureCaddyStructure, normalizePathPrefix };

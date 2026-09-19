@@ -225,3 +225,143 @@ export function siteSecurityHeaderLines({ allowFramingRoute = null, frameAncesto
 // at boot and regenerates all site files once (index.js).
 export const CADDY_SITE_RENDER_CONTRACT = '2';
 
+
+// ---- per-route edge options (migration 907; set_route_options over MCP) ----
+//
+// Five nullable JSON/text columns on service_http_routes. NULL everywhere
+// renders nothing, so a site file without options is byte-identical to the
+// pre-907 output. Rendered INSIDE the route's handle block, and wrapped in a
+// `route { }` when a rate limit is present so the plugin directive keeps its
+// textual position without a global `order` line.
+
+export function parseRouteEdgeOptions(row = {}) {
+  const j = (v) => { if (v == null || v === '') return null; try { return typeof v === 'string' ? JSON.parse(v) : v; } catch { return null; } };
+  const headers = j(row.extra_headers_json ?? row.extraHeadersJson);
+  const basicAuth = j(row.basic_auth_json ?? row.basicAuthJson);
+  const ipAllow = j(row.ip_allowlist_json ?? row.ipAllowlistJson);
+  const rateLimit = j(row.rate_limit_json ?? row.rateLimitJson);
+  const csp = row.csp != null && String(row.csp).trim() !== '' ? String(row.csp).trim() : null;
+  const out = {
+    headers: headers && typeof headers === 'object' && !Array.isArray(headers) ? headers : null,
+    csp,
+    basic_auth: Array.isArray(basicAuth) && basicAuth.length ? basicAuth : null,
+    ip_allowlist: Array.isArray(ipAllow) && ipAllow.length ? ipAllow : null,
+    rate_limit: rateLimit && typeof rateLimit === 'object' && rateLimit.events ? rateLimit : null,
+  };
+  return Object.values(out).some((v) => v != null) ? out : null;
+}
+
+const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,80}$/;
+const CIDR_RE = /^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$|^[0-9a-fA-F:]+(\/\d{1,3})?$/;
+const q = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+/**
+ * Validate the option object set_route_options accepts. Returns { options }
+ * (normalized, ready to store) or { error }. `bcryptHash` hashes basic-auth
+ * passwords; the stored form never carries a plaintext password.
+ */
+export function validateRouteEdgeOptions(input = {}, { bcryptHash = null, rateLimitAvailable = null } = {}) {
+  const out = {};
+  if (input.headers !== undefined) {
+    if (input.headers === null) out.headers = null;
+    else {
+      if (typeof input.headers !== 'object' || Array.isArray(input.headers)) return { error: 'headers must be an object of { "Header-Name": "value" } (null value removes the header)' };
+      const h = {};
+      for (const [k, v] of Object.entries(input.headers)) {
+        if (!HEADER_NAME_RE.test(k)) return { error: `"${k}" is not a valid header name` };
+        if (/^(content-security-policy|set-cookie)$/i.test(k)) return { error: `${k} cannot be set through headers (use csp for the policy)` };
+        if (v !== null && (typeof v !== 'string' || v.length > 2000 || /[\r\n]/.test(v))) return { error: `${k}: value must be a single-line string` };
+        h[k] = v;
+      }
+      out.headers = Object.keys(h).length ? h : null;
+    }
+  }
+  if (input.csp !== undefined) {
+    if (input.csp === null || input.csp === '') out.csp = null;
+    else if (typeof input.csp !== 'string' || input.csp.length > 4000 || /[\r\n"]/.test(input.csp)) return { error: 'csp must be a single-line policy string without double quotes' };
+    else out.csp = input.csp.trim();
+  }
+  if (input.basic_auth !== undefined) {
+    if (input.basic_auth === null) out.basic_auth = null;
+    else {
+      if (!Array.isArray(input.basic_auth) || !input.basic_auth.length) return { error: 'basic_auth must be an array of { username, password } (or null to remove)' };
+      if (!bcryptHash) return { error: 'basic_auth needs a password hasher' };
+      const users = [];
+      for (const u of input.basic_auth) {
+        const name = String(u?.username || '');
+        if (!/^[A-Za-z0-9._@-]{1,64}$/.test(name)) return { error: 'basic_auth usernames: letters, digits, . _ @ -' };
+        if (u.password_hash && /^\$2[aby]\$/.test(String(u.password_hash))) { users.push({ username: name, hash: String(u.password_hash) }); continue; }
+        const pw = String(u?.password || '');
+        if (pw.length < 8 || pw.length > 256) return { error: `basic_auth: ${name}'s password must be 8–256 characters` };
+        users.push({ username: name, hash: bcryptHash(pw) });
+      }
+      out.basic_auth = users;
+    }
+  }
+  if (input.ip_allowlist !== undefined) {
+    if (input.ip_allowlist === null) out.ip_allowlist = null;
+    else {
+      if (!Array.isArray(input.ip_allowlist) || !input.ip_allowlist.length) return { error: 'ip_allowlist must be a non-empty array of IPs / CIDRs (or null to remove)' };
+      const list = input.ip_allowlist.map((s) => String(s).trim());
+      const bad = list.filter((s) => !CIDR_RE.test(s) || s === '0.0.0.0/0' || s === '::/0');
+      if (bad.length) return { error: `ip_allowlist: not an IP or CIDR: ${bad.join(', ')}` };
+      out.ip_allowlist = [...new Set(list)];
+    }
+  }
+  if (input.rate_limit !== undefined) {
+    if (input.rate_limit === null) out.rate_limit = null;
+    else {
+      const rl = input.rate_limit;
+      const events = Number(rl?.events);
+      const window = String(rl?.window || '1m');
+      if (!Number.isInteger(events) || events < 1 || events > 1000000) return { error: 'rate_limit.events must be an integer 1–1000000' };
+      if (!/^\d{1,5}(s|m|h)$/.test(window)) return { error: 'rate_limit.window must look like 10s, 1m or 1h' };
+      const key = rl?.key === 'path' ? '{http.request.uri.path}' : '{remote_host}';
+      if (rateLimitAvailable === false) return { error: 'This Caddy build has no http.handlers.rate_limit module. Install caddy-ratelimit (`caddy add-package github.com/mholt/caddy-ratelimit` on the host, then restart caddy) and retry.' };
+      out.rate_limit = { events, window, key };
+    }
+  }
+  return { options: out };
+}
+
+/** Caddyfile lines for a route's edge options, to go INSIDE the handle block before the proxy/file_server body. */
+export function routeEdgeOptionLines(opts, indent = '        ', { routeId = 'r' } = {}) {
+  if (!opts) return [];
+  const lines = [];
+  const i2 = `${indent}    `;
+  if (opts.ip_allowlist) {
+    lines.push(`${indent}@pp_denied not remote_ip ${opts.ip_allowlist.join(' ')}`);
+    lines.push(`${indent}respond @pp_denied 403`);
+  }
+  if (opts.basic_auth) {
+    lines.push(`${indent}basic_auth {`);
+    for (const u of opts.basic_auth) lines.push(`${i2}${u.username} ${u.hash}`);
+    lines.push(`${indent}}`);
+  }
+  if (opts.headers || opts.csp) {
+    lines.push(`${indent}header {`);
+    for (const [k, v] of Object.entries(opts.headers || {})) {
+      lines.push(v === null ? `${i2}-${k}` : `${i2}${k} ${q(v)}`);
+    }
+    if (opts.csp) lines.push(`${i2}Content-Security-Policy ${q(opts.csp)}`);
+    lines.push(`${indent}}`);
+  }
+  if (opts.rate_limit) {
+    const zone = `pp_${String(routeId).replace(/[^A-Za-z0-9]/g, '').slice(0, 24) || 'r'}`;
+    lines.push(`${indent}rate_limit {`);
+    lines.push(`${i2}zone ${zone} {`);
+    lines.push(`${i2}    key ${opts.rate_limit.key || '{remote_host}'}`);
+    lines.push(`${i2}    events ${opts.rate_limit.events}`);
+    lines.push(`${i2}    window ${opts.rate_limit.window}`);
+    lines.push(`${i2}}`);
+    lines.push(`${indent}}`);
+  }
+  return lines;
+}
+
+/** Wrap a handler body in `route { }` when the options need textual ordering (rate_limit). */
+export function wrapRouteBody(optionLines, bodyLines, opts, indent = '        ') {
+  if (!opts?.rate_limit) return [...optionLines, ...bodyLines];
+  const shift = (l) => `    ${l}`;
+  return [`${indent}route {`, ...optionLines.map(shift), ...bodyLines.map(shift), `${indent}}`];
+}

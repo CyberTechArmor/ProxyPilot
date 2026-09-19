@@ -5,6 +5,12 @@ HTTP transport) so an AI client on a Claude subscription can operate the
 parts of ProxyPilot you'd otherwise drive by hand: deploy zips to static
 sites and LXC containers, and list/build/clone AI-dev Projects.
 
+The catalog is 205 tools: the original 72 documented in *What the tools can
+do*, plus the 133 of the **extended surface** (builds and Mock2 stages,
+components and standards, project configuration, LXC administration, edge and
+certificates, static-site releases, ProxyPilot's own administration, and
+self-editing) documented in *The extended surface* below.
+
 ## Connecting
 
 1. **Mint a token** — Security page → *Remote AI access (MCP)* → Create
@@ -26,7 +32,7 @@ Revoking the token (same card) immediately cuts the client off.
 | LXC | `list_lxc_containers`, `inspect_lxc_zip`, `apply_lxc_zip` | Same conflict flow, plus optional startup-script registration (`startup.sh` convention) with run output + exit code returned. |
 | LXC observe | `get_lxc_container`, `list_lxc_files`, `search_lxc_files`, `get_lxc_logs`, `probe_lxc_port`, `get_lxc_startup` | All read-only. Container detail (addresses, security/limits config, snapshots, registered startup), file listing/grep inside a guest, journald / startup-service / docker-compose logs without redeploying, and an in-guest port probe that reports status metadata but **never response bodies**. `probe_lxc_port` + `test_route` together separate "app down" from "edge misrouted" in two calls. |
 | LXC exec | `run_lxc_command` | One allowlisted command inside a guest, same containment as `run_project_command` (argv → positional parameters, no shell, 64 KB tails, clamped timeout). The allowlist is `lib/mcp-policy/lxc-command-allowlist.json`: read-biased (docker/compose status+logs, systemctl status, journalctl, ip, ss, curl probes, df, free, ls, stat, du), `docker compose up/restart/stop/pull` only in the registered startup working dir, `deny_always` wins over everything — no shells, no package managers, no deletion. |
-| LXC lifecycle | `create_lxc_container`, `control_lxc_container`, `set_lxc_config`, `set_lxc_network`, `snapshot_lxc_container`, `lxc_file_diff`, `restore_lxc_file` | Every mutation requires `confirm: true` and snapshots first; there is deliberately **no delete verb** and no force-kill. `set_lxc_config` writes only the keys in `lib/mcp-policy/lxc-config-allowlist.json`; `security.privileged=true` additionally demands `acknowledge_risk: true` and carries the container-root-is-host-root warning. `set_lxc_network` pins a guest's IPv4 (static DHCP reservation) so a lease renewal can't silently 502 a route. `lxc_file_diff`/`restore_lxc_file` complete the `.old` backup story (restore swaps, so it's reversible). |
+| LXC lifecycle | `create_lxc_container`, `control_lxc_container`, `set_lxc_config`, `set_lxc_network`, `snapshot_lxc_container`, `lxc_file_diff`, `restore_lxc_file` | Every mutation requires `confirm: true` and snapshots first; this original set has no delete verb and no force-kill (deletion lives in the extended surface behind an export precondition and a one-time confirmation token — see below). `set_lxc_config` writes only the keys in `lib/mcp-policy/lxc-config-allowlist.json`; `security.privileged=true` additionally demands `acknowledge_risk: true` and carries the container-root-is-host-root warning. `set_lxc_network` pins a guest's IPv4 (static DHCP reservation) so a lease renewal can't silently 502 a route. `lxc_file_diff`/`restore_lxc_file` complete the `.old` backup story (restore swaps, so it's reversible). |
 | Routing | `list_routes`, `get_route`, `test_route`, `set_route` | Inspect every served hostname (orphaned upstreams flagged), per-domain TLS/cert detail, and an edge-vantage probe pinned to the local proxy that names which failure class it found — proxy down, stale proxy→upstream binding, or app-level. `set_route` binds a hostname to a container (preferred) or ip:port through the same DB → regenerate → adapt → reload pipeline the UI uses, with rollback on failure; overwrites need `confirm_overwrite` and return the previous binding. |
 | Static-site management | `create_static_site`, `get_static_site`, `list_static_site_files`, `read_static_site_file`, `write_static_site_file`, `get_static_site_cert` | Site creation (creation-only — refuses an already-routed domain), docroot inspection, single-file read/write with the `.old` + `confirm_overwrite` contract, and certificate status. Site ids are uuid strings for UI-created sites; the zip tools accept both uuid and legacy integer ids. |
 | LXC file edits | `read_lxc_file`, `write_lxc_file`, `rerun_startup` | The chat-only update loop: read a file, propose the edit, write on approval (previous version kept as `<path>.old`), then re-run the registered startup script to redeploy — run output and exit code come back to the chat. `write_lxc_file` takes an optional `mode` ("0755") so a script lands executable without a zip apply. `rerun_startup` takes `timeout_seconds` (default 120, max 1800) and returns the **last** 64 KB of each stream — a first-boot Docker install no longer has to fit inside a fixed 2-minute window, and the failure summary (which prints last) is what comes back. Lets a Claude subscription do small container updates without any zip or shell. |
@@ -59,6 +65,119 @@ What an MCP archive does, in order: checkpoint-commit the working tree into the 
 This is a different verb from the UI's *Archive*, which destroys the guest and rebuilds it from the bare repo on *Rehydrate*. Both leave `lifecycle = archived`; a UI-archived project has no container (`get_project` reports `container_status: "none"`) and `unarchive` over MCP refuses it, pointing at *Rehydrate*. A UI *Rehydrate* of an MCP-archived project works too (it deletes the kept guest and rebuilds from the checkpoint) — it is just slower than `unarchive`.
 
 `set_project_pinned({ project_id, pinned, confirm: true })` stars the project for the token's owner (`pinned: true`) or removes every user's star (`pinned: false`) so the project-wide flag really reads false. Pinning an archived project is allowed; it only protects it from bulk operations.
+
+## The extended surface (133 tools, 2026-09)
+
+Everything the first surface left out, added in one shape so the safety
+contract is the same on every tool rather than remembered per tool. Code:
+`admin/backend/src/routes/mcp-tools/*.js` (one file per family) built on
+`routes/mcp-tools/common.js`; pure logic in `lib/mcp-ext/logic.js`; catalog in
+`lib/mcp-ext/catalog/`; enforcement policy in
+`lib/mcp-policy/mcp-extended-policy.json`; tests in `mcp-extended.test.js`.
+
+### The contract on every new write
+
+- **`dry_run: true`** on every mutating tool: validation and preconditions
+  run, the result says exactly what would change, nothing is touched.
+- **`expected_sha256`** on every file edit (mockup, inventory, rules,
+  checklist, handoff, work file, self-edit patches): the write is refused if
+  the file moved since the read that produced the hash.
+- **A snapshot or export precondition on anything destructive**, taken
+  *before* the change: `delete_lxc_container` refuses a guest without a
+  snapshot and exports it first; `restore_snapshot` snapshots the current
+  state; `delete_project` checkpoints and exports the guest;
+  `delete_static_site` / `rollback_static_site` capture a release;
+  `restore_proxypilot_db` / `restore_project_db` dump first; `promote_self` /
+  `rollback_self` tag the previous HEAD. `export: false` is an explicit
+  opt-out the ledger records.
+- **A one-time `confirmation_token`** on delete / restore / rollback / reboot
+  / `reset_passkey` / `promote_self`: the first call validates everything and
+  returns a token bound to (tool, target, key) with a preview; the caller
+  shows the user the preview and re-calls with the token, which is consumed
+  on use, refused for any other target or key, and expires after ten
+  minutes. Everything else mutating takes the lighter `confirm: true`.
+- **The server writes the ledger row and the audit entry itself.** Every
+  extended write lands one row in `mcp_ledger` (migration 904: tool, target,
+  redacted arguments, outcome `ok | error | refused | dry_run |
+  needs_confirmation`, whether a token was used, which snapshot was taken,
+  duration), one `audit_log` entry (`via: 'mcp'`), and — for project-scoped
+  writes — one hash-chained change record through the same
+  `insertChangeRecord` path `append_change_record` uses. Arguments are
+  redacted before they are stored: file contents, patches, secrets, SQL,
+  env values and upload bytes never reach the ledger. `query_audit_log` and
+  `export_grc_evidence` read both.
+- **Feature flags** gate whole families (`list_feature_flags` /
+  `set_feature_flag`, stored in `app_settings`, defaults in the policy):
+  `mcp.builds`, `mcp.destructive`, `mcp.host_control`, `mcp.self_edit`,
+  `mcp.security_scans`, `mcp.dns`, `mcp.webhooks`.
+
+### Scoped keys
+
+`mcp_tokens.scope_json` (migration 903) limits a key to a tool allowlist,
+named LXC guests (`lxc_containers`), project ids (`project_ids`), and an
+explicit `self_edit` opt-in. `create_scoped_key` mints one (the raw token and
+connector URL are returned once), `list_mcp_keys` / `revoke_mcp_key` manage
+them. A scoped key sees only what it may call in `tools/list`, and a call
+outside its scope is refused before the handler runs and audited as
+`MCP_SCOPE_REFUSED`. An unscoped key is the full surface **minus
+self-editing**, which is never granted implicitly — the operator's original
+key cannot patch ProxyPilot until a key with `scope.self_edit` exists.
+
+### The families
+
+| Family | Tools | Notes |
+|---|---|---|
+| Builds and Mock2 stages | `start_project_build` (task, size S/M/L → quick/mvp/full, model), `list_builds`, `get_build` (status, queue position) · `write_mockup` / `get_mockup` / `approve_design` · `get_inventory` / `update_inventory` · `get_rules` / `append_rule` / `run_interview` · `get_production_checklist` / `run_checklist` / `record_check` · `get_handoff` / `write_handoff` / `get_work` / `update_work` · `append_run_ledger` / `get_run_ledger` / `list_runs` / `review_run` · `list_change_records` / `get_change_record` | The spending verbs are behind `mcp.builds`. Stage artefacts are `state/*` files in the checkout, written through the verified write + commit path. `run_interview` with no answers lists the open Stage-2 questions; with answers it records them through the same `answerAuditQuestion` the dashboard uses (each appends a confirmed rule and may resume a blocked build). `review_run` stores a 1–5 score as the build's feedback event. `list_runs` spans every project. |
+| Components and standards | `list_components`, `get_component`, `import_component` (the `proxypilot-component@1` document), `install_component` (zero-token pre-install), `uninstall_component` (unselects; files stay, per CPR §7.4), `list_component_versions` · `get_standards_version`, `upgrade_project_standards` (the base-app top-up), `set_standards_source` (pin a manifest URL) | |
+| Project lifecycle and config | `delete_project` (export + token) · `rename_project` · `set_project_domain` · `set_project_env` (write-only into the guest's `/etc/environment`, which every build and start sources) / `list_project_env_keys` (names only) · `approve_egress` / `list_egress_requests` · `set_project_resources` · `set_project_build_settings` (provider preference, suggest/clarify modes, project quota) · `pull_git_remote` (token connectors) / `create_branch` / `switch_branch` / `merge_branch` / `tag_release` · `list_references` / `get_reference` / `delete_reference` · `run_project_sql` (one statement inside `BEGIN READ ONLY … ROLLBACK`, 30 s timeout) / `dump_project_db` / `restore_project_db` · CPR: `list_releases`, `snapshot_before_promote`, `promote_release`, `rollback_release` | The release registry is platform-side (`state/releases.json` + git tags): promote deploys a tag's tree as a new promote commit after snapshot_before_promote (checkpoint + `pg_dump` + Incus snapshot); rollback promotes the previous entry. Blue/green slots on production hosts remain the CPR base platform's job. |
+| LXC administration | `delete_lxc_container` (needs a snapshot; exports first; token) · `clone_lxc_container` · `export_lxc` / `import_lxc` (tarballs under `/var/lib/proxypilot/mcp-exports`) · `list_snapshots` / `restore_snapshot` (token) / `delete_snapshot` · `set_lxc_resources` · `add_lxc_device` / `remove_lxc_device` (disk sources only under the policy's share roots; proxy devices on 1024+) · `get_lxc_usage` · `delete_lxc_file` / `move_lxc_file` / `mkdir_lxc` / `chmod_lxc_file` · `push_lxc_file_from_ticket` (binary, size + sha256 verified in the guest, read back) · `service_control` · `list_processes` · `install_package` (apt allowlist in the policy) · `get_command_allowlist` / `set_command_allowlist` (per-guest additions, migration 905; `deny_always` still wins) · `get_lxc_egress` / `set_lxc_egress` · `set_port_forward` (Incus proxy device + firewall rule, reconciled on boot) · `list_cron` / `set_cron` | Every mutation snapshots or backs up first and runs argv-only (no shell re-parse of caller input). |
+| Edge, routes, certs, DNS | `delete_route` (token) · `set_route_path` (sub-path → container / ip:port) · `set_route_options` (websocket, strip_prefix, timeouts, body size, host header, framing, health path, TLS stance, **headers, CSP, basic auth, IP allowlist, rate limit** — migration 907, rendered by `lib/caddy-site-file.js`) · `list_certs` / `get_cert` / `renew_cert` / `upload_cert` / `set_dns_challenge` · `get_route_access_log` · `list_dns_records` / `set_dns_record` | DB → regenerate → adapt → reload with rollback on any failure, as `set_route`. `rate_limit` needs the caddy-ratelimit module and refuses with the install hint otherwise; basic-auth passwords are bcrypt-hashed at rest. DNS is Cloudflare only, through the DNS-01 token the Domains card stores. |
+| Static sites | `delete_static_site` (archives the docroot first; token) · `delete_static_site_file` · `create_static_release` / `list_static_releases` / `rollback_static_site` (token; captures the current state first) · `set_static_site_aliases` | Releases are full docroot copies under `/var/lib/proxypilot/static-releases/<site>/<timestamp>`. |
+| ProxyPilot itself | Users: `list_users` / `create_user` / `disable_user` (role → pending, sessions revoked) / `reset_passkey` (token) / `set_role` · MCP keys: `list_mcp_keys` / `create_scoped_key` / `revoke_mcp_key` · Settings: `get_settings` / `set_setting` (policy-allowlisted keys) / `list_feature_flags` / `set_feature_flag` · Audit: `query_audit_log` (all users, filters, `include_ledger`) · `run_lynis` / `run_trivy` / `get_audit_report` / `export_grc_evidence` (one JSON bundle with sha256) · Backups: `backup_proxypilot_db` (`VACUUM INTO`) / `restore_proxypilot_db` (token; per-table replace in one transaction after a pre-restore backup) / `list_host_snapshots` / `create_host_snapshot` (btrfs / zfs) · Host: `get_host_services` / `host_service_control` (policy-allowlisted units; docker and ssh restart-only) / `list_host_packages` / `reboot_host` (token; refused during updates, builds, backups) · Notifications: `list_webhooks` / `set_webhook` (signed JSON POSTs, migration 906, fanned out by `lib/notification-dispatch.js`) | Last-admin and superadmin protections apply as in the dashboard. `run_lynis` / `run_trivy` need the binaries on the host and say so. |
+| Self-editing | `get_self_status` · `read_self_file` · `apply_self_patch` · `run_self_checks` · `promote_self` (token) · `rollback_self` (token) | See below. |
+
+### Self-editing: ProxyPilot's own checkout as a guarded project
+
+The CPR blue/green pattern applied to the control plane, on its own scope:
+
+1. **Candidate slot.** `apply_self_patch` clones the live checkout (the one
+   `update.sh` lives in, recorded by the update runner) into
+   `/var/lib/proxypilot/self/candidate` on branch `pp-candidate` the first
+   time, then applies unified diffs there as commits — `git apply --check`
+   first, all-or-nothing, `expected_sha256` per file from `read_self_file`.
+   The live checkout is never patched.
+2. **Checks run in the candidate.** `run_self_checks` runs `backend-tests`
+   (`node --test` minus the native-module files listed in
+   `docs/known-issues.md`), `backend-syntax`, and optionally
+   `frontend-build` / `shellcheck` — on this container's node, because
+   `/var/lib/proxypilot` is bind-mounted into it. Results are recorded against
+   the candidate HEAD they ran on.
+3. **Promote swaps.** `promote_self` refuses unless the required checks
+   passed on this exact candidate HEAD, the candidate is based on the live
+   HEAD (a stale candidate is reset with `apply_self_patch({ reset: true })`),
+   the live checkout is clean, no update is live and the host agent answers.
+   It tags the live HEAD as the rollback point, fast-forwards the live
+   checkout to the candidate, and requests the root update runner's rebuild
+   (`update.sh --yes --rebuild`, the same path as the Update button; the API
+   is unreachable for a minute or two — poll `get_proxypilot_update_status`).
+   A refused rebuild request resets the live checkout to where it was.
+4. **Rollback restores the last image.** `rollback_self` resets the live
+   checkout to the recorded rollback point (or a named tag / sha), tags the
+   current HEAD first so the rollback is itself reversible, and requests the
+   same rebuild. `--discard-local` never appears; a dirty live checkout
+   refuses, as `run_proxypilot_update` does.
+
+State: `/var/lib/proxypilot/self/state.json` (candidate base/head, patches,
+check results, promotions, rollback points). Policy:
+`mcp-extended-policy.json` → `self_edit`.
+
+### Migrations
+
+903 `mcp_tokens.scope_json` + `token_prefix` · 904 `mcp_ledger` · 905
+`lxc_command_allowlists` · 906 `notification_webhooks` · 907 five nullable
+option columns on `service_http_routes` (`extra_headers_json`, `csp`,
+`basic_auth_json`, `ip_allowlist_json`, `rate_limit_json`; NULL renders the
+site file byte-identical to before).
 
 ## The restricted sibling: delegated editing
 
@@ -156,7 +275,15 @@ no `;` or `&&` — the `npm run <script>` escape hatch already covers legitimate
 repo-side tooling, and those scripts are committed and reviewable. The
 batching above is the answer to round trips; a shell is not.
 
-## The one lane (this server spends no API budget)
+## The one lane (this server spends no API budget by default)
+
+*2026-09 amendment:* the extended surface reopened the budget-spending lane
+on purpose — `start_project_build`, `approve_design`, `run_checklist` and
+the answering half of `run_interview` — behind the `mcp.builds` feature flag
+(on by default; `set_feature_flag` turns it off), a `confirm: true` gate, and
+a result that says in as many words that it spent the project's model budget.
+The text below describes the original stance, which still holds for every
+other tool: nothing else on this server bills the project's connector.
 
 There used to be two lanes here and the words you chose picked one. The
 budget-spending one is gone: `send_project_build` — the tool that queued work
@@ -259,7 +386,9 @@ quietly stop being true.
   `set_route` has no `enabled` toggle because the Caddy regenerator renders
   every stored route — parking a hostname stays a UI/host operation.
 - `set_route` manages root-path bindings only; path-prefixed fan-out routes
-  (e.g. `/api` → a second port) are still UI-only over MCP.
+  (e.g. `/api` → a second port) are `set_route_path` in the extended surface,
+  and per-route options (headers, CSP, basic auth, IP allowlist, rate limit)
+  are `set_route_options`.
 - Auth is token-based, not OAuth 2.1 with dynamic client registration.
   claude.ai connects fine via the tokenized URL; a full OAuth flow is a
   possible follow-up (see docs/known-issues.md).

@@ -27,6 +27,7 @@ import {
   PROJECT_COMMAND_OUTPUT_CAP,
 } from '../lib/mcp-logic.js';
 import { computeChangeHash, changePayload, canonicalJson } from '../mock2/change-logic.js';
+import { MCP_EXT_TOOL_NAMES } from '../lib/mcp-ext/catalog/index.js';
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from '../mock2/clone-logic.js';
 
 // ---- tokens ----
@@ -1359,7 +1360,11 @@ test('every advertised tool has a handler, and every file write goes through the
   const routeSrc = readFileSync(new URL('../routes/mcp.js', import.meta.url), 'utf8');
   const table = routeSrc.slice(routeSrc.indexOf('const TOOL_HANDLERS = {'));
   const body = table.slice(0, table.indexOf('\n};'));
+  // The extended families (routes/mcp-tools/*.js) are spread into the table
+  // as `...extended.handlers`; mcp-extended.test.js checks them by name.
+  assert.match(body, /\.\.\.extended\.handlers,/);
   for (const t of MCP_TOOLS) {
+    if (MCP_EXT_TOOL_NAMES.includes(t.name)) continue;
     assert.ok(new RegExp(`\\n  ${t.name}:`).test(body), `${t.name} is advertised but not dispatched`);
   }
   // The ratchet: a raw `cat > "$p"` in a file tool is how the truncation bug

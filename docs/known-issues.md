@@ -187,6 +187,35 @@ link (settings key, boot/timer sync into `insertFrameworkVersion`) is in
 containers TO Gitea exists (`docs/features/git-remotes.md`); a default connector
 applied to every new object is the remaining piece.
 
+## Extended MCP surface: what is verified by construction only
+
+2026-09-19: the 133-tool extended surface (`docs/features/mcp.md` § "The
+extended surface") is unit-tested against a fake ctx (catalog ↔ handler
+coverage, the gates, the ledger, scopes, the renderer, the validators) but the
+sandbox cannot prove the host-side halves. Parked follow-ups:
+
+- **Self-editing end to end** on a real host: candidate clone under
+  `/var/lib/proxypilot/self`, `run_self_checks` on the container's node
+  (needs `npm ci` to work inside the dashboard image), `promote_self` →
+  runner rebuild → `rollback_self`. Run it on a disposable VM first.
+- `set_route_options.rate_limit` needs the caddy-ratelimit module; the tool
+  probes `caddy list-modules` and refuses with the install hint otherwise.
+  Basic auth renders the Caddy 2.8 `basic_auth` directive (older Caddy
+  spells it `basicauth`; adapt fails and the change rolls back).
+- `pull_git_remote` supports token connectors only; ssh-key connectors are
+  refused by name.
+- `list_dns_records` / `set_dns_record` are Cloudflare-only (the DNS-01
+  token). No other DNS provider is integrated.
+- `run_lynis` / `run_trivy` need the binaries on the host; `list_host_snapshots`
+  / `create_host_snapshot` need btrfs or zfs and say so otherwise.
+- `restore_proxypilot_db` replaces table contents in the LIVE SQLite database
+  inside one transaction; sessions and in-memory caches may be stale
+  afterwards (sign in again). It has not been exercised against a database
+  whose schema differs from the backup's beyond added columns.
+- `service_control`'s `enable` / `disable` and `install_package` are not
+  recorded in the guest's startup script; a guest rebuilt from its startup
+  script loses them.
+
 ## The MCP chat lane does not carry the framework content
 
 2026-09-05: builds started from the UI are prompted with the pinned framework

@@ -72,7 +72,7 @@
   },
   "explicitly_absent": {
     "archive_all_unpinned": "Bulk behaviour is the agent's job: one set_project_lifecycle call per project, so each archive is its own audit row and its own pinned check.",
-    "delete_project": "No delete verb over MCP, by design (same stance as the LXC tools).",
+    "delete_project_here": "Not in this policy: delete_project lives in the extended surface (mcp-extended-policy.json) behind the mcp.destructive flag, an incus export precondition and a one-time confirmation token — never a bare confirm.",
     "force_stop": "Archive uses a clean `incus stop`; a guest that will not stop cleanly is exactly the case a human should look at."
   }
 }

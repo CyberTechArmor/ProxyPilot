@@ -2095,6 +2095,33 @@ export const api = {
       }),
   },
 
+  // Migrations — adopt a running application from another server, VM or
+  // container. `create` is sudo-gated and returns the ONE-TIME token and the
+  // command the operator pastes on the source; it is never returned again.
+  migrations: {
+    list: ({ status, limit } = {}) => {
+      const q = new URLSearchParams();
+      if (status) q.set('status', status);
+      if (limit) q.set('limit', String(limit));
+      const qs = q.toString();
+      return request(`/migrations${qs ? `?${qs}` : ''}`);
+    },
+    get: (id, { events = 200 } = {}) => request(`/migrations/${encodeURIComponent(id)}?events=${events}`),
+    events: (id, { since, limit = 200, kind } = {}) => {
+      const q = new URLSearchParams({ limit: String(limit) });
+      if (since != null) q.set('since', String(since));
+      if (kind) q.set('kind', kind);
+      return request(`/migrations/${encodeURIComponent(id)}/events?${q.toString()}`);
+    },
+    create: (body) => request('/migrations', { method: 'POST', body: JSON.stringify(body) }),
+    approve: (id) => request(`/migrations/${encodeURIComponent(id)}/approve`, { method: 'POST', body: '{}' }),
+    cancel: (id, reason) => request(`/migrations/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: JSON.stringify(reason ? { reason } : {}) }),
+    checklist: (id, { step, done = true, note } = {}) =>
+      request(`/migrations/${encodeURIComponent(id)}/checklist`, { method: 'POST', body: JSON.stringify({ step, done, ...(note ? { note } : {}) }) }),
+    egress: (id, { host, port, decision }) =>
+      request(`/migrations/${encodeURIComponent(id)}/egress`, { method: 'POST', body: JSON.stringify({ host, port: port ?? null, decision }) }),
+  },
+
   // Backups → Storage tab. CRUD on S3-compatible destinations + a
   // 'test connection' verb that HEADs the configured bucket.
   // secret_key is write-only — the GET path never returns it.

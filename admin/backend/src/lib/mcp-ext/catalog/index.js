@@ -7,6 +7,7 @@ import { EDGE_TOOLS, STATIC_ADMIN_TOOLS } from './edge.js';
 import { ADMIN_TOOLS, SELF_EDIT_CATALOG } from './admin.js';
 import { BUILD_TOOLS, PROJECT_CONFIG_TOOLS } from './builds.js';
 import { STORAGE_TOOLS } from './storage.js';
+import { MIGRATION_TOOLS } from './migration.js';
 
 export const MCP_EXT_TOOL_GROUPS = Object.freeze({
   builds: BUILD_TOOLS,
@@ -17,6 +18,7 @@ export const MCP_EXT_TOOL_GROUPS = Object.freeze({
   admin: ADMIN_TOOLS,
   self_edit: SELF_EDIT_CATALOG,
   storage: STORAGE_TOOLS,
+  migration: MIGRATION_TOOLS,
 });
 
 export const MCP_EXT_TOOLS = Object.freeze(Object.values(MCP_EXT_TOOL_GROUPS).flat());
@@ -40,6 +42,10 @@ export const MCP_EXT_INSTRUCTIONS = [
   'the mcp.builds flag; the chat lane above stays free. SELF-EDITING (read_self_file → apply_self_patch →',
   'run_self_checks → promote_self / rollback_self) works on a candidate clone and needs a key minted with',
   'scope.self_edit (create_scoped_key); the live checkout is only ever fast-forwarded or reset, never patched.',
+  'MIGRATION (create_migration → get_migration → approve_migration → migration_cutover): create_migration returns ONE',
+  'line for the operator to run as root on the SOURCE host; the agent sends an inventory manifest (env PATHS and KEY',
+  'NAMES, never values) and then WAITS — nothing is copied until approve_migration. The imported guest comes up with',
+  'the default-deny egress fence and no route; migration_cutover records each checklist step and each egress decision.',
   'STORAGE (list_disks, zpool_status, zfs_list, create_zpool, …, restore_guest_from_snapshot): every mutating verb is',
   'plan/confirm — dry_run: true returns the exact command plan and a plan_token (sha256 of the plan); the real call',
   'carries confirm: true and that token, and a changed plan invalidates it. The OS device is refused with no override;',

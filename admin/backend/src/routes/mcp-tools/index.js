@@ -10,6 +10,7 @@ import { createBuildHandlers } from './builds.js';
 import { createProjectConfigHandlers } from './project-config.js';
 import { createSelfEditHandlers } from './self-edit.js';
 import { createStorageHandlers } from './storage.js';
+import { createMigrationHandlers } from './migration.js';
 
 export function createExtendedHandlers(ctx) {
   const kit = createToolkit(ctx);
@@ -22,6 +23,7 @@ export function createExtendedHandlers(ctx) {
     createProjectConfigHandlers(kit),
     createSelfEditHandlers(kit),
     createStorageHandlers(kit),
+    createMigrationHandlers(kit),
   ];
   const out = {};
   for (const fam of families) {

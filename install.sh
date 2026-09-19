@@ -678,6 +678,17 @@ install_proxypilot_agent() {
     chmod 0755 /usr/local/bin/proxypilot-agent
     log_success "Agent binary installed at /usr/local/bin/proxypilot-agent"
 
+    # 3b. Cross-build the same binary for the architectures a MIGRATION
+    #     source host might be. The backend serves these at a tokened URL
+    #     with their sha256 (docs/features/migration.md); without them the
+    #     Migrations page can create a migration and the source host has
+    #     nothing to download.
+    if [[ -x "${script_dir}/scripts/build-migration-agent.sh" ]]; then
+        log_info "Cross-building the migration agent (amd64, arm64)..."
+        PATH="$(dirname "$go_bin"):$PATH" bash "${script_dir}/scripts/build-migration-agent.sh" "$script_dir" /var/lib/proxypilot/agent || \
+            log_warning "Migration agent cross-build failed — migrations from a source host will not be able to download an agent until it succeeds"
+    fi
+
     # 4. Systemd unit. Compare deploy/proxypilot-agent.service against
     #    the deployed copy and only rewrite + daemon-reload on diff.
     local unit_src="${script_dir}/deploy/proxypilot-agent.service"

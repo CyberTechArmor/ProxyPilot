@@ -1197,6 +1197,16 @@ else
     chmod 0755 /usr/local/bin/proxypilot-agent
     log "${GREEN}Agent binary at /usr/local/bin/proxypilot-agent${NC}"
 
+    # The same binary, cross-built for the architectures a MIGRATION source
+    # host might be. The backend serves these at a tokened URL with their
+    # sha256; a stale pair here would hand an old agent to a new server, so
+    # they are rebuilt on every update alongside the host agent.
+    if [[ -x "${SCRIPT_DIR}/scripts/build-migration-agent.sh" ]]; then
+        log "Cross-building the migration agent (amd64, arm64)..."
+        PATH="$(dirname "$GO_BIN"):$PATH" bash "${SCRIPT_DIR}/scripts/build-migration-agent.sh" "$SCRIPT_DIR" /var/lib/proxypilot/agent || \
+            log "${YELLOW}Migration agent cross-build failed — a source host will have nothing to download until it succeeds${NC}"
+    fi
+
     # 4. Systemd unit.
     UNIT_SRC="${SCRIPT_DIR}/deploy/proxypilot-agent.service"
     UNIT_DST="/etc/systemd/system/proxypilot-agent.service"

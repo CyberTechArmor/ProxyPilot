@@ -40,6 +40,7 @@ import { hydrate as hydrateCveResearch } from './lib/cve-research-scheduler.js';
 import { hydrate as hydrateCertExpiry } from './lib/cert-expiry-scheduler.js';
 import { hydrate as hydrateStorageMonitor } from './lib/storage-monitor.js';
 import { storageRouter } from './routes/storage.js';
+import { migrationRouter, migrationAgentRouter } from './routes/migrations.js';
 import { seedTlsCertFromInstall } from './lib/tls-cert-seed.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer, setMock2TerminalAuthorizer } from './routes/terminal-ws.js';
@@ -485,6 +486,11 @@ app.use('/api/cves', authenticateToken, blockPendingRole, cvesRouter);
 app.use('/api/housekeeping', authenticateToken, blockPendingRole, housekeepingRouter);
 app.use('/api/backups', authenticateToken, blockPendingRole, backupsRouter);
 app.use('/api/storage', authenticateToken, blockPendingRole, storageRouter);
+// Migrations: the agent half is authenticated by the single-use migration
+// token in its own path and carries no session, so it is mounted BEFORE the
+// operator half (Express matches in mount order) and outside authenticateToken.
+app.use('/api/migrations/agent', migrationAgentRouter);
+app.use('/api/migrations', authenticateToken, blockPendingRole, migrationRouter);
 app.use('/api/notifications', authenticateToken, blockPendingRole, notificationsRouter);
 // Lean BEAF Pro — team-shared innovation project management. Deliberately
 // NOT admin-gated: every non-pending user is a workspace member (R01).

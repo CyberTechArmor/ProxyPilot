@@ -382,11 +382,21 @@ export function planSnapshot(inv, params = {}) {
   return { plan };
 }
 
+/**
+ * Which snapshots of the same dataset are NEWER than the target — the set a
+ * rollback would destroy. Ordered by createtxg (strictly increasing, the
+ * canonical ZFS ordering) and only by creation time when a txg is missing:
+ * `creation` is whole seconds, so two snapshots taken in the same second are
+ * indistinguishable by time and one would be silently destroyed.
+ */
 function newerSnapshots(inv, target) {
-  const s = (inv.snapshots || []).find((x) => x.name === target.name);
+  const all = inv.snapshots || [];
+  const s = all.find((x) => x.name === target.name);
   if (!s) return { error: `snapshot ${target.name} does not exist` };
-  const t = s.created_at ? Date.parse(s.created_at) : 0;
-  const newer = (inv.snapshots || []).filter((x) => x.dataset === target.dataset && x.name !== target.name && (x.created_at ? Date.parse(x.created_at) : 0) > t);
+  const txg = (x) => (Number.isFinite(x.createtxg) ? x.createtxg : null);
+  const at = (x) => (x.created_at ? Date.parse(x.created_at) : 0);
+  const isNewer = (x) => (txg(x) != null && txg(s) != null ? txg(x) > txg(s) : at(x) > at(s));
+  const newer = all.filter((x) => x.dataset === target.dataset && x.name !== target.name && isNewer(x));
   return { snapshot: s, newer };
 }
 

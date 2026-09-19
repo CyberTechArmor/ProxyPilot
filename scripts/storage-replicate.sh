@@ -35,6 +35,11 @@ fi
 source "$CONF"
 
 json_escape() { python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "$(sed 's/["\\]/\\&/g' | tr -d '\n')"; }
+# A JSON string or null. Do NOT write ${v:+"\"$v\""}${v:-null}: when v IS set
+# the second expansion yields v again, not null, so every successful run wrote
+# "finished_at":"…""…" — invalid JSON, and replication_status then reported the
+# job as never having succeeded.
+json_str() { if [[ -z "${1:-}" ]]; then printf 'null'; else printf '"%s"' "$1"; fi; }
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 prev_success() { [[ -r "$STATUS" ]] && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("last_success_at") or "")' "$STATUS" 2>/dev/null || true; }
 
@@ -49,8 +54,15 @@ write_status() { # $1 running(true/false) $2 ok(true/false/null) $3 exit $4 erro
   local tail; tail="$(tail -c 4000 "$LOG" 2>/dev/null | json_escape)"
   local err; err="$(printf '%s' "$4" | json_escape)"
   cat > "$STATUS.tmp" <<JSON
-{"name":"$JOB","started_at":"$STARTED","finished_at":${5:+"\"$5\""}${5:-null},"running":$1,"ok":$2,"exit_code":$3,"error":$err,"last_success_at":${LAST_OK:+"\"$LAST_OK\""}${LAST_OK:-null},"target":"$PP_REPL_TARGET","sources":"$PP_REPL_SOURCES","log_tail":$tail}
+{"name":"$JOB","started_at":$(json_str "$STARTED"),"finished_at":$(json_str "${5:-}"),"running":$1,"ok":$2,"exit_code":${3:-null},"error":$err,"last_success_at":$(json_str "${LAST_OK:-}"),"target":"$PP_REPL_TARGET","sources":"$PP_REPL_SOURCES","log_tail":$tail}
 JSON
+  # A status file that does not parse is worse than none: the dashboard would
+  # read the job as never having run. Refuse to publish one.
+  if command -v python3 >/dev/null 2>&1 && ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$STATUS.tmp" 2>/dev/null; then
+    echo "refusing to write malformed status for $JOB" >&2
+    rm -f "$STATUS.tmp"
+    return 0
+  fi
   mv -f "$STATUS.tmp" "$STATUS"
 }
 
@@ -80,8 +92,10 @@ for src in $PP_REPL_SOURCES; do
   leaf="${src##*/}"
   dest="$PP_REPL_TARGET/$leaf"
   echo "== $(now_iso) syncoid ${ARGS[*]} $src $dest" >> "$LOG"
-  if ! "$SYNCOID" "${ARGS[@]}" "$src" "$dest" >> "$LOG" 2>&1; then
-    rc=$?
+  # NOT `if ! cmd; then rc=$?`: inside that branch $? is the status of the `!`
+  # negation, which is 0, so a failed replication reported itself successful.
+  "$SYNCOID" "${ARGS[@]}" "$src" "$dest" >> "$LOG" 2>&1 || rc=$?
+  if [[ $rc -ne 0 ]]; then
     echo "== failed with exit $rc" >> "$LOG"
     break
   fi
@@ -92,7 +106,8 @@ if [[ $rc -eq 0 ]]; then
   LAST_OK="$FINISHED"
   write_status false true 0 "" "$FINISHED"
 else
-  errline="$(grep -iE 'cannot|error|denied|refused|failed' "$LOG" | tail -n 1)"
+  # skip the wrapper's own "== " markers so the reason is syncoid's own words
+  errline="$(grep -iE 'cannot|error|denied|refused|failed' "$LOG" | grep -v '^== ' | tail -n 1)"
   write_status false false "$rc" "${errline:-syncoid exit $rc}" "$FINISHED"
 fi
 exit $rc

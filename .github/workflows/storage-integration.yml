@@ -39,7 +39,7 @@ jobs:
           node-version: 22
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: admin/backend
-      - run: node --test src/__tests__/storage-parse.test.js src/__tests__/storage-planner.test.js src/__tests__/storage-policy.test.js src/__tests__/storage-service.test.js src/__tests__/mcp-extended.test.js
+      - run: node --test src/__tests__/storage-parse.test.js src/__tests__/storage-planner.test.js src/__tests__/storage-policy.test.js src/__tests__/storage-service.test.js src/__tests__/storage-replicate.test.js src/__tests__/mcp-extended.test.js
         working-directory: admin/backend
 
   agent:

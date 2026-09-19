@@ -151,6 +151,26 @@ test('datasets: create / set props (allowlist) / destroy with pre-destroy stream
   assert.deepEqual(planDestroySnapshot(inv(), { snapshot: 'tank/exports@manual-keep' }).plan.steps[0].argv, ['zfs', 'destroy', 'tank/exports@manual-keep']);
 });
 
+test('the rollback guard orders by createtxg: two snapshots in the same second are still ordered', () => {
+  // `creation` is whole seconds, so sanoid's 15-minute snapshot and a manual
+  // one taken in the same second compare equal by time. Ordering by createtxg
+  // keeps the newer one visible — otherwise a rollback destroys it silently.
+  const base = inv();
+  const ds = 'tank/exports';
+  const at = '2026-09-19T09:00:00.000Z';
+  base.snapshots = [
+    { name: `${ds}@a`, dataset: ds, snapshot: 'a', pool: 'tank', created_at: at, createtxg: 100, clones: [], kind: 'manual' },
+    { name: `${ds}@b`, dataset: ds, snapshot: 'b', pool: 'tank', created_at: at, createtxg: 101, clones: [], kind: 'sanoid' },
+  ];
+  assert.match(planRollback(base, { snapshot: `${ds}@a` }).error, /1 newer snapshot\(s\) would be destroyed \(b\)/);
+  assert.ok(planRollback(base, { snapshot: `${ds}@a`, destroy_newer: true }).plan);
+  assert.ok(planRollback(base, { snapshot: `${ds}@b` }).plan, 'the newest snapshot rolls back with nothing to destroy');
+  // no createtxg anywhere (an older agent): fall back to creation time
+  const noTxg = inv();
+  noTxg.snapshots = base.snapshots.map(({ createtxg, ...rest }) => rest);
+  assert.ok(planRollback(noTxg, { snapshot: `${ds}@a` }).plan, 'same-second, no txg: nothing is treated as newer');
+});
+
 test('pools: replace_disk, scrub with timer, import (force for non-ONLINE), export guards', () => {
   assert.match(planReplaceDisk(inv(), { pool: 'nope', old_device: 'x', new_device: ID.sdc }).error, /not imported/);
   assert.match(planReplaceDisk(inv(), { pool: 'data', old_device: 'sdz', new_device: ID.sdc }).error, /not a member of data/);

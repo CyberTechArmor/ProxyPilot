@@ -110,7 +110,9 @@ test('ZFS storage cycle on loop devices: create → snapshot → rollback → po
     assert.equal(r.ok, true, JSON.stringify(r.failed));
     const list = run('zpool', ['list', '-H', '-o', 'name,health', POOL]);
     assert.match(list.stdout, new RegExp(`^${POOL}\\s+ONLINE`));
-    assert.match(run('zfs', ['list', '-H', '-o', 'name', '-r', POOL]).stdout, new RegExp(`${POOL}/incus\\n${POOL}/backups\\n${POOL}/exports`.replace(/\n/g, '[\\s\\S]*')));
+    // `zfs list -r` sorts by name, so assert presence, not order.
+    const named = run('zfs', ['list', '-H', '-o', 'name', '-r', POOL]).stdout.split('\n').filter(Boolean);
+    for (const ds of ['incus', 'backups', 'exports']) assert.ok(named.includes(`${POOL}/${ds}`), `${POOL}/${ds} missing from ${named.join(', ')}`);
     assert.equal(svc.managed().pool, POOL);
     assert.equal(run('zfs', ['get', '-H', '-o', 'value', 'compression', POOL]).stdout.trim(), 'zstd');
     // the two loop disks are now pool members, refused for another pool

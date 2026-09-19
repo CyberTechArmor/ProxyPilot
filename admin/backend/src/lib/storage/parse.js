@@ -427,7 +427,10 @@ export function parseZfsList(text) {
   }));
 }
 
-export const ZFS_SNAPSHOT_COLUMNS = ['name', 'creation', 'used', 'referenced', 'clones', 'defer_destroy', 'userrefs'];
+// createtxg last: it is the canonical ordering of snapshots. `creation` has
+// one-second granularity, so two snapshots taken in the same second compare
+// equal by time — the rollback guard must not miss one of them.
+export const ZFS_SNAPSHOT_COLUMNS = ['name', 'creation', 'used', 'referenced', 'clones', 'defer_destroy', 'userrefs', 'createtxg'];
 
 /** `zfs list -H -p -t snapshot -o <ZFS_SNAPSHOT_COLUMNS>` → snapshots, newest last. */
 export function parseZfsSnapshots(text) {
@@ -436,7 +439,7 @@ export function parseZfsSnapshots(text) {
     return {
       name: c[0], dataset, snapshot: snap || null, pool: String(dataset || '').split('/')[0],
       created_at: c[1] ? new Date(Number(c[1]) * 1000).toISOString() : null, used_bytes: num(c[2]), referenced_bytes: num(c[3]),
-      clones: c[4] && c[4] !== '-' ? c[4].split(',') : [], holds: num(c[6]) || 0,
+      clones: c[4] && c[4] !== '-' ? c[4].split(',') : [], holds: num(c[6]) || 0, createtxg: num(c[7]),
       kind: classifySnapshotName(snap || ''),
     };
   });

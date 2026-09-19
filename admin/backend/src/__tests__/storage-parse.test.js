@@ -116,6 +116,8 @@ test('parseZfsList / parseZfsSnapshots: properties, encryption, volumes, snapsho
   assert.deepEqual(snaps.map((s) => s.kind), ['sanoid', 'incus', 'sanoid', 'sanoid', 'sanoid', 'proxypilot', 'syncoid', 'manual']);
   assert.deepEqual(snaps[4].clones, ['tank/incus/containers/pp-db-clone']);
   assert.equal(snaps[7].holds, 1);
+  // createtxg is the canonical ordering: two snapshots can share a creation second
+  assert.deepEqual(snaps.map((s) => s.createtxg), [920, 930, 940, 950, 910, 925, 935, 900]);
   assert.equal(snaps[0].dataset, 'tank/incus/containers/pp-web'); assert.equal(snaps[0].snapshot, 'autosnap_2026-09-18_00:00:01_daily');
   assert.equal(classifySnapshotName('pp-premove-x'), 'proxypilot');
 });

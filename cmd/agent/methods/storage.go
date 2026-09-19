@@ -69,9 +69,10 @@ var (
 		"NAME", "KNAME", "PATH", "TYPE", "SIZE", "MODEL", "SERIAL", "WWN", "VENDOR", "TRAN", "ROTA", "RM", "HOTPLUG", "RO",
 		"FSTYPE", "LABEL", "UUID", "MOUNTPOINT", "MOUNTPOINTS", "PKNAME", "PARTTYPE", "PARTLABEL", "PARTUUID", "PTTYPE",
 	}
-	zpoolListColumns   = []string{"name", "size", "allocated", "free", "fragmentation", "capacity", "health", "dedupratio", "guid", "altroot", "readonly", "ashift"}
-	zfsListColumns     = []string{"name", "type", "used", "available", "referenced", "quota", "refquota", "reservation", "compression", "compressratio", "encryption", "keystatus", "keylocation", "mountpoint", "mounted", "canmount", "recordsize", "atime", "xattr", "origin", "creation", "readonly", "volsize"}
-	zfsSnapshotColumns = []string{"name", "creation", "used", "referenced", "clones", "defer_destroy", "userrefs"}
+	zpoolListColumns = []string{"name", "size", "allocated", "free", "fragmentation", "capacity", "health", "dedupratio", "guid", "altroot", "readonly", "ashift"}
+	zfsListColumns   = []string{"name", "type", "used", "available", "referenced", "quota", "refquota", "reservation", "compression", "compressratio", "encryption", "keystatus", "keylocation", "mountpoint", "mounted", "canmount", "recordsize", "atime", "xattr", "origin", "creation", "readonly", "volsize"}
+	// createtxg last: the canonical snapshot ordering (creation is whole seconds).
+	zfsSnapshotColumns = []string{"name", "creation", "used", "referenced", "clones", "defer_destroy", "userrefs", "createtxg"}
 	osMountTargets     = []string{"/", "/boot", "/boot/efi", "/boot/firmware"}
 )
 
@@ -285,6 +286,7 @@ type zfsSnapshot struct {
 	ReferencedBytes *float64 `json:"referenced_bytes"`
 	Clones          []string `json:"clones"`
 	Holds           float64  `json:"holds"`
+	CreateTxg       *float64 `json:"createtxg"`
 	Kind            string   `json:"kind"`
 }
 
@@ -1587,7 +1589,7 @@ func parseZfsSnapshots(text string) []zfsSnapshot {
 		s := zfsSnapshot{
 			Name: name, Dataset: dataset, Snapshot: emptyNull(snap), Pool: strings.SplitN(dataset, "/", 2)[0],
 			CreatedAt: epochISOFromCell(cell(c, 1)), UsedBytes: numP(cell(c, 2)), ReferencedBytes: numP(cell(c, 3)),
-			Clones: []string{}, Kind: classifySnapshotName(snap),
+			Clones: []string{}, CreateTxg: numP(cell(c, 7)), Kind: classifySnapshotName(snap),
 		}
 		if cl := cell(c, 4); cl != "" && cl != "-" {
 			s.Clones = strings.Split(cl, ",")

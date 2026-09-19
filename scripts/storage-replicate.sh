@@ -59,7 +59,14 @@ write_status true null null "" ""
 
 ARGS=()
 [[ "${PP_REPL_RECURSIVE:-1}" == "1" ]] && ARGS+=(--recursive)
-ARGS+=(--no-privilege-elevation --compress=zstd-fast --sendoptions=Lce --create-bookmark)
+ARGS+=(--no-privilege-elevation --sendoptions=Lce --create-bookmark)
+if [[ "${PP_REPL_KIND:-local}" == "remote" ]]; then
+  # Compression is a network concern: a local target pipes straight through, so
+  # the zstd binary is not a dependency of local replication.
+  ARGS+=(--compress=zstd-fast)
+else
+  ARGS+=(--compress=none)
+fi
 if [[ "${PP_REPL_KIND:-local}" == "remote" && -n "${PP_REPL_SSH_KEY:-}" ]]; then
   ARGS+=(--sshkey="$PP_REPL_SSH_KEY")
   [[ -n "${PP_REPL_SSH_PORT:-}" ]] && ARGS+=(--sshport="$PP_REPL_SSH_PORT")

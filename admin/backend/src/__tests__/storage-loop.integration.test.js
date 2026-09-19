@@ -27,7 +27,10 @@ const skipReason = !ENABLED ? 'set PROXYPILOT_STORAGE_INTEGRATION=1 to run' : !i
 const POOL = `pptest${process.pid % 1000}`;
 const POOL2 = `${POOL}b`;
 const REPL = 'looptest';
-const state = { dir: null, loops: [], links: [], unitsInstalled: [], svc: null, settings: null };
+// `ids` are the whole-disk by-id links the planner accepts; `links` is every
+// symlink the test made (whole-disk AND -partN), for cleanup only. Keeping the
+// two apart matters: a -partN path must stay refused as "not a whole disk".
+const state = { dir: null, loops: [], links: [], ids: [], unitsInstalled: [], svc: null, settings: null };
 const REPO = new URL('../../../../', import.meta.url).pathname;
 
 function cleanup() {
@@ -65,10 +68,11 @@ test('ZFS storage cycle on loop devices: create → snapshot → rollback → po
     const dev = lo.stdout.trim();
     state.loops.push(dev);
     const link = `/dev/disk/by-id/pp-test-loop-${POOL}-${i}`;
-    symlinkSync(dev, link); state.links.push(link);
+    symlinkSync(dev, link); state.links.push(link); state.ids.push(link);
     for (const n of [1, 9]) { symlinkSync(`${dev}p${n}`, `${link}-part${n}`); state.links.push(`${link}-part${n}`); }
   }
-  const ids = state.links;
+  const ids = state.ids;
+  assert.equal(ids.length, 4, 'four whole-disk by-id links');
 
   const { createStorageHost } = await import('../lib/storage/host.js');
   const { createStorageService } = await import('../lib/storage/service.js');
@@ -95,6 +99,8 @@ test('ZFS storage cycle on loop devices: create → snapshot → rollback → po
   await t.test('create_zpool (mirror) creates the pool and the managed datasets; the token must match; OS disk refused', async () => {
     const os = inv0(await svc.inventory({ smart: false, incus: false }));
     if (os) assert.match((await svc.plan('create_zpool', { name: POOL, devices: [os.by_id[0] || '/dev/disk/by-id/none'] })).error || '', /OS device|must be given as|not a known/);
+    // a partition of a loop disk is not a whole disk, even as a by-id path
+    assert.match((await svc.plan('create_zpool', { name: POOL, devices: [`${ids[0]}-part1`] })).error || '', /partition of|not a known whole disk/);
     const params = { name: POOL, layout: 'mirror', devices: [ids[0], ids[1]] };
     const p = await svc.plan('create_zpool', params);
     assert.ok(p.plan, p.error);

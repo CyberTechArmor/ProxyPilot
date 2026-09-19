@@ -355,7 +355,7 @@ export function planDestroyDataset(inv, params = {}) {
   if (guests.length) return { error: `refused: ${name} holds Incus guest storage (${guests.map((g) => g.name).join(', ')}) — delete guests through Incus (delete_lxc_container)` };
   if ((inv.incusSources || []).includes(name)) return { error: `refused: ${name} is the source dataset of an Incus storage pool` };
   const children = (inv.datasets || []).filter((d) => d.name.startsWith(`${name}/`));
-  const backupsDir = inv.backupsDir || '/var/lib/proxypilot/storage/destroyed';
+  const backupsDir = inv.backupsDir || '/var/lib/proxypilot/storage';
   const safe = name.replace(/[^A-Za-z0-9_.-]/g, '_');
   const streamFile = `${backupsDir.replace(/\/+$/, '')}/destroyed/${safe}@pp-predestroy-{{stamp}}.zfs`;
   const plan = newPlan('destroy_dataset', name, `Destroy dataset ${name}${children.length ? ` and ${children.length} child dataset(s)` : ''} after a fresh snapshot is taken and streamed to ${streamFile}`);

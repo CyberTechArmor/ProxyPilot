@@ -222,19 +222,34 @@ export function createMigrationService({
    * order and streams everything it prints back to us.
    */
   function migrateAnswers(row, spec, trust) {
-    const lines = [
-      trust.url,                                          // Incus server URL
-      'y',                                                // accept the certificate (fingerprint checked by the agent)
-      trust.token,                                        // trust token
-      spec.type === 'virtual-machine' ? '2' : '1',        // 1 container, 2 virtual-machine
-      row.target_name,                                    // instance name
-      spec.type === 'virtual-machine' ? '/dev/sda' : '/', // source disk / rootfs path (the agent substitutes the real one)
-      'no',                                               // additional filesystem mounts?
-      '',                                                 // profiles (default)
-      '',                                                 // extra config
-      'yes',                                              // begin the migration
+    const vm = spec.type === 'virtual-machine';
+    const kind = vm ? '2' : '1';
+    const source = vm ? '/dev/sda' : '/';   // the agent substitutes the real root device
+    // Answering by PROMPT, not by position. Learned live against Incus 6.0.4
+    // (LEARNINGS 183): it asks for the authentication MECHANISM between the
+    // fingerprint and the token, so a positional script feeds the token into
+    // a menu and the migration dies on "illegal base64 data".
+    const rules = [
+      { label: 'server URL', when: 'provide (the )?(Incus|LXD) server URL', send: trust.url },
+      { label: 'accept the certificate', when: 'ok \\(y/n\\)', send: 'y' },
+      { label: 'authentication mechanism', when: 'pick an authentication mechanism', send: '1' },
+      { label: 'trust token', when: 'provide the certificate token', send: trust.token, secret: true },
+      { label: 'container or virtual machine', when: 'container \\(1\\) or (a )?virtual[- ]machine \\(2\\)', send: kind },
+      { label: 'instance name', when: 'name of the (new )?instance', send: row.target_name },
+      { label: 'root filesystem path', when: 'path to the root filesystem', send: '/' },
+      { label: 'source disk', when: 'path to a disk, partition, or image file', send: source },
+      { label: 'additional mounts', when: 'additional filesystem mounts', send: 'no' },
+      // The overrides menu, whose first entry begins the migration.
+      { label: 'begin the migration', when: 'pick one of the options above', send: '1', max: 2 },
     ];
-    return { lines, note: 'Each line answers one incus-migrate prompt, in order. The agent substitutes {{ROOT_DEVICE}} / {{ROOTFS}} where it knows better.' };
+    // The same answers in order: what an operator would type by hand, and
+    // what an agent older than these rules still feeds positionally.
+    const lines = [trust.url, 'y', '1', trust.token, kind, row.target_name, source, 'no', '1'];
+    return {
+      lines,
+      rules,
+      note: 'Each rule answers one incus-migrate prompt, matched on the prompt text (case-insensitive). `lines` is the same sequence positionally. The agent substitutes {{ROOT_DEVICE}} / {{ROOTFS}} where it knows better, and fails with the prompt text if incus-migrate asks something no rule covers.',
+    };
   }
 
   /** A single-use Incus trust token for this migration, and where to reach Incus. */

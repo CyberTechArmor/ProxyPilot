@@ -214,8 +214,40 @@ test('the job document: incus-migrate gets a trust token and a server-owned answ
   assert.equal(job.incus.url, 'https://localhost:8443');
   assert.equal(job.incus.token, 'eyJjbGllbnRfbmFtZSI6');
   assert.equal(job.incus.fingerprint, 'abc123def456abc1');
-  assert.deepEqual(job.incus.answers.lines.slice(0, 5), ['https://localhost:8443', 'y', 'eyJjbGllbnRfbmFtZSI6', '2', 'pp-vm1']);
-  assert.equal(job.incus.answers.lines.at(-1), 'yes');
+  // Positional order, as an operator would type it: URL, accept the
+  // fingerprint, THEN the authentication mechanism, THEN the token. 6.0.4 asks
+  // in that order and the old script answered the menu with the token.
+  assert.deepEqual(job.incus.answers.lines, [
+    'https://localhost:8443', 'y', '1', 'eyJjbGllbnRfbmFtZSI6', '2', 'pp-vm1', '/dev/sda', 'no', '1',
+  ]);
+  // What the agent actually uses: one rule per prompt, matched on its text.
+  const byLabel = Object.fromEntries(job.incus.answers.rules.map((r) => [r.label, r]));
+  assert.equal(byLabel['authentication mechanism'].send, '1');
+  assert.equal(byLabel['trust token'].send, 'eyJjbGllbnRfbmFtZSI6');
+  assert.equal(byLabel['trust token'].secret, true, 'the token never reaches a log line');
+  assert.equal(byLabel['container or virtual machine'].send, '2');
+  assert.equal(byLabel['instance name'].send, 'pp-vm1');
+  for (const r of job.incus.answers.rules) {
+    assert.doesNotThrow(() => new RegExp(r.when, 'i'), `${r.label}: ${r.when} must compile`);
+  }
+  // The prompts Incus 6.0.4 actually printed, in the order it printed them
+  // (captured from the live run), each matching exactly one rule.
+  const prompts = [
+    ['Please provide Incus server URL: ', 'server URL'],
+    ['Certificate fingerprint: abc\nok (y/n)? ', 'accept the certificate'],
+    ['Please pick an authentication mechanism above: ', 'authentication mechanism'],
+    ['Please provide the certificate token: ', 'trust token'],
+    ['Would you like to create a container (1) or virtual-machine (2)?: ', 'container or virtual machine'],
+    ['Name of the new instance: ', 'instance name'],
+    ['Please provide the path to a disk, partition, or image file: ', 'source disk'],
+    ['Do you want to add additional filesystem mounts? [default=no]: ', 'additional mounts'],
+    ['Please pick one of the options above [default=1]: ', 'begin the migration'],
+  ];
+  for (const [prompt, label] of prompts) {
+    const hit = job.incus.answers.rules.filter((r) => new RegExp(r.when, 'i').test(prompt));
+    assert.equal(hit.length, 1, `${JSON.stringify(prompt)} should match exactly one rule, matched ${hit.map((h) => h.label).join(', ') || 'none'}`);
+    assert.equal(hit[0].label, label);
+  }
 });
 
 /* ------------------------------- the import ------------------------------ */

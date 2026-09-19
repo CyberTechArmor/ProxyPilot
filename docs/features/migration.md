@@ -27,12 +27,19 @@ source host ──(1) curl …/install.sh | sudo sh ─────────�
 | Good for | lift-and-shift, including a stack you do not want to unpick | turning an old server into a ProxyPilot-shaped guest |
 
 `transport` is derived and rarely set by hand: whole-machine uses
-`incus-migrate`, except on a Proxmox or otherwise nested LXC, where
-`incus-migrate` cannot run inside the guest (it wants the block device the
-rootfs lives on) — those take `rootfs-tar`, which tars the rootfs, streams it
-to ProxyPilot, and imports it as a split image (`incus image import
-metadata.tar.xz rootfs.tar.gz`). ProxyPilot supplies the metadata the agent
-cannot know. Application mode uses `file-sync`.
+`incus-migrate`, except on a Proxmox or otherwise nested LXC, which takes
+`rootfs-tar` — it tars the rootfs, streams it to ProxyPilot, and imports it as
+a split image (`incus image import metadata.tar.xz rootfs.tar.gz`), with
+ProxyPilot supplying the metadata the agent cannot know. Application mode uses
+`file-sync`.
+
+Why `rootfs-tar` rather than `incus-migrate` for a container source: tar is on
+every machine, `incus-migrate` is a package a Proxmox host does not have and
+may not be able to install, and `incus-migrate` needs the source to reach the
+Incus API *directly* while the tar goes through ProxyPilot, which the source is
+already talking to. Forcing `transport: "incus-migrate"` for a container
+source is allowed and works (it is how that path is tested), it just asks more
+of the source.
 
 ### Why application mode is not rsync
 
@@ -221,8 +228,10 @@ project's own egress grants — `list_egress_requests` / `approve_egress`.)
   `incus config set core.https_address <addr>:8443`. ProxyPilot mints a
   single-use trust token per migration and revokes it on cancel. Without the
   listener the job refuses and says how to fix it rather than half-starting.
-- **The source** needs `curl` and, per transport: `incus-migrate` (the
-  `incus-tools` package) or `tar`, plus the database client for a dump.
+- **The source** needs `curl` and, per transport: `incus-migrate` — on
+  Debian/Ubuntu that is **`apt install incus-extra`**, not `incus-tools`
+  (the Zabbly packages use that name) — or `tar`, plus the database client for
+  a dump.
 - **Application mode** needs nothing in the guest: the copy arrives through
   `incus exec`. The guest does need the database engine installed if a dump
   is being restored into it (the restore says so plainly when it is missing).

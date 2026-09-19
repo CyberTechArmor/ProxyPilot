@@ -1,7 +1,6 @@
 package migrate
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -45,26 +44,39 @@ func (a *Agent) RunIncusMigrate(job *Job) (int64, error) {
 			bin = p
 			a.client.Log("incus-migrate is not installed; using lxd-migrate, which speaks the same protocol")
 		} else {
-			return 0, errors.New("neither incus-migrate nor lxd-migrate is installed on this source. Install the incus-tools package (Debian/Ubuntu: `apt install incus-tools`), or re-create the migration with transport: rootfs-tar")
+			return 0, errors.New("neither incus-migrate nor lxd-migrate is installed on this source. Install it (Debian/Ubuntu: `apt install incus-extra`; the Zabbly packages call it `incus-tools`), or re-create the migration with transport: rootfs-tar")
 		}
 	}
 	if job.Incus == nil || job.Incus.URL == "" || job.Incus.Token == "" {
 		return 0, errors.New("the server did not supply an Incus endpoint and trust token")
 	}
 
-	answers := make([]string, len(job.Incus.Answers.Lines))
-	copy(answers, job.Incus.Answers.Lines)
 	root := a.rootDevice(job)
-	for i, l := range answers {
-		l = strings.ReplaceAll(l, "{{ROOT_DEVICE}}", root)
-		l = strings.ReplaceAll(l, "{{ROOTFS}}", "/")
+	subst := func(v string) string {
+		v = strings.ReplaceAll(v, "{{ROOT_DEVICE}}", root)
+		v = strings.ReplaceAll(v, "{{ROOTFS}}", "/")
 		// The server writes a placeholder path for the source disk because
 		// only the source knows what its own disk is called.
-		if l == "/dev/sda" && root != "" {
-			l = root
+		if v == "/dev/sda" && root != "" {
+			v = root
 		}
-		answers[i] = l
+		return v
 	}
+
+	rules, err := compileAnswerRules(job.Incus.Answers.Rules, subst)
+	if err != nil {
+		return 0, err
+	}
+	// An older server sends only the positional lines. Feeding them blind is
+	// what broke against 6.0.4, so say so rather than pretending.
+	blind := make([]string, 0, len(job.Incus.Answers.Lines))
+	if len(rules) == 0 {
+		for _, l := range job.Incus.Answers.Lines {
+			blind = append(blind, subst(l))
+		}
+		a.client.Log("this ProxyPilot sent no prompt rules, only a positional answer script — feeding it in order")
+	}
+
 	a.client.Log("running %s → %s as %s (%s)", filepath.Base(bin), job.Incus.URL, job.Target.Name, job.Target.Type)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -83,36 +95,179 @@ func (a *Agent) RunIncusMigrate(job *Job) (int64, error) {
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("%s would not start: %w", bin, err)
 	}
-	go func() {
+
+	if len(rules) == 0 {
+		go func() {
+			defer stdin.Close()
+			for _, line := range blind {
+				// A prompt loop reads a line at a time; a burst of lines with
+				// no pause is fine for a pipe but makes a mis-ordered answer
+				// impossible to see in the log, so pace them.
+				fmt.Fprintln(stdin, line)
+				time.Sleep(150 * time.Millisecond)
+			}
+		}()
+	} else {
 		defer stdin.Close()
-		for _, line := range answers {
-			// A prompt loop reads a line at a time; a burst of lines with no
-			// pause is fine for a pipe but makes a mis-ordered answer
-			// impossible to see in the log, so pace them.
-			fmt.Fprintln(stdin, line)
-			time.Sleep(150 * time.Millisecond)
+	}
+
+	// Read BYTES, not lines: a prompt is a partial line with no newline, so a
+	// line scanner never sees it until the answer has already been missed.
+	chunks := make(chan []byte, 32)
+	go func() {
+		buf := make([]byte, 8192)
+		defer close(chunks)
+		for {
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				c := make([]byte, n)
+				copy(c, buf[:n])
+				chunks <- c
+			}
+			if err != nil {
+				return
+			}
 		}
 	}()
 
-	var lastBytes int64
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
+	var (
+		lastBytes int64
+		pending   strings.Builder
+		unmatched string
+		lastMove  = time.Now()
+	)
+	emit := func(line string) {
+		line = strings.TrimSpace(line)
 		if line == "" {
-			continue
+			return
 		}
 		if b := parseMigrateBytes(line); b > lastBytes {
 			lastBytes = b
 			_ = a.client.Send(Event{Kind: "progress", Phase: "transfer", Bytes: b, Message: line})
-			continue
+			return
 		}
 		a.client.Log("%s", line)
 	}
-	if err := cmd.Wait(); err != nil {
-		return lastBytes, fmt.Errorf("%s failed: %w — the lines above are its own output", filepath.Base(bin), err)
+	answer := func(r *answerRule) error {
+		shown := r.send
+		if r.secret {
+			shown = "(secret)"
+		}
+		a.client.Log("answered %q → %s", strings.TrimSpace(r.label), shown)
+		if _, err := fmt.Fprintln(stdin, r.send); err != nil {
+			return fmt.Errorf("could not answer %s: %w", r.label, err)
+		}
+		return nil
+	}
+
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	var loopErr error
+
+readLoop:
+	for {
+		select {
+		case c, ok := <-chunks:
+			if !ok {
+				break readLoop
+			}
+			lastMove = time.Now()
+			for _, b := range string(c) {
+				if b == '\n' || b == '\r' {
+					emit(pending.String())
+					pending.Reset()
+					continue
+				}
+				pending.WriteRune(b)
+			}
+			if len(rules) == 0 {
+				continue
+			}
+			if r := matchAnswerRule(rules, pending.String()); r != nil {
+				emit(pending.String())
+				pending.Reset()
+				if err := answer(r); err != nil {
+					loopErr = err
+					cancel()
+					break readLoop
+				}
+			}
+		case <-tick.C:
+			// A prompt nothing answers is a version difference, and the useful
+			// thing to report is the prompt itself — not a hang.
+			if len(rules) > 0 && strings.TrimSpace(pending.String()) != "" && time.Since(lastMove) > 45*time.Second {
+				unmatched = strings.TrimSpace(pending.String())
+				cancel()
+				break readLoop
+			}
+		}
+	}
+
+	waitErr := cmd.Wait()
+	if s := strings.TrimSpace(pending.String()); s != "" && unmatched == "" {
+		emit(s)
+	}
+	switch {
+	case unmatched != "":
+		return lastBytes, fmt.Errorf("%s asked something this ProxyPilot has no answer for: %q — the answer rules need a line for it (lib/migration/service.js, migrateAnswers)", filepath.Base(bin), unmatched)
+	case loopErr != nil:
+		return lastBytes, loopErr
+	case waitErr != nil:
+		return lastBytes, fmt.Errorf("%s failed: %w — the lines above are its own output", filepath.Base(bin), waitErr)
 	}
 	return lastBytes, nil
+}
+
+// answerRule is a compiled AnswerRule plus how many times it has fired.
+type answerRule struct {
+	re     *regexp.Regexp
+	send   string
+	label  string
+	secret bool
+	max    int
+	fired  int
+}
+
+func compileAnswerRules(in []AnswerRule, subst func(string) string) ([]*answerRule, error) {
+	out := make([]*answerRule, 0, len(in))
+	for _, r := range in {
+		if strings.TrimSpace(r.When) == "" {
+			continue
+		}
+		re, err := regexp.Compile("(?i)" + r.When)
+		if err != nil {
+			return nil, fmt.Errorf("the server sent an answer rule this agent cannot compile (%q): %w", r.When, err)
+		}
+		label := r.Label
+		if label == "" {
+			label = r.When
+		}
+		max := r.Max
+		if max <= 0 {
+			max = 3
+		}
+		out = append(out, &answerRule{re: re, send: subst(r.Send), label: label, secret: r.Secret, max: max})
+	}
+	return out, nil
+}
+
+// matchAnswerRule returns the first rule whose pattern the partial line
+// matches and which has not been answered too often. A rule that keeps
+// matching means incus-migrate keeps rejecting the answer, and repeating it
+// forever would hang the migration instead of failing it.
+func matchAnswerRule(rules []*answerRule, partial string) *answerRule {
+	p := strings.TrimSpace(partial)
+	if p == "" {
+		return nil
+	}
+	for _, r := range rules {
+		if r.fired >= r.max || !r.re.MatchString(p) {
+			continue
+		}
+		r.fired++
+		return r
+	}
+	return nil
 }
 
 // rootDevice is the block device backing / — what incus-migrate asks for

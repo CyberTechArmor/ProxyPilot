@@ -240,6 +240,10 @@ test('the job document: incus-migrate gets a trust token and a server-owned answ
     ['Would you like to create a container (1) or virtual-machine (2)?: ', 'container or virtual machine'],
     ['Name of the new instance: ', 'instance name'],
     ['Please provide the path to a disk, partition, or image file: ', 'source disk'],
+    // A container source is asked for a path instead — and 6.0.4 says "a root
+    // filesystem" where the docs say "the".
+    ['Please provide the path to a root filesystem: ', 'root filesystem path'],
+    ['Please provide the path to the root filesystem: ', 'root filesystem path'],
     ['Do you want to add additional filesystem mounts? [default=no]: ', 'additional mounts'],
     ['Please pick one of the options above [default=1]: ', 'begin the migration'],
   ];

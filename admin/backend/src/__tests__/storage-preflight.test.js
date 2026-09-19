@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseFstab, deviceIdentifiers, fstabReferences, parseMdstat, hasRaidSuperblock, parseEfiBootEntries,
-  efiEntriesForDevice, deviceRisks, parseOsRelease, installPreflight, REQUIRED_PACKAGES,
+  efiEntriesForDevice, deviceRisks, parseOsRelease, installPreflight, REQUIRED_PACKAGES, parseAptCandidate,
 } from '../lib/storage/preflight.js';
 import { deviceEligibility } from '../lib/storage/planner.js';
 import { fixtureDevices } from './fixtures/storage/load.js';
@@ -254,4 +254,50 @@ test('install status: the update phase model is not shown for an install, and a 
   assert.equal(lost.terminal, true);
   assert.match(lost.reason, /never recorded this id/);
   delete globalThis.__ppUpdateStatus;
+});
+
+test('the apt candidate check catches the Debian contrib case before an install is attempted', () => {
+  // the shape apt-cache policy returns on a stock Debian host
+  assert.equal(parseAptCandidate('zfsutils-linux:\n  Installed: (none)\n  Candidate: (none)\n  Version table:\n'), null);
+  assert.equal(parseAptCandidate('zfsutils-linux:\n  Installed: (none)\n  Candidate: 2.2.7-1~bpo13+1\n'), '2.2.7-1~bpo13+1');
+  assert.equal(parseAptCandidate(''), null);
+
+  const bare = { zpool: false, zfs: false, smartctl: false, sanoid: false, syncoid: false, zfs_module_loaded: false, scrub_timer_installed: false, syncoid_unit_installed: false, replicate_helper: false, restore_helper: false };
+  const runner = { present: true, enabled: true, source_dir: '/root/ProxyPilot', script_present: true };
+  const debian = parseOsRelease('ID=debian\nVERSION_ID="13"\nPRETTY_NAME="Debian GNU/Linux 13 (trixie)"\n');
+
+  // no candidate on Debian: a warning naming contrib, and the install is NOT
+  // blocked, because the installer enables the component itself
+  const needsContrib = installPreflight({ toolchain: bare, os: debian, runner, agent: true, apt: true, zfsCandidate: null });
+  const c = needsContrib.checks.find((x) => x.id === 'packages.candidate');
+  assert.equal(c.status, 'warn');
+  assert.match(c.detail, /no installation candidate/);
+  assert.match(c.detail, /'contrib'/);
+  assert.match(c.remedy, /enables 'contrib' for you/);
+  assert.equal(needsContrib.can_install, true);
+  assert.equal(needsContrib.component_to_enable, 'contrib');
+
+  // Ubuntu asks for universe
+  const ubuntu = installPreflight({ toolchain: bare, os: parseOsRelease('ID=ubuntu\nID_LIKE=debian\n'), runner, agent: true, apt: true, zfsCandidate: null });
+  assert.equal(ubuntu.component_to_enable, 'universe');
+  assert.match(ubuntu.checks.find((x) => x.id === 'packages.candidate').detail, /'universe'/);
+
+  // a distribution we cannot fix for the operator DOES block
+  const arch = installPreflight({ toolchain: bare, os: parseOsRelease('ID=arch\n'), runner, agent: true, apt: true, zfsCandidate: null });
+  const ac = arch.checks.find((x) => x.id === 'packages.candidate');
+  assert.equal(ac.status, 'fail');
+  assert.equal(ac.blocking, true);
+  assert.equal(arch.can_install, false);
+  assert.ok(arch.blocked_by.some((b) => b.id === 'packages.candidate'));
+
+  // a candidate present is a pass carrying the version
+  const okc = installPreflight({ toolchain: bare, os: debian, runner, agent: true, apt: true, zfsCandidate: '2.2.7-1' });
+  assert.equal(okc.checks.find((x) => x.id === 'packages.candidate').status, 'pass');
+  assert.equal(okc.component_to_enable, null);
+  assert.equal(okc.zfs_candidate, '2.2.7-1');
+
+  // not looked up at all (no apt) adds no check rather than a misleading one
+  const noApt = installPreflight({ toolchain: bare, os: debian, runner, agent: true, apt: false });
+  assert.equal(noApt.checks.find((x) => x.id === 'packages.candidate'), undefined);
+  assert.equal(noApt.zfs_candidate, null);
 });

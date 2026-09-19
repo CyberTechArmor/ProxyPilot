@@ -338,7 +338,9 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
   async function preflight({ devices = false } = {}) {
     const [toolchain, os, runner, agent] = await Promise.all([host.toolchain(), host.osRelease(), host.runnerState(), host.agentPing()]);
     const apt = await host.hasBinary('apt-get');
-    const report = installPreflight({ toolchain, os, runner, agent, apt });
+    // Only ask apt when apt exists; undefined means "not looked up".
+    const zfsCandidate = apt ? await host.aptCandidate('zfsutils-linux') : undefined;
+    const report = installPreflight({ toolchain, os, runner, agent, apt, zfsCandidate });
     const out = { at: new Date(now()).toISOString(), ...report, toolchain, os, runner, agent, managed: managed() };
     if (devices) {
       const inv = await inventory({ smart: false, incus: false });

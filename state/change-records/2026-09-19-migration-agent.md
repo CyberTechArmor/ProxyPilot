@@ -45,20 +45,32 @@ throwaway guests.
   the same artifact endpoint the rootfs path uses and unpacked from the host;
   the dump travels the same way. The final delta sync keeps its meaning
   through `tar --newer-mtime`.
-- **The server owns the `incus-migrate` answer script.** The tool is a prompt
-  loop whose order changes between releases, so adapting to a new version is
-  a server-side edit, not a re-roll of every agent on every source host.
+- **The server owns the `incus-migrate` answer script — as PROMPT RULES.** The
+  tool is a prompt loop whose order changes between releases, so adapting to a
+  new version is a server-side edit, not a re-roll of every agent on every
+  source host. The first live run proved that an ORDERED list is not enough
+  (LEARNINGS 183): 6.0.4 asks for the authentication mechanism between the
+  fingerprint and the token. Each rule is a pattern, an answer and whether the
+  answer is a secret; the agent reads the tool's output as bytes (a prompt is a
+  partial line), fails with the prompt quoted when nothing matches, and stops
+  re-answering a prompt the tool keeps rejecting.
+- **Readiness is part of the product.** `migration_preflight` reports the four
+  things that decide whether a pasted command can work, and
+  `enable_incus_listener` performs the one fix ProxyPilot can: the Incus
+  listener, at the bridge gateway by default, refusing a public bind unless
+  asked, verified by re-reading and reversible with one line.
 - **The guest fence is bridge → host.** Learned the hard way (LEARNINGS 182):
   approving an internet destination records that it was reviewed and says so,
   rather than claiming a fence that does not cover it.
 
 ## Verification
 
-Both modes end to end on the operator's host against throwaway guests
-(`state/handoff.md` has the table): 300 MiB streamed and hash-verified for
-whole-machine, the app directories and a PostgreSQL dump for application
-mode, and in both cases a running app and intact data in the target. Five
-defects were found by running it and are fixed, pinned and re-verified
-(LEARNINGS 175, 176, 179, 180/182, 181). `incus-migrate` against a real VM,
-a real Proxmox source and an arm64 source remain unverified and are listed
-in the handoff.
+All THREE transports end to end on the operator's host against throwaway
+guests (`state/handoff.md` has the tables): 300 MiB streamed and hash-verified
+for `rootfs-tar`, the app directories and a PostgreSQL dump for `file-sync`,
+and 434.7 MiB through the real `incus-migrate` against a live Incus listener —
+in every case a running app and intact data in the target (all four rows, the
+`.env` still 0600 with its mtime, the cron entry). Eight defects were found by
+running it and are fixed, pinned and re-verified (LEARNINGS 175, 176, 179,
+180/182, 181, 183, 184, 185). A VM source, a real Proxmox source and an arm64
+source remain unverified and are listed in the handoff.

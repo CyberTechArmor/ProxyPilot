@@ -43,7 +43,8 @@ fingerprint in the token payload. No session cookie, no MCP key.
 | 13 | Docs, change record, handoff.md, run-ledger row | done |
 | 14 | Five defects found by RUNNING it, fixed, pinned and re-verified live (LEARNINGS 175, 176, 179, 180/182, 181) | done |
 | 15 | Readiness: `migration_preflight` + `enable_incus_listener` (MCP), `GET /preflight` + `POST /incus-listener` (REST, sudo), the Readiness panel on the page | done — the manual `incus config set core.https_address` step is now a product capability that proposes the bridge gateway and refuses a public bind without being asked |
-| 16 | `incus-migrate` end to end from the throwaway LXC source, with the listener on | in progress |
+| 16 | `incus-migrate` end to end from the throwaway LXC source, with the listener on | done — `Instance pp-mig-im2 successfully created`, 434.7 MiB moved, guest fenced and stopped; the migrated app serves its own vhost and all four rows survived. Three defects found by running it (LEARNINGS 183, 184, 185), all fixed, pinned and re-verified |
+| 17 | All three transports now proven on real hardware; only a VM source, a real Proxmox host and arm64 remain unverified (handoff) | done |
 
 ## Decisions
 
@@ -54,9 +55,15 @@ fingerprint in the token payload. No session cookie, no MCP key.
   to the same artifact endpoint the rootfs path uses and unpacked into the
   guest from the host; the dump travels the same way. The final delta sync
   keeps its meaning through `tar --newer-mtime`.
-- **Wrap, don't reimplement.** Whole-machine mode shells out to the official
-  `incus-migrate`; ProxyPilot supplies the target definition and a one-time
-  Incus trust token and reads its progress. A Proxmox LXC, where
+- **Wrap, don't reimplement — and answer what it ASKED.** Whole-machine mode
+  shells out to the official `incus-migrate`; ProxyPilot supplies the target
+  definition and a one-time Incus trust token and reads its progress. The
+  server owns the answers, and after the first live run it owns them as
+  PROMPT RULES rather than an ordered list: a positional script encodes a
+  sequence nobody promised, and 6.0.4 asks for the authentication mechanism in
+  a place the old order did not expect (LEARNINGS 183). A prompt no rule
+  covers now fails the run with the prompt quoted — which is how the second
+  defect was found in one attempt. A Proxmox LXC, where
   `incus-migrate` cannot run inside the guest, gets the rootfs-tar path
   (`tar` → ProxyPilot → `incus import`).
 - **Values are never read.** The manifest carries `.env` file PATHS and KEY

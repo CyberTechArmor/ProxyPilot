@@ -187,6 +187,25 @@ migrationRouter.post('/', requireSudo, wrap(async (req, res) => {
   res.status(201).json(r);
 }));
 
+migrationRouter.get('/preflight', wrap(async (req, res) => {
+  res.json(await migrationService().preflight());
+}));
+
+/**
+ * Turn the Incus network listener on, at an address the operator chose.
+ * incus-migrate connects to Incus DIRECTLY from the source host, so a
+ * whole-machine migration of a physical host or a VM needs this; the default
+ * is the Incus bridge gateway, which guests can reach and the internet
+ * cannot, and a bind on every interface is refused without allow_public.
+ */
+migrationRouter.post('/incus-listener', requireSudo, wrap(async (req, res) => {
+  const body = z.object({ address: z.string().max(64).optional(), allow_public: z.boolean().optional() }).strict().safeParse(req.body || {});
+  if (!body.success) return res.status(400).json({ error: body.error.issues[0]?.message || 'invalid body' });
+  const r = await migrationService().enableIncusListener({ address: body.data.address || null, allowPublic: body.data.allow_public === true, actor: req.user?.id || null, ip: req.ip });
+  if (r.error) return res.status(422).json({ error: r.error });
+  res.json(r);
+}));
+
 migrationRouter.get('/:id', wrap(async (req, res) => {
   const svc = migrationService();
   const row = svc.rowById(req.params.id);

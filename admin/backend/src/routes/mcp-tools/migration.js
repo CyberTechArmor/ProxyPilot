@@ -60,6 +60,34 @@ export function createMigrationHandlers(kit) {
     return v.error || `status ${v.status}`;
   }
 
+  const migration_preflight = reader('migration_preflight', async () => {
+    const pf = await svc().preflight();
+    return ok({
+      ...pf,
+      next: pf.ready_for['incus-migrate']
+        ? 'Every transport is available.'
+        : pf.ready_for['rootfs-tar']
+          ? 'Container and application sources are ready. A physical host or a VM needs incus-migrate, which connects to Incus directly — enable_incus_listener turns that on.'
+          : 'Fix the failing checks before creating a migration.',
+    });
+  });
+
+  const enable_incus_listener = mutation('enable_incus_listener', { subjectType: 'host', flag: 'mcp.migration', audit: 'MIGRATION_INCUS_LISTENER' }, async (args, auth, req, note) => {
+    note.subject_id = 'core.https_address';
+    const state = await svc().incusListener();
+    if (state.error) return err(state.error);
+    const address = args.address ? String(args.address) : state.suggested;
+    const d = dry(args, { would_set: 'core.https_address', to: address, currently: state.address, bridge_gateway: state.bridge_gateway });
+    if (d) return d;
+    const gate = confirmFlag(args, note, `This makes the Incus API listen on ${address}. A source host must be able to reach it; the bridge gateway is reachable by guests and not from outside this host.`);
+    if (gate) return gate;
+    const r = await svc().enableIncusListener({ address: args.address ? String(args.address) : null, allowPublic: args.allow_public === true, actor: auth?.created_by ?? null });
+    if (r.error) { note.refused = true; return err(r.error); }
+    note.summary = r.already ? `Incus already listens on ${r.address}` : `Incus now listens on ${r.address}`;
+    note.detail = { address: r.address, previous: r.previous ?? null };
+    return ok(r);
+  });
+
   /* ------------------------------ mutations ----------------------------- */
 
   const create_migration = mutation('create_migration', { subjectType: 'migration', flag: 'mcp.migration', audit: 'MIGRATION_CREATE', keepArgs: ['dry_run', 'confirm'] }, async (args, auth, req, note) => {
@@ -147,5 +175,5 @@ export function createMigrationHandlers(kit) {
     return ok(r);
   });
 
-  return { create_migration, get_migration, list_migrations, approve_migration, migration_cutover, cancel_migration };
+  return { create_migration, get_migration, list_migrations, migration_preflight, enable_incus_listener, approve_migration, migration_cutover, cancel_migration };
 }

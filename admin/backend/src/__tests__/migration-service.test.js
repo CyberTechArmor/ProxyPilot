@@ -461,6 +461,66 @@ test('cancel: the token dies, the Incus trust certificate is revoked, and no gue
   assert.match((await svc.cancelMigration(r.migration.id, {})).error, /already cancelled/);
 });
 
+/* --------------------------- preflight / listener ------------------------ */
+
+test('preflight: says which transports are available, and why one is not', async () => {
+  // Incus is not listening; the bridge gateway is the narrow address to propose.
+  const { svc } = setup({ script: (bin, args) => {
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'get') return { status: 0, stdout: '\n' };
+    if (bin === 'incus' && args[0] === 'query') return { status: 0, stdout: JSON.stringify({ devices: { eth0: { type: 'nic', network: 'incusbr0' }, root: { type: 'disk', path: '/' } } }) };
+    if (bin === 'incus' && args[0] === 'network' && args[1] === 'get') return { status: 0, stdout: '10.185.17.1/24\n' };
+    return { status: 1 };
+  } });
+  const pf = await svc.preflight();
+  assert.equal(pf.incus.listening, false);
+  assert.equal(pf.incus.bridge, 'incusbr0');
+  assert.equal(pf.incus.suggested, '10.185.17.1:8443', 'the bridge gateway, not every interface');
+  assert.equal(pf.ready_for['incus-migrate'], false);
+  const check = pf.checks.find((c) => c.id === 'incus_listener');
+  assert.equal(check.status, 'warn', 'a missing listener does not block a container source');
+  assert.match(check.remedy, /rootfs-tar/);
+  // No agent build in the test's temp dir → that IS a failure.
+  assert.equal(pf.checks.find((c) => c.id === 'agent_builds').status, 'fail');
+  assert.equal(pf.ready_for['rootfs-tar'], false);
+});
+
+test('the Incus listener: the bridge gateway by default, every interface refused without asking', async () => {
+  const sets = [];
+  const mk = (listening) => setup({ script: (bin, args) => {
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'get') return { status: 0, stdout: `${listening()}\n` };
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'set') { sets.push(args[3]); return { status: 0 }; }
+    if (bin === 'incus' && args[0] === 'query') return { status: 0, stdout: JSON.stringify({ devices: { eth0: { type: 'nic', network: 'incusbr0' } } }) };
+    if (bin === 'incus' && args[0] === 'network' && args[1] === 'get') return { status: 0, stdout: '10.185.17.1/24\n' };
+    return { status: 1 };
+  } });
+
+  let current = '';
+  const { svc } = mk(() => current);
+
+  const refused = await svc.enableIncusListener({ address: ':8443' });
+  assert.match(refused.error, /listens on every interface/);
+  assert.match(refused.error, /10\.185\.17\.1:8443/, 'and it names the narrow address that would work');
+  assert.equal(sets.length, 0, 'nothing was set');
+
+  assert.match((await svc.enableIncusListener({ address: 'not-an-address' })).error, /must be host:port/);
+
+  // The default is the bridge gateway, and the change is verified by re-reading.
+  const ok1 = await svc.enableIncusListener({ actor: 'admin-1' });
+  assert.equal(sets.at(-1), '10.185.17.1:8443', 'the default address is the bridge gateway, not every interface');
+  assert.match(ok1.error, /did not take the address/, 'a config set that does not stick is an error, not a success');
+
+  current = '10.185.17.1:8443';
+  const ok2 = await svc.enableIncusListener({ actor: 'admin-1' });
+  assert.equal(ok2.already, true, 'already listening there is not a change');
+  assert.equal(ok2.scope, 'a private address');
+
+  // Explicitly asking for every interface is allowed, and reversible.
+  current = '';
+  const pub = await svc.enableIncusListener({ address: ':8443', allowPublic: true });
+  assert.match(pub.error, /did not take/);   // the stub still reports ''
+  assert.ok(sets.includes(':8443'), 'allow_public lets the public bind through');
+});
+
 /* ---------------------------------- MCP ---------------------------------- */
 
 test('MCP: the same rules through the tool surface — confirm gates, dry_run touches nothing, blocking concerns refuse approval', async () => {

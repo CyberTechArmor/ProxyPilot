@@ -515,12 +515,12 @@ export default function PreflightPanel({ state, onInstalled }) {
               </Notice>
             )}
 
-            {!pf.can_install && blockedBy.length > 0 && (
+            {!pf.can_install && (
               <Notice level="error">
-                <p className="font-medium">Install is blocked</p>
-                {blockedBy.map((b) => (
-                  <p key={b.id} className="break-words">{b.detail}{b.remedy ? ` ${b.remedy}` : ''}</p>
-                ))}
+                <p className="font-medium">Install is blocked, so the button is disabled</p>
+                {blockedBy.length > 0
+                  ? blockedBy.map((b) => <p key={b.id} className="break-words">{b.detail}{b.remedy ? ` ${b.remedy}` : ''}</p>)
+                  : <p>The host reported no reason. Re-check, and look at the failing checks below.</p>}
               </Notice>
             )}
 

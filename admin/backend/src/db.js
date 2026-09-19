@@ -23,6 +23,11 @@ const rawDbPath = process.env.DATABASE_PATH || './data/db/proxypilot.db';
 const dbPath = rawDbPath.startsWith('/') ? rawDbPath : resolve(PROJECT_ROOT, rawDbPath);
 let db;
 
+/** The resolved on-disk path of the dashboard database (backup_proxypilot_db over MCP). */
+export function databasePath() {
+  return dbPath;
+}
+
 export function getDb() {
   if (!db) {
     // Ensure the directory exists with restrictive perms (0700). The data
@@ -2004,6 +2009,99 @@ export function initDatabase() {
       )
     `);
     d.exec('CREATE INDEX IF NOT EXISTS idx_lxc_editor_keys_container ON lxc_editor_keys(container_name)');
+  });
+
+  // Extended MCP surface (903–907). docs/features/mcp.md § "The extended
+  // surface". Each is additive; nothing here rewrites an applied migration.
+  //
+  // 903: a key may be SCOPED — a tool allowlist, named LXC guests, project
+  // ids, and an explicit self_edit opt-in (lib/mcp-ext/logic.js parseTokenScope).
+  // NULL keeps every existing key exactly as it was: the full admin surface
+  // minus self-editing, which is never granted implicitly.
+  runMigration(db, 903, 'mcp_tokens_scope', (d) => {
+    const cols = d.prepare(`PRAGMA table_info(mcp_tokens)`).all().map((c) => c.name);
+    if (!cols.includes('scope_json')) d.exec(`ALTER TABLE mcp_tokens ADD COLUMN scope_json TEXT`);
+    if (!cols.includes('token_prefix')) d.exec(`ALTER TABLE mcp_tokens ADD COLUMN token_prefix TEXT`);
+  });
+
+  // 904: the MCP ledger — one row per mutating extended-tool call, written by
+  // the SERVER after the call (never by the client), with the redacted
+  // arguments, the outcome, whether it was a dry run, which confirmation
+  // token it consumed and which snapshot/export it took first. audit_log
+  // keeps the human-facing action; this is the machine-facing record that
+  // export_grc_evidence bundles.
+  runMigration(db, 904, 'mcp_ledger', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        token_id INTEGER,
+        actor TEXT,
+        tool TEXT NOT NULL,
+        subject_type TEXT,
+        subject_id TEXT,
+        project_id INTEGER,
+        args_json TEXT,
+        outcome TEXT NOT NULL CHECK(outcome IN ('ok','error','dry_run','refused','needs_confirmation')),
+        dry_run INTEGER NOT NULL DEFAULT 0,
+        confirmation_used INTEGER NOT NULL DEFAULT 0,
+        snapshot TEXT,
+        summary TEXT,
+        detail_json TEXT,
+        duration_ms INTEGER
+      )
+    `);
+    d.exec('CREATE INDEX IF NOT EXISTS idx_mcp_ledger_ts ON mcp_ledger(ts)');
+    d.exec('CREATE INDEX IF NOT EXISTS idx_mcp_ledger_tool ON mcp_ledger(tool, ts)');
+    d.exec('CREATE INDEX IF NOT EXISTS idx_mcp_ledger_subject ON mcp_ledger(subject_type, subject_id)');
+  });
+
+  // 905: per-guest additions to the run_lxc_command allowlist
+  // (get_command_allowlist / set_command_allowlist). deny_always in the
+  // static policy still wins over anything stored here.
+  runMigration(db, 905, 'lxc_command_allowlists', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS lxc_command_allowlists (
+        container_name TEXT PRIMARY KEY,
+        read_only_json TEXT NOT NULL DEFAULT '[]',
+        mutating_json TEXT NOT NULL DEFAULT '[]',
+        updated_by TEXT,
+        updated_at TEXT NOT NULL
+      )
+    `);
+  });
+
+  // 906: outbound webhooks — a generic notification channel next to smtp/sms
+  // (lib/notification-dispatch.js fans out to every enabled row). The
+  // signing secret is encrypted at rest and never read back.
+  runMigration(db, 906, 'notification_webhooks', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS notification_webhooks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        url TEXT NOT NULL,
+        secret_enc TEXT,
+        events_json TEXT NOT NULL DEFAULT '["*"]',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_status TEXT,
+        last_error TEXT,
+        last_at TEXT
+      )
+    `);
+  });
+
+  // 907: per-route options set_route_options renders — extra response
+  // headers, a Content-Security-Policy, basic auth (bcrypt hashes), an IP
+  // allowlist and a rate limit (rendered only when Caddy carries the
+  // rate_limit module). NULL everywhere keeps the site file byte-identical.
+  runMigration(db, 907, 'route_edge_options', (d) => {
+    const cols = d.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);
+    for (const col of ['extra_headers_json', 'csp', 'basic_auth_json', 'ip_allowlist_json', 'rate_limit_json']) {
+      if (!cols.includes(col)) d.exec(`ALTER TABLE service_http_routes ADD COLUMN ${col} TEXT`);
+    }
   });
 
   // Seed the global TLS mode from the install-time env (.env is authoritative on

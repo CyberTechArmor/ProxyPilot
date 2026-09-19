@@ -18,6 +18,7 @@
 //   explicitly allows; every feature here is plain request/response.
 
 import { createHash, randomBytes } from 'node:crypto';
+import { MCP_EXT_TOOLS, MCP_EXT_INSTRUCTIONS } from './mcp-ext/catalog/index.js';
 
 export const MCP_PROTOCOL_VERSION = '2025-03-26';
 // Versions we accept from clients (echoed back when known; otherwise we answer
@@ -82,6 +83,7 @@ export const MCP_SERVER_INSTRUCTIONS = [
   'site) exist and whether the host can update; run_proxypilot_update({ confirm: true }) runs update.sh on the',
   'host — backup, pull, rebuild, ~1–2 min of API downtime — so ask the operator first, then poll',
   'get_proxypilot_update_status through the restart. Never an automatic update: every run is one confirmed call.',
+  MCP_EXT_INSTRUCTIONS,
 ].join(' ');
 
 // ---- JSON-RPC helpers ----
@@ -672,6 +674,24 @@ export function lxcContainerDetail(instance) {
   };
 }
 
+/**
+ * Merge a guest's stored allowlist additions (lxc_command_allowlists, migration
+ * 905) into the static run_lxc_command policy. deny_always is never widened:
+ * an addition that collides with a deny_always prefix is dropped here as well
+ * as refused at set time, so the static file stays the ceiling.
+ */
+export function mergeLxcCommandPolicy(base, extra = {}) {
+  const denied = (base?.deny_always?.commands || []);
+  const allowed = (list) => (Array.isArray(list) ? list : [])
+    .map((e) => (Array.isArray(e) ? e.map(String) : String(e).trim().split(/\s+/).filter(Boolean)))
+    .filter((argv) => argv.length && !denied.some((d) => d.every((t, i) => argv[i] === t)));
+  return {
+    ...base,
+    read_only: [...(base?.read_only || []), ...allowed(extra.read_only)],
+    mutating_scoped: { ...(base?.mutating_scoped || {}), commands: [...(base?.mutating_scoped?.commands || []), ...allowed(extra.mutating)] },
+  };
+}
+
 // ---- LXC lifecycle: snapshots + gated config writes ----
 //
 // Snapshot-before-mutate is the safety primitive that makes the mutating LXC
@@ -975,7 +995,7 @@ const uploadSourceProps = {
   },
 };
 
-export const MCP_TOOLS = [
+const MCP_BASE_TOOLS = [
   {
     name: 'list_static_sites',
     description: 'List the static sites ProxyPilot serves (id, name, domain). Use the id with inspect_static_site_zip / apply_static_site_zip to deploy new content.',
@@ -1986,6 +2006,12 @@ export const MCP_TOOLS = [
     },
   },
 ];
+
+// The full catalog: the original surface plus the extended families
+// (lib/mcp-ext/catalog/). One list, so tools/list, scope filtering and the
+// catalog tests see every tool.
+export const MCP_TOOLS = Object.freeze([...MCP_BASE_TOOLS, ...MCP_EXT_TOOLS]);
+export { MCP_BASE_TOOLS };
 
 // A file path RELATIVE to a project's app root, as accepted by the project
 // file tools. Rejects absolute paths, traversal, control characters, and

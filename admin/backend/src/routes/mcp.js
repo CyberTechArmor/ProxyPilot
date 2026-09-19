@@ -26,7 +26,7 @@ import { appendFile, readFile, writeFile, rename, rm, mkdir, stat as fsStat, rea
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
-import { getDb, logAudit } from '../db.js';
+import { getDb, logAudit, getSetting, setSetting, databasePath } from '../db.js';
 import { emitContentChanged } from '../lib/change-events.js';
 import { requireAdmin } from '../middleware/auth.js';
 import {
@@ -66,7 +66,7 @@ import {
   normalizeContextLines, normalizeSearchByteBudget, parseGitGrepContext, parseGitGrepFileList,
   PROJECT_MAP_MAX_FILES_DEFAULT, PROJECT_MAP_MAX_FILES_CAP, PROJECT_MAP_SYMBOLS_PER_FILE,
   PROJECT_MAP_SYMBOL_PATTERN, buildProjectMap, parseLineCounts,
-  normalizeProjectFilters, filterProjectSummaries, containerStatusWord,
+  normalizeProjectFilters, filterProjectSummaries, containerStatusWord, mergeLxcCommandPolicy,
   parseProcLoadavg, parseProcMeminfo, parseDfOutput, pickStoragePool, parseProfileRootPool,
   parsePoolResources, parseStorageInfoText, summarizeContainers, buildHostUsage, perProjectUsage,
   validateHostUsage, reclaimDelta,
@@ -75,6 +75,9 @@ import { archiveProject, unarchiveProject } from '../lib/project-lifecycle.js';
 import { checkForUpdates as selfUpdateCheck, installedState as selfUpdateInstalled, startUpdate as selfUpdateStart, updateStatus as selfUpdateStatus } from '../lib/self-update.js';
 import { MCP_RUN_CONFIRM_MESSAGE, flagsFromOptions, isUpdateId, updateStartRefusal } from '../lib/self-update-logic.js';
 import { getGitHubRepo, getCurrentVersion } from './user.js';
+import { agentCall } from '../lib/agent.js';
+import { createExtendedHandlers } from './mcp-tools/index.js';
+import { createConfirmationStore, parseTokenScope, scopeRefusal, filterCatalogForScope } from '../lib/mcp-ext/logic.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
   collectCandidatePaths, extractToStaging, applyStagingToTarget, ZIP_LIMITS, ZipError,
@@ -87,7 +90,7 @@ import {
 } from '../lib/lxc-zip.js';
 import { resolveMock2Gate } from '../mock2/gating.js';
 import { ensureNetworkNat, findOrCreateLxcService, syncLxcServiceUpstream } from './lxc.js';
-import { regenerateDomainCaddyConfig, ensureCaddyStructure, assertRoutesShareSslStance, syncPrimaryRouteFromLegacy, caddyRenderDeps } from './services.js';
+import { regenerateDomainCaddyConfig, ensureCaddyStructure, assertRoutesShareSslStance, syncPrimaryRouteFromLegacy, caddyRenderDeps, normalizePathPrefix } from './services.js';
 import { applyServiceUpstream } from '../lib/route-render.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
@@ -130,6 +133,12 @@ const PROJECT_LIFECYCLE_POLICY = JSON.parse(
 );
 // The self-update tools' policy: `enabled: false` turns run_proxypilot_update
 // off without a code change (the read-only check/status tools stay on).
+const MCP_EXTENDED_POLICY = JSON.parse(
+  readFileSync(new URL('../lib/mcp-policy/mcp-extended-policy.json', import.meta.url), 'utf8'),
+);
+// One-time confirmation tokens for the destructive extended verbs
+// (lib/mcp-ext/logic.js). Process-local: a restart voids pending tokens.
+const confirmations = createConfirmationStore();
 const SELF_UPDATE_POLICY = JSON.parse(
   readFileSync(new URL('../lib/mcp-policy/self-update-allowlist.json', import.meta.url), 'utf8'),
 );
@@ -211,6 +220,19 @@ async function zipBytesFromArgs(args) {
     }
   }
   return { buf, tmpPath };
+}
+
+// Consume an upload ticket for a NON-zip payload (push_lxc_file_from_ticket,
+// apply_self_patch). Same single-use contract as zipBytesFromArgs; the caller
+// discards the temp file when done.
+async function takeUploadTicket(ticket) {
+  if (!looksLikeUploadTicket(ticket)) throw new Error('Invalid upload ticket');
+  sweepTickets();
+  const rec = uploadTickets.get(ticket);
+  if (!rec || !rec.filePath) throw new Error('Upload ticket unknown, expired, or no bytes were uploaded to it yet');
+  uploadTickets.delete(ticket);
+  const buf = await readFile(rec.filePath);
+  return { buf, discard: () => rm(rec.filePath, { force: true }).catch(() => {}) };
 }
 
 // ---- mock2 (projects) access — gated exactly like the UI router ----
@@ -997,7 +1019,14 @@ async function toolRunLxcCommand(args, auth) {
   const registeredWd = startup?.workingDir || null;
   const workingDir = requestedWd || registeredWd || '/';
 
-  const parsed = parseLxcCommand(args.command, LXC_CMD_POLICY, { workingDir, registeredWorkingDir: registeredWd });
+  // Per-guest additions (set_command_allowlist, migration 905) are merged in;
+  // deny_always in the static policy still wins over anything stored.
+  let policy = LXC_CMD_POLICY;
+  try {
+    const row = getDb().prepare(`SELECT read_only_json, mutating_json FROM lxc_command_allowlists WHERE container_name = ?`).get(name);
+    if (row) policy = mergeLxcCommandPolicy(LXC_CMD_POLICY, { read_only: JSON.parse(row.read_only_json || '[]'), mutating: JSON.parse(row.mutating_json || '[]') });
+  } catch { /* pre-migration or unreadable row: static policy only */ }
+  const parsed = parseLxcCommand(args.command, policy, { workingDir, registeredWorkingDir: registeredWd });
   if (parsed.error) return toolResult(parsed.error, { isError: true });
 
   const timeoutMs = lxcCommandTimeoutMs(args.timeout_seconds, LXC_CMD_POLICY);
@@ -1347,7 +1376,7 @@ async function toolSnapshotLxcContainer(args, auth) {
   logAudit(auth.created_by, 'LXC_SNAPSHOT_TAKEN', 'lxc', name, { via: 'mcp', snapshot: snapName }, null);
   return toolResult({
     snapshotted: true, container: name, snapshot: snapName,
-    note: 'Restoring or deleting snapshots is a deliberate host-side act (incus restore / incus delete) — no MCP verb exists for either, by design.',
+    note: 'restore_snapshot (confirmation token; snapshots the current state first) and delete_snapshot (confirm: true) manage it from here; list_snapshots shows snapshots and export tarballs.',
   });
 }
 
@@ -3045,6 +3074,30 @@ async function toolListProjectFiles(args) {
   return toolResult({ file_count: files.length, files: files.slice(0, 2000), truncated: files.length > 2000 });
 }
 
+/**
+ * Read one project file whole, verified (size + sha256 computed in the
+ * container). { content, sha256, size, total_lines } or { error, absent? }.
+ * The extended stage-file tools (mockup, inventory, rules, checklist,
+ * handoff, work, releases) read through this so their expected_sha256
+ * preconditions mean the same thing read_project_file's do.
+ */
+async function readProjectText(incusName, rel) {
+  const abs = `${M2_APP_DIR}/${rel}`;
+  const script = 'p="$1"; cap="$2"; test -f "$p" || { echo "PP_NOT_A_FILE" >&2; exit 66; }; ' + FILE_READ_HEADER + 'head -c "$cap" -- "$p"';
+  const r = await runHostCapture('incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', abs, String(LXC_FILE_READ_CAP)], { timeoutMs: 30000, maxCapture: FILE_READ_CAPTURE });
+  if (r.status === 66) return { error: `${rel} does not exist`, absent: true };
+  if (r.status !== 0) return { error: `Could not read ${rel} — is the container running? ${(r.stderr || '').trim().slice(-300)}` };
+  const capped = captureTruncationError(rel, r);
+  if (capped) return { error: capped };
+  const head = parseReadHeader(r.stdout);
+  if (!head) return { error: `Read of ${rel} came back malformed — retry the call.` };
+  const body = Buffer.from(head.body, 'utf8');
+  if (head.size > LXC_FILE_READ_CAP) return { error: `${rel} is ${head.size} bytes, over the ${Math.floor(LXC_FILE_READ_CAP / 1024)} KB whole-file read cap` };
+  const short = readIntegrityError(rel, head.size, head.sha256, body);
+  if (short) return { error: short };
+  return { content: body.toString('utf8'), sha256: head.sha256, size: head.size, total_lines: head.totalLines };
+}
+
 async function toolReadProjectFile(args) {
   const m = await mock2Modules();
   const { project, error } = requireActiveProject(m, args);
@@ -4367,7 +4420,37 @@ async function toolRunProxypilotUpdate(args, auth) {
   });
 }
 
+/* ------------------------ the extended tool families -------------------- */
+//
+// routes/mcp-tools/*.js: builds & Mock2 stages, components & project config,
+// LXC administration, edge/certs/DNS, static-site admin, ProxyPilot admin,
+// self-editing. They receive this router's private helpers through `ctx`
+// (no import cycle) and wrap every writing tool so the SERVER writes the
+// mcp_ledger row, the audit entry and — for project-scoped writes — the
+// hash-chained change record. docs/features/mcp.md § "The extended surface".
+const extended = createExtendedHandlers({
+  getDb, logAudit, getSetting, setSetting, toolResult, uuidv4, policy: MCP_EXTENDED_POLICY, confirmations,
+  runHostCapture, runInContainer, readContainerStartup, agentCall, publicBaseUrl,
+  LXC_PREFIX, LXC_NAME_REGEX, LXC_CMD_POLICY, LXC_LIST_CAPTURE_CAP, validLxcFilePath, validTargetDir,
+  takeLxcSnapshot, fetchLxcInstance, lxcContainerDetail, lxcReachableAddress, defaultSnapshotName, validSnapshotName,
+  snapshotArgv, resolveSnapshotCliForm, verifiedContainerWrite, takeUploadTicket,
+  findOrCreateLxcService, syncLxcServiceUpstream, regenerateDomainCaddyConfig, ensureCaddyStructure,
+  assertRoutesShareSslStance, caddyAdapt, caddyReload, normalizePathPrefix,
+  validDomainName, normalizePort, validIpv4, ROUTE_SELECT, routeView, certInfoForDomain, recentErrorsForDomain,
+  caddyAccessLogPath, summarizeAccessLog,
+  getStaticSite, staticSiteDomains, SERVICES_DATA_DIR, walkDocroot,
+  mock2Enabled, mock2Modules, projectContainerName, requireActiveProject, liveBuildGuard, commitProjectPaths,
+  readProjectText, M2_APP_DIR, projectUrl, projectSummary,
+  appendProjectChangeRecord: (project, auth, summary) => mock2Modules().then((m) => appendLifecycleChangeRecord(m, project, auth, summary)),
+  selfUpdateInstalled, selfUpdateStart, selfUpdateStatus, SELF_UPDATE_POLICY,
+  mintMcpToken, hashMcpToken, MCP_TOOL_NAMES: () => MCP_TOOLS.map((t) => t.name),
+  dbPath: databasePath(),
+  listBackupsRunning: null,
+});
+export const EXTENDED_TOOL_NAMES = Object.freeze(Object.keys(extended.handlers));
+
 const TOOL_HANDLERS = {
+  ...extended.handlers,
   list_git_connectors: toolListGitConnectors,
   set_git_remote: toolSetGitRemote,
   push_git_remote: toolPushGitRemote,
@@ -4499,6 +4582,8 @@ export async function lxcContainerExists(name) {
   return parsed.list.some((c) => c?.name === target);
 }
 
+const TOOL_BY_NAME = new Map(MCP_TOOLS.map((t) => [t.name, t]));
+
 /* ---------------------------- JSON-RPC core ------------------------------ */
 
 async function handleRpc(message, auth, req) {
@@ -4525,11 +4610,17 @@ async function handleRpc(message, auth, req) {
     case 'notifications/cancelled':
       return null;   // notifications: acknowledged with 202, no body
     case 'tools/list':
-      return rpcResult(id, { tools: MCP_TOOLS });
+      // A scoped key (migration 903) sees only what it may call.
+      return rpcResult(id, { tools: filterCatalogForScope(MCP_TOOLS, parseTokenScope(auth?.scope_json)) });
     case 'tools/call': {
       const name = params?.name;
       const handler = TOOL_HANDLERS[name];
       if (!handler) return rpcError(id, RPC_INVALID_PARAMS, `Unknown tool: ${name}`);
+      const refusal = scopeRefusal(parseTokenScope(auth?.scope_json), name, params?.arguments || {}, TOOL_BY_NAME.get(name) || null);
+      if (refusal) {
+        logAudit(auth?.created_by ?? null, 'MCP_SCOPE_REFUSED', 'mcp_token', auth?.id ?? null, { via: 'mcp', tool: name, reason: refusal }, null);
+        return rpcResult(id, toolResult(refusal, { isError: true }));
+      }
       try {
         const result = await handler(params?.arguments || {}, auth, req);
         return rpcResult(id, result);
@@ -4626,9 +4717,9 @@ export function createMcpAdminRouter() {
     const name = String(req.body?.name || '').trim().slice(0, 100) || 'MCP client';
     const token = mintMcpToken();
     getDb().prepare(`
-      INSERT INTO mcp_tokens (name, token_hash, created_by, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(name, hashMcpToken(token), String(req.user.id), new Date().toISOString());
+      INSERT INTO mcp_tokens (name, token_hash, created_by, created_at, token_prefix)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(name, hashMcpToken(token), String(req.user.id), new Date().toISOString(), token.slice(0, 13));
     logAudit(req.user.id, 'MCP_TOKEN_CREATED', 'mcp_token', name, {}, req.ip);
     const base = publicBaseUrl(req);
     res.status(201).json({

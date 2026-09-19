@@ -106,7 +106,35 @@ export async function dispatchToChannels(message) {
     if (!r.ok) console.warn(`[notify] ${channel.kind} delivery failed: ${r.error}`);
     results.push({ kind: channel.kind, ...r });
   }
+  // Outbound webhooks (migration 906; set_webhook over MCP). Same best-effort
+  // stance: a dead endpoint is recorded on its row, never thrown at the caller.
+  for (const r of await dispatchToWebhooks(message)) results.push(r);
   return results;
+}
+
+async function dispatchToWebhooks(message) {
+  const out = [];
+  let rows = [];
+  let db;
+  try {
+    ({ getDb: db } = await import('../db.js'));
+    rows = db().prepare('SELECT * FROM notification_webhooks WHERE enabled = 1').all();
+  } catch { return out; }
+  if (!rows.length) return out;
+  const event = String(message.event || (message.dedupe_key ? String(message.dedupe_key).split(':')[0] : 'notification'));
+  let deliver;
+  try { ({ deliverWebhook: deliver } = await import('../routes/mcp-tools/admin.js')); } catch { return out; }
+  for (const row of rows) {
+    let events = ['*'];
+    try { events = JSON.parse(row.events_json || '["*"]'); } catch { events = ['*']; }
+    if (!events.includes('*') && !events.some((e) => e === event || (e.endsWith('*') && event.startsWith(e.slice(0, -1))))) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const r = await deliver(row, { event, level: message.level || 'info', title: message.title || message.subject || null, body: message.body || message.text || null, link: message.link || null, at: new Date().toISOString() });
+    try { db().prepare('UPDATE notification_webhooks SET last_status = ?, last_error = ?, last_at = ? WHERE id = ?').run(r.ok ? 'ok' : 'fail', r.error || null, new Date().toISOString(), row.id); } catch { /* best effort */ }
+    if (!r.ok) console.warn(`[notify] webhook ${row.name} delivery failed: ${r.error}`);
+    out.push({ kind: 'webhook', name: row.name, ...r });
+  }
+  return out;
 }
 
 // Send a one-off test through a single channel (the admin "Send test" button).

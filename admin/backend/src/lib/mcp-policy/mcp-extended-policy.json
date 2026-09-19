@@ -1,0 +1,86 @@
+{
+  "$comment": "Policy for the extended MCP tool families (routes/mcp-tools/*.js). Same stance as the other policy files: this JSON is the enforcement source of truth, the tool descriptions only summarize it. Cross-cutting contract on every new write: dry_run previews without touching anything; expected_sha256 guards any file edit; anything destructive takes a snapshot/export FIRST and demands a one-time confirmation_token issued by the tool itself; the server writes the mcp_ledger row and the audit entry (and, for project-scoped writes, the hash-chained change record) — the caller never does.",
+  "feature_flags": {
+    "$comment": "Read through app_settings (feature_flag:<name>), defaults below. list_feature_flags / set_feature_flag manage them; a flipped flag takes effect on the next call.",
+    "mcp.builds": { "default": true, "description": "start_project_build, approve_design, run_checklist, run_interview answers — the verbs that spend a project's model budget." },
+    "mcp.destructive": { "default": true, "description": "Every delete / restore / rollback / reboot verb. Off = those tools refuse before issuing a confirmation token." },
+    "mcp.host_control": { "default": true, "description": "host_service_control, install_package, reboot_host, host snapshots, restore_proxypilot_db." },
+    "mcp.self_edit": { "default": true, "description": "The self-editing family (still requires a key minted with scope.self_edit)." },
+    "mcp.security_scans": { "default": true, "description": "run_lynis / run_trivy (host binaries must be installed)." },
+    "mcp.dns": { "default": true, "description": "Cloudflare DNS record tools (need the DNS-01 Cloudflare token)." },
+    "mcp.webhooks": { "default": true, "description": "Outbound webhook notifications (list_webhooks / set_webhook and their dispatch)." }
+  },
+  "exports_dir": "/var/lib/proxypilot/mcp-exports",
+  "self_edit": {
+    "candidate_dir": "/var/lib/proxypilot/self/candidate",
+    "state_file": "/var/lib/proxypilot/self/state.json",
+    "candidate_branch": "pp-candidate",
+    "checks": {
+      "backend-tests": { "cwd": "admin/backend", "argv": ["npm", "test"], "timeout_seconds": 900, "install": ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"] },
+      "backend-syntax": { "cwd": "admin/backend", "argv": ["node", "--check-changed"], "timeout_seconds": 120 },
+      "frontend-build": { "cwd": "admin/frontend", "argv": ["npm", "run", "build"], "timeout_seconds": 1500, "install": ["npm", "ci", "--no-audit", "--no-fund"] },
+      "shellcheck": { "cwd": ".", "argv": ["shellcheck", "-S", "error", "install.sh", "update.sh", "scripts/update-runner.sh"], "timeout_seconds": 120, "optional_binary": "shellcheck" }
+    },
+    "required_checks_for_promote": ["backend-tests"],
+    "note": "Patches land in the candidate clone, never in the live checkout. promote_self fast-forwards the live checkout to the candidate HEAD (recording the previous HEAD) and requests the root update runner with --rebuild; rollback_self resets the live checkout to the recorded HEAD and requests the same rebuild. Both refuse when the live checkout is dirty, when an update is live, or when the host agent is unreachable."
+  },
+  "host_services": {
+    "$comment": "Units host_service_control may touch, with the verbs allowed on each. docker and ssh are deliberately restart/status-only: stopping docker kills this backend, stopping ssh locks the operator out.",
+    "caddy": ["status", "start", "restart", "reload"],
+    "incus": ["status", "start", "restart"],
+    "incus.socket": ["status", "start", "restart"],
+    "proxypilot-agent": ["status", "start", "restart"],
+    "proxypilot-engine-poll.timer": ["status", "start", "stop", "restart"],
+    "proxypilot-engine-inventory.timer": ["status", "start", "stop", "restart"],
+    "proxypilot-update.path": ["status", "start", "restart"],
+    "nftables": ["status", "start", "restart", "reload"],
+    "wg-quick@*": ["status", "start", "stop", "restart"],
+    "docker": ["status", "restart"],
+    "ssh": ["status", "restart"],
+    "sshd": ["status", "restart"],
+    "cron": ["status", "start", "restart"],
+    "fail2ban": ["status", "start", "stop", "restart"],
+    "unattended-upgrades": ["status", "start", "stop", "restart"]
+  },
+  "guest_services": {
+    "$comment": "service_control inside a guest: any unit, these verbs. status/is-active are read-only; the rest confirm-gated.",
+    "actions": ["status", "is-active", "start", "stop", "restart", "reload", "enable", "disable"]
+  },
+  "apt_packages": {
+    "$comment": "install_package inside a guest: only these Debian/Ubuntu package names, non-interactive apt-get. Extend here, never on the wire.",
+    "allow": [
+      "curl", "wget", "ca-certificates", "gnupg", "git", "jq", "unzip", "zip", "tar", "rsync", "htop", "vim", "nano", "less",
+      "net-tools", "iproute2", "dnsutils", "iputils-ping", "traceroute", "tcpdump", "nmap", "socat", "netcat-openbsd",
+      "build-essential", "python3", "python3-pip", "python3-venv", "nodejs", "npm", "openjdk-17-jre-headless", "golang-go",
+      "postgresql", "postgresql-client", "postgresql-contrib", "mariadb-server", "mariadb-client", "redis-server", "redis-tools", "sqlite3",
+      "nginx", "apache2", "certbot", "php-fpm", "php-cli", "php-mysql", "php-pgsql", "php-curl", "php-xml", "php-mbstring", "php-zip", "php-gd",
+      "docker.io", "docker-compose-plugin", "docker-compose", "containerd", "supervisor", "cron", "logrotate", "fail2ban", "ufw",
+      "imagemagick", "ffmpeg", "libreoffice-core", "poppler-utils", "ghostscript", "tesseract-ocr", "graphviz"
+    ]
+  },
+  "lxc_devices": {
+    "$comment": "add_lxc_device: disk sources must live under one of these host roots (a guest must never mount /etc, /root or another guest's rootfs); proxy devices listen on the host at tcp/udp:0.0.0.0:<port> only.",
+    "disk_source_roots": ["/var/lib/proxypilot/shares", "/data/services", "/srv/shares", "/mnt/shares"],
+    "proxy_listen_ports": { "min": 1024, "max": 65535 },
+    "reserved_listen_ports": [80, 443, 3001, 51820]
+  },
+  "settings": {
+    "$comment": "get_settings / set_setting: the app_settings keys an MCP client may read and write. Secret-bearing keys are readable as '[set]' / '[unset]' only and never writable here.",
+    "writable": ["github_repo", "tls_mode", "dns01_domains", "branding_name", "passkey_origin_allowlist", "update_dismissed", "dismissed_version", "mcp.standards_source_url"],
+    "readable_extra": ["installed_version", "admin_domain", "last_update_id", "caddy_site_render_contract", "branding_logo", "branding_favicon"],
+    "secret": ["cloudflare_global_token"]
+  },
+  "route_options": {
+    "$comment": "set_route_options: which keys render. rate_limit needs the http.handlers.rate_limit Caddy module (caddy-ratelimit); the tool checks caddy list-modules and refuses with the install hint when it is absent.",
+    "keys": ["websocket", "strip_prefix", "read_timeout_seconds", "write_timeout_seconds", "max_body_bytes", "host_header_override", "allow_framing", "frame_ancestors", "health_path", "tls", "headers", "csp", "basic_auth", "ip_allowlist", "rate_limit"]
+  },
+  "reboot": {
+    "delay_minutes": 1,
+    "refuse_when": ["update_running", "build_running", "backup_running"]
+  },
+  "explicitly_absent": {
+    "force_delete_without_snapshot": "delete_lxc_container refuses unless the guest has at least one snapshot AND an export tarball was taken (export: false is an explicit opt-out that the ledger records).",
+    "unscoped_self_edit": "No key edits ProxyPilot itself unless it was minted with scope.self_edit — including the operator's original full-access key.",
+    "discard_local": "promote_self / rollback_self never pass --discard-local and refuse on a dirty live checkout, same as run_proxypilot_update."
+  }
+}

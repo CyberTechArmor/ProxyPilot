@@ -4,7 +4,7 @@
 // started from a chat and one started from the dashboard are the same row,
 // with the same gates.
 //
-// The flow these six tools cover:
+// The flow these tools cover:
 //
 //   create_migration    → the one-line command the operator pastes on the
 //                         source. Nothing is copied yet.
@@ -16,6 +16,14 @@
 //   migration_cutover   → the post-import checklist and the observed-egress
 //                         decisions, both recorded with who and when.
 //   list_migrations / cancel_migration
+//   list_migration_tokens / revoke_migration_token
+//                       → what is still out there, and the way to kill one.
+//                         A token is not on a clock: it lives until the
+//                         migration ends or someone revokes it.
+//   cleanup_migration   → throw away what a finished migration left: the
+//                         guest it created, the record, or both. It refuses a
+//                         live migration, a guest it did not create, and a
+//                         guest that is serving a route.
 //
 // The ledger row, the audit entry and the change record are written by
 // kit.mutation; the service writes the migration's own event stream.
@@ -175,5 +183,60 @@ export function createMigrationHandlers(kit) {
     return ok(r);
   });
 
-  return { create_migration, get_migration, list_migrations, migration_preflight, enable_incus_listener, approve_migration, migration_cutover, cancel_migration };
+  /* ------------------------- tokens and cleanup ------------------------- */
+
+  const list_migration_tokens = reader('list_migration_tokens', async (args) => {
+    const r = svc().listTokens({ state: args.state ? String(args.state) : null });
+    return ok({
+      ...r,
+      note: 'One token per migration, for its whole life. A token does not expire on a clock: it dies when the migration reaches a terminal state, and revoke_migration_token kills it sooner. `unclaimed` is the one still on someone\'s clipboard.',
+    });
+  });
+
+  const revoke_migration_token = mutation('revoke_migration_token', { subjectType: 'migration', flag: 'mcp.migration', audit: 'MIGRATION_TOKEN_REVOKE' }, async (args, auth, req, note) => {
+    const row = svc().rowById(args.id);
+    if (!row) return err(`no migration ${args.id}`);
+    note.subject_id = row.id;
+    const before = svc().view(row).token;
+    const d = dry(args, { migration: row.id, token_id: before.id, state: before.state, would: 'refuse every later call presenting this token' });
+    if (d) return d;
+    const gate = confirmFlag(args, note, `This kills migration ${row.id}'s agent token${before.state === 'active' ? ' WHILE AN AGENT IS USING IT — the run will fail on its next call' : ''}. The migration itself is untouched.`);
+    if (gate) return gate;
+    const r = svc().revokeToken(row.id, { actor: auth?.created_by ?? null });
+    if (r.error) { note.refused = true; return err(r.error); }
+    note.summary = `revoked the agent token for migration ${row.id}`;
+    return ok(r);
+  });
+
+  const cleanup_migration = mutation('cleanup_migration', { subjectType: 'migration', flag: 'mcp.destructive', audit: 'MIGRATION_CLEANUP' }, async (args, auth, req, note) => {
+    const row = svc().rowById(args.id);
+    if (!row) return err(`no migration ${args.id}`);
+    note.subject_id = row.id;
+    const deleteGuest = args.delete_guest === true;
+    const removeRecord = args.remove_record === true;
+    const opts = {
+      deleteGuest, removeRecord, exportFirst: args.export === true, force: args.force === true,
+      actor: auth?.created_by ?? null,
+    };
+    const preview = await svc().cleanupMigration(row.id, { ...opts, dryRun: true });
+    if (preview.error) { note.refused = true; return err(preview.error); }
+    if (args.dry_run === true) return ok(preview);
+    const gate = confirmFlag(args, note, [
+      deleteGuest ? `This DELETES the guest ${row.target_name}${args.export === true ? ' (after exporting it)' : ' with no export'}.` : '',
+      removeRecord ? `This removes migration ${row.id} and its event log.` : '',
+      'Neither can be undone.',
+    ].filter(Boolean).join(' '));
+    if (gate) return gate;
+    const r = await svc().cleanupMigration(row.id, opts);
+    if (r.error) { note.refused = true; return err(r.error); }
+    note.summary = [r.guest_deleted ? `deleted guest ${row.target_name}` : null, r.record_removed ? `removed migration ${row.id}` : null].filter(Boolean).join(' and ');
+    note.detail = { target: row.target_name, guest_deleted: r.guest_deleted, record_removed: r.record_removed, export: r.export };
+    return ok(r);
+  });
+
+  return {
+    create_migration, get_migration, list_migrations, migration_preflight, enable_incus_listener,
+    approve_migration, migration_cutover, cancel_migration,
+    list_migration_tokens, revoke_migration_token, cleanup_migration,
+  };
 }

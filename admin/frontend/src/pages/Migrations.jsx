@@ -16,11 +16,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
-import { ArrowLeft, ClipboardList, Loader2, MoveRight, Plus, RefreshCw, ScrollText, Server, XCircle } from 'lucide-react';
+import { ArrowLeft, ClipboardList, Loader2, MoveRight, Plus, RefreshCw, ScrollText, Server, Trash2, XCircle } from 'lucide-react';
 import NewMigrationDialog from '@/components/migration/NewMigrationDialog';
 import InventoryReview from '@/components/migration/InventoryReview';
 import CutoverChecklist from '@/components/migration/CutoverChecklist';
 import MigrationPreflight from '@/components/migration/MigrationPreflight';
+import CleanupDialog from '@/components/migration/CleanupDialog';
+import TokenList from '@/components/migration/TokenList';
 import { BTN, Chip, EmptyState, KV, MigrationStatus, Notice, PhaseRail, TransferBar, fmtDate } from '@/components/migration/shared';
 
 const LIVE = ['created', 'running', 'awaiting_review'];
@@ -66,6 +68,7 @@ function EventLog({ events }) {
 function Detail({ id, onBack, onChanged }) {
   const { toast } = useToast();
   const [m, setM] = useState(null);
+  const [cleaning, setCleaning] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -134,6 +137,14 @@ function Detail({ id, onBack, onChanged }) {
               <XCircle className="h-4 w-4 mr-1.5" />Cancel
             </Button>
           )}
+          {/* Cleaning up is for a migration that is over: the guest it made,
+              the record, or both. A live one has to be cancelled first, and
+              the server says so rather than this hiding the button. */}
+          {['completed', 'failed', 'cancelled', 'ready'].includes(m.status) && (
+            <Button variant="outline" className={BTN} disabled={busy} onClick={() => setCleaning(true)}>
+              <Trash2 className="h-4 w-4 mr-1.5" />Clean up
+            </Button>
+          )}
         </div>
       </div>
 
@@ -144,7 +155,7 @@ function Detail({ id, onBack, onChanged }) {
           <KV label="Target">{m.target.incus_name}</KV>
           <KV label="Guest">{m.spec.type} · {m.spec.cpu} vCPU · {m.spec.memory_gb} GB{m.spec.disk_gb ? ` · ${m.spec.disk_gb} GB disk` : ''}</KV>
           <KV label="Token">{m.token.claimed ? `claimed ${fmtDate(m.token.claimed_at)}` : 'not used yet'}</KV>
-          <KV label="Token expires">{fmtDate(m.token.expires_at)}</KV>
+          <KV label="Token state">{m.token.state}{m.token.expires_at ? ` · expires ${fmtDate(m.token.expires_at)}` : ' · no expiry'}</KV>
           <KV label="Agent last seen">{m.token.last_seen_at ? fmtDate(m.token.last_seen_at) : '—'}</KV>
           <KV label="TLS pin">{m.token.tls_pin ? `${m.token.tls_pin.slice(0, 20)}…` : 'none (system trust)'}</KV>
         </div>
@@ -178,6 +189,19 @@ function Detail({ id, onBack, onChanged }) {
         </TabsContent>
         <TabsContent value="log"><Card><CardContent className="p-4"><EventLog events={m.events} /></CardContent></Card></TabsContent>
       </Tabs>
+
+      <CleanupDialog
+        open={cleaning}
+        migration={m}
+        onClose={() => setCleaning(false)}
+        onDone={(r) => {
+          setCleaning(false);
+          toast({ title: r.record_removed ? `Migration #${m.id} removed` : `${m.target.incus_name} deleted`, description: r.note });
+          onChanged?.();
+          // The record is gone — there is nothing left to show.
+          if (r.record_removed) onBack?.(); else load({ quiet: true });
+        }}
+      />
     </div>
   );
 }
@@ -228,6 +252,10 @@ export default function Migrations() {
           TLS pin and the Incus listener are what decide whether the command
           you are about to paste on a source host can work at all. */}
       <MigrationPreflight onChanged={load} />
+
+      {/* What is still out there: one token per migration, and the button
+          that kills one that should not be. */}
+      <TokenList onChanged={load} />
 
       {loading && !data ? (
         <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground py-12"><Loader2 className="h-4 w-4 animate-spin" />Loading…</div>

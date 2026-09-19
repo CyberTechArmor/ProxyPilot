@@ -206,6 +206,11 @@ migrationRouter.post('/incus-listener', requireSudo, wrap(async (req, res) => {
   res.json(r);
 }));
 
+/** Every agent token and what it is doing. Read-only; no secrets in it. */
+migrationRouter.get('/tokens', wrap(async (req, res) => {
+  res.json(migrationService().listTokens({ state: req.query.state ? String(req.query.state) : null }));
+}));
+
 migrationRouter.get('/:id', wrap(async (req, res) => {
   const svc = migrationService();
   const row = svc.rowById(req.params.id);
@@ -229,6 +234,41 @@ migrationRouter.post('/:id/approve', requireSudo, wrap(async (req, res) => {
 
 migrationRouter.post('/:id/cancel', requireSudo, wrap(async (req, res) => {
   const r = await migrationService().cancelMigration(req.params.id, { actor: req.user?.id || null, reason: req.body?.reason ? String(req.body.reason) : null, ip: req.ip });
+  if (r.error) return res.status(422).json({ error: r.error });
+  res.json(r);
+}));
+
+/** Kill one migration's token without touching the migration. */
+migrationRouter.post('/:id/token/revoke', requireSudo, wrap(async (req, res) => {
+  const r = migrationService().revokeToken(req.params.id, { actor: req.user?.id || null, ip: req.ip });
+  if (r.error) return res.status(422).json({ error: r.error });
+  res.json(r);
+}));
+
+const CleanupBody = z.object({
+  delete_guest: z.boolean().optional(),
+  remove_record: z.boolean().optional(),
+  export: z.boolean().optional(),
+  force: z.boolean().optional(),
+  dry_run: z.boolean().optional(),
+}).strict();
+
+/**
+ * Throw away what a finished migration left behind. The dry run is the
+ * default answer to the dialog's "what will this do?" — the UI calls it with
+ * dry_run first and shows the plan before the operator confirms.
+ */
+migrationRouter.post('/:id/cleanup', requireSudo, wrap(async (req, res) => {
+  const body = CleanupBody.safeParse(req.body || {});
+  if (!body.success) return res.status(400).json({ error: body.error.issues[0]?.message || 'invalid body' });
+  const r = await migrationService().cleanupMigration(req.params.id, {
+    deleteGuest: body.data.delete_guest === true,
+    removeRecord: body.data.remove_record === true,
+    exportFirst: body.data.export === true,
+    force: body.data.force === true,
+    dryRun: body.data.dry_run === true,
+    actor: req.user?.id || null, ip: req.ip,
+  });
   if (r.error) return res.status(422).json({ error: r.error });
   res.json(r);
 }));

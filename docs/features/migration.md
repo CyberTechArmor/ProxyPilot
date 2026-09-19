@@ -85,10 +85,12 @@ linux/arm64 by `scripts/build-migration-agent.sh` (install.sh and update.sh
 call it) into `/var/lib/proxypilot/agent/`, and served from the tokened URL
 with its hash.
 
-- **One credential.** A single-use, scoped, expiring migration token. The
-  first call CLAIMS it against that agent run (`X-Migration-Run`), so a token
-  read off a terminal cannot be taken over; it dies with the migration and at
-  its TTL (default 2 h).
+- **One credential.** A single-use, scoped migration token. The first call
+  CLAIMS it against that agent run (`X-Migration-Run`), so a token read off a
+  terminal cannot be taken over. It **ends by use, not by a clock**: it dies
+  when the migration reaches a terminal state, and an operator can revoke it
+  at any moment (see **Agent tokens**). A wall-clock TTL is available
+  (`ttl_seconds`, 5 min – 30 days) and off by default.
 - **TLS pinned.** The agent holds ProxyPilot to the certificate fingerprint
   in the bootstrap script. A token is never presented to a server we have not
   identified.
@@ -192,6 +194,51 @@ Approving an entry does one of two things, and the row says which:
 (For a Mock2 project guest, internet egress *is* governed, through the
 project's own egress grants — `list_egress_requests` / `approve_egress`.)
 
+## Agent tokens
+
+One token per migration, for the whole of its life, listed on the page under
+**Agent tokens** (`list_migration_tokens`, `GET /api/migrations/tokens`):
+
+| State | What it means |
+|---|---|
+| `unclaimed` | minted, never used — the command is still out there and still works |
+| `active` | claimed by the agent run doing this migration |
+| `spent` | the migration finished; the token is dead |
+| `revoked` | somebody killed it |
+| `expired` | a `ttl_seconds` was asked for and has passed |
+
+A token is not on a clock because a migration is planned work: one that dies
+while the operator is still reading the inventory buys nothing, and the claim
+binding is what actually stops a leaked token being used by somebody else.
+What replaces the clock is **Revoke** (`revoke_migration_token`) — the undo
+for a command pasted somewhere it should not have been. It kills the token and
+leaves the migration alone; cancel the migration as well if the run should
+stop. The listing never carries a secret: the plaintext token exists once, in
+the answer to `create_migration`.
+
+## Cleaning up
+
+**Clean up** on a finished migration (`cleanup_migration`) throws away what it
+left behind: the guest it created, the migration record and its event log, or
+both. The dialog asks the server what each choice would do before the button
+does anything, so a refusal is read rather than discovered.
+
+It is deliberately narrow, because deleting a guest is the most destructive
+thing in this feature:
+
+- a migration that is still running is refused — cancel it first;
+- a guest this migration **adopted** rather than created is refused: somebody
+  else's guest is not ProxyPilot's to delete;
+- a guest serving a route is refused, and points at `delete_lxc_container`,
+  which knows how to unpublish as it goes;
+- if the route tables cannot be read at all, it refuses rather than guesses;
+- a running guest is stopped cleanly first (`force` stops it hard);
+- **no export is taken unless you ask** (`export: true`): a migration guest
+  that failed never ran, and the source it came from is still standing.
+
+Removing the record also revokes the token and the Incus trust certificate,
+and deletes the transfer's working directory. None of it can be undone.
+
 ## Surface
 
 - **REST** `/api/migrations` (admin, sudo on every mutation): list, create,
@@ -201,15 +248,19 @@ project's own egress grants — `list_egress_requests` / `approve_egress`.)
   `event`, `artifact`, `finish`.
 - **REST** `GET /api/migrations/preflight` (readiness) and
   `POST /api/migrations/incus-listener` (sudo).
+- **REST** `GET /api/migrations/tokens`, `POST /api/migrations/:id/token/revoke`,
+  `POST /api/migrations/:id/cleanup` (all sudo except the listing).
 - **MCP** `create_migration`, `get_migration`, `list_migrations`,
   `approve_migration`, `migration_cutover`, `cancel_migration`,
-  `migration_preflight`, `enable_incus_listener` — behind the
-  `mcp.migration` feature flag (the readers stay available when it is off).
+  `migration_preflight`, `enable_incus_listener`, `list_migration_tokens`,
+  `revoke_migration_token`, `cleanup_migration` — behind the `mcp.migration`
+  feature flag (the readers stay available when it is off; `cleanup_migration`
+  additionally needs `mcp.destructive`).
 - **Page** Migrations (`pages/Migrations.jsx`): readiness, the list, the phase
   rail and live transfer rate, the inventory review, the checklist and the
   agent's log.
-- **Tables** `migrations` + `migration_events` (migration 909). The token is
-  stored as a sha256 hash only.
+- **Tables** `migrations` + `migration_events` (migrations 909 and 910). The
+  token is stored as a sha256 hash only.
 - **Code** `lib/migration/{manifest,plan,token,service,index}.js`,
   `routes/migrations.js`, `routes/mcp-tools/migration.js`,
   `cmd/agent/migrate/*.go`.
@@ -240,5 +291,6 @@ project's own egress grants — `list_egress_requests` / `approve_egress`.)
 
 - It never publishes a route or lifts the guest fence as part of an import.
 - It never deletes anything on the source, and cancelling a migration never
-  deletes the guest it created.
+  deletes the guest it created — deleting one is a separate, explicit
+  **Clean up**.
 - It never reads a secret value, and will not accept one if offered.

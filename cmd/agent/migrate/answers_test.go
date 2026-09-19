@@ -14,9 +14,9 @@ func TestAnswerRulesAgainstIncus604Transcript(t *testing.T) {
 		{Label: "trust token", When: "provide the certificate token", Send: "TOKEN", Secret: true},
 		{Label: "container or virtual machine", When: `container \(1\) or (a )?virtual[- ]machine \(2\)`, Send: "1"},
 		{Label: "instance name", When: "name of the (new )?instance", Send: "pp-x"},
-		{Label: "root filesystem path", When: "path to the root filesystem", Send: "{{ROOTFS}}"},
+		{Label: "root filesystem path", When: "path to (a|the) root ?(filesystem|fs)", Send: "{{ROOTFS}}"},
 		{Label: "source disk", When: "path to a disk, partition, or image file", Send: "/dev/sda"},
-		{Label: "additional mounts", When: "additional filesystem mounts", Send: "no"},
+		{Label: "additional mounts", When: "add additional (filesystem )?(mounts|mount points)", Send: "no"},
 		{Label: "begin the migration", When: "pick one of the options above", Send: "1", Max: 2},
 	}, func(v string) string {
 		if v == "{{ROOTFS}}" {
@@ -35,7 +35,7 @@ func TestAnswerRulesAgainstIncus604Transcript(t *testing.T) {
 		{"Please provide the certificate token: ", "trust token", "TOKEN"},
 		{"Would you like to create a container (1) or virtual-machine (2)?: ", "container or virtual machine", "1"},
 		{"Name of the new instance: ", "instance name", "pp-x"},
-		{"Please provide the path to the root filesystem: ", "root filesystem path", "/"},
+		{"Please provide the path to a root filesystem: ", "root filesystem path", "/"},
 		{"Do you want to add additional filesystem mounts? [default=no]: ", "additional mounts", "no"},
 		{"Please pick one of the options above [default=1]: ", "begin the migration", "1"},
 	}

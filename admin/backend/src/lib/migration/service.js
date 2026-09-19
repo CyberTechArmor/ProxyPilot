@@ -236,9 +236,11 @@ export function createMigrationService({
       { label: 'trust token', when: 'provide the certificate token', send: trust.token, secret: true },
       { label: 'container or virtual machine', when: 'container \\(1\\) or (a )?virtual[- ]machine \\(2\\)', send: kind },
       { label: 'instance name', when: 'name of the (new )?instance', send: row.target_name },
-      { label: 'root filesystem path', when: 'path to the root filesystem', send: '/' },
+      // 6.0.4 says "a root filesystem"; older releases say "the root
+      // filesystem". Match either, and accept "root fs" too.
+      { label: 'root filesystem path', when: 'path to (a|the) root ?(filesystem|fs)', send: '/' },
       { label: 'source disk', when: 'path to a disk, partition, or image file', send: source },
-      { label: 'additional mounts', when: 'additional filesystem mounts', send: 'no' },
+      { label: 'additional mounts', when: 'add additional (filesystem )?(mounts|mount points)', send: 'no' },
       // The overrides menu, whose first entry begins the migration.
       { label: 'begin the migration', when: 'pick one of the options above', send: '1', max: 2 },
     ];

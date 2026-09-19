@@ -376,6 +376,12 @@ func TestMigrateProgressParsing(t *testing.T) {
 		"Transferring image: 1.25 GiB (12 MiB/s)": 1342177280,
 		"Progress: 512 MiB":                       536870912,
 		"nothing numeric here":                    0,
+		// What Incus 6.0.4 actually prints — DECIMAL units, with the rate in
+		// the same line. Reading only MiB made a 470 MB transfer report 0 B.
+		"Transferring instance: pp-x: 469.71MB (52.17MB/s)": 469710000,
+		"Transferring instance: pp-x: 1.25GB (50MB/s)":      1250000000,
+		"Transferring instance: pp-x: 44.84MB (44.84MB/s)":  44840000,
+		"Transferring instance: pp-x: 900kB (1MB/s)":        900000,
 	}
 	for line, want := range cases {
 		if got := parseMigrateBytes(line); got != want {

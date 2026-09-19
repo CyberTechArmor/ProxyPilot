@@ -29,7 +29,10 @@ import (
 
 /* ----------------------------- incus-migrate ---------------------------- */
 
-var migrateProgressRe = regexp.MustCompile(`(\d+(?:\.\d+)?)\s*(B|KiB|MiB|GiB|TiB)`)
+// incus-migrate 6.0.4 prints DECIMAL units ("44.84MB (44.84MB/s)"); older
+// output and other tools print binary ones ("42.13MiB"). Take both, and only
+// the first number on the line — the second is the rate.
+var migrateProgressRe = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(B|[KMGT]i?B)\b`)
 
 // RunIncusMigrate drives the official incus-migrate non-interactively.
 //
@@ -298,15 +301,23 @@ func parseMigrateBytes(line string) int64 {
 	if err != nil {
 		return 0
 	}
-	switch m[2] {
-	case "KiB":
+	switch strings.ToLower(m[2]) {
+	case "kib":
 		v *= 1 << 10
-	case "MiB":
+	case "mib":
 		v *= 1 << 20
-	case "GiB":
+	case "gib":
 		v *= 1 << 30
-	case "TiB":
+	case "tib":
 		v *= 1 << 40
+	case "kb":
+		v *= 1e3
+	case "mb":
+		v *= 1e6
+	case "gb":
+		v *= 1e9
+	case "tb":
+		v *= 1e12
 	}
 	return int64(v)
 }

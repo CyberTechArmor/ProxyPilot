@@ -387,8 +387,8 @@ export function createMigrationService({
     event(row.id, {
       kind: 'state',
       message: removed.length
-        ? `guest fenced: default-deny egress, no route (${removed.length} inherited allow(s) removed: ${removed.join(', ')})`
-        : 'guest fenced: default-deny egress (the firewall baseline — this guest has no allow entries), no route',
+        ? `guest fenced: default-deny on bridge → host services, no route (${removed.length} inherited allow(s) removed: ${removed.join(', ')})`
+        : 'guest fenced: default-deny on bridge → host services (the firewall baseline — this guest has no allow entries), and no route',
     });
     return { fenced: true, removed };
   }
@@ -669,12 +669,22 @@ export function createMigrationService({
   /**
    * Record the operator's decision on one observed outbound host.
    *
-   * The service argument must be something THIS firewall knows. Its named
-   * services are installation-specific (a stock host knows only the ones it
-   * was taught), so the name from the manifest is a hint: use it only when
-   * the CLI lists it, and otherwise fall back to `proto:port`, which the CLI
-   * always accepts. (The first version always sent the name and the first
-   * real approval failed with `unknown service 'https'. Known: pgbouncer`.)
+   * What ProxyPilot's guest fence actually governs is bridge → HOST traffic:
+   * `NAMED_SERVICES` in cli/src/core/firewall/render.js is a short, code-owned
+   * list of host-side endpoints (pgbouncer on the bridge gateway, and
+   * whatever else the platform adds), and everything not listed is denied.
+   * It does not govern a guest's access to the internet.
+   *
+   * So an approval means one of two things, and the row says WHICH:
+   *   applied       the destination is one of the firewall's named host
+   *                 services, and a real allow was written for this guest.
+   *   acknowledged  it is an internet destination — reviewed and recorded,
+   *                 with nothing claimed about a fence that does not cover it.
+   *
+   * (The first version sent "https", then "tcp:443", and the first real
+   * approval failed both times with `unknown service … Known: pgbouncer`.
+   * Learning what the fence is for was the fix; inventing a vocabulary for
+   * it was not.)
    */
   async function decideEgress(id, { host, port = null, decision = 'approve', by = null } = {}) {
     const row = rowById(id);
@@ -685,28 +695,42 @@ export function createMigrationService({
     const entry = rows[idx];
     if (decision === 'approve') {
       const bare = row.target_name.startsWith(lxcPrefix) ? row.target_name.slice(lxcPrefix.length) : row.target_name;
-      const service = await egressServiceArg(entry);
-      if (!service) return { error: `${entry.host} has no port, so there is no egress service to allow` };
-      const r = await exec('proxypilot', ['--json', 'firewall', 'egress', 'allow', bare, service, '--reason', `migration ${row.id}: ${entry.host}`], { timeoutMs: 60000 });
-      if (r.status !== 0) return { error: `egress allow ${service} failed: ${tail(r.stderr) || tail(r.stdout) || `exit ${r.status}`}` };
-      entry.decision = 'approved'; entry.applied_at = nowIso(now()); entry.applied_by = by; entry.applied_as = service;
+      const service = await namedHostService(entry);
+      if (service) {
+        const r = await exec('proxypilot', ['--json', 'firewall', 'egress', 'allow', bare, service, '--reason', `migration ${row.id}: ${entry.host}`], { timeoutMs: 60000 });
+        if (r.status !== 0) return { error: `egress allow ${service} failed: ${tail(r.stderr) || tail(r.stdout) || `exit ${r.status}`}` };
+        entry.decision = 'approved'; entry.applied = true; entry.applied_as = service;
+      } else {
+        entry.decision = 'approved'; entry.applied = false; entry.applied_as = null;
+        entry.note = `${entry.host}${entry.port ? `:${entry.port}` : ''} is an internet destination. ProxyPilot's guest fence covers bridge → host services only, so this is recorded as reviewed and nothing was written to the firewall.`;
+      }
+      entry.applied_at = nowIso(now()); entry.applied_by = by;
     } else {
       entry.decision = 'denied'; entry.applied_at = nowIso(now()); entry.applied_by = by;
     }
     rows[idx] = entry;
     db().prepare('UPDATE migrations SET egress_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(rows), nowIso(now()), id);
-    event(id, { kind: 'state', message: `egress ${entry.decision}: ${entry.host}${entry.port ? `:${entry.port}` : ''}`, detail: { by } });
+    event(id, {
+      kind: 'state',
+      message: `egress ${entry.decision}${entry.applied ? ` and allowed as ${entry.applied_as}` : entry.decision === 'approved' ? ' (reviewed; the guest fence does not govern internet destinations)' : ''}: ${entry.host}${entry.port ? `:${entry.port}` : ''}`,
+      detail: { by, applied: !!entry.applied },
+    });
     return { egress: rows, entry };
   }
 
-  /** What to call this destination when talking to the firewall CLI. */
-  async function egressServiceArg(entry) {
-    const proto = entry.proto === 'udp' ? 'udp' : 'tcp';
-    if (!entry.port) return entry.service || null;
+  /**
+   * The firewall's own name for this destination, or null when it is not one
+   * of the host services the fence governs. The CLI owns the vocabulary and
+   * publishes it in `egress list`; nothing is ever invented here.
+   */
+  async function namedHostService(entry) {
     const list = await exec('proxypilot', ['--json', 'firewall', 'egress', 'list'], { timeoutMs: 60000 });
-    const known = Object.keys(parse(list.stdout, {})?.services || {});
-    if (entry.service && known.includes(entry.service)) return entry.service;
-    return `${proto}:${entry.port}`;
+    const services = parse(list.stdout, {})?.services || {};
+    if (entry.service && services[entry.service]) return entry.service;
+    for (const [name, def] of Object.entries(services)) {
+      if (def && Number(def.port) === Number(entry.port) && (def.proto || 'tcp') === (entry.proto || 'tcp')) return name;
+    }
+    return null;
   }
 
   /* ------------------------------- listing ------------------------------- */

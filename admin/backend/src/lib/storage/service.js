@@ -340,7 +340,8 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
     const apt = await host.hasBinary('apt-get');
     // Only ask apt when apt exists; undefined means "not looked up".
     const zfsCandidate = apt ? await host.aptCandidate('zfsutils-linux') : undefined;
-    const report = installPreflight({ toolchain, os, runner, agent, apt, zfsCandidate });
+    const kernel = await host.kernelState();
+    const report = installPreflight({ toolchain, os, runner, agent, apt, zfsCandidate, kernel });
     const out = { at: new Date(now()).toISOString(), ...report, toolchain, os, runner, agent, managed: managed() };
     if (devices) {
       const inv = await inventory({ smart: false, incus: false });
@@ -362,6 +363,7 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
   async function installToolchain({ actor = null, via = 'api', ip = null, force = false } = {}) {
     const pf = await preflight();
     if (!pf.can_install) return { refused: true, error: `preflight is blocked: ${pf.blocked_by.map((b) => b.detail).join('; ')}`, preflight: pf };
+    if (pf.reboot_required && !force) return { refused: true, reboot_required: true, error: `everything is installed and a ZFS module is built for ${pf.kernel?.built_for?.join(', ') || 'another kernel'}, but this host is running ${pf.kernel?.running}. A module only loads into the kernel it was built for: reboot into ${pf.kernel?.reboot_target} and it loads. Re-running the installer changes nothing; pass force: true to run it anyway.`, preflight: pf };
     if (!pf.install_needed && !force) return { refused: true, already_installed: true, error: 'the storage toolchain is already installed and current; pass force: true to run the installer again', preflight: pf };
     const { startStorageInstall } = await import('../self-update.js');
     let started;

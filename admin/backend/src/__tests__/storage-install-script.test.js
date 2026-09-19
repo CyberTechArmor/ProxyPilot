@@ -96,11 +96,31 @@ test('the installer refuses clearly rather than half-installing, and says what i
   assert.match(src, /exit 3/, 'installed but the module is not loaded');
   // Debian needs the DKMS build and its headers; Ubuntu ships the module
   assert.match(src, /PKGS\+=\(zfs-dkms zfs-zed\)/);
-  assert.match(src, /linux-headers-\$\(uname -r\)/);
+  assert.match(src, /linux-headers-\$\{RUNNING_KERNEL\}/);
   // the candidate is verified BEFORE anything is installed
   const candidateAt = src.indexOf('apt_candidate zfsutils-linux');
   const installAt = src.indexOf('apt-get install -y "${PKGS[@]}"');
   assert.ok(candidateAt > 0 && installAt > 0 && candidateAt < installAt, 'the candidate check comes first');
+
+  // Headers go in their OWN apt transaction, BEFORE the main install.
+  // zfs-dkms's postinst skips the build when headers are not configured yet,
+  // and apt does not order two unrelated packages, so a combined install can
+  // silently produce no module at all.
+  const headerInstallAt = src.indexOf('installing kernel headers first');
+  assert.ok(headerInstallAt > 0 && headerInstallAt < installAt, 'headers are installed before the main transaction');
+
+  // and the build is forced rather than trusted to postinst
+  assert.match(src, /dkms autoinstall/);
+  const dkmsAt = src.indexOf('dkms autoinstall');
+  assert.ok(dkmsAt > installAt, 'the explicit build runs after the packages are in');
+
+  // a module built for the wrong kernel must be reported as a reboot, not a
+  // failed build: those need different instructions
+  assert.match(src, /kernels_with_zfs/);
+  assert.match(src, /A module IS built, for/);
+  assert.match(src, /REBOOT into/);
+  assert.match(src, /Secure Boot is ENABLED/);
+  assert.match(src, /the DKMS build failed/);
   // and the module failure does not claim success
   assert.match(src, /NOT loaded/);
 });

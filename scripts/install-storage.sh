@@ -98,18 +98,36 @@ if ! apt_candidate zfsutils-linux >/dev/null; then
   fi
 fi
 
+RUNNING_KERNEL="$(uname -r)"
+HEADERS_FOR_RUNNING=false
 PKGS=(zfsutils-linux smartmontools sanoid pv mbuffer lzop)
 if is_debian; then
-  # Debian ships no in-tree ZFS: the module is built by DKMS, which needs the
-  # headers for the running kernel. Prefer the exact version, fall back to the
-  # arch meta package that tracks linux-image-<arch>.
   PKGS+=(zfs-dkms zfs-zed)
-  if apt_candidate "linux-headers-$(uname -r)" >/dev/null; then
-    PKGS+=("linux-headers-$(uname -r)")
+  # Debian ships no in-tree ZFS: DKMS builds the module against a kernel's
+  # headers. Install those in their OWN transaction first — zfs-dkms's postinst
+  # skips the build when the headers are not configured YET, and apt does not
+  # order two unrelated packages for us, so a single combined install can
+  # silently produce no module at all.
+  hdr=""
+  if apt_candidate "linux-headers-${RUNNING_KERNEL}" >/dev/null; then
+    hdr="linux-headers-${RUNNING_KERNEL}"
+    HEADERS_FOR_RUNNING=true
   elif apt_candidate "linux-headers-$(dpkg --print-architecture)" >/dev/null; then
-    PKGS+=("linux-headers-$(dpkg --print-architecture)")
+    # Debian's archive carries only the CURRENT kernel build, so the running
+    # kernel's headers are often gone. The arch meta tracks the current one;
+    # the module then matches after a reboot into that kernel.
+    hdr="linux-headers-$(dpkg --print-architecture)"
+    echo "  note: no headers in the archive for the running kernel ${RUNNING_KERNEL}; using ${hdr}"
+    echo "        (Debian keeps only the current kernel build, so a reboot will be needed)"
+  fi
+  if [[ -n "$hdr" ]]; then
+    echo "  installing kernel headers first: $hdr"
+    if ! apt-get install -y "$hdr"; then
+      echo "ERROR: could not install $hdr; DKMS cannot build the ZFS module without it." >&2
+      exit 5
+    fi
   else
-    echo "  WARNING: no kernel headers package found; the zfs-dkms build will fail" >&2
+    echo "  WARNING: no kernel headers package is available; the zfs-dkms build will fail" >&2
   fi
 fi
 echo "  installing: ${PKGS[*]}"
@@ -121,16 +139,45 @@ fi
 # sanoid's package ships sanoid.timer (15 min) and the syncoid binary.
 
 echo "[2/6] zfs module + import services"
-MODULE_OK=true
-if ! modprobe zfs 2>/dev/null; then
-  # A fresh DKMS build sometimes needs depmod before the module is findable.
-  depmod -a 2>/dev/null || true
-  modprobe zfs 2>/dev/null || MODULE_OK=false
+# Which kernels actually have a zfs module on disk. Answers "built but for the
+# wrong kernel", which is the difference between "reboot" and "the build failed".
+kernels_with_zfs() {
+  local d k
+  for d in /lib/modules/*/; do
+    [[ -d "$d" ]] || continue
+    k="$(basename "$d")"
+    if compgen -G "${d}updates/dkms/zfs.ko*" >/dev/null || compgen -G "${d}extra/zfs.ko*" >/dev/null || compgen -G "${d}kernel/zfs/zfs.ko*" >/dev/null; then
+      echo "$k"
+    fi
+  done
+}
+
+if is_debian && command -v dkms >/dev/null 2>&1; then
+  # Explicit build: idempotent, and it covers the case where zfs-dkms's own
+  # postinst ran before the headers were configured and skipped silently.
+  echo "  building the module with dkms (this takes a few minutes)"
+  if [[ "$HEADERS_FOR_RUNNING" == true ]]; then
+    dkms autoinstall -k "$RUNNING_KERNEL" 2>&1 | tail -n 20 || true
+  else
+    dkms autoinstall 2>&1 | tail -n 20 || true
+  fi
 fi
+
+depmod -a 2>/dev/null || true
+MODULE_OK=true
+modprobe zfs 2>/dev/null || MODULE_OK=false
+
 if [[ "$MODULE_OK" == true ]]; then
   systemctl enable --now zfs-import-cache.service zfs-import.target zfs-mount.service zfs.target 2>/dev/null || true
+  echo "  zfs module loaded ($(modinfo -F version zfs 2>/dev/null || echo 'version unknown'))"
 else
-  echo "  WARNING: the zfs module is not loaded yet." >&2
+  BUILT_FOR="$(kernels_with_zfs | tr '\n' ' ' | sed 's/ *$//')"
+  SECURE_BOOT="$(mokutil --sb-state 2>/dev/null | head -n1 || echo 'unknown')"
+  echo "  WARNING: the zfs module is not loaded." >&2
+  echo "    running kernel : ${RUNNING_KERNEL}" >&2
+  echo "    module built for: ${BUILT_FOR:-nothing}" >&2
+  echo "    secure boot     : ${SECURE_BOOT}" >&2
+  [[ -n "$BUILT_FOR" ]] && echo "    dkms: $(dkms status zfs 2>/dev/null | tr '\n' ';' || echo unavailable)" >&2
 fi
 
 echo "[3/6] units"
@@ -163,10 +210,29 @@ systemctl try-restart proxypilot-agent.service 2>/dev/null || true
 if [[ "${MODULE_OK:-true}" != true ]]; then
   echo
   echo "========================================================================"
-  echo "Packages, units and helpers are installed, but the ZFS kernel module is"
-  echo "NOT loaded. On Debian the module is built by DKMS against the running"
-  echo "kernel; if the build ran against a newer kernel than the one booted, a"
-  echo "REBOOT loads it. Check with:  dkms status ; journalctl -b | grep -i zfs"
+  echo "Packages, units and helpers are installed. The ZFS module is NOT loaded."
+  echo
+  if [[ -n "${BUILT_FOR:-}" ]]; then
+    echo "A module IS built, for: ${BUILT_FOR}"
+    echo "You are running:        ${RUNNING_KERNEL}"
+    echo
+    echo "A module only loads into the kernel it was built for, so this needs a"
+    echo "REBOOT into ${BUILT_FOR%% *}. That kernel is already installed, so:"
+    echo
+    echo "    sudo reboot"
+    echo
+    echo "After the reboot, open Storage and press Install once more: it will"
+    echo "find everything present and the module loaded, and finish green."
+  elif [[ "${SECURE_BOOT:-}" == *enabled* ]]; then
+    echo "Secure Boot is ENABLED and the DKMS module is not signed, so the kernel"
+    echo "refuses to load it. Either enrol a MOK signing key for DKMS, or disable"
+    echo "Secure Boot in firmware, then run the installer again."
+  else
+    echo "No module was built for any installed kernel, so the DKMS build failed."
+    echo "The reason is in:  /var/lib/dkms/zfs/*/build/make.log"
+    echo "Check 'dkms status' and that the headers match a kernel you can boot."
+  fi
+  echo
   echo "Nothing can read or create a pool until 'modprobe zfs' succeeds."
   echo "========================================================================"
   exit 3

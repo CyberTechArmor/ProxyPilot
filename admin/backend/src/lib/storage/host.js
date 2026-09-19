@@ -305,6 +305,28 @@ export function createStorageHost({ runHostCapture, agentCall = null, useAgent =
     return parseAptCandidate(r.stdout);
   }
 
+  /**
+   * Why the ZFS module is or is not loadable. A module only loads into the
+   * kernel it was built for, so "built, but for another kernel" is a reboot
+   * and "built for nothing" is a failed build. Those need different words.
+   */
+  async function kernelState() {
+    const [unameR, built, sb] = await Promise.all([
+      exec(['uname', '-r'], { timeoutMs: 10000 }),
+      sh('for d in /lib/modules/*/; do k=$(basename "$d"); for p in "$d"updates/dkms/zfs.ko* "$d"extra/zfs.ko* "$d"kernel/zfs/zfs.ko*; do [ -e "$p" ] && { echo "$k"; break; }; done; done', [], { timeoutMs: 15000 }),
+      exec(['mokutil', '--sb-state'], { timeoutMs: 10000 }),
+    ]);
+    const running = (unameR.stdout || '').trim() || null;
+    const builtFor = (built.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    const secureBoot = sb.status === 0 ? /enabled/i.test(sb.stdout) : null;
+    return {
+      running, built_for: builtFor,
+      built_for_running: !!running && builtFor.includes(running),
+      reboot_target: !running || builtFor.includes(running) ? null : (builtFor.slice().sort().pop() || null),
+      secure_boot: secureBoot,
+    };
+  }
+
   async function osRelease() {
     return parseOsRelease(await readFile('/etc/os-release', { maxBytes: 16 * 1024 }) || '');
   }
@@ -324,7 +346,7 @@ export function createStorageHost({ runHostCapture, agentCall = null, useAgent =
 
   return {
     exec, sh, hasBinary, listDisks, pools, datasets, zfsSnapshots, zpoolImportScan, smartFor,
-    safetyFacts, risksFor, osRelease, runnerState, agentPing, aptCandidate,
+    safetyFacts, risksFor, osRelease, runnerState, agentPing, aptCandidate, kernelState,
     incusStoragePools, incusInstances, incusDefaultProfileRoot, incusSnapshotForm,
     readFile, listDir, unitState, toolchain, agentReachable: () => agentKnown,
   };

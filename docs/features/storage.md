@@ -236,12 +236,31 @@ component to the **existing** apt stanza, keeping a `.proxypilot.bak` beside
 it, so the archive URI and signing key stay exactly as the operator has them.
 `deb-src` lines are left alone and a second run changes nothing.
 
-On Debian there is also no in-tree module: `zfs-dkms` builds it against the
-running kernel, so the installer adds the matching `linux-headers` package and
-the build takes a few minutes. If the module still will not load afterwards,
-the installer finishes the units and helpers and exits 3 saying a reboot is
-likely needed, rather than reporting success. Its other distinct exits are 4
-for a package that cannot be made available and 5 for a failed `apt-get`.
+On Debian there is also no in-tree module: `zfs-dkms` builds it with DKMS. Two
+things make that fragile, and the installer handles both.
+
+The headers go in their **own apt transaction first**. `zfs-dkms`'s postinst
+skips the build when the headers are not configured yet, and apt does not
+order two unrelated packages, so installing them together can silently produce
+no module at all. The build is then forced with `dkms autoinstall` rather than
+trusted to postinst.
+
+Debian's archive carries only the **current** kernel build, so the running
+kernel's headers are frequently gone and DKMS builds against the current
+kernel instead. The result is a module that exists but cannot load, because a
+module only loads into the kernel it was built for. The installer and the
+preflight tell these apart by listing which kernels actually have a
+`zfs.ko` on disk:
+
+| Situation | What is reported |
+|---|---|
+| built for the running kernel | loaded, green |
+| built for another kernel | reboot into that kernel, which is already installed. Re-installing changes nothing, so `install_storage_toolchain` refuses without `force` |
+| built for nothing, Secure Boot on | the kernel refuses an unsigned DKMS module: enrol a MOK key or disable Secure Boot |
+| built for nothing, Secure Boot off | the build failed, with the path to `make.log` |
+
+Exit codes: 3 installed but the module is not loaded, 4 a package that cannot
+be made available, 5 a failed `apt-get`.
 
 ## Host preparation by hand
 

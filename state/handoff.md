@@ -72,6 +72,27 @@ Both product bugs now have unit coverage that runs everywhere:
 previous success preserved, config guard) and the same-second `createtxg`
 case in `storage-planner.test.js`.
 
+## Deployed (2026-09-19)
+
+Merged to `main` as `512e6f6` and deployed to the live host with the
+self-update runner (`update.sh --yes`, run id
+`bc683c16-fba8-4050-bca0-23e577dfe899`, exit 0, ~1 min). Confirmed from the
+run log and the agent:
+
+- `Applied schema migration 908: storage_ops` — the ops ledger exists on the
+  live database
+- `[storage-monitor] registered (cron=*/15 * * * *)` — the alert monitor is
+  running
+- the host agent rebuilt at `512e6f6986`, so `storage.list_disks` /
+  `storage.zpool_status` / `storage.zfs_list` are live on the socket
+- container healthy, route drift clean, pre-update DB backup retained at
+  `/opt/proxypilot/data/db/backups/proxypilot.db.pre-update-20260919-104916`
+
+The operator's next step is the one-time host preparation
+(`sudo bash scripts/install-storage.sh`) — until then the Storage page
+renders with the toolchain badges showing zfs/sanoid/syncoid missing and
+the pool tabs empty, which is the intended no-ZFS state.
+
 ## Not yet verified on real hardware / a real host
 
 - `smartctl -j` through the nsenter root path on real SATA / NVMe devices

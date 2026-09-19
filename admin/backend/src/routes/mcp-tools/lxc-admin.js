@@ -21,7 +21,24 @@ export function createLxcAdminHandlers(kit) {
     snapshotArgv, resolveSnapshotCliForm, takeUploadTicket, findOrCreateLxcService, regenerateDomainCaddyConfig,
     caddyReload, LXC_LIST_CAPTURE_CAP,
   } = ctx;
-  const EXPORTS = policy.exports_dir;
+  // Export tarballs go to the managed ZFS exports dataset when one is mounted
+  // (Storage page / create_zpool), else the policy directory.
+  const EXPORTS_DEFAULT = policy.exports_dir;
+  let EXPORTS = EXPORTS_DEFAULT;
+  async function exportsDir() {
+    try {
+      const svc = typeof ctx.storage === 'function' ? ctx.storage() : ctx.storage;
+      const m = svc?.managed();
+      if (m) {
+        const d = await svc.host.datasets();
+        const mp = d.datasets.find((x) => x.name === m.datasets.exports)?.mountpoint;
+        EXPORTS = mp && mp.startsWith('/') ? mp : EXPORTS_DEFAULT;
+        return EXPORTS;
+      }
+    } catch { /* fall back */ }
+    EXPORTS = EXPORTS_DEFAULT;
+    return EXPORTS;
+  }
 
   const nameOf = (args) => {
     const name = String(args.container || '');
@@ -37,6 +54,7 @@ export function createLxcAdminHandlers(kit) {
   }
 
   async function exportContainer(name, { snapshot = null, instanceOnly = false } = {}) {
+    await exportsDir();
     await hostSh('mkdir -p "$1" && chmod 750 "$1"', [EXPORTS], { timeoutMs: 10000 });
     const file = `${EXPORTS}/lxc-${name}${snapshot ? `-${snapshot}` : ''}-${stamp()}.tar.gz`;
     const argv = ['export', snapshot ? `${incus(name)}/${snapshot}` : incus(name), file];
@@ -58,6 +76,7 @@ export function createLxcAdminHandlers(kit) {
     if (inst.error) return err(inst.error);
     const snapshots = inst.detail.snapshots;
     const wantExport = args.export !== false;
+    await exportsDir();
     if (!snapshots.length) {
       note.refused = true;
       return err(`Refusing to delete ${name}: it has no snapshot. Take one with snapshot_lxc_container first — the snapshot is what the export tarball is cut from, and deleting a guest that was never snapshotted leaves nothing to come back to.`);
@@ -133,7 +152,7 @@ export function createLxcAdminHandlers(kit) {
     const snap = args.snapshot ? validSnapshotName(args.snapshot) : null;
     if (args.snapshot && !snap) return err('snapshot name is invalid');
     if (snap && !inst.detail.snapshots.some((s) => s.name === snap)) return err(`Snapshot ${snap} does not exist on ${name}`);
-    const plan = { container: name, snapshot: snap, instance_only: args.instance_only === true, directory: EXPORTS };
+    const plan = { container: name, snapshot: snap, instance_only: args.instance_only === true, directory: await exportsDir() };
     const d = dry(args, plan); if (d) return d;
     const out = await exportContainer(name, { snapshot: snap, instanceOnly: args.instance_only === true });
     if (out.error) return err(out.error);
@@ -146,7 +165,7 @@ export function createLxcAdminHandlers(kit) {
     const newName = String(args.name || '');
     if (!LXC_NAME_REGEX.test(newName)) return err('name must be alphanumeric plus hyphens');
     note.subject_id = newName;
-    const file = pathUnder(EXPORTS, args.file);
+    const file = pathUnder(await exportsDir(), args.file);
     if (!file || !/\.tar(\.gz|\.xz|\.zst)?$/.test(file)) return err(`file must be a tarball name inside ${EXPORTS} (as returned by export_lxc / delete_lxc_container)`);
     const st = await hostSh('test -f "$1" && stat -c %s "$1"', [file], { timeoutMs: 10000 });
     if (st.status !== 0) return err(`No such export: ${file}`);
@@ -174,7 +193,7 @@ export function createLxcAdminHandlers(kit) {
     if (!name) return err('Invalid container name');
     const inst = await instanceOrError(name);
     if (inst.error) return err(inst.error);
-    const ex = await hostSh('ls -1 "$1" 2>/dev/null | grep "^lxc-$2-" || true', [EXPORTS, name], { timeoutMs: 10000 });
+    const ex = await hostSh('ls -1 "$1" 2>/dev/null | grep "^lxc-$2-" || true', [await exportsDir(), name], { timeoutMs: 10000 });
     return ok({ container: name, status: inst.detail.status, snapshots: inst.detail.snapshots, exports: (ex.stdout || '').trim().split('\n').filter(Boolean) });
   });
 

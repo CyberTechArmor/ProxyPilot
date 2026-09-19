@@ -1,0 +1,13 @@
+   pool: olddata
+     id: 1122334455667788990
+  state: ONLINE
+status: The pool was last accessed by another system.
+ action: The pool can be imported using its name or numeric identifier and
+	the '-f' flag.
+   see: https://openzfs.github.io/openzfs-docs/msg/ZFS-8000-EY
+ config:
+
+	olddata                                   ONLINE
+	  mirror-0                                ONLINE
+	    wwn-0x5000c500b9999999-part1          ONLINE
+	    wwn-0x5000c500b8888888-part1          ONLINE

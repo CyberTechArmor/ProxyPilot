@@ -67,6 +67,13 @@ RuntimeDirectory=proxypilot-agent proxypilot-update
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 
+# The storage.* discovery methods (cmd/agent/methods/storage.go) run lsblk
+# and `zpool import` label scanning, which read block devices directly;
+# group `disk` owns /dev/sd*, /dev/nvme* on Debian/Ubuntu. smartctl still
+# needs root (SG_IO / NVMe admin ioctls) and is filled in by the backend
+# through its root path.
+SupplementaryGroups=disk
+
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict

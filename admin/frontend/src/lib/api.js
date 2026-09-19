@@ -2044,6 +2044,43 @@ export const api = {
   housekeepingPrune: (body) =>
     request('/housekeeping/prune', { method: 'POST', body: JSON.stringify(body) }),
 
+  // Storage page — host drives + ZFS (backend routes/storage.js). Reads are
+  // plain GETs; every mutation is a plan/confirm pair: storage.plan() returns
+  // the exact commands plus a sha256 plan_token, storage.apply() re-plans on
+  // the live host and answers 409 { refused, plan, plan_token, commands }
+  // when the token no longer matches (show the new plan, ask again), 500
+  // { ok: false, failed, results } when a step failed. apply is sudo-gated;
+  // request() handles the elevation modal and replays the call.
+  storage: {
+    overview: ({ smart = true } = {}) => request(`/storage/overview${smart ? '' : '?smart=0'}`),
+    disks: ({ smart = true } = {}) => request(`/storage/disks${smart ? '' : '?smart=0'}`),
+    pools: () => request('/storage/pools'),
+    datasets: () => request('/storage/datasets'),
+    snapshots: ({ dataset, guest } = {}) => {
+      const q = new URLSearchParams();
+      if (dataset) q.set('dataset', dataset);
+      if (guest) q.set('guest', guest);
+      const qs = q.toString();
+      return request(`/storage/snapshots${qs ? `?${qs}` : ''}`);
+    },
+    policy: () => request('/storage/policy'),
+    replication: () => request('/storage/replication'),
+    freshness: () => request('/storage/freshness'),
+    alerts: () => request('/storage/alerts'),
+    ops: ({ limit = 100, op } = {}) =>
+      request(`/storage/ops?limit=${encodeURIComponent(limit)}${op ? `&op=${encodeURIComponent(op)}` : ''}`),
+    toolchain: () => request('/storage/toolchain'),
+    plan: (op, params = {}) =>
+      request('/storage/plan', { method: 'POST', body: JSON.stringify({ op, params }) }),
+    // `passphrase` only travels here (never to /plan) and only for plans
+    // whose step reads one from stdin (encrypted pool creation).
+    apply: (op, params, plan_token, { passphrase } = {}) =>
+      request('/storage/apply', {
+        method: 'POST',
+        body: JSON.stringify({ op, params, plan_token, confirm: true, ...(passphrase ? { passphrase } : {}) }),
+      }),
+  },
+
   // Backups → Storage tab. CRUD on S3-compatible destinations + a
   // 'test connection' verb that HEADs the configured bucket.
   // secret_key is write-only — the GET path never returns it.

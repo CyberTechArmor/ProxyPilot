@@ -1,0 +1,4 @@
+/ /dev/mapper/vg0-root ext4
+/boot /dev/nvme0n1p2 ext4
+/boot/efi /dev/nvme0n1p1 vfat
+swap /dev/mapper/vg0-swap swap

@@ -1,0 +1,90 @@
+{
+  "output_version": {"command": "zpool status", "vers_major": 0, "vers_minor": 1},
+  "pools": {
+    "tank": {
+      "name": "tank",
+      "state": "ONLINE",
+      "pool_guid": 12345678901234567890,
+      "txg": 987654,
+      "spa_version": 5000,
+      "zpl_version": 5,
+      "scan_stats": {
+        "function": "SCRUB",
+        "state": "FINISHED",
+        "start_time": 1789335999,
+        "end_time": 1789347843,
+        "to_examine": 1234567890123,
+        "examined": 1234567890123,
+        "skipped": 0,
+        "processed": 0,
+        "errors": 0,
+        "bytes_per_scan": 0,
+        "pass_start": 0,
+        "scrub_pause": 0,
+        "scrub_spent_paused": 0,
+        "issued_bytes_per_scan": 0,
+        "issued": 1234567890123
+      },
+      "vdevs": {
+        "tank": {
+          "name": "tank",
+          "vdev_type": "root",
+          "guid": 1111,
+          "class": "root",
+          "state": "ONLINE",
+          "read_errors": 0,
+          "write_errors": 0,
+          "checksum_errors": 0,
+          "vdevs": {
+            "mirror-0": {
+              "name": "mirror-0",
+              "vdev_type": "mirror",
+              "guid": 2222,
+              "class": "normal",
+              "state": "ONLINE",
+              "read_errors": 0,
+              "write_errors": 0,
+              "checksum_errors": 0,
+              "vdevs": {
+                "/dev/disk/by-id/wwn-0x50014ee2b1234567-part1": {
+                  "name": "/dev/disk/by-id/wwn-0x50014ee2b1234567-part1",
+                  "vdev_type": "disk",
+                  "guid": 3333,
+                  "path": "/dev/disk/by-id/wwn-0x50014ee2b1234567-part1",
+                  "class": "normal",
+                  "state": "ONLINE",
+                  "read_errors": 0,
+                  "write_errors": 0,
+                  "checksum_errors": 0
+                },
+                "/dev/disk/by-id/wwn-0x50014ee2b7654321-part1": {
+                  "name": "/dev/disk/by-id/wwn-0x50014ee2b7654321-part1",
+                  "vdev_type": "disk",
+                  "guid": 4444,
+                  "path": "/dev/disk/by-id/wwn-0x50014ee2b7654321-part1",
+                  "class": "normal",
+                  "state": "ONLINE",
+                  "read_errors": 0,
+                  "write_errors": 3,
+                  "checksum_errors": 0
+                }
+              }
+            },
+            "/dev/disk/by-id/wwn-0x5000c500c1234567-part1": {
+              "name": "/dev/disk/by-id/wwn-0x5000c500c1234567-part1",
+              "vdev_type": "disk",
+              "guid": 5555,
+              "path": "/dev/disk/by-id/wwn-0x5000c500c1234567-part1",
+              "class": "normal",
+              "state": "ONLINE",
+              "read_errors": 0,
+              "write_errors": 0,
+              "checksum_errors": 0
+            }
+          }
+        }
+      },
+      "error_count": 0
+    }
+  }
+}

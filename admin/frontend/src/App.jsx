@@ -13,6 +13,7 @@ import CVEs from '@/pages/CVEs';
 import McpAccess from '@/pages/McpAccess';
 import Troubleshooting from '@/pages/Troubleshooting';
 import Housekeeping from '@/pages/Housekeeping';
+import Storage from '@/pages/Storage';
 import Projects from '@/pages/Projects';
 import ProjectSettings from '@/pages/ProjectSettings';
 import LeanBeafPro from '@/pages/LeanBeafPro';
@@ -101,6 +102,9 @@ function App() {
         <Route path="mcp-access" element={<McpAccess />} />
         <Route path="troubleshooting" element={<Troubleshooting />} />
         <Route path="housekeeping" element={<Housekeeping />} />
+        {/* Host drives + ZFS pools/datasets/snapshots/replication (admin only;
+            the page self-guards and the backend requires an admin session). */}
+        <Route path="storage" element={<Storage />} />
         <Route path="notifications" element={<Notifications />} />
         {/* Lean BEAF Pro — team-shared innovation projects. Open to every
             authenticated non-pending user (R01); backend enforces the same. */}

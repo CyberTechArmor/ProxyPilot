@@ -124,7 +124,7 @@ export default function InventoryReview({ migration, onApprove, onEgress, busy }
         <CardContent className="p-4 space-y-3">
           <SectionHeader
             title="Outbound access"
-            description="Observed in the connection table, unit files, compose files and cron. The guest starts default-deny; approve only what it needs."
+            description="Observed in the connection table, unit files, compose files and cron — what this application actually talks to. ProxyPilot's guest fence covers bridge → host services: approving one of those writes a real allow, and approving an internet destination records that you reviewed it."
           />
           {(migration.egress || []).filter((e) => !e.internal).length === 0 ? (
             <p className="text-sm text-muted-foreground">Nothing outbound was observed.</p>
@@ -140,7 +140,11 @@ export default function InventoryReview({ migration, onApprove, onEgress, busy }
                     <Button size="sm" variant="outline" className={BTN} disabled={busy} onClick={() => onEgress?.(e, 'deny')}>Deny</Button>
                     <Button size="sm" className={BTN} disabled={busy} onClick={() => onEgress?.(e, 'approve')}>Allow</Button>
                   </>
-                ) : <Chip level={e.decision === 'approved' ? 'ok' : 'muted'}>{e.decision}</Chip>}
+                ) : (
+                  <Chip level={e.decision === 'approved' ? 'ok' : 'muted'} title={e.note || (e.applied ? `allowed as ${e.applied_as}` : undefined)}>
+                    {e.decision}{e.applied ? ` · ${e.applied_as}` : e.decision === 'approved' ? ' · reviewed' : ''}
+                  </Chip>
+                )}
               </div>
             </div>
           ))}

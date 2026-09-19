@@ -140,7 +140,7 @@ The migration is `completed` when every required step is marked.
 | `snapshot_pre_cutover` | `snapshot_lxc_container` |
 | `inventory_reviewed` | the Inventory tab |
 | `route_created` | `set_route` |
-| `egress_reviewed` | `set_lxc_egress` (or the Allow/Deny buttons, which apply a real grant) |
+| `egress_reviewed` | the Allow/Deny buttons (see below), or `set_lxc_egress` |
 | `secrets_entered` | `set_project_env` — the key names came from the manifest, the values from you |
 | `health_check` | `probe_lxc_port` |
 | `final_delta_sync` (application mode) | `migration_cutover` |
@@ -148,6 +148,25 @@ The migration is `completed` when every required step is marked.
 | `source_frozen` | stop the source service, so two copies never both take writes |
 | `verified` | `test_route` |
 | `snapshot_post_cutover` | `snapshot_lxc_container` |
+
+### What "egress" means here
+
+ProxyPilot's guest fence governs **bridge → host** traffic: the firewall's
+`NAMED_SERVICES` is a short, code-owned list of host-side endpoints, and
+everything not on it is denied. It does **not** govern a guest's access to
+the internet.
+
+So the observed-outbound list is, above all, a description of what the
+application talks to — the thing an operator needs before they publish it.
+Approving an entry does one of two things, and the row says which:
+
+- **applied** — the destination matches one of the firewall's named host
+  services, and a real allow was written for this guest.
+- **acknowledged** — it is an internet destination: reviewed and recorded,
+  with nothing claimed about a fence that does not cover it.
+
+(For a Mock2 project guest, internet egress *is* governed, through the
+project's own egress grants — `list_egress_requests` / `approve_egress`.)
 
 ## Surface
 
@@ -182,7 +201,7 @@ The migration is `completed` when every required step is marked.
 
 ## Things this deliberately does not do
 
-- It never publishes a route or lifts the egress fence as part of an import.
+- It never publishes a route or lifts the guest fence as part of an import.
 - It never deletes anything on the source, and cancelling a migration never
   deletes the guest it created.
 - It never reads a secret value, and will not accept one if offered.

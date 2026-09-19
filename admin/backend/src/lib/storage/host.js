@@ -238,6 +238,20 @@ export function createStorageHost({ runHostCapture, agentCall = null, useAgent =
     return out;
   }
 
+  /**
+   * Is a unit FILE in place? `systemctl show <u> -p UnitFileState` cannot
+   * answer this for a TEMPLATE (`foo@.service`): systemd has no enablement
+   * state for an instance-less template and returns an empty UnitFileState,
+   * which unitState() reads as "not present". Both of ProxyPilot's storage
+   * units are templates, so asking systemd made an installed host report them
+   * as missing forever — the install banner never cleared and re-running the
+   * installer changed nothing. The file on disk is the fact.
+   */
+  async function unitFilePresent(unit) {
+    const r = await sh('test -f "/etc/systemd/system/$1" || test -f "/lib/systemd/system/$1" || test -f "/usr/lib/systemd/system/$1"', [unit], { timeoutMs: 5000 });
+    return r.status === 0;
+  }
+
   async function toolchain() {
     const names = ['zpool', 'zfs', 'smartctl', 'sanoid', 'syncoid', 'wipefs', 'lsblk', 'incus'];
     const out = {};
@@ -247,10 +261,10 @@ export function createStorageHost({ runHostCapture, agentCall = null, useAgent =
     let version = null;
     if (out.zfs) { const v = await exec(['zfs', 'version'], { timeoutMs: 10000 }); version = v.status === 0 ? v.stdout.trim().split('\n')[0] : null; }
     out.zfs_version = version;
-    const [sanoidTimer, scrubTpl, syncoidTpl] = await Promise.all([unitState('sanoid.timer'), unitState('proxypilot-zfs-scrub@.timer'), unitState('proxypilot-syncoid@.service')]);
+    const [sanoidTimer, scrubTpl, syncoidTpl] = await Promise.all([unitState('sanoid.timer'), unitFilePresent('proxypilot-zfs-scrub@.timer'), unitFilePresent('proxypilot-syncoid@.service')]);
     out.sanoid_timer = sanoidTimer;
-    out.scrub_timer_installed = !!scrubTpl.present;
-    out.syncoid_unit_installed = !!syncoidTpl.present;
+    out.scrub_timer_installed = scrubTpl;
+    out.syncoid_unit_installed = syncoidTpl;
     out.replicate_helper = (await sh('test -x "$1"', [REPLICATE_BIN], { timeoutMs: 5000 })).status === 0;
     out.restore_helper = (await sh('test -x "$1"', [RESTORE_HELPER], { timeoutMs: 5000 })).status === 0;
     return out;

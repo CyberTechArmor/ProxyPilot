@@ -52,3 +52,4 @@ See handoff.md § Verified / § Verified on loop devices / § Not yet verified. 
 | 10 | Snapshot staleness gated on a policy actually being applied and sanoid running; Incus structural datasets never alert (LEARNINGS 170) | done |
 | 11 | The header banner's install button opens the install dialog instead of re-selecting the tab it is already on; wording distinguishes units from toolchain (LEARNINGS 172) | done |
 | 12 | The recovered `zpool import` scan no longer leaves the agent's warning on the page (LEARNINGS 173) | done |
+| 13 | Template units are detected by file, not by `systemctl show` — an installed host said the toolchain was missing forever (LEARNINGS 174) | done |

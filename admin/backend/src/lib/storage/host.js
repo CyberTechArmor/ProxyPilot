@@ -15,7 +15,7 @@ import { parseFstab, parseMdstat, parseEfiBootEntries, parseOsRelease, hasRaidSu
 import {
   LSBLK_COLUMNS, ZPOOL_LIST_COLUMNS, ZFS_LIST_COLUMNS, ZFS_SNAPSHOT_COLUMNS,
   parseLsblk, parseSmartctl, parseFindmnt, parseByIdMap, parseZpoolList, parseZpoolStatus, parseZpoolStatusJson, parseZpoolImport,
-  parseZfsList, parseZfsSnapshots, buildDeviceInventory, parseIncusStoragePools, parseIncusInstances,
+  parseZfsList, parseZfsSnapshots, buildDeviceInventory, parseIncusStoragePools, parseIncusInstances, parseIncusProfileRoot,
 } from './parse.js';
 
 const OS_MOUNTS = ['/', '/boot', '/boot/efi', '/boot/firmware'];
@@ -96,10 +96,20 @@ export function createStorageHost({ runHostCapture, agentCall = null, useAgent =
     return out;
   }
 
-  async function zpoolImportScan() {
+  /**
+   * The by-id scan for pools that could be imported. Needs root, so the
+   * unprivileged agent cannot do it and we run it here.
+   * `detail: true` also reports why a scan produced nothing, so a caller can
+   * tell a real failure from an empty host.
+   */
+  async function zpoolImportScan({ detail = false } = {}) {
     const r = await exec(['zpool', 'import', '-d', '/dev/disk/by-id'], { timeoutMs: 120000 });
     // Exit 1 with "no pools available to import" is the normal empty case.
-    return parseZpoolImport(r.stdout);
+    const empty = /no pools available/i.test(`${r.stdout}${r.stderr}`);
+    const importable = parseZpoolImport(r.stdout);
+    if (!detail) return importable;
+    const error = r.status === 0 || empty || importable.length ? null : (r.stderr || r.stdout || `exit ${r.status}`).trim().slice(-200);
+    return { importable, error };
   }
 
   async function zpoolList() {
@@ -149,7 +159,16 @@ export function createStorageHost({ runHostCapture, agentCall = null, useAgent =
         for (const d of devices) if (filled[d.path]) d.smart = filled[d.path];
       }
       let importable = agent.importable;
-      if (!Array.isArray(importable)) importable = await zpoolImportScan();
+      if (!Array.isArray(importable)) {
+        // The agent is unprivileged and `zpool import` scanning needs root, so
+        // it hands the scan to us. When our own scan works, the agent's
+        // warning about it described a step that has since succeeded — drop
+        // it rather than showing the operator a failure that did not stick.
+        const scan = await zpoolImportScan({ detail: true });
+        importable = scan.importable;
+        if (!scan.error) for (let i = warnings.length - 1; i >= 0; i -= 1) { if (/import scan/i.test(warnings[i])) warnings.splice(i, 1); }
+        else for (let i = 0; i < warnings.length; i += 1) { if (/import scan/i.test(warnings[i])) warnings[i] = `zpool import scan could not run (the agent is unprivileged and the fallback failed too): ${scan.error}`; }
+      }
       const inv = buildDeviceInventory({ lsblk: devices.map((d) => ({ ...d, contains: d.contains || [] })), byId: Object.fromEntries(devices.flatMap((d) => [[d.path, d.by_id || []], ...(d.partitions || []).map((p) => [p.path, p.by_id || []])])), smart: Object.fromEntries(devices.map((d) => [d.path, d.smart])), mounts: agent.mounts || await osMounts(), importable, pools: status });
       return { devices: inv, importable, warnings, source: 'agent' };
     }
@@ -189,11 +208,8 @@ export function createStorageHost({ runHostCapture, agentCall = null, useAgent =
   async function incusDefaultProfileRoot() {
     const r = await exec(['incus', 'query', '/1.0/profiles/default'], { timeoutMs: 30000 });
     if (r.status !== 0) return null;
-    try {
-      const j = JSON.parse(r.stdout);
-      const root = Object.entries(j.devices || {}).find(([, d]) => d && d.type === 'disk' && d.path === '/');
-      return root ? { name: root[0], pool: root[1].pool || null } : null;
-    } catch { return null; }
+    const p = parseIncusProfileRoot(r.stdout);
+    return p && p.device ? p : null;
   }
 
   async function incusSnapshotForm() {

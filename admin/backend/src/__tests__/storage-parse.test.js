@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseLsblk, parseSmartctl, smartVerdict, parseFindmnt, parseByIdMap, parseZpoolList, parseZpoolStatus, parseZpoolStatusJson, parseZpoolImport,
-  parseZfsList, parseZfsSnapshots, classifySnapshotName, resolveOsDisks, buildDeviceInventory, parseIncusStoragePools, parseIncusInstances, incusInstanceDataset,
+  parseZfsList, parseZfsSnapshots, classifySnapshotName, resolveOsDisks, buildDeviceInventory, parseIncusStoragePools, parseIncusInstances, parseIncusProfileRoot, incusInstanceDataset,
 } from '../lib/storage/parse.js';
 import { fx, fixtureDevices } from './fixtures/storage/load.js';
 
@@ -91,6 +91,17 @@ test('parseZpoolStatusJson: OpenZFS 2.3 JSON → the same shape', () => {
   const [p] = parseZpoolStatusJson(j);
   assert.equal(p.name, 'tank'); assert.equal(p.scan.state, 'finished'); assert.equal(p.scan.function, 'scrub'); assert.equal(p.scan.last_end, '2025-09-14T00:24:03.000Z');
   assert.equal(p.vdevs[0].type, 'mirror'); assert.equal(p.vdevs[0].class, 'data'); assert.equal(p.vdevs[0].devices[0].cksum_errors, 1);
+  // error_count: 0 is the healthy case — it must read like the text form, not
+  // as the truthy "0 data errors" that once raised a false alert.
+  assert.equal(p.error_count, 0); assert.equal(p.errors, 'No known data errors');
+  const [bad] = parseZpoolStatusJson({ pools: { tank: { name: 'tank', state: 'ONLINE', error_count: 3, vdevs: {} } } });
+  assert.equal(bad.error_count, 3); assert.equal(bad.errors, '3 data errors');
+  const [silent] = parseZpoolStatusJson({ pools: { tank: { name: 'tank', state: 'ONLINE', vdevs: {} } } });
+  assert.equal(silent.error_count, null); assert.equal(silent.errors, null);
+  // The text parser carries the same numeric count.
+  const text = parseZpoolStatus(fx('zpool-status.txt'));
+  assert.equal(text.find((x) => x.name === 'tank').error_count, 0);
+  assert.equal(text.find((x) => x.name === 'data').error_count, 3);
 });
 
 test('parseZpoolImport: importable pools with their member names; empty scan', () => {
@@ -153,6 +164,14 @@ test('incus parsers: storage pools with sources, instances with their root pool 
   assert.deepEqual(pools.map((p) => [p.name, p.driver, p.source, p.used_by_count]), [['default', 'dir', '/var/lib/incus/storage-pools/default', 2], ['zfs', 'zfs', 'tank/incus', 2]]);
   const inst = parseIncusInstances(fx('incus-list.json'));
   assert.deepEqual(inst.map((i) => [i.name, i.status, i.pool]), [['pp-web', 'Running', 'zfs'], ['pp-db', 'Stopped', 'zfs'], ['pp-legacy', 'Running', 'default']]);
+  // has_own_root says which instances are independent of the profile's root disk.
+  assert.deepEqual(inst.map((i) => [i.name, i.has_own_root]), [['pp-web', true], ['pp-db', false], ['pp-legacy', false]]);
+  assert.equal(inst[0].root_device, 'root');
+  const prof = parseIncusProfileRoot({ devices: { root: { type: 'disk', path: '/', pool: 'default' } }, used_by: ['/1.0/instances/pp-web', '/1.0/instances/st%20aging?project=staging', '/1.0/images/abc', '/1.0/instances/pp-db?project=default&filter=x'] });
+  assert.equal(prof.device, 'root'); assert.equal(prof.pool, 'default');
+  assert.deepEqual(prof.used_by, [{ name: 'pp-web', project: 'default' }, { name: 'st aging', project: 'staging' }, { name: 'pp-db', project: 'default' }]);
+  assert.equal(parseIncusProfileRoot({ devices: {}, used_by: [] }).device, null);
+  assert.equal(parseIncusProfileRoot('nope'), null);
   assert.equal(incusInstanceDataset('tank/incus', inst[0]), 'tank/incus/containers/pp-web');
   assert.equal(incusInstanceDataset('tank/incus', { name: 'vm1', type: 'virtual-machine' }), 'tank/incus/virtual-machines/vm1');
   assert.deepEqual(parseIncusInstances('nope'), []);

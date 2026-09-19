@@ -263,3 +263,19 @@ should look for the WARNING line, not only the colour. If a project needs the
 audit to block promotion, that is a per-project decision recorded in
 `state/decisions.md`, not a seed change.
 
+
+## `mock2-ui-checks.test.js` — the ui-interaction gate test is flaky under the full suite
+
+`the ui-interaction gate hands over a template that is valid JSON, passes
+itself, and parses` passes on its own and fails intermittently under
+`npm test` (roughly two runs in three), with the gate reporting *"no
+user-facing screen files in this change … skipped"* for a temp repo that
+plainly has one. Cause: the gate script in
+`src/mock2/framework-seed/gates.json` writes its changed-file list to the
+fixed path `/tmp/ui-gate-changed.txt`, so two gate runs on one machine —
+which the suite does, in parallel, each in its own temp repo — clobber each
+other's list. The fix is a per-run path (`mktemp`), but the script lives in
+the framework seed, and editing the seed publishes a new framework version on
+the next boot (see `docs/mock2/standards-and-cpr.md`), so it belongs in a
+change of its own rather than riding along with unrelated work. Pre-existing;
+not caused by the storage feature.

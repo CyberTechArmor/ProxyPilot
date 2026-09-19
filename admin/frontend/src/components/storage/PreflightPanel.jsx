@@ -337,8 +337,13 @@ export function usePreflight({ enabled = true } = {}) {
   return { pf, loading, error, reload };
 }
 
-/** Compact header banner: shown only when an install is both needed and possible. */
-export function PreflightBanner({ state, onGoDevices }) {
+/**
+ * Compact header banner: shown only when an install is both needed and
+ * possible. Its button asks the page to OPEN the install dialog (onInstall),
+ * not merely to switch tabs — Devices is already the default tab, so a tab
+ * switch was a no-op and the button looked dead.
+ */
+export function PreflightBanner({ state, onInstall }) {
   const pf = state?.pf;
   if (!pf || !pf.can_install || !pf.install_needed) return null;
   const missing = (pf.missing_packages || []).join(', ');
@@ -346,16 +351,19 @@ export function PreflightBanner({ state, onGoDevices }) {
     <Notice level="warn">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
         <div className="min-w-0">
-          <p className="font-medium">The storage toolchain is not installed</p>
+          {/* Everything apt installs can be present while ProxyPilot's own
+              units and helpers are not: say which of the two it is, or the
+              chips above (all green) read as a contradiction. */}
+          <p className="font-medium">{pf.reinstall_only ? 'ProxyPilot\'s storage units are not installed yet' : 'The storage toolchain is not installed'}</p>
           <p className="break-words">
             {pf.reinstall_only
-              ? 'ProxyPilot\'s units or helper scripts are missing.'
+              ? 'The ZFS tools themselves are in place; the scrub and replication units or the helper scripts are missing.'
               : `Missing: ${missing || 'part of the toolchain'}.`}{' '}
             The dashboard can install it for you. No disk is touched.
           </p>
         </div>
-        {onGoDevices && (
-          <Button className={cn(BTN, 'shrink-0')} onClick={onGoDevices}>
+        {onInstall && (
+          <Button className={cn(BTN, 'shrink-0')} onClick={onInstall}>
             <Download className="h-4 w-4 mr-1.5" />Preflight &amp; install
           </Button>
         )}
@@ -366,7 +374,7 @@ export function PreflightBanner({ state, onGoDevices }) {
 
 /* --------------------------------- the panel ----------------------------- */
 
-export default function PreflightPanel({ state, onInstalled }) {
+export default function PreflightPanel({ state, onInstalled, openSignal = 0 }) {
   const { toast } = useToast();
   const { pf, loading, error, reload } = state;
   const [confirm, setConfirm] = useState(false);
@@ -380,6 +388,16 @@ export default function PreflightPanel({ state, onInstalled }) {
 
   // Stop polling when the panel goes away (tab switch, navigation).
   useEffect(() => () => { pollToken.current += 1; }, []);
+
+  // The header banner asks for the install dialog from far above the panel (on
+  // a phone the panel is several screens down), so bring the panel into view
+  // and open the confirmation with it.
+  const cardRef = useRef(null);
+  useEffect(() => {
+    if (!openSignal) return;
+    cardRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    setConfirm(true);
+  }, [openSignal]);
 
   const finish = useCallback((st) => {
     setWatching(false);
@@ -469,7 +487,7 @@ export default function PreflightPanel({ state, onInstalled }) {
   const logLines = String(run?.log_tail || '').split('\n').filter((l) => l.length > 0).slice(-LOG_LINES);
 
   return (
-    <Card>
+    <Card ref={cardRef}>
       <CardContent className="p-4 space-y-3">
         <SectionHeader
           title="Preflight & install"

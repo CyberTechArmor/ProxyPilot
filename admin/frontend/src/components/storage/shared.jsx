@@ -83,9 +83,10 @@ export function HealthChip({ health, title }) {
   return <Chip level={POOL_HEALTH_LEVEL[h] || 'muted'} title={title}>{h}</Chip>;
 }
 
-const STATUS_LEVEL = { ok: 'ok', running: 'info', stale: 'warn', overdue: 'warn', never: 'warn', none: 'warn', failed: 'fail', disabled: 'muted', unmanaged: 'muted' };
+const STATUS_LEVEL = { ok: 'ok', running: 'info', stale: 'warn', overdue: 'warn', never: 'warn', none: 'warn', failed: 'fail', disabled: 'muted', unmanaged: 'muted', not_configured: 'muted' };
+const STATUS_LABEL = { not_configured: 'no policy' };
 export function StatusChip({ status, title }) {
-  return <Chip level={STATUS_LEVEL[status] || 'muted'} title={title}>{status || '—'}</Chip>;
+  return <Chip level={STATUS_LEVEL[status] || 'muted'} title={title || (status === 'not_configured' ? 'no backup policy has been applied yet — nothing is expected' : undefined)}>{STATUS_LABEL[status] || status || '—'}</Chip>;
 }
 
 const SMART_LEVEL = { ok: 'ok', warn: 'warn', fail: 'fail', unknown: 'muted' };

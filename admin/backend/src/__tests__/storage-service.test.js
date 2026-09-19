@@ -214,6 +214,11 @@ test('MCP readers: zpool_status, zfs_list filters, list_zfs_snapshots by guest/k
   const fr = parse(await handlers.storage_freshness({ alerts: true }, AUTH));
   assert.ok(fr.pools.length === 2 && Array.isArray(fr.alerts) && fr.guests.length === 3);
   assert.ok(fr.alerts.some((a) => a.key === 'storage:pool-health:data'));
+  // No backup policy has been applied in this fixture, so freshness says so
+  // once instead of calling every dataset overdue.
+  assert.equal(fr.backup.policy_applied, false); assert.equal(fr.backup.reason, 'not_configured');
+  assert.deepEqual(fr.alerts.filter((a) => a.key.startsWith('storage:snapshot-stale:')), []);
+  assert.ok(fr.alerts.some((a) => a.key === 'storage:backups-unconfigured:tank'));
   const pol = parse(await handlers.get_backup_policy({}, AUTH));
   assert.equal(pol.policy.classes.guests.daily, 14); assert.match(pol.rendered, /\[tank\/incus\]/);
   const tc = parse(await handlers.storage_toolchain({}, AUTH));
@@ -224,5 +229,7 @@ test('MCP readers: zpool_status, zfs_list filters, list_zfs_snapshots by guest/k
   assert.equal(move.commands[2], 'incus move pp-legacy --storage zfs');
   const incus = parse(await handlers.set_incus_storage_pool({ dry_run: true }, AUTH));
   assert.equal(incus.plan.subject, 'zfs'); assert.equal(incus.plan.existing_pools.length, 2);
+  assert.equal(incus.commands[0], 'incus config device override pp-db root pool=zfs');
+  assert.equal(incus.commands[2], 'incus profile device set default root pool=zfs');
   assert.equal(parseZfsList(fx('zfs-list.txt')).length, 9);
 });

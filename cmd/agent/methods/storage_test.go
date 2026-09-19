@@ -674,6 +674,9 @@ func TestStorageZpoolStatus(t *testing.T) {
 		if p.Name != "tank" || s(p.State) != "ONLINE" || p.Status != nil || p.Action != nil || p.See != nil || p.Checkpoint != nil {
 			t.Errorf("tank header: %+v", p)
 		}
+		if f(p.ErrorCount) != 0 {
+			t.Errorf("tank error_count from the text form: %v", f(p.ErrorCount))
+		}
 		if s(p.Errors) != "No known data errors" || p.ConfigText == nil || !strings.Contains(*p.ConfigText, "mirror-0") {
 			t.Errorf("tank errors/config: %v / %v", s(p.Errors), s(p.ConfigText))
 		}
@@ -769,7 +772,9 @@ esac`)
 		t.Fatalf("status = %+v", res.Status)
 	}
 	p := res.Status[0]
-	if p.Name != "tank" || s(p.State) != "ONLINE" || s(p.Errors) != "0 data errors" || p.ConfigText != nil {
+	// error_count: 0 is healthy: it must read like the text form, never as a
+	// non-empty "0 data errors" that every consumer treats as a fault.
+	if p.Name != "tank" || s(p.State) != "ONLINE" || s(p.Errors) != "No known data errors" || f(p.ErrorCount) != 0 || p.ConfigText != nil {
 		t.Errorf("pool: %+v", p)
 	}
 	if p.Scan == nil || p.Scan.State != "finished" || s(p.Scan.Function) != "scrub" || s(p.Scan.LastEnd) != "2026-09-14T01:04:03.000Z" || s(p.Scan.Started) != "2026-09-13T21:46:39.000Z" || f(p.Scan.Errors) != 0 || p.Scan.Text != nil {

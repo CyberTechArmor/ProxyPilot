@@ -535,14 +535,70 @@ export function planSetIncusStoragePool(inv, params = {}) {
   if (!existing && children.length) return { error: `refused: ${dataset} already has child datasets (${children.slice(0, 5).map((c) => c.name).join(', ')}) — Incus needs an empty dataset` };
   const plan = newPlan('set_incus_storage_pool', name, `${existing ? 'Keep' : 'Create'} Incus storage pool ${name} on ${dataset} and make it the default profile's root pool`);
   if (!existing) plan.steps.push(step(['incus', 'storage', 'create', name, 'zfs', `source=${dataset}`], 'Create the Incus storage pool', { timeout_ms: 300000 }));
+  const pins = [];
   if (params.set_default !== false) {
-    if (inv.defaultProfileRoot) plan.steps.push(step(['incus', 'profile', 'device', 'set', 'default', 'root', `pool=${name}`], `Point the default profile's root disk at ${name} (was ${inv.defaultProfileRoot.pool || '—'})`));
-    else plan.steps.push(step(['incus', 'profile', 'device', 'add', 'default', 'root', 'disk', 'path=/', `pool=${name}`], 'Add a root disk on the pool to the default profile'));
+    if (inv.defaultProfileRoot) {
+      const dev = inv.defaultProfileRoot.device || inv.defaultProfileRoot.name || 'root';
+      const { reliant, unknown } = instancesOnProfileRoot(inv);
+      // Incus refuses `profile device set default root pool=…` while any
+      // instance relies on that inherited root disk ("At least one instance
+      // relies on this profile's root disk device"). Copy the inherited
+      // device onto each of those instances first, keeping the pool it
+      // already has: nothing is moved, the guest keeps living exactly where
+      // it lives, and the profile is then free to point new guests elsewhere.
+      if (reliant.length && params.pin_existing === false) {
+        return { error: `refused: ${reliant.length} instance(s) rely on the default profile's root disk (${reliant.slice(0, 5).map((i) => i.name).join(', ')}) and Incus will not repoint it while they do — drop pin_existing: false to pin each to its current pool first (no data is moved), or pass set_default: false to leave the profile alone` };
+      }
+      for (const inst of reliant) {
+        const scope = inst.project && inst.project !== 'default' ? ['--project', inst.project] : [];
+        const argv = ['incus', 'config', 'device', 'override', ...scope, inst.name, dev];
+        if (inst.pool) argv.push(`pool=${inst.pool}`);
+        plan.steps.push(step(argv, `Pin ${inst.name} to the pool it is already on (${inst.pool || 'inherited'}) so the profile can be repointed — no data is moved`, { timeout_ms: 60000 }));
+        pins.push({ name: inst.name, project: inst.project, pool: inst.pool, device: dev });
+      }
+      if (reliant.length) plan.warnings.push(`${reliant.length} existing guest(s) stay on ${[...new Set(reliant.map((i) => i.pool || '?'))].join(', ')} — only guests created from now on land on ${name}. move_guest_storage moves an existing guest.`);
+      for (const u of unknown) plan.warnings.push(`could not check whether ${u} has its own root disk (it was not in the instance list) — if the profile step is refused, run \`incus config device override ${u} ${dev}\` and retry`);
+      plan.steps.push(step(['incus', 'profile', 'device', 'set', 'default', dev, `pool=${name}`], `Point the default profile's root disk at ${name} (was ${inv.defaultProfileRoot.pool || '—'})`));
+    } else plan.steps.push(step(['incus', 'profile', 'device', 'add', 'default', 'root', 'disk', 'path=/', `pool=${name}`], 'Add a root disk on the pool to the default profile'));
   }
   plan.steps.push(step(['incus', 'storage', 'show', name], 'Verify', { kind: 'verify' }));
   plan.existing_pools = (inv.incusPools || []).map((p) => ({ name: p.name, driver: p.driver, source: p.source, used_by: p.used_by_count }));
-  plan.reversal = inv.defaultProfileRoot ? `incus profile device set default root pool=${inv.defaultProfileRoot.pool}; incus storage delete ${name}` : `incus profile device remove default root; incus storage delete ${name}`;
+  plan.pins = pins;
+  const undoPins = pins.map((p) => `incus config device remove ${p.project && p.project !== 'default' ? `--project ${p.project} ` : ''}${p.name} ${p.device}`);
+  plan.reversal = [
+    inv.defaultProfileRoot ? `incus profile device set default ${inv.defaultProfileRoot.device || 'root'} pool=${inv.defaultProfileRoot.pool}` : 'incus profile device remove default root',
+    ...undoPins,
+    `incus storage delete ${name}`,
+  ].join('; ');
   return { plan };
+}
+
+/**
+ * Which instances inherit the default profile's root disk (and so block a
+ * change to its pool). The profile's own `used_by` is authoritative about
+ * which instances the profile applies to, across projects; `has_own_root`
+ * from the instance list says which of those carry their own root device and
+ * are therefore already independent of it. `unknown` names instances in
+ * `used_by` that the instance list did not cover, so the plan can say so
+ * instead of guessing.
+ */
+function instancesOnProfileRoot(inv) {
+  const instances = inv.instances || [];
+  const byKey = new Map(instances.map((i) => [`${i.project || 'default'}/${i.name}`, i]));
+  const usedBy = Array.isArray(inv.defaultProfileRoot?.used_by) ? inv.defaultProfileRoot.used_by : null;
+  if (!usedBy) {
+    // No used_by (older Incus, or the profile query came back thin): fall back
+    // to every instance sitting on the profile's pool without its own root.
+    const pool = inv.defaultProfileRoot?.pool || null;
+    return { reliant: instances.filter((i) => i.has_own_root === false && (!pool || i.pool === pool)), unknown: [] };
+  }
+  const reliant = []; const unknown = [];
+  for (const u of usedBy) {
+    const inst = byKey.get(`${u.project || 'default'}/${u.name}`);
+    if (!inst) { unknown.push(u.name); continue; }
+    if (inst.has_own_root === false) reliant.push(inst);
+  }
+  return { reliant, unknown };
 }
 
 const incusSnapshotArgv = (form, guest, snap) => (form === 'legacy' ? ['incus', 'snapshot', guest, snap] : ['incus', 'snapshot', 'create', guest, snap]);

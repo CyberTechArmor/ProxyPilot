@@ -161,9 +161,36 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
   };
   const OP_NAMES = Object.freeze(Object.keys(PLANNERS));
 
+  /**
+   * Binaries an op's plan will actually invoke. Checked BEFORE the plan is
+   * handed out, because a plan whose first step is destructive and whose
+   * second step needs a missing binary is the worst possible outcome:
+   * `create_zpool` would wipefs the disk and then fail on `zpool create`,
+   * leaving it blank with no pool. A missing tool is a refusal, never a
+   * half-run plan.
+   */
+  const OP_BINARIES = {
+    create_zpool: ['zpool', 'zfs', 'wipefs'], set_managed_pool: ['zfs'], create_dataset: ['zfs'], set_dataset_props: ['zfs'],
+    destroy_dataset: ['zfs'], zfs_snapshot: ['zfs'], zfs_rollback: ['zfs'], destroy_zfs_snapshot: ['zfs'],
+    replace_disk: ['zpool'], zpool_scrub: ['zpool'], import_pool: ['zpool'], export_pool: ['zpool'],
+    set_incus_storage_pool: ['zfs', 'incus'], move_guest_storage: ['incus'],
+    restore_guest_from_snapshot: ['incus'], rollback_guest_dataset: ['zfs', 'incus'], set_backup_policy: ['zfs'],
+  };
+  const INSTALL_HINT = 'run `sudo bash scripts/install-storage.sh` on the host first — it installs zfsutils-linux, smartmontools and sanoid plus the ProxyPilot units and helpers';
+
+  async function missingBinary(op) {
+    for (const bin of OP_BINARIES[op] || []) {
+      // eslint-disable-next-line no-await-in-loop
+      if (!(await host.hasBinary(bin))) return bin;
+    }
+    return null;
+  }
+
   async function plan(op, params = {}, { inv = null } = {}) {
     const fn = PLANNERS[op];
     if (!fn) return { error: `unknown storage operation ${op}` };
+    const missing = await missingBinary(op);
+    if (missing) return { error: `${missing} is not installed on this host, so ${op} cannot run: ${INSTALL_HINT}. Nothing was touched.` };
     const inventoryNow = inv || await inventory({ smart: ['create_zpool', 'replace_disk'].includes(op) });
     const r = fn(inventoryNow, params || {});
     if (r.error) return { error: r.error, inventory_at: inventoryNow.collected_at };

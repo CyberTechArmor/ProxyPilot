@@ -251,7 +251,8 @@ test('rootfs-tar: the artifact is hashed, imported as a split image, and the gue
   assert.match(initLine, /--config boot\.autostart=false/);
   assert.match(initLine, /--config security\.nesting=true/);
   assert.ok(argv.some((c) => c.startsWith('incus image delete pp-migration-')), 'the temporary image is not left in the pool');
-  assert.ok(argv.some((c) => c === 'proxypilot --json firewall egress deny web all'), 'the fence goes up before anything else');
+  assert.ok(argv.some((c) => c === 'proxypilot --json firewall egress list'), 'the fence is confirmed against the live rules, not assumed');
+  assert.ok(svc.listEvents(id).some((e) => /default-deny egress \(the firewall baseline/.test(e.message || '')), 'a clean guest is fenced by the baseline, not by adding a rule');
 
   const v = svc.view(svc.rowById(id));
   assert.equal(v.status, 'ready');
@@ -259,20 +260,39 @@ test('rootfs-tar: the artifact is hashed, imported as a split image, and the gue
   assert.ok(svc.listEvents(id).some((e) => /stopped and fenced/.test(e.message || '')));
 });
 
-test('a fence that fails is loud: it never reads as fenced', async () => {
-  const { svc } = setup({ script: (bin, args) => {
+test('a fence that cannot be confirmed is loud, and an inherited allow is removed', async () => {
+  // The firewall CLI is missing: "we could not check" must never read as
+  // "it is fenced".
+  const broken = setup({ script: (bin, args) => {
     if (bin === 'proxypilot') return { status: 1, stderr: 'firewall CLI missing' };
     if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return { status: 1 };
     return { status: 0 };
   } });
-  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
-  svc.recordManifest(svc.rowById(r.migration.id), MANIFEST);
-  await svc.approveTransfer(r.migration.id, { actor: 'a' });
-  await svc.receiveArtifact(svc.rowById(r.migration.id), Readable.from([Buffer.from('x')]));
-  await svc.importRootfsTar(svc.rowById(r.migration.id));
-  const err = svc.listEvents(r.migration.id).find((e) => e.kind === 'error');
-  assert.match(err.message, /could not apply the default-deny egress fence/);
+  const r = await broken.svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  broken.svc.recordManifest(broken.svc.rowById(r.migration.id), MANIFEST);
+  await broken.svc.approveTransfer(r.migration.id, { actor: 'a' });
+  await broken.svc.receiveArtifact(broken.svc.rowById(r.migration.id), Readable.from([Buffer.from('x')]));
+  await broken.svc.importRootfsTar(broken.svc.rowById(r.migration.id));
+  const err = broken.svc.listEvents(r.migration.id).find((e) => e.kind === 'error');
+  assert.match(err.message, /could not read the egress rules to confirm the fence/);
   assert.match(err.message, /check it by hand before the route goes up/);
+
+  // A guest name that inherited an allow from a previous life: it is removed.
+  const stale = setup({ script: (bin, args) => {
+    if (bin === 'proxypilot' && args[3] === 'list') return { status: 0, stdout: JSON.stringify({ entries: [{ container: 'web', service: 'https' }, { container: 'other', service: 'smtp' }] }) };
+    if (bin === 'proxypilot') return { status: 0, stdout: '{"ok":true}' };
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return { status: 1 };
+    return { status: 0 };
+  } });
+  const r2 = await stale.svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  stale.svc.recordManifest(stale.svc.rowById(r2.migration.id), MANIFEST);
+  await stale.svc.approveTransfer(r2.migration.id, { actor: 'a' });
+  await stale.svc.receiveArtifact(stale.svc.rowById(r2.migration.id), Readable.from([Buffer.from('x')]));
+  await stale.svc.importRootfsTar(stale.svc.rowById(r2.migration.id));
+  const argv = argvOf(stale.calls);
+  assert.ok(argv.some((c) => c === 'proxypilot --json firewall egress deny web https'), "the guest's own inherited allow is removed");
+  assert.ok(!argv.some((c) => c.includes('egress deny other')), "another guest's rule is not touched");
+  assert.ok(stale.svc.listEvents(r2.migration.id).some((e) => /1 inherited allow\(s\) removed: https/.test(e.message || '')));
 });
 
 /* -------------------------- application mode ----------------------------- */
@@ -293,7 +313,7 @@ test('application mode: approving creates the guest and fences it; the copy goes
   const launch = argvOf(calls).find((c) => c.startsWith('incus launch'));
   assert.match(launch, /^incus launch images:debian\/13 pp-app/);
   assert.match(launch, /--config boot\.autostart=false/);
-  assert.ok(argvOf(calls).some((c) => c === 'proxypilot --json firewall egress deny app all'));
+  assert.ok(argvOf(calls).some((c) => c === 'proxypilot --json firewall egress list'));
 
   const job = await svc.agentJob(svc.rowById(id));
   assert.deepEqual(job.sync.dirs, ['/srv/myapp']);

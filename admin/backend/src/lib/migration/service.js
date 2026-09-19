@@ -351,18 +351,42 @@ export function createMigrationService({
 
   /**
    * An imported guest is fenced before it is anything else: default-deny
-   * egress and no route. The firewall CLI owns the fence; a failure here is
-   * loud, because "we could not fence it" must never read as "it is fenced".
+   * egress and no route.
+   *
+   * Default-deny is the FIREWALL'S BASELINE, not something to add: every
+   * bridge → host flow that is not listed is already denied. So fencing is
+   * confirming that this guest has no allow entries, and removing any it
+   * inherited from a guest of the same name. (The first version ran
+   * `egress deny <name> all`, which asks the CLI to remove an entry that was
+   * never there and fails with "no egress entry for container" — loudly, on
+   * every clean import. Caught on the first real migration.)
    */
   async function fenceGuest(row) {
     const bare = row.target_name.startsWith(lxcPrefix) ? row.target_name.slice(lxcPrefix.length) : row.target_name;
-    const r = await exec('proxypilot', ['--json', 'firewall', 'egress', 'deny', bare, 'all'], { timeoutMs: 60000 });
-    if (r.status !== 0) {
-      event(row.id, { kind: 'error', message: `could not apply the default-deny egress fence: ${tail(r.stderr) || tail(r.stdout) || `exit ${r.status}`} — check it by hand before the route goes up` });
-      return { error: 'fence failed' };
+    const list = await exec('proxypilot', ['--json', 'firewall', 'egress', 'list'], { timeoutMs: 60000 });
+    if (list.status !== 0) {
+      event(row.id, { kind: 'error', message: `could not read the egress rules to confirm the fence: ${tail(list.stderr) || tail(list.stdout) || `exit ${list.status}`} — check it by hand before the route goes up` });
+      return { error: 'fence unverified' };
     }
-    event(row.id, { kind: 'state', message: 'guest fenced: default-deny egress, no route' });
-    return { fenced: true };
+    const entries = (parse(list.stdout, {})?.entries || []).filter((e) => e && (e.container === bare || e.container === row.target_name));
+    const removed = [];
+    for (const e of entries) {
+      const svc = e.service || (e.port ? `${e.proto || 'tcp'}:${e.port}` : null);
+      if (!svc) continue;
+      const rm = await exec('proxypilot', ['--json', 'firewall', 'egress', 'deny', bare, svc], { timeoutMs: 60000 });
+      if (rm.status !== 0) {
+        event(row.id, { kind: 'error', message: `an inherited egress allow (${svc}) could not be removed from ${bare}: ${tail(rm.stderr) || tail(rm.stdout)} — remove it by hand before the route goes up` });
+        return { error: 'fence incomplete' };
+      }
+      removed.push(svc);
+    }
+    event(row.id, {
+      kind: 'state',
+      message: removed.length
+        ? `guest fenced: default-deny egress, no route (${removed.length} inherited allow(s) removed: ${removed.join(', ')})`
+        : 'guest fenced: default-deny egress (the firewall baseline — this guest has no allow entries), no route',
+    });
+    return { fenced: true, removed };
   }
 
   /* ------------------------------- events ------------------------------- */

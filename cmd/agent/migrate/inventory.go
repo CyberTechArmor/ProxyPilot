@@ -265,11 +265,16 @@ func guestKind(virt string, c *Collector) string {
 	case "", "none":
 		return "physical"
 	case "lxc", "lxc-libvirt", "systemd-nspawn":
-		if _, err := c.Stat("/dev/.lxc"); err == nil {
-			return "lxc"
+		// Incus and LXD guests carry their own socket; everything else that
+		// reports itself as an LXC container is Proxmox or a hand-rolled
+		// container. The label is for the operator — BOTH take the
+		// rootfs-tar transport, because neither can run incus-migrate
+		// inside itself (there is no block device of its own to stream).
+		for _, sock := range []string{"/dev/incus/sock", "/dev/lxd/sock"} {
+			if _, err := c.Stat(sock); err == nil {
+				return "lxc"
+			}
 		}
-		// Proxmox marks its containers; the distinction matters because a
-		// Proxmox LXC has no block device of its own to stream.
 		if b, err := c.Read("/proc/1/environ"); err == nil && strings.Contains(string(b), "container=lxc") {
 			return "proxmox-lxc"
 		}

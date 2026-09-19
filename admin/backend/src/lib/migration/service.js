@@ -36,7 +36,13 @@ const nowIso = (t = Date.now()) => new Date(t).toISOString();
 const j = (v) => (v == null ? null : JSON.stringify(v));
 const parse = (s, fallback = null) => { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } };
 
-export function createMigrationService({ getDb, runHostCapture, publicBaseUrl, logAudit = () => {}, now = () => Date.now(), lxcPrefix = 'pp-' } = {}) {
+export function createMigrationService({
+  getDb, runHostCapture, publicBaseUrl, logAudit = () => {}, now = () => Date.now(), lxcPrefix = 'pp-',
+  // Injected rather than read from the module constants so a test (and a
+  // future packaging that moves them) does not depend on /var/lib being
+  // writable by whoever is running.
+  workDir = WORK_DIR, agentDir = AGENT_DIR,
+} = {}) {
   if (typeof getDb !== 'function') throw new Error('createMigrationService needs getDb');
   if (typeof runHostCapture !== 'function') throw new Error('createMigrationService needs runHostCapture');
 
@@ -417,7 +423,7 @@ export function createMigrationService({ getDb, runHostCapture, publicBaseUrl, l
    * `importRootfsTar`; nothing is executed from it.
    */
   async function artifactPath(row) {
-    const dir = join(WORK_DIR, String(row.id));
+    const dir = join(workDir, String(row.id));
     await mkdir(dir, { recursive: true, mode: 0o700 });
     return { dir, path: join(dir, 'rootfs.tar.gz') };
   }
@@ -620,7 +626,7 @@ export function createMigrationService({ getDb, runHostCapture, publicBaseUrl, l
   async function agentBinaries() {
     const out = {};
     for (const arch of ARCHES) {
-      const path = join(AGENT_DIR, `proxypilot-agent-linux-${arch}`);
+      const path = join(agentDir, `proxypilot-agent-linux-${arch}`);
       try {
         const st = await stat(path);
         const sum = await exec('sha256sum', [path], { timeoutMs: 120000 });

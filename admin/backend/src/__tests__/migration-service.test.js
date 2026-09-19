@@ -8,7 +8,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
 import { createMigrationService } from '../lib/migration/service.js';
@@ -59,9 +61,12 @@ function setup({ script = () => ({ status: 0, stdout: '', stderr: '' }) } = {}) 
     const r = script(bin, args, calls.length) || {};
     return { status: r.status ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
   };
+  // An uploaded rootfs tarball must land somewhere writable by whoever runs
+  // the tests — /var/lib/proxypilot is not that on a CI runner.
+  const workDir = mkdtempSync(join(tmpdir(), 'pp-migration-'));
   const svc = createMigrationService({
     getDb: () => db, runHostCapture, publicBaseUrl: () => 'http://localhost:3001',
-    logAudit: (...a) => audit.push(a), now: () => NOW,
+    logAudit: (...a) => audit.push(a), now: () => NOW, workDir, agentDir: join(workDir, 'agent'),
   });
   const confirmations = createConfirmationStore();
   const ledger = [];
@@ -71,7 +76,7 @@ function setup({ script = () => ({ status: 0, stdout: '', stderr: '' }) } = {}) 
     policy: POLICY, confirmations, runHostCapture, LXC_PREFIX: 'pp-', migration: () => svc,
   };
   const { handlers } = createExtendedHandlers(ctx);
-  return { db, svc, calls, audit, handlers, ledger };
+  return { db, svc, calls, audit, handlers, ledger, workDir, cleanup: () => rmSync(workDir, { recursive: true, force: true }) };
 }
 
 const argvOf = (calls) => calls.map((c) => c.argv.join(' '));

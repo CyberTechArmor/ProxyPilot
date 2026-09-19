@@ -9,12 +9,12 @@ const id = { type: 'number', description: 'Migration id (list_migrations).' };
 
 export const MIGRATION_TOOLS = Object.freeze([
   tool('create_migration',
-    'Start a migration and return the ONE-LINE command the operator pastes on the SOURCE host (as root). Two modes: "whole-machine" wraps the official incus-migrate to stream a physical host, a VM (any hypervisor, including Proxmox) or an LXC into Incus — a Proxmox LXC, where incus-migrate cannot run inside the guest, takes the rootfs-tar path automatically; "application" leaves the source running and rsyncs the application directories into a fresh guest, dumping and restoring the database logically. Nothing is copied until the inventory arrives and approve_migration is called. The token is single-use, scoped to this migration, expiring, and the agent pins TLS to this ProxyPilot\'s certificate.',
+    'Start a migration and return the ONE-LINE command the operator pastes on the SOURCE host (as root). Two modes: "whole-machine" wraps the official incus-migrate to stream a physical host, a VM (any hypervisor, including Proxmox) or an LXC into Incus — a Proxmox LXC, where incus-migrate cannot run inside the guest, takes the rootfs-tar path automatically; "application" leaves the source running and streams the application directories into a fresh guest (tarballs through ProxyPilot and `incus exec`, so no sshd or key is added to the guest), dumping and restoring the database logically. Nothing is copied until the inventory arrives and approve_migration is called. The token is single-use, scoped to this migration, expiring, and the agent pins TLS to this ProxyPilot\'s certificate.',
     {
       mode: { type: 'string', enum: ['whole-machine', 'application'], description: 'whole-machine moves the machine; application adopts the app into a new guest.' },
       name: { type: 'string', description: 'Guest name without the pp- prefix.' },
       type: { type: 'string', enum: ['container', 'virtual-machine'], description: 'What to create in Incus (default container).' },
-      transport: { type: 'string', enum: ['incus-migrate', 'rootfs-tar', 'rsync'], description: 'Usually omitted: it is derived from the mode and the source kind.' },
+      transport: { type: 'string', enum: ['incus-migrate', 'rootfs-tar', 'file-sync'], description: 'Usually omitted: it is derived from the mode and the source kind.' },
       source_kind: { type: 'string', description: 'physical | vm | lxc | proxmox-lxc | docker, when you already know it (the agent reports it either way).' },
       source_label: { type: 'string', description: 'How the operator refers to this source, e.g. "old-web01 at Hetzner".' },
       cpu: { type: 'number', description: 'vCPUs for the new guest (default 2).' },
@@ -25,7 +25,7 @@ export const MIGRATION_TOOLS = Object.freeze([
       nested: { type: 'boolean', description: 'security.nesting — set it when the source runs docker/compose, so the stack keeps working inside the guest.' },
       image: { type: 'string', description: 'Application mode: the base image for the new guest (default images:debian/13).' },
       app_dirs: { type: 'array', items: { type: 'string' }, description: 'Application mode: absolute directories to copy. Omit and the agent proposes them from the inventory.' },
-      excludes: { type: 'array', items: { type: 'string' }, description: 'Extra rsync excludes on top of the default set (.git, node_modules, caches, logs …).' },
+      excludes: { type: 'array', items: { type: 'string' }, description: 'Extra excludes on top of the default set (.git, node_modules, caches, logs …).' },
       database: { type: 'string', enum: ['none', 'postgres', 'mysql', 'sqlite'], description: 'Application mode: what to dump and restore into the guest.' },
       service_name: { type: 'string', description: 'The systemd unit that runs the app on the source (used by the freeze step).' },
       freeze: { type: 'string', enum: ['stop', 'read-only', 'none'], description: 'What the cutover does to the source service (default stop).' },

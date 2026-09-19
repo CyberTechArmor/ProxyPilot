@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -163,17 +164,18 @@ type Job struct {
 		} `json:"answers"`
 	} `json:"incus"`
 	Artifact *struct {
+		Kind       string   `json:"kind"`
 		ChunkBytes int      `json:"chunk_bytes"`
 		Exclude    []string `json:"exclude"`
 	} `json:"artifact"`
-	Rsync *struct {
-		Host     string   `json:"host"`
-		User     string   `json:"user"`
-		Port     int      `json:"port"`
+	Sync *struct {
 		Dirs     []string `json:"dirs"`
 		Excludes []string `json:"excludes"`
 		Database string   `json:"database"`
-	} `json:"rsync"`
+		// Set on a second pass: tar only what changed since, which is the
+		// final delta sync.
+		Since string `json:"since"`
+	} `json:"sync"`
 }
 
 // Job fetches the current instruction document.
@@ -240,10 +242,16 @@ func (c *Client) Finish(bytesMoved int64, message string) error {
 	return err
 }
 
-// UploadArtifact streams the rootfs tarball, reporting progress as it goes.
-func (c *Client) UploadArtifact(r io.Reader, sha string, onProgress func(int64)) error {
+// UploadArtifact streams one artifact — the rootfs tarball, an application
+// directory, or a database dump — reporting progress as it goes. `kind` and
+// `name` tell the server what it is and what to do with it.
+func (c *Client) UploadArtifact(r io.Reader, kind, name, sha string, onProgress func(int64)) error {
 	pr := &progressReader{r: r, onProgress: onProgress}
-	req, err := http.NewRequest(http.MethodPut, c.url("/artifact"), pr)
+	q := "?kind=" + url.QueryEscape(kind)
+	if name != "" {
+		q += "&name=" + url.QueryEscape(name)
+	}
+	req, err := http.NewRequest(http.MethodPut, c.url("/artifact"+q), pr)
 	if err != nil {
 		return err
 	}

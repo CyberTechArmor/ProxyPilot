@@ -200,12 +200,12 @@ export function createMigrationService({
       job.incus = { url: t.url, token: t.token, fingerprint: t.fingerprint, answers: migrateAnswers(row, spec, t) };
     }
     if (row.transport === 'rootfs-tar') {
-      job.artifact = { upload_path: `/api/migrations/agent/${'{token}'}/artifact`, chunk_bytes: 8 * 1024 * 1024, exclude: TAR_EXCLUDES };
+      job.artifact = { kind: 'rootfs', chunk_bytes: 8 * 1024 * 1024, exclude: TAR_EXCLUDES };
     }
-    if (row.transport === 'rsync') {
-      const t = await rsyncTarget(row, spec);
+    if (row.transport === 'file-sync') {
+      const t = await syncTarget(row, spec);
       if (t.error) return { ...job, error: t.error, approved: false };
-      job.rsync = t;
+      job.sync = t;
     }
     return job;
   }
@@ -263,29 +263,26 @@ export function createMigrationService({
     try { return new URL(String(publicBaseUrl?.() || publicBaseUrl || '')).hostname || 'localhost'; } catch { return 'localhost'; }
   }
 
-  /** Where the agent rsyncs to, in application mode: the guest, through the host. */
-  async function rsyncTarget(row, spec) {
-    const inst = await exec('incus', ['list', `^${row.target_name}$`, '--format', 'json'], { timeoutMs: 30000 });
-    if (inst.status !== 0) return { error: `could not look up ${row.target_name}: ${tail(inst.stderr)}` };
-    const list = parse(inst.stdout, []) || [];
-    if (!list.length) return { error: `the target guest ${row.target_name} does not exist yet — approve the transfer and ProxyPilot creates it first` };
-    const addr = firstAddress(list[0]);
-    if (!addr) return { error: `${row.target_name} has no address yet — start it and wait for the network` };
+  /**
+   * Application mode's transport instructions. The agent never touches the
+   * guest: it tars each directory and the database dump to ProxyPilot, which
+   * unpacks them through `incus exec`. No sshd, no key, no open port added to
+   * a guest that did not ask for one.
+   *
+   * `since` is set on a second pass so the tar carries only what changed —
+   * the final delta sync, without rsync's dependency.
+   */
+  async function syncTarget(row, spec) {
+    const chk = await exec('incus', ['config', 'show', row.target_name], { timeoutMs: 30000 });
+    if (chk.status !== 0) return { error: `the target guest ${row.target_name} does not exist yet — approve the transfer and ProxyPilot creates it first` };
+    const dirs = spec.app?.dirs || [];
+    if (!dirs.length) return { error: 'no application directory was chosen — set app_dirs on the migration (the inventory proposes them)' };
     return {
-      host: addr, user: 'root', port: 22,
-      dirs: spec.app?.dirs || [], excludes: spec.app?.excludes || [],
-      database: spec.app?.database || 'none',
-      note: 'The agent pushes over SSH to the guest; ProxyPilot installs its public key there for the duration of the migration.',
+      dirs, excludes: spec.app?.excludes || [], database: spec.app?.database || 'none',
+      chunk_bytes: 8 * 1024 * 1024,
+      since: row.approved_at && row.phase === 'cutover' ? row.approved_at : null,
+      note: 'Each directory is tarred and PUT to /artifact; ProxyPilot unpacks it into the guest. The database dump travels the same way.',
     };
-  }
-
-  function firstAddress(instance) {
-    const nets = instance?.state?.network || {};
-    for (const [iface, n] of Object.entries(nets)) {
-      if (iface === 'lo') continue;
-      for (const a of n.addresses || []) if (a.family === 'inet' && a.scope === 'global') return a.address;
-    }
-    return null;
   }
 
   /* ------------------------------ manifest ------------------------------ */
@@ -321,8 +318,8 @@ export function createMigrationService({
     if (row.approved_at) return { error: 'this transfer is already approved' };
     const spec = parse(row.spec_json, {});
 
-    // Application mode needs the guest to exist BEFORE the agent can rsync
-    // into it; whole-machine mode creates it by arriving.
+    // Application mode needs the guest to exist BEFORE anything can be
+    // unpacked into it; whole-machine mode creates it by arriving.
     if (row.mode === 'application') {
       const made = await ensureApplicationGuest(row, spec);
       if (made.error) return { error: made.error };
@@ -374,7 +371,7 @@ export function createMigrationService({
     try {
       db().prepare('INSERT INTO migration_events (migration_id, at, phase, kind, bytes, message, detail_json) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(Number(migrationId), nowIso(now()), phase, String(kind), bytes == null ? null : Math.max(0, Math.round(Number(bytes))), message == null ? null : String(message).slice(0, 2000), j(detail));
-      // Keep the stream bounded: a multi-hour rsync emits a progress line a
+      // Keep the stream bounded: a multi-hour transfer emits a progress line a
       // second, and nobody reads the middle of it.
       db().prepare(`DELETE FROM migration_events WHERE migration_id = ? AND kind = 'log' AND id NOT IN (
                       SELECT id FROM migration_events WHERE migration_id = ? ORDER BY id DESC LIMIT ?)`)
@@ -428,8 +425,22 @@ export function createMigrationService({
     return { dir, path: join(dir, 'rootfs.tar.gz') };
   }
 
-  async function receiveArtifact(row, stream, { expectedSha256 = null } = {}) {
-    const { path } = await artifactPath(row);
+  /**
+   * Receive one artifact. `kind` says what it is and what happens next:
+   *
+   *   rootfs   the whole-machine tarball — kept for importRootfsTar
+   *   dir      one application directory — unpacked INTO the guest and deleted
+   *   dbdump   a logical dump — restored INSIDE the guest and deleted
+   *
+   * The file lands under WORK_DIR, which install.sh bind-mounts into the
+   * backend container at the same path it has on the host — so the host-side
+   * `incus` can read exactly the file the backend just wrote. Nothing is
+   * executed from an artifact; a tarball is only ever fed to tar.
+   */
+  async function receiveArtifact(row, stream, { expectedSha256 = null, kind = 'rootfs', name = null } = {}) {
+    const { dir } = await artifactPath(row);
+    const safe = String(name || '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) || String(now());
+    const path = kind === 'rootfs' ? join(dir, 'rootfs.tar.gz') : join(dir, `${kind}-${safe}.bin`);
     const hash = createHash('sha256');
     let bytes = 0;
     await new Promise((resolve, reject) => {
@@ -447,10 +458,53 @@ export function createMigrationService({
     const sha = hash.digest('hex');
     if (expectedSha256 && expectedSha256.toLowerCase() !== sha) {
       await rm(path, { force: true });
-      return { error: `the rootfs tarball did not survive the transfer (sha256 ${sha}, expected ${expectedSha256})` };
+      return { error: `the ${kind} artifact did not survive the transfer (sha256 ${sha}, expected ${expectedSha256})` };
     }
-    event(row.id, { kind: 'state', phase: 'transfer', bytes, message: `rootfs tarball received (${bytes} bytes, sha256 ${sha.slice(0, 12)}…)` });
-    return { path, bytes, sha256: sha };
+    event(row.id, { kind: 'state', phase: 'transfer', bytes, message: `${kind}${name ? ` ${name}` : ''} received (${bytes} bytes, sha256 ${sha.slice(0, 12)}…)` });
+
+    if (kind === 'dir') {
+      const r = await unpackIntoGuest(row, path, name);
+      await rm(path, { force: true });
+      if (r.error) return r;
+    }
+    if (kind === 'dbdump') {
+      const r = await restoreIntoGuest(row, path, name);
+      await rm(path, { force: true });
+      if (r.error) return r;
+    }
+    return { path: kind === 'rootfs' ? path : null, bytes, sha256: sha, kind };
+  }
+
+  /**
+   * tar → the guest, through `incus exec`. The redirect happens in a host
+   * shell so the tarball streams from disk rather than through the backend's
+   * memory, and tar's own --keep-directory-symlink / -p are left at their
+   * defaults: this is a restore of the source's own tree, not an overlay.
+   */
+  async function unpackIntoGuest(row, tarPath, label) {
+    const r = await exec('sh', ['-c', 'incus exec "$1" -- tar -xzf - -C / < "$2"', 'sh', row.target_name, tarPath], { timeoutMs: 4 * 3600 * 1000 });
+    if (r.status !== 0) return { error: `could not unpack ${label || 'the directory'} into ${row.target_name}: ${tail(r.stderr) || `exit ${r.status}`}` };
+    event(row.id, { kind: 'state', phase: 'transfer', message: `unpacked ${label || 'a directory'} into ${row.target_name}` });
+    return { unpacked: true };
+  }
+
+  /** The logical dump, restored by the guest's own engine. */
+  async function restoreIntoGuest(row, dumpPath, engineAndDb) {
+    const [engine, dbName] = String(engineAndDb || '').split(':');
+    const g = row.target_name;
+    let script;
+    if (engine === 'postgres') {
+      if (!/^[A-Za-z0-9_]{1,63}$/.test(dbName || '')) return { error: `refused: ${JSON.stringify(dbName)} is not a database name` };
+      script = `incus exec "$1" -- sh -c 'command -v pg_restore >/dev/null || { echo "postgresql is not installed in the guest" >&2; exit 90; }; su postgres -c "createdb ${dbName}" 2>/dev/null; su postgres -c "pg_restore --no-owner --no-acl -d ${dbName}"' < "$2"`;
+    } else if (engine === 'mysql') {
+      script = `incus exec "$1" -- sh -c 'command -v mysql >/dev/null || { echo "mysql is not installed in the guest" >&2; exit 90; }; mysql' < "$2"`;
+    } else {
+      return { error: `unknown dump engine ${JSON.stringify(engine)}` };
+    }
+    const r = await exec('sh', ['-c', script, 'sh', g, dumpPath], { timeoutMs: 4 * 3600 * 1000 });
+    if (r.status !== 0) return { error: `restoring the ${engine} dump into ${g} failed: ${tail(r.stderr) || `exit ${r.status}`}` };
+    event(row.id, { kind: 'state', phase: 'transfer', message: `restored the ${engine} dump${dbName ? ` (${dbName})` : ''} inside ${g}` });
+    return { restored: true };
   }
 
   /**
@@ -520,7 +574,8 @@ export function createMigrationService({
     if (bytes != null) db().prepare('UPDATE migrations SET bytes_done = ? WHERE id = ?').run(Math.max(0, Math.round(bytes)), row.id);
     event(row.id, { kind: 'state', phase: 'import', message: message || 'the agent finished the transfer' });
     if (row.transport === 'rootfs-tar') return importRootfsTar(rowById(row.id));
-    // incus-migrate and rsync land the data themselves; verify and fence.
+    // incus-migrate lands the guest itself and file-sync has already been
+    // unpacked into it; verify it is really there, then fence.
     const chk = await exec('incus', ['config', 'show', row.target_name], { timeoutMs: 30000 });
     if (chk.status !== 0) return fail(row.id, `the transfer reported success but ${row.target_name} does not exist on this host`);
     await fenceGuest(rowById(row.id));

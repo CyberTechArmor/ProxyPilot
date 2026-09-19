@@ -277,16 +277,16 @@ test('a fence that fails is loud: it never reads as fenced', async () => {
 
 /* -------------------------- application mode ----------------------------- */
 
-test('application mode: approving creates the guest, fences it, and hands the agent an rsync target', async () => {
+test('application mode: approving creates the guest and fences it; the copy goes THROUGH ProxyPilot, never over SSH', async () => {
   let guestExists = false;
   const { svc, calls } = setup({ script: (bin, args) => {
     if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return guestExists ? { status: 0, stdout: 'name: pp-app' } : { status: 1 };
     if (bin === 'incus' && args[0] === 'launch') { guestExists = true; return { status: 0 }; }
-    if (bin === 'incus' && args[0] === 'list') return { status: 0, stdout: JSON.stringify([{ name: 'pp-app', state: { network: { lo: { addresses: [{ family: 'inet', address: '127.0.0.1', scope: 'local' }] }, eth0: { addresses: [{ family: 'inet', address: '10.185.17.40', scope: 'global' }] } } } }]) };
     return { status: 0 };
   } });
   const r = await svc.createMigration({ input: { mode: 'application', name: 'app', app_dirs: ['/srv/myapp'], database: 'postgres', image: 'images:debian/13' } });
   const id = r.migration.id;
+  assert.equal(r.migration.transport, 'file-sync');
   svc.recordManifest(svc.rowById(id), MANIFEST);
   await svc.approveTransfer(id, { actor: 'admin-1' });
 
@@ -296,10 +296,28 @@ test('application mode: approving creates the guest, fences it, and hands the ag
   assert.ok(argvOf(calls).some((c) => c === 'proxypilot --json firewall egress deny app all'));
 
   const job = await svc.agentJob(svc.rowById(id));
-  assert.equal(job.rsync.host, '10.185.17.40', 'the global address, not loopback');
-  assert.deepEqual(job.rsync.dirs, ['/srv/myapp']);
-  assert.equal(job.rsync.database, 'postgres');
-  assert.ok(job.rsync.excludes.includes('node_modules/'));
+  assert.deepEqual(job.sync.dirs, ['/srv/myapp']);
+  assert.equal(job.sync.database, 'postgres');
+  assert.ok(job.sync.excludes.includes('node_modules/'));
+  assert.equal(job.sync.since, null, 'the first pass carries everything');
+  assert.ok(!JSON.stringify(job).includes('ssh'), 'no SSH host, user, port or key is handed to the source');
+
+  // A directory arrives and is unpacked into the guest, not left on disk.
+  const dir = await svc.receiveArtifact(svc.rowById(id), Readable.from([Buffer.from('tar bytes')]), { kind: 'dir', name: '/srv/myapp' });
+  assert.equal(dir.kind, 'dir');
+  const unpack = argvOf(calls).find((c) => c.includes('tar -xzf'));
+  assert.match(unpack, /incus exec "\$1" -- tar -xzf - -C \/ < "\$2" sh pp-app/);
+
+  // So does the dump, restored by the guest's own engine.
+  const dump = await svc.receiveArtifact(svc.rowById(id), Readable.from([Buffer.from('pgdump')]), { kind: 'dbdump', name: 'postgres:appdb' });
+  assert.equal(dump.kind, 'dbdump');
+  const restore = argvOf(calls).find((c) => c.includes('pg_restore'));
+  assert.match(restore, /createdb appdb/);
+  assert.match(restore, /pg_restore --no-owner --no-acl -d appdb/);
+
+  // A database name is a name, never a command.
+  const bad = await svc.receiveArtifact(svc.rowById(id), Readable.from([Buffer.from('x')]), { kind: 'dbdump', name: 'postgres:appdb; rm -rf /' });
+  assert.match(bad.error, /is not a database name/);
 });
 
 /* --------------------------- events and progress ------------------------- */

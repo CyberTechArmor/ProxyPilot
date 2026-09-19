@@ -44,6 +44,13 @@ fingerprint in the token payload. No session cookie, no MCP key.
 
 ## Decisions
 
+- **Application mode does not use rsync**, which the brief asked for. rsync
+  needs a reachable sshd and an authorized key inside the target guest — a
+  package and an open port ProxyPilot would be ADDING to a guest that asked
+  for neither, when `incus exec` already reaches it. Each directory is tarred
+  to the same artifact endpoint the rootfs path uses and unpacked into the
+  guest from the host; the dump travels the same way. The final delta sync
+  keeps its meaning through `tar --newer-mtime`.
 - **Wrap, don't reimplement.** Whole-machine mode shells out to the official
   `incus-migrate`; ProxyPilot supplies the target definition and a one-time
   Incus trust token and reads its progress. A Proxmox LXC, where

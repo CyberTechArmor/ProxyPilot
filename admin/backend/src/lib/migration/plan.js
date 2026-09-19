@@ -10,10 +10,18 @@
 //                   `rootfs-tar` path instead: tar → ProxyPilot → incus import.
 //
 //   application     the source keeps running. ProxyPilot creates a fresh
-//                   guest, the agent rsyncs the application directories into
-//                   it, dumps the database logically and restores it into the
-//                   guest's own engine. Env VALUES are typed by the operator,
-//                   never read by the agent.
+//                   guest; the agent streams the application directories to
+//                   ProxyPilot as tarballs and ProxyPilot unpacks them into
+//                   the guest through `incus exec`, then the database dump
+//                   travels the same way and is restored inside the guest.
+//                   Env VALUES are typed by the operator, never read.
+//
+//                   (The brief said rsync. rsync needs a reachable sshd and a
+//                   key in the target guest — a package and an open port
+//                   ProxyPilot would be adding to a guest that did not ask
+//                   for either, when `incus exec` already reaches it. The
+//                   final delta sync keeps its meaning: the second pass tars
+//                   only what changed since the first, with --newer-mtime.)
 //
 // Nothing here executes anything: routes/migrations.js turns these
 // structures into API responses and lib/migration/service.js persists them.
@@ -21,7 +29,7 @@
 import { DEFAULT_RSYNC_EXCLUDES } from './manifest.js';
 
 export const MODES = Object.freeze(['whole-machine', 'application']);
-export const TRANSPORTS = Object.freeze(['incus-migrate', 'rootfs-tar', 'rsync']);
+export const TRANSPORTS = Object.freeze(['incus-migrate', 'rootfs-tar', 'file-sync']);
 export const GUEST_TYPES = Object.freeze(['container', 'virtual-machine']);
 
 /** Ordered phases. `get_migration` reports the current one plus bytes/rate/ETA. */
@@ -63,8 +71,8 @@ export function validateTarget(input = {}) {
   const sourceKind = String(input.source_kind || 'unknown');
   const transport = resolveTransport({ mode, type, sourceKind, requested: input.transport });
   if (!transport) return { error: `transport must be one of ${TRANSPORTS.join(', ')} (or omitted, and it is derived from the mode)` };
-  if (mode === 'application' && transport !== 'rsync') return { error: 'application mode always transports with rsync' };
-  if (mode === 'whole-machine' && transport === 'rsync') return { error: 'whole-machine mode transports with incus-migrate, or rootfs-tar for a Proxmox LXC' };
+  if (mode === 'application' && transport !== 'file-sync') return { error: 'application mode always transports with file-sync (tarballs through ProxyPilot into the guest)' };
+  if (mode === 'whole-machine' && transport === 'file-sync') return { error: 'whole-machine mode transports with incus-migrate, or rootfs-tar for a Proxmox LXC' };
   if (transport === 'rootfs-tar' && type !== 'container') return { error: 'rootfs-tar imports a container; a VM disk goes through incus-migrate' };
 
   const cpu = input.cpu == null ? 2 : intIn(input.cpu, 1, 128);
@@ -90,7 +98,7 @@ export function validateTarget(input = {}) {
     }
     for (const e of Array.isArray(input.excludes) ? input.excludes : []) {
       const s = String(e).trim();
-      if (!s || s.length > 200 || s.includes('\n')) return { error: 'excludes: one rsync pattern per entry' };
+      if (!s || s.length > 200 || s.includes('\n')) return { error: 'excludes: one tar/rsync-style pattern per entry' };
       if (!app.excludes.includes(s)) app.excludes.push(s);
     }
     const db = String(input.database || 'none');
@@ -122,7 +130,7 @@ export function validateTarget(input = {}) {
 
 function resolveTransport({ mode, type, sourceKind, requested }) {
   if (requested) return TRANSPORTS.includes(String(requested)) ? String(requested) : null;
-  if (mode === 'application') return 'rsync';
+  if (mode === 'application') return 'file-sync';
   // A Proxmox (or any nested) LXC cannot run incus-migrate inside itself:
   // it needs to read the block device the rootfs lives on, which the guest
   // does not have. Tar the rootfs and import it on our side instead.
@@ -184,7 +192,7 @@ export const CHECKLIST = Object.freeze([
   { id: 'egress_reviewed', title: 'Review outbound access', required: true, modes: ['whole-machine', 'application'], tool: 'set_lxc_egress', detail: 'The guest starts default-deny. Approve the observed hosts it actually needs, one at a time.' },
   { id: 'secrets_entered', title: 'Enter the secrets', required: true, modes: ['whole-machine', 'application'], tool: 'set_project_env', detail: 'ProxyPilot knows the KEY NAMES from the source .env files; you type the values. They were never read.' },
   { id: 'health_check', title: 'Health check green', required: true, modes: ['whole-machine', 'application'], tool: 'probe_lxc_port', detail: 'The app answers inside the guest on the port the manifest said it listens on.' },
-  { id: 'final_delta_sync', title: 'Final delta sync', required: true, modes: ['application'], tool: 'migration_cutover', detail: 'One more rsync + dump with the source application stopped, so nothing written since the first pass is lost.' },
+  { id: 'final_delta_sync', title: 'Final delta sync', required: true, modes: ['application'], tool: 'migration_cutover', detail: 'One more pass with the source application stopped — only what changed since the first copy, plus a fresh dump — so nothing written in between is lost.' },
   { id: 'dns_switched', title: 'Switch DNS', required: true, modes: ['whole-machine', 'application'], tool: 'set_dns_record', detail: 'Point the name at this host. Lower the TTL well before this step.' },
   { id: 'source_frozen', title: 'Freeze the source', required: true, modes: ['whole-machine', 'application'], tool: 'migration_cutover', detail: 'Stop the source service (or set it read-only) so two copies never both take writes.' },
   { id: 'verified', title: 'Verify through the route', required: true, modes: ['whole-machine', 'application'], tool: 'test_route', detail: 'The published domain answers from outside, with the certificate ProxyPilot issued.' },

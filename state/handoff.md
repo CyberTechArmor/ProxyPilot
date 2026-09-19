@@ -1,169 +1,181 @@
-# Handoff — ZFS storage management
+# Handoff — the migration agent (size L)
 
-Branch `claude/proxypilot-zfs-storage-l9szn1` · 2026-09-19 · size L
-Change record: `state/change-records/2026-09-19-zfs-storage.md` · doc: `docs/features/storage.md`
+Adopt a running web application from another server, VM or container onto a
+ProxyPilot-managed Incus guest. Branch
+`claude/proxypilot-zfs-storage-l9szn1`, merged to `main` and deployed to the
+live host in five increments; `docs/features/migration.md` is the feature
+doc.
 
-## Answer to the operator's question
+## The one line an operator pastes on a source host
 
-There was **no page for managing drives**. `Housekeeping → Storage` is the
-S3 destination form and the Incus page only warns when no storage pool
-exists. This cycle adds **Storage** (`/storage`, sidebar after Housekeeping)
-with Devices (SMART badges, OS tag, eligibility), Pools, Datasets, Snapshots,
-Backup & replication, History, and one plan/confirm dialog that shows the
-exact commands before anything runs — plus the 27-tool `storage` MCP family
-with the same plan/confirm contract.
-
-## Verified in this session (sandbox: no zfs kernel module, no Incus)
-
-- `node --test` storage unit tests: parse (10), planner (10), policy /
-  freshness (4), service + MCP gates (6) — 30 tests, all green, plus the
-  extended-MCP catalog test updated to 160 tools (19 green). Coverage:
-  OS-device refusal with no override, wipe semantics, layout minimums,
-  token determinism and invalidation on parameter or host-state change,
-  `{{stamp}}` substitution, failing step stops the plan, passphrase never in
-  plan / ledger / results, sanoid.conf and syncoid config rendering,
-  freshness statuses and alert keys, MCP ledger outcomes (`dry_run`,
-  `refused`, `ok` with `confirmation_used`), feature-flag gating.
-- Full backend suite: 2582 / 2594; the 6 failures are the 5 known
-  native-module files (`cve-research`, `cves`, `incus`, `vpn-mtu`,
-  `webauthn`) and the documented `mock2-ui-checks` parallelism flake (passes
-  alone). No regression from this change.
-- Go agent: see § Delegated work below.
-- Frontend: `npm run build` — see § Delegated work below.
-- Shell: `bash -n` on the three scripts; the Incus backup `index.yaml`
-  field set was checked against Incus's `backup_info.go` (`Info` struct).
-
-## Verified on loop devices — green in CI (run 3), not in this sandbox
-
-`storage-loop.integration.test.js` (skips here: the sandbox cannot load the
-zfs module) runs in `.github/workflows/storage-integration.yml` on
-ubuntu-latest as root with `zfsutils-linux` + `sanoid`, on 4 × 512 MB loop
-devices with pre-created by-id links:
-
-1. inventory sees the loops as blank, eligible, non-OS; the runner's own OS
-   disk is tagged `os: true` and refused
-2. `create_zpool` mirror + managed datasets; stale token refused; members
-   refused for a second pool
-3. `create_dataset` / write / `zfs_snapshot` ×2 / `zfs_rollback` (newer
-   refused, then `destroy_newer`) restores `v1`; `set_dataset_props` quota
-4. `set_backup_policy` renders sanoid.conf (and takes a sanoid snapshot when
-   the binary is present)
-5. second pool + `set_replication_target` (config, timer drop-in) +
-   `run_replication` through the syncoid wrapper → dataset present on pool 2,
-   status JSON records success, freshness `ok`
-6. `destroy_dataset` streams the pre-destroy snapshot; `zfs receive` brings
-   the dataset back
-7. `zpool_scrub` → freshness `ok` / `running`
-8. `export_pool` → importable scan finds it by-id, `create_zpool` on that
-   disk refused → `import_pool`
-9. `replace_disk` onto the fourth loop, resilver completes
-
-**What the first CI runs found** (the job is doing real ZFS work on the
-runner, so it earns its keep):
-
-| Run | Result | Cause |
-|---|---|---|
-| 1 | 1/9 | test bug: the pool device list picked up the test's own `-partN` symlinks, which the planner correctly refuses |
-| 2 | 6/9 | one test bug (`zfs list -r` sorts by name) and **two product bugs**: the syncoid wrapper captured `rc=$?` inside `if ! cmd` (always 0, so a failed replication recorded success) and wrote invalid JSON on every success; the rollback guard ordered snapshots by `creation`, which is whole seconds, so a snapshot taken in the same second was destroyed without warning |
-| 3 | **9/9 green** | after both product fixes + `createtxg` ordering in Node and the Go agent — https://github.com/CyberTechArmor/ProxyPilot/actions/runs/35449823223 |
-
-Both product bugs now have unit coverage that runs everywhere:
-`storage-replicate.test.js` (stub syncoid: success, failure, reason,
-previous success preserved, config guard) and the same-second `createtxg`
-case in `storage-planner.test.js`.
-
-## Deployed (2026-09-19)
-
-Merged to `main` as `512e6f6` and deployed to the live host with the
-self-update runner (`update.sh --yes`, run id
-`bc683c16-fba8-4050-bca0-23e577dfe899`, exit 0, ~1 min). Confirmed from the
-run log and the agent:
-
-- `Applied schema migration 908: storage_ops` — the ops ledger exists on the
-  live database
-- `[storage-monitor] registered (cron=*/15 * * * *)` — the alert monitor is
-  running
-- the host agent rebuilt at `512e6f6986`, so `storage.list_disks` /
-  `storage.zpool_status` / `storage.zfs_list` are live on the socket
-- container healthy, route drift clean, pre-update DB backup retained at
-  `/opt/proxypilot/data/db/backups/proxypilot.db.pre-update-20260919-104916`
-
-The operator's next step is the one-time host preparation
-(`sudo bash scripts/install-storage.sh`) — until then the Storage page
-renders with the toolchain badges showing zfs/sanoid/syncoid missing and
-the pool tabs empty, which is the intended no-ZFS state.
-
-## Not yet verified on real hardware / a real host
-
-- `smartctl -j` through the nsenter root path on real SATA / NVMe devices
-  (parsers tested on captured output); agent `permission_denied` → backend
-  fill-in.
-- Everything Incus: `set_incus_storage_pool`, `move_guest_storage`,
-  `restore_guest_from_snapshot` (the `proxypilot-storage-restore-guest`
-  helper clones a ZFS snapshot, builds `backup/index.yaml` + instance dir and
-  runs `incus import <tar> <new> --storage <pool>`; the `instance` vs
-  `container` key is preserved from the source `backup.yaml`), and
-  `rollback_guest_dataset`. Guests in non-default Incus projects are named
-  `<project>_<name>` on disk — the dataset mapping assumes the default
-  project.
-- Remote (SSH) replication end to end; `zpool status -j` on OpenZFS ≥ 2.3;
-  the alert fan-out to real SMTP / webhook endpoints; the agent's `storage.*`
-  methods on a live socket (the backend falls back to nsenter transparently).
-- The Storage page on a real host (built, not clicked through against live
-  data); walk `MOBILE_FIRST.md`'s checklist at 360 / 375 / 768 on a device.
-
-## Commands the operator runs once by hand
-
-```bash
-# on the host, after update.sh has deployed this build
-sudo bash scripts/install-storage.sh
-#   apt-get install zfsutils-linux smartmontools sanoid pv mbuffer lzop
-#   modprobe zfs; enables zfs-import/zfs-mount
-#   installs deploy/proxypilot-zfs-scrub@.{service,timer}, deploy/proxypilot-syncoid@.{service,timer}
-#   installs /usr/local/sbin/proxypilot-storage-replicate and /usr/local/sbin/proxypilot-storage-restore-guest
-#   seeds /etc/sanoid/sanoid.conf, enables sanoid.timer
-#   re-installs deploy/proxypilot-agent.service (SupplementaryGroups=disk) and restarts the agent
-
-# replication over SSH: a key on the host, authorized on the target
-sudo ssh-keygen -t ed25519 -f /root/.ssh/pp_replication -N ''
-# on the target: authorize /root/.ssh/pp_replication.pub for a user that may run `zfs receive`
-#   (root, or: zfs allow -u <user> create,mount,receive,rollback,destroy,snapshot,hold <pool>/<dataset>)
+```
+curl -fsSL https://<your-proxypilot>/api/migrations/agent/<token>/install.sh | sudo sh
 ```
 
-Paths to know: sanoid config `/etc/sanoid/sanoid.conf` (ProxyPilot-owned);
-replication jobs `/etc/proxypilot/storage/replication-<name>.conf` (0600,
-the only place the SSH key path lives); status
-`/var/lib/proxypilot/storage/replication/<name>.json`; destroyed-dataset
-streams `<backups mountpoint>/destroyed/`.
+`create_migration` (MCP) or **Migrations → New migration** prints it with
+the token filled in. It refuses to run as anything but root, picks amd64 or
+arm64, downloads the agent from the same tokened URL, **verifies its sha256
+against the hash baked into the script**, and execs it with the URL, the
+token and the TLS pin. `command_steps` is the same thing in three lines for
+an operator who wants to read the script first.
 
-## Delegated work (reviewed)
+Two variants worth knowing:
 
-Two self-contained parts were built by sub-tasks against written contracts
-and re-verified here:
+- `proxypilot-agent migrate --print` — collect the inventory and print it.
+  Sends nothing, needs no token; a source owner can see exactly what would
+  leave before agreeing to anything.
+- `… --inventory-only` — send the manifest and stop, so the review can
+  happen days before the copy.
 
-- **Go agent methods** (`cmd/agent/methods/storage.go`, 1.7k lines, 15 test
-  functions with stub binaries + fixtures under `methods/testdata/storage/`):
-  `go vet ./...` clean, `go test ./...` ok (re-run here). The sub-task diffed
-  the Go output against `lib/storage/parse.js` over the same fixtures: zero
-  differences apart from the `by_id` / `smart` fields the agent adds. Two
-  follow-ups from its report were applied here: `host.js` forwards
-  `include_loop` to the agent, and the Node scan regex accepts multi-day
-  scrub durations (`in 1 days 02:03:04`) like the Go one.
-- **Storage page** (`pages/Storage.jsx` + `components/storage/*`, 2.3k lines,
-  `api.storage.*`, route + nav): `npm run build` passes (re-run here; the two
-  warnings — api.js dynamic import, >2 MB main chunk — are pre-existing).
-  MOBILE_FIRST walk-through is by construction (grids start at
-  `grid-cols-1`, tables → cards below `md`, full-screen dialogs on `<sm`,
-  44 px controls); no browser was available for the 360 px scroll-width
-  audit. The alerts strip is computed client-side from the overview
-  (mirrors `storageAlerts`) to avoid a second SMART scan per refresh;
-  `GET /api/storage/alerts` remains for the server view. "Run now" for
-  replication uses `wait: false` so the HTTP call never blocks on syncoid.
+## What was verified, and how
 
-## Next steps
+### Verified end to end on the operator's host (two throwaway guests)
 
-1. Push → watch `.github/workflows/storage-integration.yml` (first run).
-2. On a real host: `sudo bash scripts/install-storage.sh`, open Storage,
-   check Devices (OS tag on the right disk, SMART badges), create a pool on
-   spare disks, bind Incus, move one guest, take/restore a snapshot.
-3. Then tick the "not yet verified" items above in `docs/known-issues.md`.
+Both runs used `pp-mig-src-lxc`, a throwaway Debian 13 guest carrying a
+deliberately realistic app: nginx with a two-name TLS vhost proxying to a
+Node app on 127.0.0.1:3000, PostgreSQL with a `sampledb` holding four rows,
+a cron entry calling `https://hooks.example.com/nightly`, and a 0600 `.env`
+containing `STRIPE_SECRET_KEY=sk_live_THIS_MUST_NEVER_LEAVE_THE_SOURCE`.
+
+**Whole-machine mode (`rootfs-tar`) → `pp-mig-dst-lxc`, 40 seconds:**
+
+| Step | Result |
+|---|---|
+| bootstrap | agent downloaded, sha256 verified against the script, TLS pinned to the live certificate |
+| token | claimed by the agent run; the token carried `_` and `-`, the case that used to be rejected (LEARNINGS 175) |
+| inventory | 5 s: Debian 13, 26 units, 9 listening ports, 1 vhost → **2 suggested routes**, postgres/`sampledb`, 5 cron entries, 6 env files / 9 key names, `hooks.example.com` found **in the cron line** |
+| secrets | `STRIPE_SECRET_KEY` present as a NAME; `sk_live_…` appears nowhere in the migration row — grepped on the live record |
+| gate | migration sat in `awaiting_review` until `approve_migration` |
+| transfer | 300 MiB streamed at ~15 MB/s, sha256 verified on arrival |
+| import | `incus image import metadata.tar.xz rootfs.tar.gz` → `incus init` → temporary image deleted |
+| guest | created stopped and fenced, no route |
+| agent | removed itself (`/tmp/proxypilot-migrate.*` gone) |
+| **proof** | started the guest: `sampleapp`, `nginx`, `postgresql`, `cron` all active; `curl --resolve sample.example.com:80:127.0.0.1` returns the app through its own vhost; all four database rows present |
+
+**Application mode (`file-sync`) → `pp-mig-dst-app`, 15 seconds:**
+
+| Step | Result |
+|---|---|
+| target | an existing prepared guest was reused (postgres/node/nginx pre-installed) |
+| transfer | `/srv/sampleapp` and `/var/www/sampleapp` tarred to ProxyPilot and unpacked into the guest through `incus exec` |
+| database | `pg_dump --format=custom` streamed to ProxyPilot and restored inside the guest by its own engine |
+| **proof** | in the target: `select note from sample` returns all four rows; `.env` is present at mode 0600 with its mtime; no sshd, no key and no open port were added to the guest |
+
+**The cutover surface** was exercised over MCP against those rows: a
+checklist step marked (recorded with who and the note) and reopened, an
+egress decision recorded, and an unobserved host refused
+(`evil.example.com:443 is not in this migration's observed outbound list`).
+
+Five defects were found by running it — all fixed, all now pinned by tests,
+all re-verified live: LEARNINGS 175 (token split), 176 (Incus URL), 179
+(the fence), 180 + 182 (what the fence actually governs), 181 (a finished
+run reported as stalled).
+
+### Verified by test, not on real hardware
+
+- **`incus-migrate` (whole-machine on a physical host or a VM).** The job
+  document, the trust-token minting, the answer script and the refusal when
+  Incus is not listening are covered by `migration-service.test.js`; the
+  agent's wrapper (answer piping, progress parsing, `/dev/sdaN → /dev/sda`)
+  by `parse_test.go`. **Nobody has run it against a real VM yet** — see
+  "what the operator must do once by hand".
+- The Go collectors against recorded fixtures (`parse_test.go`: nginx with
+  nested locations and a named upstream, apache, a Caddyfile with a global
+  options block, `ss`, `systemctl` including a `●`-marked failed unit,
+  crontabs, compose, a nested `findmnt` tree, `.env` keys).
+- The agent's own manifest, produced by running
+  `proxypilot-agent migrate --print` on this machine and fed through
+  `validateManifest` — the Go writer and the JS reader agree on the schema.
+- 28 backend cases across manifest / plan / token / service / agent routes,
+  including: a manifest carrying a value refused at five different depths, a
+  database name that is not a name refused before it reaches a shell, the
+  bootstrap script's hash check, and an artifact kind the transport does not
+  use refused.
+
+### Not verified
+
+- **A Proxmox source.** The `rootfs-tar` path was exercised against a nested
+  Incus LXC, which is the same code path and the same `container=lxc`
+  detection, but no actual Proxmox host was involved.
+- **A VM source**, for the same reason as `incus-migrate` above.
+- **An arm64 source.** The arm64 agent builds and is served with its hash;
+  nothing has run it.
+- **A large transfer.** The biggest real run was 300 MiB. The rate/ETA maths
+  is unit-tested, and `stalled` now only applies to a live transfer, but no
+  multi-hour copy has happened.
+- **The 360 px layout audit** for the Migrations page: built to
+  MOBILE_FIRST by construction (single-column grids, 44 px controls,
+  full-screen dialogs under `sm`, the phase rail wraps instead of scrolling)
+  but not opened in a browser at that width.
+
+## What the operator must do once, by hand
+
+1. **For `incus-migrate` (a physical host or a VM source), open the Incus
+   listener on this host:**
+   ```
+   incus config set core.https_address :8443
+   ```
+   Without it the job refuses with exactly that instruction rather than
+   half-starting. ProxyPilot mints a single-use trust token per migration
+   and revokes it when the migration is cancelled.
+2. **On the source host**, per transport: `curl` always; `incus-migrate`
+   (Debian/Ubuntu: `apt install incus-tools`) for a whole-machine VM or
+   physical source; `tar` for a container source; the database client
+   (`pg_dump` / `mysqldump`) if a dump is being carried.
+3. **In application mode, prepare the target guest** with whatever the app
+   needs at runtime — most importantly the database engine, or the restore
+   stops with "postgresql is not installed in the guest". ProxyPilot will
+   create a bare guest for you if one does not exist; adopting into a guest
+   you have prepared is the better path and is supported (it says
+   "reusing it" in the log).
+4. **Lower the DNS TTL** on the name you are moving, well before the
+   `dns_switched` step.
+
+## What the Proxmox tar path still needs
+
+The mechanism is complete and proven (tar → artifact endpoint → split-image
+import → guest). What is untested is the Proxmox-specific texture:
+
+- **Bind mounts.** `--one-file-system` means a Proxmox mount point
+  (`mp0:` …) is *not* in the tarball. The manifest lists the mounts, so the
+  operator can see them, but nothing copies them yet — a second pass with
+  application mode, or a manual copy, is needed.
+- **Unprivileged-container uid shifting.** The tarball is written with
+  `--numeric-owner`, and Incus applies its own idmap on import. A source
+  with a non-standard Proxmox idmap should be spot-checked for ownership
+  after the import.
+- **Very large rootfs.** The tar streams through ProxyPilot to
+  `/var/lib/proxypilot/migration/<id>/`, which must have room for the
+  compressed rootfs (it is deleted immediately after the import). A 500 GB
+  source needs that headroom on the ProxyPilot host's disk; there is no
+  pre-flight check for it yet.
+- **`/etc/fstab` and systemd mount units** come across inside the rootfs and
+  will try to mount things that do not exist in the guest. Look at the
+  manifest's `mounts` before starting the imported guest.
+
+## Throwaway guests still on the host
+
+Stopped, not deleted, in case you want to look at them:
+
+- `pp-mig-src-lxc` — the sample source (its `.env` holds a FAKE secret)
+- `pp-mig-dst-lxc` — the whole-machine result
+- `pp-mig-dst-app` — the application-mode result
+
+Migrations 1 and 2 in the Migrations page are those two runs. To remove:
+snapshot each (the delete guard requires it) and `delete_lxc_container`, or
+say the word and I will. The throwaway MCP key minted to drive the test is
+already revoked.
+
+## Where the parts are
+
+| | |
+|---|---|
+| Pure | `admin/backend/src/lib/migration/{manifest,plan,token}.js` |
+| Service | `admin/backend/src/lib/migration/service.js` (+ `index.js` singleton) |
+| REST | `admin/backend/src/routes/migrations.js` — operator router (sudo) + agent router (token only) |
+| MCP | `routes/mcp-tools/migration.js`, `lib/mcp-ext/catalog/migration.js`, flag `mcp.migration` |
+| Page | `pages/Migrations.jsx`, `components/migration/*` |
+| Agent | `cmd/agent/migrate/*.go` — the same binary as the host agent |
+| Build | `scripts/build-migration-agent.sh` (install.sh + update.sh call it) |
+| Schema | migration 909: `migrations`, `migration_events` |
+| Tests | `admin/backend/src/__tests__/migration-*.test.js`, `cmd/agent/migrate/parse_test.go`, CI in `.github/workflows/storage-integration.yml` |

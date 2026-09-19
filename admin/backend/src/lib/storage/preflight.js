@@ -236,16 +236,22 @@ export function installPreflight({ toolchain = {}, os = {}, runner = {}, agent =
   if (!toolchain.zpool || !toolchain.zfs) missing.push('zfsutils-linux');
   if (!toolchain.smartctl) missing.push('smartmontools');
   if (!toolchain.sanoid || !toolchain.syncoid) missing.push('sanoid');
+  // An unloaded module is work to do even when every package is present: the
+  // installer runs modprobe, and a DKMS build may simply not have finished.
+  // Leaving it out of install_needed contradicted `ready`, which requires it.
+  const moduleLoaded = !!toolchain.zfs_module_loaded;
+  const needed = missing.length > 0 || !unitsOk || !helpersOk || !moduleLoaded;
 
   return {
     checks,
     summary,
     can_install: blockingFailures.length === 0,
     blocked_by: blockingFailures.map((c) => ({ id: c.id, detail: c.detail, remedy: c.remedy })),
-    ready: zfsReady && !!toolchain.zfs_module_loaded && unitsOk && helpersOk,
-    install_needed: missing.length > 0 || !unitsOk || !helpersOk,
+    ready: zfsReady && moduleLoaded && unitsOk && helpersOk,
+    install_needed: needed,
     missing_packages: missing,
-    reinstall_only: missing.length === 0 && (!unitsOk || !helpersOk),
+    reinstall_only: missing.length === 0 && needed,
+    module_loaded: moduleLoaded,
     script: 'scripts/install-storage.sh',
   };
 }

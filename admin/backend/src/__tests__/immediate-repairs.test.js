@@ -139,3 +139,23 @@ test('ratchet: the seed auth component refuses its dev defaults in production an
   // The third-party credential is NOT minted: only the two the app owns.
   assert.equal(cfg.filter((c) => c.generate === true).length, 2);
 });
+
+test('ratchet: the seed auth component rekeys an LDAPS secret stored under the dev master secret', () => {
+  // Minting a real AUTH_MASTER_SECRET into an app that had already encrypted an
+  // LDAPS bind password under the dev default would strand that ciphertext.
+  // The component opens it with the legacy key and re-encrypts in place.
+  const doc = JSON.parse(src('mock2/framework-seed/proxypilot-auth.component.json'));
+  const file = (p) => doc.files.find((f) => f.path === p).content;
+  const crypto = file('src/auth/crypto.ts');
+  assert.match(crypto, /export function decryptSecretAny\(/);
+  assert.match(crypto, /rekeyed: true/);
+  const ldaps = file('src/auth/ldaps-service.ts');
+  assert.match(ldaps, /import \{ DEV_MASTER_SECRET \} from '\.\/config\.js';/);
+  assert.match(ldaps, /export async function openLdapsSecret\(/);
+  assert.match(ldaps, /\[DEV_MASTER_SECRET\]/);
+  assert.match(ldaps, /if \(opened\.rekeyed\) \{/);
+  assert.doesNotMatch(ldaps, /decryptSecret\(conn\.secretCiphertext/, 'a bare decrypt would strand legacy ciphertext');
+  const service = file('src/auth/service.ts');
+  assert.match(service, /const secret = await openLdapsSecret\(conn\);/);
+  assert.doesNotMatch(service, /decryptSecret\(conn\.secretCiphertext/);
+});

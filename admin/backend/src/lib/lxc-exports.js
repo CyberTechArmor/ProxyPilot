@@ -21,6 +21,47 @@
 
 import { COMPRESSION_SETTING, resolveCompression, extensionFor, incusCompressionArgs, TARBALL_SUFFIX_RE } from './export-compression.js';
 
+/**
+ * What a restored clone carries that would fight the guest it came from.
+ *
+ * A backup tarball restores the instance's OWN devices, and the original is
+ * usually still running, so two of them are hazards rather than settings:
+ *
+ *   - a pinned `eth0 ipv4.address` is Incus's static DHCP reservation. Two
+ *     guests claiming one reservation is how both lose it, so the caller
+ *     strips this — it is never what anyone wanted from a restore.
+ *   - `proxy` devices bind HOST ports, and a port has one owner. Which guest
+ *     should hold it after a restore is the operator's decision, not ours,
+ *     so these are reported and the guest is left stopped.
+ *
+ * Pure so the reasoning is testable without an Incus: hand it the `devices`
+ * map from `incus query /1.0/instances/<name>` (instance-level only — a
+ * device the profile supplies is shared by every guest already and is not
+ * this restore's doing).
+ */
+export function restoreHazards(devices = {}, { sourceContainer = 'the original' } = {}) {
+  const d = devices && typeof devices === 'object' ? devices : {};
+  const pinnedIp = (d.eth0 && typeof d.eth0 === 'object' && d.eth0['ipv4.address']) || null;
+  const proxyDevices = Object.entries(d)
+    .filter(([, dev]) => dev && dev.type === 'proxy' && dev.listen)
+    .map(([name, dev]) => `${name} (${dev.listen})`);
+  return { pinnedIp, proxyDevices };
+}
+
+/** The operator-facing sentence for each hazard. Separate so the wording is testable too. */
+export function restoreNotes({ pinnedIp = null, pinRemoved = false, proxyDevices = [], sourceContainer = 'the original' } = {}) {
+  const notes = [];
+  if (pinnedIp && pinRemoved) {
+    notes.push(`Dropped the cloned static address ${pinnedIp} — it is ${sourceContainer}'s DHCP reservation, and two guests holding one reservation is how both lose it. This container will take a fresh lease.`);
+  } else if (pinnedIp) {
+    notes.push(`This backup pins ${pinnedIp} on eth0, which ${sourceContainer} is probably still using. Clearing it failed — do that by hand before you start this container.`);
+  }
+  if (proxyDevices.length) {
+    notes.push(`It also carries ${proxyDevices.length} port forward${proxyDevices.length === 1 ? '' : 's'}: ${proxyDevices.join(', ')}. Only one guest can hold a host port, so starting this one while ${sourceContainer} runs will either fail or take the port from it.`);
+  }
+  return notes;
+}
+
 /** Keep this many ready artifacts per container; sweep the rest oldest-first. */
 export const KEEP_PER_CONTAINER = 3;
 /** And expire any artifact older than this, however few there are. */

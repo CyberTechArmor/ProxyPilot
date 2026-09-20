@@ -2,11 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import {
-  Download, Loader2, Trash2, Package, AlertTriangle, Check, Clock,
+  Download, Loader2, Trash2, Package, AlertTriangle, Check, Clock, RotateCcw,
 } from 'lucide-react';
 
 // Prepared downloads for one container.
@@ -47,6 +52,8 @@ export default function PreparedDownloads({ container, snapshots = [], canWrite 
   const [source, setSource] = useState('live');
   const [deleting, setDeleting] = useState(null);
   const [confirmId, setConfirmId] = useState(null);
+  // { row, name, busy, result } — the restore dialog, scoped to one artifact.
+  const [restore, setRestore] = useState(null);
   const timer = useRef(null);
 
   const refresh = useCallback(async () => {
@@ -87,6 +94,21 @@ export default function PreparedDownloads({ container, snapshots = [], canWrite 
       toast({ title: 'Could not start', description: e.message, variant: 'destructive' });
     } finally {
       setPreparing(false);
+    }
+  };
+
+  const doRestore = async () => {
+    if (!restore?.name?.trim()) return;
+    setRestore((r) => ({ ...r, busy: true, error: null }));
+    try {
+      const out = await api.restoreLxcPreparedExport(restore.row.id, { name: restore.name.trim() });
+      setRestore((r) => ({ ...r, busy: false, result: out }));
+      toast({
+        title: `Restored as ${out.container}`,
+        description: out.notes?.length ? out.notes[0] : `${out.source_container} was not touched.`,
+      });
+    } catch (e) {
+      setRestore((r) => ({ ...r, busy: false, error: e.message }));
     }
   };
 
@@ -193,11 +215,23 @@ export default function PreparedDownloads({ container, snapshots = [], canWrite 
 
               <div className="flex shrink-0 items-center gap-2">
                 {r.state === 'ready' && (
-                  <Button asChild variant="outline" size="sm" className="h-11 flex-1 sm:flex-none">
-                    <a href={api.lxcPreparedExportUrl(r.id)} download={r.filename}>
-                      <Download className="mr-2 h-4 w-4" />Download
-                    </a>
-                  </Button>
+                  <>
+                    <Button asChild variant="outline" size="sm" className="h-11 flex-1 sm:flex-none">
+                      <a href={api.lxcPreparedExportUrl(r.id)} download={r.filename}>
+                        <Download className="mr-2 h-4 w-4" />Download
+                      </a>
+                    </Button>
+                    {canWrite && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-11 flex-1 sm:flex-none"
+                        onClick={() => setRestore({ row: r, name: `${r.container}-restored`, busy: false, error: null, result: null })}
+                      >
+                        <RotateCcw className="mr-2 h-4 w-4" />Restore
+                      </Button>
+                    )}
+                  </>
                 )}
                 {r.state !== 'preparing' && canWrite && (
                   confirmId === r.id ? (
@@ -230,6 +264,79 @@ export default function PreparedDownloads({ container, snapshots = [], canWrite 
           </li>
         ))}
       </ul>
+
+      {/* Restore — straight from the host, so no download-and-re-upload.
+          Always a NEW container: a backup restored over a running guest is
+          the one move with no undo. */}
+      <Dialog open={!!restore} onOpenChange={(o) => { if (!o) { setRestore(null); refresh(); } }}>
+        <DialogContent className="max-h-[100dvh] w-full max-w-lg overflow-y-auto sm:max-h-[90vh]">
+          <DialogHeader>
+            <DialogTitle>Restore into a new container</DialogTitle>
+            <DialogDescription>
+              The tarball is already on the host, so this imports it directly — nothing is
+              downloaded or uploaded. <span className="font-medium">{restore?.row?.container}</span> is
+              not touched.
+            </DialogDescription>
+          </DialogHeader>
+
+          {!restore?.result ? (
+            <div className="space-y-4">
+              <p className="break-all font-mono text-xs text-muted-foreground">{restore?.row?.filename}</p>
+              <div className="space-y-2">
+                <Label htmlFor="restore-name">New container name</Label>
+                <Input
+                  id="restore-name"
+                  className="h-11"
+                  value={restore?.name || ''}
+                  onChange={(e) => setRestore((r) => ({ ...r, name: e.target.value }))}
+                  placeholder="searxng-restored"
+                  disabled={restore?.busy}
+                  autoComplete="off"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Letters, digits and hyphens. It starts stopped, with no routes — check it,
+                  then use Transfer routes to move traffic across.
+                </p>
+              </div>
+              {restore?.error && (
+                <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                  {restore.error}
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="flex items-start gap-2 text-sm">
+                <Check className="mt-0.5 h-4 w-4 shrink-0 text-green-600 dark:text-green-500" />
+                <span>
+                  Imported as <span className="font-medium">{restore.result.container}</span>, stopped.
+                </span>
+              </p>
+              {(restore.result.notes || []).map((n, i) => (
+                <p key={i} className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400">
+                  {n}
+                </p>
+              ))}
+              <p className="text-xs text-muted-foreground">{restore.result.next}</p>
+            </div>
+          )}
+
+          <DialogFooter className="flex-col gap-2 sm:flex-row">
+            {!restore?.result ? (
+              <>
+                <Button variant="ghost" className="h-11 w-full sm:w-auto" onClick={() => setRestore(null)} disabled={restore?.busy}>
+                  Cancel
+                </Button>
+                <Button className="h-11 w-full sm:w-auto" onClick={doRestore} disabled={restore?.busy || !restore?.name?.trim()}>
+                  {restore?.busy ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Restoring…</> : <><RotateCcw className="mr-2 h-4 w-4" />Restore</>}
+                </Button>
+              </>
+            ) : (
+              <Button className="h-11 w-full sm:w-auto" onClick={() => { setRestore(null); refresh(); }}>Done</Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

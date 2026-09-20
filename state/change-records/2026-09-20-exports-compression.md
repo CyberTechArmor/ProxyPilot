@@ -77,3 +77,23 @@ flags, back to back — 8.158 GB of tar each time, durations from
 zstd is 6.3× faster than gzip and 3% smaller, and 30% faster than writing
 the tarball uncompressed. The default stands, and `none` turns out to have
 no speed argument on this host at all.
+
+
+## Follow-up — the way back in (same day)
+
+The operator's first real use of the panel found two gaps (LEARNINGS 189):
+
+| Gap | Fix |
+| --- | --- |
+| The import picker was `accept=".tar.gz,.tar,.gz"` — it greyed out the `.tar.zst` the product now writes by default | Widened to every compressor it writes; the copy says the format is read from the file, not the name. The upload route already streamed into `incus import -`, so only the picker and a cosmetic temp filename were wrong. |
+| No way to restore a prepared download — the only route back in was to download gigabytes and upload them to the host they were already on | `POST /api/lxc/exports/:id/restore` + a Restore button: `incus import` straight from the host into a NEW container. |
+
+Restore is never in place — a backup over a running guest is the one move
+with no undo, and *Transfer routes* already exists for the cutover. Two
+things a clone carries are hazards rather than settings, because the guest
+it came from is usually still running: a pinned `eth0 ipv4.address` (Incus's
+static DHCP reservation — two claimants and both lose it) is **stripped**,
+and cloned `proxy` devices (host ports have one owner) are **reported** with
+the guest left stopped. `import_lxc` had the same exposure and auto-started;
+it now shares the exact same pure helpers, so the two surfaces cannot drift
+on the dangerous part.

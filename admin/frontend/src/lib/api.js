@@ -1009,6 +1009,10 @@ export const api = {
   getLxcPreparedExport: (id) => request(`/lxc/exports/${id}`),
   prepareLxcExport: (body) => request('/lxc/exports', { method: 'POST', body: JSON.stringify(body) }),
   deleteLxcPreparedExport: (id) => request(`/lxc/exports/${id}`, { method: 'DELETE' }),
+  // Restore straight from the host — no download-and-re-upload round trip.
+  // Always creates a NEW container; the original is never touched.
+  restoreLxcPreparedExport: (id, body) =>
+    request(`/lxc/exports/${id}/restore`, { method: 'POST', body: JSON.stringify(body) }),
   // Not a fetch: the browser downloads this itself, so it gets its own
   // progress bar, its own resume, and nothing is buffered in a JS Blob.
   lxcPreparedExportUrl: (id) => `/api/lxc/exports/${id}/download`,

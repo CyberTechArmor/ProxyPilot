@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { createExportStore, KEEP_PER_CONTAINER } from '../lib/lxc-exports.js';
+import { createExportStore, KEEP_PER_CONTAINER, restoreHazards, restoreNotes } from '../lib/lxc-exports.js';
 import {
   COMPRESSIONS, DEFAULT_COMPRESSION, normalizeCompression, extensionFor, contentTypeFor,
   incusCompressionArgs, tarCompressionFlag, resolveCompression, TARBALL_SUFFIX_RE,
@@ -424,4 +424,50 @@ test('adopting an OLD tarball never evicts a NEW one — retention runs on dates
     'lxc-searxng-20260920T151954Z.tar.gz',
     'lxc-searxng-20260920T152310Z.tar',
   ]);
+});
+
+/* ------------------------------- restore -------------------------------- */
+
+test('a restored clone is read for what would fight the guest it came from', () => {
+  // The shape `incus query /1.0/instances/<name>` returns for a guest that
+  // has a static DHCP reservation and two published ports.
+  const devices = {
+    eth0: { name: 'eth0', network: 'pp-br0', type: 'nic', 'ipv4.address': '10.0.10.42' },
+    root: { path: '/', pool: 'Storage', type: 'disk', size: '20GiB' },
+    'pp-fwd-8080': { type: 'proxy', listen: 'tcp:0.0.0.0:8080', connect: 'tcp:127.0.0.1:8080' },
+    'pp-fwd-8443': { type: 'proxy', listen: 'tcp:0.0.0.0:8443', connect: 'tcp:127.0.0.1:8443' },
+  };
+  const h = restoreHazards(devices, { sourceContainer: 'searxng' });
+  assert.equal(h.pinnedIp, '10.0.10.42');
+  assert.deepEqual(h.proxyDevices, ['pp-fwd-8080 (tcp:0.0.0.0:8080)', 'pp-fwd-8443 (tcp:0.0.0.0:8443)']);
+
+  // A guest with nothing to clash over produces nothing to say.
+  const clean = restoreHazards({ eth0: { type: 'nic', network: 'pp-br0' }, root: { type: 'disk' } });
+  assert.equal(clean.pinnedIp, null);
+  assert.deepEqual(clean.proxyDevices, []);
+  assert.deepEqual(restoreNotes({ ...clean }), []);
+
+  // Junk in, no crash: the route calls this on whatever the host returned.
+  assert.deepEqual(restoreHazards(null), { pinnedIp: null, proxyDevices: [] });
+  assert.deepEqual(restoreHazards({ weird: null, alsoWeird: 'string' }).proxyDevices, []);
+  // A proxy device with no listen address cannot clash over a port.
+  assert.deepEqual(restoreHazards({ p: { type: 'proxy' } }).proxyDevices, []);
+});
+
+test('the restore notes say which guest owns what, and whether the clash was cleared', () => {
+  const removed = restoreNotes({ pinnedIp: '10.0.10.42', pinRemoved: true, proxyDevices: [], sourceContainer: 'searxng' });
+  assert.equal(removed.length, 1);
+  assert.match(removed[0], /Dropped the cloned static address 10\.0\.10\.42/);
+  assert.match(removed[0], /searxng's DHCP reservation/);
+
+  // When clearing FAILED the wording must tell the operator to act, not
+  // reassure them — this is the note that prevents a silent IP collision.
+  const stuck = restoreNotes({ pinnedIp: '10.0.10.42', pinRemoved: false, sourceContainer: 'searxng' });
+  assert.match(stuck[0], /do that by hand before you start/);
+  assert.doesNotMatch(stuck[0], /Dropped/);
+
+  const ports = restoreNotes({ proxyDevices: ['pp-fwd-8080 (tcp:0.0.0.0:8080)'], sourceContainer: 'searxng' });
+  assert.match(ports[0], /1 port forward:/);
+  assert.doesNotMatch(ports[0], /forwards:/);
+  assert.match(restoreNotes({ proxyDevices: ['a (x)', 'b (y)'] })[0], /2 port forwards:/);
 });

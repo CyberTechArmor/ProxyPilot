@@ -24,6 +24,7 @@ import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 import { registerLxcWorkspaceRoutes } from './lxc-workspace.js';
 import { exportStore } from '../lib/lxc-exports-instance.js';
+import { restoreHazards, restoreNotes } from '../lib/lxc-exports.js';
 import { hasHostBinary } from '../lib/host-exec.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../lib/export-compression.js';
 import { resolveCertDir } from '../lib/caddy-cert.js';
@@ -66,7 +67,11 @@ const LXC_IMPORT_LIMIT_BYTES = parseInt(process.env.LXC_IMPORT_LIMIT_BYTES || St
 try { await mkdir(LXC_IMPORT_TMP_DIR, { recursive: true }); } catch {}
 const importStorage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, LXC_IMPORT_TMP_DIR),
-  filename: (_req, _file, cb) => cb(null, `import-${Date.now()}-${randomUUID()}.tar.gz`),
+  // `.tarball`, not `.tar.gz`: the bytes are streamed into `incus import -`,
+  // which reads the compressor out of the file, so the name was only ever
+  // decoration — and since exports default to zstd it was misleading
+  // decoration.
+  filename: (_req, _file, cb) => cb(null, `import-${Date.now()}-${randomUUID()}.tarball`),
 });
 const upload = multer({ storage: importStorage, limits: { fileSize: LXC_IMPORT_LIMIT_BYTES } });
 
@@ -672,6 +677,101 @@ lxcRouter.get('/exports/:id/download', async (req, res) => {
   // the same browser resuming the one we already counted.
   if (!m) { try { store.countDownload(Number(req.params.id)); } catch { /* best effort */ } }
   req.on('close', () => { if (child && !child.killed) { try { child.kill('SIGTERM'); } catch { /* gone */ } } });
+});
+
+/**
+ * Restore a prepared download INTO a new container.
+ *
+ * The tarball is already on the host, so the round trip the operator would
+ * otherwise make — download 3.4 GB to a laptop, upload 3.4 GB back — is
+ * pure waste: `incus import <file> <new-name>` reads it where it lies.
+ *
+ * Always a NEW guest, never in place. A backup restored over a running
+ * container is the one operation with no undo, and the dialog already has
+ * "Transfer routes" for moving traffic across once the restore is verified.
+ *
+ * Two things are cloned that MUST NOT be, because the original is usually
+ * still running:
+ *   - a pinned eth0 ipv4.address is Incus's static DHCP reservation, so the
+ *     copy would claim the original's address. It is stripped, always.
+ *   - proxy devices bind host ports; two guests cannot hold the same one.
+ *     Those are reported rather than removed — which port belongs to which
+ *     guest after a restore is the operator's call, not ours — and the guest
+ *     is left STOPPED so nothing races before they make it.
+ */
+lxcRouter.post('/exports/:id/restore', requireSudo, async (req, res) => {
+  const store = exportStore();
+  const name = String(req.body?.name || '').trim();
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'A valid new container name is required (letters, digits and hyphens).' });
+  }
+  const open = await store.openForDownload(req.params.id);
+  if (open.error) {
+    return res.status(open.error.includes('no such') ? 404 : 422).json({ success: false, error: open.error });
+  }
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  try {
+    await execOnHost(`incus info ${incusName} 2>/dev/null`);
+    return res.status(409).json({ success: false, error: `Container '${name}' already exists — pick another name.` });
+  } catch { /* good: the name is free */ }
+
+  try {
+    await execOnHost(
+      `incus import ${shellSingleQuote(open.path)} ${shellSingleQuote(incusName)}`,
+      { timeout: 45 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 },
+    );
+  } catch (err) {
+    return res.status(500).json({ success: false, error: `Restore failed: ${(err?.stderr || err?.message || 'unknown error').toString().trim().slice(0, 500)}` });
+  }
+
+  // What came back with it.
+  const notes = [];
+  let ipPinRemoved = null;
+  const proxyDevices = [];
+  try {
+    // `devices`, not `expanded_devices`: only what the BACKUP carried is the
+    // restore's doing. A device the profile supplies is shared by every
+    // guest already and is not this operation's to touch. Read as JSON
+    // rather than scraped from YAML — the key order in `config show` is
+    // alphabetical, so "the listen after the type" is not a thing.
+    const q = await execOnHost(`incus query ${shellSingleQuote(`/1.0/instances/${incusName}`)} 2>/dev/null`, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+    const devices = JSON.parse(String(q.stdout || '{}'))?.devices || {};
+    const sourceContainer = open.row.container_name;
+    const hazards = restoreHazards(devices, { sourceContainer });
+    let pinRemoved = false;
+    if (hazards.pinnedIp) {
+      try {
+        await execOnHost(`incus config device unset ${shellSingleQuote(incusName)} eth0 ipv4.address`, { timeout: 30000 });
+        pinRemoved = true;
+        ipPinRemoved = hazards.pinnedIp;
+      } catch { /* reported as still-pinned below */ }
+    }
+    proxyDevices.push(...hazards.proxyDevices);
+    notes.push(...restoreNotes({ ...hazards, pinRemoved, sourceContainer }));
+  } catch { /* the guest exists either way; these notes are advice, not the job */ }
+
+  let started = false;
+  if (req.body?.start === true) {
+    try { await execOnHost(`incus start ${shellSingleQuote(incusName)}`, { timeout: 60000 }); started = true; }
+    catch (err) { notes.push(`Imported, but it would not start: ${(err?.stderr || err?.message || '').toString().trim().slice(0, 200)}`); }
+  }
+
+  try {
+    logAudit(req.user?.id || null, 'LXC_EXPORT_RESTORE', 'lxc', name,
+      { from: open.filename, source_container: open.row.container_name, export_id: open.row.id, started, ip_pin_removed: ipPinRemoved, proxy_devices: proxyDevices }, req.ip);
+  } catch { /* best effort */ }
+
+  res.status(201).json({
+    success: true,
+    container: name,
+    from: open.filename,
+    source_container: open.row.container_name,
+    started,
+    ip_pin_removed: ipPinRemoved,
+    proxy_devices: proxyDevices,
+    notes,
+    next: `${name} is a separate container — ${open.row.container_name} was not touched. Check it, then use Transfer routes to move traffic over.`,
+  });
 });
 
 // GET /containers/snapshot-export-queue — global view of every

@@ -85,6 +85,27 @@ and then the download is an ordinary static file.
   instead of starting over. Any number of times, from any device. The bytes
   come back through `dd … iflag=skip_bytes,count_bytes` because the backend
   runs in a container that cannot see the ZFS exports dataset.
+- **Restore** (`POST /api/lxc/exports/:id/restore`, or `import_lxc` over MCP)
+  imports the tarball straight from the host into a **new** container — no
+  download-and-re-upload round trip, since the bytes are already there. Never
+  in place: a backup restored over a running guest is the one move with no
+  undo, and the container dialog already has *Transfer routes* for moving
+  traffic across once the restore checks out.
+
+  A backup carries the original's own devices, and the original is usually
+  still running, so two of them are hazards rather than settings
+  (`restoreHazards` / `restoreNotes` in `lib/lxc-exports.js`, pure and
+  tested):
+
+  | Cloned | What it would do | What happens |
+  | --- | --- | --- |
+  | `eth0 ipv4.address` | Incus's static DHCP reservation — two guests claiming one is how **both** lose it | stripped, always; the restore takes a fresh lease |
+  | `proxy` devices | bind host ports, which have exactly one owner | reported, and the guest is left **stopped**; which guest keeps the port is the operator's call |
+
+  Only instance-level devices are read (`devices`, not `expanded_devices`) —
+  a device the profile supplies is shared by every guest already and is not
+  the restore's doing.
+
 - **Delete** removes the file and the row; it refuses mid-build.
 - **Retention** keeps the newest 3 per container and drops anything past 14
   days, on boot + every six hours (`index.js`). A prepared download is a
@@ -111,6 +132,18 @@ rather than two views of a directory that disagree.
 - `export_lxc({ container, snapshot?, compression? })` — unchanged except
   that it now names the compressor, reports it back, and registers the
   artifact.
+- `import_lxc({ name, file, confirm })` — the restore, and it handles the two
+  hazards above exactly as the dashboard does, so the surfaces agree.
+
+## Uploading one back
+
+The container dialog's Import accepts any tarball the product writes —
+`.tar.zst`, `.tar.gz`, `.tar` — because the bytes are streamed into
+`incus import -`, which reads the compressor out of the file rather than the
+name. (The picker used to list only `.tar.gz`, which greyed out the default
+export the moment zstd landed.) For a tarball already on the host, use
+Restore instead: uploading 3.4 GB back to where it already sits is the round
+trip this feature exists to remove.
 
 ## The numbers
 

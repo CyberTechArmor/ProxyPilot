@@ -14,6 +14,7 @@ import {
 const PROXYPILOT_BIN = process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot';
 
 import { exportStore } from '../../lib/lxc-exports-instance.js';
+import { restoreHazards, restoreNotes } from '../../lib/lxc-exports.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../../lib/export-compression.js';
 
 export function createLxcAdminHandlers(kit) {
@@ -201,14 +202,44 @@ export function createLxcAdminHandlers(kit) {
     const gate = confirmFlag(args, note, `This imports ${file} as a new container ${newName}.`); if (gate) return gate;
     const r = await runHostCapture('incus', ['import', file, incus(newName)], { timeoutMs: 45 * 60 * 1000 });
     if (r.status !== 0) return err(`incus import failed: ${tail(r.stderr) || (r.timedOut ? 'timed out' : 'unknown error')}`);
+
+    // A backup restores the instance's OWN devices, and the guest it came
+    // from is often still running. Two of them cannot be shared, so they are
+    // handled here rather than discovered as an outage — the same reading
+    // the dashboard's Restore does, so both surfaces behave alike.
+    const notes = [];
+    let pinRemoved = false;
+    let hazards = { pinnedIp: null, proxyDevices: [] };
+    try {
+      const q = await runHostCapture('incus', ['query', `/1.0/instances/${incus(newName)}`], { timeoutMs: 30000 });
+      hazards = restoreHazards(JSON.parse(q.stdout || '{}')?.devices || {}, {});
+      if (hazards.pinnedIp) {
+        const u = await runHostCapture('incus', ['config', 'device', 'unset', incus(newName), 'eth0', 'ipv4.address'], { timeoutMs: 30000 });
+        pinRemoved = u.status === 0;
+      }
+    } catch { /* the guest exists either way */ }
+    notes.push(...restoreNotes({ ...hazards, pinRemoved, sourceContainer: 'the guest this backup came from' }));
+
+    // Published ports have one owner. Starting a second claimant on a guess
+    // is how a restore takes production down, so that needs saying out loud
+    // (start: true) rather than defaulting.
     let started = false;
-    if (args.start !== false) {
-      const s = await runHostCapture('incus', ['start', incus(newName)], { timeoutMs: 120000 });
-      started = s.status === 0;
+    const portClash = hazards.proxyDevices.length > 0 && args.start !== true;
+    if (args.start !== false && !portClash) {
+      const st = await runHostCapture('incus', ['start', incus(newName)], { timeoutMs: 120000 });
+      started = st.status === 0;
+    } else if (portClash) {
+      notes.push(`Left stopped because of those port forwards. Re-call with start: true once you have decided which guest keeps them, or remove them here with remove_lxc_device.`);
     }
     note.summary = `imported ${newName} from ${file}`;
-    note.detail = plan;
-    return ok({ imported: true, container: newName, started, file, next: 'Routes that pointed at the deleted guest were removed with it — re-create them with set_route.' });
+    note.detail = { ...plan, ip_pin_removed: pinRemoved ? hazards.pinnedIp : null, proxy_devices: hazards.proxyDevices, started };
+    return ok({
+      imported: true, container: newName, started, file,
+      ip_pin_removed: pinRemoved ? hazards.pinnedIp : null,
+      proxy_devices: hazards.proxyDevices,
+      ...(notes.length ? { notes } : {}),
+      next: 'This is a NEW guest with no routes of its own — check it, then point traffic at it with set_route.',
+    });
   });
 
   /* ------------------------------ snapshots ------------------------------ */

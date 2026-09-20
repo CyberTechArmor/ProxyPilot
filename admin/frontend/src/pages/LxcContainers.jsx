@@ -3765,12 +3765,13 @@ export default function LxcContainers() {
               <Label>Backup File *</Label>
               <Input
                 type="file"
-                accept=".tar.gz,.tar,.gz"
+                accept=".tar.zst,.zst,.tar.gz,.tgz,.gz,.tar.xz,.xz,.tar"
                 onChange={(e) => setImportFile(e.target.files?.[0] || null)}
                 disabled={importing}
               />
               <p className="text-xs text-muted-foreground">
-                Upload a .tar.gz backup file created by the export feature.
+                Any tarball the export feature made — .tar.zst, .tar.gz or .tar.
+                The format is read from the file itself, not its name.
                 {importFile && <> Selected: <span className="font-mono">{importFile.name}</span> ({formatSize(importFile.size)}).</>}
               </p>
             </div>

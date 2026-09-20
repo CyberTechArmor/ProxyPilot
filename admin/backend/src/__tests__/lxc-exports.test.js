@@ -384,3 +384,44 @@ test('the sweep adopts a tarball nobody recorded, so retention and the panel can
   assert.equal(again.adopted.length, 0);
   assert.equal(store.list().length, 2);
 });
+
+test('adopting an OLD tarball never evicts a NEW one — retention runs on dates, not row ids', async () => {
+  // The live failure, reproduced: three exports recorded this afternoon, then
+  // one from this morning adopted off the disk. Adoption inserts last, so it
+  // holds the highest id while being the oldest file. Ordering by id made the
+  // sweep keep the three most recently INSERTED and delete a tarball made
+  // twenty minutes ago.
+  const onDisk = { 'lxc-searxng-20260920T135323Z.tar.gz': [1003913216, Math.floor(Date.parse('2026-09-20T13:53:23Z') / 1000)] };
+  const { store, db } = setup({
+    script: (bin, args) => {
+      if (bin === 'incus' && args[0] === 'list') return { status: 0, stdout: 'pp-searxng\n' };
+      if (bin !== 'sh') return null;
+      if (/^ls -1/.test(args[0])) return { status: 0, stdout: `${Object.keys(onDisk).join('\n')}\n` };
+      if (/^stat -c "%s %Y"/.test(args[0])) {
+        const e = onDisk[args[2]];
+        return e ? { status: 0, stdout: `${e[0]} ${e[1]}\n` } : { status: 1, stdout: '' };
+      }
+      return null;
+    },
+  });
+  const insert = db.prepare(`
+    INSERT INTO lxc_exports (container_name, snapshot_name, path, filename, compression, state, bytes_done, created_at, expires_at)
+    VALUES ('searxng', NULL, ?, ?, 'zstd', 'ready', 1, ?, '2026-10-04T00:00:00Z')
+  `);
+  for (const [name, at] of [
+    ['lxc-searxng-20260920T151907Z.tar.zst', '2026-09-20T15:19:07Z'],
+    ['lxc-searxng-20260920T151954Z.tar.gz', '2026-09-20T15:19:54Z'],
+    ['lxc-searxng-20260920T152310Z.tar', '2026-09-20T15:23:10Z'],
+  ]) insert.run(`/pool/exports/${name}`, name, at);
+
+  const out = await store.sweep();
+  assert.equal(out.adopted.length, 1);
+  assert.equal(out.swept.length, 1);
+  assert.equal(out.swept[0].file, '/pool/exports/lxc-searxng-20260920T135323Z.tar.gz',
+    'the MORNING file is the one that goes, whatever order the rows were written in');
+  assert.deepEqual(store.list({ container: 'searxng' }).map((r) => r.filename).sort(), [
+    'lxc-searxng-20260920T151907Z.tar.zst',
+    'lxc-searxng-20260920T151954Z.tar.gz',
+    'lxc-searxng-20260920T152310Z.tar',
+  ]);
+});

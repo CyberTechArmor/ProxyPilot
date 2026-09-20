@@ -252,6 +252,15 @@ Deployed to the live host at `cc715e2` (two increments: `c1fa052` then
   zstd branch of `probeTarCompression` has only been exercised by its own
   assertions, not against a source host that has it.
 
+## Found by watching the first live sweep
+
+Retention deleted the wrong tarball: four artifacts, keep three, and it
+dropped the one from 15:19 while keeping one from 13:53. The sweep ordered
+by row id, which stops tracking recency the moment adoption inserts a fresh
+id for an old file. Fixed to order by `created_at`, with a test that
+reproduces the exact shape (LEARNINGS 188). Worth knowing because the
+symptom is quiet — the count is right, only the choice is wrong.
+
 ## Left on the host
 
 Four searxng tarballs in `/Fractionate-ZFS/exports` (~16.5 GB logical): the

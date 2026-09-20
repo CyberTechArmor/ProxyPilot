@@ -334,7 +334,13 @@ export function createExportStore({
     try {
       adopted = await adoptOrphans();
       const cutoff = iso(now() - days * 86400000);
-      const rows = db().prepare(`SELECT * FROM lxc_exports WHERE state = 'ready' ORDER BY container_name, id DESC`).all();
+      // By created_at, NOT by id. An adopted row gets a fresh id while
+      // carrying the file's own (older) date, so ordering by id made
+      // "keep the newest 3" mean "keep the 3 most recently INSERTED" —
+      // which on the first sweep after adoption deletes a tarball made
+      // minutes ago and keeps one from hours before. Caught on the live
+      // host doing exactly that.
+      const rows = db().prepare(`SELECT * FROM lxc_exports WHERE state = 'ready' ORDER BY container_name, created_at DESC, id DESC`).all();
       const seen = new Map();
       for (const r of rows) {
         const n = (seen.get(r.container_name) || 0) + 1;

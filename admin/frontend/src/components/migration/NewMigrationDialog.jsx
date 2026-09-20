@@ -6,7 +6,7 @@
 // shown ONCE and is never recoverable, so it stays up until the operator
 // dismisses it.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,7 +14,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Loader2, Terminal } from 'lucide-react';
 import { ApiError, api } from '@/lib/api';
-import { BTN, DIALOG_BODY, DIALOG_LG, Checkbox, CopyButton, Notice } from './shared';
+import { BTN, DIALOG_BODY, DIALOG_LG, Checkbox, CopyButton, Notice, fmtBytes } from './shared';
 
 const MODES = [
   { value: 'whole-machine', label: 'Whole machine', hint: 'A physical host, a VM on any hypervisor (including Proxmox) or an LXC. Wraps the official incus-migrate; a Proxmox LXC takes the rootfs-tar path automatically.' },
@@ -31,7 +31,20 @@ export default function NewMigrationDialog({ open, onClose, onCreated }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [created, setCreated] = useState(null);
+  // The pools this host actually has, with their free space: picking where a
+  // server lands is a decision, and it should not need a second window to
+  // find out which pool has room.
+  const [pools, setPools] = useState(null);
   const set = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    api.migrations.preflight()
+      .then((pf) => { if (live) setPools(pf?.storage?.pools || []); })
+      .catch(() => { if (live) setPools([]); });
+    return () => { live = false; };
+  }, [open]);
 
   const submit = async () => {
     setBusy(true); setError(null);
@@ -162,8 +175,24 @@ export default function NewMigrationDialog({ open, onClose, onCreated }) {
                 <Input id="mig-disk" className="h-11 sm:h-9" type="number" min="1" value={form.disk_gb} onChange={(e) => set('disk_gb')(e.target.value)} placeholder={form.type === 'virtual-machine' ? 'required for a VM' : 'pool default'} />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="mig-pool">Storage pool — optional</Label>
-                <Input id="mig-pool" className="h-11 sm:h-9" value={form.pool} onChange={(e) => set('pool')(e.target.value)} placeholder="the profile's pool" />
+                <Label htmlFor="mig-pool">Storage pool</Label>
+                {pools?.length ? (
+                  <Select value={form.pool || '__default__'} onValueChange={(v) => set('pool')(v === '__default__' ? '' : v)}>
+                    <SelectTrigger id="mig-pool" className="h-11 sm:h-9"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">
+                        Wherever new guests go{pools.find((p) => p.default) ? ` — ${pools.find((p) => p.default).name}` : ''}
+                      </SelectItem>
+                      {pools.map((p) => (
+                        <SelectItem key={p.name} value={p.name}>
+                          {p.name} · {p.driver || '?'} · {p.free_bytes != null ? `${fmtBytes(p.free_bytes)} free` : 'free space unreadable'}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input id="mig-pool" className="h-11 sm:h-9" value={form.pool} onChange={(e) => set('pool')(e.target.value)} placeholder="the profile's pool" />
+                )}
               </div>
             </div>
 

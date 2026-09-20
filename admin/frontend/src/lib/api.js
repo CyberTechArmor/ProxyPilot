@@ -2114,7 +2114,10 @@ export const api = {
       return request(`/migrations/${encodeURIComponent(id)}/events?${q.toString()}`);
     },
     create: (body) => request('/migrations', { method: 'POST', body: JSON.stringify(body) }),
-    approve: (id) => request(`/migrations/${encodeURIComponent(id)}/approve`, { method: 'POST', body: '{}' }),
+    // `override` approves over a blocking concern (capacity, mostly) — the
+    // server refuses without it and says what is wrong.
+    approve: (id, { override = false } = {}) =>
+      request(`/migrations/${encodeURIComponent(id)}/approve`, { method: 'POST', body: JSON.stringify(override ? { override: true } : {}) }),
     cancel: (id, reason) => request(`/migrations/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: JSON.stringify(reason ? { reason } : {}) }),
     checklist: (id, { step, done = true, note } = {}) =>
       request(`/migrations/${encodeURIComponent(id)}/checklist`, { method: 'POST', body: JSON.stringify({ step, done, ...(note ? { note } : {}) }) }),

@@ -136,6 +136,8 @@ export function getDb() {
 //               (REST or MCP): op, subject, the sha256 plan token, the plan,
 //               outcome, per-step detail. Feeds the Storage page history and
 //               export_grc_evidence (lib/storage/service.js).
+//   911 Migration capacity — the fit check (what is coming, what the target
+//               pool and the staging disk have free) recorded on the row.
 //   910 Migration token lifecycle — revocation columns on `migrations`, plus
 //               `guest_created`: tokens end when the migration does (or when
 //               an operator revokes them) rather than on a clock, and the
@@ -2202,6 +2204,16 @@ export function initDatabase() {
     for (const [col, type] of [['token_revoked_at', 'TEXT'], ['token_revoked_by', 'TEXT'], ['guest_created', 'INTEGER']]) {
       if (!cols.includes(col)) d.exec(`ALTER TABLE migrations ADD COLUMN ${col} ${type}`);
     }
+  });
+
+  // 911: will it fit? The capacity verdict measured when the inventory lands
+  // and again at approval — what is coming, how much room the target pool and
+  // ProxyPilot's own staging disk have, and the blocking concern if it will
+  // not fit. Stored so the page and the MCP reader show the same numbers the
+  // approval was judged against.
+  runMigration(db, 911, 'migration_capacity', (d) => {
+    const cols = d.prepare(`PRAGMA table_info(migrations)`).all().map((c) => c.name);
+    if (!cols.includes('capacity_json')) d.exec('ALTER TABLE migrations ADD COLUMN capacity_json TEXT');
   });
 
   runMigration(db, 907, 'route_edge_options', (d) => {

@@ -289,13 +289,129 @@ export function manifestSummary(manifest) {
   };
 }
 
+/* ------------------------------- capacity -------------------------------- */
+
+/** Rootfs tarballs of an ordinary Linux install land around half the size. */
+export const TAR_COMPRESSION_ESTIMATE = 0.5;
+/** Leave this much of the target pool free after the guest lands. */
+export const POOL_HEADROOM = 0.1;
+
+/**
+ * How many bytes this migration will actually put where.
+ *
+ * Two different places, and they are not the same number:
+ *
+ *   pool     the guest itself, on the Incus storage pool it lands in.
+ *   staging  the artifact on ProxyPilot's own disk while it is in flight —
+ *            rootfs-tar and file-sync stream THROUGH `/var/lib/proxypilot`,
+ *            so a host with a small root filesystem can fail a migration
+ *            that the target pool had ample room for. incus-migrate streams
+ *            straight into Incus and stages nothing.
+ *
+ * Whole-machine carries the source's used bytes (the pseudo-filesystems are
+ * excluded from the tar and are not counted). Application mode carries the
+ * app directories plus the database dumps it will restore.
+ */
+export function capacityNeeds(manifest, { mode, transport } = {}) {
+  const man = manifest || {};
+  const parts = [];
+  let bytes = 0;
+  if (mode === 'application') {
+    for (const d of appDirectories(man)) {
+      bytes += Number(d.size_bytes) || 0;
+      parts.push({ what: d.path, bytes: Number(d.size_bytes) || 0 });
+    }
+    for (const db of databasePlan(man)) {
+      // A logical dump is smaller than the live database, but it is restored
+      // INTO the guest, so the guest pays for both for a while.
+      const b = Number(db.total_bytes) || 0;
+      bytes += b * 2;
+      parts.push({ what: `${db.engine} dump + restore`, bytes: b * 2 });
+    }
+  } else {
+    const root = Number(man.source?.root_used_bytes) || 0;
+    bytes += root;
+    parts.push({ what: 'the source root filesystem', bytes: root });
+    for (const m of man.mounts || []) {
+      // A separate data mount travels only when it is inside the rootfs tar;
+      // --one-file-system means it is not. Name it either way.
+      if (!m || m.target === '/' || !Number(m.used_bytes)) continue;
+      if (/^\/(proc|sys|dev|run|tmp)(\/|$)/.test(m.target)) continue;
+      parts.push({ what: `${m.target} (a separate mount — NOT carried by the tarball)`, bytes: 0, note: 'copy it separately' });
+    }
+  }
+  const staging = transport === 'incus-migrate' ? 0 : Math.round(bytes * TAR_COMPRESSION_ESTIMATE);
+  return {
+    pool_bytes: bytes,
+    staging_bytes: staging,
+    parts,
+    staging_note: transport === 'incus-migrate'
+      ? 'incus-migrate streams straight into Incus — nothing is staged on this host.'
+      : `The artifact passes through ProxyPilot's own disk; the estimate is ${Math.round(TAR_COMPRESSION_ESTIMATE * 100)}% of the source, which is typical for a compressed rootfs and can be wrong in either direction.`,
+  };
+}
+
+/**
+ * Will it fit? One verdict per place, plus the concerns to put in front of
+ * the operator BEFORE they approve the transfer.
+ *
+ *   block   the free space is less than what is coming
+ *   warn    it fits, but leaves less than POOL_HEADROOM of the pool free
+ *
+ * `free` values of null mean "could not be read" — which is a warning of its
+ * own, never a silent pass.
+ */
+export function capacityVerdict({ needs, pool, poolFreeBytes = null, poolTotalBytes = null, stagingFreeBytes = null, stagingPath = null } = {}) {
+  const out = { fits: true, checks: [], concerns: [] };
+  const gib = (b) => `${(Number(b) / 1024 ** 3).toFixed(1)} GiB`;
+  const add = (id, status, text, remedy = null) => {
+    out.checks.push({ id, status, text, remedy });
+    if (status === 'block') { out.fits = false; out.concerns.push({ level: 'block', id, text, remedy }); }
+    else if (status === 'warn') out.concerns.push({ level: 'warn', id, text, remedy });
+  };
+
+  const need = Number(needs?.pool_bytes) || 0;
+  const poolName = pool || 'the default profile\'s pool';
+  if (poolFreeBytes == null) {
+    add('capacity-pool-unknown', 'warn', `Could not read how much space ${poolName} has left, so nothing checked that ${gib(need)} will fit.`,
+      'Storage → pools, or zpool_status, shows the free space.');
+  } else if (need > poolFreeBytes) {
+    add('capacity-pool', 'block', `${gib(need)} is coming and ${poolName} has ${gib(poolFreeBytes)} free — it will not fit.`,
+      'Pick a pool with room (pool: "<name>"), free space on this one, or migrate less (application mode carries only the app).');
+  } else if (need > poolFreeBytes * (1 - POOL_HEADROOM)) {
+    add('capacity-pool', 'warn', `${gib(need)} is coming and ${poolName} has ${gib(poolFreeBytes)} free — it fits, with under ${Math.round(POOL_HEADROOM * 100)}% of the free space left over.`,
+      'A pool close to full performs badly, and ZFS especially so past ~90%.');
+  } else {
+    add('capacity-pool', 'pass', `${gib(need)} into ${poolName}, which has ${gib(poolFreeBytes)} free${poolTotalBytes ? ` of ${gib(poolTotalBytes)}` : ''}.`);
+  }
+
+  const stage = Number(needs?.staging_bytes) || 0;
+  if (stage > 0) {
+    if (stagingFreeBytes == null) {
+      add('capacity-staging-unknown', 'warn', `Could not read the free space on ${stagingPath || "ProxyPilot's own disk"}, where the transfer is staged.`);
+    } else if (stage > stagingFreeBytes) {
+      add('capacity-staging', 'block', `The transfer stages about ${gib(stage)} on ${stagingPath || "ProxyPilot's disk"}, which has ${gib(stagingFreeBytes)} free.`,
+        'Free space there, or use the incus-migrate transport, which streams straight into Incus and stages nothing.');
+    } else if (stage > stagingFreeBytes * 0.8) {
+      add('capacity-staging', 'warn', `The transfer stages about ${gib(stage)} on ${stagingPath || "ProxyPilot's disk"}, which has ${gib(stagingFreeBytes)} free — close.`,
+        'The estimate assumes a rootfs compresses by about half; an incompressible source needs more.');
+    } else {
+      add('capacity-staging', 'pass', `About ${gib(stage)} staged on ${stagingPath || "ProxyPilot's disk"} (${gib(stagingFreeBytes)} free), deleted after the import.`);
+    }
+  }
+  return out;
+}
+
 /**
  * Did the source look like something this migration can actually carry?
  * Returns blocking problems first — the operator sees them before approving
  * the transfer, not after it.
  */
-export function manifestConcerns(manifest, { mode }) {
+export function manifestConcerns(manifest, { mode, capacity = null } = {}) {
   const out = [];
+  // Capacity first: "it will not fit" is the one concern that makes every
+  // other question moot, and it blocks the approval.
+  for (const c of capacity?.concerns || []) out.push({ ...c, remedy: c.remedy ?? null });
   const push = (level, id, text, remedy = null) => out.push({ level, id, text, remedy });
   if (!manifest.os?.id) push('warn', 'os-unknown', 'The source OS could not be identified (no /etc/os-release).');
   if (manifest.os?.init && manifest.os.init !== 'systemd') push('warn', 'init', `The source runs ${manifest.os.init}, not systemd — units and their ports were not collected.`);

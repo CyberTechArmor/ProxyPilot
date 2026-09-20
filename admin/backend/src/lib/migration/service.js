@@ -13,7 +13,10 @@ import { connect as tlsConnect } from 'node:tls';
 import { mkdir, writeFile, rm, stat } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { join } from 'node:path';
-import { validateManifest, manifestSummary, manifestConcerns, observedEgress, suggestedRoutes, databasePlan } from './manifest.js';
+import {
+  validateManifest, manifestSummary, manifestConcerns, observedEgress, suggestedRoutes, databasePlan,
+  capacityNeeds, capacityVerdict,
+} from './manifest.js';
 import {
   validateTarget, guestConfig, installCommand, installCommandTwoStep, checklistFor, checklistComplete,
   checklistProgress, transferProgress, PHASES, PHASE_IDS, canAdvance, TERMINAL, CHECKLIST,
@@ -80,7 +83,8 @@ export function createMigrationService({
       token: { ...tokenState(row, { now: now() }), id: row.token_id, tls_pin: row.tls_pin },
       manifest: man, manifest_at: row.manifest_at,
       summary: man ? manifestSummary(man) : null,
-      concerns: man ? manifestConcerns(man, { mode: row.mode }) : [],
+      capacity: parse(row.capacity_json, null),
+      concerns: man ? manifestConcerns(man, { mode: row.mode, capacity: parse(row.capacity_json, null) }) : [],
       approved_at: row.approved_at, approved_by: row.approved_by,
       egress: egress || (man ? observedEgress(man).map(defaultEgressDecision) : []),
       routes: man ? suggestedRoutes(man) : [],
@@ -227,29 +231,56 @@ export function createMigrationService({
     // Answering by PROMPT, not by position. Learned live against Incus 6.0.4
     // (LEARNINGS 183): it asks for the authentication MECHANISM between the
     // fingerprint and the token, so a positional script feeds the token into
-    // a menu and the migration dies on "illegal base64 data".
+    // a menu and the migration dies on "illegal base64 data". The patterns
+    // below are the prompt strings of incus-migrate 6.0.x, kept deliberately
+    // loose where the wording has drifted between releases.
     const rules = [
+      // A source host that runs Incus itself is asked this first. We always
+      // target the ProxyPilot host, never the source's own daemon.
+      { label: 'local server is the target', when: 'local (incus|lxd) server is the target', send: 'no' },
       { label: 'server URL', when: 'provide (the )?(Incus|LXD) server URL', send: trust.url },
       { label: 'accept the certificate', when: 'ok \\(y/n\\)', send: 'y' },
       { label: 'authentication mechanism', when: 'pick an authentication mechanism', send: '1' },
       { label: 'trust token', when: 'provide the certificate token', send: trust.token, secret: true },
+      // Empty accepts the prompt's own default, which is the default project.
+      { label: 'project', when: 'project to create the instance in', send: '' },
       { label: 'container or virtual machine', when: 'container \\(1\\) or (a )?virtual[- ]machine \\(2\\)', send: kind },
       { label: 'instance name', when: 'name of the (new )?instance', send: row.target_name },
       // 6.0.4 says "a root filesystem"; older releases say "the root
       // filesystem". Match either, and accept "root fs" too.
       { label: 'root filesystem path', when: 'path to (a|the) root ?(filesystem|fs)', send: '/' },
-      { label: 'source disk', when: 'path to a disk, partition, or image file', send: source },
+      { label: 'source disk', when: 'path to a disk, partition, or', send: source },
+      { label: 'UEFI boot', when: 'support UEFI booting', send: 'yes' },
+      { label: 'UEFI secure boot', when: 'support UEFI Secure Boot', send: 'yes' },
       { label: 'additional mounts', when: 'add additional (filesystem )?(mounts|mount points)', send: 'no' },
-      // The overrides menu, whose first entry begins the migration.
-      { label: 'begin the migration', when: 'pick one of the options above', send: '1', max: 2 },
+      { label: 'extra mount path', when: 'filesystem mount path', send: '', max: 2 },
     ];
+    // The overrides menu. Option 4 is "Change instance storage pool or volume
+    // size" and option 1 begins the migration, so a pool or a disk size costs
+    // one extra trip through the menu. Two rules share the prompt and are
+    // matched in order, which is how the sequence is expressed: the first ask
+    // gets 4, the next gets 1. Without a pool or a size there is no rule 4 at
+    // all and the first ask begins the migration.
+    if (spec.pool || spec.disk_gb) {
+      rules.push({ label: 'change the storage pool or size', when: 'pick one of the options above', send: '4', max: 1 });
+      rules.push({ label: 'storage pool', when: 'provide the storage pool to use', send: spec.pool || '' });
+      rules.push({ label: 'change the storage size', when: 'want to change the storage size', send: spec.disk_gb ? 'yes' : 'no' });
+      if (spec.disk_gb) rules.push({ label: 'storage size', when: 'specify the storage size', send: `${spec.disk_gb}GiB` });
+    }
+    rules.push({ label: 'begin the migration', when: 'pick one of the options above', send: '1', max: 2 });
+
     // The same answers in order: what an operator would type by hand, and
     // what an agent older than these rules still feeds positionally.
-    const lines = [trust.url, 'y', '1', trust.token, kind, row.target_name, source, 'no', '1'];
+    const lines = [trust.url, 'y', '1', trust.token, kind, row.target_name, source, 'no'];
+    if (spec.pool || spec.disk_gb) {
+      lines.push('4', spec.pool || '', spec.disk_gb ? 'yes' : 'no');
+      if (spec.disk_gb) lines.push(`${spec.disk_gb}GiB`);
+    }
+    lines.push('1');
     return {
       lines,
       rules,
-      note: 'Each rule answers one incus-migrate prompt, matched on the prompt text (case-insensitive). `lines` is the same sequence positionally. The agent substitutes {{ROOT_DEVICE}} / {{ROOTFS}} where it knows better, and fails with the prompt text if incus-migrate asks something no rule covers.',
+      note: 'Each rule answers one incus-migrate prompt, matched on the prompt text (case-insensitive), in order — two rules may share a pattern to express a sequence (the overrides menu is answered 4 then 1 when a storage pool or size is set). `lines` is the same sequence positionally. The agent substitutes {{ROOT_DEVICE}} / {{ROOTFS}} where it knows better, and fails with the prompt text if incus-migrate asks something no rule covers.',
     };
   }
 
@@ -383,7 +414,9 @@ export function createMigrationService({
 
   /** Everything an operator needs before starting a migration. Read-only. */
   async function preflight() {
-    const [builds, listener, pin] = await Promise.all([agentBinaries(), incusListener(), tlsPin()]);
+    const [builds, listener, pin, pools, staging] = await Promise.all([
+      agentBinaries(), incusListener(), tlsPin(), listPoolSpace(), stagingSpace(),
+    ]);
     const base = String(publicBaseUrl?.() || publicBaseUrl || '');
     const checks = [];
     const add = (id, status, detail, remedy = null) => checks.push({ id, status, detail, remedy });
@@ -400,8 +433,19 @@ export function createMigrationService({
       listener.listening ? `Incus listens on ${listener.address} (${listener.scope})` : 'Incus does not listen on the network',
       listener.listening ? null : `a container source can still use rootfs-tar; a physical host or a VM needs incus-migrate, which connects directly — enable it on ${listener.suggested || 'the bridge gateway'}`);
 
+    // Room. Not a pass/fail — how much a migration can bring, and where it
+    // would land by default. The per-migration verdict comes later, when the
+    // inventory says how much is actually coming.
+    const dflt = pools.find((p) => p.default);
+    add('storage', dflt?.free_bytes != null ? 'pass' : 'warn',
+      pools.length
+        ? `${pools.map((p) => `${p.name}${p.default ? ' (default)' : ''}: ${p.free_bytes != null ? `${(p.free_bytes / 1024 ** 3).toFixed(0)} GiB free` : 'free space unreadable'}`).join(', ')}; staging on ${staging.path} has ${staging.free_bytes != null ? `${(staging.free_bytes / 1024 ** 3).toFixed(0)} GiB free` : 'unreadable free space'}`
+        : 'no Incus storage pool could be read',
+      dflt?.free_bytes != null ? null : 'a migration will still run; nothing will check that what is coming fits');
+
     return {
       at: nowIso(now()), base_url: base, tls_pin: pin, agent_builds: builds, incus: listener, checks,
+      storage: { pools, staging, default_pool: dflt?.name || null },
       ready_for: {
         'rootfs-tar': haveBuilds.length > 0 && !!base,
         'file-sync': haveBuilds.length > 0 && !!base,
@@ -411,10 +455,98 @@ export function createMigrationService({
     };
   }
 
+  /* ------------------------------ capacity ------------------------------- */
+
+  /** The pool a guest lands in when the spec does not name one. */
+  async function defaultProfilePool() {
+    const r = await exec('incus', ['query', '/1.0/profiles/default'], { timeoutMs: 20000 });
+    if (r.status !== 0) return null;
+    const prof = parse(r.stdout, null);
+    return prof?.devices?.root?.pool || null;
+  }
+
+  /**
+   * Free space on an Incus storage pool, whatever drives it.
+   *
+   * `/1.0/storage-pools/<name>/resources` is what `incus storage info` reads,
+   * so it answers for zfs, btrfs, lvm and a plain directory alike — no
+   * mapping from Incus pool to ZFS pool to guess at.
+   */
+  async function poolSpace(pool) {
+    const name = pool || await defaultProfilePool();
+    if (!name) return { pool: null, free_bytes: null, total_bytes: null, error: 'no pool named and the default profile has no root disk' };
+    const r = await exec('incus', ['query', `/1.0/storage-pools/${encodeURIComponent(name)}/resources`], { timeoutMs: 30000 });
+    if (r.status !== 0) return { pool: name, free_bytes: null, total_bytes: null, error: tail(r.stderr) || `exit ${r.status}` };
+    const res = parse(r.stdout, null);
+    const total = Number(res?.space?.total);
+    const used = Number(res?.space?.used);
+    if (!Number.isFinite(total)) return { pool: name, free_bytes: null, total_bytes: null, error: 'the pool reported no space figures' };
+    return { pool: name, total_bytes: total, free_bytes: Math.max(0, total - (Number.isFinite(used) ? used : 0)), used_bytes: Number.isFinite(used) ? used : null };
+  }
+
+  /** Every Incus pool with its free space, and which one new guests land in. */
+  async function listPoolSpace() {
+    const [list, dflt] = await Promise.all([
+      exec('incus', ['storage', 'list', '--format', 'json'], { timeoutMs: 30000 }),
+      defaultProfilePool(),
+    ]);
+    if (list.status !== 0) return [];
+    const pools = parse(list.stdout, []) || [];
+    return Promise.all(pools.map(async (p) => {
+      const space = await poolSpace(p.name);
+      return {
+        name: p.name, driver: p.driver || null, default: p.name === dflt,
+        free_bytes: space.free_bytes, total_bytes: space.total_bytes, used_bytes: space.used_bytes ?? null,
+        error: space.error || null,
+      };
+    }));
+  }
+
+  /** Free space where the transfer is staged — ProxyPilot's own disk. */
+  async function stagingSpace() {
+    await mkdir(workDir, { recursive: true }).catch(() => {});
+    const r = await exec('df', ['-B1', '--output=avail', workDir], { timeoutMs: 20000 });
+    if (r.status !== 0) return { path: workDir, free_bytes: null, error: tail(r.stderr) || `exit ${r.status}` };
+    // The LAST all-digits token: `df --output=avail` prints a header line and
+    // then the number. Nothing numeric means we do not know — which is a
+    // warning. Reading it as zero would block every migration on a host whose
+    // df said something unexpected.
+    const digits = String(r.stdout || '').trim().split(/\s+/).filter((t) => /^\d+$/.test(t));
+    if (!digits.length) return { path: workDir, free_bytes: null, error: `could not read a free-space figure from df (${String(r.stdout || '').trim().slice(0, 80) || 'no output'})` };
+    return { path: workDir, free_bytes: Number(digits.at(-1)) };
+  }
+
+  /**
+   * Will this migration fit? Measured, not guessed: what the manifest says is
+   * coming against what the target pool and the staging disk actually have.
+   * Recorded on the row so the page, the MCP reader and the approval gate all
+   * read the same numbers.
+   */
+  async function measureCapacity(row, { manifest = null, store = true } = {}) {
+    const man = manifest || parse(row.manifest_json, null);
+    if (!man) return null;
+    const spec = parse(row.spec_json, {});
+    const needs = capacityNeeds(man, { mode: row.mode, transport: row.transport });
+    const [pool, staging] = await Promise.all([poolSpace(spec.pool), stagingSpace()]);
+    const verdict = capacityVerdict({
+      needs, pool: pool.pool,
+      poolFreeBytes: pool.free_bytes, poolTotalBytes: pool.total_bytes,
+      stagingFreeBytes: staging.free_bytes, stagingPath: staging.path,
+    });
+    const capacity = {
+      at: nowIso(now()), transport: row.transport, needs,
+      pool: { name: pool.pool, requested: spec.pool || null, free_bytes: pool.free_bytes, total_bytes: pool.total_bytes, error: pool.error || null },
+      staging: { path: staging.path, free_bytes: staging.free_bytes, error: staging.error || null },
+      ...verdict,
+    };
+    if (store) db().prepare('UPDATE migrations SET capacity_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(capacity), nowIso(now()), row.id);
+    return capacity;
+  }
+
   /* ------------------------------ manifest ------------------------------ */
 
   /** The agent's inventory. Refused outright if it carries a secret value. */
-  function recordManifest(row, raw) {
+  async function recordManifest(row, raw) {
     const v = validateManifest(raw);
     if (v.error) {
       event(row.id, { kind: 'error', phase: 'inventory', message: v.error });
@@ -428,21 +560,44 @@ export function createMigrationService({
                   approved_at = COALESCE(approved_at, ?), approved_by = COALESCE(approved_by, ?) WHERE id = ?`)
       .run(JSON.stringify(v.manifest), ts, JSON.stringify(egress), auto ? 'running' : 'awaiting_review', ts,
         auto ? ts : null, auto ? 'auto_transfer' : null, row.id);
+    // Measure the fit now, while the operator is about to read the review:
+    // "it will not fit" is worth knowing before the bytes start, not after.
+    const capacity = await measureCapacity(rowById(row.id), { manifest: v.manifest }).catch(() => null);
     const sum = manifestSummary(v.manifest);
     event(row.id, { kind: 'state', phase: 'inventory', message: `inventory received: ${sum.os || 'unknown OS'}, ${sum.counts.units} units, ${sum.counts.vhosts} vhosts, ${sum.counts.databases} database engine(s), ${sum.counts.egress} outbound host(s)` });
     if (!auto) event(row.id, { kind: 'state', phase: 'inventory', message: 'waiting for the operator to review the inventory and approve the transfer' });
-    return { manifest: v.manifest, summary: sum, concerns: manifestConcerns(v.manifest, { mode: row.mode }), auto_approved: auto };
+    return { manifest: v.manifest, summary: sum, capacity, concerns: manifestConcerns(v.manifest, { mode: row.mode, capacity }), auto_approved: auto };
   }
 
   /* ------------------------------ approval ------------------------------ */
 
-  async function approveTransfer(id, { actor = null, ip = null } = {}) {
+  /**
+   * Let the bytes leave the source.
+   *
+   * The blocking-concern gate lives HERE rather than in each caller, so the
+   * dashboard's Approve button and `approve_migration` refuse the same things
+   * for the same reasons. Capacity is re-measured first: the inventory may
+   * have landed hours ago, and "the pool had room then" is not an answer.
+   */
+  async function approveTransfer(id, { actor = null, ip = null, override = false } = {}) {
     const row = rowById(id);
     if (!row) return { error: 'no such migration' };
     if (TERMINAL.includes(row.status)) return { error: `migration ${id} is ${row.status}` };
     if (!row.manifest_at) return { error: 'the inventory has not arrived yet — there is nothing to review' };
     if (row.approved_at) return { error: 'this transfer is already approved' };
     const spec = parse(row.spec_json, {});
+
+    const capacity = await measureCapacity(row).catch(() => null);
+    const blocking = manifestConcerns(parse(row.manifest_json, null) || {}, { mode: row.mode, capacity }).filter((c) => c.level === 'block');
+    if (blocking.length && override !== true) {
+      return {
+        error: `refused: ${blocking.map((b) => b.text).join(' ')}`,
+        concerns: blocking,
+        capacity,
+        override_with: 'override: true (approve_migration: override_blocking: true) — only after reading the concern',
+      };
+    }
+    if (blocking.length) event(id, { kind: 'state', message: `approved over ${blocking.length} blocking concern(s) by ${actor || 'operator'}: ${blocking.map((b) => b.id).join(', ')}` });
 
     // Application mode needs the guest to exist BEFORE anything can be
     // unpacked into it; whole-machine mode creates it by arriving.
@@ -1086,6 +1241,6 @@ export function createMigrationService({
     createMigration, authenticate, agentJob, recordManifest, approveTransfer, recordEvent, receiveArtifact,
     importRootfsTar, agentFinish, cancelMigration, setChecklistStep, decideEgress, listMigrations, listEvents,
     view, rowById, rowByTokenId, agentBinaries, tlsPin, fenceGuest, preflight, incusListener, enableIncusListener,
-    revokeToken, listTokens, cleanupMigration, CHECKLIST,
+    revokeToken, listTokens, cleanupMigration, measureCapacity, poolSpace, listPoolSpace, stagingSpace, defaultProfilePool, CHECKLIST,
   };
 }

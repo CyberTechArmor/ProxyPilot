@@ -5,7 +5,7 @@ storage as ZFS: pools it creates from whole disks, the Incus storage pool on
 top (`<pool>/incus`), backups and exports datasets (`<pool>/backups`,
 `<pool>/exports`), sanoid snapshot retention, syncoid replication to a second
 pool or a remote host, and snapshot-based restore of guests. Surface: the
-**Storage** page (`/storage`), `/api/storage/*`, and the 27-tool `storage` MCP
+**Storage** page (`/storage`), `/api/storage/*`, and the 28-tool `storage` MCP
 family. Code: `admin/backend/src/lib/storage/` (parse → planner → policy /
 freshness → host → service), `routes/storage.js`, `routes/mcp-tools/storage.js`,
 `lib/storage-monitor.js`, the Go agent's `cmd/agent/methods/storage.go`,
@@ -105,12 +105,26 @@ from then on land on the new pool (`move_guest_storage` moves an existing
 one). The plan's `pins` lists them and the reversal removes them again;
 `pin_existing: false` refuses the operation instead of touching any instance.
 
-This is the only place ProxyPilot chooses where a new container's disk lives:
 `incus launch` is run without `--storage`, so a guest inherits the default
-profile's root pool. `move_guest_storage` moves one guest or a batch:
+profile's root pool — which is what `set_default_storage_pool` repoints (next
+section) and what a migration's `pool` overrides for one guest.
+`move_guest_storage` moves one guest or a batch:
 stop (only with `stop: true`), `incus snapshot create <guest>
 pp-premove-<stamp>`, `incus move <guest> --storage <pool>`, start, and a
 verification step that the guest is `Running`.
+
+## Which pool new guests land in
+
+The default profile's root disk decides where anything that does not name a
+pool of its own goes — `create_lxc_container`, a Mock2 project, a migration
+with no `pool`. Once a host has more than one pool that becomes a question of
+its own, and **Storage → Incus storage pools → Make default**
+(`set_default_storage_pool`) answers it for any existing pool, without the
+ZFS-creation half of `set_incus_storage_pool`.
+
+**Nothing moves**, and it pins inheriting guests first for the same reason
+and in the same way as the binding above. The plan names every pool, which is
+default today, and the one line that puts it back.
 
 Once a managed pool exists, `export_lxc` / `import_lxc` /
 `delete_lxc_container` write their tarballs to the exports dataset's

@@ -144,6 +144,51 @@ the three transports can run right now. The listener is the one check with a
 fix the product can perform, so it has a button (see **Operator
 prerequisites**).
 
+## Where it lands, and whether it fits
+
+`pool` on the migration spec (the dialog's **Storage pool** picker, which
+lists every pool with its free space) chooses the Incus storage pool. Leave it
+alone and the guest lands wherever new guests land — the default profile's
+root disk, which **Storage → Incus storage pools → Make default** repoints
+(`set_default_storage_pool`; it moves nothing, only changes where new things
+go). `disk_gb` sets the guest's root size; ZFS enforces that as a quota.
+
+All three transports honour both. `incus-migrate` creates the instance itself,
+so the answer rules take the extra trip through its overrides menu — option 4,
+the pool, the size, then 1 to begin. (Before 2026-09-20 they did not, and a
+whole-machine migration silently landed on the default pool whatever you
+asked for.)
+
+**Two different places have to have room**, and the review says so before you
+approve:
+
+| | the pool | ProxyPilot's own disk |
+|---|---|---|
+| `incus-migrate` | the whole guest | nothing — it streams straight into Incus |
+| `rootfs-tar` | the unpacked guest | the compressed rootfs, deleted after the import |
+| `file-sync` | the guest | each directory tarball and the database dump |
+
+The check is measured, not guessed: `capacityNeeds` reads what the manifest
+says is coming (the source's used bytes, or the app directories plus the
+database counted twice — a dump is restored beside itself), and the pool's
+free space comes from Incus's own `/1.0/storage-pools/<name>/resources`, so it
+answers for zfs, dir, btrfs and lvm alike. A separate data mount is **named
+and not counted**: `--one-file-system` leaves it on the source.
+
+- **It will not fit** → a *blocking* concern. The approval is refused, by the
+  dashboard and by `approve_migration` alike (the gate is in the service, not
+  in each surface), and the refusal carries the numbers. Tick **Approve over
+  the blocking concern** (`override_blocking: true`) when you know better — a
+  mostly-sparse disk, say; the override is recorded on the migration.
+- **It fits with under 10% of the free space left** → a warning.
+- **The free space could not be read** → a warning. Not knowing never blocks,
+  and never silently passes either.
+
+Capacity is measured when the inventory lands and **again at approval**,
+because "the pool had room an hour ago" is not an answer. `migration_preflight`
+shows every pool, its free space, which one is the default and how much room
+the staging disk has, before you create anything.
+
 ## The gate
 
 Nothing is copied until a human approves. The agent posts the manifest and
@@ -259,8 +304,10 @@ and deletes the transfer's working directory. None of it can be undone.
 - **Page** Migrations (`pages/Migrations.jsx`): readiness, the list, the phase
   rail and live transfer rate, the inventory review, the checklist and the
   agent's log.
-- **Tables** `migrations` + `migration_events` (migrations 909 and 910). The
-  token is stored as a sha256 hash only.
+- **Tables** `migrations` + `migration_events` (migrations 909–911). The
+  token is stored as a sha256 hash only; the capacity verdict is recorded on
+  the row so the page, the MCP reader and the approval gate quote the same
+  numbers.
 - **Code** `lib/migration/{manifest,plan,token,service,index}.js`,
   `routes/migrations.js`, `routes/mcp-tools/migration.js`,
   `cmd/agent/migrate/*.go`.

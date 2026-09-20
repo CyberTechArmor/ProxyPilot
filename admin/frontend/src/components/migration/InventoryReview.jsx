@@ -3,10 +3,11 @@
 // about — with the Approve button underneath, because approving is the point
 // of reading it.
 
+import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { ShieldQuestion, Play } from 'lucide-react';
-import { BTN, Chip, KV, Notice, SectionHeader, fmtBytes } from './shared';
+import { BTN, Checkbox, Chip, KV, Notice, SectionHeader, fmtBytes } from './shared';
 
 function Concern({ c }) {
   return (
@@ -17,7 +18,45 @@ function Concern({ c }) {
   );
 }
 
+/**
+ * Will it fit? Two places, because they are not the same number: the guest
+ * lands on the pool, and (except for incus-migrate) the artifact passes
+ * through ProxyPilot's own disk on the way.
+ */
+function Capacity({ c }) {
+  const tone = { pass: 'ok', warn: 'warn', block: 'fail' };
+  return (
+    <Card>
+      <CardContent className="p-4 space-y-3">
+        <SectionHeader
+          title="Room for it"
+          description={`Measured against ${c.pool?.name || 'the target pool'} when the inventory arrived, and again when you approve.`}
+        />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1">
+          <KV label="Coming">{fmtBytes(c.needs?.pool_bytes || 0)}</KV>
+          <KV label={`Free on ${c.pool?.name || '—'}`}>{c.pool?.free_bytes != null ? fmtBytes(c.pool.free_bytes) : 'unreadable'}</KV>
+          <KV label="Staged on this host">{c.needs?.staging_bytes ? `${fmtBytes(c.needs.staging_bytes)} of ${c.staging?.free_bytes != null ? fmtBytes(c.staging.free_bytes) : '?'} free` : 'nothing'}</KV>
+        </div>
+        <div className="space-y-1.5">
+          {(c.checks || []).map((k) => (
+            <div key={k.id} className="flex items-start gap-2">
+              <Chip level={tone[k.status] || 'muted'}>{k.status}</Chip>
+              <span className="text-sm break-words min-w-0">{k.text}</span>
+            </div>
+          ))}
+        </div>
+        {(c.needs?.parts || []).some((part) => part.bytes === 0) && (
+          <p className="text-xs text-muted-foreground break-words">
+            {(c.needs.parts || []).filter((part) => part.bytes === 0).map((part) => part.what).join(' · ')}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function InventoryReview({ migration, onApprove, onEgress, busy }) {
+  const [override, setOverride] = useState(false);
   const s = migration.summary;
   if (!s) {
     return (
@@ -53,6 +92,8 @@ export default function InventoryReview({ migration, onApprove, onEgress, busy }
           </div>
         </CardContent>
       </Card>
+
+      {migration.capacity && <Capacity c={migration.capacity} />}
 
       {(migration.concerns || []).length > 0 && (
         <div className="space-y-2">{migration.concerns.map((c) => <Concern key={c.id} c={c} />)}</div>
@@ -165,8 +206,20 @@ export default function InventoryReview({ migration, onApprove, onEgress, busy }
                 </p>
               </div>
             </div>
-            {blocking.length > 0 && <Notice level="error"><p>There is a blocking concern above. Resolve it, or cancel this migration and create one with the right settings.</p></Notice>}
-            <Button className={BTN} disabled={busy || blocking.length > 0} onClick={onApprove}>
+            {blocking.length > 0 && (
+              <>
+                <Notice level="error">
+                  <p className="break-words">There is a blocking concern above. Resolve it — a different pool, more room, or a smaller migration — or say you have read it and mean to go anyway.</p>
+                </Notice>
+                <Checkbox
+                  checked={override}
+                  onChange={setOverride}
+                  label="Approve over the blocking concern"
+                  hint="Only when you know why it is wrong — a mostly-sparse disk, say. It is recorded on the migration."
+                />
+              </>
+            )}
+            <Button className={BTN} disabled={busy || (blocking.length > 0 && !override)} onClick={() => onApprove?.({ override })}>
               <Play className="h-4 w-4 mr-1.5" />{pendingEgress.length ? `Approve the transfer (${pendingEgress.length} egress decision(s) still open)` : 'Approve the transfer'}
             </Button>
           </CardContent>

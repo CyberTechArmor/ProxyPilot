@@ -92,9 +92,9 @@ migrationAgentRouter.get('/:token/job', wrap(async (req, res) => {
 
 migrationAgentRouter.post('/:token/inventory', wrap(async (req, res) => {
   const a = agentAuth(req, res); if (!a) return;
-  const r = a.svc.recordManifest(a.row, req.body);
+  const r = await a.svc.recordManifest(a.row, req.body);
   if (r.error) return res.status(422).json({ error: r.error });
-  res.json({ accepted: true, auto_approved: r.auto_approved, concerns: r.concerns, summary: r.summary });
+  res.json({ accepted: true, auto_approved: r.auto_approved, concerns: r.concerns, summary: r.summary, capacity: r.capacity ?? null });
 }));
 
 const EventBody = z.object({
@@ -227,8 +227,12 @@ migrationRouter.get('/:id/events', wrap(async (req, res) => {
 }));
 
 migrationRouter.post('/:id/approve', requireSudo, wrap(async (req, res) => {
-  const r = await migrationService().approveTransfer(req.params.id, { actor: req.user?.id || null, ip: req.ip });
-  if (r.error) return res.status(422).json({ error: r.error });
+  const r = await migrationService().approveTransfer(req.params.id, {
+    actor: req.user?.id || null, ip: req.ip, override: req.body?.override === true,
+  });
+  // A refusal carries the concerns and the capacity numbers it was judged on,
+  // so the dialog can show what is wrong rather than just that something is.
+  if (r.error) return res.status(422).json({ error: r.error, concerns: r.concerns ?? null, capacity: r.capacity ?? null });
   res.json(r);
 }));
 

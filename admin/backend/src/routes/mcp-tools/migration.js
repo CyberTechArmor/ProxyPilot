@@ -134,11 +134,11 @@ export function createMigrationHandlers(kit) {
     const d = dry(args, plan); if (d) return d;
     if (blocking.length && args.override_blocking !== true) {
       note.refused = true;
-      return err(`refused: ${blocking.map((b) => b.text).join(' ')} Pass override_blocking: true only if you have read the inventory and know why it is wrong.`, { concerns: v.concerns });
+      return err(`refused: ${blocking.map((b) => b.text).join(' ')} Pass override_blocking: true only if you have read the inventory and know why it is wrong.`, { concerns: v.concerns, capacity: v.capacity ?? null });
     }
     const gate = confirmFlag(args, note, `This starts copying ${v.summary?.hostname || 'the source'} into ${row.target_name}${row.mode === 'application' ? ' (the guest is created now, fenced)' : ''}.`);
     if (gate) return gate;
-    const r = await svc().approveTransfer(row.id, { actor: auth?.created_by ?? null });
+    const r = await svc().approveTransfer(row.id, { actor: auth?.created_by ?? null, override: args.override_blocking === true });
     if (r.error) { note.refused = true; return err(r.error); }
     note.summary = `approved the transfer for migration ${row.id}`;
     return ok({ ...r, next: 'The agent starts within a few seconds. Poll get_migration for bytes, rate and ETA.' });

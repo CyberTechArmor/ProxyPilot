@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
   MANIFEST_SCHEMA, validateManifest, suggestedRoutes, observedEgress, databasePlan,
   manifestSummary, manifestConcerns, routableName, upstreamPort, appDirectories, DEFAULT_RSYNC_EXCLUDES,
+  capacityNeeds, capacityVerdict,
 } from '../lib/migration/manifest.js';
 
 const base = (over = {}) => ({
@@ -128,4 +129,92 @@ test('manifestSummary and manifestConcerns: the short read, and what stops an ap
 
   const big = validateManifest({ ...base(), mounts: [{ target: '/data', used_bytes: 900 * 1024 ** 3 }] }).manifest;
   assert.match(manifestConcerns(big, { mode: 'whole-machine' }).find((x) => x.id === 'big-mount:/data').text, /900 GiB/);
+});
+
+/* ------------------------------- capacity -------------------------------- */
+
+const GiB = 1024 ** 3;
+
+test('capacity: what a migration will actually put where', () => {
+  const whole = {
+    source: { root_used_bytes: 300 * GiB },
+    mounts: [
+      { target: '/', used_bytes: 300 * GiB },
+      { target: '/proc', used_bytes: 1 },
+      { target: '/data', used_bytes: 900 * GiB },
+    ],
+  };
+
+  // Whole-machine through the tarball: the guest pays for the rootfs, and
+  // ProxyPilot's own disk pays for the compressed artifact in flight.
+  const tar = capacityNeeds(whole, { mode: 'whole-machine', transport: 'rootfs-tar' });
+  assert.equal(tar.pool_bytes, 300 * GiB);
+  assert.equal(tar.staging_bytes, 150 * GiB);
+  // A separate mount is NAMED but not counted: --one-file-system leaves it behind.
+  const dataPart = tar.parts.find((p) => p.what.startsWith('/data'));
+  assert.ok(dataPart, '/data is reported');
+  assert.equal(dataPart.bytes, 0);
+  assert.match(dataPart.what, /NOT carried/);
+  assert.ok(!tar.parts.some((p) => p.what.startsWith('/proc')), 'pseudo-filesystems are not mentioned at all');
+
+  // incus-migrate stages nothing: it streams into Incus.
+  assert.equal(capacityNeeds(whole, { mode: 'whole-machine', transport: 'incus-migrate' }).staging_bytes, 0);
+  assert.match(capacityNeeds(whole, { mode: 'whole-machine', transport: 'incus-migrate' }).staging_note, /straight into Incus/);
+
+  // Application mode carries the directories, and a database twice — the dump
+  // lands in the guest and is restored beside it.
+  const app = capacityNeeds({
+    app_dirs: [{ path: '/srv/app', size_bytes: 4 * GiB, kind: 'node' }],
+    databases: [{ engine: 'postgres', running: true, databases: [{ name: 'appdb', size_bytes: 10 * GiB }] }],
+  }, { mode: 'application', transport: 'file-sync' });
+  assert.equal(app.pool_bytes, 24 * GiB);
+  assert.equal(app.staging_bytes, 12 * GiB);
+});
+
+test('capacity: the verdict blocks what will not fit, warns at the margin, and never passes on an unreadable pool', () => {
+  const needs = capacityNeeds({ source: { root_used_bytes: 100 * GiB } }, { mode: 'whole-machine', transport: 'rootfs-tar' });
+
+  const room = capacityVerdict({ needs, pool: 'Storage', poolFreeBytes: 900 * GiB, poolTotalBytes: 1000 * GiB, stagingFreeBytes: 500 * GiB, stagingPath: '/var/lib/proxypilot' });
+  assert.equal(room.fits, true);
+  assert.deepEqual(room.concerns, []);
+  assert.equal(room.checks.find((c) => c.id === 'capacity-pool').status, 'pass');
+  assert.match(room.checks.find((c) => c.id === 'capacity-pool').text, /100\.0 GiB .*Storage.* 900\.0 GiB free/);
+
+  const tight = capacityVerdict({ needs, pool: 'Storage', poolFreeBytes: 105 * GiB, stagingFreeBytes: 500 * GiB });
+  assert.equal(tight.fits, true, 'it does fit');
+  assert.equal(tight.concerns[0].level, 'warn');
+  assert.match(tight.concerns[0].text, /under 10% of the free space left over/);
+
+  const full = capacityVerdict({ needs, pool: 'Storage', poolFreeBytes: 40 * GiB, stagingFreeBytes: 500 * GiB });
+  assert.equal(full.fits, false);
+  assert.equal(full.concerns[0].level, 'block');
+  assert.match(full.concerns[0].text, /will not fit/);
+  assert.match(full.concerns[0].remedy, /Pick a pool with room/);
+
+  // The pool has room but ProxyPilot's own disk does not — a different block,
+  // with the transport that avoids staging as the remedy.
+  const noStage = capacityVerdict({ needs, pool: 'Storage', poolFreeBytes: 900 * GiB, stagingFreeBytes: 10 * GiB, stagingPath: '/var/lib/proxypilot' });
+  assert.equal(noStage.fits, false);
+  assert.equal(noStage.concerns[0].id, 'capacity-staging');
+  assert.match(noStage.concerns[0].remedy, /incus-migrate/);
+
+  // Unreadable is a warning, never a silent pass.
+  const blind = capacityVerdict({ needs, pool: 'Storage', poolFreeBytes: null, stagingFreeBytes: null });
+  assert.equal(blind.fits, true, 'not knowing is not a block');
+  assert.equal(blind.concerns.length, 2);
+  assert.ok(blind.concerns.every((c) => c.level === 'warn'));
+  assert.match(blind.concerns[0].text, /Could not read how much space/);
+});
+
+test('capacity concerns lead the inventory review, and blocking beats everything else', () => {
+  const man = { source: { root_used_bytes: 100 * GiB }, os: { id: 'debian', init: 'systemd' }, vhosts: [{ server: 'nginx', server_names: ['a.example.com'] }] };
+  const capacity = capacityVerdict({
+    needs: capacityNeeds(man, { mode: 'whole-machine', transport: 'rootfs-tar' }),
+    pool: 'Storage', poolFreeBytes: 10 * GiB, stagingFreeBytes: 10 * GiB,
+  });
+  const concerns = manifestConcerns(man, { mode: 'whole-machine', capacity });
+  assert.equal(concerns[0].level, 'block', 'the fit is the first thing the operator reads');
+  assert.equal(concerns[0].id, 'capacity-pool');
+  // Without a capacity verdict nothing is invented.
+  assert.ok(!manifestConcerns(man, { mode: 'whole-machine' }).some((c) => c.id.startsWith('capacity')));
 });

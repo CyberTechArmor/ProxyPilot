@@ -38,20 +38,26 @@ function schema909() {
 }
 
 /**
- * Migration 910's columns, read out of db.js the same way, so the test runs
- * the shipped list rather than a copy that can drift. 910 is JS (a PRAGMA
- * loop), so what is lifted is its column table.
+ * The columns migrations 910 and 911 add, read out of db.js the same way, so
+ * the test runs the shipped list rather than a copy that can drift. Both are
+ * JS (a PRAGMA loop and a single guarded ALTER), so what is lifted is the
+ * column names and types they mention.
  */
-function schema910() {
+function schemaAlters(version, marker, least) {
   const src = readFileSync(new URL('../db.js', import.meta.url), 'utf8');
-  const start = src.indexOf("runMigration(db, 910, 'migration_token_lifecycle'");
-  assert.ok(start > 0, 'migration 910 must exist in db.js');
-  const open = src.indexOf('for (const [col, type] of [', start);
-  const close = src.indexOf(']]', open) + 2;
-  const cols = [...src.slice(open, close).matchAll(/\['([a-z_]+)', '([A-Z]+)'\]/g)].map((m) => [m[1], m[2]]);
-  assert.ok(cols.length >= 3, 'migration 910 must add its columns');
-  return cols.map(([col, type]) => `ALTER TABLE migrations ADD COLUMN ${col} ${type};`).join('\n');
+  const start = src.indexOf(`runMigration(db, ${version}, '${marker}'`);
+  assert.ok(start > 0, `migration ${version} must exist in db.js`);
+  const body = src.slice(start, src.indexOf('\n  });', start));
+  const cols = [
+    ...[...body.matchAll(/\['([a-z_]+)', '([A-Z]+)'\]/g)].map((m) => [m[1], m[2]]),
+    ...[...body.matchAll(/ADD COLUMN (\w+) ([A-Z]+)/g)].map((m) => [m[1], m[2]]),
+  ];
+  const uniq = [...new Map(cols).entries()];
+  assert.ok(uniq.length >= least, `migration ${version} must add its columns`);
+  return uniq.map(([col, type]) => `ALTER TABLE migrations ADD COLUMN ${col} ${type};`).join('\n');
 }
+const schema910 = () => schemaAlters(910, 'migration_token_lifecycle', 3);
+const schema911 = () => schemaAlters(911, 'migration_capacity', 1);
 
 /**
  * The two route tables cleanup consults before it will delete a guest. They
@@ -80,6 +86,7 @@ function setup({ script = () => ({ status: 0, stdout: '', stderr: '' }) } = {}) 
   const db = new DatabaseSync(':memory:');
   db.exec(schema909());
   db.exec(schema910());
+  db.exec(schema911());
   db.exec(ROUTE_TABLES);
   const calls = [];
   const audit = [];
@@ -163,12 +170,12 @@ test('inventory: a manifest carrying a value is refused and logged; a good one p
   const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
   const row = svc.rowById(r.migration.id);
 
-  const bad = svc.recordManifest(row, { ...MANIFEST, env_files: [{ path: '/srv/.env', keys: ['A'], values: ['sk_live_x'] }] });
+  const bad = await svc.recordManifest(row, { ...MANIFEST, env_files: [{ path: '/srv/.env', keys: ['A'], values: ['sk_live_x'] }] });
   assert.match(bad.error, /never accepts secret VALUES/);
   assert.equal(svc.rowById(row.id).manifest_at, null, 'a refused manifest is not stored');
   assert.ok(svc.listEvents(row.id).some((e) => e.kind === 'error' && /VALUES/.test(e.message)), 'and the refusal is in the log');
 
-  const good = svc.recordManifest(row, MANIFEST);
+  const good = await svc.recordManifest(row, MANIFEST);
   assert.equal(good.summary.hostname, 'old-web01');
   assert.equal(good.auto_approved, false);
   const v = svc.view(svc.rowById(row.id));
@@ -183,7 +190,7 @@ test('inventory: a manifest carrying a value is refused and logged; a good one p
   // auto_transfer skips the wait — and says who approved it.
   const auto = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web2', source_kind: 'proxmox-lxc', auto_transfer: true } });
   const autoRow = svc.rowById(auto.migration.id);
-  assert.equal(svc.recordManifest(autoRow, MANIFEST).auto_approved, true);
+  assert.equal((await svc.recordManifest(autoRow, MANIFEST)).auto_approved, true);
   assert.equal(svc.rowById(autoRow.id).approved_by, 'auto_transfer');
   db.close();
 });
@@ -201,7 +208,7 @@ test('the job document: nothing to transport until approved, then exactly one tr
   assert.equal(job.incus, undefined);
   assert.equal(job.artifact, undefined, 'no upload instructions before approval');
 
-  svc.recordManifest(row, MANIFEST);
+  await svc.recordManifest(row, MANIFEST);
   row = svc.rowById(row.id);
   assert.equal((await svc.agentJob(row)).collect_inventory, false, 'the inventory is not collected twice');
   assert.equal((await svc.agentJob(row)).poll_seconds, 15);
@@ -220,7 +227,7 @@ test('the job document: incus-migrate gets a trust token and a server-owned answ
     return { status: 1 };
   } });
   const c = await closed.svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'physical' } });
-  closed.svc.recordManifest(closed.svc.rowById(c.migration.id), MANIFEST);
+  await closed.svc.recordManifest(closed.svc.rowById(c.migration.id), MANIFEST);
   await closed.svc.approveTransfer(c.migration.id, { actor: 'a' });
   const refused = await closed.svc.agentJob(closed.svc.rowById(c.migration.id));
   assert.equal(refused.approved, false);
@@ -234,7 +241,7 @@ test('the job document: incus-migrate gets a trust token and a server-owned answ
     return { status: 1 };
   } });
   const o = await open.svc.createMigration({ input: { mode: 'whole-machine', name: 'vm1', type: 'virtual-machine', disk_gb: 40, source_kind: 'vm' } });
-  open.svc.recordManifest(open.svc.rowById(o.migration.id), MANIFEST);
+  await open.svc.recordManifest(open.svc.rowById(o.migration.id), MANIFEST);
   await open.svc.approveTransfer(o.migration.id, { actor: 'a' });
   const job = await open.svc.agentJob(open.svc.rowById(o.migration.id));
   assert.equal(job.transport, 'incus-migrate');
@@ -244,8 +251,11 @@ test('the job document: incus-migrate gets a trust token and a server-owned answ
   // Positional order, as an operator would type it: URL, accept the
   // fingerprint, THEN the authentication mechanism, THEN the token. 6.0.4 asks
   // in that order and the old script answered the menu with the token.
+  // This one asked for a 40 GB disk, so the overrides menu is answered 4
+  // (change the pool or size) and then 1 (begin) — the extra trip.
   assert.deepEqual(job.incus.answers.lines, [
-    'https://localhost:8443', 'y', '1', 'eyJjbGllbnRfbmFtZSI6', '2', 'pp-vm1', '/dev/sda', 'no', '1',
+    'https://localhost:8443', 'y', '1', 'eyJjbGllbnRfbmFtZSI6', '2', 'pp-vm1', '/dev/sda', 'no',
+    '4', '', 'yes', '40GiB', '1',
   ]);
   // What the agent actually uses: one rule per prompt, matched on its text.
   const byLabel = Object.fromEntries(job.incus.answers.rules.map((r) => [r.label, r]));
@@ -272,13 +282,60 @@ test('the job document: incus-migrate gets a trust token and a server-owned answ
     ['Please provide the path to a root filesystem: ', 'root filesystem path'],
     ['Please provide the path to the root filesystem: ', 'root filesystem path'],
     ['Do you want to add additional filesystem mounts? [default=no]: ', 'additional mounts'],
-    ['Please pick one of the options above [default=1]: ', 'begin the migration'],
+    ['The local Incus server is the target [default=yes]: ', 'local server is the target'],
+    ['Project to create the instance in [default=default]: ', 'project'],
+    ['Does the VM support UEFI booting? [default=yes]: ', 'UEFI boot'],
+    ['Does the VM support UEFI Secure Boot? [default=yes]: ', 'UEFI secure boot'],
+    ['Please provide the storage pool to use: ', 'storage pool'],
+    ['Do you want to change the storage size? [default=no]: ', 'change the storage size'],
+    ['Please specify the storage size: ', 'storage size'],
   ];
   for (const [prompt, label] of prompts) {
     const hit = job.incus.answers.rules.filter((r) => new RegExp(r.when, 'i').test(prompt));
     assert.equal(hit.length, 1, `${JSON.stringify(prompt)} should match exactly one rule, matched ${hit.map((h) => h.label).join(', ') || 'none'}`);
     assert.equal(hit[0].label, label);
   }
+  // The overrides prompt is the one that matches TWO rules, deliberately: the
+  // agent takes them in order, so the first ask changes the pool/size and the
+  // second begins the migration.
+  const menu = job.incus.answers.rules.filter((r) => new RegExp(r.when, 'i').test('Please pick one of the options above [default=1]: '));
+  assert.deepEqual(menu.map((r) => [r.label, r.send, r.max]), [
+    ['change the storage pool or size', '4', 1],
+    ['begin the migration', '1', 2],
+  ]);
+  assert.equal(job.incus.answers.rules.find((r) => r.label === 'storage size').send, '40GiB');
+});
+
+test('the answer script: a pool lands the guest where the operator asked, and no pool skips the menu trip', async () => {
+  const mk = (input) => setup({ script: (bin, args) => {
+    if (args[0] === 'config' && args[1] === 'get') return { status: 0, stdout: '10.0.0.1:8443\n' };
+    if (args[0] === 'config' && args[1] === 'trust' && args[2] === 'add') return { status: 0, stdout: 'tok' };
+    if (args[0] === 'info') return { status: 0, stdout: 'certificate_fingerprint: abc123\n' };
+    return { status: 1 };
+  } });
+
+  // With a pool: menu → 4 → the pool → no size change → menu → 1.
+  const a = mk();
+  const withPool = await a.svc.createMigration({ input: { mode: 'whole-machine', name: 'onzfs', transport: 'incus-migrate', source_kind: 'lxc', pool: 'Storage' } });
+  await a.svc.recordManifest(a.svc.rowById(withPool.migration.id), MANIFEST);
+  await a.svc.approveTransfer(withPool.migration.id, { actor: 'a', override: true });
+  const poolJob = await a.svc.agentJob(a.svc.rowById(withPool.migration.id));
+  const poolRules = Object.fromEntries(poolJob.incus.answers.rules.map((r) => [r.label, r.send]));
+  assert.equal(poolRules['storage pool'], 'Storage', 'the pool the operator asked for reaches incus-migrate');
+  assert.equal(poolRules['change the storage size'], 'no', 'no disk_gb means the size question is declined');
+  assert.ok(!('storage size' in poolRules));
+  assert.deepEqual(poolJob.incus.answers.lines.slice(-4), ['4', 'Storage', 'no', '1']);
+
+  // Without one: there is no rule 4 at all, so the first menu ask begins.
+  const b = mk();
+  const plain = await b.svc.createMigration({ input: { mode: 'whole-machine', name: 'plain', transport: 'incus-migrate', source_kind: 'lxc' } });
+  await b.svc.recordManifest(b.svc.rowById(plain.migration.id), MANIFEST);
+  await b.svc.approveTransfer(plain.migration.id, { actor: 'a', override: true });
+  const plainJob = await b.svc.agentJob(b.svc.rowById(plain.migration.id));
+  const menu = plainJob.incus.answers.rules.filter((r) => new RegExp(r.when, 'i').test('Please pick one of the options above [default=1]: '));
+  assert.deepEqual(menu.map((r) => r.send), ['1'], 'nothing to override, so the first ask starts the transfer');
+  assert.equal(plainJob.incus.answers.lines.at(-1), '1');
+  assert.ok(!plainJob.incus.answers.rules.some((r) => r.label === 'storage pool'));
 });
 
 /* ------------------------------- the import ------------------------------ */
@@ -292,7 +349,7 @@ test('rootfs-tar: the artifact is hashed, imported as a split image, and the gue
   } });
   const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc', pool: 'tank', nested: true } });
   const id = r.migration.id;
-  svc.recordManifest(svc.rowById(id), MANIFEST);
+  await svc.recordManifest(svc.rowById(id), MANIFEST);
   await svc.approveTransfer(id, { actor: 'admin-1' });
 
   // A wrong hash is a failed transfer, not a corrupt guest.
@@ -332,7 +389,7 @@ test('a fence that cannot be confirmed is loud, and an inherited allow is remove
     return { status: 0 };
   } });
   const r = await broken.svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
-  broken.svc.recordManifest(broken.svc.rowById(r.migration.id), MANIFEST);
+  await broken.svc.recordManifest(broken.svc.rowById(r.migration.id), MANIFEST);
   await broken.svc.approveTransfer(r.migration.id, { actor: 'a' });
   await broken.svc.receiveArtifact(broken.svc.rowById(r.migration.id), Readable.from([Buffer.from('x')]));
   await broken.svc.importRootfsTar(broken.svc.rowById(r.migration.id));
@@ -348,7 +405,7 @@ test('a fence that cannot be confirmed is loud, and an inherited allow is remove
     return { status: 0 };
   } });
   const r2 = await stale.svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
-  stale.svc.recordManifest(stale.svc.rowById(r2.migration.id), MANIFEST);
+  await stale.svc.recordManifest(stale.svc.rowById(r2.migration.id), MANIFEST);
   await stale.svc.approveTransfer(r2.migration.id, { actor: 'a' });
   await stale.svc.receiveArtifact(stale.svc.rowById(r2.migration.id), Readable.from([Buffer.from('x')]));
   await stale.svc.importRootfsTar(stale.svc.rowById(r2.migration.id));
@@ -370,7 +427,7 @@ test('application mode: approving creates the guest and fences it; the copy goes
   const r = await svc.createMigration({ input: { mode: 'application', name: 'app', app_dirs: ['/srv/myapp'], database: 'postgres', image: 'images:debian/13' } });
   const id = r.migration.id;
   assert.equal(r.migration.transport, 'file-sync');
-  svc.recordManifest(svc.rowById(id), MANIFEST);
+  await svc.recordManifest(svc.rowById(id), MANIFEST);
   await svc.approveTransfer(id, { actor: 'admin-1' });
 
   const launch = argvOf(calls).find((c) => c.startsWith('incus launch'));
@@ -409,7 +466,7 @@ test('events: progress drives bytes/rate/ETA, a replayed event cannot rewind the
   const { svc } = setup({ script: () => ({ status: 1 }) });
   const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
   const id = r.migration.id;
-  svc.recordManifest(svc.rowById(id), MANIFEST);
+  await svc.recordManifest(svc.rowById(id), MANIFEST);
   await svc.approveTransfer(id, { actor: 'a' });
 
   svc.recordEvent(svc.rowById(id), { kind: 'progress', phase: 'transfer', bytes: 1024 ** 2, total_bytes: 10 * 1024 ** 2 });
@@ -462,7 +519,7 @@ test('egress: a host service gets a real allow, an internet destination is recor
   } });
   const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
   const id = r.migration.id;
-  svc.recordManifest(svc.rowById(id), {
+  await svc.recordManifest(svc.rowById(id), {
     ...MANIFEST,
     outbound: [...MANIFEST.outbound, { host: '10.0.0.9', port: 6432, proto: 'tcp', evidence: 'conntrack' }],
   });
@@ -493,7 +550,7 @@ test('"stalled" is only ever said about a transfer that is actually in flight', 
   const { svc } = setup({ script: () => ({ status: 1 }) });
   const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
   const id = r.migration.id;
-  svc.recordManifest(svc.rowById(id), MANIFEST);
+  await svc.recordManifest(svc.rowById(id), MANIFEST);
   await svc.approveTransfer(id, { actor: 'a' });
   svc.recordEvent(svc.rowById(id), { kind: 'progress', phase: 'transfer', bytes: 1024 });
   // The clock is frozen at NOW, so the sample is fresh and the run is live.
@@ -582,6 +639,129 @@ test('the Incus listener: the bridge gateway by default, every interface refused
   const pub = await svc.enableIncusListener({ address: ':8443', allowPublic: true });
   assert.match(pub.error, /did not take/);   // the stub still reports ''
   assert.ok(sets.includes(':8443'), 'allow_public lets the public bind through');
+});
+
+/* -------------------------------- capacity -------------------------------- */
+
+const GiB = 1024 ** 3;
+
+/** A host whose pool and staging disk have exactly the room we say. */
+const withSpace = ({ poolFree, poolTotal = 2000 * GiB, stagingFree, pools = [{ name: 'default', driver: 'dir' }, { name: 'Storage', driver: 'zfs' }], defaultPool = 'default' }) => ({
+  script: (bin, args) => {
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return { status: 1 };
+    if (bin === 'incus' && args[0] === 'query' && args[1] === '/1.0/profiles/default') {
+      return { status: 0, stdout: JSON.stringify({ devices: { root: { type: 'disk', path: '/', pool: defaultPool } } }) };
+    }
+    if (bin === 'incus' && args[0] === 'query' && String(args[1]).includes('/resources')) {
+      return { status: 0, stdout: JSON.stringify({ space: { total: poolTotal, used: poolTotal - poolFree } }) };
+    }
+    if (bin === 'incus' && args[0] === 'storage' && args[1] === 'list') return { status: 0, stdout: JSON.stringify(pools) };
+    if (bin === 'df') return { status: 0, stdout: `Avail\n${stagingFree}\n` };
+    return { status: 0 };
+  },
+});
+
+/** 400 GiB of source, which is what the shared MANIFEST does not carry. */
+const BIG = { ...MANIFEST, source: { ...MANIFEST.source, root_used_bytes: 400 * GiB } };
+
+test('capacity: measured when the inventory lands, against the pool the migration actually targets', async () => {
+  const { svc, calls } = setup(withSpace({ poolFree: 900 * GiB, stagingFree: 900 * GiB }));
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc', pool: 'Storage' } });
+  await svc.recordManifest(svc.rowById(r.migration.id), BIG);
+
+  const v = svc.view(svc.rowById(r.migration.id));
+  assert.equal(v.capacity.pool.name, 'Storage', 'the pool the spec named, not the profile default');
+  assert.equal(v.capacity.pool.free_bytes, 900 * GiB);
+  assert.equal(v.capacity.needs.pool_bytes, 400 * GiB);
+  assert.equal(v.capacity.needs.staging_bytes, 200 * GiB, 'a rootfs tarball is estimated at half');
+  assert.equal(v.capacity.fits, true);
+  assert.ok(!v.concerns.some((c) => c.id.startsWith('capacity')), 'room to spare says nothing');
+  assert.ok(argvOf(calls).some((c) => c === 'incus query /1.0/storage-pools/Storage/resources'));
+
+  // With no pool named it asks the default profile what new guests inherit.
+  const d = setup(withSpace({ poolFree: 900 * GiB, stagingFree: 900 * GiB, defaultPool: 'default' }));
+  const r2 = await d.svc.createMigration({ input: { mode: 'whole-machine', name: 'web2', source_kind: 'proxmox-lxc' } });
+  await d.svc.recordManifest(d.svc.rowById(r2.migration.id), BIG);
+  assert.equal(d.svc.view(d.svc.rowById(r2.migration.id)).capacity.pool.name, 'default');
+  d.cleanup();
+});
+
+test('capacity: a transfer that will not fit is refused at the approval, and the override is deliberate', async () => {
+  const { svc, audit } = setup(withSpace({ poolFree: 100 * GiB, stagingFree: 900 * GiB }));
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc', pool: 'Storage' } });
+  const id = r.migration.id;
+  await svc.recordManifest(svc.rowById(id), BIG);
+
+  const v = svc.view(svc.rowById(id));
+  assert.equal(v.capacity.fits, false);
+  assert.equal(v.concerns[0].level, 'block');
+  assert.match(v.concerns[0].text, /400\.0 GiB is coming and Storage has 100\.0 GiB free/);
+
+  const refused = await svc.approveTransfer(id, { actor: 'admin-1' });
+  assert.match(refused.error, /will not fit/);
+  assert.equal(refused.concerns[0].id, 'capacity-pool');
+  assert.ok(refused.capacity, 'the refusal carries the numbers it judged on');
+  assert.equal(svc.rowById(id).approved_at, null, 'nothing was approved');
+
+  // The operator who knows better can say so, and it is recorded.
+  const ok = await svc.approveTransfer(id, { actor: 'admin-1', override: true });
+  assert.equal(ok.error, undefined);
+  assert.equal(svc.rowById(id).status, 'running');
+  assert.ok(svc.listEvents(id).some((e) => /approved over 1 blocking concern/.test(e.message)));
+  assert.ok(audit.some((a) => a[1] === 'MIGRATION_APPROVE'));
+});
+
+test('capacity: re-measured at approval, because the pool may have filled since the inventory', async () => {
+  let free = 900 * GiB;
+  const { svc } = setup({ script: (bin, args) => {
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return { status: 1 };
+    if (bin === 'incus' && args[0] === 'query' && String(args[1]).includes('/resources')) return { status: 0, stdout: JSON.stringify({ space: { total: 2000 * GiB, used: 2000 * GiB - free } }) };
+    if (bin === 'incus' && args[0] === 'query') return { status: 0, stdout: JSON.stringify({ devices: { root: { pool: 'default' } } }) };
+    if (bin === 'df') return { status: 0, stdout: `Avail\n${900 * GiB}\n` };
+    return { status: 0 };
+  } });
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  await svc.recordManifest(svc.rowById(r.migration.id), BIG);
+  assert.equal(svc.view(svc.rowById(r.migration.id)).capacity.fits, true);
+
+  free = 50 * GiB;   // something else ate the pool in the meantime
+  const refused = await svc.approveTransfer(r.migration.id, { actor: 'a' });
+  assert.match(refused.error, /will not fit/);
+  assert.equal(svc.view(svc.rowById(r.migration.id)).capacity.pool.free_bytes, 50 * GiB, 'the stored verdict is the fresh one');
+});
+
+test('a free-space figure that cannot be read is unknown, never zero', async () => {
+  // A df that prints something unexpected once made every migration refuse
+  // with "0.0 GiB free" — not knowing is a warning, not a block.
+  const { svc } = setup({ script: (bin, args) => {
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return { status: 1 };
+    if (bin === 'df') return { status: 0, stdout: 'Avail\n' };
+    return { status: 0 };
+  } });
+  const staging = await svc.stagingSpace();
+  assert.equal(staging.free_bytes, null);
+  assert.match(staging.error, /could not read a free-space figure/);
+
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  await svc.recordManifest(svc.rowById(r.migration.id), BIG);
+  const v = svc.view(svc.rowById(r.migration.id));
+  assert.equal(v.capacity.fits, true, 'unknown does not block');
+  assert.ok(v.concerns.every((c) => c.level !== 'block'));
+  assert.ok(v.concerns.some((c) => c.id === 'capacity-staging-unknown'));
+  assert.equal((await svc.approveTransfer(r.migration.id, { actor: 'a' })).error, undefined);
+});
+
+test('preflight names every pool, its free space and which one new guests land in', async () => {
+  const { svc } = setup(withSpace({ poolFree: 900 * GiB, stagingFree: 700 * GiB, defaultPool: 'Storage' }));
+  const pf = await svc.preflight();
+  assert.deepEqual(pf.storage.pools.map((p) => p.name), ['default', 'Storage']);
+  assert.equal(pf.storage.default_pool, 'Storage');
+  assert.equal(pf.storage.pools.find((p) => p.name === 'Storage').default, true);
+  assert.equal(pf.storage.staging.free_bytes, 700 * GiB);
+  const check = pf.checks.find((c) => c.id === 'storage');
+  assert.equal(check.status, 'pass');
+  assert.match(check.detail, /Storage \(default\): 900 GiB free/);
+  assert.match(check.detail, /staging on .* 700 GiB free/);
 });
 
 /* --------------------------- tokens and cleanup -------------------------- */
@@ -762,7 +942,7 @@ test('MCP: the same rules through the tool surface — confirm gates, dry_run to
   assert.match(early.content[0].text, /inventory has not arrived/);
 
   // An application-mode source with no app dirs is a blocking concern.
-  svc.recordManifest(svc.rowById(id), { ...MANIFEST, app_dirs: [] });
+  await svc.recordManifest(svc.rowById(id), { ...MANIFEST, app_dirs: [] });
   const blocked = await handlers.approve_migration({ id, confirm: true }, AUTH);
   assert.equal(blocked.isError, true);
   assert.match(parse(blocked).error, /Application mode found no application directory/);

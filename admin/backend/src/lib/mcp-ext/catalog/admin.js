@@ -11,7 +11,7 @@ export const ADMIN_TOOLS = [
     { name: { type: 'string' }, scope: { type: 'object', description: 'tools / lxc_containers / project_ids / self_edit.' } }, ['name', 'confirm']),
   mutating('revoke_mcp_key', 'Revoke an MCP key (its clients are cut off immediately). Revoking the calling key needs allow_self: true.', { id: { type: 'number' }, allow_self: { type: 'boolean' } }, ['id', 'confirm']),
   tool('get_settings', 'Read app settings readable over MCP (secret-bearing keys show only [set]/[unset]).', { keys: { type: 'array', items: { type: 'string' } } }),
-  mutating('set_setting', 'Set one of the MCP-writable app settings (policy: mcp-extended-policy.json settings.writable).', { key: { type: 'string' }, value: { type: 'string' } }, ['key', 'value', 'confirm']),
+  mutating('set_setting', 'Set one of the MCP-writable app settings (policy: mcp-extended-policy.json settings.writable). One worth knowing: exports.compression (zstd | gzip | none, default zstd) is the compressor every guest export, prepared download and S3 snapshot push uses.', { key: { type: 'string' }, value: { type: 'string' } }, ['key', 'value', 'confirm']),
   tool('list_feature_flags', 'Feature flags that gate MCP tool families (mcp.builds, mcp.destructive, mcp.host_control, mcp.self_edit, mcp.security_scans, mcp.dns, mcp.webhooks) with their current and default values.', {}),
   mutating('set_feature_flag', 'Turn a feature flag on or off; takes effect on the next call.', { name: { type: 'string' }, enabled: { type: 'boolean' } }, ['name', 'enabled', 'confirm']),
   tool('query_audit_log', 'Query the audit log across all users: action (glob with *), resource_type/id, user, since/until, via: "mcp"; include_ledger adds the MCP ledger rows.',

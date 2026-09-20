@@ -23,7 +23,12 @@ export function publicBaseUrl() {
 }
 
 export function migrationService() {
-  if (!instance) instance = createMigrationService({ getDb, runHostCapture, publicBaseUrl, logAudit });
+  if (!instance) {
+    instance = createMigrationService({
+      getDb, runHostCapture, publicBaseUrl, logAudit,
+      getSetting: (k) => { try { return getSetting(k); } catch { return null; } },
+    });
+  }
   return instance;
 }
 

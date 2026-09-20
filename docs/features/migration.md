@@ -29,9 +29,23 @@ source host ──(1) curl …/install.sh | sudo sh ─────────�
 `transport` is derived and rarely set by hand: whole-machine uses
 `incus-migrate`, except on a Proxmox or otherwise nested LXC, which takes
 `rootfs-tar` — it tars the rootfs, streams it to ProxyPilot, and imports it as
-a split image (`incus image import metadata.tar.xz rootfs.tar.gz`), with
+a split image (`incus image import metadata.tar.xz rootfs.tar.zst`), with
 ProxyPilot supplying the metadata the agent cannot know. Application mode uses
 `file-sync`.
+
+Everything the agent streams is compressed with the compressor ProxyPilot
+names in the job (`exports.compression`, zstd by default — see
+`docs/features/lxc/exports.md`), and the agent PROBES what the source can
+actually do before it trusts that: a 2014 box with GNU tar 1.26 and no zstd
+package is exactly the machine someone is trying to get off, so the request
+is a preference and gzip is the floor. gzip is single-threaded at ~50 MB/s,
+which on a LAN makes it, not the network, the reason a migration takes hours.
+The mysqldump is compressed too (it was going over the wire raw); the
+PostgreSQL dump is not, because `--format=custom` already is. ProxyPilot
+sniffs the first four bytes of what arrives rather than trusting the label,
+and decompresses on the HOST before piping a plain tar into the guest — a
+fresh minimal guest has tar but may not have the zstd binary tar shells out
+to, and a migration is a bad moment to find that out.
 
 Why `rootfs-tar` rather than `incus-migrate` for a container source: tar is on
 every machine, `incus-migrate` is a package a Proxmox host does not have and

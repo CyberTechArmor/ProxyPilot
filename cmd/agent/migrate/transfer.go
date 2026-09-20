@@ -324,10 +324,10 @@ func parseMigrateBytes(line string) int64 {
 
 /* ------------------------------- rootfs tar ----------------------------- */
 
-// RunRootfsTar streams the rootfs to ProxyPilot as one tar.gz, hashing as it
-// goes so the server can prove the bytes survived. Nothing is written to the
-// source's disk: the tar is produced and consumed in the same pipe, because
-// a Proxmox LXC rarely has room for a copy of itself.
+// RunRootfsTar streams the rootfs to ProxyPilot as one compressed tar,
+// hashing as it goes so the server can prove the bytes survived. Nothing is
+// written to the source's disk: the tar is produced and consumed in the same
+// pipe, because a Proxmox LXC rarely has room for a copy of itself.
 func (a *Agent) RunRootfsTar(job *Job) (int64, error) {
 	if _, err := exec.LookPath("tar"); err != nil {
 		return 0, errors.New("tar is not installed on this source")
@@ -336,7 +336,8 @@ func (a *Agent) RunRootfsTar(job *Job) (int64, error) {
 	if job.Artifact != nil && len(job.Artifact.Exclude) > 0 {
 		excludes = job.Artifact.Exclude
 	}
-	args := []string{"-czf", "-", "-C", "/", "--numeric-owner", "--one-file-system", "--warning=no-file-ignored", "--warning=no-file-changed"}
+	comp := tarCompression(job.Compression)
+	args := append(tarCreateArgs(comp), "-C", "/", "--numeric-owner", "--one-file-system", "--warning=no-file-ignored", "--warning=no-file-changed")
 	for _, e := range excludes {
 		args = append(args, "--exclude="+e)
 	}
@@ -354,7 +355,7 @@ func (a *Agent) RunRootfsTar(job *Job) (int64, error) {
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
-	a.client.Log("streaming the rootfs (excluding %d pseudo/scratch paths)", len(excludes))
+	a.client.Log("streaming the rootfs, %s-compressed (excluding %d pseudo/scratch paths)", comp.Label, len(excludes))
 
 	// The server verifies a sha256 it is told; we compute it over the same
 	// stream we send, so a truncated upload cannot look complete.
@@ -413,14 +414,14 @@ func (a *Agent) RunFileSync(job *Job) (int64, error) {
 	}
 	var total int64
 	for _, dir := range job.Sync.Dirs {
-		n, err := a.sendDirectory(dir, job.Sync.Excludes, job.Sync.Since)
+		n, err := a.sendDirectory(dir, job.Sync.Excludes, job.Sync.Since, job.Compression)
 		if err != nil {
 			return total, err
 		}
 		total += n
 	}
 	if job.Sync.Database != "" && job.Sync.Database != "none" {
-		n, err := a.sendDatabase(job.Sync.Database)
+		n, err := a.sendDatabase(job.Sync.Database, job.Compression)
 		if err != nil {
 			return total, err
 		}
@@ -431,7 +432,7 @@ func (a *Agent) RunFileSync(job *Job) (int64, error) {
 
 // sendDirectory tars one directory (absolute paths preserved) straight into
 // the upload, so nothing is staged on a source that may be short of disk.
-func (a *Agent) sendDirectory(dir string, excludes []string, since string) (int64, error) {
+func (a *Agent) sendDirectory(dir string, excludes []string, since string, compression string) (int64, error) {
 	// Tar from / with the path RELATIVE to /, so the member names are
 	// `srv/myapp/…` and an extract with `-C /` in the guest puts the tree
 	// back where it came from. Tarring from the parent would name the
@@ -440,7 +441,8 @@ func (a *Agent) sendDirectory(dir string, excludes []string, since string) (int6
 	if base == "" {
 		return 0, errors.New("refusing to copy / as an application directory")
 	}
-	args := []string{"-czf", "-", "-C", "/", "--warning=no-file-changed", "--warning=no-file-ignored"}
+	comp := tarCompression(compression)
+	args := append(tarCreateArgs(comp), "-C", "/", "--warning=no-file-changed", "--warning=no-file-ignored")
 	for _, e := range excludes {
 		args = append(args, "--exclude="+e)
 	}
@@ -464,7 +466,7 @@ func (a *Agent) sendDirectory(dir string, excludes []string, since string) (int6
 	if since != "" {
 		a.client.Log("delta pass: %s (only files changed since %s)", dir, since)
 	} else {
-		a.client.Log("copying %s", dir)
+		a.client.Log("copying %s (%s-compressed)", dir, comp.Label)
 	}
 	counted := &countingReader{r: stdout}
 	upErr := a.client.UploadArtifact(counted, "dir", dir, "", func(n int64) {
@@ -489,7 +491,7 @@ func (a *Agent) sendDirectory(dir string, excludes []string, since string) (int6
 // sendDatabase dumps logically and streams the dump to ProxyPilot, which
 // restores it with the guest's own engine. The dump never lands on a disk at
 // either end.
-func (a *Agent) sendDatabase(engine string) (int64, error) {
+func (a *Agent) sendDatabase(engine, compression string) (int64, error) {
 	switch engine {
 	case "postgres":
 		dbs := a.postgresDatabases()
@@ -499,9 +501,11 @@ func (a *Agent) sendDatabase(engine string) (int64, error) {
 		var total int64
 		for _, db := range dbs {
 			a.client.Log("dumping postgres database %s", db)
+			// --format=custom is already compressed; wrapping it again
+			// costs CPU and saves nothing, so no compressor here.
 			n, err := a.streamToArtifact(
 				exec.Command("su", "-s", "/bin/sh", "-c", shellJoin([]string{"pg_dump", "--format=custom", "--no-owner", "--no-acl", db}), "postgres"),
-				"dbdump", "postgres:"+db)
+				nil, "dbdump", "postgres:"+db)
 			if err != nil {
 				return total, fmt.Errorf("postgres %s: %w", db, err)
 			}
@@ -509,8 +513,16 @@ func (a *Agent) sendDatabase(engine string) (int64, error) {
 		}
 		return total, nil
 	case "mysql":
-		a.client.Log("dumping every MySQL database")
-		return a.streamToArtifact(exec.Command("mysqldump", "--single-transaction", "--routines", "--triggers", "--all-databases"), "dbdump", "mysql:all")
+		// mysqldump writes SQL text, which compresses 5-10x. It was going
+		// over the wire raw, which on a big database is minutes of transfer
+		// for no reason.
+		comp := streamCompressor(compression)
+		if comp.Label == "none" {
+			a.client.Log("dumping every MySQL database")
+		} else {
+			a.client.Log("dumping every MySQL database (%s-compressed)", comp.Label)
+		}
+		return a.streamToArtifact(exec.Command("mysqldump", "--single-transaction", "--routines", "--triggers", "--all-databases"), comp.Argv, "dbdump", "mysql:all")
 	case "sqlite":
 		a.client.Log("sqlite travels with the application directory — nothing separate to dump")
 		return 0, nil
@@ -518,26 +530,64 @@ func (a *Agent) sendDatabase(engine string) (int64, error) {
 	return 0, fmt.Errorf("unknown database engine %q", engine)
 }
 
-func (a *Agent) streamToArtifact(cmd *exec.Cmd, kind, name string) (int64, error) {
+// streamToArtifact pipes a command's stdout to ProxyPilot, optionally
+// through a compressor. The two processes are wired together in Go rather
+// than with a shell pipeline on purpose: `sh` on a Debian source is dash,
+// which has no pipefail, so a dump that died half way would upload as a
+// perfectly valid — and perfectly truncated — compressed stream. Here both
+// exit codes are checked and the dump's own failure is the one reported.
+func (a *Agent) streamToArtifact(cmd *exec.Cmd, compressor []string, kind, name string) (int64, error) {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return 0, err
 	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
+
+	var zip *exec.Cmd
+	var zipErr strings.Builder
+	src := io.Reader(stdout)
+	if len(compressor) > 0 {
+		zip = exec.Command(compressor[0], compressor[1:]...)
+		zip.Stdin = stdout
+		zip.Stderr = &zipErr
+		zout, zerr := zip.StdoutPipe()
+		if zerr != nil {
+			return 0, zerr
+		}
+		src = zout
+	}
+
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
-	counted := &countingReader{r: stdout}
+	if zip != nil {
+		if err := zip.Start(); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return 0, fmt.Errorf("could not start %s: %w", compressor[0], err)
+		}
+	}
+
+	counted := &countingReader{r: src}
 	upErr := a.client.UploadArtifact(counted, kind, name, "", func(n int64) {
 		_ = a.client.Send(Event{Kind: "progress", Phase: "transfer", Bytes: n, Message: fmt.Sprintf("%s: %s sent", name, human(n))})
 	})
+	var zipWaitErr error
+	if zip != nil {
+		zipWaitErr = zip.Wait()
+	}
 	waitErr := cmd.Wait()
 	if upErr != nil {
 		return counted.n, upErr
 	}
+	// The dump's failure first: the compressor only ever fails because the
+	// thing feeding it did.
 	if waitErr != nil {
 		return counted.n, fmt.Errorf("%w: %s", waitErr, tailStr(stderr.String(), 300))
+	}
+	if zipWaitErr != nil {
+		return counted.n, fmt.Errorf("%s: %w: %s", compressor[0], zipWaitErr, tailStr(zipErr.String(), 200))
 	}
 	return counted.n, nil
 }

@@ -1000,6 +1000,23 @@ export const api = {
   // bar before the actual streaming download starts.
   getLxcExportInfo: (name) => request(`/lxc/containers/${name}/export-info`),
 
+  // Prepared downloads. The tarball is built once, in the background, into
+  // a file on the host; the browser then downloads an ordinary static file
+  // (Content-Length, Range, as many times as anyone likes) rather than
+  // holding a tab open while incus works. See docs/features/lxc/exports.md.
+  listLxcPreparedExports: (container) =>
+    request(`/lxc/exports${container ? `?container=${encodeURIComponent(container)}` : ''}`),
+  getLxcPreparedExport: (id) => request(`/lxc/exports/${id}`),
+  prepareLxcExport: (body) => request('/lxc/exports', { method: 'POST', body: JSON.stringify(body) }),
+  deleteLxcPreparedExport: (id) => request(`/lxc/exports/${id}`, { method: 'DELETE' }),
+  // Restore straight from the host — no download-and-re-upload round trip.
+  // Always creates a NEW container; the original is never touched.
+  restoreLxcPreparedExport: (id, body) =>
+    request(`/lxc/exports/${id}/restore`, { method: 'POST', body: JSON.stringify(body) }),
+  // Not a fetch: the browser downloads this itself, so it gets its own
+  // progress bar, its own resume, and nothing is buffered in a JS Blob.
+  lxcPreparedExportUrl: (id) => `/api/lxc/exports/${id}/download`,
+
   // Import with upload-progress callback. fetch() doesn't expose upload
   // progress; XMLHttpRequest does via xhr.upload.onprogress. Returns a
   // promise resolving with the parsed response. onProgress is called

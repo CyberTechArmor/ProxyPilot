@@ -150,6 +150,11 @@ type Job struct {
 	KeepAgent   bool   `json:"keep_agent"`
 	PollSeconds int    `json:"poll_seconds"`
 	Error       string `json:"error"`
+	// Compression is what the SERVER would like the source to compress
+	// with ("zstd" | "gzip" | "none"); the agent falls back to gzip when
+	// this source's tar cannot do it, and the server sniffs the bytes it
+	// receives rather than trusting the label.
+	Compression string `json:"compression"`
 	Target      struct {
 		Name     string  `json:"name"`
 		Type     string  `json:"type"`

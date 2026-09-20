@@ -101,7 +101,7 @@ test('ratchet: disabling or deleting a user revokes the MCP keys it minted', () 
   assert.match(user, /const revoked = revokeUserAccess\(db, id\);\s*const deleteUserTx/);
   // Ownerless keys are refused at mint time; historical orphans are revoked.
   assert.match(admin, /if \(!ownerId\) \{ note\.refused = true;/);
-  assert.match(db, /runMigration\(db, 912, 'mcp_tokens_owner_validity'/);
+  assert.match(db, /runMigration\(db, 913, 'mcp_tokens_owner_validity'/);
   assert.match(db, /created_by NOT IN \(SELECT id FROM users\)/);
   assert.match(db, /created_by IN \(SELECT id FROM users WHERE role = 'pending'\)/);
 });

@@ -136,6 +136,9 @@ export function getDb() {
 //               (REST or MCP): op, subject, the sha256 plan token, the plan,
 //               outcome, per-step detail. Feeds the Storage page history and
 //               export_grc_evidence (lib/storage/service.js).
+//   912 Prepared downloads — lxc_exports: a guest tarball built once in the
+//               background and downloadable many times (Range-resumable),
+//               with byte progress while it builds and retention after.
 //   911 Migration capacity — the fit check (what is coming, what the target
 //               pool and the staging disk have free) recorded on the row.
 //   910 Migration token lifecycle — revocation columns on `migrations`, plus
@@ -2230,7 +2233,39 @@ export function initDatabase() {
     if (!cols.includes('capacity_json')) d.exec('ALTER TABLE migrations ADD COLUMN capacity_json TEXT');
   });
 
-  // Version 912: an MCP token is only as valid as its owner. Token lookup
+  // 912: prepared downloads. A guest export used to be built fresh for every
+  // click, tied to that one HTTP request — close the tab and the work died.
+  // A row here is a tarball that EXISTS on disk: built once in the
+  // background, downloadable as many times as anyone likes (with Range, so a
+  // browser can resume), and deleted when the operator says so or when
+  // retention sweeps it.
+  runMigration(db, 912, 'lxc_exports', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS lxc_exports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        container_name TEXT NOT NULL,
+        snapshot_name TEXT,
+        path TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        compression TEXT NOT NULL,
+        state TEXT NOT NULL,
+        bytes_done INTEGER NOT NULL DEFAULT 0,
+        bytes_total INTEGER,
+        sha256 TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        ready_at TEXT,
+        expires_at TEXT,
+        downloads INTEGER NOT NULL DEFAULT 0,
+        last_downloaded_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_lxc_exports_container ON lxc_exports(container_name, created_at);
+      CREATE INDEX IF NOT EXISTS idx_lxc_exports_state ON lxc_exports(state);
+    `);
+  });
+
+  // Version 913: an MCP token is only as valid as its owner. Token lookup
   // now refuses a token whose minting admin is gone or disabled
   // (routes/mcp.js findToken), and disabling or deleting a user revokes
   // their tokens. This closes out the rows that predate the rule: a token
@@ -2238,7 +2273,7 @@ export function initDatabase() {
   // already parked as 'pending' is revoked here rather than guessed at —
   // the operator mints a fresh key from a live account. Revocation keeps
   // the row (the audit trail stays intact). Idempotent.
-  runMigration(db, 912, 'mcp_tokens_owner_validity', (d) => {
+  runMigration(db, 913, 'mcp_tokens_owner_validity', (d) => {
     const tables = d.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_tokens'`).all();
     if (!tables.length) return;
     d.prepare(

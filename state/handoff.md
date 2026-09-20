@@ -216,3 +216,52 @@ throwaway MCP keys are revoked.
 | Build | `scripts/build-migration-agent.sh` (install.sh + update.sh call it) |
 | Schema | migration 909: `migrations`, `migration_events` |
 | Tests | `admin/backend/src/__tests__/migration-*.test.js`, `cmd/agent/migrate/parse_test.go`, CI in `.github/workflows/storage-integration.yml` |
+
+---
+
+# Handoff addendum — guest exports (2026-09-20)
+
+Deployed to the live host at `cc715e2` (two increments: `c1fa052` then
+`cc715e2`). Feature doc: `docs/features/lxc/exports.md`.
+
+## Verified live
+
+- `export_lxc searxng` three times on the host, same guest and flags:
+  zstd 28.3 s / 3.647 GB, gzip 179.7 s / 3.775 GB, none 36.8 s / 8.158 GB.
+  Durations are `mcp_ledger.duration_ms`, not a stopwatch.
+- `set_setting exports.compression` accepted zstd / gzip / none and each
+  export honoured it, naming the file with the matching extension.
+- The setting is back at **zstd**.
+
+## Not yet exercised on the host
+
+- **The prepared-download path end to end** (Prepare → progress → browser
+  download with Range → Delete). The store's lifecycle is covered by 17
+  unit cases against a scripted host, but nobody has clicked the button on
+  the real dashboard yet. Worth one pass on searxng.
+- **A Range/resume download of a multi-gigabyte tarball** through Caddy —
+  the route sets `Accept-Ranges` and answers 206, but the reverse proxy in
+  front of it has not been observed passing a partial request.
+- **zstd through `incus image import`** on the rootfs-tar migration path.
+  Incus sniffs the compressor and every release we know of reads zstd; if
+  this one does not, `importRootfsTar` decompresses on the host and retries
+  once, which costs the rootfs's uncompressed size in staging disk. Proving
+  it either way needs a Proxmox source.
+- **The migration agent's zstd path on a real source.** The probe and the
+  gzip fallback are unit-tested; the sandbox has no zstd binary, so the
+  zstd branch of `probeTarCompression` has only been exercised by its own
+  assertions, not against a source host that has it.
+
+## Left on the host
+
+Four searxng tarballs in `/Fractionate-ZFS/exports` (~16.5 GB logical): the
+1.00 GB gzip one from before this change plus the three benchmark runs. The
+next retention sweep adopts all four and drops the oldest (3 kept per
+container); the rest expire in 14 days, or the Backup panel's Delete button
+removes any of them now.
+
+Also on the host, unrelated to this work:
+`Fractionate-ZFS/incus/containers/pp-snap-export-1789912095437-4745ccdd` —
+a temp instance left by the S3 snapshot-export dance on 2026-09-20 13:48.
+`sweepOrphanTempInstances()` in `lib/snapshot-s3-export.js` is what clears
+those; worth checking why it did not.

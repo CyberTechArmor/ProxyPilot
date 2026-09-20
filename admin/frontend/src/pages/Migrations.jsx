@@ -177,7 +177,7 @@ function Detail({ id, onBack, onChanged }) {
         <TabsContent value="inventory">
           <InventoryReview
             migration={m} busy={busy}
-            onApprove={() => act(() => api.migrations.approve(m.id), 'Transfer approved — the agent starts within a few seconds')}
+            onApprove={(opts) => act(() => api.migrations.approve(m.id, opts), 'Transfer approved — the agent starts within a few seconds')}
             onEgress={(e, decision) => act(() => api.migrations.egress(m.id, { host: e.host, port: e.port, decision }), `Egress ${decision === 'approve' ? 'allowed' : 'denied'}`)}
           />
         </TabsContent>

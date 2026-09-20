@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   deviceEligibility, resolveByIdDevice, validateLayout, validateDatasetProps, planToken, verifyPlanToken, renderPlanCommands, parseSize,
   planCreateZpool, planCreateDataset, planSetDatasetProps, planDestroyDataset, planSnapshot, planRollback, planDestroySnapshot, planReplaceDisk, planScrub,
-  planImportPool, planExportPool, planSetIncusStoragePool, planMoveGuestStorage, planRestoreGuestFromSnapshot, planRollbackGuestDataset, OPS,
+  planImportPool, planExportPool, planSetIncusStoragePool, planSetDefaultStoragePool, planMoveGuestStorage, planRestoreGuestFromSnapshot, planRollbackGuestDataset, OPS,
 } from '../lib/storage/planner.js';
 import { fixtureInventory } from './fixtures/storage/load.js';
 
@@ -196,6 +196,36 @@ test('pools: replace_disk, scrub with timer, import (force for non-ONLINE), expo
   assert.match(planExportPool(stopped, { pool: 'tank' }).error, /pass force: true/);
   assert.deepEqual(planExportPool(stopped, { pool: 'tank', force: true }).plan.steps[0].argv, ['zpool', 'export', '-f', 'tank']);
   assert.deepEqual(planExportPool(inv(), { pool: 'data' }).plan.steps[0].argv, ['zpool', 'export', 'data']);
+});
+
+test('the default pool: repointing where NEW guests land, without moving anything', () => {
+  // The pool exists already — this verb only changes which one new guests
+  // inherit, and pins the guests that would otherwise block the change.
+  const out = planSetDefaultStoragePool(inv(), { pool: 'zfs' });
+  assert.deepEqual(out.plan.steps.map((s) => s.argv), [
+    ['incus', 'config', 'device', 'override', 'pp-db', 'root', 'pool=zfs'],
+    ['incus', 'config', 'device', 'override', 'pp-legacy', 'root', 'pool=default'],
+    ['incus', 'profile', 'device', 'set', 'default', 'root', 'pool=zfs'],
+    ['incus', 'profile', 'show', 'default'],
+  ]);
+  assert.equal(out.plan.previous_pool, 'default');
+  assert.deepEqual(out.plan.pins.map((p) => [p.name, p.pool]), [['pp-db', 'zfs'], ['pp-legacy', 'default']]);
+  assert.match(out.plan.warnings[0], /stay where they are/);
+  assert.match(out.plan.warnings[0], /move_guest_storage moves an existing one/);
+  assert.match(out.plan.reversal, /^incus profile device set default root pool=default; incus config device remove pp-db root/);
+  assert.ok(out.plan.pools.find((p) => p.name === 'default').default, 'the plan says which pool is default today');
+
+  // Already the default → a refusal, not a no-op plan that looks like work.
+  assert.match(planSetDefaultStoragePool(inv(), { pool: 'default' }).error, /already the default/);
+  // A pool Incus does not have, with the ones it does in the message.
+  assert.match(planSetDefaultStoragePool(inv(), { pool: 'nope' }).error, /Incus has no storage pool nope \(it has/);
+  assert.match(planSetDefaultStoragePool(inv(), { pool: 'not a name!' }).error, /pool: the Incus storage pool name/);
+  // pin_existing: false refuses rather than touching guests.
+  assert.match(planSetDefaultStoragePool(inv(), { pool: 'zfs', pin_existing: false }).error, /2 instance\(s\) rely on the default profile's root disk/);
+  // No root disk on the profile at all → add one rather than set it.
+  const bare = inv(); bare.defaultProfileRoot = null;
+  assert.deepEqual(planSetDefaultStoragePool(bare, { pool: 'zfs' }).plan.steps[0].argv,
+    ['incus', 'profile', 'device', 'add', 'default', 'root', 'disk', 'path=/', 'pool=zfs']);
 });
 
 test('incus binding: set_incus_storage_pool (create vs keep, profile root), move_guest_storage batch with snapshots and verification', () => {

@@ -3,7 +3,7 @@
 // plus the managed pool's Incus binding and the guest-move action.
 
 import { useState } from 'react';
-import { ArrowRightLeft, Boxes, Clock, Download, Layers, Pause, Play, Square, Upload, Wrench } from 'lucide-react';
+import { ArrowRightLeft, Boxes, Clock, Download, Layers, Pause, Play, Square, Star, Upload, Wrench } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
@@ -255,14 +255,29 @@ export default function PoolsTab({ data, onPlan }) {
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-base flex items-center gap-2"><Boxes className="h-4 w-4" />Incus storage pools</CardTitle></CardHeader>
           <CardContent className="space-y-2">
-            {defaultRoot && <p className="text-xs text-muted-foreground">Default profile root disk: <span className="font-mono">{defaultRoot.pool || '—'}</span></p>}
+            <p className="text-xs text-muted-foreground break-words">
+              New guests — containers, VMs, projects and migrations that do not name a pool — land on the
+              default. Making another pool the default moves nothing: guests already running stay where they
+              are (use Move guests for those).
+            </p>
             {incusPools.map((p) => (
-              <div key={p.name} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-                <span className="font-mono font-medium">{p.name}</span>
-                <Chip>{p.driver}</Chip>
-                {p.source && <span className="font-mono text-xs text-muted-foreground break-all">{p.source}</span>}
-                <span className="text-xs text-muted-foreground">used by {p.used_by_count ?? 0}</span>
-                {defaultRoot?.pool === p.name && <Chip level="info">default</Chip>}
+              <div key={p.name} className="flex flex-col sm:flex-row sm:items-center gap-2 border rounded p-2.5">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm min-w-0 flex-1">
+                  <span className="font-mono font-medium">{p.name}</span>
+                  <Chip>{p.driver}</Chip>
+                  {p.source && <span className="font-mono text-xs text-muted-foreground break-all">{p.source}</span>}
+                  <span className="text-xs text-muted-foreground">used by {p.used_by_count ?? 0}</span>
+                  {defaultRoot?.pool === p.name && <Chip level="info">default for new guests</Chip>}
+                </div>
+                {defaultRoot?.pool !== p.name && (
+                  <Button
+                    variant="outline" size="sm" className={`${BTN} w-full sm:w-auto`}
+                    title={`Point the default profile's root disk at ${p.name} — new guests only`}
+                    onClick={() => onPlan({ op: 'set_default_storage_pool', params: { pool: p.name }, title: `Make ${p.name} the default for new guests` })}
+                  >
+                    <Star className="h-4 w-4 mr-1.5" />Make default
+                  </Button>
+                )}
               </div>
             ))}
           </CardContent>

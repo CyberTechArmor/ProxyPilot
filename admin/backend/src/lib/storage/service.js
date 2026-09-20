@@ -15,7 +15,7 @@
 
 import {
   planCreateZpool, planCreateDataset, planSetDatasetProps, planDestroyDataset, planSnapshot, planRollback, planDestroySnapshot,
-  planReplaceDisk, planScrub, planImportPool, planExportPool, planSetIncusStoragePool, planMoveGuestStorage,
+  planReplaceDisk, planScrub, planImportPool, planExportPool, planSetIncusStoragePool, planSetDefaultStoragePool, planMoveGuestStorage,
   planRestoreGuestFromSnapshot, planRollbackGuestDataset, planWriteHostFile, planToken, verifyPlanToken, renderPlanCommands,
   validPoolName, validDataset, MANAGED_DATASETS, INCUS_NAME_RE, REPLICATION_NAME_RE,
 } from './planner.js';
@@ -165,7 +165,8 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
   const PLANNERS = {
     create_zpool: planCreateZpool, create_dataset: planCreateDataset, set_dataset_props: planSetDatasetProps, destroy_dataset: planDestroyDataset,
     zfs_snapshot: planSnapshot, zfs_rollback: planRollback, destroy_zfs_snapshot: planDestroySnapshot, replace_disk: planReplaceDisk, zpool_scrub: planScrub,
-    import_pool: planImportPool, export_pool: planExportPool, set_incus_storage_pool: planSetIncusStoragePool, move_guest_storage: planMoveGuestStorage,
+    import_pool: planImportPool, export_pool: planExportPool, set_incus_storage_pool: planSetIncusStoragePool,
+    set_default_storage_pool: planSetDefaultStoragePool, move_guest_storage: planMoveGuestStorage,
     restore_guest_from_snapshot: planRestoreGuestFromSnapshot, rollback_guest_dataset: planRollbackGuestDataset,
     set_managed_pool: planSetManagedPool, set_backup_policy: planBackupPolicy, set_replication_target: planReplication, run_replication: planRunReplication,
   };
@@ -183,7 +184,7 @@ export function createStorageService({ host, getDb = null, getSetting, setSettin
     create_zpool: ['zpool', 'zfs', 'wipefs'], set_managed_pool: ['zfs'], create_dataset: ['zfs'], set_dataset_props: ['zfs'],
     destroy_dataset: ['zfs'], zfs_snapshot: ['zfs'], zfs_rollback: ['zfs'], destroy_zfs_snapshot: ['zfs'],
     replace_disk: ['zpool'], zpool_scrub: ['zpool'], import_pool: ['zpool'], export_pool: ['zpool'],
-    set_incus_storage_pool: ['zfs', 'incus'], move_guest_storage: ['incus'],
+    set_incus_storage_pool: ['zfs', 'incus'], set_default_storage_pool: ['incus'], move_guest_storage: ['incus'],
     restore_guest_from_snapshot: ['incus'], rollback_guest_dataset: ['zfs', 'incus'], set_backup_policy: ['zfs'],
   };
   const INSTALL_HINT = 'run `sudo bash scripts/install-storage.sh` on the host first — it installs zfsutils-linux, smartmontools and sanoid plus the ProxyPilot units and helpers';

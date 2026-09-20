@@ -102,7 +102,7 @@ export function createStorageHandlers(kit) {
 
   /* ------------------------------ mutations ----------------------------- */
 
-  const SUBJECT = { create_zpool: 'name', set_managed_pool: 'pool', create_dataset: 'name', set_dataset_props: 'dataset', destroy_dataset: 'dataset', zfs_snapshot: 'dataset', zfs_rollback: 'snapshot', destroy_zfs_snapshot: 'snapshot', replace_disk: 'pool', zpool_scrub: 'pool', import_pool: 'pool', export_pool: 'pool', set_incus_storage_pool: 'name', move_guest_storage: 'pool', set_backup_policy: null, set_replication_target: 'name', run_replication: 'name', restore_guest_from_snapshot: 'new_name', rollback_guest_dataset: 'guest' };
+  const SUBJECT = { create_zpool: 'name', set_managed_pool: 'pool', create_dataset: 'name', set_dataset_props: 'dataset', destroy_dataset: 'dataset', zfs_snapshot: 'dataset', zfs_rollback: 'snapshot', destroy_zfs_snapshot: 'snapshot', replace_disk: 'pool', zpool_scrub: 'pool', import_pool: 'pool', export_pool: 'pool', set_incus_storage_pool: 'name', set_default_storage_pool: 'pool', move_guest_storage: 'pool', set_backup_policy: null, set_replication_target: 'name', run_replication: 'name', restore_guest_from_snapshot: 'new_name', rollback_guest_dataset: 'guest' };
 
   function planned(op, { subjectType = 'storage', flag = 'mcp.storage', audit = null, prepare = (a) => a } = {}) {
     return mutation(op, { subjectType, flag, audit, keepArgs: ['plan_token', 'dry_run', 'confirm'] }, async (args, auth, req, note) => {
@@ -145,6 +145,7 @@ export function createStorageHandlers(kit) {
     import_pool: planned('import_pool', { subjectType: 'zpool' }),
     export_pool: planned('export_pool', { subjectType: 'zpool' }),
     set_incus_storage_pool: planned('set_incus_storage_pool', { subjectType: 'incus-storage', prepare: (a) => ({ ...a, name: a.name || 'zfs', dataset: a.dataset || svc().managed()?.datasets?.incus || null }) }),
+    set_default_storage_pool: planned('set_default_storage_pool', { subjectType: 'incus-storage' }),
     move_guest_storage: planned('move_guest_storage', { subjectType: 'lxc' }),
     set_backup_policy: planned('set_backup_policy', { subjectType: 'storage-policy' }),
     set_replication_target: planned('set_replication_target', { subjectType: 'replication' }),

@@ -574,6 +574,65 @@ export function planSetIncusStoragePool(inv, params = {}) {
 }
 
 /**
+ * Make an EXISTING Incus storage pool the one new guests land in.
+ *
+ * `set_incus_storage_pool` does this too, but only while creating a ZFS-backed
+ * pool from a dataset. Once a host has more than one pool, "which one do new
+ * things go to?" is a question of its own — and the answer is the default
+ * profile's root disk, which is what this repoints.
+ *
+ * Nothing moves. Existing guests stay exactly where they are: the ones that
+ * inherit the profile's root disk are first PINNED to the pool they are
+ * already on (Incus refuses the repoint while any instance relies on that
+ * inherited device), and only new guests land in the new pool. Moving one is
+ * `move_guest_storage`.
+ */
+export function planSetDefaultStoragePool(inv, params = {}) {
+  const name = String(params.pool || '');
+  if (!INCUS_NAME_RE.test(name)) return { error: 'pool: the Incus storage pool name (letters, digits, hyphens)' };
+  const pool = (inv.incusPools || []).find((p) => p.name === name);
+  if (!pool) {
+    const known = (inv.incusPools || []).map((p) => p.name).join(', ');
+    return { error: `Incus has no storage pool ${name}${known ? ` (it has ${known})` : ''} — set_incus_storage_pool creates one on a ZFS dataset` };
+  }
+  const current = inv.defaultProfileRoot?.pool || null;
+  if (current === name) return { error: `${name} is already the default profile's root pool — new guests land there already` };
+
+  const plan = newPlan('set_default_storage_pool', name, `Make ${name} the pool new guests land in (was ${current || 'unset'})`);
+  const pins = [];
+  if (inv.defaultProfileRoot) {
+    const dev = inv.defaultProfileRoot.device || inv.defaultProfileRoot.name || 'root';
+    const { reliant, unknown } = instancesOnProfileRoot(inv);
+    if (reliant.length && params.pin_existing === false) {
+      return { error: `refused: ${reliant.length} instance(s) rely on the default profile's root disk (${reliant.slice(0, 5).map((i) => i.name).join(', ')}) and Incus will not repoint it while they do — drop pin_existing: false to pin each to its current pool first (no data is moved)` };
+    }
+    for (const inst of reliant) {
+      const scope = inst.project && inst.project !== 'default' ? ['--project', inst.project] : [];
+      const argv = ['incus', 'config', 'device', 'override', ...scope, inst.name, dev];
+      if (inst.pool) argv.push(`pool=${inst.pool}`);
+      plan.steps.push(step(argv, `Pin ${inst.name} to the pool it is already on (${inst.pool || 'inherited'}) — no data is moved`, { timeout_ms: 60000 }));
+      pins.push({ name: inst.name, project: inst.project, pool: inst.pool, device: dev });
+    }
+    if (reliant.length) plan.warnings.push(`${reliant.length} existing guest(s) stay where they are — only guests created from now on land on ${name}. move_guest_storage moves an existing one.`);
+    for (const u of unknown) plan.warnings.push(`could not check whether ${u} has its own root disk (it was not in the instance list) — if the profile step is refused, run \`incus config device override ${u} ${dev}\` and retry`);
+    plan.steps.push(step(['incus', 'profile', 'device', 'set', 'default', dev, `pool=${name}`], `Point the default profile's root disk at ${name} (was ${current || '—'})`));
+  } else {
+    plan.steps.push(step(['incus', 'profile', 'device', 'add', 'default', 'root', 'disk', 'path=/', `pool=${name}`], `Add a root disk on ${name} to the default profile`));
+  }
+  plan.steps.push(step(['incus', 'profile', 'show', 'default'], 'Verify', { kind: 'verify' }));
+  plan.pins = pins;
+  plan.previous_pool = current;
+  plan.pools = (inv.incusPools || []).map((p) => ({ name: p.name, driver: p.driver, source: p.source, used_by: p.used_by_count, default: p.name === current }));
+  plan.reversal = [
+    inv.defaultProfileRoot
+      ? `incus profile device set default ${inv.defaultProfileRoot.device || 'root'} pool=${current}`
+      : 'incus profile device remove default root',
+    ...pins.map((p) => `incus config device remove ${p.project && p.project !== 'default' ? `--project ${p.project} ` : ''}${p.name} ${p.device}`),
+  ].join('; ');
+  return { plan };
+}
+
+/**
  * Which instances inherit the default profile's root disk (and so block a
  * change to its pool). The profile's own `used_by` is authoritative about
  * which instances the profile applies to, across projects; `has_own_root`

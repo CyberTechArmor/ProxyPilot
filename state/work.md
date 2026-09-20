@@ -47,6 +47,9 @@ fingerprint in the token payload. No session cookie, no MCP key.
 | 17 | All three transports now proven on real hardware; only a VM source, a real Proxmox host and arm64 remain unverified (handoff) | done |
 | 18 | Token lifecycle: no clock by default, revocable, every token listed with its state (migration 910, `list_migration_tokens`, `revoke_migration_token`, the Agent tokens panel) | done |
 | 19 | `cleanup_migration` + the Clean up button: delete the guest a finished migration created, its record, or both — refusing a live migration, an adopted guest, a published one, and an unreadable route table | done |
+| 20 | Where a migration lands: `pool` honoured by ALL three transports (incus-migrate answers its overrides menu 4 → pool → size → 1), a pool picker with free space in the dialog | done |
+| 21 | Will it fit: `capacityNeeds` / `capacityVerdict`, measured against the pool's own `/resources` and the staging disk, at inventory AND at approval; a block is refused by the service (both surfaces) and overridable deliberately | done |
+| 22 | `set_default_storage_pool` — which pool new guests land in, from Storage → Make default, pinning inheriting guests first and moving nothing | done |
 
 ## Decisions
 

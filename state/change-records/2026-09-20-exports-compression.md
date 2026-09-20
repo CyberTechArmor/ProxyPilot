@@ -57,3 +57,23 @@ its download did not:
 - **A prepared download is a convenience, not the backup of record.** Hence
   the retention sweep, and hence the capacity refusal up front rather than a
   full exports dataset discovered later.
+- **The sweep adopts what it did not write.** Tarballs from before this
+  table existed were invisible to the panel and unreachable by retention —
+  a gigabyte each that nothing would ever delete. Claiming "one list" and
+  then keeping a second, invisible one was the part that had to go.
+
+## Measured
+
+`export_lxc searxng` three times on the operator's host, same guest, same
+flags, back to back — 8.158 GB of tar each time, durations from
+`mcp_ledger.duration_ms`:
+
+| | time | size |
+|---|---|---|
+| **zstd** | **28.3 s** | **3.647 GB** |
+| gzip | 179.7 s | 3.775 GB |
+| none | 36.8 s | 8.158 GB |
+
+zstd is 6.3× faster than gzip and 3% smaller, and 30% faster than writing
+the tarball uncompressed. The default stands, and `none` turns out to have
+no speed argument on this host at all.

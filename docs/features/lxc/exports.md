@@ -89,6 +89,14 @@ and then the download is an ordinary static file.
 - **Retention** keeps the newest 3 per container and drops anything past 14
   days, on boot + every six hours (`index.js`). A prepared download is a
   convenience, not the backup of record — that is sanoid + replication.
+  The same sweep **adopts** tarballs in the directory that no row knows
+  about — the ones `export_lxc` wrote before this table existed, or one a
+  crash left behind. Retention only reaches rows and the panel only shows
+  rows, so an unadopted file is a gigabyte nobody can see and nothing will
+  ever delete. The container name is read out of the filename and resolved
+  against the guests that actually exist (names contain dashes, so
+  `lxc-a-b-<stamp>` is ambiguous on the filename alone); a file whose name
+  is not ours is left strictly alone.
 
 `export_lxc`, `delete_lxc_container` and `delete_project` register what they
 make in the same store, so the dashboard and `list_lxc_exports` show ONE list
@@ -104,8 +112,23 @@ rather than two views of a directory that disagree.
   that it now names the compressor, reports it back, and registers the
   artifact.
 
-## Where the numbers come from
+## The numbers
 
-Measured on this host (32 cores, ZFS on NVMe) against a real guest — see
-`state/run-ledger.md` for the run. gzip's ~50 MB/s is the number that makes
-the default zstd rather than a preference.
+Measured on the operator's host (32 cores, ZFS on NVMe), `export_lxc searxng`
+three times back to back with identical flags — same 8.158 GB of tar, only
+the compressor different. Durations are the `mcp_ledger.duration_ms` of each
+run, so they are the server's own timing, not a stopwatch:
+
+| | time | size | throughput |
+|---|---|---|---|
+| **zstd** | **28.3 s** | **3.647 GB** | 288 MB/s |
+| gzip | 179.7 s | 3.775 GB | 45 MB/s |
+| none | 36.8 s | 8.158 GB | 222 MB/s |
+
+zstd is **6.3× faster than gzip and 3% smaller**. And it is 30% faster than
+writing the tarball uncompressed: on a 32-core host, compressing 8.2 GB down
+to 3.6 GB costs less than writing the extra 4.5 GB. gzip's 45 MB/s is
+363 Mb/s — slower than any modern link, which is the whole argument.
+
+Restores are not symmetric: decompression is 5-10× cheaper than compression
+for all three, so nothing about the import path argues for gzip.

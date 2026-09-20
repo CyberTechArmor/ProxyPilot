@@ -19,7 +19,7 @@
 // what it makes here, so the dashboard and MCP show ONE list rather than two
 // views of the same directory that disagree.
 
-import { COMPRESSION_SETTING, resolveCompression, extensionFor, incusCompressionArgs } from './export-compression.js';
+import { COMPRESSION_SETTING, resolveCompression, extensionFor, incusCompressionArgs, TARBALL_SUFFIX_RE } from './export-compression.js';
 
 /** Keep this many ready artifacts per container; sweep the rest oldest-first. */
 export const KEEP_PER_CONTAINER = 3;
@@ -330,7 +330,9 @@ export function createExportStore({
     if (sweeping) return { swept: [], skipped: 'already running' };
     sweeping = true;
     const swept = [];
+    let adopted = [];
     try {
+      adopted = await adoptOrphans();
       const cutoff = iso(now() - days * 86400000);
       const rows = db().prepare(`SELECT * FROM lxc_exports WHERE state = 'ready' ORDER BY container_name, id DESC`).all();
       const seen = new Map();
@@ -345,7 +347,69 @@ export function createExportStore({
         if (out.deleted) swept.push({ id: r.id, container: r.container_name, file: r.path, reason: tooMany ? `keeping ${keep} per container` : `older than ${days} days` });
       }
     } finally { sweeping = false; }
-    return { swept, keep, days };
+    return { swept, adopted, keep, days };
+  }
+
+  /**
+   * Tarballs in the exports directory that predate this store (export_lxc
+   * wrote plenty before there was a table) or that a crash left unrecorded.
+   * Retention only reaches rows, and the panel only shows rows, so an
+   * unadopted file is a gigabyte nobody can see and nothing will ever
+   * delete. Adopting one makes it visible, downloadable and expirable —
+   * which is the whole claim of having ONE list.
+   *
+   * The container name is read back out of the filename this store and
+   * export_lxc both write (`lxc-<container>[-<snapshot>]-<stamp>.tar…`);
+   * anything that does not parse is left alone, because a file nobody
+   * recognises is not ours to delete.
+   */
+  /** The guests that exist right now, without the prefix. Empty on any trouble. */
+  async function liveGuestNames() {
+    const r = await runHost('incus', ['list', '--format', 'csv', '-c', 'n'], { timeoutMs: 30000 }).catch(() => null);
+    if (!r || r.status !== 0) return [];
+    return String(r.stdout || '').split('\n').map((x) => x.trim())
+      .filter((x) => x.startsWith(lxcPrefix)).map((x) => x.slice(lxcPrefix.length)).filter(Boolean);
+  }
+
+  async function adoptOrphans() {
+    const dir = await exportsDir();
+    const ls = await hostSh('ls -1 "$1" 2>/dev/null', [dir], { timeoutMs: 30000 }).catch(() => null);
+    const names = String(ls?.stdout || '').split('\n').map((x) => x.trim()).filter(Boolean);
+    if (!names.length) return [];
+    const known = new Set(db().prepare('SELECT filename FROM lxc_exports').all().map((r) => r.filename));
+    const guests = await liveGuestNames();
+    const out = [];
+    for (const filename of names) {
+      if (known.has(filename)) continue;
+      if (!TARBALL_SUFFIX_RE.test(filename)) continue;
+      // `lxc-<container>[-<snapshot>]-<stamp>.tar…`. Container names contain
+      // dashes and so do snapshot names, so the split is ambiguous on the
+      // filename alone: prefer the longest name that is actually a guest on
+      // this host, and fall back to everything before the stamp (which is
+      // what a tarball of an already-deleted guest looks like).
+      const m = /^lxc-(.+)-(\d{8}T\d{6}Z)\.tar/.exec(filename);
+      if (!m) continue;
+      const middle = m[1];
+      const guess = guests
+        .filter((g) => middle === g || middle.startsWith(`${g}-`))
+        .sort((a, b) => b.length - a.length)[0] || middle;
+      const snapshot = guess === middle ? null : middle.slice(guess.length + 1);
+      if (!NAME_RE.test(guess)) continue;
+      const compression = filename.endsWith('.gz') ? 'gzip' : filename.endsWith('.tar') ? 'none' : 'zstd';
+      // eslint-disable-next-line no-await-in-loop
+      const st = await hostSh('stat -c "%s %Y" "$1/$2" 2>/dev/null', [dir, filename], { timeoutMs: 15000 }).catch(() => null);
+      const [sizeStr, mtimeStr] = String(st?.stdout || '').trim().split(/\s+/);
+      const size = Number(sizeStr);
+      if (!Number.isFinite(size) || size <= 0) continue;
+      const created = Number(mtimeStr) > 0 ? iso(Number(mtimeStr) * 1000) : iso(now());
+      db().prepare(`
+        INSERT INTO lxc_exports (container_name, snapshot_name, path, filename, compression, state, bytes_done, bytes_total, created_at, created_by, ready_at, expires_at)
+        VALUES (?, ?, ?, ?, ?, 'ready', ?, ?, ?, 'adopted', ?, ?)
+      `).run(guess, snapshot, `${dir}/${filename}`, filename, compression, size, size, created, created,
+        iso(Date.parse(created) + EXPIRE_DAYS * 86400000));
+      out.push({ container: guess, snapshot, filename, bytes: size });
+    }
+    return out;
   }
 
   /** For the progress banner: what is building now and what is waiting. */

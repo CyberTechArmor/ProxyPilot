@@ -17,6 +17,7 @@ import {
 } from '../lib/export-compression.js';
 
 const NOW = Date.parse('2026-09-20T12:00:00Z');
+const iso = (t) => new Date(t).toISOString();
 
 /** The real migration-912 DDL, lifted out of db.js so the test runs what ships. */
 function schema912() {
@@ -58,6 +59,8 @@ function setup({ script = () => null, hasZstd = true, dir = '/pool/exports', clo
     calls.push({ bin: 'sh', args: [scriptText, ...argv] });
     const r = script('sh', [scriptText, ...argv], calls);
     if (r) return r;
+    if (/^ls -1/.test(scriptText)) return { status: 0, stdout: '' };
+    if (/^stat -c "%s %Y"/.test(scriptText)) return { status: 0, stdout: '0 0\n' };
     if (/df -B1/.test(scriptText)) return { status: 0, stdout: `${900 * 1024 ** 3}\n` };
     if (/stat -c %s "\$1" 2>\/dev\/null \|\| echo 0/.test(scriptText)) return { status: 0, stdout: '0\n' };
     if (/mv -f/.test(scriptText)) return { status: 0, stdout: `${512 * 1024 ** 2}\n` };
@@ -336,4 +339,48 @@ test('openForDownload serves only a ready artifact that is still on disk', async
   const { store: s3 } = setup({ script: (bin, args) => (bin === 'sh' && /^stat -c %s/.test(args[0]) ? { status: 1, stdout: '' } : null) });
   const gone = s3.register({ container: 'x', path: '/pool/exports/x.tar.zst', compression: 'zstd' });
   assert.match((await s3.openForDownload(gone.id)).error, /gone from disk/);
+});
+
+test('the sweep adopts a tarball nobody recorded, so retention and the panel can reach it', async () => {
+  const onDisk = {
+    'lxc-searxng-20260920T135323Z.tar.gz': [1003913216, 1789900000],   // written before this store existed
+    'lxc-grafana-nightly-20260920T140000Z.tar.zst': [2048, 1789900100], // a snapshot export
+    'notes.txt': [10, 1789900200],                                      // not ours
+    'some-other-backup.tar.gz': [10, 1789900300],                       // not ours either
+  };
+  const { store } = setup({
+    script: (bin, args) => {
+      if (bin === 'incus' && args[0] === 'list') return { status: 0, stdout: 'pp-searxng\npp-grafana\n' };
+      if (bin !== 'sh') return null;
+      if (/^ls -1/.test(args[0])) return { status: 0, stdout: `${Object.keys(onDisk).join('\n')}\n` };
+      if (/^stat -c "%s %Y"/.test(args[0])) {
+        const e = onDisk[args[2]];
+        return e ? { status: 0, stdout: `${e[0]} ${e[1]}\n` } : { status: 1, stdout: '' };
+      }
+      return null;
+    },
+  });
+
+  const out = await store.sweep();
+  assert.equal(out.adopted.length, 2, 'both ProxyPilot tarballs, and only those');
+  assert.deepEqual(out.adopted.map((a) => a.container).sort(), ['grafana', 'searxng']);
+
+  const rows = store.list();
+  const searx = rows.find((r) => r.container === 'searxng');
+  assert.equal(searx.state, 'ready');
+  assert.equal(searx.bytes, 1003913216);
+  assert.equal(searx.compression, 'gzip', 'the extension says what it was compressed with');
+  assert.equal(searx.created_by, 'adopted');
+  // The expiry counts from the file's own mtime, not from the moment it was
+  // noticed — otherwise adoption would silently reset the clock on every
+  // old tarball.
+  assert.ok(searx.expires_at < iso(NOW + 14 * 86400000), 'the clock runs from the file, not from the sweep');
+  const graf = rows.find((r) => r.container === 'grafana');
+  assert.equal(graf.compression, 'zstd');
+  assert.equal(graf.snapshot, 'nightly', 'the guest list is what resolves container-vs-snapshot in a dashed name');
+
+  // Idempotent: a second sweep adopts nothing and changes nothing.
+  const again = await store.sweep();
+  assert.equal(again.adopted.length, 0);
+  assert.equal(store.list().length, 2);
 });

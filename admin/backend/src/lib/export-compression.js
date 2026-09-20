@@ -7,16 +7,25 @@
 // than a gigabit link: on a LAN it makes the compressed download arrive LATER
 // than an uncompressed one would, while 31 of this host's 32 cores sit idle.
 //
-// zstd compresses several times faster at a similar ratio, which moves the
-// break-even past any link an operator is likely to have, so it is the
-// default. The choice is a setting because the right answer does depend on
-// where the bytes are going:
+// zstd is the default, and the numbers are not close. Measured on the
+// operator's host (32 cores, ZFS on NVMe) against the same guest, same
+// flags, three runs back to back — 8.158 GB of tar in:
 //
-//   zstd   the default: fast enough that compression is effectively free,
-//          small enough that a slow link still benefits.
+//   zstd    28.3 s   3.647 GB     288 MB/s
+//   gzip   179.7 s   3.775 GB      45 MB/s   6.3x slower AND 3% bigger
+//   none    36.8 s   8.158 GB     222 MB/s
+//
+// Two things fall out of that. gzip's 45 MB/s is 363 Mb/s, so on any link
+// faster than a slowish home connection gzip is the bottleneck rather than
+// the network. And zstd beat NO COMPRESSION by 30%: writing 3.6 GB while 32
+// cores compress costs less than writing 8.2 GB. There is no link speed at
+// which `none` wins here.
+//
+//   zstd   the default: faster than not compressing, and half the size.
 //   gzip   maximum compatibility, and the automatic fallback when the host
 //          has no zstd binary (Incus shells out to it).
-//   none   only worth it above ~10 Gb, where even zstd is the bottleneck.
+//   none   for a CPU-starved host, or a guest whose bytes are already
+//          compressed and will not shrink twice.
 //
 // Nothing here decompresses: `incus import`, `tar` and `zstd -d` all detect
 // the format, and decompression is 5-10x cheaper than compression anyway, so

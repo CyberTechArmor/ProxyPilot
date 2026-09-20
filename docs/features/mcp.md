@@ -121,7 +121,9 @@ them. A scoped key sees only what it may call in `tools/list`, and a call
 outside its scope is refused before the handler runs and audited as
 `MCP_SCOPE_REFUSED`. An unscoped key is the full surface **minus
 self-editing**, which is never granted implicitly — the operator's original
-key cannot patch ProxyPilot until a key with `scope.self_edit` exists.
+key cannot patch ProxyPilot until a key with `scope.self_edit` exists. A key
+minted through MCP inherits the minting key's owner; a key with no recorded
+owner cannot mint (and, per the security model below, cannot authenticate).
 
 ### The families
 
@@ -351,7 +353,17 @@ quietly stop being true.
 - Tokens are bearer secrets (`ppmcp_…`); only a sha256 hash is stored.
   Minting/revocation is admin-only and audited (`MCP_TOKEN_*`).
 - Every tool call runs under the identity of the admin who minted the token
-  (audit rows carry `via: 'mcp'`).
+  (audit rows carry `via: 'mcp'`) — and is only as valid as that admin. On
+  **every** call the token lookup re-reads the owner: a token whose owner was
+  deleted, disabled (role `pending`) or never recorded is refused with the
+  same 401 as a bad token, and the first refusal per token is audited as
+  `MCP_TOKEN_OWNER_REFUSED`. The endpoint is request/response (no stream),
+  so this is the re-check on an already-connected client. Disabling a user
+  (dashboard role → pending, or `disable_user`) and deleting one also
+  **revoke** their keys outright, so re-enabling the account never revives a
+  key that was dead while it was off; mint a new one. The MCP Access page and
+  `list_mcp_keys` show each key's `owner_status` (`active` / `disabled` /
+  `deleted` / `none`). Migration 912 revoked the historical orphans.
 - The endpoint is CSRF-exempt by design: authentication never rides ambient
   cookies, so a cross-site request cannot ride a session.
 - Upload tickets are single-use, unauthenticated-by-ticket (the ticket *is*

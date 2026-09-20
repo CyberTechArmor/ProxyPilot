@@ -33,8 +33,10 @@ import {
   buildManifestVerifyScript, parseShaVerifyOutput,
   planMigrationRenumber, mergeEnvDefaults, manifestEntryFromConnection,
   deriveComponentSubsystem, buildComponentsStateDoc, publicProjectComponentShape,
-  COMPONENTS_STATE_PATH,
+  COMPONENTS_STATE_PATH, planSecretMint, componentSecretKeys,
 } from './component-logic.js';
+import { mergeEnvFile } from '../lib/mcp-ext/logic.js';
+import { b64 } from './host.js';
 import { backfillManifestEntryInContainer } from './integration-enforcement.js';
 import { componentWiresBootstrap, planAuthWiring, AUTH_WIRING_TARGETS } from './scaffold-auth.js';
 import { SCAFFOLD_DEPENDENCIES } from './scaffold.js';
@@ -244,6 +246,61 @@ export async function ensureComponentDeps({ containerName, rows }) {
   return { ok: failed.length === 0, repaired, failed };
 }
 
+// ---- the secrets a component owns ----
+//
+// Until 2026-09 a contract's secrets were "never written — they surface on the
+// operator verification checklist", and the auth component fell back to a
+// literal dev-insecure default, so a freshly generated app signed its sessions
+// with a public string unless someone hand-set the env. The platform now MINTS
+// the secrets a component declares as its own (contract.config secret +
+// generate) once per project into the container's /etc/environment — the file
+// the app's systemd unit reads (deploy-logic.js) and set_project_env writes —
+// and never touches a key that is already there, so reinstall and redeploy
+// keep the values the app already signed with. Values never leave the
+// container: this function reports KEY NAMES only.
+const ENVIRONMENT_FILE = '/etc/environment';
+
+function installedSecretConfigs(rows) {
+  const configs = [];
+  for (const row of rows || []) {
+    if (row?.status !== 'installed') continue;
+    const contract = parseContractJson(row.contract_json);
+    for (const c of contract?.config || []) {
+      if (c && c.secret === true && c.generate === true) configs.push(c);
+    }
+  }
+  return configs;
+}
+
+// installedSecretKeys(rows) → the env keys every installed component expects
+// the platform to have minted (deploy validation checks they are present).
+export function installedSecretKeys(rows) {
+  return componentSecretKeys(installedSecretConfigs(rows));
+}
+
+export async function ensureComponentSecrets({ containerName, rows, rand } = {}) {
+  const configs = installedSecretConfigs(rows);
+  if (!configs.length) return { ok: true, minted: [] };
+  const cur = await containerSh(containerName, `cat ${ENVIRONMENT_FILE} 2>/dev/null || true`, { timeoutMs: 15000 });
+  if (cur.code !== 0) {
+    return { ok: false, minted: [], error: `could not read ${ENVIRONMENT_FILE}: ${(cur.stderr || cur.stdout || '').trim().slice(-200)}` };
+  }
+  const plan = planSecretMint(cur.stdout || '', configs, rand ? { rand } : {});
+  if (!plan.minted.length) return { ok: true, minted: [] };
+  const merged = mergeEnvFile(cur.stdout || '', plan.vars);
+  // Same file, mode and channel as set_project_env: written whole, then moved
+  // into place so a half-written environment is never what the unit reads.
+  const w = await containerSh(
+    containerName,
+    `umask 022\nprintf '%s' '${b64(merged)}' | base64 -d > ${ENVIRONMENT_FILE}.mock2-tmp && chmod 0644 ${ENVIRONMENT_FILE}.mock2-tmp && mv -f ${ENVIRONMENT_FILE}.mock2-tmp ${ENVIRONMENT_FILE}`,
+    { timeoutMs: 15000 },
+  );
+  if (w.code !== 0) {
+    return { ok: false, minted: [], error: `could not write ${ENVIRONMENT_FILE}: ${(w.stderr || w.stdout || '').trim().slice(-200)}` };
+  }
+  return { ok: true, minted: plan.minted };
+}
+
 // ensureScaffoldDeps — restore scaffold dependencies a corrupted package.json
 // lost. Two npm processes racing in the same tree (the pre-serialization
 // double base-app deploy) could rewrite package.json/package-lock.json and drop
@@ -387,6 +444,20 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
     ensured = await ensureComponentDeps({ containerName, rows: listProjectComponents(projectId) });
   } catch (e) { console.warn('[mock2] component dep repair failed:', e?.message); }
   for (const f of ensured.failed) failedRows.push(f);
+
+  // The secrets the installed components own are minted here, before the
+  // build's first turn, so the app never boots on a dev default (the deploy
+  // step re-checks and refuses to start production mode without them).
+  try {
+    const secrets = await ensureComponentSecrets({ containerName, rows: listProjectComponents(projectId) });
+    if (secrets.minted.length) {
+      insertMessage({
+        projectId, kind: 'system', cycleId,
+        body: `Minted ${secrets.minted.length} application secret(s) into the container environment (${secrets.minted.join(', ')}). Values stay in the container; the app reads them at start.`,
+      });
+    }
+    if (!secrets.ok) console.warn(`[mock2] component secret minting failed for project ${projectId}: ${secrets.error}`);
+  } catch (e) { console.warn('[mock2] component secret minting failed:', e?.message); }
 
   // Restore scaffold deps a corrupted package.json lost (see ensureScaffoldDeps)
   // — the deploy's install step materializes them (`npm ci` fails on the now

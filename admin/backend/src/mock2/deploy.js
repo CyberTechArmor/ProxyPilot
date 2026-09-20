@@ -24,6 +24,7 @@ import { sh, b64 } from './host.js';
 import { scaffoldPwaFiles } from './scaffold.js';
 import {
   parseRunContract, deployPlan, deployStepLabel, buildDevServiceUnit,
+  validateDeployEnvironment,
   execStartForStartCommand, deployFailureMessage, DEPLOY_STEP_TIMEOUTS_MS,
   freeWebPortScript, portHoldersReportScript,
   newBuildId, sanitizeBuildId, buildIdStampScript, buildStampReportScript, interpretBuildStamp,
@@ -202,12 +203,46 @@ async function deployProjectUnqueued({
   await retrofitPwaBuildPlumbing(containerName, appDir).catch(() => {});
   await stampBuildId(containerName, appDir).catch(() => {});
 
+  // 1.5) The secrets the installed components OWN (contract.config secret +
+  //      generate — the auth component's JWT and master keys) are minted once
+  //      into /etc/environment, which the unit below reads. Every deploy path
+  //      funnels through here, so a project provisioned before minting existed
+  //      is healed on its next deploy. Fail closed: no minting, no start.
+  //      Dynamic imports — the static ones would be a cycle (component-install
+  //      imports runner, which imports this module).
+  let requiredSecretKeys = [];
+  try {
+    const [{ ensureComponentSecrets, installedSecretKeys }, { listProjectComponents }, { getProjectByContainerName }] = await Promise.all([
+      import('./component-install.js'), import('./components.js'), import('./projects.js'),
+    ]);
+    const project = getProjectByContainerName(containerName);
+    if (project) {
+      const rows = listProjectComponents(project.id);
+      const secrets = await ensureComponentSecrets({ containerName, rows });
+      if (!secrets.ok) {
+        return { ok: false, step: 'start', error: deployFailureMessage('start', `could not mint the application's secrets: ${secrets.error}`) };
+      }
+      requiredSecretKeys = installedSecretKeys(rows);
+    }
+  } catch (e) {
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `application secret minting failed: ${e?.message || e}`) };
+  }
+
   // 2) Rewrite the systemd unit's ExecStart to the manifest `start` command,
   //    reload, and restart. WantedBy=multi-user.target already persists, so a
   //    later container restart brings the built app back (idempotency point 5).
+  //    The unit runs the app in production mode; the deploy is refused unless
+  //    the unit says so, /etc/environment does not override it, and every
+  //    minted secret is present (validateDeployEnvironment) — an omitted
+  //    variable can never silently switch the dev-default secrets back on.
   report('start');
   const execStart = execStartForStartCommand(contract.start, { appDir });
   const unit = buildDevServiceUnit({ appDir, webPort, execStart });
+  const envRead = await containerSh(containerName, 'cat /etc/environment 2>/dev/null || true', { timeoutMs: 15000 });
+  const mode = validateDeployEnvironment({ unitText: unit, environmentText: envRead.stdout || '', requiredKeys: requiredSecretKeys });
+  if (!mode.ok) {
+    return { ok: false, step: 'start', error: deployFailureMessage('start', mode.error) };
+  }
   const swap = await containerSh(
     containerName,
     `: ${DEPLOY_MARKER}\n`

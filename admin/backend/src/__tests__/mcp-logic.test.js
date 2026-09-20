@@ -10,6 +10,7 @@ import {
   MCP_PROTOCOL_VERSION, MCP_KNOWN_VERSIONS, MCP_TOOLS,
   rpcResult, rpcError, toolResult,
   mintMcpToken, hashMcpToken, looksLikeMcpToken, tokenFromRequest,
+  mcpTokenOwnerRefusal, mcpTokenOwnerStatus, MCP_OWNER_REFUSALS,
   mintUploadTicket, looksLikeUploadTicket,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs,
@@ -2455,4 +2456,32 @@ test('every incus list shell-out uses the listing capture budget', () => {
     assert.match(call, /LXC_LIST_CAPTURE_CAP/,
       `an incus list still runs on the default 256 KB budget: ${call.trim()}`);
   }
+});
+
+// ---- token owner validity (2026-09 immediate repairs) ----
+
+test('mcpTokenOwnerRefusal: a token is only as valid as its owner', () => {
+  const live = { id: 'u1', role: 'admin' };
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: live }), null);
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'user' } }), null);
+  // Disabled = parked as 'pending' (the dashboard's and disable_user's off switch).
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'pending' } }), 'owner_disabled');
+  // Deleted, or the lookup returned somebody else's row.
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: null }), 'owner_deleted');
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u2', role: 'admin' } }), 'owner_deleted');
+  // Never recorded (a scoped key minted through an ownerless key, or a pre-migration row).
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: '', owner: live }), 'no_owner');
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: null, owner: live }), 'no_owner');
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: '  ', owner: live }), 'no_owner');
+  assert.equal(mcpTokenOwnerRefusal(), 'no_owner');
+  // Numeric ids compare as strings (users.id is TEXT; created_by is TEXT).
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 7, owner: { id: '7', role: 'admin' } }), null);
+  for (const k of Object.keys(MCP_OWNER_REFUSALS)) assert.equal(typeof MCP_OWNER_REFUSALS[k], 'string');
+});
+
+test('mcpTokenOwnerStatus: the listing word for each owner state', () => {
+  assert.equal(mcpTokenOwnerStatus({ ownerId: 'u1', owner: { id: 'u1', role: 'admin' } }), 'active');
+  assert.equal(mcpTokenOwnerStatus({ ownerId: 'u1', owner: { id: 'u1', role: 'pending' } }), 'disabled');
+  assert.equal(mcpTokenOwnerStatus({ ownerId: 'u1', owner: null }), 'deleted');
+  assert.equal(mcpTokenOwnerStatus({ ownerId: '', owner: null }), 'none');
 });

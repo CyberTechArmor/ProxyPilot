@@ -744,6 +744,21 @@ const updateUserSchema = z.object({
   resetPassword: z.boolean().optional(),
 });
 
+// revokeUserAccess — everything a disabled or deleted account could still
+// use after the role flip: its live sessions (the cookie a browser still
+// holds) and the MCP keys it minted (routes/mcp.js refuses a disabled owner
+// per call, but a revoked key stays revoked when the account is re-enabled,
+// which "the owner check would refuse it" does not give). Best effort per
+// table so a pre-migration schema cannot fail the user update itself.
+function revokeUserAccess(db, userId) {
+  const now = new Date().toISOString();
+  let sessions = 0;
+  let mcpTokens = 0;
+  try { sessions = db.prepare(`UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).run(now, userId).changes; } catch { /* pre-migration */ }
+  try { mcpTokens = db.prepare(`UPDATE mcp_tokens SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL`).run(now, String(userId)).changes; } catch { /* pre-migration */ }
+  return { sessions, mcpTokens };
+}
+
 // Update user
 userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
   try {
@@ -814,6 +829,16 @@ userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
       db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...params);
     }
 
+    // Parking an account as 'pending' is the dashboard's "disable". Until
+    // 2026-09 it left the person's sessions and MCP keys alive until they
+    // expired on their own; now it revokes both at once (the MCP
+    // disable_user tool already did the sessions half).
+    let revoked = null;
+    if (role === 'pending' && user.role !== 'pending') {
+      revoked = revokeUserAccess(db, id);
+      logAudit(req.user.id, 'USER_DISABLED', 'user', id, { username: user.username, previous_role: user.role, ...revoked }, req.ip);
+    }
+
     logAudit(req.user.id, 'USER_UPDATED', 'user', id, { displayName, role, resetPassword }, req.ip);
 
     res.json({
@@ -880,6 +905,10 @@ userRouter.delete('/users/:id', requireAdmin, requireSudo, async (req, res) => {
     // would trip "FOREIGN KEY constraint failed" (the root cause of the
     // delete button silently failing). Detach those rows first — the
     // history itself is preserved, only the author link is cleared.
+    // MCP keys carry the owner id as text (no FK, so no cascade): revoke
+    // them explicitly, keeping the rows as the record that they existed.
+    // Sessions cascade with the user row.
+    const revoked = revokeUserAccess(db, id);
     const deleteUserTx = db.transaction(() => {
       db.prepare('UPDATE audit_log SET user_id = NULL WHERE user_id = ?').run(id);
       db.prepare('UPDATE file_versions SET created_by = NULL WHERE created_by = ?').run(id);
@@ -888,7 +917,7 @@ userRouter.delete('/users/:id', requireAdmin, requireSudo, async (req, res) => {
     });
     deleteUserTx();
 
-    logAudit(req.user.id, 'USER_DELETED', 'user', id, { username: user.username }, req.ip);
+    logAudit(req.user.id, 'USER_DELETED', 'user', id, { username: user.username, mcpTokensRevoked: revoked.mcpTokens }, req.ip);
 
     res.json({ success: true, message: 'User deleted' });
   } catch (error) {

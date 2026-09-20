@@ -295,3 +295,43 @@ storage quota, and choosing between them per source kind — a change of its
 own. Until then, read that concern as "the filesystem / lives on", and judge a
 container source's real size from the transfer itself, which reports actual
 bytes.
+
+## `reset.sh` deletes the legacy database path, and deletes it at all
+
+`reset.sh` ("reset password / TOTP / full reset") clears `ADMIN_PASSWORD` in
+`.env` and then `rm -f`s `data/proxypilot.db` so the first-boot setup flow
+re-triggers. Two problems. The database moved to `data/db/proxypilot.db`
+(update.sh migrates the legacy layout), so on a current install the delete
+is a no-op and the restart alone does not re-open setup — the reset does not
+reset. And where the path still matches, the recovery tool wipes every
+service, route, user and audit row to reset one password. Neither is what a
+break-glass tool should do. Found during the 2026-09 platform-architecture
+review; the fix is a root-only recovery command that edits the live users
+table (restore access to one designated administrator, revoke that account's
+sessions) and leaves the data alone — a change of its own, ahead of any SSO
+work, since a non-destructive recovery path is what makes an identity
+provider outage survivable.
+
+## The sudo window is still four sliding hours
+
+The 2026-09 immediate repairs removed the elevation a passkey login used to
+grant as a side effect and cleared every open window once (migration 605),
+so elevation now comes only from an explicit re-proof. The window itself
+(`SUDO_GRANT_HOURS`, default 4, re-armed on every gated call in
+`middleware/auth.js` `requireSudo`) is unchanged: it was an explicit operator
+request ("looser, sliding 4h"). The architecture review proposes five minutes
+plus per-operation confirmation for the most sensitive actions. That is a
+policy decision for the operator, not a repair; when it is made, change both
+the grant and the slide (they read the same variable) and consider a hard
+cap measured from the original grant so re-arming cannot extend it forever.
+
+## Delegated-editing keys are not owner-checked per call
+
+`lib/editor-keys.js` (the `/api/mcp-editor` restricted sibling) stores
+`created_by` on each key like `mcp_tokens` does, but its lookup checks only
+the hash, the revocation timestamp and the container's activation switch.
+The 2026-09 owner-validity rule (refuse a token whose minting admin is gone
+or disabled; revoke on disable/delete) was applied to the MCP surface only.
+Those keys are pinned to one container's docroot and the activation toggle
+suspends all of them at once, so the exposure is small; apply the same rule
+there in a change of its own.

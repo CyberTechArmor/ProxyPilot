@@ -12,7 +12,7 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 // ---- limits (bounds the prompt/DB cost of a single component) ----
 
@@ -515,6 +515,10 @@ export function validateComponentContract(input) {
         key,
         secret: c.secret === true,
         required: c.required === true,
+        // generate: the component OWNS this secret (a signing key, an at-rest
+        // key) — the platform mints a random value once per project rather
+        // than asking anyone for one. Never set on a third-party credential.
+        generate: c.generate === true,
         default: c.default === undefined || c.default === null ? null : String(c.default).slice(0, 400),
         description: capSlug(c.description, 300),
       });
@@ -733,6 +737,38 @@ export function mergeEnvDefaults(envText = '', config = []) {
   if (!added.length) return { text: String(envText || ''), added };
   const base = String(envText || '').replace(/\s+$/, '');
   return { text: `${base ? `${base}\n\n` : ''}# Added by component install (defaults — override as needed)\n${lines.join('\n')}\n`, added };
+}
+
+// componentSecretKeys(config) — the keys a contract marks secret + generate:
+// the ones the platform mints and a deploy must find present before it starts
+// the app in production mode.
+export function componentSecretKeys(config = []) {
+  return (config || [])
+    .filter((c) => c && c.secret === true && c.generate === true && /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(c.key || '')))
+    .map((c) => c.key);
+}
+
+// planSecretMint(envText, config, { rand }) — the secrets a component OWNS
+// are minted, not asked for. For every contract.config entry marked
+// secret + generate whose key is absent from the environment text, produce a
+// fresh random value (32 bytes, base64url). Existing keys are never touched:
+// re-running install or deploy keeps the secrets the app already signed with.
+// Returns { vars: { KEY: value }, minted: [KEY] }. Pure — the container write
+// is the caller's.
+export function planSecretMint(envText = '', config = [], { rand = () => randomBytes(32).toString('base64url') } = {}) {
+  const existing = new Set();
+  for (const line of String(envText || '').split('\n')) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (m) existing.add(m[1]);
+  }
+  const vars = {};
+  const minted = [];
+  for (const key of componentSecretKeys(config)) {
+    if (existing.has(key) || Object.prototype.hasOwnProperty.call(vars, key)) continue;
+    vars[key] = rand();
+    minted.push(key);
+  }
+  return { vars, minted };
 }
 
 // manifestEntryFromConnection — pre-declare a component connection in

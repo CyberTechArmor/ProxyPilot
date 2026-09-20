@@ -18,6 +18,7 @@ import {
   buildComponentSuggestionQuestion, parseComponentSuggestionAnswer,
   COMPONENT_SUGGESTION_ACCEPT, COMPONENT_SUGGESTION_DECLINE,
   planMigrationRenumber, mergeEnvDefaults, manifestEntryFromConnection,
+  planSecretMint, componentSecretKeys,
   deriveComponentSubsystem, buildComponentsStateDoc, buildInstalledComponentsSection,
   publicProjectComponentShape, COMPONENTS_STATE_PATH,
 } from '../mock2/component-logic.js';
@@ -202,6 +203,57 @@ test('mergeEnvDefaults: adds only missing non-secret defaults, never secrets', (
   // Nothing to add → text unchanged (no write needed).
   const noop = mergeEnvDefaults('ACCESS_TOKEN_TTL_SECONDS=900\nALREADY_SET=1\n', config);
   assert.deepEqual(noop.added, []);
+});
+
+test('planSecretMint: mints only the secrets a component owns, once, never over an existing value', () => {
+  const config = [
+    { key: 'AUTH_JWT_SECRET', secret: true, required: true, generate: true },
+    { key: 'AUTH_MASTER_SECRET', secret: true, required: true, generate: true },
+    // A third-party credential: secret and required, but NOT the app's to mint.
+    { key: 'STRIPE_KEY', secret: true, required: true },
+    // Non-secret defaults are mergeEnvDefaults' business, not this planner's.
+    { key: 'ACCESS_TOKEN_TTL_SECONDS', default: '900' },
+    { key: 'bad key', secret: true, generate: true },
+  ];
+  assert.deepEqual(componentSecretKeys(config), ['AUTH_JWT_SECRET', 'AUTH_MASTER_SECRET']);
+
+  let n = 0;
+  const rand = () => `minted-${++n}`;
+  const fresh = planSecretMint('', config, { rand });
+  assert.deepEqual(fresh.minted, ['AUTH_JWT_SECRET', 'AUTH_MASTER_SECRET']);
+  assert.deepEqual(fresh.vars, { AUTH_JWT_SECRET: 'minted-1', AUTH_MASTER_SECRET: 'minted-2' });
+
+  // Re-run against an environment that already carries one: that one is kept.
+  const partial = planSecretMint('AUTH_JWT_SECRET="already-there"\nPORT=3000\n', config, { rand });
+  assert.deepEqual(partial.minted, ['AUTH_MASTER_SECRET']);
+  assert.equal(partial.vars.AUTH_JWT_SECRET, undefined);
+
+  // Nothing missing → nothing minted (no write needed).
+  const done = planSecretMint('export AUTH_JWT_SECRET=a\nAUTH_MASTER_SECRET=b\n', config, { rand });
+  assert.deepEqual(done.minted, []);
+  assert.deepEqual(done.vars, {});
+
+  // The default generator is 32 random bytes, base64url: long enough for the
+  // component's MIN_SECRET_LENGTH and free of shell-hostile characters.
+  const real = planSecretMint('', config);
+  for (const v of Object.values(real.vars)) {
+    assert.ok(v.length >= 32, 'at least 32 chars');
+    assert.match(v, /^[A-Za-z0-9_-]+$/);
+  }
+  assert.notEqual(real.vars.AUTH_JWT_SECRET, real.vars.AUTH_MASTER_SECRET);
+});
+
+test('validateComponentContract carries the generate flag through normalisation', () => {
+  const r = validateComponentContract({
+    provides: ['auth'],
+    config: [
+      { key: 'AUTH_JWT_SECRET', secret: true, required: true, generate: true },
+      { key: 'STRIPE_KEY', secret: true, required: true },
+      { key: 'STRIPE_KEY_2', secret: true, generate: 'yes' },
+    ],
+  });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(r.contract.config.map((c) => [c.key, c.generate]), [['AUTH_JWT_SECRET', true], ['STRIPE_KEY', false], ['STRIPE_KEY_2', false]]);
 });
 
 test('manifestEntryFromConnection produces a manifest entry the gate validates', () => {

@@ -1684,6 +1684,20 @@ export function initDatabase() {
   // per-domain Cloudflare API token (DNS-01 only), AES-256-GCM via
   // lib/secrets.js — never returned to any client. The operator's DNS-01
   // specified-domain list lives in app_settings ('dns01_domains').
+  // Version 605: the passwordless passkey login used to open the sudo
+  // window as a side effect of signing in (with user verification only
+  // "preferred"). That grant is gone (routes/auth.js) and passkeys now
+  // require verified UV; the grants that path already handed out cannot
+  // be told apart from legitimately re-proved ones, so every open window
+  // is closed once. Cost: each signed-in admin re-proves before their
+  // next destructive action. Idempotent.
+  runMigration(db, 605, 'sessions_sudo_reset', (d) => {
+    const cols = d.prepare(`PRAGMA table_info(sessions)`).all().map((c) => c.name);
+    if (cols.includes('sudo_until')) {
+      d.prepare(`UPDATE sessions SET sudo_until = NULL WHERE sudo_until IS NOT NULL`).run();
+    }
+  });
+
   runMigration(db, 604, 'domain_provisioning', (d) => {
     d.exec(`
       CREATE TABLE IF NOT EXISTS provision_api_keys (
@@ -2214,6 +2228,26 @@ export function initDatabase() {
   runMigration(db, 911, 'migration_capacity', (d) => {
     const cols = d.prepare(`PRAGMA table_info(migrations)`).all().map((c) => c.name);
     if (!cols.includes('capacity_json')) d.exec('ALTER TABLE migrations ADD COLUMN capacity_json TEXT');
+  });
+
+  // Version 912: an MCP token is only as valid as its owner. Token lookup
+  // now refuses a token whose minting admin is gone or disabled
+  // (routes/mcp.js findToken), and disabling or deleting a user revokes
+  // their tokens. This closes out the rows that predate the rule: a token
+  // with no recorded owner, an owner that no longer exists, or an owner
+  // already parked as 'pending' is revoked here rather than guessed at —
+  // the operator mints a fresh key from a live account. Revocation keeps
+  // the row (the audit trail stays intact). Idempotent.
+  runMigration(db, 912, 'mcp_tokens_owner_validity', (d) => {
+    const tables = d.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_tokens'`).all();
+    if (!tables.length) return;
+    d.prepare(
+      `UPDATE mcp_tokens SET revoked_at = ?
+        WHERE revoked_at IS NULL
+          AND (created_by IS NULL OR created_by = ''
+               OR created_by NOT IN (SELECT id FROM users)
+               OR created_by IN (SELECT id FROM users WHERE role = 'pending'))`,
+    ).run(new Date().toISOString());
   });
 
   runMigration(db, 907, 'route_edge_options', (d) => {

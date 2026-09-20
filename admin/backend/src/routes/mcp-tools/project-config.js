@@ -16,6 +16,8 @@
 
 import { basename } from 'node:path';
 import { readStandardsSeedVersion, fetchStandardsManifest } from '../../lib/self-update.js';
+import { exportStore, resolveExportCompression } from '../../lib/lxc-exports-instance.js';
+import { incusCompressionArgs } from '../../lib/export-compression.js';
 import {
   intIn, stamp, sha256Hex, validGitRefName, validateEnvVars, mergeEnvFile, envFileKeys, readOnlySqlError,
   parseReleases, renderReleases, RELEASES_PATH, pathUnder,
@@ -225,7 +227,7 @@ export function createProjectConfigHandlers(kit) {
     if (live) { note.refused = true; return err('A build is running — interrupt_project_build first'); }
     const inst = await fetchLxcInstance(p.incusName);
     const hasContainer = !!inst.instance;
-    const plan = { project_id: p.project.id, name: p.project.name, url: projectUrl(p.project, p.m.domains), container: p.incusName, container_present: hasContainer, export_first: hasContainer && args.export !== false ? `${EXPORTS}/lxc-${p.incusName}-<timestamp>.tar.gz (checkpoint-committed first)` : 'SKIPPED', removes: ['project row', 'routes + certs', 'container + bridge', 'bare repo', 'slug reservations'], keeps: ['the export tarball', 'chat history, change records and ledger rows in mock2.db (orphaned by project id)'] };
+    const plan = { project_id: p.project.id, name: p.project.name, url: projectUrl(p.project, p.m.domains), container: p.incusName, container_present: hasContainer, export_first: hasContainer && args.export !== false ? `${EXPORTS}/lxc-${p.incusName}-<timestamp>.tar.zst (checkpoint-committed first; the exports.compression setting picks the compressor)` : 'SKIPPED', removes: ['project row', 'routes + certs', 'container + bridge', 'bare repo', 'slug reservations'], keeps: ['the export tarball', 'chat history, change records and ledger rows in mock2.db (orphaned by project id)'] };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmToken(args, auth, note, { tool: 'delete_project', subject: String(p.project.id), action: `permanently delete project "${p.project.name}" (${plan.url || 'no url'}) — container, repo, routes and certs`, preview: plan });
     if (gate) return gate;
@@ -233,11 +235,16 @@ export function createProjectConfigHandlers(kit) {
     if (hasContainer && args.export !== false) {
       await projectSh(p.incusName, p.m.template.buildCheckpointScript({ appDir: M2_APP_DIR, message: 'checkpoint: pre-delete (mcp)' }), [], { timeoutMs: 120000 }).catch(() => null);
       await hostSh('mkdir -p "$1" && chmod 750 "$1"', [EXPORTS], { timeoutMs: 10000 });
-      const file = `${EXPORTS}/lxc-${p.incusName}-${stamp()}.tar.gz`;
-      const r = await runHostCapture('incus', ['export', p.incusName, file], { timeoutMs: 45 * 60 * 1000 });
+      const picked = await resolveExportCompression();
+      const file = `${EXPORTS}/lxc-${p.incusName}-${stamp()}${picked.extension}`;
+      const r = await runHostCapture('incus', ['export', p.incusName, file, ...incusCompressionArgs(picked.compression)], { timeoutMs: 45 * 60 * 1000 });
       if (r.status !== 0) return err(`Nothing was deleted: incus export failed (${tail(r.stderr) || 'timed out'}). Pass export: false to delete without a tarball (the ledger records it).`);
       exported = file;
       note.snapshot = file;
+      note.detail.compression = picked.compression;
+      // Same list the container dialog and list_lxc_exports show, so the
+      // tarball of a deleted project is findable and retention reaches it.
+      try { exportStore().register({ container: p.incusName, path: file, compression: picked.compression, actor: auth?.created_by ?? null }); } catch { /* the tarball exists either way */ }
     } else if (hasContainer) note.detail.export_skipped = true;
     const project = p.project;
     p.m.projects.deleteProject(project.id);

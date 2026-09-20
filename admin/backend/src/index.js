@@ -738,6 +738,20 @@ app.use((err, req, res, next) => {
 sweepStaleSessions();
 setInterval(sweepStaleSessions, 6 * 60 * 60 * 1000).unref();
 
+// Prepared-download retention: keep the newest few tarballs per container and
+// drop anything past the expiry. These are a convenience, not the backup of
+// record (that is sanoid + replication), and a guest export is gigabytes — an
+// install that never swept would fill the exports dataset in a fortnight.
+// Once a few minutes after boot, then every six hours.
+const sweepPreparedExports = () => {
+  import('./lib/lxc-exports-instance.js')
+    .then((m) => m.exportStore().sweep())
+    .then((r) => { if (r?.swept?.length) console.log(`[lxc-exports] retention removed ${r.swept.length} tarball(s)`); })
+    .catch((err) => console.error('[lxc-exports] retention sweep failed:', err?.message || err));
+};
+setTimeout(sweepPreparedExports, 5 * 60 * 1000).unref();
+setInterval(sweepPreparedExports, 6 * 60 * 60 * 1000).unref();
+
 // Crash safety net (LEARNINGS #13): Node exits on an unhandled rejection,
 // and a stray async error from a driver (the annotate screenshot's Playwright
 // launch was the caught-in-the-wild case) then kills the whole backend —

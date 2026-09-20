@@ -18,6 +18,9 @@ import { hasHostBinary } from '../../lib/host-exec.js';
 import {
   validateTokenScope, parseTokenScope, intIn, stamp, sha256Hex, UNIT_NAME_RE, parseSystemctlUnits, parseDpkgList, parseAptUpgradable, pathUnder,
 } from '../../lib/mcp-ext/logic.js';
+import {
+  COMPRESSION_SETTING, COMPRESSIONS, DEFAULT_COMPRESSION, normalizeCompression,
+} from '../../lib/export-compression.js';
 
 const REPORTS_DIR = process.env.PROXYPILOT_SECURITY_REPORTS_DIR || '/var/lib/proxypilot/security-reports';
 const GRC_DIR = process.env.PROXYPILOT_GRC_DIR || '/var/lib/proxypilot/grc';
@@ -223,6 +226,7 @@ export function createAdminHandlers(kit) {
     if (key === 'github_repo' && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) return err('github_repo must be owner/name');
     if (key === 'dns01_domains') { try { if (!Array.isArray(JSON.parse(value))) throw new Error(); } catch { return err('dns01_domains must be a JSON array of domains'); } }
     if (key === 'mcp.standards_source_url' && !/^https:\/\/[^\s]+$/.test(value)) return err('mcp.standards_source_url must be an https URL');
+    if (key === COMPRESSION_SETTING && !normalizeCompression(value)) return err(`${COMPRESSION_SETTING} must be one of ${COMPRESSIONS.join(', ')} (default ${DEFAULT_COMPRESSION}; a host without the zstd binary falls back to gzip on its own)`);
     const current = getSetting(key);
     const d = dry(args, { key, current, value }); if (d) return d;
     const gate = confirmFlag(args, note, `Set ${key} = ${JSON.stringify(value)} (currently ${JSON.stringify(current)}).`); if (gate) return gate;

@@ -13,6 +13,9 @@ import {
 
 const PROXYPILOT_BIN = process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot';
 
+import { exportStore } from '../../lib/lxc-exports-instance.js';
+import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../../lib/export-compression.js';
+
 export function createLxcAdminHandlers(kit) {
   const { ctx, ok, err, mutation, reader, confirmToken, confirmFlag, dry, guestSh, hostSh, tail, policy } = kit;
   const {
@@ -53,17 +56,39 @@ export function createLxcAdminHandlers(kit) {
     return { instance: r.instance, detail: lxcContainerDetail(r.instance) };
   }
 
-  async function exportContainer(name, { snapshot = null, instanceOnly = false } = {}) {
+  /**
+   * The synchronous export every destructive verb takes first. Compression
+   * comes from the same setting the dashboard uses (zstd by default — gzip
+   * is single-threaded at ~50 MB/s and was costing 47 s on a 1 GB guest),
+   * falling back to gzip on a host with no zstd binary, and the artifact is
+   * registered so it appears in the one prepared-downloads list.
+   */
+  async function exportContainer(name, { snapshot = null, instanceOnly = false, compression = null, actor = null } = {}) {
     await exportsDir();
     await hostSh('mkdir -p "$1" && chmod 750 "$1"', [EXPORTS], { timeoutMs: 10000 });
-    const file = `${EXPORTS}/lxc-${name}${snapshot ? `-${snapshot}` : ''}-${stamp()}.tar.gz`;
-    const argv = ['export', snapshot ? `${incus(name)}/${snapshot}` : incus(name), file];
+    const picked = await resolveCompression({
+      requested: compression,
+      setting: (() => { try { return ctx.getSetting?.(COMPRESSION_SETTING) ?? null; } catch { return null; } })(),
+      hasBinary: async (b) => (await runHostCapture('sh', ['-c', `command -v ${JSON.stringify(b)}`], { timeoutMs: 10000 })).status === 0,
+    });
+    const file = `${EXPORTS}/lxc-${name}${snapshot ? `-${snapshot}` : ''}-${stamp()}${picked.extension}`;
+    const argv = ['export', snapshot ? `${incus(name)}/${snapshot}` : incus(name), file, ...incusCompressionArgs(picked.compression)];
     if (instanceOnly) argv.push('--instance-only');
     const r = await runHostCapture('incus', argv, { timeoutMs: 45 * 60 * 1000 });
     if (r.status !== 0) return { error: `incus export failed: ${tail(r.stderr) || (r.timedOut ? 'timed out' : 'unknown error')}` };
     const st = await hostSh('stat -c %s "$1" && sha256sum "$1" | cut -d" " -f1', [file], { timeoutMs: 10 * 60 * 1000 });
     const [size, sha] = (st.stdout || '').trim().split('\n');
-    return { file, size_bytes: Number(size) || null, sha256: /^[0-9a-f]{64}$/.test(sha || '') ? sha : null };
+    const out = {
+      file, size_bytes: Number(size) || null, sha256: /^[0-9a-f]{64}$/.test(sha || '') ? sha : null,
+      compression: picked.compression, compression_note: picked.note || null,
+    };
+    try {
+      exportStore().register({
+        container: name, snapshot, path: file, compression: picked.compression,
+        sizeBytes: out.size_bytes, sha256: out.sha256, actor,
+      });
+    } catch { /* the tarball exists either way; the list is a convenience */ }
+    return out;
   }
 
   /* ------------------------ delete / clone / export ----------------------- */
@@ -82,7 +107,7 @@ export function createLxcAdminHandlers(kit) {
       return err(`Refusing to delete ${name}: it has no snapshot. Take one with snapshot_lxc_container first — the snapshot is what the export tarball is cut from, and deleting a guest that was never snapshotted leaves nothing to come back to.`);
     }
     const bound = getDb().prepare(`SELECT DISTINCT r.domain FROM service_http_routes r JOIN services s ON s.id = r.service_id WHERE s.lxc_container_name = ?`).all(name).map((r) => r.domain);
-    const plan = { container: name, status: inst.detail.status, snapshots: snapshots.map((s) => s.name), routes_removed: bound, export: wantExport ? `${EXPORTS}/lxc-${name}-<timestamp>.tar.gz` : 'SKIPPED (export: false)' };
+    const plan = { container: name, status: inst.detail.status, snapshots: snapshots.map((s) => s.name), routes_removed: bound, export: wantExport ? `${EXPORTS}/lxc-${name}-<timestamp>.tar.zst (the exports.compression setting picks the compressor)` : 'SKIPPED (export: false)' };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmToken(args, auth, note, { tool: 'delete_lxc_container', subject: name, action: `delete container ${name} (${bound.length} route(s) removed, ${snapshots.length} snapshot(s) lost with it)`, preview: plan });
     if (gate) return gate;
@@ -154,11 +179,11 @@ export function createLxcAdminHandlers(kit) {
     if (snap && !inst.detail.snapshots.some((s) => s.name === snap)) return err(`Snapshot ${snap} does not exist on ${name}`);
     const plan = { container: name, snapshot: snap, instance_only: args.instance_only === true, directory: await exportsDir() };
     const d = dry(args, plan); if (d) return d;
-    const out = await exportContainer(name, { snapshot: snap, instanceOnly: args.instance_only === true });
+    const out = await exportContainer(name, { snapshot: snap, instanceOnly: args.instance_only === true, compression: args.compression || null, actor: auth?.created_by ?? null });
     if (out.error) return err(out.error);
     note.snapshot = out.file;
     note.summary = `exported ${name}${snap ? `/${snap}` : ''}`;
-    return ok({ exported: true, container: name, snapshot: snap, ...out, note: 'The tarball lives on the host under the ProxyPilot exports directory; import_lxc takes the file name.' });
+    return ok({ exported: true, container: name, snapshot: snap, ...out, note: 'The tarball lives on the host under the ProxyPilot exports directory; import_lxc takes the file name, list_lxc_exports lists it and the dashboard can download it.' });
   });
 
   const import_lxc = mutation('import_lxc', { subjectType: 'lxc' }, async (args, auth, req, note) => {
@@ -790,7 +815,37 @@ export function createLxcAdminHandlers(kit) {
     return ok({ set: true, container: name, user, entries: (r.stdout || '').split('\n').filter((l) => l.trim()), backup: plan.backup });
   });
 
+  /* --------------------------- prepared downloads ------------------------ */
+
+  const list_lxc_exports = reader('list_lxc_exports', async (args) => {
+    const store = exportStore();
+    const rows = store.list({ container: args.container ? String(args.container) : null, state: args.state ? String(args.state) : null });
+    return ok({
+      count: rows.length,
+      exports: rows,
+      directory: await exportsDir(),
+      queue: store.queueStatus(),
+      note: 'One row per tarball that exists on disk: export_lxc writes them, the dashboard prepares them in the background, and both show the same list. Retention keeps the newest few per container. import_lxc takes the filename; the dashboard can download it as many times as you like.',
+    });
+  });
+
+  const delete_lxc_export = mutation('delete_lxc_export', { subjectType: 'lxc' }, async (args, auth, req, note) => {
+    const store = exportStore();
+    const row = store.get(args.id);
+    if (!row) return err(`no prepared download ${args.id} (list_lxc_exports)`);
+    note.subject_id = row.container;
+    const d = dry(args, { id: row.id, container: row.container, file: row.filename, bytes: row.bytes, state: row.state });
+    if (d) return d;
+    const gate = confirmFlag(args, note, `This deletes the tarball ${row.filename} (${row.bytes ? `${Math.round(row.bytes / 1024 ** 2)} MB` : 'size unknown'}). The container is untouched.`);
+    if (gate) return gate;
+    const out = await store.remove(row.id, { actor: auth?.created_by ?? null });
+    if (out.error) { note.refused = true; return err(out.error); }
+    note.summary = `deleted export ${row.filename}`;
+    return ok({ ...out, container: row.container, note: 'The container and its snapshots are untouched — only the tarball is gone.' });
+  });
+
   return {
+    list_lxc_exports, delete_lxc_export,
     delete_lxc_container, clone_lxc_container, export_lxc, import_lxc,
     list_snapshots, restore_snapshot, delete_snapshot,
     set_lxc_resources, add_lxc_device, remove_lxc_device, get_lxc_usage,

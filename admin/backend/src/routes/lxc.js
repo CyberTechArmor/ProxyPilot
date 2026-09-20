@@ -14,7 +14,7 @@ import { requireSudo, requireAdminOrPermission } from '../middleware/auth.js';
 // pass when they hold the 'proxy' feature permission (assignable from
 // the Users page access dialog, effective in realtime).
 const requireProxyAccess = requireAdminOrPermission('proxy');
-import { getDb, logAudit } from '../db.js';
+import { getDb, logAudit, getSetting } from '../db.js';
 import { emitContentChanged } from '../lib/change-events.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure, regenerateDomainCaddyConfig, caddyRenderDeps } from './services.js';
@@ -23,6 +23,9 @@ import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 import { registerLxcWorkspaceRoutes } from './lxc-workspace.js';
+import { exportStore } from '../lib/lxc-exports-instance.js';
+import { hasHostBinary } from '../lib/host-exec.js';
+import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../lib/export-compression.js';
 import { resolveCertDir } from '../lib/caddy-cert.js';
 import { inspectIncusDevice } from '../lib/cert-mount-reconciler.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
@@ -102,6 +105,11 @@ async function execOnHost(command, options = {}) {
 }
 
 // Spawn a command on host without timeout (for long-running operations)
+/** A setting, or null when the table is not readable — never a throw in a route. */
+function settingOrNull(key) {
+  try { return getSetting(key); } catch { return null; }
+}
+
 function spawnOnHost(command) {
   if (isInDocker) {
     return spawn('nsenter', ['-t', '1', '-m', '-u', '-n', '-i', 'sh', '-c', command], {
@@ -548,6 +556,123 @@ export function deriveImageSupports(img) {
   if (claimed.size === 0) return ['container'];
   return Array.from(claimed);
 }
+
+/* ========================= prepared downloads =========================== */
+//
+// A guest tarball built ONCE, in the background, and downloaded as many
+// times as anyone likes. The old button re-ran `incus export` per click and
+// died with the HTTP request; these routes separate the two halves so the
+// expensive one happens once and the cheap one is an ordinary file download
+// with Content-Length and Range — a browser progress bar, and resume.
+//
+// Registered before /containers/:name so 'exports' is never read as a
+// container name (the ordering bug an operator hit with
+// snapshot-export-queue).
+
+lxcRouter.get('/exports', async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      exports: exportStore().list({ container: req.query.container ? String(req.query.container) : null }),
+      queue: exportStore().queueStatus(),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e?.message || 'could not list prepared downloads' });
+  }
+});
+
+lxcRouter.get('/exports/:id', (req, res) => {
+  const row = exportStore().get(req.params.id);
+  if (!row) return res.status(404).json({ success: false, error: 'no such prepared download' });
+  res.json({ success: true, export: row });
+});
+
+lxcRouter.post('/exports', requireSudo, async (req, res) => {
+  try {
+    const r = await exportStore().prepare({
+      container: req.body?.container,
+      snapshot: req.body?.snapshot || null,
+      compression: req.body?.compression || null,
+      instanceOnly: req.body?.instance_only === true,
+      actor: req.user?.id || null,
+      ip: req.ip,
+    });
+    if (r.error) return res.status(422).json({ success: false, error: r.error, existing: r.existing ?? null, needs_bytes: r.needs_bytes ?? null, free_bytes: r.free_bytes ?? null });
+    res.json({ success: true, ...r });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e?.message || 'could not start the export' });
+  }
+});
+
+lxcRouter.delete('/exports/:id', requireSudo, async (req, res) => {
+  try {
+    const r = await exportStore().remove(req.params.id, { actor: req.user?.id || null, ip: req.ip });
+    if (r.error) return res.status(422).json({ success: false, error: r.error });
+    res.json({ success: true, ...r });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e?.message || 'could not delete' });
+  }
+});
+
+/**
+ * The download itself.
+ *
+ * The tarball lives on the HOST — this process runs in a container that
+ * cannot see the ZFS exports dataset — so the bytes come back through
+ * `dd`, which is also what makes Range cheap: skip to the offset and read
+ * the requested length. Content-Length and Accept-Ranges are what give the
+ * browser its own progress bar and let an interrupted download resume
+ * instead of starting over.
+ */
+lxcRouter.get('/exports/:id/download', async (req, res) => {
+  const store = exportStore();
+  const open = await store.openForDownload(req.params.id);
+  if (open.error) return res.status(open.error.includes('no such') ? 404 : 422).json({ success: false, error: open.error });
+  const { path: file, filename, size } = open;
+
+  let start = 0;
+  let end = size - 1;
+  const range = String(req.headers.range || '');
+  const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+  if (range && !m) {
+    res.setHeader('Content-Range', `bytes */${size}`);
+    return res.status(416).json({ success: false, error: 'unsatisfiable range' });
+  }
+  if (m) {
+    if (m[1] === '' && m[2] === '') { /* bytes=- is meaningless; serve it all */ }
+    else if (m[1] === '') { start = Math.max(0, size - Number(m[2])); }
+    else {
+      start = Number(m[1]);
+      if (m[2] !== '') end = Math.min(size - 1, Number(m[2]));
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) {
+      res.setHeader('Content-Range', `bytes */${size}`);
+      return res.status(416).json({ success: false, error: 'unsatisfiable range' });
+    }
+  }
+  const length = end - start + 1;
+
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Content-Length', String(length));
+  if (m) {
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+  }
+
+  // iflag=skip_bytes,count_bytes so the offsets are BYTES, not blocks.
+  const child = spawnOnHost(
+    `dd if=${shellSingleQuote(file)} bs=1M iflag=skip_bytes,count_bytes skip=${start} count=${length} status=none`
+  );
+  child.stdout.pipe(res);
+  child.stderr.on('data', (d) => console.log(`[LXC] export download stderr: ${d.toString().trim()}`));
+  child.on('error', (err) => { if (!res.headersSent) res.status(500).json({ success: false, error: err.message }); });
+  // Only a whole-file GET counts as a download; a Range request is usually
+  // the same browser resuming the one we already counted.
+  if (!m) { try { store.countDownload(Number(req.params.id)); } catch { /* best effort */ } }
+  req.on('close', () => { if (child && !child.killed) { try { child.kill('SIGTERM'); } catch { /* gone */ } } });
+});
 
 // GET /containers/snapshot-export-queue — global view of every
 // snapshot export currently running OR queued.  Drives the
@@ -4207,9 +4332,10 @@ lxcRouter.get('/containers/:name/export', async (req, res) => {
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    const fileName = `${name}-backup.tar.gz`;
+    const fileName = `${name}-backup${picked.extension}`;
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Compression', picked.compression);
 
     // Stream the export. The container can stay running — modern incus
     // takes a brief storage-level snapshot internally for a consistent
@@ -4218,7 +4344,14 @@ lxcRouter.get('/containers/:name/export', async (req, res) => {
     // the inline services list flicker to empty in the UI for the
     // duration of the export. Dropping that gives operators a true
     // online backup.
-    const exportCmd = `incus export ${incusName} -`;
+    // Explicit compression rather than whatever the Incus server default is.
+    // gzip is single-threaded at ~50 MB/s, which is slower than a gigabit
+    // link — on a LAN it makes this download arrive later than no compression
+    // would. zstd moves the break-even past any link an operator has.
+    const picked = await resolveCompression({
+      requested: req.query.compression, setting: settingOrNull(COMPRESSION_SETTING), hasBinary: async (b) => hasHostBinary(b),
+    });
+    const exportCmd = `incus export ${incusName} - ${incusCompressionArgs(picked.compression).join(' ')}`;
     const child = spawnOnHost(exportCmd);
 
     child.stdout.pipe(res);
@@ -4337,13 +4470,17 @@ lxcRouter.get('/containers/:name/snapshot/:snapshotName/export', async (req, res
     });
   }
 
-  const fileName = `${name}-${snapshotName}-backup.tar.gz`;
+  const picked = await resolveCompression({
+    requested: req.query.compression, setting: settingOrNull(COMPRESSION_SETTING), hasBinary: async (b) => hasHostBinary(b),
+  });
+  const fileName = `${name}-${snapshotName}-backup${picked.extension}`;
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-  res.setHeader('Content-Type', 'application/gzip');
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('X-Compression', picked.compression);
 
   let child;
   try {
-    child = spawnOnHost(`incus export ${tempName} -`);
+    child = spawnOnHost(`incus export ${tempName} - ${incusCompressionArgs(picked.compression).join(' ')}`);
   } catch (e) {
     await cleanup();
     if (!res.headersSent) {

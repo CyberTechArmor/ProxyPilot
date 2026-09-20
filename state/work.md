@@ -80,3 +80,55 @@ fingerprint in the token payload. No session cookie, no MCP key.
   as pending egress requests the operator approves one at a time.
 - **The checklist is state, not prose.** Each step records who completed it
   and when, so the cutover is auditable and resumable across sessions.
+
+---
+
+# Work — guest exports: one compressor, prepared downloads (size L, 2026-09-20)
+
+Two asks from the operator, after a ZFS snapshot "felt instant" and its
+download did not:
+
+1. Compression should be a decision, and each job should use what is best
+   for it. No user-facing gzip switch.
+2. A download that survives the tab: built once in the background, with byte
+   progress, downloadable repeatedly from any device, deleted when done.
+
+## Shape
+
+```
+                    exports.compression  (zstd | gzip | none, default zstd)
+                              │
+        lib/export-compression.js  ──  request → setting → default
+                              │        + gzip fallback when the host has no zstd
+      ┌───────────────────────┼────────────────────────┬──────────────────┐
+      ▼                       ▼                        ▼                  ▼
+ streaming download    prepared downloads         S3 snapshot push   migration agent
+ (routes/lxc.js)       (lib/lxc-exports.js)    (snapshot-s3-export)  (job.compression,
+                              │                                       probed at the source)
+                   incus export → <file>.part → mv → sha256
+                              │
+                   GET /api/lxc/exports/:id/download
+                   Content-Length · Accept-Ranges · 206 · dd skip/count
+```
+
+## Decisions
+
+- **zstd by default because gzip is slower than the link.** Measured here:
+  47.4 s for a 1.00 GB export (~50 MB/s, single-threaded) while 31 of 32
+  cores idled. `none` is for a 10 Gb link, `gzip` for maximum compatibility.
+  The setting exists because the right answer depends on where the bytes go;
+  the UI does not ask, per the operator.
+- **A missing package never fails a backup.** No zstd binary → gzip, with a
+  note in the result.
+- **Nothing decompresses by name**, and where a GUEST would be the consumer
+  ProxyPilot decompresses on the host first — a fresh minimal guest has tar
+  but may not have the zstd binary tar shells out to.
+- **`backup-pack.js` stays gzip.** Its `.tar.gz` member names are part of the
+  pack format.
+- **Built into `.part`, moved when whole**, progress read from the growing
+  file. A half-built tarball is never servable and the percentage is never
+  invented.
+- **Capacity is checked before the build starts**, not discovered when the
+  exports dataset fills.
+- **Retention (3 per container / 14 days)** because a prepared download is a
+  convenience; the backup of record is sanoid + replication.

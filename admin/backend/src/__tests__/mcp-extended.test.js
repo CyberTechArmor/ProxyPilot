@@ -87,7 +87,7 @@ const AUTH = { id: 7, created_by: 'admin-1', name: 'test key', scope_json: null 
 /* -------------------------------- catalog ------------------------------ */
 
 test('the extended catalog is well-formed, unique, and every family is represented', () => {
-  assert.equal(MCP_EXT_TOOLS.length, 175);
+  assert.equal(MCP_EXT_TOOLS.length, 177);
   assert.equal(new Set(MCP_EXT_TOOL_NAMES).size, MCP_EXT_TOOL_NAMES.length);
   for (const t of MCP_EXT_TOOLS) {
     assert.match(t.name, /^[a-z][a-z0-9_]+$/);
@@ -97,7 +97,7 @@ test('the extended catalog is well-formed, unique, and every family is represent
     for (const r of t.inputSchema.required || []) assert.ok(t.inputSchema.properties[r], `${t.name}: required ${r} is not a property`);
   }
   assert.deepEqual(Object.keys(MCP_EXT_TOOL_GROUPS), ['builds', 'project_config', 'lxc_admin', 'edge', 'static_admin', 'admin', 'self_edit', 'storage', 'migration']);
-  assert.equal(MCP_TOOLS.length, 72 + 175);
+  assert.equal(MCP_TOOLS.length, 72 + 177);
   assert.ok(Object.isFrozen(MCP_TOOLS));
   assert.match(MCP_SERVER_INSTRUCTIONS, /confirmation_token/);
   assert.match(MCP_SERVER_INSTRUCTIONS, /scope\.self_edit/);

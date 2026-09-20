@@ -486,6 +486,11 @@ export function exportIncusInstance(instanceName, sandboxDir) {
   if (!hasHostBinary('incus')) {
     return { ok: false, error: 'incus not available on this host' };
   }
+  // Deliberately NOT lib/export-compression's setting: the `.tar.gz` member
+  // names are part of the backup pack's on-disk format, and an older
+  // ProxyPilot restoring a newer pack has to find them where it expects.
+  // Guest exports the operator downloads or pushes to S3 are the ones the
+  // setting governs.
   const hostOut = `/tmp/pp-incus-export-${process.pid}-${Date.now()}-${instanceName}.tar.gz`;
   const r = spawnHostSync('incus', ['export', instanceName, hostOut, '--compression', 'gzip'], {
     encoding: 'utf-8', timeout: 60 * 60_000,

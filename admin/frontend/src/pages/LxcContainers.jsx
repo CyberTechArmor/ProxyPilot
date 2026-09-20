@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
+import PreparedDownloads from '@/components/lxc/PreparedDownloads';
 import LxcCertMounts from '@/components/LxcCertMounts';
 import DelegatedEditing from '@/components/lxc/DelegatedEditing';
 import { Button } from '@/components/ui/button';
@@ -305,15 +306,9 @@ export default function LxcContainers() {
   const [addingService, setAddingService] = useState(false);
   const [editingService, setEditingService] = useState(null); // { domain, port, obtainCert, healthPath } or null
   const [editServiceForm, setEditServiceForm] = useState({ domain: '', port: '', obtainCert: true, healthPath: '' });
+  // Only guards the per-snapshot Prepare button between click and answer —
+  // the build itself is background work the panel polls for.
   const [exporting, setExporting] = useState(false);
-  // Live export progress. Carries the containerName the export belongs
-  // to so the panel only renders progress for that container — without
-  // this scoping, opening another LXC's panel mid-export inherits the
-  // running progress bar. abortController lets the Cancel button kill
-  // the in-flight fetch (and trigger backend cleanup via req.close).
-  // Shape: { containerName, snapshotName?, loaded, total, elapsedMs,
-  //          phase, throughputBps, abortController }
-  const [exportProgress, setExportProgress] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState('');
   const [importFile, setImportFile] = useState(null);
@@ -951,163 +946,6 @@ export default function LxcContainers() {
   };
 
   // Snapshot actions
-  // Streamed download with live byte counter, phase indicator, and
-  // throughput. Handles both the live-container export and the
-  // per-snapshot export — they share progress wiring; only the URL,
-  // filename, and pre-flight estimator differ.
-  //
-  // The export is bursty by nature: incus emits a small tarball
-  // header (~few KB) immediately, then stalls for minutes while it
-  // does its internal snapshot/copy work (especially on dir
-  // storage), then streams the real rootfs bytes. We treat that
-  // as two distinct phases ("preparing" → "streaming") so the UI
-  // doesn't look stuck during the copy phase. Throughput is a
-  // 10-second moving average computed from the read-loop samples.
-  const streamDownload = async ({ url, filename, fetchEstimate, label, containerName, snapshotName }) => {
-    const startTime = Date.now();
-    // AbortController wires the Cancel button to fetch — calling
-    // .abort() makes reader.read() throw, the catch path below
-    // tags it 'AbortError' so the toast says "cancelled" rather
-    // than "failed". The backend's req.on('close') handler kills
-    // the incus export child + cleans up any temp container.
-    const abortController = new AbortController();
-    setExportProgress({
-      containerName, snapshotName: snapshotName || null,
-      loaded: 0, total: null, elapsedMs: 0,
-      phase: 'preparing', throughputBps: null,
-      abortController,
-    });
-
-    let total = null;
-    if (fetchEstimate) {
-      try {
-        const info = await fetchEstimate();
-        if (typeof info?.estimatedBytes === 'number') total = info.estimatedBytes;
-      } catch {
-        // pre-flight is best-effort
-      }
-    }
-    setExportProgress((p) => ({ ...(p || { loaded: 0 }), total, elapsedMs: 0, phase: 'preparing' }));
-
-    const res = await fetch(url, { credentials: 'include', signal: abortController.signal });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `${label} failed`);
-    }
-    const reportedLen = res.headers.get('content-length');
-    if (reportedLen && /^\d+$/.test(reportedLen)) {
-      total = parseInt(reportedLen, 10);
-    }
-
-    const reader = res.body.getReader();
-    const chunks = [];
-    let loaded = 0;
-    let lastByteTime = startTime;
-    // Threshold: first chunks include the ~5-15 KB tarball header
-    // incus emits before doing its real work. We don't switch to
-    // 'streaming' until we've seen meaningful payload — 256 KB filters
-    // out the header reliably across compressors.
-    const STREAM_THRESHOLD = 256 * 1024;
-    let firstStreamingByteTime = null;
-    // 10s moving window of (loaded, t) samples, drives the
-    // throughput readout.
-    const samples = [];
-
-    // Keep elapsed/phase/throughput fresh while the read loop is
-    // blocked waiting on incus (which can be minutes during the
-    // dir-storage copy phase). The read loop only fires on
-    // incoming chunks — without this interval, the UI would freeze
-    // mid-export.
-    const tick = setInterval(() => {
-      const now = Date.now();
-      const sinceLastByte = now - lastByteTime;
-      // 'preparing' until we've seen enough bytes to know rootfs
-      // streaming has begun OR we've been quiet for >2s after the
-      // header, meaning incus is in its copy/compression stage.
-      let phase = 'preparing';
-      if (firstStreamingByteTime) {
-        phase = sinceLastByte > 5000 ? 'stalled' : 'streaming';
-      }
-      let throughputBps = null;
-      if (samples.length >= 2 && firstStreamingByteTime) {
-        const first = samples[0];
-        const last = samples[samples.length - 1];
-        const dt = (last.t - first.t) / 1000;
-        const dBytes = last.loaded - first.loaded;
-        if (dt > 0.25) throughputBps = dBytes / dt;
-      }
-      setExportProgress((p) => p ? { ...p, elapsedMs: now - startTime, phase, throughputBps } : p);
-    }, 500);
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        loaded += value.length;
-        const now = Date.now();
-        lastByteTime = now;
-        if (!firstStreamingByteTime && loaded >= STREAM_THRESHOLD) {
-          firstStreamingByteTime = now;
-          // Reset samples window so throughput reflects the
-          // streaming phase, not the long preparing-then-idle
-          // ramp-up.
-          samples.length = 0;
-          samples.push({ loaded, t: now });
-        } else if (firstStreamingByteTime) {
-          samples.push({ loaded, t: now });
-          while (samples.length > 1 && now - samples[0].t > 10000) samples.shift();
-        }
-        // Drop the loaded count into state immediately so the bytes
-        // counter ticks per-chunk; the interval tick handles
-        // elapsed/phase/throughput on its own cadence.
-        setExportProgress((p) => p ? { ...p, loaded, total } : p);
-      }
-    } finally {
-      clearInterval(tick);
-    }
-
-    const blob = new Blob(chunks, { type: 'application/gzip' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    return loaded;
-  };
-
-  // Export the live container as a tarball. Streams via ReadableStream
-  // so the UI can show a live byte counter + percentage. With the
-  // export endpoint no longer force-stopping the container, this is a
-  // true online backup — the bridge IP stays bound and the inline
-  // services list keeps showing the active routes throughout.
-  const handleExport = async () => {
-    if (!selectedContainer) return;
-    setExporting(true);
-    const ctName = selectedContainer.name;
-    try {
-      const loaded = await streamDownload({
-        url: `/api/lxc/containers/${ctName}/export`,
-        filename: `${ctName}-backup.tar.gz`,
-        fetchEstimate: () => api.getLxcExportInfo(ctName),
-        label: 'Export',
-        containerName: ctName,
-      });
-      toast({ title: 'Export complete', description: `${ctName} backup downloaded (${formatSize(loaded)}).` });
-    } catch (err) {
-      // AbortError = operator clicked Cancel. Distinguish it from a
-      // real failure so the toast doesn't blame the operator's
-      // action as an error.
-      if (err?.name === 'AbortError') {
-        toast({ title: 'Export cancelled', description: `${ctName} export cancelled.` });
-      } else {
-        toast({ title: 'Export failed', description: err.message, variant: 'destructive' });
-      }
-    } finally {
-      setExporting(false);
-      setExportProgress(null);
-    }
-  };
 
   // Refresh the per-snapshot S3 export rows for the currently-
   // selected container.  Used by the polling effect below + by
@@ -1341,32 +1179,24 @@ export default function LxcContainers() {
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [pendingS3Delete?.exportId]);
 
-  // Download a previously-taken snapshot as a tarball. incus's export
-  // accepts <container>/<snapshot>, so the backend just streams that
-  // pipe; the UI side reuses the same progress wiring as handleExport.
+  // Prepare a snapshot download. Same artifact store as the Backup panel
+  // above: the tarball is built once in the background and then downloaded
+  // as an ordinary file, rather than streamed into a tab that has to stay
+  // open for the whole export.
   const handleDownloadSnapshot = async (snapshotName) => {
     if (!selectedContainer) return;
     setExporting(true);
     const ctName = selectedContainer.name;
     try {
-      const loaded = await streamDownload({
-        url: `/api/lxc/containers/${ctName}/snapshot/${encodeURIComponent(snapshotName)}/export`,
-        filename: `${ctName}-${snapshotName}-backup.tar.gz`,
-        fetchEstimate: () => api.getLxcSnapshotExportInfo(ctName, snapshotName),
-        label: 'Snapshot download',
-        containerName: ctName,
-        snapshotName,
+      const r = await api.prepareLxcExport({ container: ctName, snapshot: snapshotName });
+      toast({
+        title: 'Building the download',
+        description: `${r.export.filename} — it appears under Backup when it is ready. You can close this dialog.`,
       });
-      toast({ title: 'Snapshot downloaded', description: `${snapshotName} (${formatSize(loaded)})` });
     } catch (err) {
-      if (err?.name === 'AbortError') {
-        toast({ title: 'Download cancelled', description: `Snapshot ${snapshotName} cancelled.` });
-      } else {
-        toast({ title: 'Download failed', description: err.message, variant: 'destructive' });
-      }
+      toast({ title: 'Could not start', description: err.message, variant: 'destructive' });
     } finally {
       setExporting(false);
-      setExportProgress(null);
     }
   };
 
@@ -1385,8 +1215,7 @@ export default function LxcContainers() {
     const startTime = Date.now();
     setImportProgress({ loaded: 0, total: importFile.size, phase: 'uploading', elapsedMs: 0, throughputBps: null });
     let elapsedTimer = null;
-    // 10-second moving window for upload throughput. Same shape as
-    // the export streamDownload sampler.
+    // 10-second moving window for upload throughput.
     const samples = [];
     try {
       const startElapsedTimer = () => {
@@ -3254,83 +3083,20 @@ export default function LxcContainers() {
                   toast={toast}
                 />
 
-                {/* Export / Backup */}
+                {/* Backup — prepared downloads.
+                    Built once on the host in the background, then served as
+                    an ordinary file with Content-Length and Range, so the
+                    browser shows its own progress, resumes an interrupted
+                    download, and a second download costs nothing. */}
                 <div>
                   <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
                     <Download className="h-4 w-4" />
                     Backup
                   </h4>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleExport}
-                      disabled={exporting}
-                    >
-                      {exporting && exportProgress?.containerName === selectedContainer.name ? (
-                        <><Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                          {exportProgress.snapshotName ? 'Downloading snapshot...' : 'Exporting...'}
-                        </>
-                      ) : (
-                        <><Download className="h-3 w-3 mr-1" />Export Container Backup</>
-                      )}
-                    </Button>
-                    {exporting && exportProgress?.containerName === selectedContainer.name && exportProgress?.abortController && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-red-500 hover:text-red-400 border-red-500/30 hover:border-red-500/60"
-                        onClick={() => exportProgress.abortController.abort()}
-                      >
-                        <X className="h-3 w-3 mr-1" />Cancel
-                      </Button>
-                    )}
-                  </div>
-                  {exportProgress && exportProgress.containerName === selectedContainer.name && (
-                    <div className="mt-2 space-y-1">
-                      {exportProgress.phase === 'streaming' && exportProgress.total ? (
-                        <div className="h-1.5 bg-muted rounded overflow-hidden">
-                          <div
-                            className="h-full bg-cyan-500 transition-[width] duration-200"
-                            style={{ width: `${Math.min(100, Math.round((exportProgress.loaded / exportProgress.total) * 100))}%` }}
-                          />
-                        </div>
-                      ) : (
-                        <div className="h-1.5 bg-muted rounded overflow-hidden">
-                          <div className="h-full w-1/3 bg-cyan-500/60 animate-pulse" />
-                        </div>
-                      )}
-                      <p className="text-[10.5px] text-muted-foreground font-mono">
-                        {exportProgress.phase === 'streaming' ? (
-                          <>
-                            {formatSize(exportProgress.loaded)}
-                            {exportProgress.total ? ` / ~${formatSize(exportProgress.total)}` : ''}
-                            {exportProgress.throughputBps && <> · {formatSize(exportProgress.throughputBps)}/s</>}
-                            {' · '}{formatDuration(exportProgress.elapsedMs)} elapsed
-                            {exportProgress.total && exportProgress.throughputBps && exportProgress.loaded < exportProgress.total && (
-                              <> · ~{formatDuration(((exportProgress.total - exportProgress.loaded) / exportProgress.throughputBps) * 1000)} remaining</>
-                            )}
-                          </>
-                        ) : (
-                          // 'preparing' (and the rare 'stalled' edge case
-                          // mid-stream) collapse to the same UI: incus
-                          // isn't producing tarball bytes right now.
-                          <>Preparing snapshot... {formatDuration(exportProgress.elapsedMs)} elapsed</>
-                        )}
-                      </p>
-                      {exportProgress.phase !== 'streaming' && (
-                        <p className="text-[10.5px] text-muted-foreground">
-                          incus is taking a consistent point-in-time view of the container's filesystem.
-                          On <span className="font-mono">dir</span> storage this requires a full copy to a temp area
-                          before tarball bytes can flow — typically several minutes for Docker-in-LXC containers.
-                          On ZFS/btrfs/LVM-thin this phase is near-instant.
-                        </p>
-                      )}
-                    </div>
-                  )}
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Downloads a full backup (.tar.gz) of this container including filesystem and config.
-                  </p>
+                  <PreparedDownloads
+                    container={selectedContainer.name}
+                    snapshots={snapshots}
+                  />
                 </div>
 
                 {/* Snapshots */}

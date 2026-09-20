@@ -10,7 +10,7 @@
 
 import { createHash } from 'node:crypto';
 import { connect as tlsConnect } from 'node:tls';
-import { mkdir, writeFile, rm, stat } from 'node:fs/promises';
+import { mkdir, writeFile, rm, stat, open } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -22,6 +22,7 @@ import {
   checklistProgress, transferProgress, PHASES, PHASE_IDS, canAdvance, TERMINAL, CHECKLIST,
 } from './plan.js';
 import { mintMigrationToken, verifyToken, parseToken, formatPin, tokenState, DEFAULT_TTL_SECONDS } from './token.js';
+import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs, extensionFor } from '../export-compression.js';
 
 export const ARCHES = Object.freeze(['amd64', 'arm64']);
 /** Where install.sh / update.sh drop the cross-built agents (scripts/build-migration-agent.sh). */
@@ -45,6 +46,9 @@ export function createMigrationService({
   // future packaging that moves them) does not depend on /var/lib being
   // writable by whoever is running.
   workDir = WORK_DIR, agentDir = AGENT_DIR,
+  // The exports.compression setting, for the tarball cleanup_migration takes
+  // before it deletes a guest. Null reads as "unset", i.e. the zstd default.
+  getSetting = () => null,
 } = {}) {
   if (typeof getDb !== 'function') throw new Error('createMigrationService needs getDb');
   if (typeof runHostCapture !== 'function') throw new Error('createMigrationService needs runHostCapture');
@@ -201,6 +205,14 @@ export function createMigrationService({
     };
     if (!approved) return job;
 
+    // What the source should compress with. gzip is single-threaded at
+    // ~50 MB/s, so on anything faster than a gigabit link it is the
+    // bottleneck rather than the network; zstd is several times faster at
+    // a similar ratio. The agent falls back on its own if the source host
+    // cannot do what we asked, and the server sniffs the received bytes
+    // rather than trusting this, so a mismatch is never fatal.
+    job.compression = (await transferCompression()).compression;
+
     if (row.transport === 'incus-migrate') {
       const t = await incusTrustToken(row);
       if (t.error) return { ...job, error: t.error, approved: false };
@@ -215,6 +227,19 @@ export function createMigrationService({
       job.sync = t;
     }
     return job;
+  }
+
+  /**
+   * The compressor for everything the agent streams here. Same setting as
+   * the export tarballs — one answer to "how does this install compress" —
+   * and zstd only when THIS host can decompress it, since the unpack runs
+   * here before the bytes reach the guest.
+   */
+  async function transferCompression() {
+    return resolveCompression({
+      setting: (() => { try { return getSetting(COMPRESSION_SETTING); } catch { return null; } })(),
+      hasBinary: async (b) => (await exec('sh', ['-c', `command -v ${JSON.stringify(b)}`], { timeoutMs: 10000 })).status === 0,
+    });
   }
 
   /**
@@ -786,13 +811,36 @@ export function createMigrationService({
   }
 
   /**
+   * How to get plain bytes out of an artifact, read from its first four:
+   * zstd (28 b5 2f fd), gzip (1f 8b) or already plain. Decompressing on the
+   * HOST rather than inside the guest is deliberate — the guest is a fresh
+   * minimal image that may have tar but not the zstd binary tar shells out
+   * to, and a migration is a bad moment to discover that.
+   */
+  async function decompressorFor(path) {
+    let magic = Buffer.alloc(0);
+    try {
+      const fh = await open(path, 'r');
+      try {
+        const buf = Buffer.alloc(4);
+        const { bytesRead } = await fh.read(buf, 0, 4, 0);
+        magic = buf.subarray(0, bytesRead);
+      } finally { await fh.close(); }
+    } catch { /* unreadable here (it may be host-side) — cat and let tar sniff */ }
+    if (magic.length >= 4 && magic.readUInt32LE(0) === 0xfd2fb528) return 'zstd -dc';
+    if (magic.length >= 2 && magic[0] === 0x1f && magic[1] === 0x8b) return 'gzip -dc';
+    return 'cat';
+  }
+
+  /**
    * tar → the guest, through `incus exec`. The redirect happens in a host
    * shell so the tarball streams from disk rather than through the backend's
    * memory, and tar's own --keep-directory-symlink / -p are left at their
    * defaults: this is a restore of the source's own tree, not an overlay.
    */
   async function unpackIntoGuest(row, tarPath, label) {
-    const r = await exec('sh', ['-c', 'incus exec "$1" -- tar -xzf - -C / < "$2"', 'sh', row.target_name, tarPath], { timeoutMs: 4 * 3600 * 1000 });
+    const decomp = await decompressorFor(tarPath);
+    const r = await exec('sh', ['-c', `${decomp} "$2" | incus exec "$1" -- tar -xf - -C /`, 'sh', row.target_name, tarPath], { timeoutMs: 4 * 3600 * 1000 });
     if (r.status !== 0) return { error: `could not unpack ${label || 'the directory'} into ${row.target_name}: ${tail(r.stderr) || `exit ${r.status}`}` };
     event(row.id, { kind: 'state', phase: 'transfer', message: `unpacked ${label || 'a directory'} into ${row.target_name}` });
     return { unpacked: true };
@@ -802,12 +850,16 @@ export function createMigrationService({
   async function restoreIntoGuest(row, dumpPath, engineAndDb) {
     const [engine, dbName] = String(engineAndDb || '').split(':');
     const g = row.target_name;
+    const decomp = await decompressorFor(dumpPath);
     let script;
     if (engine === 'postgres') {
       if (!/^[A-Za-z0-9_]{1,63}$/.test(dbName || '')) return { error: `refused: ${JSON.stringify(dbName)} is not a database name` };
-      script = `incus exec "$1" -- sh -c 'command -v pg_restore >/dev/null || { echo "postgresql is not installed in the guest" >&2; exit 90; }; su postgres -c "createdb ${dbName}" 2>/dev/null; su postgres -c "pg_restore --no-owner --no-acl -d ${dbName}"' < "$2"`;
+      // pg_dump --format=custom is already compressed and pg_restore reads
+      // it directly, so the agent never wraps it — but run it through the
+      // same sniffer anyway, which answers `cat` for it.
+      script = `${decomp} "$2" | incus exec "$1" -- sh -c 'command -v pg_restore >/dev/null || { echo "postgresql is not installed in the guest" >&2; exit 90; }; su postgres -c "createdb ${dbName}" 2>/dev/null; su postgres -c "pg_restore --no-owner --no-acl -d ${dbName}"'`;
     } else if (engine === 'mysql') {
-      script = `incus exec "$1" -- sh -c 'command -v mysql >/dev/null || { echo "mysql is not installed in the guest" >&2; exit 90; }; mysql' < "$2"`;
+      script = `${decomp} "$2" | incus exec "$1" -- sh -c 'command -v mysql >/dev/null || { echo "mysql is not installed in the guest" >&2; exit 90; }; mysql'`;
     } else {
       return { error: `unknown dump engine ${JSON.stringify(engine)}` };
     }
@@ -846,7 +898,26 @@ export function createMigrationService({
     if (t.status !== 0) return { error: `could not build the image metadata: ${tail(t.stderr)}` };
 
     event(row.id, { kind: 'state', phase: 'import', message: 'importing the rootfs as an Incus image' });
-    const imp = await exec('incus', ['image', 'import', metaTar, path, '--alias', alias], { timeoutMs: 3600000 });
+    let rootfs = path;
+    let imp = await exec('incus', ['image', 'import', metaTar, rootfs, '--alias', alias], { timeoutMs: 3600000 });
+    if (imp.status !== 0) {
+      // Incus sniffs the rootfs compressor itself and every release we know
+      // of reads zstd. If this one does not, decompress on the host and try
+      // once more rather than losing a transfer that already happened — it
+      // costs the rootfs's uncompressed size in staging disk, on this path
+      // only.
+      const decomp = await decompressorFor(rootfs);
+      if (decomp !== 'cat') {
+        const plain = `${rootfs}.plain.tar`;
+        event(row.id, { kind: 'state', phase: 'import', message: 'this Incus would not read the compressed rootfs — decompressing it on the host and retrying' });
+        const d = await exec('sh', ['-c', `${decomp} "$1" > "$2"`, 'sh', rootfs, plain], { timeoutMs: 4 * 3600 * 1000 });
+        if (d.status === 0) {
+          rootfs = plain;
+          imp = await exec('incus', ['image', 'import', metaTar, rootfs, '--alias', alias], { timeoutMs: 3600000 });
+          await exec('rm', ['-f', plain], { timeoutMs: 60000 }).catch(() => null);
+        }
+      }
+    }
     if (imp.status !== 0) return { error: `incus image import failed: ${tail(imp.stderr) || `exit ${imp.status}`}` };
 
     const cfg = guestConfig(spec, { prefix: '' });
@@ -1031,7 +1102,7 @@ export function createMigrationService({
         const state = await exec('incus', ['list', row.target_name, '--format', 'csv', '-c', 's'], { timeoutMs: 30000 });
         plan.guest = { present: true, status: String(state.stdout || '').trim() || 'unknown', created_by_migration: row.guest_created !== 0 };
         plan.delete_guest = true;
-        plan.export = exportFirst ? `${workDir}/exports/${row.target_name}-<timestamp>.tar.gz` : null;
+        plan.export = exportFirst ? `${workDir}/exports/${row.target_name}-<timestamp>${extensionFor(null)}` : null;
       }
     }
 
@@ -1042,8 +1113,12 @@ export function createMigrationService({
     if (plan.delete_guest) {
       if (exportFirst) {
         await mkdir(join(workDir, 'exports'), { recursive: true });
-        const file = join(workDir, 'exports', `${row.target_name}-${Date.now()}.tar.gz`);
-        const ex = await exec('incus', ['export', row.target_name, file, '--instance-only'], { timeoutMs: 60 * 60 * 1000 });
+        const picked = await resolveCompression({
+          setting: (() => { try { return getSetting(COMPRESSION_SETTING); } catch { return null; } })(),
+          hasBinary: async (b) => (await exec('sh', ['-c', `command -v ${JSON.stringify(b)}`], { timeoutMs: 10000 })).status === 0,
+        });
+        const file = join(workDir, 'exports', `${row.target_name}-${Date.now()}${picked.extension}`);
+        const ex = await exec('incus', ['export', row.target_name, file, '--instance-only', ...incusCompressionArgs(picked.compression)], { timeoutMs: 60 * 60 * 1000 });
         if (ex.status !== 0) return { error: `nothing was deleted: the export failed (${tail(ex.stderr) || `exit ${ex.status}`})` };
         done.export = file;
       }

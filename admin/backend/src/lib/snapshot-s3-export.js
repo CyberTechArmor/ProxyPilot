@@ -5,7 +5,8 @@
 // snapshot lives on the host's Incus storage pool and that's it.
 // This helper extends that flow with an opt-in S3 export pass:
 //
-//   1. `incus export <instance>/<snapshot> <tmp-tarball>` (gzip).
+//   1. `incus export <instance>/<snapshot> <tmp-tarball>`, with
+//      the compressor from lib/export-compression (zstd by default).
 //   2. Upload the tarball to each chosen backup_destinations row.
 //   3. Track per-destination state in lxc_snapshot_s3_exports so
 //      the UI can render 'on-site ✓ · off-site ✓' rollups and
@@ -24,12 +25,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { v4 as uuid } from 'uuid';
-import { getDb, logAudit } from '../db.js';
+import { getDb, logAudit, getSetting } from '../db.js';
 import {
   putObjectWithControl, deleteObject, buildKey, getObjectStream, headObject,
 } from './s3.js';
 import { postNotification, resolveNotification } from './notifications.js';
 import { spawnHostSync, spawnHost, hasHostBinary } from './host-exec.js';
+import {
+  COMPRESSION_SETTING, resolveCompression, incusCompressionArgs, extensionFor, contentTypeFor,
+} from './export-compression.js';
 
 // Async wrapper around spawnHost.  Drop-in replacement for
 // spawnHostSync that does NOT block the Node event loop — using
@@ -141,7 +145,13 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 // path must be host-side.  We write to /tmp on the host then
 // `cat` the bytes back into the dashboard container.  Same
 // dance backup-pack's exportIncusInstance uses.
-export async function exportSnapshotToTmp({ incusName, snapshotName }) {
+async function resolveSnapshotCompression(requested = null) {
+  let setting = null;
+  try { setting = getSetting(COMPRESSION_SETTING); } catch { setting = null; }
+  return resolveCompression({ requested, setting, hasBinary: (b) => hasHostBinary(b) });
+}
+
+export async function exportSnapshotToTmp({ incusName, snapshotName, compression = null }) {
   if (!SAFE_NAME.test(incusName)) {
     return { ok: false, error: `unsafe instance name: ${incusName}` };
   }
@@ -160,7 +170,14 @@ export async function exportSnapshotToTmp({ incusName, snapshotName }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-snap-export-'));
   try { fs.chmodSync(dir, 0o700); } catch { /* ignore */ }
   const hostTmpDir = `/tmp/pp-snap-export-${process.pid}-${Date.now()}-${shortId}`;
-  const hostOut = `${hostTmpDir}/${incusName}-${snapshotName}.tar.gz`;
+  // The caller (fanOutSnapshotExport) resolves the compressor before it
+  // writes the S3 keys, so the object name and the file on disk agree; a
+  // direct caller gets the setting resolved here instead.
+  const chosen = compression
+    ? { compression, extension: extensionFor(compression) }
+    : await resolveSnapshotCompression();
+  const ext = chosen.extension;
+  const hostOut = `${hostTmpDir}/${incusName}-${snapshotName}${ext}`;
 
   let copyDone = false;
   try {
@@ -189,7 +206,7 @@ export async function exportSnapshotToTmp({ incusName, snapshotName }) {
     const ex = await runHost('nice', [
       '-n', '19', 'incus',
       'export', tempInstance, hostOut,
-      '--instance-only', '--compression', 'gzip',
+      '--instance-only', ...incusCompressionArgs(chosen.compression),
     ], { encoding: 'utf-8', timeout: 60 * 60_000 });
     if (ex.status !== 0) {
       throw new Error(
@@ -204,10 +221,13 @@ export async function exportSnapshotToTmp({ incusName, snapshotName }) {
     if (cat.status !== 0) {
       throw new Error((cat.stderr?.toString?.() || 'cat failed').trim());
     }
-    const containerOut = path.join(dir, `${incusName}-${snapshotName}.tar.gz`);
+    const containerOut = path.join(dir, `${incusName}-${snapshotName}${ext}`);
     fs.writeFileSync(containerOut, cat.stdout);
     const stat = fs.statSync(containerOut);
-    return { ok: true, dir, path: containerOut, size: stat.size };
+    return {
+      ok: true, dir, path: containerOut, size: stat.size,
+      compression: chosen.compression, note: chosen.note || null,
+    };
   } catch (err) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
     return { ok: false, error: (err?.message || String(err)).slice(0, 1024) };
@@ -337,7 +357,9 @@ export async function importSnapshotFromS3({
   } catch { /* fall through with the un-deduped base */ }
 
   const hostTmpDir = `/tmp/pp-snap-import-${process.pid}-${Date.now()}-${shortId}`;
-  const hostTarball = `${hostTmpDir}/import.tar.gz`;
+  // Name only: `incus import` sniffs the compressor from the bytes, so the
+  // restore path works whatever the export was compressed with.
+  const hostTarball = `${hostTmpDir}/import.tarball`;
 
   let importDone = false;
   try {
@@ -553,11 +575,13 @@ export function sweepOrphanTempInstances() {
   return { ok: true, deleted, failed };
 }
 
-function buildSnapshotKey(dest, incusName, snapshotName) {
+function buildSnapshotKey(dest, incusName, snapshotName, compression) {
   // Mirrors the layout of the regular backup keys:
-  // <prefix>/snapshots/<instance>/<snapshot>.tar.gz so an
-  // operator browsing the bucket sees them grouped.
-  const objectName = `snapshots/${incusName}/${snapshotName}.tar.gz`;
+  // <prefix>/snapshots/<instance>/<snapshot>.tar.zst so an
+  // operator browsing the bucket sees them grouped. The extension
+  // follows the compressor that will actually be used, which is why
+  // the caller resolves it BEFORE the pending rows are written.
+  const objectName = `snapshots/${incusName}/${snapshotName}${extensionFor(compression)}`;
   return buildKey(dest, objectName);
 }
 
@@ -731,12 +755,16 @@ export async function fanOutSnapshotExport({
 
   const db = getDb();
 
+  // One compressor for the whole fan-out, resolved up front: the S3 keys
+  // are written before the export runs and they carry the extension.
+  const chosen = await resolveSnapshotCompression();
+
   // Insert 'pending' rows immediately so the UI sees the export
   // state without waiting for the worker to pick the job up.
   const exportIds = new Map(); // destination_id -> exportRowId
   for (const dest of destinations) {
     const exportId = uuid();
-    const s3Key = buildSnapshotKey(dest, incusName, snapshotName);
+    const s3Key = buildSnapshotKey(dest, incusName, snapshotName, chosen.compression);
     db.prepare(`
       INSERT INTO lxc_snapshot_s3_exports
         (id, container_name, snapshot_name, destination_id, s3_key, status, created_by)
@@ -755,6 +783,7 @@ export async function fanOutSnapshotExport({
     runFn: (jobId) => runSnapshotExport({
       jobId,
       containerName, incusName, snapshotName, destinations, exportIds, audit,
+      compression: chosen.compression,
     }),
   });
 }
@@ -763,6 +792,7 @@ export async function fanOutSnapshotExport({
 // Called by the queue worker; never invoked directly by routes.
 async function runSnapshotExport({
   jobId, containerName, incusName, snapshotName, destinations, exportIds, audit,
+  compression = null,
 }) {
   const db = getDb();
   const results = [];
@@ -795,7 +825,7 @@ async function runSnapshotExport({
 
   // One shared `incus export` for every destination — same
   // tarball pushed N times.
-  const exported = await exportSnapshotToTmp({ incusName, snapshotName });
+  const exported = await exportSnapshotToTmp({ incusName, snapshotName, compression });
   if (!exported.ok) {
     // Mark every pending row failed with the same export error.
     for (const dest of destinations) {
@@ -854,7 +884,7 @@ async function runSnapshotExport({
 
       try {
         const handle = putObjectWithControl(dest, row.s3_key, buffer, {
-          contentType: 'application/gzip',
+          contentType: contentTypeFor(exported.compression),
           onProgress: ({ loaded }) => {
             const now = Date.now();
             if (now - lastProgressWriteAt >= PROGRESS_THROTTLE_MS) {

@@ -445,13 +445,17 @@ test('application mode: approving creates the guest and fences it; the copy goes
   // A directory arrives and is unpacked into the guest, not left on disk.
   const dir = await svc.receiveArtifact(svc.rowById(id), Readable.from([Buffer.from('tar bytes')]), { kind: 'dir', name: '/srv/myapp' });
   assert.equal(dir.kind, 'dir');
-  const unpack = argvOf(calls).find((c) => c.includes('tar -xzf'));
-  assert.match(unpack, /incus exec "\$1" -- tar -xzf - -C \/ < "\$2" sh pp-app/);
+  // Decompressed on the HOST and piped in as a plain tar: the guest is a
+  // fresh minimal image that may not have the zstd binary tar shells out to.
+  // These nine bytes are not compressed, so the sniffer answers `cat`.
+  const unpack = argvOf(calls).find((c) => c.includes('incus exec') && c.includes('tar -xf'));
+  assert.match(unpack, /cat "\$2" \| incus exec "\$1" -- tar -xf - -C \/ sh pp-app/);
 
   // So does the dump, restored by the guest's own engine.
   const dump = await svc.receiveArtifact(svc.rowById(id), Readable.from([Buffer.from('pgdump')]), { kind: 'dbdump', name: 'postgres:appdb' });
   assert.equal(dump.kind, 'dbdump');
   const restore = argvOf(calls).find((c) => c.includes('pg_restore'));
+  assert.match(restore, /cat "\$2" \| incus exec/);
   assert.match(restore, /createdb appdb/);
   assert.match(restore, /pg_restore --no-owner --no-acl -d appdb/);
 

@@ -13,6 +13,7 @@
 // Terminology (risk R7): nothing here is named "agent".
 
 import { createHash, randomBytes } from 'node:crypto';
+import { normalizeDataGuard } from './auth-data-logic.js';
 
 // ---- limits (bounds the prompt/DB cost of a single component) ----
 
@@ -525,6 +526,12 @@ export function validateComponentContract(input) {
         // whose installed component predates that code keeps its current
         // value; the key is deferred and reported, never minted blind.
         requires_marker: normalizeMintMarker(c.requires_marker),
+        // protects: the stored data this secret encrypts (table, columns,
+        // filter, and the development default it may still be under). Before
+        // changing the key the platform reads those rows from the app's
+        // database and classifies them (auth-data-logic.js): fresh storage,
+        // data the bridge can migrate, or an unknown key → defer.
+        protects: normalizeDataGuard(c.protects),
         // fresh_value: written into the container environment when the
         // component is installed into a project for the FIRST time (nothing of
         // it existed before, so there is no data to migrate) — e.g. an empty
@@ -786,6 +793,14 @@ export function secretMintGuards(config = []) {
   return (config || [])
     .filter((c) => c && c.secret === true && c.generate === true && c.requires_marker && c.requires_marker.path && c.requires_marker.contains)
     .map((c) => ({ key: c.key, path: c.requires_marker.path, contains: c.requires_marker.contains, built: c.requires_marker.built || null }));
+}
+
+// secretDataGuards(config) → [{ key, guard }] for every minted secret that
+// declares the data it protects.
+export function secretDataGuards(config = []) {
+  return (config || [])
+    .filter((c) => c && c.secret === true && c.generate === true && c.protects && c.protects.table)
+    .map((c) => ({ key: c.key, guard: c.protects }));
 }
 
 // componentSecretKeys(config) — the keys a contract marks secret + generate:

@@ -33,8 +33,9 @@ import {
   buildManifestVerifyScript, parseShaVerifyOutput,
   planMigrationRenumber, mergeEnvDefaults, manifestEntryFromConnection,
   deriveComponentSubsystem, buildComponentsStateDoc, publicProjectComponentShape,
-  COMPONENTS_STATE_PATH, planSecretMint, componentSecretKeys, secretMintGuards, freshEnvValues,
+  COMPONENTS_STATE_PATH, planSecretMint, componentSecretKeys, secretMintGuards, freshEnvValues, secretDataGuards,
 } from './component-logic.js';
+import { authDataProbeScript, parseAuthDataProbe, classifyRows, decideMasterSecretMint } from './auth-data-logic.js';
 import { mergeEnvFile } from '../lib/mcp-ext/logic.js';
 import { b64 } from './host.js';
 import { backfillManifestEntryInContainer } from './integration-enforcement.js';
@@ -307,12 +308,43 @@ async function writeEnvironment(containerName, text) {
   return { ok: true };
 }
 
+// probeProtectedData({ containerName, guard }) → the stored rows a secret
+// protects, read from the app's own database (auth-data-logic.js). "No files
+// kept" is not "no data": this is what tells a fresh app from one whose files
+// were rebuilt over an existing or restored database.
+export async function probeProtectedData({ containerName, guard }) {
+  try {
+    const r = await containerSh(containerName, authDataProbeScript(guard), { timeoutMs: 20000 });
+    return parseAuthDataProbe(r.stdout || '');
+  } catch (e) {
+    return { state: 'unknown', rows: [], detail: `probe failed: ${e?.message || e}` };
+  }
+}
+
+// storageIsFresh({ containerName, contracts }) → { fresh, reasons }: true only
+// when every data guard the contracts declare reports fresh storage (no table,
+// no database, or no rows). An unreadable probe is NOT fresh.
+export async function storageIsFresh({ containerName, contracts } = {}) {
+  const reasons = [];
+  let fresh = true;
+  for (const contract of contracts || []) {
+    for (const { key, guard } of secretDataGuards(contract?.config || [])) {
+      const probe = await probeProtectedData({ containerName, guard });
+      const d = decideMasterSecretMint({ probe, envHasKey: false, classification: classifyRows(probe.rows, { legacy: [guard.legacy_default] }) });
+      if (!d.fresh) { fresh = false; reasons.push(`${key}: ${d.reason}`); }
+    }
+  }
+  return { fresh, reasons };
+}
+
 // ensureFreshEnvValues — on a component's FIRST install into a project (every
-// file written, nothing kept), write the contract's fresh_value entries into
-// the environment unless the key is already there. A fresh app has no data
-// under any previous key, so e.g. its legacy-key list starts EMPTY; a reinstall
-// into an existing project never reaches here.
-export async function ensureFreshEnvValues({ containerName, contracts } = {}) {
+// file written, nothing kept) AND with storage confirmed fresh by the data
+// probe, write the contract's fresh_value entries into the environment unless
+// the key is already there. A fresh app has no data under any previous key,
+// so e.g. its legacy-key list starts EMPTY. New files over an existing or
+// restored database, or a probe that could not run, never reach here.
+export async function ensureFreshEnvValues({ containerName, contracts, freshStorage = false } = {}) {
+  if (freshStorage !== true) return { ok: true, written: [], skipped: 'storage not confirmed fresh' };
   const vars = {};
   for (const contract of contracts || []) {
     for (const { key, value } of freshEnvValues(contract?.config || [])) {
@@ -348,36 +380,56 @@ export async function ensureComponentSecrets({ containerName, rows, rand } = {})
   let eligible = configs;
   const guards = secretMintGuards(configs);
   if (guards.length) {
-    // The source must carry the marker; when the built artifact exists it must
-    // carry it too (a stale dist/ predating the source is not the code that
-    // will run). The deploy builds before it mints, so at deploy time the
-    // built file is the one the unit is about to start.
+    // The source must carry the marker, and when a built artifact is declared
+    // it must EXIST and carry it: the unit runs the compiled code (the manifest
+    // start command), so a missing or stale dist/ is not the code that will
+    // run. The deploy builds before it mints, so at deploy time the built file
+    // is the one the unit is about to start; at pre-install it does not exist
+    // yet and the key waits for the deploy.
     const script = guards
       .map((g) => {
         const src = `grep -q -F -- '${shq(g.contains)}' '${APP_DIR}/${shq(g.path)}' 2>/dev/null`;
-        const built = g.built
-          ? ` && { [ ! -e '${APP_DIR}/${shq(g.built)}' ] || grep -q -F -- '${shq(g.contains)}' '${APP_DIR}/${shq(g.built)}' 2>/dev/null; }`
-          : '';
-        return `if ${src}${built}; then echo "MARKER OK ${g.key}"; else echo "MARKER MISSING ${g.key}"; fi`;
+        if (!g.built) return `if ${src}; then echo "MARKER OK ${g.key}"; else echo "MARKER MISSING ${g.key}"; fi`;
+        const builtPath = `'${APP_DIR}/${shq(g.built)}'`;
+        return `if ! ${src}; then echo "MARKER MISSING ${g.key}"; elif [ ! -e ${builtPath} ]; then echo "MARKER NOBUILD ${g.key}"; elif grep -q -F -- '${shq(g.contains)}' ${builtPath} 2>/dev/null; then echo "MARKER OK ${g.key}"; else echo "MARKER STALE ${g.key}"; fi`;
       })
       .join('\n');
     const r = await containerSh(containerName, script, { timeoutMs: 15000 });
-    const missing = new Set(
-      String(r.stdout || '').split('\n').filter((l) => l.startsWith('MARKER MISSING ')).map((l) => l.slice('MARKER MISSING '.length).trim()),
-    );
-    for (const g of guards) {
-      if (!missing.has(g.key)) continue;
-      deferred.push({
-        key: g.key,
-        reason: `${g.path} in this project does not carry "${g.contains}" — the installed component predates the code that migrates data encrypted under the previous value, so ${g.key} keeps its current value (a component upgrade brings the code; the key is minted on the deploy after that)`,
-      });
+    const verdict = new Map();
+    for (const l of String(r.stdout || '').split('\n')) {
+      const m = l.match(/^MARKER (OK|MISSING|NOBUILD|STALE) (\S+)$/);
+      if (m) verdict.set(m[2], m[1]);
     }
-    eligible = configs.filter((c) => !missing.has(c.key));
+    for (const g of guards) {
+      const v = verdict.get(g.key) || 'MISSING';
+      if (v === 'OK') continue;
+      const reason = v === 'NOBUILD'
+        ? `the compiled artifact ${g.built} does not exist yet — the running service executes the build, so ${g.key} is minted by the deploy once the build exists`
+        : v === 'STALE'
+          ? `the compiled artifact ${g.built} does not carry "${g.contains}" while ${g.path} does — a stale build is not the code that will run; ${g.key} keeps its current value until a deploy rebuilds it`
+          : `${g.path} in this project does not carry "${g.contains}" — the installed component predates the code that migrates data encrypted under the previous value, so ${g.key} keeps its current value (a component upgrade brings the code; the key is minted on the deploy after that)`;
+      deferred.push({ key: g.key, reason });
+    }
+    eligible = configs.filter((c) => (verdict.get(c.key) || (guards.some((g) => g.key === c.key) ? 'MISSING' : 'OK')) === 'OK');
+  }
+  const cur = await readEnvironment(containerName);
+  if (!cur.ok) return { ok: false, minted: [], deferred, required: [], error: cur.error };
+  // The data guard: before a key that protects stored data is minted, read
+  // those rows from the app's database and decide (auth-data-logic.js). A key
+  // already in the environment is never overwritten; fresh storage or data the
+  // component's bridge can migrate lets the mint proceed; an unknown key or an
+  // unreadable probe defers it and says why.
+  const envKeys = new Set(envFileKeysOf(cur.text));
+  for (const { key, guard } of secretDataGuards(eligible)) {
+    if (envKeys.has(key)) continue;
+    const probe = await probeProtectedData({ containerName, guard });
+    const d = decideMasterSecretMint({ probe, envHasKey: false, classification: classifyRows(probe.rows, { legacy: [guard.legacy_default] }) });
+    if (d.mint === 'ok') continue;
+    deferred.push({ key, reason: d.reason });
+    eligible = eligible.filter((c) => c.key !== key);
   }
   const required = componentSecretKeys(eligible);
   if (!eligible.length) return { ok: true, minted: [], deferred, required };
-  const cur = await readEnvironment(containerName);
-  if (!cur.ok) return { ok: false, minted: [], deferred, required, error: cur.error };
   const plan = planSecretMint(cur.text, eligible, rand ? { rand } : {});
   if (!plan.minted.length) return { ok: true, minted: [], deferred, required };
   const w = await writeEnvironment(containerName, mergeEnvFile(cur.text, plan.vars));
@@ -527,16 +579,23 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
   }
 
   // First installs (every file written, nothing kept) get their contracts'
-  // fresh_value entries: a fresh app starts with, for instance, an EMPTY
-  // legacy-key list — it has no data under any previous key, so it must never
-  // accept one. A reinstall into an existing project keeps files and skips this.
+  // fresh_value entries — but only once the DATA probe confirms fresh storage:
+  // "nothing kept" says the files are new, not that the database is. A fresh
+  // app starts with, for instance, an EMPTY legacy-key list; new files over an
+  // existing or restored database keep the component's default bridge, and a
+  // probe that could not run is reported and treated as not fresh.
   try {
     const freshContracts = installed.filter((i) => i.counts && i.counts.kept === 0).map((i) => i.contract);
-    const fresh = await ensureFreshEnvValues({ containerName, contracts: freshContracts });
-    if (fresh.written.length) {
-      insertMessage({ projectId, kind: 'system', cycleId, body: `Fresh install: set ${fresh.written.join(', ')} in the container environment (no earlier data to migrate).` });
+    if (freshContracts.length) {
+      const storage = await storageIsFresh({ containerName, contracts: freshContracts });
+      const fresh = await ensureFreshEnvValues({ containerName, contracts: freshContracts, freshStorage: storage.fresh });
+      if (fresh.written.length) {
+        insertMessage({ projectId, kind: 'system', cycleId, body: `Fresh install with fresh storage: set ${fresh.written.join(', ')} in the container environment (no earlier data to migrate).` });
+      } else if (!storage.fresh) {
+        insertMessage({ projectId, kind: 'system', cycleId, body: `New component files, but the storage is not confirmed fresh — existing keys are preserved and the legacy bridge stays enabled: ${storage.reasons.join('; ')}.` });
+      }
+      if (!fresh.ok) console.warn(`[mock2] fresh env values failed for project ${projectId}: ${fresh.error}`);
     }
-    if (!fresh.ok) console.warn(`[mock2] fresh env values failed for project ${projectId}: ${fresh.error}`);
   } catch (e) { console.warn('[mock2] fresh env values failed:', e?.message); }
 
   // Repair pass over selections already marked 'installed' (they were filtered

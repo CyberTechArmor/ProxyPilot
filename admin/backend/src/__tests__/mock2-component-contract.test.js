@@ -18,7 +18,7 @@ import {
   buildComponentSuggestionQuestion, parseComponentSuggestionAnswer,
   COMPONENT_SUGGESTION_ACCEPT, COMPONENT_SUGGESTION_DECLINE,
   planMigrationRenumber, mergeEnvDefaults, manifestEntryFromConnection,
-  planSecretMint, componentSecretKeys, normalizeMintMarker, secretMintGuards, freshEnvValues,
+  planSecretMint, componentSecretKeys, normalizeMintMarker, secretMintGuards, freshEnvValues, secretDataGuards,
   deriveComponentSubsystem, buildComponentsStateDoc, buildInstalledComponentsSection,
   publicProjectComponentShape, COMPONENTS_STATE_PATH,
 } from '../mock2/component-logic.js';
@@ -294,6 +294,15 @@ test('validateComponentContract carries the generate flag through normalisation'
   assert.equal(f.ok, true, f.error);
   assert.equal(f.contract.config[0].fresh_value, '');
   assert.equal(f.contract.config[1].fresh_value, null);
+  // protects: the data guard, normalised; a hostile filter refuses the guard.
+  const g = validateComponentContract({ provides: ['auth'], config: [
+    { key: 'AUTH_MASTER_SECRET', secret: true, generate: true, protects: { table: 'auth_connections', secret_column: 'secret_ciphertext', nonce_column: 'secret_nonce', filter: "provider = 'ldaps'", legacy_default: 'dev' } },
+    { key: 'OTHER', secret: true, generate: true, protects: { table: 't', secret_column: 'c', nonce_column: 'n', filter: 'x = 1; DROP TABLE t' } },
+  ] });
+  assert.equal(g.ok, true, g.error);
+  assert.deepEqual(g.contract.config[0].protects, { table: 'auth_connections', secret_column: 'secret_ciphertext', nonce_column: 'secret_nonce', filter: "provider = 'ldaps'", legacy_default: 'dev' });
+  assert.equal(g.contract.config[1].protects, null);
+  assert.deepEqual(secretDataGuards(g.contract.config).map((x) => x.key), ['AUTH_MASTER_SECRET']);
 });
 
 test('manifestEntryFromConnection produces a manifest entry the gate validates', () => {

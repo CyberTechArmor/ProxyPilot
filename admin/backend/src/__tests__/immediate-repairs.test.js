@@ -131,18 +131,30 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   assert.match(deploy, /requiredSecretKeys = secrets\.required;/);
   const install = src('mock2/component-install.js');
   assert.match(install, /MARKER MISSING/);
-  assert.match(install, /eligible = configs\.filter\(\(c\) => !missing\.has\(c\.key\)\);/);
+  assert.match(install, /verdict\.get\(c\.key\)/);
   assert.match(install, /export function deferredSecretsMessage/);
-  // The built artifact must carry the marker too when it exists (stale dist/).
-  assert.match(install, /\[ ! -e '\$\{APP_DIR\}\/\$\{shq\(g\.built\)\}' \] \|\| grep -q -F/);
+  // The built artifact must exist and carry the marker (NOBUILD / STALE below).
   // A first install writes the contract's fresh values (an empty legacy list);
   // a reinstall (anything kept) does not.
   assert.match(install, /installed\.filter\(\(i\) => i\.counts && i\.counts\.kept === 0\)\.map\(\(i\) => i\.contract\)/);
   assert.match(install, /export async function ensureFreshEnvValues/);
-  // The deferral stays visible: a readiness warning on every deploy.
+  // A declared built artifact must EXIST and carry the marker; missing or
+  // stale builds defer with their own reasons.
+  assert.match(install, /MARKER NOBUILD/);
+  assert.match(install, /MARKER STALE/);
+  // The data guard: rows are read from the app's database and classified
+  // before a protecting key is minted; fresh_value waits for fresh storage.
+  assert.match(install, /const d = decideMasterSecretMint\(\{ probe, envHasKey: false, classification: classifyRows\(probe\.rows, \{ legacy: \[guard\.legacy_default\] \}\) \}\);/);
+  assert.match(install, /if \(freshStorage !== true\) return \{ ok: true, written: \[\], skipped: 'storage not confirmed fresh' \};/);
+  assert.match(install, /const storage = await storageIsFresh\(\{ containerName, contracts: freshContracts \}\);/);
+  // The deferral stays visible: three readiness warnings on every deploy.
   const readiness = src('mock2/readiness-logic.js');
-  assert.match(readiness, /MASTERKEY:200/);
-  assert.match(readiness, /if \(c\.key === 'MASTERKEY' && noAuth\) continue;/);
+  assert.match(readiness, /MASTERKEY:200/); assert.match(readiness, /LEGACYBRIDGE:200/);
+  assert.match(readiness, /export function masterKeyRowsCode/);
+  assert.match(readiness, /MASTERKEY_CHECKS\.some\(\(m\) => m\.key === c\.key\) && noAuth\) continue;/);
+  // The rows check is computed on the platform side with the tested cipher.
+  const runner = src('mock2/readiness.js');
+  assert.match(runner, /MASTERKEY_ROWS:\$\{masterKeyRowsCode\(\{ probe, envKey, legacyDefault: guard\.legacy_default \}\)\}/);
   const mintIdx = deploy.indexOf('ensureComponentSecrets(');
   const validateIdx = deploy.indexOf('validateDeployEnvironment(');
   const swapIdx = deploy.indexOf('const swap = await containerSh(');
@@ -178,6 +190,9 @@ test('ratchet: the seed auth component refuses its dev defaults in production an
   const legacy = cfg.find((c) => c.key === 'AUTH_LEGACY_MASTER_SECRETS');
   assert.equal(legacy.fresh_value, '');
   assert.notEqual(legacy.secret, true);
+  // The master secret declares the data it protects, so the platform can read
+  // and classify it before changing the key.
+  assert.deepEqual(master.protects, { table: 'auth_connections', secret_column: 'secret_ciphertext', nonce_column: 'secret_nonce', filter: "provider = 'ldaps'", legacy_default: 'dev-insecure-master-secret-change-me' });
 });
 
 test('ratchet: the seed auth component rekeys an LDAPS secret stored under the dev master secret', () => {

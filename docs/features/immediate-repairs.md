@@ -77,24 +77,53 @@ public string. Finally the operator closes the bridge with `set_project_env`
 explicitly empty list empty; it never falls back to the default) and
 redeploys; `legacyBridgeEnabled` then reads false.
 
-A **fresh** app never has the bridge: the platform writes
-`AUTH_LEGACY_MASTER_SECRETS=""` into its environment on the component's first
-install (nothing kept, so nothing to migrate), and the component's own test
-pins that an explicitly empty list stays empty. The bridge is enabled only
-where a component was installed before this change.
+A **fresh** app never has the bridge — and "fresh" is decided by the data,
+not by the files. "No component files were kept" only says the files are
+new; an app can have new files over an existing or restored PostgreSQL
+holding a credential encrypted under an earlier key. So before the platform
+writes `AUTH_LEGACY_MASTER_SECRETS=""` or mints a new master secret, it reads
+the rows that secret protects from the app's own database (the contract's
+`protects` guard: `auth_connections`, `secret_ciphertext`, `secret_nonce`,
+`provider = 'ldaps'`) through `psql` as the postgres user, and classifies
+them under the component's cipher (`auth-data-logic.js`):
+
+| What the probe finds | Decision |
+| --- | --- |
+| No table, no database, or no rows | Fresh storage: empty legacy list on first install; new secret minted |
+| Rows, all under the development default | Existing data the bridge migrates: mint, keep the bridge enabled, no fresh values |
+| A key already in `/etc/environment` | Preserved, never overwritten |
+| Rows under a key that is neither in the environment nor the development default, or a mix | **Deferred** — set `AUTH_MASTER_SECRET` to that key first, then redeploy |
+| The probe could not run (no psql, connection refused, no output) | **Uncertain: deferred**, and the reason is reported |
+
+The component's own test pins that an explicitly empty list stays empty. The
+bridge is enabled only where storage was not confirmed fresh.
 
 The source-and-artifact marker is a **compatibility** check, not proof that
-the running process carries the code. The host acceptance test for an
-upgraded app is: the deploy that mints the key also built `dist/` from that
-source, the unit started with the environment it was given, and the LDAPS
-credential decrypts after a restart. A capability recorded by the build
-itself would be the durable form of this check and is a follow-up.
+the running process carries the code. The declared built artifact
+(`dist/auth/crypto.js`) must now **exist** and carry the marker, because the
+service unit executes the manifest start command (`node dist/server.js`): a
+missing build defers the key with "minted by the deploy once the build
+exists", a stale build defers it with "not the code that will run". The host
+acceptance test for an upgraded app is: the deploy that mints the key also
+built `dist/` from that source, the unit started with the environment it was
+given, and the LDAPS credential decrypts after a restart. A capability
+recorded by the build itself would be the durable form of this check and is
+a follow-up.
 
-Until an app is upgraded it stays visibly marked: the readiness probe that
-runs after every deploy reports `the app has its own master secret` as a
-warning (never a failure) whenever `AUTH_MASTER_SECRET` is absent from the
-container environment, in the build status panel and the deploy chat
-message. A project with no auth component does not get the warning.
+Until an app is fully migrated it stays visibly marked. The readiness probe
+that runs after every deploy reports **three separate facts**, each a
+warning and never a failure, in the build status panel and the deploy chat
+message; none implies the others:
+
+| Line | 200 means | Otherwise |
+| --- | --- | --- |
+| `MASTERKEY` | a **non-default** master secret is active in the environment (set, and not the development literal) | unset, or still the development default |
+| `MASTERKEY_ROWS` | every stored credential decrypts under the active key (204: nothing stored) | 404: at least one row is under another key; 500: the probe could not run |
+| `LEGACYBRIDGE` | `AUTH_LEGACY_MASTER_SECRETS` is set to an empty string | the bridge is still enabled |
+
+The guest-side probe is plain `sed`/`grep`; the rows check is computed on
+the platform side with the same classifier the mint decision uses. A project
+with no auth component gets none of the three.
 
 ## MCP token validity rule
 
@@ -146,14 +175,18 @@ and the question does not arise.
 | Existing app on the dev key | LDAPS credential survives; legacy migration completes | *sandbox*: the master secret is deferred when the marker is absent (guard + `deferred` reporting); the bridge opens legacy ciphertext and rekeys by compare-and-swap; whole auth module typechecks. *host*: a real app with an LDAPS row |
 | Existing app with a custom key | Key and encrypted credential intact | *sandbox*: `planSecretMint` never writes an existing key; `mergeEnvFile` replaces nothing it was not asked to. The served app reads only the process environment |
 | Restart or repeated update | Secrets unchanged; migrations do not damage data | *sandbox*: mint is idempotent; migrations 605/913/914 guard their own preconditions; the migration-history repair is a pure transactional module tested against populated databases for every state — nothing recorded, a legitimate main 912, the former PR 912, duplicate owner records, a 913 under another name, an interrupted retry, and a vetoed write leaving history untouched. *host*: run the update twice |
-| Fresh project | Secrets minted once; legacy fallback disabled; app works after restart | *sandbox*: first install writes an empty legacy list (`ensureFreshEnvValues`, nothing kept); the component's vitest run proves an explicitly empty list stays empty and production refuses the dev defaults. *host*: provision, restart the guest, sign in |
+| Fresh project | Secrets minted once; legacy fallback disabled; app works after restart | *sandbox*: first install writes an empty legacy list only when the data probe confirms fresh storage; the component's vitest run proves an explicitly empty list stays empty and production refuses the dev defaults. *host*: provision, restart the guest, sign in |
+| New files, existing database | Existing keys preserved; legacy migration decided explicitly | *sandbox*: `mock2-auth-data.test.js` — new files over a database holding a dev-key credential yields not-fresh and a mint through the bridge; a custom or mixed key defers; an unreadable probe defers. *host*: rebuild a project's files over its database and watch the chat message and readiness lines |
 | Authentication | Password/TOTP and verified passkey both log in, with separate sudo | *sandbox*: no passkey-only accounts exist; the login handler carries no sudo stamp; both ceremonies require UV. *host*: fresh-browser checks above |
 | MCP | Disabled, deleted, demoted and expired credentials denied, per call | *sandbox*: `mcpTokenRefusal` cases; `findToken` wiring ratchet; revocation on every disable/demote/delete path; new tokens default to a finite lifetime. *host*: call through an existing connector after disabling its owner; mint a 1-day token and call after it lapses |
 | Failed upgrade | A tested restore recovers code, database and matching secrets | *host* only: restore the recovery set on a replacement host |
 
 Test evidence: full backend suite on this branch versus the same main commit
-(`83c0dff3`) in the same sandbox — identical failure set (the ten documented
-`ERR_MODULE_NOT_FOUND` files), everything else passing. The component's
-`src/auth` (20 non-test files) typechecks under `strict` + `noUnusedLocals`
-against drizzle-orm, express, pg, ldapts and cookie, and its new
-`config.test.ts` passes under vitest. The frontend builds.
+(`83c0dff3`) in the same sandbox — **no additional failures compared with the
+baseline**; the ten documented `ERR_MODULE_NOT_FOUND` files fail on both.
+The component's `src/auth` (20 non-test files) typechecks under `strict` +
+`noUnusedLocals` against drizzle-orm, express, pg, ldapts and cookie, and its
+`config.test.ts` passes under vitest. The frontend production build
+(`npm run build`, dependencies from the committed lockfile via `npm ci`) was
+run on the `c15a6b63` tree after that commit and succeeds; nothing in the
+frontend changed after it.

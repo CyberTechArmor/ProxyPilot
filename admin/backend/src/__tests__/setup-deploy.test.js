@@ -172,7 +172,9 @@ test('deploy-op: the full path — reap, install/migrate/build, checkpoint BEFOR
   assert.deepEqual(r.minted, ['AUTH_JWT_SECRET', 'AUTH_MASTER_SECRET']);
   assert.equal(r.verification.state, 'credential_decryptable', 'nothing stored → decryptable vacuously; the application rung is a pending follow-up');
   assert.deepEqual(r.verification.pending, ['credential_use_verified']);
-  assert.deepEqual(r.followUp, { kind: 'verify_app', steps: ['verify_credential_use'], rung: 'credential_use_verified' });
+  assert.deepEqual({ ...r.followUp, revision: null }, { kind: 'verify_app', steps: ['verify_credential_use'], rung: 'credential_use_verified', revision: null });
+  assert.equal(r.followUp.revision.commit, 'c'.repeat(40), 'the follow-up names the revision it certifies');
+  assert.match(String(r.followUp.revision.buildId), /^\d{14}-[a-z0-9]+$/, 'and the build id it stamped');
   const phases = g.calls.map((c) => c.phase);
   assert.deepEqual(phases.slice(0, 5), ['reap', 'install_fresh', 'install', 'stamp_write', 'build'], 'install and build run under the old app; the migration does not');
   const stopAt = phases.indexOf('stop');

@@ -279,57 +279,99 @@ export function classifyMigrateScript(stdout, contractMigrate = null) {
 
 // ── containment of a job's transient processes ──────────────────────────
 //
-// Every deploy script runs as its own session (setsid) and records its session
-// id under RUN_DIR/<jobId>.sid, so everything it spawns — marked or not, npm's
-// children, a build's helpers, a background process a script left behind —
-// shares that session id and can be found and killed by it. The application's
-// own service is never in these sessions (systemd starts it in its own
-// cgroup), so cleanup never touches it. Cleanup targets OTHER jobs' sessions
-// only: a legitimate current holder's sessions are left alone by job id.
+// Every script a job runs in the guest is placed in a CGROUP that belongs to
+// the job, so everything it spawns — marked or not, in its session or in a
+// new one it made with setsid() — stays findable and killable as a group.
+// Sessions and markers are not containment: a child that calls setsid()
+// leaves its parent's session, and a marker only names the shell that
+// carried it. A cgroup follows every descendant.
+//
+// Mechanism, chosen by what the guest has, in this order:
+//   systemd   a transient scope unit per script (systemd-run --scope), the
+//             right form on a systemd guest (every Incus guest ProxyPilot
+//             provisions): the scope's cgroup is the containment, and
+//             `systemctl kill --kill-whom=all` is the reaper.
+//   cgroup2   a raw cgroup under the unified hierarchy (cgroup.kill).
+//   cgroup1   a raw cgroup under the pids controller (freeze-less kill loop).
+// If NONE is available the script prints CONTAINMENT:none to stderr, runs
+// nothing, and exits 97: the operation refuses rather than running under
+// weaker containment. There is no silent fallback to sessions.
+//
+// Cleanup (reapStaleWritersScript) targets OTHER jobs only: it reads the
+// units and cgroups recorded under RUN_DIR/<jobId>.*, kills each as a group,
+// waits, counts live survivors (zombies do not count), and removes what is
+// empty. The current job's own groups and everything outside them — the
+// application's own service lives in systemd's cgroup for its unit, never
+// in ours — are untouched. What remains alive is reported as
+// STALE_WRITERS:<n>, and a non-zero count is a recovery-required condition.
 export const CONTAINMENT_RUN_DIR = '/run/mock2-deploy';
+export const CONTAINMENT_UNAVAILABLE_RC = 97;
 const JOB_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
+// The cgroup roots, in preference order; tests point these at a temp tree.
+export const CGROUP_ROOTS = Object.freeze({ v2: '/sys/fs/cgroup', v1pids: '/sys/fs/cgroup/pids' });
 
-export function containedScript(jobId, body, { runDir = CONTAINMENT_RUN_DIR } = {}) {
+export function containedScript(jobId, body, { runDir = CONTAINMENT_RUN_DIR, cgroupV2Root = CGROUP_ROOTS.v2, cgroupV1Root = CGROUP_ROOTS.v1pids, allowSystemd = true } = {}) {
   const id = String(jobId || 'adhoc');
   if (!JOB_ID_RE.test(id)) throw new Error('job id must be a plain identifier');
-  if (!/^\/[A-Za-z0-9._\/-]+$/.test(runDir)) throw new Error('runDir must be an absolute path');
+  for (const pth of [runDir, cgroupV2Root, cgroupV1Root]) if (!/^\/[A-Za-z0-9._\/-]+$/.test(pth)) throw new Error('containment paths must be absolute');
   const b64 = Buffer.from(String(body), 'utf8').toString('base64');
   return [
     `: ${'mock2_deploy_marker'} job=${id}`,
-    `mkdir -p '${runDir}' 2>/dev/null || true`,
-    `T=$(mktemp '${runDir}/${id}.XXXXXX' 2>/dev/null || mktemp)`,
+    `RUN='${runDir}'; ID='${id}'`,
+    `mkdir -p "$RUN" 2>/dev/null || true`,
+    `T=$(mktemp "$RUN/$ID.XXXXXX" 2>/dev/null || mktemp)`,
     `printf '%s' '${b64}' | base64 -d > "$T"`,
-    // Under setsid the new shell is a session leader: $$ is the session id.
-    `if command -v setsid >/dev/null 2>&1; then`,
-    `  exec setsid sh -c 'echo $$ >> "$2"; : mock2_deploy_marker job=$3; . "$1"; rc=$?; rm -f "$1"; exit $rc' sh "$T" '${runDir}/${id}.sid' '${id}'`,
-    `else`,
-    `  echo $$ >> '${runDir}/${id}.sid'; . "$T"; rc=$?; rm -f "$T"; exit $rc`,
-    `fi`,
+    `N=$(date +%s%N 2>/dev/null || echo $$)`,
+    // systemd: a transient scope per script.
+    allowSystemd
+      // A probe scope first: a systemd that is present but cannot start a
+      // scope (no bus yet) falls through to a raw cgroup instead of failing
+      // the body with an unrelated error.
+      ? `if [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1 && systemd-run --scope --quiet --unit="mock2-deploy-probe-$$-$N" true >/dev/null 2>&1; then U="mock2-deploy-$ID-$N"; echo "$U.scope" >> "$RUN/$ID.units"; echo "CONTAINMENT:systemd $U.scope" >&2; exec systemd-run --scope --quiet --unit="$U" --property=KillMode=control-group sh -c ': mock2_deploy_marker job='"$ID"'; . "$1"; rc=$?; rm -f "$1"; exit $rc' sh "$T"; fi`
+      : ': no systemd path in this build',
+    // raw cgroup: v2 (cgroup.kill) first, then v1 pids.
+    `G=''; KIND=''`,
+    `if [ -f '${cgroupV2Root}/cgroup.controllers' ] && mkdir -p '${cgroupV2Root}/mock2-deploy/'"$ID" 2>/dev/null && echo $$ > '${cgroupV2Root}/mock2-deploy/'"$ID/cgroup.procs" 2>/dev/null; then G='${cgroupV2Root}/mock2-deploy/'"$ID"; KIND=cgroup2; fi`,
+    `if [ -z "$G" ] && [ -d '${cgroupV1Root}' ] && mkdir -p '${cgroupV1Root}/mock2-deploy/'"$ID" 2>/dev/null && echo $$ > '${cgroupV1Root}/mock2-deploy/'"$ID/cgroup.procs" 2>/dev/null; then G='${cgroupV1Root}/mock2-deploy/'"$ID"; KIND=cgroup1; fi`,
+    `if [ -z "$G" ]; then echo "CONTAINMENT:none" >&2; rm -f "$T"; exit ${CONTAINMENT_UNAVAILABLE_RC}; fi`,
+    `grep -qx "$G" "$RUN/$ID.cgroups" 2>/dev/null || echo "$G" >> "$RUN/$ID.cgroups"`,
+    `echo "CONTAINMENT:$KIND $G" >&2`,
+    `: mock2_deploy_marker job=$ID; . "$T"; rc=$?; rm -f "$T"; exit $rc`,
     '',
   ].join('\n');
 }
 
-// reapStaleWritersScript(currentJobId) → kills every session another job
-// recorded, then the legacy marker scripts that carry no job id (or another
-// one), waits, and reports survivors as `STALE_WRITERS:<n>`. Files whose
-// sessions are all gone are removed. The current job's own sessions and
-// anything outside these sessions are untouched.
+// parseContainment(stderr) → { kind, ref } | null from the CONTAINMENT line.
+export function parseContainment(stderr) {
+  const m = String(stderr || '').match(/^CONTAINMENT:(systemd|cgroup2|cgroup1|none)(?: (\S+))?/m);
+  return m ? { kind: m[1], ref: m[2] || null } : null;
+}
+
+// reapStaleWritersScript(currentJobId) → kills every group another job
+// recorded (scope units, cgroups), then the legacy marker scripts that carry
+// no job id or another one, waits, and reports live survivors as
+// `STALE_WRITERS:<n>`. Records whose groups are empty are removed.
 export function reapStaleWritersScript(currentJobId, { runDir = CONTAINMENT_RUN_DIR } = {}) {
   const id = String(currentJobId || 'adhoc');
   if (!JOB_ID_RE.test(id)) throw new Error('job id must be a plain identifier');
   if (!/^\/[A-Za-z0-9._\/-]+$/.test(runDir)) throw new Error('runDir must be an absolute path');
   return [
     `RUN='${runDir}'; CUR='${id}'; me=$$`,
-    'others() { for f in "$RUN"/*.sid; do [ -e "$f" ] || continue; b=$(basename "$f" .sid); [ "$b" = "$CUR" ] && continue; echo "$f"; done; }',
-    'for f in $(others); do for sid in $(cat "$f" 2>/dev/null); do [ -n "$sid" ] && [ "$sid" != "$me" ] && pkill -9 -s "$sid" 2>/dev/null || true; done; done',
-    // Legacy marker scripts from deploys that predate containment carry no job
-    // id; those of another job carry a different one. Never our own.
+    // A killed process nobody has reaped yet is a zombie, not a writer.
+    'alive() { st=$(sed -E "s/^[^)]*\\) //" /proc/$1/stat 2>/dev/null | cut -d" " -f1); [ -n "$st" ] && [ "$st" != "Z" ] && [ "$st" != "X" ]; }',
+    'others() { for f in "$RUN"/*."$1"; do [ -e "$f" ] || continue; b=$(basename "$f" ".$1"); [ "$b" = "$CUR" ] && continue; echo "$f"; done; }',
+    'live_in() { c=0; for p in $(cat "$1" 2>/dev/null); do [ "$p" = "$me" ] && continue; alive "$p" && c=$((c + 1)); done; echo $c; }',
+    // 1) systemd scopes of other jobs.
+    'for f in $(others units); do for u in $(cat "$f" 2>/dev/null); do systemctl kill --signal=KILL --kill-whom=all "$u" >/dev/null 2>&1 || true; done; done',
+    // 2) raw cgroups of other jobs: cgroup.kill where the kernel has it, a kill loop otherwise.
+    'for f in $(others cgroups); do for g in $(cat "$f" 2>/dev/null); do [ -d "$g" ] || continue; if [ -f "$g/cgroup.kill" ]; then echo 1 > "$g/cgroup.kill" 2>/dev/null || true; else for p in $(cat "$g/cgroup.procs" 2>/dev/null); do [ "$p" = "$me" ] || kill -9 "$p" 2>/dev/null || true; done; fi; done; done',
+    // 3) legacy marker scripts (pre-containment deploys) that are not ours.
     `for p in $(pgrep -f mock2_deploy_marker 2>/dev/null); do [ "$p" = "$me" ] && continue; c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null); case "$c" in *"job=$CUR"*) ;; *) kill -9 "$p" 2>/dev/null || true;; esac; done`,
     'sleep 1',
-    // A killed process that nobody has reaped yet is a zombie, not a writer.
-    'alive() { st=$(sed -E "s/^[^)]*\\) //" /proc/$1/stat 2>/dev/null | cut -d" " -f1); [ -n "$st" ] && [ "$st" != "Z" ] && [ "$st" != "X" ]; }',
     'n=0',
-    'for f in $(others); do left=0; for sid in $(cat "$f" 2>/dev/null); do [ -n "$sid" ] || continue; for p in $(pgrep -s "$sid" 2>/dev/null); do [ "$p" = "$me" ] && continue; alive "$p" && left=$((left + 1)); done; done; n=$((n + left)); [ "$left" -eq 0 ] && rm -f "$f"; done',
+    // Count what is still alive in each group; drop the records of empty ones.
+    'for f in $(others units); do left=0; for u in $(cat "$f" 2>/dev/null); do cg=$(systemctl show -p ControlGroup --value "$u" 2>/dev/null); if [ -n "$cg" ] && [ -f "/sys/fs/cgroup$cg/cgroup.procs" ]; then left=$((left + $(live_in "/sys/fs/cgroup$cg/cgroup.procs"))); elif systemctl is-active --quiet "$u" 2>/dev/null; then left=$((left + 1)); fi; done; n=$((n + left)); [ "$left" -eq 0 ] && rm -f "$f"; done',
+    'for f in $(others cgroups); do left=0; for g in $(cat "$f" 2>/dev/null); do [ -d "$g" ] || continue; l=$(live_in "$g/cgroup.procs"); left=$((left + l)); [ "$l" -eq 0 ] && rmdir "$g" 2>/dev/null; done; n=$((n + left)); [ "$left" -eq 0 ] && rm -f "$f"; done',
     `for p in $(pgrep -f mock2_deploy_marker 2>/dev/null); do [ "$p" = "$me" ] && continue; alive "$p" || continue; c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null); case "$c" in *"job=$CUR"*) ;; *) n=$((n + 1));; esac; done`,
     'echo "STALE_WRITERS:$n"',
     '',

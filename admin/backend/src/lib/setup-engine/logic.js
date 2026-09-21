@@ -92,6 +92,7 @@ export const CREDENTIAL_USE_OUTCOMES = Object.freeze({
   no_verification_credentials: 'no_verification_credentials', // no review-account login on this platform for this app
   unreachable: 'unreachable',                         // the app did not answer the sign-in or the settings read
   not_applicable: 'not_applicable',                   // no data guard: the app has no protected credential at all
+  superseded: 'superseded',                           // the guest no longer runs the revision this check was queued for
 });
 
 export const CONTAINER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$/;

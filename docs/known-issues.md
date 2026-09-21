@@ -359,7 +359,12 @@ to do it by hand.
 
 ## The container lock is in-process, and a backend restart can leave an app stopped
 
-**Since:** 2026-09 (PR #601, immediate repairs).
+**Since:** 2026-09 (PR #601, immediate repairs). **Closed** by the setup
+engine (gate two): the lock is the persistent `setup_locks` lease, the
+deploy is a saved job with checkpoints, and a restart mid-deploy is
+reconciled to a resume, a recovery or a recorded recovery-required state —
+`docs/features/setup-engine.md`. The text below describes the state before
+it, kept for the history of the record.
 
 `mock2/container-lock.js` serializes deploys, the two platform restores
 (`restore_project_db`, `restore_snapshot`) and the retry path's secret mint

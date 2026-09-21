@@ -13,7 +13,8 @@
 // job row), nowMs, log.
 //
 // Containment (guest-probes): before a deploy or a recovery touches the
-// guest, every session another job recorded is killed and counted; a survivor
+// guest, every group (scope unit or cgroup) another job recorded is killed
+// and counted, as are legacy marker scripts; a survivor
 // is a recovery-required condition — the job ends there, the lease is KEPT
 // and flagged stale so every conflicting operation is refused with the
 // recorded reason, and nothing is silently cleared.
@@ -32,12 +33,14 @@ import {
   validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, parseJson, sanitizeReason, parseOwner,
   FencedError, CancelledError, verificationState, CREDENTIAL_USE_OUTCOMES,
 } from './logic.js';
-import { runDeployOperation, PreviousWriterAliveError } from './deploy-op.js';
+import { runDeployOperation, PreviousWriterAliveError, ContainmentUnavailableError } from './deploy-op.js';
 import {
   unitStatusScript, parseUnitStatus, startUnitScript, parseStartUnit, portProbeScript, parsePortProbe,
   healthScript, parseHealth, activeKeyScript, credentialProbeScript, credentialVerdict, verificationFromObservations, DEFAULT_UNIT,
   reapStaleWritersScript, parseStaleWriters, credentialUseScript, interpretCredentialUse, CONTAINMENT_RUN_DIR,
 } from './guest-probes.js';
+
+const FOLLOW_UP_RETRY_MS = 30_000;
 
 export { FencedError, CancelledError };
 
@@ -113,15 +116,26 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
 
   const lockNow = nowMs();
   let lockEpoch;
+  // A follow-up (a verification or recovery queued for another job) is an
+  // OBLIGATION: when the app is busy it goes back to the queue with a
+  // not-before, never to a terminal 'deferred'.
+  const isFollowUp = !!p.origin?.jobId;
+  const busy = (holder, operation) => {
+    if (isFollowUp) {
+      requeueJob(db, { id: job.id, by: owner, reason: `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; this follow-up waits and retries`, notBeforeMs: nowMs() + FOLLOW_UP_RETRY_MS, nowMs: nowMs() });
+      return { status: 'requeued', outcome: 'lock_held', verification: null };
+    }
+    return fin('deferred', 'lock_held', `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; retry when it finishes`);
+  };
   const got = acquireLock(db, { app: job.app, owner, operation: job.kind, jobId: job.id, leaseMs: LEASE_MS, nowMs: lockNow });
   if (got.ok) {
     lockEpoch = Number(got.lock.epoch);
   } else if (got.reason === 'stale') {
     const t = takeoverLock(db, { app: job.app, by: owner, operation: job.kind, jobId: job.id, reason: `taking over ${got.operation} lease of ${got.holder} (expired ${got.expiredAt}) to run ${job.kind}`, leaseMs: LEASE_MS, nowMs: lockNow });
-    if (!t.ok) return fin('deferred', 'lock_held', `the app's lease is held by ${t.holder}; retry when it finishes`);
+    if (!t.ok) return busy(t.holder, null);
     lockEpoch = Number(t.lock.epoch);
   } else {
-    return fin('deferred', 'lock_held', `the app's lease is held by ${got.holder} (${got.operation}); retry when it finishes`);
+    return busy(got.holder, got.operation);
   }
 
   const obs = { unit: null, port: null, health: null, credential: null, credentialUse: null };
@@ -139,7 +153,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
 
   try {
     // Containment before anything that touches the guest: other jobs'
-    // sessions and legacy marker scripts are killed and counted. A survivor
+    // groups and legacy marker scripts are killed and counted. A survivor
     // is recorded and the job stops here with the lease kept.
     if (job.kind === 'deploy' || job.kind === 'recover_app') {
       const script = reapStaleWritersScript(job.id, { runDir });
@@ -150,7 +164,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         const still = parseStaleWriters(again.stdout);
         if (still == null || still > 0) throw new PreviousWriterAliveError(container, still ?? left);
       }
-      event('step', left == null ? 'stale-writer count unavailable; proceeding' : `${left} stale session(s)/script(s) of other jobs signalled; none remain`, null, 'reap_previous_writer');
+      event('step', left == null ? 'stale-writer count unavailable; proceeding' : `${left} stale process group(s)/script(s) of other jobs signalled; none remain`, null, 'reap_previous_writer');
     }
 
     if (job.kind === 'deploy') {
@@ -167,16 +181,17 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       if (late) event('cancel_declined', `cancel by ${late.by} arrived after the application had been stopped; the deploy finished bringing it up instead of leaving it down`);
       const { verification, recovery, ...rest } = result;
       const pub = { ...rest, verification: verification ? { state: verification.state, label: verification.label, failedAt: verification.failedAt || null, next: verification.next || null, pending: verification.pending || [] } : null };
+      const queueFollowUp = (steps, rung, reason, revision) => createJob(db, {
+        kind: 'verify_app', app: job.app,
+        plan: { steps, params: { container, webPort, unit, environmentFile: envFile, guard: p.guard || null, runDir, origin: { jobId: job.id, kind: 'deploy', rung, revision: revision || null } } },
+        configRefs: { origin: { jobId: job.id }, recovery: recovery || null },
+        requestedBy: 'deploy', via: 'system', reason, nowMs: nowMs(),
+      });
       if (result.ok) {
         // The obligation to verify is persisted BEFORE the job reports done.
         let verificationJobId = null;
         if (result.followUp && !result.skipped) {
-          const follow = createJob(db, {
-            kind: 'verify_app', app: job.app,
-            plan: { steps: result.followUp.steps, params: { container, webPort, unit, environmentFile: envFile, guard: p.guard || null, runDir, origin: { jobId: job.id, kind: 'deploy', rung: result.followUp.rung } } },
-            configRefs: { origin: { jobId: job.id }, recovery: recovery || null },
-            requestedBy: 'deploy', via: 'system', reason: `application-owned credential check for deploy ${job.id}`, nowMs: nowMs(),
-          });
+          const follow = queueFollowUp(result.followUp.steps, result.followUp.rung, `application-owned credential check for deploy ${job.id}`, result.followUp.revision);
           verificationJobId = follow.id;
           pub.verificationJobId = follow.id;
         }
@@ -189,9 +204,19 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         );
         return { ...r, result, verificationJobId };
       }
-      recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, failed_step: result.step, execution: 'failed' }, nowMs: nowMs() });
-      const r = fin('failed', `failed at ${result.step}`, result.error, verification || null);
-      return { ...r, result };
+      // A failure after the disruptive step left SOMETHING running (the
+      // restart was attempted, or the new unit started and failed health):
+      // what that is must be verified, not assumed — a post-failure
+      // verification is queued so the record ends with a checked state.
+      let verificationJobId = null;
+      if (result.restartAttempted || result.unitStarted) {
+        const follow = queueFollowUp(['unit_status', 'probe_port', 'health_check', 'verify_credential', 'verify_credential_use'], 'post_failure', `verify what runs in ${container} after deploy ${job.id} failed at ${result.step}`, null);
+        verificationJobId = follow.id;
+        pub.verificationJobId = follow.id;
+      }
+      recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, failed_step: result.step, execution: 'failed', verification_job_id: verificationJobId }, nowMs: nowMs() });
+      const r = fin('failed', `failed at ${result.step}`, `${result.error}${verificationJobId ? ` (post-failure verification queued: job ${verificationJobId})` : ''}`, verification || null);
+      return { ...r, result, verificationJobId };
     }
 
     for (const step of steps) {
@@ -248,6 +273,23 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         case 'verify_credential_use': {
           // The application-owned rung. The login is the host's to supply
           // (reviewLogin), used to build the script in memory only.
+          // First: is the guest still running the revision this check was
+          // queued for? A newer deploy in between makes the answer about a
+          // different application — recorded as superseded, never certified.
+          const want = p.origin?.revision;
+          if (want && (want.commit || want.buildId)) {
+            const rev = await guest('read_revision', `git -C '${String(p.appDir || '/srv/app')}' rev-parse HEAD 2>/dev/null | sed 's/^/REV_COMMIT:/'; [ -f '${String(p.appDir || '/srv/app')}/public/build-id.txt' ] && sed 's/^/REV_BUILD:/' '${String(p.appDir || '/srv/app')}/public/build-id.txt' | head -1\n`, { timeoutMs: 15_000 });
+            const commit = (String(rev.stdout || '').match(/^REV_COMMIT:([0-9a-f]{40})/m) || [])[1] || null;
+            const build = (String(rev.stdout || '').match(/^REV_BUILD:(\S+)/m) || [])[1] || null;
+            const mismatch = (want.commit && commit && want.commit !== commit) || (want.buildId && build && want.buildId !== build);
+            if (mismatch) {
+              obs.credentialUse = { verified: null, outcome: CREDENTIAL_USE_OUTCOMES.superseded, detail: `the guest runs ${commit ? commit.slice(0, 10) : '?'}/${build || '?'}, not the revision this check was queued for (${want.commit ? want.commit.slice(0, 10) : '?'}/${want.buildId || '?'}); that revision was never verified` };
+              event('step', `${obs.credentialUse.outcome}: ${obs.credentialUse.detail}`, { outcome: 'superseded' }, 'verify_credential_use');
+              const originJob = p.origin?.jobId && getJob(db, p.origin.jobId);
+              if (originJob) recordVerificationRung(db, { id: p.origin.jobId, rung: p.origin.rung === 'post_failure' ? 'post_failure_credential_use' : 'credential_use_verified', value: null, detail: `superseded: ${obs.credentialUse.detail}`, by: owner, nowMs: nowMs() });
+              break;
+            }
+          }
           if (!p.guard) {
             obs.credentialUse = { verified: null, outcome: CREDENTIAL_USE_OUTCOMES.not_applicable, detail: 'not applicable: no data guard, nothing to read back' };
           } else {
@@ -266,7 +308,10 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
           if (origin && getJob(db, origin)) {
             const originVerification = parseJson(getJob(db, origin).verification_json) || {};
             const state = verificationState({ ...(originVerification.facts || {}), credentialUseVerified: obs.credentialUse.verified, pendingRungs: [], deferredReason: obs.credentialUse.verified == null ? obs.credentialUse.detail : null }).state;
-            recordVerificationRung(db, { id: origin, rung: 'credential_use_verified', value: obs.credentialUse.verified, detail: `${obs.credentialUse.outcome}: ${obs.credentialUse.detail}`, by: owner, state, nowMs: nowMs() });
+            const rungName = p.origin?.rung === 'post_failure' ? 'post_failure_credential_use' : 'credential_use_verified';
+            recordVerificationRung(db, { id: origin, rung: rungName, value: obs.credentialUse.verified, detail: `${obs.credentialUse.outcome}: ${obs.credentialUse.detail}`, by: owner, state: rungName === 'credential_use_verified' ? state : null, nowMs: nowMs() });
+            // A recovery's follow-up also lands on the deploy it recovered.
+            for (const alsoId of (Array.isArray(p.origin?.also) ? p.origin.also : [])) if (alsoId !== origin && getJob(db, alsoId)) recordVerificationRung(db, { id: alsoId, rung: rungName, value: obs.credentialUse.verified, detail: `${obs.credentialUse.outcome}: ${obs.credentialUse.detail} (after recovery job ${origin})`, by: owner, nowMs: nowMs() });
           }
           break;
         }
@@ -280,18 +325,36 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       ? { state: obs.credentialUse.verified === true ? 'credential_use_verified' : obs.credentialUse.verified === false ? 'recovery_required' : 'app_healthy', outcome: obs.credentialUse.outcome, label: obs.credentialUse.detail, failedAt: obs.credentialUse.verified === false ? 'credential_use_verified' : null, next: obs.credentialUse.verified === false ? 'the stored rows decrypt under the configured key but the running application cannot read the credential: restart the unit from the current unit file and re-verify; if it persists, the process is not loading the configured key' : null, observations: { credentialUse: obs.credentialUse } }
       : verificationFromObservations(obs);
     const status = verification.state === 'recovery_required' ? 'recovery_required' : 'succeeded';
-    const result = fin(status, verification.outcome || verification.state, `${container}: ${verification.label}${verification.deferredReason ? ` (${verification.deferredReason})` : ''}`, verification);
+    // A recovery that brought the app up still owes the application-owned
+    // check the interrupted deploy never reached: queued here, before the
+    // recovery reports done, landing on the recovery AND on that deploy.
+    let verificationJobId = null;
+    if (job.kind === 'recover_app' && status === 'succeeded' && p.guard) {
+      const follow = createJob(db, {
+        kind: 'verify_app', app: job.app,
+        plan: { steps: ['verify_credential_use'], params: { container, webPort, unit, environmentFile: envFile, guard: p.guard, runDir, appDir: p.appDir || undefined, origin: { jobId: job.id, kind: 'recover_app', rung: 'credential_use_verified', revision: null, also: p.origin?.jobId ? [p.origin.jobId] : [] } } },
+        configRefs: { origin: { jobId: job.id } }, requestedBy: 'recovery', via: 'system', reason: `application-owned credential check after recovery ${job.id}${p.origin?.jobId ? ` of deploy ${p.origin.jobId}` : ''}`, nowMs: nowMs(),
+      });
+      verificationJobId = follow.id;
+      recordProgress(db, { id: job.id, owner, epoch, progress: { verification_job_id: follow.id }, nowMs: nowMs() });
+    }
+    const result = fin(status, verification.outcome || verification.state, `${container}: ${verification.label}${verification.deferredReason ? ` (${verification.deferredReason})` : ''}${verificationJobId ? ` (application-owned check pending → job ${verificationJobId})` : ''}`, verification);
     noteOrigin(db, p, job, result, nowMs());
-    return result;
+    return { ...result, verificationJobId };
   } catch (e) {
     if (e instanceof FencedError || e?.code === 'FENCED') { log('fenced', job.id); return { status: 'fenced', outcome: null, verification: null }; }
     if (e instanceof CancelledError || e?.code === 'CANCELLED') return fin('cancelled', 'cancelled', e.message, null);
+    if (e instanceof ContainmentUnavailableError || e?.code === 'CONTAINMENT_UNAVAILABLE') {
+      // Nothing ran in the guest; the lease is released (nothing to protect)
+      // and the job records exactly what the guest lacks.
+      return fin('recovery_required', 'containment_unavailable', e.message, { state: 'recovery_required', failedAt: 'containment', next: `give ${container} a process-containment mechanism: a running systemd with systemd-run (the provisioned guest image has it), or a writable cgroup tree; then retry` });
+    }
     if (e?.code === 'PREVIOUS_WRITER_ALIVE') {
       // Recorded, and the lease is KEPT and flagged: every conflicting
       // operation is refused with this reason until an operator (or a
       // later reap that succeeds) resolves it.
       keepLease = true;
-      const r = fin('recovery_required', 'previous_writer_alive', `${e.message}; the app's lease is kept and flagged stale — stop the surviving processes in the guest (sessions listed under ${runDir}) and retry`, { state: 'recovery_required', failedAt: 'containment', next: `stop the surviving deploy processes in ${container} (kill the sessions recorded under ${runDir}, never the application unit) and retry the operation` });
+      const r = fin('recovery_required', 'previous_writer_alive', `${e.message}; the app's lease is kept and flagged stale — stop the surviving processes in the guest (the scope units and cgroups recorded under ${runDir}) and retry`, { state: 'recovery_required', failedAt: 'containment', next: `stop the surviving deploy processes in ${container} (the scope units / cgroups recorded under ${runDir}: systemctl kill --kill-whom=all <scope>, or echo 1 > <cgroup>/cgroup.kill; never the application unit) and retry the operation` });
       markLockStale(db, { app: job.app, nowMs: nowMs(), recoveryJobId: job.id });
       return r;
     }

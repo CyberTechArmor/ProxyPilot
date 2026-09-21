@@ -110,10 +110,15 @@ export function liveRunners(db, { nowMs = Date.now(), maxAgeMs = 30_000 } = {}) 
 // requeueJob(db, { id, by, reason }) — a running job whose owner is gone goes
 // back to the queue for a new owner (a claim bumps the epoch). Unfenced by
 // design: it is the reconciler's write about a dead owner.
-export function requeueJob(db, { id, by, reason, nowMs = Date.now() }) {
+export function requeueJob(db, { id, by, reason, notBeforeMs = null, nowMs = Date.now() }) {
   const now = iso(nowMs);
-  const r = db.prepare(`UPDATE setup_jobs SET status = 'queued', owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'running'`).run(now, String(id));
-  if (r.changes) insertEvent(db, { jobId: id, at: now, kind: 'requeued', message: reason, data: { by } });
+  const row = getJob(db, id);
+  if (!row) return 0;
+  const prog = { ...(parseJson(row.progress_json) || {}) };
+  if (notBeforeMs) prog.not_before = iso(notBeforeMs); else delete prog.not_before;
+  prog.requeues = (Number(prog.requeues) || 0) + 1;
+  const r = db.prepare(`UPDATE setup_jobs SET status = 'queued', owner = NULL, lease_expires_at = NULL, progress_json = ?, updated_at = ? WHERE id = ? AND status = 'running'`).run(JSON.stringify(prog), now, String(id));
+  if (r.changes) insertEvent(db, { jobId: id, at: now, kind: 'requeued', message: reason, data: { by, not_before: prog.not_before || null, requeues: prog.requeues } });
   return r.changes;
 }
 
@@ -272,12 +277,17 @@ export function claimNextJob(db, { owner, kinds, leaseMs = DEFAULT_LEASE_MS, now
   const marks = kinds.map(() => '?').join(', ');
   db.exec('BEGIN IMMEDIATE');
   try {
-    const next = db.prepare(`SELECT id, epoch FROM setup_jobs WHERE status = 'queued' AND kind IN (${marks}) ORDER BY created_at, rowid LIMIT 1`).get(...kinds);
+    // A requeued follow-up may carry progress.not_before; it waits its turn.
+    const candidates = db.prepare(`SELECT id, epoch, progress_json FROM setup_jobs WHERE status = 'queued' AND kind IN (${marks}) ORDER BY created_at, rowid LIMIT 50`).all(...kinds);
+    const next = candidates.find((c) => { const nb = (parseJson(c.progress_json) || {}).not_before; return !nb || Date.parse(nb) <= nowMs; });
     if (!next) { db.exec('COMMIT'); return null; }
     const now = iso(nowMs);
     const r = db.prepare(`UPDATE setup_jobs SET status = 'running', owner = ?, epoch = epoch + 1, lease_expires_at = ?, started_at = COALESCE(started_at, ?), updated_at = ? WHERE id = ? AND status = 'queued' AND epoch = ?`)
       .run(owner, leaseExpiry(nowMs, leaseMs), now, now, next.id, next.epoch);
     if (!r.changes) { db.exec('ROLLBACK'); return null; }
+    // The wait is over: the not-before is consumed with the claim.
+    const prog = parseJson(next.progress_json) || {};
+    if (prog.not_before) { delete prog.not_before; db.prepare(`UPDATE setup_jobs SET progress_json = ? WHERE id = ?`).run(JSON.stringify(prog), next.id); }
     insertEvent(db, { jobId: next.id, at: now, kind: 'claimed', data: { owner, epoch: next.epoch + 1 } });
     db.exec('COMMIT');
     return getJob(db, next.id);

@@ -1124,8 +1124,10 @@ DATABASE_PATH=/data/db/proxypilot.db
 # unavailable, and the dashboard container never executes one itself.
 # backend-allowed — the legacy / development executor: the backend runs
 # queued jobs in its own (privileged) process when no runner is live.
-# docs/features/setup-engine.md § "Who executes".
-SETUP_EXECUTOR_POLICY=runner-required
+# docs/features/setup-engine.md § "Who executes". Written as backend-allowed
+# here and switched to runner-required by install.sh once the runner unit is
+# verified active on this host (see "Setup runner" below).
+SETUP_EXECUTOR_POLICY=backend-allowed
 
 # Caddy Configuration Path
 CADDY_SITES_DIR=/etc/caddy/sites
@@ -1678,7 +1680,24 @@ EOF
             systemctl daemon-reload
             systemctl enable proxypilot-setup-runner.service 2>/dev/null || true
             systemctl restart proxypilot-setup-runner.service 2>/dev/null || true
-            log_success "Setup runner installed (proxypilot-setup-runner.service)"
+            # The executor policy follows the EVIDENCE: runner-required only when
+            # the unit is active and the runner can open the database. Otherwise
+            # the installation keeps the legacy in-process executor and says so.
+            local runner_ok=false i
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+                if systemctl is-active --quiet proxypilot-setup-runner.service 2>/dev/null; then runner_ok=true; break; fi
+                sleep 1
+            done
+            if [ "$runner_ok" = true ] && ! /usr/local/bin/proxypilot setup-runner status --install-dir "$INSTALL_DIR" --json >/dev/null 2>&1; then
+                runner_ok=false
+            fi
+            if [ "$runner_ok" = true ]; then
+                sed -i 's/^SETUP_EXECUTOR_POLICY=.*/SETUP_EXECUTOR_POLICY=runner-required/' "${INSTALL_DIR}/.env"
+                log_success "Setup runner active — SETUP_EXECUTOR_POLICY=runner-required (deploys run in proxypilot-setup-runner.service)"
+            else
+                log_error "Setup runner did NOT start or cannot open the database — SETUP_EXECUTOR_POLICY stays backend-allowed (the dashboard container executes deploys itself)."
+                log_error "Fix: journalctl -u proxypilot-setup-runner; then set SETUP_EXECUTOR_POLICY=runner-required in ${INSTALL_DIR}/.env and restart ProxyPilot."
+            fi
         fi
 
         # Emit firewall systemd units and run the initial reconcile.

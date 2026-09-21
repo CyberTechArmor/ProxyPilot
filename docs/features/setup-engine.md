@@ -128,7 +128,7 @@ auto-cleared.
 
 The application deploy is ONE operation, `lib/setup-engine/deploy-op.js`,
 run by ONE executor, `lib/setup-engine/executor.js`:
-reap every session another job left in the guest and confirm none survive →
+reap every process group another job left in the guest and confirm none survive →
 install / build under the running old application (install skipped on an
 unchanged manifest; only the working tree and `dist/` change, which the
 running process does not reload) → the e2e browser and the PWA build stamp
@@ -223,29 +223,105 @@ outputs; a cancel that arrives after the stop is not honoured mid-way: the
 deploy finishes bringing the app up and records `cancel_declined`.
 
 **Containment of every writer** (`guest-probes.js` `containedScript`,
-`reapStaleWritersScript`). The lease expiring is not proof the previous
-writer's guest commands stopped, and a marker on the parent shell says
-nothing about the children it spawned. So every script the deploy runs in
-the guest is wrapped: it runs as its **own session** (`setsid`) under the
-job's id, and the session id is recorded in `/run/mock2-deploy/<job>.sid`.
-Everything that script spawns — `npm`'s children, a build's helpers, an
-unmarked background process it left behind — shares that session id. Before
-a deploy or a recovery touches the guest (after it holds the lease), the
-executor kills every session recorded by **another** job (`pkill -9 -s`),
-then the legacy marker scripts that carry no job id, waits, and counts live
-survivors (zombies awaiting reap do not count); it tries once more and, if
-any remain, ends the job as `recovery_required` (`previous_writer_alive`)
-with the **lease kept and flagged stale**, so every conflicting operation is
-refused with that reason until the survivors are gone — nothing is silently
-cleared. The current job's own sessions and everything outside these
-sessions are untouched; the application's service runs in systemd's own
-cgroup and session and is never a target. The suite proves this with real
-processes: a contained marked shell spawns an unmarked child that outlives
-it and keeps writing; the reap by session kills it, the file stops growing,
-and a legitimate current holder's session survives. Limit: a process that
-calls `setsid` itself (a double-forking daemon) leaves the session and is
-outside this containment; the writer inventory in
-`docs/features/immediate-repairs.md` still applies to operator shells.
+`reapStaleWritersScript`; `setup-deploy-closeout.test.js`). The lease
+expiring is not proof the previous writer's guest commands stopped, a marker
+on the parent shell says nothing about the children it spawned, and a
+session is not a boundary either: a child that calls `setsid()` (a
+double-forking daemon, a build helper that detaches) leaves its parent's
+session and is invisible to session-based cleanup. So every script the
+deploy runs in the guest is placed in a **cgroup that belongs to the job**,
+chosen by what the guest has, in this order:
+
+| Mechanism | Where | How it is reaped |
+| --- | --- | --- |
+| `systemd` — a transient scope unit per script (`systemd-run --scope --unit=mock2-deploy-<job>-<n>`, `KillMode=control-group`) | a guest with a running systemd: every Incus guest ProxyPilot provisions | `systemctl kill --signal=KILL --kill-whom=all <scope>` |
+| `cgroup2` — a raw cgroup `<root>/mock2-deploy/<job>` under the unified hierarchy | a guest with a writable cgroup v2 tree and no systemd | `cgroup.kill` (kernel ≥ 5.14): every member, atomically |
+| `cgroup1` — a raw cgroup under the `pids` controller | a guest with only a v1 tree | a `kill -9` loop over `cgroup.procs`, then a recount |
+
+A cgroup follows every descendant whatever session or process group it
+makes for itself. The wrapper records what it used under
+`/run/mock2-deploy/<job>.units` (scopes) or `<job>.cgroups` (paths) and
+prints `CONTAINMENT:<kind> <ref>` on stderr, which the deploy records on the
+job (`recovery.containment`) and as a `containment` event. **If the guest
+has none of the three, the wrapper prints `CONTAINMENT:none`, runs nothing,
+and exits 97; the deploy ends `recovery_required` / `containment_unavailable`
+before any body has run, with the lease released and the fix named. There
+is no fallback to sessions or markers: the operation refuses rather than
+run under weaker containment.** (A body's own exit 97 under a recorded
+mechanism is an ordinary failure, not a refusal.)
+
+Before a deploy or a recovery touches the guest (after it holds the lease),
+the executor's reap kills every group recorded by **another** job, then the
+legacy marker scripts that carry no job id (pre-containment deploys), waits
+one second, and counts live survivors per group (zombies awaiting reap do
+not count); records whose groups are empty are removed. It tries once more
+and, if any remain, ends the job as `recovery_required`
+(`previous_writer_alive`) with the **lease kept and flagged stale**, so every
+conflicting operation is refused with that reason until the survivors are
+gone — nothing is silently cleared. The current job's own groups and
+everything outside any job group are untouched: the application's service
+runs in systemd's cgroup for its unit and is never a target, and neither is
+an operator's shell.
+
+The guarantee, exactly: *every process started by a deploy script of a job
+that is not the current one — marked or not, in any session — is signalled
+as a group at the next takeover, and the takeover proceeds only when none of
+them is alive.* The regression (`setup-deploy-closeout.test.js`, real
+processes) does what the words say: a contained script spawns a child with
+`setsid` that is its own session leader, outlives its parent and keeps
+writing to a file; `pgrep -s <parent session>` does not find it; the reap
+under another job id kills it through the cgroup, the file stops growing,
+the empty cgroup and its record are removed, a process outside any job group
+(the application service's stand-in) and the current job's own contained
+holder are alive afterwards, and a second reap reports zero. It runs on
+every raw mechanism the host offers (in this sandbox: cgroup v2 at
+`/sys/fs/cgroup/unified` with `cgroup.kill`, and cgroup v1 `pids`); the
+systemd scope form is the same cgroup with systemd as its manager and is
+host acceptance, not sandbox evidence.
+
+Limits: (1) the reap is a takeover-time action, not a supervisor — between
+two deploys a stale writer runs until the next one reaps it (the lease and
+the recorded condition are what stop the *engine* from racing it);
+(2) `cgroup1` has no atomic kill: a process that forks between the listing
+and the signal is caught by the recount and reported as a survivor, never
+assumed dead; (3) only the deploy operation's scripts are contained —
+the executor's verification and recovery probes are single short commands
+with timeouts that start nothing long-lived, and `start_unit` starts the
+application under its own unit's cgroup, which is where it belongs;
+(4) processes an operator starts by hand in the guest are outside it, as
+the writer inventory in `docs/features/immediate-repairs.md` says.
+
+**Verification is an obligation, and only of the revision it was queued
+for.** The follow-up `verify_app` job carries `origin.revision` (the source
+commit and the build id the deploy stamped). Before the application-owned
+check runs, the executor reads what the guest runs (`git rev-parse HEAD`,
+`public/build-id.txt`); if either differs, the outcome is `superseded`
+(rung value `null`, never `true`): that deploy's revision was never
+verified, and the check does not run against something else. A newer deploy
+submitted while an older deploy's follow-up is still queued does **not**
+cancel it: the follow-up is an obligation, and it decides at run time — in
+the natural order it runs first (it is older) and certifies the older
+revision before the newer deploy stops anything; if the newer deploy ran
+first it finds the new build id and records `superseded`; and if the newer
+deploy failed before changing anything (install, build), the older revision
+still runs and is certified rather than thrown away. A follow-up that meets
+a held lease (a restore in
+progress) is **requeued** with a not-before of 30 s (`progress.not_before`,
+`requeues` counted, a `requeued` event) and the claim skips it until due —
+it is never finished as `deferred`; only a job that is not a follow-up
+(`probe`) still ends `deferred` on a held lease. A deploy that **fails
+after the stop** (the restart was attempted, or the new unit started and
+failed health) queues a post-failure `verify_app` (unit, port, health,
+credential, application-owned check; `origin.rung: post_failure`, no
+revision claim) and names it in its reason; what the guest runs after the
+failure is checked and lands on the failed record as
+`post_failure_credential_use`, and the execution verdict stays `failed`.
+A **recovery** (`recover_app`) that brought an interrupted deploy's app up
+owes the same check the deploy never reached: on success with a data guard
+it queues a `verify_credential_use` follow-up before it reports done
+(`origin.also` names the recovered deploy), and the rung lands on the
+recovery and on that deploy's record; the deploy's own verdict
+(`recovery_required`) does not change.
 
 ## Who executes: the installation policy
 
@@ -254,7 +330,7 @@ at boot (`logic.js executorPolicy`), never from a request:
 
 | Policy | No live runner | Live runner |
 | --- | --- | --- |
-| `runner-required` (written by `install.sh` and retro-fitted once by `update.sh` after the unit is installed) | the submission is **queued** and reported unavailable (`step: runner_unavailable`, HTTP 202 with a warning on the submission endpoint); nothing runs in the backend | the runner executes |
+| `runner-required` (what `install.sh` / `update.sh` set **only after** the runner unit is active and `proxypilot setup-runner status --json` opened the database; see below) | the submission is **queued** and reported unavailable (`step: runner_unavailable`, HTTP 202 with a warning on the submission endpoint); nothing runs in the backend | the runner executes |
 | `backend-allowed` (the legacy / development executor; the default when the variable is absent, i.e. a checkout with no `.env`) | the backend claims and executes queued runner jobs in its own process — on submission, on boot and every 30 s — with the **same** executor, record and locks; owner `backend@…` | the runner executes (a live runner always wins) |
 
 An unknown value reads as `runner-required` (the safe reading). No request
@@ -263,6 +339,27 @@ parameter, header or MCP argument can enable the in-process executor: the
 store's environment only. The two modes share `lib/setup-engine/executor.js`
 and the container lock; a restore submitted while either executor holds
 the app is refused the same way.
+
+**How the policy is set, and on what evidence.** `install.sh` writes
+`SETUP_EXECUTOR_POLICY=backend-allowed` into the new `.env`, installs and
+starts `proxypilot-setup-runner.service`, waits up to 10 s for the unit to
+be active, then runs `proxypilot setup-runner status --install-dir … --json`
+(root, opens the engine database). Only when both succeed does it rewrite
+the line to `runner-required` and log the success; otherwise it logs an
+**error** naming the fix (`journalctl -u proxypilot-setup-runner`, then set
+the line by hand and restart) and the installation keeps executing deploys
+in the container — visibly, never silently. `update.sh`
+(`install_setup_runner`) does the same on every update: it appends
+`runner-required` only on the same evidence, and when the runner is not
+there it warns in red — and warns again, differently, when the `.env`
+already says `runner-required`, because every deploy is then queueing. At
+boot under `runner-required` the backend logs the policy and, from 60 s on
+and every five minutes while no runner has a fresh heartbeat, warns
+`policy runner-required but no host runner heartbeat: N queued job(s)
+wait` with the `systemctl status` / `journalctl` commands; it never drains
+the queue itself under that policy. A queued deploy is reported to its
+caller as `step: runner_unavailable` (HTTP 202 with a warning on the
+submission endpoint) and appears in `GET /api/setup/jobs`.
 
 ## The runner
 
@@ -326,8 +423,8 @@ the lock itself already binds every MCP mutation that goes through
   writes rows it reads. A request cannot make it run anything but its fixed
   scripts and the guest's own contract commands inside that guest.
 - What the deployment slice REMOVED from the container's path: on a
-  `runner-required` host (every install.sh / update.sh installation from
-  this version on), the deploy's guest commands, the secret mint, the unit
+  `runner-required` host (what install.sh / update.sh set once the runner
+  proved it starts and opens the database), the deploy's guest commands, the secret mint, the unit
   swap, the recovery and every verification — the application-owned
   credential check included — never run in the backend container: they run
   in the runner, and with no runner they wait. Only a `backend-allowed`
@@ -351,7 +448,49 @@ the lock itself already binds every MCP mutation that goes through
   units in guests, and the runner needs no request-file exchange because it
   reads the same database.
 
+## Operating it: restrictions and recovery steps
+
+What an operator may see on `GET /api/setup/jobs` (or the runner's
+journal), and what to do. Every step below is reversible or read-only
+except where it says so; none needs a secret on a command line.
+
+| Record | Meaning | What to do |
+| --- | --- | --- |
+| deploy `recovery_required` / `containment_unavailable` | the guest offers no containment (no running systemd with `systemd-run`, no writable cgroup tree); **nothing ran**, the lease was released | fix the guest (the provisioned image has systemd; a hand-built guest may not), then retry the job (`POST /api/setup/jobs/:id/retry`) |
+| deploy or recovery `recovery_required` / `previous_writer_alive`, lease `stale_since` set | a previous job's processes survived two kills; the lease is kept and flagged; every deploy / restore / mint on this app is refused with this reason | in the guest: `cat /run/mock2-deploy/*.units *.cgroups`, then `systemctl kill --signal=KILL --kill-whom=all <scope>` or `echo 1 > <cgroup>/cgroup.kill` (never the application unit); retry the job — its reap recounts and, at zero, proceeds and releases the flag |
+| `verify_app` outcome `superseded` (rung value `null`) | a newer revision was running when the check came due (a newer deploy ran first); the older revision was never certified | nothing: the newer deploy carries its own follow-up; an app that never reaches `credential_use_verified` on any record has a real problem in that record's reason |
+| `verify_app` queued with `progress.not_before` and `requeues` | the app's lease was held (a restore) when the check came due; it retries every 30 s | nothing, unless the lease is stale (then the runner's reconcile records that and the check follows) |
+| deploy `failed` with "post-failure verification queued: job …" | the failure happened after the stop; a full verification of whatever runs now is queued | read that job's outcome first: `succeeded` means the old app is serving and its credential is usable; `recovery_required` names the rung and the next step |
+| deploy `queued` with `step: runner_unavailable` at submission | policy `runner-required`, no runner heartbeat | `systemctl status proxypilot-setup-runner`, `journalctl -u proxypilot-setup-runner`; the job runs when the runner heartbeats — do not set `backend-allowed` to "unblock" a production host |
+| backend log `policy runner-required but no host runner heartbeat` every five minutes | the same, seen from the backend | the same |
+| install.sh / update.sh `Setup runner did NOT start …` (error) or the red update warning | the host stays (or is left) on `backend-allowed`: deploys execute in the container | fix the runner, then set `SETUP_EXECUTOR_POLICY=runner-required` in the install's `.env` and restart ProxyPilot; `update.sh` records it itself on the next update that finds the runner working |
+
+Restrictions that hold on every installation: a deploy, restore or retry
+mint on an app whose lease is held or flagged is refused, not queued behind
+it (the follow-up verification is the one job that waits); a cancel after
+the stop is declined; the engine never restores a database or rolls a
+migration back — the protected copies are named for the operator (and for
+`restore_project_db`, until that runs as a runner job in the next slice).
+
 ## Tests
+
+`setup-deploy-closeout.test.js` (14 tests here; one real-process test per
+available cgroup mechanism plus one real-process refusal): the setsid() regression above on cgroup v2 and
+cgroup v1 (a sentinel test fails, rather than skips silently, on a host
+with no writable cgroup tree); the wrapper's refusal with no mechanism
+(real process: exit 97, `CONTAINMENT:none`, the body never ran, no record
+left) and on the record (a scripted guest: `containment_unavailable`, the
+reap and one refused wrapper are the only calls, the lease released, a
+mechanism-bearing guest deploys afterwards); supersession by what runs; an
+older follow-up kept behind a newer deploy (superseded when the deploy
+changed what runs, certified when the deploy failed before changing
+anything); the recovery's own follow-up landing on both records; the
+requeued follow-up with its not-before consumed by the
+claim and a plain probe still deferred; the post-failure verification
+landing on the failed record; ratchets on install.sh's and update.sh's
+evidence-gated promotion, the backend's runner-required warning with no
+in-process drain, the executor's revision read before the check, the
+reaper's live-only count and the wrapper having no session mechanism.
 
 `setup-deploy-finish.test.js`: the follow-up verification queued before the
 deploy is finished, surviving an API restart, running exactly once and
@@ -360,11 +499,10 @@ rung with the deploy's execution status unchanged; the maintenance boundary
 before the migration, protected copies as retained versions that a later
 deploy does not overwrite, a migration in flight reconciled with its retry
 class and its copies carried to the recovery job, a failed migration named
-and never rolled back; real-process containment (an unmarked child that
-outlives its marked parent is killed by session while a legitimate holder
-survives) and the recorded survivor state with the lease kept; the executor
-policy (explicit values, the safe reading, the default, `.env.example`,
-install.sh, update.sh), runner-required queueing with no backend mutation,
+and never rolled back; the recorded survivor state with the lease kept (the
+real-process proof moved to the closeout suite); the executor policy
+(explicit values, the safe reading, the default, `.env.example`, install.sh
+writing the safe default and promoting only by `sed`, update.sh's gate), runner-required queueing with no backend mutation,
 backend-allowed running the same executor in-process with the follow-up
 verification, a live runner taking precedence under either policy, and the
 boot wiring.
@@ -405,8 +543,16 @@ record ends `credential_use_verified` (not merely serving); stop the runner
 unit, submit a deploy and confirm the job is queued with no backend
 execution, then start the runner and confirm it runs; start a deploy and
 kill the guest-side `npm` tree's session leader mid-build, confirm the next
-deploy's reap kills the surviving children by session and the app service
-is untouched; confirm `/var/backups/proxypilot-db/app-pre-deploy-<job>.sql`
+deploy's reap kills the surviving children through their scope's cgroup and
+the app service is untouched; in the guest, start a detached writer from a
+deploy script (`setsid sh -c 'while :; do date >> /tmp/w; sleep 1; done' &`)
+and confirm the next deploy's reap stops it and `journalctl` shows the
+`systemctl kill` of the `mock2-deploy-<job>-*` scope, with the mock2-dev
+service untouched (the systemd-scope mechanism is the one the sandbox
+cannot exercise); on a fresh install confirm `.env` reads `runner-required`
+only after `systemctl is-active proxypilot-setup-runner` is true, and that
+masking the unit before `update.sh` leaves the policy unchanged with the red
+warning printed; confirm `/var/backups/proxypilot-db/app-pre-deploy-<job>.sql`
 and the `.pre-<job>` copies exist after a deploy and `restore_project_db`
 accepts the dump by name.
 

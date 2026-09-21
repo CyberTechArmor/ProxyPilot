@@ -295,6 +295,20 @@ try {
   if (policy.mode === 'backend-allowed') {
     setTimeout(drain, 15_000).unref();
     setInterval(drain, 30_000).unref();
+  } else {
+    // runner-required: nothing executes here. Say so, loudly and repeatedly,
+    // while no runner heartbeats — every deploy is queueing meanwhile.
+    const watch = async () => {
+      try {
+        const { runnerAvailable } = await import('./lib/setup-engine/backend.js');
+        if (!runnerAvailable(getDb())) {
+          const queued = getDb().prepare(`SELECT COUNT(*) AS n FROM setup_jobs WHERE status = 'queued'`).get()?.n || 0;
+          console.warn(`[setup-engine] policy runner-required but no host runner heartbeat: ${queued} queued job(s) wait; check 'systemctl status proxypilot-setup-runner' and 'journalctl -u proxypilot-setup-runner'`);
+        }
+      } catch (err) { console.error('[setup-engine] runner watch failed:', err?.message || err); }
+    };
+    setTimeout(watch, 60_000).unref();
+    setInterval(watch, 5 * 60_000).unref();
   }
 }
 

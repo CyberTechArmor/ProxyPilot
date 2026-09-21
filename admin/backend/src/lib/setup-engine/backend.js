@@ -120,6 +120,11 @@ export function submitDeployJob(db, { app, params, requestedBy = null, via = 'sy
   const v = validateRunnerJob(spec);
   if (!v.ok) return { error: v.reason };
   const job = createJob(db, { kind: 'deploy', app, plan: spec.plan, configRefs: { webPort: params.webPort, unit: 'mock2-dev.service', environmentFile: params.environmentFile || '/etc/environment', appDir: params.appDir || '/srv/app', guard: params.guard || null }, requestedBy, via, nowMs });
+  // A verification still queued for an OLDER deploy of this app is left in
+  // the queue: it is an obligation. When it runs it reads what the guest
+  // runs and records `superseded` if this deploy changed it — and still
+  // verifies the older revision if this deploy failed before changing
+  // anything (executor, verify_credential_use).
   return { job, created: true };
 }
 

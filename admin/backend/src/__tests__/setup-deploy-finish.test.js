@@ -4,9 +4,9 @@
 //   2. migration-aware checkpoints (the boundary sits before the migration,
 //      protected copies are retained versions, a migration in flight is
 //      recorded with its retry class)
-//   3. containment of every writer of a stale deployment (a real unmarked
-//      child that outlives its marked parent is killed by session; a
-//      legitimate current holder is left alone; survivors keep the lease)
+//   3. containment of every writer of a stale deployment on the record
+//      (survivors keep the lease and flag it; the real-process proof is in
+//      setup-deploy-closeout.test.js)
 //   4. the explicit executor policy (runner-required queues and reports;
 //      backend-allowed runs the same executor in-process; never a request
 //      parameter)
@@ -14,10 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { ensureSetupEngineSchema, getJob, listEvents, readLock, runnerHeartbeat, acquireLock, claimNextJob, checkpoint } from '../lib/setup-engine/store.js';
@@ -25,9 +22,10 @@ import { ownerIdentity, executorPolicy, parseJson, CREDENTIAL_USE_OUTCOMES } fro
 import { submitDeployJob, sweepSetupEngineOnBoot, executionMode, drainRunnerJobsInProcess } from '../lib/setup-engine/backend.js';
 import { runOnce, reconcile } from '../lib/setup-engine/executor.js';
 import { runDeployOperation } from '../lib/setup-engine/deploy-op.js';
-import { containedScript, reapStaleWritersScript, parseStaleWriters, classifyMigrateScript, interpretCredentialUse, credentialUseScript, parseProtectedCopies, protectedCopiesScript } from '../lib/setup-engine/guest-probes.js';
+import { classifyMigrateScript, interpretCredentialUse, credentialUseScript, parseProtectedCopies, protectedCopiesScript } from '../lib/setup-engine/guest-probes.js';
 import { deployProject, drainInProcessNow } from '../mock2/deploy.js';
 import { configureContainerLockStore, withContainerLock, ContainerLockStaleError } from '../mock2/container-lock.js';
+import { scriptedGuest as guestFor, noSecretIn, PARAMS, LOGIN, GUARD } from './helpers/scripted-guest.js';
 
 const REPO = fileURLToPath(new URL('../../../../', import.meta.url));
 const T0 = Date.parse('2026-09-21T16:00:00.000Z');
@@ -35,76 +33,8 @@ const RUNNER = ownerIdentity({ kind: 'runner', host: 'pp', pid: 300, instance: '
 const RUNNER2 = ownerIdentity({ kind: 'runner', host: 'pp', pid: 301, instance: 'ssss' });
 const BACKEND = ownerIdentity({ kind: 'backend', host: 'pp', pid: 100, instance: 'aaaa' });
 const BACKEND2 = ownerIdentity({ kind: 'backend', host: 'pp', pid: 101, instance: 'bbbb' });
-const GUARD = { table: 'auth_connections', schema: 'public', secret_column: 'secret_ciphertext', nonce_column: 'secret_nonce', filter: "provider = 'ldaps'", legacy_default: 'dev-insecure-master-secret-change-me' };
-const CONTRACT = { hasContract: true, install: 'npm ci', migrate: 'npm run migrate', build: 'npm run build', start: 'npm run start' };
-const PARAMS = (extra = {}) => ({ container: 'pp-x', appDir: '/srv/app', webPort: 3000, environmentFile: '/etc/environment', contract: CONTRACT, secrets: { configs: [] }, guard: GUARD, ...extra });
-const LOGIN = { email: 'review@app.test', password: 'pw-secret-value-9f8e7d' };
-const HAS_TOOLS = spawnSync('sh', ['-c', 'command -v pkill && command -v pgrep && command -v setsid'], { encoding: 'utf8' }).status === 0;
 
 function db() { const d = new DatabaseSync(':memory:'); ensureSetupEngineSchema(d); return d; }
-
-// A scripted guest that understands the containment wrapper and every deploy
-// and verification script. `state.ldaps` selects the app's LDAPS answer.
-function guestFor(state) {
-  const calls = [];
-  const unwrap = (raw) => { const m = String(raw).match(/printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > "\$T"/); return m ? Buffer.from(m[1], 'base64').toString('utf8') : String(raw); };
-  const jobIdOf = (raw) => (String(raw).match(/mock2_deploy_marker job=([A-Za-z0-9-]+)/) || [])[1] || 'adhoc';
-  return {
-    calls,
-    guest: async (container, raw) => {
-      const s = unwrap(raw);
-      const id = jobIdOf(raw);
-      const rec = (phase) => calls.push({ container, phase, id, raw, script: s });
-      if (/STALE_WRITERS:/.test(s)) { rec('reap'); return { code: 0, stdout: `STALE_WRITERS:${state.survivors ?? 0}\n` }; }
-      if (/PP_CRED_EOF/.test(s)) {
-        rec('credential_use');
-        assert.ok(s.includes(LOGIN.password), 'the login reaches the guest script (in memory, never a row)');
-        const bodies = {
-          current: 'SIGNIN:200\n{"configured":true,"masterKey":"current","masterKeyInventory":{"total":2,"current":2,"legacy":0,"unreadable":0,"complete":true}}\nLDAPS:200\n',
-          legacy: 'SIGNIN:200\n{"configured":true,"masterKey":"legacy","masterKeyInventory":{"total":2,"current":1,"legacy":1,"unreadable":0,"complete":false}}\nLDAPS:200\n',
-          unreadable: 'SIGNIN:200\n{"configured":true,"masterKey":"unreadable","masterKeyInventory":{"total":1,"current":0,"legacy":0,"unreadable":1,"complete":false}}\nLDAPS:200\n',
-          none: 'SIGNIN:200\n{"configured":false,"masterKey":"none","masterKeyInventory":{"total":0,"current":0,"legacy":0,"unreadable":0,"complete":true}}\nLDAPS:200\n',
-          down: 'SIGNIN:000\n',
-          nosettings: 'SIGNIN:200\nLDAPS:000\n',
-        };
-        return { code: 0, stdout: bodies[state.ldaps || 'current'] };
-      }
-      if (/DBDUMP:/.test(s)) { rec('protect'); state.protects = [...(state.protects || []), id]; return { code: 0, stdout: state.protectOut ?? `DBDUMP:/var/backups/proxypilot-db/app-pre-deploy-${id}.sql:100:${'a'.repeat(64)}\nUNITCOPY:/etc/systemd/system/mock2-dev.service.pre-${id}\nENVCOPY:/etc/environment.pre-${id}\nCOMMIT:${'d'.repeat(40)}\n` }; }
-      if (/MIGRATE_SCRIPT:/.test(s)) { rec('migrate_class'); return { code: 0, stdout: state.migrateClassOut ?? 'MIGRATE_SCRIPT:"migrate": "node scripts/migrate.mjs"\nMIGRATIONS_DIR:yes\n' }; }
-      if (/mock2\.yaml/.test(s)) { rec('contract'); return { code: 0, stdout: 'run:\n  install: npm ci\n  migrate: npm run migrate\n  build: npm run build\n  start: npm run start\n' }; }
-      if (/MOCK2_INSTALL_FRESH/.test(s)) { rec('install_fresh'); return { code: 0, stdout: 'MOCK2_INSTALL_FRESH\n' }; }
-      if (/playwright\.config/.test(s)) { rec('e2e'); return { code: 1, stdout: '' }; }
-      if (/MOCK2_RETROFIT_DONE/.test(s)) { rec('pwa'); return { code: 0, stdout: 'MOCK2_RETROFIT_DONE\n' }; }
-      if (/\/etc\/systemd\/system\/mock2-dev\.service/.test(s)) { rec('unit_swap'); state.active = true; return { code: 0, stdout: '' }; }
-      if (/journalctl/.test(s)) { rec('health'); return { code: 0, stdout: state.serves === false ? 'MOCK2_NOT_SERVING (last http_code: 000)\n' : 'MOCK2_SERVING (302)\n' }; }
-      if (/MOCK2_SERVING/.test(s) && /systemctl start/.test(s)) { rec('restart'); state.active = true; return { code: 0, stdout: 'MOCK2_SERVING (200)\n' }; }
-      if (/systemctl stop mock2-dev\.service/.test(s)) { rec('stop'); state.active = false; if (state.hooks?.stop) await state.hooks.stop(); return { code: 0, stdout: '' }; }
-      if (/MARKER (OK|MISSING)/.test(s)) { rec('markers'); return { code: 0, stdout: 'MARKER OK AUTH_MASTER_SECRET\n' }; }
-      if (/environment\.mock2-tmp/.test(s)) { rec('env_write'); return { code: 0, stdout: '' }; }
-      if (/^cat \/etc\/environment/m.test(s)) { rec('env_read'); return { code: 0, stdout: 'AUTH_JWT_SECRET=x\nAUTH_MASTER_SECRET=k\n' }; }
-      if (/PGPASSFILE|psql/.test(s)) { rec('data_probe'); return { code: 0, stdout: 'PROBE:ok\nTARGET:127.0.0.1:5432/app schema=public\nRLS:off\n' }; }
-      if (/AUTH_MASTER_SECRET=/.test(s) && /sed -n/.test(s)) { rec('active_key'); return { code: 0, stdout: 'k\n' }; }
-      if (/\/api\/health/.test(s)) { rec('health_check'); return { code: 0, stdout: 'ROOT:302\nHEALTH:200\nLOGIN:200\n' }; }
-      if (/UNIT_LOADED/.test(s)) { rec('unit_status'); return { code: 0, stdout: `UNIT_LOADED:yes\nUNIT_ENABLED:enabled\nUNIT_ACTIVE:${state.active === false ? 'inactive' : 'active'}\n` }; }
-      if (/START_RC/.test(s)) { rec('start_unit'); state.active = true; return { code: 0, stdout: 'START_RC:0\nUNIT_ACTIVE:active\n' }; }
-      if (/PORT_SERVING/.test(s)) { rec('port'); return { code: 0, stdout: state.active === false ? 'PORT_NOT_SERVING:000\n' : 'PORT_SERVING:302\n' }; }
-      if (/npm run migrate/.test(s)) { rec('migrate'); if (state.hooks?.migrate) await state.hooks.migrate(); return state.fail === 'migrate' ? { code: 1, stdout: 'apply 0002_add_col.sql\n', stderr: 'migration 0002_add_col.sql failed: relation exists' } : { code: 0, stdout: 'skip 0001 (already applied)\napply 0002\n' }; }
-      if (/npm run build/.test(s)) { rec('build'); return { code: 0, stdout: '' }; }
-      if (/npm ci/.test(s)) { rec('install'); return { code: 0, stdout: '' }; }
-      if (/build-id|sw\.js|MOCK2_BUILD_ID/.test(s)) { rec('stamp'); return { code: 0, stdout: 'MOCK2_BUILD_ID:x\n' }; }
-      rec('other'); return { code: 1, stdout: '', stderr: `unexpected: ${s.slice(0, 60)}` };
-    },
-  };
-}
-
-function noSecretIn(d, jobIds) {
-  for (const id of jobIds) {
-    const row = getJob(d, id);
-    const dump = JSON.stringify(row) + JSON.stringify(listEvents(d, id));
-    assert.equal(dump.includes(LOGIN.password), false, `review password leaked into job ${id}`);
-    assert.equal(dump.includes(LOGIN.email), false, `review email leaked into job ${id}`);
-  }
-}
 
 // ── 1. durable application-owned verification ──────────────────────────
 
@@ -152,7 +82,7 @@ test('the application rung is a persisted follow-up: queued before the deploy re
   assert.equal(g.calls.filter((c) => c.phase === 'credential_use').length, 1);
 });
 
-test('the application rung has distinct outcomes: verified, failed (legacy or unreadable rows behind a 200), no protected credentials, no verification credentials, unreachable', async () => {
+test('the application rung has distinct outcomes: verified, failed (legacy or unreadable rows behind a 200), no protected credentials, no verification credentials, unreachable, superseded', async () => {
   const cases = [
     ['current', LOGIN, true, 'verified', 'credential_use_verified'],
     ['legacy', LOGIN, false, 'failed', 'recovery_required'],
@@ -179,7 +109,7 @@ test('the application rung has distinct outcomes: verified, failed (legacy or un
     if (value === false) assert.match(follow.reason, /cannot use its credential as stored|refused/);
     noSecretIn(d, [sub.job.id, follow.id]);
   }
-  assert.deepEqual(Object.keys(CREDENTIAL_USE_OUTCOMES).sort(), ['failed', 'no_protected_credentials', 'no_verification_credentials', 'not_applicable', 'unreachable', 'verified']);
+  assert.deepEqual(Object.keys(CREDENTIAL_USE_OUTCOMES).sort(), ['failed', 'no_protected_credentials', 'no_verification_credentials', 'not_applicable', 'superseded', 'unreachable', 'verified']);
   assert.equal(interpretCredentialUse('SIGNIN:200\n{"configured":true,"masterKey":"current","masterKeyInventory":{"total":2,"current":1,"legacy":0,"unreadable":1,"complete":false}}\nLDAPS:200\n').outcome, 'failed', 'a 200 with an unreadable row is not verified');
   assert.throws(() => credentialUseScript(3000, null), /needs a login/);
 });
@@ -248,56 +178,9 @@ test('the maintenance boundary sits before the migration; protected copies are r
 
 // ── 3. containment of every writer ─────────────────────────────────────
 
-test('containment (real processes): an unmarked child that outlives its marked parent and keeps writing is killed by session; a legitimate current holder is untouched', { skip: !HAS_TOOLS && 'pkill/pgrep/setsid not installed' }, async () => {
-  const root = mkdtempSync(join(tmpdir(), 'pp-contain-'));
-  const runDir = join(root, 'run');
-  const out = join(root, 'out.txt');
-  const localSh = (script, timeoutMs = 10_000) => new Promise((resolve) => {
-    const p = spawn('sh', [], { stdio: ['pipe', 'pipe', 'pipe'], detached: false });
-    let stdout = ''; let stderr = '';
-    p.stdout.on('data', (x) => { stdout += x; }); p.stderr.on('data', (x) => { stderr += x; });
-    const t = setTimeout(() => p.kill('SIGKILL'), timeoutMs);
-    p.on('close', (code) => { clearTimeout(t); resolve({ code, stdout, stderr }); });
-    p.stdin.end(script);
-  });
-  let holderPid = null;
-  try {
-    // The stale job's script: marked, contained, spawns an UNMARKED child
-    // that outlives it and keeps writing.
-    const body = `( sh -c 'while :; do echo x >> "${out}"; sleep 0.05; done' >/dev/null 2>&1 & ) ; exit 0\n`;
-    const r0 = await localSh(containedScript('dead-job', body, { runDir }));
-    assert.equal(r0.code, 0, r0.stderr);
-    const sidFile = join(runDir, 'dead-job.sid');
-    assert.ok(existsSync(sidFile), 'the session was recorded under the job');
-    const sid = readFileSync(sidFile, 'utf8').trim().split('\n')[0];
-    await new Promise((r) => setTimeout(r, 300));
-    const size1 = statSync(out).size;
-    await new Promise((r) => setTimeout(r, 300));
-    assert.ok(statSync(out).size > size1, 'the orphaned child keeps writing after its parent exited');
-    assert.equal(spawnSync('pgrep', ['-s', sid], { encoding: 'utf8' }).status, 0, 'processes live in the recorded session');
-    assert.equal(spawnSync('pgrep', ['-f', 'mock2_deploy_marker job=dead-job'], { encoding: 'utf8' }).status, 1, 'the marked parent itself is already gone: a marker search alone would find nothing');
-    // A legitimate current holder: the CURRENT job's own contained session.
-    const holder = await localSh(containedScript('current-job', `( sleep 30 >/dev/null 2>&1 & echo $! ) ; exit 0\n`, { runDir }));
-    holderPid = Number(holder.stdout.trim().split('\n').pop());
-    assert.ok(holderPid > 0);
-    // Cleanup under the current job's ownership.
-    const reap = await localSh(reapStaleWritersScript('current-job', { runDir }));
-    assert.equal(parseStaleWriters(reap.stdout), 0, `no survivors: ${reap.stdout} ${reap.stderr}`);
-    await new Promise((r) => setTimeout(r, 300));
-    const sizeAfter = statSync(out).size;
-    await new Promise((r) => setTimeout(r, 400));
-    assert.equal(statSync(out).size, sizeAfter, 'the orphan stopped writing');
-    const aliveInSession = (spawnSync('pgrep', ['-s', sid], { encoding: 'utf8' }).stdout || '').split('\n').filter(Boolean).filter((pid) => { try { return !/\) [ZX] /.test(readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return false; } });
-    assert.deepEqual(aliveInSession, [], 'the stale session has no live process (zombies awaiting reap do not count)');
-    assert.equal(existsSync(sidFile), false, 'the dead job\'s session file was removed');
-    assert.ok(existsSync(join(runDir, 'current-job.sid')), 'the current job\'s file stays');
-    assert.doesNotThrow(() => process.kill(holderPid, 0), 'the legitimate holder is alive');
-  } finally {
-    if (holderPid) { try { process.kill(holderPid, 'SIGKILL'); } catch { /* */ } }
-    for (const f of (existsSync(runDir) ? readdirSync(runDir) : [])) { for (const s of readFileSync(join(runDir, f), 'utf8').split('\n')) { if (s.trim()) spawnSync('pkill', ['-9', '-s', s.trim()]); } }
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+// The real-process regression (a setsid() child that outlives its parent
+// and keeps writing; cleanup by cgroup; the application service and the
+// current job's holder untouched) lives in setup-deploy-closeout.test.js.
 
 test('containment on the record: a survivor after the reap ends the job as recovery_required with the lease KEPT and flagged, and conflicting operations are refused with that reason', async (t) => {
   const d = db();
@@ -342,7 +225,10 @@ test('executorPolicy: explicit values, the safe reading of an unknown value, the
   assert.deepEqual(executorPolicy({}), { mode: 'backend-allowed', source: 'default' });
   const example = readFileSync(`${REPO}.env.example`, 'utf8');
   assert.match(example, /^SETUP_EXECUTOR_POLICY=runner-required$/m);
-  assert.match(readFileSync(`${REPO}install.sh`, 'utf8'), /^SETUP_EXECUTOR_POLICY=runner-required$/m);
+  // install.sh writes the safe default and promotes it to runner-required only
+  // on host evidence (the closeout suite ratchets the gate itself).
+  assert.match(readFileSync(`${REPO}install.sh`, 'utf8'), /^SETUP_EXECUTOR_POLICY=backend-allowed$/m);
+  assert.match(readFileSync(`${REPO}install.sh`, 'utf8'), /sed -i 's\/\^SETUP_EXECUTOR_POLICY=\.\*\/SETUP_EXECUTOR_POLICY=runner-required\/'/);
   assert.match(readFileSync(`${REPO}update.sh`, 'utf8'), /grep -q '\^SETUP_EXECUTOR_POLICY=' "\$env_file"/);
 });
 

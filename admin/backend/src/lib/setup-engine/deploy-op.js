@@ -36,12 +36,16 @@
 // (the platform runner is ledgered and per-file transactional: resume; an
 // unknown runner: recovery required), and the deployed commit.
 //
-// Containment: every guest script runs as its own session under the job's
-// id (guest-probes containedScript), so a takeover can kill everything a
-// dead job spawned — marked or not — by session, and never the app's own
-// service. Before anything else the operation reaps other jobs' sessions
-// and legacy marker scripts and confirms none survive; a writer that cannot
-// be stopped fails the operation rather than racing it.
+// Containment: every guest script runs inside a cgroup that belongs to the
+// job (guest-probes containedScript: a systemd transient scope, or a raw
+// cgroup), so a takeover can kill everything a dead job spawned — marked or
+// not, in its session or in a new one it made with setsid() — as a group,
+// and never the app's own service (which lives in its unit's cgroup).
+// Before anything else the operation reaps other jobs' groups and legacy
+// marker scripts and confirms none survive; a writer that cannot be stopped
+// fails the operation rather than racing it. A guest with no containment
+// mechanism at all makes the operation REFUSE (ContainmentUnavailableError)
+// before any script body runs: there is no fallback to weaker containment.
 
 import { createHash } from 'node:crypto';
 import {
@@ -57,7 +61,7 @@ import { scaffoldPwaFiles } from '../../mock2/scaffold.js';
 import { installBrowserScript } from '../../mock2/scaffold-e2e.js';
 import {
   activeKeyScript, credentialProbeScript, credentialVerdict, healthScript, parseHealth, verificationFromObservations, parseUnitStatus,
-  containedScript, reapStaleWritersScript, parseStaleWriters, protectedCopiesScript, parseProtectedCopies, classifyMigrateScript, CONTAINMENT_RUN_DIR,
+  containedScript, reapStaleWritersScript, parseStaleWriters, protectedCopiesScript, parseProtectedCopies, classifyMigrateScript, CONTAINMENT_RUN_DIR, CONTAINMENT_UNAVAILABLE_RC, parseContainment,
 } from './guest-probes.js';
 import { sanitizeReason } from './logic.js';
 
@@ -68,6 +72,14 @@ export const INSTALL_STAMP_PATH = 'node_modules/.mock2-install-stamp';
 const MANIFEST_HASH_CMD = `cat package.json package-lock.json 2>/dev/null | sha256sum | cut -d' ' -f1`;
 const b64 = (s) => Buffer.from(String(s), 'utf8').toString('base64');
 const shq = (s) => String(s).replace(/'/g, "'\\''");
+
+export class ContainmentUnavailableError extends Error {
+  constructor(container, detail) {
+    super(`no process containment is available in ${container} (no systemd-run, no writable cgroup): the deploy refuses to run its scripts without it${detail ? ` — ${detail}` : ''}`);
+    this.name = 'ContainmentUnavailableError';
+    this.code = 'CONTAINMENT_UNAVAILABLE';
+  }
+}
 
 export class PreviousWriterAliveError extends Error {
   constructor(container, survivors) {
@@ -139,18 +151,27 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   // guest but its build outputs. From the stop onward a cancel is not
   // honoured mid-way — the operation finishes bringing the app up.
   let disruptiveBegun = false;
+  let containment = null;
   const guest = async (phase, script, timeoutMs) => {
     job.fence({ safe: !disruptiveBegun });
-    const r = await guestRaw(script, timeoutMs);
-    return r || { code: -1, stdout: '', stderr: 'no result from the guest executor' };
+    const r = (await guestRaw(script, timeoutMs)) || { code: -1, stdout: '', stderr: 'no result from the guest executor' };
+    // The wrapper reports its mechanism on stderr; exit 97 means it had none
+    // and ran nothing — the operation stops here rather than degrading.
+    const c = parseContainment(r.stderr);
+    // The refusal is the wrapper's, not a body's: CONTAINMENT:none, or exit
+    // 97 with no containment line at all. A body that exits 97 under a
+    // recorded mechanism is an ordinary failure.
+    if ((c && c.kind === 'none') || (r.code === CONTAINMENT_UNAVAILABLE_RC && !c)) throw new ContainmentUnavailableError(container, (r.stderr || '').trim().split('\n').filter((l) => !/^CONTAINMENT:/.test(l)).join(' ').slice(0, 200));
+    if (c && !containment) { containment = c; job.event?.('containment', `scripts run under ${c.kind}${c.ref ? ` (${c.ref})` : ''}`, { kind: c.kind }); }
+    return r;
   };
   const runInApp = (command, timeoutMs) => guest('run', `: ${DEPLOY_MARKER}\nset -a\n. ${environmentFile} 2>/dev/null || true\nset +a\ncd '${appDir}' || exit 97\n${command}\n`, timeoutMs);
   const report = (key, label) => { try { job.onStep?.(key, label || deployStepLabel(key)); } catch { /* */ } };
   const mark = (phase, data, message) => { try { job.checkpoint(phase, data, message); } catch { /* never fails the deploy */ } };
 
-  // 0) Nobody else's sessions may be running in this guest. The reap script
-  //    itself runs uncontained (it must not record a session of its own to
-  //    kill) and skips this job's id.
+  // 0) Nobody else's groups may be running in this guest. The reap script
+  //    itself runs uncontained (it only signals and counts; it records
+  //    nothing) and skips this job's own groups.
   if (p.reapOrphans) {
     const reapScript = reapStaleWritersScript(jobId, { runDir: p.runDir });
     job.fence({ safe: true });
@@ -174,7 +195,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   if (!contract.hasContract) return { ok: true, skipped: true };
 
   const recovery = {
-    container, appDir, webPort, unit: p.unit, unitPath: UNIT_PATH, environmentFile, runDir: p.runDir,
+    container, appDir, webPort, unit: p.unit, unitPath: UNIT_PATH, environmentFile, runDir: p.runDir, containment: null,
     contract: { install: contract.install || null, migrate: contract.migrate || null, build: contract.build || null, start: contract.start },
     guard: p.guard || null, generatedKeys: [],
     previousDeployedCommit: p.previousDeployedCommit || null,
@@ -183,6 +204,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
     completed: [],
   };
   mark('starting', { app_stopped: false, resumable: true, container, webPort, unit: p.unit, recovery }, 'deploy started; install and build come first, under the running application');
+  const stampContainment = () => { if (containment && !recovery.containment) recovery.containment = { kind: containment.kind, runDir: p.runDir }; };
 
   const plan = deployPlan(contract);
   const before = plan.filter((st) => st.key !== 'migrate');
@@ -207,6 +229,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   //    tree and dist/ change, which the running process does not reload.
   for (const step of before) {
     const r = await runStep(step);
+    stampContainment();
     if (!r.ok) return r;
     recovery.completed.push(step.key);
     mark(step.key, { app_stopped: false, resumable: true, recovery }, `${step.key} finished`);
@@ -242,7 +265,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   const stop = await guest('stop', `: ${DEPLOY_MARKER}\nsystemctl stop ${p.unit} >/dev/null 2>&1 || true\n${freeWebPortScript(webPort)}\n`, DEPLOY_STEP_TIMEOUTS_MS.start);
   if (stop.code !== 0) {
     const back = await restartUnit();
-    return { ok: false, step: 'start', error: deployFailureMessage('start', `could not stop the running app before the migration: ${tail(stop)}. ${back}`) };
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `could not stop the running app before the migration: ${tail(stop)}. ${back}`), restartAttempted: true, recovery };
   }
 
   // 1.6) The migration, with the old application stopped. The checkpoint
@@ -257,7 +280,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
       // dist/: the same set the next retry starts from. Reported, never
       // rolled back on its own.
       const back = await restartUnit();
-      return { ...m, error: `${m.error}. ${back} The migration ledger (${recovery.migration.ledger || 'none'}) records what applied; ${recovery.protected?.dbDump ? `the pre-deploy dump ${recovery.protected.dbDump.path} is the protected copy` : 'no protected database copy was taken'}.`, verification: verificationFromObservations({ unit: parseUnitStatus('UNIT_LOADED:yes\nUNIT_ENABLED:enabled\nUNIT_ACTIVE:unknown\n') }) };
+      return { ...m, error: `${m.error}. ${back} The migration ledger (${recovery.migration.ledger || 'none'}) records what applied; ${recovery.protected?.dbDump ? `the pre-deploy dump ${recovery.protected.dbDump.path} is the protected copy` : 'no protected database copy was taken'}.`, verification: verificationFromObservations({ unit: parseUnitStatus('UNIT_LOADED:yes\nUNIT_ENABLED:enabled\nUNIT_ACTIVE:unknown\n') }), restartAttempted: true, recovery };
     }
     recovery.completed.push('migrate');
     mark('migrated', { app_stopped: true, resumable: false, disruptive: true, migration_in_progress: false, recovery }, 'migration finished; key check and mint next');
@@ -273,7 +296,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
     const m = await mintComponentSecrets({ guest, appDir, environmentFile, configs: p.secrets.configs, newlyProvisioned: p.secrets.newlyProvisioned, writersStopped: true, job });
     if (!m.ok) {
       const back = await restartUnit();
-      return { ok: false, step: 'start', error: deployFailureMessage('start', `could not mint the application's secrets: ${m.error}. ${back}`) };
+      return { ok: false, step: 'start', error: deployFailureMessage('start', `could not mint the application's secrets: ${m.error}. ${back}`), restartAttempted: true, recovery };
     }
     requiredSecretKeys = m.required;
     minted = m.minted;
@@ -283,9 +306,9 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
       mark('secrets_minted', { app_stopped: true, resumable: false, recovery }, `minted ${m.minted.join(', ')} into ${environmentFile} (names only)`);
     }
   } catch (e) {
-    if (e?.code === 'FENCED') throw e;
+    if (e?.code === 'FENCED' || e?.code === 'CANCELLED' || e?.code === 'CONTAINMENT_UNAVAILABLE') throw e;
     const back = await restartUnit();
-    return { ok: false, step: 'start', error: deployFailureMessage('start', `application secret minting failed: ${e?.message || e}. ${back}`) };
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `application secret minting failed: ${e?.message || e}. ${back}`), restartAttempted: true, recovery };
   }
 
   // 2) The unit.
@@ -295,13 +318,13 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   const mode = validateDeployEnvironment({ unitText: unit, environmentText: envRead.stdout || '', requiredKeys: requiredSecretKeys });
   if (!mode.ok) {
     const back = await restartUnit();
-    return { ok: false, step: 'start', error: deployFailureMessage('start', `${mode.error}. ${back}`) };
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `${mode.error}. ${back}`), restartAttempted: true, recovery };
   }
   const swap = await guest('unit', `: ${DEPLOY_MARKER}\nprintf '%s' '${b64(unit)}' | base64 -d > ${UNIT_PATH}\nsystemctl daemon-reload\nsystemctl enable ${p.unit} >/dev/null 2>&1 || true\n${freeWebPortScript(webPort)}\nsystemctl start ${p.unit}\n`, DEPLOY_STEP_TIMEOUTS_MS.start);
   mark('unit_written', { app_stopped: true, unit_swapped: true }, 'new unit file written');
   if (swap.code !== 0) {
     const back = await restartUnit();
-    return { ok: false, step: 'start', error: deployFailureMessage('start', `${tail(swap)}\n${back}`) };
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `${tail(swap)}\n${back}`), restartAttempted: true, recovery };
   }
   mark('app_started', { app_stopped: false, unit_swapped: true }, 'new unit written and started; health check next');
 
@@ -322,7 +345,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
     const raw = `${health?.stdout || ''}${health?.stderr ? `\n${health.stderr}` : ''}`.trim();
     const detail = raw.length > 2600 ? `${raw.slice(0, 1200)}\n… (trimmed) …\n${raw.slice(-1200)}` : raw;
     obs.port = { observed: true, responding: false, code: 0 };
-    return { ok: false, step: 'health', error: deployFailureMessage('health', detail), verification: verificationFromObservations(obs), minted, deferred };
+    return { ok: false, step: 'health', error: deployFailureMessage('health', detail), verification: verificationFromObservations(obs), minted, deferred, restartAttempted: false, unitStarted: true, recovery };
   }
   obs.port = { observed: true, responding: true, code: Number((health.stdout.match(/MOCK2_SERVING \((\d+)\)/) || [])[1]) || 200 };
 
@@ -347,7 +370,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   // verify_credential_use step), queued by the executor before it reports
   // this job finished, so a dead API or runner never loses the obligation.
   // Without a data guard there is nothing to read back: not applicable.
-  const followUp = p.guard ? { kind: 'verify_app', steps: ['verify_credential_use'], rung: 'credential_use_verified' } : null;
+  const followUp = p.guard ? { kind: 'verify_app', steps: ['verify_credential_use'], rung: 'credential_use_verified', revision: { commit: recovery.protected?.sourceCommit || null, buildId: buildId?.buildId || null } } : null;
   const verification = verificationFromObservations({ ...obs, credentialUse: followUp ? null : { verified: null, detail: 'not applicable: no data guard, nothing to read back', outcome: 'not_applicable' } }, { pendingRungs: followUp ? ['credential_use_verified'] : [] });
   mark('verified', { app_stopped: false, verification_state: verification.state, recovery }, `verification: ${verification.label}${followUp ? '; application-owned credential check pending' : ''}`);
   return { ok: true, step: 'serving', buildStamp, verification, minted, deferred, followUp, recovery };

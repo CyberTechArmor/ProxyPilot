@@ -57,7 +57,7 @@ function scriptedGuest(state) {
     calls,
     guest: async (container, script) => {
       calls.push({ container, script });
-      if (/ORPHANS:/.test(script)) return { code: 0, stdout: `ORPHANS:${state.orphans ?? 0}\n` };
+      if (/STALE_WRITERS:/.test(script)) return { code: 0, stdout: `STALE_WRITERS:${state.survivors ?? 0}\n` };
       if (/UNIT_LOADED/.test(script)) {
         return { code: 0, stdout: `UNIT_LOADED:${state.loaded ? 'yes' : 'no'}\nUNIT_ENABLED:enabled\nUNIT_ACTIVE:${state.active ? 'active' : 'inactive'}\n` };
       }
@@ -327,7 +327,10 @@ test('reconcile: a dead backend that stopped an app gets a recovery job and a st
   const guests = { 'pp-a': scriptedGuest({ loaded: true, active: false, envKey: '', probe: 'PROBE:ok\nTARGET:x\nRLS:off\n' }), 'pp-c': scriptedGuest({ loaded: true, active: true }) };
   const exec = { guest: (c, s2, o) => guests[c].guest(c, s2, o) };
   const out = await runOnce({ db: d, owner: RUNNER, exec, nowMs: () => T0 + 62_000 }, { reconcileFirst: false });
-  assert.equal(out.ran.length, 2);
+  // Three: the recovery, the requeued verify, and the application-owned
+  // check the recovery queues for the deploy it brought up.
+  assert.equal(out.ran.length, 3);
+  assert.equal(out.ran.filter((j) => j.kind === 'verify_app').length, 2);
   const recRun = out.ran.find((j) => j.kind === 'recover_app');
   assert.equal(recRun.status, 'succeeded');
   assert.equal(recRun.verification.state, 'credential_decryptable');

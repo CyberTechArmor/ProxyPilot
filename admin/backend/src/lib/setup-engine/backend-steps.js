@@ -18,7 +18,7 @@
 //     event stream of that job), so the one setup record shows every phase.
 
 import {
-  claimNextJob, acquireLock, takeoverLock, releaseLock, readLock, requeueJob, checkpoint, recordProgress, finishJob, appendEvent, getJob, annotateJobProgress, annotateTerminalOutcome, fenceJob, renewLock,
+  claimNextJob, acquireLock, takeoverLock, releaseLock, readLock, requeueJob, checkpoint, recordProgress, finishJob, appendEvent, getJob, annotateJobProgress, annotateTerminalOutcome, fenceJob, renewLock, heartbeat,
 } from './store.js';
 import { validateRoutesParams, HOST_ROUTES_LOCK, BACKEND_STEP_KINDS, setupOutcome, phaseSummary } from './setup-logic.js';
 import { parseJson, sanitizeReason, leaseHold, FencedError, CancelledError } from './logic.js';
@@ -61,6 +61,8 @@ export function settleSetupRecord(db, { setupJobId, createJobId = null, phase, u
 }
 const LEASE_MS = 30_000;
 const KEEPALIVE_MS = 10_000;
+// What renewAll reports when the job claim itself is no longer this step's.
+const JOB_CLAIM = Symbol('job claim');
 const RETRY_MS = 30_000;
 const HOLD_RETRY_MS = 5 * 60_000;
 const ROUTES_LEASE_WAIT_MS = 15_000;
@@ -131,24 +133,33 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     const ck = checkpoint(db, { id: job.id, owner, epoch, phase: 'routes', checkpoint: { resumable: false, disruptive: false, routes: true, container: p.container, domains: p.services.map((s) => s.domain) }, message: `configuring ${p.services.length} route(s) for ${p.container} → ${p.ip}`, nowMs: nowMs() });
     if (!(Number(ck) > 0)) throw new FencedError(job.id);
     if (typeof deps.configureRoutes !== 'function') { noteOrigin('failed', { detail: 'no route configurator is available in this process' }); return fin('failed', 'error', 'no route configurator is available in this process; retry the job'); }
-    // Before every write the configurator makes, both leases are renewed at
-    // the epochs this step holds them; a renewal that changes no row means
-    // another owner has them and nothing further is written. Between writes
-    // — a `caddy adapt` or reload that runs long — a keep-alive renews both
-    // leases every KEEPALIVE_MS so a legitimately long operation never lets
-    // its lease lapse; a keep-alive renewal that changes no row is remembered
-    // and the next fence throws before anything else is written.
-    const renewBoth = () => {
+    // Before every write the configurator makes, THREE leases are renewed at
+    // the epochs this step holds them — the job claim itself (`setup_jobs`,
+    // the store's fenced heartbeat: owner + epoch + still running), the
+    // guest's lock and the shared routes lock; a renewal that changes no row
+    // means another owner has it, or the job was ended or re-claimed, and
+    // nothing further is written. Between writes — a `caddy adapt` or reload
+    // that runs long — a keep-alive renews all three every KEEPALIVE_MS, so a
+    // legitimately long operation never lets the claim lapse for the runner's
+    // reconcile to record it interrupted under live locks, and never lets a
+    // lock lapse either; a keep-alive renewal that changes no row is
+    // remembered and the next fence throws before anything else is written.
+    // The claim is renewed FIRST: a claim that is no longer this step's (a
+    // zero-row heartbeat — reassigned, terminal, or already reconciled) is a
+    // FencedError, the same signal the executor's gate raises, and a lost
+    // claim is never revived because the heartbeat only extends a claim this
+    // owner still holds at this epoch.
+    const renewAll = () => {
+      if (!(heartbeat(db, { id: job.id, owner, epoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) return JOB_CLAIM;
       if (!(renewLock(db, { app: job.app, owner, epoch: lockEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) return job.app;
       if (!(renewLock(db, { app: HOST_ROUTES_LOCK, owner, epoch: routesEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) return HOST_ROUTES_LOCK;
       return null;
     };
     const fence = () => {
-      const gone = lost || renewBoth();
-      if (gone) { lost = gone; throw new LeaseLostError(gone); }
-      fenceJob(db, { id: job.id, owner, epoch, safe: false, leaseMs: LEASE_MS, nowMs: nowMs() });
+      const gone = lost || renewAll();
+      if (gone) { lost = gone; throw gone === JOB_CLAIM ? new FencedError(job.id) : new LeaseLostError(gone); }
     };
-    keepAlive = setInterval(() => { try { const gone = renewBoth(); if (gone) lost = gone; } catch { /* the next fence decides */ } }, Math.max(20, Number(keepAliveMs) || KEEPALIVE_MS));
+    keepAlive = setInterval(() => { try { const gone = renewAll(); if (gone) lost = gone; } catch { /* the next fence decides */ } }, Math.max(20, Number(keepAliveMs) || KEEPALIVE_MS));
     if (typeof keepAlive.unref === 'function') keepAlive.unref();
     fence();
     const res = await deps.configureRoutes({ container: p.container, name: p.serviceName, ip: p.ip, services: p.services, fence });

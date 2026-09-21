@@ -1207,6 +1207,64 @@ test('route ownership through the PRODUCTION adapter: both leases are RENEWED wh
   }
 });
 
+test('the JOB CLAIM is heart-beaten with the locks (production adapter, real timer keep-alive, the runner\'s actual reconcile): a render that outlives the claim period three times over keeps the claim and both locks live, reconcile leaves the active job untouched, the reload runs once and the setup settles complete; a claim ended by the reconciler, or re-claimed at a new epoch, while the render waits stops every later write, revives nothing and releases no other owner\'s lock', async (t) => {
+  const h = scriptedHost({ instances: [] }); const g = scriptedGuest({}); const dirs = [];
+  t.after(() => { configureContainerLockStore(null); for (const x of dirs) rmSync(x, { recursive: true, force: true }); });
+  const iso = (ms) => new Date(ms).toISOString();
+  const live = (row, c) => !!row && !!row.lease_expires_at && Date.parse(row.lease_expires_at) > c.nowMs();
+  // 1) The claim outlives its period (30 s) three times over while the keep-alive runs: the runner's reconcile finds nothing stale.
+  {
+    const d = db(); const dir = tmp(); dirs.push(dir); const c = clock(); const probes = []; let id;
+    const caddy = caddyDir(dir, { adapt: async () => { for (let i = 0; i < 3; i += 1) { c.tick(22_000); await sleepReal(80); const r = reconcile({ db: d, owner: RUNNER, nowMs: c.nowMs() }); const j = getJob(d, id); probes.push({ tick: i, reconcile: [r.requeued, r.interrupted, r.recoveryQueued].flat(), job: { status: j.status, owner: j.owner, live: live(j, c) }, guest: { owner: readLock(d, 'pp-n')?.owner || null, live: live(readLock(d, 'pp-n'), c) }, routes: { owner: readLock(d, HOST_ROUTES_LOCK)?.owner || null, live: live(readLock(d, HOST_ROUTES_LOCK), c) } }); } } });
+    opsStore(d, h, g, { renderDeps: caddy.render }); id = seedRoutesChain(d);
+    const out = await drainBackendStepsNow(undefined, { nowMs: c.nowMs, keepAliveMs: 20 });
+    assert.equal(probes.length, 3);
+    for (const p of probes) {
+      assert.deepEqual(p.reconcile, [], `tick ${p.tick}: the runner's reconcile touched nothing: ${JSON.stringify(p)}`);
+      assert.deepEqual(p.job, { status: 'running', owner: BACKEND, live: true }, `tick ${p.tick}: the claim is this backend's and live`);
+      assert.deepEqual(p.guest, { owner: BACKEND, live: true }, `tick ${p.tick}`); assert.deepEqual(p.routes, { owner: BACKEND, live: true }, `tick ${p.tick}`);
+    }
+    assert.equal(out.ran[0].status, 'succeeded', getJob(d, id).reason); assert.equal(out.ran[0].outcome, 'routes_configured');
+    assert.equal(caddy.log.reload, 1, 'the reload ran once'); assert.equal(caddy.log.adapt, 1);
+    assert.equal(getJob(d, id).status, 'succeeded'); assert.equal(getJob(d, 'setup-1').outcome, 'setup_complete'); assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.completion, 'complete');
+    assert.equal(readLock(d, 'pp-n'), null); assert.equal(readLock(d, HOST_ROUTES_LOCK), null);
+  }
+  // 2) The claim ends under the render: a heartbeat that never came (the
+  // process paused), the runner's reconcile records the job interrupted and
+  // releases its guest lock, another owner takes that lock — all while adapt
+  // waits. The keep-alive sees the claim gone; the next write is refused.
+  {
+    const d = db(); const dir = tmp(); dirs.push(dir); const c = clock(); let id; let recon = null; let rowAfterReconcile = null;
+    const caddy = caddyDir(dir, { adapt: async () => {
+      d.prepare(`UPDATE setup_jobs SET lease_expires_at = ? WHERE id = ?`).run(iso(c.nowMs() - 1), id);
+      recon = reconcile({ db: d, owner: RUNNER, nowMs: c.nowMs() });
+      rowAfterReconcile = { ...getJob(d, id) };
+      assert.ok(acquireLock(d, { app: 'pp-n', owner: OTHER, operation: 'instance_stop', jobId: 'o-1', leaseMs: 60_000, nowMs: c.nowMs() }).ok, 'the released guest lock is another owner\'s now');
+      await sleepReal(120);
+    } });
+    opsStore(d, h, g, { renderDeps: caddy.render }); id = seedRoutesChain(d);
+    const out = await drainBackendStepsNow(undefined, { nowMs: c.nowMs, keepAliveMs: 20 });
+    assert.deepEqual(recon.interrupted, [id], 'the runner recorded the job interrupted'); assert.equal(rowAfterReconcile.status, 'failed'); assert.equal(rowAfterReconcile.outcome, 'interrupted');
+    assert.equal(out.ran[0].status, 'fenced', JSON.stringify(out.ran[0]));
+    assert.equal(caddy.log.reload, 0, 'no reload after the claim ended'); assert.deepEqual([caddy.log.writes, caddy.log.removes], [[], []], 'no rollback write either');
+    const row = getJob(d, id);
+    assert.deepEqual({ status: row.status, outcome: row.outcome, lease: row.lease_expires_at, reason: row.reason }, { status: 'failed', outcome: 'interrupted', lease: rowAfterReconcile.lease_expires_at, reason: rowAfterReconcile.reason }, 'the record the reconciler wrote stands: nothing revived the claim, nothing rewrote the outcome');
+    assert.ok(!listEvents(d, id).some((e) => /lease_lost|routes were not completed/.test(e.message || '')), 'the step recorded no outcome of its own on a job that is no longer its');
+    assert.equal(readLock(d, 'pp-n').owner, OTHER, 'the other owner\'s guest lock is untouched'); assert.equal(readLock(d, HOST_ROUTES_LOCK), null, 'the step\'s own routes lock is released');
+    assert.equal(getJob(d, 'setup-1').outcome, 'setup_pending', 'the setup record is the next owner\'s to settle (the boot sweep or a retry), not a fenced step\'s');
+  }
+  // 3) The claim re-assigned at a new epoch (another backend claimed the requeued job) while the render waits.
+  {
+    const d = db(); const dir = tmp(); dirs.push(dir); const c = clock(); let id; const NEXT = ownerIdentity({ kind: 'backend', host: 'pp', pid: 101, instance: 'bbbb' });
+    const caddy = caddyDir(dir, { adapt: async () => { d.prepare(`UPDATE setup_jobs SET owner = ?, epoch = epoch + 1, lease_expires_at = ? WHERE id = ?`).run(NEXT, iso(c.nowMs() + 30_000), id); await sleepReal(120); } });
+    opsStore(d, h, g, { renderDeps: caddy.render }); id = seedRoutesChain(d);
+    const out = await drainBackendStepsNow(undefined, { nowMs: c.nowMs, keepAliveMs: 20 });
+    assert.equal(out.ran[0].status, 'fenced'); assert.equal(caddy.log.reload, 0); assert.deepEqual(caddy.log.writes, []);
+    const row = getJob(d, id); assert.equal(row.owner, NEXT); assert.equal(row.status, 'running', 'the next owner\'s claim is untouched: not finished, not failed by the fenced step');
+    assert.equal(getJob(d, 'setup-1').outcome, 'setup_pending'); assert.equal(readLock(d, HOST_ROUTES_LOCK), null);
+  }
+});
+
 test('the shared network lease is RENEWED through a slow live sequence (each command longer than the lease period): no other job can take it over meanwhile and every command is issued; a worker whose lease was taken over issues no further mutation', async (t) => {
   const c = clock();
   const d = db(); const st = { instances: [inst({ name: 'pp-n', config: { 'volatile.uuid': UUID_B } })] }; const h = scriptedHost(st); const g = scriptedGuest({});

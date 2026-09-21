@@ -738,10 +738,20 @@ reload, and every write and the reload of a rollback — so a step whose
 lease was taken over ends `failed` / `lease_lost` with nothing further
 written, and **no rollback runs after the loss**: the site files and the
 upstream row are the new owner's, and a stale worker's "restore" would
-overwrite its work. Between writes (a `caddy adapt` or reload that runs
-long) a keep-alive renews both leases every 10 s, so a legitimately long
-operation never lets them lapse; a renewal that changes no row is
-remembered and the next write throws. Then `lib/guest-routes.js` `configureGuestRoutes`: the
+overwrite its work. The fence renews **three** leases at the epochs the
+step holds them — the job claim itself first (the store's fenced
+`heartbeat`: owner, epoch, still running), then the guest lock, then the
+routes lock — and between writes (a `caddy adapt` or reload that runs
+long) a keep-alive renews the same three every 10 s, so a legitimately
+long operation never lets the claim lapse for the runner's `reconcile` to
+record it interrupted under live locks, and never lets a lock lapse
+either; a renewal that changes no row is remembered and the next write
+throws. A claim that is no longer the step's (re-claimed at a new epoch,
+ended by the reconciler, expired and taken) is the executor's own
+`FencedError`: the step writes no outcome, touches no setup record and
+releases only the locks it holds at its epochs — a lost claim is never
+revived, because the heartbeat extends only a claim this owner still
+holds. Then `lib/guest-routes.js` `configureGuestRoutes`: the
 guest's `services` row, its upstream moved and re-rendered when the
 address changed, one `service_http_routes` row per service (a domain
 already routed to THIS guest's service is `existing`, re-rendered and never
@@ -998,7 +1008,17 @@ ownership intact (every file restored, the known-good config reloaded)
 and after the lease was taken (nothing restored, the new owner's site
 file and upstream row untouched, `lease_lost`); both leases renewed
 through a validation that outlives the lease period five times over and
-a keep-alive that sees the loss stopping the reload; and the timeout kill
+a keep-alive that sees the loss stopping the reload; the third review
+(R-040) by the job claim heart-beaten with the locks — the render
+outliving the claim period three times over with the runner's actual
+`reconcile()` invoked at each increment while adapt waits (it touches
+nothing; claim and both locks live and this backend's at every probe; one
+reload; setup and create complete), the claim ended by that reconciler
+under the render (fenced: no reload, no rollback write, the reconciler's
+record and the other owner's guest lock untouched, the routes lock
+released, the setup record left to its next owner) and re-claimed at a new
+epoch by another backend (fenced, the next owner's claim untouched); and
+the timeout kill
 with REAL processes through `submitRunnerJob` and the executor under the
 sandbox's cgroup1 pids containment: an init script daemonising a `setsid`
 writer, the client timed out at the bound, the recorded leader killed and

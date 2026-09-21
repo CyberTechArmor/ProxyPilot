@@ -328,9 +328,11 @@ test('ratchet (A-17.7): the post-launch and post-start fix-ups are setup-engine 
   assert.match(src('lib/setup-engine/backend.js'), /if \(isInit && writerStopped !== true\) return \{ ok: false, error: [^\n]*code: 'WRITER_NOT_ESTABLISHED' \};/, 'an init acknowledgement must establish the writer stopped');
   assert.match(src('routes/setup.js'), /writerStopped: z\.boolean\(\)\.optional\(\)/);
   const steps = src('lib/setup-engine/backend-steps.js');
-  assert.match(steps, /const renewBoth = \(\) => \{\n\s+if \(!\(renewLock\(db, \{ app: job\.app, owner, epoch: lockEpoch/, 'the routes step renews both leases before every write');
-  assert.match(steps, /const fence = \(\) => \{\n\s+const gone = lost \|\| renewBoth\(\);\n\s+if \(gone\) \{ lost = gone; throw new LeaseLostError\(gone\); \}/, 'a lost lease stops every later write');
-  assert.match(steps, /keepAlive = setInterval\(\(\) => \{ try \{ const gone = renewBoth\(\); if \(gone\) lost = gone; \}/, 'the leases are renewed between writes (a long adapt or reload never lets them lapse)');
+  // The review of afcc895 (R-040): the job CLAIM is heart-beaten with the two locks, first, on every fence and from the keep-alive; a zero-row heartbeat is the executor's own FencedError and revives nothing.
+  assert.match(steps, /const renewAll = \(\) => \{\n\s+if \(!\(heartbeat\(db, \{ id: job\.id, owner, epoch, leaseMs: LEASE_MS, nowMs: nowMs\(\) \}\) > 0\)\) return JOB_CLAIM;\n\s+if \(!\(renewLock\(db, \{ app: job\.app, owner, epoch: lockEpoch/, 'the routes step renews the claim and both leases before every write');
+  assert.match(steps, /const fence = \(\) => \{\n\s+const gone = lost \|\| renewAll\(\);\n\s+if \(gone\) \{ lost = gone; throw gone === JOB_CLAIM \? new FencedError\(job\.id\) : new LeaseLostError\(gone\); \}/, 'a lost claim or lease stops every later write');
+  assert.match(steps, /keepAlive = setInterval\(\(\) => \{ try \{ const gone = renewAll\(\); if \(gone\) lost = gone; \}/, 'claim and leases are renewed between writes (a long adapt or reload never lets any of them lapse)');
+  assert.match(steps, /if \(e instanceof FencedError \|\| e\?\.code === 'FENCED'\) \{ log\('fenced', job\.id\); return \{ status: 'fenced', outcome: null \}; \}/, 'a fenced step writes no outcome of its own');
   assert.match(src('lib/guest-routes.js'), /const check = \(\) => \{ if \(typeof fence === 'function'\) fence\(\); \};/);
   // The review of 91933cf (R-038): the fence reaches the real adapter and every write of the render, the upstream move and the rollback.
   assert.match(src('mock2/ops.js'), /configureRoutes: async \(\{ name, ip, services, fence = null \}\) => \{\n[\s\S]{0,300}return configureGuestRoutes\(store\.getDb\(\), \{ name, ip, services, render, fence \}\);/, 'the production adapter forwards the fence');

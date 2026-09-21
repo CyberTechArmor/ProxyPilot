@@ -72,6 +72,9 @@ process environment.
 1. **Non-destructive root recovery command** that preserves data and
    encryption keys, tested independently of the dashboard (replaces the
    destructive `reset.sh` path recorded in `docs/known-issues.md`).
+   **Implemented** (`proxypilot recover`, `docs/features/root-recovery.md`);
+   host acceptance outstanding. Progress ledger:
+   `docs/core/setup-engine-ledger.md`.
 2. **Independent host runner**, with the planned privilege separation: the
    runner, not the privileged backend container, is what executes host
    operations.

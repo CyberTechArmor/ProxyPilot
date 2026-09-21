@@ -43,10 +43,12 @@ tab is not evidence of anything below.
    security key) will be refused, with a message saying so; every signed-in
    admin re-proves once before their next destructive action; a passkey
    login no longer counts as that re-proof.
-5. **Know that the non-destructive root recovery command does not exist
-   yet.** `reset.sh` is destructive and targets the legacy database path
-   (`docs/known-issues.md`). If step 2 fails, fix that before updating, not
-   after.
+5. **Know the recovery command.** `sudo proxypilot recover admin <name>
+   --password --totp` restores one local administrator without touching
+   data or keys (`docs/features/root-recovery.md`); `reset.sh` now delegates
+   to it. It ships with this update, so on the version you are updating
+   *from* it does not exist yet: if step 2 fails, fix that before updating,
+   not after.
 
 After the update, repeat step 2 in a fresh browser: local login, sudo
 re-proof, and if you use passkeys, a passkey login followed by a separate

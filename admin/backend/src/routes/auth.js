@@ -232,8 +232,10 @@ function getDeviceName(userAgent) {
 authRouter.get('/setup-status', (req, res) => {
   const db = getDb();
   // Setup is needed if any admin user has an empty password_hash
+  // Local accounts only: a directory-backed (LDAP) administrator has an
+  // intentionally empty password_hash and must never look claimable here.
   const needsSetup = db.prepare(
-    "SELECT id, username FROM users WHERE role = 'admin' AND (password_hash = '' OR password_hash IS NULL) LIMIT 1"
+    "SELECT id, username FROM users WHERE role = 'admin' AND (password_hash = '' OR password_hash IS NULL) AND (auth_source IS NULL OR auth_source = 'local') LIMIT 1"
   ).get();
 
   res.json({
@@ -258,9 +260,12 @@ authRouter.post('/initial-setup', async (req, res) => {
       return res.status(400).json({ error: 'Passwords do not match' });
     }
 
-    // Only allow setup for admin users with no password set
+    // Only allow setup for LOCAL admin users with no password set. An LDAP
+    // administrator's empty hash is by design (routes/auth.js login), not an
+    // invitation: without this filter anyone who knew the name could set a
+    // password and be issued a session as that administrator.
     const user = db.prepare(
-      "SELECT * FROM users WHERE username = ? AND role = 'admin' AND (password_hash = '' OR password_hash IS NULL)"
+      "SELECT * FROM users WHERE username = ? AND role = 'admin' AND (password_hash = '' OR password_hash IS NULL) AND (auth_source IS NULL OR auth_source = 'local')"
     ).get(username);
 
     if (!user) {

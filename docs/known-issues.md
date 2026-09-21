@@ -296,21 +296,26 @@ own. Until then, read that concern as "the filesystem / lives on", and judge a
 container source's real size from the transfer itself, which reports actual
 bytes.
 
-## `reset.sh` deletes the legacy database path, and deletes it at all
+## `reset.sh` deletes the legacy database path, and deletes it at all — RESOLVED 2026-09
 
-`reset.sh` ("reset password / TOTP / full reset") clears `ADMIN_PASSWORD` in
-`.env` and then `rm -f`s `data/proxypilot.db` so the first-boot setup flow
-re-triggers. Two problems. The database moved to `data/db/proxypilot.db`
-(update.sh migrates the legacy layout), so on a current install the delete
-is a no-op and the restart alone does not re-open setup — the reset does not
-reset. And where the path still matches, the recovery tool wipes every
-service, route, user and audit row to reset one password. Neither is what a
-break-glass tool should do. Found during the 2026-09 platform-architecture
-review; the fix is a root-only recovery command that edits the live users
-table (restore access to one designated administrator, revoke that account's
-sessions) and leaves the data alone — a change of its own, ahead of any SSO
-work, since a non-destructive recovery path is what makes an identity
-provider outage survivable.
+`reset.sh` ("reset password / TOTP / full reset") used to clear
+`ADMIN_PASSWORD` in `.env` and then `rm -f` `data/proxypilot.db` so the
+first-boot setup flow re-triggered. Two problems. The database moved to
+`data/db/proxypilot.db` (update.sh migrates the legacy layout), so on a
+current install the delete was a no-op and the restart alone did not re-open
+setup — the reset did not reset. And where the path still matched, the
+recovery tool wiped every service, route, user and audit row to reset one
+password. Found during the 2026-09 platform-architecture review.
+
+Resolved by the non-destructive root recovery command
+(`docs/features/root-recovery.md`): `sudo proxypilot recover admin <name>
+--password [--totp …]` edits the one named local administrator in the live
+users table, revokes that account's sessions, elevation grants and trusted
+devices, records an audit event without secret material, takes a `VACUUM
+INTO` copy first, and leaves every other account, all data, the `.env` and
+its keys alone. `reset.sh` keeps its commands and delegates to it; it no
+longer deletes or rewrites anything. Still open: the host acceptance run
+recorded at the end of the feature doc.
 
 ## The sudo window is still four sliding hours
 

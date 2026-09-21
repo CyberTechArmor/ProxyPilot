@@ -70,7 +70,7 @@ import {
   parseProcLoadavg, parseProcMeminfo, parseDfOutput, pickStoragePool, parseProfileRootPool,
   parsePoolResources, parseStorageInfoText, summarizeContainers, buildHostUsage, perProjectUsage,
   validateHostUsage, reclaimDelta,
-  mcpTokenRefusal, mcpTokenOwnerStatus, mcpTokenExpiry,
+  mcpTokenRefusal, mcpTokenOwnerStatus, mcpTokenExpiry, mcpTokenDefaultDays,
 } from '../lib/mcp-logic.js';
 import { archiveProject, unarchiveProject } from '../lib/project-lifecycle.js';
 import { checkForUpdates as selfUpdateCheck, installedState as selfUpdateInstalled, startUpdate as selfUpdateStart, updateStatus as selfUpdateStatus } from '../lib/self-update.js';
@@ -4754,15 +4754,15 @@ export function createMcpAdminRouter() {
   // ONCE; only its hash is stored.
   router.post('/', requireAdmin, (req, res) => {
     const name = String(req.body?.name || '').trim().slice(0, 100) || 'MCP client';
-    // Optional expiry (migration 914). Absent = never, as before.
-    const expiry = mcpTokenExpiry(req.body?.expires_in_days);
+    // Lifetime (migration 914): absent = MCP_TOKEN_DEFAULT_DAYS (365), 0 = never (explicit).
+    const expiry = mcpTokenExpiry(req.body?.expires_in_days, Date.now(), { defaultDays: mcpTokenDefaultDays() });
     if (expiry.error) return res.status(400).json({ error: expiry.error });
     const token = mintMcpToken();
     getDb().prepare(`
       INSERT INTO mcp_tokens (name, token_hash, created_by, created_at, token_prefix, expires_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(name, hashMcpToken(token), String(req.user.id), new Date().toISOString(), token.slice(0, 13), expiry.expiresAt);
-    logAudit(req.user.id, 'MCP_TOKEN_CREATED', 'mcp_token', name, { expires_at: expiry.expiresAt }, req.ip);
+    logAudit(req.user.id, 'MCP_TOKEN_CREATED', 'mcp_token', name, { expires_at: expiry.expiresAt, never_expires: !!expiry.never }, req.ip);
     const base = publicBaseUrl(req);
     res.status(201).json({
       token,

@@ -45,6 +45,21 @@ test('with fixture credentials it makes the request the redirect was hiding', ()
 
 test('the exact case that used to pass: a login redirect with everything behind it broken', () => {
   // ROOT 302 is what probeServing saw and called healthy.
+  {
+    // MASTERKEY: a warning (never a failure) when the app has no master secret
+    // of its own; not applicable to a project with no auth component.
+    const s = readinessScript({ port: 3000 });
+    assert.match(s, /AUTH_MASTER_SECRET=/);
+    assert.match(s, /MASTERKEY:200/);
+    const warn = parseReadiness('ROOT:200\nHEALTH:200\nLOGIN:200\nSIGNUP:200\nSTATIC:200\nMASTERKEY:404\n');
+    assert.equal(warn.ready, true);
+    assert.match(warn.summary, /1 warning\(s\): the app has its own master secret \(HTTP 404\)/);
+    assert.match(warn.checks.find((c) => c.key === 'MASTERKEY').why, /public development default/);
+    const noAuth = parseReadiness('ROOT:200\nHEALTH:200\nLOGIN:404\nSIGNUP:404\nSTATIC:200\nMASTERKEY:404\n');
+    assert.equal(noAuth.checks.some((c) => c.key === 'MASTERKEY'), false);
+    const fine = parseReadiness('ROOT:200\nHEALTH:200\nLOGIN:200\nSIGNUP:200\nSTATIC:200\nMASTERKEY:200\n');
+    assert.equal(fine.warnings.length, 0);
+  }
   const r = parseReadiness('ROOT:302\nHEALTH:503\nLOGIN:200\nSTATIC:200\nSIGNIN:200\nAPP:500\n');
   assert.equal(r.ready, false);
   // Both real problems are named, in words an operator can act on.

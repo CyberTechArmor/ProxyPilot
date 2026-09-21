@@ -33,7 +33,7 @@ import {
   buildManifestVerifyScript, parseShaVerifyOutput,
   planMigrationRenumber, mergeEnvDefaults, manifestEntryFromConnection,
   deriveComponentSubsystem, buildComponentsStateDoc, publicProjectComponentShape,
-  COMPONENTS_STATE_PATH, planSecretMint, componentSecretKeys, secretMintGuards,
+  COMPONENTS_STATE_PATH, planSecretMint, componentSecretKeys, secretMintGuards, freshEnvValues,
 } from './component-logic.js';
 import { mergeEnvFile } from '../lib/mcp-ext/logic.js';
 import { b64 } from './host.js';
@@ -289,6 +289,58 @@ export function installedSecretKeys(rows) {
 //   required — the minted-or-eligible keys a deploy must find present.
 const shq = (s) => String(s).replace(/'/g, "'\\''");
 
+// The container's environment file, read whole and written whole (moved into
+// place, so the unit never reads a half-written file). Same file, mode and
+// channel as set_project_env.
+async function readEnvironment(containerName) {
+  const cur = await containerSh(containerName, `cat ${ENVIRONMENT_FILE} 2>/dev/null || true`, { timeoutMs: 15000 });
+  if (cur.code !== 0) return { ok: false, error: `could not read ${ENVIRONMENT_FILE}: ${(cur.stderr || cur.stdout || '').trim().slice(-200)}` };
+  return { ok: true, text: cur.stdout || '' };
+}
+async function writeEnvironment(containerName, text) {
+  const w = await containerSh(
+    containerName,
+    `umask 022\nprintf '%s' '${b64(text)}' | base64 -d > ${ENVIRONMENT_FILE}.mock2-tmp && chmod 0644 ${ENVIRONMENT_FILE}.mock2-tmp && mv -f ${ENVIRONMENT_FILE}.mock2-tmp ${ENVIRONMENT_FILE}`,
+    { timeoutMs: 15000 },
+  );
+  if (w.code !== 0) return { ok: false, error: `could not write ${ENVIRONMENT_FILE}: ${(w.stderr || w.stdout || '').trim().slice(-200)}` };
+  return { ok: true };
+}
+
+// ensureFreshEnvValues — on a component's FIRST install into a project (every
+// file written, nothing kept), write the contract's fresh_value entries into
+// the environment unless the key is already there. A fresh app has no data
+// under any previous key, so e.g. its legacy-key list starts EMPTY; a reinstall
+// into an existing project never reaches here.
+export async function ensureFreshEnvValues({ containerName, contracts } = {}) {
+  const vars = {};
+  for (const contract of contracts || []) {
+    for (const { key, value } of freshEnvValues(contract?.config || [])) {
+      if (!Object.prototype.hasOwnProperty.call(vars, key)) vars[key] = value;
+    }
+  }
+  const keys = Object.keys(vars);
+  if (!keys.length) return { ok: true, written: [] };
+  const cur = await readEnvironment(containerName);
+  if (!cur.ok) return { ok: false, written: [], error: cur.error };
+  const existing = new Set(envFileKeysOf(cur.text));
+  const toWrite = {};
+  for (const k of keys) if (!existing.has(k)) toWrite[k] = vars[k];
+  const written = Object.keys(toWrite);
+  if (!written.length) return { ok: true, written: [] };
+  const w = await writeEnvironment(containerName, mergeEnvFile(cur.text, toWrite));
+  if (!w.ok) return { ok: false, written: [], error: w.error };
+  return { ok: true, written };
+}
+function envFileKeysOf(text) {
+  const keys = [];
+  for (const line of String(text || '').split('\n')) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (m) keys.push(m[1]);
+  }
+  return keys;
+}
+
 export async function ensureComponentSecrets({ containerName, rows, rand } = {}) {
   const configs = installedSecretConfigs(rows);
   if (!configs.length) return { ok: true, minted: [], deferred: [], required: [] };
@@ -296,8 +348,18 @@ export async function ensureComponentSecrets({ containerName, rows, rand } = {})
   let eligible = configs;
   const guards = secretMintGuards(configs);
   if (guards.length) {
+    // The source must carry the marker; when the built artifact exists it must
+    // carry it too (a stale dist/ predating the source is not the code that
+    // will run). The deploy builds before it mints, so at deploy time the
+    // built file is the one the unit is about to start.
     const script = guards
-      .map((g) => `if grep -q -F -- '${shq(g.contains)}' '${APP_DIR}/${shq(g.path)}' 2>/dev/null; then echo "MARKER OK ${g.key}"; else echo "MARKER MISSING ${g.key}"; fi`)
+      .map((g) => {
+        const src = `grep -q -F -- '${shq(g.contains)}' '${APP_DIR}/${shq(g.path)}' 2>/dev/null`;
+        const built = g.built
+          ? ` && { [ ! -e '${APP_DIR}/${shq(g.built)}' ] || grep -q -F -- '${shq(g.contains)}' '${APP_DIR}/${shq(g.built)}' 2>/dev/null; }`
+          : '';
+        return `if ${src}${built}; then echo "MARKER OK ${g.key}"; else echo "MARKER MISSING ${g.key}"; fi`;
+      })
       .join('\n');
     const r = await containerSh(containerName, script, { timeoutMs: 15000 });
     const missing = new Set(
@@ -314,23 +376,12 @@ export async function ensureComponentSecrets({ containerName, rows, rand } = {})
   }
   const required = componentSecretKeys(eligible);
   if (!eligible.length) return { ok: true, minted: [], deferred, required };
-  const cur = await containerSh(containerName, `cat ${ENVIRONMENT_FILE} 2>/dev/null || true`, { timeoutMs: 15000 });
-  if (cur.code !== 0) {
-    return { ok: false, minted: [], deferred, required, error: `could not read ${ENVIRONMENT_FILE}: ${(cur.stderr || cur.stdout || '').trim().slice(-200)}` };
-  }
-  const plan = planSecretMint(cur.stdout || '', eligible, rand ? { rand } : {});
+  const cur = await readEnvironment(containerName);
+  if (!cur.ok) return { ok: false, minted: [], deferred, required, error: cur.error };
+  const plan = planSecretMint(cur.text, eligible, rand ? { rand } : {});
   if (!plan.minted.length) return { ok: true, minted: [], deferred, required };
-  const merged = mergeEnvFile(cur.stdout || '', plan.vars);
-  // Same file, mode and channel as set_project_env: written whole, then moved
-  // into place so a half-written environment is never what the unit reads.
-  const w = await containerSh(
-    containerName,
-    `umask 022\nprintf '%s' '${b64(merged)}' | base64 -d > ${ENVIRONMENT_FILE}.mock2-tmp && chmod 0644 ${ENVIRONMENT_FILE}.mock2-tmp && mv -f ${ENVIRONMENT_FILE}.mock2-tmp ${ENVIRONMENT_FILE}`,
-    { timeoutMs: 15000 },
-  );
-  if (w.code !== 0) {
-    return { ok: false, minted: [], deferred, required, error: `could not write ${ENVIRONMENT_FILE}: ${(w.stderr || w.stdout || '').trim().slice(-200)}` };
-  }
+  const w = await writeEnvironment(containerName, mergeEnvFile(cur.text, plan.vars));
+  if (!w.ok) return { ok: false, minted: [], deferred, required, error: w.error };
   return { ok: true, minted: plan.minted, deferred, required };
 }
 
@@ -474,6 +525,19 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
       }, null);
     } catch (e) { console.warn('[mock2] preinstall audit log failed:', e?.message); }
   }
+
+  // First installs (every file written, nothing kept) get their contracts'
+  // fresh_value entries: a fresh app starts with, for instance, an EMPTY
+  // legacy-key list — it has no data under any previous key, so it must never
+  // accept one. A reinstall into an existing project keeps files and skips this.
+  try {
+    const freshContracts = installed.filter((i) => i.counts && i.counts.kept === 0).map((i) => i.contract);
+    const fresh = await ensureFreshEnvValues({ containerName, contracts: freshContracts });
+    if (fresh.written.length) {
+      insertMessage({ projectId, kind: 'system', cycleId, body: `Fresh install: set ${fresh.written.join(', ')} in the container environment (no earlier data to migrate).` });
+    }
+    if (!fresh.ok) console.warn(`[mock2] fresh env values failed for project ${projectId}: ${fresh.error}`);
+  } catch (e) { console.warn('[mock2] fresh env values failed:', e?.message); }
 
   // Repair pass over selections already marked 'installed' (they were filtered
   // out of INSTALLABLE above and never re-run installOne): verify their declared

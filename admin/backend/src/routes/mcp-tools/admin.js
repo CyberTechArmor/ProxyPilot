@@ -15,7 +15,7 @@ import { join, basename } from 'node:path';
 import { checkSuperadminProtection } from '../../lib/superadmin.js';
 import { encryptSecret, decryptSecret } from '../../lib/secrets.js';
 import { hasHostBinary } from '../../lib/host-exec.js';
-import { mcpTokenOwnerStatus, mcpTokenExpiry } from '../../lib/mcp-logic.js';
+import { mcpTokenOwnerStatus, mcpTokenExpiry, mcpTokenDefaultDays } from '../../lib/mcp-logic.js';
 import {
   validateTokenScope, parseTokenScope, intIn, stamp, sha256Hex, UNIT_NAME_RE, parseSystemctlUnits, parseDpkgList, parseAptUpgradable, pathUnder,
 } from '../../lib/mcp-ext/logic.js';
@@ -204,16 +204,16 @@ export function createAdminHandlers(kit) {
     // one at all rather than mint a dead key.
     const ownerId = String(auth.created_by || '').trim();
     if (!ownerId) { note.refused = true; return err('This key has no recorded owner, so it cannot mint another; mint from a key owned by a live admin (MCP Access page)'); }
-    const expiry = mcpTokenExpiry(args.expires_in_days);
+    const expiry = mcpTokenExpiry(args.expires_in_days, Date.now(), { defaultDays: mcpTokenDefaultDays() });
     if (expiry.error) return err(expiry.error);
-    const gate = confirmFlag(args, note, `Mint MCP key "${name}" with scope ${JSON.stringify(scope || 'unscoped')}${expiry.expiresAt ? ` expiring ${expiry.expiresAt}` : ''}.`); if (gate) return gate;
+    const gate = confirmFlag(args, note, `Mint MCP key "${name}" with scope ${JSON.stringify(scope || 'unscoped')}${expiry.expiresAt ? ` expiring ${expiry.expiresAt}` : ' that never expires (explicit)'}.`); if (gate) return gate;
     const token = mintMcpToken();
     const prefix = token.slice(0, 13);
     const info = getDb().prepare('INSERT INTO mcp_tokens (name, token_hash, created_by, created_at, scope_json, token_prefix, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(name, hashMcpToken(token), ownerId, new Date().toISOString(), scope ? JSON.stringify(scope) : null, prefix, expiry.expiresAt);
     note.subject_id = String(info.lastInsertRowid);
     note.summary = `minted MCP key ${name}`;
-    note.detail = { scope: scope || null, prefix, expires_at: expiry.expiresAt };
+    note.detail = { scope: scope || null, prefix, expires_at: expiry.expiresAt, never_expires: !!expiry.never };
     const base = req ? ctx.publicBaseUrl(req) : '';
     return ok({ created: true, id: Number(info.lastInsertRowid), name, prefix, scope: scope || null, expires_at: expiry.expiresAt, token, ...(base ? { endpoint: `${base}/api/mcp`, connector_url: `${base}/api/mcp/t/${token}` } : {}), note: 'Store the token now — it is shown once. A scoped key sees only the tools its scope allows in tools/list.' });
   });

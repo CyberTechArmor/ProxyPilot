@@ -178,13 +178,28 @@ export function mcpTokenOwnerStatus(args) {
   return { no_owner: 'none', owner_deleted: 'deleted', owner_disabled: 'disabled', owner_not_admin: 'demoted', expired: 'expired' }[r];
 }
 
-// mcpTokenExpiry(expiresInDays, now) → an ISO expiry, or null for "never"; a
-// value outside 1..3650 days is refused with an error string.
-export function mcpTokenExpiry(expiresInDays, now = Date.now()) {
-  if (expiresInDays === undefined || expiresInDays === null || expiresInDays === '') return { expiresAt: null };
-  const n = Number(expiresInDays);
-  if (!Number.isInteger(n) || n < 1 || n > 3650) return { error: 'expires_in_days must be a whole number of days between 1 and 3650' };
-  return { expiresAt: new Date(now + n * 24 * 60 * 60 * 1000).toISOString() };
+// mcpTokenExpiry(expiresInDays, now, { defaultDays }) → { expiresAt, never }.
+// Absent = the configured default lifetime (MCP_TOKEN_DEFAULT_DAYS, 365) — a
+// newly minted token expires unless someone says otherwise. 0 = never, an
+// explicit choice that the audit row records; 1..3650 = that many days. Tokens
+// minted before migration 914 have no expiry and are unchanged (the listing
+// shows them as never expiring so they can be inventoried and replaced).
+export const MCP_TOKEN_DEFAULT_DAYS = 365;
+export function mcpTokenExpiry(expiresInDays, now = Date.now(), { defaultDays = MCP_TOKEN_DEFAULT_DAYS } = {}) {
+  let n;
+  if (expiresInDays === undefined || expiresInDays === null || expiresInDays === '') n = Number(defaultDays);
+  else n = Number(expiresInDays);
+  if (n === 0) return { expiresAt: null, never: true };
+  if (!Number.isInteger(n) || n < 1 || n > 3650) return { error: 'expires_in_days must be a whole number of days between 1 and 3650, or 0 for never' };
+  return { expiresAt: new Date(now + n * 24 * 60 * 60 * 1000).toISOString(), never: false };
+}
+
+// The operator-configured default lifetime, validated the same way.
+export function mcpTokenDefaultDays(env = process.env) {
+  const raw = env.MCP_TOKEN_DEFAULT_DAYS;
+  if (raw === undefined || raw === null || raw === '') return MCP_TOKEN_DEFAULT_DAYS;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 3650 ? n : MCP_TOKEN_DEFAULT_DAYS;
 }
 
 export function looksLikeMcpToken(token) {

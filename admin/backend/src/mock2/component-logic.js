@@ -525,6 +525,13 @@ export function validateComponentContract(input) {
         // whose installed component predates that code keeps its current
         // value; the key is deferred and reported, never minted blind.
         requires_marker: normalizeMintMarker(c.requires_marker),
+        // fresh_value: written into the container environment when the
+        // component is installed into a project for the FIRST time (nothing of
+        // it existed before, so there is no data to migrate) — e.g. an empty
+        // legacy-key list, so a fresh app never accepts the development key.
+        // Never written on a reinstall; an existing project keeps the
+        // component's own default until an operator changes it.
+        fresh_value: typeof c.fresh_value === 'string' ? c.fresh_value.slice(0, 400) : null,
         default: c.default === undefined || c.default === null ? null : String(c.default).slice(0, 400),
         description: capSlug(c.description, 300),
       });
@@ -750,11 +757,27 @@ export function mergeEnvDefaults(envText = '', config = []) {
 // a shell grep in the container); the substring is bounded.
 export function normalizeMintMarker(m) {
   if (!m || typeof m !== 'object') return null;
-  const path = String(m.path || '').trim();
+  const safePath = (p) => {
+    const s = String(p || '').trim();
+    return s && /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(s) && !s.includes('..') ? s : null;
+  };
+  const path = safePath(m.path);
   const contains = String(m.contains || '').trim().slice(0, 200);
   if (!path || !contains) return null;
-  if (!/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(path) || path.includes('..')) return null;
-  return { path, contains };
+  // built: the compiled artifact the source becomes (dist/…). When it exists
+  // it must carry the marker too — a stale build that predates the source
+  // would otherwise satisfy a source-only check.
+  const built = m.built === undefined || m.built === null ? null : safePath(m.built);
+  if (m.built !== undefined && m.built !== null && !built) return null;
+  return built ? { path, contains, built } : { path, contains };
+}
+
+// freshEnvValues(config) → [{ key, value }] the platform writes into the
+// container environment on a component's FIRST install into a project.
+export function freshEnvValues(config = []) {
+  return (config || [])
+    .filter((c) => c && typeof c.fresh_value === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(c.key || '')))
+    .map((c) => ({ key: c.key, value: c.fresh_value }));
 }
 
 // secretMintGuards(config) → [{ key, path, contains }] for every minted secret
@@ -762,7 +785,7 @@ export function normalizeMintMarker(m) {
 export function secretMintGuards(config = []) {
   return (config || [])
     .filter((c) => c && c.secret === true && c.generate === true && c.requires_marker && c.requires_marker.path && c.requires_marker.contains)
-    .map((c) => ({ key: c.key, path: c.requires_marker.path, contains: c.requires_marker.contains }));
+    .map((c) => ({ key: c.key, path: c.requires_marker.path, contains: c.requires_marker.contains, built: c.requires_marker.built || null }));
 }
 
 // componentSecretKeys(config) — the keys a contract marks secret + generate:

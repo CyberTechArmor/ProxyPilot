@@ -88,6 +88,20 @@ export const READINESS_CHECKS = Object.freeze([
 
 // The in-container script. curl only — no jq, no node, nothing that has to be
 // installed in the app's container.
+// The one non-HTTP readiness line: does the container environment carry the
+// app's own master secret? Absent, the auth component encrypts stored
+// credentials under its public development default — a deferred mint
+// (docs/features/immediate-repairs.md). Reported as a warning on every
+// deploy so a deferred project stays visibly marked; skipped for a project
+// with no auth component (LOGIN 404).
+export const MASTERKEY_CHECK = Object.freeze({
+  key: 'MASTERKEY',
+  describe: 'the app has its own master secret',
+  ok: (n) => n === 200,
+  required: false,
+  why: 'AUTH_MASTER_SECRET is not set in the container environment, so stored credentials are encrypted under the public development default — install the current auth component and redeploy (docs/features/immediate-repairs.md)',
+});
+
 export function readinessScript({ port, authed = null }) {
   const base = `http://127.0.0.1:${Number(port)}`;
   const lines = ['set -u'];
@@ -97,6 +111,7 @@ export function readinessScript({ port, authed = null }) {
       `echo "${c.key}:\${C:-000}"`,
     );
   }
+  lines.push(`if grep -q -E '^AUTH_MASTER_SECRET=.+' /etc/environment 2>/dev/null; then echo "MASTERKEY:200"; else echo "MASTERKEY:404"; fi`);
   // The signed-in question, when the platform holds fixture credentials. This
   // is the one the redirect hid: an app can serve /login perfectly and 500 on
   // every screen behind it.
@@ -158,7 +173,7 @@ export function parseReadiness(stdout) {
     return { ready: false, checks: [], failures: ['the readiness probe produced no output'], summary: 'the readiness probe produced no output' };
   }
 
-  const all = [...READINESS_CHECKS, ...AUTHED_CHECKS];
+  const all = [...READINESS_CHECKS, MASTERKEY_CHECK, ...AUTHED_CHECKS];
   const checks = [];
   for (const c of all) {
     if (!codes.has(c.key)) continue;                 // not reached / not applicable
@@ -166,6 +181,7 @@ export function parseReadiness(stdout) {
     // SIGNIN failing is not a fault when the app has no auth component at all
     // (LOGIN 404) — the fixture has nothing to sign into.
     const noAuth = codes.get('LOGIN') === 404;
+    if (c.key === 'MASTERKEY' && noAuth) continue;   // no auth component: nothing to encrypt
     const required = c.required && !(noAuth && (c.key === 'SIGNIN' || c.key === 'APP'));
     checks.push({ key: c.key, code, ok: c.ok(code), required, describe: c.describe, why: c.why });
   }

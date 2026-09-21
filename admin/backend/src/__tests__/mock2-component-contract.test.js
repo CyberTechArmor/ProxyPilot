@@ -18,7 +18,7 @@ import {
   buildComponentSuggestionQuestion, parseComponentSuggestionAnswer,
   COMPONENT_SUGGESTION_ACCEPT, COMPONENT_SUGGESTION_DECLINE,
   planMigrationRenumber, mergeEnvDefaults, manifestEntryFromConnection,
-  planSecretMint, componentSecretKeys, normalizeMintMarker, secretMintGuards,
+  planSecretMint, componentSecretKeys, normalizeMintMarker, secretMintGuards, freshEnvValues,
   deriveComponentSubsystem, buildComponentsStateDoc, buildInstalledComponentsSection,
   publicProjectComponentShape, COMPONENTS_STATE_PATH,
 } from '../mock2/component-logic.js';
@@ -251,12 +251,18 @@ test('normalizeMintMarker / secretMintGuards: a marker names a plain relative fi
   assert.equal(normalizeMintMarker({ path: '/etc/passwd', contains: 'x' }), null, 'absolute paths refused');
   assert.equal(normalizeMintMarker({ path: '../x.ts', contains: 'x' }), null, 'parent traversal refused');
   assert.equal(normalizeMintMarker({ path: "a'b.ts", contains: 'x' }), null, 'shell-hostile characters refused');
+  // The optional built artifact follows the same path rules; a bad one refuses the whole marker.
+  assert.deepEqual(normalizeMintMarker({ path: 'src/a.ts', contains: 'x', built: 'dist/a.js' }), { path: 'src/a.ts', contains: 'x', built: 'dist/a.js' });
+  assert.equal(normalizeMintMarker({ path: 'src/a.ts', contains: 'x', built: '../a.js' }), null);
+  assert.deepEqual(secretMintGuards([{ key: 'K', secret: true, generate: true, requires_marker: { path: 'src/a.ts', contains: 'x', built: 'dist/a.js' } }]), [{ key: 'K', path: 'src/a.ts', contains: 'x', built: 'dist/a.js' }]);
+  // fresh_value: written on a component's first install only; must be a string.
+  assert.deepEqual(freshEnvValues([{ key: 'AUTH_LEGACY_MASTER_SECRETS', fresh_value: '' }, { key: 'X', fresh_value: 'y' }, { key: 'NO' }, { key: 'bad key', fresh_value: '1' }]), [{ key: 'AUTH_LEGACY_MASTER_SECRETS', value: '' }, { key: 'X', value: 'y' }]);
   const config = [
     { key: 'AUTH_MASTER_SECRET', secret: true, generate: true, requires_marker: { path: 'src/auth/crypto.ts', contains: 'decryptSecretAny' } },
     { key: 'AUTH_JWT_SECRET', secret: true, generate: true },
     { key: 'STRIPE_KEY', secret: true, requires_marker: { path: 'x', contains: 'y' } },
   ];
-  assert.deepEqual(secretMintGuards(config), [{ key: 'AUTH_MASTER_SECRET', path: 'src/auth/crypto.ts', contains: 'decryptSecretAny' }]);
+  assert.deepEqual(secretMintGuards(config), [{ key: 'AUTH_MASTER_SECRET', path: 'src/auth/crypto.ts', contains: 'decryptSecretAny', built: null }]);
   // planSecretMint over the ELIGIBLE subset (the installer filters guarded keys
   // whose marker is missing before planning) mints only what is left.
   const eligible = config.filter((c) => c.key !== 'AUTH_MASTER_SECRET');
@@ -284,6 +290,10 @@ test('validateComponentContract carries the generate flag through normalisation'
   assert.equal(m.ok, true, m.error);
   assert.deepEqual(m.contract.config[0].requires_marker, { path: 'src/auth/crypto.ts', contains: 'decryptSecretAny' });
   assert.equal(m.contract.config[1].requires_marker, null);
+  const f = validateComponentContract({ provides: ['auth'], config: [{ key: 'AUTH_LEGACY_MASTER_SECRETS', fresh_value: '' }, { key: 'N', fresh_value: 7 }] });
+  assert.equal(f.ok, true, f.error);
+  assert.equal(f.contract.config[0].fresh_value, '');
+  assert.equal(f.contract.config[1].fresh_value, null);
 });
 
 test('manifestEntryFromConnection produces a manifest entry the gate validates', () => {

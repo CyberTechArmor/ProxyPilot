@@ -1310,7 +1310,7 @@ export const api = {
     }),
   // ---- MCP access tokens (Claude connector) ----
   mcpListTokens: () => request('/mcp-tokens'),
-  mcpCreateToken: (name) => request('/mcp-tokens', { method: 'POST', body: JSON.stringify({ name }) }),
+  mcpCreateToken: (name, expiresInDays) => request('/mcp-tokens', { method: 'POST', body: JSON.stringify({ name, ...(expiresInDays === undefined ? {} : { expires_in_days: expiresInDays }) }) }),
   mcpRevokeToken: (id) => request(`/mcp-tokens/${id}`, { method: 'DELETE' }),
   // ---- Delegated editing (per-container editor keys) ----
   // A key is scoped to one container and one directory inside it, server-side.

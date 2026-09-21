@@ -11,7 +11,7 @@ import {
   rpcResult, rpcError, toolResult,
   mintMcpToken, hashMcpToken, looksLikeMcpToken, tokenFromRequest,
   mcpTokenOwnerRefusal, mcpTokenOwnerStatus, MCP_OWNER_REFUSALS,
-  mcpTokenRefusal, mcpTokenExpired, mcpTokenExpiry,
+  mcpTokenRefusal, mcpTokenExpired, mcpTokenExpiry, mcpTokenDefaultDays, MCP_TOKEN_DEFAULT_DAYS,
   mintUploadTicket, looksLikeUploadTicket,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs,
@@ -2512,12 +2512,28 @@ test('mcpTokenExpired / mcpTokenRefusal: expiry is optional and checked first', 
   for (const k of ['owner_not_admin', 'expired']) assert.equal(typeof MCP_OWNER_REFUSALS[k], 'string');
 });
 
-test('mcpTokenExpiry: absent means never; 1..3650 whole days; anything else refused', () => {
+test('mcpTokenExpiry: absent means the default lifetime; 0 means never, explicitly; 1..3650 days; else refused', () => {
   const now = Date.parse('2026-09-21T00:00:00Z');
-  assert.deepEqual(mcpTokenExpiry(undefined, now), { expiresAt: null });
-  assert.deepEqual(mcpTokenExpiry(null, now), { expiresAt: null });
-  assert.deepEqual(mcpTokenExpiry('', now), { expiresAt: null });
-  assert.deepEqual(mcpTokenExpiry(30, now), { expiresAt: '2026-10-21T00:00:00.000Z' });
-  assert.deepEqual(mcpTokenExpiry('1', now), { expiresAt: '2026-09-22T00:00:00.000Z' });
-  for (const bad of [0, -1, 1.5, 3651, 'soon', {}]) assert.match(mcpTokenExpiry(bad, now).error, /between 1 and 3650/);
+  assert.equal(MCP_TOKEN_DEFAULT_DAYS, 365);
+  // Absent → the default (365 days), not "never".
+  assert.deepEqual(mcpTokenExpiry(undefined, now), { expiresAt: '2027-09-21T00:00:00.000Z', never: false });
+  assert.deepEqual(mcpTokenExpiry('', now), { expiresAt: '2027-09-21T00:00:00.000Z', never: false });
+  assert.deepEqual(mcpTokenExpiry(null, now, { defaultDays: 30 }), { expiresAt: '2026-10-21T00:00:00.000Z', never: false });
+  // An operator default of 0 means new tokens never expire unless the mint says.
+  assert.deepEqual(mcpTokenExpiry(undefined, now, { defaultDays: 0 }), { expiresAt: null, never: true });
+  // 0 at mint = never, recorded as an explicit choice.
+  assert.deepEqual(mcpTokenExpiry(0, now), { expiresAt: null, never: true });
+  assert.deepEqual(mcpTokenExpiry('0', now), { expiresAt: null, never: true });
+  assert.deepEqual(mcpTokenExpiry(30, now), { expiresAt: '2026-10-21T00:00:00.000Z', never: false });
+  assert.deepEqual(mcpTokenExpiry('1', now), { expiresAt: '2026-09-22T00:00:00.000Z', never: false });
+  for (const bad of [-1, 1.5, 3651, 'soon', {}]) assert.match(mcpTokenExpiry(bad, now).error, /between 1 and 3650, or 0 for never/);
+});
+
+test('mcpTokenDefaultDays: reads MCP_TOKEN_DEFAULT_DAYS, falls back to 365 on anything invalid', () => {
+  assert.equal(mcpTokenDefaultDays({}), 365);
+  assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: '' }), 365);
+  assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: '90' }), 90);
+  assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: '0' }), 0);
+  assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: '9999' }), 365);
+  assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: 'forever' }), 365);
 });

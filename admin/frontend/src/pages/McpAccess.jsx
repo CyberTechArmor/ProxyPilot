@@ -31,6 +31,8 @@ export default function McpAccess() {
   const { toast } = useToast();
   const [tokens, setTokens] = useState([]);
   const [name, setName] = useState('');
+  // Lifetime in days; blank = the server default (365), 0 = never (explicit).
+  const [expiresDays, setExpiresDays] = useState('');
   const [busy, setBusy] = useState(false);
   const [minted, setMinted] = useState(null); // { token, connector_url, endpoint } — shown once
 
@@ -49,7 +51,7 @@ export default function McpAccess() {
   const mint = async () => {
     setBusy(true);
     try {
-      const r = await api.mcpCreateToken(name.trim() || 'MCP client');
+      const r = await api.mcpCreateToken(name.trim() || 'MCP client', expiresDays === '' ? undefined : Number(expiresDays));
       setMinted(r);
       setName('');
       load();
@@ -139,11 +141,24 @@ export default function McpAccess() {
               aria-label="Token name"
               className="h-11 sm:h-10 flex-1"
             />
+            <Input
+              type="number" inputMode="numeric" min="0" max="3650"
+              value={expiresDays}
+              onChange={(e) => setExpiresDays(e.target.value)}
+              placeholder="Expires in days (365)"
+              aria-label="Expires in days; 0 means never"
+              title="Days until this token expires. Blank = 365. 0 = never (explicit)."
+              className="h-11 sm:h-10 sm:w-48"
+            />
             <Button onClick={mint} disabled={busy} className="h-11 sm:h-10 shrink-0">
               {busy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
               Create token
             </Button>
           </div>
+          <p className="text-xs text-muted-foreground">
+            New tokens expire after 365 days unless you set a lifetime; 0 means never. A token whose
+            owner is disabled, demoted or deleted stops working at once.
+          </p>
 
           {active.length === 0 ? (
             <p className="text-xs text-muted-foreground">No active tokens. The MCP endpoint refuses every request until one exists.</p>
@@ -156,6 +171,8 @@ export default function McpAccess() {
                     <div className="text-xs text-muted-foreground">
                       Created {t.created_at ? new Date(t.created_at).toLocaleDateString() : '—'}
                       {t.last_used_at ? ` · last used ${new Date(t.last_used_at).toLocaleString()}` : ' · never used'}
+                      {t.expires_at ? ` · expires ${new Date(t.expires_at).toLocaleDateString()}` : ' · never expires'}
+                      {t.owner_status && t.owner_status !== 'active' ? ` · owner ${t.owner_status}` : ''}
                     </div>
                   </div>
                   <Button

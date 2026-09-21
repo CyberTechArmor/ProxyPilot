@@ -114,14 +114,11 @@ test('ratchet: disabling or deleting a user revokes the MCP keys it minted', () 
   assert.match(admin, /if \(demotion \|\| role === 'pending'\) \{/);
 });
 
-test('ratchet: a database that ran the branch\'s old migration 912 still gets lxc_exports', () => {
+test('ratchet: the migration-history repair runs before 912 and comes from the tested pure module', () => {
   const db = src('db.js');
-  const guard = db.slice(db.indexOf('const stray = db.prepare(`SELECT name FROM schema_migrations WHERE version = 912`)'), db.indexOf("runMigration(db, 912, 'lxc_exports'"));
-  assert.ok(guard.length > 0, 'guard sits before the 912 migration');
-  assert.match(guard, /stray\.name === 'mcp_tokens_owner_validity'/);
-  assert.match(guard, /UPDATE schema_migrations SET version = 913 WHERE version = 912/);
-  // The row is deleted only when 913 already records the same migration.
-  assert.match(guard, /has913\.name === 'mcp_tokens_owner_validity'/);
+  assert.match(db, /import \{ repairStrayMigration912 \} from '\.\/lib\/migration-repair\.js';/);
+  const at = db.indexOf('repairStrayMigration912(db, { log:');
+  assert.ok(at > 0 && at < db.indexOf("runMigration(db, 912, 'lxc_exports'"), 'repair sits before the 912 migration');
 });
 
 // ---- minted secrets + production mode wiring ----
@@ -136,6 +133,16 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   assert.match(install, /MARKER MISSING/);
   assert.match(install, /eligible = configs\.filter\(\(c\) => !missing\.has\(c\.key\)\);/);
   assert.match(install, /export function deferredSecretsMessage/);
+  // The built artifact must carry the marker too when it exists (stale dist/).
+  assert.match(install, /\[ ! -e '\$\{APP_DIR\}\/\$\{shq\(g\.built\)\}' \] \|\| grep -q -F/);
+  // A first install writes the contract's fresh values (an empty legacy list);
+  // a reinstall (anything kept) does not.
+  assert.match(install, /installed\.filter\(\(i\) => i\.counts && i\.counts\.kept === 0\)\.map\(\(i\) => i\.contract\)/);
+  assert.match(install, /export async function ensureFreshEnvValues/);
+  // The deferral stays visible: a readiness warning on every deploy.
+  const readiness = src('mock2/readiness-logic.js');
+  assert.match(readiness, /MASTERKEY:200/);
+  assert.match(readiness, /if \(c\.key === 'MASTERKEY' && noAuth\) continue;/);
   const mintIdx = deploy.indexOf('ensureComponentSecrets(');
   const validateIdx = deploy.indexOf('validateDeployEnvironment(');
   const swapIdx = deploy.indexOf('const swap = await containerSh(');
@@ -162,10 +169,15 @@ test('ratchet: the seed auth component refuses its dev defaults in production an
   assert.match(config, /return refuseInsecureProductionSecrets\(AuthConfigSchema\.parse\(\{/);
   // The third-party credential is NOT minted: only the two the app owns.
   assert.equal(cfg.filter((c) => c.generate === true).length, 2);
-  // The master secret is minted only into code that can migrate what it replaces.
+  // The master secret is minted only into code that can migrate what it replaces —
+  // checked in the source AND the compiled artifact.
   const master = cfg.find((c) => c.key === 'AUTH_MASTER_SECRET');
-  assert.deepEqual(master.requires_marker, { path: 'src/auth/crypto.ts', contains: 'decryptSecretAny' });
+  assert.deepEqual(master.requires_marker, { path: 'src/auth/crypto.ts', contains: 'decryptSecretAny', built: 'dist/auth/crypto.js' });
   assert.equal(cfg.find((c) => c.key === 'AUTH_JWT_SECRET').requires_marker, undefined);
+  // A fresh install starts with an EMPTY legacy list.
+  const legacy = cfg.find((c) => c.key === 'AUTH_LEGACY_MASTER_SECRETS');
+  assert.equal(legacy.fresh_value, '');
+  assert.notEqual(legacy.secret, true);
 });
 
 test('ratchet: the seed auth component rekeys an LDAPS secret stored under the dev master secret', () => {
@@ -198,4 +210,11 @@ test('ratchet: the seed auth component rekeys an LDAPS secret stored under the d
   const service = file('src/auth/service.ts');
   assert.match(service, /const \{ secret \} = await openLdapsSecret\(conn\);/);
   assert.doesNotMatch(service, /decryptSecret\(conn\.secretCiphertext/);
+  // Completion is established by an inventory over every row, not one read.
+  assert.match(ldaps, /export async function masterKeyInventory\(\)/);
+  assert.match(ldaps, /inv\.complete = inv\.legacy === 0 && inv\.unreadable === 0;/);
+  assert.match(ldaps, /masterKeyInventory: inventory,/);
+  // The component's own test pins the empty-list parsing and the refusal.
+  const configTest = file('src/auth/config.test.ts');
+  assert.match(configTest, /AUTH_LEGACY_MASTER_SECRETS: '' \}\)\)\)\.toEqual\(\[\]\)/);
 });

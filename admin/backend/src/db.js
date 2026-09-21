@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { repairStrayMigration912 } from './lib/migration-repair.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { mkdirSync, existsSync, chmodSync } from 'fs';
@@ -2239,28 +2240,17 @@ export function initDatabase() {
   // background, downloadable as many times as anyone likes (with Range, so a
   // browser can resume), and deleted when the operator says so or when
   // retention sweeps it.
-  // A checkout of the immediate-repairs branch briefly numbered the MCP
-  // owner-validity migration 912 before main took that number for
-  // lxc_exports. A database that ran that branch carries a 912 row with the
-  // OTHER name, and runMigration — keyed by number — would then skip
-  // lxc_exports for good. Move that row to 913, its real number (the work it
-  // records is the same), so 912 runs. Nothing is deleted unless the same
-  // migration is already recorded under 913 as well, in which case the 912
-  // row is a duplicate record of it.
+  // A database that ran an earlier build of the immediate-repairs branch
+  // recorded the MCP owner-validity migration as 912 — the number main then
+  // took for lxc_exports. lib/migration-repair.js identifies that record by
+  // NAME and moves it to 913 (its real number) so 912 runs; a legitimate 912
+  // is never touched. Tested against populated databases in
+  // migration-repair.test.js.
   try {
     ensureSchemaMigrationsTable(db);
-    const stray = db.prepare(`SELECT name FROM schema_migrations WHERE version = 912`).get();
-    if (stray && stray.name === 'mcp_tokens_owner_validity') {
-      const has913 = db.prepare(`SELECT name FROM schema_migrations WHERE version = 913`).get();
-      if (has913 && has913.name === 'mcp_tokens_owner_validity') {
-        db.prepare(`DELETE FROM schema_migrations WHERE version = 912`).run();
-      } else if (!has913) {
-        db.prepare(`UPDATE schema_migrations SET version = 913 WHERE version = 912`).run();
-      }
-      console.warn('[db] moved the stray migration record 912 (mcp_tokens_owner_validity) to 913 so lxc_exports (912) runs');
-    }
+    repairStrayMigration912(db, { log: (m) => console.warn(m) });
   } catch (e) {
-    console.warn('[db] stray-912 check failed:', e?.message || e);
+    console.warn('[db] migration history repair failed:', e?.message || e);
   }
 
   runMigration(db, 912, 'lxc_exports', (d) => {

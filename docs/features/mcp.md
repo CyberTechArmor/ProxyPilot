@@ -363,10 +363,12 @@ quietly stop being true.
   **revoke** their keys outright, so re-enabling the account never revives a
   key that was dead while it was off; mint a new one. Demoting an admin to
   user (either surface) revokes their keys too: keys are admin artifacts, and
-  a non-admin owner is refused per call. A key may carry an expiry
-  (`expires_in_days`, 1–3650, at mint on the MCP Access page or
-  `create_scoped_key`; absent = never, so nothing minted before migration
-  914 changes). The MCP Access page and `list_mcp_keys` show each key's
+  a non-admin owner is refused per call. A newly minted key expires after
+  `MCP_TOKEN_DEFAULT_DAYS` (365) unless the mint says otherwise
+  (`expires_in_days`, 1–3650, or `0` for never — recorded in the audit row);
+  keys minted before migration 914 carry no expiry and are unchanged, and
+  the listings show them as never expiring so they can be replaced. The MCP
+  Access page and `list_mcp_keys` show each key's
   `owner_status` (`active` / `disabled` / `demoted` / `deleted` / `expired` /
   `none`). Migration 913 revoked the historical orphans. The full rule and
   the upgrade notes: `docs/features/immediate-repairs.md`.

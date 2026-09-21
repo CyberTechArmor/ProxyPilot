@@ -815,5 +815,35 @@ recover
     process.exitCode = await recoverAdminCommand(username, opts, globalOpts);
   });
 
+// ── setup-runner command group ──────────────────────────────────────────────
+// The independent host runner (docs/features/setup-engine.md): root, outside
+// the dashboard container, acting on the setup jobs the API only records.
+import { setupRunnerCommand } from '../src/commands/setup-runner.js';
+
+const setupRunner = program
+  .command('setup-runner')
+  .description('Host runner for setup jobs: recover and verify apps, reconcile dead leases');
+
+for (const [name, desc] of [
+  ['serve', 'Run the loop: reconcile on start and every minute, poll the queue (what proxypilot-setup-runner.service runs)'],
+  ['once', 'Reconcile, drain the queued runner jobs, exit'],
+  ['reconcile', 'Record what dead holders left (queue recoveries, release untouched leases), exit'],
+  ['status', 'Show locks (with stale flags) and recent jobs'],
+]) {
+  setupRunner
+    .command(name)
+    .description(desc)
+    .option('--install-dir <dir>', 'ProxyPilot install root (default /opt/proxypilot)')
+    .option('--env <file>', 'The .env to read DATABASE_PATH from (default <install-dir>/.env)')
+    .option('--db <file>', 'Backend database path (overrides the .env)')
+    .option('--poll-ms <ms>', 'serve: queue poll interval (default 2000)')
+    .option('--max <n>', 'once: at most this many jobs (default 5)')
+    .option('--limit <n>', 'status: recent jobs to show (default 20)')
+    .action(async (opts, cmd) => {
+      const globalOpts = cmd.optsWithGlobals();
+      process.exitCode = await setupRunnerCommand(name, opts, globalOpts);
+    });
+}
+
 // ── parse and execute ───────────────────────────────────────────────────────
 program.parseAsync(process.argv);

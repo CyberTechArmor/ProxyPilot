@@ -1,0 +1,45 @@
+# proxypilot-setup-runner — the independent host runner for setup jobs
+# (docs/features/setup-engine.md, docs/core/setup-engine-requirements.md R2).
+#
+# The dashboard backend records what it is doing (a lease per app and a saved
+# job with a checkpoint before every disruptive step) but it lives in a
+# container that dies with `docker compose down`, and the unprivileged agent
+# may not start units inside guests. This unit is the process that ACTS on
+# those records: on start and every minute it reconciles leases whose holder
+# is dead (an app a crashed deploy left stopped gets a recovery job; an
+# untouched lease is released with a note), and between reconciles it drains
+# the queue of runner jobs — recover_app, verify_app, probe — each a fixed set
+# of scripts run in the named guest through `incus exec`. No job carries a
+# command; the runner validates the kind and its parameters before it takes
+# the app's lease.
+#
+# Root, because starting a guest's unit and reading its environment file
+# through incus needs it; the browser-facing API never reaches this process —
+# it writes rows the runner reads. Restart=always so a reboot or a crash
+# resumes the loop; the loop's first act is the reconcile.
+
+[Unit]
+Description=ProxyPilot setup runner (recovery and verification of managed apps)
+After=network.target incus.service
+Wants=incus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/proxypilot setup-runner serve
+Restart=always
+RestartSec=5
+Environment=HOME=/root
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+StandardOutput=journal
+StandardError=journal
+# Hardening that still allows `incus exec` (a socket call) and the database
+# under /opt/proxypilot/data. No new privileges are needed.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=full
+ReadWritePaths=/opt/proxypilot/data /var/lib/proxypilot
+
+[Install]
+WantedBy=multi-user.target

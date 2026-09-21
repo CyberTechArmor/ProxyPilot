@@ -132,8 +132,12 @@ export function redact(value, depth = 0) {
   if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
   const out = {};
   for (const [k, v] of Object.entries(value)) {
-    if (SECRET_KEY_RE.test(k) && !/_(name|names|path|paths|ref|refs|present|count|set|key_names|keys)$/i.test(k) && !/^(has_|is_|n_)/i.test(k)) {
-      out[k] = v == null ? v : REDACTED;
+    // A key that NAMES a secret is a reference, not a value: secret_column,
+    // key_path, token_count, has_password… stay. A key that HOLDS one goes.
+    // Only a STRING under such a key is a value that could be the secret; an
+    // object is a record about it (walked), a number or boolean a fact.
+    if (typeof v === 'string' && SECRET_KEY_RE.test(k) && !/_(name|names|path|paths|ref|refs|present|count|set|key_names|keys|column|columns|table|tables|file|files|dir|kind|state|id|ids)$/i.test(k) && !/^(has_|is_|n_)/i.test(k)) {
+      out[k] = REDACTED;
     } else {
       out[k] = redact(v, depth + 1);
     }

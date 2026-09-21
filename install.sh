@@ -1660,6 +1660,18 @@ EOF
         chmod 0755 /usr/local/bin/proxypilot
         log_success "ProxyPilot CLI installed at /usr/local/bin/proxypilot"
 
+        # Setup runner: the root systemd service that recovers and verifies
+        # managed apps and reconciles leases a crashed backend left behind
+        # (docs/features/setup-engine.md). Runs the CLI just installed.
+        if [[ -f "${SCRIPT_DIR}/deploy/proxypilot-setup-runner.service" ]]; then
+            cp "${SCRIPT_DIR}/deploy/proxypilot-setup-runner.service" /etc/systemd/system/proxypilot-setup-runner.service
+            chmod 0644 /etc/systemd/system/proxypilot-setup-runner.service
+            systemctl daemon-reload
+            systemctl enable proxypilot-setup-runner.service 2>/dev/null || true
+            systemctl restart proxypilot-setup-runner.service 2>/dev/null || true
+            log_success "Setup runner installed (proxypilot-setup-runner.service)"
+        fi
+
         # Emit firewall systemd units and run the initial reconcile.
         if [[ -x "${SCRIPT_DIR}/scripts/install-firewall.sh" ]]; then
             log_info "Configuring host firewall (nftables)..."

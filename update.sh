@@ -1279,6 +1279,43 @@ install_update_runner() {
 install_update_runner
 log ""
 
+# Setup runner — the independent host runner for setup jobs
+# (docs/features/setup-engine.md): a root systemd service that recovers and
+# verifies managed apps and reconciles leases a crashed backend left behind.
+# Runs the installed CLI (/usr/local/bin/proxypilot setup-runner serve), so it
+# is installed after the CLI below is refreshed; the unit is enabled and
+# restarted whenever its file changed.
+install_setup_runner() {
+    local unit="proxypilot-setup-runner.service"
+    local src="${SCRIPT_DIR}/deploy/${unit}"
+    if [[ ! -f "$src" ]]; then
+        log "${YELLOW}deploy/${unit} not found; skipping setup runner install${NC}"
+        return 0
+    fi
+    if [ "$EUID" -ne 0 ]; then
+        log "${YELLOW}Not root; skipping setup runner install${NC}"
+        return 0
+    fi
+    local changed=false
+    if ! cmp -s "$src" "/etc/systemd/system/${unit}" 2>/dev/null; then
+        cp "$src" "/etc/systemd/system/${unit}"
+        chmod 0644 "/etc/systemd/system/${unit}"
+        changed=true
+        systemctl daemon-reload
+        log "Installed setup runner unit: ${unit}"
+    fi
+    if ! systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+        systemctl enable "$unit" 2>&1 | tee -a "$LOG_FILE"
+    fi
+    # The runner imports the backend's pure modules from this checkout's copy
+    # under the install dir; restart it so a changed runner or a changed rule
+    # is what runs. Its first act on start is the reconcile.
+    if [ "$changed" = true ] || ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+        systemctl restart "$unit" 2>/dev/null || true
+    fi
+    log "${GREEN}Setup runner ready (${unit} enabled)${NC}"
+}
+
 # Detect Docker deployment so we can skip the host-side backend npm
 # install. node-pty's prebuild falls back to node-gyp rebuild on hosts
 # without make/g++, which prints a noisy gyp ERR! block even though the
@@ -1367,6 +1404,7 @@ if [[ -d "$SCRIPT_DIR/cli" ]]; then
 exec /usr/bin/env node "${SCRIPT_DIR}/cli/bin/proxypilot.js" "\$@"
 EOF
     chmod 0755 /usr/local/bin/proxypilot
+    install_setup_runner
     cd "$SCRIPT_DIR"
 
     if [[ -x "$SCRIPT_DIR/scripts/install-firewall.sh" ]]; then

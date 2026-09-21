@@ -149,7 +149,7 @@ test('redaction: secret-looking keys and values never land in a job row or an ev
   const d = db();
   const plan = {
     steps: ['mint'],
-    params: { container: 'pp-x', password: 'hunter2-hunter2', AUTH_MASTER_SECRET: 'abc', secret_names: ['AUTH_JWT_SECRET'], has_password: true, key_path: '/etc/environment' },
+    params: { container: 'pp-x', password: 'hunter2-hunter2', AUTH_MASTER_SECRET: 'abc', secret_names: ['AUTH_JWT_SECRET'], has_password: true, key_path: '/etc/environment', guard: { table: 'auth_connections', secret_column: 'secret_ciphertext', nonce_column: 'secret_nonce' } },
     notes: 'DATABASE_URL=postgres://app:s3cr3t@127.0.0.1/app and hash $2a$12$abcdefghijklmnopqrstuuXQ1qYbzE8oJ/4dQpM0R6Vg9Yq1YZg1a and enc:v1:00:11:22 and AUTH_JWT_SECRET=deadbeefdeadbeef',
   };
   const j = createJob(d, { kind: 'deploy', app: 'pp-x', plan, configRefs: { token: 'tok', unit: 'mock2-dev.service' }, nowMs: T0 });
@@ -161,6 +161,7 @@ test('redaction: secret-looking keys and values never land in a job row or an ev
   assert.deepEqual(stored.params.secret_names, ['AUTH_JWT_SECRET'], 'a NAME list is a reference and stays');
   assert.equal(stored.params.has_password, true, 'a presence flag stays');
   assert.equal(stored.params.key_path, '/etc/environment', 'a path stays');
+  assert.deepEqual(stored.params.guard, { table: 'auth_connections', secret_column: 'secret_ciphertext', nonce_column: 'secret_nonce' }, 'a data guard names columns; it is a reference');
   assert.match(stored.notes, /postgres:\/\/app:\[redacted\]@127\.0\.0\.1\/app/);
   assert.match(stored.notes, /AUTH_JWT_SECRET=\[redacted\]/);
   startJob(d, { id: j.id, owner: BACKEND_A, nowMs: T0 });

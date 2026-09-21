@@ -18,8 +18,12 @@
 //                                      next safe checkpoint while running (sudo)
 //   POST /api/setup/jobs/:id/acknowledge  an operator has inspected the guest a
 //                                      lifecycle verb left in an unknown state
-//                                      (recovery_required / interrupted_uncertain):
-//                                      releases the stale lease that records it (sudo)
+//                                      (recovery_required / interrupted_uncertain),
+//                                      or established that an init script with an
+//                                      unknown outcome has stopped writing
+//                                      ({ writerStopped: true }; recovery_required /
+//                                      init_uncertain): releases the stale lease that
+//                                      records it (sudo)
 
 import { Router } from 'express';
 import { z } from 'zod';
@@ -98,11 +102,14 @@ setupRouter.post('/apps/:app/deploy', requireAdmin, requireSudo, async (req, res
 });
 
 setupRouter.post('/jobs/:id/acknowledge', requireAdmin, requireSudo, (req, res) => {
-  const body = z.object({ note: z.string().max(300).optional() }).safeParse(req.body || {});
+  // `writerStopped: true` is required for an init script with an unknown
+  // outcome (A-17.7): the operator establishes that nothing of the script is
+  // still changing the guest before the hold is released.
+  const body = z.object({ note: z.string().max(300).optional(), writerStopped: z.boolean().optional() }).safeParse(req.body || {});
   if (!body.success) return res.status(400).json({ error: body.error.errors[0].message });
-  const r = acknowledgeUncertainJob(getDb(), { id: String(req.params.id), by: req.user?.username || req.user?.id || null, via: 'ui', note: body.data.note || null });
-  if (!r.ok) return res.status(r.code === 'NOT_FOUND' ? 404 : r.code === 'NOT_RECORDED' ? 500 : 409).json({ error: r.error });
-  logAudit(req.user?.id || null, 'SETUP_JOB_ACKNOWLEDGED', 'setup_job', r.job.id, { app: r.job.app, kind: r.job.kind, released: !!r.released, already: !!r.already }, req.ip);
+  const r = acknowledgeUncertainJob(getDb(), { id: String(req.params.id), by: req.user?.username || req.user?.id || null, via: 'ui', note: body.data.note || null, writerStopped: body.data.writerStopped === true });
+  if (!r.ok) return res.status(r.code === 'NOT_FOUND' ? 404 : r.code === 'NOT_RECORDED' ? 500 : 409).json({ error: r.error, code: r.code });
+  logAudit(req.user?.id || null, 'SETUP_JOB_ACKNOWLEDGED', 'setup_job', r.job.id, { app: r.job.app, kind: r.job.kind, released: !!r.released, already: !!r.already, writer_stopped: body.data.writerStopped === true }, req.ip);
   res.json({ job: jobView(r.job), released: !!r.released, already: !!r.already });
 });
 

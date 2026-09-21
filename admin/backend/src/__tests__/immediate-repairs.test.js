@@ -304,6 +304,23 @@ test('ratchet (A-17.7): the post-launch and post-start fix-ups are setup-engine 
   const logic = src('lib/setup-engine/setup-logic.js');
   assert.match(logic, /p\.command != null \|\| p\.script != null \|\| p\.argv != null \|\| p\.args != null \|\| p\.options != null \|\| p\.initScriptText != null/);
   assert.match(logic, /export const HOST_NETWORK_LOCK = '@host\/network';/); assert.match(logic, /export const HOST_ROUTES_LOCK = '@host\/routes';/);
+  // The review of 92404d9 (platform ledger R-034…R-037): the hold, the renewed shared leases, the private output, the completion contract.
+  assert.match(logic, /^\s+`umask 077`,$/m, 'every guest artifact is created owner-only from its first byte');
+  assert.doesNotMatch(logic, /tail -c|INIT_TAIL_BYTES/, 'the wrapper never prints the script\'s output back');
+  assert.doesNotMatch(op, /(?<![a-z])tail: /, 'no output tail on the record');
+  assert.match(op, /const natHost = async \(argv, opts\) => \{\n\s+if \(held && !lease\.renew\(HOST_NETWORK_LOCK\)\) throw new SharedLeaseLostError/, 'every NAT command renews and checks the shared lease first');
+  assert.match(op, /state: 'uncertain', hold: true/, 'an unknown init holds');
+  const executor = src('lib/setup-engine/executor.js');
+  assert.match(executor, /if \(result\.hold\) \{\n[\s\S]{0,400}keepLease = true;\n\s+markLockStale\(db, \{ app: job\.app, nowMs: nowMs\(\), recoveryJobId: job\.id \}\);/, 'the executor keeps and flags the lease on an uncertain init');
+  assert.match(executor, /An unresolved hold is checked BEFORE the lease is acquired/, 'the hold is respected whoever the lease names');
+  assert.match(src('lib/setup-engine/logic.js'), /SETUP_JOB_KINDS\.includes\(j\.kind\) && j\.status === 'recovery_required' && j\.outcome === 'init_uncertain'/, 'leaseHold covers an unresolved init');
+  assert.match(src('lib/setup-engine/backend.js'), /if \(isInit && writerStopped !== true\) return \{ ok: false, error: [^\n]*code: 'WRITER_NOT_ESTABLISHED' \};/, 'an init acknowledgement must establish the writer stopped');
+  assert.match(src('routes/setup.js'), /writerStopped: z\.boolean\(\)\.optional\(\)/);
+  const steps = src('lib/setup-engine/backend-steps.js');
+  assert.match(steps, /const fence = \(\) => \{\n\s+if \(!\(renewLock\(db, \{ app: job\.app, owner, epoch: lockEpoch/, 'the routes step renews both leases before every write');
+  assert.match(src('lib/guest-routes.js'), /const check = \(\) => \{ if \(typeof fence === 'function'\) fence\(\); \};/);
+  assert.match(logic, /if \(pending\.length\) return \{ status: 'succeeded', outcome: 'setup_pending', completion: 'pending'/, 'a pending required phase is never setup_complete');
+  assert.match(steps, /export function settleSetupRecord\(/, 'a settled routes outcome recomputes the aggregate');
   // Both executors know the input store: the runner from the database it opened, the backend from its own path.
   assert.match(src('../../../cli/src/commands/setup-runner.js'), /inputsDir: deps\.inputsDir \|\| setupInputsDir\(o\.install\.dbPath\)/);
   assert.match(src('index.js'), /configureContainerLockStore\(\{ getDb, owner: backendOwner\(\), inputsDir: setupInputsDir\(databasePath\(\)\) \}\);/);

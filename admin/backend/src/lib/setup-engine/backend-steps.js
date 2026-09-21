@@ -18,12 +18,47 @@
 //     event stream of that job), so the one setup record shows every phase.
 
 import {
-  claimNextJob, acquireLock, takeoverLock, releaseLock, readLock, requeueJob, checkpoint, recordProgress, finishJob, appendEvent, getJob, annotateJobProgress, fenceJob,
+  claimNextJob, acquireLock, takeoverLock, releaseLock, readLock, requeueJob, checkpoint, recordProgress, finishJob, appendEvent, getJob, annotateJobProgress, annotateTerminalOutcome, fenceJob, renewLock,
 } from './store.js';
-import { validateRoutesParams, HOST_ROUTES_LOCK, BACKEND_STEP_KINDS } from './setup-logic.js';
+import { validateRoutesParams, HOST_ROUTES_LOCK, BACKEND_STEP_KINDS, setupOutcome, phaseSummary } from './setup-logic.js';
 import { parseJson, sanitizeReason, leaseHold, FencedError, CancelledError } from './logic.js';
 
 export { BACKEND_STEP_KINDS };
+
+// Thrown by the fence configureGuestRoutes calls before every write when a
+// lease this step holds (the guest's, the route store's) is no longer its
+// own at its epoch: nothing further is written.
+export class LeaseLostError extends Error {
+  constructor(name) { super(`the ${name} lease is no longer this job's; no further route write is issued`); this.name = 'LeaseLostError'; this.code = 'LEASE_LOST'; this.lease = name; }
+}
+
+// settleSetupRecord(db, { setupJobId, createJobId, phase, update, event })
+// — a follow-up's outcome landing on the setup record it was delegated
+// from: the phase is rewritten, the AGGREGATE completion recomputed
+// (setupOutcome) and recorded as the setup job's `progress.completion` and
+// — the job being terminal — its outcome (`setup_complete` /
+// `setup_partial`, from `setup_pending`), then mirrored onto the lifecycle
+// job the setup followed. Execution status stays what it was; the
+// completion contract is one function for every surface.
+export function settleSetupRecord(db, { setupJobId, createJobId = null, phase, update, event, nowMs = Date.now() }) {
+  const setup = getJob(db, setupJobId);
+  if (!setup) return null;
+  const prog = parseJson(setup.progress_json) || {};
+  const phases = { ...(prog.phases || {}), [phase]: { ...((prog.phases || {})[phase] || {}), ...update } };
+  const verdict = setupOutcome(phases);
+  annotateJobProgress(db, { id: setupJobId, progress: { phases, completion: verdict.completion }, nowMs });
+  if (['succeeded', 'failed'].includes(setup.status) && setup.outcome !== verdict.outcome && verdict.completion !== 'uncertain') {
+    annotateTerminalOutcome(db, { id: setupJobId, fromStatus: setup.status, outcome: verdict.outcome, reason: `${setup.app}: ${phaseSummary(phases)}; completion ${verdict.completion}`, nowMs });
+  }
+  appendEvent(db, { jobId: setupJobId, kind: 'recovery_result', phase, message: `${event}; completion ${verdict.completion}`, data: { phase, state: update.state, completion: verdict.completion, follow_up_job: update.job || null }, nowMs });
+  const originId = createJobId || ((parseJson(setup.plan_json) || {}).params || {}).origin?.jobId || null;
+  if (originId && getJob(db, originId)) {
+    const o = parseJson(getJob(db, originId).progress_json) || {};
+    annotateJobProgress(db, { id: originId, progress: { setup: { ...(o.setup || {}), job: setupJobId, outcome: verdict.outcome, completion: verdict.completion, phases: Object.fromEntries(Object.entries(phases).map(([k, v]) => [k, v.state])) } }, nowMs });
+    appendEvent(db, { jobId: originId, kind: 'recovery_result', phase: 'setup', message: `guest_setup job ${setupJobId}: ${phase} ${update.state} — completion ${verdict.completion}`, data: { follow_up_job: setupJobId, state: verdict.completion }, nowMs });
+  }
+  return verdict;
+}
 const LEASE_MS = 30_000;
 const RETRY_MS = 30_000;
 const HOLD_RETRY_MS = 5 * 60_000;
@@ -54,13 +89,20 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
   const origin = p.origin || {};
   const noteOrigin = (state, extra = {}) => {
     if (!origin.jobId || !getJob(db, origin.jobId)) return;
-    const prior = (parseJson(getJob(db, origin.jobId).progress_json) || {}).phases || {};
-    annotateJobProgress(db, { id: origin.jobId, progress: { phases: { ...prior, routes: { ...(prior.routes || {}), state, job: job.id, ...extra } }, routes_job_id: job.id }, nowMs: nowMs() });
-    appendEvent(db, { jobId: origin.jobId, kind: 'recovery_result', phase: 'routes', message: `configure_routes job ${job.id}: ${state}${extra.detail ? ` — ${extra.detail}` : ''}`, data: { follow_up_job: job.id, state }, nowMs: nowMs() });
+    annotateJobProgress(db, { id: origin.jobId, progress: { routes_job_id: job.id }, nowMs: nowMs() });
+    settleSetupRecord(db, { setupJobId: origin.jobId, createJobId: origin.createJobId || null, phase: 'routes', update: { state, job: job.id, ...extra }, event: `configure_routes job ${job.id}: ${state}${extra.detail ? ` — ${extra.detail}` : ''}`, nowMs: nowMs() });
   };
   const requeue = (why, ms) => { requeueJob(db, { id: job.id, by: owner, reason: why, notBeforeMs: nowMs() + ms, nowMs: nowMs() }); return { status: 'requeued', outcome: 'lock_held' }; };
 
-  // The guest's lease.
+  // The guest's lease — an unresolved hold first, whoever the lease names
+  // (the backend's own in-process setup may have recorded it).
+  {
+    const existing = readLock(db, job.app);
+    if (existing && existing.stale_since && existing.recovery_job_id) {
+      const hold = leaseHold({ lock: existing, recordingJob: getJob(db, existing.recovery_job_id) });
+      if (hold.hold) { event('hold', hold.reason, { recording_job: existing.recovery_job_id }, 'lock'); return requeue(`${hold.reason}; this follow-up waits`, HOLD_RETRY_MS); }
+    }
+  }
   const got = acquireLock(db, { app: job.app, owner, operation: job.kind, jobId: job.id, leaseMs: LEASE_MS, nowMs: nowMs() });
   let lockEpoch;
   if (got.ok) lockEpoch = Number(got.lock.epoch);
@@ -88,7 +130,17 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     const ck = checkpoint(db, { id: job.id, owner, epoch, phase: 'routes', checkpoint: { resumable: false, disruptive: false, routes: true, container: p.container, domains: p.services.map((s) => s.domain) }, message: `configuring ${p.services.length} route(s) for ${p.container} → ${p.ip}`, nowMs: nowMs() });
     if (!(Number(ck) > 0)) throw new FencedError(job.id);
     if (typeof deps.configureRoutes !== 'function') { noteOrigin('failed', { detail: 'no route configurator is available in this process' }); return fin('failed', 'error', 'no route configurator is available in this process; retry the job'); }
-    const res = await deps.configureRoutes({ container: p.container, name: p.serviceName, ip: p.ip, services: p.services });
+    // Before every write the configurator makes, both leases are renewed at
+    // the epochs this step holds them; a renewal that changes no row means
+    // another owner has them and nothing further is written.
+    const fence = () => {
+      if (!(renewLock(db, { app: job.app, owner, epoch: lockEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) throw new LeaseLostError(job.app);
+      if (!(renewLock(db, { app: HOST_ROUTES_LOCK, owner, epoch: routesEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) throw new LeaseLostError(HOST_ROUTES_LOCK);
+      fenceJob(db, { id: job.id, owner, epoch, safe: false, leaseMs: LEASE_MS, nowMs: nowMs() });
+    };
+    fence();
+    const res = await deps.configureRoutes({ container: p.container, name: p.serviceName, ip: p.ip, services: p.services, fence });
+    fence();
     const pub = { created: res.created || [], existing: res.existing || [], conflicts: res.conflicts || [], rendered: res.rendered || [], renderWarning: res.renderWarning || null, upstreamWarning: res.upstreamWarning || null, ip: p.ip };
     recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub }, nowMs: nowMs() });
     const summary = `${p.container}: ${pub.created.length} route(s) created, ${pub.existing.length} already present, ${pub.conflicts.length} conflict(s)${pub.conflicts.length ? ` (${pub.conflicts.map((c) => c.domain).join(', ')})` : ''}; ${pub.renderWarning ? pub.renderWarning : `${pub.rendered.length} rendered`}${pub.upstreamWarning ? `; ${pub.upstreamWarning}` : ''}`;
@@ -103,6 +155,11 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
   } catch (e) {
     if (e instanceof FencedError || e?.code === 'FENCED') { log('fenced', job.id); return { status: 'fenced', outcome: null }; }
     if (e instanceof CancelledError || e?.code === 'CANCELLED') { noteOrigin('skipped', { detail: 'cancelled' }); return fin('cancelled', 'cancelled', e.message); }
+    if (e instanceof LeaseLostError || e?.code === 'LEASE_LOST') {
+      event('step', e.message, { lease: e.lease }, 'routes');
+      noteOrigin('failed', { detail: `${e.message}; retry the job` });
+      return fin('failed', 'lease_lost', `${e.message}; the routes were not completed by this job — retry it`, { state: 'not_applicable', label: e.message, failedAt: 'routes', next: 'retry the job' });
+    }
     noteOrigin('failed', { detail: sanitizeReason(e?.message || String(e), 300) });
     return fin('failed', 'error', sanitizeReason(e?.message || String(e)));
   } finally {

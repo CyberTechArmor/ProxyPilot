@@ -1548,7 +1548,7 @@ async function toolCreateLxcContainer(args, auth) {
     const { containerLockStore } = await import('../mock2/container-lock.js');
     setup = await waitForSetup(containerLockStore().getDb(), launch.setupJobId, { timeoutMs: 60_000 });
     if (!setup) warnings.push(`the post-launch setup (job ${launch.setupJobId}) had not finished within a minute; the address will appear on get_lxc_container`);
-    else if (setup.status !== 'succeeded') warnings.push(`post-launch setup ${setup.status}: ${setup.reason || setup.outcome}`);
+    else if (setup.status !== 'succeeded' || (setup.progress?.completion && setup.progress.completion !== 'complete')) warnings.push(`post-launch setup ${setup.progress?.completion || setup.status}: ${setup.reason || setup.outcome}`);
   }
   const probe = await fetchLxcInstance(incusName);
   const detail = probe.instance ? lxcContainerDetail(probe.instance) : null;

@@ -595,11 +595,30 @@ MCP `create_lxc_container`'s NAT and 15 s DHCP poll, is one runner job kind,
 
 | Phase | Where | What |
 | --- | --- | --- |
-| `network_nat` | host argv, under the host-wide lease `@host/network` | `sysctl -w net.ipv4.ip_forward=1`; `incus network list --format json`; for every managed bridge the host reported (its name validated again before it becomes an argument): `incus network set <bridge> ipv4.nat true`, `iptables -C DOCKER-USER -i|-o <bridge> -j ACCEPT` else `-I`; `iptables -t nat -C POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE` else `-A`. Idempotent. A live holder of the lease is waited for (20 s); a dead one is taken over; still held → the phase is `skipped (contended)` and a retry redoes it. A missing Docker chain is a note; a refused `sysctl` or bridge NAT fails the phase |
+| `network_nat` | host argv, under the host-wide lease `@host/network` | `sysctl -w net.ipv4.ip_forward=1`; `incus network list --format json`; for every managed bridge the host reported (its name validated again before it becomes an argument): `incus network set <bridge> ipv4.nat true`, `iptables -C DOCKER-USER -i|-o <bridge> -j ACCEPT` else `-I`; `iptables -t nat -C POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE` else `-A`. Idempotent. A live holder of the lease is waited for (20 s); a dead one is taken over; still held → the phase is `skipped (contended)` and a retry redoes it. **Every command under the lease renews it first at the epoch this job holds it and checks it is still this job's**: a sequence of bounded commands that outlives one lease period keeps the lease, and a lease another job took over meanwhile stops this one before its next write (`failed` / `leaseLost`, the count of commands issued on the record, nothing further issued). A missing Docker chain is a note; a refused `sysctl` or bridge NAT fails the phase |
 | `await_address` | host argv | `incus list <name> --format json` every second until the guest holds a **host-reachable** IPv4 (eth0 first, then the Incus NIC device, never a `docker0` / `br-*` / `veth*` address inside the guest) or the bound wait (`addressTimeoutMs`, dashboard 30 s, MCP 15 s, at most 5 min) elapses — recorded as `failed` with the guest left running |
 | `dns` | contained guest script | `/etc/resolv.conf` carries the public resolvers (the first one is the marker; a symlink is replaced) — `written` / `unchanged` / `failed` |
-| `init_script` | contained guest script | the operator's script, issued **once** (below) |
-| `routes` | the backend (`configure_routes`) | recorded `pending` on the setup with the follow-up's job id; the backend annotates the outcome back onto the same phase |
+| `init_script` | contained guest script | the operator's script, issued **once** (below); the record carries its state, exit code and the log's reference — never its output |
+| `routes` | the backend (`configure_routes`) | recorded `pending` on the setup with the follow-up's job id; the backend settles the outcome back onto the same phase and recomputes the setup's completion |
+
+**The completion contract.** `setupOutcome(phases)` is one function every
+surface reads (the job's outcome, `progress.completion`, the create-status
+answer, MCP's result, the future wizard): `complete` when every required
+phase is done; `pending` (outcome `setup_pending`) while a required phase
+is with another job — the routes — so a setup is **never** reported
+complete with its routes outstanding; `partial` (`setup_partial`) when a
+required phase failed, was refused, timed out, was skipped for contention,
+or is a failed / acknowledged-uncertain init a retry did not repeat;
+`uncertain` (`init_uncertain`) while an init script's completion is
+unknown and unacknowledged. The job's **execution status** (`succeeded`,
+`failed`, `recovery_required`) is recorded separately and never conflated
+with it: a setup that ran to its end with the routes pending is
+`succeeded` / `setup_pending`; when the routes step lands, the backend
+(`settleSetupRecord`) rewrites the phase, recomputes the completion and
+annotates the terminal outcome (`setup_complete` or `setup_partial`) on
+the setup job and the summary on the lifecycle job it followed — a failed
+render leaves both `partial`, a later successful retry settles both
+`complete`.
 
 **One parent record, every phase.** The create route submits the launch
 job with the whole setup plan (`params.setup`: phases, the address bound,
@@ -623,47 +642,84 @@ can (no address → routes skipped by name), and the job ends `failed` /
 (`mock2/ops.js` `createStatus`): the same answer after a closed browser or
 a restarted API, and no map to forget.
 
-**The init script is bound and issued once.** The script text never
-becomes a row, an event or a log line — an operator's script may carry a
-token or a password, and the engine's redaction net cannot know every
-shape. The route writes it to an **input file next to the database**
-(`<db dir>/setup-inputs/<ref>.init.sh`, 0600 in a 0700 directory,
-`lib/setup-engine/setup-inputs.js`); the plan carries `initScript: { ref,
-sha256, bytes }`. The executor — the runner from the database it opened,
-the backend in-process from its own path, the same bind-mounted directory —
-reads the file by reference, refuses the phase when it is missing or its
-digest is not the plan's, writes the `init_script` checkpoint
-(`init_issued: true`; mandatory: a write the store rejects issues nothing),
-and runs the wrapper in the job's cgroup: the script is materialised from
-base64, run under `sh` in its own session, its exit code written to
-`/var/log/pp-init-<job>.rc` and its output to `.log` **inside the guest**,
-`PP_INIT_RC:<n>` plus the output tail returned for the record; the input
-file is consumed (unlinked) when the phase completes. A script that runs
-past `initTimeoutMs` (5 min by default, 30 at most) has its exec client
-killed by the executor and its session group stopped by the kill script
-(TERM, then KILL); the phase reads `timed_out` with what was captured.
+**The init script is bound and issued once, and its output stays in the
+guest.** The script text never becomes a row, an event or a log line — an
+operator's script may carry a token or a password, and the engine's
+redaction net cannot know every shape. The route writes it to an **input
+file next to the database** (`<db dir>/setup-inputs/<ref>.init.sh`, 0600
+in a 0700 directory, `lib/setup-engine/setup-inputs.js`); the plan carries
+`initScript: { ref, sha256, bytes }`. The executor — the runner from the
+database it opened, the backend in-process from its own path, the same
+bind-mounted directory — reads the file by reference, refuses the phase
+when it is missing or its digest is not the plan's, writes the
+`init_script` checkpoint (`init_issued: true`; mandatory: a write the
+store rejects issues nothing), and runs the wrapper in the job's cgroup
+**under `umask 077`**: the script is materialised from base64 (0700), run
+under `sh` in its own session, its exit code written to
+`/var/log/pp-init-<job>.rc` and its stdout and stderr to `.log` — every
+artifact owner-only from its first byte whatever the guest's umask (the
+log is re-chmodded 0600 as well) — and the wrapper prints **markers only**
+(`PP_INIT_RC:<n>`, `PP_INIT_LOG:<path>`, `PP_INIT_LOG_BYTES:<n>`), never
+the output: what the script printed (a generated credential, say) exists
+in the guest's 0600 log and nowhere else, and no regex stands between it
+and the record because nothing crosses. The phase records the state, the
+exit code, the log's path and size; warnings and reasons name the log
+("its output (61 bytes) is in /var/log/pp-init-<job>.log inside the
+container"). The input file is consumed (unlinked) when the phase
+completes. A script that runs past `initTimeoutMs` (5 min by default, 30
+at most) has its exec client killed by the executor and its session group
+stopped by the kill script (TERM, then KILL); when the kill establishes
+the writer gone the phase reads `timed_out`; when it cannot, the writer is
+unknown and the guest is **held** (next paragraph).
 
-**Interruption and retries never repeat it.** An owner dying before the
-script was issued resumes the job (the idempotent phases run again). Dying
-after: the resumed job runs the read-back script instead of the wrapper —
-an exit code the guest recorded is the phase's result (`resumed: true`);
-none → `uncertain` (`recovery_required` / `init_uncertain`, the lease
-released because the guest is running and usable, the reason naming the
-`.log` and `.rc` to read), and nothing is run again. With no runner to
-resume it (the backend's boot sweep after a dead in-process executor) the
-record ends `init_uncertain` the same way, with the phases that were done
-kept. A retry (`POST /api/setup/jobs/:id/retry`, or `retryOf`) reads the
-origin's phase table: an init the origin issued, completed (any exit code),
-timed out or left uncertain is `skipped` / `notRepeated` and the retry says
-so; running it again is a deliberate new request carrying the script. The
-retry redoes NAT, the address, DNS and re-queues the routes.
+**An unknown writer holds the guest; nothing repeats it.** An owner dying
+before the script was issued resumes the job (the idempotent phases run
+again). Dying after: the resumed job runs the read-back script instead of
+the wrapper — an exit code the guest recorded is the phase's result
+(`resumed: true`, the log referenced); none → `uncertain`
+(`recovery_required` / `init_uncertain`) with the writer's state as the
+guest reports it (`running` with its pid, `stopped` with no exit code
+recorded, `unknown`), and — because a script nobody can account for may
+still be changing the guest — the guest's lease is **kept, flagged stale
+and pointed at the job** (the same hold a never-replayed restart takes,
+`leaseHold`): every exclusive kind (a lifecycle verb, a restore, a direct
+setup or retry) is refused at submission and at the executor, a follow-up
+(a verification, a follow-up's retry, the routes step) waits on the long
+interval, a probe defers — whoever the lease names, the hold is checked
+before any lease is acquired, so a runner cannot walk over the hold it
+recorded itself. With no runner to resume it (the backend's boot sweep
+after a dead in-process executor) the record ends `init_uncertain` and
+held the same way, with the phases that were done kept. The hold ends only
+through `POST /api/setup/jobs/:id/acknowledge` **with `writerStopped:
+true`**: the operator establishes that nothing of the script is still
+changing the guest (the recorded pid is gone, `.rc` read) and says so;
+without the attestation the request is refused (`WRITER_NOT_ESTABLISHED`,
+409) and the hold stands. The acknowledgement is one transaction — the
+outcome (`init_uncertain_acknowledged`), the phase marked `acknowledged`
+with the writer recorded as stopped by whom, the completion recomputed
+(`partial`), the event and the release of exactly that lease commit
+together or not at all. Nothing ever replays the script: not the
+acknowledgement, not a resume, not a retry. A retry (`POST
+/api/setup/jobs/:id/retry`, or `retryOf`) reads the origin's phase table
+and **keeps the origin's result** — its state, exit code and log — with
+`notRepeated: true` beside it: a retry of a failed init is still a failed
+setup (`setup_partial`), a retry of an acknowledged-uncertain init is
+partial with the acknowledgement carried (no new hold for a resolved
+condition), and running the script again is a deliberate new request
+carrying it. The retry redoes NAT, the address, DNS and re-queues the
+routes.
 
 **The routes are the backend's.** `configure_routes` (`BACKEND_JOB_KINDS`,
 drained by `lib/setup-engine/backend-steps.js` on boot, every 15 s, when a
 create-status poll sees it queued, and after a retry) takes the guest's
 lease and the host-wide `@host/routes` lease — a held one requeues it with
-a not-before, an unresolved hold waits longer; it is an obligation, never
-finished deferred — then `lib/guest-routes.js` `configureGuestRoutes`: the
+a not-before, an unresolved hold (checked first, whoever the lease names)
+waits longer; it is an obligation, never finished deferred — and hands
+the configurator a **fence** that renews both leases at their epochs and
+throws when either is no longer this step's: `configureGuestRoutes` calls
+it before every write (the service row, the upstream move, each route
+row, the render), so a step whose lease was taken over ends `failed` /
+`lease_lost` with nothing further written, then `lib/guest-routes.js` `configureGuestRoutes`: the
 guest's `services` row, its upstream moved and re-rendered when the
 address changed, one `service_http_routes` row per service (a domain
 already routed to THIS guest's service is `existing`, re-rendered and never
@@ -782,7 +838,7 @@ and enabled by `install.sh` and `update.sh` right after the CLI wrapper
 | `POST /api/setup/jobs/:id/retry` (sudo) | queue the same runner plan again with `reuse` |
 | `POST /api/setup/apps/:app/deploy` (sudo) | submit a deploy and return its job id (202 queued for the runner; 200 with the result when no runner is live and it ran in-process) |
 | `POST /api/setup/jobs/:id/cancel` (sudo) | cancel a queued job, or a running one at its next safe checkpoint |
-| `POST /api/setup/jobs/:id/acknowledge` (sudo) | an operator has inspected the guest a restart or create left in an unknown state (`recovery_required` / `interrupted_uncertain`): in one transaction records who and when on the job and releases the stale lease that records it; refused for any other job (409); a store failure leaves the hold in place (500, nothing recorded) |
+| `POST /api/setup/jobs/:id/acknowledge` (sudo) | an operator has inspected the guest a restart or create left in an unknown state (`recovery_required` / `interrupted_uncertain`), or — with `{ writerStopped: true }` — established that an init script with an unknown outcome (`recovery_required` / `init_uncertain`) has stopped writing: in one transaction records who and when on the job (and, for an init, the phase as acknowledged with the completion recomputed) and releases the stale lease that records it; refused for any other job (409), and for an init without the attestation (409, `WRITER_NOT_ESTABLISHED`, the hold intact); a store failure leaves the hold in place (500, nothing recorded) |
 
 Admin only, behind the global CSRF check and a fresh sudo grant, audited
 (`SETUP_DEPLOY_REQUESTED`, `SETUP_JOB_CANCEL_REQUESTED`,
@@ -879,11 +935,36 @@ copies a deploy or restore took are named on its record for that.
 
 ## Tests
 
-`setup-post-launch.test.js` (29 tests; three run the generated guest scripts
-under the sandbox's real `sh` with a real detached child for the timeout,
-the rest over a scripted host + guest and the real store, executor and
-backend step on `node:sqlite`, the routes step over the real `services` /
-`service_http_routes` schema with a fake render bundle): the kind
+`setup-post-launch.test.js` (32 tests; three run the generated guest scripts
+under the sandbox's real `sh` with a real detached child for the timeout
+and the guest's umask at 022, one more runs the real wrapper and read-back
+through the store with a script that echoes a synthetic credential, the
+rest over a scripted host + guest and the real store, executor and backend
+step on `node:sqlite`, the routes step over the real `services` /
+`service_http_routes` schema with a fake render bundle). The review of the
+first revision (platform ledger R-034…R-037) is covered by: an unknown
+writer (still running, gone without an exit code, unknown) holding the
+guest — every exclusive kind refused at submission and at the executor
+with nothing issued, a follow-up and a follow-up's retry waiting with the
+hold event, a probe deferred, the acknowledgement refused without
+`writerStopped`, refused and releasing nothing when its event write fails,
+and releasing exactly the lease with the phase, outcome, completion and
+event together otherwise, after which the waiters run and a start is
+accepted, a retry still partial and never re-running; the boot sweep
+holding the same way, also when the lease row had already gone; a kill
+that leaves the writer alive holding, one that establishes it gone not;
+the shared network lease renewed through a sequence in which every command
+outlives the lease period (another owner refused `held` at every step, no
+takeover, every command issued) and a worker whose lease was taken over
+mid-sequence issuing nothing further (three commands then none, the new
+owner's lease untouched); the routes fence (a lost route-store lease and a
+lost guest lease, through the real configurator: no row written after the
+loss); the echoed credential in the guest's 0600 log and in no row, event,
+verification or create-status answer, with the read-back the same; a
+retry keeping a failed init failed; a failed render and an interrupted
+routes step settling the setup and its lifecycle parent `partial`, a
+successful retry settling both `complete`, `setup_pending` while the
+routes are with the backend. The rest of the file: the kind
 registries (both modules agree; `configure_routes` never a runner kind);
 strict parameter validation (a script reference and never its text,
 ordered phases, validated services, bounded waits, secret lookalikes;
@@ -914,7 +995,8 @@ before the script (resumed, run once) and after (exit read back — 0 and
 7 — never re-run; nothing recorded → `init_uncertain`, lease released,
 origin annotated, a start not refused, a retry still not repeating; the
 boot sweep for a dead backend); a dead backend mid-routes (interrupted,
-the setup's phase marked, the retry re-rendering with no duplicate row);
+the setup's phase marked and the aggregate settled, the retry re-rendering
+with no duplicate row);
 `configureGuestRoutes` (conflicts never clobbered, render failure keeps
 rows, upstream move); runner-required (direct setup refused, create
 refused before any launch, a live runner running create then setup);
@@ -1091,7 +1173,13 @@ then `ready`; kill the runner during the init script and confirm the
 restarted runner's record reads `resumed: true` with the exit the guest
 recorded (or `init_uncertain` naming the log when the script died with
 it), that the script did NOT run twice (the marker appears once in the
-log), and that Start / Stop on the guest are not refused afterwards; retry
+log) — and when the script is still running, that the record reads
+`init_uncertain` with its pid, that Stop / Delete are refused (409) and
+MCP's `delete_lxc_container` too, that `POST /api/setup/jobs/:id/acknowledge`
+without `writerStopped` is refused, and that after the writer is gone the
+acknowledgement with `writerStopped: true` releases the guest and a Stop
+runs; that `/var/log/pp-init-<job>.log` is mode 0600 in the guest and its
+content appears in no job row, event or create-status answer; retry
 that setup from `/api/setup/jobs/:id/retry` and confirm NAT and DNS run
 again and the init phase reads `skipped` / `notRepeated`; create a guest
 with an init script that exits 1 and confirm the toast names the exit code,

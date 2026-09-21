@@ -166,18 +166,24 @@ export function lockVerdict({ lock, owner, nowMs }) {
 }
 
 // leaseHold({ lock, recordingJob }) → { hold: true, reason } when the stale
-// lease records an UNRESOLVED lifecycle verb (a restart or create whose
-// result the record could not establish): no job kind takes it over — not a
-// recovery, not a verification, not a probe — because a takeover releases
+// lease records an UNRESOLVED condition: a lifecycle verb (a restart or
+// create whose result the record could not establish), or a guest setup
+// whose init script's completion is unknown (A-17.7: an unknown writer may
+// still be changing the guest). No job kind takes it over — not a recovery,
+// not a verification, not a probe, not a retry — because a takeover releases
 // the lease when it finishes, and a diagnostic check clearing the condition
 // would let a conflicting operation in. Only an operator's acknowledgement
-// clears it. Any other stale lease (a dead deploy with a recovery queued) is
-// the reconciler's to take over as before.
+// clears it (for an init: one that establishes the writer stopped). Any
+// other stale lease (a dead deploy with a recovery queued) is the
+// reconciler's to take over as before.
 export function leaseHold({ lock, recordingJob = null }) {
   if (!lock || !lock.stale_since || !lock.recovery_job_id) return { hold: false };
   const j = recordingJob && String(recordingJob.id) === String(lock.recovery_job_id) ? recordingJob : null;
   if (j && LIFECYCLE_JOB_KINDS.includes(j.kind) && j.status === 'recovery_required' && j.outcome === 'interrupted_uncertain') {
     return { hold: true, reason: `an unresolved ${j.kind} (job ${j.id}) left ${lock.app} in an unknown state; the lease is held until an operator acknowledges that job (POST /api/setup/jobs/${j.id}/acknowledge)` };
+  }
+  if (j && SETUP_JOB_KINDS.includes(j.kind) && j.status === 'recovery_required' && j.outcome === 'init_uncertain') {
+    return { hold: true, reason: `the init script of ${lock.app} has an unknown outcome (job ${j.id}); the lease is held until an operator establishes its writer has stopped and acknowledges that job (POST /api/setup/jobs/${j.id}/acknowledge with writerStopped: true)` };
   }
   return { hold: false };
 }

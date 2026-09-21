@@ -46,19 +46,25 @@ export async function syncServiceUpstream(db, service, ip, render) {
   }
 }
 
-// configureGuestRoutes(db, { name, ip, services, render }) → {
+// configureGuestRoutes(db, { name, ip, services, render, fence }) → {
 //   serviceId, created: [domain], existing: [domain], conflicts: [{ domain,
 //   detail }], rendered: [domain], renderWarning, upstreamWarning }
 // Idempotent: a domain already routed to THIS guest's service is `existing`
 // (a retry re-renders it, never duplicates it); one routed elsewhere is a
 // conflict that is reported and never clobbered. The render covers the
 // created and existing domains together; its failure leaves the rows
-// (`renderWarning`) — a retry renders them again.
-export async function configureGuestRoutes(db, { name, ip, services, render, uuid = uuidv4 }) {
+// (`renderWarning`) — a retry renders them again. `fence()` is called before
+// every write (each row, the upstream move, the render): a caller whose
+// lease is no longer its own throws from it and nothing further is written.
+export async function configureGuestRoutes(db, { name, ip, services, render, uuid = uuidv4, fence = null }) {
+  const check = () => { if (typeof fence === 'function') fence(); };
+  check();
   const svc = findOrCreateLxcService(db, name, ip, { uuid });
+  check();
   const sync = await syncServiceUpstream(db, svc, ip, render);
   const created = []; const existing = []; const conflicts = [];
   for (const s of services) {
+    check();
     const domain = String(s.domain).toLowerCase();
     const row = db.prepare(`SELECT service_id FROM service_http_routes WHERE domain = ? AND path_prefix = '/'`).get(domain);
     if (row) {
@@ -79,6 +85,7 @@ export async function configureGuestRoutes(db, { name, ip, services, render, uui
   const toRender = [...created, ...existing];
   let rendered = []; let renderWarning = null;
   if (toRender.length) {
+    check();
     try { rendered = (await renderDomains({ db, domains: toRender, ...render })).domains || []; } catch (e) { renderWarning = `Routes were recorded but Caddy was not updated: ${e?.message || e}`; }
   }
   return { serviceId: svc.id, created, existing, conflicts, rendered, renderWarning, upstreamWarning: sync.warning || null };

@@ -19,8 +19,9 @@
 //                   address inside the guest) or the bound wait elapses
 //   dns             guest: /etc/resolv.conf carries the public resolvers
 //   init_script     guest: the operator's script, bound to the guest identity
-//                   and to the script's sha256, issued once, its exit code
-//                   and output tail recorded in the guest as well
+//                   and to the script's sha256, issued once; its exit code
+//                   and its OUTPUT stay in the guest (0600 files) — the
+//                   record carries the exit code and the log's reference
 //   routes          backend (`configure_routes`): the route rows and the Caddy
 //                   render for the services the operator named, under
 //                   `@host/routes` and the guest's lease
@@ -29,7 +30,9 @@
 // dying before the script was issued RESUMES the job. After the issue the
 // resumed job READS what the guest recorded (`/var/log/pp-init-<job>.rc`) and
 // never runs the script again; with nothing recorded the record ends
-// `init_uncertain` and says how to look.
+// `init_uncertain`, the guest's lease is HELD (an unknown writer may still be
+// changing the guest) until an operator establishes the writer stopped and
+// acknowledges, and it says how to look.
 
 import { CONTAINER_NAME_RE, redact } from './logic.js';
 
@@ -48,7 +51,7 @@ export const DEFAULT_INIT_TIMEOUT_MS = 5 * 60_000;
 export const MAX_INIT_TIMEOUT_MS = 30 * 60_000;
 export const INIT_LOG_DIR = '/var/log';
 export const INIT_TMP_DIR = '/tmp';
-export const INIT_TAIL_BYTES = 4096;
+export const INIT_LOG_MAX_BYTES = 64 * 1024 * 1024;
 export const INPUT_REF_RE = /^[A-Za-z0-9-]{1,64}$/;
 export const SHA256_RE = /^[0-9a-f]{64}$/;
 export const IPV4_RE = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
@@ -264,36 +267,47 @@ function initPaths(jobId, { logDir = INIT_LOG_DIR, tmpDir = INIT_TMP_DIR } = {})
 // the operator's script from base64, runs it under `sh` in its own session
 // (so a timeout can kill the whole group), records its exit code in
 // `<logDir>/pp-init-<job>.rc` and its output in `.log` — both survive the
-// runner — and prints `PP_INIT_RC:<n>` plus the output tail for the record.
-export function initScriptWrapper({ jobId, b64, logDir, tmpDir, tailBytes = INIT_TAIL_BYTES } = {}) {
+// runner — and prints ONLY structured markers for the record:
+// `PP_INIT_RC:<n>`, `PP_INIT_LOG:<path>`, `PP_INIT_LOG_BYTES:<n>`. The
+// script's output is never printed back: a script may echo a credential,
+// and nothing that leaves the guest lands in a job row, an event or an API
+// answer. Every artifact (the script, the log, the exit code, the pid) is
+// created under `umask 077` — owner-only from its first byte, whatever the
+// guest's default umask — and the log is re-chmodded 0600 for good measure.
+export function initScriptWrapper({ jobId, b64, logDir, tmpDir } = {}) {
   const P = initPaths(jobId, { logDir, tmpDir });
   if (typeof b64 !== 'string' || !/^[A-Za-z0-9+/=]+$/.test(b64)) throw new Error('the script body travels as base64');
   return [
+    `umask 077`,
     `LOG='${P.log}'; RC='${P.rc}'; PIDF='${P.pid}'; S='${P.script}'`,
     `mkdir -p '${P.logDir}' '${P.tmpDir}' 2>/dev/null || true`,
-    `rm -f "$RC" "$PIDF" 2>/dev/null`,
+    `rm -f "$RC" "$PIDF" "$S" "$LOG" 2>/dev/null`,
     `if ! printf '%s' '${b64}' | base64 -d > "$S" 2>/dev/null; then echo PP_INIT_WRITE_FAILED; rm -f "$S"; exit 96; fi`,
     `chmod 700 "$S" 2>/dev/null || true`,
-    `: > "$LOG" 2>/dev/null || LOG=/dev/null`,
+    `if ! : > "$LOG" 2>/dev/null; then echo PP_INIT_WRITE_FAILED; rm -f "$S"; exit 96; fi`,
+    `chmod 600 "$LOG" 2>/dev/null || true`,
     `if command -v setsid >/dev/null 2>&1; then setsid sh "$S" > "$LOG" 2>&1 < /dev/null & else sh "$S" > "$LOG" 2>&1 < /dev/null & fi`,
     `pid=$!; echo "$pid" > "$PIDF" 2>/dev/null; wait "$pid"; rc=$?`,
     `echo "$rc" > "$RC" 2>/dev/null; rm -f "$S" "$PIDF" 2>/dev/null`,
     `echo "PP_INIT_RC:$rc"`,
-    `tail -c ${Number(tailBytes) || INIT_TAIL_BYTES} "$LOG" 2>/dev/null`,
+    `echo "PP_INIT_LOG:$LOG"`,
+    `echo "PP_INIT_LOG_BYTES:$(wc -c < "$LOG" 2>/dev/null | tr -d ' ')"`,
     '',
   ].join('\n');
 }
 
 // initResultReadScript({ jobId }) → the script a RESUMED job runs instead of
-// the wrapper: it reads what the guest recorded, never runs the script again.
-export function initResultReadScript({ jobId, logDir, tmpDir, tailBytes = INIT_TAIL_BYTES } = {}) {
+// the wrapper: it reads what the guest recorded — the exit code, whether the
+// recorded pid is still alive, the log's size — never the log's content, and
+// never runs the script again.
+export function initResultReadScript({ jobId, logDir, tmpDir } = {}) {
   const P = initPaths(jobId, { logDir, tmpDir });
   return [
+    `umask 077`,
     `LOG='${P.log}'; RC='${P.rc}'; PIDF='${P.pid}'`,
-    `if [ -f "$RC" ]; then echo "PP_INIT_RC:$(cat "$RC")"; tail -c ${Number(tailBytes) || INIT_TAIL_BYTES} "$LOG" 2>/dev/null; exit 0; fi`,
-    `echo PP_INIT_RC:none`,
-    `p=$(cat "$PIDF" 2>/dev/null); if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "PP_INIT_RUNNING:$p"; fi`,
-    `tail -c ${Number(tailBytes) || INIT_TAIL_BYTES} "$LOG" 2>/dev/null`,
+    `if [ -f "$RC" ]; then echo "PP_INIT_RC:$(cat "$RC")"; else echo PP_INIT_RC:none; p=$(cat "$PIDF" 2>/dev/null); if [ -n "$p" ]; then if kill -0 "$p" 2>/dev/null; then echo "PP_INIT_RUNNING:$p"; else echo "PP_INIT_DEAD:$p"; fi; else echo PP_INIT_NOPID; fi; fi`,
+    `echo "PP_INIT_LOG:$LOG"`,
+    `[ -f "$LOG" ] && echo "PP_INIT_LOG_BYTES:$(wc -c < "$LOG" 2>/dev/null | tr -d ' ')"`,
     '',
   ].join('\n');
 }
@@ -303,6 +317,7 @@ export function initResultReadScript({ jobId, logDir, tmpDir, tailBytes = INIT_T
 export function initKillScript({ jobId, logDir, tmpDir } = {}) {
   const P = initPaths(jobId, { logDir, tmpDir });
   return [
+    `umask 077`,
     `PIDF='${P.pid}'; S='${P.script}'`,
     `p=$(cat "$PIDF" 2>/dev/null)`,
     `if [ -z "$p" ]; then echo PP_INIT_KILL:nopid; rm -f "$S"; exit 0; fi`,
@@ -313,15 +328,29 @@ export function initKillScript({ jobId, logDir, tmpDir } = {}) {
   ].join('\n');
 }
 
-// parseInitResult(stdout) → { rc: number | null, running: pid | null, tail,
-// writeFailed }. `rc: null` with nothing else is "nothing recorded".
+// parseInitResult(stdout) → { rc, recorded, running, dead, noPid, log,
+// logBytes, writeFailed } from the markers alone. Anything else the guest
+// printed is dropped here: the record carries structure, never output.
+//   rc          the recorded exit code, or null
+//   recorded    a PP_INIT_RC marker was seen (the wrapper / read-back ran)
+//   running     the recorded pid that is still alive, or null
+//   dead        the recorded pid is gone with no exit code (writer stopped, completion unknown)
+//   noPid       nothing recorded at all
 export function parseInitResult(stdout) {
   const s = String(stdout || '');
   const rcm = s.match(/^PP_INIT_RC:(\d+|none)/m);
   const run = s.match(/^PP_INIT_RUNNING:(\d+)/m);
-  const tail = s.replace(/^PP_INIT_(RC|RUNNING|WRITE_FAILED).*$/mg, '').trim().slice(-INIT_TAIL_BYTES);
-  return { rc: rcm && rcm[1] !== 'none' ? Number(rcm[1]) : null, running: run ? Number(run[1]) : null, tail, writeFailed: /^PP_INIT_WRITE_FAILED/m.test(s), recorded: !!rcm };
+  const dead = s.match(/^PP_INIT_DEAD:(\d+)/m);
+  const log = s.match(/^PP_INIT_LOG:(\/[A-Za-z0-9._\/-]+)/m);
+  const bytes = s.match(/^PP_INIT_LOG_BYTES:(\d+)/m);
+  return {
+    rc: rcm && rcm[1] !== 'none' ? Number(rcm[1]) : null, recorded: !!rcm,
+    running: run ? Number(run[1]) : null, dead: dead ? Number(dead[1]) : null, noPid: /^PP_INIT_NOPID/m.test(s),
+    log: log ? log[1] : null, logBytes: bytes ? Number(bytes[1]) : null,
+    writeFailed: /^PP_INIT_WRITE_FAILED/m.test(s),
+  };
 }
+export function initLogPath(jobId, { logDir } = {}) { return initPaths(jobId, { logDir }).log; }
 
 export function parseInitKill(stdout) {
   const m = String(stdout || '').match(/^PP_INIT_KILL:(gone|nopid|alive)/m);
@@ -338,26 +367,49 @@ export function phaseTable(required, recorded = {}) {
   return out;
 }
 
-// setupOutcome(phases) → the job's terminal reading of its phase table:
-//   { status: 'succeeded', outcome: 'setup_complete' }        every phase done (routes may be pending → handled by the caller)
-//   { status: 'recovery_required', outcome: 'init_uncertain' } the script's completion is unknown
-//   { status: 'failed', outcome: 'setup_partial', failed: [...] } otherwise; the guest is usable, the record says what is missing
+// setupOutcome(phases) → the reading of a phase table, the COMPLETION
+// contract every surface shares (the job's outcome, the create-status
+// answer, MCP's result, the future wizard):
+//   { status: 'recovery_required', outcome: 'init_uncertain', completion: 'uncertain' }
+//       the script's completion is unknown and not yet acknowledged: the
+//       guest's lease is held until an operator establishes the writer stopped
+//   { status: 'failed', outcome: 'setup_partial', completion: 'partial', failed: [...] }
+//       a required phase failed, was refused, timed out, was skipped for
+//       contention, or an acknowledged-uncertain / failed init a retry did not
+//       repeat (its original result is kept, `notRepeated` recorded beside it)
+//   { status: 'succeeded', outcome: 'setup_pending', completion: 'pending', pending: [...] }
+//       nothing failed but a required phase is with another job (the routes)
+//   { status: 'succeeded', outcome: 'setup_complete', completion: 'complete' }
+// `status` is the job's EXECUTION status; `completion` is what the operator
+// asked for. They are recorded separately and never conflated.
 export function setupOutcome(phases) {
   const entries = Object.entries(phases || {});
-  if (entries.some(([, v]) => v.state === 'uncertain')) return { status: 'recovery_required', outcome: 'init_uncertain', failed: entries.filter(([, v]) => v.state !== 'done' && v.state !== 'pending').map(([k]) => k) };
+  const uncertain = entries.filter(([, v]) => v.state === 'uncertain' && !v.acknowledged).map(([k]) => k);
+  if (uncertain.length) return { status: 'recovery_required', outcome: 'init_uncertain', completion: 'uncertain', failed: entries.filter(([, v]) => v.state !== 'done' && v.state !== 'pending').map(([k]) => k), pending: [] };
   const failed = entries.filter(([, v]) => !['done', 'pending', 'skipped'].includes(v.state) || (v.state === 'skipped' && v.contended)).map(([k]) => k);
-  if (failed.length) return { status: 'failed', outcome: 'setup_partial', failed };
-  return { status: 'succeeded', outcome: 'setup_complete', failed: [] };
+  if (failed.length) return { status: 'failed', outcome: 'setup_partial', completion: 'partial', failed, pending: entries.filter(([, v]) => v.state === 'pending').map(([k]) => k) };
+  const pending = entries.filter(([, v]) => v.state === 'pending').map(([k]) => k);
+  if (pending.length) return { status: 'succeeded', outcome: 'setup_pending', completion: 'pending', failed: [], pending };
+  return { status: 'succeeded', outcome: 'setup_complete', completion: 'complete', failed: [], pending: [] };
+}
+
+// phaseSummary(phases) → one line naming every phase and its state, for
+// reasons and labels; details are bounded and never carry script output.
+export function phaseSummary(phases) {
+  return Object.entries(phases || {}).map(([k, v]) => `${k}: ${v.state}${v.notRepeated ? ' (not repeated)' : ''}${v.state !== 'done' && v.detail ? ` (${String(v.detail).slice(0, 120)})` : ''}`).join('; ');
 }
 
 // initWarning(phase) → the sentence the dashboard shows for an init script
-// that did not end cleanly, or null.
+// that did not end cleanly, or null. It names the log inside the guest; it
+// never carries the script's output.
 export function initWarning(ph) {
   if (!ph || ph.state === 'done' || ph.state === 'not_run' || ph.state === 'pending') return null;
+  const log = ph.log || `/var/log/pp-init-${ph.job || '<job>'}.log`;
+  const again = ph.notRepeated ? ' (from the attempt this setup retried; not run again)' : '';
   if (ph.state === 'skipped') return ph.detail ? `Init script not run: ${ph.detail}` : null;
-  if (ph.state === 'timed_out') return `Init script timed out after ${Math.round((ph.timeoutMs || DEFAULT_INIT_TIMEOUT_MS) / 60000)} minutes and was stopped — finish setup manually inside the container.${ph.tail ? `\nLast output:\n${ph.tail}` : ''}`;
-  if (ph.state === 'uncertain') return `Init script outcome unknown: ${ph.detail || 'the runner died while it ran'} — check /var/log/pp-init-${ph.job || '<job>'}.log inside the container before running it again.`;
-  if (ph.state === 'failed' && ph.rc != null) return `Init script exited with code ${ph.rc}. Last output:\n${ph.tail || '(no output captured)'}`;
+  if (ph.state === 'timed_out') return `Init script timed out after ${Math.round((ph.timeoutMs || DEFAULT_INIT_TIMEOUT_MS) / 60000)} minute(s) and was stopped${again} — its output is in ${log} inside the container; finish setup manually.`;
+  if (ph.state === 'uncertain') return `Init script outcome unknown${ph.acknowledged ? ' (acknowledged)' : ''}: ${ph.detail || 'the runner died while it ran'} — read ${log} and ${log.replace(/\.log$/, '.rc')} inside the container${ph.acknowledged ? '' : '; the guest is held until the job is acknowledged'}.`;
+  if (ph.state === 'failed' && ph.rc != null) return `Init script exited with code ${ph.rc}${again}; its output (${ph.logBytes != null ? `${ph.logBytes} bytes` : 'see the log'}) is in ${log} inside the container.`;
   return `Init script ${ph.state}: ${ph.detail || 'see the setup job'}`;
 }
 
@@ -393,17 +445,14 @@ export function createStatusView({ create, setup = null, routes = null, nowMs = 
   // The setup job is terminal. Routes may still be with the backend.
   const routesPhase = phases.routes || null;
   const routesOpen = routesPhase && routesPhase.state === 'pending' && (!routes || ['queued', 'running'].includes(routes.status));
-  if (routesOpen) return { ...base, phase: 'caddy', message: 'Configuring reverse proxy…' };
+  if (routesOpen) return { ...base, phase: 'caddy', message: 'Configuring reverse proxy…', completion: 'pending' };
   let routesView = routesPhase;
   if (routesPhase && routesPhase.state === 'pending' && routes && !['queued', 'running'].includes(routes.status)) {
     // The routes job ended without annotating the setup record (its owner died): read its own row.
     routesView = routes.status === 'succeeded' ? { state: 'done', conflicts: routes.progress?.result?.conflicts || [] } : { state: routes.status === 'cancelled' ? 'skipped' : 'failed', detail: routes.reason || `routes ${routes.status}` };
   }
-  const out = { ...base, phase: 'ready', message: 'Container is ready', initScriptWarning: initWarning(phases.init_script), caddyWarning: routesWarning(routesView) };
-  if (setup.status !== 'succeeded' && !out.initScriptWarning && !out.caddyWarning) {
-    const addr = phases.await_address;
-    if (addr && addr.state !== 'done') out.caddyWarning = null;
-    out.message = `Container is running; setup ended ${setup.status}${setup.reason ? `: ${setup.reason}` : ''}`;
-  }
+  const completion = setupOutcome({ ...phases, ...(routesView ? { routes: routesView } : {}) }).completion;
+  const out = { ...base, phase: 'ready', message: 'Container is ready', completion, initScriptWarning: initWarning(phases.init_script), caddyWarning: routesWarning(routesView) };
+  if (completion !== 'complete') out.message = completion === 'uncertain' ? 'Container is running; its init script has an unknown outcome and the container is held until the setup job is acknowledged' : `Container is running; setup ${completion}${setup.reason ? `: ${setup.reason}` : ''}`;
   return out;
 }

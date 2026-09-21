@@ -21,13 +21,24 @@
 //     record for the address; start / restart / reboot's fix-up follow-up;
 //   * failure paths: no address, an init script that exits nonzero, one that
 //     times out (killed, recorded), containment unavailable; the guest stays
-//     Running and the record is partial and truthful;
+//     Running and the record is partial and truthful; nothing a script
+//     prints reaches a row, an event or an answer (a real echoed credential
+//     through the real wrapper under `umask 022`: 0600 artifacts, no leak);
 //   * interruption: a dead owner before the script (resumed, run once),
 //     after the script (resumed, the recorded exit READ, never re-run;
-//     nothing recorded → init_uncertain with the lease released), the
+//     nothing recorded → init_uncertain with the guest's lease HELD until an
+//     operator establishes the writer stopped and acknowledges — every kind
+//     refused or waiting meanwhile, the acknowledgement atomic), the
 //     backend's boot sweep;
 //   * safe retries: a retried setup never repeats an issued or completed
-//     init, and re-renders rather than duplicates routes;
+//     init and KEEPS its result (a failed init is still a failed setup), and
+//     re-renders rather than duplicates routes;
+//   * shared leases: renewed under a slow live sequence beyond the lease
+//     period and fenced (a worker that loses the network or routes lease
+//     issues no further mutation);
+//   * the completion contract: pending or failed routes keep the setup
+//     from `setup_complete`; a settled outcome lands on the setup and on
+//     the lifecycle job it followed;
 //   * unavailable runners, unresolved holds, and contention on the shared
 //     network and route leases (waited for, taken over when dead, requeued).
 // The REST routes and the MCP tool import the native database module; their
@@ -49,7 +60,7 @@ import {
 import { setupInputsDir, writeInitScriptInput, readInitScriptInput, consumeInitScriptInput, sweepSetupInputs, sha256Of } from '../lib/setup-engine/setup-inputs.js';
 import { ownerIdentity, parseJson, validateRunnerJob, reconcileDecision, RUNNER_JOB_KINDS, MUTATING_JOB_KINDS, EXCLUSIVE_JOB_KINDS, BACKEND_JOB_KINDS, SETUP_JOB_KINDS as SETUP_KINDS_FROM_LOGIC } from '../lib/setup-engine/logic.js';
 import { validateLifecycleParams, setupFollowUpFor } from '../lib/setup-engine/lifecycle-logic.js';
-import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, createJob, claimNextJob, checkpoint, runnerHeartbeat, listJobs, holdStaleLock, recordJobOutcome, releaseLock } from '../lib/setup-engine/store.js';
+import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, createJob, claimNextJob, checkpoint, runnerHeartbeat, listJobs, holdStaleLock, recordJobOutcome, releaseLock, renewLock } from '../lib/setup-engine/store.js';
 import { runOnce, reconcile } from '../lib/setup-engine/executor.js';
 import { runBackendSteps } from '../lib/setup-engine/backend-steps.js';
 import { submitRunnerJob } from '../lib/setup-engine/orchestrator.js';
@@ -58,7 +69,10 @@ import { runGuestSetupOperation } from '../lib/setup-engine/setup-op.js';
 import { configureGuestRoutes, findOrCreateLxcService, syncServiceUpstream } from '../lib/guest-routes.js';
 import { configureContainerLockStore } from '../mock2/container-lock.js';
 import { runLifecycle, runGuestSetup, createStatus, waitForSetup, drainBackendStepsNow, lifecycleHttpStatus, resolveSetupPlan } from '../mock2/ops.js';
-import { unwrapContained } from './helpers/scripted-guest.js';
+import { jobView, takeoverLock } from '../lib/setup-engine/store.js';
+import { unwrapContained, jobIdOf } from './helpers/scripted-guest.js';
+import { acknowledgeUncertainJob } from '../lib/setup-engine/backend.js';
+import { LeaseLostError, settleSetupRecord } from '../lib/setup-engine/backend-steps.js';
 
 const T0 = Date.parse('2026-09-23T12:00:00.000Z');
 const RUNNER = ownerIdentity({ kind: 'runner', host: 'pp', pid: 300, instance: 'rrrr' });
@@ -70,6 +84,10 @@ const UUID_A = '11111111-2222-3333-4444-555555555555';
 const UUID_B = '99999999-8888-7777-6666-555555555555';
 const SHA = 'a'.repeat(64);
 const SCRIPT = '#!/bin/sh\napt-get install -y nginx\nexport API_TOKEN=tok-9f8e7d6c5b4a-secret\necho done\n';
+// A script that PRINTS a synthetic credential (what a real init script may
+// do); its output must reach the guest's log and nothing else.
+const CRED = 'AKIA-synthetic-cred-7Q2Z9X4M1L8N';
+const ECHO_SCRIPT = `#!/bin/sh\necho "installing"\necho "generated token: ${CRED}"\necho "PASSWORD=${CRED}-pw" >&2\nexit 5\n`;
 const SERVICES = [{ domain: 'app.example.test', port: 3000, obtainCert: true }, { domain: 'api.example.test', port: 8080, obtainCert: false, healthPath: '/healthz' }];
 
 function db() { const d = new DatabaseSync(':memory:'); ensureSetupEngineSchema(d); return d; }
@@ -95,6 +113,7 @@ function scriptedHost(state) {
     host: async (argv) => {
       calls.push(argv);
       assert.ok(Array.isArray(argv) && argv.every((a) => typeof a === 'string'), 'argv arrays only');
+      if (state.onCall) await state.onCall(argv, calls.length);
       const [bin, ...a] = argv;
       if (bin === 'sysctl') { state.ipForward = a.includes('net.ipv4.ip_forward=1'); return state.sysctlFails ? { code: 255, stdout: '', stderr: 'sysctl: permission denied' } : { code: 0, stdout: 'net.ipv4.ip_forward = 1\n', stderr: '' }; }
       if (bin === 'iptables') {
@@ -141,18 +160,24 @@ function scriptedGuest(state) {
     calls,
     guest: async (container, raw) => {
       const s = unwrapContained(raw);
+      const id = jobIdOf(raw);
       const rec = (phase) => calls.push({ container, phase, script: s, raw });
       if (state.containment === 'none' && /CONTAINMENT:none/.test(raw)) { rec('refused'); return { code: 97, stdout: '', stderr: 'CONTAINMENT:none\n' }; }
       if (/PP_DNS:/.test(s)) { rec('dns'); if (state.dnsFails) return { code: 1, stdout: 'PP_DNS:failed\n', stderr: '' }; state.dnsWrites = (state.dnsWrites || 0) + 1; return { code: 0, stdout: state.dnsPresent ? 'PP_DNS:unchanged\n' : 'PP_DNS:written\n', stderr: '' }; }
-      if (/PP_INIT_KILL/.test(s)) { rec('init_kill'); state.killed = (state.killed || 0) + 1; return { code: 0, stdout: 'PP_INIT_KILL:gone\n', stderr: '' }; }
-      if (/PP_INIT_RC:none/.test(s)) { rec('init_read'); return { code: 0, stdout: state.guestRc == null ? `PP_INIT_RC:none\n${state.guestRunning ? `PP_INIT_RUNNING:${state.guestRunning}\n` : ''}partial output\n` : `PP_INIT_RC:${state.guestRc}\nrecorded output\n`, stderr: '' }; }
+      // state.realShell = <dir>: the init wrapper, the read-back and the kill
+      // script run under a REAL sh with /var/log and /tmp redirected to <dir>
+      // and the guest's umask at 022 — the generated shell under its interpreter.
+      const real = (script) => { const rw = script.split("'/var/log").join('@L@').split("'/tmp").join('@T@').split('@L@').join(`'${state.realShell}`).split('@T@').join(`'${state.realShell}`); const r = spawnSync('sh', ['-c', 'umask 022; exec sh -s'], { input: rw, encoding: 'utf8', timeout: 20_000 }); return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' }; };
+      if (/PP_INIT_KILL/.test(s)) { rec('init_kill'); state.killed = (state.killed || 0) + 1; if (state.realShell) return real(s); return { code: 0, stdout: `PP_INIT_KILL:${state.killResult || 'gone'}\n`, stderr: '' }; }
+      if (/PP_INIT_RC:none/.test(s)) { rec('init_read'); if (state.realShell) return real(s); return { code: 0, stdout: state.guestRc == null ? `PP_INIT_RC:none\n${state.guestRunning ? `PP_INIT_RUNNING:${state.guestRunning}\n` : state.guestDead ? `PP_INIT_DEAD:${state.guestDead}\n` : 'PP_INIT_NOPID\n'}PP_INIT_LOG:/var/log/pp-init-${id}.log\nPP_INIT_LOG_BYTES:17\n` : `PP_INIT_RC:${state.guestRc}\nPP_INIT_LOG:/var/log/pp-init-${id}.log\nPP_INIT_LOG_BYTES:33\n`, stderr: '' }; }
       if (/PP_INIT_RC:\$rc/.test(s)) {
         rec('init');
         const m = s.match(/printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > "\$S"/);
         state.initScripts.push(m ? Buffer.from(m[1], 'base64').toString('utf8') : null);
-        if (state.initTimesOut) return { code: 124, stdout: 'still going\n', stderr: '\n[timeout after 305000ms]' };
+        if (state.realShell) return real(s);
+        if (state.initTimesOut) return { code: 124, stdout: '', stderr: '\n[timeout after 305000ms]' };
         const rc = state.initRc ?? 0;
-        return { code: 0, stdout: `PP_INIT_RC:${rc}\nReading package lists...\n${rc ? 'E: Unable to locate package nginx\n' : 'done\n'}`, stderr: '' };
+        return { code: 0, stdout: `PP_INIT_RC:${rc}\nPP_INIT_LOG:/var/log/pp-init-${id}.log\nPP_INIT_LOG_BYTES:${rc ? 61 : 5}\n`, stderr: '' };
       }
       rec('other'); return { code: 1, stdout: '', stderr: `unexpected: ${s.slice(0, 60)}` };
     },
@@ -165,7 +190,8 @@ const runAll = (d, ex, c, opts = {}) => runOnce({ db: d, owner: RUNNER, exec: ex
 const mutations = (h) => h.calls.filter((a) => !(a[0] === 'incus' && (a[1] === 'list' || (a[1] === 'network' && a[2] === 'list'))));
 const phasesOf = (d, id) => (parseJson(getJob(d, id).progress_json) || {}).phases || {};
 const setupOf = (d, createId) => { const p = parseJson(getJob(d, createId).progress_json) || {}; return p.setup_job_id ? getJob(d, p.setup_job_id) : null; };
-const noScriptIn = (d, ids) => { for (const id of ids) { const dump = JSON.stringify(getJob(d, id)) + JSON.stringify(listEvents(d, id)); assert.equal(dump.includes('tok-9f8e7d6c5b4a'), false, `the init script's token leaked into job ${id}`); assert.equal(dump.includes('apt-get install'), false, `the init script's text leaked into job ${id}`); } };
+const noScriptIn = (d, ids) => { for (const id of ids) { const dump = JSON.stringify(getJob(d, id)) + JSON.stringify(listEvents(d, id)); assert.equal(dump.includes('tok-9f8e7d6c5b4a'), false, `the init script's token leaked into job ${id}`); assert.equal(dump.includes('apt-get install'), false, `the init script's text leaked into job ${id}`); assert.equal(dump.includes(CRED), false, `the script's printed credential leaked into job ${id}`); assert.equal(/installing|generated token/.test(dump), false, `the script's output leaked into job ${id}`); } };
+const holdOn = (d, app, jobId) => { const l = readLock(d, app); assert.ok(l && l.stale_since && l.recovery_job_id === jobId, `${app} is held by job ${jobId}: ${JSON.stringify(l)}`); return l; };
 
 // A store for the ops layer over a scripted host + guest, an input dir and a
 // route configurator that records what it was asked for.
@@ -261,19 +287,30 @@ test('the NAT phase renders fixed argv; a bridge name the host reports is valida
 
 test('scripts, markers and the record\'s reading: parseDns, parseInitResult, the phase table, the outcome and the create-status view', () => {
   assert.equal(parseDns('PP_DNS:written\n'), 'written'); assert.equal(parseDns('nothing'), null);
-  assert.deepEqual(parseInitResult('PP_INIT_RC:3\nsome output\n'), { rc: 3, running: null, tail: 'some output', writeFailed: false, recorded: true });
-  assert.deepEqual(parseInitResult('PP_INIT_RC:none\nPP_INIT_RUNNING:4242\nhalf\n').running, 4242);
+  // Markers only: whatever else the guest printed is dropped, never a "tail".
+  const parsed = parseInitResult(`PP_INIT_RC:3\ngenerated token: ${CRED}\nPP_INIT_LOG:/var/log/pp-init-j.log\nPP_INIT_LOG_BYTES:40\n`);
+  assert.deepEqual(parsed, { rc: 3, recorded: true, running: null, dead: null, noPid: false, log: '/var/log/pp-init-j.log', logBytes: 40, writeFailed: false });
+  assert.equal(JSON.stringify(parsed).includes(CRED), false);
+  assert.deepEqual([parseInitResult('PP_INIT_RC:none\nPP_INIT_RUNNING:4242\n').running, parseInitResult('PP_INIT_RC:none\nPP_INIT_DEAD:4242\n').dead, parseInitResult('PP_INIT_RC:none\nPP_INIT_NOPID\n').noPid], [4242, 4242, true]);
   assert.equal(parseInitResult('PP_INIT_WRITE_FAILED\n').writeFailed, true);
   assert.equal(parseInitKill('PP_INIT_KILL:gone'), 'gone');
   assert.deepEqual(phaseTable(['network_nat', 'dns'], { network_nat: { state: 'done' } }), { network_nat: { state: 'done' }, dns: { state: 'not_run' } });
-  assert.deepEqual(setupOutcome({ network_nat: { state: 'done' }, routes: { state: 'pending' } }), { status: 'succeeded', outcome: 'setup_complete', failed: [] });
-  assert.deepEqual(setupOutcome({ network_nat: { state: 'done' }, init_script: { state: 'failed', rc: 2 }, routes: { state: 'not_run' } }), { status: 'failed', outcome: 'setup_partial', failed: ['init_script', 'routes'] });
-  assert.equal(setupOutcome({ init_script: { state: 'uncertain' } }).outcome, 'init_uncertain');
+  // The completion contract.
+  assert.deepEqual(setupOutcome({ network_nat: { state: 'done' }, routes: { state: 'pending' } }), { status: 'succeeded', outcome: 'setup_pending', completion: 'pending', failed: [], pending: ['routes'] }, 'a required phase with another job is never "complete"');
+  assert.deepEqual(setupOutcome({ network_nat: { state: 'done' }, routes: { state: 'done' } }), { status: 'succeeded', outcome: 'setup_complete', completion: 'complete', failed: [], pending: [] });
+  assert.deepEqual(setupOutcome({ network_nat: { state: 'done' }, init_script: { state: 'failed', rc: 2 }, routes: { state: 'not_run' } }), { status: 'failed', outcome: 'setup_partial', completion: 'partial', failed: ['init_script', 'routes'], pending: [] });
+  assert.deepEqual(setupOutcome({ init_script: { state: 'done' }, routes: { state: 'failed' } }).completion, 'partial', 'a failed routes step is a partial setup');
+  assert.equal(setupOutcome({ init_script: { state: 'uncertain' } }).completion, 'uncertain');
+  assert.equal(setupOutcome({ init_script: { state: 'uncertain', acknowledged: true } }).completion, 'partial', 'an acknowledged unknown init is a partial setup, not a new hold');
   assert.equal(setupOutcome({ network_nat: { state: 'skipped', contended: true } }).outcome, 'setup_partial', 'a contended NAT is not a completed setup');
-  assert.equal(setupOutcome({ init_script: { state: 'skipped', notRepeated: true } }).outcome, 'setup_complete', 'an init a retry deliberately did not repeat is not a failure of the retry');
-  assert.match(initWarning({ state: 'failed', rc: 100, tail: 'E: boom' }), /exited with code 100[\s\S]*E: boom/);
-  assert.match(initWarning({ state: 'timed_out', timeoutMs: 300000 }), /timed out after 5 minutes/);
+  assert.equal(setupOutcome({ init_script: { state: 'failed', rc: 100, notRepeated: true } }).outcome, 'setup_partial', 'an init a retry did not repeat keeps its result: a failed init is still a failed setup');
+  assert.equal(setupOutcome({ init_script: { state: 'done', notRepeated: true } }).outcome, 'setup_complete');
+  assert.match(initWarning({ state: 'failed', rc: 100, log: '/var/log/pp-init-j.log', logBytes: 61 }), /exited with code 100; its output \(61 bytes\) is in \/var\/log\/pp-init-j\.log inside the container/);
+  assert.match(initWarning({ state: 'failed', rc: 100, notRepeated: true, job: 'j' }), /not run again/);
+  assert.match(initWarning({ state: 'timed_out', timeoutMs: 300000, job: 'j' }), /timed out after 5 minute\(s\) and was stopped — its output is in \/var\/log\/pp-init-j\.log/);
+  assert.match(initWarning({ state: 'uncertain', job: 'j' }), /held until the job is acknowledged/);
   assert.equal(initWarning({ state: 'done' }), null);
+  assert.equal(JSON.stringify(initWarning({ state: 'failed', rc: 1, detail: 'x' })).includes('tail'), false);
   // The create-status view from records alone.
   const create = (over = {}) => ({ id: 'c1', status: 'succeeded', created_at: new Date(T0 - 40_000).toISOString(), progress: { setup_job_id: 's1' }, ...over });
   const setup = (over = {}) => ({ id: 's1', status: 'running', phase: 'dns', progress: { phases: { network_nat: { state: 'done' } }, address: { ip: '10.10.10.7' } }, ...over });
@@ -289,16 +326,22 @@ test('scripts, markers and the record\'s reading: parseDns, parseInitResult, the
   assert.equal(createStatusView({ create: create(), setup: setup({ phase: 'await_address' }), nowMs: T0 }).phase, 'network');
   assert.equal(createStatusView({ create: create(), setup: setup({ phase: 'dns' }), nowMs: T0 }).phase, 'network');
   assert.equal(createStatusView({ create: create(), setup: setup({ phase: 'init_script' }), nowMs: T0 }).phase, 'init-script');
-  const pendingRoutes = setup({ status: 'succeeded', phase: 'finished', progress: { phases: { network_nat: { state: 'done' }, routes: { state: 'pending' } }, address: { ip: '10.10.10.7' }, routes_job_id: 'r1' } });
-  assert.equal(createStatusView({ create: create(), setup: pendingRoutes, routes: { id: 'r1', status: 'queued' }, nowMs: T0 }).phase, 'caddy');
-  const doneRoutes = setup({ status: 'succeeded', phase: 'finished', progress: { phases: { network_nat: { state: 'done' }, init_script: { state: 'failed', rc: 2, tail: 'E: nope' }, routes: { state: 'done', conflicts: [{ domain: 'api.example.test' }] } }, address: { ip: '10.10.10.7' } } });
+  const pendingRoutes = setup({ status: 'succeeded', phase: 'finished', progress: { phases: { network_nat: { state: 'done' }, routes: { state: 'pending' } }, address: { ip: '10.10.10.7' }, routes_job_id: 'r1', completion: 'pending' } });
+  const caddy = createStatusView({ create: create(), setup: pendingRoutes, routes: { id: 'r1', status: 'queued' }, nowMs: T0 });
+  assert.equal(caddy.phase, 'caddy'); assert.equal(caddy.completion, 'pending');
+  const doneRoutes = setup({ status: 'succeeded', phase: 'finished', progress: { phases: { network_nat: { state: 'done' }, init_script: { state: 'failed', rc: 2, log: '/var/log/pp-init-s1.log', logBytes: 9 }, routes: { state: 'done', conflicts: [{ domain: 'api.example.test' }] } }, address: { ip: '10.10.10.7' } } });
   const ready = createStatusView({ create: create(), setup: doneRoutes, nowMs: T0 });
-  assert.equal(ready.phase, 'ready'); assert.equal(ready.ip, '10.10.10.7'); assert.match(ready.initScriptWarning, /exited with code 2/); assert.match(ready.caddyWarning, /api.example.test already routed elsewhere/); assert.equal(ready.setupJobId, 's1');
+  assert.equal(ready.phase, 'ready'); assert.equal(ready.ip, '10.10.10.7'); assert.equal(ready.completion, 'partial'); assert.match(ready.initScriptWarning, /exited with code 2; its output \(9 bytes\) is in \/var\/log\/pp-init-s1\.log/); assert.match(ready.caddyWarning, /api.example.test already routed elsewhere/); assert.equal(ready.setupJobId, 's1');
+  assert.equal(JSON.stringify(ready).includes('E: nope'), false);
+  const complete = createStatusView({ create: create(), setup: setup({ status: 'succeeded', phase: 'finished', progress: { phases: { network_nat: { state: 'done' }, routes: { state: 'done' } }, completion: 'complete', address: { ip: '10.10.10.7' } } }), nowMs: T0 });
+  assert.equal(complete.completion, 'complete'); assert.equal(complete.message, 'Container is ready');
   // A routes job that died without annotating: read from its own row.
   const orphan = createStatusView({ create: create(), setup: pendingRoutes, routes: { id: 'r1', status: 'failed', reason: 'interrupted' }, nowMs: T0 });
-  assert.equal(orphan.phase, 'ready'); assert.match(orphan.caddyWarning, /Routes failed: interrupted/);
+  assert.equal(orphan.phase, 'ready'); assert.equal(orphan.completion, 'partial'); assert.match(orphan.caddyWarning, /Routes failed: interrupted/);
   const partial = createStatusView({ create: create(), setup: setup({ status: 'failed', reason: 'pp-n: await_address: failed (no address)', phase: 'finished', progress: { phases: { await_address: { state: 'failed', detail: 'no address' }, routes: { state: 'skipped', detail: 'no host-reachable address was found' } } } }), nowMs: T0 });
-  assert.equal(partial.phase, 'ready', 'the guest is usable'); assert.match(partial.caddyWarning, /Routes not configured: no host-reachable address/);
+  assert.equal(partial.phase, 'ready', 'the guest is usable'); assert.equal(partial.completion, 'partial'); assert.match(partial.caddyWarning, /Routes not configured: no host-reachable address/);
+  const held = createStatusView({ create: create(), setup: setup({ status: 'recovery_required', outcome: 'init_uncertain', phase: 'finished', progress: { phases: { init_script: { state: 'uncertain', job: 's1' } }, completion: 'uncertain' } }), nowMs: T0 });
+  assert.equal(held.completion, 'uncertain'); assert.match(held.message, /held until the setup job is acknowledged/);
 });
 
 // ── 2. the guest scripts under a real sh ──────────────────────────────────
@@ -324,22 +367,29 @@ test('dnsScript under sh: writes the resolvers when the marker is absent (replac
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('initScriptWrapper under sh: the script runs from base64, its exit code and output are recorded in the guest and reported; the read-back finds them; the temp script is gone', () => {
+const shUmask022 = (script, { timeoutMs = 10_000 } = {}) => spawnSync('sh', ['-c', 'umask 022; exec sh -s'], { input: script, encoding: 'utf8', timeout: timeoutMs });
+
+test('initScriptWrapper under sh (umask 022): the script runs from base64; its exit code and output are recorded in the guest as 0600 files; the wrapper prints markers only — a credential the script echoes stays in the log; the read-back finds the exit; the temp script is gone', () => {
   const dir = tmp();
-  const body = '#!/bin/sh\necho hello from init\necho to stderr >&2\nexit 3\n';
-  const b64 = Buffer.from(body, 'utf8').toString('base64');
-  const r = sh(initScriptWrapper({ jobId: 'job-1', b64, logDir: dir, tmpDir: dir }));
+  const b64 = Buffer.from(ECHO_SCRIPT, 'utf8').toString('base64');
+  const r = shUmask022(initScriptWrapper({ jobId: 'job-1', b64, logDir: dir, tmpDir: dir }));
   assert.equal(r.status, 0, r.stderr);
   const res = parseInitResult(r.stdout);
-  assert.equal(res.rc, 3); assert.equal(res.recorded, true); assert.match(res.tail, /hello from init/); assert.match(res.tail, /to stderr/);
-  assert.equal(readFileSync(join(dir, 'pp-init-job-1.rc'), 'utf8').trim(), '3');
-  assert.match(readFileSync(join(dir, 'pp-init-job-1.log'), 'utf8'), /hello from init/);
+  assert.equal(res.rc, 5); assert.equal(res.recorded, true); assert.equal(res.log, join(dir, 'pp-init-job-1.log')); assert.ok(res.logBytes > 20);
+  assert.equal(r.stdout.includes(CRED), false, 'the wrapper never prints the script\'s output'); assert.equal(r.stderr.includes(CRED), false);
+  assert.equal(r.stdout.trim().split('\n').every((l) => /^PP_INIT_(RC|LOG|LOG_BYTES):/.test(l)), true, `markers only: ${r.stdout}`);
+  assert.equal(readFileSync(join(dir, 'pp-init-job-1.rc'), 'utf8').trim(), '5');
+  const log = readFileSync(join(dir, 'pp-init-job-1.log'), 'utf8');
+  assert.match(log, /installing/); assert.ok(log.includes(CRED), 'stdout and stderr both land in the log'); assert.ok(log.includes(`${CRED}-pw`));
+  assert.equal(statSync(join(dir, 'pp-init-job-1.log')).mode & 0o777, 0o600, 'the log is owner-only under umask 022');
+  assert.equal(statSync(join(dir, 'pp-init-job-1.rc')).mode & 0o777, 0o600);
   assert.equal(existsSync(join(dir, 'pp-init-job-1.sh')), false, 'the materialised script is removed');
   assert.equal(existsSync(join(dir, 'pp-init-job-1.pid')), false);
-  const read = sh(initResultReadScript({ jobId: 'job-1', logDir: dir, tmpDir: dir }));
-  assert.equal(parseInitResult(read.stdout).rc, 3, 'a resumed job reads the recorded exit');
-  const none = sh(initResultReadScript({ jobId: 'job-2', logDir: dir, tmpDir: dir }));
-  assert.deepEqual([parseInitResult(none.stdout).rc, parseInitResult(none.stdout).recorded], [null, true]);
+  const read = shUmask022(initResultReadScript({ jobId: 'job-1', logDir: dir, tmpDir: dir }));
+  const back = parseInitResult(read.stdout);
+  assert.equal(back.rc, 5, 'a resumed job reads the recorded exit'); assert.equal(back.log, join(dir, 'pp-init-job-1.log')); assert.equal(read.stdout.includes(CRED), false, 'the read-back never prints the log');
+  const none = shUmask022(initResultReadScript({ jobId: 'job-2', logDir: dir, tmpDir: dir }));
+  assert.deepEqual([parseInitResult(none.stdout).rc, parseInitResult(none.stdout).recorded, parseInitResult(none.stdout).noPid], [null, true, true]);
   assert.throws(() => initScriptWrapper({ jobId: 'job 1', b64 }), /plain identifier/);
   assert.throws(() => initScriptWrapper({ jobId: 'job-1', b64: 'not base64!' }), /base64/);
   rmSync(dir, { recursive: true, force: true });
@@ -349,11 +399,13 @@ test('a timed-out init under sh: the client is killed, the script keeps running 
   const dir = tmp();
   const body = '#!/bin/sh\necho started\nsleep 30 &\nsleep 30\n';
   const b64 = Buffer.from(body, 'utf8').toString('base64');
-  const child = spawn('sh', ['-s'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn('sh', ['-c', 'umask 022; exec sh -s'], { stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdin.end(initScriptWrapper({ jobId: 'job-t', b64, logDir: dir, tmpDir: dir }));
   await new Promise((r) => setTimeout(r, 700));
   const pidFile = join(dir, 'pp-init-job-t.pid');
   assert.ok(existsSync(pidFile), 'the wrapper recorded the script pid');
+  for (const f of ['pp-init-job-t.log', 'pp-init-job-t.pid']) assert.equal(statSync(join(dir, f)).mode & 0o777, 0o600, `${f} is owner-only while the script runs (umask 022 in the guest)`);
+  assert.equal(statSync(join(dir, 'pp-init-job-t.sh')).mode & 0o777, 0o700, 'the materialised script is owner-only');
   const pid = Number(readFileSync(pidFile, 'utf8').trim());
   child.kill('SIGKILL'); // the executor's timeout: the exec client dies
   await new Promise((r) => setTimeout(r, 200));
@@ -406,7 +458,8 @@ test('dashboard create: the launch job carries the plan; its executor queues the
   const cprog = parseJson(create.progress_json);
   assert.ok(cprog.setup_job_id, 'the create names the setup it queued');
   const setupJob = getJob(d, cprog.setup_job_id);
-  assert.equal(setupJob.kind, 'guest_setup'); assert.equal(setupJob.status, 'succeeded', setupJob.reason); assert.equal(setupJob.outcome, 'setup_complete');
+  assert.equal(setupJob.kind, 'guest_setup'); assert.equal(setupJob.status, 'succeeded', setupJob.reason);
+  assert.equal(setupJob.outcome, 'setup_pending', 'the routes are with another job: the setup is not complete yet'); assert.equal(parseJson(setupJob.progress_json).completion, 'pending');
   assert.equal(setupJob.requested_by, 'thomas', 'the operator who asked for the create owns the setup too');
   const sp = parseJson(setupJob.plan_json).params;
   assert.deepEqual(sp.expect, { uuid: UUID_B, created_at: '2026-09-23T12:00:05Z' }, 'bound to the guest the launch read back, not to the request');
@@ -438,12 +491,15 @@ test('dashboard create: the launch job carries the plan; its executor queues the
   assert.equal(getJob(d, routesJob.id).status, 'running', 'the poll kicked the drain');
   const ran = await drainBackendStepsNow();
   assert.equal(ran.ran.length, 1); assert.equal(ran.ran[0].status, 'succeeded'); assert.equal(ran.ran[0].outcome, 'routes_configured');
-  assert.deepEqual(asked, [{ container: 'pp-new', name: 'new', ip: '10.10.10.7', services: SERVICES }]);
+  assert.deepEqual(asked.map(({ fence, ...r }) => r), [{ container: 'pp-new', name: 'new', ip: '10.10.10.7', services: SERVICES }]); assert.equal(typeof asked[0].fence, 'function', 'the configurator is handed the lease fence');
   assert.equal(phasesOf(d, setupJob.id).routes.state, 'done', 'the routes outcome landed on the setup record'); assert.deepEqual(phasesOf(d, setupJob.id).routes.created, SERVICES.map((s) => s.domain));
   assert.ok(listEvents(d, setupJob.id).some((e) => e.kind === 'recovery_result' && /configure_routes job .*: done/.test(e.message)));
-  assert.deepEqual(parseJson(getJob(d, create.id).progress_json).setup.phases, { network_nat: 'done', await_address: 'done', dns: 'done', init_script: 'done', routes: 'pending' }, 'the create carries the setup summary as the setup reported it');
+  const settled = getJob(d, setupJob.id);
+  assert.equal(settled.outcome, 'setup_complete', 'the settled routes made the setup complete'); assert.equal(parseJson(settled.progress_json).completion, 'complete'); assert.match(settled.reason, /completion complete/);
+  const parent = parseJson(getJob(d, create.id).progress_json).setup;
+  assert.deepEqual(parent.phases, { network_nat: 'done', await_address: 'done', dns: 'done', init_script: 'done', routes: 'done' }, 'the create carries the settled summary'); assert.equal(parent.completion, 'complete'); assert.equal(parent.outcome, 'setup_complete');
   view = createStatus(d, 'pp-new', { nowMs: T0 });
-  assert.equal(view.phase, 'ready'); assert.equal(view.initScriptWarning, null); assert.equal(view.caddyWarning, null); assert.equal(view.routesJobId, routesJob.id);
+  assert.equal(view.phase, 'ready'); assert.equal(view.completion, 'complete'); assert.equal(view.initScriptWarning, null); assert.equal(view.caddyWarning, null); assert.equal(view.routesJobId, routesJob.id);
   assert.equal(readLock(d, 'pp-new'), null); assert.equal(readLock(d, HOST_NETWORK_LOCK), null); assert.equal(readLock(d, HOST_ROUTES_LOCK), null, 'every lease released');
   // A second create of the same name while nothing is open is a launch refusal (exists); nothing here reads a map.
   const again = await runLifecycle({ kind: 'instance_create', containerName: 'pp-new', image: 'images:debian/12', via: 'ui' });
@@ -527,7 +583,7 @@ test('no address: the wait ends at its bound, DNS and the init script still run,
   assert.equal(readLock(d, 'pp-n'), null);
 });
 
-test('an init script that exits nonzero: recorded with its code and tail, the input consumed, the guest kept; the create-status warning names it; a RETRY redoes NAT and DNS and never runs the script again', async (t) => {
+test('an init script that exits nonzero: recorded with its code and the log\'s reference (never its output), the input consumed, the guest kept; a RETRY redoes NAT and DNS, never runs the script again, and KEEPS the failure — it is still a failed setup', async (t) => {
   const d = db(); const inputsDir = join(tmp(), 'setup-inputs'); const c = clock();
   const st = { instances: [inst({ name: 'pp-n', config: { 'volatile.uuid': UUID_B } })] }; const h = scriptedHost(st); const gs = { initRc: 100 }; const g = scriptedGuest(gs);
   const script = writeInitScriptInput(inputsDir, SCRIPT);
@@ -535,9 +591,10 @@ test('an init script that exits nonzero: recorded with its code and tail, the in
   const out = await runAll(d, exec(h, g), c, { inputsDir });
   assert.equal(out.ran[0].status, 'failed'); assert.equal(out.ran[0].outcome, 'setup_partial');
   const ph = phasesOf(d, sub.job.id);
-  assert.equal(ph.init_script.state, 'failed'); assert.equal(ph.init_script.rc, 100); assert.match(ph.init_script.tail, /Unable to locate package/);
+  assert.equal(ph.init_script.state, 'failed'); assert.equal(ph.init_script.rc, 100); assert.equal(ph.init_script.log, `/var/log/pp-init-${sub.job.id}.log`); assert.equal(ph.init_script.logBytes, 61); assert.equal(ph.init_script.tail, undefined, 'no output on the record');
   assert.equal(readInitScriptInput(inputsDir, script.ref), null, 'consumed');
-  assert.match(initWarning(ph.init_script), /exited with code 100/);
+  assert.match(initWarning(ph.init_script), /exited with code 100; its output \(61 bytes\) is in \/var\/log\/pp-init-/);
+  assert.equal(parseJson(getJob(d, sub.job.id).progress_json).completion, 'partial'); assert.equal(readLock(d, 'pp-n'), null, 'a failed init holds nothing: its writer ended');
   noScriptIn(d, [sub.job.id]);
   assert.equal(gs.initScripts.length, 1);
   // The retry: the same plan with retryOf (what POST /api/setup/jobs/:id/retry queues).
@@ -545,14 +602,16 @@ test('an init script that exits nonzero: recorded with its code and tail, the in
   const retry = createJob(d, { kind: 'guest_setup', app: 'pp-n', plan: parseJson(getJob(d, sub.job.id).plan_json), configRefs: {}, retryOf: sub.job.id, via: 'ui', nowMs: T0 + 60_000 });
   c.tick(60_000);
   const out2 = await runAll(d, exec(h, g), c, { inputsDir });
-  assert.equal(out2.ran[0].id, retry.id); assert.equal(out2.ran[0].status, 'succeeded', getJob(d, retry.id).reason);
+  assert.equal(out2.ran[0].id, retry.id); assert.equal(out2.ran[0].status, 'failed', 'a retry that cannot repeat a failed init is still a failed setup'); assert.equal(out2.ran[0].outcome, 'setup_partial');
   const ph2 = phasesOf(d, retry.id);
   assert.equal(ph2.network_nat.state, 'done'); assert.equal(ph2.dns.state, 'done');
-  assert.equal(ph2.init_script.state, 'skipped'); assert.equal(ph2.init_script.notRepeated, true); assert.match(ph2.init_script.detail, /completed with exit 100 by the attempt this job retries; a retry never repeats it/);
+  assert.equal(ph2.init_script.state, 'failed', 'the original result is kept'); assert.equal(ph2.init_script.rc, 100); assert.equal(ph2.init_script.notRepeated, true); assert.equal(ph2.init_script.log, `/var/log/pp-init-${sub.job.id}.log`); assert.match(ph2.init_script.detail, /exited 100 in the attempt this job retries; .* a retry never repeats an issued init script/);
+  assert.equal(parseJson(getJob(d, retry.id).progress_json).completion, 'partial'); assert.match(initWarning(ph2.init_script), /not run again/);
   assert.equal(gs.initScripts.length, 1, 'the script did not run again'); assert.equal(gs.dnsWrites, 2);
+  noScriptIn(d, [retry.id]);
 });
 
-test('an init script that times out: the exec client dies at the bound, the kill script stops the group, the phase reads timed_out with the tail; nothing is re-run', async (t) => {
+test('an init script that times out: the exec client dies at the bound; the kill script establishes the writer stopped → timed_out with the log named and no hold; a writer still alive after the kill → uncertain and the guest is HELD', async (t) => {
   const d = db(); const inputsDir = join(tmp(), 'setup-inputs'); const c = clock();
   const st = { instances: [inst({ name: 'pp-n', config: { 'volatile.uuid': UUID_B } })] }; const h = scriptedHost(st); const gs = { initTimesOut: true }; const g = scriptedGuest(gs);
   const script = writeInitScriptInput(inputsDir, SCRIPT);
@@ -560,10 +619,21 @@ test('an init script that times out: the exec client dies at the bound, the kill
   const out = await runAll(d, exec(h, g), c, { inputsDir });
   assert.equal(out.ran[0].status, 'failed');
   const ph = phasesOf(d, sub.job.id);
-  assert.equal(ph.init_script.state, 'timed_out'); assert.equal(ph.init_script.killed, 'gone'); assert.match(ph.init_script.detail, /ran longer than 60 s and was stopped/); assert.match(ph.init_script.tail, /still going/);
+  assert.equal(ph.init_script.state, 'timed_out'); assert.equal(ph.init_script.killed, 'gone'); assert.deepEqual(ph.init_script.writer, { state: 'stopped', pid: null }); assert.match(ph.init_script.detail, /ran longer than 60 s and was stopped \(its output is in \/var\/log\/pp-init-/); assert.equal(ph.init_script.tail, undefined);
   assert.equal(gs.killed, 1); assert.equal(gs.initScripts.length, 1);
   assert.equal(readInitScriptInput(inputsDir, script.ref), null);
-  assert.match(initWarning(ph.init_script), /timed out after 1 minutes/);
+  assert.match(initWarning(ph.init_script), /timed out after 1 minute\(s\)/);
+  assert.equal(readLock(d, 'pp-n'), null, 'the writer was established stopped: no hold');
+  // The kill cannot establish the writer stopped: unknown completion, held.
+  const gs2 = { initTimesOut: true, killResult: 'alive' }; const g2 = scriptedGuest(gs2);
+  const script2 = writeInitScriptInput(inputsDir, SCRIPT);
+  const sub2 = submitRunnerJob(d, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script2, initTimeoutMs: 60_000 }, nowMs: T0 });
+  const out2 = await runAll(d, exec(h, g2), c, { inputsDir });
+  assert.equal(out2.ran[0].status, 'recovery_required'); assert.equal(out2.ran[0].outcome, 'init_uncertain');
+  const ph2 = phasesOf(d, sub2.job.id);
+  assert.equal(ph2.init_script.state, 'uncertain'); assert.equal(ph2.init_script.writer.state, 'running'); assert.match(ph2.init_script.detail, /still alive after the kill/);
+  holdOn(d, 'pp-n', sub2.job.id);
+  assert.equal(submitRunnerJob(d, { kind: 'instance_stop', app: 'pp-n', params: { container: 'pp-n' }, nowMs: T0 }).code, 'CONTAINER_BUSY', 'the lease is still live (held by the job) then stale: refused either way');
 });
 
 test('containment unavailable in the guest: the host phases run, the guest phases are refused by name (nothing run), the guest is kept; a script input the executor cannot run is refused when its digest differs from the plan', async (t) => {
@@ -660,7 +730,7 @@ test('interruption AFTER the script was issued: the resumed job READS the exit c
     const out = await runAll(d, exec(h, g), c, { inputsDir });
     assert.equal(out.ran[0].status, 'succeeded', getJob(d, 'dead-1').reason);
     const ph = phasesOf(d, 'dead-1');
-    assert.equal(ph.init_script.state, 'done'); assert.equal(ph.init_script.resumed, true); assert.match(ph.init_script.detail, /result read from the guest/);
+    assert.equal(ph.init_script.state, 'done'); assert.equal(ph.init_script.resumed, true); assert.match(ph.init_script.detail, /exit code read from the guest/);
     assert.equal(g.calls.filter((x) => x.phase === 'init').length, 0, 'the script was NOT run again'); assert.equal(g.calls.filter((x) => x.phase === 'init_read').length, 1);
   }
   // (b) the guest recorded exit 7.
@@ -671,56 +741,130 @@ test('interruption AFTER the script was issued: the resumed job READS the exit c
     await runAll(d, exec(h, g), c, { inputsDir });
     assert.equal(getJob(d, 'dead-1').status, 'failed'); assert.equal(phasesOf(d, 'dead-1').init_script.rc, 7); assert.equal(g.calls.filter((x) => x.phase === 'init').length, 0);
   }
-  // (c) nothing recorded: uncertain, the lease released, the origin annotated, a later start not refused.
+  // (c) nothing recorded and the writer still running: uncertain, the guest HELD,
+  //     the origin annotated; every conflicting kind refused or waiting; only an
+  //     acknowledgement that establishes the writer stopped releases it — atomically.
   {
-    const c = clock(); const { d, h, g } = mk({ guestRc: null, guestRunning: 4242 });
+    const c = clock(); const { d, h, g, st } = mk({ guestRc: null, guestRunning: 4242 });
     createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/12' } }, status: 'succeeded', nowMs: T0 - 200_000 });
     deadSetup(d, { params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script, origin: { jobId: 'create-1', kind: 'instance_create' } }, cp });
     reconcile({ db: d, owner: RUNNER, nowMs: T0 });
     const out = await runAll(d, exec(h, g), c, { inputsDir });
     assert.equal(out.ran[0].status, 'recovery_required'); assert.equal(out.ran[0].outcome, 'init_uncertain');
     const ph = phasesOf(d, 'dead-1');
-    assert.equal(ph.init_script.state, 'uncertain'); assert.match(ph.init_script.detail, /still running in the guest as pid 4242/);
-    assert.match(getJob(d, 'dead-1').reason, /pp-init-dead-1\.log/); assert.equal(g.calls.filter((x) => x.phase === 'init').length, 0);
-    assert.equal(readLock(d, 'pp-n'), null, 'no hold: the guest is running and usable');
-    assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.outcome, 'init_uncertain');
-    assert.ok(listEvents(d, 'create-1').some((e) => e.kind === 'recovery_result' && /init_uncertain/.test(e.message)));
-    const start = submitRunnerJob(d, { kind: 'instance_start', app: 'pp-n', params: { container: 'pp-n' }, nowMs: T0 });
-    assert.ok(start.job, `a start after an uncertain init is not refused: ${start.error}`);
-    // A retry of the uncertain setup never repeats the script either.
-    const retry = createJob(d, { kind: 'guest_setup', app: 'pp-n', plan: parseJson(getJob(d, 'dead-1').plan_json), retryOf: 'dead-1', nowMs: T0 + 1000 });
+    assert.equal(ph.init_script.state, 'uncertain'); assert.deepEqual(ph.init_script.writer, { state: 'running', pid: 4242 }); assert.match(ph.init_script.detail, /still running in the guest as pid 4242/); assert.equal(ph.init_script.tail, undefined);
+    assert.match(getJob(d, 'dead-1').reason, /pp-init-dead-1\.rc/); assert.equal(g.calls.filter((x) => x.phase === 'init').length, 0);
+    assert.equal(parseJson(getJob(d, 'dead-1').progress_json).completion, 'uncertain');
+    assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.outcome, 'init_uncertain'); assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.completion, 'uncertain');
+    assert.ok(listEvents(d, 'dead-1').some((e) => e.kind === 'hold'));
+    const held = holdOn(d, 'pp-n', 'dead-1');
+    assert.equal(held.owner, RUNNER, 'the job\'s own lease is kept and flagged');
+    c.tick(60_000); // the kept lease lapses: a recorded stale condition, never a free lock
+    // Every conflicting kind: refused at submission and at the executor, nothing issued.
+    for (const kind of ['instance_delete', 'instance_stop', 'instance_start', 'instance_restart', 'restore_snapshot', 'guest_setup']) {
+      const params = kind === 'restore_snapshot' ? { container: 'pp-n', snapshot: 'snap-1' } : kind === 'guest_setup' ? { container: 'pp-n', phases: ['dns'] } : { container: 'pp-n' };
+      const sub = submitRunnerJob(d, { kind, app: 'pp-n', params, nowMs: c.nowMs() });
+      assert.equal(sub.code, 'CONTAINER_LOCK_STALE', `${kind} at submission: ${sub.error}`); assert.match(sub.error, /recovery is required/);
+    }
+    const before = h.calls.length; const guestBefore = g.calls.length;
+    const rawDelete = createJob(d, { kind: 'instance_delete', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', force: true } }, nowMs: c.nowMs() });
+    const rawRetry = createJob(d, { kind: 'guest_setup', app: 'pp-n', plan: parseJson(getJob(d, 'dead-1').plan_json), retryOf: 'dead-1', nowMs: c.nowMs() }); // carries the origin: a follow-up's retry waits
+    const { origin: _o, ...directParams } = parseJson(getJob(d, 'dead-1').plan_json).params;
+    const rawDirect = createJob(d, { kind: 'guest_setup', app: 'pp-n', plan: { steps: [], params: directParams }, retryOf: 'dead-1', nowMs: c.nowMs() }); // an operator's direct retry is refused
+    const follow = createJob(d, { kind: 'verify_app', app: 'pp-n', plan: { steps: ['probe_port'], params: { container: 'pp-n', webPort: 3000, origin: { jobId: 'create-1', kind: 'instance_create', rung: 'x' } } }, nowMs: c.nowMs() });
+    const probe = createJob(d, { kind: 'probe', app: 'pp-n', plan: { steps: ['probe_port'], params: { container: 'pp-n', webPort: 3000 } }, nowMs: c.nowMs() });
+    await runAll(d, exec(h, g), c);
+    assert.equal(getJob(d, rawDelete.id).status, 'refused'); assert.equal(getJob(d, rawDelete.id).outcome, 'lock_stale');
+    assert.equal(getJob(d, rawRetry.id).status, 'queued', 'a retry that is itself a follow-up waits on the hold'); assert.ok(listEvents(d, rawRetry.id).some((e) => e.kind === 'hold'));
+    assert.equal(getJob(d, rawDirect.id).status, 'refused'); assert.equal(getJob(d, rawDirect.id).outcome, 'lock_stale');
+    assert.equal(getJob(d, follow.id).status, 'queued', 'a follow-up waits'); assert.ok(listEvents(d, follow.id).some((e) => e.kind === 'hold' && /init script of pp-n has an unknown outcome/.test(e.message)));
+    assert.equal(getJob(d, probe.id).status, 'deferred', 'a probe defers'); assert.equal(getJob(d, probe.id).outcome, 'lock_held');
+    assert.equal(h.calls.length, before, 'no incus stop / delete was issued'); assert.equal(g.calls.length, guestBefore, 'no guest script ran'); assert.equal(st.instances.length, 1); assert.equal(st.instances[0].status, 'Running');
+    holdOn(d, 'pp-n', 'dead-1');
+    // The acknowledgement must establish the writer stopped.
+    const noAttest = acknowledgeUncertainJob(d, { id: 'dead-1', by: 'thomas', nowMs: c.nowMs() });
+    assert.equal(noAttest.ok, false); assert.equal(noAttest.code, 'WRITER_NOT_ESTABLISHED'); holdOn(d, 'pp-n', 'dead-1'); assert.equal(getJob(d, 'dead-1').outcome, 'init_uncertain');
+    // ... and is one transaction: a failing event write records nothing and releases nothing.
+    const realPrepare = d.prepare.bind(d);
+    d.prepare = (sql) => { if (/INSERT INTO setup_job_events/.test(sql)) { const st2 = realPrepare(sql); return { run: (...a) => { if (a.some((v) => /acknowledged by/.test(String(v)))) throw new Error('disk full'); return st2.run(...a); } }; } return realPrepare(sql); };
+    const broken = acknowledgeUncertainJob(d, { id: 'dead-1', by: 'thomas', writerStopped: true, nowMs: c.nowMs() });
+    d.prepare = realPrepare;
+    assert.equal(broken.ok, false); assert.equal(broken.code, 'NOT_RECORDED'); holdOn(d, 'pp-n', 'dead-1'); assert.equal(getJob(d, 'dead-1').outcome, 'init_uncertain'); assert.equal(phasesOf(d, 'dead-1').init_script.acknowledged, undefined);
+    assert.equal(submitRunnerJob(d, { kind: 'instance_stop', app: 'pp-n', params: { container: 'pp-n' }, nowMs: c.nowMs() }).code, 'CONTAINER_LOCK_STALE', 'still refused');
+    // A sound acknowledgement with the attestation: outcome, phase, event and release together.
+    const ack = acknowledgeUncertainJob(d, { id: 'dead-1', by: 'thomas', writerStopped: true, note: 'pid 4242 gone, rc absent', nowMs: c.nowMs() });
+    assert.equal(ack.ok, true); assert.equal(ack.released, 1); assert.equal(readLock(d, 'pp-n'), null);
+    assert.equal(getJob(d, 'dead-1').outcome, 'init_uncertain_acknowledged'); assert.equal(phasesOf(d, 'dead-1').init_script.acknowledged, true); assert.equal(phasesOf(d, 'dead-1').init_script.writer.state, 'stopped'); assert.equal(parseJson(getJob(d, 'dead-1').progress_json).completion, 'partial');
+    assert.ok(listEvents(d, 'dead-1').some((e) => e.kind === 'acknowledged' && e.data_json && JSON.parse(e.data_json).writer_stopped === true));
+    assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.completion, 'partial');
+    // The follow-ups that waited on the hold run once it is gone (their not-before elapses)…
+    c.tick(6 * 60_000);
+    await runAll(d, exec(h, g), c, { inputsDir });
+    assert.equal(getJob(d, follow.id).status, 'succeeded', 'the waiting follow-up ran once the hold was gone');
+    assert.equal(getJob(d, rawRetry.id).status, 'failed', 'the waiting retry ran too — and kept the (acknowledged) uncertain init: still not complete'); assert.equal(getJob(d, rawRetry.id).outcome, 'setup_partial'); assert.equal(g.calls.filter((x) => x.phase === 'init').length, 0);
+    // … and an operator's start is accepted and runs.
+    const start = submitRunnerJob(d, { kind: 'instance_start', app: 'pp-n', params: { container: 'pp-n' }, nowMs: c.nowMs() });
+    assert.ok(start.job, `a start after the acknowledgement is accepted: ${start.error}`);
+    await runAll(d, exec(h, g), c);
+    assert.equal(getJob(d, start.job.id).status, 'succeeded');
+    // A retry after the acknowledgement never repeats the script and stays partial: no new hold.
+    const retry = createJob(d, { kind: 'guest_setup', app: 'pp-n', plan: parseJson(getJob(d, 'dead-1').plan_json), retryOf: 'dead-1', nowMs: c.nowMs() });
     await runAll(d, exec(h, g), c, { inputsDir, kinds: ['guest_setup'] });
-    assert.equal(phasesOf(d, retry.id).init_script.state, 'skipped'); assert.match(phasesOf(d, retry.id).init_script.detail, /issued with an unknown outcome/); assert.equal(g.calls.filter((x) => x.phase === 'init').length, 0);
+    assert.equal(getJob(d, retry.id).status, 'failed'); assert.equal(getJob(d, retry.id).outcome, 'setup_partial');
+    assert.deepEqual([phasesOf(d, retry.id).init_script.state, phasesOf(d, retry.id).init_script.notRepeated, phasesOf(d, retry.id).init_script.acknowledged], ['uncertain', true, true]);
+    assert.match(phasesOf(d, retry.id).init_script.detail, /unknown outcome \(acknowledged\) in the attempt this job retries/);
+    assert.equal(g.calls.filter((x) => x.phase === 'init').length, 0); assert.equal(readLock(d, 'pp-n'), null, 'a resolved condition takes no new hold');
   }
-  // (d) the backend's boot sweep for a dead in-process executor: uncertain, released, never re-run.
+  // (c2) the recorded writer is gone but no exit code was recorded: completion unknown → still held.
+  {
+    const c = clock(); const { d, h, g } = mk({ guestRc: null, guestDead: 4242 });
+    deadSetup(d, { params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script }, cp });
+    reconcile({ db: d, owner: RUNNER, nowMs: T0 });
+    await runAll(d, exec(h, g), c, { inputsDir });
+    assert.equal(getJob(d, 'dead-1').outcome, 'init_uncertain'); assert.deepEqual(phasesOf(d, 'dead-1').init_script.writer, { state: 'stopped', pid: 4242 }); holdOn(d, 'pp-n', 'dead-1');
+  }
+  // (d) the backend's boot sweep for a dead in-process executor: uncertain, HELD, never re-run.
   {
     const { d } = mk({});
     deadSetup(d, { params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script }, cp, owner: DEAD_BACKEND });
     const dec = reconcileDecision({ job: getJob(d, 'dead-1'), lock: readLock(d, 'pp-n'), nowMs: T0, canAct: false });
-    assert.equal(dec.action, 'record_uncertain'); assert.equal(dec.keepStale, false); assert.equal(dec.setup, true);
+    assert.equal(dec.action, 'record_uncertain'); assert.equal(dec.setup, true);
     const swept = sweepSetupEngineOnBoot(d, { owner: BACKEND, nowMs: T0 });
     assert.deepEqual(swept.interrupted, ['dead-1']);
-    assert.equal(getJob(d, 'dead-1').status, 'recovery_required'); assert.equal(getJob(d, 'dead-1').outcome, 'init_uncertain'); assert.equal(readLock(d, 'pp-n'), null);
-    assert.equal(phasesOf(d, 'dead-1').init_script.state, 'uncertain'); assert.equal(phasesOf(d, 'dead-1').network_nat.state, 'done', 'what was done stays on the record');
+    assert.equal(getJob(d, 'dead-1').status, 'recovery_required'); assert.equal(getJob(d, 'dead-1').outcome, 'init_uncertain');
+    holdOn(d, 'pp-n', 'dead-1');
+    assert.equal(phasesOf(d, 'dead-1').init_script.state, 'uncertain'); assert.equal(phasesOf(d, 'dead-1').network_nat.state, 'done', 'what was done stays on the record'); assert.equal(parseJson(getJob(d, 'dead-1').progress_json).completion, 'uncertain');
+    assert.equal(submitRunnerJob(d, { kind: 'instance_delete', app: 'pp-n', params: { container: 'pp-n' }, nowMs: T0 }).code, 'CONTAINER_LOCK_STALE');
+    // A lease row that had already expired and been removed still gets the hold written in the dead owner's name.
+    const { d: d2 } = mk({});
+    deadSetup(d2, { params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script }, cp, owner: DEAD_BACKEND });
+    d2.exec(`DELETE FROM setup_locks WHERE app = 'pp-n'`);
+    sweepSetupEngineOnBoot(d2, { owner: BACKEND, nowMs: T0 });
+    holdOn(d2, 'pp-n', 'dead-1');
   }
 });
 
-test('a dead backend mid-routes: the boot sweep records the routes job interrupted and marks the setup\'s routes phase failed; a retry of the routes job re-renders and never duplicates a row (real schema, fake render)', async (t) => {
+test('a dead backend mid-routes: the boot sweep records the routes job interrupted, marks the setup\'s routes phase failed and settles the setup PARTIAL (its lifecycle parent too); a retry of the routes job re-renders, never duplicates a row, and settles it COMPLETE (real schema, fake render)', async (t) => {
   const d = db(); ensureRoutesSchema(d);
-  createJob(d, { id: 'setup-1', kind: 'guest_setup', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', phases: ['routes'], services: SERVICES, serviceName: 'n' } }, status: 'succeeded', nowMs: T0 - 10_000 });
-  createJob(d, { id: 'routes-1', kind: 'configure_routes', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', serviceName: 'n', ip: '10.10.10.7', services: SERVICES, origin: { jobId: 'setup-1', kind: 'guest_setup' } } }, nowMs: T0 - 9_000 });
+  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/12' } }, status: 'succeeded', nowMs: T0 - 11_000 });
+  createJob(d, { id: 'setup-1', kind: 'guest_setup', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', phases: ['routes'], services: SERVICES, serviceName: 'n', origin: { jobId: 'create-1', kind: 'instance_create' } } }, status: 'succeeded', nowMs: T0 - 10_000 });
+  d.prepare(`UPDATE setup_jobs SET outcome = 'setup_pending', progress_json = ? WHERE id = 'setup-1'`).run(JSON.stringify({ phases: { network_nat: { state: 'done' }, routes: { state: 'pending' } }, completion: 'pending', address: { ip: '10.10.10.7' } }));
+  createJob(d, { id: 'routes-1', kind: 'configure_routes', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', serviceName: 'n', ip: '10.10.10.7', services: SERVICES, origin: { jobId: 'setup-1', kind: 'guest_setup', createJobId: 'create-1' } } }, nowMs: T0 - 9_000 });
   const c1 = claimNextJob(d, { owner: DEAD_BACKEND, kinds: ['configure_routes'], nowMs: T0 - 80_000 });
   checkpoint(d, { id: 'routes-1', owner: DEAD_BACKEND, epoch: c1.epoch, phase: 'routes', checkpoint: { resumable: false, disruptive: false, routes: true }, nowMs: T0 - 70_000 });
   const swept = sweepSetupEngineOnBoot(d, { owner: BACKEND, nowMs: T0 });
   assert.deepEqual(swept.interrupted, ['routes-1']); assert.equal(getJob(d, 'routes-1').outcome, 'interrupted');
   assert.equal(phasesOf(d, 'setup-1').routes.state, 'failed'); assert.match(phasesOf(d, 'setup-1').routes.detail, /backend died while configuring the routes/);
+  assert.equal(getJob(d, 'setup-1').outcome, 'setup_partial', 'the aggregate is settled on the setup record'); assert.equal(parseJson(getJob(d, 'setup-1').progress_json).completion, 'partial'); assert.equal(getJob(d, 'setup-1').status, 'succeeded', 'execution status stays what it was');
+  assert.deepEqual(parseJson(getJob(d, 'create-1').progress_json).setup, { job: 'setup-1', outcome: 'setup_partial', completion: 'partial', phases: { network_nat: 'done', routes: 'failed' } }, 'the lifecycle parent sees it');
   // The retry, through the real guest-routes over the real tables and a fake render.
   const rendered = []; const render = fakeRender(rendered);
-  const deps = { configureRoutes: (args) => configureGuestRoutes(d, { name: args.name, ip: args.ip, services: args.services, render }) };
+  const deps = { configureRoutes: (args) => configureGuestRoutes(d, { name: args.name, ip: args.ip, services: args.services, render, fence: args.fence }) };
   createJob(d, { id: 'routes-2', kind: 'configure_routes', app: 'pp-n', plan: parseJson(getJob(d, 'routes-1').plan_json), retryOf: 'routes-1', nowMs: T0 });
   let out = await runBackendSteps({ db: d, owner: BACKEND, deps, nowMs: () => T0 + 1 });
   assert.equal(out.ran[0].status, 'succeeded'); assert.deepEqual(out.ran[0].result.created, ['app.example.test', 'api.example.test']); assert.deepEqual(rendered.splice(0), [['app.example.test', 'api.example.test']]);
   assert.equal(phasesOf(d, 'setup-1').routes.state, 'done');
+  assert.equal(getJob(d, 'setup-1').outcome, 'setup_complete'); assert.equal(parseJson(getJob(d, 'setup-1').progress_json).completion, 'complete'); assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.completion, 'complete');
   assert.equal(d.prepare(`SELECT COUNT(*) AS n FROM service_http_routes`).get().n, 2);
   assert.equal(d.prepare(`SELECT target_ip, lxc_container_name FROM services`).get().target_ip, '10.10.10.7');
   // Run it once more (an operator's second retry): existing, re-rendered, no duplicate.
@@ -729,6 +873,93 @@ test('a dead backend mid-routes: the boot sweep records the routes job interrupt
   assert.deepEqual(out.ran[0].result.existing, ['app.example.test', 'api.example.test']); assert.deepEqual(out.ran[0].result.created, []);
   assert.equal(d.prepare(`SELECT COUNT(*) AS n FROM service_http_routes`).get().n, 2); assert.deepEqual(rendered, [['app.example.test', 'api.example.test']]);
   assert.equal(readLock(d, 'pp-n'), null); assert.equal(readLock(d, HOST_ROUTES_LOCK), null);
+});
+
+test('a failed route render keeps the setup PARTIAL on every record; a render that succeeds later settles it complete; a routes job that loses a lease mid-way writes nothing further (fenced)', async (t) => {
+  const d = db();
+  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/12' } }, status: 'succeeded', nowMs: T0 - 11_000 });
+  createJob(d, { id: 'setup-1', kind: 'guest_setup', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', phases: ['dns', 'routes'], services: SERVICES, serviceName: 'n', origin: { jobId: 'create-1', kind: 'instance_create' } } }, status: 'succeeded', nowMs: T0 - 10_000 });
+  d.prepare(`UPDATE setup_jobs SET outcome = 'setup_pending', progress_json = ? WHERE id = 'setup-1'`).run(JSON.stringify({ phases: { dns: { state: 'done' }, routes: { state: 'pending' } }, completion: 'pending' }));
+  const mk = (id, retryOf = null) => createJob(d, { id, kind: 'configure_routes', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', serviceName: 'n', ip: '10.10.10.7', services: SERVICES, origin: { jobId: 'setup-1', kind: 'guest_setup', createJobId: 'create-1' } } }, retryOf, nowMs: T0 });
+  mk('r-1');
+  let out = await runBackendSteps({ db: d, owner: BACKEND, deps: { configureRoutes: async () => ({ created: ['app.example.test', 'api.example.test'], rendered: [], renderWarning: 'Routes were recorded but Caddy was not updated: caddy adapt: syntax' }) }, nowMs: () => T0 + 1 });
+  assert.equal(out.ran[0].status, 'failed'); assert.equal(out.ran[0].outcome, 'routes_recorded_render_failed');
+  assert.equal(phasesOf(d, 'setup-1').routes.state, 'failed'); assert.equal(getJob(d, 'setup-1').outcome, 'setup_partial'); assert.equal(parseJson(getJob(d, 'setup-1').progress_json).completion, 'partial');
+  assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.completion, 'partial'); assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.phases.routes, 'failed');
+  const view = createStatusView({ create: jobView(getJob(d, 'create-1')), setup: jobView(getJob(d, 'setup-1')), routes: jobView(getJob(d, 'r-1')), nowMs: T0 });
+  assert.equal(view.completion, 'partial'); assert.match(view.caddyWarning, /Caddy was not updated/);
+  mk('r-2', 'r-1');
+  out = await runBackendSteps({ db: d, owner: BACKEND, deps: { configureRoutes: async () => ({ created: [], existing: ['app.example.test', 'api.example.test'], rendered: ['app.example.test', 'api.example.test'] }) }, nowMs: () => T0 + 2 });
+  assert.equal(out.ran[0].status, 'succeeded'); assert.equal(getJob(d, 'setup-1').outcome, 'setup_complete'); assert.equal(parseJson(getJob(d, 'setup-1').progress_json).completion, 'complete'); assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.completion, 'complete');
+  // The fence: the route store's lease taken by another owner between two writes.
+  const writes = [];
+  mk('r-3', 'r-2');
+  out = await runBackendSteps({ db: d, owner: BACKEND, deps: { configureRoutes: async ({ fence }) => { fence(); writes.push('row-1'); d.exec(`UPDATE setup_locks SET owner = '${OTHER}', epoch = epoch + 1 WHERE app = '${HOST_ROUTES_LOCK}'`); fence(); writes.push('row-2'); return { created: ['x'] }; } }, nowMs: () => T0 + 3 });
+  assert.equal(out.ran[0].status, 'failed'); assert.equal(out.ran[0].outcome, 'lease_lost'); assert.deepEqual(writes, ['row-1'], 'nothing is written after the lease is lost');
+  assert.equal(phasesOf(d, 'setup-1').routes.state, 'failed'); assert.match(phasesOf(d, 'setup-1').routes.detail, /lease is no longer this job's/); assert.equal(parseJson(getJob(d, 'setup-1').progress_json).completion, 'partial');
+  assert.equal(readLock(d, HOST_ROUTES_LOCK).owner, OTHER, 'the other owner\'s lease is untouched'); assert.equal(readLock(d, 'pp-n'), null);
+  // The guest's own lease lost the same way, through the real configurator: no row is inserted.
+  const d2 = db(); ensureRoutesSchema(d2);
+  createJob(d2, { id: 'r-4', kind: 'configure_routes', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', serviceName: 'n', ip: '10.10.10.7', services: SERVICES } }, nowMs: T0 });
+  const render = fakeRender([]);
+  out = await runBackendSteps({ db: d2, owner: BACKEND, deps: { configureRoutes: (args) => { d2.exec(`UPDATE setup_locks SET owner = '${OTHER}', epoch = epoch + 1 WHERE app = 'pp-n'`); return configureGuestRoutes(d2, { name: args.name, ip: args.ip, services: args.services, render, fence: args.fence }); } }, nowMs: () => T0 + 4 });
+  assert.equal(out.ran[0].outcome, 'lease_lost'); assert.equal(d2.prepare(`SELECT COUNT(*) AS n FROM services`).get().n, 0, 'not even the service row'); assert.equal(d2.prepare(`SELECT COUNT(*) AS n FROM service_http_routes`).get().n, 0);
+});
+
+test('the shared network lease is RENEWED through a slow live sequence (each command longer than the lease period): no other job can take it over meanwhile and every command is issued; a worker whose lease was taken over issues no further mutation', async (t) => {
+  const c = clock();
+  const d = db(); const st = { instances: [inst({ name: 'pp-n', config: { 'volatile.uuid': UUID_B } })] }; const h = scriptedHost(st); const g = scriptedGuest({});
+  // Every host command takes 20 s (lease 30 s): the sequence outlives the lease many times over.
+  const probes = [];
+  st.onCall = async (argv) => { c.tick(20_000); if (argv[0] !== 'incus' || argv[1] !== 'list') { const l = readLock(d, HOST_NETWORK_LOCK); probes.push({ cmd: argv.slice(0, 3).join(' '), owner: l?.owner || null, live: !!l && Date.parse(l.lease_expires_at) > c.nowMs(), foreign: acquireLock(d, { app: HOST_NETWORK_LOCK, owner: OTHER, operation: 'network_nat', jobId: 'o', nowMs: c.nowMs() }).reason }); } };
+  const s1 = submitRunnerJob(d, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['network_nat'] }, nowMs: T0 });
+  await runAll(d, exec(h, g), c);
+  assert.equal(getJob(d, s1.job.id).status, 'succeeded', getJob(d, s1.job.id).reason);
+  assert.ok(probes.length >= 6, `a full NAT sequence ran: ${probes.length} commands`);
+  for (const p of probes) { assert.equal(p.owner, RUNNER, `${p.cmd}: the lease is this job's`); assert.equal(p.live, true, `${p.cmd}: renewed, not lapsed`); assert.equal(p.foreign, 'held', `${p.cmd}: another job cannot take it`); }
+  assert.equal(readLock(d, HOST_NETWORK_LOCK), null, 'released at the end');
+  assert.ok(mutations(h).some((a) => a[0] === 'iptables' && a[1] === '-I'), 'the DOCKER-USER insert was issued once, by this job');
+  // Ownership taken away mid-sequence (a takeover after a lapse we force): the worker stops before its next write.
+  const d2 = db(); const st2 = { instances: [inst({ name: 'pp-n', config: { 'volatile.uuid': UUID_B } })] }; const h2 = scriptedHost(st2); let n = 0;
+  st2.onCall = async (argv) => { if (argv[0] === 'incus' && argv[1] === 'list') return; n += 1; if (n === 3) { d2.exec(`UPDATE setup_locks SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE app = '${HOST_NETWORK_LOCK}'`); const t = takeoverLock(d2, { app: HOST_NETWORK_LOCK, by: OTHER, operation: 'network_nat', jobId: 'other-1', reason: 'test', nowMs: c.nowMs() }); assert.ok(t.ok, 'the other job took the lapsed lease'); } };
+  const s2 = submitRunnerJob(d2, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['network_nat', 'dns'] }, nowMs: c.nowMs() });
+  await runAll(d2, exec(h2, g), c);
+  const ph = phasesOf(d2, s2.job.id);
+  assert.equal(ph.network_nat.state, 'failed'); assert.equal(ph.network_nat.leaseLost, true); assert.equal(ph.network_nat.issued, 3, 'three commands, then nothing');
+  assert.equal(mutations(h2).filter((a) => a[0] === 'iptables').length, 0, 'no iptables write was issued after the loss');
+  assert.equal(readLock(d2, HOST_NETWORK_LOCK).owner, OTHER, 'the new owner\'s lease is untouched by the fenced worker');
+  assert.equal(ph.dns.state, 'done', 'the phases that need no shared lease still run'); assert.equal(getJob(d2, s2.job.id).outcome, 'setup_partial');
+  assert.ok(listEvents(d2, s2.job.id).some((e) => /lease is no longer this job's/.test(e.message)));
+});
+
+test('a credential the init script echoes never enters a job row, an event, a verification or the create-status answer — through the real wrapper under a real sh with the guest\'s umask at 022 — and the guest\'s artifacts are owner-only', async (t) => {
+  const d = db(); const inputsDir = join(tmp(), 'setup-inputs'); const guestDir = tmp(); const c = clock();
+  const st = { instances: [inst({ name: 'pp-n', config: { 'volatile.uuid': UUID_B } })] }; const h = scriptedHost(st); const gs = { realShell: guestDir }; const g = scriptedGuest(gs);
+  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/12' } }, status: 'succeeded', nowMs: T0 - 1000 });
+  const script = writeInitScriptInput(inputsDir, ECHO_SCRIPT);
+  const sub = submitRunnerJob(d, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['dns', 'init_script'], expect: { uuid: UUID_B }, initScript: script, origin: { jobId: 'create-1', kind: 'instance_create' } }, nowMs: T0 });
+  const out = await runAll(d, exec(h, g), c, { inputsDir });
+  assert.equal(out.ran[0].status, 'failed'); assert.equal(out.ran[0].outcome, 'setup_partial');
+  const ph = phasesOf(d, sub.job.id);
+  assert.equal(ph.init_script.state, 'failed'); assert.equal(ph.init_script.rc, 5); assert.ok(ph.init_script.logBytes > 20); assert.equal(ph.init_script.log, join(guestDir, `pp-init-${sub.job.id}.log`), 'the record names the log the guest reported (its /var/log, redirected here)');
+  const logFile = join(guestDir, `pp-init-${sub.job.id}.log`);
+  assert.ok(readFileSync(logFile, 'utf8').includes(CRED), 'the credential is in the guest\'s log'); assert.equal(statSync(logFile).mode & 0o777, 0o600, 'owner-only under umask 022');
+  assert.equal(statSync(join(guestDir, `pp-init-${sub.job.id}.rc`)).mode & 0o777, 0o600);
+  noScriptIn(d, [sub.job.id, 'create-1']);
+  for (const row of d.prepare(`SELECT * FROM setup_jobs`).all()) assert.equal(JSON.stringify(row).includes(CRED), false, 'no row anywhere');
+  for (const row of d.prepare(`SELECT * FROM setup_job_events`).all()) assert.equal(JSON.stringify(row).includes(CRED), false, 'no event anywhere');
+  const view = createStatusView({ create: jobView(getJob(d, 'create-1')), setup: jobView(getJob(d, sub.job.id)), nowMs: T0 });
+  assert.equal(JSON.stringify(view).includes(CRED), false); assert.match(view.initScriptWarning, /exited with code 5; its output \(\d+ bytes\) is in \S+pp-init-\S+\.log inside the container/);
+  // A resumed read-back of that guest (the real read script): the exit code, never the log.
+  const gs2 = { realShell: guestDir }; const g2 = scriptedGuest(gs2);
+  const d2 = db();
+  deadSetup(d2, { id: sub.job.id, params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script }, cp: { phase: 'init_script', setup: true, resumable: true, disruptive: false, init_issued: true, target: { uuid: UUID_B }, container: 'pp-n', phases: {} } });
+  reconcile({ db: d2, owner: RUNNER, nowMs: c.nowMs() });
+  await runAll(d2, exec(h, g2), c, { inputsDir });
+  assert.equal(phasesOf(d2, sub.job.id).init_script.rc, 5); assert.equal(phasesOf(d2, sub.job.id).init_script.resumed, true);
+  for (const row of d2.prepare(`SELECT * FROM setup_jobs`).all()) assert.equal(JSON.stringify(row).includes(CRED), false);
+  for (const row of d2.prepare(`SELECT * FROM setup_job_events`).all()) assert.equal(JSON.stringify(row).includes(CRED), false);
+  rmSync(guestDir, { recursive: true, force: true });
 });
 
 // ── 8. the routes step itself ─────────────────────────────────────────────

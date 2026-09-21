@@ -295,3 +295,80 @@ storage quota, and choosing between them per source kind — a change of its
 own. Until then, read that concern as "the filesystem / lives on", and judge a
 container source's real size from the transfer itself, which reports actual
 bytes.
+
+## `reset.sh` deletes the legacy database path, and deletes it at all
+
+`reset.sh` ("reset password / TOTP / full reset") clears `ADMIN_PASSWORD` in
+`.env` and then `rm -f`s `data/proxypilot.db` so the first-boot setup flow
+re-triggers. Two problems. The database moved to `data/db/proxypilot.db`
+(update.sh migrates the legacy layout), so on a current install the delete
+is a no-op and the restart alone does not re-open setup — the reset does not
+reset. And where the path still matches, the recovery tool wipes every
+service, route, user and audit row to reset one password. Neither is what a
+break-glass tool should do. Found during the 2026-09 platform-architecture
+review; the fix is a root-only recovery command that edits the live users
+table (restore access to one designated administrator, revoke that account's
+sessions) and leaves the data alone — a change of its own, ahead of any SSO
+work, since a non-destructive recovery path is what makes an identity
+provider outage survivable.
+
+## The sudo window is still four sliding hours
+
+The 2026-09 immediate repairs removed the elevation a passkey login used to
+grant as a side effect and cleared every open window once (migration 605),
+so elevation now comes only from an explicit re-proof. The window itself
+(`SUDO_GRANT_HOURS`, default 4, re-armed on every gated call in
+`middleware/auth.js` `requireSudo`) is unchanged: it was an explicit operator
+request ("looser, sliding 4h"). The architecture review proposes five minutes
+plus per-operation confirmation for the most sensitive actions. That is a
+policy decision for the operator, not a repair; when it is made, change both
+the grant and the slide (they read the same variable) and consider a hard
+cap measured from the original grant so re-arming cannot extend it forever.
+
+## Delegated-editing keys are not owner-checked per call
+
+`lib/editor-keys.js` (the `/api/mcp-editor` restricted sibling) stores
+`created_by` on each key like `mcp_tokens` does, but its lookup checks only
+the hash, the revocation timestamp and the container's activation switch.
+The 2026-09 owner-validity rule (refuse a token whose minting admin is gone
+or disabled; revoke on disable/delete) was applied to the MCP surface only.
+Those keys are pinned to one container's docroot and the activation toggle
+suspends all of them at once, so the exposure is small; apply the same rule
+there in a change of its own.
+
+## Existing generated apps cannot receive updated component code
+
+`installOne` keeps every path that already exists in a project ("a re-install
+never wipes adapted files"), so publishing a new version of a seed component
+reaches new projects only. The 2026-09 immediate repairs needed this to be
+otherwise: the auth component learned to migrate an LDAPS secret stored under
+its development master secret, but an existing app keeps its old
+`src/auth/*.ts`, so the platform now DEFERS minting `AUTH_MASTER_SECRET` for
+such an app (contract `requires_marker`) instead of stranding its data. Those
+apps run on the development master secret until a deliberate component
+upgrade flow exists — one that can replace component-owned files a build has
+not adapted (hash-matched to the installed version, like the auth-wiring
+repair does for entry files) and re-run the deploy so the key is minted. A
+change of its own; until then `docs/features/immediate-repairs.md` says how
+to do it by hand.
+
+## The container lock is in-process, and a backend restart can leave an app stopped
+
+**Since:** 2026-09 (PR #601, immediate repairs).
+
+`mock2/container-lock.js` serializes deploys, the two platform restores
+(`restore_project_db`, `restore_snapshot`) and the retry path's secret mint
+per container, and refuses a restore while a deploy holds the container. It
+is a map in the backend's memory: it does not survive a backend restart. A
+deploy interrupted by a restart is not resumed — the next deploy reaps the
+orphan's scripts inside the guest first, so deploys do not overlap, but the
+app the interrupted deploy stopped stays stopped until that deploy or a manual
+`systemctl start mock2-dev.service` in the guest. The restart a failed deploy
+attempts reports *serving* / *not serving* / *unknown* and never *recovered*:
+the credential is not read back through the application.
+
+**Remedy:** a persistent lock and a host runner with saved progress that
+resumes or records recovery on start — requirements R1–R4 in
+`docs/core/setup-engine-requirements.md` (gate two). Until then, after a
+backend restart during a deploy, check the project's readiness lines and start
+the unit by hand if the app is down.

@@ -127,6 +127,81 @@ export function hashMcpToken(token) {
   return createHash('sha256').update(String(token)).digest('hex');
 }
 
+// ---- token owner validity (2026-09 immediate repairs) ----
+//
+// An MCP token runs as the admin who minted it, so it is only as valid as
+// that admin: a token whose owner was deleted, disabled (role 'pending'), or
+// never recorded must not authenticate — expiry and deletion cascades do not
+// cover "disabled", and the endpoint is per-request (POST JSON-RPC, no
+// stream), so checking here on every call IS the re-check on an open client.
+// Pure: the router passes the users row it looked up.
+export const MCP_OWNER_REFUSALS = Object.freeze({
+  no_owner: 'this token has no recorded owner',
+  owner_deleted: "this token's owner no longer exists",
+  owner_disabled: "this token's owner is disabled",
+  owner_not_admin: "this token's owner is no longer an admin",
+  expired: 'this token has expired',
+});
+
+// Tokens are minted by admins only (the dashboard route and the
+// scoped-key tool both require an admin owner), so a demoted owner's token
+// is refused too — reducing the person's role reduces what their keys can
+// do, all the way to nothing.
+export function mcpTokenOwnerRefusal({ ownerId, owner } = {}) {
+  const id = ownerId == null ? '' : String(ownerId).trim();
+  if (!id) return 'no_owner';
+  if (!owner || String(owner.id) !== id) return 'owner_deleted';
+  if (owner.role === 'pending') return 'owner_disabled';
+  if (owner.role !== 'admin') return 'owner_not_admin';
+  return null;
+}
+
+// mcpTokenExpired(expiresAt, now) — true once a token's optional expiry has
+// passed. An unset or unparseable expiry never expires (the pre-914 rows).
+export function mcpTokenExpired(expiresAt, now = Date.now()) {
+  if (!expiresAt) return false;
+  const t = Date.parse(expiresAt);
+  return Number.isFinite(t) && t <= now;
+}
+
+// mcpTokenRefusal — the whole per-call validity rule: unexpired, then a
+// live admin owner. The router has already excluded revoked rows by query.
+export function mcpTokenRefusal({ expiresAt, ownerId, owner, now } = {}) {
+  if (mcpTokenExpired(expiresAt, now)) return 'expired';
+  return mcpTokenOwnerRefusal({ ownerId, owner });
+}
+
+// The listing word for the MCP Access page / list_mcp_keys.
+export function mcpTokenOwnerStatus(args) {
+  const r = mcpTokenRefusal(args);
+  if (!r) return 'active';
+  return { no_owner: 'none', owner_deleted: 'deleted', owner_disabled: 'disabled', owner_not_admin: 'demoted', expired: 'expired' }[r];
+}
+
+// mcpTokenExpiry(expiresInDays, now, { defaultDays }) → { expiresAt, never }.
+// Absent = the configured default lifetime (MCP_TOKEN_DEFAULT_DAYS, 365) — a
+// newly minted token expires unless someone says otherwise. 0 = never, an
+// explicit choice that the audit row records; 1..3650 = that many days. Tokens
+// minted before migration 914 have no expiry and are unchanged (the listing
+// shows them as never expiring so they can be inventoried and replaced).
+export const MCP_TOKEN_DEFAULT_DAYS = 365;
+export function mcpTokenExpiry(expiresInDays, now = Date.now(), { defaultDays = MCP_TOKEN_DEFAULT_DAYS } = {}) {
+  let n;
+  if (expiresInDays === undefined || expiresInDays === null || expiresInDays === '') n = Number(defaultDays);
+  else n = Number(expiresInDays);
+  if (n === 0) return { expiresAt: null, never: true };
+  if (!Number.isInteger(n) || n < 1 || n > 3650) return { error: 'expires_in_days must be a whole number of days between 1 and 3650, or 0 for never' };
+  return { expiresAt: new Date(now + n * 24 * 60 * 60 * 1000).toISOString(), never: false };
+}
+
+// The operator-configured default lifetime, validated the same way.
+export function mcpTokenDefaultDays(env = process.env) {
+  const raw = env.MCP_TOKEN_DEFAULT_DAYS;
+  if (raw === undefined || raw === null || raw === '') return MCP_TOKEN_DEFAULT_DAYS;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 3650 ? n : MCP_TOKEN_DEFAULT_DAYS;
+}
+
 export function looksLikeMcpToken(token) {
   return /^ppmcp_[0-9a-f]{64}$/.test(String(token || ''));
 }

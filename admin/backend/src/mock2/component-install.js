@@ -33,8 +33,11 @@ import {
   buildManifestVerifyScript, parseShaVerifyOutput,
   planMigrationRenumber, mergeEnvDefaults, manifestEntryFromConnection,
   deriveComponentSubsystem, buildComponentsStateDoc, publicProjectComponentShape,
-  COMPONENTS_STATE_PATH,
+  COMPONENTS_STATE_PATH, planSecretMint, componentSecretKeys, secretMintGuards, freshEnvValues, secretDataGuards,
 } from './component-logic.js';
+import { authDataProbeScript, parseAuthDataProbe, classifyRows, decideMasterSecretMint } from './auth-data-logic.js';
+import { mergeEnvFile } from '../lib/mcp-ext/logic.js';
+import { b64 } from './host.js';
 import { backfillManifestEntryInContainer } from './integration-enforcement.js';
 import { componentWiresBootstrap, planAuthWiring, AUTH_WIRING_TARGETS } from './scaffold-auth.js';
 import { SCAFFOLD_DEPENDENCIES } from './scaffold.js';
@@ -244,6 +247,215 @@ export async function ensureComponentDeps({ containerName, rows }) {
   return { ok: failed.length === 0, repaired, failed };
 }
 
+// ---- the secrets a component owns ----
+//
+// Until 2026-09 a contract's secrets were "never written — they surface on the
+// operator verification checklist", and the auth component fell back to a
+// literal dev-insecure default, so a freshly generated app signed its sessions
+// with a public string unless someone hand-set the env. The platform now MINTS
+// the secrets a component declares as its own (contract.config secret +
+// generate) once per project into the container's /etc/environment — the file
+// the app's systemd unit reads (deploy-logic.js) and set_project_env writes —
+// and never touches a key that is already there, so reinstall and redeploy
+// keep the values the app already signed with. Values never leave the
+// container: this function reports KEY NAMES only.
+const ENVIRONMENT_FILE = '/etc/environment';
+
+function installedSecretConfigs(rows) {
+  const configs = [];
+  for (const row of rows || []) {
+    if (row?.status !== 'installed') continue;
+    const contract = parseContractJson(row.contract_json);
+    for (const c of contract?.config || []) {
+      if (c && c.secret === true && c.generate === true) configs.push(c);
+    }
+  }
+  return configs;
+}
+
+// installedSecretKeys(rows) → the env keys every installed component expects
+// the platform to have minted (deploy validation checks they are present).
+export function installedSecretKeys(rows) {
+  return componentSecretKeys(installedSecretConfigs(rows));
+}
+
+// Result: { ok, minted, deferred, required, error? }.
+//   minted   — keys written this call (names only).
+//   deferred — [{ key, reason }]: keys whose requires_marker is NOT on disk.
+//              The installer never overwrites a file an app already has, so a
+//              project generated before the component learned to migrate data
+//              under a replaced key keeps its current value (today: the dev
+//              default for AUTH_MASTER_SECRET) rather than having its stored
+//              data stranded. Reported, not silent.
+//   required — the minted-or-eligible keys a deploy must find present.
+const shq = (s) => String(s).replace(/'/g, "'\\''");
+
+// The container's environment file, read whole and written whole (moved into
+// place, so the unit never reads a half-written file). Same file, mode and
+// channel as set_project_env.
+async function readEnvironment(containerName) {
+  const cur = await containerSh(containerName, `cat ${ENVIRONMENT_FILE} 2>/dev/null || true`, { timeoutMs: 15000 });
+  if (cur.code !== 0) return { ok: false, error: `could not read ${ENVIRONMENT_FILE}: ${(cur.stderr || cur.stdout || '').trim().slice(-200)}` };
+  return { ok: true, text: cur.stdout || '' };
+}
+async function writeEnvironment(containerName, text) {
+  const w = await containerSh(
+    containerName,
+    `umask 022\nprintf '%s' '${b64(text)}' | base64 -d > ${ENVIRONMENT_FILE}.mock2-tmp && chmod 0644 ${ENVIRONMENT_FILE}.mock2-tmp && mv -f ${ENVIRONMENT_FILE}.mock2-tmp ${ENVIRONMENT_FILE}`,
+    { timeoutMs: 15000 },
+  );
+  if (w.code !== 0) return { ok: false, error: `could not write ${ENVIRONMENT_FILE}: ${(w.stderr || w.stdout || '').trim().slice(-200)}` };
+  return { ok: true };
+}
+
+// probeProtectedData({ containerName, guard }) → the stored rows a secret
+// protects, read from the app's own database (auth-data-logic.js). "No files
+// kept" is not "no data": this is what tells a fresh app from one whose files
+// were rebuilt over an existing or restored database.
+export async function probeProtectedData({ containerName, guard }) {
+  try {
+    const r = await containerSh(containerName, authDataProbeScript(guard), { timeoutMs: 20000 });
+    return parseAuthDataProbe(r.stdout || '');
+  } catch (e) {
+    return { state: 'unknown', rows: [], detail: `probe failed: ${e?.message || e}` };
+  }
+}
+
+// storageIsFresh({ containerName, contracts, newlyProvisioned }) → { fresh,
+// reasons }: true only when the platform POSITIVELY identified this container
+// as newly provisioned (created in this run from the template, no restored,
+// copied or rehydrated data) AND every data guard the contracts declare finds
+// nothing stored. New files over an existing database, a probe that could not
+// run, or data on a supposedly new container are all NOT fresh.
+export async function storageIsFresh({ containerName, contracts, newlyProvisioned = false } = {}) {
+  const reasons = [];
+  if (newlyProvisioned !== true) return { fresh: false, reasons: ['this container was not positively identified as newly provisioned (a rebuild, a clone with data, a rehydrate, or a later install)'] };
+  let fresh = true;
+  for (const contract of contracts || []) {
+    for (const { key, guard } of secretDataGuards(contract?.config || [])) {
+      const probe = await probeProtectedData({ containerName, guard });
+      const d = decideMasterSecretMint({ probe, envHasKey: false, newlyProvisioned: true, classification: classifyRows(probe.rows, { legacy: [guard.legacy_default] }) });
+      if (!d.fresh) { fresh = false; reasons.push(`${key}: ${d.reason}`); }
+    }
+  }
+  return { fresh, reasons };
+}
+
+// ensureFreshEnvValues — on a component's FIRST install into a project (every
+// file written, nothing kept) AND with storage confirmed fresh by the data
+// probe, write the contract's fresh_value entries into the environment unless
+// the key is already there. A fresh app has no data under any previous key,
+// so e.g. its legacy-key list starts EMPTY. New files over an existing or
+// restored database, or a probe that could not run, never reach here.
+export async function ensureFreshEnvValues({ containerName, contracts, freshStorage = false } = {}) {
+  if (freshStorage !== true) return { ok: true, written: [], skipped: 'storage not confirmed fresh' };
+  const vars = {};
+  for (const contract of contracts || []) {
+    for (const { key, value } of freshEnvValues(contract?.config || [])) {
+      if (!Object.prototype.hasOwnProperty.call(vars, key)) vars[key] = value;
+    }
+  }
+  const keys = Object.keys(vars);
+  if (!keys.length) return { ok: true, written: [] };
+  const cur = await readEnvironment(containerName);
+  if (!cur.ok) return { ok: false, written: [], error: cur.error };
+  const existing = new Set(envFileKeysOf(cur.text));
+  const toWrite = {};
+  for (const k of keys) if (!existing.has(k)) toWrite[k] = vars[k];
+  const written = Object.keys(toWrite);
+  if (!written.length) return { ok: true, written: [] };
+  const w = await writeEnvironment(containerName, mergeEnvFile(cur.text, toWrite));
+  if (!w.ok) return { ok: false, written: [], error: w.error };
+  return { ok: true, written };
+}
+function envFileKeysOf(text) {
+  const keys = [];
+  for (const line of String(text || '').split('\n')) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (m) keys.push(m[1]);
+  }
+  return keys;
+}
+
+// Options: newlyProvisioned — the container was created in this run from the
+// template with no earlier data (provision.js says so; nothing else may);
+// writersStopped — the app is stopped (deploy.js stops it before calling), so
+// a key that protects stored data may change without a concurrent write
+// landing under the old key. Without either, a data-guarded key is deferred.
+export async function ensureComponentSecrets({ containerName, rows, rand, newlyProvisioned = false, writersStopped = false } = {}) {
+  const configs = installedSecretConfigs(rows);
+  if (!configs.length) return { ok: true, minted: [], deferred: [], required: [] };
+  const deferred = [];
+  let eligible = configs;
+  const guards = secretMintGuards(configs);
+  if (guards.length) {
+    // The source must carry the marker, and when a built artifact is declared
+    // it must EXIST and carry it: the unit runs the compiled code (the manifest
+    // start command), so a missing or stale dist/ is not the code that will
+    // run. The deploy builds before it mints, so at deploy time the built file
+    // is the one the unit is about to start; at pre-install it does not exist
+    // yet and the key waits for the deploy.
+    const script = guards
+      .map((g) => {
+        const src = `grep -q -F -- '${shq(g.contains)}' '${APP_DIR}/${shq(g.path)}' 2>/dev/null`;
+        if (!g.built) return `if ${src}; then echo "MARKER OK ${g.key}"; else echo "MARKER MISSING ${g.key}"; fi`;
+        const builtPath = `'${APP_DIR}/${shq(g.built)}'`;
+        return `if ! ${src}; then echo "MARKER MISSING ${g.key}"; elif [ ! -e ${builtPath} ]; then echo "MARKER NOBUILD ${g.key}"; elif grep -q -F -- '${shq(g.contains)}' ${builtPath} 2>/dev/null; then echo "MARKER OK ${g.key}"; else echo "MARKER STALE ${g.key}"; fi`;
+      })
+      .join('\n');
+    const r = await containerSh(containerName, script, { timeoutMs: 15000 });
+    const verdict = new Map();
+    for (const l of String(r.stdout || '').split('\n')) {
+      const m = l.match(/^MARKER (OK|MISSING|NOBUILD|STALE) (\S+)$/);
+      if (m) verdict.set(m[2], m[1]);
+    }
+    for (const g of guards) {
+      const v = verdict.get(g.key) || 'MISSING';
+      if (v === 'OK') continue;
+      const reason = v === 'NOBUILD'
+        ? `the compiled artifact ${g.built} does not exist yet — the running service executes the build, so ${g.key} is minted by the deploy once the build exists`
+        : v === 'STALE'
+          ? `the compiled artifact ${g.built} does not carry "${g.contains}" while ${g.path} does — a stale build is not the code that will run; ${g.key} keeps its current value until a deploy rebuilds it`
+          : `${g.path} in this project does not carry "${g.contains}" — the installed component predates the code that migrates data encrypted under the previous value, so ${g.key} keeps its current value (a component upgrade brings the code; the key is minted on the deploy after that)`;
+      deferred.push({ key: g.key, reason });
+    }
+    eligible = configs.filter((c) => (verdict.get(c.key) || (guards.some((g) => g.key === c.key) ? 'MISSING' : 'OK')) === 'OK');
+  }
+  const cur = await readEnvironment(containerName);
+  if (!cur.ok) return { ok: false, minted: [], deferred, required: [], error: cur.error };
+  // The data guard: before a key that protects stored data is minted, read
+  // those rows from the app's database and decide (auth-data-logic.js). A key
+  // already in the environment is never overwritten; fresh storage or data the
+  // component's bridge can migrate lets the mint proceed; an unknown key or an
+  // unreadable probe defers it and says why.
+  const envKeys = new Set(envFileKeysOf(cur.text));
+  for (const { key, guard } of secretDataGuards(eligible)) {
+    if (envKeys.has(key)) continue;
+    const probe = await probeProtectedData({ containerName, guard });
+    const d = decideMasterSecretMint({
+      probe, envHasKey: false, newlyProvisioned, writersStopped,
+      classification: classifyRows(probe.rows, { legacy: [guard.legacy_default] }),
+    });
+    if (d.mint === 'ok') continue;
+    deferred.push({ key, reason: d.reason });
+    eligible = eligible.filter((c) => c.key !== key);
+  }
+  const required = componentSecretKeys(eligible);
+  if (!eligible.length) return { ok: true, minted: [], deferred, required };
+  const plan = planSecretMint(cur.text, eligible, rand ? { rand } : {});
+  if (!plan.minted.length) return { ok: true, minted: [], deferred, required };
+  const w = await writeEnvironment(containerName, mergeEnvFile(cur.text, plan.vars));
+  if (!w.ok) return { ok: false, minted: [], deferred, required, error: w.error };
+  return { ok: true, minted: plan.minted, deferred, required };
+}
+
+// deferredSecretsMessage(deferred) → the project-chat line for keys that were
+// NOT minted, or null when none were deferred.
+export function deferredSecretsMessage(deferred = []) {
+  if (!deferred || !deferred.length) return null;
+  return `Not minted: ${deferred.map((d) => `${d.key} (${d.reason})`).join('; ')}.`;
+}
+
 // ensureScaffoldDeps — restore scaffold dependencies a corrupted package.json
 // lost. Two npm processes racing in the same tree (the pre-serialization
 // double base-app deploy) could rewrite package.json/package-lock.json and drop
@@ -296,7 +508,7 @@ export async function ensureNodeRuntime({ containerName }) {
 // a chat message so the record of WHAT the build uses is visible where the
 // build happens. Returns { ok, installed, failed } — ok is false when any
 // selection failed (the caller blocks the build; pressing Build again retries).
-export async function preinstallComponents({ project, initiatedBy = null, actingAsAdmin = 0, cycleId = null }) {
+export async function preinstallComponents({ project, initiatedBy = null, actingAsAdmin = 0, cycleId = null, newlyProvisioned = false }) {
   const projectId = Number(project.id);
 
   // Auto-apply (operator setting, default on): every published component with
@@ -378,6 +590,26 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
     } catch (e) { console.warn('[mock2] preinstall audit log failed:', e?.message); }
   }
 
+  // First installs (every file written, nothing kept) get their contracts'
+  // fresh_value entries — but only once the DATA probe confirms fresh storage:
+  // "nothing kept" says the files are new, not that the database is. A fresh
+  // app starts with, for instance, an EMPTY legacy-key list; new files over an
+  // existing or restored database keep the component's default bridge, and a
+  // probe that could not run is reported and treated as not fresh.
+  try {
+    const freshContracts = installed.filter((i) => i.counts && i.counts.kept === 0).map((i) => i.contract);
+    if (freshContracts.length) {
+      const storage = await storageIsFresh({ containerName, contracts: freshContracts, newlyProvisioned });
+      const fresh = await ensureFreshEnvValues({ containerName, contracts: freshContracts, freshStorage: storage.fresh });
+      if (fresh.written.length) {
+        insertMessage({ projectId, kind: 'system', cycleId, body: `Fresh install with fresh storage: set ${fresh.written.join(', ')} in the container environment (no earlier data to migrate).` });
+      } else if (!storage.fresh) {
+        insertMessage({ projectId, kind: 'system', cycleId, body: `New component files, but the storage is not confirmed fresh — existing keys are preserved and the legacy bridge stays enabled: ${storage.reasons.join('; ')}.` });
+      }
+      if (!fresh.ok) console.warn(`[mock2] fresh env values failed for project ${projectId}: ${fresh.error}`);
+    }
+  } catch (e) { console.warn('[mock2] fresh env values failed:', e?.message); }
+
   // Repair pass over selections already marked 'installed' (they were filtered
   // out of INSTALLABLE above and never re-run installOne): verify their declared
   // deps exist in node_modules and reinstall the missing ones. Heals projects
@@ -387,6 +619,25 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
     ensured = await ensureComponentDeps({ containerName, rows: listProjectComponents(projectId) });
   } catch (e) { console.warn('[mock2] component dep repair failed:', e?.message); }
   for (const f of ensured.failed) failedRows.push(f);
+
+  // The secrets the installed components own are minted here, before the
+  // build's first turn, so the app never boots on a dev default (the deploy
+  // step re-checks and refuses to start production mode without them).
+  try {
+    // Data-guarded keys are minted here only on a newly provisioned container
+    // (nothing runs yet); on an existing app the deploy mints them after it
+    // stops the app (writersStopped) — never beside a running writer.
+    const secrets = await ensureComponentSecrets({ containerName, rows: listProjectComponents(projectId), newlyProvisioned });
+    if (secrets.minted.length) {
+      insertMessage({
+        projectId, kind: 'system', cycleId,
+        body: `Minted ${secrets.minted.length} application secret(s) into the container environment (${secrets.minted.join(', ')}). Values stay in the container; the app reads them at start.`,
+      });
+    }
+    const deferredNote = deferredSecretsMessage(secrets.deferred);
+    if (deferredNote) insertMessage({ projectId, kind: 'system', cycleId, body: deferredNote });
+    if (!secrets.ok) console.warn(`[mock2] component secret minting failed for project ${projectId}: ${secrets.error}`);
+  } catch (e) { console.warn('[mock2] component secret minting failed:', e?.message); }
 
   // Restore scaffold deps a corrupted package.json lost (see ensureScaffoldDeps)
   // — the deploy's install step materializes them (`npm ci` fails on the now

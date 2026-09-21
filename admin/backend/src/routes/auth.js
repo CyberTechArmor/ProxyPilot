@@ -25,6 +25,14 @@ import {
   insertCredential,
   updateCredentialCounter,
 } from '../lib/webauthn.js';
+import {
+  PASSKEY_USER_VERIFICATION,
+  PASSKEY_REQUIRE_UV,
+  USER_VERIFICATION_REASON,
+  USER_VERIFICATION_ERROR,
+  classifyWebAuthnFailure,
+  passkeyAuthenticatorSelection,
+} from '../lib/passkey-policy.js';
 
 // Account lockout knobs. Defaults: after 10 failed login attempts
 // inside a 30-minute window the user is locked for 30 minutes. The
@@ -808,7 +816,7 @@ authRouter.post('/sudo/passkey/begin', authenticateToken, async (req, res) => {
     const options = await generateAuthenticationOptions({
       rpID: getRpId(req),
       allowCredentials,
-      userVerification: 'preferred',
+      userVerification: PASSKEY_USER_VERIFICATION,
     });
 
     putChallenge(`sudo:${req.user.jti}`, {
@@ -866,6 +874,9 @@ authRouter.post('/sudo/passkey/verify', authenticateToken, async (req, res) => {
     if (!result.ok) {
       recordLoginFailure(db, user, req);
       logAudit(user.id, 'SUDO_DENIED', 'user', user.id, { reason: result.reason }, req.ip);
+      if (result.reason === USER_VERIFICATION_REASON) {
+        return res.status(401).json({ error: USER_VERIFICATION_ERROR, reason: result.reason });
+      }
       return res.status(401).json({ error: 'Passkey verification failed' });
     }
 
@@ -972,10 +983,9 @@ authRouter.post('/passkey/register/begin', authenticateToken, async (req, res) =
       userDisplayName: user.display_name || user.username,
       attestationType: 'none',
       excludeCredentials: excluded,
-      authenticatorSelection: {
-        residentKey: 'preferred',
-        userVerification: 'preferred',
-      },
+      // residentKey preferred (discoverable sign-in), user verification
+      // REQUIRED — and verified server-side below (lib/passkey-policy.js).
+      authenticatorSelection: passkeyAuthenticatorSelection(),
     });
 
     putChallenge(`reg:${req.user.jti}`, {
@@ -1012,10 +1022,14 @@ authRouter.post('/passkey/register/verify', authenticateToken, async (req, res) 
         expectedChallenge: entry.challenge,
         expectedOrigin: expectedOrigins,
         expectedRPID,
-        requireUserVerification: false,
+        requireUserVerification: PASSKEY_REQUIRE_UV,
       });
     } catch (e) {
-      logAudit(user.id, 'PASSKEY_REGISTER_FAILED', 'user', user.id, { reason: e?.message }, req.ip);
+      const reason = classifyWebAuthnFailure(e?.message) || e?.message;
+      logAudit(user.id, 'PASSKEY_REGISTER_FAILED', 'user', user.id, { reason }, req.ip);
+      if (reason === USER_VERIFICATION_REASON) {
+        return res.status(400).json({ error: USER_VERIFICATION_ERROR, reason });
+      }
       return res.status(400).json({ error: 'Passkey registration failed verification.' });
     }
 
@@ -1083,7 +1097,7 @@ authRouter.post('/passkey/authenticate/begin', async (req, res) => {
     const options = await generateAuthenticationOptions({
       rpID: getRpId(req),
       allowCredentials, // undefined => discoverable credentials path
-      userVerification: 'preferred',
+      userVerification: PASSKEY_USER_VERIFICATION,
     });
 
     const challengeId = uuidv4();
@@ -1161,6 +1175,9 @@ authRouter.post('/passkey/authenticate/verify', async (req, res) => {
     if (!result.ok) {
       recordLoginFailure(db, user, req);
       logAudit(user.id, 'PASSKEY_AUTH_FAILED', 'user', user.id, { reason: result.reason }, req.ip);
+      if (result.reason === USER_VERIFICATION_REASON) {
+        return res.status(401).json({ error: USER_VERIFICATION_ERROR, reason: result.reason });
+      }
       return res.status(401).json({ error: 'Passkey verification failed' });
     }
 
@@ -1181,17 +1198,16 @@ authRouter.post('/passkey/authenticate/verify', async (req, res) => {
       } catch (e) { /* duplicate */ }
     }
 
-    // Mint the session AND open sudo in one shot. A fresh passkey
-    // assertion is at least as strong as password+TOTP, so it
-    // satisfies both the login and the sudo gate.
+    // Mint the session ONLY. Until 2026-09 this path also opened the sudo
+    // window "in one shot" (a fresh assertion is at least as strong as
+    // password+TOTP) — but password+TOTP login never did that, and with
+    // user verification merely preferred it handed four sliding hours of
+    // elevation to whoever held an unlocked device. Login is login; a
+    // destructive action re-proves through /sudo or /sudo/passkey like
+    // every other session (migration 605 cleared the grants this path had
+    // already handed out).
     const token = generateToken(user, { ip: req.ip, userAgent: req.headers['user-agent'] });
     setAuthCookies(res, token);
-    const sudoUntilISO = new Date(Date.now() + SUDO_GRANT_HOURS * 60 * 60 * 1000).toISOString();
-    db.prepare(
-      `UPDATE sessions SET sudo_until = ? WHERE user_id = ? AND id = (
-         SELECT id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1
-       )`
-    ).run(sudoUntilISO, user.id, user.id);
 
     logAudit(user.id, 'PASSKEY_LOGIN_SUCCESS', 'user', user.id, { credentialId: stored.credential_id }, req.ip);
 
@@ -1207,7 +1223,9 @@ authRouter.post('/passkey/authenticate/verify', async (req, res) => {
         totpEnabled: !!user.totp_enabled,
         passwordChangeRequired: !!user.password_change_required,
       },
-      sudoUntil: sudoUntilISO,
+      // Kept in the response shape for older clients; always null now — a
+      // passkey login no longer elevates.
+      sudoUntil: null,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

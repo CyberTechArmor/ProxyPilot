@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { repairStrayMigration912 } from './lib/migration-repair.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { mkdirSync, existsSync, chmodSync } from 'fs';
@@ -1687,6 +1688,20 @@ export function initDatabase() {
   // per-domain Cloudflare API token (DNS-01 only), AES-256-GCM via
   // lib/secrets.js — never returned to any client. The operator's DNS-01
   // specified-domain list lives in app_settings ('dns01_domains').
+  // Version 605: the passwordless passkey login used to open the sudo
+  // window as a side effect of signing in (with user verification only
+  // "preferred"). That grant is gone (routes/auth.js) and passkeys now
+  // require verified UV; the grants that path already handed out cannot
+  // be told apart from legitimately re-proved ones, so every open window
+  // is closed once. Cost: each signed-in admin re-proves before their
+  // next destructive action. Idempotent.
+  runMigration(db, 605, 'sessions_sudo_reset', (d) => {
+    const cols = d.prepare(`PRAGMA table_info(sessions)`).all().map((c) => c.name);
+    if (cols.includes('sudo_until')) {
+      d.prepare(`UPDATE sessions SET sudo_until = NULL WHERE sudo_until IS NOT NULL`).run();
+    }
+  });
+
   runMigration(db, 604, 'domain_provisioning', (d) => {
     d.exec(`
       CREATE TABLE IF NOT EXISTS provision_api_keys (
@@ -2225,6 +2240,19 @@ export function initDatabase() {
   // background, downloadable as many times as anyone likes (with Range, so a
   // browser can resume), and deleted when the operator says so or when
   // retention sweeps it.
+  // A database that ran an earlier build of the immediate-repairs branch
+  // recorded the MCP owner-validity migration as 912 — the number main then
+  // took for lxc_exports. lib/migration-repair.js identifies that record by
+  // NAME and moves it to 913 (its real number) so 912 runs; a legitimate 912
+  // is never touched. Tested against populated databases in
+  // migration-repair.test.js.
+  try {
+    ensureSchemaMigrationsTable(db);
+    repairStrayMigration912(db, { log: (m) => console.warn(m) });
+  } catch (e) {
+    console.warn('[db] migration history repair failed:', e?.message || e);
+  }
+
   runMigration(db, 912, 'lxc_exports', (d) => {
     d.exec(`
       CREATE TABLE IF NOT EXISTS lxc_exports (
@@ -2249,6 +2277,37 @@ export function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_lxc_exports_container ON lxc_exports(container_name, created_at);
       CREATE INDEX IF NOT EXISTS idx_lxc_exports_state ON lxc_exports(state);
     `);
+  });
+
+  // Version 913: an MCP token is only as valid as its owner. Token lookup
+  // now refuses a token whose minting admin is gone or disabled
+  // (routes/mcp.js findToken), and disabling or deleting a user revokes
+  // their tokens. This closes out the rows that predate the rule: a token
+  // with no recorded owner, an owner that no longer exists, or an owner
+  // already parked as 'pending' is revoked here rather than guessed at —
+  // the operator mints a fresh key from a live account. Revocation keeps
+  // the row (the audit trail stays intact). Idempotent.
+  runMigration(db, 913, 'mcp_tokens_owner_validity', (d) => {
+    const tables = d.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_tokens'`).all();
+    if (!tables.length) return;
+    d.prepare(
+      `UPDATE mcp_tokens SET revoked_at = ?
+        WHERE revoked_at IS NULL
+          AND (created_by IS NULL OR created_by = ''
+               OR created_by NOT IN (SELECT id FROM users)
+               OR created_by IN (SELECT id FROM users WHERE role = 'pending'))`,
+    ).run(new Date().toISOString());
+  });
+
+  // Version 914: MCP tokens can expire. expires_at is optional — an existing
+  // token keeps working unchanged (claude.ai connectors and scoped keys must
+  // not die on upgrade); a token minted with expires_in_days is refused after
+  // that moment (routes/mcp.js findToken). Idempotent.
+  runMigration(db, 914, 'mcp_tokens_expiry', (d) => {
+    const tables = d.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_tokens'`).all();
+    if (!tables.length) return;
+    const cols = d.prepare(`PRAGMA table_info(mcp_tokens)`).all().map((c) => c.name);
+    if (!cols.includes('expires_at')) d.exec(`ALTER TABLE mcp_tokens ADD COLUMN expires_at TEXT`);
   });
 
   runMigration(db, 907, 'route_edge_options', (d) => {

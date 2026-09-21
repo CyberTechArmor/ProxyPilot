@@ -14,6 +14,7 @@ import {
   parseRunContract, deployPlan, deployStepLabel, buildDevServiceUnit,
   execStartForStartCommand, execStartForServePy, deployProjectStatus,
   deployFailureMessage, DEFAULT_RUN_CONTRACT, freeWebPortScript,
+  DEPLOY_NODE_ENV, parseEnvironmentFile, validateDeployEnvironment,
 } from '../mock2/deploy-logic.js';
 import {
   defaultManifest, buildSeedFiles, buildContainerSetupScript, parseManifestWebPort,
@@ -107,6 +108,44 @@ test('buildDevServiceUnit swaps only ExecStart; keeps port + WantedBy', () => {
   assert.match(unit, /EnvironmentFile=-\/etc\/environment/);
   assert.match(unit, /ExecStart=\/bin\/sh -lc 'exec npm run start'/);
   assert.match(unit, /WantedBy=multi-user\.target/);
+});
+
+test('buildDevServiceUnit runs the app in production mode, set in the unit itself', () => {
+  assert.equal(DEPLOY_NODE_ENV, 'production');
+  const unit = buildDevServiceUnit({ appDir: '/srv/app', webPort: 3000, execStart: '/bin/true' });
+  assert.match(unit, /^Environment=NODE_ENV=production$/m);
+  // The placeholder (serve.py) unit goes through the same builder — harmless there.
+  assert.match(buildDevServiceUnit({ execStart: execStartForServePy() }), /^Environment=NODE_ENV=production$/m);
+});
+
+test('parseEnvironmentFile reads KEY=value, quoted values, export prefixes; skips comments', () => {
+  const env = parseEnvironmentFile('# comment\nA=1\nB="two words"\nexport C=\'x\'\nnot a line\nD=\n');
+  assert.deepEqual([...env.entries()], [['A', '1'], ['B', 'two words'], ['C', 'x'], ['D', '']]);
+});
+
+test('validateDeployEnvironment fails closed: unit mode, no override, every owned secret present', () => {
+  const unit = buildDevServiceUnit({ execStart: '/bin/true' });
+  const required = ['AUTH_JWT_SECRET', 'AUTH_MASTER_SECRET'];
+  const good = 'AUTH_JWT_SECRET="a"\nAUTH_MASTER_SECRET="b"\nPORT=3000\n';
+  assert.deepEqual(validateDeployEnvironment({ unitText: unit, environmentText: good, requiredKeys: required }), { ok: true, mode: 'production' });
+  // No owned secrets (a project without the auth component): mode alone suffices.
+  assert.equal(validateDeployEnvironment({ unitText: unit, environmentText: '' }).ok, true);
+  // A unit that does not set the mode — a future edit to the builder — is refused.
+  const noMode = validateDeployEnvironment({ unitText: unit.replace(/^Environment=NODE_ENV=production$/m, ''), environmentText: good, requiredKeys: required });
+  assert.equal(noMode.ok, false);
+  assert.match(noMode.error, /does not set NODE_ENV=production/);
+  // /etc/environment overriding the mode (EnvironmentFile wins in systemd).
+  const override = validateDeployEnvironment({ unitText: unit, environmentText: `${good}NODE_ENV=development\n`, requiredKeys: required });
+  assert.equal(override.ok, false);
+  assert.match(override.error, /NODE_ENV=development/);
+  assert.match(override.error, /EnvironmentFile wins/);
+  // The same value there is fine.
+  assert.equal(validateDeployEnvironment({ unitText: unit, environmentText: `${good}NODE_ENV="production"\n`, requiredKeys: required }).ok, true);
+  // A missing or empty owned secret.
+  const missing = validateDeployEnvironment({ unitText: unit, environmentText: 'AUTH_JWT_SECRET="a"\nAUTH_MASTER_SECRET=\n', requiredKeys: required });
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /AUTH_MASTER_SECRET/);
+  assert.doesNotMatch(missing.error, /AUTH_JWT_SECRET/);
 });
 
 test('execStartForStartCommand wraps in a login shell and cds to the app dir', () => {

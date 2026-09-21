@@ -9,10 +9,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomBytes, createCipheriv } from 'node:crypto';
 import {
   readinessScript, parseReadiness, readinessLogLines, readinessChatMessage,
-  READINESS_CHECKS, AUTHED_CHECKS,
-} from '../mock2/readiness-logic.js';
+  READINESS_CHECKS, AUTHED_CHECKS, masterKeyRowsCode } from '../mock2/readiness-logic.js';
+import { masterKeyFor } from '../mock2/auth-data-logic.js';
 
 const AUTH = { email: 'design-review@fixture.invalid', password: 'x'.repeat(20) };
 
@@ -45,6 +46,46 @@ test('with fixture credentials it makes the request the redirect was hiding', ()
 
 test('the exact case that used to pass: a login redirect with everything behind it broken', () => {
   // ROOT 302 is what probeServing saw and called healthy.
+  {
+    // MASTERKEY: a warning (never a failure) when the app has no master secret
+    // of its own; not applicable to a project with no auth component.
+    // Three separate facts, three lines; each is a warning, never a failure.
+    const s = readinessScript({ port: 3000 });
+    assert.match(s, /AUTH_MASTER_SECRET=/);
+    assert.match(s, /dev-insecure-master-secret-change-me/);
+    assert.match(s, /MASTERKEY:200/); assert.match(s, /LEGACYBRIDGE:200/);
+    // The rows check is NOT in the shell (it needs the cipher): readiness.js
+    // appends it from the platform side.
+    assert.doesNotMatch(s, /MASTERKEY_ROWS/);
+    {
+      const key = 'k'.repeat(40); const dev = 'dev-insecure-master-secret-change-me';
+      const enc = (pt, m) => { const n = randomBytes(12); const c = createCipheriv('aes-256-gcm', masterKeyFor(m), n); const e = Buffer.concat([c.update(pt, 'utf8'), c.final()]); return { ciphertext: Buffer.concat([e, c.getAuthTag()]).toString('base64'), nonce: n.toString('base64') }; };
+      assert.equal(masterKeyRowsCode({ probe: { state: 'unknown' } }), 500);
+      assert.equal(masterKeyRowsCode({ probe: { state: 'rls', rows: [] } }), 500, 'row security in force: the rows could not be established');
+      assert.equal(masterKeyRowsCode({ probe: { state: 'empty', rows: [] }, envKey: key }), 204);
+      assert.equal(masterKeyRowsCode({ probe: { state: 'no_table', rows: [] } }), 204);
+      assert.equal(masterKeyRowsCode({ probe: { state: 'rows', rows: [enc('x', key)] }, envKey: key }), 200);
+      assert.equal(masterKeyRowsCode({ probe: { state: 'rows', rows: [enc('x', key), enc('y', dev)] }, envKey: key }), 404, 'one row still under the dev key');
+      // No key set: the active key IS the dev default, so dev rows count as current (MASTERKEY separately says 404).
+      assert.equal(masterKeyRowsCode({ probe: { state: 'rows', rows: [enc('x', dev)] }, envKey: '' }), 200);
+      assert.equal(masterKeyRowsCode({ probe: { state: 'rows', rows: [enc('x', key)] }, envKey: '' }), 404);
+    }
+    // A key set but still the dev default is 404: "a key exists" is not "a non-default key is active".
+    const three = parseReadiness('ROOT:200\nHEALTH:200\nLOGIN:200\nSIGNUP:200\nSTATIC:200\nMASTERKEY:404\nLEGACYBRIDGE:404\nMASTERKEY_ROWS:404\n');
+    assert.equal(three.ready, true);
+    assert.equal(three.warnings.length, 3);
+    assert.match(three.checks.find((c) => c.key === 'MASTERKEY').why, /public key/);
+    assert.match(three.checks.find((c) => c.key === 'MASTERKEY_ROWS').why, /masterKeyInventory/);
+    assert.match(three.checks.find((c) => c.key === 'LEGACYBRIDGE').why, /set it empty and redeploy/);
+    // Half-migrated: key active, rows fine, bridge still open → exactly one warning.
+    const half = parseReadiness('ROOT:200\nHEALTH:200\nLOGIN:200\nSIGNUP:200\nSTATIC:200\nMASTERKEY:200\nLEGACYBRIDGE:404\nMASTERKEY_ROWS:200\n');
+    assert.deepEqual(half.checks.filter((c) => !c.ok).map((c) => c.key), ['LEGACYBRIDGE']);
+    // No stored credentials (204) is fine; a failed probe (500) is a warning.
+    assert.equal(parseReadiness('ROOT:200\nHEALTH:200\nLOGIN:200\nSIGNUP:200\nSTATIC:200\nMASTERKEY:200\nLEGACYBRIDGE:200\nMASTERKEY_ROWS:204\n').warnings.length, 0);
+    assert.equal(parseReadiness('ROOT:200\nHEALTH:200\nLOGIN:200\nSIGNUP:200\nSTATIC:200\nMASTERKEY:200\nLEGACYBRIDGE:200\nMASTERKEY_ROWS:500\n').warnings.length, 1);
+    const noAuth = parseReadiness('ROOT:200\nHEALTH:200\nLOGIN:404\nSIGNUP:404\nSTATIC:200\nMASTERKEY:404\nLEGACYBRIDGE:404\nMASTERKEY_ROWS:500\n');
+    assert.equal(noAuth.checks.some((c) => c.key.startsWith('MASTERKEY') || c.key === 'LEGACYBRIDGE'), false);
+  }
   const r = parseReadiness('ROOT:302\nHEALTH:503\nLOGIN:200\nSTATIC:200\nSIGNIN:200\nAPP:500\n');
   assert.equal(r.ready, false);
   // Both real problems are named, in words an operator can act on.

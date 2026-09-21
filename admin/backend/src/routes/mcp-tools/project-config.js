@@ -18,6 +18,7 @@ import { basename } from 'node:path';
 import { readStandardsSeedVersion, fetchStandardsManifest } from '../../lib/self-update.js';
 import { exportStore, resolveExportCompression } from '../../lib/lxc-exports-instance.js';
 import { incusCompressionArgs } from '../../lib/export-compression.js';
+import { withContainerLock } from '../../mock2/container-lock.js';
 import {
   intIn, stamp, sha256Hex, validGitRefName, validateEnvVars, mergeEnvFile, envFileKeys, readOnlySqlError,
   parseReleases, renderReleases, RELEASES_PATH, pathUnder,
@@ -711,15 +712,27 @@ export function createProjectConfigHandlers(kit) {
     const d = dry(args, plan); if (d) return d;
     const gate = confirmToken(args, auth, note, { tool: 'restore_project_db', subject: `${p.project.id}/${basename(file)}`, action: `replace ${p.project.name}'s database with ${basename(file)}`, preview: plan });
     if (gate) return gate;
-    const pre = `${DB_DUMPS_DIR}/app-pre-restore-${stamp()}.sql`;
-    const dump = await projectSh(p.incusName, 'f="$1"; mkdir -p "$(dirname "$f")"; su - postgres -c "pg_dump --clean --if-exists app" > "$f" && chmod 600 "$f"', [pre], { timeoutMs: 20 * 60 * 1000 });
-    if (dump.status !== 0) return err(`Refusing to restore without a pre-restore dump: ${tail(dump.stderr)}`);
-    note.snapshot = pre;
-    const r = await projectSh(p.incusName, 'f="$1"; cp "$f" /tmp/pp-restore.sql && chmod 644 /tmp/pp-restore.sql; su - postgres -c "psql -X -v ON_ERROR_STOP=0 -q -d app -f /tmp/pp-restore.sql" 2>&1 | grep -E "^(psql|ERROR)" | head -n 40; rm -f /tmp/pp-restore.sql; exit 0', [file], { timeoutMs: 30 * 60 * 1000 });
-    const errors = (r.stdout || '').split('\n').filter((l) => /ERROR/.test(l));
-    note.summary = `db restored from ${basename(file)}`;
-    note.detail = { file, pre_restore_dump: pre, errors: errors.length };
-    return ok({ restored: true, file, pre_restore_dump: pre, errors: errors.slice(0, 20), reverse_with: `restore_project_db({ project_id: ${p.project.id}, file: "${basename(pre)}" })`, next: 'redeploy_project (or a restart) so the app reconnects cleanly.' });
+    // The restore takes the container's exclusive lock — the one the deploy
+    // holds from its stop to its start — and is REFUSED, before any change,
+    // while a deploy (or another restore) holds it; a deploy arriving during
+    // the restore queues behind it.
+    const run = async () => {
+      const pre = `${DB_DUMPS_DIR}/app-pre-restore-${stamp()}.sql`;
+      const dump = await projectSh(p.incusName, 'f="$1"; mkdir -p "$(dirname "$f")"; su - postgres -c "pg_dump --clean --if-exists app" > "$f" && chmod 600 "$f"', [pre], { timeoutMs: 20 * 60 * 1000 });
+      if (dump.status !== 0) return err(`Refusing to restore without a pre-restore dump: ${tail(dump.stderr)}`);
+      note.snapshot = pre;
+      const r = await projectSh(p.incusName, 'f="$1"; cp "$f" /tmp/pp-restore.sql && chmod 644 /tmp/pp-restore.sql; su - postgres -c "psql -X -v ON_ERROR_STOP=0 -q -d app -f /tmp/pp-restore.sql" 2>&1 | grep -E "^(psql|ERROR)" | head -n 40; rm -f /tmp/pp-restore.sql; exit 0', [file], { timeoutMs: 30 * 60 * 1000 });
+      const errors = (r.stdout || '').split('\n').filter((l) => /ERROR/.test(l));
+      note.summary = `db restored from ${basename(file)}`;
+      note.detail = { file, pre_restore_dump: pre, errors: errors.length };
+      return ok({ restored: true, file, pre_restore_dump: pre, errors: errors.slice(0, 20), reverse_with: `restore_project_db({ project_id: ${p.project.id}, file: "${basename(pre)}" })`, next: 'redeploy_project (or a restart) so the app reconnects cleanly.' });
+    };
+    try {
+      return await withContainerLock(p.incusName, 'restore_project_db', run, { wait: false });
+    } catch (e) {
+      if (e?.code === 'CONTAINER_BUSY') return err(`${e.holder} is in progress for this project's container — the restore was refused before any change; retry when it finishes`);
+      throw e;
+    }
   });
 
   /* ---------------------------------- CPR --------------------------------- */

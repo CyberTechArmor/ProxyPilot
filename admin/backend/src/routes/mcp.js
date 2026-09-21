@@ -70,6 +70,7 @@ import {
   parseProcLoadavg, parseProcMeminfo, parseDfOutput, pickStoragePool, parseProfileRootPool,
   parsePoolResources, parseStorageInfoText, summarizeContainers, buildHostUsage, perProjectUsage,
   validateHostUsage, reclaimDelta,
+  mcpTokenRefusal, mcpTokenOwnerStatus, mcpTokenExpiry, mcpTokenDefaultDays,
 } from '../lib/mcp-logic.js';
 import { archiveProject, unarchiveProject } from '../lib/project-lifecycle.js';
 import { checkForUpdates as selfUpdateCheck, installedState as selfUpdateInstalled, startUpdate as selfUpdateStart, updateStatus as selfUpdateStatus } from '../lib/self-update.js';
@@ -155,14 +156,37 @@ function validTargetDir(p) {
 
 // ---- token auth ----
 
+// Every tool call re-derives the caller from the token AND its owner: a
+// valid, unrevoked token whose minting admin is gone or disabled is refused
+// (lib/mcp-logic.js mcpTokenOwnerRefusal). The endpoint is request/response
+// with no stream, so this per-call check is what "re-check on an already-open
+// connection" means here. The refusal is audited once per token per process
+// — a disabled owner's client retrying every few seconds must not flood the
+// audit log, but the first refusal must be on record.
+const ownerRefusalsAudited = new Set();
+function noteOwnerRefusal(row, reason) {
+  const key = `${row.id}:${reason}`;
+  if (ownerRefusalsAudited.has(key)) return;
+  ownerRefusalsAudited.add(key);
+  try {
+    logAudit(null, 'MCP_TOKEN_OWNER_REFUSED', 'mcp_token', String(row.id), { reason, name: row.name, created_by: row.created_by || null }, null);
+  } catch { /* audit is best effort here */ }
+}
+
 function findToken(rawToken) {
   if (!rawToken) return null;
   try {
-    const row = getDb()
+    const db = getDb();
+    const row = db
       .prepare(`SELECT * FROM mcp_tokens WHERE token_hash = ? AND revoked_at IS NULL`)
       .get(hashMcpToken(rawToken));
     if (!row) return null;
-    getDb().prepare(`UPDATE mcp_tokens SET last_used_at = ? WHERE id = ?`)
+    const owner = row.created_by
+      ? db.prepare(`SELECT id, role FROM users WHERE id = ?`).get(String(row.created_by))
+      : null;
+    const refusal = mcpTokenRefusal({ expiresAt: row.expires_at, ownerId: row.created_by, owner });
+    if (refusal) { noteOwnerRefusal(row, refusal); return null; }
+    db.prepare(`UPDATE mcp_tokens SET last_used_at = ? WHERE id = ?`)
       .run(new Date().toISOString(), row.id);
     return row;
   } catch { return null; }   // pre-migration
@@ -4710,7 +4734,18 @@ export function createMcpAdminRouter() {
   router.get('/', requireAdmin, (req, res) => {
     let rows = [];
     try {
-      rows = getDb().prepare(`SELECT id, name, created_by, created_at, last_used_at, revoked_at FROM mcp_tokens ORDER BY id DESC`).all();
+      const db = getDb();
+      const users = new Map(db.prepare(`SELECT id, username, role FROM users`).all().map((u) => [String(u.id), u]));
+      const cols = db.prepare(`PRAGMA table_info(mcp_tokens)`).all().map((c) => c.name);
+      const expiresCol = cols.includes('expires_at') ? ', expires_at' : '';
+      rows = db.prepare(`SELECT id, name, created_by, created_at, last_used_at, revoked_at${expiresCol} FROM mcp_tokens ORDER BY id DESC`).all()
+        .map((r) => {
+          const owner = users.get(String(r.created_by || '')) || null;
+          // owner_status: 'active' | 'disabled' | 'deleted' | 'demoted' |
+          // 'expired' | 'none'. Anything but 'active' means the token no
+          // longer authenticates (findToken).
+          return { ...r, expires_at: r.expires_at || null, owner_username: owner?.username || null, owner_status: mcpTokenOwnerStatus({ expiresAt: r.expires_at, ownerId: r.created_by, owner }) };
+        });
     } catch { /* pre-migration */ }
     res.json({ tokens: rows });
   });
@@ -4719,16 +4754,20 @@ export function createMcpAdminRouter() {
   // ONCE; only its hash is stored.
   router.post('/', requireAdmin, (req, res) => {
     const name = String(req.body?.name || '').trim().slice(0, 100) || 'MCP client';
+    // Lifetime (migration 914): absent = MCP_TOKEN_DEFAULT_DAYS (365), 0 = never (explicit).
+    const expiry = mcpTokenExpiry(req.body?.expires_in_days, Date.now(), { defaultDays: mcpTokenDefaultDays() });
+    if (expiry.error) return res.status(400).json({ error: expiry.error });
     const token = mintMcpToken();
     getDb().prepare(`
-      INSERT INTO mcp_tokens (name, token_hash, created_by, created_at, token_prefix)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(name, hashMcpToken(token), String(req.user.id), new Date().toISOString(), token.slice(0, 13));
-    logAudit(req.user.id, 'MCP_TOKEN_CREATED', 'mcp_token', name, {}, req.ip);
+      INSERT INTO mcp_tokens (name, token_hash, created_by, created_at, token_prefix, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(name, hashMcpToken(token), String(req.user.id), new Date().toISOString(), token.slice(0, 13), expiry.expiresAt);
+    logAudit(req.user.id, 'MCP_TOKEN_CREATED', 'mcp_token', name, { expires_at: expiry.expiresAt, never_expires: !!expiry.never }, req.ip);
     const base = publicBaseUrl(req);
     res.status(201).json({
       token,
       name,
+      expires_at: expiry.expiresAt,
       endpoint: `${base}/api/mcp`,
       connector_url: `${base}/api/mcp/t/${token}`,
       note: 'Store this token now — it is shown only once.',

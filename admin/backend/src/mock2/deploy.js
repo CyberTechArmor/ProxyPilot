@@ -24,12 +24,14 @@ import { sh, b64 } from './host.js';
 import { scaffoldPwaFiles } from './scaffold.js';
 import {
   parseRunContract, deployPlan, deployStepLabel, buildDevServiceUnit,
+  validateDeployEnvironment,
   execStartForStartCommand, deployFailureMessage, DEPLOY_STEP_TIMEOUTS_MS,
-  freeWebPortScript, portHoldersReportScript,
+  freeWebPortScript, portHoldersReportScript, servingProbeScript, restartVerdict, restartOutcomeText,
   newBuildId, sanitizeBuildId, buildIdStampScript, buildStampReportScript, interpretBuildStamp,
   LEGACY_SW_JS,
 } from './deploy-logic.js';
 import { parseDeclaredEgress } from './egress-logic.js';
+import { withContainerLock } from './container-lock.js';
 // The declared default port; a project row normally carries its own.
 import { DEFAULT_WEB_PORT } from './template.js';
 import { updateProject } from './projects.js';
@@ -89,25 +91,19 @@ export async function readDeclaredEgress(containerName, appDir = '/srv/app') {
 // the base-app deploy, the rehydrate restore — can fire independently, and two
 // deploys interleaving on ONE container stomp the same unit and web port: each
 // runs freeWebPortScript then `systemctl start`, so one instance binds and the
-// other crash-loops on EADDRINUSE until the health window closes. One
-// in-process queue per container serializes them; a queued deploy simply runs
-// after the current one finishes (idempotent — it redeploys the same checkout).
-const deployQueues = new Map();
+// other crash-loops on EADDRINUSE until the health window closes. The
+// per-container lock (container-lock.js) serializes them, and it is the SAME
+// lock the database and snapshot restores take, so a restore cannot rewrite
+// the database between the deploy's probe and its start. A queued deploy
+// simply runs after the current one finishes (idempotent — it redeploys the
+// same checkout). The lock is held for the deploy's whole lifetime.
 
 // deployProject({ containerName, appDir, webPort, runContract, onStep }) →
 // { ok, step, error }. Runs the ordered plan, then swaps the unit and restarts,
 // then health-checks the web port. onStep(key, label) reports progress (wired to
 // setJob so the CycleCard shows "Installing dependencies…" etc.).
 export async function deployProject(args) {
-  const key = String(args?.containerName || '');
-  const prev = deployQueues.get(key) || Promise.resolve();
-  const run = prev.catch(() => {}).then(() => deployProjectUnqueued(args));
-  deployQueues.set(key, run);
-  try {
-    return await run;
-  } finally {
-    if (deployQueues.get(key) === run) deployQueues.delete(key);
-  }
+  return withContainerLock(String(args?.containerName || ''), 'deploy', () => deployProjectUnqueued(args));
 }
 
 async function deployProjectUnqueued({
@@ -202,12 +198,86 @@ async function deployProjectUnqueued({
   await retrofitPwaBuildPlumbing(containerName, appDir).catch(() => {});
   await stampBuildId(containerName, appDir).catch(() => {});
 
+  // 1.5) Stop the running app, THEN mint. The secrets the installed components
+  //      OWN (contract.config secret + generate — the auth component's JWT and
+  //      master keys) are minted once into /etc/environment, which the unit
+  //      below reads. A key that protects stored data is decided on the data
+  //      (auth-data-logic.js), and that decision is only sound while nothing
+  //      can write under the old key: the old app is stopped and the port
+  //      freed here, before the final probe, and the new unit starts below
+  //      with the new key already persisted. Deploys for one container are
+  //      serialized on the container lock (container-lock.js), which the restores share, so two deploys cannot decide differently and a restore cannot land between the probe and the start.
+  //      Fail closed: a failed mint restarts the old unit and reports.
+  //      Dynamic imports — the static ones would be a cycle (component-install
+  //      imports runner, which imports this module).
+  report('start');
+  // Every failure after this point starts the unit again before returning,
+  // so a failed deploy never leaves the app down. What it starts is a
+  // COMPATIBLE set by construction: the build already replaced dist/, and a
+  // key that protects stored data is persisted only when the code on disk
+  // carries the migration bridge — so old rows stay readable whichever of
+  // (old key, new key) the environment holds when the process comes up.
+  // Returns the outcome text: "restart attempted" plus whether the app is
+  // serving again — never "recovered", which needs the credential read back
+  // through the application (deploy-logic RESTART_OUTCOME).
+  const restartUnit = async () => {
+    const r = await containerSh(
+      containerName,
+      `systemctl daemon-reload >/dev/null 2>&1 || true\nsystemctl start mock2-dev.service >/dev/null 2>&1 || true\n${servingProbeScript(webPort, 10)}`,
+      { timeoutMs: 90000 },
+    ).catch(() => null);
+    return restartOutcomeText(restartVerdict(r?.stdout));
+  };
+  const stop = await containerSh(
+    containerName,
+    `: ${DEPLOY_MARKER}\nsystemctl stop mock2-dev.service >/dev/null 2>&1 || true\n${freeWebPortScript(webPort)}\n`,
+    { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.start },
+  );
+  if (stop.code !== 0) {
+    const back = await restartUnit();
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `could not stop the running app before the key check: ${tail(stop)}. ${back}`) };
+  }
+  let requiredSecretKeys = [];
+  try {
+    const [{ ensureComponentSecrets }, { listProjectComponents }, { getProjectByContainerName }] = await Promise.all([
+      import('./component-install.js'), import('./components.js'), import('./projects.js'),
+    ]);
+    const project = getProjectByContainerName(containerName);
+    if (project) {
+      const rows = listProjectComponents(project.id);
+      const secrets = await ensureComponentSecrets({ containerName, rows, writersStopped: true });
+      if (!secrets.ok) {
+        const back = await restartUnit();
+        return { ok: false, step: 'start', error: deployFailureMessage('start', `could not mint the application's secrets: ${secrets.error}. ${back}`) };
+      }
+      // A deferred key (marker, data or artifact not ready) is neither minted
+      // nor required — the app keeps its current value, and the deferral is
+      // reported by the install and retry paths and by readiness.
+      requiredSecretKeys = secrets.required;
+    }
+  } catch (e) {
+    const back = await restartUnit();
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `application secret minting failed: ${e?.message || e}. ${back}`) };
+  }
+
   // 2) Rewrite the systemd unit's ExecStart to the manifest `start` command,
   //    reload, and restart. WantedBy=multi-user.target already persists, so a
   //    later container restart brings the built app back (idempotency point 5).
-  report('start');
+  //    The unit runs the app in production mode; the deploy is refused unless
+  //    the unit says so, /etc/environment does not override it, and every
+  //    minted secret is present (validateDeployEnvironment) — an omitted
+  //    variable can never silently switch the dev-default secrets back on.
   const execStart = execStartForStartCommand(contract.start, { appDir });
   const unit = buildDevServiceUnit({ appDir, webPort, execStart });
+  const envRead = await containerSh(containerName, 'cat /etc/environment 2>/dev/null || true', { timeoutMs: 15000 });
+  const mode = validateDeployEnvironment({ unitText: unit, environmentText: envRead.stdout || '', requiredKeys: requiredSecretKeys });
+  if (!mode.ok) {
+    // After key persistence: the environment now holds the minted key and the
+    // code on disk carries the bridge, so starting the (unchanged) unit brings
+    // up a readable app while the operator fixes the environment.
+    const back = await restartUnit();
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `${mode.error}. ${back}`) };
+  }
   const swap = await containerSh(
     containerName,
     `: ${DEPLOY_MARKER}\n`
@@ -222,7 +292,11 @@ async function deployProjectUnqueued({
     { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.start },
   );
   if (swap.code !== 0) {
-    return { ok: false, step: 'start', error: deployFailureMessage('start', tail(swap)) };
+    // The new unit is on disk; the environment and dist/ are the pair it
+    // reads. A retry of the start is harmless if the app itself will not
+    // come up, and brings it back when daemon-reload or the port free failed.
+    const back = await restartUnit();
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `${tail(swap)}\n${back}`) };
   }
 
   // 3) Health-check: the app must actually SERVE ITS SHELL before we call the

@@ -57,6 +57,15 @@ export function getProject(id) {
   return getMock2Db().prepare(`SELECT * FROM mock2_projects WHERE id = ?`).get(id);
 }
 
+// The project a container belongs to. The deploy path is keyed by container
+// name and needs the row to reach the project's installed components (their
+// contracts say which secrets the app owns).
+export function getProjectByContainerName(containerName) {
+  return getMock2Db()
+    .prepare(`SELECT * FROM mock2_projects WHERE container_name = ?`)
+    .get(String(containerName || ''));
+}
+
 // Mint a slug that is unique for this parent domain AND has never been used
 // before (mock2_slug_history is the never-reuse list — an old slug is blocked
 // forever, ADR-006 / 03-data-model.md). Loops on the astronomically-rare

@@ -104,6 +104,7 @@ import {
   cacheHealth,
 } from './usage-logic.js';
 import { deployProject, readRunContract, readDeclaredEgress, stampDeployedCommit } from './deploy.js';
+import { withContainerLock } from './container-lock.js';
 import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
 import { reconcileMock2Firewall } from './firewall.js';
 import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit, resolveBrowserTarget } from './smoke.js';
@@ -978,11 +979,26 @@ export async function retryDeploy({ project, cycle }) {
       // "Retry deploy" the one-click recovery. Dynamic import — the static one
       // would be a cycle (component-install imports runner for exec helpers).
       try {
-        const [{ ensureComponentDeps, ensureScaffoldDeps, ensureNodeRuntime }, { listProjectComponents }] = await Promise.all([
+        const [{ ensureComponentDeps, ensureScaffoldDeps, ensureNodeRuntime, ensureComponentSecrets, deferredSecretsMessage }, { listProjectComponents }] = await Promise.all([
           import('./component-install.js'), import('./components.js'),
         ]);
         try { await ensureScaffoldDeps({ containerName }); } catch { /* best effort */ }
         try { await ensureNodeRuntime({ containerName }); } catch (e) { console.warn('[mock2] retry-deploy node runtime repair failed:', e?.message); }
+        // Secrets the components own are minted once; a project provisioned
+        // before minting existed gets them here (the deploy refuses to start
+        // production mode without them).
+        try {
+          // Under the container lock: the environment file is read-modify-write.
+          const secrets = await withContainerLock(containerName, 'retry-secrets', () => ensureComponentSecrets({ containerName, rows: listProjectComponents(projectId) }));
+          if (secrets.minted.length) {
+            insertMessage({
+              projectId, kind: 'system', cycleId: cycle.id,
+              body: `Minted ${secrets.minted.length} application secret(s) into the container environment before redeploying (${secrets.minted.join(', ')}).`,
+            });
+          }
+          const deferredNote = deferredSecretsMessage(secrets.deferred);
+          if (deferredNote) insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: deferredNote });
+        } catch (e) { console.warn('[mock2] retry-deploy secret minting failed:', e?.message); }
         const ensured = await ensureComponentDeps({ containerName, rows: listProjectComponents(projectId) });
         if (ensured.repaired.length) {
           insertMessage({

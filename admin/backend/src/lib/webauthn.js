@@ -21,6 +21,10 @@
 //     enforces this when we pass `requireUserVerification: true` and a
 //     stored `counter`, but we double-check after the call as a belt-
 //     and-braces measure (see verifyAssertion below).
+//   * User verification is REQUIRED and verified server-side
+//     (lib/passkey-policy.js). A passkey assertion is the passwordless
+//     login and the sudo factor, so the signed UV flag — not just the
+//     browser-side request for it — is what the backend checks.
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -29,6 +33,7 @@ import {
 } from '@simplewebauthn/server';
 import crypto from 'crypto';
 import { getDb, getSetting } from '../db.js';
+import { PASSKEY_REQUIRE_UV, classifyWebAuthnFailure } from './passkey-policy.js';
 
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
@@ -211,10 +216,12 @@ export async function verifyAssertion({ response, expectedChallenge, expectedOri
         counter: credential.counter,
         transports: credential.transports,
       },
-      requireUserVerification: false,
+      requireUserVerification: PASSKEY_REQUIRE_UV,
     });
   } catch (e) {
-    return { ok: false, reason: e?.message || 'verification threw' };
+    // Surface the UV refusal under its own reason so the audit row and the
+    // UI say WHY ("your authenticator did not verify you"), not just "failed".
+    return { ok: false, reason: classifyWebAuthnFailure(e?.message) || e?.message || 'verification threw' };
   }
   if (!result.verified) {
     return { ok: false, reason: 'not_verified' };

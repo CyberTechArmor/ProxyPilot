@@ -10,6 +10,8 @@ import {
   MCP_PROTOCOL_VERSION, MCP_KNOWN_VERSIONS, MCP_TOOLS,
   rpcResult, rpcError, toolResult,
   mintMcpToken, hashMcpToken, looksLikeMcpToken, tokenFromRequest,
+  mcpTokenOwnerRefusal, mcpTokenOwnerStatus, MCP_OWNER_REFUSALS,
+  mcpTokenRefusal, mcpTokenExpired, mcpTokenExpiry, mcpTokenDefaultDays, MCP_TOKEN_DEFAULT_DAYS,
   mintUploadTicket, looksLikeUploadTicket,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs,
@@ -2455,4 +2457,83 @@ test('every incus list shell-out uses the listing capture budget', () => {
     assert.match(call, /LXC_LIST_CAPTURE_CAP/,
       `an incus list still runs on the default 256 KB budget: ${call.trim()}`);
   }
+});
+
+// ---- token owner validity (2026-09 immediate repairs) ----
+
+test('mcpTokenOwnerRefusal: a token is only as valid as its owner', () => {
+  const live = { id: 'u1', role: 'admin' };
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: live }), null);
+  // A non-admin owner is refused (see the demotion test below).
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'user' } }), 'owner_not_admin');
+  // Disabled = parked as 'pending' (the dashboard's and disable_user's off switch).
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'pending' } }), 'owner_disabled');
+  // Deleted, or the lookup returned somebody else's row.
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: null }), 'owner_deleted');
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u2', role: 'admin' } }), 'owner_deleted');
+  // Never recorded (a scoped key minted through an ownerless key, or a pre-migration row).
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: '', owner: live }), 'no_owner');
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: null, owner: live }), 'no_owner');
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: '  ', owner: live }), 'no_owner');
+  assert.equal(mcpTokenOwnerRefusal(), 'no_owner');
+  // Numeric ids compare as strings (users.id is TEXT; created_by is TEXT).
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 7, owner: { id: '7', role: 'admin' } }), null);
+  for (const k of Object.keys(MCP_OWNER_REFUSALS)) assert.equal(typeof MCP_OWNER_REFUSALS[k], 'string');
+});
+
+test('mcpTokenOwnerStatus: the listing word for each owner state', () => {
+  assert.equal(mcpTokenOwnerStatus({ ownerId: 'u1', owner: { id: 'u1', role: 'admin' } }), 'active');
+  assert.equal(mcpTokenOwnerStatus({ ownerId: 'u1', owner: { id: 'u1', role: 'pending' } }), 'disabled');
+  assert.equal(mcpTokenOwnerStatus({ ownerId: 'u1', owner: null }), 'deleted');
+  assert.equal(mcpTokenOwnerStatus({ ownerId: '', owner: null }), 'none');
+});
+
+test('mcpTokenOwnerRefusal: a demoted owner (admin → user) is refused too', () => {
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'user' } }), 'owner_not_admin');
+  assert.equal(mcpTokenOwnerStatus({ ownerId: 'u1', owner: { id: 'u1', role: 'user' } }), 'demoted');
+  // pending wins over not-admin: disabled is the more specific state.
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'pending' } }), 'owner_disabled');
+});
+
+test('mcpTokenExpired / mcpTokenRefusal: expiry is optional and checked first', () => {
+  const now = Date.parse('2026-09-21T12:00:00Z');
+  assert.equal(mcpTokenExpired(null, now), false);
+  assert.equal(mcpTokenExpired('', now), false);
+  assert.equal(mcpTokenExpired('not a date', now), false, 'an unparseable expiry never expires (pre-914 rows)');
+  assert.equal(mcpTokenExpired('2026-09-21T12:00:01Z', now), false);
+  assert.equal(mcpTokenExpired('2026-09-21T12:00:00Z', now), true);
+  assert.equal(mcpTokenExpired('2026-09-20T00:00:00Z', now), true);
+  const live = { id: 'u1', role: 'admin' };
+  assert.equal(mcpTokenRefusal({ expiresAt: null, ownerId: 'u1', owner: live, now }), null);
+  assert.equal(mcpTokenRefusal({ expiresAt: '2026-01-01T00:00:00Z', ownerId: 'u1', owner: live, now }), 'expired');
+  // Expired beats a bad owner: the token is dead regardless of who owned it.
+  assert.equal(mcpTokenRefusal({ expiresAt: '2026-01-01T00:00:00Z', ownerId: '', owner: null, now }), 'expired');
+  assert.equal(mcpTokenOwnerStatus({ expiresAt: '2026-01-01T00:00:00Z', ownerId: 'u1', owner: live, now }), 'expired');
+  for (const k of ['owner_not_admin', 'expired']) assert.equal(typeof MCP_OWNER_REFUSALS[k], 'string');
+});
+
+test('mcpTokenExpiry: absent means the default lifetime; 0 means never, explicitly; 1..3650 days; else refused', () => {
+  const now = Date.parse('2026-09-21T00:00:00Z');
+  assert.equal(MCP_TOKEN_DEFAULT_DAYS, 365);
+  // Absent → the default (365 days), not "never".
+  assert.deepEqual(mcpTokenExpiry(undefined, now), { expiresAt: '2027-09-21T00:00:00.000Z', never: false });
+  assert.deepEqual(mcpTokenExpiry('', now), { expiresAt: '2027-09-21T00:00:00.000Z', never: false });
+  assert.deepEqual(mcpTokenExpiry(null, now, { defaultDays: 30 }), { expiresAt: '2026-10-21T00:00:00.000Z', never: false });
+  // An operator default of 0 means new tokens never expire unless the mint says.
+  assert.deepEqual(mcpTokenExpiry(undefined, now, { defaultDays: 0 }), { expiresAt: null, never: true });
+  // 0 at mint = never, recorded as an explicit choice.
+  assert.deepEqual(mcpTokenExpiry(0, now), { expiresAt: null, never: true });
+  assert.deepEqual(mcpTokenExpiry('0', now), { expiresAt: null, never: true });
+  assert.deepEqual(mcpTokenExpiry(30, now), { expiresAt: '2026-10-21T00:00:00.000Z', never: false });
+  assert.deepEqual(mcpTokenExpiry('1', now), { expiresAt: '2026-09-22T00:00:00.000Z', never: false });
+  for (const bad of [-1, 1.5, 3651, 'soon', {}]) assert.match(mcpTokenExpiry(bad, now).error, /between 1 and 3650, or 0 for never/);
+});
+
+test('mcpTokenDefaultDays: reads MCP_TOKEN_DEFAULT_DAYS, falls back to 365 on anything invalid', () => {
+  assert.equal(mcpTokenDefaultDays({}), 365);
+  assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: '' }), 365);
+  assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: '90' }), 90);
+  assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: '0' }), 0);
+  assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: '9999' }), 365);
+  assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: 'forever' }), 365);
 });

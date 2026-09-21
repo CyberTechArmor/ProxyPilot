@@ -88,10 +88,23 @@ export function acknowledgeUncertainJob(db, { id, by = null, via = 'ui', note = 
   const acknowledged = job.outcome === 'interrupted_uncertain_acknowledged';
   if (job.status !== 'recovery_required' || !['interrupted_uncertain', 'interrupted_uncertain_acknowledged'].includes(job.outcome)) return { ok: false, error: `job ${id} is ${job.status}${job.outcome ? ` (${job.outcome})` : ''}; only an unresolved lifecycle verb (recovery_required / interrupted_uncertain) is acknowledged this way`, code: 'NOT_ACKNOWLEDGEABLE' };
   if (acknowledged) return { ok: true, job, released: 0, already: true };
-  const released = clearStaleLock(db, { app: job.app, recoveryJobId: job.id });
+  // One transaction: the outcome, the event and the lease release commit
+  // together or not at all. A hold is never released without the record
+  // that says who released it, and never recorded as released while it
+  // still stands.
   const at = new Date(nowMs).toISOString();
-  appendEvent(db, { jobId: job.id, kind: 'acknowledged', message: `acknowledged by ${by || 'an administrator'} (${via}): the guest was inspected; ${released ? 'the stale lease is released' : 'no stale lease recorded this job'}${note ? ` — ${String(note).slice(0, 300)}` : ''}`, data: { by, via, released: !!released }, nowMs });
-  annotateTerminalOutcome(db, { id: job.id, fromStatus: 'recovery_required', outcome: 'interrupted_uncertain_acknowledged', reason: `${job.reason || ''}; acknowledged by ${by || 'an administrator'} at ${at}: the guest was inspected and the lease released`, nowMs });
+  db.exec('BEGIN IMMEDIATE');
+  let released = 0;
+  try {
+    const changed = annotateTerminalOutcome(db, { id: job.id, fromStatus: 'recovery_required', outcome: 'interrupted_uncertain_acknowledged', reason: `${job.reason || ''}; acknowledged by ${by || 'an administrator'} at ${at}: the guest was inspected and the lease released`, nowMs });
+    if (!changed) throw new Error(`job ${id} changed under the acknowledgement; nothing was released`);
+    released = clearStaleLock(db, { app: job.app, recoveryJobId: job.id });
+    appendEvent(db, { jobId: job.id, kind: 'acknowledged', message: `acknowledged by ${by || 'an administrator'} (${via}): the guest was inspected; ${released ? 'the stale lease is released' : 'no stale lease recorded this job'}${note ? ` — ${String(note).slice(0, 300)}` : ''}`, data: { by, via, released: !!released }, nowMs });
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* */ }
+    return { ok: false, error: `the acknowledgement was not recorded (${e?.message || e}); the lease is still held`, code: 'NOT_RECORDED' };
+  }
   return { ok: true, job: getJob(db, job.id), released };
 }
 

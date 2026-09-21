@@ -156,6 +156,23 @@ export function lockVerdict({ lock, owner, nowMs }) {
   return { ok: false, reason: 'stale', ...base, expiredAt: lock.lease_expires_at };
 }
 
+// leaseHold({ lock, recordingJob }) → { hold: true, reason } when the stale
+// lease records an UNRESOLVED lifecycle verb (a restart or create whose
+// result the record could not establish): no job kind takes it over — not a
+// recovery, not a verification, not a probe — because a takeover releases
+// the lease when it finishes, and a diagnostic check clearing the condition
+// would let a conflicting operation in. Only an operator's acknowledgement
+// clears it. Any other stale lease (a dead deploy with a recovery queued) is
+// the reconciler's to take over as before.
+export function leaseHold({ lock, recordingJob = null }) {
+  if (!lock || !lock.stale_since || !lock.recovery_job_id) return { hold: false };
+  const j = recordingJob && String(recordingJob.id) === String(lock.recovery_job_id) ? recordingJob : null;
+  if (j && LIFECYCLE_JOB_KINDS.includes(j.kind) && j.status === 'recovery_required' && j.outcome === 'interrupted_uncertain') {
+    return { hold: true, reason: `an unresolved ${j.kind} (job ${j.id}) left ${lock.app} in an unknown state; the lease is held until an operator acknowledges that job (POST /api/setup/jobs/${j.id}/acknowledge)` };
+  }
+  return { hold: false };
+}
+
 // takeoverVerdict({ lock, nowMs }) → whether a reconciler may take a lock over.
 // Only a STALE lease may be taken; a live one is somebody's work in progress.
 export function takeoverVerdict({ lock, nowMs }) {

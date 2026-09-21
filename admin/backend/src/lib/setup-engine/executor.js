@@ -30,7 +30,7 @@ import {
   runnerHeartbeat, requeueJob, recordVerificationRung,
 } from './store.js';
 import {
-  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, EXCLUSIVE_JOB_KINDS, LIFECYCLE_JOB_KINDS, parseJson, sanitizeReason, parseOwner,
+  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, EXCLUSIVE_JOB_KINDS, LIFECYCLE_JOB_KINDS, leaseHold, parseJson, sanitizeReason, parseOwner,
   FencedError, CancelledError, verificationState, CREDENTIAL_USE_OUTCOMES,
 } from './logic.js';
 import { runDeployOperation, PreviousWriterAliveError, ContainmentUnavailableError } from './deploy-op.js';
@@ -45,6 +45,9 @@ import {
 } from './guest-probes.js';
 
 const FOLLOW_UP_RETRY_MS = 30_000;
+// A follow-up that meets an unresolved hold waits longer between looks: the
+// hold ends when an operator acts, not by itself.
+const HOLD_RETRY_MS = 5 * 60_000;
 
 export { FencedError, CancelledError };
 
@@ -148,9 +151,10 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
   // OBLIGATION: when the app is busy it goes back to the queue with a
   // not-before, never to a terminal 'deferred'.
   const isFollowUp = !!p.origin?.jobId;
-  const busy = (holder, operation) => {
+  const event = (kind, message, data = null, phase = null) => appendEvent(db, { jobId: job.id, kind, phase, message, data, nowMs: nowMs() });
+  const busy = (holder, operation, { retryMs = FOLLOW_UP_RETRY_MS } = {}) => {
     if (isFollowUp) {
-      requeueJob(db, { id: job.id, by: owner, reason: `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; this follow-up waits and retries`, notBeforeMs: nowMs() + FOLLOW_UP_RETRY_MS, nowMs: nowMs() });
+      requeueJob(db, { id: job.id, by: owner, reason: `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; this follow-up waits and retries`, notBeforeMs: nowMs() + retryMs, nowMs: nowMs() });
       return { status: 'requeued', outcome: 'lock_held', verification: null };
     }
     // A restore never runs later under a state nobody looked at: refused.
@@ -169,6 +173,16 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
     const stale = readLock(db, job.app);
     return fin('refused', 'lock_stale', `a previous ${stale?.operation || 'operation'} for ${job.app} did not finish (holder ${stale?.owner || got.holder}${stale?.recovery_job_id ? `, recorded by job ${stale.recovery_job_id}` : ''}); recovery or acknowledgement is required before ${job.kind} — nothing was done`);
   } else if (got.reason === 'stale') {
+    // An unresolved hold is not a dead lease to take over: a takeover
+    // releases the lease when the job ends, and a verification or probe that
+    // did so would clear a condition it did not resolve. Every kind waits
+    // (a follow-up) or defers (anything else) until the acknowledgement.
+    const stale = readLock(db, job.app);
+    const hold = leaseHold({ lock: stale, recordingJob: stale?.recovery_job_id ? getJob(db, stale.recovery_job_id) : null });
+    if (hold.hold) {
+      event('hold', hold.reason, { recording_job: stale.recovery_job_id }, 'lock');
+      return busy(stale.owner, `unresolved ${getJob(db, stale.recovery_job_id)?.kind || 'operation'}, see job ${stale.recovery_job_id}`, { retryMs: HOLD_RETRY_MS });
+    }
     const t = takeoverLock(db, { app: job.app, by: owner, operation: job.kind, jobId: job.id, reason: `taking over ${got.operation} lease of ${got.holder} (expired ${got.expiredAt}) to run ${job.kind}`, leaseMs: LEASE_MS, nowMs: lockNow });
     if (!t.ok) return busy(t.holder, null);
     lockEpoch = Number(t.lock.epoch);
@@ -187,7 +201,6 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
     const r = await exec.guest(container, script, { timeoutMs });
     return r || { code: -1, stdout: '', stderr: 'no result' };
   };
-  const event = (kind, message, data = null, phase = null) => appendEvent(db, { jobId: job.id, kind, phase, message, data, nowMs: nowMs() });
 
   try {
     // Containment before anything that touches the guest: other jobs'

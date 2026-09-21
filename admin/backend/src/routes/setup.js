@@ -98,7 +98,7 @@ setupRouter.post('/jobs/:id/acknowledge', requireAdmin, requireSudo, (req, res) 
   const body = z.object({ note: z.string().max(300).optional() }).safeParse(req.body || {});
   if (!body.success) return res.status(400).json({ error: body.error.errors[0].message });
   const r = acknowledgeUncertainJob(getDb(), { id: String(req.params.id), by: req.user?.username || req.user?.id || null, via: 'ui', note: body.data.note || null });
-  if (!r.ok) return res.status(r.code === 'NOT_FOUND' ? 404 : 409).json({ error: r.error });
+  if (!r.ok) return res.status(r.code === 'NOT_FOUND' ? 404 : r.code === 'NOT_RECORDED' ? 500 : 409).json({ error: r.error });
   logAudit(req.user?.id || null, 'SETUP_JOB_ACKNOWLEDGED', 'setup_job', r.job.id, { app: r.job.app, kind: r.job.kind, released: !!r.released, already: !!r.already }, req.ip);
   res.json({ job: jobView(r.job), released: !!r.released, already: !!r.already });
 });

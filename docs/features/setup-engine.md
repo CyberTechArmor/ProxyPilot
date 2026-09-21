@@ -525,7 +525,7 @@ invalid plan) (`lifecycleHttpStatus`).
 | Kind | Owner dies after the command was issued | Owner dies before |
 | --- | --- | --- |
 | start, stop, snapshot create, snapshot delete, delete | **resumed**: the requeued job re-reads the resource; the end state already holds → finished (`resumed after an interrupted attempt`, nothing re-issued); the target is still there with the **same identity** the dead attempt bound (`checkpoint.target`) → the same command once more; a resource of a different identity under the name → `refused`, nothing issued | resumed and run |
-| restart, create | **never replayed**: the record ends `recovery_required` / `interrupted_uncertain` naming the check (`incus list <name> --format json`), no recovery job is queued (a generic guest has no application to recover), and the guest's lease is **kept stale**, pointing at that record: every exclusive operation on the guest is refused with the condition — at submission, and at the executor for a row that arrived any other way — until an operator has looked and acknowledged the job (`POST /api/setup/jobs/:id/acknowledge`, sudo), which records who and when on the job and releases exactly that lease | resumed and run |
+| restart, create | **never replayed**: the record ends `recovery_required` / `interrupted_uncertain` naming the check (`incus list <name> --format json`), no recovery job is queued (a generic guest has no application to recover), and the guest's lease is **kept stale**, pointing at that record: every exclusive operation on the guest is refused with the condition — at submission, and at the executor for a row that arrived any other way — and **no job kind takes the lease over** (a follow-up verification waits, requeued every five minutes; a probe or a recovery defers; a diagnostic check clears nothing) until an operator has looked and acknowledged the job (`POST /api/setup/jobs/:id/acknowledge`, sudo). The acknowledgement is one transaction: the outcome, the event naming who and when, and the release of exactly that lease commit together or not at all — a failure leaves the hold in place | resumed and run |
 
 A delete's target identity is recorded at `validated` and again at
 `issuing`, so an absent guest after an interrupted delete is verified as this
@@ -537,7 +537,9 @@ the operation at `checkpoint` with nothing issued — a record that says
 `issued: false` is never reconciled against a command that ran. A cancel is
 honoured at the fence before the command; after it, the job finishes and
 reads the state back. A stale lease is never taken over by an exclusive kind
-(a restore, a lifecycle verb): only a recovery or a verification may.
+(a restore, a lifecycle verb): only a recovery or a verification may — and
+none of them when the lease records an unresolved lifecycle verb
+(`leaseHold`), which only the acknowledgement clears.
 
 **The record outlives the resource.** Every checkpoint, the identity of what
 was deleted, the argv-free plan and the outcome live in `setup_jobs` /
@@ -668,7 +670,7 @@ and enabled by `install.sh` and `update.sh` right after the CLI wrapper
 | `POST /api/setup/jobs/:id/retry` (sudo) | queue the same runner plan again with `reuse` |
 | `POST /api/setup/apps/:app/deploy` (sudo) | submit a deploy and return its job id (202 queued for the runner; 200 with the result when no runner is live and it ran in-process) |
 | `POST /api/setup/jobs/:id/cancel` (sudo) | cancel a queued job, or a running one at its next safe checkpoint |
-| `POST /api/setup/jobs/:id/acknowledge` (sudo) | an operator has inspected the guest a restart or create left in an unknown state (`recovery_required` / `interrupted_uncertain`): records who and when on the job and releases the stale lease that records it; refused for any other job |
+| `POST /api/setup/jobs/:id/acknowledge` (sudo) | an operator has inspected the guest a restart or create left in an unknown state (`recovery_required` / `interrupted_uncertain`): in one transaction records who and when on the job and releases the stale lease that records it; refused for any other job (409); a store failure leaves the hold in place (500, nothing recorded) |
 
 Admin only, behind the global CSRF check and a fresh sudo grant, audited
 (`SETUP_DEPLOY_REQUESTED`, `SETUP_JOB_CANCEL_REQUESTED`,
@@ -786,10 +788,14 @@ job, duplicate) and at claim; interruption for every idempotent kind
 changed identity, resumed before any command) and for restart / create
 (`interrupted_uncertain`, nothing re-issued, no recovery job, the lease
 kept stale so a delete is refused at submission and — for a row that
-bypassed the orchestrator — at the executor, a stale row written when none
-was left, the acknowledgement releasing exactly that lease and the next
-request running) through the runner's reconcile and the backend's boot
-sweep; mandatory checkpoints (SQLite rejecting the `issuing` write through
+bypassed the orchestrator — at the executor, a verification follow-up
+requeued and a probe deferred on the hold with the lease untouched and a
+delete still refused afterwards, a stale row written when none was left,
+the acknowledgement releasing exactly that lease and the next request
+running) through the runner's reconcile and the backend's boot sweep; the
+acknowledgement as one transaction (the event write and the outcome write
+each made to fail: nothing recorded, the hold kept, a delete still refused;
+a sound store landing all three together); mandatory checkpoints (SQLite rejecting the `issuing` write through
 the real store and executor → nothing issued; a fenced job stopped before
 the command; a handle reporting no row changed); a nonzero exit (1, 124)
 with the guest still Running recorded as failed, never as restarted or

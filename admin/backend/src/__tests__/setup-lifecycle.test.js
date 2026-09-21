@@ -493,7 +493,21 @@ test('interruption, never-replayed kinds (R-023): a restart or create whose comm
     assert.match(getJob(d, 'direct-del').reason, /a previous .* for pp-x did not finish \(holder runner@pp#999:dead, recorded by job dead-1\); recovery or acknowledgement is required before instance_delete — nothing was done/);
     assert.deepEqual(h.calls, [], 'nothing runs'); assert.equal(st.instances.length, 1, 'the guest is untouched');
     assert.ok(readLock(d, 'pp-x')?.stale_since, 'the stale lease is still there');
-    // A verification for the app is not blocked by it (the lease is stale, not live): a follow-up can still take it over — only exclusive kinds are refused.
+    // No OTHER kind takes the hold over either (R-027): a verification for the app is a follow-up that waits (requeued, 5 min), a probe defers, and neither releases the lease — a diagnostic check clears nothing.
+    createJob(d, { id: 'verify-1', kind: 'verify_app', app: 'pp-x', plan: { steps: ['unit_status', 'probe_port'], params: { container: 'pp-x', webPort: 3000, unit: 'mock2-dev.service', origin: { jobId: 'dead-1', kind: 'instance_restart', rung: 'post_failure' } } }, nowMs: T0 + 3 });
+    createJob(d, { id: 'probe-1', kind: 'probe', app: 'pp-x', plan: { steps: ['unit_status'], params: { container: 'pp-x', webPort: 3000, unit: 'mock2-dev.service' } }, nowMs: T0 + 3 });
+    const g = scriptedGuest({});
+    const out3 = await runAll(d, { guest: g.guest, host: h.host }, T0 + 4, { max: 5 });
+    const byId = Object.fromEntries(out3.ran.map((r) => [r.id, r]));
+    assert.equal(byId['verify-1'].status, 'requeued'); assert.equal(byId['verify-1'].outcome, 'lock_held');
+    assert.equal(byId['probe-1'].status, 'deferred'); assert.equal(byId['probe-1'].outcome, 'lock_held');
+    assert.equal(getJob(d, 'verify-1').status, 'queued'); assert.ok(Date.parse(parseJson(getJob(d, 'verify-1').progress_json).not_before) >= T0 + 4 + 5 * 60_000 - 1, 'a follow-up waits five minutes on a hold');
+    assert.ok(listEvents(d, 'verify-1').some((e) => e.kind === 'hold' && /unresolved instance_(restart|create) \(job dead-1\)/.test(e.message)));
+    assert.deepEqual(g.calls, [], 'no probe ran in the guest'); assert.deepEqual(h.calls, []);
+    const still = readLock(d, 'pp-x');
+    assert.ok(still && still.stale_since && still.recovery_job_id === 'dead-1' && still.owner === DEAD, 'the hold survives every job kind');
+    assert.equal(submit(d, 'instance_delete', { container: 'pp-x' }, { nowMs: T0 + 5 }).code, 'CONTAINER_LOCK_STALE', 'a delete after the verification is still refused');
+    d.prepare(`DELETE FROM setup_jobs WHERE id IN ('verify-1', 'probe-1')`).run();
     // The operator looks, then acknowledges: the lease goes, the record says who and when, and the next request runs.
     const bad = acknowledgeUncertainJob(d, { id: 'direct-del', by: 'admin', nowMs: T0 + 4 });
     assert.equal(bad.ok, false); assert.match(bad.error, /only an unresolved lifecycle verb/); assert.ok(readLock(d, 'pp-x'), 'acknowledging the wrong job releases nothing');
@@ -523,6 +537,30 @@ test('interruption, never-replayed kinds (R-023): a restart or create whose comm
   const held = readLock(d2, 'pp-n');
   assert.ok(held && held.stale_since && held.recovery_job_id === 'dead-1' && held.owner === DEAD, JSON.stringify(held));
   assert.equal(submit(d2, 'instance_start', { container: 'pp-n' }, { nowMs: T0 + 1 }).code, 'CONTAINER_LOCK_STALE');
+});
+
+test('the acknowledgement is one transaction (R-028): a failure recording it leaves the hold in place; nothing is released without the record', async () => {
+  const d = db(); const st = { instances: [inst()] }; const h = scriptedHost(st);
+  deadJob(d, { kind: 'instance_restart', params: { container: 'pp-x' }, cp: { phase: 'issuing', lifecycle: true, replay: 'never', resumable: false, disruptive: true, issued: true, container: 'pp-x' } });
+  reconcile({ db: d, owner: RUNNER, nowMs: T0 });
+  assert.ok(readLock(d, 'pp-x')?.stale_since);
+  // The event write fails (a full disk, a lock): the request fails, and the hold, the outcome and the queue are exactly as before.
+  const failing = { exec: (sql) => d.exec(sql), prepare: (sql) => { const stmt = d.prepare(sql); return { run: (...a) => { if (/INSERT INTO setup_job_events/.test(sql) && a[2] === 'acknowledged') throw new Error('SQLITE_FULL: database or disk is full'); return stmt.run(...a); }, get: (...a) => stmt.get(...a), all: (...a) => stmt.all(...a) }; } };
+  const r = acknowledgeUncertainJob(failing, { id: 'dead-1', by: 'admin', nowMs: T0 + 1 });
+  assert.equal(r.ok, false); assert.equal(r.code, 'NOT_RECORDED'); assert.match(r.error, /not recorded \(SQLITE_FULL: database or disk is full\); the lease is still held/);
+  assert.ok(readLock(d, 'pp-x')?.stale_since, 'the hold is still there'); assert.equal(getJob(d, 'dead-1').outcome, 'interrupted_uncertain');
+  assert.ok(!listEvents(d, 'dead-1').some((e) => e.kind === 'acknowledged'));
+  assert.equal(submit(d, 'instance_delete', { container: 'pp-x' }, { nowMs: T0 + 2 }).code, 'CONTAINER_LOCK_STALE', 'a delete is still refused');
+  const out = await runAll(d, exec(h), T0 + 3); assert.deepEqual(out.ran, []); assert.equal(st.instances.length, 1);
+  // The outcome write failing the same way: nothing released either.
+  const failing2 = { exec: (sql) => d.exec(sql), prepare: (sql) => { const stmt = d.prepare(sql); return { run: (...a) => { if (/UPDATE setup_jobs SET outcome = \?, reason = \?/.test(sql)) throw new Error('SQLITE_BUSY'); return stmt.run(...a); }, get: (...a) => stmt.get(...a), all: (...a) => stmt.all(...a) }; } };
+  assert.equal(acknowledgeUncertainJob(failing2, { id: 'dead-1', by: 'admin', nowMs: T0 + 4 }).code, 'NOT_RECORDED');
+  assert.ok(readLock(d, 'pp-x')?.stale_since);
+  // A sound store: all three land together, and a second lifecycle request runs.
+  const ok = acknowledgeUncertainJob(d, { id: 'dead-1', by: 'admin', nowMs: T0 + 5 });
+  assert.equal(ok.ok, true); assert.equal(ok.released, 1); assert.equal(readLock(d, 'pp-x'), null); assert.equal(getJob(d, 'dead-1').outcome, 'interrupted_uncertain_acknowledged');
+  assert.ok(listEvents(d, 'dead-1').some((e) => e.kind === 'acknowledged'));
+  assert.ok(submit(d, 'instance_stop', { container: 'pp-x', force: true }, { nowMs: T0 + 6 }).job);
 });
 
 test('mandatory checkpoints (R-024): a checkpoint that cannot be persisted — the store rejects the write, or the job is no longer this owner\'s — stops the operation before any command is issued, through the real store and executor', async () => {

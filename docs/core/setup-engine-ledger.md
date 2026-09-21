@@ -103,6 +103,29 @@ resumed or retried job re-reads and converges without replaying blindly.
 `restart_recommended`, `warnings` for a best-effort step (the reserved
 ports), and the `jobId` / `job_id` as the durable reference.
 
+## A-17.8 correction checklist — the review of `ad1a638` (recorded before the edit)
+
+Three findings, closed on the same branch. The reviewer's seven reproductions
+are re-established as behavioural tests through the actual handlers, store,
+executor and retry / reconcile paths BEFORE the corrections, then asserted
+in their corrected form. Scope: the configuration kinds only; nothing else
+moves.
+
+| ID | Finding | Correction | Acceptance check |
+| --- | --- | --- | --- |
+| C-1a | The firewall CLI saves the desired egress / rule configuration in `firewall.json` BEFORE it reconciles; a rejected reconcile leaves the saved configuration in place and `egress list` / `firewall list` show it, so the job read "present" and reported verified success, and a repeated request skipped application | saved configuration and applied policy are two steps: the `egress` / `rule` step verifies the SAVED configuration (and tolerates the CLI's exit 1 only when its JSON shows the save with a `reconcile.rejection`), and a new required `reconcile` step verifies the APPLIED policy through existing interfaces — `proxypilot --json firewall status` (`last_reconcile.applied`, `ruleset_checksum`) against `proxypilot --json firewall reconcile --dry-run` (the desired checksum); evidence missing, a rejection, or a checksum that differs → the step issues `proxypilot --json firewall reconcile` and requires `ok && applied`; a step is `done` only when its command succeeded (or was tolerated by name) AND its read-back holds — exit 1 with a matching read-back is `failed`, never `done` | check 1: an egress allow whose reconcile is rejected ends `failed at reconcile` with the saved entry recorded and no verified success; a retry with the lockout fixed issues no second `egress allow`, issues `firewall reconcile` and ends verified |
+| C-1b | forward-rule verification accepted the expected rule ID with the wrong port | `forwardRuleVerdict`: id, `source: service-l4`, `proto`, `port_start`, `port_end`, `scope`, `service` tag and `enabled` compared against the plan; any difference is `present with other properties`, never verified | check 2: a saved rule under the expected id with another port or protocol fails the `rule` read-back and the job never reports verified |
+| C-2a | `set_port_forward` inserted / deleted the `service_l4_forwards` row before the job was admitted and rolled it back inside the request: a busy refusal deleted the row without a removal job; a retry of a partial addition could succeed with host resources and no row | the row mutation is the job's first step (`row`), under the guest's lease and `@host/firewall`, through a store the executor hands the operation (`forwardStore`: insert / delete / get / the enabled UDP ranges); the tool only validates, confirms and submits — a refusal at submission changes nothing; the definite-failure disposition (delete the row AND remove the device / rule this attempt added, recorded as `rollback`) is the job's, so it settles whether or not the request is alive; a retry re-inserts the row before it touches the host, and a row that can no longer be inserted (superseded by another forward on the port) is refused explicitly with the orphans of this id cleaned, never a success without a row | checks 3, 4: a refused removal (busy guest) leaves the row and the host untouched; a retry of a partially failed addition ends with the row present and the host applied, or refused with the row absent and the orphans removed — never host resources without a row; plus: the owner dying after the row insert and the device add → the reconcile requeues, the resumed job reads the row and the device as done, issues the rule and the reconcile once, settles once |
+| C-2b | the UDP reservation aggregate travelled in the plan, so an older retry replayed a stale aggregate over newer forwards' reservations | the `reserved` step recomputes the aggregate from the authoritative rows under `@host/firewall` at execution time (`forwardStore.reservedRanges()`); the plan carries no aggregate (`reserved` is refused by the validator) | check 5: an older retry run after a newer UDP-range forward was applied writes a drop-in that keeps the newer range |
+| C-3 | `issuedBefore` proved that a write began, not that every requested change completed; a job resumed after changing CPU changed memory with its original snapshot missing or replaced | before any REMAINING mutation the original snapshot's identity (name + `created_at`, the record's own or the retry origin's) must be verifiable on the guest; missing, replaced or unrecorded → no further write: the completed changes are read back (`done`), the first step needing a write ends the job `failed at protect` with `protection: missing \| replaced \| unverifiable`, `partial: true`, the prior values on the record and recovery guidance; no replacement snapshot is ever taken and presented as the original; a retry whose origin had issued gets the same rule (`originIssued`) | checks 6, 7: a resumed `config_set` with CPU applied and the snapshot gone, or replaced under its name, reads CPU back as done and does NOT set memory; a request whose remaining state already holds still completes read-only |
+
+Shared: authorization, confirmations, validation, fixed argv, redaction,
+the lease order (claim → guest → `@host/firewall`), the keep-alive and the
+fencing are unchanged; the CLI fixtures model the save-before-reconcile
+order (`firewall.json` written, then `reconcile` recorded in
+`firewall_reconciles`), with `status` and `reconcile --dry-run` as the
+evidence the job reads.
+
 ## Milestone B — setup APIs and the guided frontend wizard
 
 Not started (0 %). Server-side state only: the browser never declares an

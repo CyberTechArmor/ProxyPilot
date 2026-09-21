@@ -519,6 +519,12 @@ export function validateComponentContract(input) {
         // key) — the platform mints a random value once per project rather
         // than asking anyone for one. Never set on a third-party credential.
         generate: c.generate === true,
+        // requires_marker: mint this secret only when the app's code ON DISK
+        // carries the marker (a file plus a substring) — the code that can
+        // migrate data encrypted under the value being replaced. A project
+        // whose installed component predates that code keeps its current
+        // value; the key is deferred and reported, never minted blind.
+        requires_marker: normalizeMintMarker(c.requires_marker),
         default: c.default === undefined || c.default === null ? null : String(c.default).slice(0, 400),
         description: capSlug(c.description, 300),
       });
@@ -737,6 +743,26 @@ export function mergeEnvDefaults(envText = '', config = []) {
   if (!added.length) return { text: String(envText || ''), added };
   const base = String(envText || '').replace(/\s+$/, '');
   return { text: `${base ? `${base}\n\n` : ''}# Added by component install (defaults — override as needed)\n${lines.join('\n')}\n`, added };
+}
+
+// normalizeMintMarker(m) → { path, contains } or null. The path is relative to
+// the app dir and restricted to a plain character set (it is interpolated into
+// a shell grep in the container); the substring is bounded.
+export function normalizeMintMarker(m) {
+  if (!m || typeof m !== 'object') return null;
+  const path = String(m.path || '').trim();
+  const contains = String(m.contains || '').trim().slice(0, 200);
+  if (!path || !contains) return null;
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(path) || path.includes('..')) return null;
+  return { path, contains };
+}
+
+// secretMintGuards(config) → [{ key, path, contains }] for every minted secret
+// that declares a requires_marker.
+export function secretMintGuards(config = []) {
+  return (config || [])
+    .filter((c) => c && c.secret === true && c.generate === true && c.requires_marker && c.requires_marker.path && c.requires_marker.contains)
+    .map((c) => ({ key: c.key, path: c.requires_marker.path, contains: c.requires_marker.contains }));
 }
 
 // componentSecretKeys(config) — the keys a contract marks secret + generate:

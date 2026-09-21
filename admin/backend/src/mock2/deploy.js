@@ -212,7 +212,7 @@ async function deployProjectUnqueued({
   //      imports runner, which imports this module).
   let requiredSecretKeys = [];
   try {
-    const [{ ensureComponentSecrets, installedSecretKeys }, { listProjectComponents }, { getProjectByContainerName }] = await Promise.all([
+    const [{ ensureComponentSecrets }, { listProjectComponents }, { getProjectByContainerName }] = await Promise.all([
       import('./component-install.js'), import('./components.js'), import('./projects.js'),
     ]);
     const project = getProjectByContainerName(containerName);
@@ -222,7 +222,10 @@ async function deployProjectUnqueued({
       if (!secrets.ok) {
         return { ok: false, step: 'start', error: deployFailureMessage('start', `could not mint the application's secrets: ${secrets.error}`) };
       }
-      requiredSecretKeys = installedSecretKeys(rows);
+      // A deferred key (its requires_marker is not in this project's code) is
+      // neither minted nor required — the app keeps running on its current
+      // value, and the deferral is reported by the install and retry paths.
+      requiredSecretKeys = secrets.required;
     }
   } catch (e) {
     return { ok: false, step: 'start', error: deployFailureMessage('start', `application secret minting failed: ${e?.message || e}`) };

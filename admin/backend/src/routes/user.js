@@ -750,11 +750,13 @@ const updateUserSchema = z.object({
 // per call, but a revoked key stays revoked when the account is re-enabled,
 // which "the owner check would refuse it" does not give). Best effort per
 // table so a pre-migration schema cannot fail the user update itself.
-function revokeUserAccess(db, userId) {
+function revokeUserAccess(db, userId, { sessions: revokeSessions = true } = {}) {
   const now = new Date().toISOString();
   let sessions = 0;
   let mcpTokens = 0;
-  try { sessions = db.prepare(`UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).run(now, userId).changes; } catch { /* pre-migration */ }
+  if (revokeSessions) {
+    try { sessions = db.prepare(`UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).run(now, userId).changes; } catch { /* pre-migration */ }
+  }
   try { mcpTokens = db.prepare(`UPDATE mcp_tokens SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL`).run(now, String(userId)).changes; } catch { /* pre-migration */ }
   return { sessions, mcpTokens };
 }
@@ -837,6 +839,12 @@ userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
     if (role === 'pending' && user.role !== 'pending') {
       revoked = revokeUserAccess(db, id);
       logAudit(req.user.id, 'USER_DISABLED', 'user', id, { username: user.username, previous_role: user.role, ...revoked }, req.ip);
+    } else if (isDemotion) {
+      // admin → user keeps the person signed in but takes their MCP keys:
+      // those are admin artifacts, and a demoted owner's key is refused per
+      // call anyway. Revoking keeps a later re-promotion from reviving them.
+      revoked = revokeUserAccess(db, id, { sessions: false });
+      logAudit(req.user.id, 'USER_DEMOTED', 'user', id, { username: user.username, previous_role: user.role, role, ...revoked }, req.ip);
     }
 
     logAudit(req.user.id, 'USER_UPDATED', 'user', id, { displayName, role, resetPassword }, req.ip);

@@ -2239,6 +2239,30 @@ export function initDatabase() {
   // background, downloadable as many times as anyone likes (with Range, so a
   // browser can resume), and deleted when the operator says so or when
   // retention sweeps it.
+  // A checkout of the immediate-repairs branch briefly numbered the MCP
+  // owner-validity migration 912 before main took that number for
+  // lxc_exports. A database that ran that branch carries a 912 row with the
+  // OTHER name, and runMigration — keyed by number — would then skip
+  // lxc_exports for good. Move that row to 913, its real number (the work it
+  // records is the same), so 912 runs. Nothing is deleted unless the same
+  // migration is already recorded under 913 as well, in which case the 912
+  // row is a duplicate record of it.
+  try {
+    ensureSchemaMigrationsTable(db);
+    const stray = db.prepare(`SELECT name FROM schema_migrations WHERE version = 912`).get();
+    if (stray && stray.name === 'mcp_tokens_owner_validity') {
+      const has913 = db.prepare(`SELECT name FROM schema_migrations WHERE version = 913`).get();
+      if (has913 && has913.name === 'mcp_tokens_owner_validity') {
+        db.prepare(`DELETE FROM schema_migrations WHERE version = 912`).run();
+      } else if (!has913) {
+        db.prepare(`UPDATE schema_migrations SET version = 913 WHERE version = 912`).run();
+      }
+      console.warn('[db] moved the stray migration record 912 (mcp_tokens_owner_validity) to 913 so lxc_exports (912) runs');
+    }
+  } catch (e) {
+    console.warn('[db] stray-912 check failed:', e?.message || e);
+  }
+
   runMigration(db, 912, 'lxc_exports', (d) => {
     d.exec(`
       CREATE TABLE IF NOT EXISTS lxc_exports (
@@ -2283,6 +2307,17 @@ export function initDatabase() {
                OR created_by NOT IN (SELECT id FROM users)
                OR created_by IN (SELECT id FROM users WHERE role = 'pending'))`,
     ).run(new Date().toISOString());
+  });
+
+  // Version 914: MCP tokens can expire. expires_at is optional — an existing
+  // token keeps working unchanged (claude.ai connectors and scoped keys must
+  // not die on upgrade); a token minted with expires_in_days is refused after
+  // that moment (routes/mcp.js findToken). Idempotent.
+  runMigration(db, 914, 'mcp_tokens_expiry', (d) => {
+    const tables = d.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_tokens'`).all();
+    if (!tables.length) return;
+    const cols = d.prepare(`PRAGMA table_info(mcp_tokens)`).all().map((c) => c.name);
+    if (!cols.includes('expires_at')) d.exec(`ALTER TABLE mcp_tokens ADD COLUMN expires_at TEXT`);
   });
 
   runMigration(db, 907, 'route_edge_options', (d) => {

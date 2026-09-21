@@ -335,3 +335,19 @@ or disabled; revoke on disable/delete) was applied to the MCP surface only.
 Those keys are pinned to one container's docroot and the activation toggle
 suspends all of them at once, so the exposure is small; apply the same rule
 there in a change of its own.
+
+## Existing generated apps cannot receive updated component code
+
+`installOne` keeps every path that already exists in a project ("a re-install
+never wipes adapted files"), so publishing a new version of a seed component
+reaches new projects only. The 2026-09 immediate repairs needed this to be
+otherwise: the auth component learned to migrate an LDAPS secret stored under
+its development master secret, but an existing app keeps its old
+`src/auth/*.ts`, so the platform now DEFERS minting `AUTH_MASTER_SECRET` for
+such an app (contract `requires_marker`) instead of stranding its data. Those
+apps run on the development master secret until a deliberate component
+upgrade flow exists — one that can replace component-owned files a build has
+not adapted (hash-matched to the installed version, like the auth-wiring
+repair does for entry files) and re-run the deploy so the key is minted. A
+change of its own; until then `docs/features/immediate-repairs.md` says how
+to do it by hand.

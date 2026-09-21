@@ -361,9 +361,15 @@ quietly stop being true.
   so this is the re-check on an already-connected client. Disabling a user
   (dashboard role → pending, or `disable_user`) and deleting one also
   **revoke** their keys outright, so re-enabling the account never revives a
-  key that was dead while it was off; mint a new one. The MCP Access page and
-  `list_mcp_keys` show each key's `owner_status` (`active` / `disabled` /
-  `deleted` / `none`). Migration 913 revoked the historical orphans.
+  key that was dead while it was off; mint a new one. Demoting an admin to
+  user (either surface) revokes their keys too: keys are admin artifacts, and
+  a non-admin owner is refused per call. A key may carry an expiry
+  (`expires_in_days`, 1–3650, at mint on the MCP Access page or
+  `create_scoped_key`; absent = never, so nothing minted before migration
+  914 changes). The MCP Access page and `list_mcp_keys` show each key's
+  `owner_status` (`active` / `disabled` / `demoted` / `deleted` / `expired` /
+  `none`). Migration 913 revoked the historical orphans. The full rule and
+  the upgrade notes: `docs/features/immediate-repairs.md`.
 - The endpoint is CSRF-exempt by design: authentication never rides ambient
   cookies, so a cross-site request cannot ride a session.
 - Upload tickets are single-use, unauthenticated-by-ticket (the ticket *is*

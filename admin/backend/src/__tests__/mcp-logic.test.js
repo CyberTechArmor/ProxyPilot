@@ -11,6 +11,7 @@ import {
   rpcResult, rpcError, toolResult,
   mintMcpToken, hashMcpToken, looksLikeMcpToken, tokenFromRequest,
   mcpTokenOwnerRefusal, mcpTokenOwnerStatus, MCP_OWNER_REFUSALS,
+  mcpTokenRefusal, mcpTokenExpired, mcpTokenExpiry,
   mintUploadTicket, looksLikeUploadTicket,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs,
@@ -2463,7 +2464,8 @@ test('every incus list shell-out uses the listing capture budget', () => {
 test('mcpTokenOwnerRefusal: a token is only as valid as its owner', () => {
   const live = { id: 'u1', role: 'admin' };
   assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: live }), null);
-  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'user' } }), null);
+  // A non-admin owner is refused (see the demotion test below).
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'user' } }), 'owner_not_admin');
   // Disabled = parked as 'pending' (the dashboard's and disable_user's off switch).
   assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'pending' } }), 'owner_disabled');
   // Deleted, or the lookup returned somebody else's row.
@@ -2484,4 +2486,38 @@ test('mcpTokenOwnerStatus: the listing word for each owner state', () => {
   assert.equal(mcpTokenOwnerStatus({ ownerId: 'u1', owner: { id: 'u1', role: 'pending' } }), 'disabled');
   assert.equal(mcpTokenOwnerStatus({ ownerId: 'u1', owner: null }), 'deleted');
   assert.equal(mcpTokenOwnerStatus({ ownerId: '', owner: null }), 'none');
+});
+
+test('mcpTokenOwnerRefusal: a demoted owner (admin → user) is refused too', () => {
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'user' } }), 'owner_not_admin');
+  assert.equal(mcpTokenOwnerStatus({ ownerId: 'u1', owner: { id: 'u1', role: 'user' } }), 'demoted');
+  // pending wins over not-admin: disabled is the more specific state.
+  assert.equal(mcpTokenOwnerRefusal({ ownerId: 'u1', owner: { id: 'u1', role: 'pending' } }), 'owner_disabled');
+});
+
+test('mcpTokenExpired / mcpTokenRefusal: expiry is optional and checked first', () => {
+  const now = Date.parse('2026-09-21T12:00:00Z');
+  assert.equal(mcpTokenExpired(null, now), false);
+  assert.equal(mcpTokenExpired('', now), false);
+  assert.equal(mcpTokenExpired('not a date', now), false, 'an unparseable expiry never expires (pre-914 rows)');
+  assert.equal(mcpTokenExpired('2026-09-21T12:00:01Z', now), false);
+  assert.equal(mcpTokenExpired('2026-09-21T12:00:00Z', now), true);
+  assert.equal(mcpTokenExpired('2026-09-20T00:00:00Z', now), true);
+  const live = { id: 'u1', role: 'admin' };
+  assert.equal(mcpTokenRefusal({ expiresAt: null, ownerId: 'u1', owner: live, now }), null);
+  assert.equal(mcpTokenRefusal({ expiresAt: '2026-01-01T00:00:00Z', ownerId: 'u1', owner: live, now }), 'expired');
+  // Expired beats a bad owner: the token is dead regardless of who owned it.
+  assert.equal(mcpTokenRefusal({ expiresAt: '2026-01-01T00:00:00Z', ownerId: '', owner: null, now }), 'expired');
+  assert.equal(mcpTokenOwnerStatus({ expiresAt: '2026-01-01T00:00:00Z', ownerId: 'u1', owner: live, now }), 'expired');
+  for (const k of ['owner_not_admin', 'expired']) assert.equal(typeof MCP_OWNER_REFUSALS[k], 'string');
+});
+
+test('mcpTokenExpiry: absent means never; 1..3650 whole days; anything else refused', () => {
+  const now = Date.parse('2026-09-21T00:00:00Z');
+  assert.deepEqual(mcpTokenExpiry(undefined, now), { expiresAt: null });
+  assert.deepEqual(mcpTokenExpiry(null, now), { expiresAt: null });
+  assert.deepEqual(mcpTokenExpiry('', now), { expiresAt: null });
+  assert.deepEqual(mcpTokenExpiry(30, now), { expiresAt: '2026-10-21T00:00:00.000Z' });
+  assert.deepEqual(mcpTokenExpiry('1', now), { expiresAt: '2026-09-22T00:00:00.000Z' });
+  for (const bad of [0, -1, 1.5, 3651, 'soon', {}]) assert.match(mcpTokenExpiry(bad, now).error, /between 1 and 3650/);
 });

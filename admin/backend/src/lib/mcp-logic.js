@@ -139,21 +139,52 @@ export const MCP_OWNER_REFUSALS = Object.freeze({
   no_owner: 'this token has no recorded owner',
   owner_deleted: "this token's owner no longer exists",
   owner_disabled: "this token's owner is disabled",
+  owner_not_admin: "this token's owner is no longer an admin",
+  expired: 'this token has expired',
 });
 
+// Tokens are minted by admins only (the dashboard route and the
+// scoped-key tool both require an admin owner), so a demoted owner's token
+// is refused too — reducing the person's role reduces what their keys can
+// do, all the way to nothing.
 export function mcpTokenOwnerRefusal({ ownerId, owner } = {}) {
   const id = ownerId == null ? '' : String(ownerId).trim();
   if (!id) return 'no_owner';
   if (!owner || String(owner.id) !== id) return 'owner_deleted';
   if (owner.role === 'pending') return 'owner_disabled';
+  if (owner.role !== 'admin') return 'owner_not_admin';
   return null;
+}
+
+// mcpTokenExpired(expiresAt, now) — true once a token's optional expiry has
+// passed. An unset or unparseable expiry never expires (the pre-914 rows).
+export function mcpTokenExpired(expiresAt, now = Date.now()) {
+  if (!expiresAt) return false;
+  const t = Date.parse(expiresAt);
+  return Number.isFinite(t) && t <= now;
+}
+
+// mcpTokenRefusal — the whole per-call validity rule: unexpired, then a
+// live admin owner. The router has already excluded revoked rows by query.
+export function mcpTokenRefusal({ expiresAt, ownerId, owner, now } = {}) {
+  if (mcpTokenExpired(expiresAt, now)) return 'expired';
+  return mcpTokenOwnerRefusal({ ownerId, owner });
 }
 
 // The listing word for the MCP Access page / list_mcp_keys.
 export function mcpTokenOwnerStatus(args) {
-  const r = mcpTokenOwnerRefusal(args);
+  const r = mcpTokenRefusal(args);
   if (!r) return 'active';
-  return { no_owner: 'none', owner_deleted: 'deleted', owner_disabled: 'disabled' }[r];
+  return { no_owner: 'none', owner_deleted: 'deleted', owner_disabled: 'disabled', owner_not_admin: 'demoted', expired: 'expired' }[r];
+}
+
+// mcpTokenExpiry(expiresInDays, now) → an ISO expiry, or null for "never"; a
+// value outside 1..3650 days is refused with an error string.
+export function mcpTokenExpiry(expiresInDays, now = Date.now()) {
+  if (expiresInDays === undefined || expiresInDays === null || expiresInDays === '') return { expiresAt: null };
+  const n = Number(expiresInDays);
+  if (!Number.isInteger(n) || n < 1 || n > 3650) return { error: 'expires_in_days must be a whole number of days between 1 and 3650' };
+  return { expiresAt: new Date(now + n * 24 * 60 * 60 * 1000).toISOString() };
 }
 
 export function looksLikeMcpToken(token) {

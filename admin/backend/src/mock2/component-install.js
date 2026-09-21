@@ -33,7 +33,7 @@ import {
   buildManifestVerifyScript, parseShaVerifyOutput,
   planMigrationRenumber, mergeEnvDefaults, manifestEntryFromConnection,
   deriveComponentSubsystem, buildComponentsStateDoc, publicProjectComponentShape,
-  COMPONENTS_STATE_PATH, planSecretMint, componentSecretKeys,
+  COMPONENTS_STATE_PATH, planSecretMint, componentSecretKeys, secretMintGuards,
 } from './component-logic.js';
 import { mergeEnvFile } from '../lib/mcp-ext/logic.js';
 import { b64 } from './host.js';
@@ -278,15 +278,48 @@ export function installedSecretKeys(rows) {
   return componentSecretKeys(installedSecretConfigs(rows));
 }
 
+// Result: { ok, minted, deferred, required, error? }.
+//   minted   — keys written this call (names only).
+//   deferred — [{ key, reason }]: keys whose requires_marker is NOT on disk.
+//              The installer never overwrites a file an app already has, so a
+//              project generated before the component learned to migrate data
+//              under a replaced key keeps its current value (today: the dev
+//              default for AUTH_MASTER_SECRET) rather than having its stored
+//              data stranded. Reported, not silent.
+//   required — the minted-or-eligible keys a deploy must find present.
+const shq = (s) => String(s).replace(/'/g, "'\\''");
+
 export async function ensureComponentSecrets({ containerName, rows, rand } = {}) {
   const configs = installedSecretConfigs(rows);
-  if (!configs.length) return { ok: true, minted: [] };
+  if (!configs.length) return { ok: true, minted: [], deferred: [], required: [] };
+  const deferred = [];
+  let eligible = configs;
+  const guards = secretMintGuards(configs);
+  if (guards.length) {
+    const script = guards
+      .map((g) => `if grep -q -F -- '${shq(g.contains)}' '${APP_DIR}/${shq(g.path)}' 2>/dev/null; then echo "MARKER OK ${g.key}"; else echo "MARKER MISSING ${g.key}"; fi`)
+      .join('\n');
+    const r = await containerSh(containerName, script, { timeoutMs: 15000 });
+    const missing = new Set(
+      String(r.stdout || '').split('\n').filter((l) => l.startsWith('MARKER MISSING ')).map((l) => l.slice('MARKER MISSING '.length).trim()),
+    );
+    for (const g of guards) {
+      if (!missing.has(g.key)) continue;
+      deferred.push({
+        key: g.key,
+        reason: `${g.path} in this project does not carry "${g.contains}" — the installed component predates the code that migrates data encrypted under the previous value, so ${g.key} keeps its current value (a component upgrade brings the code; the key is minted on the deploy after that)`,
+      });
+    }
+    eligible = configs.filter((c) => !missing.has(c.key));
+  }
+  const required = componentSecretKeys(eligible);
+  if (!eligible.length) return { ok: true, minted: [], deferred, required };
   const cur = await containerSh(containerName, `cat ${ENVIRONMENT_FILE} 2>/dev/null || true`, { timeoutMs: 15000 });
   if (cur.code !== 0) {
-    return { ok: false, minted: [], error: `could not read ${ENVIRONMENT_FILE}: ${(cur.stderr || cur.stdout || '').trim().slice(-200)}` };
+    return { ok: false, minted: [], deferred, required, error: `could not read ${ENVIRONMENT_FILE}: ${(cur.stderr || cur.stdout || '').trim().slice(-200)}` };
   }
-  const plan = planSecretMint(cur.stdout || '', configs, rand ? { rand } : {});
-  if (!plan.minted.length) return { ok: true, minted: [] };
+  const plan = planSecretMint(cur.stdout || '', eligible, rand ? { rand } : {});
+  if (!plan.minted.length) return { ok: true, minted: [], deferred, required };
   const merged = mergeEnvFile(cur.stdout || '', plan.vars);
   // Same file, mode and channel as set_project_env: written whole, then moved
   // into place so a half-written environment is never what the unit reads.
@@ -296,9 +329,16 @@ export async function ensureComponentSecrets({ containerName, rows, rand } = {})
     { timeoutMs: 15000 },
   );
   if (w.code !== 0) {
-    return { ok: false, minted: [], error: `could not write ${ENVIRONMENT_FILE}: ${(w.stderr || w.stdout || '').trim().slice(-200)}` };
+    return { ok: false, minted: [], deferred, required, error: `could not write ${ENVIRONMENT_FILE}: ${(w.stderr || w.stdout || '').trim().slice(-200)}` };
   }
-  return { ok: true, minted: plan.minted };
+  return { ok: true, minted: plan.minted, deferred, required };
+}
+
+// deferredSecretsMessage(deferred) → the project-chat line for keys that were
+// NOT minted, or null when none were deferred.
+export function deferredSecretsMessage(deferred = []) {
+  if (!deferred || !deferred.length) return null;
+  return `Not minted: ${deferred.map((d) => `${d.key} (${d.reason})`).join('; ')}.`;
 }
 
 // ensureScaffoldDeps — restore scaffold dependencies a corrupted package.json
@@ -456,6 +496,8 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
         body: `Minted ${secrets.minted.length} application secret(s) into the container environment (${secrets.minted.join(', ')}). Values stay in the container; the app reads them at start.`,
       });
     }
+    const deferredNote = deferredSecretsMessage(secrets.deferred);
+    if (deferredNote) insertMessage({ projectId, kind: 'system', cycleId, body: deferredNote });
     if (!secrets.ok) console.warn(`[mock2] component secret minting failed for project ${projectId}: ${secrets.error}`);
   } catch (e) { console.warn('[mock2] component secret minting failed:', e?.message); }
 

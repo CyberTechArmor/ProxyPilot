@@ -978,7 +978,7 @@ export async function retryDeploy({ project, cycle }) {
       // "Retry deploy" the one-click recovery. Dynamic import — the static one
       // would be a cycle (component-install imports runner for exec helpers).
       try {
-        const [{ ensureComponentDeps, ensureScaffoldDeps, ensureNodeRuntime, ensureComponentSecrets }, { listProjectComponents }] = await Promise.all([
+        const [{ ensureComponentDeps, ensureScaffoldDeps, ensureNodeRuntime, ensureComponentSecrets, deferredSecretsMessage }, { listProjectComponents }] = await Promise.all([
           import('./component-install.js'), import('./components.js'),
         ]);
         try { await ensureScaffoldDeps({ containerName }); } catch { /* best effort */ }
@@ -994,6 +994,8 @@ export async function retryDeploy({ project, cycle }) {
               body: `Minted ${secrets.minted.length} application secret(s) into the container environment before redeploying (${secrets.minted.join(', ')}).`,
             });
           }
+          const deferredNote = deferredSecretsMessage(secrets.deferred);
+          if (deferredNote) insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: deferredNote });
         } catch (e) { console.warn('[mock2] retry-deploy secret minting failed:', e?.message); }
         const ensured = await ensureComponentDeps({ containerName, rows: listProjectComponents(projectId) });
         if (ensured.repaired.length) {

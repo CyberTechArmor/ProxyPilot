@@ -15,7 +15,7 @@ import { join, basename } from 'node:path';
 import { checkSuperadminProtection } from '../../lib/superadmin.js';
 import { encryptSecret, decryptSecret } from '../../lib/secrets.js';
 import { hasHostBinary } from '../../lib/host-exec.js';
-import { mcpTokenOwnerStatus } from '../../lib/mcp-logic.js';
+import { mcpTokenOwnerStatus, mcpTokenExpiry } from '../../lib/mcp-logic.js';
 import {
   validateTokenScope, parseTokenScope, intIn, stamp, sha256Hex, UNIT_NAME_RE, parseSystemctlUnits, parseDpkgList, parseAptUpgradable, pathUnder,
 } from '../../lib/mcp-ext/logic.js';
@@ -88,9 +88,20 @@ export function createAdminHandlers(kit) {
     const d = dry(args, { user: user.username, from: user.role, to: role }); if (d) return d;
     const gate = confirmFlag(args, note, `Change ${user.username} from ${user.role} to ${role}.`); if (gate) return gate;
     db.prepare('UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(role, user.id);
+    // Losing admin loses the MCP keys (they are admin artifacts; a demoted
+    // owner's key is refused per call anyway, and revoking keeps a later
+    // re-promotion from reviving it). Parking as pending also ends sessions.
+    let mcpKeysRevoked = 0;
+    let sessionsRevoked = 0;
+    if (demotion || role === 'pending') {
+      try { mcpKeysRevoked = db.prepare('UPDATE mcp_tokens SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL').run(new Date().toISOString(), String(user.id)).changes; } catch { /* pre-migration */ }
+    }
+    if (role === 'pending') {
+      try { sessionsRevoked = db.prepare('UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(new Date().toISOString(), user.id).changes; } catch { /* pre-migration */ }
+    }
     note.summary = `${user.username}: ${user.role} → ${role}`;
-    note.detail = { from: user.role, to: role };
-    return ok({ applied: true, user: { ...userShape(user), role }, previous_role: user.role });
+    note.detail = { from: user.role, to: role, mcp_keys_revoked: mcpKeysRevoked, sessions_revoked: sessionsRevoked };
+    return ok({ applied: true, user: { ...userShape(user), role }, previous_role: user.role, mcp_keys_revoked: mcpKeysRevoked, sessions_revoked: sessionsRevoked });
   });
 
   const disable_user = mutation('disable_user', { subjectType: 'user' }, async (args, auth, req, note) => {
@@ -156,7 +167,7 @@ export function createAdminHandlers(kit) {
 
   /* ------------------------------ MCP keys ------------------------------- */
 
-  const keyShape = (r) => ({ id: r.id, name: r.name, prefix: r.token_prefix || null, created_by: r.created_by, created_at: r.created_at, last_used_at: r.last_used_at, revoked_at: r.revoked_at, scope: parseTokenScope(r.scope_json), scoped: !!r.scope_json });
+  const keyShape = (r) => ({ id: r.id, name: r.name, prefix: r.token_prefix || null, created_by: r.created_by, created_at: r.created_at, last_used_at: r.last_used_at, revoked_at: r.revoked_at, expires_at: r.expires_at || null, scope: parseTokenScope(r.scope_json), scoped: !!r.scope_json });
 
   const list_mcp_keys = reader('list_mcp_keys', async (args, auth) => {
     const db = getDb();
@@ -165,7 +176,7 @@ export function createAdminHandlers(kit) {
     // even though it is not revoked (routes/mcp.js findToken).
     const withOwner = (r) => {
       const owner = users.get(String(r.created_by || '')) || null;
-      return { ...keyShape(r), owner_username: owner?.username || null, owner_status: mcpTokenOwnerStatus({ ownerId: r.created_by, owner }) };
+      return { ...keyShape(r), owner_username: owner?.username || null, owner_status: mcpTokenOwnerStatus({ expiresAt: r.expires_at, ownerId: r.created_by, owner }) };
     };
     const rows = db.prepare('SELECT * FROM mcp_tokens ORDER BY id DESC').all();
     const includeRevoked = args.include_revoked === true;
@@ -193,16 +204,18 @@ export function createAdminHandlers(kit) {
     // one at all rather than mint a dead key.
     const ownerId = String(auth.created_by || '').trim();
     if (!ownerId) { note.refused = true; return err('This key has no recorded owner, so it cannot mint another; mint from a key owned by a live admin (MCP Access page)'); }
-    const gate = confirmFlag(args, note, `Mint MCP key "${name}" with scope ${JSON.stringify(scope || 'unscoped')}.`); if (gate) return gate;
+    const expiry = mcpTokenExpiry(args.expires_in_days);
+    if (expiry.error) return err(expiry.error);
+    const gate = confirmFlag(args, note, `Mint MCP key "${name}" with scope ${JSON.stringify(scope || 'unscoped')}${expiry.expiresAt ? ` expiring ${expiry.expiresAt}` : ''}.`); if (gate) return gate;
     const token = mintMcpToken();
     const prefix = token.slice(0, 13);
-    const info = getDb().prepare('INSERT INTO mcp_tokens (name, token_hash, created_by, created_at, scope_json, token_prefix) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(name, hashMcpToken(token), ownerId, new Date().toISOString(), scope ? JSON.stringify(scope) : null, prefix);
+    const info = getDb().prepare('INSERT INTO mcp_tokens (name, token_hash, created_by, created_at, scope_json, token_prefix, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(name, hashMcpToken(token), ownerId, new Date().toISOString(), scope ? JSON.stringify(scope) : null, prefix, expiry.expiresAt);
     note.subject_id = String(info.lastInsertRowid);
     note.summary = `minted MCP key ${name}`;
-    note.detail = { scope: scope || null, prefix };
+    note.detail = { scope: scope || null, prefix, expires_at: expiry.expiresAt };
     const base = req ? ctx.publicBaseUrl(req) : '';
-    return ok({ created: true, id: Number(info.lastInsertRowid), name, prefix, scope: scope || null, token, ...(base ? { endpoint: `${base}/api/mcp`, connector_url: `${base}/api/mcp/t/${token}` } : {}), note: 'Store the token now — it is shown once. A scoped key sees only the tools its scope allows in tools/list.' });
+    return ok({ created: true, id: Number(info.lastInsertRowid), name, prefix, scope: scope || null, expires_at: expiry.expiresAt, token, ...(base ? { endpoint: `${base}/api/mcp`, connector_url: `${base}/api/mcp/t/${token}` } : {}), note: 'Store the token now — it is shown once. A scoped key sees only the tools its scope allows in tools/list.' });
   });
 
   const revoke_mcp_key = mutation('revoke_mcp_key', { subjectType: 'mcp_token' }, async (args, auth, req, note) => {

@@ -83,7 +83,7 @@ test('ratchet: MCP token lookup consults the owner on every call and audits the 
   const mcp = src('routes/mcp.js');
   const fn = mcp.slice(mcp.indexOf('function findToken('), mcp.indexOf('// ---- upload tickets'));
   assert.match(fn, /SELECT id, role FROM users WHERE id = \?/);
-  assert.match(fn, /mcpTokenOwnerRefusal\(\{ ownerId: row\.created_by, owner \}\)/);
+  assert.match(fn, /mcpTokenRefusal\(\{ expiresAt: row\.expires_at, ownerId: row\.created_by, owner \}\)/);
   assert.match(fn, /if \(refusal\) \{ noteOwnerRefusal\(row, refusal\); return null; \}/);
   assert.match(mcp, /'MCP_TOKEN_OWNER_REFUSED'/);
 });
@@ -93,7 +93,7 @@ test('ratchet: disabling or deleting a user revokes the MCP keys it minted', () 
   const user = src('routes/user.js');
   const db = src('db.js');
   assert.match(admin, /UPDATE mcp_tokens SET revoked_at = \? WHERE created_by = \? AND revoked_at IS NULL/);
-  assert.match(user, /function revokeUserAccess\(db, userId\)/);
+  assert.match(user, /function revokeUserAccess\(db, userId, \{ sessions: revokeSessions = true \} = \{\}\)/);
   assert.match(user, /UPDATE mcp_tokens SET revoked_at = \? WHERE created_by = \? AND revoked_at IS NULL/);
   assert.match(user, /UPDATE sessions SET revoked_at = \? WHERE user_id = \? AND revoked_at IS NULL/);
   // The dashboard's "disable" (role → pending) and delete both call it.
@@ -104,6 +104,24 @@ test('ratchet: disabling or deleting a user revokes the MCP keys it minted', () 
   assert.match(db, /runMigration\(db, 913, 'mcp_tokens_owner_validity'/);
   assert.match(db, /created_by NOT IN \(SELECT id FROM users\)/);
   assert.match(db, /created_by IN \(SELECT id FROM users WHERE role = 'pending'\)/);
+  // Expiry column (914) and the per-call rule that reads it.
+  assert.match(db, /runMigration\(db, 914, 'mcp_tokens_expiry'/);
+  assert.match(db, /ALTER TABLE mcp_tokens ADD COLUMN expires_at TEXT/);
+  const mcp = src('routes/mcp.js');
+  assert.match(mcp, /mcpTokenRefusal\(\{ expiresAt: row\.expires_at, ownerId: row\.created_by, owner \}\)/);
+  // Demotion (admin → user) revokes keys in both the dashboard and the tool.
+  assert.match(user, /\} else if \(isDemotion\) \{\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*revoked = revokeUserAccess\(db, id, \{ sessions: false \}\);/);
+  assert.match(admin, /if \(demotion \|\| role === 'pending'\) \{/);
+});
+
+test('ratchet: a database that ran the branch\'s old migration 912 still gets lxc_exports', () => {
+  const db = src('db.js');
+  const guard = db.slice(db.indexOf('const stray = db.prepare(`SELECT name FROM schema_migrations WHERE version = 912`)'), db.indexOf("runMigration(db, 912, 'lxc_exports'"));
+  assert.ok(guard.length > 0, 'guard sits before the 912 migration');
+  assert.match(guard, /stray\.name === 'mcp_tokens_owner_validity'/);
+  assert.match(guard, /UPDATE schema_migrations SET version = 913 WHERE version = 912/);
+  // The row is deleted only when 913 already records the same migration.
+  assert.match(guard, /has913\.name === 'mcp_tokens_owner_validity'/);
 });
 
 // ---- minted secrets + production mode wiring ----
@@ -112,6 +130,12 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   const deploy = src('mock2/deploy.js');
   assert.match(deploy, /ensureComponentSecrets\(\{ containerName, rows \}\)/);
   assert.match(deploy, /validateDeployEnvironment\(\{ unitText: unit, environmentText: envRead\.stdout \|\| '', requiredKeys: requiredSecretKeys \}\)/);
+  // A deferred key (marker missing on disk) is neither minted nor required.
+  assert.match(deploy, /requiredSecretKeys = secrets\.required;/);
+  const install = src('mock2/component-install.js');
+  assert.match(install, /MARKER MISSING/);
+  assert.match(install, /eligible = configs\.filter\(\(c\) => !missing\.has\(c\.key\)\);/);
+  assert.match(install, /export function deferredSecretsMessage/);
   const mintIdx = deploy.indexOf('ensureComponentSecrets(');
   const validateIdx = deploy.indexOf('validateDeployEnvironment(');
   const swapIdx = deploy.indexOf('const swap = await containerSh(');
@@ -138,6 +162,10 @@ test('ratchet: the seed auth component refuses its dev defaults in production an
   assert.match(config, /return refuseInsecureProductionSecrets\(AuthConfigSchema\.parse\(\{/);
   // The third-party credential is NOT minted: only the two the app owns.
   assert.equal(cfg.filter((c) => c.generate === true).length, 2);
+  // The master secret is minted only into code that can migrate what it replaces.
+  const master = cfg.find((c) => c.key === 'AUTH_MASTER_SECRET');
+  assert.deepEqual(master.requires_marker, { path: 'src/auth/crypto.ts', contains: 'decryptSecretAny' });
+  assert.equal(cfg.find((c) => c.key === 'AUTH_JWT_SECRET').requires_marker, undefined);
 });
 
 test('ratchet: the seed auth component rekeys an LDAPS secret stored under the dev master secret', () => {
@@ -150,12 +178,24 @@ test('ratchet: the seed auth component rekeys an LDAPS secret stored under the d
   assert.match(crypto, /export function decryptSecretAny\(/);
   assert.match(crypto, /rekeyed: true/);
   const ldaps = file('src/auth/ldaps-service.ts');
-  assert.match(ldaps, /import \{ DEV_MASTER_SECRET \} from '\.\/config\.js';/);
+  assert.match(ldaps, /import \{ legacyMasterSecrets \} from '\.\/config\.js';/);
   assert.match(ldaps, /export async function openLdapsSecret\(/);
-  assert.match(ldaps, /\[DEV_MASTER_SECRET\]/);
-  assert.match(ldaps, /if \(opened\.rekeyed\) \{/);
+  assert.match(ldaps, /legacyMasterSecrets\(config\)/);
   assert.doesNotMatch(ldaps, /decryptSecret\(conn\.secretCiphertext/, 'a bare decrypt would strand legacy ciphertext');
+  // The rekey is a compare-and-swap on the ciphertext that was read, never the
+  // settings upsert (which resets label and status), and it is reported.
+  assert.match(ldaps, /rekeyLdapsConnection\(\{\s*tenantId,\s*expectedCiphertext: conn\.secretCiphertext,/);
+  assert.doesNotMatch(ldaps.slice(ldaps.indexOf('export async function openLdapsSecret'), ldaps.indexOf('async function readStoredSecret')), /upsertLdapsConnection/);
+  assert.match(ldaps, /masterKey: keyStatus,/);
+  const repo = file('src/auth/repo.ts');
+  assert.match(repo, /export async function rekeyLdapsConnection\(/);
+  assert.match(repo, /eq\(authConnections\.secretCiphertext, input\.expectedCiphertext\)/);
+  // The bridge is bounded: the legacy list is configuration, defaulting to
+  // the dev default and emptied once nothing is left to migrate.
+  const config = file('src/auth/config.ts');
+  assert.match(config, /AUTH_LEGACY_MASTER_SECRETS: z\.string\(\)\.default\(DEV_MASTER_SECRET\)/);
+  assert.match(config, /export function legacyMasterSecrets\(cfg: AuthConfig\): string\[\]/);
   const service = file('src/auth/service.ts');
-  assert.match(service, /const secret = await openLdapsSecret\(conn\);/);
+  assert.match(service, /const \{ secret \} = await openLdapsSecret\(conn\);/);
   assert.doesNotMatch(service, /decryptSecret\(conn\.secretCiphertext/);
 });

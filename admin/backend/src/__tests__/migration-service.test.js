@@ -8,7 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -1128,4 +1128,56 @@ test('the switch is refused where a tarball cannot do the job: a VM target, a fu
   const app = setup({ script: (bin, args) => (bin === 'incus' && args[0] === 'config' && args[1] === 'show' ? { status: 1 } : { status: 0 }) });
   const a = await app.svc.createMigration({ input: { mode: 'application', name: 'app', app_dirs: ['/srv/myapp'] } });
   assert.match((await app.svc.switchTransport(app.svc.rowById(a.migration.id), { transport: 'rootfs-tar' })).error, /only a whole-machine migration/);
+});
+
+/* ------------------------- a source that goes away ------------------------ */
+
+test('a broken upload fails the migration loudly, with the byte count, and leaves no partial tarball', async () => {
+  const { svc, workDir } = setup({ script: (bin, args) => (bin === 'incus' && args[0] === 'config' && args[1] === 'show' ? { status: 1 } : { status: 0 }) });
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  const id = r.migration.id;
+  await svc.recordManifest(svc.rowById(id), MANIFEST);
+  await svc.approveTransfer(id, { actor: 'admin-1' });
+
+  // 3 MiB arrive, then the socket dies — an SSH session took the agent.
+  const broken = new Readable({
+    read() {
+      this.push(Buffer.alloc(1024 * 1024));
+      this.push(Buffer.alloc(1024 * 1024));
+      this.push(Buffer.alloc(1024 * 1024));
+      this.destroy(new Error('aborted'));
+    },
+  });
+  const out = await svc.receiveArtifact(svc.rowById(id), broken);
+  assert.match(out.error, /upload from the source ended after \d+\.\d MiB \(aborted\)/, 'how much arrived, and why it stopped');
+  assert.match(out.error, /cannot be resumed/);
+  const row = svc.rowById(id);
+  assert.equal(row.status, 'failed', 'not left "running" for someone to notice');
+  assert.match(row.error, /the agent died or lost its connection/);
+  assert.equal(existsSync(join(workDir, String(id), 'rootfs.tar.gz')), false, 'the partial tarball is not kept');
+  assert.ok(svc.listEvents(id).some((e) => e.kind === 'error' && /ended after/.test(e.message)));
+});
+
+test('the watchdog fails a running transfer whose agent has gone silent, and nothing else', async () => {
+  const { svc, db } = setup({ script: (bin, args) => (bin === 'incus' && args[0] === 'config' && args[1] === 'show' ? { status: 1 } : { status: 0 }) });
+  const mk = async (name) => {
+    const r = await svc.createMigration({ input: { mode: 'whole-machine', name, source_kind: 'proxmox-lxc' } });
+    await svc.recordManifest(svc.rowById(r.migration.id), MANIFEST);
+    return r.migration.id;
+  };
+  const silent = await mk('a');
+  const alive = await mk('b');
+  const waiting = await mk('c');   // awaiting_review: the agent polls slowly and nothing is moving — never the watchdog's business
+  await svc.approveTransfer(silent, { actor: 'x' });
+  await svc.approveTransfer(alive, { actor: 'x' });
+  const old = new Date(NOW - 20 * 60 * 1000).toISOString();
+  db.prepare('UPDATE migrations SET token_last_seen_at = ? WHERE id IN (?, ?)').run(old, silent, waiting);
+  db.prepare('UPDATE migrations SET token_last_seen_at = ? WHERE id = ?').run(new Date(NOW - 2 * 60 * 1000).toISOString(), alive);
+
+  assert.deepEqual(svc.sweepStalled(), { failed: [silent] });
+  assert.equal(svc.rowById(silent).status, 'failed');
+  assert.match(svc.rowById(silent).error, /no contact from the agent since .* \(15 minutes\)/);
+  assert.equal(svc.rowById(alive).status, 'running', 'two quiet minutes is a slow file, not a dead source');
+  assert.equal(svc.rowById(waiting).status, 'awaiting_review');
+  assert.deepEqual(svc.sweepStalled(), { failed: [] }, 'a failed row is terminal and not failed twice');
 });

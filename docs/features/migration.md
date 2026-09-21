@@ -65,6 +65,30 @@ already talking to. Forcing `transport: "incus-migrate"` for a container
 source is allowed and works (it is how that path is tested), it just asks more
 of the source.
 
+### The agent survives the terminal
+
+The bootstrap script starts the agent **detached**: a transient systemd
+unit (`proxypilot-migrate-<id>-<epoch>`, follow it with `journalctl -u … -f`)
+where the source has systemd, `setsid nohup … > /var/log/proxypilot-migrate-…log`
+elsewhere. The script prints the unit or log name and returns; the SSH
+session can be closed. The agent also ignores SIGHUP. Migration #12 died at
+15 GiB when the session that had pasted the command dropped — the agent
+ran in that session's foreground and SIGHUP took it. Set
+`PROXYPILOT_MIGRATE_FOREGROUND=1` before the command to keep it in the
+terminal for a debugging session.
+
+Two things make a dead source visible instead of leaving the migration at
+"running" for someone to notice. A broken upload — the socket closes before
+the body ended — fails the migration with the byte count and the reason,
+and removes the partial tarball (an upload is one stream with one hash at
+the end, so it cannot be resumed; the remedy is a new migration). A source
+that leaves nothing to observe (power loss, an agent killed between two
+polls) is caught by the watchdog `sweepStalled`, run every minute from
+`index.js`: a running transfer whose agent has not been heard from for 15
+minutes is failed with the last-contact time. Progress lines arrive every
+5 s while bytes move and the agent polls every 5–15 s while it waits, so
+that silence is never a slow disk.
+
 ### When the source has no `incus-migrate`
 
 A physical host or a VM defaults to `incus-migrate`, and the package is often

@@ -27,14 +27,21 @@ test('the bootstrap script verifies the binary before running it, and pins TLS',
   assert.match(s, /\[ "\$GOT" = "\$SHA" \] \|\| \{ echo "proxypilot-migrate: REFUSED/);
   assert.ok(s.includes(SHA) && s.includes('c'.repeat(64)), 'both architectures carry their own hash');
   assert.match(s, /PIN="sha256:b{64}"/);
-  assert.match(s, /exec "\$BIN" migrate --url "\$URL" --token "\$TOKEN" --pin "\$PIN"/);
+  // The agent runs DETACHED from the terminal: a transient systemd unit
+  // where there is one, setsid+nohup elsewhere, and in the foreground only
+  // when asked. The first real transfer died with the SSH session.
+  assert.match(s, /systemd-run --quiet --collect --unit "\$NAME" .*"\$BIN" migrate --url "\$URL" --token "\$TOKEN" --pin "\$PIN"/);
+  assert.match(s, /setsid nohup "\$BIN" migrate --url "\$URL" --token "\$TOKEN" --pin "\$PIN"/);
+  assert.match(s, /PROXYPILOT_MIGRATE_FOREGROUND[^\n]*\n\s*exec "\$BIN" migrate --url "\$URL" --token "\$TOKEN" --pin "\$PIN"/);
+  assert.match(s, /trap - EXIT INT TERM/, 'the cleanup trap is released once the agent is running detached');
+  assert.match(s, /this session can be closed/);
   // An unsupported CPU stops, rather than downloading something that cannot run.
   assert.match(s, /unsupported CPU/);
   assert.match(s, /rm -f "\$BIN"/, 'the binary is cleaned up on the way out');
   assert.ok(!s.includes('--keep'), 'keep_agent off means the flag is simply absent');
 
   const keep = bootstrapScript({ base: 'https://e.example.com', token: 't', migrationId: 1, pin: null, sums: { amd64: SHA }, keepAgent: true });
-  assert.match(keep, /--keep/);
+  assert.equal((keep.match(/--pin "\$PIN" --keep/g) || []).length, 3, 'every launch form carries --keep');
   assert.match(keep, /PIN=""/, 'no certificate to pin is stated, not faked');
 
   // No build for an architecture → the script says so instead of downloading a 404.

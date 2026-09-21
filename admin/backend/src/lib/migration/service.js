@@ -864,7 +864,7 @@ export function createMigrationService({
       // took the agent with it.
       await rm(path, { force: true }).catch(() => null);
       const reason = String(e?.message || e);
-      return fail(row.id, `the ${kind} upload from the source ended after ${humanBytes(bytes)} (${reason}) — the agent died or lost its connection. An upload cannot be resumed: create a new migration and run its command on the source again. (Agents from this version run detached from the terminal, so a closed SSH session no longer does this.)`);
+      return fail(row.id, `the ${kind} upload from the source ended after ${humanBytes(bytes)} (${reason}) — the connection carrying it closed: the agent died, the network dropped, or something between the source and ProxyPilot cut the request. An upload cannot be resumed: create a new migration and run its command on the source again. The agent runs detached from the terminal, so a closed SSH session is not the cause; check the agent's own log on the source (journalctl -u proxypilot-migrate-${row.id}-*) for its side of it.`);
     }
     const sha = hash.digest('hex');
     if (expectedSha256 && expectedSha256.toLowerCase() !== sha) {

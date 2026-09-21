@@ -77,6 +77,13 @@ ran in that session's foreground and SIGHUP took it. Set
 `PROXYPILOT_MIGRATE_FOREGROUND=1` before the command to keep it in the
 terminal for a debugging session.
 
+The backend's HTTP server has **no clock on a request body**
+(`lib/http-server-timeouts.js`, applied in `index.js`): Node 20 defaults
+`requestTimeout` to 300 s, and migrations #12 and #14 — the same 249 GiB
+rootfs, 15 GiB in at 85 MiB/s — were both cut off 5 min 17 s and 5 min 24 s
+into the upload by that clock plus its 30 s check interval, with a failure
+line that blamed the agent. The headers clock (60 s) stays.
+
 Two things make a dead source visible instead of leaving the migration at
 "running" for someone to notice. A broken upload — the socket closes before
 the body ended — fails the migration with the byte count and the reason,

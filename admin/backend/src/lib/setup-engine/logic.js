@@ -24,6 +24,7 @@
 //            a port opened.
 
 import { validateLifecycleParams } from './lifecycle-logic.js';
+import { validateSetupParams } from './setup-logic.js';
 
 export const HOLDER_KINDS = Object.freeze(['backend', 'runner', 'cli']);
 
@@ -61,20 +62,28 @@ export const VIA = Object.freeze(['ui', 'cli', 'mcp', 'runner', 'system']);
 // The Incus lifecycle and snapshot verbs (A-17.2 … A-17.5) are runner jobs
 // too; their parameters and fixed commands live in lifecycle-logic.js.
 export const LIFECYCLE_JOB_KINDS = Object.freeze(['instance_create', 'instance_start', 'instance_stop', 'instance_restart', 'instance_delete', 'snapshot_create', 'snapshot_delete']);
-export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS]);
+// The post-launch / post-start guest setup (A-17.7) is a runner job too; its
+// phases, parameters and scripts live in setup-logic.js. (Both lists are
+// spelled out here because of the import cycle; the suite checks they agree.)
+export const SETUP_JOB_KINDS = Object.freeze(['guest_setup']);
+export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS]);
 // The kinds that MUTATE a guest or its storage: one at a time per app, and an
 // exclusive kind is refused (never queued behind) while any of them is open.
-export const MUTATING_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS]);
+export const MUTATING_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, 'configure_routes']);
 // A restore is destructive, and a lifecycle verb is an operator's immediate
 // action on a guest: neither waits for a held lease (it would run minutes
 // later under a state its operator never looked at) — refused, and refused
-// again rather than queued when no executor is available.
-export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapshot', ...LIFECYCLE_JOB_KINDS]);
+// again rather than queued when no executor is available. A guest setup
+// submitted directly (a retry, an operator's request) is the same; queued as
+// a FOLLOW-UP of a create / start / restart it waits instead (executor).
+export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapshot', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS]);
 // Job kinds the BACKEND records for the operations it still executes itself
 // (they hold the same lock; the runner recovers them when the backend dies).
 // The two restores and the retry mint moved to the runner (A-13…A-15);
-// their pre-move records keep the old kind names in history.
-export const BACKEND_JOB_KINDS = Object.freeze(['credential_migration']);
+// their pre-move records keep the old kind names in history. `configure_routes`
+// (A-17.7) is the backend's by design: ProxyPilot's own route rows and its
+// Caddy render, queued by the guest setup and drained by the backend.
+export const BACKEND_JOB_KINDS = Object.freeze(['credential_migration', 'configure_routes']);
 export const LEGACY_BACKEND_JOB_KINDS = Object.freeze(['restore_project_db', 'retry-secrets']);
 // A runner is live when its heartbeat is younger than this.
 export const RUNNER_LIVE_MS = 30_000;
@@ -334,6 +343,14 @@ export function reconcileDecision({ job, lock = null, nowMs, canAct = true, runn
   if (!leaseExpired(lease, nowMs)) return { action: 'nothing', reason: 'lease is live' };
   const cp = parseJson(job.checkpoint_json) || {};
   const disruptive = cp.app_stopped === true || cp.disruptive === true;
+  if (cp.setup === true && cp.init_issued === true) {
+    // A guest setup whose init script was issued: the resumed job reads the
+    // result the guest recorded and never runs the script again; when nobody
+    // can act, the record says the outcome is unknown and the lease goes —
+    // the guest is running and usable, nothing further is issued.
+    if (runnerKinds.includes(job.kind) && canAct) return { action: 'resume', reason: `owner ${job.owner} is gone after the init script was issued; the resumed job reads the guest's recorded result and never runs the script again` };
+    return { action: 'record_uncertain', reason: `owner ${job.owner} is gone after the init script was issued and before its result was read; nothing can act now and the script is never replayed`, releaseLock: true, keepStale: false, setup: true };
+  }
   if (runnerKinds.includes(job.kind) && cp.resumable === true && !disruptive && canAct) {
     return { action: 'resume', reason: `owner ${job.owner} is gone; checkpoint '${cp.phase || job.phase || '?'}' is resumable` };
   }
@@ -465,6 +482,10 @@ export function validateRunnerJob(job) {
   if (LIFECYCLE_JOB_KINDS.includes(job.kind)) {
     const lv = validateLifecycleParams(job.kind, p);
     if (!lv.ok) return lv;
+  }
+  if (SETUP_JOB_KINDS.includes(job.kind)) {
+    const sv = validateSetupParams(p);
+    if (!sv.ok) return sv;
   }
   const flat = JSON.stringify(plan);
   if (flat !== JSON.stringify(redact(plan))) return { ok: false, reason: 'the plan carries a value that looks like a secret; plans carry references only' };

@@ -270,6 +270,46 @@ test('ratchet (A-17.6): the Incus lifecycle and snapshot verbs of the dashboard 
   assert.match(logic, /p\.command != null \|\| p\.script != null \|\| p\.argv != null \|\| p\.args != null \|\| p\.options != null/);
 });
 
+test('ratchet (A-17.7): the post-launch and post-start fix-ups are setup-engine phases; the dashboard and MCP run no NAT / DNS / init-script command and keep no in-memory creation state', () => {
+  const lxcRoute = src('routes/lxc.js');
+  assert.doesNotMatch(lxcRoute, /async function ensureDns|export async function ensureNetworkNat|function ensureNetworkNat/, 'the NAT and DNS fix-ups are phases of the guest_setup job');
+  assert.doesNotMatch(lxcRoute, /sysctl -w net\.ipv4\.ip_forward|iptables -C DOCKER-USER|incus network set \$\{net\.name\} ipv4\.nat/, 'no host NAT command in the route');
+  assert.doesNotMatch(lxcRoute, /incus exec \$\{incusName\} -- (tee \/tmp\/pp-init\.sh|chmod \+x \/tmp\/pp-init\.sh|sh \/tmp\/pp-init\.sh|rm -f \/tmp\/pp-init\.sh)/, 'the init script runs contained in the runner, from an input file by reference');
+  assert.doesNotMatch(lxcRoute, /> \/etc\/resolv\.conf|rm -f \/etc\/resolv\.conf/, 'no guest DNS write in the route');
+  assert.doesNotMatch(lxcRoute, /const activeCreations = new Map\(\)|activeCreations\.(get|set|has|delete)\(/, 'creation progress is read from the records, never a map an API restart forgets');
+  assert.match(lxcRoute, /writeInitScriptInput\(dir, initScript\.trim\(\)\)/, 'the script becomes a 0600 input next to the database');
+  assert.match(lxcRoute, /setup\.phases\.push\('init_script'\)/); assert.match(lxcRoute, /setup\.phases\.push\('routes'\)/);
+  assert.match(lxcRoute, /lifecycleViaRunner\('instance_create', incusName, req, \{\n\s+image: String\(image\), profile: profile \? String\(profile\) : 'default', config: launchConfig, vm: isVm, rootSize: isVm \? '20GiB' : null, setup, detach: true,/, 'the launch job carries the setup plan');
+  assert.match(lxcRoute, /lifecycleViaRunner\('instance_start', incusName, req, \{ fixup: true \}\)/, 'start asks for the NAT + DNS follow-up');
+  assert.match(lxcRoute, /lifecycleViaRunner\('instance_restart', incusName, req, \{ force: true, fixup: true \}\)/, 'restart asks for it');
+  assert.match(lxcRoute, /lifecycleViaRunner\('instance_restart', incusName, req, \{ force: false, fixup: true \}\)/, 'reboot asks for it');
+  assert.match(lxcRoute, /const view = createStatus\(getDb\(\), incusName\);/, 'create-status reads the records');
+  assert.match(lxcRoute, /openJobsFor\(getDb\(\), incusName, \['instance_create', 'guest_setup'\]\)/, 'an open create is refused from the records');
+  const createRoute = lxcRoute.slice(lxcRoute.indexOf("lxcRouter.post('/containers', async (req, res) => {"), lxcRoute.indexOf("lxcRouter.get('/containers/:name/create-status'"));
+  assert.doesNotMatch(createRoute, /INSERT INTO service_http_routes|renderDomains\(|syncLxcServiceUpstream\(|findOrCreateLxcService\(/, 'the create-time route rows and their render are the configure_routes step (lib/guest-routes.js), not the request handler');
+  assert.doesNotMatch(createRoute.slice(createRoute.indexOf("lifecycleViaRunner('instance_create'")), /execOnHost\(|spawnOnHost\(/, 'the create route runs no host command after the launch (the pre-flight reads before it stay)');
+  assert.match(lxcRoute, /export \{ findOrCreateLxcService \} from '\.\.\/lib\/guest-routes\.js';/);
+  const mcp = src('routes/mcp.js');
+  assert.doesNotMatch(mcp, /ensureNetworkNat/, 'MCP\'s create does not run NAT itself');
+  assert.match(mcp, /runLifecycle\(\{ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, rootSize: diskGb !== null \? `\$\{diskGb\}GiB` : null, setup: \{ phases: \['network_nat', 'await_address'\], addressTimeoutMs: 15_000 \}/, 'the launch carries the NAT + address plan');
+  assert.match(mcp, /await waitForSetup\(containerLockStore\(\)\.getDb\(\), launch\.setupJobId, \{ timeoutMs: 60_000 \}\)/, 'the tool waits on the setup record, not on a host poll');
+  assert.doesNotMatch(mcp, /for \(let i = 0; i < 15; i \+= 1\) \{\n\s+const probe = await fetchLxcInstance\(incusName\);/, 'no DHCP poll in the tool');
+  // The engine side: fixed argv, contained guest scripts, no shell of its own.
+  const op = src('lib/setup-engine/setup-op.js');
+  assert.doesNotMatch(op, /'sh', '-c'|spawn\(|execOnHost|runHostCapture|nsenter|exec\.guest\(/, 'the host channel and the contained guest executor only');
+  assert.match(op, /containedGuest\(\{ exec, container: name, job \}\)/);
+  assert.match(op, /mark\('init_script', \{ setup: true, resumable: true, disruptive: false, init_issued: true,[^\n]*\{ required: true \}\)/, 'the checkpoint before the script is mandatory');
+  assert.match(op, /if \(prior && prior\.init_issued === true\) \{/, 'a resumed job reads, never re-runs');
+  assert.match(op, /if \(origin && \['done', 'failed', 'timed_out', 'uncertain'\]\.includes\(origin\.state\)\) \{/, 'a retry never repeats an issued or completed init');
+  const logic = src('lib/setup-engine/setup-logic.js');
+  assert.match(logic, /p\.command != null \|\| p\.script != null \|\| p\.argv != null \|\| p\.args != null \|\| p\.options != null \|\| p\.initScriptText != null/);
+  assert.match(logic, /export const HOST_NETWORK_LOCK = '@host\/network';/); assert.match(logic, /export const HOST_ROUTES_LOCK = '@host\/routes';/);
+  // Both executors know the input store: the runner from the database it opened, the backend from its own path.
+  assert.match(src('../../../cli/src/commands/setup-runner.js'), /inputsDir: deps\.inputsDir \|\| setupInputsDir\(o\.install\.dbPath\)/);
+  assert.match(src('index.js'), /configureContainerLockStore\(\{ getDb, owner: backendOwner\(\), inputsDir: setupInputsDir\(databasePath\(\)\) \}\);/);
+  assert.match(src('index.js'), /setInterval\(backendSteps, 15_000\)\.unref\(\);/, 'the backend drains its own steps whatever the policy');
+});
+
 test('ratchet: the seed auth component refuses its dev defaults in production and marks its secrets as minted', () => {
   const doc = JSON.parse(src('mock2/framework-seed/proxypilot-auth.component.json'));
   const cfg = doc.contract.config;

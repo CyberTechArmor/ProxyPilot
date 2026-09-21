@@ -8,11 +8,12 @@ import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { existsSync, statSync, readFileSync } from 'fs';
-import { initDatabase, getDb, getSetting, setSetting, logAudit } from './db.js';
+import { initDatabase, getDb, getSetting, setSetting, logAudit, databasePath } from './db.js';
 import { noteCompletedUpdateOnBoot } from './lib/self-update.js';
 import { configureContainerLockStore } from './mock2/container-lock.js';
 import { backendOwner, sweepSetupEngineOnBoot } from './lib/setup-engine/backend.js';
 import { executorPolicy } from './lib/setup-engine/logic.js';
+import { setupInputsDir, sweepSetupInputs } from './lib/setup-engine/setup-inputs.js';
 import { setupRouter } from './routes/setup.js';
 import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
@@ -272,7 +273,9 @@ app.use('/api/', csrfProtection);
 initDatabase();
 // Setup engine (gate two): the container lock's persistent lease + job rows,
 // and the boot sweep that records what a predecessor left running.
-configureContainerLockStore({ getDb, owner: backendOwner() });
+// The init-script input store of a guest setup lives next to the database
+// (setup-inputs.js): written here by reference, read by the executor.
+configureContainerLockStore({ getDb, owner: backendOwner(), inputsDir: setupInputsDir(databasePath()) });
 try {
   const swept = sweepSetupEngineOnBoot(getDb());
   if (swept.interrupted.length || swept.recoveryQueued.length) console.warn('[setup-engine] boot sweep:', JSON.stringify(swept));
@@ -312,6 +315,23 @@ try {
     setTimeout(watch, 60_000).unref();
     setInterval(watch, 5 * 60_000).unref();
   }
+  // The backend's OWN steps (configure_routes, queued by a guest setup) run
+  // here whatever the policy: on boot and every 15 s, and on demand when the
+  // dashboard polls a create whose routes are still queued. The input store
+  // is swept of files nobody consumed (a setup that never reached its init
+  // phase and was never retried) once an hour.
+  const backendSteps = async () => {
+    try {
+      const { drainBackendStepsNow } = await import('./mock2/ops.js');
+      const r = await drainBackendStepsNow();
+      if (r.ran?.length) console.log('[setup-engine] backend steps ran:', r.ran.map((j) => `${j.kind} ${j.app} ${j.status}`).join(', '));
+    } catch (err) { console.error('[setup-engine] backend steps failed:', err?.message || err); }
+  };
+  setTimeout(backendSteps, 10_000).unref();
+  setInterval(backendSteps, 15_000).unref();
+  const sweepInputs = () => { try { const gone = sweepSetupInputs(setupInputsDir(databasePath())); if (gone.length) console.log(`[setup-engine] swept ${gone.length} unconsumed setup input(s)`); } catch (err) { console.error('[setup-engine] input sweep failed:', err?.message || err); } };
+  setTimeout(sweepInputs, 5 * 60_000).unref();
+  setInterval(sweepInputs, 60 * 60_000).unref();
 }
 
 // Sweep orphan in_progress backup rows.  The create-backup

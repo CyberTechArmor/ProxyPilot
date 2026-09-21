@@ -17,9 +17,11 @@
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { ownerIdentity, reconcileDecision, recoveryJobFrom, verifyJobFrom, parseJson, runnerIsLive, RUNNER_LIVE_MS, validateRunnerJob, TERMINAL_STATUS, executorPolicy, RUNNER_JOB_KINDS } from './logic.js';
-import { runOnce, recordUncertainLifecycle } from './executor.js';
+import { runOnce, recordUncertainLifecycle, recordUncertainSetup } from './executor.js';
+import { runBackendSteps } from './backend-steps.js';
+import { BACKEND_STEP_KINDS } from './setup-logic.js';
 import {
-  staleRunningJobs, readLock, releaseLock, markLockStale, clearStaleLock, recordJobOutcome, annotateTerminalOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners, appendEvent,
+  staleRunningJobs, readLock, releaseLock, markLockStale, clearStaleLock, recordJobOutcome, annotateTerminalOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners, appendEvent, annotateJobProgress,
 } from './store.js';
 
 let identity = null;
@@ -41,9 +43,12 @@ export function sweepSetupEngineOnBoot(db, { owner = backendOwner(), nowMs = Dat
     if (d.action === 'record_interrupted') {
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
       if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      // A backend step that died leaves its phase on the record it served.
+      if (BACKEND_STEP_KINDS.includes(job.kind)) noteInterruptedStep(db, { job, nowMs });
       summary.interrupted.push(job.id);
     } else if (d.action === 'record_uncertain') {
-      recordUncertainLifecycle(db, { job, lock, owner, reason: d.reason, nowMs });
+      if (d.setup) recordUncertainSetup(db, { job, lock, owner, reason: d.reason, nowMs });
+      else recordUncertainLifecycle(db, { job, lock, owner, reason: d.reason, nowMs });
       summary.interrupted.push(job.id);
     } else if (d.action === 'verify') {
       const spec = verifyJobFrom(job, { nowIso: new Date(nowMs).toISOString() });
@@ -72,6 +77,22 @@ export function sweepSetupEngineOnBoot(db, { owner = backendOwner(), nowMs = Dat
     }
   }
   return summary;
+}
+
+function noteInterruptedStep(db, { job, nowMs }) {
+  const origin = ((parseJson(job.plan_json) || {}).params || {}).origin?.jobId;
+  if (!origin || !getJob(db, origin)) return;
+  const prior = (parseJson(getJob(db, origin).progress_json) || {}).phases || {};
+  annotateJobProgress(db, { id: origin, progress: { phases: { ...prior, routes: { ...(prior.routes || {}), state: 'failed', job: job.id, detail: `the backend died while configuring the routes (job ${job.id}); retry that job` } } }, nowMs });
+  appendEvent(db, { jobId: origin, kind: 'recovery_result', phase: 'routes', message: `configure_routes job ${job.id}: interrupted — retry it`, data: { follow_up_job: job.id, state: 'failed' }, nowMs });
+}
+
+// drainBackendSteps(db, { deps, owner, max, nowMs }) — the backend's own
+// steps (configure_routes), whatever the executor policy: on boot, on the
+// interval, and when a caller has just seen one queued. Idempotent and safe
+// to call concurrently: the claim is a compare-and-swap.
+export async function drainBackendSteps(db, { deps, owner = backendOwner(), max = 5, nowMs = () => Date.now(), log = () => {}, sleep } = {}) {
+  return runBackendSteps({ db, owner, deps, max, nowMs, log, sleep });
 }
 
 // acknowledgeUncertainJob(db, { id, by, via, nowMs }) → { ok, job, released }
@@ -220,9 +241,9 @@ export function executionMode(db, { env = process.env, nowMs = Date.now() } = {}
 // { skipped }) unless the policy allows it AND no runner is live; the runner
 // is preferred whenever it exists. Heartbeats are not written (a backend is
 // not a runner).
-export async function drainRunnerJobsInProcess(db, { owner = backendOwner(), exec, reviewLogin = null, max = 5, nowMs = () => Date.now(), env = process.env, log = () => {}, kinds = [...RUNNER_JOB_KINDS] } = {}) {
+export async function drainRunnerJobsInProcess(db, { owner = backendOwner(), exec, reviewLogin = null, max = 5, nowMs = () => Date.now(), env = process.env, log = () => {}, kinds = [...RUNNER_JOB_KINDS], inputsDir = null, sleep = null } = {}) {
   const mode = executionMode(db, { env, nowMs: nowMs() });
   if (mode.executor !== 'backend') return { skipped: mode.executor, policy: mode.policy.mode, ran: [] };
   if (!exec) return { skipped: 'no_exec', policy: mode.policy.mode, ran: [] };
-  return runOnce({ db, owner, exec, reviewLogin, nowMs, log, heartbeat: false }, { max, reconcileFirst: false, kinds });
+  return runOnce({ db, owner, exec, reviewLogin, nowMs, log, heartbeat: false, inputsDir, sleep }, { max, reconcileFirst: false, kinds });
 }

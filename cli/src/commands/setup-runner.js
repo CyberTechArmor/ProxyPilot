@@ -16,6 +16,7 @@ import { spawn } from 'node:child_process';
 import { resolveInstall } from '../recovery/install.js';
 import { ensureSetupEngineSchema, listLocks, listJobs, jobView } from '../../../admin/backend/src/lib/setup-engine/store.js';
 import { ownerIdentity } from '../../../admin/backend/src/lib/setup-engine/logic.js';
+import { setupInputsDir } from '../../../admin/backend/src/lib/setup-engine/setup-inputs.js';
 import { reconcile, runOnce, serve } from '../setup-runner/runner.js';
 import { hostReviewLogin } from '../setup-runner/review-login.js';
 import * as output from '../output.js';
@@ -102,6 +103,9 @@ export async function setupRunnerCommand(action, opts = {}, globalOpts = {}, dep
     db = o.db;
     const runDeps = {
       db, owner: o.owner, exec: deps.exec, log: json ? () => {} : deps.log, nowMs: deps.nowMs,
+      // A guest setup's init script is an input file next to the database
+      // (setup-inputs.js), read by reference and verified by digest.
+      inputsDir: deps.inputsDir || setupInputsDir(o.install.dbPath),
       reviewLogin: deps.reviewLogin || hostReviewLogin({ dbPath: o.install.dbPath, envPath: o.install.envPath, log: json ? () => {} : deps.log }),
     };
     switch (action) {

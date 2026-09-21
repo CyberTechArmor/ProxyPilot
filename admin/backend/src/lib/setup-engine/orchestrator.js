@@ -20,7 +20,7 @@ import { createJob, getJob, readLock, openJobsFor, cancelQueuedJob } from './sto
 import { validateRunnerJob, EXCLUSIVE_JOB_KINDS, MUTATING_JOB_KINDS, lockVerdict, parseJson, TERMINAL_STATUS } from './logic.js';
 import { executionMode, drainRunnerJobsInProcess, waitForJob } from './backend.js';
 
-const describe = (kind) => (kind === 'restore_db' || kind === 'restore_snapshot' ? 'the restore' : `the ${String(kind).replace('_', ' ')}`);
+const describe = (kind) => (kind === 'restore_db' || kind === 'restore_snapshot' ? 'the restore' : kind === 'guest_setup' ? 'the guest setup' : `the ${String(kind).replace('_', ' ')}`);
 
 export function submitRunnerJob(db, { kind, app, params, configRefs = {}, requestedBy = null, via = 'system', retryOf = null, reason = null, nowMs = Date.now() }) {
   const spec = { kind, app, plan: { steps: [], params: { ...params, container: app } } };

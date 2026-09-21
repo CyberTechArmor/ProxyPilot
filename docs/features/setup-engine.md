@@ -569,17 +569,129 @@ exists to poll. Under `backend-allowed` a detached submission kicks the
 in-process drain rather than waiting for the 30 s interval.
 
 What this group did NOT move (each recorded as a later A-17 group in the
-platform ledger): the post-start fix-ups `ensureNetworkNat` / `ensureDns`
-and the create route's post-launch configuration (IP wait, DNS, the init
-script through `incus exec`, the routes); the guest configuration verbs
-(`resize`, `set_lxc_config`, `set_lxc_resources`, `set_lxc_network`,
-devices, port forwards) and the pre-mutation `takeLxcSnapshot` they lean
-on; rename, clone, import / export and their post-import start, the
-zip-import start and cleanup, the prepared-download and S3-export temp
-instances; the project provisioning launch / delete and the idle sweep's
-stop / start (`mock2/provision.js`, `lib/project-lifecycle.js`); the
-component pre-install, Caddy, storage, migration transports, the workspace
-terminal, and every read (`incus list`, `info`, `query`, usage, logs).
+platform ledger): the guest configuration verbs (`resize`,
+`set_lxc_config`, `set_lxc_resources`, `set_lxc_network`, devices, port
+forwards) and the pre-mutation `takeLxcSnapshot` they lean on; rename,
+clone, import / export and their post-import start, the zip-import start
+and cleanup, the prepared-download and S3-export temp instances; the
+project provisioning launch / delete and the idle sweep's stop / start
+(`mock2/provision.js`, `lib/project-lifecycle.js`); the component
+pre-install, Caddy, storage, migration transports, the workspace terminal,
+and every read (`incus list`, `info`, `query`, usage, logs). The
+post-launch configuration and the post-start fix-ups it listed here first
+are the next section's (A-17.7).
+
+## The post-launch and post-start guest setup (A-17.7)
+
+What used to follow a launch in the dashboard's create route — an in-memory
+`activeCreations` map, `ensureNetworkNat` (host `sysctl`, `incus network
+set`, `iptables`), a 30 × 1 s IP wait, `ensureDns` (the guest's
+`/etc/resolv.conf`), the operator's init script piped through `incus exec`
+with a 5-minute kill, the route rows and the Caddy render — and the
+fire-and-forget NAT + DNS after the start / restart / reboot buttons, and
+MCP `create_lxc_container`'s NAT and 15 s DHCP poll, is one runner job kind,
+**`guest_setup`**, with five ordered phases, plus one backend-executed kind,
+**`configure_routes`**, for the routes.
+
+| Phase | Where | What |
+| --- | --- | --- |
+| `network_nat` | host argv, under the host-wide lease `@host/network` | `sysctl -w net.ipv4.ip_forward=1`; `incus network list --format json`; for every managed bridge the host reported (its name validated again before it becomes an argument): `incus network set <bridge> ipv4.nat true`, `iptables -C DOCKER-USER -i|-o <bridge> -j ACCEPT` else `-I`; `iptables -t nat -C POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE` else `-A`. Idempotent. A live holder of the lease is waited for (20 s); a dead one is taken over; still held → the phase is `skipped (contended)` and a retry redoes it. A missing Docker chain is a note; a refused `sysctl` or bridge NAT fails the phase |
+| `await_address` | host argv | `incus list <name> --format json` every second until the guest holds a **host-reachable** IPv4 (eth0 first, then the Incus NIC device, never a `docker0` / `br-*` / `veth*` address inside the guest) or the bound wait (`addressTimeoutMs`, dashboard 30 s, MCP 15 s, at most 5 min) elapses — recorded as `failed` with the guest left running |
+| `dns` | contained guest script | `/etc/resolv.conf` carries the public resolvers (the first one is the marker; a symlink is replaced) — `written` / `unchanged` / `failed` |
+| `init_script` | contained guest script | the operator's script, issued **once** (below) |
+| `routes` | the backend (`configure_routes`) | recorded `pending` on the setup with the follow-up's job id; the backend annotates the outcome back onto the same phase |
+
+**One parent record, every phase.** The create route submits the launch
+job with the whole setup plan (`params.setup`: phases, the address bound,
+the script reference, the services); the start / restart / reboot routes
+submit theirs with `fixup: true`. The lifecycle op returns the setup as a
+follow-up and the executor persists it as a `guest_setup` job — **bound to
+the identity it read back from the launched / started guest** (`expect` =
+`volatile.uuid` + `created_at`; a create's plan may not carry an identity
+of its own) — BEFORE the lifecycle job reports done, recording
+`setup_job_id` on it. The setup record's `progress.phases` names every
+required phase with its state (`done`, `skipped`, `failed`, `refused`,
+`timed_out`, `uncertain`, `pending`, `not_run`) and is rewritten after
+every phase, so a record read at any moment says what was done and what
+was not; when it finishes, the summary lands back on the lifecycle job
+(`progress.setup`) and the routes step's outcome lands on the setup's
+`routes` phase. A phase that fails after the guest is Running undoes
+nothing: the guest stays usable, the later phases still run where they
+can (no address → routes skipped by name), and the job ends `failed` /
+`setup_partial` naming the phases — never a success claim. The dashboard's
+`GET /containers/:name/create-status` is derived from the three records
+(`mock2/ops.js` `createStatus`): the same answer after a closed browser or
+a restarted API, and no map to forget.
+
+**The init script is bound and issued once.** The script text never
+becomes a row, an event or a log line — an operator's script may carry a
+token or a password, and the engine's redaction net cannot know every
+shape. The route writes it to an **input file next to the database**
+(`<db dir>/setup-inputs/<ref>.init.sh`, 0600 in a 0700 directory,
+`lib/setup-engine/setup-inputs.js`); the plan carries `initScript: { ref,
+sha256, bytes }`. The executor — the runner from the database it opened,
+the backend in-process from its own path, the same bind-mounted directory —
+reads the file by reference, refuses the phase when it is missing or its
+digest is not the plan's, writes the `init_script` checkpoint
+(`init_issued: true`; mandatory: a write the store rejects issues nothing),
+and runs the wrapper in the job's cgroup: the script is materialised from
+base64, run under `sh` in its own session, its exit code written to
+`/var/log/pp-init-<job>.rc` and its output to `.log` **inside the guest**,
+`PP_INIT_RC:<n>` plus the output tail returned for the record; the input
+file is consumed (unlinked) when the phase completes. A script that runs
+past `initTimeoutMs` (5 min by default, 30 at most) has its exec client
+killed by the executor and its session group stopped by the kill script
+(TERM, then KILL); the phase reads `timed_out` with what was captured.
+
+**Interruption and retries never repeat it.** An owner dying before the
+script was issued resumes the job (the idempotent phases run again). Dying
+after: the resumed job runs the read-back script instead of the wrapper —
+an exit code the guest recorded is the phase's result (`resumed: true`);
+none → `uncertain` (`recovery_required` / `init_uncertain`, the lease
+released because the guest is running and usable, the reason naming the
+`.log` and `.rc` to read), and nothing is run again. With no runner to
+resume it (the backend's boot sweep after a dead in-process executor) the
+record ends `init_uncertain` the same way, with the phases that were done
+kept. A retry (`POST /api/setup/jobs/:id/retry`, or `retryOf`) reads the
+origin's phase table: an init the origin issued, completed (any exit code),
+timed out or left uncertain is `skipped` / `notRepeated` and the retry says
+so; running it again is a deliberate new request carrying the script. The
+retry redoes NAT, the address, DNS and re-queues the routes.
+
+**The routes are the backend's.** `configure_routes` (`BACKEND_JOB_KINDS`,
+drained by `lib/setup-engine/backend-steps.js` on boot, every 15 s, when a
+create-status poll sees it queued, and after a retry) takes the guest's
+lease and the host-wide `@host/routes` lease — a held one requeues it with
+a not-before, an unresolved hold waits longer; it is an obligation, never
+finished deferred — then `lib/guest-routes.js` `configureGuestRoutes`: the
+guest's `services` row, its upstream moved and re-rendered when the
+address changed, one `service_http_routes` row per service (a domain
+already routed to THIS guest's service is `existing`, re-rendered and never
+duplicated; one routed elsewhere is a conflict that is reported and never
+clobbered), then the Caddy render for the created and existing domains
+together. A render failure keeps the rows (`routes_recorded_render_failed`)
+and a retry renders again. The Caddy pivot itself is A-17.12's and stays
+where it is: this step runs in the backend whatever the executor policy
+because it is ProxyPilot's own rows and its own reload, not a host
+privilege. A lifecycle verb submitted while the routes job is open is
+refused busy like any other mutating job.
+
+**Exclusive, or a follow-up.** A `guest_setup` is in `EXCLUSIVE_JOB_KINDS`:
+submitted directly (`mock2/ops.js` `runGuestSetup`, a retry) it is refused
+— never queued — while the guest's lease is held or a mutating job is open,
+on a stale lease, and when no executor is live (`cancelled` /
+`runner_unavailable`). Queued as a follow-up (its plan carries `origin`) it
+waits instead: requeued on a live lease, requeued with the long interval on
+an unresolved lifecycle hold, and it runs once the hold is acknowledged.
+Every parameter is validated at submission and again by the executor
+(`validateSetupParams`): phases in their fixed order, a script reference
+and never its text (`initScriptText`, `command`, `argv`, … are refused),
+validated domains and ports, bounded waits, IPv4 resolvers, a secret
+lookalike refused. MCP's `create_lxc_container` carries the two host phases
+and waits on the setup **record** for the address (`waitForSetup`, one
+minute), reporting `setup_job_id` and what the setup recorded when it ended
+otherwise.
+
 
 ## Who executes: the installation policy
 
@@ -699,11 +811,17 @@ the lock itself already binds every MCP mutation that goes through
   run in the runner, and with no runner the deploy waits and everything
   else is refused. Only a `backend-allowed` installation keeps the
   in-process executor and its nsenter pivot for these operations.
+- The post-launch slice (A-17.7) moved the create route's post-launch
+  configuration and the post-start NAT / DNS fix-ups the same way: the
+  host NAT commands, the address wait, the guest's resolv.conf and the
+  operator's init script run in the runner as `guest_setup` phases (the
+  script an input file by reference, never a row); only the route rows and
+  their Caddy render stay in the backend, as its own `configure_routes`
+  step, because Caddy is A-17.12's.
 - What it did NOT remove: the container still has `privileged: true`,
   `pid: host` and the Docker socket, and every other feature (the guest
   configuration verbs and their pre-mutation snapshots, rename / clone /
-  import / export and the transports' temp instances, the create route's
-  post-launch configuration and the post-start NAT / DNS fix-ups, project
+  import / export and the transports' temp instances, project
   provisioning and the idle sweep, the component pre-install, Caddy,
   storage, migration, the workspace terminal, every read) still pivots
   through it. Dropping that reach is Phase F of
@@ -760,6 +878,59 @@ is an operator's explicit, confirmed request naming the copy, and the
 copies a deploy or restore took are named on its record for that.
 
 ## Tests
+
+`setup-post-launch.test.js` (29 tests; three run the generated guest scripts
+under the sandbox's real `sh` with a real detached child for the timeout,
+the rest over a scripted host + guest and the real store, executor and
+backend step on `node:sqlite`, the routes step over the real `services` /
+`service_http_routes` schema with a fake render bundle): the kind
+registries (both modules agree; `configure_routes` never a runner kind);
+strict parameter validation (a script reference and never its text,
+ordered phases, validated services, bounded waits, secret lookalikes;
+through `validateRunnerJob`; a create's plan without an identity, `fixup`
+on start / restart only; `setupFollowUpFor`); the fixed NAT argv, a bridge
+name validated before it is an argument, the host-reachable address pick
+(eth0, the NIC device, never a runtime's own bridge); the markers, the
+phase table, the outcome, the create-status view for every state; the DNS
+script writing, leaving alone, replacing a symlink, failing; the init
+wrapper recording `.rc` / `.log` / the tail and removing its script, the
+read-back, the timed-out script surviving its client in its own session
+and stopped by the kill script with nothing claiming an exit; the input
+store (0600 / 0700, once per reference, digest, consume, sweep); the
+dashboard create end to end (the plan on the launch, the setup bound to
+the launched guest, every phase recorded, the script reaching the guest
+once and never a row, the routes step queued and landed, the summary on
+the create, create-status `caddy` → `ready`, the poll kicking the drain,
+every lease released); a create without script or services; a failed
+launch queueing no setup; MCP's create waiting on the record; start /
+restart / reboot's fix-up (a Running guest still gets it; no fixup → no
+setup; not a project → no ladder); no address (routes skipped, guest
+kept); a nonzero exit (recorded, consumed, the retry redoing NAT / DNS and
+never the script); a timeout (killed, recorded); containment unavailable
+(host phases done, guest phases refused, nothing run, input kept); a
+tampered input refused by digest; identity (recreated guest refused,
+Stopped refused, absent not found); NAT notes and failures; interruption
+before the script (resumed, run once) and after (exit read back — 0 and
+7 — never re-run; nothing recorded → `init_uncertain`, lease released,
+origin annotated, a start not refused, a retry still not repeating; the
+boot sweep for a dead backend); a dead backend mid-routes (interrupted,
+the setup's phase marked, the retry re-rendering with no duplicate row);
+`configureGuestRoutes` (conflicts never clobbered, render failure keeps
+rows, upstream move); runner-required (direct setup refused, create
+refused before any launch, a live runner running create then setup);
+unresolved holds (direct refused at submission and executor, follow-up
+requeued with the hold intact, running after the acknowledgement);
+contention on `@host/network` (waited, skipped contended, dead holder
+taken over, released) and on the routes (guest lease and route store
+requeue with a not-before, dead holder taken over); mutual refusal between
+lifecycle verbs and open setups; the direct surface's plan and digest; the
+executor refusing rows that carry the script text, a command or an
+unordered plan. `immediate-repairs.test.js` gained the A-17.7 ratchet on
+the callers (no NAT / DNS / init-script command and no creation map in the
+routes, the plan on the launch, `fixup` on the three buttons, create-status
+from the records, the MCP wait) and on the engine (contained scripts, the
+mandatory checkpoint, the read-never-rerun and retry rules, both executors'
+input directory).
 
 `setup-lifecycle.test.js` (20 tests; one with a real spawn capture of the
 runner's host channel; the rest over a scripted host executor and the real
@@ -903,6 +1074,40 @@ dead backend and runner jobs, the serve loop, the command, the exec wrapper,
 the unit and install wiring). Both against `node:sqlite`.
 
 ## Host acceptance (not yet run)
+
+For the post-launch group (A-17.7, platform ledger HA-10): on a
+`runner-required` host, create a container from the dashboard with an init
+script (one that installs a package and echoes a marker) and two services;
+confirm the create job is owned by `runner@…` and carries `setup_job_id`,
+the setup job shows the five phases `done` / `done` / `done` / `done` /
+`done` with the address `incus list` shows, `/etc/resolv.conf` in the guest
+carries the resolvers, `/var/log/pp-init-<job>.rc` reads `0` and `.log` the
+marker, `<data>/db/setup-inputs/` holds no file for it afterwards, the
+routes are in `service_http_routes` and Caddy serves them, and neither the
+job rows, the events nor the runner's journal contain a line of the
+script; close the browser during the init script and restart the backend
+container: the create-status poll after the restart shows `init-script`
+then `ready`; kill the runner during the init script and confirm the
+restarted runner's record reads `resumed: true` with the exit the guest
+recorded (or `init_uncertain` naming the log when the script died with
+it), that the script did NOT run twice (the marker appears once in the
+log), and that Start / Stop on the guest are not refused afterwards; retry
+that setup from `/api/setup/jobs/:id/retry` and confirm NAT and DNS run
+again and the init phase reads `skipped` / `notRepeated`; create a guest
+with an init script that exits 1 and confirm the toast names the exit code,
+the guest is running and usable; create with a service whose domain is
+already routed to another guest and confirm the conflict is reported and
+the other route untouched; create two guests at once and confirm the runner
+serialises their NAT phases on `@host/network` (one `lock_takeover` or
+wait event at most, never interleaved iptables writes) and the backend
+serialises their route renders on `@host/routes`; start, restart and
+reboot a guest from the dashboard and confirm each answer carries
+`setupJobId` and the fix-up job ran NAT + DNS in the runner; over MCP,
+`create_lxc_container` and confirm the result carries `setup_job_id` and
+`primary_address` from the setup record within the minute; stop the runner
+and confirm a create is refused (503) before any launch; on a guest with no
+containment mechanism confirm the DNS and init phases read `refused` /
+`containment_unavailable` and the guest is still created and running.
 
 For the lifecycle group (A-17.2 … A-17.6, platform ledger HA-09): on a
 `runner-required` host, start, stop, restart and reboot a guest from the

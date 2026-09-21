@@ -28,6 +28,7 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { engineOverview, jobDetail, requestAppRecovery, acknowledgeUncertainJob } from '../lib/setup-engine/backend.js';
 import { listJobs, getJob, createJob, jobView, requestCancel } from '../lib/setup-engine/store.js';
 import { CONTAINER_NAME_RE, RUNNER_JOB_KINDS, retryPlan, validateRunnerJob, parseJson } from '../lib/setup-engine/logic.js';
+import { BACKEND_STEP_KINDS } from '../lib/setup-engine/setup-logic.js';
 
 export const setupRouter = Router();
 
@@ -69,11 +70,13 @@ setupRouter.post('/jobs/:id/retry', requireAdmin, requireSudo, (req, res) => {
   const db = getDb();
   const prior = getJob(db, String(req.params.id));
   if (!prior) return res.status(404).json({ error: 'No such job' });
-  if (!RUNNER_JOB_KINDS.includes(prior.kind)) return res.status(400).json({ error: `only runner jobs (${RUNNER_JOB_KINDS.join(', ')}) can be retried here; a ${prior.kind} is retried from its own surface` });
+  if (!RUNNER_JOB_KINDS.includes(prior.kind) && !BACKEND_STEP_KINDS.includes(prior.kind)) return res.status(400).json({ error: `only runner jobs (${RUNNER_JOB_KINDS.join(', ')}) and backend steps (${BACKEND_STEP_KINDS.join(', ')}) can be retried here; a ${prior.kind} is retried from its own surface` });
   if (['queued', 'running'].includes(prior.status)) return res.status(409).json({ error: `job ${prior.id} is ${prior.status}` });
   const plan = retryPlan(prior);
   const job = createJob(db, { kind: prior.kind, app: prior.app, plan, configRefs: parseJson(prior.config_refs_json) || {}, requestedBy: req.user?.username || null, via: 'ui', retryOf: prior.id });
   logAudit(req.user?.id || null, 'SETUP_JOB_RETRIED', 'setup_job', job.id, { app: job.app, kind: job.kind, retry_of: prior.id, reuse: plan.reuse.length }, req.ip);
+  // A backend step is the backend's to run: kick the drain rather than wait for the interval.
+  if (BACKEND_STEP_KINDS.includes(job.kind)) import('../mock2/ops.js').then(({ drainBackendStepsNow }) => drainBackendStepsNow()).catch(() => {});
   res.status(201).json({ job: jobView(job) });
 });
 

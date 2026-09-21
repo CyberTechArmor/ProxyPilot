@@ -163,6 +163,8 @@ export async function deployProject(args) {
 export function inProcessExecutorDeps(store = containerLockStore()) {
   return {
     owner: store?.owner,
+    // The init-script input store next to the database (setup-inputs.js).
+    inputsDir: store?.inputsDir || null,
     exec: store?.guestExec || {
       guest: (name, script, { timeoutMs } = {}) => containerSh(name, script, { timeoutMs }),
       // Host commands as argv arrays (a snapshot restore); through the same

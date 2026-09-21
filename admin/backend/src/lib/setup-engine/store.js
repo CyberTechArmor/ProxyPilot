@@ -398,6 +398,18 @@ export function annotateTerminalOutcome(db, { id, fromStatus, outcome, reason, n
     .run(outcome, reason == null ? null : sanitizeReason(reason, 1200), iso(nowMs), String(id), fromStatus).changes;
 }
 
+// annotateJobProgress(db, { id, progress }) → changes. UNFENCED and status-
+// agnostic: a note another job leaves on a record (a follow-up's outcome on
+// the phase it was delegated — `routes` on a guest_setup, the setup summary
+// on the create that queued it). Merges into progress_json, redacted; never
+// touches the status, the outcome or the checkpoint.
+export function annotateJobProgress(db, { id, progress, nowMs = Date.now() }) {
+  const row = getJob(db, id);
+  if (!row) return 0;
+  const merged = { ...(parseJson(row.progress_json) || {}), ...redact(progress || {}) };
+  return db.prepare(`UPDATE setup_jobs SET progress_json = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(merged), iso(nowMs), String(id)).changes;
+}
+
 // requestCancel(db, { id, by }) → changes. Recorded on a queued or running
 // job; the executor honours it at its next safe checkpoint (before the
 // disruptive step) and declines it after. A queued job is cancelled outright.

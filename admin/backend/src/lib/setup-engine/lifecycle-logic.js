@@ -27,6 +27,7 @@
 // check, and nothing is issued again.
 
 import { CONTAINER_NAME_RE, redact } from './logic.js';
+import { validateSetupParams, FIXUP_PHASES, SETUP_PHASES } from './setup-logic.js';
 
 export const LIFECYCLE_JOB_KINDS = Object.freeze(['instance_create', 'instance_start', 'instance_stop', 'instance_restart', 'instance_delete', 'snapshot_create', 'snapshot_delete']);
 export const SNAPSHOT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
@@ -83,6 +84,18 @@ export function validateLifecycleParams(kind, p = {}) {
   if (!isBool(p.force)) return { ok: false, reason: 'force must be a boolean' };
   if (p.force === true && !['instance_stop', 'instance_restart', 'instance_delete'].includes(kind)) return { ok: false, reason: `force applies to stop, restart and delete, not ${kind}` };
   if (!isBool(p.managed)) return { ok: false, reason: 'managed must be a boolean' };
+  // The post-start fix-up (A-17.7): a start / restart may ask for the NAT and
+  // DNS phases as a follow-up; a create may carry the whole setup plan (the
+  // guest identity is bound by the executor from the launched guest).
+  if (!isBool(p.fixup)) return { ok: false, reason: 'fixup must be a boolean' };
+  if (p.fixup === true && !['instance_start', 'instance_restart'].includes(kind)) return { ok: false, reason: `fixup applies to start and restart, not ${kind}` };
+  if (p.setup != null) {
+    if (kind !== 'instance_create') return { ok: false, reason: `a ${kind} job carries no setup plan` };
+    if (!isPlainObject(p.setup)) return { ok: false, reason: 'setup must be a plan of phases' };
+    if (p.setup.expect != null || p.setup.container != null) return { ok: false, reason: 'the setup plan of a create binds its identity from the launched guest, not from the request' };
+    const sv = validateSetupParams({ ...p.setup, container: String(p.container) });
+    if (!sv.ok) return { ok: false, reason: `setup: ${sv.reason}` };
+  }
   if (p.expect != null) {
     if (!isPlainObject(p.expect)) return { ok: false, reason: 'expect must be an identity record' };
     for (const k of Object.keys(p.expect)) if (!['uuid', 'created_at', 'status'].includes(k)) return { ok: false, reason: `expect.${k} is not an identity field` };
@@ -118,7 +131,7 @@ export function validateLifecycleParams(kind, p = {}) {
       }
     }
   } else {
-    for (const k of ['image', 'profile', 'network', 'vm', 'rootSize', 'config']) if (p[k] != null) return { ok: false, reason: `a ${kind} job carries no ${k}` };
+    for (const k of ['image', 'profile', 'network', 'vm', 'rootSize', 'config', 'setup']) if (p[k] != null) return { ok: false, reason: `a ${kind} job carries no ${k}` };
   }
   if (JSON.stringify(p) !== JSON.stringify(redact(p))) return { ok: false, reason: 'the plan carries a value that looks like a secret; plans carry references only' };
   return { ok: true };
@@ -230,4 +243,20 @@ export function lifecycleVerification(kind, verdict, { container, snapshot = nul
     next: verdict.ok ? null : `read 'incus list ${container} --format json' and decide; nothing further was issued`,
     facts: { resource: { kind, container, snapshot, observed: verdict.observed, expected: verdict.expected } },
   };
+}
+
+// The follow-up a lifecycle job queues for the guest setup (A-17.7): the
+// whole plan a create carried, bound to the guest the launch read back; the
+// NAT + DNS fix-up a start / restart asked for. Pure: the executor creates
+// the job from this.
+export function setupFollowUpFor(kind, p, identity) {
+  const expect = identity && (identity.uuid != null || identity.created_at != null) ? { ...(identity.uuid != null ? { uuid: String(identity.uuid) } : {}), ...(identity.created_at != null ? { created_at: String(identity.created_at) } : {}) } : null;
+  if (kind === 'instance_create' && p.setup) {
+    const phases = [...SETUP_PHASES].filter((ph) => p.setup.phases.includes(ph));
+    return { kind: 'guest_setup', params: { ...p.setup, container: String(p.container), phases, ...(expect ? { expect } : {}) } };
+  }
+  if ((kind === 'instance_start' || kind === 'instance_restart') && p.fixup === true) {
+    return { kind: 'guest_setup', params: { container: String(p.container), phases: [...FIXUP_PHASES], ...(expect ? { expect } : {}) } };
+  }
+  return null;
 }

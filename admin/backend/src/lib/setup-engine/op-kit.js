@@ -36,6 +36,19 @@ export function containedGuest({ exec, container, job = noopJob(), runDir = CONT
   return { guest, markDisruptive: () => { disruptive = true; }, containment: () => containment, jobId };
 }
 
+// uncontainedGuest({ exec, container, job }) → (script, timeoutMs) → result.
+// The ONE deliberate exception to containment: the script that stops and
+// inspects a job's containment group (setup-logic initKillScript) must not
+// be a member of the group it kills and counts. Fenced like every other
+// guest script (a fenced job issues no kill either); never used for a
+// script that changes the guest.
+export function uncontainedGuest({ exec, container, job = noopJob() }) {
+  return async (script, timeoutMs = 20_000) => {
+    job.fence({ safe: false });
+    return (await exec.guest(container, script, { timeoutMs })) || { code: -1, stdout: '', stderr: 'no result from the guest executor' };
+  };
+}
+
 // hostArgv(exec) → the host executor as argv arrays only (never a shell
 // string), or null when the executor offers none.
 export function hostArgv(exec) {

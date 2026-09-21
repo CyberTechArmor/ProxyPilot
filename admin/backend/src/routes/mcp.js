@@ -92,7 +92,7 @@ import {
   STARTUP_UNIT_NAME,
 } from '../lib/lxc-zip.js';
 import { resolveMock2Gate } from '../mock2/gating.js';
-import { ensureNetworkNat, findOrCreateLxcService, syncLxcServiceUpstream } from './lxc.js';
+import { findOrCreateLxcService, syncLxcServiceUpstream } from './lxc.js';
 import { regenerateDomainCaddyConfig, ensureCaddyStructure, assertRoutesShareSslStance, syncPrimaryRouteFromLegacy, caddyRenderDeps, normalizePathPrefix } from './services.js';
 import { applyServiceUpstream } from '../lib/route-render.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
@@ -1533,29 +1533,35 @@ async function toolCreateLxcContainer(args, auth) {
       'security.syscalls.intercept.bpf.devices': 'true',
     });
   }
-  const { runLifecycle } = await import('../mock2/ops.js');
-  const launch = await runLifecycle({ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, rootSize: diskGb !== null ? `${diskGb}GiB` : null, requestedBy: auth.created_by ?? null, via: 'mcp' });
+  // The NAT fix-up and the DHCP wait after the launch are the setup engine's
+  // (A-17.7): the launch job carries the plan, its executor queues a
+  // `guest_setup` follow-up bound to the launched guest, and this tool waits
+  // on that record for the host-reachable address instead of polling the
+  // host itself.
+  const { runLifecycle, waitForSetup } = await import('../mock2/ops.js');
+  const launch = await runLifecycle({ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, rootSize: diskGb !== null ? `${diskGb}GiB` : null, setup: { phases: ['network_nat', 'await_address'], addressTimeoutMs: 15_000 }, requestedBy: auth.created_by ?? null, via: 'mcp' });
   if (!launch.ok) return toolResult(`Launch failed: ${launch.error}${launch.jobId ? ` (job ${launch.jobId})` : ''}`, { isError: true });
 
   const warnings = [...(Array.isArray(launch.warnings) ? launch.warnings : [])];
-  await ensureNetworkNat().catch(() => {});
-
-  // Give the guest a moment to pick up a DHCP lease so the result is usable.
-  let detail = null;
-  for (let i = 0; i < 15; i += 1) {
-    const probe = await fetchLxcInstance(incusName);
-    detail = probe.instance ? lxcContainerDetail(probe.instance) : null;
-    if (detail?.primary_address) break;   // a HOST-reachable v4, not a guest-internal one
-    await new Promise((resolve) => { setTimeout(resolve, 1000); });
+  let setup = null;
+  if (launch.setupJobId) {
+    const { containerLockStore } = await import('../mock2/container-lock.js');
+    setup = await waitForSetup(containerLockStore().getDb(), launch.setupJobId, { timeoutMs: 60_000 });
+    if (!setup) warnings.push(`the post-launch setup (job ${launch.setupJobId}) had not finished within a minute; the address will appear on get_lxc_container`);
+    else if (setup.status !== 'succeeded' || (setup.progress?.completion && setup.progress.completion !== 'complete')) warnings.push(`post-launch setup ${setup.progress?.completion || setup.status}: ${setup.reason || setup.outcome}`);
   }
+  const probe = await fetchLxcInstance(incusName);
+  const detail = probe.instance ? lxcContainerDetail(probe.instance) : null;
   logAudit(auth.created_by, 'LXC_CREATED', 'lxc', name, {
-    via: 'mcp', image, cpu, memory_gb: memoryGb, disk_gb: diskGb, docker_ready: dockerReady, autostart,
+    via: 'mcp', image, cpu, memory_gb: memoryGb, disk_gb: diskGb, docker_ready: dockerReady, autostart, setup_job: launch.setupJobId || null,
   }, null);
   return toolResult({
     created: true,
     container: name,
     image,
     job_id: launch.jobId,
+    setup_job_id: launch.setupJobId || null,
+    ...(setup?.progress?.address?.ip && !detail?.primary_address ? { primary_address: setup.progress.address.ip } : {}),
     ...(detail || {}),
     ...(warnings.length ? { warnings } : {}),
     next: 'Deploy content with inspect_lxc_zip/apply_lxc_zip (register a startup.sh), or write files directly with write_lxc_file.',

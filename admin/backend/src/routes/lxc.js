@@ -18,7 +18,8 @@ import { getDb, logAudit, getSetting } from '../db.js';
 import { emitContentChanged } from '../lib/change-events.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure, regenerateDomainCaddyConfig, caddyRenderDeps } from './services.js';
-import { applyServiceUpstream, renderDomains, domainsForService } from '../lib/route-render.js';
+import { renderDomains, domainsForService } from '../lib/route-render.js';
+import { syncServiceUpstream } from '../lib/guest-routes.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
@@ -82,7 +83,9 @@ const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';
 const NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
 
 // In-memory tracking of active container creation jobs
-const activeCreations = new Map();
+// Creation progress is no longer an in-memory map: GET /containers/:name/create-status
+// reads the instance_create job, the guest_setup it queued and the
+// configure_routes that setup queued (mock2/ops.js createStatus).
 
 // In-memory tracking of active snapshot creation jobs.
 // Key: jobId. Value: { name, snapshotName, startedAt, status, error?,
@@ -143,69 +146,17 @@ function spawnOnHost(command) {
   }
 }
 
-// Ensure container has public DNS configured
-async function ensureDns(incusName) {
-  try {
-    await execOnHost(
-      `incus exec ${incusName} -- sh -c 'if ! grep -q "9.9.9.9" /etc/resolv.conf 2>/dev/null; then rm -f /etc/resolv.conf; printf "nameserver 9.9.9.9\\nnameserver 1.1.1.1\\n" > /etc/resolv.conf; fi'`,
-      { timeout: 10000 }
-    );
-  } catch {}
-}
-
-// Ensure NAT and IP forwarding are enabled so containers have internet.
-// Exported for the MCP create_lxc_container tool, which mirrors this route's
-// post-launch setup. Best-effort throughout — failures log, never throw.
-export async function ensureNetworkNat() {
-  // Step 1: Enable IP forwarding on the host
-  try {
-    await execOnHost('sysctl -w net.ipv4.ip_forward=1', { timeout: 5000 });
-    console.log('[LXC] IP forwarding enabled');
-  } catch (err) {
-    console.error('[LXC] Failed to enable IP forwarding:', err.message);
-  }
-
-  // Step 2: Enable NAT on all managed Incus bridge networks
-  try {
-    const result = await execOnHost('incus network list --format json', { timeout: 10000 });
-    const networks = JSON.parse(result.stdout || '[]');
-    for (const net of networks) {
-      if (net.type === 'bridge' && net.managed) {
-        try {
-          await execOnHost(`incus network set ${net.name} ipv4.nat true`, { timeout: 10000 });
-          console.log(`[LXC] Enabled ipv4.nat on bridge '${net.name}'`);
-        } catch {}
-
-        // Step 3: Allow Incus bridge traffic through Docker's FORWARD chain
-        // Docker sets FORWARD policy to DROP, blocking Incus container traffic
-        try {
-          await execOnHost(
-            `iptables -C DOCKER-USER -i ${net.name} -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i ${net.name} -j ACCEPT`,
-            { timeout: 10000 }
-          );
-          await execOnHost(
-            `iptables -C DOCKER-USER -o ${net.name} -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o ${net.name} -j ACCEPT`,
-            { timeout: 10000 }
-          );
-          console.log(`[LXC] Docker FORWARD rules added for bridge '${net.name}'`);
-        } catch {}
-      }
-    }
-  } catch (err) {
-    console.error('[LXC] incus network NAT setup failed:', err.message);
-  }
-
-  // Step 4: Fallback — add iptables MASQUERADE directly for container subnets
-  try {
-    await execOnHost(
-      'iptables -t nat -C POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE',
-      { timeout: 10000 }
-    );
-    console.log('[LXC] iptables MASQUERADE rule ensured');
-  } catch (err) {
-    console.error('[LXC] iptables MASQUERADE failed:', err.message);
-  }
-}
+// The post-launch and post-start fix-ups that used to live here —
+// ensureNetworkNat (host: ip_forward, ipv4.nat on the managed bridges, the
+// DOCKER-USER and MASQUERADE rules) and ensureDns (guest: /etc/resolv.conf)
+// — are phases of the setup engine's `guest_setup` job since A-17.7
+// (lib/setup-engine/setup-logic.js, setup-op.js): the create route's launch
+// job carries the whole setup plan (NAT, the address wait, DNS, the init
+// script, the routes) and the start / restart / reboot routes ask for the
+// NAT + DNS fix-up; the executor queues the setup as a durable follow-up of
+// the job, bound to the guest it read back. Nothing here runs a host or
+// guest command for them any more, and nothing is lost when the API
+// restarts: the records are the state.
 
 // Validate instance name to prevent command injection
 function validateName(name) {
@@ -1103,38 +1054,16 @@ lxcRouter.post('/containers', async (req, res) => {
     }
   }
 
-  // Check if a creation is already in progress for this name
-  if (activeCreations.has(incusName)) {
-    const existing = activeCreations.get(incusName);
-    if (existing.phase !== 'ready' && existing.phase !== 'failed') {
-      return res.status(409).json({
-        success: false,
-        error: `Container '${name}' creation is already in progress.`,
-      });
+  // A create still open for this name (its launch or its setup) is refused,
+  // from the records rather than a map that an API restart forgets.
+  {
+    const { openJobsFor } = await import('../lib/setup-engine/store.js');
+    const open = openJobsFor(getDb(), incusName, ['instance_create', 'guest_setup']);
+    if (open.length) {
+      return res.status(409).json({ success: false, error: `Container '${name}' creation is already in progress (job ${open[0].id}).`, jobId: open[0].id });
     }
   }
 
-  // Initialize creation tracking
-  const creation = {
-    phase: 'downloading',
-    message: 'Downloading image...',
-    startTime: Date.now(),
-    name,
-    incusName,
-    image,
-    type,
-    services,
-    domain: services.length > 0 ? services[0].domain : null,
-    port: services.length > 0 ? services[0].port : null,
-    cpu: cpu || null,
-    memory: memory || null,
-    error: null,
-    ip: null,
-    stderr: '',
-  };
-  activeCreations.set(incusName, creation);
-
-  // Start the launch process asynchronously (no timeout — runs until done)
   // Docker-in-LXC support. Without these flags `dockerd` can't mount
   // overlayfs (kernel denies overlay mounts inside an unprivileged
   // user namespace) and image pulls fail with `permission denied` on
@@ -1206,194 +1135,40 @@ lxcRouter.post('/containers', async (req, res) => {
   if (cpu) launchConfig['limits.cpu'] = String(cpu);
   if (memory) launchConfig['limits.memory'] = `${memory}MB`;
   else if (isVm) launchConfig['limits.memory'] = '2GiB';
-  console.log(`[LXC] Starting async launch of ${incusName} from ${image} (setup-engine job)`);
 
-  (async () => {
-    const launch = await lifecycleViaRunner('instance_create', incusName, req, {
-      image: String(image), profile: profile ? String(profile) : 'default', config: launchConfig, vm: isVm, rootSize: isVm ? '20GiB' : null,
-    });
-    creation.jobId = launch.jobId || null;
-    if (!launch.ok) {
-      creation.phase = 'failed';
-      creation.error = launch.error || 'Launch failed';
-      creation.message = creation.error;
-      console.error(`[LXC] Launch failed: ${creation.error}`);
-      // Keep the creation record for 2 minutes so the frontend can read the error
-      setTimeout(() => activeCreations.delete(incusName), 120000);
-      return;
-    }
-    if (Array.isArray(launch.warnings) && launch.warnings.length) creation.launchWarning = launch.warnings.join('; ');
-
-    // Launch succeeded — configure the container
+  // The post-launch setup (A-17.7), carried by the launch job and queued by
+  // its executor as a `guest_setup` follow-up bound to the guest it read
+  // back: NAT, the address wait, DNS, the init script (an input file next to
+  // the database, referenced by digest — never a job row), the routes (a
+  // backend-executed configure_routes job). Browser closed or API restarted,
+  // the records carry it; GET …/create-status reads them.
+  const setup = { phases: ['network_nat', 'await_address', 'dns'], addressTimeoutMs: 30_000 };
+  if (initScript && typeof initScript === 'string' && initScript.trim()) {
     try {
-      creation.phase = 'configuring';
-      creation.message = 'Configuring container...';
-
-      // Ensure NAT is enabled on the bridge so containers have internet
-      await ensureNetworkNat();
-
-      // Wait for IP address
-      creation.phase = 'network';
-      creation.message = 'Waiting for network...';
-
-      let ip = null;
-      for (let i = 0; i < 30; i++) {
-        await sleep(1000);
-        try {
-          const result = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
-          const containers = JSON.parse(result.stdout || '[]');
-          if (containers.length > 0) {
-            ip = extractIPv4(containers[0]);
-            if (ip) break;
-          }
-        } catch {}
-      }
-      creation.ip = ip;
-
-      // Configure DNS with public resolvers
-      await ensureDns(incusName);
-
-      // Run init script if provided. We don't fail the whole
-      // creation on a non-zero exit — the operator can finish setup
-      // by hand — but we capture the exit code + the tail of output
-      // and surface it on `creation.initScriptWarning` so the UI can
-      // show "container ready, init script exited 100" instead of
-      // silently producing an empty container.
-      if (initScript && typeof initScript === 'string' && initScript.trim()) {
-        creation.phase = 'init-script';
-        creation.message = 'Running init script...';
-        try {
-          const scriptContent = initScript.trim();
-          // Encode as base64 before piping into the container. The
-          // previous `printf '%s' ${JSON.stringify(...)}` round-trip
-          // emitted JSON-style escapes — `\n` arrived as literal
-          // backslash-n on the container side, so the entire script
-          // collapsed to a single line that began with `#!/bin/sh\n…`
-          // and bash treated the whole thing as one comment. The
-          // script "ran" with exit code 0 and no packages were ever
-          // installed. base64 is shell-safe (only [A-Za-z0-9+/=]),
-          // and `base64 -d` is in coreutils on every distro we ship
-          // images for.
-          const b64 = Buffer.from(scriptContent, 'utf8').toString('base64');
-          await execOnHost(
-            `echo '${b64}' | base64 -d | incus exec ${incusName} -- tee /tmp/pp-init.sh > /dev/null`,
-            { timeout: 15000 }
-          );
-          await execOnHost(`incus exec ${incusName} -- chmod +x /tmp/pp-init.sh`, { timeout: 5000 });
-          const initChild = spawnOnHost(`incus exec ${incusName} -- sh /tmp/pp-init.sh`);
-          let stdoutBuf = '';
-          let stderrBuf = '';
-          const TAIL_BYTES = 4096;
-          initChild.stdout?.on('data', (d) => {
-            stdoutBuf = (stdoutBuf + d.toString()).slice(-TAIL_BYTES);
-          });
-          initChild.stderr?.on('data', (d) => {
-            stderrBuf = (stderrBuf + d.toString()).slice(-TAIL_BYTES);
-          });
-          const result = await new Promise((resolve) => {
-            const timeout = setTimeout(() => {
-              try { initChild.kill(); } catch {}
-              resolve({ code: null, killed: true });
-            }, 300000);
-            initChild.on('close', (code) => { clearTimeout(timeout); resolve({ code, killed: false }); });
-            initChild.on('error', (err) => { clearTimeout(timeout); resolve({ code: null, killed: false, err: err.message }); });
-          });
-          await execOnHost(`incus exec ${incusName} -- rm -f /tmp/pp-init.sh`, { timeout: 5000 }).catch(() => {});
-
-          if (result.killed) {
-            creation.initScriptWarning = 'Init script timed out after 5 minutes — finish setup manually inside the container.';
-            console.error(`[LXC] Init script for ${incusName} timed out`);
-          } else if (result.code !== 0) {
-            const tail = stderrBuf || stdoutBuf || '(no output captured)';
-            creation.initScriptWarning = `Init script exited with code ${result.code}. Last output:\n${tail}`;
-            console.error(`[LXC] Init script for ${incusName} exited ${result.code}: ${tail}`);
-          } else {
-            console.log(`[LXC] Init script completed cleanly for ${incusName}`);
-          }
-        } catch (initErr) {
-          creation.initScriptWarning = `Init script setup failed: ${initErr.message}`;
-          console.error(`[LXC] Init script failed: ${initErr.message}`);
-        }
-      }
-
-      // Configure Caddy reverse proxy for all services
-      if (services.length > 0 && ip) {
-        creation.phase = 'caddy';
-        creation.message = `Configuring reverse proxy for ${services.length} service${services.length > 1 ? 's' : ''}...`;
-
-        // Routes created at container-create time used to be written straight
-        // to disk with no database row at all. That made them permanently
-        // invisible to every name-based lookup — the only way to associate one
-        // with its container was to read the file back and match its upstream
-        // address, which is the attribution path that misfiled hostnames under
-        // the wrong container. They are ordinary routes now, and the renderer
-        // derives the site file from them like any other.
-        const db = getDb();
-        const svcRow = findOrCreateLxcService(db, name, ip);
-        // A container recreated under an existing name reuses its service row,
-        // which may still hold the previous instance's address. Move it (and
-        // re-render whatever it already served) before adding these routes.
-        await syncLxcServiceUpstream(db, svcRow, ip);
-        const createdDomains = new Set();
-        for (const svc of services) {
-          try {
-            const health =
-              svc.healthPath && validateHealthPath(svc.healthPath).ok ? svc.healthPath : null;
-            db.prepare(
-              `INSERT INTO service_http_routes
-                 (id, service_id, domain, path_prefix, target_port,
-                  websocket_enabled, ssl_enabled, force_https, max_upload_size,
-                  strip_prefix, health_path)
-               VALUES (?, ?, ?, '/', ?, 0, ?, ?, '1G', 0, ?)`
-            ).run(
-              uuidv4(),
-              svcRow.id,
-              svc.domain,
-              svc.port,
-              svc.obtainCert ? 1 : 0,
-              svc.obtainCert ? 1 : 0,
-              health
-            );
-            createdDomains.add(svc.domain);
-          } catch (e) {
-            // UNIQUE(domain, path_prefix) — the domain is already routed
-            // somewhere. Don't clobber it; the operator gets the existing
-            // route and a log line rather than a silent takeover.
-            console.error(`[LXC] could not add route ${svc.domain}: ${e?.message || e}`);
-            creation.caddyWarning =
-              `${svc.domain} is already routed elsewhere and was not added.`;
-          }
-        }
-
-        try {
-          await renderDomains({ db, domains: [...createdDomains], ...caddyRenderDeps });
-          console.log(`[LXC] Rendered ${createdDomains.size} route(s) for ${incusName} -> ${ip}`);
-        } catch (e) {
-          console.error('[LXC] Caddy render failed:', e?.message || e);
-          creation.caddyWarning = `Routes were recorded but Caddy was not updated: ${e?.message || e}`;
-        }
-      }
-
-      creation.phase = 'ready';
-      creation.message = 'Container is ready';
-      console.log(`[LXC] Container ${incusName} is ready (IP: ${ip || 'none'})`);
-
-    } catch (err) {
-      creation.phase = 'failed';
-      creation.error = err.stderr || err.message || 'Post-launch configuration failed';
-      creation.message = creation.error;
-      console.error(`[LXC] Post-launch config failed: ${creation.error}`);
+      const { writeInitScriptInput } = await import('../lib/setup-engine/setup-inputs.js');
+      const { containerLockStore } = await import('../mock2/container-lock.js');
+      const dir = containerLockStore()?.inputsDir;
+      if (!dir) return res.status(503).json({ success: false, error: 'The setup engine is not configured; the init script cannot be recorded.' });
+      setup.initScript = writeInitScriptInput(dir, initScript.trim());
+      setup.phases.push('init_script');
+    } catch (e) {
+      return res.status(400).json({ success: false, error: `Init script not accepted: ${e?.message || e}` });
     }
+  }
+  if (services.length > 0) {
+    setup.phases.push('routes');
+    setup.services = services.map((svc) => ({ domain: svc.domain, port: svc.port, obtainCert: svc.obtainCert !== false, ...(svc.healthPath ? { healthPath: svc.healthPath } : {}) }));
+    setup.serviceName = name;
+  }
+  console.log(`[LXC] Launch of ${incusName} from ${image} submitted (setup-engine job; setup phases ${setup.phases.join(', ')})`);
 
-    // Clean up creation tracking after 2 minutes
-    setTimeout(() => activeCreations.delete(incusName), 120000);
-  })().catch((err) => {
-    creation.phase = 'failed';
-    creation.error = err?.message || String(err);
-    creation.message = creation.error;
-    console.error(`[LXC] Launch failed: ${creation.error}`);
-    setTimeout(() => activeCreations.delete(incusName), 120000);
+  const launch = await lifecycleViaRunner('instance_create', incusName, req, {
+    image: String(image), profile: profile ? String(profile) : 'default', config: launchConfig, vm: isVm, rootSize: isVm ? '20GiB' : null, setup, detach: true,
   });
+  if (!launch.ok) {
+    if (setup.initScript) { try { const { consumeInitScriptInput } = await import('../lib/setup-engine/setup-inputs.js'); const { containerLockStore } = await import('../mock2/container-lock.js'); consumeInitScriptInput(containerLockStore()?.inputsDir, setup.initScript.ref); } catch { /* swept later */ } }
+    return lifecycleFailure(res, launch, `Failed to create container '${name}'`);
+  }
 
   // Return immediately — frontend will poll for progress
   res.status(202).json({
@@ -1401,6 +1176,8 @@ lxcRouter.post('/containers', async (req, res) => {
     message: 'Container creation started',
     name,
     incusName,
+    jobId: launch.jobId || null,
+    executor: launch.executor || null,
   });
 });
 
@@ -1413,19 +1190,16 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
   }
 
   const incusName = `${INSTANCE_PREFIX}${name}`;
-  const creation = activeCreations.get(incusName);
 
-  // If we have an active creation record, use it
-  if (creation) {
-    return res.json({
-      success: true,
-      phase: creation.phase,
-      message: creation.message,
-      error: creation.error,
-      ip: creation.ip,
-      initScriptWarning: creation.initScriptWarning || null,
-      elapsed: Math.round((Date.now() - creation.startTime) / 1000),
-    });
+  // The records: the newest launch job of this guest, the setup it queued
+  // and the routes step that setup queued. The same answer after a closed
+  // browser or a restarted API.
+  try {
+    const { createStatus } = await import('../mock2/ops.js');
+    const view = createStatus(getDb(), incusName);
+    if (view) return res.json({ success: true, ...view });
+  } catch (e) {
+    console.error(`[LXC] create-status for ${incusName}: ${e?.message || e}`);
   }
 
   // No active creation — check if container exists already (maybe from a previous creation)
@@ -2032,84 +1806,16 @@ function normalizeLxcPathPrefix(value) {
 // other endpoint uses.
 // Exported for the MCP set_route tool, which binds domains to LXC upstreams
 // through the same per-container service rows this route uses.
-export function findOrCreateLxcService(db, name, ip) {
-  const existing = db
-    .prepare(`SELECT * FROM services WHERE lxc_container_name = ? AND is_admin = 0 LIMIT 1`)
-    .get(name);
-  if (existing) {
-    // Deliberately does NOT write target_ip here.
-    //
-    // One services row owns every route on the container, so writing the new
-    // address makes it live for ALL of them — while the caller goes on to
-    // re-render only the single domain it is editing. That is exactly how
-    // git.fractionate.ai ended up stranded on an address a lease had since
-    // reassigned to another project's guest: the row said .224, its site file
-    // still said .22, and nothing ever reconciled them.
-    //
-    // Callers use syncLxcServiceUpstream() below, which moves the address and
-    // re-renders every affected domain together, or leaves both stores alone.
-    return existing;
-  }
-  const id = uuidv4();
-  db.prepare(
-    `INSERT INTO services
-       (id, name, kind, runtime, target_ip, lxc_container_name, type, status)
-     VALUES (?, ?, 'container_service', 'lxc', ?, ?, 'docker', 'active')`
-  ).run(id, name, ip, name);
-  return db.prepare(`SELECT * FROM services WHERE id = ?`).get(id);
-}
-
-/**
- * Move a per-LXC service row onto the guest's current address, bringing every
- * domain it serves with it.
- *
- * Call this on any path that has a fresh address in hand and is about to write
- * a route. It no-ops when the address is unchanged (the common case), so it is
- * safe to call unconditionally.
- *
- * Never throws: a failure here means the address did not move and both stores
- * were left as they were, which is a warning on an otherwise-successful route
- * write rather than a reason to fail it. The returned warning is surfaced to
- * the operator, and the drift report (lib/route-drift.js) will keep flagging
- * the mismatch until it is resolved.
- *
- * @param {object} db
- * @param {object} service  row from findOrCreateLxcService
- * @param {string} ip       the guest's current address
- * @returns {Promise<{changed: boolean, domains: string[], warning: string|null}>}
- */
+// findOrCreateLxcService / syncLxcServiceUpstream live in lib/guest-routes.js
+// since A-17.7 (the backend-executed configure_routes step shares them and
+// the suite runs them on node:sqlite); this router's wrapper binds the
+// Caddy render bundle.
+export { findOrCreateLxcService } from '../lib/guest-routes.js';
 export async function syncLxcServiceUpstream(db, service, ip) {
-  if (!service || !ip || service.target_ip === ip) {
-    return { changed: false, domains: [], warning: null };
-  }
-  try {
-    const result = await applyServiceUpstream({
-      db,
-      serviceId: service.id,
-      ip,
-      render: caddyRenderDeps,
-    });
-    if (result.changed) {
-      service.target_ip = ip;
-      if (result.domains.length) {
-        console.log(
-          `[LXC] ${service.lxc_container_name}: upstream ${result.oldIp} -> ${ip}, ` +
-          `re-rendered ${result.domains.length} domain(s): ${result.domains.join(', ')}`
-        );
-      }
-    }
-    return { changed: result.changed, domains: result.domains, warning: null };
-  } catch (e) {
-    const detail = e?.message || String(e);
-    console.error(`[LXC] upstream sync failed for ${service.lxc_container_name}:`, detail);
-    return {
-      changed: false,
-      domains: [],
-      warning:
-        `Container address moved to ${ip} but the existing routes could not be ` +
-        `re-rendered (${detail}). Those routes still point at ${service.target_ip || 'an unrecorded address'}.`,
-    };
-  }
+  const r = await syncServiceUpstream(db, service, ip, caddyRenderDeps);
+  if (r.changed && r.domains.length) console.log(`[LXC] ${service.lxc_container_name}: upstream → ${ip}, re-rendered ${r.domains.length} domain(s): ${r.domains.join(', ')}`);
+  if (r.warning) console.error(`[LXC] upstream sync failed for ${service.lxc_container_name}: ${r.warning}`);
+  return r;
 }
 
 // MEET reference layout. Source: deploy/external-proxy/caddy/single-domain.Caddyfile
@@ -3772,12 +3478,11 @@ lxcRouter.post('/containers/:name/start', async (req, res) => {
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    const out = await lifecycleViaRunner('instance_start', incusName, req);
+    // The NAT + DNS fix-up after the start is a `guest_setup` follow-up the
+    // job's executor queues (A-17.7): recorded, not fire-and-forget.
+    const out = await lifecycleViaRunner('instance_start', incusName, req, { fixup: true });
     if (!out.ok) return lifecycleFailure(res, out, `Failed to start container '${name}'`);
-    // Ensure NAT and DNS after start (non-blocking)
-    ensureNetworkNat().catch(() => {});
-    ensureDns(incusName).catch(() => {});
-    res.json({ success: true, message: `Container '${name}' started.`, jobId: out.jobId, status: out.instanceState || null, verificationJobId: out.verificationJobId || null });
+    res.json({ success: true, message: `Container '${name}' started.`, jobId: out.jobId, status: out.instanceState || null, verificationJobId: out.verificationJobId || null, setupJobId: out.setupJobId || null });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -4140,12 +3845,9 @@ lxcRouter.post('/containers/:name/restart', async (req, res) => {
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    const out = await lifecycleViaRunner('instance_restart', incusName, req, { force: true });
+    const out = await lifecycleViaRunner('instance_restart', incusName, req, { force: true, fixup: true });
     if (!out.ok) return lifecycleFailure(res, out, `Failed to restart container '${name}'`);
-    // Ensure NAT and DNS after restart (non-blocking)
-    ensureNetworkNat().catch(() => {});
-    ensureDns(incusName).catch(() => {});
-    res.json({ success: true, message: `Container '${name}' restarted.`, jobId: out.jobId, status: out.instanceState || null, verificationJobId: out.verificationJobId || null });
+    res.json({ success: true, message: `Container '${name}' restarted.`, jobId: out.jobId, status: out.instanceState || null, verificationJobId: out.verificationJobId || null, setupJobId: out.setupJobId || null });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -4178,11 +3880,9 @@ lxcRouter.post('/containers/:name/reboot', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     console.log(`[LXC] Reboot (graceful) requested for ${incusName}`);
-    const out = await lifecycleViaRunner('instance_restart', incusName, req, { force: false });
+    const out = await lifecycleViaRunner('instance_restart', incusName, req, { force: false, fixup: true });
     if (!out.ok) return lifecycleFailure(res, out, `Failed to reboot instance '${name}'`);
-    ensureNetworkNat().catch(() => {});
-    ensureDns(incusName).catch(() => {});
-    res.json({ success: true, message: `Instance '${name}' is rebooting.`, jobId: out.jobId, status: out.instanceState || null });
+    res.json({ success: true, message: `Instance '${name}' is rebooting.`, jobId: out.jobId, status: out.instanceState || null, setupJobId: out.setupJobId || null });
   } catch (error) {
     res.status(500).json({
       success: false,

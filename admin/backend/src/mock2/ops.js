@@ -13,6 +13,9 @@ import { submitRunnerJob, resolveRetryOf, runSubmittedJob } from '../lib/setup-e
 import { DUMP_NAME_RE, ENV_COPY_NAME_RE, recoverySetOf, bindRecoverySet } from '../lib/setup-engine/restore-logic.js';
 import { getJob } from '../lib/setup-engine/store.js';
 import { LIFECYCLE_JOB_KINDS, LIFECYCLE_PROFILE, validateLifecycleParams } from '../lib/setup-engine/lifecycle-logic.js';
+import { SETUP_PHASES, validateSetupParams, createStatusView, normalizeServices, BACKEND_STEP_KINDS } from '../lib/setup-engine/setup-logic.js';
+import { drainBackendSteps, waitForJob } from '../lib/setup-engine/backend.js';
+import { listJobs, jobView } from '../lib/setup-engine/store.js';
 import { createHash } from 'node:crypto';
 
 const noStore = () => ({ ok: false, step: 'submit', error: 'the setup engine store is not configured; the operation cannot be recorded, so it is not run' });
@@ -131,7 +134,7 @@ export { LIFECYCLE_JOB_KINDS };
 // digest } | { ok: false, error }. Pure: the plan is what a confirmation
 // token is bound to (kind, guest, snapshot, force, the confirmed identity,
 // the launch parameters), and params is what the job carries.
-export function resolveLifecyclePlan(db, { kind, containerName, force = false, snapshot = null, note = null, expect = null, managed = false, webPort = null, guard = null, image = null, profile = null, config = null, vm = false, network = null, rootSize = null }) {
+export function resolveLifecyclePlan(db, { kind, containerName, force = false, snapshot = null, note = null, expect = null, managed = false, webPort = null, guard = null, image = null, profile = null, config = null, vm = false, network = null, rootSize = null, setup = null, fixup = false }) {
   if (!LIFECYCLE_JOB_KINDS.includes(kind)) return { ok: false, error: `unknown lifecycle operation '${kind}'` };
   const prof = LIFECYCLE_PROFILE[kind];
   const params = { container: String(containerName || '') };
@@ -146,13 +149,27 @@ export function resolveLifecyclePlan(db, { kind, containerName, force = false, s
     if (vm === true) params.vm = true;
     if (network) params.network = String(network);
     if (rootSize) params.rootSize = String(rootSize);
+    // The post-launch setup (A-17.7) the executor queues as a follow-up of
+    // the launch, bound to the guest it reads back: phases in their fixed
+    // order, the script by reference, the services validated here.
+    if (setup && typeof setup === 'object') {
+      const phases = [...SETUP_PHASES].filter((ph) => Array.isArray(setup.phases) && setup.phases.includes(ph));
+      params.setup = { phases };
+      if (setup.addressTimeoutMs != null) params.setup.addressTimeoutMs = Number(setup.addressTimeoutMs);
+      if (setup.initTimeoutMs != null) params.setup.initTimeoutMs = Number(setup.initTimeoutMs);
+      if (setup.resolvers) params.setup.resolvers = setup.resolvers;
+      if (setup.initScript) params.setup.initScript = { ref: String(setup.initScript.ref), sha256: String(setup.initScript.sha256), bytes: Number(setup.initScript.bytes) };
+      if (setup.services) { params.setup.services = setup.services; params.setup.serviceName = String(setup.serviceName || ''); }
+    }
   }
+  // The post-start fix-up (NAT + DNS) a start / restart asks for.
+  if (fixup === true && (kind === 'instance_start' || kind === 'instance_restart')) params.fixup = true;
   if (managed === true && (kind === 'instance_start' || kind === 'instance_restart')) {
     params.managed = true; params.webPort = Number(webPort) || 3000; params.unit = 'mock2-dev.service'; params.environmentFile = '/etc/environment'; params.guard = guard || null;
   }
   const v = validateLifecycleParams(kind, params);
   if (!v.ok) return { ok: false, error: v.reason };
-  const plan = { kind, container: params.container, ...(params.snapshot ? { snapshot: params.snapshot } : {}), force: params.force === true, expect: params.expect || null, ...(kind === 'instance_create' ? { image: params.image, profile: params.profile || 'default', config: params.config || {}, vm: params.vm === true, network: params.network || null, root_size: params.rootSize || null } : {}) };
+  const plan = { kind, container: params.container, ...(params.snapshot ? { snapshot: params.snapshot } : {}), force: params.force === true, expect: params.expect || null, ...(kind === 'instance_create' ? { image: params.image, profile: params.profile || 'default', config: params.config || {}, vm: params.vm === true, network: params.network || null, root_size: params.rootSize || null, setup: params.setup ? { phases: params.setup.phases, init_script: params.setup.initScript?.sha256 || null, services: (params.setup.services || []).map((s) => s.domain) } : null } : {}), ...(params.fixup ? { fixup: true } : {}) };
   return { ok: true, plan, params, digest: planDigest(plan) };
 }
 
@@ -162,7 +179,7 @@ export function resolveLifecyclePlan(db, { kind, containerName, force = false, s
 // guest's lease is held or a mutating job is open, and when no executor is
 // available. `managed` is resolved here from the project registry for a
 // start / restart: a project guest gets the ladder as a follow-up.
-export async function runLifecycle({ kind, containerName, force = false, snapshot = null, note = null, expect = null, image = null, profile = null, config = null, vm = false, network = null, rootSize = null, requestedBy = null, via = 'system', onEvent = null, detach = false, awaitKick = false, waitMs = null }) {
+export async function runLifecycle({ kind, containerName, force = false, snapshot = null, note = null, expect = null, image = null, profile = null, config = null, vm = false, network = null, rootSize = null, setup = null, fixup = false, requestedBy = null, via = 'system', onEvent = null, detach = false, awaitKick = false, waitMs = null }) {
   const store = containerLockStore();
   if (!store) return noStore();
   const db = store.getDb();
@@ -170,12 +187,108 @@ export async function runLifecycle({ kind, containerName, force = false, snapsho
   if (kind === 'instance_start' || kind === 'instance_restart') {
     try { const refs = await resolveDeployParams({ containerName }); managed = refs.projectId != null; webPort = refs.webPort; guard = refs.guard || null; } catch { managed = false; }
   }
-  const res = resolveLifecyclePlan(db, { kind, containerName, force, snapshot, note, expect, managed, webPort, guard, image, profile, config, vm, network, rootSize });
+  const res = resolveLifecyclePlan(db, { kind, containerName, force, snapshot, note, expect, managed, webPort, guard, image, profile, config, vm, network, rootSize, setup, fixup });
   if (!res.ok) return { ok: false, step: 'plan', code: 'INVALID', error: res.error };
   const sub = submitRunnerJob(db, { kind, app: res.params.container, params: res.params, configRefs: { ...res.plan, kind: undefined, managed }, requestedBy, via });
   if (sub.error) return { ok: false, step: 'submit', error: sub.error, code: sub.code, holder: sub.holder };
+  const out = await runSubmittedJob(db, sub.job, { store, deps: inProcessExecutorDeps(store), env: store.env || process.env, onEvent, detach, awaitKick, waitMs });
+  if (out.setupJobId == null && out.jobId) { const row = getJob(db, out.jobId); const prog = row ? JSON.parse(row.progress_json || '{}') : {}; out.setupJobId = prog.setup_job_id || null; }
+  return out;
+}
+
+// ── the post-launch / post-start guest setup (A-17.7) ─────────────────────
+//
+// Normally a FOLLOW-UP the executor queues from a create (the whole plan) or
+// a start / restart (`fixup`), bound to the guest it read back. Submitted
+// directly (an operator re-running the setup of a guest that is there), it
+// is exclusive like a lifecycle verb: refused while the guest is busy or no
+// executor is live, never queued behind.
+
+export function resolveSetupPlan(db, { containerName, phases, expect = null, initScript = null, services = null, serviceName = null, addressTimeoutMs = null, initTimeoutMs = null, resolvers = null, retryOf = null }) {
+  const r = resolveRetryOf(db, { jobId: retryOf, app: containerName, kind: 'guest_setup' });
+  if (r.error) return { ok: false, error: r.error };
+  const params = { container: String(containerName || ''), phases: [...SETUP_PHASES].filter((ph) => Array.isArray(phases) && phases.includes(ph)) };
+  if (expect && (expect.uuid != null || expect.created_at != null)) params.expect = { ...(expect.uuid != null ? { uuid: String(expect.uuid) } : {}), ...(expect.created_at != null ? { created_at: String(expect.created_at) } : {}) };
+  if (initScript) params.initScript = { ref: String(initScript.ref), sha256: String(initScript.sha256), bytes: Number(initScript.bytes) };
+  if (services) { params.services = services; params.serviceName = String(serviceName || ''); }
+  if (addressTimeoutMs != null) params.addressTimeoutMs = Number(addressTimeoutMs);
+  if (initTimeoutMs != null) params.initTimeoutMs = Number(initTimeoutMs);
+  if (resolvers) params.resolvers = resolvers;
+  if (r.job) params.retryOf = r.job.id;
+  const v = validateSetupParams(params);
+  if (!v.ok) return { ok: false, error: v.reason };
+  const plan = { kind: 'guest_setup', container: params.container, phases: params.phases, expect: params.expect || null, init_script: params.initScript?.sha256 || null, services: (params.services || []).map((s) => s.domain), retry_of: r.job?.id || null };
+  return { ok: true, plan, params, retryJob: r.job, digest: planDigest(plan) };
+}
+
+export async function runGuestSetup({ containerName, phases, expect = null, initScript = null, services = null, serviceName = null, addressTimeoutMs = null, initTimeoutMs = null, resolvers = null, retryOf = null, requestedBy = null, via = 'system', onEvent = null, detach = false, awaitKick = false, waitMs = null }) {
+  const store = containerLockStore();
+  if (!store) return noStore();
+  const db = store.getDb();
+  const res = resolveSetupPlan(db, { containerName, phases, expect, initScript, services, serviceName, addressTimeoutMs, initTimeoutMs, resolvers, retryOf });
+  if (!res.ok) return { ok: false, step: 'plan', code: 'INVALID', error: res.error };
+  const sub = submitRunnerJob(db, { kind: 'guest_setup', app: res.params.container, params: res.params, configRefs: { ...res.plan, kind: undefined }, requestedBy, via, retryOf: res.retryJob?.id || null });
+  if (sub.error) return { ok: false, step: 'submit', error: sub.error, code: sub.code, holder: sub.holder };
   return runSubmittedJob(db, sub.job, { store, deps: inProcessExecutorDeps(store), env: store.env || process.env, onEvent, detach, awaitKick, waitMs });
 }
+
+// backendStepDeps(store) → { configureRoutes } — the route configurator the
+// backend-executed `configure_routes` step calls: ProxyPilot's own rows and
+// its Caddy render (lib/guest-routes.js over the services router's render
+// bundle). The step's ownership `fence` is forwarded as-is: it is checked
+// before every row, every site file, the validation, the reload and every
+// write of a rollback. The Caddy bundle (`store.renderDeps`) is the ONE
+// external dependency a test replaces; the adapter, the configurator and
+// the render logic stay the production code. A store may still supply a
+// whole `configureRoutes` of its own.
+export function backendStepDeps(store = containerLockStore()) {
+  if (store?.configureRoutes) return { configureRoutes: store.configureRoutes };
+  return {
+    configureRoutes: async ({ name, ip, services, fence = null }) => {
+      const { configureGuestRoutes } = await import('../lib/guest-routes.js');
+      const render = store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;
+      return configureGuestRoutes(store.getDb(), { name, ip, services, render, fence });
+    },
+  };
+}
+
+// drainBackendStepsNow(store) — the boot / interval / on-demand drain of the
+// backend's own steps. One drain at a time in this process; a second caller
+// during a drain gets the running one.
+let backendDrain = null;
+export async function drainBackendStepsNow(store = containerLockStore(), { max = 5, nowMs, keepAliveMs } = {}) {
+  if (!store) return { skipped: 'no_store', ran: [] };
+  if (backendDrain) return backendDrain;
+  backendDrain = drainBackendSteps(store.getDb(), { deps: backendStepDeps(store), owner: store.owner, max, ...(nowMs ? { nowMs } : {}), ...(keepAliveMs ? { keepAliveMs } : {}) }).finally(() => { backendDrain = null; });
+  return backendDrain;
+}
+
+// createStatus(db, incusName, { nowMs }) → the dashboard's create-status
+// answer for a guest, derived from the records alone: the newest
+// instance_create job of the guest, the guest_setup it queued and the
+// configure_routes that setup queued. Null when no create was recorded.
+export function createStatus(db, incusName, { nowMs = Date.now() } = {}) {
+  const creates = listJobs(db, { app: incusName, limit: 200 }).filter((j) => j.kind === 'instance_create');
+  if (!creates.length) return null;
+  const create = jobView(creates[0]);
+  const setupId = create.progress?.setup_job_id || null;
+  const setup = setupId ? jobView(getJob(db, setupId)) : null;
+  const routesId = setup?.progress?.routes_job_id || null;
+  const routes = routesId ? jobView(getJob(db, routesId)) : null;
+  const view = createStatusView({ create, setup, routes, nowMs });
+  if (view && routes && ['queued'].includes(routes.status) && BACKEND_STEP_KINDS.includes(routes.kind)) drainBackendStepsNow().catch(() => {});
+  return view;
+}
+
+// waitForSetup(db, setupJobId, { timeoutMs }) → the terminal setup row
+// (through jobView) or null on timeout — what the MCP create waits on for
+// the address.
+export async function waitForSetup(db, setupJobId, { timeoutMs = 60_000, onEvent = null } = {}) {
+  const row = await waitForJob(db, setupJobId, { timeoutMs, onEvent, pollMs: 500 });
+  return row ? jobView(row) : null;
+}
+
+export { normalizeServices };
 
 // lifecycleHttpStatus(out) → the HTTP status a REST route answers a failed
 // runLifecycle with: 409 for a held guest or a changed target, 503 for no

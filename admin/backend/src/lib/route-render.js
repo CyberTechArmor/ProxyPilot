@@ -94,8 +94,18 @@ export async function snapshotDomainConfigs(domains, caddyFilePath) {
  * @param {(domain: string) => string} opts.caddyFilePath
  * @param {(path: string, content: string) => Promise<void>} opts.writeConfig
  * @param {(path: string) => Promise<void>} opts.removeConfig
+ * @param {(() => void)|null} [opts.fence]  ownership check, called before EVERY
+ *   write this render makes — each domain's regenerate, the validation, the
+ *   reload, and each write and the reload of a rollback. A caller whose lease
+ *   is no longer its own throws from it (an error with `code: 'LEASE_LOST'`):
+ *   the render stops at once, and a rollback is NOT attempted, because the
+ *   site files now belong to whoever took the lease and a stale worker's
+ *   "restore" would overwrite the new owner's work. The lease error is
+ *   rethrown as-is so the caller records it truthfully.
  * @returns {Promise<{domains: string[]}>}
  */
+export const isLeaseLost = (e) => !!e && (e.code === 'LEASE_LOST' || e.code === 'SHARED_LEASE_LOST' || e.name === 'LeaseLostError');
+
 export async function renderDomains({
   db,
   domains,
@@ -105,14 +115,22 @@ export async function renderDomains({
   caddyFilePath,
   writeConfig,
   removeConfig,
+  fence = null,
 }) {
   const targets = [...new Set(domains.filter(Boolean))];
   if (targets.length === 0) return { domains: [] };
+  const guard = () => { if (typeof fence === 'function') fence(); };
 
+  guard();
   const backups = await snapshotDomainConfigs(targets, caddyFilePath);
 
+  // The rollback: every file back to its snapshot, then Caddy back onto the
+  // known-good config — each write behind the fence. Ownership lost midway
+  // ends the rollback where it stands (nothing further is overwritten) and
+  // surfaces the lease error in place of the original failure.
   const restore = async () => {
     for (const b of backups) {
+      guard();
       try {
         if (b.existed && b.content !== null) await writeConfig(b.path, b.content);
         else await removeConfig(b.path);
@@ -120,31 +138,34 @@ export async function renderDomains({
         console.error(`[route-render] restore failed for ${b.domain}:`, e?.message || e);
       }
     }
+    guard();
     try { await reload(); } catch { /* already reporting the original failure */ }
+  };
+  const failWith = async (err, message) => {
+    if (isLeaseLost(err)) throw err;
+    try { await restore(); } catch (e) { if (isLeaseLost(e)) throw e; }
+    throw new Error(message);
   };
 
   try {
-    for (const domain of targets) await regenerate(db, domain);
+    for (const domain of targets) { guard(); await regenerate(db, domain); }
   } catch (err) {
-    await restore();
-    throw new Error(`Failed to render Caddy config: ${err?.message || err}`);
+    await failWith(err, `Failed to render Caddy config: ${err?.message || err}`);
   }
 
   // Never leave Caddy running a config we have not validated.
   try {
+    guard();
     await adapt();
   } catch (err) {
-    await restore();
-    throw new Error(
-      `Generated Caddy config failed validation: ${err?.stderr || err?.message || err}`
-    );
+    await failWith(err, `Generated Caddy config failed validation: ${err?.stderr || err?.message || err}`);
   }
 
   try {
+    guard();
     await reload();
   } catch (err) {
-    await restore();
-    throw new Error(`Caddy reload failed: ${err?.stderr || err?.message || err}`);
+    await failWith(err, `Caddy reload failed: ${err?.stderr || err?.message || err}`);
   }
 
   return { domains: targets };
@@ -164,7 +185,8 @@ export async function renderDomains({
  * @param {object} opts.render              the dependency bundle for renderDomains
  * @returns {Promise<{changed: boolean, oldIp: string|null, newIp: string, domains: string[]}>}
  */
-export async function applyServiceUpstream({ db, serviceId, ip, render }) {
+export async function applyServiceUpstream({ db, serviceId, ip, render, fence = null }) {
+  const guard = () => { if (typeof fence === 'function') fence(); };
   const row = db.prepare(`SELECT id, target_ip FROM services WHERE id = ?`).get(serviceId);
   if (!row) throw new Error(`Service ${serviceId} not found`);
 
@@ -175,19 +197,25 @@ export async function applyServiceUpstream({ db, serviceId, ip, render }) {
 
   const domains = domainsForService(db, serviceId);
 
+  guard();
   db.prepare(
     `UPDATE services SET target_ip = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
   ).run(ip, serviceId);
 
   try {
-    await renderDomains({ db, domains, ...render });
+    await renderDomains({ db, domains, ...render, fence });
   } catch (err) {
     // renderDomains has already restored the site files; put the row back too
-    // so the two stores stay in agreement on the failure path.
-    try {
-      db.prepare(`UPDATE services SET target_ip = ? WHERE id = ?`).run(oldIp, serviceId);
-    } catch (e) {
-      console.error('[route-render] failed to revert target_ip:', e?.message || e);
+    // so the two stores stay in agreement on the failure path — unless the
+    // lease was lost: the row is then the new owner's to write, not ours.
+    if (!isLeaseLost(err)) {
+      try {
+        guard();
+        db.prepare(`UPDATE services SET target_ip = ? WHERE id = ?`).run(oldIp, serviceId);
+      } catch (e) {
+        if (isLeaseLost(e)) throw e;
+        console.error('[route-render] failed to revert target_ip:', e?.message || e);
+      }
     }
     throw err;
   }

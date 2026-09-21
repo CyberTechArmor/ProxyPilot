@@ -9,7 +9,7 @@
 // eth0 is on the project subnet from birth; the bridge is torn down on archive
 // and on delete.
 //
-// NAT is left ON (ensureNetworkNat would NAT it anyway — risk R2 — and the fence
+// NAT is left ON (the setup engine's network_nat phase would NAT it anyway — risk R2 — and the fence
 // is the firewall's default-deny in FRONT of the NAT path, not NAT-off). DHCP is
 // left ON so Incus's dnsmasq assigns the container address and serves DNS on the
 // gateway (the container's resolver, allowed through the fence to the gateway

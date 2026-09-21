@@ -270,6 +270,85 @@ test('ratchet (A-17.6): the Incus lifecycle and snapshot verbs of the dashboard 
   assert.match(logic, /p\.command != null \|\| p\.script != null \|\| p\.argv != null \|\| p\.args != null \|\| p\.options != null/);
 });
 
+test('ratchet (A-17.7): the post-launch and post-start fix-ups are setup-engine phases; the dashboard and MCP run no NAT / DNS / init-script command and keep no in-memory creation state', () => {
+  const lxcRoute = src('routes/lxc.js');
+  assert.doesNotMatch(lxcRoute, /async function ensureDns|export async function ensureNetworkNat|function ensureNetworkNat/, 'the NAT and DNS fix-ups are phases of the guest_setup job');
+  assert.doesNotMatch(lxcRoute, /sysctl -w net\.ipv4\.ip_forward|iptables -C DOCKER-USER|incus network set \$\{net\.name\} ipv4\.nat/, 'no host NAT command in the route');
+  assert.doesNotMatch(lxcRoute, /incus exec \$\{incusName\} -- (tee \/tmp\/pp-init\.sh|chmod \+x \/tmp\/pp-init\.sh|sh \/tmp\/pp-init\.sh|rm -f \/tmp\/pp-init\.sh)/, 'the init script runs contained in the runner, from an input file by reference');
+  assert.doesNotMatch(lxcRoute, /> \/etc\/resolv\.conf|rm -f \/etc\/resolv\.conf/, 'no guest DNS write in the route');
+  assert.doesNotMatch(lxcRoute, /const activeCreations = new Map\(\)|activeCreations\.(get|set|has|delete)\(/, 'creation progress is read from the records, never a map an API restart forgets');
+  assert.match(lxcRoute, /writeInitScriptInput\(dir, initScript\.trim\(\)\)/, 'the script becomes a 0600 input next to the database');
+  assert.match(lxcRoute, /setup\.phases\.push\('init_script'\)/); assert.match(lxcRoute, /setup\.phases\.push\('routes'\)/);
+  assert.match(lxcRoute, /lifecycleViaRunner\('instance_create', incusName, req, \{\n\s+image: String\(image\), profile: profile \? String\(profile\) : 'default', config: launchConfig, vm: isVm, rootSize: isVm \? '20GiB' : null, setup, detach: true,/, 'the launch job carries the setup plan');
+  assert.match(lxcRoute, /lifecycleViaRunner\('instance_start', incusName, req, \{ fixup: true \}\)/, 'start asks for the NAT + DNS follow-up');
+  assert.match(lxcRoute, /lifecycleViaRunner\('instance_restart', incusName, req, \{ force: true, fixup: true \}\)/, 'restart asks for it');
+  assert.match(lxcRoute, /lifecycleViaRunner\('instance_restart', incusName, req, \{ force: false, fixup: true \}\)/, 'reboot asks for it');
+  assert.match(lxcRoute, /const view = createStatus\(getDb\(\), incusName\);/, 'create-status reads the records');
+  assert.match(lxcRoute, /openJobsFor\(getDb\(\), incusName, \['instance_create', 'guest_setup'\]\)/, 'an open create is refused from the records');
+  const createRoute = lxcRoute.slice(lxcRoute.indexOf("lxcRouter.post('/containers', async (req, res) => {"), lxcRoute.indexOf("lxcRouter.get('/containers/:name/create-status'"));
+  assert.doesNotMatch(createRoute, /INSERT INTO service_http_routes|renderDomains\(|syncLxcServiceUpstream\(|findOrCreateLxcService\(/, 'the create-time route rows and their render are the configure_routes step (lib/guest-routes.js), not the request handler');
+  assert.doesNotMatch(createRoute.slice(createRoute.indexOf("lifecycleViaRunner('instance_create'")), /execOnHost\(|spawnOnHost\(/, 'the create route runs no host command after the launch (the pre-flight reads before it stay)');
+  assert.match(lxcRoute, /export \{ findOrCreateLxcService \} from '\.\.\/lib\/guest-routes\.js';/);
+  const mcp = src('routes/mcp.js');
+  assert.doesNotMatch(mcp, /ensureNetworkNat/, 'MCP\'s create does not run NAT itself');
+  assert.match(mcp, /runLifecycle\(\{ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, rootSize: diskGb !== null \? `\$\{diskGb\}GiB` : null, setup: \{ phases: \['network_nat', 'await_address'\], addressTimeoutMs: 15_000 \}/, 'the launch carries the NAT + address plan');
+  assert.match(mcp, /await waitForSetup\(containerLockStore\(\)\.getDb\(\), launch\.setupJobId, \{ timeoutMs: 60_000 \}\)/, 'the tool waits on the setup record, not on a host poll');
+  assert.doesNotMatch(mcp, /for \(let i = 0; i < 15; i \+= 1\) \{\n\s+const probe = await fetchLxcInstance\(incusName\);/, 'no DHCP poll in the tool');
+  // The engine side: fixed argv, contained guest scripts, no shell of its own.
+  const op = src('lib/setup-engine/setup-op.js');
+  assert.doesNotMatch(op, /'sh', '-c'|spawn\(|execOnHost|runHostCapture|nsenter|exec\.guest\(/, 'the host channel and the contained guest executor only');
+  assert.match(op, /containedGuest\(\{ exec, container: name, job \}\)/);
+  // The review of 91933cf (R-039): the timeout kill stops and inspects the attempt's containment GROUP, from outside it; only an empty group releases the hold.
+  assert.match(op, /const killGuest = uncontainedGuest\(\{ exec, container: name, job \}\);/, 'the group kill is the one script issued outside containment');
+  assert.match(op, /const k = await killGuest\(initKillScript\(\{ jobId \}\), 20_000\); kill = parseInitKillReport\(k\.stdout\);/);
+  assert.match(op, /const stopped = killed === 'gone';/, 'only an empty group is a recorded timeout');
+  assert.doesNotMatch(op, /guest\('init_script_kill'/, 'never through the contained executor (it would join the group it kills)');
+  const opKit = src('lib/setup-engine/op-kit.js');
+  assert.match(opKit, /export function uncontainedGuest\(\{ exec, container, job = noopJob\(\) \}\) \{\n\s+return async \(script, timeoutMs = 20_000\) => \{\n\s+job\.fence\(\{ safe: false \}\);/, 'the exception is fenced and named');
+  assert.match(op, /mark\('init_script', \{ setup: true, resumable: true, disruptive: false, init_issued: true,[^\n]*\{ required: true \}\)/, 'the checkpoint before the script is mandatory');
+  assert.match(op, /if \(prior && prior\.init_issued === true\) \{/, 'a resumed job reads, never re-runs');
+  assert.match(op, /if \(origin && \['done', 'failed', 'timed_out', 'uncertain'\]\.includes\(origin\.state\)\) \{/, 'a retry never repeats an issued or completed init');
+  const logic = src('lib/setup-engine/setup-logic.js');
+  assert.match(logic, /p\.command != null \|\| p\.script != null \|\| p\.argv != null \|\| p\.args != null \|\| p\.options != null \|\| p\.initScriptText != null/);
+  assert.match(logic, /export const HOST_NETWORK_LOCK = '@host\/network';/); assert.match(logic, /export const HOST_ROUTES_LOCK = '@host\/routes';/);
+  // The review of 92404d9 (platform ledger R-034…R-037): the hold, the renewed shared leases, the private output, the completion contract.
+  assert.match(logic, /^\s+`umask 077`,$/m, 'every guest artifact is created owner-only from its first byte');
+  assert.doesNotMatch(logic, /tail -c|INIT_TAIL_BYTES/, 'the wrapper never prints the script\'s output back');
+  assert.doesNotMatch(op, /(?<![a-z])tail: /, 'no output tail on the record');
+  assert.match(op, /const natHost = async \(argv, opts\) => \{\n\s+if \(held && !lease\.renew\(HOST_NETWORK_LOCK\)\) throw new SharedLeaseLostError/, 'every NAT command renews and checks the shared lease first');
+  assert.match(op, /state: 'uncertain', hold: true/, 'an unknown init holds');
+  assert.match(logic, /\$RUN\/\$ID\.units"; CF="\$RUN\/\$ID\.cgroups"/, 'the kill reads the containment records');
+  assert.match(logic, /echo PP_INIT_KILL:norecord/, 'a missing record is its own verdict'); assert.match(logic, /echo "PP_INIT_KILL:unknown \$n"/, 'so is an inspection that could not conclude');
+  assert.doesNotMatch(logic, /PP_INIT_KILL:nopid|kill -0 "\$p" 2>\/dev\/null; then echo "PP_INIT_KILL:alive/, 'the recorded pid alone is never the verdict');
+  assert.doesNotMatch(logic, /kill -(TERM|KILL) -- /, 'signals are spelled kill -s (dash rejects kill -KILL -- -pgid)');
+  const executor = src('lib/setup-engine/executor.js');
+  assert.match(executor, /if \(result\.hold\) \{\n[\s\S]{0,400}keepLease = true;\n\s+markLockStale\(db, \{ app: job\.app, nowMs: nowMs\(\), recoveryJobId: job\.id \}\);/, 'the executor keeps and flags the lease on an uncertain init');
+  assert.match(executor, /An unresolved hold is checked BEFORE the lease is acquired/, 'the hold is respected whoever the lease names');
+  assert.match(src('lib/setup-engine/logic.js'), /SETUP_JOB_KINDS\.includes\(j\.kind\) && j\.status === 'recovery_required' && j\.outcome === 'init_uncertain'/, 'leaseHold covers an unresolved init');
+  assert.match(src('lib/setup-engine/backend.js'), /if \(isInit && writerStopped !== true\) return \{ ok: false, error: [^\n]*code: 'WRITER_NOT_ESTABLISHED' \};/, 'an init acknowledgement must establish the writer stopped');
+  assert.match(src('routes/setup.js'), /writerStopped: z\.boolean\(\)\.optional\(\)/);
+  const steps = src('lib/setup-engine/backend-steps.js');
+  // The review of afcc895 (R-040): the job CLAIM is heart-beaten with the two locks, first, on every fence and from the keep-alive; a zero-row heartbeat is the executor's own FencedError and revives nothing.
+  assert.match(steps, /const renewAll = \(\) => \{\n\s+if \(!\(heartbeat\(db, \{ id: job\.id, owner, epoch, leaseMs: LEASE_MS, nowMs: nowMs\(\) \}\) > 0\)\) return JOB_CLAIM;\n\s+if \(!\(renewLock\(db, \{ app: job\.app, owner, epoch: lockEpoch/, 'the routes step renews the claim and both leases before every write');
+  assert.match(steps, /const fence = \(\) => \{\n\s+const gone = lost \|\| renewAll\(\);\n\s+if \(gone\) \{ lost = gone; throw gone === JOB_CLAIM \? new FencedError\(job\.id\) : new LeaseLostError\(gone\); \}/, 'a lost claim or lease stops every later write');
+  assert.match(steps, /keepAlive = setInterval\(\(\) => \{ try \{ const gone = renewAll\(\); if \(gone\) lost = gone; \}/, 'claim and leases are renewed between writes (a long adapt or reload never lets any of them lapse)');
+  assert.match(steps, /if \(e instanceof FencedError \|\| e\?\.code === 'FENCED'\) \{ log\('fenced', job\.id\); return \{ status: 'fenced', outcome: null \}; \}/, 'a fenced step writes no outcome of its own');
+  assert.match(src('lib/guest-routes.js'), /const check = \(\) => \{ if \(typeof fence === 'function'\) fence\(\); \};/);
+  // The review of 91933cf (R-038): the fence reaches the real adapter and every write of the render, the upstream move and the rollback.
+  assert.match(src('mock2/ops.js'), /configureRoutes: async \(\{ name, ip, services, fence = null \}\) => \{\n[\s\S]{0,300}return configureGuestRoutes\(store\.getDb\(\), \{ name, ip, services, render, fence \}\);/, 'the production adapter forwards the fence');
+  const render = src('lib/route-render.js');
+  assert.match(render, /for \(const domain of targets\) \{ guard\(\); await regenerate\(db, domain\); \}/, 'each domain\'s site file behind the fence');
+  assert.match(render, /const failWith = async \(err, message\) => \{\n\s+if \(isLeaseLost\(err\)\) throw err;/, 'no rollback after the lease is lost: the files are the new owner\'s');
+  assert.match(render, /const restore = async \(\) => \{\n\s+for \(const b of backups\) \{\n\s+guard\(\);/, 'every write of a rollback behind the fence');
+  assert.match(render, /if \(!isLeaseLost\(err\)\) \{\n\s+try \{\n\s+guard\(\);\n\s+db\.prepare\(`UPDATE services SET target_ip = \? WHERE id = \?`\)\.run\(oldIp, serviceId\);/, 'the upstream revert too');
+  assert.match(logic, /if \(pending\.length\) return \{ status: 'succeeded', outcome: 'setup_pending', completion: 'pending'/, 'a pending required phase is never setup_complete');
+  assert.match(steps, /export function settleSetupRecord\(/, 'a settled routes outcome recomputes the aggregate');
+  // Both executors know the input store: the runner from the database it opened, the backend from its own path.
+  assert.match(src('../../../cli/src/commands/setup-runner.js'), /inputsDir: deps\.inputsDir \|\| setupInputsDir\(o\.install\.dbPath\)/);
+  assert.match(src('index.js'), /configureContainerLockStore\(\{ getDb, owner: backendOwner\(\), inputsDir: setupInputsDir\(databasePath\(\)\) \}\);/);
+  assert.match(src('index.js'), /setInterval\(backendSteps, 15_000\)\.unref\(\);/, 'the backend drains its own steps whatever the policy');
+});
+
 test('ratchet: the seed auth component refuses its dev defaults in production and marks its secrets as minted', () => {
   const doc = JSON.parse(src('mock2/framework-seed/proxypilot-auth.component.json'));
   const cfg = doc.contract.config;

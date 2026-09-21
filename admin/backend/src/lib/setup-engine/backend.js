@@ -17,9 +17,12 @@
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { ownerIdentity, reconcileDecision, recoveryJobFrom, verifyJobFrom, parseJson, runnerIsLive, RUNNER_LIVE_MS, validateRunnerJob, TERMINAL_STATUS, executorPolicy, RUNNER_JOB_KINDS } from './logic.js';
-import { runOnce, recordUncertainLifecycle } from './executor.js';
+import { setupOutcome } from './setup-logic.js';
+import { runOnce, recordUncertainLifecycle, recordUncertainSetup } from './executor.js';
+import { runBackendSteps, settleSetupRecord } from './backend-steps.js';
+import { BACKEND_STEP_KINDS, SETUP_JOB_KINDS } from './setup-logic.js';
 import {
-  staleRunningJobs, readLock, releaseLock, markLockStale, clearStaleLock, recordJobOutcome, annotateTerminalOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners, appendEvent,
+  staleRunningJobs, readLock, releaseLock, markLockStale, clearStaleLock, recordJobOutcome, annotateTerminalOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners, appendEvent, annotateJobProgress,
 } from './store.js';
 
 let identity = null;
@@ -41,9 +44,12 @@ export function sweepSetupEngineOnBoot(db, { owner = backendOwner(), nowMs = Dat
     if (d.action === 'record_interrupted') {
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
       if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      // A backend step that died leaves its phase on the record it served.
+      if (BACKEND_STEP_KINDS.includes(job.kind)) noteInterruptedStep(db, { job, nowMs });
       summary.interrupted.push(job.id);
     } else if (d.action === 'record_uncertain') {
-      recordUncertainLifecycle(db, { job, lock, owner, reason: d.reason, nowMs });
+      if (d.setup) recordUncertainSetup(db, { job, lock, owner, reason: d.reason, nowMs });
+      else recordUncertainLifecycle(db, { job, lock, owner, reason: d.reason, nowMs });
       summary.interrupted.push(job.id);
     } else if (d.action === 'verify') {
       const spec = verifyJobFrom(job, { nowIso: new Date(nowMs).toISOString() });
@@ -74,20 +80,46 @@ export function sweepSetupEngineOnBoot(db, { owner = backendOwner(), nowMs = Dat
   return summary;
 }
 
-// acknowledgeUncertainJob(db, { id, by, via, nowMs }) → { ok, job, released }
-// | { ok: false, error }. An operator's explicit resolution of a lifecycle
-// verb whose outcome the record could not establish (`interrupted_uncertain`):
-// they looked at the guest and say so. The acknowledgement is recorded on the
-// job (an event, the outcome) and the stale lease that records THIS job's
-// condition is released — nothing else is; a lease recording a different
-// condition stays. Idempotent: a second acknowledgement releases nothing and
-// says the job was already acknowledged.
-export function acknowledgeUncertainJob(db, { id, by = null, via = 'ui', note = null, nowMs = Date.now() }) {
+function noteInterruptedStep(db, { job, nowMs }) {
+  const origin = ((parseJson(job.plan_json) || {}).params || {}).origin || {};
+  if (!origin.jobId || !getJob(db, origin.jobId)) return;
+  settleSetupRecord(db, { setupJobId: origin.jobId, createJobId: origin.createJobId || null, phase: 'routes', update: { state: 'failed', job: job.id, detail: `the backend died while configuring the routes (job ${job.id}); retry that job` }, event: `configure_routes job ${job.id}: interrupted — retry it`, nowMs });
+}
+
+// drainBackendSteps(db, { deps, owner, max, nowMs }) — the backend's own
+// steps (configure_routes), whatever the executor policy: on boot, on the
+// interval, and when a caller has just seen one queued. Idempotent and safe
+// to call concurrently: the claim is a compare-and-swap.
+export async function drainBackendSteps(db, { deps, owner = backendOwner(), max = 5, nowMs = () => Date.now(), log = () => {}, sleep, keepAliveMs } = {}) {
+  return runBackendSteps({ db, owner, deps, max, nowMs, log, sleep, keepAliveMs });
+}
+
+// acknowledgeUncertainJob(db, { id, by, via, note, writerStopped, nowMs })
+// → { ok, job, released } | { ok: false, error, code }. An operator's
+// explicit resolution of a condition the record could not establish:
+//   * a lifecycle verb (`interrupted_uncertain`): they looked at the guest
+//     and say so;
+//   * a guest setup whose init script's completion is unknown
+//     (`init_uncertain`, A-17.7): they must ESTABLISH that the script's
+//     writer has stopped (the recorded pid is gone, nothing of it is still
+//     changing the guest) and say so with `writerStopped: true` — an
+//     acknowledgement without it is refused (`WRITER_NOT_ESTABLISHED`) and
+//     the hold stands. The script is never replayed by the acknowledgement.
+// The acknowledgement is recorded on the job (an event, the outcome, the
+// init phase marked acknowledged) and the stale lease that records THIS
+// job's condition is released — nothing else is; a lease recording a
+// different condition stays. Idempotent: a second acknowledgement releases
+// nothing and says the job was already acknowledged.
+export function acknowledgeUncertainJob(db, { id, by = null, via = 'ui', note = null, writerStopped = null, nowMs = Date.now() }) {
   const job = getJob(db, id);
   if (!job) return { ok: false, error: 'No such job', code: 'NOT_FOUND' };
-  const acknowledged = job.outcome === 'interrupted_uncertain_acknowledged';
-  if (job.status !== 'recovery_required' || !['interrupted_uncertain', 'interrupted_uncertain_acknowledged'].includes(job.outcome)) return { ok: false, error: `job ${id} is ${job.status}${job.outcome ? ` (${job.outcome})` : ''}; only an unresolved lifecycle verb (recovery_required / interrupted_uncertain) is acknowledged this way`, code: 'NOT_ACKNOWLEDGEABLE' };
+  const isInit = SETUP_JOB_KINDS.includes(job.kind);
+  const pending = isInit ? 'init_uncertain' : 'interrupted_uncertain';
+  const done = `${pending}_acknowledged`;
+  const acknowledged = job.outcome === done;
+  if (job.status !== 'recovery_required' || ![pending, done].includes(job.outcome)) return { ok: false, error: `job ${id} is ${job.status}${job.outcome ? ` (${job.outcome})` : ''}; only an unresolved lifecycle verb (recovery_required / interrupted_uncertain) or an init script with an unknown outcome (recovery_required / init_uncertain) is acknowledged this way`, code: 'NOT_ACKNOWLEDGEABLE' };
   if (acknowledged) return { ok: true, job, released: 0, already: true };
+  if (isInit && writerStopped !== true) return { ok: false, error: `job ${id} records an init script whose writer may still be changing ${job.app}; establish that it has stopped (read /var/log/pp-init-${job.id}.rc and the recorded pid inside the guest) and acknowledge with writerStopped: true — the hold stands until then`, code: 'WRITER_NOT_ESTABLISHED' };
   // One transaction: the outcome, the event and the lease release commit
   // together or not at all. A hold is never released without the record
   // that says who released it, and never recorded as released while it
@@ -96,10 +128,19 @@ export function acknowledgeUncertainJob(db, { id, by = null, via = 'ui', note = 
   db.exec('BEGIN IMMEDIATE');
   let released = 0;
   try {
-    const changed = annotateTerminalOutcome(db, { id: job.id, fromStatus: 'recovery_required', outcome: 'interrupted_uncertain_acknowledged', reason: `${job.reason || ''}; acknowledged by ${by || 'an administrator'} at ${at}: the guest was inspected and the lease released`, nowMs });
+    const changed = annotateTerminalOutcome(db, { id: job.id, fromStatus: 'recovery_required', outcome: done, reason: `${job.reason || ''}; acknowledged by ${by || 'an administrator'} at ${at}: ${isInit ? 'the init script\'s writer was established stopped' : 'the guest was inspected'} and the lease released`, nowMs });
     if (!changed) throw new Error(`job ${id} changed under the acknowledgement; nothing was released`);
+    if (isInit) {
+      const prog = parseJson(job.progress_json) || {};
+      const phases = { ...(prog.phases || {}), init_script: { ...((prog.phases || {}).init_script || { state: 'uncertain' }), acknowledged: true, hold: false, writer: { state: 'stopped', pid: (prog.phases || {}).init_script?.writer?.pid ?? null, establishedBy: by || 'an administrator' } } };
+      const completion = setupOutcome(phases).completion;
+      const n = annotateJobProgress(db, { id: job.id, progress: { phases, completion }, nowMs });
+      if (!n) throw new Error(`job ${id} changed under the acknowledgement; nothing was released`);
+      const originId = ((parseJson(job.plan_json) || {}).params || {}).origin?.jobId;
+      if (originId && getJob(db, originId)) { const o = parseJson(getJob(db, originId).progress_json) || {}; annotateJobProgress(db, { id: originId, progress: { setup: { ...(o.setup || {}), outcome: done, completion, phases: { ...((o.setup || {}).phases || {}), init_script: 'uncertain' } } }, nowMs }); }
+    }
     released = clearStaleLock(db, { app: job.app, recoveryJobId: job.id });
-    appendEvent(db, { jobId: job.id, kind: 'acknowledged', message: `acknowledged by ${by || 'an administrator'} (${via}): the guest was inspected; ${released ? 'the stale lease is released' : 'no stale lease recorded this job'}${note ? ` — ${String(note).slice(0, 300)}` : ''}`, data: { by, via, released: !!released }, nowMs });
+    appendEvent(db, { jobId: job.id, kind: 'acknowledged', message: `acknowledged by ${by || 'an administrator'} (${via}): ${isInit ? 'the init script\'s writer was established stopped (writerStopped: true)' : 'the guest was inspected'}; ${released ? 'the stale lease is released' : 'no stale lease recorded this job'}${note ? ` — ${String(note).slice(0, 300)}` : ''}`, data: { by, via, released: !!released, ...(isInit ? { writer_stopped: true } : {}) }, nowMs });
     db.exec('COMMIT');
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch { /* */ }
@@ -220,9 +261,9 @@ export function executionMode(db, { env = process.env, nowMs = Date.now() } = {}
 // { skipped }) unless the policy allows it AND no runner is live; the runner
 // is preferred whenever it exists. Heartbeats are not written (a backend is
 // not a runner).
-export async function drainRunnerJobsInProcess(db, { owner = backendOwner(), exec, reviewLogin = null, max = 5, nowMs = () => Date.now(), env = process.env, log = () => {}, kinds = [...RUNNER_JOB_KINDS] } = {}) {
+export async function drainRunnerJobsInProcess(db, { owner = backendOwner(), exec, reviewLogin = null, max = 5, nowMs = () => Date.now(), env = process.env, log = () => {}, kinds = [...RUNNER_JOB_KINDS], inputsDir = null, sleep = null } = {}) {
   const mode = executionMode(db, { env, nowMs: nowMs() });
   if (mode.executor !== 'backend') return { skipped: mode.executor, policy: mode.policy.mode, ran: [] };
   if (!exec) return { skipped: 'no_exec', policy: mode.policy.mode, ran: [] };
-  return runOnce({ db, owner, exec, reviewLogin, nowMs, log, heartbeat: false }, { max, reconcileFirst: false, kinds });
+  return runOnce({ db, owner, exec, reviewLogin, nowMs, log, heartbeat: false, inputsDir, sleep }, { max, reconcileFirst: false, kinds });
 }

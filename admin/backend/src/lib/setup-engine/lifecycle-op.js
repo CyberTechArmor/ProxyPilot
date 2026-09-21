@@ -21,7 +21,7 @@
 
 import {
   LIFECYCLE_PROFILE, validateLifecycleParams, lifecycleArgv, instanceListArgv, rootSizeArgv, snapshotNoteArgv, cleanupArgv,
-  instanceIdentity, snapshotIdentity, identityMatches, stateVerdict, alreadyDone, lifecycleOutcomeStep, lifecycleVerification,
+  instanceIdentity, snapshotIdentity, identityMatches, stateVerdict, alreadyDone, lifecycleOutcomeStep, lifecycleVerification, setupFollowUpFor,
 } from './lifecycle-logic.js';
 import { parseInstanceList } from './restore-logic.js';
 import { createSnapshotWithFallback } from './restore-snapshot-op.js';
@@ -131,7 +131,7 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
     mark('verified', { lifecycle: true, resumable: true, disruptive: false, issued: issuedBefore, target: identity, container: name }, note);
     job.event?.('step', note, null, 'already_done');
     log(kind, `${name}: ${note}`);
-    return { ok: true, step: lifecycleOutcomeStep(kind), instanceState: verdict.observed, verified: verdict, identity, alreadyInState: !issuedBefore, resumedAfterIssue: issuedBefore, verification: lifecycleVerification(kind, verdict, { container: name, snapshot: snap }), followUp: followUpFor(kind, p) };
+    return { ok: true, step: lifecycleOutcomeStep(kind), instanceState: verdict.observed, verified: verdict, identity, alreadyInState: !issuedBefore, resumedAfterIssue: issuedBefore, verification: lifecycleVerification(kind, verdict, { container: name, snapshot: snap }), followUp: followUpFor(kind, p, identity) };
   }
 
   // 3) the boundary: from here a cancel is declined and, for a kind that is
@@ -201,17 +201,25 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
     ok: true, step: lifecycleOutcomeStep(kind), instanceState: verdict.observed, verified: verdict, identity: prof.removes ? identity : finalIdentity, wasRunning,
     ...(warnings.length ? { warnings } : {}),
     verification: lifecycleVerification(kind, verdict, { container: name, snapshot: snap }),
-    followUp: followUpFor(kind, p),
+    followUp: followUpFor(kind, p, prof.removes ? identity : finalIdentity),
   };
 }
 
-// A managed application brought up by a start or restart gets the full
-// ladder as a follow-up; any other kind, or any other guest, has no
-// application to check and says so through its verification.
-function followUpFor(kind, p) {
-  if (p.managed !== true) return null;
-  if (kind !== 'instance_start' && kind !== 'instance_restart') return null;
-  return { kind: 'verify_app', steps: ['unit_status', 'probe_port', 'health_check', 'verify_credential', 'verify_credential_use'], rung: 'credential_use_verified', revision: null };
+// The follow-ups a lifecycle job queues before it reports done (the executor
+// persists each as its own job): the guest setup a create carried or the
+// NAT / DNS fix-up a start / restart asked for (A-17.7), bound to the guest
+// the job read back; then, for a MANAGED application brought up by a start
+// or restart, the full ladder. Any other kind, or any other guest, has no
+// application to check and says so through its verification. An array, or
+// null when there is nothing to queue.
+function followUpFor(kind, p, identity) {
+  const out = [];
+  const setup = setupFollowUpFor(kind, p, identity);
+  if (setup) out.push(setup);
+  if (p.managed === true && (kind === 'instance_start' || kind === 'instance_restart')) {
+    out.push({ kind: 'verify_app', steps: ['unit_status', 'probe_port', 'health_check', 'verify_credential', 'verify_credential_use'], rung: 'credential_use_verified', revision: null });
+  }
+  return out.length ? out : null;
 }
 
 export class CheckpointNotPersistedError extends Error {

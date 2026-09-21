@@ -21,8 +21,8 @@ import { createHash, createDecipheriv } from 'node:crypto';
 const IDENT_RE = /^[a-z_][a-z0-9_]*$/;
 const FILTER_RE = /^[A-Za-z0-9_ =<>!'().,]*$/;
 
-// normalizeDataGuard(g) → { table, secret_column, nonce_column, filter,
-// legacy_default } or null. Identifiers are plain SQL identifiers; the filter
+// normalizeDataGuard(g) → { table, schema, secret_column, nonce_column,
+// filter, legacy_default } or null. Identifiers are plain SQL identifiers; the filter
 // is a bounded, semicolon-free expression (it is interpolated into a psql -c).
 export function normalizeDataGuard(g) {
   if (!g || typeof g !== 'object') return null;
@@ -31,32 +31,52 @@ export function normalizeDataGuard(g) {
   const nonceColumn = String(g.nonce_column || '').trim();
   const filter = String(g.filter || '').trim().slice(0, 200);
   const legacyDefault = typeof g.legacy_default === 'string' ? g.legacy_default.slice(0, 200) : '';
-  if (![table, secretColumn, nonceColumn].every((s) => IDENT_RE.test(s))) return null;
+  const schema = String(g.schema || 'public').trim();
+  if (![table, secretColumn, nonceColumn, schema].every((s) => IDENT_RE.test(s))) return null;
   if (filter && (!FILTER_RE.test(filter) || filter.includes(';'))) return null;
-  return { table, secret_column: secretColumn, nonce_column: nonceColumn, filter, legacy_default: legacyDefault };
+  return { table, schema, secret_column: secretColumn, nonce_column: nonceColumn, filter, legacy_default: legacyDefault };
 }
 
 // authDataProbeScript(guard) → the shell that lists the stored secrets. It
-// targets the database the APP uses: DATABASE_URL from the container
+// connects EXACTLY as the app does: DATABASE_URL from the container
 // environment (the same file the unit reads), falling back to the scaffold
-// default, with the database name parsed from it. A non-local host is not
-// something psql-as-postgres can vouch for, so it is reported as remote and
-// treated as unknown. psql runs with -X and ON_ERROR_STOP and its exit status
-// decides: empty output is an empty query ONLY when psql exited 0. Every
-// outcome is a PROBE: line, so silence is never mistaken for success. The URL
-// itself is never printed (it carries a password); only the database name is.
+// default, split into user, password, host (or a socket directory), port and
+// database — every part the app uses, so a second local PostgreSQL on another
+// port or socket can never be probed by mistake. The password reaches psql
+// through PGPASSWORD in that one command's environment, never argv, and
+// neither the URL nor the password is ever printed; the target line names
+// host, port and database only. A non-local TCP host is reported as remote
+// and treated as unknown. psql runs with -X and ON_ERROR_STOP and its exit
+// status decides: empty output is an empty query ONLY when psql exited 0.
+// The table is schema-qualified (guard.schema, 'public' by default), so a
+// changed search_path cannot redirect the query. Every outcome is a PROBE:
+// line, so silence is never mistaken for success.
 export function authDataProbeScript(guard) {
+  const schema = guard.schema || 'public';
   const where = [guard.filter, `${guard.secret_column} <> ''`].filter(Boolean).join(' AND ');
-  const sql = `SELECT ${guard.secret_column}, ${guard.nonce_column} FROM ${guard.table} WHERE ${where}`;
+  const sql = `SELECT ${guard.secret_column}, ${guard.nonce_column} FROM ${schema}.${guard.table} WHERE ${where}`;
   return [
     'command -v psql >/dev/null 2>&1 || { echo "PROBE:nopsql"; exit 0; }',
     `URL=$( (set -a; . /etc/environment 2>/dev/null; set +a; printf '%s' "\${DATABASE_URL:-postgres://app:app@127.0.0.1:5432/app}") )`,
-    `HOST=$(printf '%s' "$URL" | sed -n 's|^[a-z]*://[^@/]*@\\([^:/?]*\\).*|\\1|p')`,
-    `DB=$(printf '%s' "$URL" | sed -n 's|^[a-z]*://[^/]*/\\([^?]*\\).*|\\1|p')`,
-    `case "$HOST" in ""|127.0.0.1|localhost|::1) ;; *) echo "PROBE:remote"; exit 0;; esac`,
-    `[ -n "$DB" ] || { echo "ERR:no database name in DATABASE_URL"; echo "PROBE:error"; exit 0; }`,
-    `echo "DB:$DB"`,
-    `out=$(su - postgres -c "psql -X -v ON_ERROR_STOP=1 -tA -F '|' --pset footer=off -d '$DB' -c \\"${sql}\\"" 2>&1); ec=$?`,
+    // user:pass@host:port/db?query → parts, by parameter expansion (no echo of the URL).
+    'REST=${URL#*://}',
+    'case "$REST" in *@*) AUTH=${REST%%@*}; HP=${REST#*@};; *) AUTH=""; HP=$REST;; esac',
+    'case "$HP" in */*) DBQ=${HP#*/}; HP=${HP%%/*};; *) DBQ="";; esac',
+    'case "$DBQ" in *\\?*) DB=${DBQ%%\\?*}; QUERY=${DBQ#*\\?};; *) DB=$DBQ; QUERY="";; esac',
+    'case "$AUTH" in *:*) PGUSER_=${AUTH%%:*}; PGPASS_=${AUTH#*:};; *) PGUSER_=$AUTH; PGPASS_="";; esac',
+    'case "$HP" in *:*) PGHOST_=${HP%:*}; PGPORT_=${HP##*:};; *) PGHOST_=$HP; PGPORT_=5432;; esac',
+    // libpq-style ?host=/run/postgresql overrides the host (a socket directory).
+    'case "$QUERY" in *host=*) H=${QUERY#*host=}; PGHOST_=${H%%&*};; esac',
+    // percent-decode the password and user (a URL-encoded @ or : is common).
+    // Percent-decoding in plain sh (dash's printf has no \xHH, so go through octal).
+    'dec() { s=$1; o=; while [ -n "$s" ]; do case "$s" in %[0-9A-Fa-f][0-9A-Fa-f]*) x=${s#%}; x=${x%"${x#??}"}; o="$o$(printf "\\\\$(printf \'%03o\' $((0x$x)))")"; s=${s#???};; *) o="$o${s%"${s#?}"}"; s=${s#?};; esac; done; printf \'%s\' "$o"; }',
+    'PGUSER_=$(dec "$PGUSER_"); PGPASS_=$(dec "$PGPASS_")',
+    'case "$PGHOST_" in ""|127.0.0.1|localhost|::1|/*) ;; *) echo "PROBE:remote"; exit 0;; esac',
+    '[ -n "$DB" ] || { echo "ERR:no database name in DATABASE_URL"; echo "PROBE:error"; exit 0; }',
+    '[ -n "$PGUSER_" ] || { echo "ERR:no user in DATABASE_URL"; echo "PROBE:error"; exit 0; }',
+    'echo "TARGET:${PGHOST_:-127.0.0.1}:${PGPORT_}/${DB} schema=' + schema + '"',
+    'echo "DB:$DB"',
+    `out=$(PGPASSWORD="$PGPASS_" psql -X -v ON_ERROR_STOP=1 -tA -F '|' --pset footer=off -h "\${PGHOST_:-127.0.0.1}" -p "$PGPORT_" -U "$PGUSER_" -d "$DB" -c "${sql}" 2>&1); ec=$?`,
     `if [ "$ec" -eq 0 ]; then printf '%s\\n' "$out" | sed -e '/^$/d' -e 's/^/ROW:/'; echo "PROBE:ok"; else printf '%s\\n' "$out" | head -3 | sed 's/^/ERR:/'; echo "PROBE:error"; fi`,
     '',
   ].join('\n');
@@ -72,6 +92,7 @@ export function parseAuthDataProbe(stdout) {
   const errs = [];
   let probe = null;
   let database = null;
+  let target = null;
   for (const l of lines) {
     if (l.startsWith('ROW:')) {
       const body = l.slice(4);
@@ -79,23 +100,24 @@ export function parseAuthDataProbe(stdout) {
       if (i > 0) rows.push({ ciphertext: body.slice(0, i), nonce: body.slice(i + 1) });
     } else if (l.startsWith('ERR:')) errs.push(l.slice(4).trim());
     else if (l.startsWith('DB:')) database = l.slice(3).trim();
+    else if (l.startsWith('TARGET:')) target = l.slice(7).trim();
     else if (l.startsWith('PROBE:')) probe = l.slice(6).trim();
   }
-  const dbName = database || 'app';
-  if (probe === 'remote') return { state: 'unknown', rows: [], database, detail: 'DATABASE_URL points at a non-local host, which the in-container probe cannot vouch for' };
+  const dbName = target || database || 'app';
+  if (probe === 'remote') return { state: 'unknown', rows: [], database, target, detail: 'DATABASE_URL points at a non-local host, which the in-container probe cannot vouch for' };
   if (probe === 'ok') {
     return rows.length
-      ? { state: 'rows', rows, database, detail: `${rows.length} stored credential(s) in database ${dbName}` }
-      : { state: 'empty', rows: [], database, detail: `no stored credentials in database ${dbName}` };
+      ? { state: 'rows', rows, database, target, detail: `${rows.length} stored credential(s) in database ${dbName}` }
+      : { state: 'empty', rows: [], database, target, detail: `no stored credentials in database ${dbName}` };
   }
   if (probe === 'error') {
     const text = errs.join(' ');
-    if (/relation .* does not exist/i.test(text)) return { state: 'no_table', rows: [], database, detail: `the credentials table does not exist in database ${dbName}` };
-    if (/database .* does not exist/i.test(text)) return { state: 'no_database', rows: [], database, detail: `database ${dbName} does not exist` };
-    return { state: 'unknown', rows: [], database, detail: text || 'psql failed without output' };
+    if (/relation .* does not exist/i.test(text)) return { state: 'no_table', rows: [], database, target, detail: `the credentials table does not exist in database ${dbName}` };
+    if (/database .* does not exist/i.test(text)) return { state: 'no_database', rows: [], database, target, detail: `database ${dbName} does not exist` };
+    return { state: 'unknown', rows: [], database, target, detail: text || 'psql failed without output' };
   }
-  if (probe === 'nopsql') return { state: 'unknown', rows: [], database, detail: 'psql is not available in the container' };
-  return { state: 'unknown', rows: [], database, detail: 'the probe produced no result' };
+  if (probe === 'nopsql') return { state: 'unknown', rows: [], database, target, detail: 'psql is not available in the container' };
+  return { state: 'unknown', rows: [], database, target, detail: 'the probe produced no result' };
 }
 
 export function masterKeyFor(master) {

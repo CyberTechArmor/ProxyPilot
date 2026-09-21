@@ -255,7 +255,8 @@
           "secret_column": "secret_ciphertext",
           "nonce_column": "secret_nonce",
           "filter": "provider = 'ldaps'",
-          "legacy_default": "dev-insecure-master-secret-change-me"
+          "legacy_default": "dev-insecure-master-secret-change-me",
+          "schema": "public"
         }
       },
       {

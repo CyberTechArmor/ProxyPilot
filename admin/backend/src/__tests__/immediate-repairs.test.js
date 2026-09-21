@@ -171,9 +171,15 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   const validateIdx = deploy.indexOf('validateDeployEnvironment(');
   const swapIdx = deploy.indexOf('const swap = await containerSh(');
   assert.ok(stopIdx > 0 && stopIdx < mintIdx && mintIdx < validateIdx && validateIdx < swapIdx, 'stop the app, then mint, then validate, then write and start the unit');
-  // The final probe and mint happen with writers stopped; a failed mint restarts the old unit.
+  // The final probe and mint happen with writers stopped; every failure after
+  // the stop — stop itself, mint, and validation after key persistence —
+  // starts the unit again before returning.
   assert.match(deploy, /ensureComponentSecrets\(\{ containerName, rows, writersStopped: true \}\)/);
-  assert.match(deploy, /systemctl start mock2-dev\.service >\/dev\/null 2>&1 \|\| true/);
+  assert.match(deploy, /const restartUnit = \(\) => containerSh\(containerName, 'systemctl daemon-reload[^']*systemctl start mock2-dev\.service/);
+  assert.equal((deploy.match(/await restartUnit\(\);/g) || []).length, 5, 'stop failure, mint failure, mint exception, validation failure, unit swap failure');
+  // The swap failure path restarts too — the comment promise "every failure after this point" is kept by the code.
+  assert.match(deploy, /if \(swap\.code !== 0\) \{[^}]*await restartUnit\(\);/);
+  assert.match(deploy, /the app was started again on its current unit/);
   // Deploys for one container are serialized.
   assert.match(deploy, /const deployQueues = new Map\(\);/);
 });
@@ -209,7 +215,7 @@ test('ratchet: the seed auth component refuses its dev defaults in production an
   assert.notEqual(legacy.secret, true);
   // The master secret declares the data it protects, so the platform can read
   // and classify it before changing the key.
-  assert.deepEqual(master.protects, { table: 'auth_connections', secret_column: 'secret_ciphertext', nonce_column: 'secret_nonce', filter: "provider = 'ldaps'", legacy_default: 'dev-insecure-master-secret-change-me' });
+  assert.deepEqual(master.protects, { table: 'auth_connections', schema: 'public', secret_column: 'secret_ciphertext', nonce_column: 'secret_nonce', filter: "provider = 'ldaps'", legacy_default: 'dev-insecure-master-secret-change-me' });
 });
 
 test('ratchet: the seed auth component rekeys an LDAPS secret stored under the dev master secret', () => {

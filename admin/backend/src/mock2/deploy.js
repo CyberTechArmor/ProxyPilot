@@ -216,12 +216,20 @@ async function deployProjectUnqueued({
   //      Dynamic imports — the static ones would be a cycle (component-install
   //      imports runner, which imports this module).
   report('start');
+  // Every failure after this point starts the unit again before returning,
+  // so a failed deploy never leaves the app down. What it starts is a
+  // COMPATIBLE set by construction: the build already replaced dist/, and a
+  // key that protects stored data is persisted only when the code on disk
+  // carries the migration bridge — so old rows stay readable whichever of
+  // (old key, new key) the environment holds when the process comes up.
+  const restartUnit = () => containerSh(containerName, 'systemctl daemon-reload >/dev/null 2>&1 || true\nsystemctl start mock2-dev.service >/dev/null 2>&1 || true\n', { timeoutMs: 60000 }).catch(() => {});
   const stop = await containerSh(
     containerName,
     `: ${DEPLOY_MARKER}\nsystemctl stop mock2-dev.service >/dev/null 2>&1 || true\n${freeWebPortScript(webPort)}\n`,
     { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.start },
   );
   if (stop.code !== 0) {
+    await restartUnit();
     return { ok: false, step: 'start', error: deployFailureMessage('start', `could not stop the running app before the key check: ${tail(stop)}`) };
   }
   let requiredSecretKeys = [];
@@ -234,7 +242,7 @@ async function deployProjectUnqueued({
       const rows = listProjectComponents(project.id);
       const secrets = await ensureComponentSecrets({ containerName, rows, writersStopped: true });
       if (!secrets.ok) {
-        await containerSh(containerName, 'systemctl start mock2-dev.service >/dev/null 2>&1 || true\n').catch(() => {});
+        await restartUnit();
         return { ok: false, step: 'start', error: deployFailureMessage('start', `could not mint the application's secrets: ${secrets.error}`) };
       }
       // A deferred key (marker, data or artifact not ready) is neither minted
@@ -243,7 +251,7 @@ async function deployProjectUnqueued({
       requiredSecretKeys = secrets.required;
     }
   } catch (e) {
-    await containerSh(containerName, 'systemctl start mock2-dev.service >/dev/null 2>&1 || true\n').catch(() => {});
+    await restartUnit();
     return { ok: false, step: 'start', error: deployFailureMessage('start', `application secret minting failed: ${e?.message || e}`) };
   }
 
@@ -259,7 +267,11 @@ async function deployProjectUnqueued({
   const envRead = await containerSh(containerName, 'cat /etc/environment 2>/dev/null || true', { timeoutMs: 15000 });
   const mode = validateDeployEnvironment({ unitText: unit, environmentText: envRead.stdout || '', requiredKeys: requiredSecretKeys });
   if (!mode.ok) {
-    return { ok: false, step: 'start', error: deployFailureMessage('start', mode.error) };
+    // After key persistence: the environment now holds the minted key and the
+    // code on disk carries the bridge, so starting the (unchanged) unit brings
+    // up a readable app while the operator fixes the environment.
+    await restartUnit();
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `${mode.error} — the app was started again on its current unit`) };
   }
   const swap = await containerSh(
     containerName,
@@ -275,6 +287,10 @@ async function deployProjectUnqueued({
     { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.start },
   );
   if (swap.code !== 0) {
+    // The new unit is on disk; the environment and dist/ are the pair it
+    // reads. A retry of the start is harmless if the app itself will not
+    // come up, and brings it back when daemon-reload or the port free failed.
+    await restartUnit();
     return { ok: false, step: 'start', error: deployFailureMessage('start', tail(swap)) };
   }
 

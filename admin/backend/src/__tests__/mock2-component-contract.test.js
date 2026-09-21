@@ -300,7 +300,7 @@ test('validateComponentContract carries the generate flag through normalisation'
     { key: 'OTHER', secret: true, generate: true, protects: { table: 't', secret_column: 'c', nonce_column: 'n', filter: 'x = 1; DROP TABLE t' } },
   ] });
   assert.equal(g.ok, true, g.error);
-  assert.deepEqual(g.contract.config[0].protects, { table: 'auth_connections', secret_column: 'secret_ciphertext', nonce_column: 'secret_nonce', filter: "provider = 'ldaps'", legacy_default: 'dev' });
+  assert.deepEqual(g.contract.config[0].protects, { table: 'auth_connections', schema: 'public', secret_column: 'secret_ciphertext', nonce_column: 'secret_nonce', filter: "provider = 'ldaps'", legacy_default: 'dev' });
   assert.equal(g.contract.config[1].protects, null);
   assert.deepEqual(secretDataGuards(g.contract.config).map((x) => x.key), ['AUTH_MASTER_SECRET']);
 });

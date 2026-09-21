@@ -84,17 +84,24 @@ holding a credential encrypted under an earlier key. So before the platform
 writes `AUTH_LEGACY_MASTER_SECRETS=""` or mints a new master secret, it reads
 the rows that secret protects from the app's own database (the contract's
 `protects` guard: `auth_connections`, `secret_ciphertext`, `secret_nonce`,
-`provider = 'ldaps'`) through `psql` as the postgres user, and classifies
-them under the component's cipher (`auth-data-logic.js`):
+`provider = 'ldaps'`) **connecting exactly as the app does**, and classifies
+them under the component's cipher (`auth-data-logic.js`).
 
-The probe targets the database the app itself uses: `DATABASE_URL` from the
-container environment (the file the unit reads), falling back to the scaffold
-default, with the database name parsed out of it and never printed (it
-carries a password). A non-local host is reported as remote and treated as
-unknown. `psql` runs with `-X`, `ON_ERROR_STOP=1` and footer off, and rows
-are emitted only when it exited zero — empty output is an empty query only
-on a successful query. Every branch prints a result line, so silence is never
-read as success.
+The probe reads `DATABASE_URL` from the file the unit reads at start
+(`/etc/environment`, falling back to the scaffold default), parses the user,
+password, host or socket directory (`?host=`), port and database name out of
+it the way the app's `pg` client does (percent-decoding included), and runs
+`psql -h … -p … -U … -d …` with the password in `PGPASSWORD` — not as the
+postgres superuser over the default socket, which can reach a different
+server or database than the app. The query names the schema
+(`public.auth_connections`; the contract's `protects.schema`). A non-local
+host is reported as remote and treated as unknown. `psql` runs with `-X`,
+`ON_ERROR_STOP=1` and footer off, and rows are emitted only when it exited
+zero — empty output is an empty query only on a successful query. Every
+branch prints a result line, so silence is never read as success, and the
+probe prints its exact target — `TARGET:host:port/database schema=…` — which
+the decision carries into its reason, so the deploy chat says *which*
+database was read. The URL, the password and the user are never printed.
 
 "Newly provisioned" is a **positive** identification, not an inference: only
 the provision path may say it, and only for a container created in that run
@@ -118,12 +125,70 @@ review named — probe finds nothing, the still-running old app saves an LDAPS
 credential under the development key, a new key activates with the bridge
 disabled — cannot happen because the deploy **stops the app and frees its
 port before the final probe and mint**, persists the new key and unit, and
-only then starts the new process. A failed mint restarts the old unit. Deploys
-for one container are serialized (`deployQueues` in `deploy.js`), so two
-deploys cannot make conflicting decisions. Outside the deploy — the
-pre-install and retry paths — a key that protects stored data is never minted
-for an existing app; it waits for the deploy. The compare-and-swap rekey
-covers later individual updates; this ordering covers the transition.
+only then starts the new process. Every failure after the stop starts the
+unit again (see the failure table below). Deploys for one container are
+serialized (`deployQueues` in `deploy.js`), so two deploys cannot make
+conflicting decisions. Outside the deploy — the pre-install and retry paths —
+a key that protects stored data is never minted for an existing app; it waits
+for the deploy. The compare-and-swap rekey covers later individual updates;
+this ordering covers the transition.
+
+### Host validation: three details before the deployment behavior counts as proven
+
+The sandbox proves the ordering and the parsing; only the host proves that
+the probe and the app agree on the world. Check these three on the first
+controlled host run and record the evidence in the acceptance table.
+
+**1. The database target is exact.** The probe and the app must read the same
+server, database and schema. Evidence: the `TARGET:` line in the deploy
+chat's decision reason (host, port, database, schema). Compare it with what
+the app itself connects to: inside the guest, `systemctl show
+mock2-dev.service -p EnvironmentFiles` names the file the probe read, and
+`DATABASE_URL` in it is the app's connection string; the app's schema module
+declares its tables in `public` with no `search_path` override. A `?host=`
+socket directory, a non-default port and a percent-encoded password are
+each exercised by `mock2-auth-data.test.js` against a stub `psql`, but the
+host check is the one that catches a second PostgreSQL on the guest, a
+`search_path` set on the role, or a `pgpass`/`PGSERVICE` the app relies on
+that the probe does not.
+
+**2. All relevant writers are stopped.** The stop covers everything that
+writes `auth_connections` in normal operation, and nothing else does:
+
+| Writer | Covered by the stop? |
+| --- | --- |
+| The app process (`mock2-dev.service`): settings upsert, compare-and-swap rekey, connection-status update in `repo.ts` — the only code in the component that writes the table | Yes — the unit is stopped and the port freed before the probe |
+| Timers, workers or queues in the generated app | None exist: the auth component's only timer is a TLS connect timeout in the LDAPS test |
+| `run_project_sql` (MCP) | Not a writer: `BEGIN READ ONLY … ROLLBACK` |
+| `restore_project_db` (MCP) | **Not covered.** It rewrites the whole database as the postgres superuser and is not serialized with deploys. It is also the one path that brings rows under an *older* key into an app whose bridge is already closed: after restoring a dump into a fresh-provisioned app, re-open the bridge (`set_project_env` `AUTH_LEGACY_MASTER_SECRETS` to the key those rows used) and redeploy, and read `MASTERKEY_ROWS` |
+| Operator executors — `run_project_command`, `run_lxc_command`, the workspace terminal, `write_lxc_file` on `/etc/environment` | **Not covered.** They are not stopped by a deploy and can run `psql` at will. Do not run them against the app's database during a deploy; the persistent setup engine of gate two is where a real lock belongs |
+
+`deployQueues` is an in-memory map: it serializes deploys within one backend
+process and **does not survive a backend restart**. A deploy orphaned by a
+restart is not resumed; the next deploy's first action is `pkill -9 -f
+mock2_deploy_marker` inside the guest, which reaps the orphan's scripts before
+anything else runs, so two deploys do not overlap even across a restart —
+but a restart mid-deploy can still leave the app stopped until that next
+deploy or a manual `systemctl start`. A persistent, restart-safe lock is gate
+two work (the setup engine).
+
+**3. Failure recovery preserves a compatible set.** The build replaced
+`dist/` before the stop, and a key that protects stored data is persisted only
+when the built artifact on disk carries the migration bridge (`requires_marker`
+with `built`). So whichever of (old key, new key) the environment holds when
+a process comes up, the code that comes up can read every stored row:
+
+| Failure point | What is on disk | What `restartUnit()` starts | Readable? |
+| --- | --- | --- | --- |
+| Stopping the app or freeing the port fails | old environment, new `dist/`, old unit | old unit → new code, old key, bridge as before | Yes — new code reads old-key rows directly |
+| Probe or mint fails, or throws, before anything is written | old environment, new `dist/`, old unit | same as above | Yes |
+| Mint wrote the key, then `validateDeployEnvironment` refuses (mode overridden, key missing) | **new key** in `/etc/environment`, new `dist/`, old unit | old unit → new code, new key, bridge kept (an existing app never gets an empty legacy list) | Yes — old-key rows through the bridge, new rows under the new key; the chat says "the app was started again on its current unit" |
+| Writing the new unit, `daemon-reload`, freeing the port or `systemctl start` fails | new key, new `dist/`, **new unit** | new unit (start retried) | Yes if the app starts; if it does not, the failure is the app's own and is reported verbatim |
+| Backend dies between stop and start | as far as it got | nothing until the next deploy or a manual start | The set on disk is compatible at every step above; the app is down until started |
+
+What the table cannot prove is the last row's "if the app starts": that is the
+host test — after the deploy's restart, open the LDAPS settings and confirm
+the credential decrypts (`masterKey` current, inventory complete).
 
 The component's own test pins that an explicitly empty list stays empty. The
 bridge is enabled only where storage was not positively identified as new.
@@ -220,7 +285,9 @@ and the question does not arise.
 | Fresh project | Secrets minted once; legacy fallback disabled; app works after restart | *sandbox*: first install writes an empty legacy list only when the data probe confirms fresh storage; the component's vitest run proves an explicitly empty list stays empty and production refuses the dev defaults. *host*: provision, restart the guest, sign in |
 | New files, existing database | Existing keys preserved; legacy migration decided explicitly | *sandbox*: `mock2-auth-data.test.js` — new files over a database holding a dev-key credential yields not-fresh and a mint through the bridge only with writers stopped; a custom or mixed key defers; an unreadable probe defers; rows on a supposedly new container defer. *host*: rebuild a project's files over its database and watch the chat message and readiness lines |
 | Wrong or unavailable database | Key and legacy configuration unchanged | *sandbox*: a missing table or database on an existing app, a remote `DATABASE_URL`, a schema error, no psql, or no output all decide `defer` with nothing written. *host*: point `DATABASE_URL` at a wrong name, deploy, confirm the environment file is unchanged and the reason is reported |
-| Write attempted during the transition | Prevented, or safely handled | *sandbox*: ratchet — the deploy stops the unit and frees the port before the final probe and mint, mints with `writersStopped: true`, restarts the old unit on failure; deploys per container are serialized; pre-install and retry never mint a data-guarded key for an existing app. *host*: start a deploy, attempt an LDAPS settings save during it, confirm the save fails or lands readable |
+| Write attempted during the transition | Prevented, or safely handled | *sandbox*: ratchet — the deploy stops the unit and frees the port before the final probe and mint, mints with `writersStopped: true`, restarts the unit on every failure after the stop (five paths); deploys per container are serialized; pre-install and retry never mint a data-guarded key for an existing app; the writer inventory above names what the stop does not cover. *host*: start a deploy, attempt an LDAPS settings save during it, confirm the save fails or lands readable |
+| Probe reads the app's database | The probe and the app agree on server, database and schema | *sandbox*: the generated shell, executed with a stub `psql`, connects with the URL's user, decoded password, host or socket directory, port and database, and prints the target; a remote host is refused before any connection. *host*: compare the `TARGET:` line with the unit's environment file and the app's schema |
+| Failure after the stop | The app comes back readable | *sandbox*: ratchet on the five restart paths; the failure table above. *host*: force a validation failure (override `NODE_ENV` in `/etc/environment`), deploy, confirm the app is up again and the LDAPS credential decrypts |
 | After restart | The application itself decrypts the credential with the intended configuration | *host* only: open the LDAPS settings after the deploy's restart; `masterKey` current, inventory complete, connection test passes |
 | Authentication | Password/TOTP and verified passkey both log in, with separate sudo | *sandbox*: no passkey-only accounts exist; the login handler carries no sudo stamp; both ceremonies require UV. *host*: fresh-browser checks above |
 | MCP | Disabled, deleted, demoted and expired credentials denied, per call | *sandbox*: `mcpTokenRefusal` cases; `findToken` wiring ratchet; revocation on every disable/demote/delete path; new tokens default to a finite lifetime. *host*: call through an existing connector after disabling its owner; mint a 1-day token and call after it lapses |
@@ -228,7 +295,10 @@ and the question does not arise.
 
 Test evidence: full backend suite on this branch versus the same main commit
 (`83c0dff3`) in the same sandbox — **no additional failures compared with the
-baseline**; the ten documented `ERR_MODULE_NOT_FOUND` files fail on both.
+baseline**; the ten documented `ERR_MODULE_NOT_FOUND` files fail on both
+(2647 of 2667 tests pass on the final tree). The probe shell is executed in
+the suite under `dash` with a stub `psql`, the same `/bin/sh` a Debian or
+Ubuntu guest runs it with.
 The component's `src/auth` (20 non-test files) typechecks under `strict` +
 `noUnusedLocals` against drizzle-orm, express, pg, ldapts and cookie, and its
 `config.test.ts` passes under vitest. The frontend production build

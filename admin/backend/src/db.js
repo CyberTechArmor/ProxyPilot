@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { repairStrayMigration912 } from './lib/migration-repair.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
+import { SETUP_ENGINE_SCHEMA } from './lib/setup-engine/store.js';
 import { mkdirSync, existsSync, chmodSync } from 'fs';
 import { dirname, resolve, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -147,6 +148,13 @@ export function getDb() {
 //               an operator revokes them) rather than on a clock, and the
 //               cleanup verb needs to know whether ProxyPilot created the
 //               guest it is offering to delete.
+//   1000 Setup engine — setup_locks, setup_jobs, setup_job_events: the
+//               persistent per-app lease every platform operation holds
+//               (deploy, restores, credential migration, recovery), the
+//               saved operation (approved plan, progress, checkpoint before
+//               a disruptive step, configuration REFERENCES — never values)
+//               and its redacted event stream (lib/setup-engine/store.js,
+//               docs/core/setup-engine-requirements.md R1/R2/R4).
 //   909 Migration — migrations + migration_events: one row per attempt to
 //               move a source host or application onto a ProxyPilot guest.
 //               Holds the target spec, the single-use agent token (hash
@@ -2308,6 +2316,16 @@ export function initDatabase() {
     if (!tables.length) return;
     const cols = d.prepare(`PRAGMA table_info(mcp_tokens)`).all().map((c) => c.name);
     if (!cols.includes('expires_at')) d.exec(`ALTER TABLE mcp_tokens ADD COLUMN expires_at TEXT`);
+  });
+
+  // Version 1000: the setup engine's persistent state (gate two). One lease
+  // per app that survives a backend restart — an expired lease with a dead
+  // holder is a recorded condition, not a free lock — plus the saved
+  // operation and its redacted events. The schema text is owned by
+  // lib/setup-engine/store.js so the host runner and the suite create the
+  // identical tables; every statement is IF NOT EXISTS.
+  runMigration(db, 1000, 'setup_engine_locks_jobs_events', (d) => {
+    d.exec(SETUP_ENGINE_SCHEMA);
   });
 
   runMigration(db, 907, 'route_edge_options', (d) => {

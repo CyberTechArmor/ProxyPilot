@@ -282,9 +282,13 @@ export function createLxcAdminHandlers(kit) {
       return ok({ restored: true, container: name, snapshot: snap, pre_restore_snapshot: pre.name, reverse_with: `restore_snapshot({ container: "${name}", snapshot: "${pre.name}" })` });
     };
     try {
-      return await withContainerLock(incus(name), 'restore_snapshot', run, { wait: false });
+      return await withContainerLock(incus(name), 'restore_snapshot', run, {
+        wait: false,
+        job: { kind: 'restore_snapshot', plan: { steps: ['pre_restore_snapshot', 'incus_restore'], params: { container: incus(name), snapshot: snap } }, configRefs: { snapshot: snap }, requestedBy: auth?.name || null, via: 'mcp' },
+      });
     } catch (e) {
       if (e?.code === 'CONTAINER_BUSY') return err(`${e.holder} is in progress for ${name} — the restore was refused before any change; retry when it finishes`);
+      if (e?.code === 'CONTAINER_LOCK_STALE') return err(`${e.message}; the restore was refused before any change`);
       throw e;
     }
   });

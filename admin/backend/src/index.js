@@ -10,6 +10,9 @@ import { dirname, join } from 'path';
 import { existsSync, statSync, readFileSync } from 'fs';
 import { initDatabase, getDb, getSetting, setSetting, logAudit } from './db.js';
 import { noteCompletedUpdateOnBoot } from './lib/self-update.js';
+import { configureContainerLockStore } from './mock2/container-lock.js';
+import { backendOwner, sweepSetupEngineOnBoot } from './lib/setup-engine/backend.js';
+import { setupRouter } from './routes/setup.js';
 import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
@@ -264,6 +267,15 @@ app.use('/api/', csrfProtection);
 
 // Initialize database
 initDatabase();
+// Setup engine (gate two): the container lock's persistent lease + job rows,
+// and the boot sweep that records what a predecessor left running.
+configureContainerLockStore({ getDb, owner: backendOwner() });
+try {
+  const swept = sweepSetupEngineOnBoot(getDb());
+  if (swept.interrupted.length || swept.recoveryQueued.length) console.warn('[setup-engine] boot sweep:', JSON.stringify(swept));
+} catch (err) {
+  console.error('[setup-engine] boot sweep failed:', err?.message || err);
+}
 
 // Sweep orphan in_progress backup rows.  The create-backup
 // route inserts a row in 'in_progress' immediately, then packs +
@@ -486,6 +498,7 @@ app.use('/api/cves', authenticateToken, blockPendingRole, cvesRouter);
 app.use('/api/housekeeping', authenticateToken, blockPendingRole, housekeepingRouter);
 app.use('/api/backups', authenticateToken, blockPendingRole, backupsRouter);
 app.use('/api/storage', authenticateToken, blockPendingRole, storageRouter);
+app.use('/api/setup', authenticateToken, blockPendingRole, setupRouter);
 // Migrations: the agent half is authenticated by the single-use migration
 // token in its own path and carries no session, so it is mounted BEFORE the
 // operator half (Express matches in mount order) and outside authenticateToken.

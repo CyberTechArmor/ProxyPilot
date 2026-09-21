@@ -180,18 +180,20 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   // The swap failure path restarts too — the comment promise "every failure after this point" is kept by the code.
   assert.match(deploy, /if \(swap\.code !== 0\) \{[^}]*await restartUnit\(\);/);
   // "Restart attempted" and "recovered" are different states: the restart reports whether the app serves, and never claims recovery.
-  assert.match(deploy, /return restartOutcomeText\(restartVerdict\(r\?\.stdout\)\);/);
+  assert.match(deploy, /const verdict = restartVerdict\(r\?\.stdout\);[\s\S]{0,400}return restartOutcomeText\(verdict\);/);
   assert.doesNotMatch(deploy, /the app was started again on its current unit/);
   assert.equal((deploy.match(/\$\{back\}/g) || []).length, 5, 'every restart path reports its outcome');
   // Deploys for one container are serialized on the container lock that the
   // restores and the retry-path mint share (container-lock.js).
-  assert.match(deploy, /withContainerLock\(String\(args\?\.containerName \|\| ''\), 'deploy', \(\) => deployProjectUnqueued\(args\)\)/);
+  // Gate two: the lock also persists a job row (lib/setup-engine) and hands the
+  // deploy a checkpoint handle; the serialization is unchanged.
+  assert.match(deploy, /withContainerLock\(containerName, 'deploy', \(handle\) => deployProjectUnqueued\(\{ \.\.\.args, job: handle \}\), \{ job \}\)/);
   assert.doesNotMatch(deploy, /deployQueues/);
   const projectConfig = src('routes/mcp-tools/project-config.js');
-  assert.match(projectConfig, /withContainerLock\(p\.incusName, 'restore_project_db', run, \{ wait: false \}\)/, 'the database restore is refused while a deploy holds the container');
+  assert.match(projectConfig, /withContainerLock\(p\.incusName, 'restore_project_db', run, \{\s*wait: false,/, 'the database restore is refused while a deploy holds the container');
   assert.ok(projectConfig.indexOf("withContainerLock(p.incusName, 'restore_project_db'") > projectConfig.indexOf("tool: 'restore_project_db'"), 'the lock is taken after the confirmation gate, before the pre-restore dump');
   const lxcAdmin = src('routes/mcp-tools/lxc-admin.js');
-  assert.match(lxcAdmin, /withContainerLock\(incus\(name\), 'restore_snapshot', run, \{ wait: false \}\)/, 'the snapshot restore takes the same lock');
+  assert.match(lxcAdmin, /withContainerLock\(incus\(name\), 'restore_snapshot', run, \{\s*wait: false,/, 'the snapshot restore takes the same lock');
   const runnerSrc = src('mock2/runner.js');
   assert.match(runnerSrc, /withContainerLock\(containerName, 'retry-secrets', \(\) => ensureComponentSecrets\(/, 'the retry-path mint holds the lock');
 });

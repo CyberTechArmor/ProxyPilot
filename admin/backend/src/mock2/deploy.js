@@ -103,12 +103,26 @@ export async function readDeclaredEgress(containerName, appDir = '/srv/app') {
 // then health-checks the web port. onStep(key, label) reports progress (wired to
 // setJob so the CycleCard shows "Installing dependencies…" etc.).
 export async function deployProject(args) {
-  return withContainerLock(String(args?.containerName || ''), 'deploy', () => deployProjectUnqueued(args));
+  const containerName = String(args?.containerName || '');
+  // The persisted job carries REFERENCES only: the guest, the port, the unit
+  // and the environment file the runner would read to recover — never a value.
+  const job = {
+    kind: 'deploy',
+    plan: { steps: ['install', 'migrate', 'build', 'stop', 'mint', 'unit', 'start', 'health'], params: { container: containerName, webPort: Number(args?.webPort) || 3000, appDir: args?.appDir || '/srv/app' } },
+    configRefs: { webPort: Number(args?.webPort) || 3000, unit: 'mock2-dev.service', environmentFile: '/etc/environment', appDir: args?.appDir || '/srv/app' },
+    requestedBy: args?.requestedBy || null,
+    via: args?.via || 'system',
+  };
+  return withContainerLock(containerName, 'deploy', (handle) => deployProjectUnqueued({ ...args, job: handle }), { job });
 }
 
 async function deployProjectUnqueued({
-  containerName, appDir = '/srv/app', webPort = 3000, runContract, onStep = null,
+  containerName, appDir = '/srv/app', webPort = 3000, runContract, onStep = null, job = null,
 }) {
+  // The persisted job handle (container-lock.js). Its checkpoint is what a
+  // reconciler reads after a crash: written BEFORE the app is stopped, and
+  // cleared once it is started again.
+  const mark = (phase, data, message) => { try { job?.checkpoint?.(phase, data, message); } catch { /* never fails a deploy */ } };
   // Reap deploy scripts a dead backend orphaned in this container (see
   // DEPLOY_MARKER) — they keep running npm/systemctl and corrupt this deploy.
   // pkill never signals its own process, so carrying the marker string in the
@@ -211,6 +225,7 @@ async function deployProjectUnqueued({
   //      Dynamic imports — the static ones would be a cycle (component-install
   //      imports runner, which imports this module).
   report('start');
+  mark('build_done', { app_stopped: false, container: containerName, webPort, unit: 'mock2-dev.service' }, 'install, migrate and build finished; about to stop the application');
   // Every failure after this point starts the unit again before returning,
   // so a failed deploy never leaves the app down. What it starts is a
   // COMPATIBLE set by construction: the build already replaced dist/, and a
@@ -226,8 +241,15 @@ async function deployProjectUnqueued({
       `systemctl daemon-reload >/dev/null 2>&1 || true\nsystemctl start mock2-dev.service >/dev/null 2>&1 || true\n${servingProbeScript(webPort, 10)}`,
       { timeoutMs: 90000 },
     ).catch(() => null);
-    return restartOutcomeText(restartVerdict(r?.stdout));
+    const verdict = restartVerdict(r?.stdout);
+    // Recorded as what it is: a restart ATTEMPT with the port's answer. The
+    // checkpoint says the app is no longer known-stopped only when it serves.
+    mark('restart_attempted', { app_stopped: verdict !== 'serving', restart_verdict: verdict }, `restart attempted after a failure: ${verdict}`);
+    return restartOutcomeText(verdict);
   };
+  // THE checkpoint before the disruptive step: from here until the new unit
+  // serves, a dead backend leaves the app stopped, and the record says so.
+  mark('stopping_app', { app_stopped: true, container: containerName, webPort, unit: 'mock2-dev.service', disruptive: true }, 'stopping the application before the key check and mint');
   const stop = await containerSh(
     containerName,
     `: ${DEPLOY_MARKER}\nsystemctl stop mock2-dev.service >/dev/null 2>&1 || true\n${freeWebPortScript(webPort)}\n`,
@@ -298,6 +320,7 @@ async function deployProjectUnqueued({
     const back = await restartUnit();
     return { ok: false, step: 'start', error: deployFailureMessage('start', `${tail(swap)}\n${back}`) };
   }
+  mark('app_started', { app_stopped: false, unit_swapped: true }, 'new unit written and started; health check next');
 
   // 3) Health-check: the app must actually SERVE ITS SHELL before we call the
   //    cycle "succeeded" ("succeeded" ⇒ running AND not erroring). Poll the port a

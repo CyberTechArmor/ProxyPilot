@@ -728,9 +728,13 @@ export function createProjectConfigHandlers(kit) {
       return ok({ restored: true, file, pre_restore_dump: pre, errors: errors.slice(0, 20), reverse_with: `restore_project_db({ project_id: ${p.project.id}, file: "${basename(pre)}" })`, next: 'redeploy_project (or a restart) so the app reconnects cleanly.' });
     };
     try {
-      return await withContainerLock(p.incusName, 'restore_project_db', run, { wait: false });
+      return await withContainerLock(p.incusName, 'restore_project_db', run, {
+        wait: false,
+        job: { kind: 'restore_project_db', plan: { steps: ['pre_restore_dump', 'psql_restore'], params: { container: p.incusName, file: basename(file) } }, configRefs: { file, dumpsDir: DB_DUMPS_DIR }, requestedBy: auth?.name || null, via: 'mcp' },
+      });
     } catch (e) {
       if (e?.code === 'CONTAINER_BUSY') return err(`${e.holder} is in progress for this project's container — the restore was refused before any change; retry when it finishes`);
+      if (e?.code === 'CONTAINER_LOCK_STALE') return err(`${e.message}; the restore was refused before any change`);
       throw e;
     }
   });

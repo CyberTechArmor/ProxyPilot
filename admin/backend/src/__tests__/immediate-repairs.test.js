@@ -125,7 +125,6 @@ test('ratchet: the migration-history repair runs before 912 and comes from the t
 
 test('ratchet: the deploy mints owned secrets and refuses to start without production mode', () => {
   const deploy = src('mock2/deploy.js');
-  assert.match(deploy, /ensureComponentSecrets\(\{ containerName, rows \}\)/);
   assert.match(deploy, /validateDeployEnvironment\(\{ unitText: unit, environmentText: envRead\.stdout \|\| '', requiredKeys: requiredSecretKeys \}\)/);
   // A deferred key (marker missing on disk) is neither minted nor required.
   assert.match(deploy, /requiredSecretKeys = secrets\.required;/);
@@ -144,9 +143,21 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   assert.match(install, /MARKER STALE/);
   // The data guard: rows are read from the app's database and classified
   // before a protecting key is minted; fresh_value waits for fresh storage.
-  assert.match(install, /const d = decideMasterSecretMint\(\{ probe, envHasKey: false, classification: classifyRows\(probe\.rows, \{ legacy: \[guard\.legacy_default\] \}\) \}\);/);
+  assert.match(install, /probe, envHasKey: false, newlyProvisioned, writersStopped,/);
   assert.match(install, /if \(freshStorage !== true\) return \{ ok: true, written: \[\], skipped: 'storage not confirmed fresh' \};/);
-  assert.match(install, /const storage = await storageIsFresh\(\{ containerName, contracts: freshContracts \}\);/);
+  assert.match(install, /const storage = await storageIsFresh\(\{ containerName, contracts: freshContracts, newlyProvisioned \}\);/);
+  assert.match(install, /if \(newlyProvisioned !== true\) return \{ fresh: false,/);
+  // Only the provision path may say "newly provisioned", and only for a
+  // container created from the template with no restored, copied or
+  // rehydrated data.
+  const provision = src('mock2/provision.js');
+  assert.match(provision, /newlyProvisioned: dataOrigin === 'new'/);
+  assert.match(provision, /dataOrigin: copyDatabase \? 'restored' : 'new'/);
+  assert.match(provision, /mode: 'rehydrate', dataOrigin: 'rehydrate'/);
+  assert.match(provision, /preinstallComponents\(\{ project, initiatedBy: project\?\.created_by \?\? null, newlyProvisioned: newlyProvisioned === true \}\)/);
+  for (const other of ['mock2/audit.js', 'mock2/routes.js', '../src/routes/mcp-tools/project-config.js'.replace('../src/', '')]) {
+    assert.doesNotMatch(src(other), /newlyProvisioned/, `${other} must not claim a fresh provision`);
+  }
   // The deferral stays visible: three readiness warnings on every deploy.
   const readiness = src('mock2/readiness-logic.js');
   assert.match(readiness, /MASTERKEY:200/); assert.match(readiness, /LEGACYBRIDGE:200/);
@@ -155,10 +166,16 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   // The rows check is computed on the platform side with the tested cipher.
   const runner = src('mock2/readiness.js');
   assert.match(runner, /MASTERKEY_ROWS:\$\{masterKeyRowsCode\(\{ probe, envKey, legacyDefault: guard\.legacy_default \}\)\}/);
+  const stopIdx = deploy.indexOf('systemctl stop mock2-dev.service');
   const mintIdx = deploy.indexOf('ensureComponentSecrets(');
   const validateIdx = deploy.indexOf('validateDeployEnvironment(');
   const swapIdx = deploy.indexOf('const swap = await containerSh(');
-  assert.ok(mintIdx < validateIdx && validateIdx < swapIdx, 'mint, then validate, then write the unit');
+  assert.ok(stopIdx > 0 && stopIdx < mintIdx && mintIdx < validateIdx && validateIdx < swapIdx, 'stop the app, then mint, then validate, then write and start the unit');
+  // The final probe and mint happen with writers stopped; a failed mint restarts the old unit.
+  assert.match(deploy, /ensureComponentSecrets\(\{ containerName, rows, writersStopped: true \}\)/);
+  assert.match(deploy, /systemctl start mock2-dev\.service >\/dev\/null 2>&1 \|\| true/);
+  // Deploys for one container are serialized.
+  assert.match(deploy, /const deployQueues = new Map\(\);/);
 });
 
 test('ratchet: the seed auth component refuses its dev defaults in production and marks its secrets as minted', () => {

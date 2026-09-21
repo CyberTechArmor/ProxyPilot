@@ -321,16 +321,20 @@ export async function probeProtectedData({ containerName, guard }) {
   }
 }
 
-// storageIsFresh({ containerName, contracts }) → { fresh, reasons }: true only
-// when every data guard the contracts declare reports fresh storage (no table,
-// no database, or no rows). An unreadable probe is NOT fresh.
-export async function storageIsFresh({ containerName, contracts } = {}) {
+// storageIsFresh({ containerName, contracts, newlyProvisioned }) → { fresh,
+// reasons }: true only when the platform POSITIVELY identified this container
+// as newly provisioned (created in this run from the template, no restored,
+// copied or rehydrated data) AND every data guard the contracts declare finds
+// nothing stored. New files over an existing database, a probe that could not
+// run, or data on a supposedly new container are all NOT fresh.
+export async function storageIsFresh({ containerName, contracts, newlyProvisioned = false } = {}) {
   const reasons = [];
+  if (newlyProvisioned !== true) return { fresh: false, reasons: ['this container was not positively identified as newly provisioned (a rebuild, a clone with data, a rehydrate, or a later install)'] };
   let fresh = true;
   for (const contract of contracts || []) {
     for (const { key, guard } of secretDataGuards(contract?.config || [])) {
       const probe = await probeProtectedData({ containerName, guard });
-      const d = decideMasterSecretMint({ probe, envHasKey: false, classification: classifyRows(probe.rows, { legacy: [guard.legacy_default] }) });
+      const d = decideMasterSecretMint({ probe, envHasKey: false, newlyProvisioned: true, classification: classifyRows(probe.rows, { legacy: [guard.legacy_default] }) });
       if (!d.fresh) { fresh = false; reasons.push(`${key}: ${d.reason}`); }
     }
   }
@@ -373,7 +377,12 @@ function envFileKeysOf(text) {
   return keys;
 }
 
-export async function ensureComponentSecrets({ containerName, rows, rand } = {}) {
+// Options: newlyProvisioned — the container was created in this run from the
+// template with no earlier data (provision.js says so; nothing else may);
+// writersStopped — the app is stopped (deploy.js stops it before calling), so
+// a key that protects stored data may change without a concurrent write
+// landing under the old key. Without either, a data-guarded key is deferred.
+export async function ensureComponentSecrets({ containerName, rows, rand, newlyProvisioned = false, writersStopped = false } = {}) {
   const configs = installedSecretConfigs(rows);
   if (!configs.length) return { ok: true, minted: [], deferred: [], required: [] };
   const deferred = [];
@@ -423,7 +432,10 @@ export async function ensureComponentSecrets({ containerName, rows, rand } = {})
   for (const { key, guard } of secretDataGuards(eligible)) {
     if (envKeys.has(key)) continue;
     const probe = await probeProtectedData({ containerName, guard });
-    const d = decideMasterSecretMint({ probe, envHasKey: false, classification: classifyRows(probe.rows, { legacy: [guard.legacy_default] }) });
+    const d = decideMasterSecretMint({
+      probe, envHasKey: false, newlyProvisioned, writersStopped,
+      classification: classifyRows(probe.rows, { legacy: [guard.legacy_default] }),
+    });
     if (d.mint === 'ok') continue;
     deferred.push({ key, reason: d.reason });
     eligible = eligible.filter((c) => c.key !== key);
@@ -496,7 +508,7 @@ export async function ensureNodeRuntime({ containerName }) {
 // a chat message so the record of WHAT the build uses is visible where the
 // build happens. Returns { ok, installed, failed } — ok is false when any
 // selection failed (the caller blocks the build; pressing Build again retries).
-export async function preinstallComponents({ project, initiatedBy = null, actingAsAdmin = 0, cycleId = null }) {
+export async function preinstallComponents({ project, initiatedBy = null, actingAsAdmin = 0, cycleId = null, newlyProvisioned = false }) {
   const projectId = Number(project.id);
 
   // Auto-apply (operator setting, default on): every published component with
@@ -587,7 +599,7 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
   try {
     const freshContracts = installed.filter((i) => i.counts && i.counts.kept === 0).map((i) => i.contract);
     if (freshContracts.length) {
-      const storage = await storageIsFresh({ containerName, contracts: freshContracts });
+      const storage = await storageIsFresh({ containerName, contracts: freshContracts, newlyProvisioned });
       const fresh = await ensureFreshEnvValues({ containerName, contracts: freshContracts, freshStorage: storage.fresh });
       if (fresh.written.length) {
         insertMessage({ projectId, kind: 'system', cycleId, body: `Fresh install with fresh storage: set ${fresh.written.join(', ')} in the container environment (no earlier data to migrate).` });
@@ -612,7 +624,10 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
   // build's first turn, so the app never boots on a dev default (the deploy
   // step re-checks and refuses to start production mode without them).
   try {
-    const secrets = await ensureComponentSecrets({ containerName, rows: listProjectComponents(projectId) });
+    // Data-guarded keys are minted here only on a newly provisioned container
+    // (nothing runs yet); on an existing app the deploy mints them after it
+    // stops the app (writersStopped) — never beside a running writer.
+    const secrets = await ensureComponentSecrets({ containerName, rows: listProjectComponents(projectId), newlyProvisioned });
     if (secrets.minted.length) {
       insertMessage({
         projectId, kind: 'system', cycleId,

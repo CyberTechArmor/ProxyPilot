@@ -32,24 +32,37 @@ test('normalizeDataGuard: plain identifiers and a bounded, semicolon-free filter
   assert.equal(normalizeDataGuard(null), null);
 });
 
-test('authDataProbeScript: runs as postgres against the app database, every outcome is a PROBE line', () => {
+test('authDataProbeScript: targets the app\'s own DATABASE_URL, never prints it, refuses remote hosts, gates rows on exit 0', () => {
   const s = authDataProbeScript(GUARD);
   assert.match(s, /command -v psql/);
-  assert.match(s, /su - postgres -c "psql -X -tA -F '\|' -d app -c/);
-  assert.match(s, /SELECT secret_ciphertext, secret_nonce FROM auth_connections WHERE provider = 'ldaps' AND secret_ciphertext <> ''/);
-  assert.match(s, /PROBE:ok/); assert.match(s, /PROBE:error/); assert.match(s, /PROBE:nopsql/);
+  assert.match(s, /\. \/etc\/environment/);
+  assert.match(s, /DATABASE_URL:-postgres:\/\/app:app@127\.0\.0\.1:5432\/app/);
+  assert.match(s, /case "\$HOST" in ""\|127\.0\.0\.1\|localhost\|::1\)/);
+  assert.match(s, /PROBE:remote/);
+  assert.match(s, /echo "DB:\$DB"/);
+  assert.doesNotMatch(s, /echo "\$URL"|echo \$URL|printf '%s\\n' "\$URL"/, 'the URL (with its password) is never printed');
+  assert.match(s, /psql -X -v ON_ERROR_STOP=1 -tA -F '\|' --pset footer=off -d '\$DB' -c \\"SELECT secret_ciphertext, secret_nonce FROM auth_connections WHERE provider = 'ldaps' AND secret_ciphertext <> ''\\"/);
+  assert.match(s, /if \[ "\$ec" -eq 0 \]; then printf '%s\\n' "\$out" \| sed -e '\/\^\$\/d' -e 's\/\^\/ROW:\/'; echo "PROBE:ok"; else/);
+  assert.match(s, /PROBE:error/); assert.match(s, /PROBE:nopsql/);
 });
 
-test('parseAuthDataProbe: no table, no database, empty, rows, and the unknowns', () => {
-  assert.equal(parseAuthDataProbe('ERR:ERROR:  relation "auth_connections" does not exist\nPROBE:error\n').state, 'no_table');
-  assert.equal(parseAuthDataProbe('ERR:psql: error: connection to server failed: FATAL:  database "app" does not exist\nPROBE:error\n').state, 'no_database');
-  assert.equal(parseAuthDataProbe('PROBE:ok\n').state, 'empty');
-  const two = parseAuthDataProbe('ROW:AAAA|BBBB\nROW:CCCC|DDDD\nPROBE:ok\n');
+test('parseAuthDataProbe: no table, no database, empty, rows, remote, and the unknowns — with the database named', () => {
+  assert.equal(parseAuthDataProbe('DB:app\nERR:ERROR:  relation "auth_connections" does not exist\nPROBE:error\n').state, 'no_table');
+  assert.match(parseAuthDataProbe('DB:app\nERR:ERROR:  relation "auth_connections" does not exist\nPROBE:error\n').detail, /database app/);
+  assert.equal(parseAuthDataProbe('DB:other\nERR:psql: error: connection to server failed: FATAL:  database "other" does not exist\nPROBE:error\n').state, 'no_database');
+  const empty = parseAuthDataProbe('DB:app\nPROBE:ok\n');
+  assert.equal(empty.state, 'empty'); assert.equal(empty.database, 'app');
+  const two = parseAuthDataProbe('DB:app\nROW:AAAA|BBBB\nROW:CCCC|DDDD\nPROBE:ok\n');
   assert.equal(two.state, 'rows');
   assert.deepEqual(two.rows, [{ ciphertext: 'AAAA', nonce: 'BBBB' }, { ciphertext: 'CCCC', nonce: 'DDDD' }]);
+  assert.equal(parseAuthDataProbe('PROBE:remote\n').state, 'unknown');
+  assert.match(parseAuthDataProbe('PROBE:remote\n').detail, /non-local host/);
   assert.equal(parseAuthDataProbe('PROBE:nopsql\n').state, 'unknown');
-  assert.equal(parseAuthDataProbe('ERR:psql: error: connection refused\nPROBE:error\n').state, 'unknown');
+  assert.equal(parseAuthDataProbe('DB:app\nERR:psql: error: connection refused\nPROBE:error\n').state, 'unknown');
+  assert.equal(parseAuthDataProbe('DB:app\nERR:ERROR:  column "secret_nonce" does not exist\nPROBE:error\n').state, 'unknown', 'an unexpected schema is not "no table"');
   assert.equal(parseAuthDataProbe('').state, 'unknown');
+  // Rows without a PROBE:ok line (a killed probe) are not an answer.
+  assert.equal(parseAuthDataProbe('DB:app\nROW:AAAA|BBBB\n').state, 'unknown');
 });
 
 test('decryptUnderMaster matches the component scheme; classifyRows tells current, legacy and unknown apart', () => {
@@ -64,43 +77,75 @@ test('decryptUnderMaster matches the component scheme; classifyRows tells curren
   assert.deepEqual(classifyRows([], { legacy: [DEV] }), { total: 0, current: 0, legacy: 0, unknown: 0 });
 });
 
-test('decision: fresh storage → empty bridge and a new key are safe', () => {
+const probeOf = (rowsList) => parseAuthDataProbe(`DB:app\n${rowsList.map((r) => `ROW:${r.ciphertext}|${r.nonce}`).join('\n')}${rowsList.length ? '\n' : ''}PROBE:ok\n`);
+const classify = (probe) => classifyRows(probe.rows, { legacy: [DEV] });
+
+test('decision: only a POSITIVELY newly provisioned container with nothing stored is fresh', () => {
   for (const state of ['no_table', 'no_database', 'empty']) {
-    const d = decideMasterSecretMint({ probe: { state, detail: 'x' }, envHasKey: false });
+    const d = decideMasterSecretMint({ probe: { state, detail: 'x' }, newlyProvisioned: true });
     assert.equal(d.fresh, true); assert.equal(d.mint, 'ok');
+  }
+  // The same probe results on a container NOT identified as newly provisioned are never fresh.
+  for (const state of ['no_table', 'no_database', 'empty']) {
+    assert.equal(decideMasterSecretMint({ probe: { state, detail: 'x' } }).fresh, false);
   }
 });
 
-test('decision: NEW component files + EXISTING database with a legacy-encrypted credential → not fresh, mint through the bridge', () => {
+test('decision: data on a supposedly new container is a contradiction — defer, change nothing', () => {
+  const probe = probeOf([encrypt('{"host":"ldap"}', DEV)]);
+  const d = decideMasterSecretMint({ probe, newlyProvisioned: true, classification: classify(probe) });
+  assert.equal(d.fresh, false); assert.equal(d.mint, 'defer'); assert.match(d.reason, /reported as newly provisioned, yet/);
+});
+
+test('decision: a missing table or database on an EXISTING app is investigated, not initialised', () => {
+  for (const state of ['no_table', 'no_database']) {
+    const d = decideMasterSecretMint({ probe: { state, detail: 'the credentials table does not exist in database app' }, writersStopped: true });
+    assert.equal(d.fresh, false); assert.equal(d.mint, 'defer'); assert.match(d.reason, /schema the key protects is missing/);
+  }
+});
+
+test('decision: an existing app with the correct database and no rows may initialise — only with writers stopped', () => {
+  const probe = probeOf([]);
+  assert.equal(decideMasterSecretMint({ probe }).mint, 'defer');
+  assert.match(decideMasterSecretMint({ probe }).reason, /after it stops the app/);
+  const d = decideMasterSecretMint({ probe, writersStopped: true });
+  assert.equal(d.mint, 'ok'); assert.equal(d.fresh, false); assert.match(d.reason, /read while the app is stopped/);
+});
+
+test('decision: NEW component files + EXISTING database with a legacy-encrypted credential → not fresh, mint through the bridge (writers stopped)', () => {
   // The review\'s case: "nothing kept" yet data exists. The empty legacy list
   // must NOT be written (fresh=false) and the mint may proceed only because
-  // every row is under the development default the bridge knows.
-  const row = encrypt('{"host":"ldap"}', DEV);
-  const probe = parseAuthDataProbe(`ROW:${row.ciphertext}|${row.nonce}\nPROBE:ok\n`);
-  const d = decideMasterSecretMint({ probe, envHasKey: false, classification: classifyRows(probe.rows, { legacy: [DEV] }) });
-  assert.equal(d.fresh, false);
-  assert.equal(d.mint, 'ok');
-  assert.match(d.reason, /development default/);
+  // every row is under the development default the bridge knows, and only
+  // once the deploy has stopped the app.
+  const probe = probeOf([encrypt('{"host":"ldap"}', DEV)]);
+  assert.equal(decideMasterSecretMint({ probe, classification: classify(probe) }).mint, 'defer');
+  const d = decideMasterSecretMint({ probe, writersStopped: true, classification: classify(probe) });
+  assert.equal(d.fresh, false); assert.equal(d.mint, 'ok'); assert.match(d.reason, /development default/);
 });
 
 test('decision: existing database under a custom or unknown key → defer and say why', () => {
-  const row = encrypt('{"host":"ldap"}', CUSTOM);
-  const probe = parseAuthDataProbe(`ROW:${row.ciphertext}|${row.nonce}\nPROBE:ok\n`);
-  const d = decideMasterSecretMint({ probe, envHasKey: false, classification: classifyRows(probe.rows, { legacy: [DEV] }) });
-  assert.equal(d.fresh, false);
-  assert.equal(d.mint, 'defer');
-  assert.match(d.reason, /neither in the environment nor the development default/);
-  // Mixed: one legacy, one unknown → still defer (a partial rekey strands the rest).
-  const dev = encrypt('{"host":"ldap"}', DEV);
-  const mixed = parseAuthDataProbe(`ROW:${row.ciphertext}|${row.nonce}\nROW:${dev.ciphertext}|${dev.nonce}\nPROBE:ok\n`);
-  assert.equal(decideMasterSecretMint({ probe: mixed, envHasKey: false, classification: classifyRows(mixed.rows, { legacy: [DEV] }) }).mint, 'defer');
+  const custom = encrypt('{"host":"ldap"}', CUSTOM);
+  const probe = probeOf([custom]);
+  const d = decideMasterSecretMint({ probe, writersStopped: true, classification: classify(probe) });
+  assert.equal(d.fresh, false); assert.equal(d.mint, 'defer'); assert.match(d.reason, /neither in the environment nor the development default/);
+  const mixed = probeOf([custom, encrypt('{"host":"ldap"}', DEV)]);
+  assert.equal(decideMasterSecretMint({ probe: mixed, writersStopped: true, classification: classify(mixed) }).mint, 'defer');
 });
 
-test('decision: a key already in the environment is never overwritten; an unreadable probe defers', () => {
-  const row = encrypt('{"host":"ldap"}', MINTED);
-  const probe = parseAuthDataProbe(`ROW:${row.ciphertext}|${row.nonce}\nPROBE:ok\n`);
-  const d = decideMasterSecretMint({ probe, envHasKey: true, classification: classifyRows(probe.rows, { current: MINTED, legacy: [DEV] }) });
+test('decision: a key already in the environment is never overwritten; an unreadable, remote or wrong database defers and changes nothing', () => {
+  const probe = probeOf([encrypt('{"host":"ldap"}', MINTED)]);
+  const d = decideMasterSecretMint({ probe, envHasKey: true, writersStopped: true, classification: classifyRows(probe.rows, { current: MINTED, legacy: [DEV] }) });
   assert.equal(d.mint, 'existing'); assert.equal(d.fresh, false);
-  const u = decideMasterSecretMint({ probe: { state: 'unknown', detail: 'psql is not available in the container' }, envHasKey: false });
-  assert.equal(u.mint, 'defer'); assert.equal(u.fresh, false); assert.match(u.reason, /could not be read/);
+  for (const detail of ['psql is not available in the container', 'DATABASE_URL points at a non-local host, which the in-container probe cannot vouch for', 'ERROR:  column "secret_nonce" does not exist']) {
+    const u = decideMasterSecretMint({ probe: { state: 'unknown', detail }, newlyProvisioned: true, writersStopped: true });
+    assert.equal(u.mint, 'defer'); assert.equal(u.fresh, false); assert.match(u.reason, /could not be read/); assert.match(u.reason, /left as they are/);
+  }
+});
+
+test('nothing sensitive leaves the classifier: reasons carry counts and wording, never ciphertext, plaintext or keys', () => {
+  const row = encrypt('{"host":"ldap","bindPassword":"hunter2"}', CUSTOM);
+  const probe = probeOf([row]);
+  const d = decideMasterSecretMint({ probe, writersStopped: true, classification: classify(probe) });
+  assert.doesNotMatch(d.reason, /hunter2/); assert.doesNotMatch(d.reason, new RegExp(row.ciphertext.slice(0, 12))); assert.doesNotMatch(d.reason, new RegExp(CUSTOM));
+  assert.doesNotMatch(probe.detail, new RegExp(row.ciphertext.slice(0, 12)));
 });

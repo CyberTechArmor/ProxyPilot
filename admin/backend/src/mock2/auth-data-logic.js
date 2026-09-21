@@ -36,44 +36,66 @@ export function normalizeDataGuard(g) {
   return { table, secret_column: secretColumn, nonce_column: nonceColumn, filter, legacy_default: legacyDefault };
 }
 
-// authDataProbeScript(guard) → the shell that lists the stored secrets. Runs
-// psql as the postgres user against the in-container database, the way
-// run_project_sql and the restore path do. Every outcome is a PROBE: line.
+// authDataProbeScript(guard) → the shell that lists the stored secrets. It
+// targets the database the APP uses: DATABASE_URL from the container
+// environment (the same file the unit reads), falling back to the scaffold
+// default, with the database name parsed from it. A non-local host is not
+// something psql-as-postgres can vouch for, so it is reported as remote and
+// treated as unknown. psql runs with -X and ON_ERROR_STOP and its exit status
+// decides: empty output is an empty query ONLY when psql exited 0. Every
+// outcome is a PROBE: line, so silence is never mistaken for success. The URL
+// itself is never printed (it carries a password); only the database name is.
 export function authDataProbeScript(guard) {
   const where = [guard.filter, `${guard.secret_column} <> ''`].filter(Boolean).join(' AND ');
   const sql = `SELECT ${guard.secret_column}, ${guard.nonce_column} FROM ${guard.table} WHERE ${where}`;
   return [
     'command -v psql >/dev/null 2>&1 || { echo "PROBE:nopsql"; exit 0; }',
-    `out=$(su - postgres -c "psql -X -tA -F '|' -d app -c \\"${sql}\\"" 2>&1); ec=$?`,
-    'if [ "$ec" -eq 0 ]; then printf \'%s\\n\' "$out" | sed -e \'/^$/d\' -e \'s/^/ROW:/\'; echo "PROBE:ok"; else printf \'%s\\n\' "$out" | head -3 | sed \'s/^/ERR:/\'; echo "PROBE:error"; fi',
+    `URL=$( (set -a; . /etc/environment 2>/dev/null; set +a; printf '%s' "\${DATABASE_URL:-postgres://app:app@127.0.0.1:5432/app}") )`,
+    `HOST=$(printf '%s' "$URL" | sed -n 's|^[a-z]*://[^@/]*@\\([^:/?]*\\).*|\\1|p')`,
+    `DB=$(printf '%s' "$URL" | sed -n 's|^[a-z]*://[^/]*/\\([^?]*\\).*|\\1|p')`,
+    `case "$HOST" in ""|127.0.0.1|localhost|::1) ;; *) echo "PROBE:remote"; exit 0;; esac`,
+    `[ -n "$DB" ] || { echo "ERR:no database name in DATABASE_URL"; echo "PROBE:error"; exit 0; }`,
+    `echo "DB:$DB"`,
+    `out=$(su - postgres -c "psql -X -v ON_ERROR_STOP=1 -tA -F '|' --pset footer=off -d '$DB' -c \\"${sql}\\"" 2>&1); ec=$?`,
+    `if [ "$ec" -eq 0 ]; then printf '%s\\n' "$out" | sed -e '/^$/d' -e 's/^/ROW:/'; echo "PROBE:ok"; else printf '%s\\n' "$out" | head -3 | sed 's/^/ERR:/'; echo "PROBE:error"; fi`,
     '',
   ].join('\n');
 }
 
-// parseAuthDataProbe(stdout) → { state, rows, detail }.
+// parseAuthDataProbe(stdout) → { state, rows, detail, database }.
 //   state: 'no_table' | 'no_database' | 'empty' | 'rows' | 'unknown'
+// rows carry ciphertext only — never a plaintext, never a key — and the
+// details are counts and psql's error wording, safe for the project chat.
 export function parseAuthDataProbe(stdout) {
   const lines = String(stdout || '').split('\n').map((l) => l.trimEnd());
   const rows = [];
   const errs = [];
   let probe = null;
+  let database = null;
   for (const l of lines) {
     if (l.startsWith('ROW:')) {
       const body = l.slice(4);
       const i = body.indexOf('|');
       if (i > 0) rows.push({ ciphertext: body.slice(0, i), nonce: body.slice(i + 1) });
     } else if (l.startsWith('ERR:')) errs.push(l.slice(4).trim());
+    else if (l.startsWith('DB:')) database = l.slice(3).trim();
     else if (l.startsWith('PROBE:')) probe = l.slice(6).trim();
   }
-  if (probe === 'ok') return rows.length ? { state: 'rows', rows, detail: `${rows.length} stored credential(s)` } : { state: 'empty', rows: [], detail: 'no stored credentials' };
+  const dbName = database || 'app';
+  if (probe === 'remote') return { state: 'unknown', rows: [], database, detail: 'DATABASE_URL points at a non-local host, which the in-container probe cannot vouch for' };
+  if (probe === 'ok') {
+    return rows.length
+      ? { state: 'rows', rows, database, detail: `${rows.length} stored credential(s) in database ${dbName}` }
+      : { state: 'empty', rows: [], database, detail: `no stored credentials in database ${dbName}` };
+  }
   if (probe === 'error') {
     const text = errs.join(' ');
-    if (/relation .* does not exist/i.test(text)) return { state: 'no_table', rows: [], detail: 'the credentials table does not exist yet' };
-    if (/database .* does not exist/i.test(text)) return { state: 'no_database', rows: [], detail: 'the application database does not exist yet' };
-    return { state: 'unknown', rows: [], detail: text || 'psql failed without output' };
+    if (/relation .* does not exist/i.test(text)) return { state: 'no_table', rows: [], database, detail: `the credentials table does not exist in database ${dbName}` };
+    if (/database .* does not exist/i.test(text)) return { state: 'no_database', rows: [], database, detail: `database ${dbName} does not exist` };
+    return { state: 'unknown', rows: [], database, detail: text || 'psql failed without output' };
   }
-  if (probe === 'nopsql') return { state: 'unknown', rows: [], detail: 'psql is not available in the container' };
-  return { state: 'unknown', rows: [], detail: 'the probe produced no result' };
+  if (probe === 'nopsql') return { state: 'unknown', rows: [], database, detail: 'psql is not available in the container' };
+  return { state: 'unknown', rows: [], database, detail: 'the probe produced no result' };
 }
 
 export function masterKeyFor(master) {
@@ -106,21 +128,45 @@ export function classifyRows(rows, { current = null, legacy = [] } = {}) {
   return out;
 }
 
-// decideMasterSecretMint({ probe, envHasKey, classification }) →
-//   { fresh, mint: 'ok' | 'existing' | 'defer', reason }
-//   fresh: storage confirmed new (safe to disable the legacy bridge)
+// decideMasterSecretMint({ probe, envHasKey, classification, newlyProvisioned,
+// writersStopped }) → { fresh, mint: 'ok' | 'existing' | 'defer', reason }
+//
+//   fresh: storage POSITIVELY identified as newly provisioned — the platform
+//          created this container in this run from the template with no
+//          restored, copied or rehydrated data (newlyProvisioned), AND the
+//          probe found nothing. Only then is the legacy bridge disabled.
 //   mint:  ok — mint a new key now; existing — a key is already set (never
-//          overwritten); defer — do not change the key, reason says why
-export function decideMasterSecretMint({ probe, envHasKey = false, classification = null } = {}) {
+//          overwritten); defer — leave the key alone, reason says why
+//
+// On an EXISTING app: a missing table or database is not "fresh", it is
+// something to investigate (a wrong database name, a schema that has not
+// migrated, an incomplete restore); an empty table is fine but only while
+// the app is stopped (writersStopped — the deploy stops it before the final
+// probe, so a credential saved under the old key between probe and restart
+// cannot exist); rows all under the development default migrate through the
+// bridge, again only with writers stopped; anything else defers.
+export function decideMasterSecretMint({ probe, envHasKey = false, classification = null, newlyProvisioned = false, writersStopped = false } = {}) {
   const state = probe?.state || 'unknown';
+  const detail = probe?.detail || 'no detail';
   if (state === 'unknown') {
-    return { fresh: false, mint: 'defer', reason: `the app's stored credentials could not be read (${probe?.detail || 'no detail'}), so the key is left as it is` };
-  }
-  if (state === 'no_table' || state === 'no_database' || state === 'empty') {
-    return { fresh: true, mint: 'ok', reason: `fresh storage: ${probe.detail}` };
+    return { fresh: false, mint: 'defer', reason: `the app's stored credentials could not be read (${detail}), so the key and the legacy configuration are left as they are` };
   }
   if (envHasKey) {
     return { fresh: false, mint: 'existing', reason: 'a master secret is already set in the environment; it is never overwritten' };
+  }
+  const nothingStored = state === 'no_table' || state === 'no_database' || state === 'empty';
+  if (newlyProvisioned) {
+    if (nothingStored) return { fresh: true, mint: 'ok', reason: `newly provisioned storage: ${detail}` };
+    return { fresh: false, mint: 'defer', reason: `this project was reported as newly provisioned, yet ${detail} — the data is not new, so nothing is changed until that is understood` };
+  }
+  if (state === 'no_table' || state === 'no_database') {
+    return { fresh: false, mint: 'defer', reason: `${detail} on an existing app — the schema the key protects is missing, so the key and the legacy configuration are left as they are until that is investigated` };
+  }
+  if (!writersStopped) {
+    return { fresh: false, mint: 'defer', reason: 'the app may still be writing; the key is minted by the deploy after it stops the app, never while it runs' };
+  }
+  if (state === 'empty') {
+    return { fresh: false, mint: 'ok', reason: `${detail}, read while the app is stopped` };
   }
   const c = classification || { total: 0, current: 0, legacy: 0, unknown: 0 };
   if (c.total > 0 && c.unknown === 0 && c.current === 0) {

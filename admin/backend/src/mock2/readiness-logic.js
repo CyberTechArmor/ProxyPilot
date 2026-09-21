@@ -92,7 +92,9 @@ export const READINESS_CHECKS = Object.freeze([
 // installed in the app's container.
 // The non-HTTP readiness lines — three separate facts about the app's master
 // secret, because none implies the others (docs/features/immediate-repairs.md):
-//   MASTERKEY       a NON-DEFAULT master secret is active in the environment
+//   MASTERKEY       a NON-DEFAULT master secret is configured in the environment
+//                   the restarted unit read (not proof of what an older
+//                   process loaded)
 //   MASTERKEY_ROWS  every stored credential decrypts under that active key
 //                   (200), some do not (404), none stored (204), probe failed (500)
 //   LEGACYBRIDGE    the legacy-key fallback is disabled (AUTH_LEGACY_MASTER_SECRETS
@@ -103,14 +105,18 @@ export const READINESS_CHECKS = Object.freeze([
 export const DEV_MASTER_SECRET_LITERAL = 'dev-insecure-master-secret-change-me';
 export const MASTERKEY_CHECK = Object.freeze({
   key: 'MASTERKEY',
-  describe: 'a non-default master secret is active',
+  // "configured": the environment file the unit reads at start. Readiness runs
+  // after the deploy restarted the unit, so this is what THAT process loaded;
+  // the application-level confirmation (the LDAPS settings decrypting the
+  // stored credential after a restart) is the host acceptance test.
+  describe: 'a non-default master secret is configured for the restarted app',
   ok: (n) => n === 200,
   required: false,
   why: 'AUTH_MASTER_SECRET is unset or still the public development default in the container environment, so stored credentials are encrypted under a public key — install the current auth component and redeploy (docs/features/immediate-repairs.md)',
 });
 export const MASTERKEY_ROWS_CHECK = Object.freeze({
   key: 'MASTERKEY_ROWS',
-  describe: 'every stored credential is under the active master secret',
+  describe: 'every stored credential decrypts under the configured master secret',
   ok: (n) => n === 200 || n === 204,
   required: false,
   why: 'at least one stored credential does not decrypt under the active master secret (still under a legacy key, or the probe could not run) — open the LDAPS settings to rekey and check masterKeyInventory',

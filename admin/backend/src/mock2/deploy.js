@@ -203,13 +203,27 @@ async function deployProjectUnqueued({
   await retrofitPwaBuildPlumbing(containerName, appDir).catch(() => {});
   await stampBuildId(containerName, appDir).catch(() => {});
 
-  // 1.5) The secrets the installed components OWN (contract.config secret +
-  //      generate — the auth component's JWT and master keys) are minted once
-  //      into /etc/environment, which the unit below reads. Every deploy path
-  //      funnels through here, so a project provisioned before minting existed
-  //      is healed on its next deploy. Fail closed: no minting, no start.
+  // 1.5) Stop the running app, THEN mint. The secrets the installed components
+  //      OWN (contract.config secret + generate — the auth component's JWT and
+  //      master keys) are minted once into /etc/environment, which the unit
+  //      below reads. A key that protects stored data is decided on the data
+  //      (auth-data-logic.js), and that decision is only sound while nothing
+  //      can write under the old key: the old app is stopped and the port
+  //      freed here, before the final probe, and the new unit starts below
+  //      with the new key already persisted. Deploys for one container are
+  //      serialized (deployQueues), so two deploys cannot decide differently.
+  //      Fail closed: a failed mint restarts the old unit and reports.
   //      Dynamic imports — the static ones would be a cycle (component-install
   //      imports runner, which imports this module).
+  report('start');
+  const stop = await containerSh(
+    containerName,
+    `: ${DEPLOY_MARKER}\nsystemctl stop mock2-dev.service >/dev/null 2>&1 || true\n${freeWebPortScript(webPort)}\n`,
+    { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.start },
+  );
+  if (stop.code !== 0) {
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `could not stop the running app before the key check: ${tail(stop)}`) };
+  }
   let requiredSecretKeys = [];
   try {
     const [{ ensureComponentSecrets }, { listProjectComponents }, { getProjectByContainerName }] = await Promise.all([
@@ -218,16 +232,18 @@ async function deployProjectUnqueued({
     const project = getProjectByContainerName(containerName);
     if (project) {
       const rows = listProjectComponents(project.id);
-      const secrets = await ensureComponentSecrets({ containerName, rows });
+      const secrets = await ensureComponentSecrets({ containerName, rows, writersStopped: true });
       if (!secrets.ok) {
+        await containerSh(containerName, 'systemctl start mock2-dev.service >/dev/null 2>&1 || true\n').catch(() => {});
         return { ok: false, step: 'start', error: deployFailureMessage('start', `could not mint the application's secrets: ${secrets.error}`) };
       }
-      // A deferred key (its requires_marker is not in this project's code) is
-      // neither minted nor required — the app keeps running on its current
-      // value, and the deferral is reported by the install and retry paths.
+      // A deferred key (marker, data or artifact not ready) is neither minted
+      // nor required — the app keeps its current value, and the deferral is
+      // reported by the install and retry paths and by readiness.
       requiredSecretKeys = secrets.required;
     }
   } catch (e) {
+    await containerSh(containerName, 'systemctl start mock2-dev.service >/dev/null 2>&1 || true\n').catch(() => {});
     return { ok: false, step: 'start', error: deployFailureMessage('start', `application secret minting failed: ${e?.message || e}`) };
   }
 
@@ -238,7 +254,6 @@ async function deployProjectUnqueued({
   //    the unit says so, /etc/environment does not override it, and every
   //    minted secret is present (validateDeployEnvironment) — an omitted
   //    variable can never silently switch the dev-default secrets back on.
-  report('start');
   const execStart = execStartForStartCommand(contract.start, { appDir });
   const unit = buildDevServiceUnit({ appDir, webPort, execStart });
   const envRead = await containerSh(containerName, 'cat /etc/environment 2>/dev/null || true', { timeoutMs: 15000 });

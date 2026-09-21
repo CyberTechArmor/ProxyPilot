@@ -187,7 +187,9 @@ echo "[mock2] cloned bare repo $SRC -> $DST"
   if (cloneRes.code !== 0) {
     return fail(project, `source repo clone failed: ${(cloneRes.stderr || cloneRes.stdout || '').trim().slice(-500)}`);
   }
-  await bringUpFromRepo(project, { repoPath, containerName, mode: 'provision' });
+  // A clone that copies the source database is NOT newly provisioned storage:
+  // the rows it will hold are under the source's key.
+  await bringUpFromRepo(project, { repoPath, containerName, mode: 'provision', dataOrigin: copyDatabase ? 'restored' : 'new' });
 
   if (!copyDatabase) return;
   // Only copy data when the bring-up actually reached 'active' (the migrate
@@ -268,7 +270,11 @@ async function provisionProject(project, { repoPath, containerName }) {
 // M3 verify test can delete the image cache between archive and rehydrate and
 // still succeed. Each step updates the progress map; any hard failure calls
 // fail() (with the mode-appropriate terminal lifecycle) and returns.
-async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provision' }) {
+// dataOrigin: 'new' — the container is created here from the template and no
+// data is restored, copied or rehydrated into it (the ONLY case the installer
+// may treat as newly provisioned storage); 'restored' — a clone that copies a
+// database afterwards; 'rehydrate' — an existing project's data comes back.
+async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provision', dataOrigin = 'new' }) {
   const projectId = Number(project.id);
   const image = MOCK2_BASE_IMAGE;
   const rehydrate = mode === 'rehydrate';
@@ -443,7 +449,7 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   // A NEW project should be a WORKING app the moment it exists — open the URL,
   // create the first administrator, sign in — before any mockup or build.
   if (!rehydrate) {
-    await deployBaseApp(getProject(projectId), { reason: 'provision' });
+    await deployBaseApp(getProject(projectId), { reason: 'provision', newlyProvisioned: dataOrigin === 'new' });
   }
   // ---- Fire-and-forget: run the design action queued during provisioning ----
   // (send the brief → first concept turn; skip mockup → lock design and run
@@ -518,7 +524,7 @@ export function isBaseAppDeploying(projectId) {
   return baseAppDeployInFlight.has(Number(projectId));
 }
 
-export async function deployBaseApp(project, { reason = 'provision' } = {}) {
+export async function deployBaseApp(project, { reason = 'provision', newlyProvisioned = false } = {}) {
   const projectId = Number(project?.id);
   if (!Number.isFinite(projectId)) return { ok: false, error: 'no project' };
   if (baseAppDeployInFlight.has(projectId)) {
@@ -526,13 +532,13 @@ export async function deployBaseApp(project, { reason = 'provision' } = {}) {
   }
   baseAppDeployInFlight.add(projectId);
   try {
-    return await deployBaseAppInner(project, projectId, { reason });
+    return await deployBaseAppInner(project, projectId, { reason, newlyProvisioned });
   } finally {
     baseAppDeployInFlight.delete(projectId);
   }
 }
 
-async function deployBaseAppInner(project, projectId, { reason }) {
+async function deployBaseAppInner(project, projectId, { reason, newlyProvisioned = false }) {
   const containerName = project.container_name || containerNameForProject(projectId);
   const webPort = project.web_port || DEFAULT_WEB_PORT;
   const say = async (body) => {
@@ -569,7 +575,7 @@ async function deployBaseAppInner(project, projectId, { reason }) {
     // Dynamic import: component-install imports this module (container
     // naming), so a static import would be a cycle.
     const { preinstallComponents } = await import('./component-install.js');
-    const pre = await preinstallComponents({ project, initiatedBy: project?.created_by ?? null });
+    const pre = await preinstallComponents({ project, initiatedBy: project?.created_by ?? null, newlyProvisioned: newlyProvisioned === true });
     if (!pre.ok) {
       // Deploying with missing components would fail at tsc against absent
       // modules (the "Cannot find module 'ldapts'" failure) — stop here with
@@ -692,7 +698,7 @@ async function rehydrateProject(project, { repoPath, containerName }) {
   if ((check.stdout || '').trim() !== 'ok') {
     return fail(project, `bare repo missing at ${repoPath} — cannot rehydrate`, { lifecycle: 'archived' });
   }
-  return bringUpFromRepo(project, { repoPath, containerName, mode: 'rehydrate' });
+  return bringUpFromRepo(project, { repoPath, containerName, mode: 'rehydrate', dataOrigin: 'rehydrate' });
 }
 
 // ---- Archive (M3): checkpoint → push → destroy → 'archived' ----

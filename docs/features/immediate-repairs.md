@@ -87,16 +87,46 @@ the rows that secret protects from the app's own database (the contract's
 `provider = 'ldaps'`) through `psql` as the postgres user, and classifies
 them under the component's cipher (`auth-data-logic.js`):
 
-| What the probe finds | Decision |
+The probe targets the database the app itself uses: `DATABASE_URL` from the
+container environment (the file the unit reads), falling back to the scaffold
+default, with the database name parsed out of it and never printed (it
+carries a password). A non-local host is reported as remote and treated as
+unknown. `psql` runs with `-X`, `ON_ERROR_STOP=1` and footer off, and rows
+are emitted only when it exited zero — empty output is an empty query only
+on a successful query. Every branch prints a result line, so silence is never
+read as success.
+
+"Newly provisioned" is a **positive** identification, not an inference: only
+the provision path may say it, and only for a container created in that run
+from the template with no restored, copied or rehydrated data. A clone that
+copies the source database, a rehydrate, a rebuild of files, and every later
+install or deploy are not newly provisioned, whatever the probe finds.
+
+| Observed state | Decision |
 | --- | --- |
-| No table, no database, or no rows | Fresh storage: empty legacy list on first install; new secret minted |
-| Rows, all under the development default | Existing data the bridge migrates: mint, keep the bridge enabled, no fresh values |
+| Newly provisioned container **and** the probe finds no table, no database or no rows | Fresh storage: empty legacy list written; new secret minted |
+| Newly provisioned container but the probe finds rows | Contradiction: **deferred**, nothing changed, reported |
+| Existing app, correct database, table present, no rows | Initialise, **only while the app is stopped** (the deploy stops it before this probe); no fresh values |
+| Existing app, rows all under the development default | Existing data the bridge migrates: mint while stopped, keep the bridge, no fresh values |
+| Existing app, expected database or table missing | **Deferred and investigated** — a wrong database name, an unmigrated schema or an incomplete restore looks exactly like this |
 | A key already in `/etc/environment` | Preserved, never overwritten |
 | Rows under a key that is neither in the environment nor the development default, or a mix | **Deferred** — set `AUTH_MASTER_SECRET` to that key first, then redeploy |
-| The probe could not run (no psql, connection refused, no output) | **Uncertain: deferred**, and the reason is reported |
+| Connection, permission, query or output-parsing failure, or a remote database | **Deferred without changing secrets**, reason reported |
+
+**The transition is protected against a concurrent write.** The race the
+review named — probe finds nothing, the still-running old app saves an LDAPS
+credential under the development key, a new key activates with the bridge
+disabled — cannot happen because the deploy **stops the app and frees its
+port before the final probe and mint**, persists the new key and unit, and
+only then starts the new process. A failed mint restarts the old unit. Deploys
+for one container are serialized (`deployQueues` in `deploy.js`), so two
+deploys cannot make conflicting decisions. Outside the deploy — the
+pre-install and retry paths — a key that protects stored data is never minted
+for an existing app; it waits for the deploy. The compare-and-swap rekey
+covers later individual updates; this ordering covers the transition.
 
 The component's own test pins that an explicitly empty list stays empty. The
-bridge is enabled only where storage was not confirmed fresh.
+bridge is enabled only where storage was not positively identified as new.
 
 The source-and-artifact marker is a **compatibility** check, not proof that
 the running process carries the code. The declared built artifact
@@ -124,6 +154,18 @@ message; none implies the others:
 The guest-side probe is plain `sed`/`grep`; the rows check is computed on
 the platform side with the same classifier the mint decision uses. A project
 with no auth component gets none of the three.
+
+Read `MASTERKEY` precisely: it reports the key **configured** in the file the
+unit reads at start. Readiness runs after the deploy restarted the unit, so
+that is the key the process this deploy started loaded — not proof about any
+older process. The application-level confirmation is the host test: after the
+restart, the LDAPS settings decrypt the stored credential and report
+`masterKey` current with the inventory complete.
+
+Nothing sensitive leaves the probe: the classifier decrypts in memory and
+discards plaintext, reasons carry counts and psql's error wording, the
+database URL is never printed, and the shell helper does not log command
+output.
 
 ## MCP token validity rule
 
@@ -176,7 +218,10 @@ and the question does not arise.
 | Existing app with a custom key | Key and encrypted credential intact | *sandbox*: `planSecretMint` never writes an existing key; `mergeEnvFile` replaces nothing it was not asked to. The served app reads only the process environment |
 | Restart or repeated update | Secrets unchanged; migrations do not damage data | *sandbox*: mint is idempotent; migrations 605/913/914 guard their own preconditions; the migration-history repair is a pure transactional module tested against populated databases for every state — nothing recorded, a legitimate main 912, the former PR 912, duplicate owner records, a 913 under another name, an interrupted retry, and a vetoed write leaving history untouched. *host*: run the update twice |
 | Fresh project | Secrets minted once; legacy fallback disabled; app works after restart | *sandbox*: first install writes an empty legacy list only when the data probe confirms fresh storage; the component's vitest run proves an explicitly empty list stays empty and production refuses the dev defaults. *host*: provision, restart the guest, sign in |
-| New files, existing database | Existing keys preserved; legacy migration decided explicitly | *sandbox*: `mock2-auth-data.test.js` — new files over a database holding a dev-key credential yields not-fresh and a mint through the bridge; a custom or mixed key defers; an unreadable probe defers. *host*: rebuild a project's files over its database and watch the chat message and readiness lines |
+| New files, existing database | Existing keys preserved; legacy migration decided explicitly | *sandbox*: `mock2-auth-data.test.js` — new files over a database holding a dev-key credential yields not-fresh and a mint through the bridge only with writers stopped; a custom or mixed key defers; an unreadable probe defers; rows on a supposedly new container defer. *host*: rebuild a project's files over its database and watch the chat message and readiness lines |
+| Wrong or unavailable database | Key and legacy configuration unchanged | *sandbox*: a missing table or database on an existing app, a remote `DATABASE_URL`, a schema error, no psql, or no output all decide `defer` with nothing written. *host*: point `DATABASE_URL` at a wrong name, deploy, confirm the environment file is unchanged and the reason is reported |
+| Write attempted during the transition | Prevented, or safely handled | *sandbox*: ratchet — the deploy stops the unit and frees the port before the final probe and mint, mints with `writersStopped: true`, restarts the old unit on failure; deploys per container are serialized; pre-install and retry never mint a data-guarded key for an existing app. *host*: start a deploy, attempt an LDAPS settings save during it, confirm the save fails or lands readable |
+| After restart | The application itself decrypts the credential with the intended configuration | *host* only: open the LDAPS settings after the deploy's restart; `masterKey` current, inventory complete, connection test passes |
 | Authentication | Password/TOTP and verified passkey both log in, with separate sudo | *sandbox*: no passkey-only accounts exist; the login handler carries no sudo stamp; both ceremonies require UV. *host*: fresh-browser checks above |
 | MCP | Disabled, deleted, demoted and expired credentials denied, per call | *sandbox*: `mcpTokenRefusal` cases; `findToken` wiring ratchet; revocation on every disable/demote/delete path; new tokens default to a finite lifetime. *host*: call through an existing connector after disabling its owner; mint a 1-day token and call after it lapses |
 | Failed upgrade | A tested restore recovers code, database and matching secrets | *host* only: restore the recovery set on a replacement host |

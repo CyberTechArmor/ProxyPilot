@@ -16,12 +16,16 @@
 //                                      none is live) and is observed above
 //   POST /api/setup/jobs/:id/cancel    cancel: outright while queued, at the
 //                                      next safe checkpoint while running (sudo)
+//   POST /api/setup/jobs/:id/acknowledge  an operator has inspected the guest a
+//                                      lifecycle verb left in an unknown state
+//                                      (recovery_required / interrupted_uncertain):
+//                                      releases the stale lease that records it (sudo)
 
 import { Router } from 'express';
 import { z } from 'zod';
 import { getDb, logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
-import { engineOverview, jobDetail, requestAppRecovery } from '../lib/setup-engine/backend.js';
+import { engineOverview, jobDetail, requestAppRecovery, acknowledgeUncertainJob } from '../lib/setup-engine/backend.js';
 import { listJobs, getJob, createJob, jobView, requestCancel } from '../lib/setup-engine/store.js';
 import { CONTAINER_NAME_RE, RUNNER_JOB_KINDS, retryPlan, validateRunnerJob, parseJson } from '../lib/setup-engine/logic.js';
 
@@ -88,6 +92,15 @@ setupRouter.post('/apps/:app/deploy', requireAdmin, requireSudo, async (req, res
   if (!out.ok) return res.status(409).json({ error: out.error || 'deploy refused', step: out.step || null, jobId: out.jobId || null });
   if (out.submitted) return res.status(out.created ? 202 : 200).json({ jobId: out.jobId, created: out.created, runner: out.runner, executor: out.executor, policy: out.policy, status: 'queued' });
   return res.status(200).json({ jobId: out.jobId || null, created: true, runner: null, status: 'finished', result: { ok: out.ok, step: out.step || null, skipped: !!out.skipped } });
+});
+
+setupRouter.post('/jobs/:id/acknowledge', requireAdmin, requireSudo, (req, res) => {
+  const body = z.object({ note: z.string().max(300).optional() }).safeParse(req.body || {});
+  if (!body.success) return res.status(400).json({ error: body.error.errors[0].message });
+  const r = acknowledgeUncertainJob(getDb(), { id: String(req.params.id), by: req.user?.username || req.user?.id || null, via: 'ui', note: body.data.note || null });
+  if (!r.ok) return res.status(r.code === 'NOT_FOUND' ? 404 : r.code === 'NOT_RECORDED' ? 500 : 409).json({ error: r.error });
+  logAudit(req.user?.id || null, 'SETUP_JOB_ACKNOWLEDGED', 'setup_job', r.job.id, { app: r.job.app, kind: r.job.kind, released: !!r.released, already: !!r.already }, req.ip);
+  res.json({ job: jobView(r.job), released: !!r.released, already: !!r.already });
 });
 
 setupRouter.post('/jobs/:id/cancel', requireAdmin, requireSudo, (req, res) => {

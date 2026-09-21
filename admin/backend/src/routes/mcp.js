@@ -1397,11 +1397,15 @@ async function toolSnapshotLxcContainer(args, auth) {
     snapName = validSnapshotName(args.name);
     if (!snapName) return toolResult('Snapshot name must be alphanumeric plus ._- (max 63 chars)', { isError: true });
   }
-  const snap = await takeLxcSnapshot(incusName, snapName);
-  if (snap.error) return toolResult(`Could not snapshot ${name}: ${snap.error}`, { isError: true });
-  logAudit(auth.created_by, 'LXC_SNAPSHOT_TAKEN', 'lxc', name, { via: 'mcp', snapshot: snapName }, null);
+  // A setup-engine job (`snapshot_create`, docs/features/setup-engine.md
+  // § "Incus lifecycle and snapshots"): the runner takes the snapshot under
+  // the guest's lease and reads it back before the job reports done.
+  const { runLifecycle } = await import('../mock2/ops.js');
+  const out = await runLifecycle({ kind: 'snapshot_create', containerName: incusName, snapshot: snapName, requestedBy: auth.created_by ?? null, via: 'mcp' });
+  if (!out.ok) return toolResult(`Could not snapshot ${name}: ${out.error}${out.jobId ? ` (job ${out.jobId})` : ''}`, { isError: true });
+  logAudit(auth.created_by, 'LXC_SNAPSHOT_TAKEN', 'lxc', name, { via: 'mcp', snapshot: snapName, job_id: out.jobId }, null);
   return toolResult({
-    snapshotted: true, container: name, snapshot: snapName,
+    snapshotted: true, container: name, snapshot: snapName, job_id: out.jobId, created_at: out.identity?.created_at || null,
     note: 'restore_snapshot (confirmation token; snapshots the current state first) and delete_snapshot (confirm: true) manage it from here; list_snapshots shows snapshots and export tarballs.',
   });
 }
@@ -1417,20 +1421,26 @@ async function toolControlLxcContainer(args, auth) {
     return toolResult(`Confirm with the user, then re-call with confirm: true to ${action} ${name}.`, { isError: true });
   }
   const incusName = `${LXC_PREFIX}${name}`;
-  // Clean shutdown only — no --force. A guest that will not stop cleanly is
-  // exactly the case a human should look at.
-  const r = await runHostCapture('incus', [action, incusName], { timeoutMs: 180000 });
-  logAudit(auth.created_by, 'LXC_CONTROL', 'lxc', name, { via: 'mcp', action, exit: r.status, timed_out: !!r.timedOut }, null);
-  if (r.status !== 0) {
-    const why = r.timedOut
-      ? `timed out — the guest did not ${action} cleanly within 180s (no force-kill is issued over MCP; check it with get_lxc_container)`
-      : (r.stderr || '').trim().slice(-300) || 'unknown error';
-    return toolResult(`Could not ${action} ${name}: ${why}`, { isError: true });
+  // A setup-engine job (`instance_start` / `instance_stop` / `instance_restart`):
+  // the runner issues the one fixed `incus` command under the guest's lease
+  // and reads the state back before the job reports done. Clean shutdown
+  // only — no --force. A guest that will not stop cleanly is exactly the
+  // case a human should look at. Refused, never queued, while a deploy or a
+  // restore holds the guest and when no executor is available.
+  const { runLifecycle, LIFECYCLE_ACTIONS } = await import('../mock2/ops.js');
+  const out = await runLifecycle({ kind: LIFECYCLE_ACTIONS[action], containerName: incusName, force: false, requestedBy: auth.created_by ?? null, via: 'mcp' });
+  logAudit(auth.created_by, 'LXC_CONTROL', 'lxc', name, { via: 'mcp', action, job_id: out.jobId || null, ok: !!out.ok, step: out.step || null }, null);
+  if (!out.ok) {
+    const why = /timeout|timed out/i.test(out.error || '')
+      ? `${out.error} — the guest did not ${action} cleanly (no force-kill is issued over MCP; check it with get_lxc_container)`
+      : out.error;
+    return toolResult(`Could not ${action} ${name}: ${why}${out.jobId ? ` (job ${out.jobId})` : ''}`, { isError: true });
   }
-  const detail = await fetchLxcInstance(incusName);
   return toolResult({
-    done: true, action, container: name,
-    status: detail.instance?.status || null,
+    done: true, action, container: name, job_id: out.jobId,
+    status: out.instanceState || null,
+    ...(out.alreadyInState ? { note: `the guest was already ${out.instanceState}; nothing was issued` } : {}),
+    ...(out.verificationJobId ? { verification: { pending: true, job_id: out.verificationJobId } } : {}),
   });
 }
 
@@ -1500,43 +1510,35 @@ async function toolCreateLxcContainer(args, auth) {
     return toolResult(`Container ${name} already exists (status ${existing.instance.status}) — creation never replaces. Use get_lxc_container to inspect it.`, { isError: true });
   }
 
-  const argv = ['launch', image, incusName, '--profile', 'default',
-    '--config', `limits.cpu=${cpu}`,
-    '--config', `limits.memory=${memoryGb}GB`,
-    '--config', `boot.autostart=${autostart}`];
+  // The launch is a setup-engine job (`instance_create`): the plan names the
+  // image, the profile and the allowlisted --config keys; the runner renders
+  // `incus launch …` on the host, reads the guest back as Running before it
+  // reports created, and removes a half-created guest when the launch failed
+  // (never one that already existed: a create never replaces). Memory is
+  // passed in MiB so a fractional GB stays exact.
+  const config = {
+    'limits.cpu': String(cpu),
+    'limits.memory': `${Math.round(memoryGb * 1024)}MiB`,
+    'boot.autostart': String(autostart),
+  };
   if (dockerReady) {
     // Same flag set the UI creation route uses for Docker-in-LXC guests:
     // nesting plus the syscall intercepts BuildKit and sysctl-touching
     // images need. Privileged mode is NOT part of docker-ready.
-    argv.push(
-      '--config', 'security.nesting=true',
-      '--config', 'security.syscalls.intercept.mknod=true',
-      '--config', 'security.syscalls.intercept.setxattr=true',
-      '--config', 'security.syscalls.intercept.bpf=true',
-      '--config', 'security.syscalls.intercept.bpf.devices=true',
-    );
+    Object.assign(config, {
+      'security.nesting': 'true',
+      'security.syscalls.intercept.mknod': 'true',
+      'security.syscalls.intercept.setxattr': 'true',
+      'security.syscalls.intercept.bpf': 'true',
+      'security.syscalls.intercept.bpf.devices': 'true',
+    });
   }
-  // Image download can dominate first-launch time.
-  const r = await runHostCapture('incus', argv, { timeoutMs: 300000 });
-  if (r.status !== 0) {
-    // Best-effort cleanup of a half-created instance, same as the UI route —
-    // but NEVER when the launch failed because the name is in use: that
-    // instance belongs to someone else (a create that raced this one), and
-    // "cleaning it up" would force-delete a live container we did not make.
-    const stderrTail = (r.stderr || '').trim();
-    if (!/already exists|already in use/i.test(stderrTail)) {
-      await runHostCapture('incus', ['delete', incusName, '--force'], { timeoutMs: 60000 }).catch(() => {});
-    }
-    const why = r.timedOut ? 'timed out after 300s (slow image download?)' : stderrTail.slice(-400) || 'unknown error';
-    return toolResult(`Launch failed: ${why}`, { isError: true });
-  }
+  const { runLifecycle } = await import('../mock2/ops.js');
+  const launch = await runLifecycle({ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, rootSize: diskGb !== null ? `${diskGb}GiB` : null, requestedBy: auth.created_by ?? null, via: 'mcp' });
+  if (!launch.ok) return toolResult(`Launch failed: ${launch.error}${launch.jobId ? ` (job ${launch.jobId})` : ''}`, { isError: true });
 
-  const warnings = [];
+  const warnings = [...(Array.isArray(launch.warnings) ? launch.warnings : [])];
   await ensureNetworkNat().catch(() => {});
-  if (diskGb !== null) {
-    const d = await runHostCapture('incus', ['config', 'device', 'override', incusName, 'root', `size=${diskGb}GiB`], { timeoutMs: 30000 });
-    if (d.status !== 0) warnings.push(`root disk size could not be set (${(d.stderr || '').trim().slice(-200)}) — the profile default applies`);
-  }
 
   // Give the guest a moment to pick up a DHCP lease so the result is usable.
   let detail = null;
@@ -1553,6 +1555,7 @@ async function toolCreateLxcContainer(args, auth) {
     created: true,
     container: name,
     image,
+    job_id: launch.jobId,
     ...(detail || {}),
     ...(warnings.length ? { warnings } : {}),
     next: 'Deploy content with inspect_lxc_zip/apply_lxc_zip (register a startup.sh), or write files directly with write_lxc_file.',

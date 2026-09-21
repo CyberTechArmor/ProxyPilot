@@ -2,9 +2,11 @@
 
 Gate two's foundation (`docs/core/setup-engine-requirements.md` R1, R2, R4).
 Every platform operation that changes what a guest runs or stores — today
-the deploy, the project database restore, the container snapshot restore
-and the retry path's secret mint; later the credential migration and the
-guided setup — holds one **persistent lease per app**, records itself as a
+the deploy, the project database restore, the container snapshot restore,
+the retry path's secret mint, and the Incus lifecycle and snapshot verbs
+(create, start, stop, restart, delete; snapshot create and delete); later
+the credential migration and the guided setup — holds one **persistent
+lease per app**, records itself as a
 **saved job** with a checkpoint before its disruptive step, and is
 **recovered by a root host runner** when the process that ran it dies. The
 browser, the CLI and MCP submit and observe rows; the runner acts.
@@ -443,6 +445,142 @@ plan is what the dry run shows. `retry_of`, `environment_copy` and the
 dump are resolved on the server with ownership checks (same app, same
 kind, a terminal prior job; a recovery set of this app).
 
+## Incus lifecycle and snapshots as runner jobs (A-17.2 … A-17.6)
+
+Since this slice the Incus instance lifecycle verbs and the snapshot create
+and delete are runner jobs: `instance_create`, `instance_start`,
+`instance_stop`, `instance_restart`, `instance_delete`, `snapshot_create`,
+`snapshot_delete` (`lifecycle-logic.js` `LIFECYCLE_JOB_KINDS`, mirrored in
+`logic.js` `RUNNER_JOB_KINDS`). Their surfaces — the dashboard's
+`POST /containers/:name/{start,stop,restart,reboot}`, `DELETE /containers/:name`,
+`POST /containers` (the launch), `POST /containers/:name/snapshot`, both
+snapshot `DELETE` routes and the `exportTemps` category of
+`POST /cleanup/execute`; the MCP tools `control_lxc_container`,
+`create_lxc_container`, `snapshot_lxc_container`, `delete_lxc_container`
+(the stop and the delete; its protective export stays where it was) and
+`delete_snapshot` — call `mock2/ops.js` `runLifecycle` and observe the job.
+None of them builds an `incus` command any more; the dashboard's create
+route used to interpolate the image and profile unquoted into a shell
+string (R-017).
+
+**One operation, fixed commands.** `lifecycle-op.js` runs every kind over
+the host executor's argv channel (the runner spawns `incus` directly; the
+backend's in-process executor uses its pivot):
+
+| Kind | Command | Verified afterwards |
+| --- | --- | --- |
+| `instance_start` | `incus start <name>` | `incus list` reads **Running** |
+| `instance_stop` | `incus stop <name> [--force]` | **Stopped** |
+| `instance_restart` | `incus restart <name> [--force]` | **Running** |
+| `instance_delete` | `incus stop <name> [--force]` when running, then `incus delete <name>` | **absent** |
+| `instance_create` | `incus launch <image> <name> --profile <p> [--config k=v]… [--network <bridge>] [--vm]`, then best-effort `incus config device override <name> root size=<n>` | present and **Running** |
+| `snapshot_create` | `incus snapshot create <name> <snap>` (legacy form discovered from the client's answer), then best-effort `incus config set <name>/snapshots/<snap> user.note=…` | the snapshot **present** |
+| `snapshot_delete` | `incus snapshot delete <name> <snap>` | the snapshot **absent** |
+
+The argv comes from `lifecycleArgv(kind, params)` and from nothing else. A
+plan carries names, flags and — for a create — a config map whose keys are
+on `LAUNCH_CONFIG_ALLOWLIST` (`security.nesting`, the four
+`security.syscalls.intercept.*` keys, `security.privileged`, `raw.lxc`
+accepting exactly `lxc.apparmor.profile=unconfined`, `limits.cpu`,
+`limits.memory`, `boot.autostart`, each with a value shape); a plan with a
+`command`, `argv`, `args`, `options` or `script`, an unknown config key, an
+unaccepted value or a value that looks like a secret is refused at
+submission and again by the runner before it renders anything
+(`validateLifecycleParams`). The runner validates every claimed job itself:
+authorization happens where the request arrives (the route's permission and
+sudo, the MCP key and its gates), validation at the privileged boundary.
+
+**Read before, read after, claim nothing.** Every job reads the guest first
+(`incus list <name> --format json`): the target must exist — or, for a
+create, must not — and must be the resource the operator confirmed. A
+delete is bound to the guest's identity (Incus's `volatile.uuid` and
+`created_at`, `params.expect`) and a snapshot delete to the snapshot's
+`created_at`; a guest or snapshot recreated under the same name since the
+confirmation is refused with nothing issued (`refused` / `target`). After
+the command the guest is read again, and only the state in the table above
+is success: a command that exited 0 while the guest still reads otherwise
+ends `failed` at `verify` — "not claiming success". A start of a guest
+already Running (or a stop of one already Stopped) issues nothing and says
+so. A failed launch that left a half-created guest removes it
+(`incus delete --force`, recorded as `cleanup`) — never one that already
+existed, because a create never replaces. The verification recorded on a
+lifecycle job is the resource's own state (`resource_state_verified`); the
+application ladder is `not_applicable` by name, except that a start or
+restart of a **managed** application (a project guest) queues the full
+`verify_app` ladder as a follow-up, exactly as a snapshot restore does.
+
+**Exclusive, never queued behind.** A lifecycle verb is an operator's
+immediate action: like the restores it is refused at submission while the
+guest's lease is held (live: "in progress"; stale: "recovery is required")
+or while any mutating job of the guest is open, refused again at claim time
+if a lease appeared meanwhile, and refused — `cancelled` /
+`runner_unavailable`, not left queued — when no executor is available. A
+second identical request while the first is open is refused, not duplicated.
+The dashboard maps these to 409 (busy, stale, changed target, create over an
+existing name), 503 (no executor), 404 (no such guest or snapshot), 400 (an
+invalid plan) (`lifecycleHttpStatus`).
+
+**Interruption is operation-specific** (`LIFECYCLE_PROFILE[kind].replay`):
+
+| Kind | Owner dies after the command was issued | Owner dies before |
+| --- | --- | --- |
+| start, stop, snapshot create, snapshot delete, delete | **resumed**: the requeued job re-reads the resource; the end state already holds → finished (`resumed after an interrupted attempt`, nothing re-issued); the target is still there with the **same identity** the dead attempt bound (`checkpoint.target`) → the same command once more; a resource of a different identity under the name → `refused`, nothing issued | resumed and run |
+| restart, create | **never replayed**: the record ends `recovery_required` / `interrupted_uncertain` naming the check (`incus list <name> --format json`), no recovery job is queued (a generic guest has no application to recover), and the guest's lease is **kept stale**, pointing at that record: every exclusive operation on the guest is refused with the condition — at submission, and at the executor for a row that arrived any other way — and **no job kind takes the lease over** (a follow-up verification waits, requeued every five minutes; a probe or a recovery defers; a diagnostic check clears nothing) until an operator has looked and acknowledged the job (`POST /api/setup/jobs/:id/acknowledge`, sudo). The acknowledgement is one transaction: the outcome, the event naming who and when, and the release of exactly that lease commit together or not at all — a failure leaves the hold in place | resumed and run |
+
+A delete's target identity is recorded at `validated` and again at
+`issuing`, so an absent guest after an interrupted delete is verified as this
+job's work only when the dead attempt had reached `issued: true` — an absent
+target before any command is somebody else's doing and is reported as such.
+The `validated` and `issuing` checkpoints are **mandatory**: a write the
+store rejects, or one that changes no row because the job was fenced, ends
+the operation at `checkpoint` with nothing issued — a record that says
+`issued: false` is never reconciled against a command that ran. A cancel is
+honoured at the fence before the command; after it, the job finishes and
+reads the state back. A stale lease is never taken over by an exclusive kind
+(a restore, a lifecycle verb): only a recovery or a verification may — and
+none of them when the lease records an unresolved lifecycle verb
+(`leaseHold`), which only the acknowledgement clears.
+
+**The record outlives the resource.** Every checkpoint, the identity of what
+was deleted, the argv-free plan and the outcome live in `setup_jobs` /
+`setup_job_events` on the host; a job that deleted a guest or a snapshot
+keeps its evidence. Nothing in a plan or an event is a secret: the note a
+snapshot carries is bounded text that the redaction net still scans.
+
+**Confirmation covers the resource.** `delete_lxc_container`'s one-time
+token is bound to `<name>/<digest>` where the digest covers the guest's
+identity, the export decision and `force`, so a token issued for one guest
+cannot delete a guest recreated under its name; the job then revalidates the
+same identity before the delete. `delete_snapshot` keeps `confirm: true`
+and binds the job to the snapshot's timestamp from the listing the caller
+saw. The dashboard's container delete keeps `requireSudo`; both snapshot
+delete routes now require it too (R-016), and the client's sudo modal makes
+that transparent. `control_lxc_container` keeps `confirm: true` and clean
+shutdown only (no `--force` over MCP); the dashboard's stop and restart
+buttons keep their `--force`, its reboot its graceful restart.
+
+**The snapshot dialog's polling** is unchanged: `POST /containers/:name/snapshot`
+submits the job detached and answers with the client's `jobId` (plus the
+engine's `setupJobId`); `GET …/snapshot-jobs/:jobId` reads the engine record
+(`running` while queued or running, `done` on `succeeded`, `error` with the
+job's reason otherwise) and records the duration for the next estimate. A
+refusal — busy guest, no executor — is answered synchronously, before any job
+exists to poll. Under `backend-allowed` a detached submission kicks the
+in-process drain rather than waiting for the 30 s interval.
+
+What this group did NOT move (each recorded as a later A-17 group in the
+platform ledger): the post-start fix-ups `ensureNetworkNat` / `ensureDns`
+and the create route's post-launch configuration (IP wait, DNS, the init
+script through `incus exec`, the routes); the guest configuration verbs
+(`resize`, `set_lxc_config`, `set_lxc_resources`, `set_lxc_network`,
+devices, port forwards) and the pre-mutation `takeLxcSnapshot` they lean
+on; rename, clone, import / export and their post-import start, the
+zip-import start and cleanup, the prepared-download and S3-export temp
+instances; the project provisioning launch / delete and the idle sweep's
+stop / start (`mock2/provision.js`, `lib/project-lifecycle.js`); the
+component pre-install, Caddy, storage, migration transports, the workspace
+terminal, and every read (`incus list`, `info`, `query`, usage, logs).
+
 ## Who executes: the installation policy
 
 `SETUP_EXECUTOR_POLICY` in the installation's `.env` — read by the backend
@@ -532,6 +670,7 @@ and enabled by `install.sh` and `update.sh` right after the CLI wrapper
 | `POST /api/setup/jobs/:id/retry` (sudo) | queue the same runner plan again with `reuse` |
 | `POST /api/setup/apps/:app/deploy` (sudo) | submit a deploy and return its job id (202 queued for the runner; 200 with the result when no runner is live and it ran in-process) |
 | `POST /api/setup/jobs/:id/cancel` (sudo) | cancel a queued job, or a running one at its next safe checkpoint |
+| `POST /api/setup/jobs/:id/acknowledge` (sudo) | an operator has inspected the guest a restart or create left in an unknown state (`recovery_required` / `interrupted_uncertain`): in one transaction records who and when on the job and releases the stale lease that records it; refused for any other job (409); a store failure leaves the hold in place (500, nothing recorded) |
 
 Admin only, behind the global CSRF check and a fresh sudo grant, audited
 (`SETUP_DEPLOY_REQUESTED`, `SETUP_JOB_CANCEL_REQUESTED`,
@@ -548,24 +687,28 @@ the lock itself already binds every MCP mutation that goes through
   reads their environment files for the engine; the browser-facing API
   writes rows it reads. A request cannot make it run anything but its fixed
   scripts and the guest's own contract commands inside that guest.
-- What the deployment slice and the restores slice REMOVED from the
-  container's path: on a `runner-required` host (what install.sh /
-  update.sh set once the runner proved it starts and opens the database),
-  the deploy's guest commands, both restores (their dumps, `psql`, the
-  `incus snapshot` commands), the retry path's mint,, the secret mint, the unit
-  swap, the recovery and every verification — the application-owned
-  credential check included — never run in the backend container: they run
-  in the runner, and with no runner they wait. Only a `backend-allowed`
-  installation keeps the in-process executor and its nsenter pivot for
-  these operations.
+- What the deployment slice, the restores slice and the lifecycle slice
+  REMOVED from the container's path: on a `runner-required` host (what
+  install.sh / update.sh set once the runner proved it starts and opens the
+  database), the deploy's guest commands, both restores (their dumps,
+  `psql`, the `incus snapshot` commands), the retry path's mint, the secret
+  mint, the unit swap, the recovery and every verification — the
+  application-owned credential check included — and the Incus lifecycle
+  verbs (`incus launch|start|stop|restart|delete`) and snapshot create /
+  delete of the dashboard and MCP never run in the backend container: they
+  run in the runner, and with no runner the deploy waits and everything
+  else is refused. Only a `backend-allowed` installation keeps the
+  in-process executor and its nsenter pivot for these operations.
 - What it did NOT remove: the container still has `privileged: true`,
-  `pid: host` and the Docker socket, and every other feature (Incus
-  lifecycle and snapshots other than the restore, the component
-  pre-install, Caddy, storage, migration, the workspace terminal) still
-  pivots through it. Dropping that reach is
-  Phase F of `docs/features/security-completion/master-spec.md`; this
-  slice reduces what depends on it by one operation, and does not claim
-  more.
+  `pid: host` and the Docker socket, and every other feature (the guest
+  configuration verbs and their pre-mutation snapshots, rename / clone /
+  import / export and the transports' temp instances, the create route's
+  post-launch configuration and the post-start NAT / DNS fix-ups, project
+  provisioning and the idle sweep, the component pre-install, Caddy,
+  storage, migration, the workspace terminal, every read) still pivots
+  through it. Dropping that reach is Phase F of
+  `docs/features/security-completion/master-spec.md`; each slice reduces
+  what depends on it, and does not claim more.
 - The dashboard backend still runs `privileged: true`, `pid: host`, with the
   Docker socket mounted, and still drives Incus, Caddy and Docker itself
   through `nsenter -t 1` for every existing feature. **That reach is
@@ -598,6 +741,15 @@ except where it says so; none needs a secret on a command line.
 | restore_snapshot `failed` at `coverage` | the guest has custom storage volumes attached that an instance snapshot does not restore | pass `accept_partial: true` for a root-disk-only restore (the result says `complete: false`), or restore the volumes by other means |
 | restore_snapshot `succeeded` with `complete: false` | the root disk was restored; the named custom volumes were not | what the result names is still at its current state |
 | `retry_secrets` `cancelled` / `runner_unavailable` | the retry path's mint had no executor; not queued | the deploy that follows mints the same keys when the runner runs it |
+| a lifecycle job (`instance_*`, `snapshot_*`) `cancelled` / `runner_unavailable` | no runner heartbeat under `runner-required`: the verb was refused, never queued | start the runner, click again |
+| a lifecycle job `refused` at `target` | the guest or snapshot under that name is not the one the request was confirmed for (its uuid or timestamp changed) | look at it again (`incus list <name> --format json`, the snapshots panel) and submit a new request |
+| a lifecycle job `refused` at `query` ("already exists") | a create over an existing name; nothing was launched | pick another name, or delete the existing guest deliberately |
+| a lifecycle job `failed` at `verify` | the command exited 0 but the guest does not read as the verb promises (e.g. a start that leaves it Stopped) | read the guest's console / `incus info --show-log <name>`; nothing was claimed |
+| a lifecycle job `failed` at `issue` with `cleanup` | the launch failed; a half-created guest was removed (`removed: true`) or could not be (`detail`) | fix the image / profile named in the error; remove the leftover by hand if `removed` is false |
+| a restart or create `recovery_required` / `interrupted_uncertain`, lease `stale_since` set with `recovery_job_id` = that job | the owner died after issuing the command and before reading the result; it is not replayed; every operation on the guest is refused with this condition | `incus list <name> --format json` (or `incus info`); when you know the guest's state, `POST /api/setup/jobs/:id/acknowledge` — the lease is released and the job reads `interrupted_uncertain_acknowledged`; then submit the request you want |
+| a lifecycle job `failed` at `checkpoint` ("could not be persisted") | the engine database rejected the checkpoint before the command, or the job was fenced; nothing was issued | look at the database (disk, locks); submit again |
+| a lifecycle job `refused` / `lock_stale` | a row reached the executor (a retry, a direct insert) while the guest's lease is stale | resolve the condition the lease records (recovery, or the acknowledgement above), then submit again |
+| a start / stop / delete / snapshot verb resumed after its owner died ("resumed after an interrupted attempt") | the requeued job re-read the resource and finished, or re-issued the same command against the same identity | nothing |
 | install.sh / update.sh `Setup runner did NOT start …` (error) or the red update warning | the host stays (or is left) on `backend-allowed`: deploys execute in the container | fix the runner, then set `SETUP_EXECUTOR_POLICY=runner-required` in the install's `.env` and restart ProxyPilot; `update.sh` records it itself on the next update that finds the runner working |
 
 Restrictions that hold on every installation: a deploy, restore or retry
@@ -608,6 +760,61 @@ is an operator's explicit, confirmed request naming the copy, and the
 copies a deploy or restore took are named on its record for that.
 
 ## Tests
+
+`setup-lifecycle.test.js` (20 tests; one with a real spawn capture of the
+runner's host channel; the rest over a scripted host executor and the real
+executor on `node:sqlite`): the kind registry and the agreement between
+`lifecycle-logic.js` and `logic.js` (both import orders load); strict
+parameter validation (no command / argv / options, force only where it
+applies, the launch config allowlist and value shapes, note bounds, secret
+lookalikes) reaching `validateRunnerJob` and `submitRunnerJob`; the fixed
+argv per kind and a refusal to render an invalid plan; identity, state
+verdicts and the idempotent short-circuit; every kind end to end (the argv
+issued, the state read back, the record's outcome and verification, the
+lease released, `resultFromJob` keeping the job status and the guest state
+apart); a start of a running guest issuing nothing; a start that exits 0
+but leaves the guest Stopped failing at `verify`; a delete bound to the
+confirmed identity (refused for another uuid with nothing issued; stop then
+delete for the right one; the identity kept on the record; a missing guest
+not found; a guest that will not stop cleanly not deleted); a create with
+the allowlisted config and `--vm`, the root size a warning when the profile
+refuses it, an existing name refused before launch, a failed launch's
+half-created guest removed; snapshot create with the note, the legacy CLI
+form, an existing name refused, snapshot delete bound to the timestamp; the
+managed follow-up landing on the record and the explicit `not_applicable`
+otherwise; contention at submission (live lease, stale lease, open mutating
+job, duplicate) and at claim; interruption for every idempotent kind
+(finished by re-reading, re-issued against the same identity, refused on a
+changed identity, resumed before any command) and for restart / create
+(`interrupted_uncertain`, nothing re-issued, no recovery job, the lease
+kept stale so a delete is refused at submission and — for a row that
+bypassed the orchestrator — at the executor, a verification follow-up
+requeued and a probe deferred on the hold with the lease untouched and a
+delete still refused afterwards, a stale row written when none was left,
+the acknowledgement releasing exactly that lease and the next request
+running) through the runner's reconcile and the backend's boot sweep; the
+acknowledgement as one transaction (the event write and the outcome write
+each made to fail: nothing recorded, the hold kept, a delete still refused;
+a sound store landing all three together); mandatory checkpoints (SQLite rejecting the `issuing` write through
+the real store and executor → nothing issued; a fenced job stopped before
+the command; a handle reporting no row changed); a nonzero exit (1, 124)
+with the guest still Running recorded as failed, never as restarted or
+started;
+cancel before the claim and after it; runner-required refusing (cancelled,
+no host call) while a live runner takes the job and backend-allowed runs the
+same executor in-process, with a detached snapshot kicked rather than left
+for the interval; the ops layer's plan digest, HTTP mapping and refusal of
+an invalid plan before any row; the MCP tools `delete_lxc_container` (the
+token bound to the identity: a guest recreated under the same name cannot
+be deleted with it; the job through the executor; no `incus stop|delete` in
+the tool; the ledger row naming the job) and `delete_snapshot` (bound to the
+timestamp; a replaced snapshot refused by the job; busy refused); and the
+rendered argv reaching `hostGuestExec` as one spawn with no shell.
+`immediate-repairs.test.js` carries the source ratchets for the dashboard
+routes (which import the native database module and are not executed here):
+every verb goes through `lifecycleViaRunner`, none of the removed shell
+strings remains, both snapshot delete routes require sudo, and only the
+transport group's post-import start and temp cleanup are left.
 
 `setup-restores.test.js` (21 tests; two with real processes — the runner's
 host channel — and real AES-GCM rows for the compatibility check; the
@@ -696,6 +903,31 @@ dead backend and runner jobs, the serve loop, the command, the exec wrapper,
 the unit and install wiring). Both against `node:sqlite`.
 
 ## Host acceptance (not yet run)
+
+For the lifecycle group (A-17.2 … A-17.6, platform ledger HA-09): on a
+`runner-required` host, start, stop, restart and reboot a guest from the
+dashboard and confirm each job is owned by `runner@…`, the button's answer
+carries the `jobId`, and `incus list` agrees with the recorded
+`instanceState`; click Start on a running guest and confirm the record says
+nothing was issued; create a container and a VM from the dashboard (with
+Docker support on the container) and confirm the guest's config carries
+exactly the allowlisted keys, the VM's root size, and the init script and
+routes still run after the job; create with an image that does not exist
+and confirm the half-created guest is gone and the create-status shows the
+job's reason; take a snapshot with a note from the dialog and confirm the
+progress poll ends `done`, the note is on the snapshot and
+`snapshot_durations` gained a row; delete a snapshot from the dashboard and
+confirm the sudo prompt, then the job; over MCP, `delete_lxc_container`
+dry-run, recreate the guest under the same name, present the first token
+and confirm the "different target" refusal, then delete with a fresh token
+and confirm the export, the job and the ledger row; kill the runner between
+a delete's stop and its delete and confirm the restarted runner resumes the
+job and the guest is gone; kill it during a restart and confirm the record
+reads `interrupted_uncertain`, the guest is Running, nothing was
+re-issued and a Stop from the dashboard is refused (409) until the job is
+acknowledged, after which it runs; stop the runner and confirm a start is refused (503, job
+`cancelled` / `runner_unavailable`) rather than queued; on a legacy Incus
+client confirm the snapshot create still lands.
 
 For this slice's corrections: on a runner-required host, kill the runner
 between the stop and the start of a deploy of an app with an LDAPS

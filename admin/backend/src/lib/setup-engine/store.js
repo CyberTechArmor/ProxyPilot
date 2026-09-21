@@ -214,6 +214,27 @@ export function markLockStale(db, { app, nowMs = Date.now(), recoveryJobId = nul
     .run(iso(nowMs), recoveryJobId, String(app)).changes;
 }
 
+// holdStaleLock — the durable EXCLUSION for an unresolved condition: the dead
+// owner's lease row is flagged stale and pointed at the job that records the
+// condition; when no row is left (a lease that had already expired and been
+// removed), one is written in the dead owner's name, already expired and
+// stale. Either way every exclusive operation on the app is refused with the
+// recorded condition until clearStaleLock releases it.
+export function holdStaleLock(db, { app, owner, operation, jobId, epoch = 1, nowMs = Date.now() }) {
+  const now = iso(nowMs);
+  const current = readLock(db, app);
+  if (current) return markLockStale(db, { app, nowMs, recoveryJobId: jobId });
+  return db.prepare(`INSERT INTO setup_locks (app, owner, operation, job_id, epoch, acquired_at, lease_expires_at, stale_since, recovery_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(String(app), owner, operation, jobId, Number(epoch) || 1, now, now, now, jobId).changes;
+}
+
+// clearStaleLock — an operator's explicit resolution: the stale lease that
+// records THIS job's condition is released. Nothing else releases it: not a
+// live lease, not a lease recording another job.
+export function clearStaleLock(db, { app, recoveryJobId }) {
+  return db.prepare(`DELETE FROM setup_locks WHERE app = ? AND stale_since IS NOT NULL AND recovery_job_id = ?`).run(String(app), String(recoveryJobId)).changes;
+}
+
 // ── jobs ────────────────────────────────────────────────────────────────
 
 export function getJob(db, id) {
@@ -365,6 +386,16 @@ export function recordJobOutcome(db, { id, status, outcome = null, reason = null
     .run(status, outcome, reason == null ? null : sanitizeReason(reason), verification == null ? null : JSON.stringify(redact(verification)), now, now, String(id));
   if (r.changes) insertEvent(db, { jobId: id, at: now, kind: 'reconciled', message: reason, data: { status, outcome, by } });
   return r.changes;
+}
+
+// annotateTerminalOutcome(db, { id, fromStatus, outcome, reason, nowMs }) →
+// changes. A terminal job's outcome refined by a later, recorded fact (an
+// operator's acknowledgement): the status stays what it was; only the
+// outcome and the reason change. Never touches a queued or running job.
+export function annotateTerminalOutcome(db, { id, fromStatus, outcome, reason, nowMs = Date.now() }) {
+  if (!TERMINAL_STATUS.includes(fromStatus)) throw new Error(`annotateTerminalOutcome: '${fromStatus}' is not a terminal status`);
+  return db.prepare(`UPDATE setup_jobs SET outcome = ?, reason = ?, updated_at = ? WHERE id = ? AND status = ?`)
+    .run(outcome, reason == null ? null : sanitizeReason(reason, 1200), iso(nowMs), String(id), fromStatus).changes;
 }
 
 // requestCancel(db, { id, by }) → changes. Recorded on a queued or running

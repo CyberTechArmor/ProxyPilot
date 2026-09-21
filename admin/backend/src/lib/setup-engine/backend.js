@@ -17,9 +17,9 @@
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { ownerIdentity, reconcileDecision, recoveryJobFrom, verifyJobFrom, parseJson, runnerIsLive, RUNNER_LIVE_MS, validateRunnerJob, TERMINAL_STATUS, executorPolicy, RUNNER_JOB_KINDS } from './logic.js';
-import { runOnce } from './executor.js';
+import { runOnce, recordUncertainLifecycle } from './executor.js';
 import {
-  staleRunningJobs, readLock, releaseLock, markLockStale, recordJobOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners,
+  staleRunningJobs, readLock, releaseLock, markLockStale, clearStaleLock, recordJobOutcome, annotateTerminalOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners, appendEvent,
 } from './store.js';
 
 let identity = null;
@@ -41,6 +41,9 @@ export function sweepSetupEngineOnBoot(db, { owner = backendOwner(), nowMs = Dat
     if (d.action === 'record_interrupted') {
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
       if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      summary.interrupted.push(job.id);
+    } else if (d.action === 'record_uncertain') {
+      recordUncertainLifecycle(db, { job, lock, owner, reason: d.reason, nowMs });
       summary.interrupted.push(job.id);
     } else if (d.action === 'verify') {
       const spec = verifyJobFrom(job, { nowIso: new Date(nowMs).toISOString() });
@@ -69,6 +72,40 @@ export function sweepSetupEngineOnBoot(db, { owner = backendOwner(), nowMs = Dat
     }
   }
   return summary;
+}
+
+// acknowledgeUncertainJob(db, { id, by, via, nowMs }) → { ok, job, released }
+// | { ok: false, error }. An operator's explicit resolution of a lifecycle
+// verb whose outcome the record could not establish (`interrupted_uncertain`):
+// they looked at the guest and say so. The acknowledgement is recorded on the
+// job (an event, the outcome) and the stale lease that records THIS job's
+// condition is released — nothing else is; a lease recording a different
+// condition stays. Idempotent: a second acknowledgement releases nothing and
+// says the job was already acknowledged.
+export function acknowledgeUncertainJob(db, { id, by = null, via = 'ui', note = null, nowMs = Date.now() }) {
+  const job = getJob(db, id);
+  if (!job) return { ok: false, error: 'No such job', code: 'NOT_FOUND' };
+  const acknowledged = job.outcome === 'interrupted_uncertain_acknowledged';
+  if (job.status !== 'recovery_required' || !['interrupted_uncertain', 'interrupted_uncertain_acknowledged'].includes(job.outcome)) return { ok: false, error: `job ${id} is ${job.status}${job.outcome ? ` (${job.outcome})` : ''}; only an unresolved lifecycle verb (recovery_required / interrupted_uncertain) is acknowledged this way`, code: 'NOT_ACKNOWLEDGEABLE' };
+  if (acknowledged) return { ok: true, job, released: 0, already: true };
+  // One transaction: the outcome, the event and the lease release commit
+  // together or not at all. A hold is never released without the record
+  // that says who released it, and never recorded as released while it
+  // still stands.
+  const at = new Date(nowMs).toISOString();
+  db.exec('BEGIN IMMEDIATE');
+  let released = 0;
+  try {
+    const changed = annotateTerminalOutcome(db, { id: job.id, fromStatus: 'recovery_required', outcome: 'interrupted_uncertain_acknowledged', reason: `${job.reason || ''}; acknowledged by ${by || 'an administrator'} at ${at}: the guest was inspected and the lease released`, nowMs });
+    if (!changed) throw new Error(`job ${id} changed under the acknowledgement; nothing was released`);
+    released = clearStaleLock(db, { app: job.app, recoveryJobId: job.id });
+    appendEvent(db, { jobId: job.id, kind: 'acknowledged', message: `acknowledged by ${by || 'an administrator'} (${via}): the guest was inspected; ${released ? 'the stale lease is released' : 'no stale lease recorded this job'}${note ? ` — ${String(note).slice(0, 300)}` : ''}`, data: { by, via, released: !!released }, nowMs });
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* */ }
+    return { ok: false, error: `the acknowledgement was not recorded (${e?.message || e}); the lease is still held`, code: 'NOT_RECORDED' };
+  }
+  return { ok: true, job: getJob(db, job.id), released };
 }
 
 // requestAppRecovery(db, { app, requestedBy, via, webPort, unit }) → the job

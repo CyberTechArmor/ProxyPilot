@@ -227,6 +227,49 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   assert.match(ops, /submitRunnerJob\(db, \{ kind: 'retry_secrets'/);
 });
 
+test('ratchet (A-17.6): the Incus lifecycle and snapshot verbs of the dashboard and MCP run as setup-engine jobs; the surfaces build no incus lifecycle command of their own', () => {
+  const lxcRoute = src('routes/lxc.js');
+  // The dashboard routes: every lifecycle / snapshot verb submits through the engine.
+  for (const kind of ['instance_start', 'instance_stop', 'instance_restart', 'instance_delete', 'instance_create', 'snapshot_create', 'snapshot_delete']) {
+    assert.match(lxcRoute, new RegExp(`lifecycleViaRunner\\('${kind}'`), `${kind} goes through the engine`);
+  }
+  assert.doesNotMatch(lxcRoute, /execOnHost\(`incus (start|stop|restart) \$\{incusName\}( --force)? 2>&1`/, 'no start/stop/restart shell string (the zip import\'s post-import start belongs to the transport group)');
+  assert.doesNotMatch(lxcRoute, /execOnHost\(`incus delete \$\{incusName\} --force 2>&1`/, 'no container delete shell string');
+  assert.doesNotMatch(lxcRoute, /incus launch \$\{image\}/, 'no launch shell string (the profile and image were interpolated unquoted)');
+  assert.doesNotMatch(lxcRoute, /spawnOnHost\(`incus snapshot create/, 'no snapshot create shell string');
+  assert.doesNotMatch(lxcRoute, /execOnHost\(`incus snapshot delete/, 'no snapshot delete shell string');
+  assert.match(lxcRoute, /'\/containers\/:name\/snapshot\/:snapshotName', requireSudo/, 'a snapshot delete needs fresh sudo (R-016)');
+  assert.match(lxcRoute, /'\/containers\/:name\/snapshot\/:snapshotName\/local', requireSudo/);
+  assert.match(lxcRoute, /'\/containers\/:name', requireSudo/, 'the container delete keeps its sudo');
+  // R-025: the whole-snapshot delete removes nothing off-host unless the local copy is gone.
+  const wholeDelete = lxcRoute.slice(lxcRoute.indexOf("lxcRouter.delete('/containers/:name/snapshot/:snapshotName', requireSudo"), lxcRoute.indexOf('// 2. Drop every S3 copy'));
+  assert.match(wholeDelete, /if \(!local\.ok && !local\.notFound\) return lifecycleFailure\(res, local,/, 'a refused or failed local delete returns before the S3 copies and the notes');
+  assert.doesNotMatch(wholeDelete, /errors\.push\(\{ scope: 'local'/, 'a local failure is never a "partial" failure');
+  // What is left on the container's pivot in this file is the import / export transport group (recorded in the ledger), nothing of this group.
+  const leftover = [...lxcRoute.matchAll(/execOnHost\(`incus (start|stop|restart|delete|launch) /g)].map((m) => m[1]);
+  assert.deepEqual(leftover.sort(), ['delete', 'delete', 'start', 'start'], `only the import/export transports' post-import start and temp cleanup remain (A-17 transport group): ${leftover.join(', ')}`);
+  // MCP: the three original tools and the two admin tools.
+  const mcp = src('routes/mcp.js');
+  assert.match(mcp, /runLifecycle\(\{ kind: LIFECYCLE_ACTIONS\[action\], containerName: incusName, force: false/, 'control_lxc_container is a job, clean shutdown only');
+  assert.match(mcp, /runLifecycle\(\{ kind: 'instance_create', containerName: incusName, image, profile: 'default', config/, 'create_lxc_container is a job with an allowlisted config');
+  assert.match(mcp, /runLifecycle\(\{ kind: 'snapshot_create', containerName: incusName, snapshot: snapName/, 'snapshot_lxc_container is a job');
+  assert.doesNotMatch(mcp, /runHostCapture\('incus', \[action, incusName\]/);
+  assert.doesNotMatch(mcp, /const argv = \['launch', image, incusName/);
+  const lxcAdmin = src('routes/mcp-tools/lxc-admin.js');
+  assert.match(lxcAdmin, /runLifecycle\(\{ kind: 'instance_delete', containerName: incus\(name\), force: args\.force === true, expect: identity/, 'delete_lxc_container binds the identity');
+  assert.match(lxcAdmin, /subject: `\$\{name\}\/\$\{digest\}`, action: `delete container/, 'the token covers the identity');
+  assert.match(lxcAdmin, /runLifecycle\(\{ kind: 'snapshot_delete', containerName: incus\(name\), snapshot: snap, expect: target\.created_at/, 'delete_snapshot binds the timestamp');
+  assert.doesNotMatch(lxcAdmin, /runHostCapture\('incus', \['stop', incus\(name\)/);
+  assert.doesNotMatch(lxcAdmin, /runHostCapture\('incus', \['delete', incus\(name\)\]/);
+  assert.doesNotMatch(lxcAdmin, /snapshotArgv\('delete'/);
+  // The engine side: fixed argv only, from the plan.
+  const op = src('lib/setup-engine/lifecycle-op.js');
+  assert.match(op, /await host\(lifecycleArgv\(kind, p\), \{ timeoutMs: TIMEOUTS\[kind\] \}\)/, 'the command issued is the rendered argv');
+  assert.doesNotMatch(op, /'sh', '-c'|spawn\(|execOnHost|runHostCapture|nsenter/, 'no shell, no spawn of its own: the executor\'s host channel only');
+  const logic = src('lib/setup-engine/lifecycle-logic.js');
+  assert.match(logic, /p\.command != null \|\| p\.script != null \|\| p\.argv != null \|\| p\.args != null \|\| p\.options != null/);
+});
+
 test('ratchet: the seed auth component refuses its dev defaults in production and marks its secrets as minted', () => {
   const doc = JSON.parse(src('mock2/framework-seed/proxypilot-auth.component.json'));
   const cfg = doc.contract.config;

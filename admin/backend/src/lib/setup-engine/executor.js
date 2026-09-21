@@ -26,17 +26,18 @@
 
 import {
   claimNextJob, heartbeat, checkpoint, finishJob, recordJobOutcome, staleRunningJobs, readLock, takeoverLock, releaseLock,
-  acquireLock, markLockStale, createJob, openRecoveryJobFor, appendEvent, getJob, renewLock, fenceJob, recordGenerated, recordProgress,
+  acquireLock, markLockStale, holdStaleLock, createJob, openRecoveryJobFor, appendEvent, getJob, renewLock, fenceJob, recordGenerated, recordProgress,
   runnerHeartbeat, requeueJob, recordVerificationRung,
 } from './store.js';
 import {
-  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, EXCLUSIVE_JOB_KINDS, parseJson, sanitizeReason, parseOwner,
+  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, EXCLUSIVE_JOB_KINDS, LIFECYCLE_JOB_KINDS, leaseHold, parseJson, sanitizeReason, parseOwner,
   FencedError, CancelledError, verificationState, CREDENTIAL_USE_OUTCOMES,
 } from './logic.js';
 import { runDeployOperation, PreviousWriterAliveError, ContainmentUnavailableError } from './deploy-op.js';
 import { runRestoreDbOperation } from './restore-db-op.js';
 import { runRestoreSnapshotOperation } from './restore-snapshot-op.js';
 import { runRetrySecretsOperation } from './retry-secrets-op.js';
+import { runLifecycleOperation } from './lifecycle-op.js';
 import {
   unitStatusScript, parseUnitStatus, startUnitScript, parseStartUnit, portProbeScript, parsePortProbe,
   healthScript, parseHealth, activeKeyScript, credentialProbeScript, credentialVerdict, verificationFromObservations, DEFAULT_UNIT,
@@ -44,6 +45,9 @@ import {
 } from './guest-probes.js';
 
 const FOLLOW_UP_RETRY_MS = 30_000;
+// A follow-up that meets an unresolved hold waits longer between looks: the
+// hold ends when an operator acts, not by itself.
+const HOLD_RETRY_MS = 5 * 60_000;
 
 export { FencedError, CancelledError };
 
@@ -66,6 +70,9 @@ export function reconcile({ db, owner, nowMs = Date.now(), log = () => {} } = {}
     } else if (d.action === 'record_interrupted') {
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
       if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      summary.interrupted.push(job.id);
+    } else if (d.action === 'record_uncertain') {
+      recordUncertainLifecycle(db, { job, lock, owner, reason: d.reason, nowMs });
       summary.interrupted.push(job.id);
     } else if (d.action === 'verify') {
       const spec = verifyJobFrom(job, { nowIso: new Date(nowMs).toISOString() });
@@ -98,6 +105,26 @@ export function reconcile({ db, owner, nowMs = Date.now(), log = () => {} } = {}
   return summary;
 }
 
+// recordUncertainLifecycle — a lifecycle verb (restart, create) whose command
+// was issued by an owner that died before reading the result. Never replayed:
+// the record says exactly what is unknown and how to look, and the guest's
+// lease is KEPT, flagged stale and pointed at this job, so every exclusive
+// operation on the guest is refused with the condition until an operator has
+// looked and acknowledged it (backend.js acknowledgeUncertainJob,
+// POST /api/setup/jobs/:id/acknowledge). No recovery job is queued: a
+// generic guest has no in-guest application to recover on behalf of.
+export function recordUncertainLifecycle(db, { job, lock, owner, reason, nowMs }) {
+  const cp = parseJson(job.checkpoint_json) || {};
+  const container = cp.container || job.app;
+  recordJobOutcome(db, {
+    id: job.id, status: 'recovery_required', outcome: 'interrupted_uncertain',
+    reason: `${reason}; the ${job.kind} of ${container} may or may not have taken effect — read 'incus list ${container} --format json' and decide; the guest's lease is kept stale and every operation on it is refused until this job is acknowledged (POST /api/setup/jobs/${job.id}/acknowledge); nothing is replayed automatically`,
+    verification: { state: 'recovery_required', failedAt: 'resource_state', note: 'not verified: the owner died after issuing the command and before reading the resource back', next: `incus list ${container} --format json; then acknowledge job ${job.id}` },
+    by: owner, nowMs,
+  });
+  holdStaleLock(db, { app: job.app, owner: job.owner, operation: job.kind, jobId: job.id, epoch: (lock && lock.owner === job.owner ? lock.epoch : job.epoch) || 1, nowMs });
+}
+
 // ── execute ─────────────────────────────────────────────────────────────
 
 export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {} }) {
@@ -124,19 +151,38 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
   // OBLIGATION: when the app is busy it goes back to the queue with a
   // not-before, never to a terminal 'deferred'.
   const isFollowUp = !!p.origin?.jobId;
-  const busy = (holder, operation) => {
+  const event = (kind, message, data = null, phase = null) => appendEvent(db, { jobId: job.id, kind, phase, message, data, nowMs: nowMs() });
+  const busy = (holder, operation, { retryMs = FOLLOW_UP_RETRY_MS } = {}) => {
     if (isFollowUp) {
-      requeueJob(db, { id: job.id, by: owner, reason: `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; this follow-up waits and retries`, notBeforeMs: nowMs() + FOLLOW_UP_RETRY_MS, nowMs: nowMs() });
+      requeueJob(db, { id: job.id, by: owner, reason: `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; this follow-up waits and retries`, notBeforeMs: nowMs() + retryMs, nowMs: nowMs() });
       return { status: 'requeued', outcome: 'lock_held', verification: null };
     }
     // A restore never runs later under a state nobody looked at: refused.
-    if (EXCLUSIVE_JOB_KINDS.includes(job.kind)) return fin('refused', 'lock_held', `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; the restore was refused before any change — submit it again when the holder has finished`);
+    if (EXCLUSIVE_JOB_KINDS.includes(job.kind)) return fin('refused', 'lock_held', `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; the ${job.kind} was refused before any change — submit it again when the holder has finished`);
     return fin('deferred', 'lock_held', `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; retry when it finishes`);
   };
   const got = acquireLock(db, { app: job.app, owner, operation: job.kind, jobId: job.id, leaseMs: LEASE_MS, nowMs: lockNow });
   if (got.ok) {
     lockEpoch = Number(got.lock.epoch);
+  } else if (got.reason === 'stale' && EXCLUSIVE_JOB_KINDS.includes(job.kind)) {
+    // A stale lease is a RECORDED condition (a dead deploy, an unresolved
+    // lifecycle verb). Only a recovery or a verification may take it over;
+    // an exclusive operation — a restore, a lifecycle verb — is refused with
+    // the condition, however it was submitted (the orchestrator refuses it
+    // earlier; this is the boundary a retry or a direct row cannot pass).
+    const stale = readLock(db, job.app);
+    return fin('refused', 'lock_stale', `a previous ${stale?.operation || 'operation'} for ${job.app} did not finish (holder ${stale?.owner || got.holder}${stale?.recovery_job_id ? `, recorded by job ${stale.recovery_job_id}` : ''}); recovery or acknowledgement is required before ${job.kind} — nothing was done`);
   } else if (got.reason === 'stale') {
+    // An unresolved hold is not a dead lease to take over: a takeover
+    // releases the lease when the job ends, and a verification or probe that
+    // did so would clear a condition it did not resolve. Every kind waits
+    // (a follow-up) or defers (anything else) until the acknowledgement.
+    const stale = readLock(db, job.app);
+    const hold = leaseHold({ lock: stale, recordingJob: stale?.recovery_job_id ? getJob(db, stale.recovery_job_id) : null });
+    if (hold.hold) {
+      event('hold', hold.reason, { recording_job: stale.recovery_job_id }, 'lock');
+      return busy(stale.owner, `unresolved ${getJob(db, stale.recovery_job_id)?.kind || 'operation'}, see job ${stale.recovery_job_id}`, { retryMs: HOLD_RETRY_MS });
+    }
     const t = takeoverLock(db, { app: job.app, by: owner, operation: job.kind, jobId: job.id, reason: `taking over ${got.operation} lease of ${got.holder} (expired ${got.expiredAt}) to run ${job.kind}`, leaseMs: LEASE_MS, nowMs: lockNow });
     if (!t.ok) return busy(t.holder, null);
     lockEpoch = Number(t.lock.epoch);
@@ -155,7 +201,6 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
     const r = await exec.guest(container, script, { timeoutMs });
     return r || { code: -1, stdout: '', stderr: 'no result' };
   };
-  const event = (kind, message, data = null, phase = null) => appendEvent(db, { jobId: job.id, kind, phase, message, data, nowMs: nowMs() });
 
   try {
     // Containment before anything that touches the guest: other jobs'
@@ -173,7 +218,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       event('step', left == null ? 'stale-writer count unavailable; proceeding' : `${left} stale process group(s)/script(s) of other jobs signalled; none remain`, null, 'reap_previous_writer');
     }
 
-    if (['deploy', 'restore_db', 'restore_snapshot', 'retry_secrets'].includes(job.kind)) {
+    if (['deploy', 'restore_db', 'restore_snapshot', 'retry_secrets'].includes(job.kind) || LIFECYCLE_JOB_KINDS.includes(job.kind)) {
       const handle = {
         id: job.id,
         fence,
@@ -192,6 +237,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         const originJob = p.envCopy?.originJobId ? getJob(db, String(p.envCopy.originJobId)) : null;
         result = await runRestoreDbOperation({ params: { ...p, runDir }, exec: fencedExec, job: handle, originJob, reuse, log });
       } else if (job.kind === 'restore_snapshot') result = await runRestoreSnapshotOperation({ params: p, exec: fencedExec, job: handle, reuse, log });
+      else if (LIFECYCLE_JOB_KINDS.includes(job.kind)) result = await runLifecycleOperation({ kind: job.kind, params: p, exec: fencedExec, job: handle, prior: parseJson(job.checkpoint_json), log });
       else result = await runRetrySecretsOperation({ params: { ...p, runDir }, exec: fencedExec, job: handle, reuse, log });
       const late = (parseJson(getJob(db, job.id)?.progress_json) || {}).cancel_requested;
       if (late) event('cancel_declined', `cancel by ${late.by} arrived after the disruptive step; the ${job.kind} finished bringing the app up instead of leaving it down`);
@@ -218,7 +264,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
           pub.verificationJobId = follow.id;
         }
         recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, verification_job_id: verificationJobId, execution: result.skipped ? 'skipped' : okOutcome }, nowMs: nowMs() });
-        const summary = job.kind === 'deploy' ? `${container}: serving` : job.kind === 'restore_db' ? `${container}: database restored from ${rest.restored?.dump} (${rest.errors ?? '?'} error line(s); ${rest.compatibility?.mode})` : job.kind === 'restore_snapshot' ? `${container}: restored to ${rest.restoredTo}${rest.partial ? ' (root disk only; custom volumes NOT restored)' : ''}; pre-restore ${rest.preRestore?.name}` : `${container}: ${(rest.minted || []).length} secret(s) minted, ${(rest.deferred || []).length} deferred, ${(rest.reused || []).length} reused`;
+        const summary = job.kind === 'deploy' ? `${container}: serving` : LIFECYCLE_JOB_KINDS.includes(job.kind) ? `${container}: ${job.kind.replace('_', ' ')} → ${rest.instanceState}${rest.alreadyInState ? ' (already in that state; nothing issued)' : ''}${rest.resumedAfterIssue ? ' (resumed after an interrupted attempt)' : ''}${rest.warnings?.length ? `; ${rest.warnings.join('; ')}` : ''}` : job.kind === 'restore_db' ? `${container}: database restored from ${rest.restored?.dump} (${rest.errors ?? '?'} error line(s); ${rest.compatibility?.mode})` : job.kind === 'restore_snapshot' ? `${container}: restored to ${rest.restoredTo}${rest.partial ? ' (root disk only; custom volumes NOT restored)' : ''}; pre-restore ${rest.preRestore?.name}` : `${container}: ${(rest.minted || []).length} secret(s) minted, ${(rest.deferred || []).length} deferred, ${(rest.reused || []).length} reused`;
         const r = fin(
           result.skipped ? 'succeeded' : (verification?.state === 'recovery_required' ? 'recovery_required' : 'succeeded'),
           result.skipped ? 'skipped' : okOutcome,
@@ -237,8 +283,11 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         verificationJobId = follow.id;
         pub.verificationJobId = follow.id;
       }
-      recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, failed_step: result.step, execution: 'failed', verification_job_id: verificationJobId }, nowMs: nowMs() });
-      const r = fin('failed', `failed at ${result.step}`, `${result.error}${verificationJobId ? ` (post-failure verification queued: job ${verificationJobId})` : ''}`, verification || null);
+      recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, failed_step: result.step, execution: result.refused ? 'refused' : 'failed', verification_job_id: verificationJobId }, nowMs: nowMs() });
+      // A refusal before anything was issued (an invalid plan, a target that
+      // is not the one confirmed, a create over an existing name) is recorded
+      // as such, distinct from a command that ran and failed.
+      const r = fin(result.refused ? 'refused' : 'failed', result.refused ? result.step : `failed at ${result.step}`, `${result.error}${verificationJobId ? ` (post-failure verification queued: job ${verificationJobId})` : ''}`, verification || null);
       return { ...r, result, verificationJobId };
     }
 

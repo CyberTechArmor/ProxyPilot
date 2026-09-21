@@ -1243,7 +1243,7 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'create_lxc_container',
-    description: 'Create a new LXC/Incus guest. Creation-only, so inherently non-destructive: fails if the name already exists, never replaces. docker_ready (default true) sets security.nesting plus the syscall intercepts Docker needs at birth, so the keyring/nesting failures do not occur on new guests — privileged mode is NOT included and stays behind set_lxc_config\'s risk gate. Waits briefly for a DHCP lease and returns the same detail as get_lxc_container. Requires confirm: true.',
+    description: 'Create a new LXC/Incus guest as a setup-engine job (the runner launches it from a validated plan and reads it back as Running; a failed launch removes the half-created guest). Creation-only, so inherently non-destructive: fails if the name already exists, never replaces. docker_ready (default true) sets security.nesting plus the syscall intercepts Docker needs at birth, so the keyring/nesting failures do not occur on new guests — privileged mode is NOT included and stays behind set_lxc_config\'s risk gate. Waits briefly for a DHCP lease and returns the same detail as get_lxc_container. Requires confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1262,7 +1262,7 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'control_lxc_container',
-    description: 'Start, stop (clean shutdown only — no force-kill), or restart an LXC guest. The step that applies restart-required config changes (set_lxc_config reports when one is needed). No delete verb exists, by design. Requires confirm: true.',
+    description: 'Start, stop (clean shutdown only — no force-kill), or restart an LXC guest, as a setup-engine job under the guest\'s lease: the runner issues the one fixed incus command and reads the state back before it reports done (a guest already in the requested state issues nothing). Refused, never queued, while a deploy or a restore holds the guest and when no executor is available. The step that applies restart-required config changes (set_lxc_config reports when one is needed). Deleting is delete_lxc_container. Requires confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1307,7 +1307,7 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'snapshot_lxc_container',
-    description: 'Take a named snapshot of a guest — the safety primitive every mutating LXC tool leans on (they all snapshot before changing anything). With list: true it just returns the existing snapshots. No restore or delete verb over MCP: restoring is a deliberate host-side act (incus restore).',
+    description: 'Take a named snapshot of a guest, as a setup-engine job under the guest\'s lease (the runner creates it and reads it back before reporting). With list: true it just returns the existing snapshots. restore_snapshot and delete_snapshot manage it from there.',
     inputSchema: {
       type: 'object',
       properties: {

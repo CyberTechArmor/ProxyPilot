@@ -94,6 +94,22 @@ const activeCreations = new Map();
 const activeSnapshots = new Map();
 const SNAPSHOT_JOB_TTL_MS = 30 * 60 * 1000; // keep finished jobs around for 30 min so the UI can settle
 
+// The Incus lifecycle verbs (start / stop / restart / delete / create) and
+// the snapshot create / delete are setup-engine jobs since A-17 (docs/
+// features/setup-engine.md § "Incus lifecycle and snapshots"): the route
+// names the verb and the guest, the runner renders the fixed `incus` argv
+// under the guest's lease, and the job record — outside the guest — carries
+// the result. No `incus start|stop|restart|delete|launch|snapshot` shell
+// string is built here any more.
+async function lifecycleViaRunner(kind, incusName, req, extra = {}) {
+  const { runLifecycle } = await import('../mock2/ops.js');
+  return runLifecycle({ kind, containerName: incusName, requestedBy: req?.user?.username || null, via: 'ui', ...extra });
+}
+async function lifecycleFailure(res, out, prefix) {
+  const { lifecycleHttpStatus } = await import('../mock2/ops.js');
+  return res.status(lifecycleHttpStatus(out)).json({ success: false, error: `${prefix}: ${out.error}`, details: out.error, jobId: out.jobId || null, step: out.step || null, code: out.code || null });
+}
+
 // Check if running in Docker container
 const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
 
@@ -1119,7 +1135,6 @@ lxcRouter.post('/containers', async (req, res) => {
   activeCreations.set(incusName, creation);
 
   // Start the launch process asynchronously (no timeout — runs until done)
-  const profileArg = profile ? `--profile ${profile}` : '--profile default';
   // Docker-in-LXC support. Without these flags `dockerd` can't mount
   // overlayfs (kernel denies overlay mounts inside an unprivileged
   // user namespace) and image pulls fail with `permission denied` on
@@ -1161,56 +1176,53 @@ lxcRouter.post('/containers', async (req, res) => {
   // into two checkboxes was a footgun that made every Docker image
   // touching sysctls fail until the operator manually edited the
   // LXC's raw.lxc.
-  let dockerConfigArgs = '';
+  // The launch plan: image, profile, the allowlisted --config keys (Docker
+  // readiness, the resource limits the operator picked, the VM memory
+  // floor) and the VM flag. Everything is validated by name in the plan
+  // (lib/setup-engine/lifecycle-logic.js); nothing is interpolated into a
+  // shell. The job renders `incus launch …` on the host and reads the guest
+  // back as Running before it reports created; a failed launch removes the
+  // half-created guest and says so.
+  const launchConfig = {};
   if (dockerSupport === true) {
-    dockerConfigArgs = ' --config security.nesting=true' +
-      ' --config security.syscalls.intercept.mknod=true' +
-      ' --config security.syscalls.intercept.setxattr=true' +
-      ' --config security.syscalls.intercept.bpf=true' +
-      ' --config security.syscalls.intercept.bpf.devices=true';
+    Object.assign(launchConfig, {
+      'security.nesting': 'true',
+      'security.syscalls.intercept.mknod': 'true',
+      'security.syscalls.intercept.setxattr': 'true',
+      'security.syscalls.intercept.bpf': 'true',
+      'security.syscalls.intercept.bpf.devices': 'true',
+    });
     if (dockerPrivileged === true) {
-      dockerConfigArgs += ' --config security.privileged=true' +
-        ` --config raw.lxc=${JSON.stringify('lxc.apparmor.profile=unconfined')}`;
+      launchConfig['security.privileged'] = 'true';
+      launchConfig['raw.lxc'] = 'lxc.apparmor.profile=unconfined';
     }
   }
-  // VM flag — appended via a static literal, not interpolated user
-  // input, so no shell-escape needed here. The legacy `image`,
-  // `incusName`, and `profileArg` interpolations above are
-  // pre-existing and out of scope per the brief.
-  const vmFlag = isVm ? ' --vm' : '';
-  const launchCmd = `incus launch ${image} ${incusName} ${profileArg}${dockerConfigArgs}${vmFlag}`;
-  console.log(`[LXC] Starting async launch: ${launchCmd}`);
+  // Resource limits ride on the launch. VMs need a memory floor — Incus
+  // rejects booting a VM without a limits.memory value on most stock
+  // profiles — so default to 2GiB if the operator didn't pick one.
+  // Containers keep the legacy "no implicit memory cap" behaviour. A VM's
+  // root disk defaults to 20GiB (best effort: some profiles carry no
+  // `root` device by name; the job then reports a warning, never a failure).
+  if (cpu) launchConfig['limits.cpu'] = String(cpu);
+  if (memory) launchConfig['limits.memory'] = `${memory}MB`;
+  else if (isVm) launchConfig['limits.memory'] = '2GiB';
+  console.log(`[LXC] Starting async launch of ${incusName} from ${image} (setup-engine job)`);
 
-  const child = spawnOnHost(launchCmd);
-
-  child.stderr.on('data', (data) => {
-    creation.stderr += data.toString();
-    const output = data.toString().toLowerCase();
-    // Detect download progress from Incus output
-    if (output.includes('retrieving') || output.includes('download') || output.includes('unpack')) {
-      creation.phase = 'downloading';
-      creation.message = 'Downloading image...';
-    }
-  });
-
-  child.stdout.on('data', (data) => {
-    console.log(`[LXC] Launch stdout: ${data.toString().trim()}`);
-  });
-
-  child.on('close', async (code) => {
-    console.log(`[LXC] Launch process exited with code ${code}`);
-
-    if (code !== 0) {
+  (async () => {
+    const launch = await lifecycleViaRunner('instance_create', incusName, req, {
+      image: String(image), profile: profile ? String(profile) : 'default', config: launchConfig, vm: isVm, rootSize: isVm ? '20GiB' : null,
+    });
+    creation.jobId = launch.jobId || null;
+    if (!launch.ok) {
       creation.phase = 'failed';
-      creation.error = creation.stderr.trim() || `Launch exited with code ${code}`;
+      creation.error = launch.error || 'Launch failed';
       creation.message = creation.error;
       console.error(`[LXC] Launch failed: ${creation.error}`);
-      // Clean up partial container
-      try { await execOnHost(`incus delete ${incusName} --force 2>/dev/null || true`); } catch {}
       // Keep the creation record for 2 minutes so the frontend can read the error
       setTimeout(() => activeCreations.delete(incusName), 120000);
       return;
     }
+    if (Array.isArray(launch.warnings) && launch.warnings.length) creation.launchWarning = launch.warnings.join('; ');
 
     // Launch succeeded — configure the container
     try {
@@ -1219,41 +1231,6 @@ lxcRouter.post('/containers', async (req, res) => {
 
       // Ensure NAT is enabled on the bridge so containers have internet
       await ensureNetworkNat();
-
-      // Set resource limits. VMs need a memory floor — Incus rejects
-      // booting a VM without a limits.memory value on most stock
-      // profiles — so default to 2GiB if the operator didn't pick
-      // one. Containers keep the legacy "no implicit memory cap"
-      // behaviour. Disk size for VMs goes through `incus config
-      // device set <name> root size=...` because the root device
-      // lives on the profile, not on `limits.*`. The shellSingleQuote
-      // wrappers around the operator-supplied size strings are the
-      // new-VM-code convention; legacy CT-side calls above use plain
-      // template interpolation per the file's pre-existing pattern.
-      if (cpu) {
-        await execOnHost(`incus config set ${incusName} limits.cpu=${cpu}`);
-      }
-      if (memory) {
-        await execOnHost(`incus config set ${incusName} limits.memory=${memory}MB`);
-      } else if (isVm) {
-        await execOnHost(`incus config set ${incusName} limits.memory=${shellSingleQuote('2GiB')}`);
-      }
-      if (isVm) {
-        // Default 20GiB root disk if unset. Idempotent: setting the
-        // same size twice is a no-op for incus. We DON'T resize down
-        // automatically — that would discard data on a re-create.
-        try {
-          await execOnHost(
-            `incus config device set ${incusName} root size=${shellSingleQuote('20GiB')}`
-          );
-        } catch (e) {
-          // Some profiles don't carry a `root` device by name; in
-          // that case incus emits "device 'root' doesn't exist" and
-          // the operator can size the disk by hand later. Don't fail
-          // the whole launch over a default that's purely advisory.
-          console.warn('[LXC] VM default root size: ', e?.message || e);
-        }
-      }
 
       // Wait for IP address
       creation.phase = 'network';
@@ -1410,13 +1387,11 @@ lxcRouter.post('/containers', async (req, res) => {
 
     // Clean up creation tracking after 2 minutes
     setTimeout(() => activeCreations.delete(incusName), 120000);
-  });
-
-  child.on('error', (err) => {
+  })().catch((err) => {
     creation.phase = 'failed';
-    creation.error = err.message;
-    creation.message = err.message;
-    console.error(`[LXC] Launch spawn error: ${err.message}`);
+    creation.error = err?.message || String(err);
+    creation.message = creation.error;
+    console.error(`[LXC] Launch failed: ${creation.error}`);
     setTimeout(() => activeCreations.delete(incusName), 120000);
   });
 
@@ -3797,11 +3772,12 @@ lxcRouter.post('/containers/:name/start', async (req, res) => {
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus start ${incusName} 2>&1`);
+    const out = await lifecycleViaRunner('instance_start', incusName, req);
+    if (!out.ok) return lifecycleFailure(res, out, `Failed to start container '${name}'`);
     // Ensure NAT and DNS after start (non-blocking)
     ensureNetworkNat().catch(() => {});
     ensureDns(incusName).catch(() => {});
-    res.json({ success: true, message: `Container '${name}' started.` });
+    res.json({ success: true, message: `Container '${name}' started.`, jobId: out.jobId, status: out.instanceState || null, verificationJobId: out.verificationJobId || null });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -3824,8 +3800,9 @@ lxcRouter.post('/containers/:name/stop', async (req, res) => {
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus stop ${incusName} --force 2>&1`);
-    res.json({ success: true, message: `Container '${name}' stopped.` });
+    const out = await lifecycleViaRunner('instance_stop', incusName, req, { force: true });
+    if (!out.ok) return lifecycleFailure(res, out, `Failed to stop container '${name}'`);
+    res.json({ success: true, message: `Container '${name}' stopped.`, jobId: out.jobId, status: out.instanceState || null });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -4163,11 +4140,12 @@ lxcRouter.post('/containers/:name/restart', async (req, res) => {
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus restart ${incusName} --force 2>&1`);
+    const out = await lifecycleViaRunner('instance_restart', incusName, req, { force: true });
+    if (!out.ok) return lifecycleFailure(res, out, `Failed to restart container '${name}'`);
     // Ensure NAT and DNS after restart (non-blocking)
     ensureNetworkNat().catch(() => {});
     ensureDns(incusName).catch(() => {});
-    res.json({ success: true, message: `Container '${name}' restarted.` });
+    res.json({ success: true, message: `Container '${name}' restarted.`, jobId: out.jobId, status: out.instanceState || null, verificationJobId: out.verificationJobId || null });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -4200,10 +4178,11 @@ lxcRouter.post('/containers/:name/reboot', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     console.log(`[LXC] Reboot (graceful) requested for ${incusName}`);
-    await execOnHost(`incus restart ${incusName} 2>&1`);
+    const out = await lifecycleViaRunner('instance_restart', incusName, req, { force: false });
+    if (!out.ok) return lifecycleFailure(res, out, `Failed to reboot instance '${name}'`);
     ensureNetworkNat().catch(() => {});
     ensureDns(incusName).catch(() => {});
-    res.json({ success: true, message: `Instance '${name}' is rebooting.` });
+    res.json({ success: true, message: `Instance '${name}' is rebooting.`, jobId: out.jobId, status: out.instanceState || null });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -4285,11 +4264,11 @@ lxcRouter.delete('/containers/:name', requireSudo, async (req, res) => {
       // Ignore - container may not exist or be stopped
     }
 
-    // Stop container if running
-    await execOnHost(`incus stop ${incusName} --force 2>/dev/null || true`);
-
-    // Delete container
-    await execOnHost(`incus delete ${incusName} --force 2>&1`);
+    // Stop (force) and delete, as one runner job under the guest's lease; the
+    // job binds the guest's identity before the delete and keeps its record
+    // after the guest is gone. Refused while a deploy or restore holds it.
+    const del = await lifecycleViaRunner('instance_delete', incusName, req, { force: true });
+    if (!del.ok) return lifecycleFailure(res, del, `Failed to delete container '${name}'`);
 
     // Tear down this container's routes across BOTH stores.
     //
@@ -4709,75 +4688,77 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
   };
   activeSnapshots.set(jobId, job);
 
-  // spawnOnHost has no built-in timeout; we let incus take as long as
-  // it needs and report progress via the status endpoint instead.
-  const child = spawnOnHost(`incus snapshot create ${incusName} ${snapshotName}`);
-  let stderr = '';
-  let stdout = '';
-  child.stderr.on('data', (d) => { stderr += d.toString(); });
-  child.stdout.on('data', (d) => { stdout += d.toString(); });
-  child.on('error', (err) => {
-    job.status = 'error';
-    job.error = `Failed to start incus snapshot create: ${err.message}`;
-    job.finishedAt = Date.now();
-  });
-  child.on('close', async (code) => {
-    if (code === 0) {
-      // Set description if note provided. Best-effort; failure here
-      // shouldn't fail the snapshot itself.
-      if (note) {
-        await execOnHost(
-          `incus config set ${incusName}/snapshots/${snapshotName} user.note=${JSON.stringify(note)} 2>&1`,
-          { timeout: 10000 }
-        ).catch(() => {});
-      }
-      job.status = 'done';
-      job.finishedAt = Date.now();
-      // Record duration for ETA on subsequent snapshots of this container.
-      try {
-        const db = getDb();
-        const duration = job.finishedAt - job.startedAt;
-        let sizeBytes = null;
-        try {
-          const r = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
-          const instance = JSON.parse(r.stdout || '{}');
-          const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
-          if (pool) sizeBytes = await readVolumeUsedBytes(pool, `container/${incusName}`);
-        } catch {}
-        db.prepare(
-          'INSERT INTO snapshot_durations (container_name, duration_ms, size_bytes) VALUES (?, ?, ?)'
-        ).run(name, duration, sizeBytes);
-        // Keep at most the 20 most recent rows per container.
-        db.prepare(`
-          DELETE FROM snapshot_durations
-          WHERE container_name = ?
-            AND id NOT IN (
-              SELECT id FROM snapshot_durations
-              WHERE container_name = ?
-              ORDER BY created_at DESC
-              LIMIT 20
-            )
-        `).run(name, name);
-      } catch (err) {
-        console.error('[LXC] failed to record snapshot duration:', err.message);
-      }
-    } else {
-      job.status = 'error';
-      const out = (stderr || stdout || '').trim();
-      job.error = out
-        ? `Failed to create snapshot for container '${name}': ${out}`
-        : `Failed to create snapshot for container '${name}': incus exited with code ${code}.`;
-      job.finishedAt = Date.now();
-    }
-  });
+  // The snapshot is a setup-engine job (`snapshot_create`): submitted
+  // detached, executed by the runner under the guest's lease, the snapshot
+  // read back before the job reports done, the note recorded on it by the
+  // job. This handler keeps its polling contract: the in-memory entry maps
+  // the client's jobId to the engine job, and the status endpoint reads the
+  // engine record. A refusal (busy guest, no executor) is answered here,
+  // synchronously, before any job exists to poll.
+  const submitted = await lifecycleViaRunner('snapshot_create', incusName, req, { snapshot: snapshotName, note: note ? String(note) : null, detach: true });
+  if (!submitted.ok) {
+    activeSnapshots.delete(jobId);
+    return lifecycleFailure(res, submitted, `Failed to create snapshot for container '${name}'`);
+  }
+  job.setupJobId = submitted.jobId;
+  job.incusName = incusName;
 
   res.json({
     success: true,
     jobId,
+    setupJobId: submitted.jobId,
     estimateMs,
     message: `Snapshot '${snapshotName}' creation started for container '${name}'.`,
   });
 });
+
+// The engine record behind a snapshot job, folded into the polling entry:
+// running while queued/running, done on succeeded, error otherwise. The
+// snapshot's duration is recorded once, for the ETA of the next one.
+async function refreshSnapshotJob(job) {
+  if (!job.setupJobId || job.finishedAt) return job;
+  let row = null;
+  try {
+    const [{ containerLockStore }, { getJob }] = await Promise.all([import('../mock2/container-lock.js'), import('../lib/setup-engine/store.js')]);
+    const store = containerLockStore();
+    row = store ? getJob(store.getDb(), job.setupJobId) : null;
+  } catch { row = null; }
+  if (!row) { job.status = 'error'; job.error = `Snapshot job ${job.setupJobId} is not on record.`; job.finishedAt = Date.now(); return job; }
+  if (row.status === 'queued' || row.status === 'running') return job;
+  job.finishedAt = Date.parse(row.finished_at || row.updated_at) || Date.now();
+  if (row.status === 'succeeded') {
+    job.status = 'done';
+    try {
+      const db = getDb();
+      const duration = job.finishedAt - job.startedAt;
+      let sizeBytes = null;
+      try {
+        const r = await execOnHost(`incus query /1.0/instances/${job.incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
+        const instance = JSON.parse(r.stdout || '{}');
+        const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
+        if (pool) sizeBytes = await readVolumeUsedBytes(pool, `container/${job.incusName}`);
+      } catch {}
+      db.prepare('INSERT INTO snapshot_durations (container_name, duration_ms, size_bytes) VALUES (?, ?, ?)').run(job.name, duration, sizeBytes);
+      // Keep at most the 20 most recent rows per container.
+      db.prepare(`
+        DELETE FROM snapshot_durations
+        WHERE container_name = ?
+          AND id NOT IN (
+            SELECT id FROM snapshot_durations
+            WHERE container_name = ?
+            ORDER BY created_at DESC
+            LIMIT 20
+          )
+      `).run(job.name, job.name);
+    } catch (err) {
+      console.error('[LXC] failed to record snapshot duration:', err.message);
+    }
+  } else {
+    job.status = 'error';
+    job.error = `Failed to create snapshot for container '${job.name}': ${row.reason || `${row.status}${row.outcome ? ` (${row.outcome})` : ''}`}`;
+  }
+  return job;
+}
 
 // GET /containers/:name/snapshot-exports — list every S3 export
 // row for this container.  Used by the snapshots panel to render
@@ -4945,7 +4926,7 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/can
 // Returns elapsedMs (always) and estimateMs (when an estimate exists).
 // Once status is 'done' or 'error' the job stays around for a while so
 // the UI can render a final state on the next poll.
-lxcRouter.get('/containers/:name/snapshot-jobs/:jobId', (req, res) => {
+lxcRouter.get('/containers/:name/snapshot-jobs/:jobId', async (req, res) => {
   const { name, jobId } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -4954,10 +4935,12 @@ lxcRouter.get('/containers/:name/snapshot-jobs/:jobId', (req, res) => {
   if (!job || job.name !== name) {
     return res.status(404).json({ success: false, error: 'Snapshot job not found.' });
   }
+  await refreshSnapshotJob(job);
   const now = job.finishedAt || Date.now();
   res.json({
     success: true,
     jobId: job.id,
+    setupJobId: job.setupJobId || null,
     snapshotName: job.snapshotName,
     status: job.status,
     elapsedMs: now - job.startedAt,
@@ -5009,25 +4992,29 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', requireSudo, 
 // DELETE /containers/:name/snapshot/:snapshotName/local - Drop the
 // local copy only; any S3-stored copies stay.  Used when an
 // operator wants to reclaim pool space but keep the S3 backups.
-lxcRouter.delete('/containers/:name/snapshot/:snapshotName/local', async (req, res) => {
+lxcRouter.delete('/containers/:name/snapshot/:snapshotName/local', requireSudo, async (req, res) => {
   const { name, snapshotName } = req.params;
 
   if (!validateName(name) || !validateName(snapshotName)) {
     return res.status(400).json({ success: false, error: 'Invalid name.' });
   }
 
-  const SNAPSHOT_TIMEOUT_MS = 2 * 60 * 1000;
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus snapshot delete ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
+    // A setup-engine job (`snapshot_delete`): the snapshot is read, deleted
+    // by the runner and read back as gone before the job reports done.
+    const out = await lifecycleViaRunner('snapshot_delete', incusName, req, { snapshot: snapshotName });
+    if (!out.ok) return lifecycleFailure(res, out, `Failed to delete local snapshot from container '${name}'`);
+    logAudit(req.user?.id || null, 'LXC_SNAPSHOT_DELETED', 'lxc', name, { snapshot: snapshotName, scope: 'local', job_id: out.jobId }, req.ip);
     res.json({
       success: true,
       message: `Local copy of '${snapshotName}' deleted; S3 copies untouched.`,
+      jobId: out.jobId,
     });
   } catch (error) {
     res.status(500).json(formatSnapshotError(
       `Failed to delete local snapshot from container '${name}'`,
-      error, SNAPSHOT_TIMEOUT_MS,
+      error, 5 * 60 * 1000,
     ));
   }
 });
@@ -5037,7 +5024,7 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName/local', async (req, r
 // S3 destination it was exported to.  The frontend's whole-snapshot
 // trash button drives this; per-location deletes use the
 // scoped /local and /s3-export/:exportId endpoints.
-lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) => {
+lxcRouter.delete('/containers/:name/snapshot/:snapshotName', requireSudo, async (req, res) => {
   const { name, snapshotName } = req.params;
 
   if (!validateName(name)) {
@@ -5054,23 +5041,20 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
     });
   }
 
-  // Delete reclaims storage; on copy-on-write backends with many
-  // overlapping snapshots this can take a while.
-  const SNAPSHOT_TIMEOUT_MS = 2 * 60 * 1000;
   const incusName = `${INSTANCE_PREFIX}${name}`;
   const errors = [];
 
-  // 1. Drop the local snapshot.  Tolerated if it's already gone
-  // (operator may have dropped the local copy first via the
-  // /local endpoint).
-  try {
-    await execOnHost(`incus snapshot delete ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
-  } catch (error) {
-    const msg = (error.stderr || error.message || '').toLowerCase();
-    if (!msg.includes('not found') && !msg.includes("doesn't exist") && !msg.includes('no such')) {
-      errors.push({ scope: 'local', error: (error.stderr || error.message || 'unknown').trim().slice(0, 512) });
-    }
-  }
+  // 1. Drop the local snapshot — a setup-engine job (`snapshot_delete`).
+  // Tolerated if it's already gone (operator may have dropped the local
+  // copy first via the /local endpoint). Anything else — a refusal before
+  // execution (the guest's lease held, no executor, a changed target) or a
+  // local delete that ran and failed — returns HERE: the S3 copies and the
+  // notes are removed only once the local copy is gone. A partial failure
+  // reported below is an S3 copy that could not be removed, never a local
+  // snapshot that still exists.
+  const local = await lifecycleViaRunner('snapshot_delete', incusName, req, { snapshot: snapshotName });
+  const localJobId = local.jobId || null;
+  if (!local.ok && !local.notFound) return lifecycleFailure(res, local, `Failed to delete snapshot '${snapshotName}' from container '${name}' (its S3 copies and notes were left untouched)`);
 
   // 2. Drop every S3 copy (exported rows).  Pending uploads get
   // cancel_requested set so the queue worker aborts them; failed
@@ -5130,9 +5114,11 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
       details: errors,
     });
   }
+  logAudit(req.user?.id || null, 'LXC_SNAPSHOT_DELETED', 'lxc', name, { snapshot: snapshotName, scope: 'all', job_id: localJobId }, req.ip);
   res.json({
     success: true,
     message: `Snapshot '${snapshotName}' deleted from container '${name}'.`,
+    jobId: localJobId,
   });
 });
 
@@ -5577,12 +5563,11 @@ lxcRouter.post('/cleanup/execute', requireSudo, async (req, res) => {
       const containers = JSON.parse(r.stdout || '[]');
       const orphans = containers.filter((c) => typeof c.name === 'string' && c.name.startsWith(PP_SNAP_EXPORT_PREFIX));
       for (const c of orphans) {
-        try {
-          await execOnHost(`incus delete ${c.name} --force`, { timeout: 60000 });
-          result.removed++;
-        } catch (e) {
-          result.errors.push(`${c.name}: ${(e.stderr || e.message || '').trim()}`);
-        }
+        // One `instance_delete` job per orphan (force: a crashed export may
+        // have left it running); the job reads the guest back as gone.
+        const out = await lifecycleViaRunner('instance_delete', c.name, req, { force: true });
+        if (out.ok) result.removed++;
+        else result.errors.push(`${c.name}: ${out.error}`);
       }
     } catch (e) {
       result.errors.push(`enumerate failed: ${(e.stderr || e.message || '').trim()}`);

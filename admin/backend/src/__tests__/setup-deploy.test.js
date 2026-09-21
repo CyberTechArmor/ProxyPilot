@@ -604,7 +604,7 @@ test('every /api/setup mutation is admin + fresh sudo behind the global CSRF che
   for (const action of ['SETUP_DEPLOY_REQUESTED', 'SETUP_JOB_CANCEL_REQUESTED', 'SETUP_RECOVERY_REQUESTED', 'SETUP_JOB_RETRIED']) assert.ok(routes.includes(action), `${action} audited`);
   const index = readFileSync(`${REPO}admin/backend/src/index.js`, 'utf8');
   assert.ok(index.indexOf("app.use('/api/', csrfProtection)") < index.indexOf("app.use('/api/setup', authenticateToken, blockPendingRole, setupRouter)"), 'CSRF is mounted before the setup routes');
-  assert.deepEqual([...RUNNER_JOB_KINDS], ['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets'], 'the two restores and the retry mint are runner jobs since A-13…A-15');
+  assert.deepEqual([...RUNNER_JOB_KINDS], ['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', 'instance_create', 'instance_start', 'instance_stop', 'instance_restart', 'instance_delete', 'snapshot_create', 'snapshot_delete'], 'the two restores and the retry mint are runner jobs since A-13…A-15; the Incus lifecycle and snapshot verbs since A-17');
   const executor = readFileSync(`${REPO}admin/backend/src/lib/setup-engine/executor.js`, 'utf8');
   assert.ok(executor.indexOf('validateRunnerJob(job)') < executor.indexOf('acquireLock(db, { app: job.app'), 'validated before the lease is taken');
   const runner = readFileSync(`${REPO}cli/src/setup-runner/runner.js`, 'utf8');

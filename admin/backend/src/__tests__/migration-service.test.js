@@ -218,6 +218,12 @@ test('the job document: nothing to transport until approved, then exactly one tr
   assert.equal(job.approved, true);
   assert.ok(job.artifact.chunk_bytes > 0);
   assert.ok(job.artifact.exclude.includes('./proc/*'), 'the pseudo-filesystems never travel');
+  assert.equal(job.install_tools, true, 'the agent is told it may install zstd on the source');
+
+  const strict = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web2', source_kind: 'proxmox-lxc', install_tools: false } });
+  await svc.recordManifest(svc.rowById(strict.migration.id), MANIFEST);
+  await svc.approveTransfer(strict.migration.id, { actor: 'admin-1' });
+  assert.equal((await svc.agentJob(svc.rowById(strict.migration.id))).install_tools, false, 'and told not to when the operator said so');
 });
 
 test('the job document: incus-migrate gets a trust token and a server-owned answer script, or a refusal that says why', async () => {

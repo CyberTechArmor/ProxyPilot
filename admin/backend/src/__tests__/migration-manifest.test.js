@@ -246,3 +246,17 @@ test('tools: the source says what it can run, and a missing incus-migrate is a c
   // Application mode has no whole-machine transport to worry about.
   assert.deepEqual(manifestConcerns(withTools, { mode: 'application', transport: 'file-sync' }).filter((c) => /missing/.test(c.id)), []);
 });
+
+test('tools: a source without zstd is told what the agent will do about it, and what it costs if it may not', () => {
+  const noZstd = validateManifest(base({ tools: { incus_migrate: true, tar: true, zstd: false } })).manifest;
+  const will = manifestConcerns(noZstd, { mode: 'whole-machine', transport: 'rootfs-tar', target_type: 'container' }).find((c) => c.id === 'zstd-missing');
+  assert.equal(will.level, 'warn');
+  assert.match(will.text, /agent will install it/);
+  const wont = manifestConcerns(noZstd, { mode: 'application', transport: 'file-sync', install_tools: false }).find((c) => c.id === 'zstd-missing');
+  assert.match(wont.text, /gzip on one core/);
+  assert.match(wont.remedy, /apt install zstd/);
+  // incus-migrate streams the disk itself; the source's tar compressor is irrelevant.
+  assert.equal(manifestConcerns(noZstd, { mode: 'whole-machine', transport: 'incus-migrate', target_type: 'container' }).some((c) => c.id === 'zstd-missing'), false);
+  const has = validateManifest(base({ tools: { incus_migrate: true, tar: true, zstd: true } })).manifest;
+  assert.equal(manifestConcerns(has, { mode: 'whole-machine', transport: 'rootfs-tar' }).some((c) => c.id === 'zstd-missing'), false);
+});

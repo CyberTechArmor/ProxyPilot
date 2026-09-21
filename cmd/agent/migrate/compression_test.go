@@ -78,3 +78,34 @@ func TestStreamCompressorNeverWrapsWhatItCannotRun(t *testing.T) {
 		}
 	}
 }
+
+func TestZstdInstallPlan(t *testing.T) {
+	only := func(names ...string) func(string) bool {
+		return func(b string) bool {
+			for _, n := range names {
+				if n == b {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	// Debian/Ubuntu: install first, update only as the retry.
+	apt := zstdInstallPlan(only("apt-get", "dpkg"))
+	if apt == nil || apt.Manager != "apt-get" || len(apt.Argv) != 3 || apt.Argv[1][1] != "update" {
+		t.Fatalf("apt plan: %+v", apt)
+	}
+	for _, m := range []string{"dnf", "yum", "apk", "zypper", "pacman"} {
+		p := zstdInstallPlan(only(m))
+		if p == nil || p.Manager != m || len(p.Argv) != 1 || p.Argv[0][0] != m {
+			t.Fatalf("%s plan: %+v", m, p)
+		}
+	}
+	// dnf wins over a yum shim on the same box.
+	if p := zstdInstallPlan(only("yum", "dnf")); p.Manager != "dnf" {
+		t.Fatalf("dnf should win over yum, got %s", p.Manager)
+	}
+	if zstdInstallPlan(only("tar")) != nil {
+		t.Fatal("no package manager means no plan, not a guess")
+	}
+}

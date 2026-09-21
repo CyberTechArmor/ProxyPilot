@@ -88,7 +88,7 @@ export function createMigrationService({
       manifest: man, manifest_at: row.manifest_at,
       summary: man ? manifestSummary(man) : null,
       capacity: parse(row.capacity_json, null),
-      concerns: man ? manifestConcerns(man, { mode: row.mode, capacity: parse(row.capacity_json, null), transport: row.transport, target_type: spec.type }) : [],
+      concerns: man ? manifestConcerns(man, { mode: row.mode, capacity: parse(row.capacity_json, null), transport: row.transport, target_type: spec.type, install_tools: spec.install_tools !== false }) : [],
       approved_at: row.approved_at, approved_by: row.approved_by,
       egress: egress || (man ? observedEgress(man).map(defaultEgressDecision) : []),
       routes: man ? suggestedRoutes(man) : [],
@@ -212,6 +212,7 @@ export function createMigrationService({
     // cannot do what we asked, and the server sniffs the received bytes
     // rather than trusting this, so a mismatch is never fatal.
     job.compression = (await transferCompression()).compression;
+    job.install_tools = spec.install_tools !== false;
 
     if (row.transport === 'incus-migrate') {
       const t = await incusTrustToken(row);
@@ -592,7 +593,7 @@ export function createMigrationService({
     const sum = manifestSummary(v.manifest);
     event(row.id, { kind: 'state', phase: 'inventory', message: `inventory received: ${sum.os || 'unknown OS'}, ${sum.counts.units} units, ${sum.counts.vhosts} vhosts, ${sum.counts.databases} database engine(s), ${sum.counts.egress} outbound host(s)` });
     if (!auto) event(row.id, { kind: 'state', phase: 'inventory', message: 'waiting for the operator to review the inventory and approve the transfer' });
-    return { manifest: v.manifest, summary: sum, capacity, concerns: manifestConcerns(v.manifest, { mode: row.mode, capacity, transport: row.transport, target_type: spec.type }), auto_approved: auto };
+    return { manifest: v.manifest, summary: sum, capacity, concerns: manifestConcerns(v.manifest, { mode: row.mode, capacity, transport: row.transport, target_type: spec.type, install_tools: spec.install_tools !== false }), auto_approved: auto };
   }
 
   /* ------------------------------ approval ------------------------------ */
@@ -614,7 +615,7 @@ export function createMigrationService({
     const spec = parse(row.spec_json, {});
 
     const capacity = await measureCapacity(row).catch(() => null);
-    const blocking = manifestConcerns(parse(row.manifest_json, null) || {}, { mode: row.mode, capacity, transport: row.transport, target_type: spec.type }).filter((c) => c.level === 'block');
+    const blocking = manifestConcerns(parse(row.manifest_json, null) || {}, { mode: row.mode, capacity, transport: row.transport, target_type: spec.type, install_tools: spec.install_tools !== false }).filter((c) => c.level === 'block');
     if (blocking.length && override !== true) {
       return {
         error: `refused: ${blocking.map((b) => b.text).join(' ')}`,

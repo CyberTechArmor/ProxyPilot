@@ -50,6 +50,8 @@ test('validateTarget: the transport follows from the mode and the source, and ev
   const spec = validateTarget({ mode: 'whole-machine', name: 'web' }).spec;
   assert.equal(spec.auto_transfer, false);
   assert.equal(spec.keep_agent, false);
+  assert.equal(spec.install_tools, true, 'the agent may install zstd on the source unless told otherwise');
+  assert.equal(validateTarget({ mode: 'whole-machine', name: 'web', install_tools: false }).spec.install_tools, false);
   assert.equal(spec.freeze, 'stop');
 });
 

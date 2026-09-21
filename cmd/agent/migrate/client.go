@@ -155,7 +155,11 @@ type Job struct {
 	// this source's tar cannot do it, and the server sniffs the bytes it
 	// receives rather than trusting the label.
 	Compression string `json:"compression"`
-	Target      struct {
+	// InstallTools is the operator's spec (default on): the agent may
+	// install what the transfer needs on the source — today that is zstd.
+	// Absent from an older server, which reads as off.
+	InstallTools bool `json:"install_tools"`
+	Target       struct {
 		Name     string  `json:"name"`
 		Type     string  `json:"type"`
 		Pool     string  `json:"pool"`

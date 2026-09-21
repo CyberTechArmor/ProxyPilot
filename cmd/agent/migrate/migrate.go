@@ -110,6 +110,11 @@ func (a *Agent) run(inventoryOnly bool) error {
 	if err != nil {
 		return a.client.Fail(err)
 	}
+	if job.Transport != "incus-migrate" {
+		// Everything but incus-migrate is a tar this source compresses; make
+		// sure it can do so on every core before the first byte moves.
+		a.EnsureZstd(job)
+	}
 	var moved int64
 	switch job.Transport {
 	case "incus-migrate":

@@ -123,6 +123,10 @@ export function validateTarget(input = {}) {
       app: mode === 'application' ? app : null,
       auto_transfer: input.auto_transfer === true,
       keep_agent: input.keep_agent === true,
+      // The agent may install what the transfer needs on the source (zstd,
+      // so a big rootfs compresses on every core). Default on; off is for a
+      // source nobody may touch, and costs a gzip-speed transfer.
+      install_tools: input.install_tools !== false,
       freeze: ['stop', 'read-only', 'none'].includes(String(input.freeze)) ? String(input.freeze) : 'stop',
     },
   };

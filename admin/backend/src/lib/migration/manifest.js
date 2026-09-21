@@ -420,10 +420,21 @@ export const INSTALL_INCUS_MIGRATE = 'install it on the source: `apt install inc
  * block for a VM (a tarball has no disk image in it; install the tool, and
  * the agent checks again when the transfer starts — no new migration).
  */
-export function transportConcerns(manifest, { mode, transport, targetType } = {}) {
+export function transportConcerns(manifest, { mode, transport, targetType, installTools = true } = {}) {
   const tools = manifest?.tools;
-  if (!tools || mode !== 'whole-machine') return [];
+  if (!tools) return [];
   const out = [];
+  // Every transport but incus-migrate is a tar the source compresses, and
+  // without zstd that is gzip on ONE core: a 250 GiB rootfs takes five
+  // hours instead of one. The agent installs zstd before the transfer
+  // unless the spec says not to, in which case the operator should know
+  // what that costs.
+  if (transport !== 'incus-migrate' && tools.zstd === false) {
+    out.push(installTools
+      ? { level: 'warn', id: 'zstd-missing', text: 'zstd is not installed on the source. The agent will install it (apt/dnf/apk/zypper/pacman) when the transfer starts, so the copy compresses on every core; if that fails the transfer falls back to single-core gzip and the log says so.', remedy: 'Nothing to do. To keep the agent from installing packages, set install_tools: false on the migration and install zstd (or pigz) by hand.' }
+      : { level: 'warn', id: 'zstd-missing', text: 'zstd is not installed on the source and install_tools is off, so the transfer will compress with gzip on one core — expect roughly 5–10 MiB/s, hours for a large rootfs.', remedy: 'Install zstd (or pigz) on the source before approving: `apt install zstd`.' });
+  }
+  if (mode !== 'whole-machine') return out;
   if (transport === 'incus-migrate' && !tools.incus_migrate && !tools.lxd_migrate) {
     if (targetType === 'virtual-machine') {
       out.push({
@@ -450,13 +461,13 @@ export function transportConcerns(manifest, { mode, transport, targetType } = {}
  * Returns blocking problems first — the operator sees them before approving
  * the transfer, not after it.
  */
-export function manifestConcerns(manifest, { mode, capacity = null, transport = null, target_type: targetType = null } = {}) {
+export function manifestConcerns(manifest, { mode, capacity = null, transport = null, target_type: targetType = null, install_tools: installTools = true } = {}) {
   const out = [];
   // Capacity first: "it will not fit" is the one concern that makes every
   // other question moot, and it blocks the approval.
   for (const c of capacity?.concerns || []) out.push({ ...c, remedy: c.remedy ?? null });
   const push = (level, id, text, remedy = null) => out.push({ level, id, text, remedy });
-  for (const c of transportConcerns(manifest, { mode, transport, targetType })) out.push(c);
+  for (const c of transportConcerns(manifest, { mode, transport, targetType, installTools })) out.push(c);
   if (!manifest.os?.id) push('warn', 'os-unknown', 'The source OS could not be identified (no /etc/os-release).');
   if (manifest.os?.init && manifest.os.init !== 'systemd') push('warn', 'init', `The source runs ${manifest.os.init}, not systemd — units and their ports were not collected.`);
   if (mode === 'application' && !(manifest.app_dirs || []).length) push('block', 'no-app-dirs', 'Application mode found no application directory to copy.', 'Name the directories explicitly in the migration target spec (app_dirs), or use whole-machine mode.');

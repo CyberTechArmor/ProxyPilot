@@ -31,6 +31,7 @@ export const MIGRATION_TOOLS = Object.freeze([
       freeze: { type: 'string', enum: ['stop', 'read-only', 'none'], description: 'What the cutover does to the source service (default stop).' },
       auto_transfer: { type: 'boolean', description: 'Skip the inventory review and start copying as soon as the manifest lands. Default false, and false is the right answer for production.' },
       keep_agent: { type: 'boolean', description: 'Leave the agent binary on the source afterwards (default false — it removes itself).' },
+      install_tools: { type: 'boolean', description: 'Let the agent install what the transfer needs on the source — zstd, so the rootfs compresses on every core instead of single-core gzip (default true). false for a source nobody may touch; expect a much slower transfer.' },
       ttl_seconds: { type: 'number', description: 'Optional wall-clock lifetime for the token, 300–2592000. Omitted (the default) the token has NO clock: it lives until the migration ends or someone revokes it.' },
       dry_run: P.dry_run, confirm: P.confirm,
     }, ['mode', 'name', 'confirm']),

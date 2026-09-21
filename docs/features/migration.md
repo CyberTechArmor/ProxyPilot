@@ -40,6 +40,16 @@ actually do before it trusts that: a 2014 box with GNU tar 1.26 and no zstd
 package is exactly the machine someone is trying to get off, so the request
 is a preference and gzip is the floor. gzip is single-threaded at ~50 MB/s,
 which on a LAN makes it, not the network, the reason a migration takes hours.
+So the agent **installs zstd on the source** before the transfer when it is
+missing (`install_tools` on the spec, default on — through `apt-get`, `dnf`,
+`yum`, `apk`, `zypper` or `pacman`, whichever the source has; the outcome is
+a log line, and a failed install is the gzip fallback, never a failed
+migration). A source with `pigz` and no zstd gets gzip on every core. The
+inventory reports the source's tools, so the review says `zstd-missing` and
+what will happen about it before you approve; with `install_tools: false`
+the same concern says what single-core gzip will cost. The first real
+migration (249 GiB from a Debian 11 host) ran at 7 MiB/s on gzip — a
+five-hour copy that zstd on the same 16 cores does in well under one.
 The mysqldump is compressed too (it was going over the wire raw); the
 PostgreSQL dump is not, because `--format=custom` already is. ProxyPilot
 sniffs the first four bytes of what arrives rather than trusting the label,

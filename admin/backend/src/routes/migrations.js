@@ -186,6 +186,7 @@ const CreateBody = z.object({
   service_name: z.string().max(128).optional(),
   auto_transfer: z.boolean().optional(),
   keep_agent: z.boolean().optional(),
+  install_tools: z.boolean().optional(),
   freeze: z.enum(['stop', 'read-only', 'none']).optional(),
   ttl_seconds: z.number().int().min(300).max(86400).optional(),
 }).strict();

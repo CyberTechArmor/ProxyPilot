@@ -15,7 +15,9 @@ const PROXYPILOT_BIN = process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot'
 
 import { exportStore } from '../../lib/lxc-exports-instance.js';
 import { restoreHazards, restoreNotes } from '../../lib/lxc-exports.js';
-import { withContainerLock } from '../../mock2/container-lock.js';
+import { restoreSnapshot, resolveRestoreSnapshotPlan } from '../../mock2/ops.js';
+import { containerLockStore } from '../../mock2/container-lock.js';
+import { snapshotCoverage } from '../../lib/setup-engine/restore-logic.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../../lib/export-compression.js';
 
 export function createLxcAdminHandlers(kit) {
@@ -264,33 +266,38 @@ export function createLxcAdminHandlers(kit) {
     if (inst.error) return err(inst.error);
     const target = inst.detail.snapshots.find((s) => s.name === snap);
     if (!target) return err(`Snapshot ${snap} does not exist on ${name} (list_snapshots)`);
-    const plan = { container: name, restore_to: snap, snapshot_created_at: target.created_at, pre_restore_snapshot: `pp-mcp-pre-restore-<timestamp>`, note: 'The current state is snapshotted first, so the restore itself is reversible.' };
-    const d = dry(args, plan); if (d) return d;
-    const gate = confirmToken(args, auth, note, { tool: 'restore_snapshot', subject: `${name}/${snap}`, action: `restore ${name} to snapshot ${snap} (everything written since is replaced)`, preview: plan });
-    if (gate) return gate;
-    // Same exclusive lock as a project deploy and database restore: refused
-    // while one is in progress, held for the restore's own lifetime.
-    const run = async () => {
-      const pre = await takeLxcSnapshot(incus(name), defaultSnapshotName(new Date(), 'pp-mcp-pre-restore'));
-      if (pre.error) return err(`Refusing to restore without a pre-restore snapshot: ${pre.error}`);
-      note.snapshot = pre.name;
-      const form = await resolveSnapshotCliForm();
-      const r = await runHostCapture('incus', snapshotArgv('restore', incus(name), snap, form), { timeoutMs: 10 * 60 * 1000 });
-      if (r.status !== 0) return err(`incus snapshot restore failed: ${tail(r.stderr) || 'unknown error'} (pre-restore snapshot ${pre.name} was taken)`);
-      note.summary = `restored ${name} to ${snap}`;
-      note.detail = { restored_to: snap };
-      return ok({ restored: true, container: name, snapshot: snap, pre_restore_snapshot: pre.name, reverse_with: `restore_snapshot({ container: "${name}", snapshot: "${pre.name}" })` });
+    // What an instance snapshot covers: the root disk. A custom storage
+    // volume attached as a disk device is outside it — the restore refuses
+    // unless the caller accepts a partial restore by name.
+    const coverage = snapshotCoverage(inst.instance);
+    const store = containerLockStore();
+    if (!store) return err('the setup engine store is not configured; the restore cannot be recorded, so it is not run');
+    const resolved = resolveRestoreSnapshotPlan(store.getDb(), { containerName: incus(name), snapshot: snap, acceptPartial: args.accept_partial === true, retryOf: args.retry_of || null });
+    if (!resolved.ok) return err(resolved.error);
+    const plan = {
+      ...resolved.plan, container: name, snapshot_created_at: target.created_at,
+      coverage: { root_disk: coverage.root || 'root', custom_volumes_not_restored: coverage.customVolumes },
+      pre_restore_snapshot: 'pp-pre-restore-<job>-<stamp>, taken first (identified by name and timestamp on the job record) so the restore itself is reversible',
+      then: 'incus snapshot restore → the guest runs again if it was running → a managed application is verified by a follow-up job',
     };
-    try {
-      return await withContainerLock(incus(name), 'restore_snapshot', run, {
-        wait: false,
-        job: { kind: 'restore_snapshot', plan: { steps: ['pre_restore_snapshot', 'incus_restore'], params: { container: incus(name), snapshot: snap } }, configRefs: { snapshot: snap }, requestedBy: auth?.name || null, via: 'mcp' },
-      });
-    } catch (e) {
-      if (e?.code === 'CONTAINER_BUSY') return err(`${e.holder} is in progress for ${name} — the restore was refused before any change; retry when it finishes`);
-      if (e?.code === 'CONTAINER_LOCK_STALE') return err(`${e.message}; the restore was refused before any change`);
-      throw e;
+    if (coverage.customVolumes.length && args.accept_partial !== true) plan.refusal = `${coverage.customVolumes.length} custom volume(s) attached; pass accept_partial: true to restore the root disk only`;
+    const d = dry(args, plan); if (d) return d;
+    const gate = confirmToken(args, auth, note, { tool: 'restore_snapshot', subject: `${name}/${resolved.digest}`, action: `restore ${name} to snapshot ${snap} (everything written since is replaced${coverage.customVolumes.length ? '; the attached custom volumes are NOT restored' : ''})`, preview: plan });
+    if (gate) return gate;
+    const out = await restoreSnapshot({ containerName: incus(name), snapshot: snap, acceptPartial: args.accept_partial === true, retryOf: args.retry_of || null, requestedBy: auth?.name || null, via: 'mcp' });
+    if (!out.ok) {
+      if (out.code === 'CONTAINER_BUSY' || out.code === 'CONTAINER_LOCK_STALE') return err(out.error);
+      return err(`${out.error}${out.jobId ? ` (job ${out.jobId}; GET /api/setup/jobs/${out.jobId})` : ''}`, out.jobId ? { job_id: out.jobId, step: out.step, refused: !!out.refused } : null);
     }
+    note.snapshot = out.preRestore?.name || null;
+    note.summary = `restored ${name} to ${snap}${out.partial ? ' (root disk only)' : ''} (job ${out.jobId})`;
+    note.detail = { restored_to: snap, partial: !!out.partial, custom_volumes_not_restored: (out.coverage?.customVolumes || []).map((v) => v.device), job_id: out.jobId };
+    return ok({
+      restored: true, complete: !out.partial, job_id: out.jobId, container: name, snapshot: snap, status: out.status || null,
+      pre_restore_snapshot: out.preRestore?.name || null, custom_volumes_not_restored: out.coverage?.customVolumes || [],
+      verification: out.verificationJobId ? { pending: true, job_id: out.verificationJobId } : (out.verification || null),
+      reverse_with: out.preRestore?.name ? `restore_snapshot({ container: "${name}", snapshot: "${out.preRestore.name}"${out.partial ? ', accept_partial: true' : ''} })` : null,
+    });
   });
 
   const delete_snapshot = mutation('delete_snapshot', { subjectType: 'lxc', flag: 'mcp.destructive' }, async (args, auth, req, note) => {

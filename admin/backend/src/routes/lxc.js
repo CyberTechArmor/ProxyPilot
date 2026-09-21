@@ -4967,7 +4967,7 @@ lxcRouter.get('/containers/:name/snapshot-jobs/:jobId', (req, res) => {
 });
 
 // POST /containers/:name/snapshot/:snapshotName/restore - Restore a snapshot
-lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', async (req, res) => {
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', requireSudo, async (req, res) => {
   const { name, snapshotName } = req.params;
 
   if (!validateName(name)) {
@@ -4984,18 +4984,25 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', async (req, r
     });
   }
 
-  // Restore touches the same storage as create; same timeout reasoning.
-  const SNAPSHOT_TIMEOUT_MS = 5 * 60 * 1000;
-
+  // The restore is a runner job (docs/features/setup-engine.md § Restores):
+  // pre-restore snapshot, the app's lease, argv to incus, a verification
+  // follow-up for a managed app. Refused, before any change, while a deploy
+  // or another restore holds the guest, and when no executor is available.
   try {
-    const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus snapshot restore ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
+    const { restoreSnapshot } = await import('../mock2/ops.js');
+    const out = await restoreSnapshot({ containerName: `${INSTANCE_PREFIX}${name}`, snapshot: snapshotName, acceptPartial: req.body?.accept_partial === true, requestedBy: req.user?.username || null, via: 'ui' });
+    if (!out.ok) {
+      const status = out.code === 'CONTAINER_BUSY' || out.code === 'CONTAINER_LOCK_STALE' ? 409 : out.step === 'runner_unavailable' ? 503 : out.step === 'coverage' ? 409 : 500;
+      return res.status(status).json({ success: false, error: out.error, jobId: out.jobId || null, step: out.step || null });
+    }
+    logAudit(req.user?.id || null, 'LXC_SNAPSHOT_RESTORED', 'lxc', name, { snapshot: snapshotName, job_id: out.jobId, pre_restore_snapshot: out.preRestore?.name || null, partial: !!out.partial }, req.ip);
     res.json({
       success: true,
-      message: `Snapshot '${snapshotName}' restored for container '${name}'.`,
+      message: `Snapshot '${snapshotName}' restored for container '${name}'${out.partial ? ' (root disk only; attached custom volumes were not restored)' : ''}.`,
+      jobId: out.jobId, preRestoreSnapshot: out.preRestore?.name || null, complete: !out.partial, verificationJobId: out.verificationJobId || null,
     });
   } catch (error) {
-    res.status(500).json(formatSnapshotError(`Failed to restore snapshot for container '${name}'`, error, SNAPSHOT_TIMEOUT_MS));
+    res.status(500).json(formatSnapshotError(`Failed to restore snapshot for container '${name}'`, error, 10 * 60 * 1000));
   }
 });
 

@@ -20,7 +20,7 @@
 // Terminology (risk R7): nothing here is named "agent".
 
 import { createHash } from 'node:crypto';
-import { sh, b64 } from './host.js';
+import { sh, b64, runHost } from './host.js';
 import { scaffoldPwaFiles } from './scaffold.js';
 import {
   parseRunContract, deployStepLabel,
@@ -163,7 +163,12 @@ export async function deployProject(args) {
 export function inProcessExecutorDeps(store = containerLockStore()) {
   return {
     owner: store?.owner,
-    exec: store?.guestExec || { guest: (name, script, { timeoutMs } = {}) => containerSh(name, script, { timeoutMs }) },
+    exec: store?.guestExec || {
+      guest: (name, script, { timeoutMs } = {}) => containerSh(name, script, { timeoutMs }),
+      // Host commands as argv arrays (a snapshot restore); through the same
+      // pivot every host command of this process takes, never a shell string.
+      host: store?.hostExec || (async (argv, { timeoutMs } = {}) => runHost(argv[0], argv.slice(1), { timeoutMs })),
+    },
     reviewLogin: store?.reviewLogin || (async (container) => {
       try {
         const [{ getProjectByContainerName }, { getReviewLogin }] = await Promise.all([import('./projects.js'), import('./review-account.js')]);
@@ -217,6 +222,7 @@ export async function resolveDeployParams({ containerName, appDir = '/srv/app', 
       }
       const guards = secretDataGuards(params.secrets.configs);
       if (!params.guard && guards[0]?.guard) params.guard = guards[0].guard;
+      if (guards[0]?.key) params.guardKey = guards[0].key;
     }
   } catch { /* no mock2 registry here: nothing to mint, nothing to guard */ }
   return params;

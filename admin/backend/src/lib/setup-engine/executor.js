@@ -30,10 +30,13 @@ import {
   runnerHeartbeat, requeueJob, recordVerificationRung,
 } from './store.js';
 import {
-  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, parseJson, sanitizeReason, parseOwner,
+  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, EXCLUSIVE_JOB_KINDS, parseJson, sanitizeReason, parseOwner,
   FencedError, CancelledError, verificationState, CREDENTIAL_USE_OUTCOMES,
 } from './logic.js';
 import { runDeployOperation, PreviousWriterAliveError, ContainmentUnavailableError } from './deploy-op.js';
+import { runRestoreDbOperation } from './restore-db-op.js';
+import { runRestoreSnapshotOperation } from './restore-snapshot-op.js';
+import { runRetrySecretsOperation } from './retry-secrets-op.js';
 import {
   unitStatusScript, parseUnitStatus, startUnitScript, parseStartUnit, portProbeScript, parsePortProbe,
   healthScript, parseHealth, activeKeyScript, credentialProbeScript, credentialVerdict, verificationFromObservations, DEFAULT_UNIT,
@@ -78,9 +81,10 @@ export function reconcile({ db, owner, nowMs = Date.now(), log = () => {} } = {}
         recovery = createJob(db, { kind: spec.kind, app: spec.app, plan: spec.plan, configRefs: { origin: spec.plan.params.origin, recovery: cp.recovery || null }, requestedBy: spec.requested_by, via: spec.via, reason: spec.reason, nowMs });
       }
       const mig = cp.migration_in_progress === true ? ` A migration was in flight (retry class: ${cp.recovery?.migration?.retry || 'unknown'}).` : '';
+      const rst = cp.restore_in_progress === true ? ` A database restore was in flight: the database may be partially restored; the pre-restore dump ${cp.recovery?.protected?.dbDump?.path || 'is not recorded'} is the protected copy.` : (job.kind === 'restore_snapshot' ? ` A snapshot restore was in flight (pre-restore snapshot ${cp.recovery?.preRestore?.name || 'not recorded'}).` : '');
       recordJobOutcome(db, {
         id: job.id, status: 'recovery_required', outcome: 'interrupted_after_stop',
-        reason: `${d.reason}; the application '${cp.container || job.app}' may still be stopped;${mig} recovery job ${recovery.id} queued`,
+        reason: `${d.reason}; the application '${cp.container || job.app}' may still be stopped;${mig}${rst} recovery job ${recovery.id} queued`,
         verification: { state: 'recovery_required', failedAt: 'port_responding', note: 'not verified: the owner died while the application was stopped' },
         by: owner, nowMs,
       });
@@ -125,6 +129,8 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       requeueJob(db, { id: job.id, by: owner, reason: `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; this follow-up waits and retries`, notBeforeMs: nowMs() + FOLLOW_UP_RETRY_MS, nowMs: nowMs() });
       return { status: 'requeued', outcome: 'lock_held', verification: null };
     }
+    // A restore never runs later under a state nobody looked at: refused.
+    if (EXCLUSIVE_JOB_KINDS.includes(job.kind)) return fin('refused', 'lock_held', `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; the restore was refused before any change — submit it again when the holder has finished`);
     return fin('deferred', 'lock_held', `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; retry when it finishes`);
   };
   const got = acquireLock(db, { app: job.app, owner, operation: job.kind, jobId: job.id, leaseMs: LEASE_MS, nowMs: lockNow });
@@ -155,7 +161,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
     // Containment before anything that touches the guest: other jobs'
     // groups and legacy marker scripts are killed and counted. A survivor
     // is recorded and the job stops here with the lease kept.
-    if (job.kind === 'deploy' || job.kind === 'recover_app') {
+    if (['deploy', 'recover_app', 'restore_db', 'retry_secrets'].includes(job.kind)) {
       const script = reapStaleWritersScript(job.id, { runDir });
       const reap = await guest('reap_previous_writer', script, { timeoutMs: 30_000, safe: true });
       const left = parseStaleWriters(reap.stdout);
@@ -167,7 +173,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       event('step', left == null ? 'stale-writer count unavailable; proceeding' : `${left} stale process group(s)/script(s) of other jobs signalled; none remain`, null, 'reap_previous_writer');
     }
 
-    if (job.kind === 'deploy') {
+    if (['deploy', 'restore_db', 'restore_snapshot', 'retry_secrets'].includes(job.kind)) {
       const handle = {
         id: job.id,
         fence,
@@ -176,10 +182,26 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         event: (kind, message, data = null) => event(kind, message, data),
         onStep: (key, label) => event('step', label, null, key),
       };
-      const result = await runDeployOperation({ params: { ...p, reapOrphans: false, runDir }, exec: { guest: (c, script, o) => { fence(); return exec.guest(c, script, o); } }, job: handle, log });
+      const fencedExec = { guest: (c, script, o) => { fence(); return exec.guest(c, script, o); }, ...(typeof exec.host === 'function' ? { host: (argv, o) => { fence(); return exec.host(argv, o); } } : {}) };
+      // What a previous attempt recorded (a retry's origin, and this job's own
+      // progress when it was resumed): reused only after revalidation.
+      const reuse = reuseFrom(db, job, p);
+      let result;
+      if (job.kind === 'deploy') result = await runDeployOperation({ params: { ...p, reapOrphans: false, runDir }, exec: fencedExec, job: handle, log });
+      else if (job.kind === 'restore_db') {
+        const originJob = p.envCopy?.originJobId ? getJob(db, String(p.envCopy.originJobId)) : null;
+        result = await runRestoreDbOperation({ params: { ...p, runDir }, exec: fencedExec, job: handle, originJob, reuse, log });
+      } else if (job.kind === 'restore_snapshot') result = await runRestoreSnapshotOperation({ params: p, exec: fencedExec, job: handle, reuse, log });
+      else result = await runRetrySecretsOperation({ params: { ...p, runDir }, exec: fencedExec, job: handle, reuse, log });
       const late = (parseJson(getJob(db, job.id)?.progress_json) || {}).cancel_requested;
-      if (late) event('cancel_declined', `cancel by ${late.by} arrived after the application had been stopped; the deploy finished bringing it up instead of leaving it down`);
-      const { verification, recovery, ...rest } = result;
+      if (late) event('cancel_declined', `cancel by ${late.by} arrived after the disruptive step; the ${job.kind} finished bringing the app up instead of leaving it down`);
+      const { verification: opVerification, recovery, ...rest } = result;
+      // A restore reports the ladder it observed with the application rungs
+      // pending for its follow-up; the deploy and the mint bring their own.
+      const verification = opVerification || (job.kind === 'restore_db' && result.ok
+        ? verificationFromObservations({ unit: { loaded: true, observed: true, isActive: result.unitActive === true, active: result.unitActive ? 'active' : 'inactive' }, port: result.port || null, health: result.health }, { pendingRungs: ['credential_decryptable', 'credential_use_verified'] })
+        : (job.kind === 'restore_snapshot' && result.ok && result.followUp ? { state: 'configured', label: 'restored; verification pending', pending: ['port_responding', 'app_healthy', 'credential_decryptable', 'credential_use_verified'], facts: { pendingRungs: ['credential_use_verified'] } } : null));
+      const okOutcome = job.kind === 'deploy' ? 'serving' : (result.step || 'completed');
       const pub = { ...rest, verification: verification ? { state: verification.state, label: verification.label, failedAt: verification.failedAt || null, next: verification.next || null, pending: verification.pending || [] } : null };
       const queueFollowUp = (steps, rung, reason, revision) => createJob(db, {
         kind: 'verify_app', app: job.app,
@@ -191,15 +213,16 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         // The obligation to verify is persisted BEFORE the job reports done.
         let verificationJobId = null;
         if (result.followUp && !result.skipped) {
-          const follow = queueFollowUp(result.followUp.steps, result.followUp.rung, `application-owned credential check for deploy ${job.id}`, result.followUp.revision);
+          const follow = queueFollowUp(result.followUp.steps, result.followUp.rung, job.kind === 'deploy' ? `application-owned credential check for deploy ${job.id}` : `verify ${container} after ${job.kind} ${job.id}`, result.followUp.revision);
           verificationJobId = follow.id;
           pub.verificationJobId = follow.id;
         }
-        recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, verification_job_id: verificationJobId, execution: result.skipped ? 'skipped' : 'serving' }, nowMs: nowMs() });
+        recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, verification_job_id: verificationJobId, execution: result.skipped ? 'skipped' : okOutcome }, nowMs: nowMs() });
+        const summary = job.kind === 'deploy' ? `${container}: serving` : job.kind === 'restore_db' ? `${container}: database restored from ${rest.restored?.dump} (${rest.errors ?? '?'} error line(s); ${rest.compatibility?.mode})` : job.kind === 'restore_snapshot' ? `${container}: restored to ${rest.restoredTo}${rest.partial ? ' (root disk only; custom volumes NOT restored)' : ''}; pre-restore ${rest.preRestore?.name}` : `${container}: ${(rest.minted || []).length} secret(s) minted, ${(rest.deferred || []).length} deferred, ${(rest.reused || []).length} reused`;
         const r = fin(
           result.skipped ? 'succeeded' : (verification?.state === 'recovery_required' ? 'recovery_required' : 'succeeded'),
-          result.skipped ? 'skipped' : 'serving',
-          result.skipped ? 'no run contract; nothing to deploy' : `${container}: serving; verification ${verification?.state}${verification?.pending?.length ? ` (pending: ${verification.pending.join(', ')} → job ${verificationJobId})` : ''}`,
+          result.skipped ? 'skipped' : okOutcome,
+          result.skipped ? 'no run contract; nothing to deploy' : `${summary}; verification ${verification?.state || 'not_applicable'}${verification?.pending?.length ? ` (pending: ${verification.pending.join(', ')} → job ${verificationJobId})` : ''}`,
           verification || null,
         );
         return { ...r, result, verificationJobId };
@@ -210,7 +233,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       // verification is queued so the record ends with a checked state.
       let verificationJobId = null;
       if (result.restartAttempted || result.unitStarted) {
-        const follow = queueFollowUp(['unit_status', 'probe_port', 'health_check', 'verify_credential', 'verify_credential_use'], 'post_failure', `verify what runs in ${container} after deploy ${job.id} failed at ${result.step}`, null);
+        const follow = queueFollowUp(['unit_status', 'probe_port', 'health_check', 'verify_credential', 'verify_credential_use'], 'post_failure', `verify what runs in ${container} after ${job.kind} ${job.id} failed at ${result.step}`, null);
         verificationJobId = follow.id;
         pub.verificationJobId = follow.id;
       }
@@ -363,6 +386,18 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
   } finally {
     if (!keepLease) releaseLock(db, { app: job.app, owner, epoch: lockEpoch });
   }
+}
+
+// reuseFrom(db, job, params) → the artifacts a retry's origin and this job's
+// own earlier attempt recorded, with their identity, for revalidation.
+function reuseFrom(db, job, params) {
+  const out = [];
+  const add = (row) => { for (const g of (parseJson(row?.progress_json) || {}).generated || []) out.push({ kind: g.kind, name: g.name, where: g.where || null, sha256: g.sha256 || null, bytes: g.bytes ?? null, created_at: g.created_at || null }); };
+  const originId = job.retry_of || params?.retryOf || null;
+  if (originId) { const origin = getJob(db, String(originId)); if (origin && origin.app === job.app && origin.kind === job.kind) add(origin); }
+  add(getJob(db, job.id));
+  for (const r of Array.isArray(params?.reuse) ? params.reuse : []) if (r && r.kind && r.name && !out.some((o) => o.kind === r.kind && o.name === r.name)) out.push({ kind: r.kind, name: r.name, where: r.where || null, sha256: r.sha256 || null, bytes: r.bytes ?? null, created_at: r.created_at || null });
+  return out;
 }
 
 function defaultSteps(kind) {

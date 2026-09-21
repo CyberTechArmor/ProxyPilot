@@ -18,7 +18,8 @@ import { basename } from 'node:path';
 import { readStandardsSeedVersion, fetchStandardsManifest } from '../../lib/self-update.js';
 import { exportStore, resolveExportCompression } from '../../lib/lxc-exports-instance.js';
 import { incusCompressionArgs } from '../../lib/export-compression.js';
-import { withContainerLock } from '../../mock2/container-lock.js';
+import { restoreProjectDb, resolveRestoreDbPlan } from '../../mock2/ops.js';
+import { containerLockStore } from '../../mock2/container-lock.js';
 import {
   intIn, stamp, sha256Hex, validGitRefName, validateEnvVars, mergeEnvFile, envFileKeys, readOnlySqlError,
   parseReleases, renderReleases, RELEASES_PATH, pathUnder,
@@ -705,38 +706,43 @@ export function createProjectConfigHandlers(kit) {
     note.subject_id = p.project.id; note.project_id = p.project.id; note.project = p.project;
     const guard = liveBuildGuard(p.m, p.project); if (guard) return err(guard);
     const file = pathUnder(DB_DUMPS_DIR, basename(String(args.file || '')));
-    if (!file || !/\.sql$/.test(file)) return err(`file must be a dump name inside ${DB_DUMPS_DIR} (from dump_project_db)`);
+    if (!file || !/\.sql$/.test(file)) return err(`file must be a dump name inside ${DB_DUMPS_DIR} (from dump_project_db, a deploy's pre-deploy copy, or a restore's pre-restore copy)`);
+    // The plan is resolved on the server: the dump name, the environment
+    // copy it forms a recovery set with (bound by the job record of THIS app
+    // that took them together — a file name alone binds nothing), the prior
+    // attempt a retry reuses. The confirmation token is bound to its digest.
+    const store = containerLockStore();
+    if (!store) return err('the setup engine store is not configured; the restore cannot be recorded, so it is not run');
+    const resolved = resolveRestoreDbPlan(store.getDb(), { containerName: p.incusName, file: basename(file), environmentCopy: args.environment_copy || null, retryOf: args.retry_of || null });
+    if (!resolved.ok) return err(resolved.error);
     const st = await projectSh(p.incusName, 'test -f "$1" && wc -c < "$1"', [file], { timeoutMs: 15000 });
     if (st.status !== 0) return err(`No such dump in the container: ${file}`);
-    const plan = { project_id: p.project.id, file, bytes: Number((st.stdout || '').trim()) || null, pre_restore_dump: `${DB_DUMPS_DIR}/app-pre-restore-<timestamp>.sql`, then: 'psql -f <dump> (the dump carries --clean --if-exists, so the database lands exactly on the dumped state)' };
-    const d = dry(args, plan); if (d) return d;
-    const gate = confirmToken(args, auth, note, { tool: 'restore_project_db', subject: `${p.project.id}/${basename(file)}`, action: `replace ${p.project.name}'s database with ${basename(file)}`, preview: plan });
-    if (gate) return gate;
-    // The restore takes the container's exclusive lock — the one the deploy
-    // holds from its stop to its start — and is REFUSED, before any change,
-    // while a deploy (or another restore) holds it; a deploy arriving during
-    // the restore queues behind it.
-    const run = async () => {
-      const pre = `${DB_DUMPS_DIR}/app-pre-restore-${stamp()}.sql`;
-      const dump = await projectSh(p.incusName, 'f="$1"; mkdir -p "$(dirname "$f")"; su - postgres -c "pg_dump --clean --if-exists app" > "$f" && chmod 600 "$f"', [pre], { timeoutMs: 20 * 60 * 1000 });
-      if (dump.status !== 0) return err(`Refusing to restore without a pre-restore dump: ${tail(dump.stderr)}`);
-      note.snapshot = pre;
-      const r = await projectSh(p.incusName, 'f="$1"; cp "$f" /tmp/pp-restore.sql && chmod 644 /tmp/pp-restore.sql; su - postgres -c "psql -X -v ON_ERROR_STOP=0 -q -d app -f /tmp/pp-restore.sql" 2>&1 | grep -E "^(psql|ERROR)" | head -n 40; rm -f /tmp/pp-restore.sql; exit 0', [file], { timeoutMs: 30 * 60 * 1000 });
-      const errors = (r.stdout || '').split('\n').filter((l) => /ERROR/.test(l));
-      note.summary = `db restored from ${basename(file)}`;
-      note.detail = { file, pre_restore_dump: pre, errors: errors.length };
-      return ok({ restored: true, file, pre_restore_dump: pre, errors: errors.slice(0, 20), reverse_with: `restore_project_db({ project_id: ${p.project.id}, file: "${basename(pre)}" })`, next: 'redeploy_project (or a restart) so the app reconnects cleanly.' });
+    const plan = {
+      project_id: p.project.id, ...resolved.plan, bytes: Number((st.stdout || '').trim()) || null,
+      compatibility: resolved.plan.mode === 'recovery_set'
+        ? `the dump's protected rows must decrypt under the key in ${resolved.plan.environment_copy}, which is then put in force as /etc/environment (the current one is copied first)`
+        : 'the dump\'s protected rows must decrypt under the CURRENT configuration; otherwise the restore refuses before stopping anything (pass environment_copy for a recovery set)',
+      pre_restore: `${DB_DUMPS_DIR}/app-pre-restore-<job>.sql and /etc/environment.pre-restore-<job>, taken before the stop`,
+      then: 'stop mock2-dev.service → psql -f <dump> (--clean --if-exists: the database lands exactly on the dumped state) → start → verify (a follow-up job checks the application)',
     };
-    try {
-      return await withContainerLock(p.incusName, 'restore_project_db', run, {
-        wait: false,
-        job: { kind: 'restore_project_db', plan: { steps: ['pre_restore_dump', 'psql_restore'], params: { container: p.incusName, file: basename(file) } }, configRefs: { file, dumpsDir: DB_DUMPS_DIR }, requestedBy: auth?.name || null, via: 'mcp' },
-      });
-    } catch (e) {
-      if (e?.code === 'CONTAINER_BUSY') return err(`${e.holder} is in progress for this project's container — the restore was refused before any change; retry when it finishes`);
-      if (e?.code === 'CONTAINER_LOCK_STALE') return err(`${e.message}; the restore was refused before any change`);
-      throw e;
+    const d = dry(args, plan); if (d) return d;
+    const gate = confirmToken(args, auth, note, { tool: 'restore_project_db', subject: `${p.project.id}/${resolved.digest}`, action: `replace ${p.project.name}'s database with ${resolved.plan.dump}${resolved.plan.environment_copy ? ` and its configuration with ${resolved.plan.environment_copy}` : ''}`, preview: plan });
+    if (gate) return gate;
+    const out = await restoreProjectDb({ containerName: p.incusName, file: basename(file), environmentCopy: args.environment_copy || null, retryOf: args.retry_of || null, requestedBy: auth?.name || null, via: 'mcp' });
+    if (!out.ok) {
+      if (out.code === 'CONTAINER_BUSY' || out.code === 'CONTAINER_LOCK_STALE') return err(`${out.error}`);
+      return err(`${out.error}${out.jobId ? ` (job ${out.jobId}; GET /api/setup/jobs/${out.jobId})` : ''}`, out.jobId ? { job_id: out.jobId, step: out.step, refused: !!out.refused, queued: !!out.queued } : null);
     }
+    note.snapshot = out.protected?.dbDump?.path || null;
+    note.summary = `db restored from ${resolved.plan.dump} (job ${out.jobId})`;
+    note.detail = { file: resolved.plan.dump, environment_copy: resolved.plan.environment_copy, mode: resolved.plan.mode, pre_restore_dump: out.protected?.dbDump?.path || null, errors: out.errors ?? null, job_id: out.jobId };
+    return ok({
+      restored: true, job_id: out.jobId, file: resolved.plan.dump, mode: resolved.plan.mode, environment_copy: resolved.plan.environment_copy,
+      pre_restore_dump: out.protected?.dbDump?.path || null, pre_restore_environment: out.protected?.envCopy || null, errors: out.errors ?? null, error_lines: (out.errorLines || []).slice(0, 20),
+      compatibility: out.compatibility || null, verification: out.verificationJobId ? { pending: true, job_id: out.verificationJobId } : null,
+      reverse_with: out.protected?.dbDump?.path ? `restore_project_db({ project_id: ${p.project.id}, file: "${basename(out.protected.dbDump.path)}"${out.protected?.envCopy ? `, environment_copy: "${basename(out.protected.envCopy)}"` : ''} })` : null,
+      next: 'The application was restarted; the follow-up verification job reports whether it can use its credentials. redeploy_project if the code must change too.',
+    });
   });
 
   /* ---------------------------------- CPR --------------------------------- */

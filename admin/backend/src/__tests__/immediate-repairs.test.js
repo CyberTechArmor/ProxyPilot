@@ -203,13 +203,28 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   assert.doesNotMatch(deployEntry, /systemctl stop/, 'the entry module no longer carries a deploy of its own');
   const executor = src('lib/setup-engine/executor.js');
   assert.match(executor, /runDeployOperation\(\{ params: \{ \.\.\.p, reapOrphans: false, runDir \}/);
+  // Since A-13…A-15 the two restores and the retry mint are runner jobs: the
+  // surfaces submit through mock2/ops.js (the orchestrator refuses a restore
+  // while a deploy or another restore holds the app, before any change) and
+  // run no guest or host command of their own.
   const projectConfig = src('routes/mcp-tools/project-config.js');
-  assert.match(projectConfig, /withContainerLock\(p\.incusName, 'restore_project_db', run, \{\s*wait: false,/, 'the database restore is refused while a deploy holds the container');
-  assert.ok(projectConfig.indexOf("withContainerLock(p.incusName, 'restore_project_db'") > projectConfig.indexOf("tool: 'restore_project_db'"), 'the lock is taken after the confirmation gate, before the pre-restore dump');
+  assert.match(projectConfig, /const out = await restoreProjectDb\(\{ containerName: p\.incusName/, 'the database restore is a runner job');
+  assert.ok(projectConfig.indexOf('await restoreProjectDb(') > projectConfig.indexOf("tool: 'restore_project_db'"), 'submitted after the confirmation gate');
+  assert.doesNotMatch(projectConfig, /pg_dump --clean --if-exists app" > "\$f"/, 'no pre-restore dump is taken by the tool itself');
+  assert.doesNotMatch(projectConfig, /psql -X -v ON_ERROR_STOP=0/, 'no psql runs in the tool');
   const lxcAdmin = src('routes/mcp-tools/lxc-admin.js');
-  assert.match(lxcAdmin, /withContainerLock\(incus\(name\), 'restore_snapshot', run, \{\s*wait: false,/, 'the snapshot restore takes the same lock');
+  assert.match(lxcAdmin, /const out = await restoreSnapshot\(\{ containerName: incus\(name\), snapshot: snap, acceptPartial/, 'the snapshot restore is a runner job');
+  assert.doesNotMatch(lxcAdmin, /snapshotArgv\('restore'/, 'no incus restore runs in the tool');
+  const lxcRoute = src('routes/lxc.js');
+  assert.match(lxcRoute, /'\/containers\/:name\/snapshot\/:snapshotName\/restore', requireSudo/, 'the dashboard route needs fresh sudo');
+  assert.doesNotMatch(lxcRoute, /execOnHost\(`incus snapshot restore/, 'the dashboard route builds no shell string for incus');
   const runnerSrc = src('mock2/runner.js');
-  assert.match(runnerSrc, /withContainerLock\(containerName, 'retry-secrets', \(\) => ensureComponentSecrets\(/, 'the retry-path mint holds the lock');
+  assert.match(runnerSrc, /const secrets = await retryProjectSecrets\(\{ containerName, via: 'system' \}\)/, 'the retry-path mint is a runner job');
+  assert.doesNotMatch(runnerSrc, /withContainerLock\(containerName, 'retry-secrets'/);
+  const ops = src('mock2/ops.js');
+  assert.match(ops, /submitRunnerJob\(db, \{ kind: 'restore_db'/);
+  assert.match(ops, /submitRunnerJob\(db, \{ kind: 'restore_snapshot'/);
+  assert.match(ops, /submitRunnerJob\(db, \{ kind: 'retry_secrets'/);
 });
 
 test('ratchet: the seed auth component refuses its dev defaults in production and marks its secrets as minted', () => {

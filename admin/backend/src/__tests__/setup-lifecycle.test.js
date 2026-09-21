@@ -41,7 +41,8 @@ import { ownerIdentity, parseJson, validateRunnerJob, reconcileDecision, RUNNER_
 import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, createJob, claimNextJob, checkpoint, runnerHeartbeat, listJobs } from '../lib/setup-engine/store.js';
 import { runOnce, reconcile } from '../lib/setup-engine/executor.js';
 import { submitRunnerJob, runSubmittedJob, resultFromJob } from '../lib/setup-engine/orchestrator.js';
-import { sweepSetupEngineOnBoot } from '../lib/setup-engine/backend.js';
+import { sweepSetupEngineOnBoot, acknowledgeUncertainJob } from '../lib/setup-engine/backend.js';
+import { runLifecycleOperation, CheckpointNotPersistedError } from '../lib/setup-engine/lifecycle-op.js';
 import { configureContainerLockStore } from '../mock2/container-lock.js';
 import { runLifecycle, resolveLifecyclePlan, lifecycleHttpStatus, LIFECYCLE_ACTIONS, planDigest } from '../mock2/ops.js';
 import { createExtendedHandlers } from '../routes/mcp-tools/index.js';
@@ -466,31 +467,123 @@ test('interruption, idempotent kinds: a dead owner\'s start / delete is resumed 
   assert.equal(out.ran[0].status, 'succeeded'); assert.deepEqual(mutations(h), [['incus', 'start', 'pp-x']]);
 });
 
-test('interruption, never-replayed kinds: a restart or create whose command was issued ends recovery_required naming the check; nothing is re-issued, no recovery job is queued, the lease is released; the boot sweep records the same', async () => {
+test('interruption, never-replayed kinds (R-023): a restart or create whose command was issued ends recovery_required naming the check; nothing is re-issued, no recovery job is queued, the lease is KEPT stale so every operation on the guest is refused — at submission and at the executor, however the row got there — until an operator acknowledges; the boot sweep records the same', async () => {
   for (const [kind, params] of [['instance_restart', { container: 'pp-x' }], ['instance_create', { container: 'pp-x', image: 'images:debian/12' }]]) {
     const d = db(); const st = { instances: [inst()] }; const h = scriptedHost(st);
     const job = deadJob(d, { kind, params, cp: { phase: 'issuing', lifecycle: true, replay: 'never', resumable: false, disruptive: true, issued: true, target: null, container: 'pp-x' } });
     acquireLock(d, { app: 'pp-x', owner: DEAD, operation: kind, jobId: job.id, nowMs: T0 - 99_000 });
     const decision = reconcileDecision({ job: getJob(d, 'dead-1'), lock: readLock(d, 'pp-x'), nowMs: T0 });
-    assert.equal(decision.action, 'record_uncertain', kind); assert.match(decision.reason, /command issued and its result unread; it is not replayed/);
+    assert.equal(decision.action, 'record_uncertain', kind); assert.match(decision.reason, /command issued and its result unread; it is not replayed/); assert.equal(decision.releaseLock, false);
     const r = reconcile({ db: d, owner: RUNNER, nowMs: T0 });
     assert.deepEqual(r.interrupted, ['dead-1']); assert.deepEqual(r.recoveryQueued, [], 'no recover_app for a generic guest');
     const row = getJob(d, 'dead-1');
     assert.equal(row.status, 'recovery_required'); assert.equal(row.outcome, 'interrupted_uncertain');
-    assert.match(row.reason, /may or may not have taken effect — read 'incus list pp-x --format json' and decide; .*nothing is replayed automatically/);
+    assert.match(row.reason, /may or may not have taken effect — read 'incus list pp-x --format json' and decide; the guest's lease is kept stale and every operation on it is refused until this job is acknowledged \(POST \/api\/setup\/jobs\/dead-1\/acknowledge\); nothing is replayed automatically/);
     assert.equal(parseJson(row.verification_json).failedAt, 'resource_state');
-    assert.equal(readLock(d, 'pp-x'), null, 'the explicit outcome ends the ownership protection');
-    const out = await runAll(d, exec(h), T0 + 1);
-    assert.deepEqual(out.ran, []); assert.deepEqual(h.calls, [], 'nothing runs');
-    assert.equal(listJobs(d, { app: 'pp-x' }).length, 1);
+    // The durable exclusion: the dead owner's lease stays, stale, pointing at this record.
+    const lock = readLock(d, 'pp-x');
+    assert.ok(lock, 'the lease is kept'); assert.equal(lock.owner, DEAD); assert.ok(lock.stale_since); assert.equal(lock.recovery_job_id, 'dead-1');
+    // A conflicting operation is refused at submission …
+    const del = submit(d, 'instance_delete', { container: 'pp-x' }, { nowMs: T0 + 1 });
+    assert.equal(del.code, 'CONTAINER_LOCK_STALE'); assert.match(del.error, /did not finish \(holder runner@pp#999:dead\); recovery is required before the instance delete/);
+    // … and at the executor, for a row that bypassed the orchestrator (a retry, a direct insert): refused, nothing issued.
+    createJob(d, { id: 'direct-del', kind: 'instance_delete', app: 'pp-x', plan: { steps: [], params: { container: 'pp-x', force: true } }, nowMs: T0 + 2 });
+    const out = await runAll(d, exec(h), T0 + 3);
+    assert.equal(out.ran.length, 1); assert.equal(out.ran[0].status, 'refused'); assert.equal(out.ran[0].outcome, 'lock_stale');
+    assert.match(getJob(d, 'direct-del').reason, /a previous .* for pp-x did not finish \(holder runner@pp#999:dead, recorded by job dead-1\); recovery or acknowledgement is required before instance_delete — nothing was done/);
+    assert.deepEqual(h.calls, [], 'nothing runs'); assert.equal(st.instances.length, 1, 'the guest is untouched');
+    assert.ok(readLock(d, 'pp-x')?.stale_since, 'the stale lease is still there');
+    // A verification for the app is not blocked by it (the lease is stale, not live): a follow-up can still take it over — only exclusive kinds are refused.
+    // The operator looks, then acknowledges: the lease goes, the record says who and when, and the next request runs.
+    const bad = acknowledgeUncertainJob(d, { id: 'direct-del', by: 'admin', nowMs: T0 + 4 });
+    assert.equal(bad.ok, false); assert.match(bad.error, /only an unresolved lifecycle verb/); assert.ok(readLock(d, 'pp-x'), 'acknowledging the wrong job releases nothing');
+    const ack = acknowledgeUncertainJob(d, { id: 'dead-1', by: 'admin', via: 'ui', note: 'incus list shows it Running', nowMs: T0 + 5 });
+    assert.equal(ack.ok, true); assert.equal(ack.released, 1); assert.equal(readLock(d, 'pp-x'), null);
+    assert.equal(getJob(d, 'dead-1').outcome, 'interrupted_uncertain_acknowledged'); assert.match(getJob(d, 'dead-1').reason, /acknowledged by admin at .*: the guest was inspected and the lease released/);
+    assert.ok(listEvents(d, 'dead-1').some((e) => e.kind === 'acknowledged' && /incus list shows it Running/.test(e.message)));
+    const again = acknowledgeUncertainJob(d, { id: 'dead-1', by: 'admin', nowMs: T0 + 6 });
+    assert.equal(again.ok, true); assert.equal(again.already, true); assert.equal(again.released, 0);
+    const del2 = submit(d, 'instance_delete', { container: 'pp-x', force: true }, { nowMs: T0 + 7 });
+    assert.ok(del2.job, del2.error);
+    const out2 = await runAll(d, exec(h), T0 + 8);
+    assert.equal(out2.ran[0].status, 'succeeded'); assert.equal(st.instances.length, 0);
+    assert.equal(listJobs(d, { app: 'pp-x' }).length, 3);
   }
-  // The backend's boot sweep on its predecessor's job: the same record.
+  // The backend's boot sweep on its predecessor's job: the same record and the same kept lease.
   const d = db(); const job = deadJob(d, { kind: 'instance_restart', params: { container: 'pp-x' }, cp: { phase: 'issuing', lifecycle: true, replay: 'never', resumable: false, disruptive: true, issued: true, container: 'pp-x' } });
   d.prepare(`UPDATE setup_jobs SET owner = ? WHERE id = ?`).run(DEAD_BACKEND, job.id);
   acquireLock(d, { app: 'pp-x', owner: DEAD_BACKEND, operation: 'instance_restart', jobId: job.id, nowMs: T0 - 99_000 });
   const sw = sweepSetupEngineOnBoot(d, { owner: BACKEND, nowMs: T0 });
   assert.deepEqual(sw.interrupted, ['dead-1']); assert.deepEqual(sw.recoveryQueued, []);
-  assert.equal(getJob(d, 'dead-1').outcome, 'interrupted_uncertain'); assert.equal(readLock(d, 'pp-x'), null);
+  assert.equal(getJob(d, 'dead-1').outcome, 'interrupted_uncertain'); assert.equal(readLock(d, 'pp-x')?.recovery_job_id, 'dead-1');
+  // No lease row left at all (it had been removed): the condition still excludes — a stale row is written in the dead owner's name.
+  const d2 = db(); deadJob(d2, { kind: 'instance_create', params: { container: 'pp-n', image: 'images:debian/12' }, cp: { phase: 'issuing', lifecycle: true, replay: 'never', resumable: false, disruptive: true, issued: true, container: 'pp-n' } });
+  assert.equal(readLock(d2, 'pp-n'), null);
+  reconcile({ db: d2, owner: RUNNER, nowMs: T0 });
+  const held = readLock(d2, 'pp-n');
+  assert.ok(held && held.stale_since && held.recovery_job_id === 'dead-1' && held.owner === DEAD, JSON.stringify(held));
+  assert.equal(submit(d2, 'instance_start', { container: 'pp-n' }, { nowMs: T0 + 1 }).code, 'CONTAINER_LOCK_STALE');
+});
+
+test('mandatory checkpoints (R-024): a checkpoint that cannot be persisted — the store rejects the write, or the job is no longer this owner\'s — stops the operation before any command is issued, through the real store and executor', async () => {
+  // (a) the real store, with SQLite rejecting the `issuing` checkpoint write.
+  const d = db(); const st = { instances: [inst()] }; const h = scriptedHost(st);
+  const failing = {
+    exec: (sql) => d.exec(sql),
+    prepare: (sql) => {
+      const stmt = d.prepare(sql);
+      return {
+        run: (...a) => { if (/SET phase = \?, checkpoint_json = \?/.test(sql) && a[0] === 'issuing') throw new Error('SQLITE_IOERR: disk I/O error'); return stmt.run(...a); },
+        get: (...a) => stmt.get(...a), all: (...a) => stmt.all(...a),
+      };
+    },
+  };
+  const s = submit(d, 'instance_restart', { container: 'pp-x' });
+  const out = await runOnce({ db: failing, owner: RUNNER, exec: exec(h), nowMs: () => T0 + 1 }, { reconcileFirst: false });
+  assert.equal(out.ran[0].status, 'failed'); assert.equal(out.ran[0].outcome, 'failed at checkpoint');
+  const row = getJob(d, s.job.id);
+  assert.match(row.reason, /the 'issuing' checkpoint could not be persisted \(SQLITE_IOERR: disk I\/O error\); refusing to issue a command whose record would not say so; nothing was issued/);
+  assert.deepEqual(mutations(h), [], 'no restart was issued'); assert.equal(st.restarts, undefined);
+  assert.equal(parseJson(row.checkpoint_json).issued, false, 'the record and the world agree: nothing issued');
+  assert.equal(resultFromJob(row).notIssued, true); assert.equal(readLock(d, 'pp-x'), null);
+  // (b) the write changes no row because the job was fenced (another owner took it): stopped before the command.
+  const d2 = db(); const st2 = { instances: [inst({ status: 'Stopped' })] }; const h2 = scriptedHost(st2);
+  const s2 = submit(d2, 'instance_start', { container: 'pp-x' });
+  const claimed = claimNextJob(d2, { owner: RUNNER, kinds: ['instance_start'], nowMs: T0 + 1 });
+  // Fence the job under RUNNER's feet at the validated → issuing boundary: the host list call is the hook.
+  let fenced = false;
+  const hostFencing = { host: async (argv) => { const r = await h2.host(argv); if (!fenced && argv[1] === 'list') { fenced = true; d2.prepare(`UPDATE setup_jobs SET epoch = epoch + 1, owner = ? WHERE id = ?`).run(DEAD, s2.job.id); } return r; } };
+  const { executeJob } = await import('../lib/setup-engine/executor.js');
+  const r2 = await executeJob(claimed, { db: d2, owner: RUNNER, exec: { guest: async () => ({ code: 0, stdout: '' }), host: hostFencing.host }, nowMs: () => T0 + 2 });
+  assert.equal(r2.status, 'fenced', JSON.stringify(r2)); assert.deepEqual(mutations(h2), [], 'nothing issued by a fenced worker');
+  // (c) the operation alone, with a handle whose checkpoint reports no row changed.
+  const st3 = { instances: [inst()] }; const h3 = scriptedHost(st3);
+  const handle = { id: 'j1', fence: () => {}, checkpoint: (phase) => (phase === 'issuing' ? 0 : 1), generated: () => 1, event: () => {}, onStep: null };
+  const r3 = await runLifecycleOperation({ kind: 'instance_restart', params: { container: 'pp-x' }, exec: exec(h3), job: handle });
+  assert.equal(r3.ok, false); assert.equal(r3.step, 'checkpoint'); assert.equal(r3.notIssued, true); assert.match(r3.error, /changed no row/); assert.deepEqual(mutations(h3), []);
+  assert.equal(new CheckpointNotPersistedError('issuing', 'x').code, 'CHECKPOINT_NOT_PERSISTED');
+});
+
+test('a nonzero exit is a failure whatever the guest reads afterwards (R-026): a restart that exits 1 or times out with the guest still Running is not "restarted"', async () => {
+  const d = db(); const st = { instances: [inst()] }; const h = scriptedHost(st);
+  const base = h.host;
+  h.host = async (argv) => { const r = await base(argv); if (argv[1] === 'restart') return { code: 1, stdout: '', stderr: 'Error: The instance is busy' }; return r; };
+  const s = submit(d, 'instance_restart', { container: 'pp-x' });
+  const out = await runAll(d, exec(h), T0 + 1);
+  assert.equal(out.ran[0].status, 'failed', getJob(d, s.job.id).reason);
+  const r = resultFromJob(getJob(d, s.job.id));
+  assert.equal(r.step, 'issue'); assert.equal(r.instanceState, 'Running'); assert.match(r.error, /incus instance restart exited 1: Error: The instance is busy; pp-x reads Running afterwards — not claiming restarted/);
+  assert.equal(parseJson(getJob(d, s.job.id).verification_json).state, 'recovery_required');
+  // A timeout (124) the same way, and a start that exits nonzero while the guest reads Running.
+  h.host = async (argv) => { const r = await base(argv); if (argv[1] === 'restart') return { code: 124, stdout: '', stderr: '[timeout after 180000ms]' }; if (argv[1] === 'start') return { code: 1, stdout: '', stderr: 'Error: The instance is already running' }; return r; };
+  const s2 = submit(d, 'instance_restart', { container: 'pp-x' }, { nowMs: T0 + 2 });
+  await runAll(d, exec(h), T0 + 3);
+  assert.match(getJob(d, s2.job.id).reason, /exited 124 \(timed out\)/); assert.equal(getJob(d, s2.job.id).status, 'failed');
+  st.instances[0].status = 'Stopped';
+  h.host = async (argv) => { const r = await base(argv); if (argv[1] === 'start') { st.instances[0].status = 'Running'; return { code: 1, stdout: '', stderr: 'Error: The instance is already running' }; } return r; };
+  const s3 = submit(d, 'instance_start', { container: 'pp-x' }, { nowMs: T0 + 4 });
+  await runAll(d, exec(h), T0 + 5);
+  assert.equal(getJob(d, s3.job.id).status, 'failed'); assert.match(getJob(d, s3.job.id).reason, /exited 1: .*already running; pp-x reads Running afterwards — not claiming started/);
 });
 
 test('cancel: honoured before the command, declined after it (the job finishes and reads the state back)', async () => {

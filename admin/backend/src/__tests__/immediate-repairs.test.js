@@ -241,6 +241,10 @@ test('ratchet (A-17.6): the Incus lifecycle and snapshot verbs of the dashboard 
   assert.match(lxcRoute, /'\/containers\/:name\/snapshot\/:snapshotName', requireSudo/, 'a snapshot delete needs fresh sudo (R-016)');
   assert.match(lxcRoute, /'\/containers\/:name\/snapshot\/:snapshotName\/local', requireSudo/);
   assert.match(lxcRoute, /'\/containers\/:name', requireSudo/, 'the container delete keeps its sudo');
+  // R-025: the whole-snapshot delete removes nothing off-host unless the local copy is gone.
+  const wholeDelete = lxcRoute.slice(lxcRoute.indexOf("lxcRouter.delete('/containers/:name/snapshot/:snapshotName', requireSudo"), lxcRoute.indexOf('// 2. Drop every S3 copy'));
+  assert.match(wholeDelete, /if \(!local\.ok && !local\.notFound\) return lifecycleFailure\(res, local,/, 'a refused or failed local delete returns before the S3 copies and the notes');
+  assert.doesNotMatch(wholeDelete, /errors\.push\(\{ scope: 'local'/, 'a local failure is never a "partial" failure');
   // What is left on the container's pivot in this file is the import / export transport group (recorded in the ledger), nothing of this group.
   const leftover = [...lxcRoute.matchAll(/execOnHost\(`incus (start|stop|restart|delete|launch) /g)].map((m) => m[1]);
   assert.deepEqual(leftover.sort(), ['delete', 'delete', 'start', 'start'], `only the import/export transports' post-import start and temp cleanup remain (A-17 transport group): ${leftover.join(', ')}`);

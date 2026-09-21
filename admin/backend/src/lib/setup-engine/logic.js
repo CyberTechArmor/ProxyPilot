@@ -324,9 +324,9 @@ export function reconcileDecision({ job, lock = null, nowMs, canAct = true, runn
     // A lifecycle verb whose command was issued and is never replayed
     // (restart, create): the outcome is unknown to the record, no in-guest
     // recovery applies (there may be no application at all), and nothing is
-    // issued again. Recovery required is the explicit outcome; the lease is
-    // released with it.
-    return { action: 'record_uncertain', reason: `owner ${job.owner} is gone after '${cp.phase || job.phase}' with the ${job.kind} command issued and its result unread; it is not replayed`, releaseLock: !!lock && lock.owner === job.owner };
+    // issued again. Recovery required is the recorded outcome; the lease is
+    // KEPT stale until an operator acknowledges the record.
+    return { action: 'record_uncertain', reason: `owner ${job.owner} is gone after '${cp.phase || job.phase}' with the ${job.kind} command issued and its result unread; it is not replayed`, releaseLock: false, keepStale: true };
   }
   if (!disruptive && cp.unit_swapped === true && !cp.verification_state) {
     // The new unit was started and the owner died before verification: the

@@ -49,7 +49,22 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
   const name = String(p.container);
   const snap = prof.target === 'snapshot' ? String(p.snapshot) : null;
   const report = (key, label) => { try { job.onStep?.(key, label); } catch { /* */ } };
-  const mark = (phase, data, message) => { try { job.checkpoint(phase, data, message); } catch { /* */ } };
+  // A checkpoint that must be on record before the next step is REQUIRED: a
+  // write that throws, or that changes no row (the job was fenced), stops the
+  // operation before it issues anything — a record that says `issued: false`
+  // must never be reconciled against a command that ran. The checkpoints
+  // after the command are best effort (the job's own finish is the record).
+  const mark = (phase, data, message, { required = false } = {}) => {
+    let changes;
+    try { changes = job.checkpoint(phase, data, message); } catch (e) { if (required) throw new CheckpointNotPersistedError(phase, e?.message || String(e)); return; }
+    if (required && job.id && !(Number(changes) > 0)) {
+      // No row changed: either the job was fenced (the fence says so, as
+      // FencedError, and the executor records nothing more) or the store is
+      // refusing the write — either way nothing is issued.
+      job.fence({ safe: false });
+      throw new CheckpointNotPersistedError(phase, 'the checkpoint changed no row');
+    }
+  };
   const fail = (step, error, extra = {}) => ({ ok: false, step, error: sanitizeReason(error, 800), ...extra });
   const list = async () => {
     const r = await host(instanceListArgv(name), { timeoutMs: 30_000 });
@@ -105,7 +120,9 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
     }
   }
   const wasRunning = !!inst && String(inst.status || '').toLowerCase() === 'running';
-  mark('validated', { lifecycle: true, resumable: true, disruptive: false, replay: prof.replay, issued: issuedBefore, target: identity, container: name, wasRunning }, `${kind} of ${what} validated${p.expect ? ' against the confirmed identity' : ''}`);
+  try {
+    mark('validated', { lifecycle: true, resumable: true, disruptive: false, replay: prof.replay, issued: issuedBefore, target: identity, container: name, wasRunning }, `${kind} of ${what} validated${p.expect ? ' against the confirmed identity' : ''}`, { required: true });
+  } catch (e) { if (e?.code === 'FENCED' || e?.code === 'CANCELLED') throw e; return fail('checkpoint', `${e.message}; nothing was issued`, { notIssued: true, instanceState: inst?.status || null, identity }); }
 
   // 2) nothing left to do?
   if (alreadyDone(kind, { instance: inst, snapshot: snap, issued: issuedBefore })) {
@@ -120,7 +137,9 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
   // 3) the boundary: from here a cancel is declined and, for a kind that is
   // never replayed, an interruption ends recovery_required.
   const issueData = { lifecycle: true, replay: prof.replay, resumable: prof.replay === 'idempotent', disruptive: prof.replay === 'never', issued: true, target: identity, container: name, wasRunning };
-  mark('issuing', issueData, `issuing ${kind} for ${what}`);
+  try {
+    mark('issuing', issueData, `issuing ${kind} for ${what}`, { required: true });
+  } catch (e) { if (e?.code === 'FENCED' || e?.code === 'CANCELLED') throw e; return fail('checkpoint', `${e.message}; nothing was issued`, { notIssued: true, instanceState: inst?.status || null, identity }); }
   job.fence({ safe: false });
 
   // A delete stops a running guest first, as a separate fixed command.
@@ -142,11 +161,15 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
     issue = await host(lifecycleArgv(kind, p), { timeoutMs: TIMEOUTS[kind] });
   }
 
-  // 4) verify by reading the resource back.
+  // 4) verify by reading the resource back. A nonzero exit is a failure
+  // whatever the guest reads afterwards: a Running guest after a restart that
+  // exited 1 or timed out is no proof a restart happened, and an absent guest
+  // after a delete that exited 1 is somebody else's doing. The observed state
+  // goes on the record; success is never inferred from it.
   const after = await list();
-  if (after.error) return fail('verify', `${kind} exited ${issue.code}; the guest could not be read back afterwards: ${after.error}`, { issued: true, instanceState: null, identity });
+  if (after.error) return fail(issue.code === 0 ? 'verify' : 'issue', `${kind} exited ${issue.code}; the guest could not be read back afterwards: ${after.error}`, { issued: true, instanceState: null, identity });
   const verdict = stateVerdict(kind, { instance: after.instance, snapshot: snap });
-  if (issue.code !== 0 && !verdict.ok) {
+  if (issue.code !== 0) {
     // A failed launch may leave a half-created guest that did not exist when
     // this job validated: removed, and said so.
     let cleanup = null;
@@ -156,7 +179,7 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
       cleanup = { attempted: true, removed: !gone.instance, detail: d.code === 0 ? null : tailOf(d, 200) };
       job.event?.('step', cleanup.removed ? `half-created ${name} removed` : `half-created ${name} could NOT be removed: ${cleanup.detail}`, null, 'cleanup');
     }
-    return fail('issue', `incus ${kind.replace('_', ' ')} failed: ${tailOf(issue, 300) || (issue.code === 124 ? 'timed out' : 'unknown error')}`, { issued: true, instanceState: verdict.observed, identity, cleanup });
+    return fail('issue', `incus ${kind.replace('_', ' ')} exited ${issue.code}${issue.code === 124 ? ' (timed out)' : ''}: ${tailOf(issue, 300) || 'no output'}; ${what} reads ${verdict.observed} afterwards — not claiming ${lifecycleOutcomeStep(kind)}`, { issued: true, instanceState: verdict.observed, identity, cleanup, verification: lifecycleVerification(kind, { ...verdict, ok: false }, { container: name, snapshot: snap }) });
   }
   if (!verdict.ok) return fail('verify', `incus ${kind.replace('_', ' ')} exited ${issue.code} but ${what} reads ${verdict.observed}, not ${verdict.expected}; not claiming success`, { issued: true, instanceState: verdict.observed, identity, verification: lifecycleVerification(kind, verdict, { container: name, snapshot: snap }) });
 
@@ -189,6 +212,15 @@ function followUpFor(kind, p) {
   if (p.managed !== true) return null;
   if (kind !== 'instance_start' && kind !== 'instance_restart') return null;
   return { kind: 'verify_app', steps: ['unit_status', 'probe_port', 'health_check', 'verify_credential', 'verify_credential_use'], rung: 'credential_use_verified', revision: null };
+}
+
+export class CheckpointNotPersistedError extends Error {
+  constructor(phase, why) {
+    super(`the '${phase}' checkpoint could not be persisted (${why}); refusing to issue a command whose record would not say so`);
+    this.name = 'CheckpointNotPersistedError';
+    this.code = 'CHECKPOINT_NOT_PERSISTED';
+    this.phase = phase;
+  }
 }
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return undefined; } }

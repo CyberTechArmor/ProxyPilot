@@ -5046,16 +5046,15 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', requireSudo, async 
 
   // 1. Drop the local snapshot — a setup-engine job (`snapshot_delete`).
   // Tolerated if it's already gone (operator may have dropped the local
-  // copy first via the /local endpoint); every other refusal or failure
-  // is reported and the S3 copies are still handled below.
-  let localJobId = null;
-  {
-    const out = await lifecycleViaRunner('snapshot_delete', incusName, req, { snapshot: snapshotName });
-    localJobId = out.jobId || null;
-    if (!out.ok && !out.notFound) {
-      errors.push({ scope: 'local', error: String(out.error || 'unknown').slice(0, 512), jobId: out.jobId || null, step: out.step || null });
-    }
-  }
+  // copy first via the /local endpoint). Anything else — a refusal before
+  // execution (the guest's lease held, no executor, a changed target) or a
+  // local delete that ran and failed — returns HERE: the S3 copies and the
+  // notes are removed only once the local copy is gone. A partial failure
+  // reported below is an S3 copy that could not be removed, never a local
+  // snapshot that still exists.
+  const local = await lifecycleViaRunner('snapshot_delete', incusName, req, { snapshot: snapshotName });
+  const localJobId = local.jobId || null;
+  if (!local.ok && !local.notFound) return lifecycleFailure(res, local, `Failed to delete snapshot '${snapshotName}' from container '${name}' (its S3 copies and notes were left untouched)`);
 
   // 2. Drop every S3 copy (exported rows).  Pending uploads get
   // cancel_requested set so the queue worker aborts them; failed

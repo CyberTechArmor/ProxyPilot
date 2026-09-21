@@ -525,14 +525,19 @@ invalid plan) (`lifecycleHttpStatus`).
 | Kind | Owner dies after the command was issued | Owner dies before |
 | --- | --- | --- |
 | start, stop, snapshot create, snapshot delete, delete | **resumed**: the requeued job re-reads the resource; the end state already holds → finished (`resumed after an interrupted attempt`, nothing re-issued); the target is still there with the **same identity** the dead attempt bound (`checkpoint.target`) → the same command once more; a resource of a different identity under the name → `refused`, nothing issued | resumed and run |
-| restart, create | **never replayed**: the record ends `recovery_required` / `interrupted_uncertain` naming the check (`incus list <name> --format json`), no recovery job is queued (a generic guest has no application to recover), the lease is released because that outcome is the established one | resumed and run |
+| restart, create | **never replayed**: the record ends `recovery_required` / `interrupted_uncertain` naming the check (`incus list <name> --format json`), no recovery job is queued (a generic guest has no application to recover), and the guest's lease is **kept stale**, pointing at that record: every exclusive operation on the guest is refused with the condition — at submission, and at the executor for a row that arrived any other way — until an operator has looked and acknowledged the job (`POST /api/setup/jobs/:id/acknowledge`, sudo), which records who and when on the job and releases exactly that lease | resumed and run |
 
 A delete's target identity is recorded at `validated` and again at
 `issuing`, so an absent guest after an interrupted delete is verified as this
 job's work only when the dead attempt had reached `issued: true` — an absent
 target before any command is somebody else's doing and is reported as such.
-A cancel is honoured at the fence before the command; after it, the job
-finishes and reads the state back.
+The `validated` and `issuing` checkpoints are **mandatory**: a write the
+store rejects, or one that changes no row because the job was fenced, ends
+the operation at `checkpoint` with nothing issued — a record that says
+`issued: false` is never reconciled against a command that ran. A cancel is
+honoured at the fence before the command; after it, the job finishes and
+reads the state back. A stale lease is never taken over by an exclusive kind
+(a restore, a lifecycle verb): only a recovery or a verification may.
 
 **The record outlives the resource.** Every checkpoint, the identity of what
 was deleted, the argv-free plan and the outcome live in `setup_jobs` /
@@ -663,6 +668,7 @@ and enabled by `install.sh` and `update.sh` right after the CLI wrapper
 | `POST /api/setup/jobs/:id/retry` (sudo) | queue the same runner plan again with `reuse` |
 | `POST /api/setup/apps/:app/deploy` (sudo) | submit a deploy and return its job id (202 queued for the runner; 200 with the result when no runner is live and it ran in-process) |
 | `POST /api/setup/jobs/:id/cancel` (sudo) | cancel a queued job, or a running one at its next safe checkpoint |
+| `POST /api/setup/jobs/:id/acknowledge` (sudo) | an operator has inspected the guest a restart or create left in an unknown state (`recovery_required` / `interrupted_uncertain`): records who and when on the job and releases the stale lease that records it; refused for any other job |
 
 Admin only, behind the global CSRF check and a fresh sudo grant, audited
 (`SETUP_DEPLOY_REQUESTED`, `SETUP_JOB_CANCEL_REQUESTED`,
@@ -738,7 +744,9 @@ except where it says so; none needs a secret on a command line.
 | a lifecycle job `refused` at `query` ("already exists") | a create over an existing name; nothing was launched | pick another name, or delete the existing guest deliberately |
 | a lifecycle job `failed` at `verify` | the command exited 0 but the guest does not read as the verb promises (e.g. a start that leaves it Stopped) | read the guest's console / `incus info --show-log <name>`; nothing was claimed |
 | a lifecycle job `failed` at `issue` with `cleanup` | the launch failed; a half-created guest was removed (`removed: true`) or could not be (`detail`) | fix the image / profile named in the error; remove the leftover by hand if `removed` is false |
-| a restart or create `recovery_required` / `interrupted_uncertain` | the owner died after issuing the command and before reading the result; it is not replayed | `incus list <name> --format json`; submit a new request if the state is not what you want |
+| a restart or create `recovery_required` / `interrupted_uncertain`, lease `stale_since` set with `recovery_job_id` = that job | the owner died after issuing the command and before reading the result; it is not replayed; every operation on the guest is refused with this condition | `incus list <name> --format json` (or `incus info`); when you know the guest's state, `POST /api/setup/jobs/:id/acknowledge` — the lease is released and the job reads `interrupted_uncertain_acknowledged`; then submit the request you want |
+| a lifecycle job `failed` at `checkpoint` ("could not be persisted") | the engine database rejected the checkpoint before the command, or the job was fenced; nothing was issued | look at the database (disk, locks); submit again |
+| a lifecycle job `refused` / `lock_stale` | a row reached the executor (a retry, a direct insert) while the guest's lease is stale | resolve the condition the lease records (recovery, or the acknowledgement above), then submit again |
 | a start / stop / delete / snapshot verb resumed after its owner died ("resumed after an interrupted attempt") | the requeued job re-read the resource and finished, or re-issued the same command against the same identity | nothing |
 | install.sh / update.sh `Setup runner did NOT start …` (error) or the red update warning | the host stays (or is left) on `backend-allowed`: deploys execute in the container | fix the runner, then set `SETUP_EXECUTOR_POLICY=runner-required` in the install's `.env` and restart ProxyPilot; `update.sh` records it itself on the next update that finds the runner working |
 
@@ -776,8 +784,16 @@ otherwise; contention at submission (live lease, stale lease, open mutating
 job, duplicate) and at claim; interruption for every idempotent kind
 (finished by re-reading, re-issued against the same identity, refused on a
 changed identity, resumed before any command) and for restart / create
-(`interrupted_uncertain`, nothing re-issued, no recovery job, lease
-released) through the runner's reconcile and the backend's boot sweep;
+(`interrupted_uncertain`, nothing re-issued, no recovery job, the lease
+kept stale so a delete is refused at submission and — for a row that
+bypassed the orchestrator — at the executor, a stale row written when none
+was left, the acknowledgement releasing exactly that lease and the next
+request running) through the runner's reconcile and the backend's boot
+sweep; mandatory checkpoints (SQLite rejecting the `issuing` write through
+the real store and executor → nothing issued; a fenced job stopped before
+the command; a handle reporting no row changed); a nonzero exit (1, 124)
+with the guest still Running recorded as failed, never as restarted or
+started;
 cancel before the claim and after it; runner-required refusing (cancelled,
 no host call) while a live runner takes the job and backend-allowed runs the
 same executor in-process, with a detached snapshot kicked rather than left
@@ -901,8 +917,9 @@ and confirm the "different target" refusal, then delete with a fresh token
 and confirm the export, the job and the ledger row; kill the runner between
 a delete's stop and its delete and confirm the restarted runner resumes the
 job and the guest is gone; kill it during a restart and confirm the record
-reads `interrupted_uncertain`, the guest is Running and nothing was
-re-issued; stop the runner and confirm a start is refused (503, job
+reads `interrupted_uncertain`, the guest is Running, nothing was
+re-issued and a Stop from the dashboard is refused (409) until the job is
+acknowledged, after which it runs; stop the runner and confirm a start is refused (503, job
 `cancelled` / `runner_unavailable`) rather than queued; on a legacy Incus
 client confirm the snapshot create still lands.
 

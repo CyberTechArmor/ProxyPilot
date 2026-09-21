@@ -26,7 +26,7 @@
 
 import {
   claimNextJob, heartbeat, checkpoint, finishJob, recordJobOutcome, staleRunningJobs, readLock, takeoverLock, releaseLock,
-  acquireLock, markLockStale, createJob, openRecoveryJobFor, appendEvent, getJob, renewLock, fenceJob, recordGenerated, recordProgress,
+  acquireLock, markLockStale, holdStaleLock, createJob, openRecoveryJobFor, appendEvent, getJob, renewLock, fenceJob, recordGenerated, recordProgress,
   runnerHeartbeat, requeueJob, recordVerificationRung,
 } from './store.js';
 import {
@@ -104,19 +104,22 @@ export function reconcile({ db, owner, nowMs = Date.now(), log = () => {} } = {}
 
 // recordUncertainLifecycle — a lifecycle verb (restart, create) whose command
 // was issued by an owner that died before reading the result. Never replayed:
-// the record says exactly what is unknown and how to look; the lease is
-// released because recovery_required IS the established outcome (there is no
-// in-guest application to recover on behalf of a generic guest).
+// the record says exactly what is unknown and how to look, and the guest's
+// lease is KEPT, flagged stale and pointed at this job, so every exclusive
+// operation on the guest is refused with the condition until an operator has
+// looked and acknowledged it (backend.js acknowledgeUncertainJob,
+// POST /api/setup/jobs/:id/acknowledge). No recovery job is queued: a
+// generic guest has no in-guest application to recover on behalf of.
 export function recordUncertainLifecycle(db, { job, lock, owner, reason, nowMs }) {
   const cp = parseJson(job.checkpoint_json) || {};
   const container = cp.container || job.app;
   recordJobOutcome(db, {
     id: job.id, status: 'recovery_required', outcome: 'interrupted_uncertain',
-    reason: `${reason}; the ${job.kind} of ${container} may or may not have taken effect — read 'incus list ${container} --format json' and decide; submit a new request if the state is not what you want (nothing is replayed automatically)`,
-    verification: { state: 'recovery_required', failedAt: 'resource_state', note: 'not verified: the owner died after issuing the command and before reading the resource back', next: `incus list ${container} --format json` },
+    reason: `${reason}; the ${job.kind} of ${container} may or may not have taken effect — read 'incus list ${container} --format json' and decide; the guest's lease is kept stale and every operation on it is refused until this job is acknowledged (POST /api/setup/jobs/${job.id}/acknowledge); nothing is replayed automatically`,
+    verification: { state: 'recovery_required', failedAt: 'resource_state', note: 'not verified: the owner died after issuing the command and before reading the resource back', next: `incus list ${container} --format json; then acknowledge job ${job.id}` },
     by: owner, nowMs,
   });
-  if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+  holdStaleLock(db, { app: job.app, owner: job.owner, operation: job.kind, jobId: job.id, epoch: (lock && lock.owner === job.owner ? lock.epoch : job.epoch) || 1, nowMs });
 }
 
 // ── execute ─────────────────────────────────────────────────────────────
@@ -157,6 +160,14 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
   const got = acquireLock(db, { app: job.app, owner, operation: job.kind, jobId: job.id, leaseMs: LEASE_MS, nowMs: lockNow });
   if (got.ok) {
     lockEpoch = Number(got.lock.epoch);
+  } else if (got.reason === 'stale' && EXCLUSIVE_JOB_KINDS.includes(job.kind)) {
+    // A stale lease is a RECORDED condition (a dead deploy, an unresolved
+    // lifecycle verb). Only a recovery or a verification may take it over;
+    // an exclusive operation — a restore, a lifecycle verb — is refused with
+    // the condition, however it was submitted (the orchestrator refuses it
+    // earlier; this is the boundary a retry or a direct row cannot pass).
+    const stale = readLock(db, job.app);
+    return fin('refused', 'lock_stale', `a previous ${stale?.operation || 'operation'} for ${job.app} did not finish (holder ${stale?.owner || got.holder}${stale?.recovery_job_id ? `, recorded by job ${stale.recovery_job_id}` : ''}); recovery or acknowledgement is required before ${job.kind} — nothing was done`);
   } else if (got.reason === 'stale') {
     const t = takeoverLock(db, { app: job.app, by: owner, operation: job.kind, jobId: job.id, reason: `taking over ${got.operation} lease of ${got.holder} (expired ${got.expiredAt}) to run ${job.kind}`, leaseMs: LEASE_MS, nowMs: lockNow });
     if (!t.ok) return busy(t.holder, null);

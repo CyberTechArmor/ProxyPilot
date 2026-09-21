@@ -46,6 +46,7 @@ import { hydrate as hydrateStorageMonitor } from './lib/storage-monitor.js';
 import { storageRouter } from './routes/storage.js';
 import { migrationRouter, migrationAgentRouter } from './routes/migrations.js';
 import { migrationService } from './lib/migration/index.js';
+import { applyStreamingTimeouts } from './lib/http-server-timeouts.js';
 import { seedTlsCertFromInstall } from './lib/tls-cert-seed.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer, setMock2TerminalAuthorizer } from './routes/terminal-ws.js';
@@ -839,6 +840,10 @@ process.on('uncaughtException', (err) => {
 // `noServer` mode and registers its own `upgrade` listener on `server`,
 // so the order matters: attach BEFORE `server.listen()`.
 const server = http.createServer(app);
+// No clock on a request body: a migration rootfs or an export restore is
+// one request of many gigabytes, and Node's 300 s default killed two of
+// them at five minutes (lib/http-server-timeouts.js has the story).
+applyStreamingTimeouts(server);
 attachTerminalServer(server);
 
 server.listen(PORT, '0.0.0.0', () => {

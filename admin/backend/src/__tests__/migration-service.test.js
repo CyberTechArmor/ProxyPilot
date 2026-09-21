@@ -1153,7 +1153,8 @@ test('a broken upload fails the migration loudly, with the byte count, and leave
   assert.match(out.error, /cannot be resumed/);
   const row = svc.rowById(id);
   assert.equal(row.status, 'failed', 'not left "running" for someone to notice');
-  assert.match(row.error, /the agent died or lost its connection/);
+  assert.match(row.error, /the connection carrying it closed/);
+  assert.match(row.error, /journalctl -u proxypilot-migrate-\d+-\*/, 'points at the agent\'s own log for its side of the story');
   assert.equal(existsSync(join(workDir, String(id), 'rootfs.tar.gz')), false, 'the partial tarball is not kept');
   assert.ok(svc.listEvents(id).some((e) => e.kind === 'error' && /ended after/.test(e.message)));
 });

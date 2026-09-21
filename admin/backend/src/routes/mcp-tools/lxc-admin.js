@@ -16,7 +16,6 @@ import { exportStore } from '../../lib/lxc-exports-instance.js';
 import { restoreHazards, restoreNotes } from '../../lib/lxc-exports.js';
 import { restoreSnapshot, resolveRestoreSnapshotPlan, runLifecycle, runGuestConfig, planDigest } from '../../mock2/ops.js';
 import { instanceIdentity } from '../../lib/setup-engine/lifecycle-logic.js';
-import { reservedRangesFromRows } from '../../lib/setup-engine/config-logic.js';
 import { containerLockStore } from '../../mock2/container-lock.js';
 import { snapshotCoverage } from '../../lib/setup-engine/restore-logic.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../../lib/export-compression.js';
@@ -790,28 +789,30 @@ export function createLxcAdminHandlers(kit) {
       const rows = service ? db.prepare(`SELECT * FROM service_l4_forwards WHERE service_id = ? ORDER BY proto, listen_port`).all(service.id) : [];
       return ok({ container: name, forwards: rows });
     }
+    // The row in service_l4_forwards is written and removed by the JOB, as
+    // its first step under the guest's lease and the host-wide firewall
+    // lease (docs/features/setup-engine.md § "The guest configuration
+    // verbs"); this tool validates, confirms and submits. A refusal at
+    // submission (a busy guest, no executor) changes nothing — no row, no
+    // host state; the disposition of a failed apply (the row and this
+    // attempt's device and rule rolled back) is the job's own, settled
+    // whether or not this request is still alive.
     if (action === 'remove') {
       const id = String(args.forward_id || '');
       const row = service ? db.prepare(`SELECT * FROM service_l4_forwards WHERE id = ? AND service_id = ?`).get(id, service.id) : null;
       if (!row) return err('forward_id not found on this container (action: "list" shows them)');
-      const d = dry(args, { container: name, remove: row }); if (d) return d;
+      const d = dry(args, { container: name, remove: row, then: 'a setup-engine job removes the row, the proxy device and the firewall rule, reconciles the firewall and recomputes the reserved UDP ranges' }); if (d) return d;
       const gate = confirmFlag(args, note, `Remove the ${row.proto}/${row.listen_port} forward from ${name}.`); if (gate) return gate;
-      // The row is ProxyPilot's (a backend step); the host side — the
-      // `ppl4-<id>` proxy device, the `service-l4-<id>` firewall rule and the
-      // reserved-ports drop-in recomputed from the rows that remain — is a
-      // setup-engine job (`forward_remove`) under the guest's lease and the
-      // host-wide firewall lease, every part read back as gone.
-      db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(id);
       const inst = await instanceOrError(name);
-      const reserved = reservedRangesFromRows(db.prepare(`SELECT proto, listen_port, listen_port_end, enabled FROM service_l4_forwards WHERE enabled = 1`).all());
       const out = await runGuestConfig({
         kind: 'forward_remove', containerName: incus(name), forward: { id: row.id, proto: row.proto, listen: row.listen_port, listenEnd: row.listen_port_end, connect: row.connect_port, connectEnd: row.connect_port_end },
-        reserved, ...(inst.instance ? { expect: instanceIdentity(inst.instance) } : {}), requestedBy: auth?.name || null, via: 'mcp',
+        ...(inst.instance ? { expect: instanceIdentity(inst.instance) } : {}), requestedBy: auth?.name || null, via: 'mcp',
       });
-      note.summary = `removed ${row.proto}/${row.listen_port} forward on ${name}${out.jobId ? ` (job ${out.jobId})` : ''}`;
-      note.detail = { removed: row, job_id: out.jobId || null, host_cleared: !!out.ok };
-      if (!out.ok) return err(`The forward row was removed but the host side could not be cleared: ${out.error}${out.jobId ? ` (job ${out.jobId})` : ''} — retry the job to clear it; the L4 reconciler also removes an orphan device at its next pass`, { removed: true, forward: row, job_id: out.jobId || null, step: out.step, applied: out.applied || null });
-      return ok({ removed: true, container: name, forward: row, reconcile: { applied: [{ id: row.id, status: 'removed', detail: { incus: out.applied?.device?.state || null, firewall: out.applied?.rule?.state || null } }], reservedPorts: out.reserved || null }, job_id: out.jobId, verified: true, ...(out.warnings?.length ? { warnings: out.warnings } : {}) });
+      const rowGone = !db.prepare(`SELECT id FROM service_l4_forwards WHERE id = ?`).get(id);
+      note.summary = `${rowGone ? 'removed' : 'did not remove'} ${row.proto}/${row.listen_port} forward on ${name}${out.jobId ? ` (job ${out.jobId})` : ''}`;
+      note.detail = { removed: row, job_id: out.jobId || null, row_removed: rowGone, host_cleared: !!out.ok };
+      if (!out.ok) return err(`${rowGone ? 'The forward row was removed but the host side could not be cleared' : 'The forward was not removed'}: ${out.error}${out.jobId ? ` (job ${out.jobId})` : ''} — ${rowGone ? 'retry the job to clear it; the L4 reconciler also removes an orphan device at its next pass' : 'nothing was changed; submit it again'}`, { removed: rowGone, forward: row, job_id: out.jobId || null, step: out.step, refused: !!out.refused, applied: out.applied || null });
+      return ok({ removed: true, container: name, forward: row, reconcile: { applied: [{ id: row.id, status: 'removed', detail: { incus: out.applied?.device?.state || null, firewall: out.applied?.rule?.state || null, policy: out.firewallPolicy?.state || null } }], reservedPorts: out.reserved || null }, job_id: out.jobId, verified: true, ...(out.warnings?.length ? { warnings: out.warnings } : {}) });
     }
     if (action !== 'add') return err("action must be 'add', 'remove' or 'list'");
     const proto = args.protocol === 'udp' ? 'udp' : 'tcp';
@@ -826,42 +827,25 @@ export function createLxcAdminHandlers(kit) {
     if (inst.error) return err(inst.error);
     const bridgeIp = inst.detail.primary_address || service?.target_ip || null;
     if (!bridgeIp) return err(`${name} has no host-reachable IPv4 address — is it running?`);
-    const plan = { container: name, proto, listen: listenEnd ? `${listen}-${listenEnd}` : listen, connect: connectEnd ? `${connect}-${connectEnd}` : connect, bridge_ip: bridgeIp, description: args.description ? String(args.description).slice(0, 255) : null };
+    const taken = db.prepare(`SELECT id FROM service_l4_forwards WHERE proto = ? AND listen_port = ? AND (listen_port_end IS ? OR listen_port_end = ?)`).get(proto, listen, listenEnd, listenEnd);
+    if (taken) return err(`Another forward (${taken.id}) already binds ${proto}/${listenEnd ? `${listen}-${listenEnd}` : listen}`);
+    const plan = { container: name, proto, listen: listenEnd ? `${listen}-${listenEnd}` : listen, connect: connectEnd ? `${connect}-${connectEnd}` : connect, bridge_ip: bridgeIp, description: args.description ? String(args.description).slice(0, 255) : null, then: 'a setup-engine job records the row, adds the proxy device and the firewall rule, reconciles the firewall and recomputes the reserved UDP ranges — each read back' };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmFlag(args, note, `Forward host ${proto}/${plan.listen} → ${name}:${plan.connect} (Incus proxy device + firewall rule).`); if (gate) return gate;
     const svc = service || findOrCreateLxcService(db, name, bridgeIp);
     const id = ctx.uuidv4();
-    try {
-      db.prepare(`INSERT INTO service_l4_forwards (id, service_id, proto, listen_port, listen_port_end, connect_port, connect_port_end, description, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`)
-        .run(id, svc.id, proto, listen, listenEnd, connect, connectEnd, plan.description);
-    } catch (e) {
-      if (/UNIQUE constraint/i.test(e.message)) return err(`Another forward already binds ${proto}/${plan.listen}`);
-      throw e;
-    }
-    // The row is ProxyPilot's (a backend step); the host side — the
-    // `ppl4-<id>` proxy device, the `service-l4-<id>` firewall rule and the
-    // reserved-ports drop-in recomputed from every enabled row — is a
-    // setup-engine job (`forward_apply`) under the guest's lease and the
-    // host-wide firewall lease, bound to the guest's identity, each part read
-    // back before it reports done. A DEFINITE failure or refusal rolls the
-    // row back as before, with the record and the response naming what the
-    // host still holds (the L4 reconciler sweeps an orphan device); an
-    // outcome the tool could not observe to its end keeps the row, and the
-    // job or the reconciler converges on it.
-    const reserved = reservedRangesFromRows(db.prepare(`SELECT proto, listen_port, listen_port_end, enabled FROM service_l4_forwards WHERE enabled = 1`).all());
     const out = await runGuestConfig({
       kind: 'forward_apply', containerName: incus(name), forward: { id, proto, listen, listenEnd, connect, connectEnd, description: plan.description },
-      bridgeIp, serviceTag: svc.name || null, reserved, expect: instanceIdentity(inst.instance), requestedBy: auth?.name || null, via: 'mcp',
+      bridgeIp, serviceTag: svc.name || null, serviceId: String(svc.id), expect: instanceIdentity(inst.instance), requestedBy: auth?.name || null, via: 'mcp',
     });
     if (!out.ok) {
-      const unobserved = out.step === 'wait';
-      if (!unobserved) db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(id);
-      return err(`L4 apply failed: ${out.error}${out.jobId ? ` (job ${out.jobId})` : ''} — ${unobserved ? 'the forward row is kept until the job is read (retry it, or re-reconcile)' : 'the forward row was rolled back'}`, { job_id: out.jobId || null, step: out.step, applied: out.applied || null, row_kept: unobserved });
+      const rowPresent = !!db.prepare(`SELECT id FROM service_l4_forwards WHERE id = ?`).get(id);
+      return err(`L4 apply failed: ${out.error}${out.jobId ? ` (job ${out.jobId})` : ''}${out.rollback ? '' : rowPresent ? ' — the forward row is recorded and the job did not settle it (retry the job)' : ' — no forward row was written'}`, { job_id: out.jobId || null, step: out.step, refused: !!out.refused, superseded: !!out.superseded, applied: out.applied || null, row: out.row || null, rollback: out.rollback || null, row_kept: rowPresent });
     }
-    const reconcile = { applied: [{ id, status: 'applied', detail: { incus: out.applied?.device?.state === 'already' ? 'present' : 'applied', firewall: out.applied?.rule?.state === 'already' ? 'present' : 'applied' } }], reservedPorts: out.reserved || null };
+    const reconcile = { applied: [{ id, status: 'applied', detail: { incus: out.applied?.device?.state === 'already' ? 'present' : 'applied', firewall: out.applied?.rule?.state === 'already' ? 'present' : 'applied', policy: out.firewallPolicy?.state || null } }], reservedPorts: out.reserved || null };
     note.summary = `forward ${proto}/${plan.listen} → ${name}:${plan.connect} (job ${out.jobId})`;
-    note.detail = { ...plan, job_id: out.jobId };
-    return ok({ added: true, forward_id: id, ...plan, reconcile, job_id: out.jobId, verified: true, ...(out.warnings?.length ? { warnings: out.warnings } : {}), reverse_with: `set_port_forward({ container: "${name}", action: "remove", forward_id: "${id}", confirm: true })` });
+    note.detail = { ...plan, then: undefined, job_id: out.jobId };
+    return ok({ added: true, forward_id: id, ...plan, then: undefined, reconcile, job_id: out.jobId, verified: true, ...(out.warnings?.length ? { warnings: out.warnings } : {}), reverse_with: `set_port_forward({ container: "${name}", action: "remove", forward_id: "${id}", confirm: true })` });
   });
 
   /* ---------------------------------- cron -------------------------------- */

@@ -802,8 +802,8 @@ idempotent, each over the host executor's argv channel:
 | `device_add` | `add_lxc_device` | `incus config device add <name> <dev> disk\|proxy k=v…` | the device present with every planned property |
 | `device_remove` | `remove_lxc_device` | `incus config device remove <name> <dev>` | absent; the removed device's reference-only properties recorded as `previous` |
 | `network_pin` | `set_lxc_network` | `incus config device override <name> eth0 ipv4.address=<ip>`, on "already exists" `device set … ipv4.address <ip>` | `devices.eth0["ipv4.address"] === ip` |
-| `forward_apply` / `forward_remove` | `set_port_forward` add / remove | `incus config device add <name> ppl4-<id> proxy listen= connect=` / `remove`; `proxypilot --json firewall add-service-l4 --id service-l4-<id> …` / `remove-service-l4`; the reserved-ports drop-in refreshed (below) | the device with its listen / connect and the rule enabled in `proxypilot --json firewall list` — or both absent; the drop-in body and `sysctl -n net.ipv4.ip_local_reserved_ports` |
-| `egress_set` | `set_lxc_egress` | `proxypilot --json firewall egress allow\|deny <guest> <service> [--reason r]` | the service present in / absent from the guest's entry in `egress list`; the CLI's reconcile summary on the record |
+| `forward_apply` / `forward_remove` | `set_port_forward` add / remove | the `service_l4_forwards` row written / removed (the job's first step, through the store the executor hands it); `incus config device add <name> ppl4-<id> proxy listen= connect=` / `remove`; `proxypilot --json firewall add-service-l4 --id service-l4-<id> …` / `remove-service-l4`; `proxypilot --json firewall reconcile` when the applied policy does not match; the reserved-ports drop-in refreshed from the rows (below) | the row with the plan's fields; the device with its listen / connect; the SAVED rule with every property (`source`, `proto`, `port_start`, `port_end`, `scope`, `service`, `enabled`) in `firewall list` — or all absent; the APPLIED policy: `firewall status`'s last reconcile applied with the checksum `reconcile --dry-run` reports for the saved configuration; the drop-in body and `sysctl -n net.ipv4.ip_local_reserved_ports` |
+| `egress_set` | `set_lxc_egress` | `proxypilot --json firewall egress allow\|deny <guest> <service> [--reason r]`; `proxypilot --json firewall reconcile` when the applied policy does not match | the service present in / absent from the guest's SAVED entry in `egress list`; the APPLIED policy as above; the CLI's reconcile summary on the record |
 
 **Validation at both ends.** The surface validates (the MCP policy files,
 `confirm: true`, `dry_run`, `acknowledge_risk`; the resize route's ranges)
@@ -821,6 +821,31 @@ like a secret, is refused at submission and again at claim. Every argv
 comes from the renderers in `config-logic.js` and from nothing else. Under
 `runner-required` with no live runner every kind is refused — `cancelled`
 / `runner_unavailable`, never executed in the backend, never left queued.
+
+**Saved is not applied.** The firewall CLI writes the desired
+configuration to `firewall.json` BEFORE it reconciles, and a rejected
+reconcile (a lockout, an `nft` failure) leaves the saved configuration in
+place with `egress list` / `firewall list` showing it. The review of the
+first revision (R-050) found the job reading that saved configuration as
+proof. Since the correction the saved configuration (`egress` / `rule`)
+and the applied policy (`reconcile`) are two steps: the write step
+tolerates the CLI's exit 1 only when its JSON shows the save with a
+`reconcile.rejection`, recording the rejection; the `reconcile` step then
+reads the evidence — `proxypilot --json firewall status` (the last
+recorded reconcile: applied, and its checksum) against `proxypilot --json
+firewall reconcile --dry-run` (the desired ruleset's checksum) — and
+issues `proxypilot --json firewall reconcile` when they differ, `done`
+only when it reports ok and applied. A saved-but-rejected change ends
+`failed at reconcile`, never verified; a repeated request never skips
+application because the reconcile step reads the evidence, not the saved
+entry; a retry after the cause is fixed issues no second write and
+reconciles once. A forward's saved rule is compared property by property
+(`forwardRuleVerdict`): the expected id with another port, protocol,
+range end, scope, service tag or source, or disabled, is `present with
+other properties` and never verifies (R-051). And in every kind a step is
+`done` only when its command succeeded (or was tolerated by name) AND its
+read-back holds: an exit 1 behind a matching read-back is `failed` with
+the exit on the record.
 
 **Read, then issue only what is missing, then read back.** Every step
 reads its own state first and issues its command only when the state does
@@ -849,9 +874,22 @@ records it as generated with its `created_at`; a snapshot that fails or
 does not read back prevents the change. A snapshot already there under the
 planned name that this request did not take is refused (its content is
 unknown). A resumed attempt, or a retry (`retryOf`, `reuse`), reuses the
-recorded snapshot only when name AND `created_at` still match; one
-replaced under the name refuses; one gone after the change was issued is a
-warning (nothing more to protect) and never a second snapshot. The record
+recorded snapshot only when name AND `created_at` still match. Once a
+write has begun — this job's interrupted attempt had issued, or the origin
+it retries had (`originIssued`) — the ORIGINAL snapshot's identity must be
+verifiable before anything further is written: `issuedBefore` proves that
+a write began, not that every requested change completed (R-052, the
+review of the first revision, which let a job resumed after changing CPU
+change memory with its snapshot gone). Missing, replaced under its name
+or unrecorded, the job reads the completed changes back (`done`), issues
+NO remaining change (`not_run`) and ends `failed at protect` with
+`protection: { state: missing | replaced | unverifiable }`, `partial:
+true`, the prior values in `previous` and the guidance: revert from those
+values, or submit a new request deliberately — it takes a fresh snapshot
+of the guest as it is now, which is not the original pre-change point. No
+replacement snapshot is ever taken and presented as the original. A
+resumed job whose remaining state already holds completes read-only, the
+unverifiable snapshot a warning on the record. The record
 and every result state the coverage honestly (`snapshot.covers`): an
 instance snapshot restores the guest's root disk and configuration only —
 attached custom volumes are named as not covered — and never ProxyPilot's
@@ -900,30 +938,46 @@ retry (`POST /api/setup/jobs/:id/retry`) is its recovery path; there is no
 hold and no acknowledgement for this group, because no step of it has an
 outcome the next read cannot establish.
 
-**Forwards: the row is the backend's, the host side the runner's.**
-`set_port_forward` add inserts the `service_l4_forwards` row (ProxyPilot's
-own table — a backend step, like the routes) and submits `forward_apply`
-with the row's fields, the guest's bridge address, the service tag and the
-reserved set recomputed from every enabled UDP range row; remove deletes
-the row and submits `forward_remove` with the recomputed set. The job
-tolerates a device or rule already in its end state (the L4 reconciler's
-own idempotency) and refreshes the drop-in
-`/etc/sysctl.d/99-proxypilot-l4-reserved.conf` with the reconciler's exact
-body — the one host script of this group, a fixed text under `sh -c`
-whose only arguments are the base64 of the rendered body and the drop-in's
-constant path (`reservedWriteArgv`), applied with `sysctl -p` and read back
-through `sysctl -n`; an empty set removes the file and reloads
-`/etc/sysctl.conf`. A definite failure or refusal of the apply rolls the
-row back as the tool always did, and the response and the record name what
-the host still holds (the L4 reconciler sweeps an orphan `ppl4-*` device
-at its next pass); an outcome the tool could not observe to its end keeps
-the row for the job and the reconciler to converge on. The response keeps
-its shape (`reconcile.applied[].detail.{incus,firewall}`,
+**Forwards: the row and its disposition are the job's.** The first
+revision wrote the `service_l4_forwards` row in the request before the job
+was admitted and rolled it back in the request (R-050 of the review: a
+busy refusal deleted the row with no removal job; a retry of a partial
+addition could end with host resources and no row; an older retry
+replayed a stale reservation aggregate over newer forwards). Since the
+correction `set_port_forward` only validates, confirms and submits — a
+refusal at submission changes nothing — and the row is the job's FIRST
+step (`row`), written for an apply and removed for a remove through the
+store the executor hands the operation (`forwardStore`, the same database
+the setup engine's rows live in), under the guest's lease and
+`@host/firewall`, before the device, the saved rule, the applied policy and
+the reserved ranges. The reserved UDP ranges are recomputed from the
+enabled rows under the lease at the moment of the check and of the write
+(the plan carries no aggregate; the validator refuses one), so an older
+retry keeps what newer forwards reserved. A definite failure after the row
+was written is settled by the job itself (`settleForward`): the row, the
+device and the rule this id holds are removed (each best effort, each
+recorded as `rollback`), the response naming what could not be removed
+(the L4 reconciler sweeps an orphan device at its next pass) — the
+disposition settles whether or not the request is still alive. A retry
+re-records the row before it touches the host; a row that can no longer be
+written because another forward binds the port (the executor's store
+checks the port NULL-safely, as `UNIQUE` ignores a NULL range end) is
+refused as `superseded` with this id's orphans removed — never a success
+without an authoritative row. The drop-in
+`/etc/sysctl.d/99-proxypilot-l4-reserved.conf` is refreshed with the
+reconciler's exact body — the one host script of this group, a fixed text
+under `sh -c` whose only arguments are the base64 of the rendered body and
+the drop-in's constant path (`reservedWriteArgv`), applied with `sysctl
+-p` and read back through `sysctl -n`; an empty set removes the file and
+reloads `/etc/sysctl.conf`. The response keeps its shape
+(`reconcile.applied[].detail.{incus,firewall,policy}`,
 `reconcile.reservedPorts`) with `job_id` and `verified: true` beside it.
 
 **Truthful results.** Every result carries `applied` per step, `previous`,
-`snapshot` (name, timestamp, reused, covers), `partial` and `notRun` on a
-failure, `warnings` for a best-effort step, the executor's `jobId`; the MCP
+`snapshot` (name, timestamp, reused, verified, covers), `partial` and
+`notRun` on a failure, `protection` when the original snapshot could not
+be verified, `row`, `firewallPolicy` and `rollback` for a forward,
+`warnings` for a best-effort step, the executor's `jobId`; the MCP
 results keep their fields (`applied`, `snapshot`, `restart_required`,
 `restart_recommended`, `previous`, `reconcile`, `reverse_with`) and add
 `job_id`, `verified`, `snapshot_covers`, `previous_value` /
@@ -1133,6 +1187,25 @@ is an operator's explicit, confirmed request naming the copy, and the
 copies a deploy or restore took are named on its record for that.
 
 ## Tests
+
+`setup-guest-config-review.test.js` (8 tests): the review of the first
+revision's seven reproductions — a rejected egress application not
+verified and applied by the retry; a saved rule under the expected id with
+the wrong port or protocol never verified; a refused forward removal
+preserving its row and host state; a retry of a partially failed addition
+ending with row AND host, or refused superseded with the orphans removed;
+an older retry preserving a newer forward's reservation; a missing and a
+replaced original snapshot after the first write preventing the remaining
+one — plus the row-settlement path interrupted after its row and device
+(resumed once, settled once) and a resumed job completing read-only. Every
+symbol it imports exists at the reviewed head, and the file was run
+against `ad1a638` in a worktree: the seven fail there for the reviewer's
+reasons (verified success with exit 1; `added: true` with the wrong port;
+the row removed on a refusal; the device left with no row; the newer
+range lost; memory changed) and pass on the correction. Its fixture,
+shared with the main suite (`helpers/scripted-config-host.js`), models the
+CLI's save-before-reconcile order with `status`, `reconcile --dry-run` and
+`reconcile` as the evidence.
 
 `setup-guest-config.test.js` (24 tests; the reserved-ports drop-in written
 under the sandbox's real `sh` against a temp file, twice — once alone, once
@@ -1458,7 +1531,13 @@ refused for `/etc`; `remove_lxc_device` with `previous` on the result;
 `/etc/sysctl.d/99-proxypilot-l4-reserved.conf` carrying the range and
 `sysctl net.ipv4.ip_local_reserved_ports` agreeing, the remove clearing all
 three; `set_lxc_egress` allow / deny reflected in `proxypilot firewall
-egress list` and the nftables ruleset; two forwards submitted at once (two
+egress list` and the nftables ruleset — and, with `proxypilot firewall`
+in a rejecting state (a lockout the dry-run reports), an allow that ends
+`failed at reconcile` with the entry saved in `firewall.json`, the
+ruleset unchanged (`nft list table inet proxypilot`) and a retry after the
+cause is fixed applying it with one reconcile; `set_port_forward` add
+with the guest busy (a deploy running) refused with NO row in
+`service_l4_forwards` and nothing on the host; two forwards submitted at once (two
 MCP calls) serialized on `@host/firewall` (the second's job waiting, both
 applied); the runner killed during a `set_lxc_resources` after its first
 key — the restarted runner's record reading `resumed after an interrupted

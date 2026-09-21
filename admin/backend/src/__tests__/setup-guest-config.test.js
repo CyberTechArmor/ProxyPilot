@@ -40,9 +40,11 @@ import { join } from 'node:path';
 import {
   CONFIG_JOB_KINDS as KINDS_FROM_CONFIG, FIREWALL_KINDS, SNAPSHOT_KINDS, HOST_FIREWALL_LOCK, CONFIG_KEY_ALLOWLIST, PROXYPILOT_BIN, validateConfigParams,
   configSetArgv, rootSizeOverrideArgv, deviceAddArgv, deviceRemoveArgv, networkPinOverrideArgv, networkPinSetArgv, forwardDeviceAddArgv, firewallAddArgv, firewallRemoveArgv, firewallListArgv,
+  firewallStatusArgv, firewallDryRunArgv, firewallReconcileArgv, forwardRuleVerdict, reconcileEvidence, firewallCliResult,
   egressArgv, egressListArgv, reservedWriteArgv, reservedRemoveArgv, reservedReadArgv, sysctlApplyArgv, reservedPlan, reservedRangesFromRows, RESERVED_WRITE_SCRIPT,
   configKeyVerdict, deviceVerdict, networkVerdict, ruleVerdict, egressVerdict, recordedDevice, priorConfig, parseCliJson, shortGuestName, loadDevicePolicy,
 } from '../lib/setup-engine/config-logic.js';
+import { scriptedConfigHost as scriptedHost, forwardsSchema, mcpCtx, parse, AUTH } from './helpers/scripted-config-host.js';
 import { runConfigOperation } from '../lib/setup-engine/config-op.js';
 import { ownerIdentity, parseJson, validateRunnerJob, reconcileDecision, RUNNER_JOB_KINDS, MUTATING_JOB_KINDS, EXCLUSIVE_JOB_KINDS, CONFIG_JOB_KINDS } from '../lib/setup-engine/logic.js';
 import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, createJob, claimNextJob, checkpoint, runnerHeartbeat, listJobs, releaseLock } from '../lib/setup-engine/store.js';
@@ -53,8 +55,6 @@ import { retryPlan } from '../lib/setup-engine/logic.js';
 import { configureContainerLockStore } from '../mock2/container-lock.js';
 import { runGuestConfig, resolveConfigPlan, lifecycleHttpStatus } from '../mock2/ops.js';
 import { createExtendedHandlers } from '../routes/mcp-tools/index.js';
-import { createConfirmationStore } from '../lib/mcp-ext/logic.js';
-import { lxcContainerDetail, MCP_TOOLS } from '../lib/mcp-logic.js';
 import { hostGuestExec } from '../../../../cli/src/commands/setup-runner.js';
 import { reservedPortsBody, RESERVED_PORTS_HEADER } from '../lib/l4-reserved-ports.js';
 import { scriptedGuest, LOGIN } from './helpers/scripted-guest.js';
@@ -70,7 +70,7 @@ const UUID_B = '99999999-8888-7777-6666-555555555555';
 const TOKEN = 'tok-9f8e7d6c5b4a-never-on-a-record';
 const IDENTITY = { uuid: UUID_A, created_at: '2026-09-01T10:00:00Z' };
 
-function db() { const d = new DatabaseSync(':memory:'); ensureSetupEngineSchema(d); return d; }
+function db() { const d = new DatabaseSync(':memory:'); ensureSetupEngineSchema(d); forwardsSchema(d); return d; }
 function tmp() { return mkdtempSync(join(tmpdir(), 'pp-config-')); }
 const inst = (over = {}) => ({
   name: 'pp-x', status: 'Running', created_at: '2026-09-01T10:00:00Z',
@@ -81,97 +81,11 @@ const inst = (over = {}) => ({
   ...over,
 });
 
-// The scripted host: `incus …` and `proxypilot --json firewall …` as argv
-// arrays over a state; `sh -c`, `cat` and `rm` are REAL (the reserved-ports
-// drop-in is a temp file), `sysctl` reads and applies that file.
-function scriptedHost(state) {
-  const calls = [];
-  const byName = (n) => state.instances.find((i) => i.name === n) || null;
-  state.rules = state.rules || []; state.egress = state.egress || []; state.sysctl = state.sysctl ?? '';
-  const real = (argv) => { const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' }); return { code: r.status ?? -1, stdout: r.stdout || '', stderr: r.stderr || '' }; };
-  const json = (o) => ({ code: 0, stdout: JSON.stringify(o), stderr: '' });
-  return {
-    calls,
-    host: async (argv) => {
-      calls.push(argv);
-      assert.ok(Array.isArray(argv) && argv.every((a) => typeof a === 'string'), 'argv arrays only');
-      if (state.hook) { const h = state.hook; const r = await h(argv); if (r) return r; }
-      if (argv[0] === 'sh' || argv[0] === 'cat' || argv[0] === 'rm') return real(argv);
-      if (argv[0] === 'sysctl') {
-        if (argv[1] === '-n') return { code: 0, stdout: `${state.sysctl}\n`, stderr: '' };
-        if (state.sysctlFails) return { code: 1, stdout: '', stderr: 'sysctl: permission denied' };
-        const f = argv[2]; const body = existsSync(f) ? readFileSync(f, 'utf8') : '';
-        const m = /net\.ipv4\.ip_local_reserved_ports = (.*)/.exec(body); state.sysctl = m ? m[1].trim() : (f === '/etc/sysctl.conf' ? '' : state.sysctl);
-        return { code: 0, stdout: '', stderr: '' };
-      }
-      if (argv[0] === PROXYPILOT_BIN) {
-        assert.equal(argv[1], '--json'); assert.equal(argv[2], 'firewall');
-        const verb = argv[3];
-        if (verb === 'list') return json(state.rules);
-        if (verb === 'add-service-l4') {
-          const opt = (k) => { const i = argv.indexOf(k); return i > 0 ? argv[i + 1] : null; };
-          const id = opt('--id');
-          if (state.rules.some((r) => r.id === id)) return { code: 1, stdout: '', stderr: `a rule with id ${id} already exists` };
-          if (state.fwAddFails) return { code: 1, stdout: '', stderr: 'Error: panic mode is active' };
-          state.rules.push({ id, port_start: Number(opt('--port')), port_end: opt('--port-end') ? Number(opt('--port-end')) : null, proto: opt('--proto'), reason: opt('--reason'), service: opt('--service'), enabled: !state.fwAddDisabled, source: 'service-l4' });
-          return json({ ok: true, action: 'add-service-l4', reconcile: { applied: true, checksum: 'c1', rejection: null } });
-        }
-        if (verb === 'remove-service-l4') { const n = state.rules.length; state.rules = state.rules.filter((r) => r.id !== argv[4]); return n === state.rules.length ? json({ ok: true, action: 'remove-service-l4', rule: { id: argv[4] }, already_absent: true }) : json({ ok: true, action: 'remove-service-l4' }); }
-        if (verb === 'egress' && argv[4] === 'list') return json({ services: { dns: {}, http: {}, smtp: {} }, entries: state.egress });
-        if (verb === 'egress') {
-          const [, , , , action, container, service] = argv;
-          if (state.egressFails) return { code: 1, stdout: '', stderr: 'Error: reconcile rejected' };
-          let e = state.egress.find((x) => x.container === container);
-          if (action === 'allow') { if (!e) { e = { container, allow: [], reason: null }; state.egress.push(e); } if (!e.allow.includes(service)) e.allow.push(service); const ri = argv.indexOf('--reason'); if (ri > 0) e.reason = argv[ri + 1]; }
-          else { if (!e) return { code: 1, stdout: '', stderr: 'no egress entry for container' }; if (!state.egressDenySilent) { e.allow = e.allow.filter((s) => s !== service); if (!e.allow.length) state.egress = state.egress.filter((x) => x !== e); } }
-          return json({ action: `egress-${action}`, payload: { container, service }, reconcile: { applied: true, checksum: 'c2', rejection: null } });
-        }
-        return { code: 1, stdout: '', stderr: `unexpected ${argv.join(' ')}` };
-      }
-      if (argv[0] !== 'incus') return { code: 127, stdout: '', stderr: 'not incus' };
-      const verb = argv[1];
-      if (verb === 'list') { const i = byName(argv[2]); return { code: 0, stdout: JSON.stringify(i ? [i] : []), stderr: '' }; }
-      if (verb === 'snapshot' && argv[2] === 'create') {
-        const i = byName(argv[3]); if (!i) return { code: 1, stdout: '', stderr: 'Error: Instance not found' };
-        if (state.snapshotFails) return { code: 1, stdout: '', stderr: 'Error: Failed creating instance snapshot: no space left' };
-        if (i.snapshots.some((s) => s.name === argv[4])) return { code: 1, stdout: '', stderr: 'Error: Snapshot already exists' };
-        i.snapshots.push({ name: argv[4], created_at: `2026-09-26T12:0${i.snapshots.length}:00Z` }); return { code: 0, stdout: '', stderr: '' };
-      }
-      if (verb === 'config' && argv[2] === 'set') {
-        const i = byName(argv[3]); if (!i) return { code: 1, stdout: '', stderr: 'Error: Instance not found' };
-        if (state.configSetFails === argv[4]) return { code: 1, stdout: '', stderr: `Error: Invalid value for ${argv[4]}` };
-        if (state.configSetSilent !== argv[4]) i.config[argv[4]] = argv[5];
-        return { code: 0, stdout: '', stderr: '' };
-      }
-      if (verb === 'config' && argv[2] === 'device') {
-        const sub = argv[3]; const i = byName(argv[4]); if (!i) return { code: 1, stdout: '', stderr: 'Error: Instance not found' };
-        i.devices = i.devices || {};
-        if (sub === 'override') {
-          const dev = argv[5]; const [k, v] = argv[6].split('=');
-          if (i.devices[dev]) return { code: 1, stdout: '', stderr: `Error: The device already exists` };
-          if (state.overrideFails) return { code: 1, stdout: '', stderr: `Error: device '${dev}' doesn't exist` };
-          i.devices[dev] = { ...(i.expanded_devices?.[dev] || { type: dev === 'root' ? 'disk' : 'nic' }), [k]: v }; return { code: 0, stdout: '', stderr: '' };
-        }
-        if (sub === 'set') { const dev = argv[5]; if (!i.devices[dev]) return { code: 1, stdout: '', stderr: 'Error: Device not found' }; i.devices[dev][argv[6]] = argv[7]; return { code: 0, stdout: '', stderr: '' }; }
-        if (sub === 'add') {
-          const dev = argv[5];
-          if (i.devices[dev]) return { code: 1, stdout: '', stderr: `Error: The device already exists` };
-          if (state.deviceAddFails) return { code: 1, stdout: '', stderr: 'Error: Failed to start device: bind failed' };
-          if (state.deviceAddSilent) return { code: 0, stdout: '', stderr: '' };
-          i.devices[dev] = { type: argv[6], ...Object.fromEntries(argv.slice(7).map((kv) => { const j = kv.indexOf('='); return [kv.slice(0, j), kv.slice(j + 1)]; })) };
-          return { code: 0, stdout: '', stderr: '' };
-        }
-        if (sub === 'remove') { const dev = argv[5]; if (!i.devices[dev]) return { code: 1, stdout: '', stderr: 'Error: Device not found' }; if (state.deviceRemoveSilent) return { code: 0, stdout: '', stderr: '' }; delete i.devices[dev]; return { code: 0, stdout: '', stderr: '' }; }
-      }
-      return { code: 1, stdout: '', stderr: `unexpected ${argv.join(' ')}` };
-    },
-  };
-}
 const exec = (h, g = scriptedGuest({})) => ({ guest: g.guest, host: h.host });
 function clock(start = T0) { const c = { t: start }; c.nowMs = () => c.t; c.sleep = async (ms) => { c.t += ms; }; c.tick = (ms) => { c.t += ms; }; return c; }
 // heartbeat: false — a runner heartbeat stamped with the fake clock would read as a live runner to a caller on the real clock.
 const runAll = (d, ex, c, opts = {}) => runOnce({ db: d, owner: opts.owner || RUNNER, exec: ex, reviewLogin: async () => LOGIN, nowMs: c.nowMs, sleep: c.sleep, keepAliveMs: opts.keepAliveMs || 60_000, reservedPortsPath: opts.reservedPortsPath || null, heartbeat: false, log: () => {} }, { reconcileFirst: false, ...opts });
-const READS = (a) => (a[0] === 'incus' && a[1] === 'list') || (a[0] === PROXYPILOT_BIN && (a[3] === 'list' || (a[3] === 'egress' && a[4] === 'list'))) || a[0] === 'cat' || (a[0] === 'sysctl' && a[1] === '-n');
+const READS = (a) => (a[0] === 'incus' && a[1] === 'list') || (a[0] === PROXYPILOT_BIN && (a[3] === 'list' || a[3] === 'status' || (a[3] === 'reconcile' && a[4] === '--dry-run') || (a[3] === 'egress' && a[4] === 'list'))) || a[0] === 'cat' || (a[0] === 'sysctl' && a[1] === '-n');
 const mutations = (h) => h.calls.filter((a) => !READS(a));
 const submit = (d, kind, params, extra = {}) => submitRunnerJob(d, { kind, app: params.container, params, nowMs: T0, ...extra });
 const cps = (d, id) => listEvents(d, id).filter((e) => e.kind === 'checkpoint').map((e) => e.phase);
@@ -208,8 +122,8 @@ test('validation is strict: allowlisted keys and shapes, the risk acknowledgemen
   ok('device_add', { container: 'pp-x', device: 'web', deviceType: 'proxy', props: { listen: 'tcp:0.0.0.0:8080', connect: 'tcp:127.0.0.1:80' } });
   ok('device_remove', { container: 'pp-x', device: 'shared' });
   ok('network_pin', { container: 'pp-x', ip: '10.10.10.5', previous: '10.10.10.5', snapshot: { name: 'pp-mcp-pre-network-x' } });
-  ok('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'udp', listen: 50000, listenEnd: 50100, connect: 50000, connectEnd: 50100, description: 'media' }, bridgeIp: '10.10.10.5', serviceTag: 'x', reserved: [[50000, 50100]] });
-  ok('forward_remove', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 7881, connect: 7881 }, reserved: [] });
+  ok('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'udp', listen: 50000, listenEnd: 50100, connect: 50000, connectEnd: 50100, description: 'media' }, bridgeIp: '10.10.10.5', serviceTag: 'x', serviceId: 'svc-x' });
+  ok('forward_remove', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 7881, connect: 7881 } });
   ok('egress_set', { container: 'pp-x', action: 'allow', service: 'smtp', reason: 'mail relay' });
   bad('config_set', { container: '../x', changes: [] }, /guest name/);
   bad('config_set', { container: 'pp-x', changes: [{ key: 'limits.cpu', value: '4' }], argv: ['incus'] }, /never carries a command/);
@@ -239,19 +153,21 @@ test('validation is strict: allowlisted keys and shapes, the risk acknowledgemen
   bad('device_remove', { container: 'pp-x', device: 'ppcert-x' }, /managed by ProxyPilot/);
   bad('network_pin', { container: 'pp-x', ip: '10.10.10' }, /IPv4/);
   bad('network_pin', { container: 'pp-x', ip: '10.10.10.5', previous: 'x' }, /previous/);
-  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'sctp', listen: 1, connect: 1 }, bridgeIp: '10.0.0.1', reserved: [] }, /proto/);
-  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'udp', listen: 50000, listenEnd: 50100, connect: 50000, connectEnd: 50050 }, bridgeIp: '10.0.0.1', reserved: [] }, /same width/);
-  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80, description: '-x' }, bridgeIp: '10.0.0.1', reserved: [] }, /description/);
-  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80 }, reserved: [] }, /bridgeIp/);
-  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80 }, bridgeIp: '10.0.0.1', reserved: [[50100, 50000]] }, /reserved entry/);
-  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80 }, bridgeIp: '10.0.0.1', reserved: [], snapshot: { name: 's' } }, /carries no snapshot/);
-  bad('forward_remove', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80 }, bridgeIp: '10.0.0.1', reserved: [] }, /carries no bridgeIp/);
+  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'sctp', listen: 1, connect: 1 }, bridgeIp: '10.0.0.1', serviceId: 's' }, /proto/);
+  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'udp', listen: 50000, listenEnd: 50100, connect: 50000, connectEnd: 50050 }, bridgeIp: '10.0.0.1', serviceId: 's' }, /same width/);
+  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80, description: '-x' }, bridgeIp: '10.0.0.1', serviceId: 's' }, /description/);
+  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80 }, serviceId: 's' }, /bridgeIp/);
+  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80 }, bridgeIp: '10.0.0.1' }, /serviceId/);
+  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80 }, bridgeIp: '10.0.0.1', serviceId: 's', reserved: [[50000, 50100]] }, /carries no reservation aggregate: the runner recomputes/);
+  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80 }, bridgeIp: '10.0.0.1', serviceId: 's', snapshot: { name: 's' } }, /carries no snapshot/);
+  bad('forward_remove', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80 }, bridgeIp: '10.0.0.1' }, /carries no bridgeIp/);
+  bad('forward_remove', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80 }, serviceId: 's' }, /carries no serviceId/);
   bad('egress_set', { container: 'pp-x', action: 'block', service: 'dns' }, /action/);
   bad('egress_set', { container: 'pp-x', action: 'allow', service: 'dns; rm' }, /service/);
   bad('egress_set', { container: 'pp-x', action: 'allow', service: 'dns', reason: 'x'.repeat(201) }, /reason/);
   bad('egress_set', { container: 'pp-x', action: 'allow', service: 'dns', snapshot: { name: 's' } }, /carries no snapshot/);
   bad('egress_set', { container: 'pp-x', action: 'allow', service: 'dns', reason: 'AUTH_MASTER_SECRET=abcdefghijklmnop' }, /looks like a secret/);
-  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80, description: 'API_SECRET_KEY=abcdefghijklmnop' }, bridgeIp: '10.0.0.1', reserved: [] }, /looks like a secret/);
+  bad('forward_apply', { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 80, connect: 80, description: 'API_SECRET_KEY=abcdefghijklmnop' }, bridgeIp: '10.0.0.1', serviceId: 's' }, /looks like a secret/);
   // validateRunnerJob delegates: a configuration job with a command never becomes a queued job.
   assert.match(validateRunnerJob({ kind: 'config_set', app: 'pp-x', plan: { params: { container: 'pp-x', changes: [{ key: 'limits.cpu', value: '4' }], command: 'x' } } }).reason, /never carries a command/);
   assert.equal(validateRunnerJob({ kind: 'egress_set', app: 'pp-x', plan: { params: { container: 'pp-x', action: 'deny', service: 'smtp' } } }).ok, true);
@@ -271,6 +187,7 @@ test('the fixed commands: one argv per step, rendered from the plan alone; the f
   assert.deepEqual(firewallAddArgv({ id: 'f2', proto: 'tcp', listen: 7881, connect: 7881 }), [PROXYPILOT_BIN, '--json', 'firewall', 'add-service-l4', '--id', 'service-l4-f2', '--port', '7881', '--proto', 'tcp', '--reason', 'service-l4 tcp/7881']);
   assert.deepEqual(firewallRemoveArgv('f1'), [PROXYPILOT_BIN, '--json', 'firewall', 'remove-service-l4', 'service-l4-f1']);
   assert.deepEqual(firewallListArgv(), [PROXYPILOT_BIN, '--json', 'firewall', 'list']);
+  assert.deepEqual(firewallStatusArgv(), [PROXYPILOT_BIN, '--json', 'firewall', 'status']); assert.deepEqual(firewallDryRunArgv(), [PROXYPILOT_BIN, '--json', 'firewall', 'reconcile', '--dry-run']); assert.deepEqual(firewallReconcileArgv(), [PROXYPILOT_BIN, '--json', 'firewall', 'reconcile']);
   assert.deepEqual(egressArgv('pp-x', 'allow', 'smtp', 'mail'), [PROXYPILOT_BIN, '--json', 'firewall', 'egress', 'allow', 'x', 'smtp', '--reason', 'mail']);
   assert.deepEqual(egressArgv('pp-x', 'deny', 'smtp', 'ignored'), [PROXYPILOT_BIN, '--json', 'firewall', 'egress', 'deny', 'x', 'smtp']);
   assert.deepEqual(egressListArgv(), [PROXYPILOT_BIN, '--json', 'firewall', 'egress', 'list']);
@@ -294,6 +211,24 @@ test('read-backs and prior state: verdicts compare what the guest and the firewa
   assert.equal(other.ok, false); assert.match(other.observed, /other properties \(source=\/srv\/shares\/data\)/);
   assert.deepEqual(deviceVerdict(i, 'nope', { present: false }), { ok: true, observed: 'absent', expected: 'absent', device: null });
   assert.equal(networkVerdict(i, '10.10.10.5').ok, false); assert.equal(networkVerdict({ devices: { eth0: { 'ipv4.address': '10.10.10.5' } } }, '10.10.10.5').ok, true);
+  const f = { id: 'f1', proto: 'udp', listen: 50000, listenEnd: 50100, connect: 50000, connectEnd: 50100 };
+  const saved = { id: 'service-l4-f1', source: 'service-l4', proto: 'udp', port_start: 50000, port_end: 50100, scope: 'public', service: 'x', enabled: true };
+  assert.equal(forwardRuleVerdict([saved], f, 'x', { present: true }).ok, true);
+  assert.match(forwardRuleVerdict([{ ...saved, port_start: 50001 }], f, 'x', { present: true }).observed, /other properties \(port_start=50001\)/);
+  assert.match(forwardRuleVerdict([{ ...saved, proto: 'tcp' }], f, 'x', { present: true }).observed, /proto=tcp/);
+  assert.match(forwardRuleVerdict([{ ...saved, port_end: null }], f, 'x', { present: true }).observed, /port_end=\(unset\)/);
+  assert.match(forwardRuleVerdict([{ ...saved, scope: 'vpn-only' }], f, 'x', { present: true }).observed, /scope=vpn-only/);
+  assert.match(forwardRuleVerdict([{ ...saved, source: 'manual' }], f, 'x', { present: true }).observed, /source=manual/);
+  assert.match(forwardRuleVerdict([saved], f, null, { present: true }).observed, /service=x/, 'the tag is part of the identity');
+  assert.match(forwardRuleVerdict([{ ...saved, enabled: false }], f, 'x', { present: true }).observed, /enabled=false/);
+  assert.equal(forwardRuleVerdict([saved], f, 'x', { present: false }).ok, false); assert.equal(forwardRuleVerdict([], f, 'x', { present: false }).ok, true);
+  assert.equal(reconcileEvidence({ last_reconcile: { ruleset_checksum: 'abc', applied: 1, rejection_reason: null } }, { ok: true, checksum: 'abc' }).ok, true);
+  assert.match(reconcileEvidence({ last_reconcile: { ruleset_checksum: 'abc', applied: 0, rejection_reason: 'lockout' } }, { ok: true, checksum: 'abc' }).observed, /rejected \(lockout\)/);
+  assert.match(reconcileEvidence({ last_reconcile: { ruleset_checksum: 'old', applied: 1 } }, { ok: true, checksum: 'abc' }).observed, /applied ruleset \(old\) is not the saved one/);
+  assert.match(reconcileEvidence({ last_reconcile: null }, { ok: true, checksum: 'abc' }).observed, /no reconcile recorded/);
+  assert.match(reconcileEvidence({ last_reconcile: { ruleset_checksum: 'abc', applied: 1 } }, { ok: false, checksum: 'abc', rejection: { reason: 'lockout' } }).observed, /cannot be applied: lockout/);
+  assert.deepEqual(firewallCliResult({ stdout: JSON.stringify({ action: 'egress-allow', payload: { container: 'x' }, reconcile: { applied: false, checksum: 'c', rejection: { reason: 'lockout' } } }) }), { json: { action: 'egress-allow', payload: { container: 'x' }, reconcile: { applied: false, checksum: 'c', rejection: { reason: 'lockout' } } }, reconcile: { applied: false, checksum: 'c', rejection: 'lockout' }, saved: true });
+  assert.equal(firewallCliResult({ stdout: '' }).saved, false);
   assert.deepEqual(ruleVerdict([{ id: 'service-l4-f1', enabled: true }], 'service-l4-f1', { present: true }), { ok: true, observed: 'present', expected: 'present' });
   assert.equal(ruleVerdict([{ id: 'service-l4-f1', enabled: false }], 'service-l4-f1', { present: true }).ok, false);
   assert.equal(ruleVerdict(null, 'x', { present: false }).observed, 'unreadable');
@@ -476,9 +411,10 @@ test('forward_apply / forward_remove: the proxy device, the firewall rule and th
   const f = { id: 'f1', proto: 'udp', listen: 50000, listenEnd: 50100, connect: 50000, connectEnd: 50100, description: 'media' };
   const locksSeen = [];
   st.hook = async (argv) => { if (argv[0] === PROXYPILOT_BIN && argv[3] === 'add-service-l4') locksSeen.push({ guest: readLock(d, 'pp-x')?.owner || null, fw: readLock(d, HOST_FIREWALL_LOCK)?.owner || null }); return null; };
-  const sub = submit(d, 'forward_apply', { container: 'pp-x', forward: f, bridgeIp: '10.10.10.5', serviceTag: 'x', reserved: [[50000, 50100]], expect: IDENTITY });
+  const sub = submit(d, 'forward_apply', { container: 'pp-x', forward: f, bridgeIp: '10.10.10.5', serviceTag: 'x', serviceId: 'svc-x', expect: IDENTITY });
   await runAll(d, exec(h), c, { reservedPortsPath: path });
   const row = getJob(d, sub.job.id); assert.equal(row.status, 'succeeded', row.reason);
+  assert.deepEqual(d.prepare(`SELECT id, service_id, proto, listen_port, listen_port_end FROM service_l4_forwards`).all().map((x) => ({ ...x })), [{ id: 'f1', service_id: 'svc-x', proto: 'udp', listen_port: 50000, listen_port_end: 50100 }], 'the row is the job\'s first step');
   const m = mutations(h);
   assert.deepEqual(m[0], ['incus', 'config', 'device', 'add', 'pp-x', 'ppl4-f1', 'proxy', 'listen=udp:0.0.0.0:50000-50100', 'connect=udp:10.10.10.5:50000-50100']);
   assert.deepEqual(m[1], firewallAddArgv(f, 'x'));
@@ -488,38 +424,39 @@ test('forward_apply / forward_remove: the proxy device, the firewall rule and th
   assert.deepEqual(locksSeen, [{ guest: RUNNER, fw: RUNNER }], 'both leases held through the firewall write');
   assert.equal(readLock(d, HOST_FIREWALL_LOCK), null); assert.equal(readLock(d, 'pp-x'), null);
   const r = resultFromJob(row);
-  assert.deepEqual(Object.fromEntries(Object.entries(r.applied).map(([k, a]) => [k, a.state])), { device: 'done', rule: 'done', reserved: 'done' });
-  assert.deepEqual(r.reserved, { state: 'done', value: '50000-50100', file: true, live: true });
+  assert.deepEqual(Object.fromEntries(Object.entries(r.applied).map(([k, a]) => [k, a.state])), { row: 'done', device: 'done', rule: 'done', reconcile: 'already', reserved: 'done' }, 'the rule\'s own reconcile applied the policy; the evidence read, nothing re-issued');
+  assert.deepEqual(r.reserved, { state: 'done', value: '50000-50100', file: true, live: true }); assert.equal(r.firewallPolicy.state, 'already');
   assert.deepEqual(st.rules.map((x) => [x.id, x.port_start, x.port_end, x.proto, x.reason, x.service]), [['service-l4-f1', 50000, 50100, 'udp', 'media', 'x']]);
   // A second apply of the same forward: everything present, nothing issued.
   h.calls.length = 0;
-  const again = submit(d, 'forward_apply', { container: 'pp-x', forward: f, bridgeIp: '10.10.10.5', serviceTag: 'x', reserved: [[50000, 50100]] }, { nowMs: T0 + 5 });
+  const again = submit(d, 'forward_apply', { container: 'pp-x', forward: f, bridgeIp: '10.10.10.5', serviceTag: 'x', serviceId: 'svc-x' }, { nowMs: T0 + 5 });
   await runAll(d, exec(h), c, { reservedPortsPath: path });
   assert.equal(resultFromJob(getJob(d, again.job.id)).alreadyInState, true); assert.deepEqual(mutations(h), []);
-  // The firewall refuses: the device is on the record as done, the rule failed, the job fails at the rule (partial), the reserved step not run.
+  // The firewall refuses: the device was added and is on the record, the rule failed, the job fails at the rule and ROLLS BACK its row and the device (the job's own disposition), the later steps not run.
   st.fwAddFails = true; h.calls.length = 0;
   const f2 = { id: 'f2', proto: 'tcp', listen: 7881, connect: 7881 };
-  const fails = submit(d, 'forward_apply', { container: 'pp-x', forward: f2, bridgeIp: '10.10.10.5', reserved: [[50000, 50100]] }, { nowMs: T0 + 6 });
+  const fails = submit(d, 'forward_apply', { container: 'pp-x', forward: f2, bridgeIp: '10.10.10.5', serviceId: 'svc-x' }, { nowMs: T0 + 6 });
   await runAll(d, exec(h), c, { reservedPortsPath: path });
   const fr = resultFromJob(getJob(d, fails.job.id));
-  assert.equal(fr.ok, false); assert.equal(fr.step, 'rule'); assert.equal(fr.partial, true); assert.deepEqual(fr.notRun, ['reserved']); assert.match(fr.error, /panic mode/);
-  assert.equal(st.instances[0].devices['ppl4-f2'].type, 'proxy', 'the device the record says is applied is there');
+  assert.equal(fr.ok, false); assert.equal(fr.step, 'rule'); assert.equal(fr.partial, true); assert.deepEqual(fr.notRun, ['reconcile', 'reserved']); assert.match(fr.error, /panic mode/); assert.match(fr.error, /rolled back: row removed, device removed, rule absent/);
+  assert.deepEqual(fr.rollback && { row: fr.rollback.row, device: fr.rollback.device, rule: fr.rollback.rule }, { row: 'removed', device: 'removed', rule: 'absent' }); assert.equal(fr.row.state, 'rolled_back');
+  assert.equal(st.instances[0].devices['ppl4-f2'], undefined, 'the device this attempt added is gone'); assert.deepEqual(d.prepare(`SELECT id FROM service_l4_forwards`).all().map((x) => x.id), ['f1'], 'no row without its host state');
   st.fwAddFails = false;
-  // Remove f2 (device present, rule absent → tolerated), then f1 with nothing left to reserve: the drop-in is removed and the kernel value cleared.
+  // Remove f2 (nothing of it is left: row, device and rule all absent → nothing issued), then f1 with nothing left to reserve: the drop-in is removed and the kernel value cleared.
   h.calls.length = 0;
-  const rm2 = submit(d, 'forward_remove', { container: 'pp-x', forward: f2, reserved: [[50000, 50100]] }, { nowMs: T0 + 7 });
+  const rm2 = submit(d, 'forward_remove', { container: 'pp-x', forward: f2 }, { nowMs: T0 + 7 });
   await runAll(d, exec(h), c, { reservedPortsPath: path });
-  assert.equal(getJob(d, rm2.job.id).status, 'succeeded', getJob(d, rm2.job.id).reason);
-  assert.deepEqual(mutations(h), [['incus', 'config', 'device', 'remove', 'pp-x', 'ppl4-f2']], 'the absent rule is not removed again; the drop-in is current');
+  assert.equal(getJob(d, rm2.job.id).status, 'succeeded', getJob(d, rm2.job.id).reason); assert.equal(resultFromJob(getJob(d, rm2.job.id)).alreadyInState, true);
+  assert.deepEqual(mutations(h), [], 'nothing to remove, nothing issued; the drop-in is current');
   h.calls.length = 0;
-  const rm1 = submit(d, 'forward_remove', { container: 'pp-x', forward: f, reserved: [] }, { nowMs: T0 + 8 });
+  const rm1 = submit(d, 'forward_remove', { container: 'pp-x', forward: f }, { nowMs: T0 + 8 });
   await runAll(d, exec(h), c, { reservedPortsPath: path });
   assert.equal(getJob(d, rm1.job.id).status, 'succeeded', getJob(d, rm1.job.id).reason);
   assert.deepEqual(mutations(h), [['incus', 'config', 'device', 'remove', 'pp-x', 'ppl4-f1'], firewallRemoveArgv('f1'), ['rm', '-f', path], ['sysctl', '-p', '/etc/sysctl.conf']]);
-  assert.equal(existsSync(path), false); assert.equal(st.sysctl, ''); assert.deepEqual(st.rules, []); assert.deepEqual(st.instances[0].devices, {});
+  assert.equal(existsSync(path), false); assert.equal(st.sysctl, ''); assert.deepEqual(st.rules, []); assert.deepEqual(st.instances[0].devices, {}); assert.deepEqual(d.prepare(`SELECT id FROM service_l4_forwards`).all(), [], 'the row went first');
   // A sysctl that fails is a warning on a still-successful forward (the reconciler's contract), with the reserved step's state truthful.
   st.sysctlFails = true; h.calls.length = 0;
-  const warn = submit(d, 'forward_apply', { container: 'pp-x', forward: f, bridgeIp: '10.10.10.5', reserved: [[50000, 50100]] }, { nowMs: T0 + 9 });
+  const warn = submit(d, 'forward_apply', { container: 'pp-x', forward: f, bridgeIp: '10.10.10.5', serviceId: 'svc-x' }, { nowMs: T0 + 9 });
   await runAll(d, exec(h), c, { reservedPortsPath: path });
   const w = resultFromJob(getJob(d, warn.job.id));
   assert.equal(w.ok, true, JSON.stringify(w)); assert.equal(w.reserved.state, 'failed'); assert.match(w.warnings[0], /reserved: .*permission denied/);
@@ -532,7 +469,7 @@ test('egress_set: allow then deny through the firewall CLI, the entry read back 
   await runAll(d, exec(h), c);
   const a = getJob(d, allow.job.id); assert.equal(a.status, 'succeeded', a.reason);
   assert.deepEqual(mutations(h), [[PROXYPILOT_BIN, '--json', 'firewall', 'egress', 'allow', 'x', 'smtp', '--reason', 'mail relay']]);
-  const r = resultFromJob(a); assert.deepEqual(r.allow, ['smtp']); assert.deepEqual(r.reconcile, { applied: true, checksum: 'c2', rejection: null });
+  const r = resultFromJob(a); assert.deepEqual(r.allow, ['smtp']); assert.equal(r.reconcile.applied, true); assert.equal(r.reconcile.rejection, null); assert.equal(r.reconcile.checksum, h.checksum(), 'the reconcile the CLI ran on the write'); assert.equal(r.firewallPolicy.state, 'already', 'the applied policy read from the evidence; no second reconcile');
   assert.ok(!h.calls.some((x) => x[0] === 'incus'), 'egress needs no guest read');
   assert.equal(readLock(d, HOST_FIREWALL_LOCK), null);
   h.calls.length = 0;
@@ -546,7 +483,7 @@ test('egress_set: allow then deny through the firewall CLI, the entry read back 
   st.egress = [{ container: 'x', allow: ['dns'] }]; st.egressDenySilent = true; h.calls.length = 0;
   const silent = submit(d, 'egress_set', { container: 'pp-x', action: 'deny', service: 'dns' }, { nowMs: T0 + 7 });
   await runAll(d, exec(h), c);
-  const s = getJob(d, silent.job.id); assert.equal(s.status, 'failed'); assert.match(s.reason, /deny egress dns exited 0.*; reads present afterwards/);
+  const s = getJob(d, silent.job.id); assert.equal(s.status, 'failed'); assert.match(s.reason, /deny egress dns \(saved configuration\) exited 0.*; reads present afterwards; not run: reconcile/);
 });
 
 // ── 3. locks, the shared lease, the executor policy, the keep-alive ───────
@@ -612,14 +549,14 @@ test('the shared firewall lease: a live holder is waited for and the job is refu
     return null;
   };
   const f = { id: 'f9', proto: 'tcp', listen: 7881, connect: 7881 };
-  const lost = submit(d, 'forward_apply', { container: 'pp-x', forward: f, bridgeIp: '10.10.10.5', reserved: [] }, { nowMs: c.nowMs() });
+  const lost = submit(d, 'forward_apply', { container: 'pp-x', forward: f, bridgeIp: '10.10.10.5', serviceId: 'svc-x' }, { nowMs: c.nowMs() });
   await runAll(d, exec(h), c);
   const lr = getJob(d, lost.job.id); assert.equal(lr.status, 'failed'); assert.equal(lr.outcome, 'failed at lease');
   assert.match(lr.reason, /@host\/firewall lease is no longer this job's \(after 2 command\(s\)\); no further command is issued under it; pp-x: forward_apply was not completed by this job — retry it/);
   assert.deepEqual(mutations(h), [['incus', 'config', 'device', 'add', 'pp-x', 'ppl4-f9', 'proxy', 'listen=tcp:0.0.0.0:7881', 'connect=tcp:10.10.10.5:7881']], 'the firewall rule was never written');
   const r = resultFromJob(lr); assert.equal(r.leaseLost, true);
   assert.deepEqual({ state: r.applied.device.state, issued: r.applied.device.issued, lost: r.applied.device.leaseLost }, { state: 'unverified', issued: true, lost: true }, 'the device command was issued and its read-back not done under the lease: never "done"');
-  assert.deepEqual(r.notRun, ['rule', 'reserved']); assert.equal(r.applied.rule, undefined);
+  assert.deepEqual(r.notRun, ['rule', 'reconcile', 'reserved']); assert.equal(r.applied.rule, undefined); assert.equal(r.applied.row.state, 'done', 'the row step preceded the device');
   assert.ok(listEvents(d, lost.job.id).some((e) => e.kind === 'step' && /no longer this job's \(after 2 command\(s\)\)/.test(e.message)), 'the loss is an event on the job');
   assert.equal(readLock(d, HOST_FIREWALL_LOCK).owner, OTHER, 'the new owner\'s lease is untouched'); assert.deepEqual(st.rules, []);
 });
@@ -698,13 +635,15 @@ test('interrupted BEFORE the first write: the dead owner\'s job is requeued by t
   reconcile({ db: d, owner: RUNNER, nowMs: T0 });
   await runAll(d, exec(h), c);
   const rc = getJob(d, 'dead-recreated'); assert.equal(rc.status, 'refused'); assert.match(rc.reason, /changed since this job's interrupted attempt bound it/); assert.deepEqual(mutations(h), []);
-  // The recorded snapshot is gone after the issue: a warning, the job converges, no new snapshot.
+  // The recorded snapshot is gone after the issue (the review of ad1a638, R-052): the original pre-change point cannot be verified, so the applied key is read back and the remaining one is NOT issued; no replacement snapshot is taken.
   st.instances = [inst({ config: { 'volatile.uuid': UUID_A, 'limits.cpu': '4', 'limits.memory': '2048MB' } })]; h.calls.length = 0;
   deadJob(d, { kind: 'config_set', params: params2, cp: { phase: 'applied', config: true, resumable: true, disruptive: false, issued: true, target: IDENTITY, container: 'pp-x', kind: 'config_set', snapshot: { name: 'pp-mcp-pre-resources-2', created_at: '2026-09-26T11:00:00Z' }, applied: { 'config:limits.cpu': { state: 'done', issued: true } } }, id: 'dead-gone' });
   reconcile({ db: d, owner: RUNNER, nowMs: T0 });
   await runAll(d, exec(h), c);
-  const g = getJob(d, 'dead-gone'); assert.equal(g.status, 'succeeded', g.reason); assert.match(g.reason, /no longer on the guest; the attempt's change was already issued/);
-  assert.deepEqual(mutations(h), [['incus', 'config', 'set', 'pp-x', 'limits.memory', '4096MB']]); assert.equal(resultFromJob(g).snapshot.missing, true);
+  const g = getJob(d, 'dead-gone'); assert.equal(g.status, 'failed'); assert.equal(g.outcome, 'failed at protect'); assert.match(g.reason, /recorded for this change is no longer on pp-x; the remaining change \(config:limits\.memory\) was NOT issued/);
+  assert.deepEqual(mutations(h), [], 'no write, no replacement snapshot'); assert.equal(st.instances[0].config['limits.memory'], '2048MB');
+  const gr = resultFromJob(g); assert.equal(gr.snapshot.missing, true); assert.equal(gr.snapshot.verified, false); assert.equal(gr.protection.state, 'missing'); assert.equal(gr.partial, true);
+  assert.deepEqual(Object.fromEntries(Object.entries(gr.applied).map(([k, a]) => [k, a.state])), { 'config:limits.cpu': 'done', 'config:limits.memory': 'not_run' });
   noSecretIn(d, ['dead-before', 'dead-after', 'dead-recreated', 'dead-gone']);
 });
 
@@ -731,11 +670,16 @@ test('the boot sweep (a dead in-process backend, nothing to act) records an issu
   const rr = getJob(d, retry.id); assert.equal(rr.status, 'succeeded', rr.reason);
   assert.deepEqual(mutations(h), [['incus', 'config', 'device', 'add', 'pp-x', 'media', 'disk', 'source=/srv/shares/media', 'path=/mnt/media']], 'no second snapshot');
   assert.equal(resultFromJob(rr).snapshot.reused, true);
-  // The origin's snapshot replaced under its name since: refused, nothing written.
+  // The origin's snapshot replaced under its name since: the origin had begun writing, so the original cannot be verified — nothing is written, the record says so (R-052).
   st.instances[0].snapshots = [{ name: 'pp-mcp-pre-device-7', created_at: '2026-09-26T11:59:00Z' }]; delete st.instances[0].devices.media; h.calls.length = 0;
   const retry2 = createJob(d, { kind: 'device_add', app: 'pp-x', plan, retryOf: 'b-1', nowMs: T0 + 1 });
   await runAll(d, exec(h), c);
-  const r2 = getJob(d, retry2.id); assert.equal(r2.status, 'refused'); assert.match(r2.reason, /with a different timestamp than the one this job recorded/); assert.deepEqual(mutations(h), []);
+  const r2 = getJob(d, retry2.id); assert.equal(r2.status, 'failed'); assert.equal(r2.outcome, 'failed at protect'); assert.match(r2.reason, /is not the one this change recorded \(timestamp 2026-09-26T11:59:00Z, recorded 2026-09-26T11:00:00Z\)/); assert.deepEqual(mutations(h), []);
+  assert.equal(resultFromJob(r2).protection.state, 'replaced');
+  // A fresh request (no origin) meeting a foreign snapshot under its planned name is still refused before any change.
+  const fresh = submit(d, 'device_add', params, { nowMs: T0 + 2 });
+  await runAll(d, exec(h), c);
+  const fr = getJob(d, fresh.job.id); assert.equal(fr.status, 'refused'); assert.match(fr.reason, /already exists on pp-x and was not taken by this request/); assert.deepEqual(mutations(h), []);
 });
 
 test('mandatory checkpoints: a store that rejects the issuing checkpoint issues nothing; a fenced job (its claim moved) writes nothing and touches no target', async () => {
@@ -778,46 +722,6 @@ test('the ops layer: resolveConfigPlan binds the digest to the exact change; an 
   assert.equal(refused.code, 'CONTAINER_BUSY'); assert.equal(lifecycleHttpStatus(refused), 409); void busy;
 });
 
-const POLICY = JSON.parse(readFileSync(new URL('../lib/mcp-policy/mcp-extended-policy.json', import.meta.url), 'utf8'));
-const LXC_POLICY = JSON.parse(readFileSync(new URL('../lib/mcp-policy/lxc-command-allowlist.json', import.meta.url), 'utf8'));
-const toolResult = (data, { isError = false } = {}) => ({ content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }], isError });
-const parse = (r) => { try { return JSON.parse(r.content[0].text); } catch { return { error: r.content[0].text, isError: !!r.isError }; } };
-const AUTH = { id: 7, created_by: 'admin-1', name: 'test key', scope_json: null };
-
-// The MCP context: the real node:sqlite database (the services / forwards /
-// ledger tables the tools read and write), the guest read from the scripted
-// state, a host channel that records what the TOOL itself issues.
-function mcpCtx(d, state) {
-  d.exec(`CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT, runtime TEXT, type TEXT, status TEXT, is_admin INTEGER DEFAULT 0, target_ip TEXT, lxc_container_name TEXT);
-    CREATE TABLE IF NOT EXISTS service_l4_forwards (id TEXT PRIMARY KEY, service_id TEXT NOT NULL, proto TEXT NOT NULL CHECK (proto IN ('tcp','udp')), listen_port INTEGER NOT NULL, listen_port_end INTEGER, connect_port INTEGER NOT NULL, connect_port_end INTEGER, description TEXT, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(proto, listen_port, listen_port_end));
-    CREATE TABLE IF NOT EXISTS mcp_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, token_id INTEGER, actor TEXT, tool TEXT NOT NULL, subject_type TEXT, subject_id TEXT, project_id INTEGER, args_json TEXT, outcome TEXT NOT NULL, dry_run INTEGER NOT NULL DEFAULT 0, confirmation_used INTEGER NOT NULL DEFAULT 0, snapshot TEXT, summary TEXT, detail_json TEXT, duration_ms INTEGER);`);
-  const confirmations = createConfirmationStore();
-  const hostCalls = [];
-  let n = 0;
-  const ctx = {
-    getDb: () => d, logAudit: () => {}, getSetting: () => null, setSetting: () => {}, toolResult, uuidv4: () => `fwd-${(n += 1)}`, policy: POLICY, confirmations,
-    runHostCapture: async (bin, args) => { hostCalls.push([bin, ...args]); return { status: 0, stdout: '', stderr: '' }; },
-    runInContainer: async () => ({ status: 0, stdout: '', stderr: '' }), readContainerStartup: async () => null, agentCall: async () => { throw new Error('no agent'); }, publicBaseUrl: () => 'https://pp.test',
-    LXC_PREFIX: 'pp-', LXC_NAME_REGEX: /^[a-zA-Z0-9][a-zA-Z0-9-]*$/, LXC_CMD_POLICY: LXC_POLICY, LXC_LIST_CAPTURE_CAP: 1 << 24,
-    validLxcFilePath: (p) => p, validTargetDir: (p) => (String(p || '').startsWith('/') ? String(p) : null),
-    takeLxcSnapshot: async () => { throw new Error('the config verbs never call takeLxcSnapshot'); }, fetchLxcInstance: async (nm) => { const i = state.instances.find((x) => x.name === nm); return i ? { instance: i } : { notFound: true }; },
-    lxcContainerDetail, lxcReachableAddress: () => null,
-    defaultSnapshotName: (dt, p = 'pp-mcp') => `${p}-20260926-120000`, validSnapshotName: (s) => (/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(String(s || '')) ? String(s) : null), snapshotArgv: (v, i, s) => ['snapshot', v, i, s], resolveSnapshotCliForm: async () => 'subcommand',
-    verifiedContainerWrite: async () => ({}), takeUploadTicket: async () => { throw new Error('no ticket'); },
-    findOrCreateLxcService: (dbx, name, ip) => { const ex = dbx.prepare(`SELECT * FROM services WHERE lxc_container_name = ? AND is_admin = 0`).get(name); if (ex) return ex; dbx.prepare(`INSERT INTO services (id, name, target_ip, lxc_container_name) VALUES (?, ?, ?, ?)`).run(`svc-${name}`, name, ip, name); return dbx.prepare(`SELECT * FROM services WHERE id = ?`).get(`svc-${name}`); },
-    syncLxcServiceUpstream: async () => ({}), regenerateDomainCaddyConfig: async () => {}, ensureCaddyStructure: async () => {},
-    assertRoutesShareSslStance: () => {}, caddyAdapt: async () => {}, caddyReload: async () => {}, normalizePathPrefix: (v) => v || '/',
-    validDomainName: (s) => s, normalizePort: (p) => Number(p) || null, validIpv4: (s) => s, ROUTE_SELECT: 'SELECT 1', routeView: (r) => r, certInfoForDomain: async () => ({}), recentErrorsForDomain: async () => null,
-    caddyAccessLogPath: (x) => x, summarizeAccessLog: () => ({}), getStaticSite: () => null, staticSiteDomains: () => [], SERVICES_DATA_DIR: '/data/services', walkDocroot: async () => ({ files: [] }),
-    mock2Enabled: () => true, mock2Modules: async () => ({}), projectContainerName: () => 'pp-x', requireActiveProject: () => ({ project: { id: 1, name: 'demo' } }),
-    liveBuildGuard: () => null, commitProjectPaths: async () => ({}), readProjectText: async () => ({ error: 'x' }), M2_APP_DIR: '/srv/app', projectUrl: () => null, projectSummary: (p) => p,
-    appendProjectChangeRecord: async () => ({ appended: true, seq: 1 }),
-    selfUpdateInstalled: async () => ({ reachable: false }), selfUpdateStart: async () => { throw new Error('off'); }, selfUpdateStatus: async () => ({ status: 'idle' }), SELF_UPDATE_POLICY: { enabled: true },
-    mintMcpToken: () => 'ppmcp_' + 'a'.repeat(64), hashMcpToken: (tk) => `h:${tk}`, MCP_TOOL_NAMES: () => MCP_TOOLS.map((x) => x.name), dbPath: '/tmp/pp.db', listBackupsRunning: null,
-  };
-  const ledger = () => d.prepare(`SELECT * FROM mcp_ledger ORDER BY id`).all();
-  return { ctx, ledger, confirmations, hostCalls };
-}
 function mcpStore(d, h) { configureContainerLockStore({ getDb: () => d, owner: BACKEND, env: { SETUP_EXECUTOR_POLICY: 'backend-allowed' }, guestExec: exec(h), hostExec: h.host, reviewLogin: async () => LOGIN }); }
 
 test('MCP set_lxc_resources / add_lxc_device / remove_lxc_device: dry_run and the confirm gate as before; the job is bound to the guest\'s identity, takes the planned snapshot first and reads every value back; the tool itself issues no incus command; the ledger row names the job and the snapshot; a guest replaced between the read and the job is refused', async (t) => {
@@ -871,30 +775,31 @@ test('MCP set_port_forward add / remove: the row is the tool\'s (a backend step)
   assert.equal(dry.would.listen, '50000-50100'); assert.equal(d.prepare(`SELECT count(*) AS n FROM service_l4_forwards`).get().n, 0);
   const add = parse(await tools.set_port_forward({ container: 'x', protocol: 'udp', listen_port: 50000, listen_port_end: 50100, connect_port: 50000, description: 'media', confirm: true }, AUTH));
   assert.equal(add.added, true, JSON.stringify(add)); assert.equal(add.forward_id, 'fwd-1'); assert.ok(add.job_id); assert.equal(add.verified, true);
-  assert.deepEqual(add.reconcile.applied, [{ id: 'fwd-1', status: 'applied', detail: { incus: 'applied', firewall: 'applied' } }]); assert.deepEqual(add.reconcile.reservedPorts, { state: 'done', value: '50000-50100', file: true, live: true });
+  assert.deepEqual(add.reconcile.applied, [{ id: 'fwd-1', status: 'applied', detail: { incus: 'applied', firewall: 'applied', policy: 'already' } }]); assert.deepEqual(add.reconcile.reservedPorts, { state: 'done', value: '50000-50100', file: true, live: true });
   assert.deepEqual(hostCalls, []);
   const m = mutations(h);
   assert.deepEqual(m[0], ['incus', 'config', 'device', 'add', 'pp-x', 'ppl4-fwd-1', 'proxy', 'listen=udp:0.0.0.0:50000-50100', 'connect=udp:10.10.10.5:50000-50100']);
   assert.deepEqual(m[1], [PROXYPILOT_BIN, '--json', 'firewall', 'add-service-l4', '--id', 'service-l4-fwd-1', '--port', '50000', '--proto', 'udp', '--reason', 'media', '--port-end', '50100', '--service', 'x']);
   assert.equal(readFileSync(path, 'utf8'), reservedPortsBody('50000-50100'));
-  const job = getJob(d, add.job_id); assert.equal(job.kind, 'forward_apply'); assert.deepEqual(parseJson(job.plan_json).params.reserved, [[50000, 50100]]);
-  assert.equal(d.prepare(`SELECT count(*) AS n FROM service_l4_forwards WHERE id = 'fwd-1'`).get().n, 1);
+  const job = getJob(d, add.job_id); assert.equal(job.kind, 'forward_apply'); assert.equal(parseJson(job.plan_json).params.reserved, undefined, 'no aggregate in the plan'); assert.equal(parseJson(job.plan_json).params.serviceId, 'svc-x');
+  assert.equal(d.prepare(`SELECT count(*) AS n FROM service_l4_forwards WHERE id = 'fwd-1'`).get().n, 1, 'the row written by the job');
+  assert.ok(listEvents(d, add.job_id).some((e) => /record forward fwd-1 in service_l4_forwards/.test(e.message || '')), 'the row step on the record');
   assert.equal(JSON.parse(ledger().find((r) => r.tool === 'set_port_forward' && r.outcome === 'ok').detail_json).job_id, add.job_id);
-  // A definite failure at the firewall: the row is rolled back, the response says what the host holds.
+  // A definite failure at the firewall: the JOB rolls the row and this attempt's device back; the response names the disposition.
   st.fwAddFails = true; h.calls.length = 0;
   const fail = parse(await tools.set_port_forward({ container: 'x', protocol: 'tcp', listen_port: 7881, connect_port: 7881, confirm: true }, AUTH));
-  assert.match(fail.error, /L4 apply failed: .*panic mode.* \(applied before it: device\); not run: reserved \(job .*\) — the forward row was rolled back/);
-  assert.equal(fail.applied.device.state, 'done'); assert.equal(fail.applied.rule.state, 'failed'); assert.equal(fail.row_kept, false);
+  assert.match(fail.error, /L4 apply failed: .*panic mode.* \(applied before it: row, device\); not run: reconcile, reserved; rolled back: row removed, device removed, rule absent \(job .*\)/);
+  assert.equal(fail.applied.device.state, 'done'); assert.equal(fail.applied.rule.state, 'failed'); assert.equal(fail.row_kept, false); assert.equal(fail.row.state, 'rolled_back'); assert.equal(fail.rollback.device, 'removed');
   assert.equal(d.prepare(`SELECT count(*) AS n FROM service_l4_forwards WHERE id = 'fwd-2'`).get().n, 0);
-  assert.equal(st.instances[0].devices['ppl4-fwd-2']?.type, 'proxy', 'the device the response names is still on the host for the reconciler');
+  assert.equal(st.instances[0].devices['ppl4-fwd-2'], undefined, 'no host resource without its row');
   st.fwAddFails = false;
   // List, then remove: the row goes, the job clears the host and the reservation.
   const list = parse(await tools.set_port_forward({ container: 'x', action: 'list' }, AUTH)); assert.deepEqual(list.forwards.map((f) => f.id), ['fwd-1']);
   h.calls.length = 0;
   const rm = parse(await tools.set_port_forward({ container: 'x', action: 'remove', forward_id: 'fwd-1', confirm: true }, AUTH));
-  assert.equal(rm.removed, true, JSON.stringify(rm)); assert.equal(rm.forward.id, 'fwd-1'); assert.ok(rm.job_id); assert.deepEqual(rm.reconcile.applied, [{ id: 'fwd-1', status: 'removed', detail: { incus: 'done', firewall: 'done' } }]);
+  assert.equal(rm.removed, true, JSON.stringify(rm)); assert.equal(rm.forward.id, 'fwd-1'); assert.ok(rm.job_id); assert.deepEqual(rm.reconcile.applied, [{ id: 'fwd-1', status: 'removed', detail: { incus: 'done', firewall: 'done', policy: 'already' } }]);
   assert.deepEqual(mutations(h), [['incus', 'config', 'device', 'remove', 'pp-x', 'ppl4-fwd-1'], [PROXYPILOT_BIN, '--json', 'firewall', 'remove-service-l4', 'service-l4-fwd-1'], ['rm', '-f', path], ['sysctl', '-p', '/etc/sysctl.conf']]);
-  assert.equal(existsSync(path), false); assert.deepEqual(parseJson(getJob(d, rm.job_id).plan_json).params.reserved, []);
+  assert.equal(existsSync(path), false); assert.equal(parseJson(getJob(d, rm.job_id).plan_json).params.reserved, undefined);
   assert.equal(d.prepare(`SELECT count(*) AS n FROM service_l4_forwards`).get().n, 0);
 });
 
@@ -905,7 +810,7 @@ test('MCP set_lxc_egress: allow and deny run as jobs under the firewall lease wi
   const tools = createExtendedHandlers(ctx).handlers;
   assert.match(parse(await tools.set_lxc_egress({ container: 'x', action: 'allow', service: 'smtp' }, AUTH)).error, /confirm: true/);
   const allow = parse(await tools.set_lxc_egress({ container: 'x', action: 'allow', service: 'smtp', reason: 'relay', confirm: true }, AUTH));
-  assert.equal(allow.applied, true, JSON.stringify(allow)); assert.deepEqual(allow.reconcile, { applied: true, checksum: 'c2', rejection: null }); assert.deepEqual(allow.allow, ['smtp']); assert.ok(allow.job_id);
+  assert.equal(allow.applied, true, JSON.stringify(allow)); assert.equal(allow.reconcile.applied, true); assert.equal(allow.reconcile.rejection, null); assert.deepEqual(allow.allow, ['smtp']); assert.ok(allow.job_id);
   assert.equal(allow.reverse_with, 'set_lxc_egress({ container: "x", action: "deny", service: "smtp", confirm: true })');
   assert.deepEqual(mutations(h), [[PROXYPILOT_BIN, '--json', 'firewall', 'egress', 'allow', 'x', 'smtp', '--reason', 'relay']]); assert.deepEqual(hostCalls, []);
   assert.equal(getJob(d, allow.job_id).kind, 'egress_set');
@@ -915,7 +820,7 @@ test('MCP set_lxc_egress: allow and deny run as jobs under the firewall lease wi
   assert.equal(deny.applied, true); assert.deepEqual(deny.allow, []); assert.deepEqual(st.egress, []);
   st.egressFails = true; h.calls.length = 0;
   const fails = parse(await tools.set_lxc_egress({ container: 'x', action: 'allow', service: 'dns', confirm: true }, AUTH));
-  assert.match(fails.error, /Egress allow failed: .*reconcile rejected/); assert.ok(fails.job_id);
+  assert.match(fails.error, /Egress allow failed: .*unknown service/); assert.ok(fails.job_id);
 });
 
 // ── 6. the rendered argv reaches the real host channel verbatim ───────────

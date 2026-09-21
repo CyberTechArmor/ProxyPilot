@@ -251,7 +251,7 @@ const identityOf = (expect) => (expect && (expect.uuid != null || expect.created
 // resolveConfigPlan(db, { kind, containerName, … }) → { ok, plan, params,
 // digest, retryJob } | { ok: false, error }. Pure: the plan is what a
 // confirmation is bound to, params what the job carries.
-export function resolveConfigPlan(db, { kind, containerName, expect = null, changes = null, rootSize = null, acknowledgeRisk = false, snapshot = null, device = null, deviceType = null, props = null, ip = null, previous = null, forward = null, bridgeIp = null, serviceTag = null, reserved = null, action = null, service = null, reason = null, retryOf = null }) {
+export function resolveConfigPlan(db, { kind, containerName, expect = null, changes = null, rootSize = null, acknowledgeRisk = false, snapshot = null, device = null, deviceType = null, props = null, ip = null, previous = null, forward = null, bridgeIp = null, serviceTag = null, serviceId = null, action = null, service = null, reason = null, retryOf = null }) {
   if (!CONFIG_JOB_KINDS.includes(kind)) return { ok: false, error: `unknown configuration operation '${kind}'` };
   const r = resolveRetryOf(db, { jobId: retryOf, app: containerName, kind });
   if (r.error) return { ok: false, error: r.error };
@@ -274,9 +274,8 @@ export function resolveConfigPlan(db, { kind, containerName, expect = null, chan
     case 'forward_apply': case 'forward_remove': {
       const f = forward || {};
       params.forward = { id: String(f.id || ''), proto: f.proto, listen: Number(f.listen), connect: Number(f.connect), ...(f.listenEnd != null ? { listenEnd: Number(f.listenEnd) } : {}), ...(f.connectEnd != null ? { connectEnd: Number(f.connectEnd) } : {}), ...(f.description ? { description: String(f.description) } : {}) };
-      if (kind === 'forward_apply') params.bridgeIp = String(bridgeIp || '');
+      if (kind === 'forward_apply') { params.bridgeIp = String(bridgeIp || ''); params.serviceId = String(serviceId || ''); }
       if (serviceTag) params.serviceTag = String(serviceTag);
-      params.reserved = Array.isArray(reserved) ? reserved.map((x) => [Number(x?.[0]), Number(x?.[1])]) : [];
       break;
     }
     case 'egress_set': params.action = String(action || ''); params.service = String(service || ''); if (reason) params.reason = String(reason); break;
@@ -291,7 +290,7 @@ export function resolveConfigPlan(db, { kind, containerName, expect = null, chan
     ...(kind === 'device_add' ? { device: params.device, type: params.deviceType, props: params.props } : {}),
     ...(kind === 'device_remove' ? { device: params.device } : {}),
     ...(kind === 'network_pin' ? { ip: params.ip, previous: params.previous || null } : {}),
-    ...(kind === 'forward_apply' || kind === 'forward_remove' ? { forward: params.forward, bridge_ip: params.bridgeIp || null, service_tag: params.serviceTag || null, reserved: params.reserved } : {}),
+    ...(kind === 'forward_apply' || kind === 'forward_remove' ? { forward: params.forward, bridge_ip: params.bridgeIp || null, service_tag: params.serviceTag || null, service_id: params.serviceId || null } : {}),
     ...(kind === 'egress_set' ? { action: params.action, service: params.service, reason: params.reason || null } : {}),
   };
   return { ok: true, plan, params, retryJob: r.job, digest: planDigest(plan) };

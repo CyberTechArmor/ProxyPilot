@@ -197,7 +197,8 @@ export function validateConfigParams(kind, p = {}) {
       break;
     }
     case 'forward_apply': case 'forward_remove': {
-      const bad = only(['container', 'expect', 'acknowledgeRisk', 'forward', 'bridgeIp', 'serviceTag', 'reserved']); if (bad) return { ok: false, reason: bad };
+      if (p.reserved != null) return { ok: false, reason: 'a forward job carries no reservation aggregate: the runner recomputes the reserved UDP ranges from the authoritative rows under the firewall lease' };
+      const bad = only(['container', 'expect', 'acknowledgeRisk', 'forward', 'bridgeIp', 'serviceTag', 'serviceId']); if (bad) return { ok: false, reason: bad };
       const f = p.forward;
       if (!isPlainObject(f)) return { ok: false, reason: 'forward must be the forward row\'s fields' };
       for (const k of Object.keys(f)) if (!['id', 'proto', 'listen', 'listenEnd', 'connect', 'connectEnd', 'description'].includes(k)) return { ok: false, reason: `forward.${k} is not a forward field` };
@@ -208,11 +209,14 @@ export function validateConfigParams(kind, p = {}) {
       if (f.connectEnd != null && (!isPort(f.connectEnd) || f.connectEnd < f.connect)) return { ok: false, reason: 'forward.connectEnd must be a port at or above connect' };
       if ((f.listenEnd != null) !== (f.connectEnd != null) || (f.listenEnd != null && (f.listenEnd - f.listen) !== (f.connectEnd - f.connect))) return { ok: false, reason: 'listen and connect port ranges must be the same width' };
       if (f.description != null && !text(f.description, DESCRIPTION_MAX)) return { ok: false, reason: `forward.description must be text of at most ${DESCRIPTION_MAX} characters` };
-      if (kind === 'forward_apply') { if (!IPV4_RE.test(String(p.bridgeIp || ''))) return { ok: false, reason: 'bridgeIp must be the guest\'s IPv4 address' }; }
-      else if (p.bridgeIp != null) return { ok: false, reason: 'a forward_remove job carries no bridgeIp' };
+      if (kind === 'forward_apply') {
+        if (!IPV4_RE.test(String(p.bridgeIp || ''))) return { ok: false, reason: 'bridgeIp must be the guest\'s IPv4 address' };
+        if (!FORWARD_ID_RE.test(String(p.serviceId || ''))) return { ok: false, reason: 'serviceId must be the services row the forward belongs to' };
+      } else {
+        if (p.bridgeIp != null) return { ok: false, reason: 'a forward_remove job carries no bridgeIp' };
+        if (p.serviceId != null) return { ok: false, reason: 'a forward_remove job carries no serviceId (the row names it)' };
+      }
       if (p.serviceTag != null && !SERVICE_TAG_RE.test(String(p.serviceTag))) return { ok: false, reason: 'serviceTag must be a service name' };
-      if (!Array.isArray(p.reserved) || p.reserved.length > MAX_RESERVED_RANGES) return { ok: false, reason: `reserved must be the list of UDP listen ranges to reserve (at most ${MAX_RESERVED_RANGES})` };
-      for (const r of p.reserved) if (!Array.isArray(r) || r.length !== 2 || !isPort(r[0]) || !isPort(r[1]) || r[1] <= r[0]) return { ok: false, reason: 'every reserved entry is [start, end] with end above start' };
       break;
     }
     case 'egress_set': {
@@ -257,6 +261,12 @@ export function firewallAddArgv(f, serviceTag = null) {
 }
 export function firewallRemoveArgv(id) { return [PROXYPILOT_BIN, '--json', 'firewall', 'remove-service-l4', forwardRuleId(id)]; }
 export function firewallListArgv() { return [PROXYPILOT_BIN, '--json', 'firewall', 'list']; }
+// The APPLIED policy's evidence (never the saved configuration): the last
+// recorded reconcile (`status`) against the desired ruleset's checksum
+// (`reconcile --dry-run`), and the reconcile itself when they differ.
+export function firewallStatusArgv() { return [PROXYPILOT_BIN, '--json', 'firewall', 'status']; }
+export function firewallDryRunArgv() { return [PROXYPILOT_BIN, '--json', 'firewall', 'reconcile', '--dry-run']; }
+export function firewallReconcileArgv() { return [PROXYPILOT_BIN, '--json', 'firewall', 'reconcile']; }
 export function egressArgv(container, action, service, reason = null) {
   const argv = [PROXYPILOT_BIN, '--json', 'firewall', 'egress', action, shortGuestName(container), String(service)];
   if (action === 'allow' && reason) argv.push('--reason', String(reason));
@@ -344,6 +354,41 @@ export function parseCliJson(stdout) {
   try { return JSON.parse(s); } catch { /* */ }
   const last = s.split('\n').filter((l) => l.trim()).pop();
   try { return JSON.parse(last); } catch { return null; }
+}
+// forwardRuleVerdict(list, forward, serviceTag, { present }) → the SAVED
+// rule compared property by property with the plan: its id alone proves
+// nothing (a rule under the expected id with another port is not this
+// forward's).
+export function forwardRuleVerdict(list, f, serviceTag, { present }) {
+  if (!Array.isArray(list)) return { ok: false, observed: 'unreadable', expected: present ? 'present' : 'absent' };
+  const id = forwardRuleId(f.id);
+  const rule = list.find((r) => r && r.id === id) || null;
+  if (!present) return { ok: !rule, observed: rule ? 'present' : 'absent', expected: 'absent' };
+  if (!rule) return { ok: false, observed: 'absent', expected: 'present' };
+  const want = { source: 'service-l4', proto: f.proto, port_start: Number(f.listen), port_end: f.listenEnd != null ? Number(f.listenEnd) : null, scope: 'public', service: serviceTag || null, enabled: true };
+  const have = { source: rule.source ?? null, proto: rule.proto ?? null, port_start: rule.port_start != null ? Number(rule.port_start) : null, port_end: rule.port_end != null ? Number(rule.port_end) : null, scope: rule.scope ?? 'public', service: rule.service ?? null, enabled: rule.enabled !== false };
+  const mismatched = Object.keys(want).filter((k) => want[k] !== have[k]).map((k) => `${k}=${have[k] === null ? '(unset)' : have[k]}`);
+  return { ok: mismatched.length === 0, observed: mismatched.length ? `present with other properties (${mismatched.join(', ')})` : 'present', expected: 'present', mismatched };
+}
+// reconcileEvidence(statusJson, dryRunJson) → is the SAVED configuration the
+// APPLIED policy? Only a recorded, applied reconcile whose checksum is the
+// desired ruleset's checksum says so.
+export function reconcileEvidence(status, dry) {
+  const last = status && status.last_reconcile ? status.last_reconcile : null;
+  const desired = dry && dry.ok !== false && dry.checksum ? String(dry.checksum) : null;
+  if (!desired) return { ok: false, observed: dry && dry.rejection ? `the desired ruleset cannot be applied: ${dry.rejection.reason || dry.rejection}` : 'the desired ruleset\'s checksum is unreadable', desired: null, last };
+  if (!last) return { ok: false, observed: 'no reconcile recorded', desired, last };
+  const applied = Number(last.applied) === 1 && !last.rejection_reason;
+  const same = String(last.ruleset_checksum || '') === desired;
+  return { ok: applied && same, observed: applied && same ? `applied (${desired.slice(0, 12)})` : !applied ? `the last reconcile was rejected (${last.rejection_reason || 'not applied'})` : `the applied ruleset (${String(last.ruleset_checksum || '').slice(0, 12)}) is not the saved one (${desired.slice(0, 12)})`, desired, last };
+}
+// firewallCliResult(r) → what the CLI's JSON says about a write: the
+// configuration SAVED (a rule or payload echoed) and the reconcile it ran.
+export function firewallCliResult(r) {
+  const j = parseCliJson(r?.stdout);
+  const reconcile = j && j.reconcile ? { applied: j.reconcile.applied === true, checksum: j.reconcile.checksum ?? null, rejection: j.reconcile.rejection ? (j.reconcile.rejection.reason || String(j.reconcile.rejection)) : null } : null;
+  const saved = !!j && (j.rule != null || j.payload != null || j.already_absent === true || (j.ok === true && !j.reconcile_error));
+  return { json: j, reconcile, saved };
 }
 export function ruleVerdict(list, ruleId, { present }) {
   if (!Array.isArray(list)) return { ok: false, observed: 'unreadable', expected: present ? 'present' : 'absent' };

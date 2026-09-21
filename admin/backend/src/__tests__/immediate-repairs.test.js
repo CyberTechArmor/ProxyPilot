@@ -292,8 +292,6 @@ test('ratchet (A-17.8): the guest configuration verbs and their pre-mutation sna
   assert.doesNotMatch(lxcAdmin, /runHostCapture\('incus', \['config', 'set'/, 'no config set in a tool');
   assert.doesNotMatch(lxcAdmin, /runHostCapture\('incus', \['config', 'device', '(add|remove|override)'/, 'no device add / remove / override in a tool (the clone\'s eth0 unset is the transport group\'s)');
   assert.doesNotMatch(lxcAdmin, /reconcileServiceL4Forwards|proxypilotCli\(\['egress', action/, 'no L4 reconcile and no egress write from a tool; the read (get_lxc_egress) keeps its CLI read');
-  assert.match(lxcAdmin, /db\.prepare\(`INSERT INTO service_l4_forwards/, 'the row stays the tool\'s own backend step');
-  assert.match(lxcAdmin, /if \(!unobserved\) db\.prepare\(`DELETE FROM service_l4_forwards WHERE id = \?`\)\.run\(id\);/, 'a definite failure rolls the row back as before');
   // The engine side: fixed argv only, from the plan; the one host script is the reserved-ports write with positional arguments; every read goes through the lease-renewing runner.
   const op = src('lib/setup-engine/config-op.js');
   assert.doesNotMatch(op, /'sh', '-c'|spawn\(|execOnHost|runHostCapture|nsenter|exec\.guest\(/, 'the executor\'s host channel only; no shell of its own');
@@ -301,12 +299,22 @@ test('ratchet (A-17.8): the guest configuration verbs and their pre-mutation sna
   assert.match(op, /if \(held && !lease\.renew\(HOST_FIREWALL_LOCK\)\) throw new SharedLeaseLostError\(HOST_FIREWALL_LOCK, `after \$\{issuedUnderLease\} command\(s\)`\);/, 'every command under the shared lease renews it first');
   assert.match(op, /mark\('issuing', cp\(\{ issued: true, snapshot, applied \}\), `issuing \$\{kind\} for \$\{name\} \(\$\{step\.key\}\)`, \{ required: true \}\);/, 'the checkpoint before the first write is mandatory');
   assert.match(op, /const c = await createSnapshotWithFallback\(host, name, want, \{ timeoutMs: TIMEOUTS\.snapshot \}\);\n\s+if \(!c\.ok\) return fail\('protect'/, 'a failed snapshot prevents the change');
-  assert.match(op, /if \(recorded && \(!recorded\.created_at \|\| recorded\.created_at === found\.created_at\)\) \{/, 'a recorded snapshot is reused only by name AND timestamp');
+  assert.match(op, /if \(found && recorded && \(!recorded\.created_at \|\| recorded\.created_at === found\.created_at\)\) \{/, 'a recorded snapshot is reused only by name AND timestamp');
   const logic = src('lib/setup-engine/config-logic.js');
   assert.match(logic, /p\.command != null \|\| p\.script != null \|\| p\.argv != null \|\| p\.args != null \|\| p\.options != null/);
   assert.equal((logic.match(/'sh', '-c'/g) || []).length, 1, 'one fixed host script: the reserved-ports write');
   assert.match(logic, /export function reservedWriteArgv\(body, path = RESERVED_PORTS_PATH\) \{ return \['sh', '-c', RESERVED_WRITE_SCRIPT, 'sh', Buffer\.from\(String\(body\), 'utf8'\)\.toString\('base64'\), String\(path\)\]; \}/, 'its arguments are the rendered body and the constant path');
   assert.match(logic, /if \(RISK_ACKNOWLEDGED_KEYS\[c\.key\] === c\.value && p\.acknowledgeRisk !== true\)/, 'the runner re-checks the risk acknowledgement');
+  // The review of ad1a638 (R-050…R-052): the row is the job's, the applied policy is verified separately from the saved configuration, the original snapshot is verified before any remaining write.
+  assert.doesNotMatch(lxcAdmin, /INSERT INTO service_l4_forwards|DELETE FROM service_l4_forwards/, 'the tool never writes the forward row: the job does, under the leases');
+  assert.match(op, /key: 'row', label: apply \? `record forward \$\{f\.id\} in service_l4_forwards`/, 'the row is the job\'s first step');
+  assert.match(op, /key: 'reconcile', label: 'apply the saved firewall configuration \(reconcile\)'/, 'the applied policy is its own step');
+  assert.match(op, /const ok = after\.ok && r\.code === 0;/, 'done needs the command AND the read-back');
+  assert.match(op, /const plan = reservedPlan\(store\.reservedRanges\(\)\);/, 'the reservation aggregate comes from the rows at execution time');
+  assert.match(logic, /if \(p\.reserved != null\) return \{ ok: false, reason: 'a forward job carries no reservation aggregate/);
+  assert.match(logic, /export function forwardRuleVerdict\(list, f, serviceTag, \{ present \}\)/); assert.match(logic, /export function reconcileEvidence\(status, dry\)/);
+  assert.match(op, /\} else if \(writeBegun\) \{/, 'after a write has begun the original snapshot must verify'); assert.match(op, /if \(!mutate\) \{/, 'no remaining write without it');
+  assert.match(op, /rollback = await settleForward\(/, 'the failed apply\'s disposition is the job\'s');
   assert.match(src('lib/setup-engine/logic.js'), /EXCLUSIVE_JOB_KINDS = Object\.freeze\(\['restore_db', 'restore_snapshot', \.\.\.LIFECYCLE_JOB_KINDS, \.\.\.SETUP_JOB_KINDS, \.\.\.CONFIG_JOB_KINDS\]\)/);
   const executor = src('lib/setup-engine/executor.js');
   assert.match(executor, /keepAlive = setInterval\(\(\) => \{ try \{ const gone = renewAll\(\); if \(gone\) lost = gone; \}/, 'the claim, the guest\'s lease and every held shared lease are heart-beaten during a long command');

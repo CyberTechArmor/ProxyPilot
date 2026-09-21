@@ -989,7 +989,9 @@ export async function retryDeploy({ project, cycle }) {
         // production mode without them).
         try {
           // Under the container lock: the environment file is read-modify-write.
-          const secrets = await withContainerLock(containerName, 'retry-secrets', () => ensureComponentSecrets({ containerName, rows: listProjectComponents(projectId) }));
+          const secrets = await withContainerLock(containerName, 'retry-secrets', () => ensureComponentSecrets({ containerName, rows: listProjectComponents(projectId) }), {
+            job: { kind: 'retry-secrets', plan: { steps: ['mint_missing_secrets'], params: { container: containerName } }, configRefs: { environmentFile: '/etc/environment' }, via: 'system' },
+          });
           if (secrets.minted.length) {
             insertMessage({
               projectId, kind: 'system', cycleId: cycle.id,

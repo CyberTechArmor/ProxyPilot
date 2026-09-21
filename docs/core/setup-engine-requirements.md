@@ -72,12 +72,19 @@ process environment.
 1. **Non-destructive root recovery command** that preserves data and
    encryption keys, tested independently of the dashboard (replaces the
    destructive `reset.sh` path recorded in `docs/known-issues.md`).
+   **Implemented** (`proxypilot recover`, `docs/features/root-recovery.md`);
+   host acceptance outstanding. Progress ledger:
+   `docs/core/setup-engine-ledger.md`.
 2. **Independent host runner**, with the planned privilege separation: the
    runner, not the privileged backend container, is what executes host
-   operations.
+   operations. **Implemented** for recovery and verification
+   (`proxypilot setup-runner`, `deploy/proxypilot-setup-runner.service`,
+   `docs/features/setup-engine.md`); the backend container's own reach is
+   unchanged and is inventoried in the ledger.
 3. **Persistent setup engine and shared locks that survive backend
    restarts** (R1, R2, R4): saved operations, resumption or recorded recovery
-   on start.
+   on start. **Implemented** (migration 1000, `lib/setup-engine`, the
+   container lock's persistent backing, the boot sweep, `/api/setup`).
 4. **Setup APIs and the frontend wizard** (R3, R4): progress, deferred
    actions, retries and recovery states. Server-side state only: the browser
    never declares an installation fresh or an operation complete.
@@ -86,9 +93,10 @@ process environment.
    followed by **app provisioning automation** (registry, shared
    integrations, coordinated lifecycle).
 
-The persistent runner (2–3) is the main development focus once gate one's
-last check is resolved; the real-host acceptance work for gate one runs
-separately from these code milestones.
+Deliverables 1–3 have code and executable tests in the tree; their
+live-host acceptance is listed separately in the ledger and in each feature
+doc. The real-host acceptance work for gate one runs separately from these
+code milestones.
 
 ## Status
 

@@ -772,5 +772,78 @@ sshPasswordAuth
     await sshPasswordAuthDisableCommand(opts, globalOpts);
   });
 
+// ── recover command group ───────────────────────────────────────────────────
+// Non-destructive root recovery (docs/features/root-recovery.md): restore one
+// local administrator's access in the live database; nothing else changes.
+import { recoverAdminCommand, recoverStatusCommand } from '../src/commands/recover.js';
+
+const recover = program
+  .command('recover')
+  .description('Root recovery: restore a local administrator without touching data or keys');
+
+recover
+  .command('status')
+  .description('Show every account\'s standing (who is recoverable, locked, directory-backed, or passwordless)')
+  .option('--install-dir <dir>', 'ProxyPilot install root (default /opt/proxypilot)')
+  .option('--env <file>', 'The .env to read DATABASE_PATH and DOMAIN from (default <install-dir>/.env)')
+  .option('--db <file>', 'Backend database path (overrides the .env)')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    process.exitCode = await recoverStatusCommand(opts, globalOpts);
+  });
+
+recover
+  .command('admin <username>')
+  .description('Restore access for ONE local administrator; preserves all other accounts, data and keys')
+  .option('--password', 'Set a new password (generated and shown once unless --password-file/--password-stdin); change required at next login')
+  .option('--password-file <file>', 'Read the new password from a file (never pass it on the command line)')
+  .option('--password-stdin', 'Read the new password from stdin')
+  .option('--totp', 'Clear the second factor so the next password login enrols a new authenticator')
+  .option('--unlock', 'Clear the failed-attempt lockout')
+  .option('--passkeys', 'Delete the account\'s passkeys')
+  .option('--revoke-mcp-keys', 'Revoke the MCP keys this account minted')
+  .option('--promote', 'Make a user/pending local account an administrator as part of the recovery')
+  .option('--create', 'Create a NEW local administrator with this name (for an all-directory installation whose directory is down)')
+  .option('--dry-run', 'Print the plan and change nothing')
+  .option('--yes', 'Apply without the typed confirmation (required when there is no terminal)')
+  .option('--no-backup', 'Skip the VACUUM INTO copy of the database taken before writing')
+  .option('--install-dir <dir>', 'ProxyPilot install root (default /opt/proxypilot)')
+  .option('--env <file>', 'The .env to read DATABASE_PATH and DOMAIN from (default <install-dir>/.env)')
+  .option('--db <file>', 'Backend database path (overrides the .env)')
+  .action(async (username, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    process.exitCode = await recoverAdminCommand(username, opts, globalOpts);
+  });
+
+// ── setup-runner command group ──────────────────────────────────────────────
+// The independent host runner (docs/features/setup-engine.md): root, outside
+// the dashboard container, acting on the setup jobs the API only records.
+import { setupRunnerCommand } from '../src/commands/setup-runner.js';
+
+const setupRunner = program
+  .command('setup-runner')
+  .description('Host runner for setup jobs: recover and verify apps, reconcile dead leases');
+
+for (const [name, desc] of [
+  ['serve', 'Run the loop: reconcile on start and every minute, poll the queue (what proxypilot-setup-runner.service runs)'],
+  ['once', 'Reconcile, drain the queued runner jobs, exit'],
+  ['reconcile', 'Record what dead holders left (queue recoveries, release untouched leases), exit'],
+  ['status', 'Show locks (with stale flags) and recent jobs'],
+]) {
+  setupRunner
+    .command(name)
+    .description(desc)
+    .option('--install-dir <dir>', 'ProxyPilot install root (default /opt/proxypilot)')
+    .option('--env <file>', 'The .env to read DATABASE_PATH from (default <install-dir>/.env)')
+    .option('--db <file>', 'Backend database path (overrides the .env)')
+    .option('--poll-ms <ms>', 'serve: queue poll interval (default 2000)')
+    .option('--max <n>', 'once: at most this many jobs (default 5)')
+    .option('--limit <n>', 'status: recent jobs to show (default 20)')
+    .action(async (opts, cmd) => {
+      const globalOpts = cmd.optsWithGlobals();
+      process.exitCode = await setupRunnerCommand(name, opts, globalOpts);
+    });
+}
+
 // ── parse and execute ───────────────────────────────────────────────────────
 program.parseAsync(process.argv);

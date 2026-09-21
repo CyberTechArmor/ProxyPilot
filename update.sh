@@ -1279,6 +1279,70 @@ install_update_runner() {
 install_update_runner
 log ""
 
+# Setup runner — the independent host runner for setup jobs
+# (docs/features/setup-engine.md): a root systemd service that recovers and
+# verifies managed apps and reconciles leases a crashed backend left behind.
+# Runs the installed CLI (/usr/local/bin/proxypilot setup-runner serve), so it
+# is installed after the CLI below is refreshed; the unit is enabled and
+# restarted whenever its file changed.
+install_setup_runner() {
+    local unit="proxypilot-setup-runner.service"
+    local src="${SCRIPT_DIR}/deploy/${unit}"
+    if [[ ! -f "$src" ]]; then
+        log "${YELLOW}deploy/${unit} not found; skipping setup runner install${NC}"
+        return 0
+    fi
+    if [ "$EUID" -ne 0 ]; then
+        log "${YELLOW}Not root; skipping setup runner install${NC}"
+        return 0
+    fi
+    local changed=false
+    if ! cmp -s "$src" "/etc/systemd/system/${unit}" 2>/dev/null; then
+        cp "$src" "/etc/systemd/system/${unit}"
+        chmod 0644 "/etc/systemd/system/${unit}"
+        changed=true
+        systemctl daemon-reload
+        log "Installed setup runner unit: ${unit}"
+    fi
+    if ! systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+        systemctl enable "$unit" 2>&1 | tee -a "$LOG_FILE"
+    fi
+    # The runner imports the backend's pure modules from this checkout's copy
+    # under the install dir; restart it so a changed runner or a changed rule
+    # is what runs. Its first act on start is the reconcile.
+    if [ "$changed" = true ] || ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+        systemctl restart "$unit" 2>/dev/null || true
+    fi
+    # The executor policy follows the EVIDENCE, retro-fitted once: an
+    # installation whose runner unit is active and can open the database
+    # requires the runner from now on. If the runner did not come up, the
+    # line is NOT written (the legacy in-process executor keeps working) and
+    # the failure is printed in red with the fix. A line that already exists
+    # is never rewritten: an operator's explicit choice stands.
+    local env_file="${INSTALL_DIR:-/opt/proxypilot}/.env" runner_ok=false i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then runner_ok=true; break; fi
+        sleep 1
+    done
+    if [ "$runner_ok" = true ] && ! /usr/local/bin/proxypilot setup-runner status --install-dir "${INSTALL_DIR:-/opt/proxypilot}" --json >/dev/null 2>&1; then
+        runner_ok=false
+    fi
+    if [ "$runner_ok" = true ]; then
+        log "${GREEN}Setup runner ready (${unit} active)${NC}"
+        if [ -f "$env_file" ] && ! grep -q '^SETUP_EXECUTOR_POLICY=' "$env_file" 2>/dev/null; then
+            printf '\n# Who executes setup jobs (docs/features/setup-engine.md § "Who executes").\nSETUP_EXECUTOR_POLICY=runner-required\n' >> "$env_file"
+            log "Recorded SETUP_EXECUTOR_POLICY=runner-required in ${env_file}"
+        fi
+    else
+        log "${RED}Setup runner did NOT start or cannot open the database (systemctl status ${unit}; journalctl -u ${unit}).${NC}"
+        if grep -q '^SETUP_EXECUTOR_POLICY=runner-required' "$env_file" 2>/dev/null; then
+            log "${RED}This installation REQUIRES the runner: every deploy will queue until it is running.${NC}"
+        else
+            log "${YELLOW}SETUP_EXECUTOR_POLICY was not set to runner-required: the dashboard container keeps executing deploys itself until the runner works and the line is added to ${env_file}.${NC}"
+        fi
+    fi
+}
+
 # Detect Docker deployment so we can skip the host-side backend npm
 # install. node-pty's prebuild falls back to node-gyp rebuild on hosts
 # without make/g++, which prints a noisy gyp ERR! block even though the
@@ -1367,6 +1431,7 @@ if [[ -d "$SCRIPT_DIR/cli" ]]; then
 exec /usr/bin/env node "${SCRIPT_DIR}/cli/bin/proxypilot.js" "\$@"
 EOF
     chmod 0755 /usr/local/bin/proxypilot
+    install_setup_runner
     cd "$SCRIPT_DIR"
 
     if [[ -x "$SCRIPT_DIR/scripts/install-firewall.sh" ]]; then

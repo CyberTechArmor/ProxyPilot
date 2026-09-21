@@ -43,10 +43,12 @@ tab is not evidence of anything below.
    security key) will be refused, with a message saying so; every signed-in
    admin re-proves once before their next destructive action; a passkey
    login no longer counts as that re-proof.
-5. **Know that the non-destructive root recovery command does not exist
-   yet.** `reset.sh` is destructive and targets the legacy database path
-   (`docs/known-issues.md`). If step 2 fails, fix that before updating, not
-   after.
+5. **Know the recovery command.** `sudo proxypilot recover admin <name>
+   --password --totp` restores one local administrator without touching
+   data or keys (`docs/features/root-recovery.md`); `reset.sh` now delegates
+   to it. It ships with this update, so on the version you are updating
+   *from* it does not exist yet: if step 2 fails, fix that before updating,
+   not after.
 
 After the update, repeat step 2 in a fresh browser: local login, sudo
 re-proof, and if you use passkeys, a passkey login followed by a separate
@@ -189,15 +191,15 @@ writes `auth_connections` in normal operation, and nothing else does:
 
 The lock is checked server-side, so it applies to the dashboard, the CLI and
 MCP alike, and the operation that does the work holds it for its whole
-lifetime — the request that asked for it does not. It is an **in-process**
-lock: it serializes within one backend process and **does not survive a
-backend restart**. A deploy orphaned by a restart is not resumed; the next
-deploy's first action is `pkill -9 -f mock2_deploy_marker` inside the guest,
-which reaps the orphan's scripts before anything else runs, so two deploys do
-not overlap even across a restart — but a restart mid-deploy can still leave
-the app stopped until that next deploy or a manual `systemctl start`. Recovery
-without waiting for another deploy, and a restart-safe lock, are the setup
-engine's first requirements (`docs/core/setup-engine-requirements.md`).
+lifetime — the request that asked for it does not. Since gate two
+(`docs/features/setup-engine.md`) it is **persistent**: the in-process chain
+still serializes callers inside one backend, and the same call also holds a
+lease row in the database that survives a restart. A lease whose holder died
+is a recorded condition that refuses every new operation on that app until
+the host runner has recovered it — a restart mid-deploy no longer leaves the
+app stopped until the next deploy. The next deploy's first action is still
+`pkill -9 -f mock2_deploy_marker` inside the guest, which reaps an orphan's
+scripts before anything else runs.
 
 **3. Failure recovery preserves a compatible set.** The build replaced
 `dist/` before the stop, and a key that protects stored data is persisted only

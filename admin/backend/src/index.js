@@ -10,6 +10,10 @@ import { dirname, join } from 'path';
 import { existsSync, statSync, readFileSync } from 'fs';
 import { initDatabase, getDb, getSetting, setSetting, logAudit } from './db.js';
 import { noteCompletedUpdateOnBoot } from './lib/self-update.js';
+import { configureContainerLockStore } from './mock2/container-lock.js';
+import { backendOwner, sweepSetupEngineOnBoot } from './lib/setup-engine/backend.js';
+import { executorPolicy } from './lib/setup-engine/logic.js';
+import { setupRouter } from './routes/setup.js';
 import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
@@ -264,6 +268,49 @@ app.use('/api/', csrfProtection);
 
 // Initialize database
 initDatabase();
+// Setup engine (gate two): the container lock's persistent lease + job rows,
+// and the boot sweep that records what a predecessor left running.
+configureContainerLockStore({ getDb, owner: backendOwner() });
+try {
+  const swept = sweepSetupEngineOnBoot(getDb());
+  if (swept.interrupted.length || swept.recoveryQueued.length) console.warn('[setup-engine] boot sweep:', JSON.stringify(swept));
+} catch (err) {
+  console.error('[setup-engine] boot sweep failed:', err?.message || err);
+}
+// Who executes setup jobs is the installation's policy (SETUP_EXECUTOR_POLICY,
+// docs/features/setup-engine.md § "Who executes"). Under `backend-allowed`
+// (legacy / development) and only while no host runner is live, this process
+// drains queued runner jobs itself — on boot and every 30 s — with the same
+// executor the runner uses. Under `runner-required` it never does.
+{
+  const policy = executorPolicy();
+  console.log(`[setup-engine] executor policy: ${policy.mode} (${policy.source})${policy.note ? ` — ${policy.note}` : ''}`);
+  const drain = async () => {
+    try {
+      const { drainInProcessNow } = await import('./mock2/deploy.js');
+      const r = await drainInProcessNow();
+      if (r.ran?.length) console.log('[setup-engine] in-process executor ran:', r.ran.map((j) => `${j.kind} ${j.app} ${j.status}`).join(', '));
+    } catch (err) { console.error('[setup-engine] in-process drain failed:', err?.message || err); }
+  };
+  if (policy.mode === 'backend-allowed') {
+    setTimeout(drain, 15_000).unref();
+    setInterval(drain, 30_000).unref();
+  } else {
+    // runner-required: nothing executes here. Say so, loudly and repeatedly,
+    // while no runner heartbeats — every deploy is queueing meanwhile.
+    const watch = async () => {
+      try {
+        const { runnerAvailable } = await import('./lib/setup-engine/backend.js');
+        if (!runnerAvailable(getDb())) {
+          const queued = getDb().prepare(`SELECT COUNT(*) AS n FROM setup_jobs WHERE status = 'queued'`).get()?.n || 0;
+          console.warn(`[setup-engine] policy runner-required but no host runner heartbeat: ${queued} queued job(s) wait; check 'systemctl status proxypilot-setup-runner' and 'journalctl -u proxypilot-setup-runner'`);
+        }
+      } catch (err) { console.error('[setup-engine] runner watch failed:', err?.message || err); }
+    };
+    setTimeout(watch, 60_000).unref();
+    setInterval(watch, 5 * 60_000).unref();
+  }
+}
 
 // Sweep orphan in_progress backup rows.  The create-backup
 // route inserts a row in 'in_progress' immediately, then packs +
@@ -486,6 +533,7 @@ app.use('/api/cves', authenticateToken, blockPendingRole, cvesRouter);
 app.use('/api/housekeeping', authenticateToken, blockPendingRole, housekeepingRouter);
 app.use('/api/backups', authenticateToken, blockPendingRole, backupsRouter);
 app.use('/api/storage', authenticateToken, blockPendingRole, storageRouter);
+app.use('/api/setup', authenticateToken, blockPendingRole, setupRouter);
 // Migrations: the agent half is authenticated by the single-use migration
 // token in its own path and carries no session, so it is mounted BEFORE the
 // operator half (Express matches in mount order) and outside authenticateToken.

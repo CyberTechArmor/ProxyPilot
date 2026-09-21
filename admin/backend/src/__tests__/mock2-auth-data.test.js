@@ -39,8 +39,16 @@ test('authDataProbeScript: connects exactly as the app does (user, password via 
   assert.match(s, /command -v psql/);
   assert.match(s, /\. \/etc\/environment/);
   assert.match(s, /DATABASE_URL:-postgres:\/\/app:app@127\.0\.0\.1:5432\/app/);
-  // Every connection part the app uses is parsed and passed; the password rides the command's own environment, not argv.
-  assert.match(s, /PGPASSWORD="\$PGPASS_" psql -X -v ON_ERROR_STOP=1 -tA -F '\|' --pset footer=off -h "\$\{PGHOST_:-127\.0\.0\.1\}" -p "\$PGPORT_" -U "\$PGUSER_" -d "\$DB" -c "SELECT secret_ciphertext, secret_nonce FROM public\.auth_connections WHERE provider = 'ldaps' AND secret_ciphertext <> ''"/);
+  // Every connection part the app uses is parsed and passed; the password rides a private password file, never argv or the environment.
+  assert.match(s, /q\(\) \{ PGPASSFILE="\$PF" psql -X -w -v ON_ERROR_STOP=1 -tA -F '\|' --pset footer=off -h "\$\{PGHOST_:-127\.0\.0\.1\}" -p "\$PGPORT_" -U "\$PGUSER_" -d "\$DB" -c "\$1" 2>&1; \}/);
+  assert.match(s, /out=\$\(q "SELECT secret_ciphertext, secret_nonce FROM public\.auth_connections WHERE provider = 'ldaps' AND secret_ciphertext <> ''"\); ec=\$\?/);
+  assert.doesNotMatch(s, /PGPASSWORD/, 'the password is not put in the environment');
+  assert.match(s, /umask 077; PF=\$\(mktemp 2>\/dev\/null\) \|\| \{ echo "ERR:could not create a private password file"; echo "PROBE:error"; exit 0; \}/);
+  assert.match(s, /trap 'rm -f "\$PF"' EXIT/, 'the password file is removed however the probe ends');
+  assert.match(s, /printf '\*:\*:\*:%s:%s\\n' "\$\(esc "\$PGUSER_"\)" "\$\(esc "\$PGPASS_"\)" > "\$PF"/);
+  // Row-level security is read before the rows, and stops the probe when policies apply to the app's role.
+  assert.match(s, /rls=\$\(q "SELECT CASE WHEN NOT c\.relrowsecurity THEN 'off' WHEN r\.rolsuper OR r\.rolbypassrls THEN 'bypass' WHEN c\.relowner = r\.oid AND NOT c\.relforcerowsecurity THEN 'owner' ELSE 'on' END FROM pg_class c, pg_roles r WHERE c\.oid = 'public\.auth_connections'::regclass AND r\.rolname = current_user"\); ec=\$\?/);
+  assert.match(s, /echo "RLS:\$rls"\ncase "\$rls" in on\) echo "PROBE:rls"; exit 0;; esac\nout=\$\(q /);
   assert.match(s, /PGPORT_=5432;;/, 'default port when the URL has none');
   assert.match(s, /\*host=\*\) H=\$\{QUERY#\*host=\}; PGHOST_=\$\{H%%&\*\};;/, 'libpq-style socket-directory override honoured');
   assert.match(s, /case "\$PGHOST_" in ""\|127\.0\.0\.1\|localhost\|::1\|\/\*\) ;; \*\) echo "PROBE:remote"; exit 0;; esac/, 'loopback and socket paths only');
@@ -62,28 +70,50 @@ test('the probe shell parses a URL the way the app would (executed locally with 
   const { spawnSync } = await import('node:child_process');
   const dir = mkdtempSync(join(tmpdir(), 'pp-probe-'));
   try {
-    // Parse the flags the way psql would, whatever their order.
-    writeFileSync(join(dir, 'psql'), '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -h) h=$2; shift;; -p) p=$2; shift;; -U) U=$2; shift;; -d) d=$2; shift;; esac; shift; done\necho "CONNECT h=$h p=$p U=$U d=$d pw=$PGPASSWORD"\n');
+    // Parse the flags the way psql would, whatever their order; answer the
+    // row-security query from STUB_RLS and report, for the rows query, what
+    // the connection would have been — including the password file's first
+    // line, its mode, its path, and whether PGPASSWORD leaked into the env.
+    writeFileSync(join(dir, 'psql'), [
+      '#!/bin/sh',
+      'while [ $# -gt 0 ]; do case "$1" in -h) h=$2; shift;; -p) p=$2; shift;; -U) U=$2; shift;; -d) d=$2; shift;; -c) c=$2; shift;; -w) w=1;; esac; shift; done',
+      'case "$c" in *relrowsecurity*) echo "${STUB_RLS:-off}"; exit 0;; esac',
+      // printf, not echo: dash's echo rewrites backslash escapes, which is exactly what the file must carry verbatim.
+      `printf '%s\\n' "CONNECT h=$h p=$p U=$U d=$d w=\${w:-0} pf=$(sed -n 1p "$PGPASSFILE") mode=$(stat -c %a "$PGPASSFILE") env=\${PGPASSWORD:-unset} file=$PGPASSFILE"`,
+      '',
+    ].join('\n'));
     chmodSync(join(dir, 'psql'), 0o755);
-    const run = (url) => {
+    const run = (url, extraEnv = {}) => {
       // The script sources /etc/environment; point it at a scratch file instead.
       const env = join(dir, 'environment'); writeFileSync(env, url ? `DATABASE_URL="${url}"\n` : '');
       const script = authDataProbeScript(GUARD).replace('. /etc/environment', `. ${env}`);
-      const r = spawnSync('sh', ['-c', script], { env: { PATH: `${dir}:/usr/bin:/bin` }, encoding: 'utf8' });
+      const r = spawnSync('sh', ['-c', script], { env: { PATH: `${dir}:/usr/bin:/bin`, TMPDIR: dir, ...extraEnv }, encoding: 'utf8' });
       return r.stdout;
     };
+    const { existsSync } = await import('node:fs');
     // Default URL when none is set.
-    assert.match(run(''), /TARGET:127\.0\.0\.1:5432\/app schema=public/);
-    assert.match(run(''), /CONNECT h=127\.0\.0\.1 p=5432 U=app d=app pw=app/);
-    // Another port and a percent-encoded password reach psql exactly.
+    const dflt = run('');
+    assert.match(dflt, /TARGET:127\.0\.0\.1:5432\/app schema=public/);
+    assert.match(dflt, /RLS:off\n/);
+    assert.match(dflt, /CONNECT h=127\.0\.0\.1 p=5432 U=app d=app w=1 pf=\*:\*:\*:app:app mode=600 env=unset file=/);
+    assert.match(dflt, /PROBE:ok/);
+    const pf = /file=(\S+)/.exec(dflt)[1];
+    assert.equal(existsSync(pf), false, 'the password file is gone once the probe exits');
+    // Another port and a percent-encoded password reach psql exactly, through the file.
     const out = run('postgres://svc:p%40ss@localhost:5433/appdb?sslmode=disable');
     assert.match(out, /TARGET:localhost:5433\/appdb schema=public/);
-    assert.match(out, /CONNECT h=localhost p=5433 U=svc d=appdb pw=p@ss/);
+    assert.match(out, /CONNECT h=localhost p=5433 U=svc d=appdb w=1 pf=\*:\*:\*:svc:p@ss mode=600 env=unset/);
     assert.doesNotMatch(out, /p%40ss/);
+    // A colon or backslash in the password is escaped the way libpq reads the file.
+    assert.match(run('postgres://svc:a%3Ab%5Cc@localhost:5432/app'), /pf=\*:\*:\*:svc:a\\:b\\\\c mode=600/);
     // A socket directory via ?host= is honoured; a remote host is refused before any connection.
     assert.match(run('postgres://app:app@/app?host=/run/postgresql'), /CONNECT h=\/run\/postgresql p=5432 U=app d=app/);
     const remote = run('postgres://app:app@db.example.net:5432/app');
     assert.match(remote, /PROBE:remote/); assert.doesNotMatch(remote, /CONNECT/);
+    // Row-level security that applies to the app's role stops the probe before the rows are read.
+    const rls = run('', { STUB_RLS: 'on' });
+    assert.match(rls, /RLS:on\nPROBE:rls\n/); assert.doesNotMatch(rls, /CONNECT/);
+    for (const v of ['bypass', 'owner']) assert.match(run('', { STUB_RLS: v }), new RegExp(`RLS:${v}\\n[^\\n]*CONNECT `), `${v} still reads the rows`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -103,6 +133,12 @@ test('parseAuthDataProbe: no table, no database, empty, rows, remote, and the un
   assert.deepEqual(two.rows, [{ ciphertext: 'AAAA', nonce: 'BBBB' }, { ciphertext: 'CCCC', nonce: 'DDDD' }]);
   assert.equal(parseAuthDataProbe('PROBE:remote\n').state, 'unknown');
   assert.match(parseAuthDataProbe('PROBE:remote\n').detail, /non-local host/);
+  // Row-level security in force for the app's role is its own state; the finding rides along otherwise.
+  const rls = parseAuthDataProbe('TARGET:127.0.0.1:5432/app schema=public\nDB:app\nRLS:on\nPROBE:rls\n');
+  assert.equal(rls.state, 'rls'); assert.equal(rls.rls, 'on'); assert.match(rls.detail, /row-level security is enabled .* for the app's own role/);
+  assert.equal(parseAuthDataProbe('DB:app\nRLS:owner\nPROBE:ok\n').rls, 'owner');
+  assert.equal(parseAuthDataProbe('DB:app\nRLS:owner\nPROBE:ok\n').state, 'empty');
+  assert.equal(parseAuthDataProbe('DB:app\nERR:ERROR:  relation "public.auth_connections" does not exist\nPROBE:error\n').state, 'no_table', 'the row-security query fails the same way on a missing table');
   assert.equal(parseAuthDataProbe('PROBE:nopsql\n').state, 'unknown');
   assert.equal(parseAuthDataProbe('DB:app\nERR:psql: error: connection refused\nPROBE:error\n').state, 'unknown');
   assert.equal(parseAuthDataProbe('DB:app\nERR:ERROR:  column "secret_nonce" does not exist\nPROBE:error\n').state, 'unknown', 'an unexpected schema is not "no table"');
@@ -185,6 +221,15 @@ test('decision: a key already in the environment is never overwritten; an unread
   for (const detail of ['psql is not available in the container', 'DATABASE_URL points at a non-local host, which the in-container probe cannot vouch for', 'ERROR:  column "secret_nonce" does not exist']) {
     const u = decideMasterSecretMint({ probe: { state: 'unknown', detail }, newlyProvisioned: true, writersStopped: true });
     assert.equal(u.mint, 'defer'); assert.equal(u.fresh, false); assert.match(u.reason, /could not be read/); assert.match(u.reason, /left as they are/);
+  }
+});
+
+test('decideMasterSecretMint: row-level security in force defers, with the remedy named and no secret changed', () => {
+  const probe = parseAuthDataProbe('DB:app\nRLS:on\nPROBE:rls\n');
+  for (const newlyProvisioned of [false, true]) {
+    const d = decideMasterSecretMint({ probe, newlyProvisioned, writersStopped: true, classification: classify(probe) });
+    assert.equal(d.mint, 'defer'); assert.equal(d.fresh, false);
+    assert.match(d.reason, /row-level security/); assert.match(d.reason, /BYPASSRLS/);
   }
 });
 

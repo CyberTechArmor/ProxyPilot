@@ -91,9 +91,12 @@ The probe reads `DATABASE_URL` from the file the unit reads at start
 (`/etc/environment`, falling back to the scaffold default), parses the user,
 password, host or socket directory (`?host=`), port and database name out of
 it the way the app's `pg` client does (percent-decoding included), and runs
-`psql -h … -p … -U … -d …` with the password in `PGPASSWORD` — not as the
-postgres superuser over the default socket, which can reach a different
-server or database than the app. The query names the schema
+`psql -h … -p … -U … -d …` — not as the postgres superuser over the default
+socket, which can reach a different server or database than the app. The
+password reaches psql through a **private temporary password file**
+(`PGPASSFILE`, created under `umask 077`, removed by a trap however the probe
+ends) rather than `PGPASSWORD`, which other processes can read on some
+systems; `-w` means psql never prompts. The query names the schema
 (`public.auth_connections`; the contract's `protects.schema`). A non-local
 host is reported as remote and treated as unknown. `psql` runs with `-X`,
 `ON_ERROR_STOP=1` and footer off, and rows are emitted only when it exited
@@ -102,6 +105,18 @@ branch prints a result line, so silence is never read as success, and the
 probe prints its exact target — `TARGET:host:port/database schema=…` — which
 the decision carries into its reason, so the deploy chat says *which*
 database was read. The URL, the password and the user are never printed.
+
+**Row-level security is checked before the rows are read.** Connecting as the
+app's own role means the probe sees what that role sees, and a policy can
+hide rows without an error — a misleading empty result. So the probe first
+reads the table's flags and the role's standing (`relrowsecurity`,
+`relforcerowsecurity`, superuser or `BYPASSRLS`, ownership) and reports
+`off`, `bypass`, `owner` or `on`. On `on` it stops with its own state, the
+decision defers naming the remedy, and `MASTERKEY_ROWS` reads 500. The seed
+component does not enable row security on `auth_connections` and the app
+connects as the table's owner, so on a generated app the check reads `off`
+and the visibility question is closed; the check exists for the app that
+adds a policy later.
 
 "Newly provisioned" is a **positive** identification, not an inference: only
 the provision path may say it, and only for a container created in that run
@@ -127,11 +142,13 @@ disabled — cannot happen because the deploy **stops the app and frees its
 port before the final probe and mint**, persists the new key and unit, and
 only then starts the new process. Every failure after the stop starts the
 unit again (see the failure table below). Deploys for one container are
-serialized (`deployQueues` in `deploy.js`), so two deploys cannot make
-conflicting decisions. Outside the deploy — the pre-install and retry paths —
-a key that protects stored data is never minted for an existing app; it waits
-for the deploy. The compare-and-swap rekey covers later individual updates;
-this ordering covers the transition.
+serialized on the **container lock** (`mock2/container-lock.js`), which the
+database restore, the snapshot restore and the retry path's mint take too, so
+two deploys cannot make conflicting decisions and a platform restore cannot
+rewrite the database between the probe and the start. Outside the deploy —
+the pre-install and retry paths — a key that protects stored data is never
+minted for an existing app; it waits for the deploy. The compare-and-swap
+rekey covers later individual updates; this ordering covers the transition.
 
 ### Host validation: three details before the deployment behavior counts as proven
 
@@ -160,17 +177,22 @@ writes `auth_connections` in normal operation, and nothing else does:
 | The app process (`mock2-dev.service`): settings upsert, compare-and-swap rekey, connection-status update in `repo.ts` — the only code in the component that writes the table | Yes — the unit is stopped and the port freed before the probe |
 | Timers, workers or queues in the generated app | None exist: the auth component's only timer is a TLS connect timeout in the LDAPS test |
 | `run_project_sql` (MCP) | Not a writer: `BEGIN READ ONLY … ROLLBACK` |
-| `restore_project_db` (MCP) | **Not covered.** It rewrites the whole database as the postgres superuser and is not serialized with deploys. It is also the one path that brings rows under an *older* key into an app whose bridge is already closed: after restoring a dump into a fresh-provisioned app, re-open the bridge (`set_project_env` `AUTH_LEGACY_MASTER_SECRETS` to the key those rows used) and redeploy, and read `MASTERKEY_ROWS` |
-| Operator executors — `run_project_command`, `run_lxc_command`, the workspace terminal, `write_lxc_file` on `/etc/environment` | **Not covered.** They are not stopped by a deploy and can run `psql` at will. Do not run them against the app's database during a deploy; the persistent setup engine of gate two is where a real lock belongs |
+| `restore_project_db` (MCP) | **Covered by the container lock.** It takes the same exclusive lock the deploy holds from its stop to its start, is **refused before any change** while a deploy or another restore holds it (the reply names the holder), and holds it for its own lifetime, so a deploy arriving mid-restore queues behind it. It is still the one path that brings rows under an *older* key into an app whose bridge is already closed: after restoring a dump into a fresh-provisioned app, re-open the bridge (`set_project_env` `AUTH_LEGACY_MASTER_SECRETS` to the key those rows used), redeploy, and read `MASTERKEY_ROWS` |
+| `restore_snapshot` (MCP, whole-container snapshot) | **Covered by the container lock**, the same way: refused while a deploy or restore holds the container, held for the restore's lifetime |
+| The retry path's secret mint (`runner.js`, before "Retry deploy") | **Covered**: it holds the lock while it reads and rewrites `/etc/environment` |
+| Operator executors — `run_project_command`, `run_lxc_command`, the workspace terminal, `write_lxc_file` on `/etc/environment` | **Not covered, by design.** An unrestricted administrator shell is an operational boundary, not a platform operation: it is not stopped by a deploy and can run `psql` at will. Do not run them against the app's database during a deploy |
 
-`deployQueues` is an in-memory map: it serializes deploys within one backend
-process and **does not survive a backend restart**. A deploy orphaned by a
-restart is not resumed; the next deploy's first action is `pkill -9 -f
-mock2_deploy_marker` inside the guest, which reaps the orphan's scripts before
-anything else runs, so two deploys do not overlap even across a restart —
-but a restart mid-deploy can still leave the app stopped until that next
-deploy or a manual `systemctl start`. A persistent, restart-safe lock is gate
-two work (the setup engine).
+The lock is checked server-side, so it applies to the dashboard, the CLI and
+MCP alike, and the operation that does the work holds it for its whole
+lifetime — the request that asked for it does not. It is an **in-process**
+lock: it serializes within one backend process and **does not survive a
+backend restart**. A deploy orphaned by a restart is not resumed; the next
+deploy's first action is `pkill -9 -f mock2_deploy_marker` inside the guest,
+which reaps the orphan's scripts before anything else runs, so two deploys do
+not overlap even across a restart — but a restart mid-deploy can still leave
+the app stopped until that next deploy or a manual `systemctl start`. Recovery
+without waiting for another deploy, and a restart-safe lock, are the setup
+engine's first requirements (`docs/core/setup-engine-requirements.md`).
 
 **3. Failure recovery preserves a compatible set.** The build replaced
 `dist/` before the stop, and a key that protects stored data is persisted only
@@ -189,6 +211,17 @@ a process comes up, the code that comes up can read every stored row:
 What the table cannot prove is the last row's "if the app starts": that is the
 host test — after the deploy's restart, open the LDAPS settings and confirm
 the credential decrypts (`masterKey` current, inventory complete).
+
+**"Restart attempted" and "application recovered" are different states.**
+After every restart the deploy polls the web port for ten seconds and the
+failure message says which of three things happened: the app is serving
+again (with the note that this is *not* a verified recovery until the
+protected credential is read back through the application), the app is
+**not** serving (it is down; follow the recovery procedure), or the outcome
+could not be determined. No message says "recovered": the deploy cannot read
+the credential through the application, and a serving process is not proof
+the credential decrypts. The application-level check is the operator's — or,
+in gate two, the setup engine's recovery verification.
 
 The component's own test pins that an explicitly empty list stays empty. The
 bridge is enabled only where storage was not positively identified as new.
@@ -291,14 +324,17 @@ and the question does not arise.
 | After restart | The application itself decrypts the credential with the intended configuration | *host* only: open the LDAPS settings after the deploy's restart; `masterKey` current, inventory complete, connection test passes |
 | Authentication | Password/TOTP and verified passkey both log in, with separate sudo | *sandbox*: no passkey-only accounts exist; the login handler carries no sudo stamp; both ceremonies require UV. *host*: fresh-browser checks above |
 | MCP | Disabled, deleted, demoted and expired credentials denied, per call | *sandbox*: `mcpTokenRefusal` cases; `findToken` wiring ratchet; revocation on every disable/demote/delete path; new tokens default to a finite lifetime. *host*: call through an existing connector after disabling its owner; mint a 1-day token and call after it lapses |
+| Restore requested during a deploy | Refused or queued before any change | *sandbox*: `container-lock.test.js` — a `wait: false` caller is refused while the container is held, naming the holder, and never runs; a deploy arriving during a restore queues behind it; the lock is released on failure. Ratchets: both restore tools take the lock after their confirmation gate and before the pre-restore dump or snapshot. *host*: start a deploy, call `restore_project_db` with a valid token, confirm the refusal names `deploy` and no pre-restore dump was written |
+| Row visibility for the probe's role | The inventory sees every tenant's credential, or the probe says it cannot tell | *sandbox*: the stub `psql` answers the row-security query `off` / `bypass` / `owner` (rows read) or `on` (the probe stops with `PROBE:rls`, the decision defers naming `BYPASSRLS`, readiness reads 500). The seed component enables no policy on `auth_connections`. *host*: `RLS:off` in the probe output of a generated app |
+| Password handling in the probe | The password never enters argv or the environment | *sandbox*: the stub `psql` sees `PGPASSWORD` unset and a `PGPASSFILE` of mode `600` whose line carries the decoded, libpq-escaped password; the file is gone when the probe exits. *host*: `ps` during a probe shows no password |
 | Failed upgrade | A tested restore recovers code, database and matching secrets | *host* only: restore the recovery set on a replacement host |
 
 Test evidence: full backend suite on this branch versus the same main commit
 (`83c0dff3`) in the same sandbox — **no additional failures compared with the
 baseline**; the ten documented `ERR_MODULE_NOT_FOUND` files fail on both
-(2647 of 2667 tests pass on the final tree). The probe shell is executed in
-the suite under `dash` with a stub `psql`, the same `/bin/sh` a Debian or
-Ubuntu guest runs it with.
+(2653 of 2673 tests pass on the final tree). The probe shell is
+executed in the suite under `dash` with a stub `psql`, the same `/bin/sh` a
+Debian or Ubuntu guest runs it with.
 The component's `src/auth` (20 non-test files) typechecks under `strict` +
 `noUnusedLocals` against drizzle-orm, express, pg, ldapts and cookie, and its
 `config.test.ts` passes under vitest. The frontend production build

@@ -15,6 +15,7 @@ const PROXYPILOT_BIN = process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot'
 
 import { exportStore } from '../../lib/lxc-exports-instance.js';
 import { restoreHazards, restoreNotes } from '../../lib/lxc-exports.js';
+import { withContainerLock } from '../../mock2/container-lock.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../../lib/export-compression.js';
 
 export function createLxcAdminHandlers(kit) {
@@ -267,15 +268,25 @@ export function createLxcAdminHandlers(kit) {
     const d = dry(args, plan); if (d) return d;
     const gate = confirmToken(args, auth, note, { tool: 'restore_snapshot', subject: `${name}/${snap}`, action: `restore ${name} to snapshot ${snap} (everything written since is replaced)`, preview: plan });
     if (gate) return gate;
-    const pre = await takeLxcSnapshot(incus(name), defaultSnapshotName(new Date(), 'pp-mcp-pre-restore'));
-    if (pre.error) return err(`Refusing to restore without a pre-restore snapshot: ${pre.error}`);
-    note.snapshot = pre.name;
-    const form = await resolveSnapshotCliForm();
-    const r = await runHostCapture('incus', snapshotArgv('restore', incus(name), snap, form), { timeoutMs: 10 * 60 * 1000 });
-    if (r.status !== 0) return err(`incus snapshot restore failed: ${tail(r.stderr) || 'unknown error'} (pre-restore snapshot ${pre.name} was taken)`);
-    note.summary = `restored ${name} to ${snap}`;
-    note.detail = { restored_to: snap };
-    return ok({ restored: true, container: name, snapshot: snap, pre_restore_snapshot: pre.name, reverse_with: `restore_snapshot({ container: "${name}", snapshot: "${pre.name}" })` });
+    // Same exclusive lock as a project deploy and database restore: refused
+    // while one is in progress, held for the restore's own lifetime.
+    const run = async () => {
+      const pre = await takeLxcSnapshot(incus(name), defaultSnapshotName(new Date(), 'pp-mcp-pre-restore'));
+      if (pre.error) return err(`Refusing to restore without a pre-restore snapshot: ${pre.error}`);
+      note.snapshot = pre.name;
+      const form = await resolveSnapshotCliForm();
+      const r = await runHostCapture('incus', snapshotArgv('restore', incus(name), snap, form), { timeoutMs: 10 * 60 * 1000 });
+      if (r.status !== 0) return err(`incus snapshot restore failed: ${tail(r.stderr) || 'unknown error'} (pre-restore snapshot ${pre.name} was taken)`);
+      note.summary = `restored ${name} to ${snap}`;
+      note.detail = { restored_to: snap };
+      return ok({ restored: true, container: name, snapshot: snap, pre_restore_snapshot: pre.name, reverse_with: `restore_snapshot({ container: "${name}", snapshot: "${pre.name}" })` });
+    };
+    try {
+      return await withContainerLock(incus(name), 'restore_snapshot', run, { wait: false });
+    } catch (e) {
+      if (e?.code === 'CONTAINER_BUSY') return err(`${e.holder} is in progress for ${name} — the restore was refused before any change; retry when it finishes`);
+      throw e;
+    }
   });
 
   const delete_snapshot = mutation('delete_snapshot', { subjectType: 'lxc', flag: 'mcp.destructive' }, async (args, auth, req, note) => {

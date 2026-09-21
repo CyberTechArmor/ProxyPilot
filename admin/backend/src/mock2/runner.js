@@ -104,6 +104,7 @@ import {
   cacheHealth,
 } from './usage-logic.js';
 import { deployProject, readRunContract, readDeclaredEgress, stampDeployedCommit } from './deploy.js';
+import { withContainerLock } from './container-lock.js';
 import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
 import { reconcileMock2Firewall } from './firewall.js';
 import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit, resolveBrowserTarget } from './smoke.js';
@@ -987,7 +988,8 @@ export async function retryDeploy({ project, cycle }) {
         // before minting existed gets them here (the deploy refuses to start
         // production mode without them).
         try {
-          const secrets = await ensureComponentSecrets({ containerName, rows: listProjectComponents(projectId) });
+          // Under the container lock: the environment file is read-modify-write.
+          const secrets = await withContainerLock(containerName, 'retry-secrets', () => ensureComponentSecrets({ containerName, rows: listProjectComponents(projectId) }));
           if (secrets.minted.length) {
             insertMessage({
               projectId, kind: 'system', cycleId: cycle.id,

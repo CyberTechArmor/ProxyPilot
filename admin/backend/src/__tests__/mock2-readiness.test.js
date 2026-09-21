@@ -61,6 +61,7 @@ test('the exact case that used to pass: a login redirect with everything behind 
       const key = 'k'.repeat(40); const dev = 'dev-insecure-master-secret-change-me';
       const enc = (pt, m) => { const n = randomBytes(12); const c = createCipheriv('aes-256-gcm', masterKeyFor(m), n); const e = Buffer.concat([c.update(pt, 'utf8'), c.final()]); return { ciphertext: Buffer.concat([e, c.getAuthTag()]).toString('base64'), nonce: n.toString('base64') }; };
       assert.equal(masterKeyRowsCode({ probe: { state: 'unknown' } }), 500);
+      assert.equal(masterKeyRowsCode({ probe: { state: 'rls', rows: [] } }), 500, 'row security in force: the rows could not be established');
       assert.equal(masterKeyRowsCode({ probe: { state: 'empty', rows: [] }, envKey: key }), 204);
       assert.equal(masterKeyRowsCode({ probe: { state: 'no_table', rows: [] } }), 204);
       assert.equal(masterKeyRowsCode({ probe: { state: 'rows', rows: [enc('x', key)] }, envKey: key }), 200);

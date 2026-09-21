@@ -274,6 +274,49 @@ export function portHoldersReportScript(webPort = 3000) {
 // The ordered deploy steps and their bounded timeouts (R5 — an install/build
 // spends wall-clock; every step is time-bounded). `migrate` and `build` are
 // skipped when the contract omits them; `install` and `start` are the minimum.
+// servingProbeScript(webPort, tries) → shell that polls the web port once a
+// second and prints MOCK2_SERVING (code) or MOCK2_NOT_SERVING (last
+// http_code: …) once. The short form of the deploy's health check, for the
+// restart a failed deploy attempts: it answers "is the app serving again?"
+// and nothing more.
+export function servingProbeScript(webPort = 3000, tries = 10) {
+  const n = Math.max(1, Math.min(60, Number(tries) || 10));
+  return [
+    'last="000"',
+    'i=0',
+    `while [ $i -lt ${n} ]; do`,
+    `  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${Number(webPort)}/" 2>/dev/null)`,
+    '  [ -n "$code" ] && last="$code"',
+    '  if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 500 ]; then echo "MOCK2_SERVING ($code)"; exit 0; fi',
+    '  i=$((i+1)); sleep 1',
+    'done',
+    'echo "MOCK2_NOT_SERVING (last http_code: $last)"',
+    '',
+  ].join('\n');
+}
+
+// restartVerdict(stdout) → 'serving' | 'not_serving' | 'unknown'.
+export function restartVerdict(stdout) {
+  const s = String(stdout || '');
+  if (/MOCK2_SERVING/.test(s)) return 'serving';
+  if (/MOCK2_NOT_SERVING/.test(s)) return 'not_serving';
+  return 'unknown';
+}
+
+// "Restart attempted" and "application recovered" are different states. The
+// deploy can attempt the first and observe whether the app serves; the second
+// needs the protected credential read back through the application, which the
+// operator (or, later, the setup engine's recovery check) confirms. No text
+// here says "recovered".
+export const RESTART_OUTCOME = Object.freeze({
+  serving: 'Restart attempted on the current unit: the app is serving again. This is not a verified recovery — confirm the protected credential is readable (LDAPS settings: masterKey current, inventory complete) before treating it as one',
+  not_serving: 'Restart attempted on the current unit, but the app is NOT serving: it is down. Follow the recovery procedure in docs/features/immediate-repairs.md',
+  unknown: 'Restart attempted on the current unit; whether the app is serving could not be determined — check it before proceeding',
+});
+export function restartOutcomeText(verdict) {
+  return RESTART_OUTCOME[verdict] || RESTART_OUTCOME.unknown;
+}
+
 export const DEPLOY_STEP_TIMEOUTS_MS = Object.freeze({
   install: 600000, // npm install can be minutes
   migrate: 180000,

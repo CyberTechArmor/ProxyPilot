@@ -55,6 +55,10 @@ export function authDataProbeScript(guard) {
   const schema = guard.schema || 'public';
   const where = [guard.filter, `${guard.secret_column} <> ''`].filter(Boolean).join(' AND ');
   const sql = `SELECT ${guard.secret_column}, ${guard.nonce_column} FROM ${schema}.${guard.table} WHERE ${where}`;
+  // off: no row security on the table. bypass: superuser or BYPASSRLS. owner:
+  // the table's owner, exempt unless FORCE ROW LEVEL SECURITY. on: policies
+  // apply to this role and the probe cannot prove it sees every row.
+  const rlsSql = `SELECT CASE WHEN NOT c.relrowsecurity THEN 'off' WHEN r.rolsuper OR r.rolbypassrls THEN 'bypass' WHEN c.relowner = r.oid AND NOT c.relforcerowsecurity THEN 'owner' ELSE 'on' END FROM pg_class c, pg_roles r WHERE c.oid = '${schema}.${guard.table}'::regclass AND r.rolname = current_user`;
   return [
     'command -v psql >/dev/null 2>&1 || { echo "PROBE:nopsql"; exit 0; }',
     `URL=$( (set -a; . /etc/environment 2>/dev/null; set +a; printf '%s' "\${DATABASE_URL:-postgres://app:app@127.0.0.1:5432/app}") )`,
@@ -76,14 +80,32 @@ export function authDataProbeScript(guard) {
     '[ -n "$PGUSER_" ] || { echo "ERR:no user in DATABASE_URL"; echo "PROBE:error"; exit 0; }',
     'echo "TARGET:${PGHOST_:-127.0.0.1}:${PGPORT_}/${DB} schema=' + schema + '"',
     'echo "DB:$DB"',
-    `out=$(PGPASSWORD="$PGPASS_" psql -X -v ON_ERROR_STOP=1 -tA -F '|' --pset footer=off -h "\${PGHOST_:-127.0.0.1}" -p "$PGPORT_" -U "$PGUSER_" -d "$DB" -c "${sql}" 2>&1); ec=$?`,
+    // The password reaches psql through a private, temporary password file
+    // (PGPASSFILE, mode 0600, removed on exit) rather than the environment,
+    // which other processes can read on some systems. `*` for host, port and
+    // database: the file serves this one connection. `-w`: never prompt.
+    'umask 077; PF=$(mktemp 2>/dev/null) || { echo "ERR:could not create a private password file"; echo "PROBE:error"; exit 0; }',
+    "trap 'rm -f \"$PF\"' EXIT",
+    "esc() { printf '%s' \"$1\" | sed 's/[\\\\:]/\\\\&/g'; }",
+    'printf \'*:*:*:%s:%s\\n\' "$(esc "$PGUSER_")" "$(esc "$PGPASS_")" > "$PF"',
+    'q() { PGPASSFILE="$PF" psql -X -w -v ON_ERROR_STOP=1 -tA -F \'|\' --pset footer=off -h "${PGHOST_:-127.0.0.1}" -p "$PGPORT_" -U "$PGUSER_" -d "$DB" -c "$1" 2>&1; }',
+    // Row-level security hides rows from a role without an error, so an empty
+    // result under it would be misleading. Read the table's flags and the
+    // role's standing first; stop when the probe cannot prove it sees every row.
+    `rls=$(q "${rlsSql}"); ec=$?`,
+    `if [ "$ec" -ne 0 ]; then printf '%s\\n' "$rls" | head -3 | sed 's/^/ERR:/'; echo "PROBE:error"; exit 0; fi`,
+    'echo "RLS:$rls"',
+    'case "$rls" in on) echo "PROBE:rls"; exit 0;; esac',
+    `out=$(q "${sql}"); ec=$?`,
     `if [ "$ec" -eq 0 ]; then printf '%s\\n' "$out" | sed -e '/^$/d' -e 's/^/ROW:/'; echo "PROBE:ok"; else printf '%s\\n' "$out" | head -3 | sed 's/^/ERR:/'; echo "PROBE:error"; fi`,
     '',
   ].join('\n');
 }
 
-// parseAuthDataProbe(stdout) → { state, rows, detail, database }.
-//   state: 'no_table' | 'no_database' | 'empty' | 'rows' | 'unknown'
+// parseAuthDataProbe(stdout) → { state, rows, detail, database, target, rls }.
+//   state: 'no_table' | 'no_database' | 'empty' | 'rows' | 'rls' | 'unknown'
+//   rls: 'off' | 'bypass' | 'owner' | 'on' | null — what the probe found about
+//   row-level security on the table for the app's role ('on' ⇒ state 'rls').
 // rows carry ciphertext only — never a plaintext, never a key — and the
 // details are counts and psql's error wording, safe for the project chat.
 export function parseAuthDataProbe(stdout) {
@@ -93,6 +115,7 @@ export function parseAuthDataProbe(stdout) {
   let probe = null;
   let database = null;
   let target = null;
+  let rls = null;
   for (const l of lines) {
     if (l.startsWith('ROW:')) {
       const body = l.slice(4);
@@ -101,23 +124,26 @@ export function parseAuthDataProbe(stdout) {
     } else if (l.startsWith('ERR:')) errs.push(l.slice(4).trim());
     else if (l.startsWith('DB:')) database = l.slice(3).trim();
     else if (l.startsWith('TARGET:')) target = l.slice(7).trim();
+    else if (l.startsWith('RLS:')) rls = l.slice(4).trim() || null;
     else if (l.startsWith('PROBE:')) probe = l.slice(6).trim();
   }
   const dbName = target || database || 'app';
-  if (probe === 'remote') return { state: 'unknown', rows: [], database, target, detail: 'DATABASE_URL points at a non-local host, which the in-container probe cannot vouch for' };
+  const base = { rows: [], database, target, rls };
+  if (probe === 'remote') return { ...base, state: 'unknown', detail: 'DATABASE_URL points at a non-local host, which the in-container probe cannot vouch for' };
+  if (probe === 'rls') return { ...base, state: 'rls', detail: `row-level security is enabled on the credentials table in database ${dbName} for the app's own role, so the probe cannot prove it sees every stored credential` };
   if (probe === 'ok') {
     return rows.length
-      ? { state: 'rows', rows, database, target, detail: `${rows.length} stored credential(s) in database ${dbName}` }
-      : { state: 'empty', rows: [], database, target, detail: `no stored credentials in database ${dbName}` };
+      ? { ...base, state: 'rows', rows, detail: `${rows.length} stored credential(s) in database ${dbName}` }
+      : { ...base, state: 'empty', detail: `no stored credentials in database ${dbName}` };
   }
   if (probe === 'error') {
     const text = errs.join(' ');
-    if (/relation .* does not exist/i.test(text)) return { state: 'no_table', rows: [], database, target, detail: `the credentials table does not exist in database ${dbName}` };
-    if (/database .* does not exist/i.test(text)) return { state: 'no_database', rows: [], database, target, detail: `database ${dbName} does not exist` };
-    return { state: 'unknown', rows: [], database, target, detail: text || 'psql failed without output' };
+    if (/relation .* does not exist/i.test(text)) return { ...base, state: 'no_table', detail: `the credentials table does not exist in database ${dbName}` };
+    if (/database .* does not exist/i.test(text)) return { ...base, state: 'no_database', detail: `database ${dbName} does not exist` };
+    return { ...base, state: 'unknown', detail: text || 'psql failed without output' };
   }
-  if (probe === 'nopsql') return { state: 'unknown', rows: [], database, target, detail: 'psql is not available in the container' };
-  return { state: 'unknown', rows: [], database, target, detail: 'the probe produced no result' };
+  if (probe === 'nopsql') return { ...base, state: 'unknown', detail: 'psql is not available in the container' };
+  return { ...base, state: 'unknown', detail: 'the probe produced no result' };
 }
 
 export function masterKeyFor(master) {
@@ -172,6 +198,9 @@ export function decideMasterSecretMint({ probe, envHasKey = false, classificatio
   const detail = probe?.detail || 'no detail';
   if (state === 'unknown') {
     return { fresh: false, mint: 'defer', reason: `the app's stored credentials could not be read (${detail}), so the key and the legacy configuration are left as they are` };
+  }
+  if (state === 'rls') {
+    return { fresh: false, mint: 'defer', reason: `${detail} — an empty or partial result could hide rows under another key, so the key and the legacy configuration are left as they are (grant the app's role BYPASSRLS, or disable row security on that table, then redeploy)` };
   }
   if (envHasKey) {
     return { fresh: false, mint: 'existing', reason: 'a master secret is already set in the environment; it is never overwritten' };

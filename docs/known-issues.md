@@ -351,3 +351,24 @@ not adapted (hash-matched to the installed version, like the auth-wiring
 repair does for entry files) and re-run the deploy so the key is minted. A
 change of its own; until then `docs/features/immediate-repairs.md` says how
 to do it by hand.
+
+## The container lock is in-process, and a backend restart can leave an app stopped
+
+**Since:** 2026-09 (PR #601, immediate repairs).
+
+`mock2/container-lock.js` serializes deploys, the two platform restores
+(`restore_project_db`, `restore_snapshot`) and the retry path's secret mint
+per container, and refuses a restore while a deploy holds the container. It
+is a map in the backend's memory: it does not survive a backend restart. A
+deploy interrupted by a restart is not resumed — the next deploy reaps the
+orphan's scripts inside the guest first, so deploys do not overlap, but the
+app the interrupted deploy stopped stays stopped until that deploy or a manual
+`systemctl start mock2-dev.service` in the guest. The restart a failed deploy
+attempts reports *serving* / *not serving* / *unknown* and never *recovered*:
+the credential is not read back through the application.
+
+**Remedy:** a persistent lock and a host runner with saved progress that
+resumes or records recovery on start — requirements R1–R4 in
+`docs/core/setup-engine-requirements.md` (gate two). Until then, after a
+backend restart during a deploy, check the project's readiness lines and start
+the unit by hand if the app is down.

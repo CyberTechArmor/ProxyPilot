@@ -89,7 +89,10 @@ contract is the same on every tool rather than remembered per tool. Code:
   `delete_static_site` / `rollback_static_site` capture a release;
   `restore_proxypilot_db` / `restore_project_db` dump first; `promote_self` /
   `rollback_self` tag the previous HEAD. `export: false` is an explicit
-  opt-out the ledger records.
+  opt-out the ledger records. `restore_project_db` and `restore_snapshot`
+  also take the project container's exclusive lock (the one a deploy holds
+  from stopping the app to starting it) and are refused, before any change,
+  while a deploy or another restore holds it — the reply names the holder.
 - **A one-time `confirmation_token`** on delete / restore / rollback / reboot
   / `reset_passkey` / `promote_self`: the first call validates everything and
   returns a token bound to (tool, target, key) with a preview; the caller

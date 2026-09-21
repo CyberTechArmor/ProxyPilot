@@ -151,7 +151,7 @@ export function masterKeyScript() {
 //   500 the probe could not run
 export function masterKeyRowsCode({ probe, envKey = '', legacyDefault = DEV_MASTER_SECRET_LITERAL } = {}) {
   const state = probe?.state || 'unknown';
-  if (state === 'unknown') return 500;
+  if (state === 'unknown' || state === 'rls') return 500;
   if (state !== 'rows') return 204;
   const active = envKey || legacyDefault;
   const c = classifyRows(probe.rows, { current: active, legacy: [] });

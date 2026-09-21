@@ -16,9 +16,9 @@
 
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { ownerIdentity, reconcileDecision, recoveryJobFrom, parseJson } from './logic.js';
+import { ownerIdentity, reconcileDecision, recoveryJobFrom, verifyJobFrom, parseJson, runnerIsLive, RUNNER_LIVE_MS, validateRunnerJob, TERMINAL_STATUS } from './logic.js';
 import {
-  staleRunningJobs, readLock, releaseLock, markLockStale, recordJobOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView,
+  staleRunningJobs, readLock, releaseLock, markLockStale, recordJobOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners,
 } from './store.js';
 
 let identity = null;
@@ -41,6 +41,13 @@ export function sweepSetupEngineOnBoot(db, { owner = backendOwner(), nowMs = Dat
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
       if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
       summary.interrupted.push(job.id);
+    } else if (d.action === 'verify') {
+      const spec = verifyJobFrom(job, { nowIso: new Date(nowMs).toISOString() });
+      const verify = createJob(db, { kind: spec.kind, app: spec.app, plan: spec.plan, configRefs: { origin: spec.plan.params.origin }, requestedBy: spec.requested_by, via: spec.via, reason: spec.reason, nowMs });
+      recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted_unverified', reason: `${d.reason}; verification job ${verify.id} queued; the recovery references are kept on this record`, by: owner, nowMs });
+      if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      summary.interrupted.push(job.id);
+      summary.recoveryQueued.push({ job: job.id, recovery: verify.id, app: job.app, kind: 'verify_app' });
     } else if (d.action === 'record_recovery_required' || d.action === 'recover') {
       const cp = parseJson(job.checkpoint_json) || {};
       let recovery = openRecoveryJobFor(db, job.app);
@@ -89,4 +96,61 @@ export function jobDetail(db, id) {
   const row = getJob(db, id);
   if (!row) return null;
   return { job: jobView(row), events: listEvents(db, id).map((e) => ({ ...e, data: parseJson(e.data_json), data_json: undefined })) };
+}
+
+// ── who executes a deploy ───────────────────────────────────────────────
+
+// runnerAvailable(db, { nowMs }) → the live runner row, or null. A deploy is
+// submitted to the runner only while one has a fresh heartbeat; otherwise the
+// backend executes the same operation itself (the in-process executor).
+export function runnerAvailable(db, { nowMs = Date.now() } = {}) {
+  const rows = liveRunners(db, { nowMs, maxAgeMs: RUNNER_LIVE_MS });
+  return rows.find((r) => runnerIsLive(r, nowMs)) || null;
+}
+
+// submitDeployJob(db, { app, params, requestedBy, via }) → the queued job.
+// Refused (returned as { error }) when the plan does not validate, or when an
+// open deploy for the same app is already queued or running — a repeated
+// submission observes that job instead of duplicating work.
+export function submitDeployJob(db, { app, params, requestedBy = null, via = 'system', nowMs = Date.now() }) {
+  const open = db.prepare(`SELECT * FROM setup_jobs WHERE app = ? AND kind = 'deploy' AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1`).get(String(app));
+  if (open) return { job: open, created: false };
+  const spec = { kind: 'deploy', app, plan: { steps: ['install', 'migrate', 'build', 'stop', 'mint', 'unit', 'start', 'health', 'verify'], params } };
+  const v = validateRunnerJob(spec);
+  if (!v.ok) return { error: v.reason };
+  const job = createJob(db, { kind: 'deploy', app, plan: spec.plan, configRefs: { webPort: params.webPort, unit: 'mock2-dev.service', environmentFile: params.environmentFile || '/etc/environment', appDir: params.appDir || '/srv/app', guard: params.guard || null }, requestedBy, via, nowMs });
+  return { job, created: true };
+}
+
+// waitForJob(db, id, { pollMs, timeoutMs, onEvent, sleep }) → the terminal row,
+// or null on timeout. Replays events to onEvent as they appear (the callers'
+// onStep labels come from the executor's step events).
+export async function waitForJob(db, id, { pollMs = 1000, timeoutMs = 45 * 60 * 1000, onEvent = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), nowMs = () => Date.now() } = {}) {
+  const start = nowMs();
+  let lastEvent = 0;
+  for (;;) {
+    const row = getJob(db, id);
+    if (!row) return null;
+    if (onEvent) {
+      for (const e of db.prepare(`SELECT * FROM setup_job_events WHERE job_id = ? AND id > ? ORDER BY id`).all(String(id), lastEvent)) {
+        lastEvent = e.id;
+        try { onEvent(e); } catch { /* */ }
+      }
+    }
+    if (TERMINAL_STATUS.includes(row.status)) return row;
+    if (nowMs() - start > timeoutMs) return null;
+    await sleep(pollMs);
+  }
+}
+
+// deployResultFromJob(row) → the { ok, step, error, skipped, … } shape every
+// deploy caller has always consumed, from the persisted outcome.
+export function deployResultFromJob(row) {
+  if (!row) return { ok: false, step: 'submit', error: 'the deploy job disappeared' };
+  const progress = parseJson(row.progress_json) || {};
+  const result = progress.result || null;
+  if (result && typeof result === 'object') return { ...result, jobId: row.id, status: row.status };
+  if (row.status === 'succeeded') return { ok: true, step: 'serving', jobId: row.id, status: row.status };
+  if (row.status === 'cancelled') return { ok: false, step: 'cancelled', error: row.reason || 'cancelled', jobId: row.id, status: row.status };
+  return { ok: false, step: progress.failed_step || row.phase || 'deploy', error: row.reason || `deploy ${row.status}`, jobId: row.id, status: row.status };
 }

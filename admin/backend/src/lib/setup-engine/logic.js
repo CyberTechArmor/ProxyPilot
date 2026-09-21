@@ -24,6 +24,29 @@
 //            a port opened.
 
 export const HOLDER_KINDS = Object.freeze(['backend', 'runner', 'cli']);
+
+// Thrown by a job's fence when its owner or epoch moved: the executor stops
+// before its next guest command and writes nothing more (its writes would
+// change nothing anyway).
+export class FencedError extends Error {
+  constructor(jobId) {
+    super(`job ${jobId}: ownership moved (heartbeat changed nothing); stopping without touching the target`);
+    this.name = 'FencedError';
+    this.code = 'FENCED';
+  }
+}
+
+// Thrown by a job's fence when a cancel was requested and the operation is
+// at a safe point (before its disruptive step). After the disruptive step a
+// cancel is NOT honoured mid-way: the operation finishes starting the app,
+// and the cancel is recorded as declined with the reason.
+export class CancelledError extends Error {
+  constructor(jobId, by) {
+    super(`job ${jobId}: cancelled${by ? ` by ${by}` : ''} at a safe checkpoint`);
+    this.name = 'CancelledError';
+    this.code = 'CANCELLED';
+  }
+}
 export const DEFAULT_LEASE_MS = 30_000;
 export const JOB_STATUS = Object.freeze(['queued', 'running', 'succeeded', 'failed', 'deferred', 'refused', 'recovery_required', 'cancelled']);
 export const TERMINAL_STATUS = Object.freeze(['succeeded', 'failed', 'deferred', 'refused', 'recovery_required', 'cancelled']);
@@ -33,10 +56,12 @@ export const VIA = Object.freeze(['ui', 'cli', 'mcp', 'runner', 'system']);
 // claimed by it — the browser-facing API can only ask for one of these, and
 // none of them takes a command, a path outside the guest, or a value that is
 // a secret.
-export const RUNNER_JOB_KINDS = Object.freeze(['recover_app', 'verify_app', 'probe']);
+export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe']);
 // Job kinds the BACKEND records for the operations it still executes itself
 // (they hold the same lock; the runner recovers them when the backend dies).
-export const BACKEND_JOB_KINDS = Object.freeze(['deploy', 'restore_project_db', 'restore_snapshot', 'retry-secrets', 'credential_migration']);
+export const BACKEND_JOB_KINDS = Object.freeze(['restore_project_db', 'restore_snapshot', 'retry-secrets', 'credential_migration']);
+// A runner is live when its heartbeat is younger than this.
+export const RUNNER_LIVE_MS = 30_000;
 
 export const CONTAINER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$/;
 
@@ -153,7 +178,7 @@ export function sanitizeReason(text, max = 600) {
 
 // ── verification ladder (R4) ────────────────────────────────────────────
 
-export const VERIFY_STATES = Object.freeze(['unconfigured', 'configured', 'port_responding', 'app_healthy', 'credential_verified', 'recovery_required']);
+export const VERIFY_STATES = Object.freeze(['unconfigured', 'configured', 'port_responding', 'app_healthy', 'credential_decryptable', 'credential_use_verified', 'recovery_required']);
 
 // verificationState(obs) → { state, label, facts, next }. Each fact is
 // true / false / null (not checked). The ladder is monotonic: a higher rung
@@ -161,13 +186,23 @@ export const VERIFY_STATES = Object.freeze(['unconfigured', 'configured', 'port_
 // below the top means recovery is required; a rung that was not checked
 // (null) simply caps the state — "port responding" is never promoted to
 // "application healthy" because the health check did not run.
-export function verificationState({ unitConfigured = null, unitActive = null, portResponding = null, appHealthy = null, credentialVerified = null, deferredReason = null } = {}) {
-  const facts = { unitConfigured, unitActive, portResponding, appHealthy, credentialVerified };
+//
+// Two credential rungs, deliberately distinct: `credential_decryptable` is
+// the platform's classifier opening the stored rows with the configured key
+// (evidence about the data and the file); `credential_use_verified` is the
+// APPLICATION reading its protected credential back through its own code
+// path with the key its process loaded. The first never becomes the second
+// by relabelling.
+export function verificationState({ unitConfigured = null, unitActive = null, portResponding = null, appHealthy = null, credentialDecryptable = null, credentialUseVerified = null, credentialVerified = undefined, deferredReason = null } = {}) {
+  // `credentialVerified` is the pre-split name for the classifier rung.
+  if (credentialVerified !== undefined && credentialDecryptable === null) credentialDecryptable = credentialVerified;
+  const facts = { unitConfigured, unitActive, portResponding, appHealthy, credentialDecryptable, credentialUseVerified };
   const rungs = [
     ['configured', unitConfigured],
     ['port_responding', unitActive === false ? false : portResponding],
     ['app_healthy', appHealthy],
-    ['credential_verified', credentialVerified],
+    ['credential_decryptable', credentialDecryptable],
+    ['credential_use_verified', credentialUseVerified],
   ];
   let state = 'unconfigured';
   let next = 'configure the application unit';
@@ -185,8 +220,9 @@ const LABELS = Object.freeze({
   unconfigured: 'not configured',
   configured: 'configured (unit present; not verified running)',
   port_responding: 'running: port responding (not verified healthy)',
-  app_healthy: 'application healthy (credential not verified)',
-  credential_verified: 'application healthy and the protected credential reads back',
+  app_healthy: 'application healthy (stored credential not checked)',
+  credential_decryptable: 'application healthy; the stored credential decrypts under the configured key (not yet read back through the application)',
+  credential_use_verified: 'application healthy and the application itself reads its protected credential back',
   recovery_required: 'recovery required',
 });
 
@@ -194,8 +230,9 @@ function nextStep(state) {
   switch (state) {
     case 'configured': return 'start the unit and probe the port';
     case 'port_responding': return 'run the application health check';
-    case 'app_healthy': return 'read the protected credential back through the application';
-    case 'credential_verified': return 'nothing — verified';
+    case 'app_healthy': return 'classify the stored credential rows under the configured key';
+    case 'credential_decryptable': return 'read the protected credential back through the application (sign in as the review account and read the LDAPS settings: masterKey current, inventory complete)';
+    case 'credential_use_verified': return 'nothing — verified';
     default: return 'configure the application unit';
   }
 }
@@ -204,7 +241,8 @@ function recoveryStep(rung) {
     case 'configured': return 'the unit is missing or invalid: redeploy, or restore the unit file from the last checkpoint';
     case 'port_responding': return 'the unit is not serving: read its journal (journalctl -u mock2-dev.service), start it, and re-verify';
     case 'app_healthy': return 'the process answers but the application is failing: read its log, check the database and the environment file, re-verify';
-    case 'credential_verified': return 'the application runs but cannot read its protected credential: the active key does not match the stored rows — restore the recovery set (database + environment) together, or set the key the rows were written under';
+    case 'credential_decryptable': return 'the application runs but the stored credential does not decrypt under the configured key — restore the recovery set (database + environment) together, or set the key the rows were written under; never roll the environment key back on its own';
+    case 'credential_use_verified': return 'the stored rows decrypt under the configured key but the running application cannot read the credential: the process did not load that key (an old process, a unit that reads another file) — restart the unit from the current unit file and re-verify';
     default: return 'follow the recovery procedure';
   }
 }
@@ -224,8 +262,14 @@ export function reconcileDecision({ job, lock = null, nowMs, canAct = true, runn
   if (!leaseExpired(lease, nowMs)) return { action: 'nothing', reason: 'lease is live' };
   const cp = parseJson(job.checkpoint_json) || {};
   const disruptive = cp.app_stopped === true || cp.disruptive === true;
-  if (runnerKinds.includes(job.kind) && cp.resumable === true && canAct) {
+  if (runnerKinds.includes(job.kind) && cp.resumable === true && !disruptive && canAct) {
     return { action: 'resume', reason: `owner ${job.owner} is gone; checkpoint '${cp.phase || job.phase || '?'}' is resumable` };
+  }
+  if (!disruptive && cp.unit_swapped === true && !cp.verification_state) {
+    // The new unit was started and the owner died before verification: the
+    // stopped-app marker is clear, but the verification is unfinished and the
+    // recovery references are still needed — verify, do not forget.
+    return { action: 'verify', reason: `owner ${job.owner} is gone after '${cp.phase || job.phase}' with the application started but not verified`, releaseLock: !!lock && lock.owner === job.owner };
   }
   if (!disruptive) {
     return { action: 'record_interrupted', reason: `owner ${job.owner} is gone; no disruptive step had begun (last phase '${job.phase || cp.phase || 'start'}')`, releaseLock: !!lock && lock.owner === job.owner };
@@ -236,6 +280,13 @@ export function reconcileDecision({ job, lock = null, nowMs, canAct = true, runn
   return { action: 'recover', reason: `owner ${job.owner} is gone after '${cp.phase || job.phase}' with the application stopped` };
 }
 
+// verifyJobFrom(job) → the queued verify_app job a reconciler creates for a
+// dead owner that had started the new unit but not verified it.
+export function verifyJobFrom(job, { nowIso }) {
+  const spec = recoveryJobFrom(job, { nowIso });
+  return { ...spec, kind: 'verify_app', plan: { steps: ['unit_status', 'probe_port', 'health_check', 'verify_credential'], params: spec.plan.params }, reason: `verify ${job.app} after ${job.kind} job ${job.id} was interrupted with the application started but unverified` };
+}
+
 // recoveryJobFrom(job) → the queued recover_app job a reconciler creates for
 // a dead deploy/restore. Carries REFERENCES only (container, port, unit,
 // guard table names) — the checkpoint is where the deploy put them, and it
@@ -243,13 +294,14 @@ export function reconcileDecision({ job, lock = null, nowMs, canAct = true, runn
 export function recoveryJobFrom(job, { nowIso }) {
   const cp = parseJson(job.checkpoint_json) || {};
   const refs = parseJson(job.config_refs_json) || {};
+  const rec = cp.recovery || {};
   const params = {
-    container: cp.container || job.app,
-    webPort: Number(cp.webPort || refs.webPort) || 3000,
-    unit: cp.unit || refs.unit || 'mock2-dev.service',
-    guard: refs.guard || null,
-    environmentFile: refs.environmentFile || '/etc/environment',
-    origin: { jobId: job.id, kind: job.kind, phase: cp.phase || job.phase || null },
+    container: cp.container || rec.container || job.app,
+    webPort: Number(cp.webPort || rec.webPort || refs.webPort) || 3000,
+    unit: cp.unit || rec.unit || refs.unit || 'mock2-dev.service',
+    guard: refs.guard || rec.guard || (parseJson(job.plan_json)?.params?.guard) || null,
+    environmentFile: refs.environmentFile || rec.environmentFile || '/etc/environment',
+    origin: { jobId: job.id, kind: job.kind, phase: cp.phase || job.phase || null, generatedKeys: rec.generatedKeys || [] },
   };
   return {
     kind: 'recover_app',
@@ -292,9 +344,49 @@ export function validateRunnerJob(job) {
   if (p.webPort != null && !(Number.isInteger(p.webPort) && p.webPort > 0 && p.webPort < 65536)) return { ok: false, reason: 'webPort must be a port' };
   if (p.unit != null && !/^[A-Za-z0-9@._-]+\.service$/.test(String(p.unit))) return { ok: false, reason: 'unit must be a .service name' };
   if (p.command != null || p.script != null || p.argv != null) return { ok: false, reason: 'a runner job never carries a command' };
+  if (p.appDir != null && !/^\/[A-Za-z0-9._\/-]+$/.test(String(p.appDir))) return { ok: false, reason: 'appDir must be an absolute path inside the guest' };
+  if (p.environmentFile != null && !/^\/[A-Za-z0-9._\/-]+$/.test(String(p.environmentFile))) return { ok: false, reason: 'environmentFile must be an absolute path inside the guest' };
+  if (job.kind === 'deploy') {
+    const v = validateDeployContract(p.contract);
+    if (!v.ok) return v;
+    if (p.secrets != null) {
+      if (!Array.isArray(p.secrets.configs)) return { ok: false, reason: 'secrets.configs must be a list of contract config entries' };
+      for (const c of p.secrets.configs) {
+        if (!c || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(c.key || ''))) return { ok: false, reason: 'every secret config names an environment key' };
+        if ('value' in c || 'default' in c) return { ok: false, reason: 'a secret config carries no value' };
+      }
+    }
+  } else if (p.contract != null || p.secrets != null) {
+    return { ok: false, reason: `a ${job.kind} job carries no contract or secret configuration` };
+  }
   const flat = JSON.stringify(plan);
   if (flat !== JSON.stringify(redact(plan))) return { ok: false, reason: 'the plan carries a value that looks like a secret; plans carry references only' };
   return { ok: true };
+}
+
+// validateDeployContract(contract) → { ok } | { ok: false, reason }. The run
+// contract is the app's own mock2.yaml `run:` block, resolved by the server
+// from the guest's working tree (or read by the executor from the same file
+// when null): guest-scope commands the app declares for itself. They are not
+// host commands and never come from the request; what is checked here is
+// shape — bounded single-line strings — not content.
+export function validateDeployContract(contract) {
+  if (contract == null) return { ok: true };
+  if (typeof contract !== 'object') return { ok: false, reason: 'contract must be an object' };
+  for (const k of ['runtime', 'install', 'migrate', 'build', 'start']) {
+    const v = contract[k];
+    if (v == null) continue;
+    if (typeof v !== 'string' || v.length > 2000 || /[\0\r\n]/.test(v)) return { ok: false, reason: `contract.${k} must be a single line of at most 2000 characters` };
+  }
+  if (contract.hasContract && !contract.start) return { ok: false, reason: 'a contract with hasContract needs a start command' };
+  return { ok: true };
+}
+
+// runnerIsLive(runnerRow, nowMs) — a heartbeat younger than RUNNER_LIVE_MS.
+export function runnerIsLive(row, nowMs = Date.now(), maxAgeMs = RUNNER_LIVE_MS) {
+  if (!row || !row.heartbeat_at) return false;
+  const t = Date.parse(row.heartbeat_at);
+  return Number.isFinite(t) && nowMs - t < maxAgeMs;
 }
 
 export function parseJson(text) {

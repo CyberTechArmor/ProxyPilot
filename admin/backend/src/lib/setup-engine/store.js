@@ -15,7 +15,7 @@
 
 import crypto from 'node:crypto';
 import {
-  DEFAULT_LEASE_MS, leaseExpiry, lockVerdict, takeoverVerdict, redact, sanitizeReason, parseJson, TERMINAL_STATUS,
+  DEFAULT_LEASE_MS, leaseExpiry, lockVerdict, takeoverVerdict, redact, sanitizeReason, parseJson, TERMINAL_STATUS, FencedError, CancelledError,
 } from './logic.js';
 
 export const SETUP_ENGINE_SCHEMA = `
@@ -68,8 +68,68 @@ CREATE TABLE IF NOT EXISTS setup_job_events (
 CREATE INDEX IF NOT EXISTS idx_setup_job_events_job ON setup_job_events(job_id, id);
 `;
 
+// Migration 1001: the runners' liveness. One row per runner identity, its
+// heartbeat refreshed every poll tick; the backend submits a deploy to the
+// runner only while one is live, and otherwise executes the same operation
+// itself (docs/features/setup-engine.md § "Who executes").
+export const SETUP_RUNNERS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS setup_runners (
+  owner        TEXT PRIMARY KEY,
+  host         TEXT,
+  pid          INTEGER,
+  version      TEXT,
+  started_at   TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL
+);
+`;
+
 export function ensureSetupEngineSchema(db) {
   db.exec(SETUP_ENGINE_SCHEMA);
+  db.exec(SETUP_RUNNERS_SCHEMA);
+}
+
+// ── runners ─────────────────────────────────────────────────────────────
+
+export function runnerHeartbeat(db, { owner, host = null, pid = null, version = null, nowMs = Date.now() }) {
+  const now = iso(nowMs);
+  db.prepare(`INSERT INTO setup_runners (owner, host, pid, version, started_at, heartbeat_at) VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT(owner) DO UPDATE SET heartbeat_at = excluded.heartbeat_at, host = excluded.host, pid = excluded.pid, version = excluded.version`)
+    .run(owner, host, pid == null ? null : Number(pid), version, now, now);
+}
+
+export function runnerGoodbye(db, { owner }) {
+  return db.prepare(`DELETE FROM setup_runners WHERE owner = ?`).run(owner).changes;
+}
+
+// liveRunners(db, { nowMs, maxAgeMs }) → runner rows with a fresh heartbeat.
+export function liveRunners(db, { nowMs = Date.now(), maxAgeMs = 30_000 } = {}) {
+  const cutoff = iso(nowMs - maxAgeMs);
+  return db.prepare(`SELECT * FROM setup_runners WHERE heartbeat_at > ? ORDER BY heartbeat_at DESC`).all(cutoff);
+}
+
+// requeueJob(db, { id, by, reason }) — a running job whose owner is gone goes
+// back to the queue for a new owner (a claim bumps the epoch). Unfenced by
+// design: it is the reconciler's write about a dead owner.
+export function requeueJob(db, { id, by, reason, nowMs = Date.now() }) {
+  const now = iso(nowMs);
+  const r = db.prepare(`UPDATE setup_jobs SET status = 'queued', owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'running'`).run(now, String(id));
+  if (r.changes) insertEvent(db, { jobId: id, at: now, kind: 'requeued', message: reason, data: { by } });
+  return r.changes;
+}
+
+// recordVerificationRung(db, { id, rung, value, detail, by }) — a rung added
+// to a FINISHED job's verification by a party other than its executor (the
+// backend's application-owned credential check). Unfenced: the job is
+// terminal; the write says who added what.
+export function recordVerificationRung(db, { id, rung, value, detail = null, by, state = null, nowMs = Date.now() }) {
+  const row = getJob(db, id);
+  if (!row) return 0;
+  const cur = parseJson(row.verification_json) || {};
+  const rungs = { ...(cur.rungs || {}), [rung]: { value, detail: detail == null ? null : sanitizeReason(detail), by, at: iso(nowMs) } };
+  const next = { ...cur, rungs, ...(state ? { state, label: state } : {}) };
+  const r = db.prepare(`UPDATE setup_jobs SET verification_json = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(redact(next)), iso(nowMs), String(id));
+  if (r.changes) insertEvent(db, { jobId: id, at: iso(nowMs), kind: 'verification', phase: rung, message: detail, data: { rung, value, by, state } });
+  return r.changes;
 }
 
 const iso = (ms) => new Date(ms).toISOString();
@@ -262,11 +322,23 @@ export function recordGenerated(db, { id, owner, epoch, resource, nowMs = Date.n
     .run(JSON.stringify({ ...prog, generated }), iso(nowMs), String(id), owner, Number(epoch)).changes;
 }
 
+// recordProgress(db, { id, owner, epoch, progress }) → changes. Merges into
+// progress_json (redacted). Fenced. The executor's own result lands here as
+// progress.result so every caller reads one shape back.
+export function recordProgress(db, { id, owner, epoch, progress, nowMs = Date.now() }) {
+  const row = getJob(db, id);
+  if (!row) return 0;
+  const merged = { ...(parseJson(row.progress_json) || {}), ...redact(progress || {}) };
+  return db.prepare(`UPDATE setup_jobs SET progress_json = ?, updated_at = ? WHERE id = ? AND owner = ? AND epoch = ? AND status = 'running'`)
+    .run(JSON.stringify(merged), iso(nowMs), String(id), owner, Number(epoch)).changes;
+}
+
 // finishJob(db, { id, owner, epoch, status, outcome, reason, verification }) →
 // changes. Terminal statuses only. Fenced.
-export function finishJob(db, { id, owner, epoch, status, outcome = null, reason = null, verification = null, nowMs = Date.now() }) {
+export function finishJob(db, { id, owner, epoch, status, outcome = null, reason = null, verification = null, progress = null, nowMs = Date.now() }) {
   if (!TERMINAL_STATUS.includes(status)) throw new Error(`finishJob: '${status}' is not a terminal status`);
   const now = iso(nowMs);
+  if (progress) recordProgress(db, { id, owner, epoch, progress, nowMs });
   const r = db.prepare(`UPDATE setup_jobs SET status = ?, outcome = ?, reason = ?, verification_json = ?, finished_at = ?, updated_at = ?, lease_expires_at = NULL WHERE id = ? AND owner = ? AND epoch = ? AND status = 'running'`)
     .run(status, outcome, reason == null ? null : sanitizeReason(reason), verification == null ? null : JSON.stringify(redact(verification)), now, now, String(id), owner, Number(epoch));
   if (r.changes) insertEvent(db, { jobId: id, at: now, kind: 'finished', message: reason, data: { status, outcome } });
@@ -283,6 +355,38 @@ export function recordJobOutcome(db, { id, status, outcome = null, reason = null
     .run(status, outcome, reason == null ? null : sanitizeReason(reason), verification == null ? null : JSON.stringify(redact(verification)), now, now, String(id));
   if (r.changes) insertEvent(db, { jobId: id, at: now, kind: 'reconciled', message: reason, data: { status, outcome, by } });
   return r.changes;
+}
+
+// requestCancel(db, { id, by }) → changes. Recorded on a queued or running
+// job; the executor honours it at its next safe checkpoint (before the
+// disruptive step) and declines it after. A queued job is cancelled outright.
+export function requestCancel(db, { id, by, nowMs = Date.now() }) {
+  const row = getJob(db, id);
+  if (!row) return { ok: false, reason: 'no such job' };
+  const now = iso(nowMs);
+  if (row.status === 'queued') {
+    const r = db.prepare(`UPDATE setup_jobs SET status = 'cancelled', outcome = 'cancelled', reason = ?, finished_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'`).run(`cancelled by ${by} before it started`, now, now, String(id));
+    if (r.changes) insertEvent(db, { jobId: id, at: now, kind: 'cancelled', message: `cancelled by ${by} before it started` });
+    return { ok: r.changes === 1, state: 'cancelled' };
+  }
+  if (row.status !== 'running') return { ok: false, reason: `job is ${row.status}` };
+  const prog = parseJson(row.progress_json) || {};
+  db.prepare(`UPDATE setup_jobs SET progress_json = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify({ ...prog, cancel_requested: { by, at: now } }), now, String(id));
+  insertEvent(db, { jobId: id, at: now, kind: 'cancel_requested', message: `cancel requested by ${by}; honoured at the next safe checkpoint` });
+  return { ok: true, state: 'requested' };
+}
+
+// fenceJob(db, { id, owner, epoch, safe, leaseMs, nowMs }) — the executor's
+// gate before every guest command: renews the lease (a heartbeat that changes
+// nothing means ownership moved → FencedError) and, at a SAFE point, honours a
+// pending cancel (CancelledError).
+export function fenceJob(db, { id, owner, epoch, safe = false, leaseMs = DEFAULT_LEASE_MS, nowMs = Date.now() }) {
+  if (!heartbeat(db, { id, owner, epoch, leaseMs, nowMs })) throw new FencedError(id);
+  if (safe) {
+    const row = getJob(db, id);
+    const c = (parseJson(row?.progress_json) || {}).cancel_requested;
+    if (c) throw new CancelledError(id, c.by);
+  }
 }
 
 // staleRunningJobs(db, { nowMs, ownerKind }) → running jobs whose lease expired.

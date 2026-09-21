@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { repairStrayMigration912 } from './lib/migration-repair.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import { SETUP_ENGINE_SCHEMA } from './lib/setup-engine/store.js';
+import { SETUP_ENGINE_SCHEMA, SETUP_RUNNERS_SCHEMA } from './lib/setup-engine/store.js';
 import { mkdirSync, existsSync, chmodSync } from 'fs';
 import { dirname, resolve, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -148,6 +148,7 @@ export function getDb() {
 //               an operator revokes them) rather than on a clock, and the
 //               cleanup verb needs to know whether ProxyPilot created the
 //               guest it is offering to delete.
+//   1001 Setup engine — setup_runners: the host runners' heartbeats.
 //   1000 Setup engine — setup_locks, setup_jobs, setup_job_events: the
 //               persistent per-app lease every platform operation holds
 //               (deploy, restores, credential migration, recovery), the
@@ -2326,6 +2327,11 @@ export function initDatabase() {
   // identical tables; every statement is IF NOT EXISTS.
   runMigration(db, 1000, 'setup_engine_locks_jobs_events', (d) => {
     d.exec(SETUP_ENGINE_SCHEMA);
+  });
+
+  // Version 1001: the host runners' heartbeats (lib/setup-engine/store.js).
+  runMigration(db, 1001, 'setup_engine_runners', (d) => {
+    d.exec(SETUP_RUNNERS_SCHEMA);
   });
 
   runMigration(db, 907, 'route_edge_options', (d) => {

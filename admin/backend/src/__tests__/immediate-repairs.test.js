@@ -124,10 +124,13 @@ test('ratchet: the migration-history repair runs before 912 and comes from the t
 // ---- minted secrets + production mode wiring ----
 
 test('ratchet: the deploy mints owned secrets and refuses to start without production mode', () => {
-  const deploy = src('mock2/deploy.js');
+  // Gate two moved the deploy's execution into ONE operation
+  // (lib/setup-engine/deploy-op.js) that the host runner and the backend's
+  // in-process fallback both run; the ratchets below read that file.
+  const deploy = src('lib/setup-engine/deploy-op.js');
   assert.match(deploy, /validateDeployEnvironment\(\{ unitText: unit, environmentText: envRead\.stdout \|\| '', requiredKeys: requiredSecretKeys \}\)/);
   // A deferred key (marker missing on disk) is neither minted nor required.
-  assert.match(deploy, /requiredSecretKeys = secrets\.required;/);
+  assert.match(deploy, /requiredSecretKeys = m\.required;/);
   const install = src('mock2/component-install.js');
   assert.match(install, /MARKER MISSING/);
   assert.match(install, /verdict\.get\(c\.key\)/);
@@ -166,16 +169,16 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   // The rows check is computed on the platform side with the tested cipher.
   const runner = src('mock2/readiness.js');
   assert.match(runner, /MASTERKEY_ROWS:\$\{masterKeyRowsCode\(\{ probe, envKey, legacyDefault: guard\.legacy_default \}\)\}/);
-  const stopIdx = deploy.indexOf('systemctl stop mock2-dev.service');
-  const mintIdx = deploy.indexOf('ensureComponentSecrets(');
+  const stopIdx = deploy.indexOf('systemctl stop ${p.unit}');
+  const mintIdx = deploy.indexOf('mintComponentSecrets({');
   const validateIdx = deploy.indexOf('validateDeployEnvironment(');
-  const swapIdx = deploy.indexOf('const swap = await containerSh(');
+  const swapIdx = deploy.indexOf("const swap = await guest('unit'");
   assert.ok(stopIdx > 0 && stopIdx < mintIdx && mintIdx < validateIdx && validateIdx < swapIdx, 'stop the app, then mint, then validate, then write and start the unit');
   // The final probe and mint happen with writers stopped; every failure after
   // the stop — stop itself, mint, and validation after key persistence —
   // starts the unit again before returning.
-  assert.match(deploy, /ensureComponentSecrets\(\{ containerName, rows, writersStopped: true \}\)/);
-  assert.match(deploy, /const restartUnit = async \(\) => \{[\s\S]{0,400}`systemctl daemon-reload[^`]*systemctl start mock2-dev\.service[^`]*\$\{servingProbeScript\(webPort, 10\)\}`/);
+  assert.match(deploy, /mintComponentSecrets\(\{ guest, appDir, environmentFile, configs: p\.secrets\.configs, newlyProvisioned: p\.secrets\.newlyProvisioned, writersStopped: true, job \}\)/);
+  assert.match(deploy, /const restartUnit = async \(\) => \{[\s\S]{0,400}`systemctl daemon-reload[^`]*systemctl start \$\{p\.unit\}[^`]*\$\{servingProbeScript\(webPort, 10\)\}`/);
   assert.equal((deploy.match(/const back = await restartUnit\(\);/g) || []).length, 5, 'stop failure, mint failure, mint exception, validation failure, unit swap failure');
   // The swap failure path restarts too — the comment promise "every failure after this point" is kept by the code.
   assert.match(deploy, /if \(swap\.code !== 0\) \{[^}]*await restartUnit\(\);/);
@@ -185,10 +188,15 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   assert.equal((deploy.match(/\$\{back\}/g) || []).length, 5, 'every restart path reports its outcome');
   // Deploys for one container are serialized on the container lock that the
   // restores and the retry-path mint share (container-lock.js).
-  // Gate two: the lock also persists a job row (lib/setup-engine) and hands the
-  // deploy a checkpoint handle; the serialization is unchanged.
-  assert.match(deploy, /withContainerLock\(containerName, 'deploy', \(handle\) => deployProjectUnqueued\(\{ \.\.\.args, job: handle \}\), \{ job \}\)/);
-  assert.doesNotMatch(deploy, /deployQueues/);
+  // Gate two: the deploy is a persisted job. A live host runner executes the
+  // operation; otherwise the backend runs the SAME operation in-process under
+  // the persistent container lock (mock2/deploy.js) — one implementation.
+  const deployEntry = src('mock2/deploy.js');
+  assert.match(deployEntry, /withContainerLock\(containerName, 'deploy', async \(handle\) => \{/);
+  assert.match(deployEntry, /runDeployOperation\(\{ params, exec, job: jobHandle \}\)/);
+  assert.match(deployEntry, /submitDeployJob\(db, \{ app: containerName, params, requestedBy, via \}\)/);
+  assert.doesNotMatch(deployEntry, /deployProjectUnqueued|deployQueues/);
+  assert.doesNotMatch(deployEntry, /systemctl stop/, 'the entry module no longer carries a deploy of its own');
   const projectConfig = src('routes/mcp-tools/project-config.js');
   assert.match(projectConfig, /withContainerLock\(p\.incusName, 'restore_project_db', run, \{\s*wait: false,/, 'the database restore is refused while a deploy holds the container');
   assert.ok(projectConfig.indexOf("withContainerLock(p.incusName, 'restore_project_db'") > projectConfig.indexOf("tool: 'restore_project_db'"), 'the lock is taken after the confirmation gate, before the pre-restore dump');

@@ -57,6 +57,7 @@ function scriptedGuest(state) {
     calls,
     guest: async (container, script) => {
       calls.push({ container, script });
+      if (/ORPHANS:/.test(script)) return { code: 0, stdout: `ORPHANS:${state.orphans ?? 0}\n` };
       if (/UNIT_LOADED/.test(script)) {
         return { code: 0, stdout: `UNIT_LOADED:${state.loaded ? 'yes' : 'no'}\nUNIT_ENABLED:enabled\nUNIT_ACTIVE:${state.active ? 'active' : 'inactive'}\n` };
       }
@@ -142,7 +143,7 @@ test('verificationFromObservations climbs the ladder only as far as what was obs
   const healthy = verificationFromObservations({ unit, port, health: parseHealth('ROOT:200\nHEALTH:200\nLOGIN:200\n') });
   assert.equal(healthy.state, 'app_healthy');
   const full = verificationFromObservations({ unit, port, health: parseHealth('ROOT:200\nHEALTH:200\nLOGIN:200\n'), credential: { verified: true, code: 200, detail: 'x' } });
-  assert.equal(full.state, 'credential_verified');
+  assert.equal(full.state, 'credential_decryptable');
   const down = verificationFromObservations({ unit, port: parsePortProbe('PORT_NOT_SERVING:000\n') });
   assert.equal(down.state, 'recovery_required');
   assert.equal(down.failedAt, 'port_responding');
@@ -158,7 +159,7 @@ function queuedRecovery(d, { guard = GUARD, kind = 'recover_app', origin = null 
   return createJob(d, { kind, app: 'pp-x', plan: { steps: kind === 'recover_app' ? ['start_unit', 'probe_port', 'health_check', 'verify_credential'] : ['unit_status', 'probe_port', 'health_check', 'verify_credential'], params: { container: 'pp-x', webPort: 3000, unit: 'mock2-dev.service', guard, environmentFile: '/etc/environment', origin } }, requestedBy: 'alice', via: 'ui', nowMs: T0 });
 }
 
-test('executeJob recover_app: starts the stopped unit, probes, verifies the credential, records credential_verified and releases the lease', async () => {
+test('executeJob recover_app: starts the stopped unit, probes, verifies the credential, records credential_decryptable and releases the lease', async () => {
   const d = db();
   const key = 'a-real-master-secret-value';
   const row = encryptUnder(key);
@@ -168,20 +169,20 @@ test('executeJob recover_app: starts the stopped unit, probes, verifies the cred
   const claimed = claimNextJob(d, { owner: RUNNER, kinds: ['recover_app'], nowMs: T0 });
   const r = await executeJob(claimed, { db: d, owner: RUNNER, exec: g, nowMs: () => T0 + 1000 });
   assert.equal(r.status, 'succeeded');
-  assert.equal(r.verification.state, 'credential_verified');
+  assert.equal(r.verification.state, 'credential_decryptable');
   assert.ok(g.calls.some((c) => /systemctl start/.test(c.script)), 'the unit was started');
   assert.ok(g.calls.every((c) => c.container === 'pp-x'));
   const row2 = getJob(d, job.id);
   assert.equal(row2.status, 'succeeded');
-  assert.equal(row2.outcome, 'credential_verified');
-  assert.match(row2.reason, /protected credential reads back/);
+  assert.equal(row2.outcome, 'credential_decryptable');
+  assert.match(row2.reason, /decrypts under the configured key/);
   const ver = JSON.parse(row2.verification_json);
   assert.equal(ver.observations.credential.code, 200);
   assert.equal(JSON.stringify(row2).includes(key), false, 'the active key never lands in the row');
   assert.equal(listEvents(d, job.id).some((e) => e.data_json && e.data_json.includes(key)), false);
   assert.equal(readLock(d, 'pp-x'), null, 'lease released');
   const phases = listEvents(d, job.id).filter((e) => e.kind === 'checkpoint').map((e) => e.phase);
-  assert.deepEqual(phases, ['unit_status', 'start_unit', 'probe_port', 'health_check', 'read_active_key', 'verify_credential']);
+  assert.deepEqual(phases, ['reap_previous_writer', 'unit_status', 'start_unit', 'probe_port', 'health_check', 'read_active_key', 'verify_credential']);
 });
 
 test('executeJob: a port that never answers is recovery_required with the procedure, never "recovered"; an unhealthy app likewise; a mismatched key is recovery_required at the credential rung', async () => {
@@ -189,7 +190,7 @@ test('executeJob: a port that never answers is recovery_required with the proced
   const cases = [
     [{ loaded: true, active: false, startWorks: false, serves: false }, 'not_serving', 'port_responding', /journalctl/],
     [{ loaded: true, active: true, rootCode: 500 }, 'unhealthy', 'app_healthy', /read its log/],
-    [{ loaded: true, active: true, envKey: 'wrong-key-value', probe: `PROBE:ok\nTARGET:x\nRLS:off\nROW:${encryptUnder('right-key').ciphertext}|${encryptUnder('right-key').nonce}\n` }, 'recovery_required', 'credential_verified', /recovery set/],
+    [{ loaded: true, active: true, envKey: 'wrong-key-value', probe: `PROBE:ok\nTARGET:x\nRLS:off\nROW:${encryptUnder('right-key').ciphertext}|${encryptUnder('right-key').nonce}\n` }, 'recovery_required', 'credential_decryptable', /recovery set/],
     [{ loaded: false }, 'unit_missing', 'configured', /redeploy/],
   ];
   for (const [state, outcome, failedAt, next] of cases) {
@@ -247,7 +248,7 @@ test('executeJob: a live foreign lease defers the job; a dead backend\'s lease i
   claimed = claimNextJob(d, { owner: RUNNER, kinds: ['recover_app'], nowMs: T0 + 120_000 });
   r = await executeJob(claimed, { db: d, owner: RUNNER, exec: scriptedGuest({ loaded: true, active: false, envKey: '', probe: 'PROBE:ok\nTARGET:x\nRLS:off\n' }), nowMs: () => T0 + 120_000 });
   assert.equal(r.status, 'succeeded');
-  assert.equal(r.verification.state, 'credential_verified');
+  assert.equal(r.verification.state, 'credential_decryptable');
   assert.equal(readLock(d, 'pp-x'), null, 'the taken-over lease is released when done');
   const ev = listEvents(d, claimed.id);
   const takeover = ev.find((e) => e.kind === 'lock_takeover');
@@ -329,7 +330,7 @@ test('reconcile: a dead backend that stopped an app gets a recovery job and a st
   assert.equal(out.ran.length, 2);
   const recRun = out.ran.find((j) => j.kind === 'recover_app');
   assert.equal(recRun.status, 'succeeded');
-  assert.equal(recRun.verification.state, 'credential_verified');
+  assert.equal(recRun.verification.state, 'credential_decryptable');
   assert.ok(guests['pp-a'].calls.some((c) => /systemctl start/.test(c.script)), 'pp-a was started');
   assert.equal(readLock(d, 'pp-a'), null, 'the stale lease is gone once recovery finished');
   const ver = out.ran.find((j) => j.kind === 'verify_app');

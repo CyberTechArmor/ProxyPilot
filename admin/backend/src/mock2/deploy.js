@@ -23,21 +23,21 @@ import { createHash } from 'node:crypto';
 import { sh, b64 } from './host.js';
 import { scaffoldPwaFiles } from './scaffold.js';
 import {
-  parseRunContract, deployPlan, deployStepLabel, buildDevServiceUnit,
-  validateDeployEnvironment,
-  execStartForStartCommand, deployFailureMessage, DEPLOY_STEP_TIMEOUTS_MS,
-  freeWebPortScript, portHoldersReportScript, servingProbeScript, restartVerdict, restartOutcomeText,
+  parseRunContract, deployStepLabel,
   newBuildId, sanitizeBuildId, buildIdStampScript, buildStampReportScript, interpretBuildStamp,
-  LEGACY_SW_JS,
+  LEGACY_SW_JS, BUILD_ID_PLACEHOLDER,
 } from './deploy-logic.js';
 import { parseDeclaredEgress } from './egress-logic.js';
-import { withContainerLock } from './container-lock.js';
+import { withContainerLock, containerLockStore } from './container-lock.js';
+import { runDeployOperation, UNIT_NAME } from '../lib/setup-engine/deploy-op.js';
+import { runnerAvailable, submitDeployJob, waitForJob, deployResultFromJob } from '../lib/setup-engine/backend.js';
+import { recordVerificationRung } from '../lib/setup-engine/store.js';
+import { verificationState } from '../lib/setup-engine/logic.js';
 // The declared default port; a project row normally carries its own.
 import { DEFAULT_WEB_PORT } from './template.js';
 import { updateProject } from './projects.js';
 import { installBrowserScript } from './scaffold-e2e.js';
 
-const UNIT_PATH = '/etc/systemd/system/mock2-dev.service';
 
 // Run a script inside the container (base64-streamed to `incus exec -- sh`, so
 // no quoting hazard). Always resolves { code, stdout, stderr }.
@@ -46,18 +46,9 @@ function containerSh(containerName, script, { timeoutMs = 120000 } = {}) {
 }
 
 // Every deploy-step script carries this marker in its command line (a no-op
-// shell comment), so a NEW deploy can reap scripts a DEAD backend left running
-// in the container. The in-process queue serializes deploys within one backend
-// process, but a backend restart (node --watch, an update) mid-deploy orphans
-// the in-container script — it keeps running npm/systemctl and fights the next
-// deploy (the ETXTBSY / EADDRINUSE churn seen after frequent restarts).
+// shell comment), so a NEW deploy can reap scripts a DEAD writer left running
+// in the container (deploy-op.js reaps and verifies before it starts).
 const DEPLOY_MARKER = 'mock2_deploy_marker';
-
-// See the install-skip note in deployProjectUnqueued. The stamp lives INSIDE
-// node_modules on purpose: any install path that wipes the tree (npm ci)
-// wipes the stamp with it, so a half-installed tree can never read as fresh.
-const INSTALL_STAMP_PATH = 'node_modules/.mock2-install-stamp';
-const MANIFEST_HASH_CMD = `cat package.json package-lock.json 2>/dev/null | sha256sum | cut -d' ' -f1`;
 
 // Run a deploy command in the app dir. Sources /etc/environment (so any
 // operator-set env is present) then runs the command; egress is the bridge NAT.
@@ -102,274 +93,196 @@ export async function readDeclaredEgress(containerName, appDir = '/srv/app') {
 // { ok, step, error }. Runs the ordered plan, then swaps the unit and restarts,
 // then health-checks the web port. onStep(key, label) reports progress (wired to
 // setJob so the CycleCard shows "Installing dependencies…" etc.).
+// deployProject(args) → { ok, step, error, skipped, buildStamp, verification, jobId }.
+//
+// Gate two: the deploy is a persisted job executed by ONE operation
+// (lib/setup-engine/deploy-op.js). Who executes it depends on the host:
+//
+//   * a live host runner (proxypilot-setup-runner.service, heartbeat in
+//     setup_runners) → the job is submitted and this call WAITS for it,
+//     replaying the runner's step events to onStep. The browser, this API
+//     process and this promise can all go away; the runner finishes the job,
+//     and its record says what happened.
+//   * no live runner → the same operation runs here, in-process, under the
+//     persistent container lock (owner = this backend), with the nsenter
+//     guest pivot. Its record and checkpoints are identical; a backend that
+//     dies mid-way is reconciled by the boot sweep / the runner exactly as a
+//     runner-owned job would be.
+//
+// Everything the operation needs about the project is resolved HERE into
+// references (the run contract from args or the guest's manifest, the
+// installed components' secret contracts and data guards from mock2.db, the
+// port, the app dir) — never a secret value. `detach: true` submits and
+// returns the job id without waiting (the /api/setup submission endpoint).
 export async function deployProject(args) {
   const containerName = String(args?.containerName || '');
-  // The persisted job carries REFERENCES only: the guest, the port, the unit
-  // and the environment file the runner would read to recover — never a value.
+  const params = await resolveDeployParams({ ...args, containerName });
+  const store = containerLockStore();
+  const requestedBy = args?.requestedBy || null;
+  const via = args?.via || 'system';
+  const onStep = typeof args?.onStep === 'function' ? args.onStep : null;
+
+  if (store) {
+    const db = store.getDb();
+    const runner = runnerAvailable(db);
+    if (runner) {
+      const sub = submitDeployJob(db, { app: containerName, params, requestedBy, via });
+      if (sub.error) return { ok: false, step: 'submit', error: sub.error };
+      if (args?.detach) return { ok: true, submitted: true, jobId: sub.job.id, created: sub.created, runner: runner.owner };
+      const row = await waitForJob(db, sub.job.id, {
+        onEvent: (e) => { if (e.kind === 'step' && onStep) onStep(e.phase || 'deploy', e.message || deployStepLabel(e.phase)); },
+      });
+      if (!row) return { ok: false, step: 'wait', error: `deploy job ${sub.job.id} did not finish in time; it may still be running — see /api/setup/jobs/${sub.job.id}`, jobId: sub.job.id };
+      const result = deployResultFromJob(row);
+      if (result.ok && !result.skipped) result.verification = await applyCredentialUseRung({ db, jobId: row.id, containerName, webPort: params.webPort, guard: params.guard, verification: result.verification, by: 'backend' });
+      return result;
+    }
+  }
+
+  // In-process executor: the same operation, this backend as the owner.
   const job = {
-    kind: 'deploy',
-    plan: { steps: ['install', 'migrate', 'build', 'stop', 'mint', 'unit', 'start', 'health'], params: { container: containerName, webPort: Number(args?.webPort) || 3000, appDir: args?.appDir || '/srv/app' } },
-    configRefs: { webPort: Number(args?.webPort) || 3000, unit: 'mock2-dev.service', environmentFile: '/etc/environment', appDir: args?.appDir || '/srv/app' },
-    requestedBy: args?.requestedBy || null,
-    via: args?.via || 'system',
+    kind: 'deploy', plan: { steps: ['install', 'migrate', 'build', 'stop', 'mint', 'unit', 'start', 'health', 'verify'], params },
+    configRefs: { webPort: params.webPort, unit: UNIT_NAME, environmentFile: params.environmentFile, appDir: params.appDir, guard: params.guard || null },
+    requestedBy, via,
   };
-  return withContainerLock(containerName, 'deploy', (handle) => deployProjectUnqueued({ ...args, job: handle }), { job });
+  const out = await withContainerLock(containerName, 'deploy', async (handle) => {
+    const exec = { guest: (name, script, { timeoutMs } = {}) => containerSh(name, script, { timeoutMs }) };
+    const jobHandle = { fence: (o) => handle.fence(o), checkpoint: handle.checkpoint, generated: handle.generated, event: handle.event, onStep };
+    let result;
+    try {
+      result = await runDeployOperation({ params, exec, job: jobHandle });
+    } catch (e) {
+      if (e?.code === 'PREVIOUS_WRITER_ALIVE') result = { ok: false, step: 'reap', error: e.message };
+      else throw e;
+    }
+    handle.progress({ result: publicResult(result), failed_step: result.ok ? null : result.step });
+    return { ...result, jobId: handle.id };
+  }, { job });
+  // The job row is terminal now; the application-owned rung is added to it.
+  if (out.ok && !out.skipped && store) {
+    out.verification = await applyCredentialUseRung({ db: store.getDb(), jobId: out.jobId, containerName, webPort: params.webPort, guard: params.guard, verification: out.verification, by: 'backend' });
+  }
+  return out;
 }
 
-async function deployProjectUnqueued({
-  containerName, appDir = '/srv/app', webPort = 3000, runContract, onStep = null, job = null,
-}) {
-  // The persisted job handle (container-lock.js). Its checkpoint is what a
-  // reconciler reads after a crash: written BEFORE the app is stopped, and
-  // cleared once it is started again.
-  const mark = (phase, data, message) => { try { job?.checkpoint?.(phase, data, message); } catch { /* never fails a deploy */ } };
-  // Reap deploy scripts a dead backend orphaned in this container (see
-  // DEPLOY_MARKER) — they keep running npm/systemctl and corrupt this deploy.
-  // pkill never signals its own process, so carrying the marker string in the
-  // killer's own command line is safe.
-  await containerSh(containerName, `pkill -9 -f ${DEPLOY_MARKER} 2>/dev/null || true`).catch(() => {});
+function publicResult(r) {
+  if (!r) return null;
+  const { verification, ...rest } = r;
+  return { ...rest, verification: verification ? { state: verification.state, label: verification.label, failedAt: verification.failedAt || null, next: verification.next || null } : null };
+}
 
-  const contract = runContract && runContract.hasContract
-    ? runContract
-    : await readRunContract(containerName, appDir);
-
-  // No run contract (an old placeholder project) — nothing to deploy; the
-  // placeholder serve.py keeps serving. Not a failure.
-  if (!contract.hasContract) {
-    return { ok: true, skipped: true };
-  }
-
-  const report = (key) => { if (onStep) onStep(key, deployStepLabel(key)); };
-
-  // 1) install → migrate → build (each bounded, proxy env sourced).
-  for (const step of deployPlan(contract)) {
-    report(step.key);
-    // Install skip: sha256 of package.json + package-lock.json, stamped into
-    // node_modules after a successful install. Unchanged manifests + an
-    // existing node_modules ⇒ nothing to install — a quick edit that touched
-    // one HTML file otherwise paid a full `npm ci` (often the longest
-    // non-model step) on every deploy. `npm ci` deletes node_modules, so a
-    // real install clears the stamp until it succeeds again; the dependency
-    // repair passes rewrite the manifests, which changes the hash and forces
-    // the install back on. Only for npm-based contracts — a custom install
-    // command may do more than the manifests describe.
-    if (step.key === 'install' && /npm/.test(step.command)) {
-      const fresh = await runInApp(
-        containerName, appDir,
-        `hash=$(${MANIFEST_HASH_CMD})\n[ -d node_modules ] && [ -f '${INSTALL_STAMP_PATH}' ] && [ "$(cat '${INSTALL_STAMP_PATH}' 2>/dev/null)" = "$hash" ] && echo MOCK2_INSTALL_FRESH || true`,
-        30000,
-      );
-      if (/MOCK2_INSTALL_FRESH/.test(fresh.stdout || '')) {
-        if (onStep) onStep('install', 'Dependencies unchanged — install skipped.');
-        continue;
-      }
-    }
-    let r = await runInApp(containerName, appDir, step.command, step.timeoutMs);
-    // ETXTBSY on install is a transient race on a native binary (esbuild's
-    // postinstall re-executes the file npm just wrote — a known npm flake on
-    // container filesystems, or the wake of a concurrent install that has
-    // since been serialized away). One clean retry after the tree settles
-    // resolves it; any other failure is real and returned as-is.
-    if (r.code !== 0 && step.key === 'install' && /ETXTBSY|text file busy/i.test(tail(r))) {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      r = await runInApp(containerName, appDir, step.command, step.timeoutMs);
-    }
-    if (r.code !== 0) {
-      return { ok: false, step: step.key, error: deployFailureMessage(step.key, tail(r)) };
-    }
-    if (step.key === 'install') {
-      await runInApp(containerName, appDir, `hash=$(${MANIFEST_HASH_CMD}); printf '%s' "$hash" > '${INSTALL_STAMP_PATH}'`, 15000).catch(() => {});
-    }
-  }
-
-  // 1a) The Playwright browser, once per container.
-  //
-  //     The project ships a real browser suite (scaffold-e2e.js) and Playwright
-  //     needs a Chromium (~170MB) to run it. Installed HERE rather than at
-  //     provision so an EXISTING project picks it up on its next deploy too,
-  //     and guarded by an "is it already there" check so it costs one `ls` on
-  //     every deploy after the first.
-  //
-  //     Strictly best-effort: no egress, a slow CDN or a full disk must never
-  //     fail a deploy over a test tool. When it does not land, the e2e gate
-  //     skips with the exact command to run.
-  await installE2eBrowser(containerName, appDir, onStep).catch(() => {});
-
-  // 1b) Stamp this deploy's BUILD ID into the PWA plumbing, after the build (so
-  //     the built output is stamped too) and before the restart.
-  //
-  //     This is the fix for the "I deployed but the browser still runs the old
-  //     code" class of failure: a service worker only updates when sw.js's BYTES
-  //     change, and it only drops old cached assets when the cache NAME changes.
-  //     With a hardcoded cache name neither ever happened, so a client could
-  //     serve pre-deploy JS indefinitely while the server served the new build —
-  //     three builds were burned chasing exactly that ghost. Stamping a fresh id
-  //     per deploy changes both, and writes the id where the post-deploy check
-  //     can compare what the CLIENT ran against what the SERVER has.
-  //
-  //     Best-effort by design: a project without these files (an older scaffold)
-  //     is simply left alone — never a deploy failure.
-  await retrofitPwaBuildPlumbing(containerName, appDir).catch(() => {});
-  await stampBuildId(containerName, appDir).catch(() => {});
-
-  // 1.5) Stop the running app, THEN mint. The secrets the installed components
-  //      OWN (contract.config secret + generate — the auth component's JWT and
-  //      master keys) are minted once into /etc/environment, which the unit
-  //      below reads. A key that protects stored data is decided on the data
-  //      (auth-data-logic.js), and that decision is only sound while nothing
-  //      can write under the old key: the old app is stopped and the port
-  //      freed here, before the final probe, and the new unit starts below
-  //      with the new key already persisted. Deploys for one container are
-  //      serialized on the container lock (container-lock.js), which the restores share, so two deploys cannot decide differently and a restore cannot land between the probe and the start.
-  //      Fail closed: a failed mint restarts the old unit and reports.
-  //      Dynamic imports — the static ones would be a cycle (component-install
-  //      imports runner, which imports this module).
-  report('start');
-  mark('build_done', { app_stopped: false, container: containerName, webPort, unit: 'mock2-dev.service' }, 'install, migrate and build finished; about to stop the application');
-  // Every failure after this point starts the unit again before returning,
-  // so a failed deploy never leaves the app down. What it starts is a
-  // COMPATIBLE set by construction: the build already replaced dist/, and a
-  // key that protects stored data is persisted only when the code on disk
-  // carries the migration bridge — so old rows stay readable whichever of
-  // (old key, new key) the environment holds when the process comes up.
-  // Returns the outcome text: "restart attempted" plus whether the app is
-  // serving again — never "recovered", which needs the credential read back
-  // through the application (deploy-logic RESTART_OUTCOME).
-  const restartUnit = async () => {
-    const r = await containerSh(
-      containerName,
-      `systemctl daemon-reload >/dev/null 2>&1 || true\nsystemctl start mock2-dev.service >/dev/null 2>&1 || true\n${servingProbeScript(webPort, 10)}`,
-      { timeoutMs: 90000 },
-    ).catch(() => null);
-    const verdict = restartVerdict(r?.stdout);
-    // Recorded as what it is: a restart ATTEMPT with the port's answer. The
-    // checkpoint says the app is no longer known-stopped only when it serves.
-    mark('restart_attempted', { app_stopped: verdict !== 'serving', restart_verdict: verdict }, `restart attempted after a failure: ${verdict}`);
-    return restartOutcomeText(verdict);
+// resolveDeployParams(args) → the operation's REFERENCES. The components'
+// secret contracts come from mock2.db (dynamic import: this module stays
+// importable without it); a project the registry does not know gets no
+// secret configuration and no guard — the deploy then mints nothing.
+export async function resolveDeployParams({ containerName, appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, runContract = null, newlyProvisioned = false } = {}) {
+  const params = {
+    container: String(containerName || ''), appDir: String(appDir || '/srv/app'), webPort: Number(webPort) || DEFAULT_WEB_PORT,
+    environmentFile: '/etc/environment',
+    contract: runContract && runContract.hasContract ? pickContract(runContract) : null,
+    secrets: { configs: [], newlyProvisioned: newlyProvisioned === true },
+    guard: null,
   };
-  // THE checkpoint before the disruptive step: from here until the new unit
-  // serves, a dead backend leaves the app stopped, and the record says so.
-  mark('stopping_app', { app_stopped: true, container: containerName, webPort, unit: 'mock2-dev.service', disruptive: true }, 'stopping the application before the key check and mint');
-  const stop = await containerSh(
-    containerName,
-    `: ${DEPLOY_MARKER}\nsystemctl stop mock2-dev.service >/dev/null 2>&1 || true\n${freeWebPortScript(webPort)}\n`,
-    { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.start },
-  );
-  if (stop.code !== 0) {
-    const back = await restartUnit();
-    return { ok: false, step: 'start', error: deployFailureMessage('start', `could not stop the running app before the key check: ${tail(stop)}. ${back}`) };
-  }
-  let requiredSecretKeys = [];
   try {
-    const [{ ensureComponentSecrets }, { listProjectComponents }, { getProjectByContainerName }] = await Promise.all([
-      import('./component-install.js'), import('./components.js'), import('./projects.js'),
+    const [{ getProjectByContainerName }, { listProjectComponents }, { parseContractJson, secretDataGuards }] = await Promise.all([
+      import('./projects.js'), import('./components.js'), import('./component-logic.js'),
     ]);
     const project = getProjectByContainerName(containerName);
     if (project) {
-      const rows = listProjectComponents(project.id);
-      const secrets = await ensureComponentSecrets({ containerName, rows, writersStopped: true });
-      if (!secrets.ok) {
-        const back = await restartUnit();
-        return { ok: false, step: 'start', error: deployFailureMessage('start', `could not mint the application's secrets: ${secrets.error}. ${back}`) };
+      params.projectId = project.id;
+      if (!webPort && project.web_port) params.webPort = Number(project.web_port) || params.webPort;
+      for (const row of listProjectComponents(project.id)) {
+        if (row?.status !== 'installed') continue;
+        const contract = parseContractJson(row.contract_json);
+        for (const c of contract?.config || []) {
+          if (c && c.secret === true && c.generate === true) params.secrets.configs.push(secretConfigRef(c));
+        }
       }
-      // A deferred key (marker, data or artifact not ready) is neither minted
-      // nor required — the app keeps its current value, and the deferral is
-      // reported by the install and retry paths and by readiness.
-      requiredSecretKeys = secrets.required;
+      const guards = secretDataGuards(params.secrets.configs);
+      if (guards[0]?.guard) params.guard = guards[0].guard;
     }
-  } catch (e) {
-    const back = await restartUnit();
-    return { ok: false, step: 'start', error: deployFailureMessage('start', `application secret minting failed: ${e?.message || e}. ${back}`) };
-  }
+  } catch { /* no mock2 registry here: nothing to mint, nothing to guard */ }
+  return params;
+}
 
-  // 2) Rewrite the systemd unit's ExecStart to the manifest `start` command,
-  //    reload, and restart. WantedBy=multi-user.target already persists, so a
-  //    later container restart brings the built app back (idempotency point 5).
-  //    The unit runs the app in production mode; the deploy is refused unless
-  //    the unit says so, /etc/environment does not override it, and every
-  //    minted secret is present (validateDeployEnvironment) — an omitted
-  //    variable can never silently switch the dev-default secrets back on.
-  const execStart = execStartForStartCommand(contract.start, { appDir });
-  const unit = buildDevServiceUnit({ appDir, webPort, execStart });
-  const envRead = await containerSh(containerName, 'cat /etc/environment 2>/dev/null || true', { timeoutMs: 15000 });
-  const mode = validateDeployEnvironment({ unitText: unit, environmentText: envRead.stdout || '', requiredKeys: requiredSecretKeys });
-  if (!mode.ok) {
-    // After key persistence: the environment now holds the minted key and the
-    // code on disk carries the bridge, so starting the (unchanged) unit brings
-    // up a readable app while the operator fixes the environment.
-    const back = await restartUnit();
-    return { ok: false, step: 'start', error: deployFailureMessage('start', `${mode.error}. ${back}`) };
-  }
-  const swap = await containerSh(
-    containerName,
-    `: ${DEPLOY_MARKER}\n`
-      + `printf '%s' '${b64(unit)}' | base64 -d > ${UNIT_PATH}\n`
-      + `systemctl daemon-reload\n`
-      + `systemctl enable mock2-dev.service >/dev/null 2>&1 || true\n`
-      // Free the web port before starting so a fresh instance never races an
-      // orphan a prior deploy left on it (the EADDRINUSE crash-loop). Then a
-      // clean start rather than restart-into-a-storm.
-      + `${freeWebPortScript(webPort)}\n`
-      + `systemctl start mock2-dev.service\n`,
-    { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.start },
-  );
-  if (swap.code !== 0) {
-    // The new unit is on disk; the environment and dist/ are the pair it
-    // reads. A retry of the start is harmless if the app itself will not
-    // come up, and brings it back when daemon-reload or the port free failed.
-    const back = await restartUnit();
-    return { ok: false, step: 'start', error: deployFailureMessage('start', `${tail(swap)}\n${back}`) };
-  }
-  mark('app_started', { app_stopped: false, unit_swapped: true }, 'new unit written and started; health check next');
+function pickContract(c) {
+  const out = { hasContract: true };
+  for (const k of ['runtime', 'install', 'migrate', 'build', 'start']) if (c[k]) out[k] = String(c[k]);
+  return out;
+}
 
-  // 3) Health-check: the app must actually SERVE ITS SHELL before we call the
-  //    cycle "succeeded" ("succeeded" ⇒ running AND not erroring). Poll the port a
-  //    few times (the app needs a moment to bind). A booted-but-broken app that
-  //    answers the root with a 5xx is NOT serving — that's the "compiles but
-  //    doesn't work" failure mode, and calling it success is exactly what let
-  //    broken builds ship. So we accept any 2xx/3xx/4xx (the app is up and its
-  //    own routing is its concern) but treat a 5xx server error on the shell, or a
-  //    refused/failed CONNECTION (000), as not-serving.
-  report('health');
-  const health = await containerSh(
-    containerName,
-    `: ${DEPLOY_MARKER}\nlast="000"\ni=0\nwhile [ $i -lt 45 ]; do\n`
-      + `  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${webPort}/" 2>/dev/null)\n`
-      + `  [ -n "$code" ] && last="$code"\n`
-      + `  if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 500 ]; then echo "MOCK2_SERVING ($code)"; exit 0; fi\n`
-      + `  i=$((i+1)); sleep 2\n`
-      + `done\n`
-      + `echo "MOCK2_NOT_SERVING (last http_code: $last)"\n`
-      + `echo "# service state:"; systemctl is-active mock2-dev.service 2>&1 || true\n`
-      // Who holds the web port RIGHT NOW — when the crash reason is
-      // EADDRINUSE this names the offending process instead of leaving the
-      // operator guessing. Tool-independent: falls back to /proc when ss is
-      // not installed (the old ss-only line printed "(nothing bound)" over a
-      // held port on minimal images).
-      + `echo "# port ${webPort} holders:"\n${portHoldersReportScript(webPort)}\n`
-      + `echo "# recent app output (this is the crash reason if it exits after starting, or the 5xx cause):"\n`
-      + `journalctl -u mock2-dev.service --no-pager -n 25 2>/dev/null || true\n`,
-    { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.health },
-  );
-  if (!/MOCK2_SERVING/.test(health.stdout || '')) {
-    // Keep BOTH ends of the output: the head carries the status line, service
-    // state, and the port-holder identification (the EADDRINUSE culprit); the
-    // tail carries the crash reason from the journal. A plain tail-slice let a
-    // long journal push the holder line out of the message entirely.
-    const raw = `${health?.stdout || ''}${health?.stderr ? `\n${health.stderr}` : ''}`.trim();
-    const detail = raw.length > 2600
-      ? `${raw.slice(0, 1200)}\n… (trimmed) …\n${raw.slice(-1200)}`
-      : raw;
-    return { ok: false, step: 'health', error: deployFailureMessage('health', detail) };
+// The parts of a contract.config entry the mint needs: key, the marker and the
+// data guard. Never a default or a value.
+function secretConfigRef(c) {
+  const out = { key: String(c.key), secret: true, generate: true };
+  if (c.requires_marker) out.requires_marker = { path: c.requires_marker.path, contains: c.requires_marker.contains, built: c.requires_marker.built || null };
+  if (c.protects) out.protects = { ...c.protects };
+  return out;
+}
+
+// ── the application-owned credential rung ───────────────────────────────
+//
+// The classifier says the stored rows decrypt under the configured key. This
+// asks the APPLICATION: sign in as the platform's review account and read the
+// LDAPS settings its own code path serves (masterKey current, inventory
+// complete). Only then does the ladder reach credential_use_verified. The
+// review login never enters a job row: it is handed to curl inside the guest
+// through a private temporary file, as the readiness probe does.
+export async function verifyCredentialUse({ containerName, webPort, login, timeoutMs = 30000 }) {
+  if (!login?.email || !login?.password) return { verified: null, detail: 'no review account credentials on this platform; the application-owned credential check was not run' };
+  const base = `http://127.0.0.1:${Number(webPort)}`;
+  const creds = JSON.stringify({ email: String(login.email), password: String(login.password) });
+  const script = [
+    'umask 077', 'JAR=$(mktemp)', 'CRED=$(mktemp)', "trap 'rm -f \"$JAR\" \"$CRED\"' EXIT INT TERM",
+    `cat > "$CRED" <<'PP_CRED_EOF'`, creds, 'PP_CRED_EOF',
+    `C=$(curl -sS -o /dev/null -c "$JAR" -w '%{http_code}' --max-time 10 -X POST -H 'Content-Type: application/json' --data-binary @"$CRED" "${base}/api/auth/login" 2>/dev/null)`,
+    'echo "SIGNIN:${C:-000}"',
+    `BODY=$(curl -sS -b "$JAR" -w '\\nLDAPS:%{http_code}' --max-time 10 "${base}/api/admin/ldaps" 2>/dev/null)`,
+    'echo "$BODY"', '',
+  ].join('\n');
+  let r;
+  try { r = await containerSh(containerName, script, { timeoutMs }); } catch (e) { return { verified: null, detail: `the application check could not run: ${e?.message || e}` }; }
+  return interpretCredentialUse(r?.stdout || '');
+}
+
+// interpretCredentialUse(stdout) → { verified: true|false|null, detail }.
+export function interpretCredentialUse(stdout) {
+  const s = String(stdout || '');
+  const signin = Number((s.match(/^SIGNIN:(\d{3})/m) || [])[1] || 0);
+  const code = Number((s.match(/^LDAPS:(\d{3})/m) || [])[1] || 0);
+  if (!signin || signin >= 400) return { verified: null, detail: `the review account could not sign in (HTTP ${signin || '000'}); the application-owned credential check was not run` };
+  if (code !== 200) return { verified: code === 0 ? null : false, detail: code === 0 ? 'the LDAPS settings did not answer; the application-owned credential check was not run' : `the application refused the LDAPS settings read (HTTP ${code})` };
+  let body = null;
+  try {
+    const jsonText = s.slice(s.indexOf('SIGNIN:')).split('\n').slice(1).join('\n').replace(/\nLDAPS:\d{3}\s*$/, '').trim();
+    body = JSON.parse(jsonText);
+  } catch { return { verified: false, detail: 'the LDAPS settings answered but not with JSON the check understands' }; }
+  const inv = body?.masterKeyInventory || {};
+  const key = body?.masterKey;
+  if (!body?.configured && Number(inv.total || 0) === 0) return { verified: null, detail: 'no stored credential to read back through the application (LDAPS not configured); the rung stays unverified until one exists', masterKey: key || null };
+  if ((key === 'current' || key === 'rekeyed') && inv.complete === true) return { verified: true, detail: `the application read its LDAPS credential back (masterKey ${key}, inventory complete: ${inv.current}/${inv.total})`, masterKey: key };
+  return { verified: false, detail: `the application cannot use its credential as stored (masterKey ${key || 'unknown'}, inventory current ${inv.current ?? '?'}/${inv.total ?? '?'}, legacy ${inv.legacy ?? '?'}, unreadable ${inv.unreadable ?? '?'})`, masterKey: key || null };
+}
+
+async function applyCredentialUseRung({ db, jobId, containerName, webPort, guard, verification, by }) {
+  let use;
+  if (!guard) use = { verified: null, detail: 'no data guard recorded for this app; nothing to read back' };
+  else {
+    let login = null;
+    try {
+      const [{ getProjectByContainerName }, { getReviewLogin }] = await Promise.all([import('./projects.js'), import('./review-account.js')]);
+      const project = getProjectByContainerName(containerName);
+      login = project ? getReviewLogin(project.id) : null;
+    } catch { login = null; }
+    use = await verifyCredentialUse({ containerName, webPort, login });
   }
-
-  // The app answers — but does what it serves actually REACH a browser? Read
-  // back the stamped build ids. A stale-risk verdict is reported alongside a
-  // successful deploy (it is a client-cache warning, not a serving failure), so
-  // the operator learns immediately instead of after several "please fix" rounds.
-  const buildStamp = await verifyBuildStamp(containerName, appDir);
-
-  return { ok: true, step: 'serving', buildStamp };
+  const facts = verification?.facts || {};
+  const next = verificationState({ ...facts, credentialUseVerified: use.verified, deferredReason: use.verified == null ? use.detail : facts.deferredReason || null });
+  const merged = { ...(verification || {}), ...next, observations: { ...(verification?.observations || {}), credentialUse: { verified: use.verified, detail: use.detail } } };
+  if (db && jobId) {
+    try { recordVerificationRung(db, { id: jobId, rung: 'credential_use_verified', value: use.verified, detail: use.detail, by, state: next.state }); } catch { /* */ }
+  }
+  return merged;
 }
 
 // Record the commit the app is now SERVING (best-effort). Every successful

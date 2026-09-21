@@ -20,23 +20,19 @@
 
 import {
   claimNextJob, heartbeat, checkpoint, finishJob, recordJobOutcome, staleRunningJobs, readLock, takeoverLock, releaseLock,
-  acquireLock, markLockStale, createJob, openRecoveryJobFor, appendEvent, getJob, renewLock,
+  acquireLock, markLockStale, createJob, openRecoveryJobFor, appendEvent, getJob, renewLock, fenceJob, recordGenerated, recordProgress,
+  runnerHeartbeat, runnerGoodbye, requeueJob,
 } from '../../../admin/backend/src/lib/setup-engine/store.js';
 import {
-  validateRunnerJob, reconcileDecision, recoveryJobFrom, RUNNER_JOB_KINDS, parseJson, sanitizeReason, parseOwner,
+  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, parseJson, sanitizeReason, parseOwner, FencedError, CancelledError,
 } from '../../../admin/backend/src/lib/setup-engine/logic.js';
+import { runDeployOperation, reapOrphansScript, parseOrphans, PreviousWriterAliveError } from '../../../admin/backend/src/lib/setup-engine/deploy-op.js';
 import {
   unitStatusScript, parseUnitStatus, startUnitScript, parseStartUnit, portProbeScript, parsePortProbe,
   healthScript, parseHealth, activeKeyScript, credentialProbeScript, credentialVerdict, verificationFromObservations, DEFAULT_UNIT,
 } from './probes.js';
 
-export class FencedError extends Error {
-  constructor(jobId) {
-    super(`job ${jobId}: ownership moved (heartbeat changed nothing); stopping without touching the target`);
-    this.name = 'FencedError';
-    this.code = 'FENCED';
-  }
-}
+export { FencedError, CancelledError };
 
 const GUEST_TIMEOUT_MS = 90_000;
 const LEASE_MS = 30_000;
@@ -54,14 +50,20 @@ export function reconcile({ db, owner, nowMs = Date.now(), log = () => {} } = {}
     if (d.action === 'resume') {
       // A dead runner's resumable job: back to the queue, where this loop
       // claims it under a new epoch. The steps are idempotent.
-      db.prepare(`UPDATE setup_jobs SET status = 'queued', owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'running'`).run(new Date(nowMs).toISOString(), job.id);
-      appendEvent(db, { jobId: job.id, kind: 'requeued', phase: cp.phase || job.phase, message: `${d.reason}; requeued by ${owner}`, nowMs });
+      requeueJob(db, { id: job.id, by: owner, reason: `${d.reason}; requeued by ${owner}`, nowMs });
       if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
       summary.requeued.push(job.id);
     } else if (d.action === 'record_interrupted') {
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
       if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
       summary.interrupted.push(job.id);
+    } else if (d.action === 'verify') {
+      const spec = verifyJobFrom(job, { nowIso: new Date(nowMs).toISOString() });
+      const verify = createJob(db, { kind: spec.kind, app: spec.app, plan: spec.plan, configRefs: { origin: spec.plan.params.origin }, requestedBy: spec.requested_by, via: spec.via, reason: spec.reason, nowMs });
+      recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted_unverified', reason: `${d.reason}; verification job ${verify.id} queued; the recovery references are kept on this record`, by: owner, nowMs });
+      if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      summary.interrupted.push(job.id);
+      summary.recoveryQueued.push({ job: job.id, recovery: verify.id, app: job.app, kind: 'verify_app' });
     } else if (d.action === 'recover') {
       let recovery = openRecoveryJobFor(db, job.app);
       if (!recovery) {
@@ -121,16 +123,60 @@ export async function executeJob(job, { db, owner, exec, nowMs = () => Date.now(
   }
 
   const obs = { unit: null, port: null, health: null, credential: null };
-  const guest = async (phase, script, { timeoutMs = GUEST_TIMEOUT_MS, resumable = true, data = {} } = {}) => {
-    // The fence, before every command that touches the target.
-    if (!heartbeat(db, { id: job.id, owner, epoch, leaseMs: LEASE_MS, nowMs: nowMs() })) throw new FencedError(job.id);
+  const fence = (opts = {}) => {
+    fenceJob(db, { id: job.id, owner, epoch, safe: !!opts.safe, leaseMs: LEASE_MS, nowMs: nowMs() });
     renewLock(db, { app: job.app, owner, epoch: lockEpoch, leaseMs: LEASE_MS, nowMs: nowMs() });
+  };
+  const guest = async (phase, script, { timeoutMs = GUEST_TIMEOUT_MS, resumable = true, data = {}, safe = false } = {}) => {
+    // The fence, before every command that touches the target.
+    fence({ safe });
     checkpoint(db, { id: job.id, owner, epoch, phase, checkpoint: { resumable, container, unit, webPort, ...data }, message: `${phase}`, nowMs: nowMs() });
     const r = await exec.guest(container, script, { timeoutMs });
     return r || { code: -1, stdout: '', stderr: 'no result' };
   };
 
   try {
+    // A previous writer's scripts (a dead deploy's install/build/start, ours
+    // or a backend's) must be gone before this job touches the guest: the
+    // lease expiring is not proof they stopped. Reap, then count survivors.
+    if (job.kind === 'deploy' || job.kind === 'recover_app') {
+      const reap = await guest('reap_previous_writer', reapOrphansScript(), { timeoutMs: 30_000, safe: true });
+      const left = parseOrphans(reap.stdout);
+      if (left != null && left > 0) {
+        const again = await guest('reap_previous_writer', reapOrphansScript(), { timeoutMs: 30_000, safe: true });
+        const still = parseOrphans(again.stdout);
+        if (still == null || still > 0) throw new PreviousWriterAliveError(container, still ?? left);
+      }
+      appendEvent(db, { jobId: job.id, kind: 'step', phase: 'reap_previous_writer', message: left == null ? 'orphan count unavailable; proceeding' : `${left} orphan script(s) signalled; none remain`, nowMs: nowMs() });
+    }
+
+    if (job.kind === 'deploy') {
+      const handle = {
+        fence,
+        checkpoint: (phase, data, message) => checkpoint(db, { id: job.id, owner, epoch, phase, checkpoint: data, message, nowMs: nowMs() }),
+        generated: (resource) => recordGenerated(db, { id: job.id, owner, epoch, resource, nowMs: nowMs() }),
+        event: (kind, message, data = null) => appendEvent(db, { jobId: job.id, kind, message, data, nowMs: nowMs() }),
+        onStep: (key, label) => appendEvent(db, { jobId: job.id, kind: 'step', phase: key, message: label, nowMs: nowMs() }),
+      };
+      // Reap already done above; the operation's own reap would be a repeat.
+      const result = await runDeployOperation({ params: { ...p, reapOrphans: false }, exec: { guest: (c, script, o) => { fence(); return exec.guest(c, script, o); } }, job: handle, log });
+      // A cancel that arrived after the disruptive step was not honoured
+      // mid-way: the app was brought up; say so on the record.
+      const late = (parseJson(getJob(db, job.id)?.progress_json) || {}).cancel_requested;
+      if (late) appendEvent(db, { jobId: job.id, kind: 'cancel_declined', message: `cancel by ${late.by} arrived after the application had been stopped; the deploy finished bringing it up instead of leaving it down`, nowMs: nowMs() });
+      const { verification, ...rest } = result;
+      const pub = { ...rest, verification: verification ? { state: verification.state, label: verification.label, failedAt: verification.failedAt || null, next: verification.next || null } : null };
+      if (result.ok) {
+        const state = result.skipped ? 'skipped' : (verification?.state || 'serving');
+        recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub }, nowMs: nowMs() });
+        const r = fin(result.skipped ? 'succeeded' : (verification?.state === 'recovery_required' ? 'recovery_required' : 'succeeded'), state, result.skipped ? 'no run contract; nothing to deploy' : `${container}: ${verification?.label || 'serving'}`, verification || null);
+        return { ...r, result };
+      }
+      recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, failed_step: result.step }, nowMs: nowMs() });
+      const r = fin('failed', `failed at ${result.step}`, result.error, verification || null);
+      return { ...r, result };
+    }
+
     for (const step of steps) {
       switch (step) {
         case 'unit_status': case 'start_unit': {
@@ -193,7 +239,9 @@ export async function executeJob(job, { db, owner, exec, nowMs = () => Date.now(
     noteOrigin(db, p, job, result, nowMs());
     return result;
   } catch (e) {
-    if (e instanceof FencedError) { log('fenced', job.id); return { status: 'fenced', outcome: null, verification: null }; }
+    if (e instanceof FencedError || e?.code === 'FENCED') { log('fenced', job.id); return { status: 'fenced', outcome: null, verification: null }; }
+    if (e instanceof CancelledError || e?.code === 'CANCELLED') return fin('cancelled', 'cancelled', e.message, null);
+    if (e?.code === 'PREVIOUS_WRITER_ALIVE') return fin('failed', 'previous_writer_alive', e.message, null);
     const verification = verificationFromObservations(obs);
     return fin('failed', 'error', sanitizeReason(e?.message || String(e)), verification);
   } finally {
@@ -202,6 +250,7 @@ export async function executeJob(job, { db, owner, exec, nowMs = () => Date.now(
 }
 
 function defaultSteps(kind) {
+  if (kind === 'deploy') return [];
   if (kind === 'recover_app') return ['start_unit', 'probe_port', 'health_check', 'verify_credential'];
   if (kind === 'verify_app') return ['unit_status', 'probe_port', 'health_check', 'verify_credential'];
   return ['unit_status', 'probe_port'];
@@ -222,6 +271,7 @@ function noteOrigin(db, params, job, result, nowMs) {
 export async function runOnce(deps, { max = 5, reconcileFirst = true } = {}) {
   const { db, owner } = deps;
   const out = { reconciled: null, ran: [] };
+  try { runnerHeartbeat(db, { owner, host: describeOwner(owner).host, pid: describeOwner(owner).pid, version: deps.version || null, nowMs: deps.nowMs ? deps.nowMs() : Date.now() }); } catch { /* */ }
   if (reconcileFirst) out.reconciled = reconcile({ db, owner, nowMs: deps.nowMs ? deps.nowMs() : Date.now(), log: deps.log });
   for (let i = 0; i < max; i += 1) {
     const job = claimNextJob(db, { owner, kinds: [...RUNNER_JOB_KINDS], leaseMs: LEASE_MS, nowMs: deps.nowMs ? deps.nowMs() : Date.now() });
@@ -250,6 +300,7 @@ export async function serve(deps, { pollMs = 2000, reconcileEveryMs = 60_000, sh
     }
     await sleep(pollMs);
   }
+  try { runnerGoodbye(deps.db, { owner: deps.owner }); } catch { /* */ }
   deps.log?.('serve', 'stopping');
 }
 

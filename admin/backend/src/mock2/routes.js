@@ -5115,10 +5115,11 @@ export function createMock2Router() {
         containerName: project.container_name,
         webPort: project.web_port || 3000,
         projectId: project.id,
+        requestedBy: req.user?.username || null, via: 'ui',
       });
       const after = await probeServing(project);
       return res.json({
-        ok: !!deployed?.ok && after.serving, serving: after.serving, redeployed: true,
+        ok: !!deployed?.ok && after.serving, serving: after.serving, redeployed: true, jobId: deployed?.jobId || null,
         error: deployed?.ok ? (after.serving ? null : after.reason) : (deployed?.error || `deploy failed at ${deployed?.step || 'unknown'}`),
         message: deployed?.ok && after.serving
           ? 'Deployed — the app is live.'

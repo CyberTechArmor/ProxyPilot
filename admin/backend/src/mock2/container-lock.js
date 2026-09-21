@@ -33,7 +33,7 @@
 // the app, so a reconciler knows the app was stopped. Existing callers that
 // ignore the argument keep working.
 
-import { acquireLock, renewLock, releaseLock, createJob, startJob, checkpoint as storeCheckpoint, recordGenerated, finishJob } from '../lib/setup-engine/store.js';
+import { acquireLock, renewLock, releaseLock, createJob, startJob, checkpoint as storeCheckpoint, recordGenerated, finishJob, fenceJob, appendEvent, recordProgress } from '../lib/setup-engine/store.js';
 import { sanitizeReason } from '../lib/setup-engine/logic.js';
 
 const locks = new Map(); // container → { chain, holder, since, waiting }
@@ -74,13 +74,19 @@ export function containerLockStoreConfigured() {
   return !!store;
 }
 
+// containerLockStore() → { getDb, owner } while configured (deploy.js asks it
+// whether a runner can be handed the job), else null.
+export function containerLockStore() {
+  return store ? { getDb: store.getDb, owner: store.owner } : null;
+}
+
 // containerLockHolder(name) → { holder, since, waiting } | null
 export function containerLockHolder(name) {
   const l = locks.get(String(name || ''));
   return l ? { holder: l.holder, since: l.since, waiting: l.waiting } : null;
 }
 
-const noopJob = Object.freeze({ id: null, checkpoint: () => 0, generated: () => 0, persistent: false });
+const noopJob = Object.freeze({ id: null, checkpoint: () => 0, generated: () => 0, fence: () => {}, event: () => {}, progress: () => 0, persistent: false });
 
 // Take the persistent lease + create the job row for one operation. Returns
 // the handle fn receives, plus release(status, outcome, reason).
@@ -107,12 +113,22 @@ function openPersistent(key, label, { kind, plan, configRefs, requestedBy, via }
   timer.unref?.();
   const handle = {
     id: row.id,
+    _timer: timer,
     persistent: true,
     checkpoint: (phase, data = {}, message = null) => {
       try { return storeCheckpoint(store.getDb(), { id: row.id, owner, epoch: 1, phase, checkpoint: data, message }); } catch { return 0; }
     },
     generated: (resource) => {
       try { return recordGenerated(store.getDb(), { id: row.id, owner, epoch: 1, resource }); } catch { return 0; }
+    },
+    // The fence: renew the job lease; stop when ownership moved (FencedError)
+    // or, at a safe point, when a cancel was requested (CancelledError).
+    fence: (opts = {}) => fenceJob(store.getDb(), { id: row.id, owner, epoch: 1, safe: !!opts.safe, leaseMs: store.leaseMs }),
+    event: (kind, message, data = null) => {
+      try { appendEvent(store.getDb(), { jobId: row.id, kind, message, data }); } catch { /* */ }
+    },
+    progress: (data) => {
+      try { return recordProgress(store.getDb(), { id: row.id, owner, epoch: 1, progress: data }); } catch { return 0; }
     },
   };
   const release = (status, outcome, reason, verification = null) => {
@@ -148,17 +164,20 @@ export async function withContainerLock(name, holder, fn, { wait = true, job = n
     try {
       result = await fn(handle);
     } catch (e) {
-      release('failed', 'threw', sanitizeReason(e?.message || String(e)));
+      if (e?.code === 'CANCELLED') release('cancelled', 'cancelled', sanitizeReason(e.message));
+      else if (e?.code === 'FENCED') { clearInterval(handle._timer); /* the new owner's record, not ours */ }
+      else release('failed', 'threw', sanitizeReason(e?.message || String(e)));
       throw e;
     }
     // An operation reports its own outcome in its result when it can
     // ({ ok, error, deferred }); otherwise a normal return is success.
+    const verification = result && typeof result === 'object' && result.verification ? result.verification : null;
     if (result && typeof result === 'object' && result.ok === false) {
-      release('failed', result.step ? `failed at ${result.step}` : 'failed', sanitizeReason(result.error || 'failed'));
+      release('failed', result.step ? `failed at ${result.step}` : 'failed', sanitizeReason(result.error || 'failed'), verification);
     } else if (result && typeof result === 'object' && result.deferred) {
-      release('deferred', 'deferred', sanitizeReason(result.reason || result.error || 'deferred'));
+      release('deferred', 'deferred', sanitizeReason(result.reason || result.error || 'deferred'), verification);
     } else {
-      release('succeeded', 'completed', null);
+      release('succeeded', verification?.state || 'completed', null, verification);
     }
     return result;
   });

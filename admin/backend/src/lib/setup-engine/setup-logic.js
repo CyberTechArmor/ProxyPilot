@@ -35,6 +35,7 @@
 // acknowledges, and it says how to look.
 
 import { CONTAINER_NAME_RE, redact } from './logic.js';
+import { CONTAINMENT_RUN_DIR } from './guest-probes.js';
 
 export const SETUP_JOB_KINDS = Object.freeze(['guest_setup']);
 // Executed by the backend whatever the executor policy (ProxyPilot's own rows and its Caddy render).
@@ -312,18 +313,55 @@ export function initResultReadScript({ jobId, logDir, tmpDir } = {}) {
   ].join('\n');
 }
 
-// initKillScript({ jobId }) → after a timeout: the script's session group
-// (TERM, then KILL) from the recorded pid; reports whether it is gone.
-export function initKillScript({ jobId, logDir, tmpDir } = {}) {
+// initKillScript({ jobId, runDir }) → after a timeout: stops and inspects
+// the COMPLETE writer group of this job's init attempt — the systemd scopes
+// and raw cgroups its contained scripts recorded under `<runDir>/<job>.units`
+// and `.cgroups` (guest-probes containedScript) — never the recorded pid
+// alone. A `setsid()` descendant leaves the session group the wrapper
+// started but never its cgroup, so the group is what is killed (TERM, then
+// KILL, twice) and what is counted afterwards; zombies do not count. This
+// script is issued UNCONTAINED (op-kit's contained guest would put it in the
+// very group it kills), so `$$` is outside the group by construction.
+// Verdicts, on one marker line, are the only thing the record carries:
+//   PP_INIT_KILL:gone       every recorded group is empty; records removed
+//   PP_INIT_KILL:alive <n>  n writers survived the kill
+//   PP_INIT_KILL:norecord   no containment record: the writer group cannot be
+//                           inspected (the recorded pid is killed best-effort)
+//   PP_INIT_KILL:unknown    a group could not be inspected (no systemctl for
+//                           a recorded scope, a cgroup tree no longer there)
+// plus PP_INIT_GROUPS:<n>. Only `gone` releases the hold (setup-op).
+// Signals are spelled `kill -s SIG` throughout: dash rejects `kill -KILL --
+// -pgid` ("Illegal number"), which is how the pid-based predecessor of this
+// script killed a leader and left its group behind.
+export function initKillScript({ jobId, runDir = CONTAINMENT_RUN_DIR, logDir, tmpDir } = {}) {
   const P = initPaths(jobId, { logDir, tmpDir });
+  if (!/^\/[A-Za-z0-9._\/-]+$/.test(runDir)) throw new Error('runDir must be an absolute path');
   return [
     `umask 077`,
-    `PIDF='${P.pid}'; S='${P.script}'`,
+    `RUN='${runDir}'; ID='${P.id}'; PIDF='${P.pid}'; S='${P.script}'; me=$$`,
+    `UF="$RUN/$ID.units"; CF="$RUN/$ID.cgroups"`,
+    // A killed process nobody has reaped yet is a zombie, not a writer.
+    'alive() { st=$(sed -E "s/^[^)]*\\) //" /proc/$1/stat 2>/dev/null | cut -d" " -f1); [ -n "$st" ] && [ "$st" != "Z" ] && [ "$st" != "X" ]; }',
+    'live_in() { c=0; for p in $(cat "$1" 2>/dev/null); do [ "$p" = "$me" ] && continue; alive "$p" && c=$((c + 1)); done; echo $c; }',
+    `groups=0; [ -s "$UF" ] && groups=$((groups + $(grep -c . "$UF"))); [ -s "$CF" ] && groups=$((groups + $(grep -c . "$CF")))`,
     `p=$(cat "$PIDF" 2>/dev/null)`,
-    `if [ -z "$p" ]; then echo PP_INIT_KILL:nopid; rm -f "$S"; exit 0; fi`,
-    `kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null; sleep 2`,
-    `kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null; sleep 1`,
-    `if kill -0 "$p" 2>/dev/null; then echo "PP_INIT_KILL:alive $p"; else echo PP_INIT_KILL:gone; rm -f "$S" "$PIDF"; fi`,
+    // The wrapper bodies containment materialised for this job (a killed
+    // wrapper never reached its own rm): the init script is in them.
+    `for f in "$RUN/$ID".*; do case "$f" in *.units|*.cgroups) ;; *) rm -f "$f" 2>/dev/null;; esac; done`,
+    // No record: the attempt's group cannot be inspected. The recorded pid's
+    // session is killed on the way out, but that establishes nothing.
+    `if [ "$groups" -eq 0 ]; then [ -n "$p" ] && { kill -s KILL -- "-$p" 2>/dev/null || kill -s KILL "$p" 2>/dev/null; sleep 1; }; rm -f "$S"; echo "PP_INIT_GROUPS:0"; echo PP_INIT_KILL:norecord; exit 0; fi`,
+    'kill_groups() { for u in $(cat "$UF" 2>/dev/null); do systemctl kill --signal="$1" --kill-whom=all "$u" >/dev/null 2>&1 || true; done; for g in $(cat "$CF" 2>/dev/null); do [ -d "$g" ] || continue; if [ "$1" = KILL ] && [ -f "$g/cgroup.kill" ]; then echo 1 > "$g/cgroup.kill" 2>/dev/null || true; else for q in $(cat "$g/cgroup.procs" 2>/dev/null); do [ "$q" = "$me" ] || kill -s "$1" "$q" 2>/dev/null || true; done; fi; done; }',
+    `kill_groups TERM; sleep 2; kill_groups KILL; sleep 1; kill_groups KILL`,
+    `n=0; unknown=0`,
+    // Each recorded scope: its live processes through its control group, or
+    // the unit's own state; no systemctl at all is an inspection that failed.
+    'for u in $(cat "$UF" 2>/dev/null); do if ! command -v systemctl >/dev/null 2>&1; then unknown=$((unknown + 1)); continue; fi; cg=$(systemctl show -p ControlGroup --value "$u" 2>/dev/null) || { unknown=$((unknown + 1)); continue; }; if [ -n "$cg" ] && [ -f "/sys/fs/cgroup$cg/cgroup.procs" ]; then n=$((n + $(live_in "/sys/fs/cgroup$cg/cgroup.procs"))); elif systemctl is-active --quiet "$u" 2>/dev/null; then n=$((n + 1)); fi; done',
+    // Each recorded cgroup: its live processes; a group that is no longer
+    // there is empty only while its tree still is.
+    'for g in $(cat "$CF" 2>/dev/null); do if [ -d "$g" ]; then if [ -r "$g/cgroup.procs" ]; then l=$(live_in "$g/cgroup.procs"); n=$((n + l)); [ "$l" -eq 0 ] && rmdir "$g" 2>/dev/null; else unknown=$((unknown + 1)); fi; elif [ ! -f "$(dirname "$(dirname "$g")")/cgroup.procs" ]; then unknown=$((unknown + 1)); fi; done',
+    `echo "PP_INIT_GROUPS:$groups"`,
+    `if [ "$unknown" -gt 0 ]; then echo "PP_INIT_KILL:unknown $n"; elif [ "$n" -gt 0 ]; then echo "PP_INIT_KILL:alive $n"; else rm -f "$S" "$PIDF" "$UF" "$CF"; echo PP_INIT_KILL:gone; fi`,
     '',
   ].join('\n');
 }
@@ -352,9 +390,17 @@ export function parseInitResult(stdout) {
 }
 export function initLogPath(jobId, { logDir } = {}) { return initPaths(jobId, { logDir }).log; }
 
+// parseInitKill(stdout) → 'gone' | 'alive' | 'norecord' | 'unknown' | null;
+// parseInitKillReport(stdout) adds the survivor and group counts.
 export function parseInitKill(stdout) {
-  const m = String(stdout || '').match(/^PP_INIT_KILL:(gone|nopid|alive)/m);
+  const m = String(stdout || '').match(/^PP_INIT_KILL:(gone|alive|norecord|unknown)/m);
   return m ? m[1] : null;
+}
+export function parseInitKillReport(stdout) {
+  const s = String(stdout || '');
+  const m = s.match(/^PP_INIT_KILL:(gone|alive|norecord|unknown)(?: (\d+))?/m);
+  const g = s.match(/^PP_INIT_GROUPS:(\d+)/m);
+  return { verdict: m ? m[1] : null, survivors: m && m[2] != null ? Number(m[2]) : (m && m[1] === 'gone' ? 0 : null), groups: g ? Number(g[1]) : null };
 }
 
 // ── the record ──────────────────────────────────────────────────────────

@@ -60,25 +60,26 @@ export function settleSetupRecord(db, { setupJobId, createJobId = null, phase, u
   return verdict;
 }
 const LEASE_MS = 30_000;
+const KEEPALIVE_MS = 10_000;
 const RETRY_MS = 30_000;
 const HOLD_RETRY_MS = 5 * 60_000;
 const ROUTES_LEASE_WAIT_MS = 15_000;
 
 // runBackendSteps({ db, owner, deps: { configureRoutes }, nowMs, log, max, sleep }) → { ran: [...] }
-export async function runBackendSteps({ db, owner, deps, nowMs = () => Date.now(), log = () => {}, max = 5, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export async function runBackendSteps({ db, owner, deps, nowMs = () => Date.now(), log = () => {}, max = 5, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), keepAliveMs = KEEPALIVE_MS }) {
   const out = { ran: [] };
   for (let i = 0; i < max; i += 1) {
     const job = claimNextJob(db, { owner, kinds: [...BACKEND_STEP_KINDS], leaseMs: LEASE_MS, nowMs: nowMs() });
     if (!job) break;
     log('claimed', job.id, job.kind, job.app);
-    const r = await executeBackendStep(job, { db, owner, deps, nowMs, log, sleep });
+    const r = await executeBackendStep(job, { db, owner, deps, nowMs, log, sleep, keepAliveMs });
     out.ran.push({ id: job.id, kind: job.kind, app: job.app, ...r });
     log('finished', job.id, r.status, r.outcome);
   }
   return out;
 }
 
-export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = () => Date.now(), log = () => {}, sleep }) {
+export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = () => Date.now(), log = () => {}, sleep, keepAliveMs = KEEPALIVE_MS }) {
   const epoch = Number(job.epoch);
   const fin = (status, outcome, reason, verification = null) => { finishJob(db, { id: job.id, owner, epoch, status, outcome, reason, verification, nowMs: nowMs() }); return { status, outcome }; };
   const event = (kind, message, data = null, phase = null) => appendEvent(db, { jobId: job.id, kind, phase, message, data, nowMs: nowMs() });
@@ -115,7 +116,7 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     lockEpoch = Number(t.lock.epoch);
   } else return requeue(`the guest's lease is held by ${got.holder} (${got.operation}); this follow-up waits and retries`, RETRY_MS);
 
-  let routesHeld = false; let routesEpoch = null;
+  let routesHeld = false; let routesEpoch = null; let keepAlive = null; let lost = null;
   try {
     // The shared route store: one writer at a time across every guest.
     const started = nowMs();
@@ -132,12 +133,23 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     if (typeof deps.configureRoutes !== 'function') { noteOrigin('failed', { detail: 'no route configurator is available in this process' }); return fin('failed', 'error', 'no route configurator is available in this process; retry the job'); }
     // Before every write the configurator makes, both leases are renewed at
     // the epochs this step holds them; a renewal that changes no row means
-    // another owner has them and nothing further is written.
+    // another owner has them and nothing further is written. Between writes
+    // — a `caddy adapt` or reload that runs long — a keep-alive renews both
+    // leases every KEEPALIVE_MS so a legitimately long operation never lets
+    // its lease lapse; a keep-alive renewal that changes no row is remembered
+    // and the next fence throws before anything else is written.
+    const renewBoth = () => {
+      if (!(renewLock(db, { app: job.app, owner, epoch: lockEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) return job.app;
+      if (!(renewLock(db, { app: HOST_ROUTES_LOCK, owner, epoch: routesEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) return HOST_ROUTES_LOCK;
+      return null;
+    };
     const fence = () => {
-      if (!(renewLock(db, { app: job.app, owner, epoch: lockEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) throw new LeaseLostError(job.app);
-      if (!(renewLock(db, { app: HOST_ROUTES_LOCK, owner, epoch: routesEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) throw new LeaseLostError(HOST_ROUTES_LOCK);
+      const gone = lost || renewBoth();
+      if (gone) { lost = gone; throw new LeaseLostError(gone); }
       fenceJob(db, { id: job.id, owner, epoch, safe: false, leaseMs: LEASE_MS, nowMs: nowMs() });
     };
+    keepAlive = setInterval(() => { try { const gone = renewBoth(); if (gone) lost = gone; } catch { /* the next fence decides */ } }, Math.max(20, Number(keepAliveMs) || KEEPALIVE_MS));
+    if (typeof keepAlive.unref === 'function') keepAlive.unref();
     fence();
     const res = await deps.configureRoutes({ container: p.container, name: p.serviceName, ip: p.ip, services: p.services, fence });
     fence();
@@ -163,6 +175,7 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     noteOrigin('failed', { detail: sanitizeReason(e?.message || String(e), 300) });
     return fin('failed', 'error', sanitizeReason(e?.message || String(e)));
   } finally {
+    if (keepAlive) clearInterval(keepAlive);
     if (routesHeld) releaseLock(db, { app: HOST_ROUTES_LOCK, owner, epoch: routesEpoch });
     releaseLock(db, { app: job.app, owner, epoch: lockEpoch });
   }

@@ -298,6 +298,13 @@ test('ratchet (A-17.7): the post-launch and post-start fix-ups are setup-engine 
   const op = src('lib/setup-engine/setup-op.js');
   assert.doesNotMatch(op, /'sh', '-c'|spawn\(|execOnHost|runHostCapture|nsenter|exec\.guest\(/, 'the host channel and the contained guest executor only');
   assert.match(op, /containedGuest\(\{ exec, container: name, job \}\)/);
+  // The review of 91933cf (R-039): the timeout kill stops and inspects the attempt's containment GROUP, from outside it; only an empty group releases the hold.
+  assert.match(op, /const killGuest = uncontainedGuest\(\{ exec, container: name, job \}\);/, 'the group kill is the one script issued outside containment');
+  assert.match(op, /const k = await killGuest\(initKillScript\(\{ jobId \}\), 20_000\); kill = parseInitKillReport\(k\.stdout\);/);
+  assert.match(op, /const stopped = killed === 'gone';/, 'only an empty group is a recorded timeout');
+  assert.doesNotMatch(op, /guest\('init_script_kill'/, 'never through the contained executor (it would join the group it kills)');
+  const opKit = src('lib/setup-engine/op-kit.js');
+  assert.match(opKit, /export function uncontainedGuest\(\{ exec, container, job = noopJob\(\) \}\) \{\n\s+return async \(script, timeoutMs = 20_000\) => \{\n\s+job\.fence\(\{ safe: false \}\);/, 'the exception is fenced and named');
   assert.match(op, /mark\('init_script', \{ setup: true, resumable: true, disruptive: false, init_issued: true,[^\n]*\{ required: true \}\)/, 'the checkpoint before the script is mandatory');
   assert.match(op, /if \(prior && prior\.init_issued === true\) \{/, 'a resumed job reads, never re-runs');
   assert.match(op, /if \(origin && \['done', 'failed', 'timed_out', 'uncertain'\]\.includes\(origin\.state\)\) \{/, 'a retry never repeats an issued or completed init');
@@ -310,6 +317,10 @@ test('ratchet (A-17.7): the post-launch and post-start fix-ups are setup-engine 
   assert.doesNotMatch(op, /(?<![a-z])tail: /, 'no output tail on the record');
   assert.match(op, /const natHost = async \(argv, opts\) => \{\n\s+if \(held && !lease\.renew\(HOST_NETWORK_LOCK\)\) throw new SharedLeaseLostError/, 'every NAT command renews and checks the shared lease first');
   assert.match(op, /state: 'uncertain', hold: true/, 'an unknown init holds');
+  assert.match(logic, /\$RUN\/\$ID\.units"; CF="\$RUN\/\$ID\.cgroups"/, 'the kill reads the containment records');
+  assert.match(logic, /echo PP_INIT_KILL:norecord/, 'a missing record is its own verdict'); assert.match(logic, /echo "PP_INIT_KILL:unknown \$n"/, 'so is an inspection that could not conclude');
+  assert.doesNotMatch(logic, /PP_INIT_KILL:nopid|kill -0 "\$p" 2>\/dev\/null; then echo "PP_INIT_KILL:alive/, 'the recorded pid alone is never the verdict');
+  assert.doesNotMatch(logic, /kill -(TERM|KILL) -- /, 'signals are spelled kill -s (dash rejects kill -KILL -- -pgid)');
   const executor = src('lib/setup-engine/executor.js');
   assert.match(executor, /if \(result\.hold\) \{\n[\s\S]{0,400}keepLease = true;\n\s+markLockStale\(db, \{ app: job\.app, nowMs: nowMs\(\), recoveryJobId: job\.id \}\);/, 'the executor keeps and flags the lease on an uncertain init');
   assert.match(executor, /An unresolved hold is checked BEFORE the lease is acquired/, 'the hold is respected whoever the lease names');
@@ -317,8 +328,17 @@ test('ratchet (A-17.7): the post-launch and post-start fix-ups are setup-engine 
   assert.match(src('lib/setup-engine/backend.js'), /if \(isInit && writerStopped !== true\) return \{ ok: false, error: [^\n]*code: 'WRITER_NOT_ESTABLISHED' \};/, 'an init acknowledgement must establish the writer stopped');
   assert.match(src('routes/setup.js'), /writerStopped: z\.boolean\(\)\.optional\(\)/);
   const steps = src('lib/setup-engine/backend-steps.js');
-  assert.match(steps, /const fence = \(\) => \{\n\s+if \(!\(renewLock\(db, \{ app: job\.app, owner, epoch: lockEpoch/, 'the routes step renews both leases before every write');
+  assert.match(steps, /const renewBoth = \(\) => \{\n\s+if \(!\(renewLock\(db, \{ app: job\.app, owner, epoch: lockEpoch/, 'the routes step renews both leases before every write');
+  assert.match(steps, /const fence = \(\) => \{\n\s+const gone = lost \|\| renewBoth\(\);\n\s+if \(gone\) \{ lost = gone; throw new LeaseLostError\(gone\); \}/, 'a lost lease stops every later write');
+  assert.match(steps, /keepAlive = setInterval\(\(\) => \{ try \{ const gone = renewBoth\(\); if \(gone\) lost = gone; \}/, 'the leases are renewed between writes (a long adapt or reload never lets them lapse)');
   assert.match(src('lib/guest-routes.js'), /const check = \(\) => \{ if \(typeof fence === 'function'\) fence\(\); \};/);
+  // The review of 91933cf (R-038): the fence reaches the real adapter and every write of the render, the upstream move and the rollback.
+  assert.match(src('mock2/ops.js'), /configureRoutes: async \(\{ name, ip, services, fence = null \}\) => \{\n[\s\S]{0,300}return configureGuestRoutes\(store\.getDb\(\), \{ name, ip, services, render, fence \}\);/, 'the production adapter forwards the fence');
+  const render = src('lib/route-render.js');
+  assert.match(render, /for \(const domain of targets\) \{ guard\(\); await regenerate\(db, domain\); \}/, 'each domain\'s site file behind the fence');
+  assert.match(render, /const failWith = async \(err, message\) => \{\n\s+if \(isLeaseLost\(err\)\) throw err;/, 'no rollback after the lease is lost: the files are the new owner\'s');
+  assert.match(render, /const restore = async \(\) => \{\n\s+for \(const b of backups\) \{\n\s+guard\(\);/, 'every write of a rollback behind the fence');
+  assert.match(render, /if \(!isLeaseLost\(err\)\) \{\n\s+try \{\n\s+guard\(\);\n\s+db\.prepare\(`UPDATE services SET target_ip = \? WHERE id = \?`\)\.run\(oldIp, serviceId\);/, 'the upstream revert too');
   assert.match(logic, /if \(pending\.length\) return \{ status: 'succeeded', outcome: 'setup_pending', completion: 'pending'/, 'a pending required phase is never setup_complete');
   assert.match(steps, /export function settleSetupRecord\(/, 'a settled routes outcome recomputes the aggregate');
   // Both executors know the input store: the runner from the database it opened, the backend from its own path.

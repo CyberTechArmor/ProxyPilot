@@ -48,14 +48,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, existsSync, statSync, writeFileSync, symlinkSync, utimesSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, statSync, writeFileSync, symlinkSync, utimesSync, rmSync, rmdirSync, accessSync, readdirSync, constants as FS } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
   SETUP_JOB_KINDS, BACKEND_STEP_KINDS, SETUP_PHASES, FIXUP_PHASES, HOST_NETWORK_LOCK, HOST_ROUTES_LOCK, validateSetupParams, validateRoutesParams, normalizeServices,
   ipForwardArgv, networkListArgv, bridgeNatArgv, dockerUserCheckArgv, dockerUserInsertArgv, masqueradeCheckArgv, masqueradeAppendArgv, managedBridges,
-  hostReachableIpv4, dnsScript, parseDns, initScriptWrapper, initResultReadScript, initKillScript, parseInitResult, parseInitKill, phaseTable, setupOutcome, createStatusView, initWarning,
+  hostReachableIpv4, dnsScript, parseDns, initScriptWrapper, initResultReadScript, initKillScript, parseInitResult, parseInitKill, parseInitKillReport, phaseTable, setupOutcome, createStatusView, initWarning,
 } from '../lib/setup-engine/setup-logic.js';
 import { setupInputsDir, writeInitScriptInput, readInitScriptInput, consumeInitScriptInput, sweepSetupInputs, sha256Of } from '../lib/setup-engine/setup-inputs.js';
 import { ownerIdentity, parseJson, validateRunnerJob, reconcileDecision, RUNNER_JOB_KINDS, MUTATING_JOB_KINDS, EXCLUSIVE_JOB_KINDS, BACKEND_JOB_KINDS, SETUP_JOB_KINDS as SETUP_KINDS_FROM_LOGIC } from '../lib/setup-engine/logic.js';
@@ -67,12 +67,14 @@ import { submitRunnerJob } from '../lib/setup-engine/orchestrator.js';
 import { sweepSetupEngineOnBoot } from '../lib/setup-engine/backend.js';
 import { runGuestSetupOperation } from '../lib/setup-engine/setup-op.js';
 import { configureGuestRoutes, findOrCreateLxcService, syncServiceUpstream } from '../lib/guest-routes.js';
-import { configureContainerLockStore } from '../mock2/container-lock.js';
+import { configureContainerLockStore, containerLockStore } from '../mock2/container-lock.js';
 import { runLifecycle, runGuestSetup, createStatus, waitForSetup, drainBackendStepsNow, lifecycleHttpStatus, resolveSetupPlan } from '../mock2/ops.js';
 import { jobView, takeoverLock } from '../lib/setup-engine/store.js';
 import { unwrapContained, jobIdOf } from './helpers/scripted-guest.js';
 import { acknowledgeUncertainJob } from '../lib/setup-engine/backend.js';
 import { LeaseLostError, settleSetupRecord } from '../lib/setup-engine/backend-steps.js';
+import { containedScript, parseContainment, CONTAINMENT_RUN_DIR } from '../lib/setup-engine/guest-probes.js';
+import { renderDomains } from '../lib/route-render.js';
 
 const T0 = Date.parse('2026-09-23T12:00:00.000Z');
 const RUNNER = ownerIdentity({ kind: 'runner', host: 'pp', pid: 300, instance: 'rrrr' });
@@ -158,17 +160,33 @@ function scriptedGuest(state) {
   state.initScripts = [];
   return {
     calls,
-    guest: async (container, raw) => {
+    guest: async (container, raw, opts = {}) => {
       const s = unwrapContained(raw);
-      const id = jobIdOf(raw);
-      const rec = (phase) => calls.push({ container, phase, script: s, raw });
+      // The job id: the containment marker, or — for the one script issued
+      // outside containment, the kill — the ID the script itself carries.
+      const id = s !== raw ? jobIdOf(raw) : (raw.match(/\bID='([A-Za-z0-9-]+)'/) || [])[1] || 'adhoc';
+      const rec = (phase) => calls.push({ container, phase, script: s, raw, contained: s !== raw });
       if (state.containment === 'none' && /CONTAINMENT:none/.test(raw)) { rec('refused'); return { code: 97, stdout: '', stderr: 'CONTAINMENT:none\n' }; }
+      // state.realContained: every script runs AS ISSUED — the production
+      // containment wrapper over the real cgroup tree and run dir, the init
+      // artifacts in the real /var/log and /tmp — under a real sh with the
+      // executor's timeout enforced (the client is killed at the bound, as
+      // incus exec's would be: exit 124). state.beforeKill(id) runs between
+      // the timed-out init and the kill script.
+      if (state.realContained && (/PP_INIT_/.test(s) || /PP_INIT_/.test(raw))) {
+        if (/PP_INIT_KILL/.test(s)) { rec('init_kill'); state.killed = (state.killed || 0) + 1; if (state.beforeKill) { try { await state.beforeKill(id); } catch (e) { state.hookError = e; } } }
+        else if (/PP_INIT_RC:none/.test(s)) rec('init_read');
+        else { rec('init'); const m = s.match(/printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > "\$S"/); state.initScripts.push(m ? Buffer.from(m[1], 'base64').toString('utf8') : null); }
+        const r = spawnSync('sh', ['-c', 'umask 022; exec sh -s'], { input: raw, encoding: 'utf8', timeout: Number(opts.timeoutMs) || 20_000, killSignal: 'SIGKILL' });
+        if (r.error && r.error.code === 'ETIMEDOUT') return { code: 124, stdout: r.stdout || '', stderr: `${r.stderr || ''}\n[timeout after ${opts.timeoutMs}ms]` };
+        return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+      }
       if (/PP_DNS:/.test(s)) { rec('dns'); if (state.dnsFails) return { code: 1, stdout: 'PP_DNS:failed\n', stderr: '' }; state.dnsWrites = (state.dnsWrites || 0) + 1; return { code: 0, stdout: state.dnsPresent ? 'PP_DNS:unchanged\n' : 'PP_DNS:written\n', stderr: '' }; }
       // state.realShell = <dir>: the init wrapper, the read-back and the kill
       // script run under a REAL sh with /var/log and /tmp redirected to <dir>
       // and the guest's umask at 022 — the generated shell under its interpreter.
       const real = (script) => { const rw = script.split("'/var/log").join('@L@').split("'/tmp").join('@T@').split('@L@').join(`'${state.realShell}`).split('@T@').join(`'${state.realShell}`); const r = spawnSync('sh', ['-c', 'umask 022; exec sh -s'], { input: rw, encoding: 'utf8', timeout: 20_000 }); return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' }; };
-      if (/PP_INIT_KILL/.test(s)) { rec('init_kill'); state.killed = (state.killed || 0) + 1; if (state.realShell) return real(s); return { code: 0, stdout: `PP_INIT_KILL:${state.killResult || 'gone'}\n`, stderr: '' }; }
+      if (/PP_INIT_KILL/.test(s)) { rec('init_kill'); state.killed = (state.killed || 0) + 1; if (state.realShell) return real(s); return { code: 0, stdout: `PP_INIT_GROUPS:${state.killResult === 'norecord' ? 0 : 1}\nPP_INIT_KILL:${state.killResult || 'gone'}\n`, stderr: '' }; }
       if (/PP_INIT_RC:none/.test(s)) { rec('init_read'); if (state.realShell) return real(s); return { code: 0, stdout: state.guestRc == null ? `PP_INIT_RC:none\n${state.guestRunning ? `PP_INIT_RUNNING:${state.guestRunning}\n` : state.guestDead ? `PP_INIT_DEAD:${state.guestDead}\n` : 'PP_INIT_NOPID\n'}PP_INIT_LOG:/var/log/pp-init-${id}.log\nPP_INIT_LOG_BYTES:17\n` : `PP_INIT_RC:${state.guestRc}\nPP_INIT_LOG:/var/log/pp-init-${id}.log\nPP_INIT_LOG_BYTES:33\n`, stderr: '' }; }
       if (/PP_INIT_RC:\$rc/.test(s)) {
         rec('init');
@@ -195,11 +213,16 @@ const holdOn = (d, app, jobId) => { const l = readLock(d, app); assert.ok(l && l
 
 // A store for the ops layer over a scripted host + guest, an input dir and a
 // route configurator that records what it was asked for.
-function opsStore(d, h, g, { policy = 'backend-allowed', inputsDir = null, routes = null } = {}) {
+//   renderDeps   a Caddy render bundle: the store then has NO configureRoutes
+//                of its own and the backend step runs the PRODUCTION adapter
+//                (ops.js backendStepDeps → lib/guest-routes.js → lib/route-render.js)
+//                over the real tables, with only Caddy replaced.
+function opsStore(d, h, g, { policy = 'backend-allowed', inputsDir = null, routes = null, renderDeps = null } = {}) {
   const asked = [];
   configureContainerLockStore({
     getDb: () => d, owner: BACKEND, env: { SETUP_EXECUTOR_POLICY: policy }, guestExec: exec(h, g), hostExec: h.host, reviewLogin: async () => null, inputsDir,
-    configureRoutes: routes || (async (args) => { asked.push(args); return { created: args.services.map((s) => s.domain), existing: [], conflicts: [], rendered: args.services.map((s) => s.domain), renderWarning: null, upstreamWarning: null }; }),
+    configureRoutes: renderDeps ? null : (routes || (async (args) => { asked.push(args); return { created: args.services.map((s) => s.domain), existing: [], conflicts: [], rendered: args.services.map((s) => s.domain), renderWarning: null, upstreamWarning: null }; })),
+    renderDeps,
   });
   return { asked };
 }
@@ -293,7 +316,8 @@ test('scripts, markers and the record\'s reading: parseDns, parseInitResult, the
   assert.equal(JSON.stringify(parsed).includes(CRED), false);
   assert.deepEqual([parseInitResult('PP_INIT_RC:none\nPP_INIT_RUNNING:4242\n').running, parseInitResult('PP_INIT_RC:none\nPP_INIT_DEAD:4242\n').dead, parseInitResult('PP_INIT_RC:none\nPP_INIT_NOPID\n').noPid], [4242, 4242, true]);
   assert.equal(parseInitResult('PP_INIT_WRITE_FAILED\n').writeFailed, true);
-  assert.equal(parseInitKill('PP_INIT_KILL:gone'), 'gone');
+  assert.equal(parseInitKill('PP_INIT_KILL:gone'), 'gone'); assert.equal(parseInitKill('PP_INIT_KILL:nopid'), null, 'the pid-only verdict is gone');
+  assert.deepEqual(parseInitKillReport('PP_INIT_GROUPS:2\nPP_INIT_KILL:alive 3\n'), { verdict: 'alive', survivors: 3, groups: 2 }); assert.deepEqual(parseInitKillReport('PP_INIT_GROUPS:0\nPP_INIT_KILL:norecord\n'), { verdict: 'norecord', survivors: null, groups: 0 }); assert.deepEqual(parseInitKillReport('PP_INIT_GROUPS:1\nPP_INIT_KILL:gone\n').survivors, 0);
   assert.deepEqual(phaseTable(['network_nat', 'dns'], { network_nat: { state: 'done' } }), { network_nat: { state: 'done' }, dns: { state: 'not_run' } });
   // The completion contract.
   assert.deepEqual(setupOutcome({ network_nat: { state: 'done' }, routes: { state: 'pending' } }), { status: 'succeeded', outcome: 'setup_pending', completion: 'pending', failed: [], pending: ['routes'] }, 'a required phase with another job is never "complete"');
@@ -395,31 +419,145 @@ test('initScriptWrapper under sh (umask 022): the script runs from base64; its e
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('a timed-out init under sh: the client is killed, the script keeps running in its own session, the kill script stops the whole group and the read-back finds no exit code (uncertain, never re-run)', async (t) => {
-  const dir = tmp();
-  const body = '#!/bin/sh\necho started\nsleep 30 &\nsleep 30\n';
+test('a timed-out init under sh with NO containment record: the client is killed, the script keeps running in its own session, the read-back finds no exit code; the kill script kills the recorded session best-effort but reports norecord — a session-group kill establishes nothing about a setsid descendant', async (t) => {
+  const dir = tmp(); const runDir = join(dir, 'run');
+  const out = join(dir, 'writer.out');
+  // The script starts a writer in a NEW session (as a daemonising installer
+  // does) and then blocks; the writer outlives everything the pid names.
+  const body = `#!/bin/sh\necho started\nsetsid sh -c 'echo $$ > ${dir}/writer.pid; while :; do date >> ${out}; sleep 0.1; done' > /dev/null 2>&1 < /dev/null &\nsleep 30\n`;
   const b64 = Buffer.from(body, 'utf8').toString('base64');
   const child = spawn('sh', ['-c', 'umask 022; exec sh -s'], { stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdin.end(initScriptWrapper({ jobId: 'job-t', b64, logDir: dir, tmpDir: dir }));
-  await new Promise((r) => setTimeout(r, 700));
+  await new Promise((r) => setTimeout(r, 900));
   const pidFile = join(dir, 'pp-init-job-t.pid');
-  assert.ok(existsSync(pidFile), 'the wrapper recorded the script pid');
+  assert.ok(existsSync(pidFile), 'the wrapper recorded the script pid'); assert.ok(existsSync(join(dir, 'writer.pid')), 'the descendant started');
   for (const f of ['pp-init-job-t.log', 'pp-init-job-t.pid']) assert.equal(statSync(join(dir, f)).mode & 0o777, 0o600, `${f} is owner-only while the script runs (umask 022 in the guest)`);
   assert.equal(statSync(join(dir, 'pp-init-job-t.sh')).mode & 0o777, 0o700, 'the materialised script is owner-only');
-  const pid = Number(readFileSync(pidFile, 'utf8').trim());
+  const pid = Number(readFileSync(pidFile, 'utf8').trim()); const writer = Number(readFileSync(join(dir, 'writer.pid'), 'utf8').trim());
+  t.after(() => { for (const p of [writer, pid]) { try { process.kill(-p, 'SIGKILL'); } catch { /* gone */ } try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } rmSync(dir, { recursive: true, force: true }); });
   child.kill('SIGKILL'); // the executor's timeout: the exec client dies
   await new Promise((r) => setTimeout(r, 200));
-  assert.equal(alive(pid), true, 'the init script outlives its client (its own session)');
+  assert.equal(alive(pid), true, 'the init script outlives its client (its own session)'); assert.equal(alive(writer), true);
   const read = sh(initResultReadScript({ jobId: 'job-t', logDir: dir, tmpDir: dir }));
   const res = parseInitResult(read.stdout);
   assert.equal(res.rc, null); assert.equal(res.running, pid, 'the read-back reports it running, records nothing as done');
-  const kill = sh(initKillScript({ jobId: 'job-t', logDir: dir, tmpDir: dir }), { timeoutMs: 15_000 });
-  assert.equal(parseInitKill(kill.stdout), 'gone', kill.stdout + kill.stderr);
-  assert.equal(alive(pid), false, 'the session group is gone');
+  const kill = sh(initKillScript({ jobId: 'job-t', runDir, logDir: dir, tmpDir: dir }), { timeoutMs: 15_000 });
+  assert.deepEqual(parseInitKillReport(kill.stdout), { verdict: 'norecord', survivors: null, groups: 0 }, kill.stdout + kill.stderr);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(alive(pid), false, 'the recorded session is killed on the way out');
+  assert.equal(alive(writer), true, 'the setsid descendant is NOT in that session: it survives — exactly why a pid-based "gone" was never evidence');
+  const size = statSync(out).size; await new Promise((r) => setTimeout(r, 400)); assert.ok(statSync(out).size > size, 'it is still writing');
   assert.equal(existsSync(join(dir, 'pp-init-job-t.rc')), false, 'nothing claims an exit code');
-  t.after(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } rmSync(dir, { recursive: true, force: true }); });
+  assert.equal(kill.stdout.trim().split('\n').every((l) => /^PP_INIT_(KILL|GROUPS):/.test(l)), true, `markers only: ${kill.stdout}`);
 });
-function alive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
+// Alive means running, not a zombie: this sandbox's pid 1 reaps nothing, and kill(pid, 0) answers yes for a corpse.
+function alive(pid) { try { const st = readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^[^)]*\) /, '').split(' ')[0]; return !!st && st !== 'Z' && st !== 'X'; } catch { return false; } }
+
+
+// Real containment over the DEFAULT roots and run dir the production wrapper
+// uses (cgroup2, cgroup1 pids, or systemd), plus the guest paths the init
+// artifacts land in — probed like the closeout suite does, with a throwaway
+// job so nothing of the probe remains.
+function realContainmentKind() {
+  try { for (const p of ['/var/log', '/tmp', '/run']) accessSync(p, FS.W_OK); } catch { return null; }
+  const runDir = join(tmp(), 'run');
+  const r = spawnSync('sh', ['-s'], { input: containedScript('pp-setup-probe', 'echo probe-ok', { runDir }), encoding: 'utf8', timeout: 10_000 });
+  const c = parseContainment(r.stderr);
+  if (c?.ref && c.kind !== 'systemd') { try { rmdirSync(c.ref); } catch { /* left for the reaper */ } }
+  return c && c.kind !== 'none' && /probe-ok/.test(r.stdout || '') ? c.kind : null;
+}
+const sleepReal = (ms) => new Promise((r) => setTimeout(r, ms));
+const procsIn = (g) => { try { return readFileSync(`${g}/cgroup.procs`, 'utf8').split('\n').map((x) => Number(x)).filter(Boolean); } catch { return []; } };
+const recordedGroups = (id) => { const f = `${CONTAINMENT_RUN_DIR}/${id}.cgroups`; return existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean) : []; };
+const recordedUnits = (id) => { const f = `${CONTAINMENT_RUN_DIR}/${id}.units`; return existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean) : []; };
+
+test('REAL PROCESSES through the store and the executor: an init script whose setsid descendant keeps writing after its recorded parent is gone — the timeout kill stops the WHOLE containment group, issued outside it, and only then records timed_out with no hold; with the containment record missing the kill is inconclusive, the guest is HELD, conflicting work is refused, and only the writer-stopped acknowledgement releases it', async (t) => {
+  const kind = realContainmentKind();
+  if (!kind) { t.skip('no real containment mechanism here (no writable cgroup tree or systemd), or /var/log, /tmp, /run not writable'); return; }
+  const d = db(); const inputsDir = join(tmp(), 'setup-inputs'); const work = tmp(); const c = clock();
+  const st = { instances: [inst({ name: 'pp-n', config: { 'volatile.uuid': UUID_B } })] }; const h = scriptedHost(st);
+  const jobs = []; const writers = []; const seen = {};
+  t.after(async () => {
+    for (const w of writers) { try { process.kill(w, 'SIGKILL'); } catch { /* gone */ } }
+    for (const id of jobs) {
+      for (const root of ['/sys/fs/cgroup', '/sys/fs/cgroup/unified', '/sys/fs/cgroup/pids']) { const g = `${root}/mock2-deploy/${id}`; if (existsSync(g)) { for (const p of procsIn(g)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } await sleepReal(100); try { rmdirSync(g); } catch { /* still populated: reported below */ } } }
+      for (const u of recordedUnits(id)) spawnSync('systemctl', ['kill', '--signal=KILL', '--kill-whom=all', u]);
+      for (const f of [`/var/log/pp-init-${id}.log`, `/var/log/pp-init-${id}.rc`, `/var/log/pp-init-${id}.pid`, `/tmp/pp-init-${id}.sh`]) rmSync(f, { force: true });
+      try { for (const f of readdirSync(CONTAINMENT_RUN_DIR)) if (f.startsWith(`${id}.`)) rmSync(join(CONTAINMENT_RUN_DIR, f), { force: true }); } catch { /* no run dir */ }
+    }
+    rmSync(work, { recursive: true, force: true });
+  });
+  // The script daemonises a writer into a NEW session (as an installer that
+  // forks a service does) and then blocks: the recorded pid names the
+  // blocked leader, never the writer.
+  const writerScript = (tag) => `#!/bin/sh\necho init-output-7f3a\nsetsid sh -c 'echo $$ > ${work}/${tag}.pid; while :; do date >> ${work}/${tag}.out; sleep 0.1; done' > /dev/null 2>&1 < /dev/null &\nsleep 60\n`;
+  const grows = async (file, ms = 500) => { const a = statSync(file).size; await sleepReal(ms); return statSync(file).size > a; };
+  const waitFor = async (file) => { for (let i = 0; i < 40 && !existsSync(file); i += 1) await sleepReal(50); return existsSync(file); };
+  const captureWriter = async (id, tag) => { assert.ok(await waitFor(`${work}/${tag}.pid`), 'the descendant started'); const writer = Number(readFileSync(`${work}/${tag}.pid`, 'utf8').trim()); writers.push(writer); const groups = recordedGroups(id); const units = recordedUnits(id); assert.ok(groups.length + units.length >= 1, `the init attempt recorded its containment (${kind}) under ${CONTAINMENT_RUN_DIR}`); return { writer, groups, units }; };
+
+  // 1) Conclusive: the recorded parent dies, its setsid descendant does not.
+  const gs = { realContained: true, beforeKill: async (id) => {
+    const parent = Number(readFileSync(`/var/log/pp-init-${id}.pid`, 'utf8').trim());
+    seen.w1 = await captureWriter(id, 'w1');
+    assert.equal(alive(parent), true, 'the leader outlived the timed-out client'); process.kill(parent, 'SIGKILL'); await sleepReal(300);
+    assert.equal(alive(parent), false, 'the recorded pid is gone…'); assert.equal(alive(seen.w1.writer), true, '…and the setsid descendant is not');
+    assert.equal(await grows(`${work}/w1.out`), true, 'it keeps writing after its parent exited');
+    if (seen.w1.groups.length) assert.ok(seen.w1.groups.some((g) => procsIn(g).includes(seen.w1.writer)), 'the descendant left the session, never the job\'s cgroup');
+  } };
+  const g = scriptedGuest(gs);
+  const script = writeInitScriptInput(inputsDir, writerScript('w1'));
+  const sub = submitRunnerJob(d, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script, initTimeoutMs: 1000 }, nowMs: T0 });
+  assert.ok(sub.job, sub.error); jobs.push(sub.job.id);
+  const out = await runAll(d, exec(h, g), c, { inputsDir });
+  if (gs.hookError) throw gs.hookError;
+  assert.equal(out.ran[0].status, 'failed', getJob(d, sub.job.id).reason);
+  const ph = phasesOf(d, sub.job.id);
+  assert.equal(ph.init_script.state, 'timed_out'); assert.equal(ph.init_script.killed, 'gone'); assert.equal(ph.init_script.survivors, 0); assert.ok(ph.init_script.groups >= 1, `groups recorded: ${ph.init_script.groups}`);
+  assert.deepEqual(ph.init_script.writer, { state: 'stopped', pid: null }); assert.match(ph.init_script.detail, /ran longer than 1 s and was stopped — its containment group \(\d+ recorded\) is empty/);
+  assert.equal(alive(seen.w1.writer), false, 'the group kill stopped the descendant the pid never named');
+  assert.equal(await grows(`${work}/w1.out`), false, 'nothing writes any more');
+  for (const grp of seen.w1.groups) assert.equal(existsSync(grp), false, `the emptied cgroup is removed: ${grp}`);
+  assert.equal(existsSync(`${CONTAINMENT_RUN_DIR}/${sub.job.id}.cgroups`), false, 'the record is removed once every group is empty'); assert.equal(existsSync(`${CONTAINMENT_RUN_DIR}/${sub.job.id}.units`), false);
+  assert.equal(existsSync(`/tmp/pp-init-${sub.job.id}.sh`), false); assert.equal(existsSync(`/var/log/pp-init-${sub.job.id}.pid`), false); assert.equal(existsSync(`/var/log/pp-init-${sub.job.id}.rc`), false, 'nothing claims an exit code');
+  assert.equal(statSync(`/var/log/pp-init-${sub.job.id}.log`).mode & 0o777, 0o600, 'the log stays, owner-only'); assert.ok(readFileSync(`/var/log/pp-init-${sub.job.id}.log`, 'utf8').includes('init-output-7f3a'), 'the script\'s output is in the guest\'s log');
+  assert.equal(g.calls.find((x) => x.phase === 'init').contained, true, 'the init ran inside the containment wrapper'); assert.equal(g.calls.find((x) => x.phase === 'init_kill').contained, false, 'the kill was issued OUTSIDE it');
+  assert.equal(readLock(d, 'pp-n'), null, 'every group empty: no hold'); assert.equal(gs.killed, 1);
+  noScriptIn(d, [sub.job.id]); assert.equal((JSON.stringify(getJob(d, sub.job.id)) + JSON.stringify(listEvents(d, sub.job.id))).includes('init-output-7f3a'), false, 'no output in the record');
+  assert.equal(submitRunnerJob(d, { kind: 'instance_delete', app: 'pp-n', params: { container: 'pp-n', force: true }, nowMs: c.nowMs() }).job != null, true, 'conflicting work is accepted once the writers are conclusively stopped');
+  d.prepare(`DELETE FROM setup_jobs WHERE kind = 'instance_delete'`).run();
+
+  // 2) Inconclusive: the containment record is gone before the kill (a
+  // rebooted /run, a reaper that ran between). The pid-only kill of the
+  // leader is best effort and proves nothing; the descendant keeps writing.
+  const gs2 = { realContained: true, beforeKill: async (id) => { seen.w2 = await captureWriter(id, 'w2'); for (const f of [`${CONTAINMENT_RUN_DIR}/${id}.cgroups`, `${CONTAINMENT_RUN_DIR}/${id}.units`]) rmSync(f, { force: true }); } };
+  const g2 = scriptedGuest(gs2);
+  const script2 = writeInitScriptInput(inputsDir, writerScript('w2'));
+  const sub2 = submitRunnerJob(d, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script2, initTimeoutMs: 1000 }, nowMs: c.nowMs() });
+  assert.ok(sub2.job, sub2.error); jobs.push(sub2.job.id);
+  const out2 = await runAll(d, exec(h, g2), c, { inputsDir });
+  if (gs2.hookError) throw gs2.hookError;
+  assert.equal(out2.ran[0].status, 'recovery_required'); assert.equal(out2.ran[0].outcome, 'init_uncertain');
+  const ph2 = phasesOf(d, sub2.job.id);
+  assert.equal(ph2.init_script.state, 'uncertain'); assert.equal(ph2.init_script.killed, 'norecord'); assert.equal(ph2.init_script.groups, 0); assert.deepEqual(ph2.init_script.writer, { state: 'unknown', pid: null });
+  assert.match(ph2.init_script.detail, /containment record is missing, so the writer group could not be inspected/); assert.match(ph2.init_script.detail, /guest is held until the job is acknowledged/);
+  assert.equal(alive(seen.w2.writer), true, 'the descendant survived the pid-only best effort'); assert.equal(await grows(`${work}/w2.out`), true, 'and is still writing — the hold is what protects the guest');
+  holdOn(d, 'pp-n', sub2.job.id);
+  const del = submitRunnerJob(d, { kind: 'instance_delete', app: 'pp-n', params: { container: 'pp-n', force: true }, nowMs: c.nowMs() });
+  assert.ok(['CONTAINER_BUSY', 'CONTAINER_LOCK_STALE'].includes(del.code), `a delete is refused while the writer is unknown: ${JSON.stringify(del)}`);
+  assert.ok(['CONTAINER_BUSY', 'CONTAINER_LOCK_STALE'].includes(submitRunnerJob(d, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['dns'], expect: { uuid: UUID_B } }, nowMs: c.nowMs() }).code), 'so is another setup');
+  assert.equal(st.instances.length, 1, 'nothing touched the guest');
+  const noAttest = acknowledgeUncertainJob(d, { id: sub2.job.id, by: 'thomas', nowMs: c.nowMs() });
+  assert.equal(noAttest.code, 'WRITER_NOT_ESTABLISHED'); holdOn(d, 'pp-n', sub2.job.id);
+  // The operator stops the group by hand (the cgroup the attempt was in) and attests to it.
+  for (const grp of seen.w2.groups) { for (const p of procsIn(grp)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } }
+  try { process.kill(seen.w2.writer, 'SIGKILL'); } catch { /* gone */ }
+  await sleepReal(300); assert.equal(alive(seen.w2.writer), false);
+  for (const grp of seen.w2.groups) { try { rmdirSync(grp); } catch { /* a corpse nobody reaped; the after-hook retries */ } }
+  const ack = acknowledgeUncertainJob(d, { id: sub2.job.id, by: 'thomas', writerStopped: true, note: `killed cgroup ${seen.w2.groups[0] || seen.w2.units[0] || '?'} by hand; nothing writes`, nowMs: c.nowMs() });
+  assert.equal(ack.ok, true, JSON.stringify(ack)); assert.equal(readLock(d, 'pp-n'), null); assert.equal(getJob(d, sub2.job.id).outcome, 'init_uncertain_acknowledged');
+  assert.ok(submitRunnerJob(d, { kind: 'instance_delete', app: 'pp-n', params: { container: 'pp-n', force: true }, nowMs: c.nowMs() }).job, 'the acknowledged hold no longer refuses the delete');
+  noScriptIn(d, [sub2.job.id]);
+});
 
 // ── 3. the input store ────────────────────────────────────────────────────
 
@@ -619,7 +757,8 @@ test('an init script that times out: the exec client dies at the bound; the kill
   const out = await runAll(d, exec(h, g), c, { inputsDir });
   assert.equal(out.ran[0].status, 'failed');
   const ph = phasesOf(d, sub.job.id);
-  assert.equal(ph.init_script.state, 'timed_out'); assert.equal(ph.init_script.killed, 'gone'); assert.deepEqual(ph.init_script.writer, { state: 'stopped', pid: null }); assert.match(ph.init_script.detail, /ran longer than 60 s and was stopped \(its output is in \/var\/log\/pp-init-/); assert.equal(ph.init_script.tail, undefined);
+  assert.equal(ph.init_script.state, 'timed_out'); assert.equal(ph.init_script.killed, 'gone'); assert.deepEqual(ph.init_script.writer, { state: 'stopped', pid: null }); assert.match(ph.init_script.detail, /ran longer than 60 s and was stopped — its containment group \(1 recorded\) is empty \(its output is in \/var\/log\/pp-init-/); assert.equal(ph.init_script.tail, undefined); assert.equal(ph.init_script.groups, 1);
+  assert.equal(g.calls.find((x) => x.phase === 'init_kill').contained, false, 'the kill is issued outside the containment wrapper'); assert.equal(g.calls.find((x) => x.phase === 'init').contained, true);
   assert.equal(gs.killed, 1); assert.equal(gs.initScripts.length, 1);
   assert.equal(readInitScriptInput(inputsDir, script.ref), null);
   assert.match(initWarning(ph.init_script), /timed out after 1 minute\(s\)/);
@@ -629,11 +768,26 @@ test('an init script that times out: the exec client dies at the bound; the kill
   const script2 = writeInitScriptInput(inputsDir, SCRIPT);
   const sub2 = submitRunnerJob(d, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script2, initTimeoutMs: 60_000 }, nowMs: T0 });
   const out2 = await runAll(d, exec(h, g2), c, { inputsDir });
+  if (gs2.hookError) throw gs2.hookError;
   assert.equal(out2.ran[0].status, 'recovery_required'); assert.equal(out2.ran[0].outcome, 'init_uncertain');
   const ph2 = phasesOf(d, sub2.job.id);
   assert.equal(ph2.init_script.state, 'uncertain'); assert.equal(ph2.init_script.writer.state, 'running'); assert.match(ph2.init_script.detail, /still alive after the kill/);
   holdOn(d, 'pp-n', sub2.job.id);
   assert.equal(submitRunnerJob(d, { kind: 'instance_stop', app: 'pp-n', params: { container: 'pp-n' }, nowMs: T0 }).code, 'CONTAINER_BUSY', 'the lease is still live (held by the job) then stale: refused either way');
+  // No containment record to inspect: the same hold, whatever became of the recorded pid.
+  const d3 = db(); const gs3 = { initTimesOut: true, killResult: 'norecord' }; const g3 = scriptedGuest(gs3);
+  const script3 = writeInitScriptInput(inputsDir, SCRIPT);
+  const sub3 = submitRunnerJob(d3, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script3, initTimeoutMs: 60_000 }, nowMs: T0 });
+  const out3 = await runAll(d3, exec(h, g3), c, { inputsDir });
+  assert.equal(out3.ran[0].outcome, 'init_uncertain');
+  const ph3 = phasesOf(d3, sub3.job.id);
+  assert.equal(ph3.init_script.killed, 'norecord'); assert.equal(ph3.init_script.groups, 0); assert.equal(ph3.init_script.writer.state, 'unknown'); assert.match(ph3.init_script.detail, /containment record is missing/);
+  holdOn(d3, 'pp-n', sub3.job.id);
+  // An inspection that could not conclude, likewise.
+  const d4 = db(); const g4 = scriptedGuest({ initTimesOut: true, killResult: 'unknown 0' });
+  const sub4 = submitRunnerJob(d4, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: writeInitScriptInput(inputsDir, SCRIPT), initTimeoutMs: 60_000 }, nowMs: T0 });
+  await runAll(d4, exec(h, g4), c, { inputsDir });
+  assert.equal(phasesOf(d4, sub4.job.id).init_script.killed, 'unknown'); assert.match(phasesOf(d4, sub4.job.id).init_script.detail, /could not be inspected conclusively/); holdOn(d4, 'pp-n', sub4.job.id);
 });
 
 test('containment unavailable in the guest: the host phases run, the guest phases are refused by name (nothing run), the guest is kept; a script input the executor cannot run is refused when its digest differs from the plan', async (t) => {
@@ -904,6 +1058,153 @@ test('a failed route render keeps the setup PARTIAL on every record; a render th
   const render = fakeRender([]);
   out = await runBackendSteps({ db: d2, owner: BACKEND, deps: { configureRoutes: (args) => { d2.exec(`UPDATE setup_locks SET owner = '${OTHER}', epoch = epoch + 1 WHERE app = 'pp-n'`); return configureGuestRoutes(d2, { name: args.name, ip: args.ip, services: args.services, render, fence: args.fence }); } }, nowMs: () => T0 + 4 });
   assert.equal(out.ran[0].outcome, 'lease_lost'); assert.equal(d2.prepare(`SELECT COUNT(*) AS n FROM services`).get().n, 0, 'not even the service row'); assert.equal(d2.prepare(`SELECT COUNT(*) AS n FROM service_http_routes`).get().n, 0);
+});
+
+// A Caddy over a temp dir: site files really written from the rows (so a
+// file's content says whose render it is), adapt / reload counted, hooks for
+// what a test injects at each step — the only thing the production route
+// path does not run here is the caddy binary.
+function caddyDir(dir, hooks = {}) {
+  const log = { adapt: 0, reload: 0, regenerated: [], writes: [], removes: [] };
+  const caddyFilePath = (dom) => join(dir, `${dom}.caddy`);
+  const render = {
+    regenerate: async (db, domain) => {
+      const row = db.prepare(`SELECT r.domain, r.target_port, s.target_ip FROM service_http_routes r JOIN services s ON s.id = r.service_id WHERE r.domain = ? AND r.path_prefix = '/'`).get(domain);
+      log.regenerated.push(domain); writeFileSync(caddyFilePath(domain), `${domain} { reverse_proxy ${row.target_ip}:${row.target_port} } # by ${BACKEND}\n`);
+      if (hooks.afterRegenerate) await hooks.afterRegenerate(domain, log);
+    },
+    adapt: async () => { log.adapt += 1; if (hooks.adapt) await hooks.adapt(log); },
+    reload: async () => { log.reload += 1; if (hooks.reload) await hooks.reload(log); },
+    caddyFilePath,
+    writeConfig: async (path, content) => { log.writes.push(path); writeFileSync(path, content); },
+    removeConfig: async (path) => { log.removes.push(path); rmSync(path, { force: true }); },
+  };
+  return { log, render, file: (dom) => (existsSync(caddyFilePath(dom)) ? readFileSync(caddyFilePath(dom), 'utf8') : null) };
+}
+// A create → setup (routes pending) → configure_routes chain over the real
+// route tables, ready for the backend's drain.
+function seedRoutesChain(d, { ip = '10.10.10.7', services = SERVICES, id = 'routes-1' } = {}) {
+  ensureRoutesSchema(d);
+  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/12' } }, status: 'succeeded', nowMs: T0 - 11_000 });
+  createJob(d, { id: 'setup-1', kind: 'guest_setup', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', phases: ['routes'], services, serviceName: 'n', origin: { jobId: 'create-1', kind: 'instance_create' } } }, status: 'succeeded', nowMs: T0 - 10_000 });
+  d.prepare(`UPDATE setup_jobs SET outcome = 'setup_pending', progress_json = ? WHERE id = 'setup-1'`).run(JSON.stringify({ phases: { network_nat: { state: 'done' }, routes: { state: 'pending', job: id } }, completion: 'pending', address: { ip } }));
+  createJob(d, { id, kind: 'configure_routes', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', serviceName: 'n', ip, services, origin: { jobId: 'setup-1', kind: 'guest_setup', createJobId: 'create-1' } } }, nowMs: T0 - 9_000 });
+  return id;
+}
+const takeOver = (d, app) => { d.exec(`UPDATE setup_locks SET owner = '${OTHER}', epoch = epoch + 1 WHERE app = '${app}'`); return readLock(d, app); };
+const settledPartial = (d) => { assert.equal(phasesOf(d, 'setup-1').routes.state, 'failed'); assert.equal(getJob(d, 'setup-1').outcome, 'setup_partial'); assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.completion, 'partial'); };
+
+test('route ownership through the PRODUCTION adapter (ops backendStepDeps → guest-routes → route-render, real tables, a Caddy over a temp dir): the site files are rendered from the rows, validated and reloaded once, and the setup settles complete', async (t) => {
+  const d = db(); const dir = tmp(); const caddy = caddyDir(dir); const h = scriptedHost({ instances: [] }); const g = scriptedGuest({});
+  t.after(() => { configureContainerLockStore(null); rmSync(dir, { recursive: true, force: true }); });
+  opsStore(d, h, g, { renderDeps: caddy.render });
+  assert.equal(containerLockStore().configureRoutes, null, 'no configurator of the test\'s own: the production adapter runs'); assert.equal(containerLockStore().renderDeps, caddy.render);
+  const id = seedRoutesChain(d);
+  const out = await drainBackendStepsNow(undefined, { nowMs: () => T0 });
+  assert.equal(out.ran.length, 1); assert.equal(out.ran[0].status, 'succeeded', getJob(d, id).reason); assert.equal(out.ran[0].outcome, 'routes_configured');
+  assert.deepEqual(out.ran[0].result.created, ['app.example.test', 'api.example.test']); assert.deepEqual(out.ran[0].result.rendered, ['app.example.test', 'api.example.test']);
+  assert.match(caddy.file('app.example.test'), /reverse_proxy 10\.10\.10\.7:3000/); assert.match(caddy.file('api.example.test'), /reverse_proxy 10\.10\.10\.7:8080/);
+  assert.deepEqual([caddy.log.adapt, caddy.log.reload, caddy.log.regenerated], [1, 1, ['app.example.test', 'api.example.test']]);
+  assert.equal(d.prepare(`SELECT COUNT(*) AS n FROM service_http_routes`).get().n, 2); assert.deepEqual(d.prepare(`SELECT name, lxc_container_name, target_ip FROM services`).all().map((r) => ({ ...r })), [{ name: 'n', lxc_container_name: 'n', target_ip: '10.10.10.7' }], 'the guest\'s one services row, keyed by its service name as the dashboard always keyed it');
+  assert.equal(getJob(d, 'setup-1').outcome, 'setup_complete'); assert.equal(parseJson(getJob(d, 'create-1').progress_json).setup.completion, 'complete');
+  assert.equal(readLock(d, 'pp-n'), null); assert.equal(readLock(d, HOST_ROUTES_LOCK), null);
+});
+
+test('route ownership through the PRODUCTION adapter: the lease taken BEFORE any mutation → nothing is written (no row, no file, no adapt); taken DURING a multi-domain render → the next domain is not rendered, nothing is validated or reloaded, NO rollback touches what is now the new owner\'s, and the new owner\'s lease is untouched; the setup settles partial and truthfully names the lost lease', async (t) => {
+  const h = scriptedHost({ instances: [] }); const g = scriptedGuest({}); const dirs = [];
+  t.after(() => { configureContainerLockStore(null); for (const x of dirs) rmSync(x, { recursive: true, force: true }); });
+  // 1) Before any mutation: the routes lease is taken the moment this job holds it, before its first fence.
+  {
+    const d = db(); const dir = tmp(); dirs.push(dir); const caddy = caddyDir(dir);
+    opsStore(d, h, g, { renderDeps: caddy.render }); const id = seedRoutesChain(d);
+    let taken = null; let n = 0;
+    const nowMs = () => { if (!taken && readLock(d, HOST_ROUTES_LOCK)?.owner === BACKEND) taken = takeOver(d, HOST_ROUTES_LOCK); return T0 + (n += 1); };
+    const out = await drainBackendStepsNow(undefined, { nowMs });
+    assert.equal(out.ran[0].status, 'failed'); assert.equal(out.ran[0].outcome, 'lease_lost'); assert.match(getJob(d, id).reason, /@host\/routes lease is no longer this job's/);
+    assert.equal(d.prepare(`SELECT COUNT(*) AS n FROM services`).get().n, 0, 'not even the service row'); assert.equal(d.prepare(`SELECT COUNT(*) AS n FROM service_http_routes`).get().n, 0);
+    assert.deepEqual([caddy.log.adapt, caddy.log.reload, caddy.log.regenerated, caddy.log.writes, caddy.log.removes], [0, 0, [], [], []]); assert.equal(caddy.file('app.example.test'), null);
+    const l = readLock(d, HOST_ROUTES_LOCK); assert.equal(l.owner, OTHER); assert.equal(l.epoch, taken.epoch, 'the new owner\'s lease, epoch and all, is untouched by the fenced worker'); assert.equal(readLock(d, 'pp-n'), null, 'this job\'s own lease is released');
+    settledPartial(d); assert.match(phasesOf(d, 'setup-1').routes.detail, /lease is no longer this job's/);
+  }
+  // 2) During the render: the GUEST lease is taken after the first domain's site file is written.
+  {
+    const d = db(); const dir = tmp(); dirs.push(dir); let taken = null;
+    const caddy = caddyDir(dir, { afterRegenerate: async (domain) => { if (domain === 'app.example.test') { taken = takeOver(d, 'pp-n'); writeFileSync(join(dir, 'app.example.test.caddy'), `app.example.test { reverse_proxy 10.10.10.9:3000 } # by ${OTHER}\n`); } } });
+    opsStore(d, h, g, { renderDeps: caddy.render }); const id = seedRoutesChain(d);
+    const out = await drainBackendStepsNow(undefined, { nowMs: () => T0 });
+    assert.equal(out.ran[0].outcome, 'lease_lost'); assert.match(getJob(d, id).reason, /pp-n lease is no longer this job's/);
+    assert.deepEqual(caddy.log.regenerated, ['app.example.test'], 'the second domain is never rendered'); assert.equal(caddy.log.adapt, 0, 'nothing validated'); assert.equal(caddy.log.reload, 0, 'nothing reloaded');
+    assert.deepEqual([caddy.log.writes, caddy.log.removes], [[], []], 'no rollback write or removal after the loss');
+    assert.match(caddy.file('app.example.test'), new RegExp(`10\\.10\\.10\\.9:3000 \\} # by ${OTHER}`), 'the new owner\'s file stands (a rollback would have removed it)'); assert.equal(caddy.file('api.example.test'), null);
+    assert.equal(d.prepare(`SELECT COUNT(*) AS n FROM service_http_routes`).get().n, 2, 'the rows written before the loss stay for the owner to render (a retry re-renders, never duplicates)');
+    const l = readLock(d, 'pp-n'); assert.equal(l.owner, OTHER); assert.equal(l.epoch, taken.epoch); assert.equal(readLock(d, HOST_ROUTES_LOCK), null);
+    settledPartial(d);
+  }
+});
+
+test('route ownership through the PRODUCTION adapter, the failure path: a render that fails with ownership INTACT rolls every site file back and reloads the known-good config (routes_recorded_render_failed, rows kept); a render that fails AFTER the lease was taken rolls nothing back — the new owner\'s files and its upstream row are not overwritten by the stale worker — and is recorded as the lease loss it is', async (t) => {
+  const h = scriptedHost({ instances: [] }); const g = scriptedGuest({}); const dirs = [];
+  t.after(() => { configureContainerLockStore(null); for (const x of dirs) rmSync(x, { recursive: true, force: true }); });
+  // 1) Ownership intact: adapt rejects the generated config.
+  {
+    const d = db(); const dir = tmp(); dirs.push(dir);
+    const caddy = caddyDir(dir, { adapt: async () => { const e = new Error('caddy adapt'); e.stderr = 'syntax error at line 3'; throw e; } });
+    writeFileSync(join(dir, 'app.example.test.caddy'), 'app.example.test { respond "known good" }\n');
+    opsStore(d, h, g, { renderDeps: caddy.render }); const id = seedRoutesChain(d);
+    const out = await drainBackendStepsNow(undefined, { nowMs: () => T0 });
+    assert.equal(out.ran[0].status, 'failed'); assert.equal(out.ran[0].outcome, 'routes_recorded_render_failed', getJob(d, id).reason);
+    assert.match(out.ran[0].result.renderWarning, /Caddy was not updated: Generated Caddy config failed validation: syntax error at line 3/);
+    assert.deepEqual(caddy.log.regenerated, ['app.example.test', 'api.example.test']); assert.equal(caddy.log.adapt, 1); assert.equal(caddy.log.reload, 1, 'the rollback reloads the known-good config');
+    assert.deepEqual(caddy.log.writes, [join(dir, 'app.example.test.caddy')], 'the pre-existing file is put back'); assert.deepEqual(caddy.log.removes, [join(dir, 'api.example.test.caddy')], 'the new one is removed');
+    assert.equal(caddy.file('app.example.test'), 'app.example.test { respond "known good" }\n'); assert.equal(caddy.file('api.example.test'), null);
+    assert.equal(d.prepare(`SELECT COUNT(*) AS n FROM service_http_routes`).get().n, 2, 'the rows stay: a retry renders them again');
+    settledPartial(d); assert.match(phasesOf(d, 'setup-1').routes.detail, /Caddy was not updated/);
+    assert.equal(readLock(d, 'pp-n'), null); assert.equal(readLock(d, HOST_ROUTES_LOCK), null);
+  }
+  // 2) Ownership lost at the validation: the new owner has already moved the
+  // upstream and rewritten a site file when adapt fails for the stale worker.
+  {
+    const d = db(); const dir = tmp(); dirs.push(dir); let taken = null;
+    const caddy = caddyDir(dir, { adapt: async () => { taken = takeOver(d, HOST_ROUTES_LOCK); d.prepare(`UPDATE services SET target_ip = '10.10.10.9' WHERE id = 'svc-n'`).run(); writeFileSync(join(dir, 'app.example.test.caddy'), `app.example.test { reverse_proxy 10.10.10.9:3000 } # by ${OTHER}\n`); const e = new Error('caddy adapt'); e.stderr = 'connection reset'; throw e; } });
+    opsStore(d, h, g, { renderDeps: caddy.render }); const id = seedRoutesChain(d);
+    // The service already exists at an older address with one route: the step moves the upstream first (the same fenced render).
+    d.prepare(`INSERT INTO services (id, name, kind, runtime, target_ip, lxc_container_name, type, status) VALUES ('svc-n', 'n', 'container_service', 'lxc', '10.10.10.6', 'n', 'docker', 'active')`).run();
+    d.prepare(`INSERT INTO service_http_routes (id, service_id, domain, path_prefix, target_port) VALUES ('r-app', 'svc-n', 'app.example.test', '/', 3000)`).run();
+    writeFileSync(join(dir, 'app.example.test.caddy'), 'app.example.test { reverse_proxy 10.10.10.6:3000 } # old\n');
+    const out = await drainBackendStepsNow(undefined, { nowMs: () => T0 });
+    assert.equal(out.ran[0].outcome, 'lease_lost', getJob(d, id).reason); assert.match(getJob(d, id).reason, /@host\/routes lease is no longer this job's/);
+    assert.deepEqual(caddy.log.regenerated, ['app.example.test'], 'the upstream move re-rendered what the service served; the loss ended it there'); assert.equal(caddy.log.adapt, 1); assert.equal(caddy.log.reload, 0, 'no reload of a rollback');
+    assert.deepEqual([caddy.log.writes, caddy.log.removes], [[], []], 'the rollback wrote nothing: the files are the new owner\'s');
+    assert.match(caddy.file('app.example.test'), new RegExp(`10\\.10\\.10\\.9:3000 \\} # by ${OTHER}`), 'the new owner\'s site file stands');
+    assert.equal(d.prepare(`SELECT target_ip FROM services WHERE id = 'svc-n'`).get().target_ip, '10.10.10.9', 'the new owner\'s upstream row is not reverted by the stale worker');
+    assert.equal(d.prepare(`SELECT COUNT(*) AS n FROM service_http_routes`).get().n, 1, 'no route row was added after the loss');
+    const l = readLock(d, HOST_ROUTES_LOCK); assert.equal(l.owner, OTHER); assert.equal(l.epoch, taken.epoch); assert.equal(readLock(d, 'pp-n'), null);
+    settledPartial(d); assert.match(phasesOf(d, 'setup-1').routes.detail, /lease is no longer this job's/);
+  }
+});
+
+test('route ownership through the PRODUCTION adapter: both leases are RENEWED while a legitimately long validation runs (the clock passes the lease period many times over) — no other job can take either meanwhile, and the step completes; a renewal that fails between writes stops the next write', async (t) => {
+  const h = scriptedHost({ instances: [] }); const g = scriptedGuest({}); const dirs = [];
+  t.after(() => { configureContainerLockStore(null); for (const x of dirs) rmSync(x, { recursive: true, force: true }); });
+  {
+    const d = db(); const dir = tmp(); dirs.push(dir); const c = clock(); const probes = [];
+    const caddy = caddyDir(dir, { adapt: async () => { for (let i = 0; i < 5; i += 1) { c.tick(25_000); await new Promise((r) => setTimeout(r, 60)); probes.push({ guest: acquireLock(d, { app: 'pp-n', owner: OTHER, operation: 'instance_stop', jobId: 'o', nowMs: c.nowMs() }).reason, routes: acquireLock(d, { app: HOST_ROUTES_LOCK, owner: OTHER, operation: 'configure_routes', jobId: 'o', nowMs: c.nowMs() }).reason }); } } });
+    opsStore(d, h, g, { renderDeps: caddy.render }); const id = seedRoutesChain(d);
+    const out = await drainBackendStepsNow(undefined, { nowMs: c.nowMs, keepAliveMs: 20 });
+    assert.equal(out.ran[0].status, 'succeeded', getJob(d, id).reason); assert.equal(out.ran[0].outcome, 'routes_configured');
+    assert.equal(probes.length, 5); for (const p of probes) assert.deepEqual(p, { guest: 'held', routes: 'held' }, 'renewed, never lapsed: ' + JSON.stringify(probes));
+    assert.equal(caddy.log.reload, 1); assert.equal(getJob(d, 'setup-1').outcome, 'setup_complete');
+    assert.equal(readLock(d, 'pp-n'), null); assert.equal(readLock(d, HOST_ROUTES_LOCK), null, 'released at the end');
+  }
+  // The keep-alive finds the guest lease gone (taken while adapt ran): the reload — the next write — is refused.
+  {
+    const d = db(); const dir = tmp(); dirs.push(dir); const c = clock();
+    const caddy = caddyDir(dir, { adapt: async () => { takeOver(d, 'pp-n'); await new Promise((r) => setTimeout(r, 120)); } });
+    opsStore(d, h, g, { renderDeps: caddy.render }); seedRoutesChain(d);
+    const out = await drainBackendStepsNow(undefined, { nowMs: c.nowMs, keepAliveMs: 20 });
+    assert.equal(out.ran[0].outcome, 'lease_lost'); assert.equal(caddy.log.adapt, 1); assert.equal(caddy.log.reload, 0, 'no reload after the keep-alive saw the loss'); assert.deepEqual(caddy.log.writes, []);
+    assert.equal(readLock(d, 'pp-n').owner, OTHER); settledPartial(d);
+  }
 });
 
 test('the shared network lease is RENEWED through a slow live sequence (each command longer than the lease period): no other job can take it over meanwhile and every command is issued; a worker whose lease was taken over issues no further mutation', async (t) => {

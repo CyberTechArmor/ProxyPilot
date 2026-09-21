@@ -90,8 +90,8 @@ function noteInterruptedStep(db, { job, nowMs }) {
 // steps (configure_routes), whatever the executor policy: on boot, on the
 // interval, and when a caller has just seen one queued. Idempotent and safe
 // to call concurrently: the claim is a compare-and-swap.
-export async function drainBackendSteps(db, { deps, owner = backendOwner(), max = 5, nowMs = () => Date.now(), log = () => {}, sleep } = {}) {
-  return runBackendSteps({ db, owner, deps, max, nowMs, log, sleep });
+export async function drainBackendSteps(db, { deps, owner = backendOwner(), max = 5, nowMs = () => Date.now(), log = () => {}, sleep, keepAliveMs } = {}) {
+  return runBackendSteps({ db, owner, deps, max, nowMs, log, sleep, keepAliveMs });
 }
 
 // acknowledgeUncertainJob(db, { id, by, via, note, writerStopped, nowMs })

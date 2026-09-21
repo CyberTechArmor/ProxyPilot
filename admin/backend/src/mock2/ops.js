@@ -235,13 +235,19 @@ export async function runGuestSetup({ containerName, phases, expect = null, init
 // backendStepDeps(store) → { configureRoutes } — the route configurator the
 // backend-executed `configure_routes` step calls: ProxyPilot's own rows and
 // its Caddy render (lib/guest-routes.js over the services router's render
-// bundle). A test store supplies its own.
+// bundle). The step's ownership `fence` is forwarded as-is: it is checked
+// before every row, every site file, the validation, the reload and every
+// write of a rollback. The Caddy bundle (`store.renderDeps`) is the ONE
+// external dependency a test replaces; the adapter, the configurator and
+// the render logic stay the production code. A store may still supply a
+// whole `configureRoutes` of its own.
 export function backendStepDeps(store = containerLockStore()) {
   if (store?.configureRoutes) return { configureRoutes: store.configureRoutes };
   return {
-    configureRoutes: async ({ name, ip, services }) => {
-      const [{ configureGuestRoutes }, { caddyRenderDeps }] = await Promise.all([import('../lib/guest-routes.js'), import('../routes/services.js')]);
-      return configureGuestRoutes(store.getDb(), { name, ip, services, render: caddyRenderDeps });
+    configureRoutes: async ({ name, ip, services, fence = null }) => {
+      const { configureGuestRoutes } = await import('../lib/guest-routes.js');
+      const render = store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;
+      return configureGuestRoutes(store.getDb(), { name, ip, services, render, fence });
     },
   };
 }
@@ -250,10 +256,10 @@ export function backendStepDeps(store = containerLockStore()) {
 // backend's own steps. One drain at a time in this process; a second caller
 // during a drain gets the running one.
 let backendDrain = null;
-export async function drainBackendStepsNow(store = containerLockStore(), { max = 5 } = {}) {
+export async function drainBackendStepsNow(store = containerLockStore(), { max = 5, nowMs, keepAliveMs } = {}) {
   if (!store) return { skipped: 'no_store', ran: [] };
   if (backendDrain) return backendDrain;
-  backendDrain = drainBackendSteps(store.getDb(), { deps: backendStepDeps(store), owner: store.owner, max }).finally(() => { backendDrain = null; });
+  backendDrain = drainBackendSteps(store.getDb(), { deps: backendStepDeps(store), owner: store.owner, max, ...(nowMs ? { nowMs } : {}), ...(keepAliveMs ? { keepAliveMs } : {}) }).finally(() => { backendDrain = null; });
   return backendDrain;
 }
 

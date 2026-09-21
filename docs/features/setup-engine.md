@@ -667,10 +667,22 @@ exit code, the log's path and size; warnings and reasons name the log
 ("its output (61 bytes) is in /var/log/pp-init-<job>.log inside the
 container"). The input file is consumed (unlinked) when the phase
 completes. A script that runs past `initTimeoutMs` (5 min by default, 30
-at most) has its exec client killed by the executor and its session group
-stopped by the kill script (TERM, then KILL); when the kill establishes
-the writer gone the phase reads `timed_out`; when it cannot, the writer is
-unknown and the guest is **held** (next paragraph).
+at most) has its exec client killed by the executor; the kill script then
+stops and inspects the attempt's **whole containment group** — the scopes
+and cgroups the contained scripts recorded under `/run/mock2-deploy/<job>.*`
+(`systemctl kill --kill-whom=all` per scope, `cgroup.kill` or a kill loop
+per cgroup; TERM, then KILL) — and counts what is still alive in every
+recorded group afterwards, zombies excluded. It is the one script issued
+*outside* containment (`op-kit.js` `uncontainedGuest`), because a member
+of the group cannot kill and count it. The recorded pid is never the
+verdict: an installer that daemonises with `setsid()` leaves the session
+group the wrapper started but never its cgroup. Only `PP_INIT_KILL:gone`
+(every recorded group empty; the records, the wrapper bodies and the pid
+file removed) reads `timed_out`; `alive <n>`, `norecord` (nothing recorded
+to inspect — the pid's session is killed on the way out, which proves
+nothing) and `unknown` (a scope with no `systemctl`, a cgroup tree no
+longer there) are an unknown writer and the guest is **held** (next
+paragraph).
 
 **An unknown writer holds the guest; nothing repeats it.** An owner dying
 before the script was issued resumes the job (the idempotent phases run
@@ -692,7 +704,8 @@ after a dead in-process executor) the record ends `init_uncertain` and
 held the same way, with the phases that were done kept. The hold ends only
 through `POST /api/setup/jobs/:id/acknowledge` **with `writerStopped:
 true`**: the operator establishes that nothing of the script is still
-changing the guest (the recorded pid is gone, `.rc` read) and says so;
+changing the guest (the job's cgroup or scope empty, `.rc` read — never
+the recorded pid alone) and says so;
 without the attestation the request is refused (`WRITER_NOT_ESTABLISHED`,
 409) and the hold stands. The acknowledgement is one transaction — the
 outcome (`init_uncertain_acknowledged`), the phase marked `acknowledged`
@@ -716,10 +729,19 @@ lease and the host-wide `@host/routes` lease — a held one requeues it with
 a not-before, an unresolved hold (checked first, whoever the lease names)
 waits longer; it is an obligation, never finished deferred — and hands
 the configurator a **fence** that renews both leases at their epochs and
-throws when either is no longer this step's: `configureGuestRoutes` calls
-it before every write (the service row, the upstream move, each route
-row, the render), so a step whose lease was taken over ends `failed` /
-`lease_lost` with nothing further written, then `lib/guest-routes.js` `configureGuestRoutes`: the
+throws when either is no longer this step's. The production adapter
+(`mock2/ops.js` `backendStepDeps`) forwards it as-is, and it is checked
+before every write of the whole path: the service row, the upstream move
+and its revert, each route row, and inside `lib/route-render.js`
+`renderDomains` the snapshot, each domain's site file, the validation, the
+reload, and every write and the reload of a rollback — so a step whose
+lease was taken over ends `failed` / `lease_lost` with nothing further
+written, and **no rollback runs after the loss**: the site files and the
+upstream row are the new owner's, and a stale worker's "restore" would
+overwrite its work. Between writes (a `caddy adapt` or reload that runs
+long) a keep-alive renews both leases every 10 s, so a legitimately long
+operation never lets them lapse; a renewal that changes no row is
+remembered and the next write throws. Then `lib/guest-routes.js` `configureGuestRoutes`: the
 guest's `services` row, its upstream moved and re-rendered when the
 address changed, one `service_http_routes` row per service (a domain
 already routed to THIS guest's service is `existing`, re-rendered and never
@@ -964,7 +986,30 @@ verification or create-status answer, with the read-back the same; a
 retry keeping a failed init failed; a failed render and an interrupted
 routes step settling the setup and its lifecycle parent `partial`, a
 successful retry settling both `complete`, `setup_pending` while the
-routes are with the backend. The rest of the file: the kind
+routes are with the backend. The second review (R-038, R-039) by: the
+route path through the PRODUCTION adapter (`backendStepDeps` →
+`drainBackendStepsNow`, the store carrying only a Caddy over a temp dir)
+— success with the files rendered from the rows, one adapt and one
+reload; the routes lease taken before any mutation (no row, no file); the
+guest lease taken after the first of two domains (the second never
+rendered, nothing validated or reloaded, no rollback write, the new
+owner's file standing, its epoch untouched); a validation failure with
+ownership intact (every file restored, the known-good config reloaded)
+and after the lease was taken (nothing restored, the new owner's site
+file and upstream row untouched, `lease_lost`); both leases renewed
+through a validation that outlives the lease period five times over and
+a keep-alive that sees the loss stopping the reload; and the timeout kill
+with REAL processes through `submitRunnerJob` and the executor under the
+sandbox's cgroup1 pids containment: an init script daemonising a `setsid`
+writer, the client timed out at the bound, the recorded leader killed and
+the descendant still writing inside the job's cgroup → the group kill
+stops it (`gone`, no hold, cgroup and records removed, a delete
+accepted); the record removed before the kill → `norecord`, the
+descendant still writing, the guest held, a delete and a setup refused,
+the acknowledgement refused without the attestation and releasing only
+after the writers are stopped by hand; plus the scripted `alive`,
+`norecord` and `unknown` verdicts holding, and a pid-only kill shown to
+leave the descendant writing (why the pid was never evidence). The rest of the file: the kind
 registries (both modules agree; `configure_routes` never a runner kind);
 strict parameter validation (a script reference and never its text,
 ordered phases, validated services, bounded waits, secret lookalikes;
@@ -1176,9 +1221,14 @@ it), that the script did NOT run twice (the marker appears once in the
 log) — and when the script is still running, that the record reads
 `init_uncertain` with its pid, that Stop / Delete are refused (409) and
 MCP's `delete_lxc_container` too, that `POST /api/setup/jobs/:id/acknowledge`
-without `writerStopped` is refused, and that after the writer is gone the
-acknowledgement with `writerStopped: true` releases the guest and a Stop
-runs; that `/var/log/pp-init-<job>.log` is mode 0600 in the guest and its
+without `writerStopped` is refused, and that after the job's scope or
+cgroup is empty the acknowledgement with `writerStopped: true` releases
+the guest and a Stop runs; run an init script that daemonises a writer
+with `setsid` and let it time out, and confirm the record reads
+`timed_out` / `killed: gone` only when `systemctl status
+mock2-deploy-<job>-*.scope` (or the job's cgroup) shows nothing left, that
+the writer is gone with it, and that on a guest with no systemd the raw
+cgroup form does the same; that `/var/log/pp-init-<job>.log` is mode 0600 in the guest and its
 content appears in no job row, event or create-status answer; retry
 that setup from `/api/setup/jobs/:id/retry` and confirm NAT and DNS run
 again and the init phase reads `skipped` / `notRepeated`; create a guest

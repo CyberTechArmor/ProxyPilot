@@ -80,7 +80,7 @@ export function containerLockStoreConfigured() {
 // containerLockStore() → { getDb, owner } while configured (deploy.js asks it
 // whether a runner can be handed the job), else null.
 export function containerLockStore() {
-  return store ? { getDb: store.getDb, owner: store.owner, env: store.env || null, guestExec: store.guestExec || null, hostExec: store.hostExec || null, reviewLogin: store.reviewLogin || null, inputsDir: store.inputsDir || null, configureRoutes: store.configureRoutes || null } : null;
+  return store ? { getDb: store.getDb, owner: store.owner, env: store.env || null, guestExec: store.guestExec || null, hostExec: store.hostExec || null, reviewLogin: store.reviewLogin || null, inputsDir: store.inputsDir || null, configureRoutes: store.configureRoutes || null, renderDeps: store.renderDeps || null } : null;
 }
 
 // containerLockHolder(name) → { holder, since, waiting } | null

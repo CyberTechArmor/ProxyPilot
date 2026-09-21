@@ -34,11 +34,11 @@
 import {
   validateSetupParams, SETUP_PHASES, GUEST_PHASES, HOST_NETWORK_LOCK, DEFAULT_RESOLVERS, DEFAULT_ADDRESS_TIMEOUT_MS, DEFAULT_INIT_TIMEOUT_MS,
   ipForwardArgv, networkListArgv, bridgeNatArgv, dockerUserCheckArgv, dockerUserInsertArgv, masqueradeCheckArgv, masqueradeAppendArgv, managedBridges,
-  hostReachableIpv4, dnsScript, parseDns, initScriptWrapper, initResultReadScript, initKillScript, parseInitResult, parseInitKill, phaseTable, setupOutcome, phaseSummary, initLogPath,
+  hostReachableIpv4, dnsScript, parseDns, initScriptWrapper, initResultReadScript, initKillScript, parseInitResult, parseInitKillReport, phaseTable, setupOutcome, phaseSummary, initLogPath,
 } from './setup-logic.js';
 import { instanceListArgv, instanceIdentity, identityMatches } from './lifecycle-logic.js';
 import { parseInstanceList } from './restore-logic.js';
-import { hostArgv, noopJob, tailOf, containedGuest, ContainmentUnavailableError } from './op-kit.js';
+import { hostArgv, noopJob, tailOf, containedGuest, uncontainedGuest, ContainmentUnavailableError } from './op-kit.js';
 import { CheckpointNotPersistedError } from './lifecycle-op.js';
 import { sanitizeReason } from './logic.js';
 
@@ -112,6 +112,10 @@ export async function runGuestSetupOperation({ params, exec, job = noopJob(), pr
   } catch (e) { if (e?.code === 'FENCED' || e?.code === 'CANCELLED') throw e; return fail('checkpoint', `${e.message}; nothing was run`, { notIssued: true, instanceState: inst.status || null, identity }); }
 
   const contained = containedGuest({ exec, container: name, job });
+  // The one script that runs OUTSIDE the job's containment: the kill that
+  // stops and inspects the init attempt's writer group must not be a member
+  // of the group it kills and counts (op-kit uncontainedGuest).
+  const killGuest = uncontainedGuest({ exec, container: name, job });
   let containmentRefused = null;
   const guest = async (phase, script, timeoutMs) => {
     if (containmentRefused) throw containmentRefused;
@@ -157,7 +161,7 @@ export async function runGuestSetupOperation({ params, exec, job = noopJob(), pr
       continue;
     }
     if (phase === 'init_script') {
-      record('init_script', await initPhase({ p, job, guest, deps, prior, priorPhases, priorAcknowledged, phases, mark, report, containmentRefused, nowMs }));
+      record('init_script', await initPhase({ p, job, guest, killGuest, deps, prior, priorPhases, priorAcknowledged, phases, mark, report, containmentRefused, nowMs }));
       if (phases.init_script.state !== 'done' && phases.init_script.state !== 'skipped') log('guest_setup', `${name}: init script ${phases.init_script.state}`);
       continue;
     }
@@ -270,7 +274,7 @@ async function natPhase({ host, deps, job, sleep, nowMs, warnings }) {
 // guest's record; a retry keeps what its origin recorded and does not repeat.
 // The record carries states, exit codes and the log's reference — never a
 // line of the script's output.
-async function initPhase({ p, job, guest, deps, prior, priorPhases, priorAcknowledged = false, phases, mark, report, containmentRefused, nowMs }) {
+async function initPhase({ p, job, guest, killGuest, deps, prior, priorPhases, priorAcknowledged = false, phases, mark, report, containmentRefused, nowMs }) {
   const ref = String(p.initScript.ref);
   const timeoutMs = Number(p.initTimeoutMs) || DEFAULT_INIT_TIMEOUT_MS;
   const jobId = String(job.id || 'adhoc');
@@ -329,16 +333,27 @@ async function initPhase({ p, job, guest, deps, prior, priorPhases, priorAcknowl
   const timedOut = r.code === 124 || r.timedOut === true;
   if (timedOut || (!res.recorded && r.code !== 0)) {
     // The executor's timeout killed the exec client (the runner reports 124,
-    // the in-process pivot `timedOut`); the script may still run. The kill
-    // script establishes whether the writer stopped: `gone` is a recorded
-    // timeout; anything else is an unknown writer and the guest is held.
-    let killed = null;
-    try { const k = await guest('init_script_kill', initKillScript({ jobId }), 15_000); killed = parseInitKill(k.stdout); } catch { killed = null; }
+    // the in-process pivot `timedOut`); the script may still run — and so
+    // may a `setsid()` descendant the recorded pid's session never held. The
+    // kill script stops and inspects the attempt's COMPLETE containment
+    // group from the records the contained scripts left (its scopes, its
+    // cgroups), issued outside that group. Only `gone` — every recorded
+    // group empty — is a recorded timeout; a survivor, a missing record or
+    // an inspection that could not conclude is an unknown writer and the
+    // guest is held until the job is acknowledged. The recorded pid
+    // disappearing establishes nothing on its own.
+    let kill = { verdict: null, survivors: null, groups: null };
+    try { const k = await killGuest(initKillScript({ jobId }), 20_000); kill = parseInitKillReport(k.stdout); } catch { kill = { verdict: null, survivors: null, groups: null }; }
     consume();
+    const killed = kill.verdict;
     const stopped = killed === 'gone';
-    const base = { job: jobId, timeoutMs, killed: killed || 'unknown', log, script: { ref, sha256: input.sha256 }, writer: { state: stopped ? 'stopped' : killed === 'alive' ? 'running' : 'unknown', pid: null } };
-    if (timedOut && stopped) return { ...base, state: 'timed_out', hold: false, detail: `the script ran longer than ${Math.round(timeoutMs / 1000)} s and was stopped (its output is in ${log} inside the guest); finish setup manually` };
-    return { ...base, state: 'uncertain', hold: true, detail: `${timedOut ? `the script ran longer than ${Math.round(timeoutMs / 1000)} s` : `the exec session ended (exit ${r.code}) before an exit code was recorded`} and its writer ${killed === 'alive' ? 'is still alive after the kill' : 'could not be established as stopped'}; nothing was run again, and the guest is held until the job is acknowledged (its output is in ${log} inside the guest)` };
+    const why = killed === 'alive' ? `${kill.survivors == null ? 'a writer' : `${kill.survivors} process${kill.survivors === 1 ? '' : 'es'}`} in its containment group ${kill.survivors == null || kill.survivors === 1 ? 'is' : 'are'} still alive after the kill`
+      : killed === 'norecord' ? 'its containment record is missing, so the writer group could not be inspected'
+        : killed === 'unknown' ? `its writer group could not be inspected conclusively${kill.survivors ? ` (${kill.survivors} still alive where it could be)` : ''}`
+          : 'could not be established as stopped';
+    const base = { job: jobId, timeoutMs, killed: killed || 'unknown', groups: kill.groups, survivors: kill.survivors, log, script: { ref, sha256: input.sha256 }, writer: { state: stopped ? 'stopped' : killed === 'alive' ? 'running' : 'unknown', pid: null } };
+    if (timedOut && stopped) return { ...base, state: 'timed_out', hold: false, detail: `the script ran longer than ${Math.round(timeoutMs / 1000)} s and was stopped — its containment group (${kill.groups ?? '?'} recorded) is empty (its output is in ${log} inside the guest); finish setup manually` };
+    return { ...base, state: 'uncertain', hold: true, detail: `${timedOut ? `the script ran longer than ${Math.round(timeoutMs / 1000)} s` : `the exec session ended (exit ${r.code}) before an exit code was recorded`} and its writer ${why}; nothing was run again, and the guest is held until the job is acknowledged (its output is in ${log} inside the guest)` };
   }
   consume();
   if (!res.recorded) return { state: 'uncertain', hold: true, job: jobId, log, writer: { state: 'unknown', pid: null }, script: { ref, sha256: input.sha256 }, detail: 'the wrapper printed no exit marker; what ran is unknown, and the guest is held until the job is acknowledged' };

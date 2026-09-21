@@ -11,7 +11,7 @@
 // derived from them like any other.
 
 import { v4 as uuidv4 } from 'uuid';
-import { applyServiceUpstream, renderDomains } from './route-render.js';
+import { applyServiceUpstream, renderDomains, isLeaseLost } from './route-render.js';
 
 // findOrCreateLxcService(db, name, ip) → the guest's services row.
 // Deliberately does NOT write target_ip on an existing row: one services row
@@ -34,13 +34,14 @@ export function findOrCreateLxcService(db, name, ip, { uuid = uuidv4 } = {}) {
 // warning }: moves the row's address and re-renders what it already served,
 // atomically across both stores (route-render applyServiceUpstream); a
 // failure leaves both where they were and says so.
-export async function syncServiceUpstream(db, service, ip, render) {
+export async function syncServiceUpstream(db, service, ip, render, fence = null) {
   if (!service || !ip || service.target_ip === ip) return { changed: false, domains: [], warning: null };
   try {
-    const result = await applyServiceUpstream({ db, serviceId: service.id, ip, render });
+    const result = await applyServiceUpstream({ db, serviceId: service.id, ip, render, fence });
     if (result.changed) service.target_ip = ip;
     return { changed: result.changed, domains: result.domains, warning: null };
   } catch (e) {
+    if (isLeaseLost(e)) throw e;
     const detail = e?.message || String(e);
     return { changed: false, domains: [], warning: `Container address moved to ${ip} but the existing routes could not be re-rendered (${detail}). Those routes still point at ${service.target_ip || 'an unrecorded address'}.` };
   }
@@ -54,14 +55,17 @@ export async function syncServiceUpstream(db, service, ip, render) {
 // conflict that is reported and never clobbered. The render covers the
 // created and existing domains together; its failure leaves the rows
 // (`renderWarning`) — a retry renders them again. `fence()` is called before
-// every write (each row, the upstream move, the render): a caller whose
-// lease is no longer its own throws from it and nothing further is written.
+// every write — each row, the upstream move and every write inside it, each
+// domain's site file, the validation, the reload, and every write of a
+// rollback (lib/route-render.js): a caller whose lease is no longer its own
+// throws from it, nothing further is written, no rollback touches what is
+// now another owner's, and the lease error surfaces as such.
 export async function configureGuestRoutes(db, { name, ip, services, render, uuid = uuidv4, fence = null }) {
   const check = () => { if (typeof fence === 'function') fence(); };
   check();
   const svc = findOrCreateLxcService(db, name, ip, { uuid });
   check();
-  const sync = await syncServiceUpstream(db, svc, ip, render);
+  const sync = await syncServiceUpstream(db, svc, ip, render, fence);
   const created = []; const existing = []; const conflicts = [];
   for (const s of services) {
     check();
@@ -86,7 +90,7 @@ export async function configureGuestRoutes(db, { name, ip, services, render, uui
   let rendered = []; let renderWarning = null;
   if (toRender.length) {
     check();
-    try { rendered = (await renderDomains({ db, domains: toRender, ...render })).domains || []; } catch (e) { renderWarning = `Routes were recorded but Caddy was not updated: ${e?.message || e}`; }
+    try { rendered = (await renderDomains({ db, domains: toRender, ...render, fence })).domains || []; } catch (e) { if (isLeaseLost(e)) throw e; renderWarning = `Routes were recorded but Caddy was not updated: ${e?.message || e}`; }
   }
   return { serviceId: svc.id, created, existing, conflicts, rendered, renderWarning, upstreamWarning: sync.warning || null };
 }

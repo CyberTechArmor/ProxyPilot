@@ -106,6 +106,10 @@ func (a *Agent) run(inventoryOnly bool) error {
 	}
 
 	_ = a.client.Send(Event{Kind: "phase", Phase: "transfer", Message: "starting the transfer"})
+	job, err = a.settleTransport(job)
+	if err != nil {
+		return a.client.Fail(err)
+	}
 	var moved int64
 	switch job.Transport {
 	case "incus-migrate":
@@ -126,6 +130,47 @@ func (a *Agent) run(inventoryOnly bool) error {
 		return fmt.Errorf("the transfer finished but ProxyPilot could not be told: %w", err)
 	}
 	return nil
+}
+
+// settleTransport checks that the transport the job names can actually run
+// on this source, and switches it when it cannot and something else can.
+//
+// The case this exists for: a whole-machine migration approved with
+// `incus-migrate`, on a source that never had the package. The first
+// version failed the migration there with "install it, or re-create the
+// migration with transport: rootfs-tar" — a new token, a new paste on the
+// source, a new inventory and a new approval, to end up with exactly the
+// guest the rootfs-tar transport produces from the same tar the source
+// already has. So: ask ProxyPilot to switch this migration to rootfs-tar,
+// and carry on with the job it hands back. The server decides — it re-checks
+// that the tarball fits on its own disk, which incus-migrate never needed —
+// and refuses when the target is a VM, which a tarball cannot become.
+func (a *Agent) settleTransport(job *Job) (*Job, error) {
+	if job.Transport != "incus-migrate" {
+		return job, nil
+	}
+	if _, err := findMigrateBinary(); err == nil {
+		return job, nil
+	}
+	next, err := fallbackTransport(job)
+	if err != nil {
+		return nil, err
+	}
+	a.client.Log("%v — switching this migration to %s: the rootfs is streamed to ProxyPilot as a tarball and imported as a container (%s to use incus-migrate next time)", ErrNoMigrateTool, next, InstallMigrateHint)
+	switched, err := a.client.SwitchTransport(next, ErrNoMigrateTool.Error())
+	if err != nil {
+		return nil, fmt.Errorf("%w — ProxyPilot would not switch the transfer to %s: %v", ErrNoMigrateTool, next, err)
+	}
+	if switched.Transport != next {
+		return nil, fmt.Errorf("ProxyPilot answered the transport switch with %q, not %q", switched.Transport, next)
+	}
+	if switched.Error != "" {
+		return nil, errors.New(switched.Error)
+	}
+	if !switched.Approved {
+		return nil, errors.New("the transfer is no longer approved after the transport switch")
+	}
+	return switched, nil
 }
 
 // waitForApproval polls until the operator approves (or cancels). The wait

@@ -1,6 +1,10 @@
 package migrate
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
 
 // The prompts Incus 6.0.4 printed during the live run, in order. The old
 // positional answer script fed the trust token into the authentication menu
@@ -90,5 +94,25 @@ func TestCompileAnswerRulesRejectsBadPattern(t *testing.T) {
 	rules, err := compileAnswerRules([]AnswerRule{{When: "  ", Send: "x"}}, func(v string) string { return v })
 	if err != nil || len(rules) != 0 {
 		t.Fatalf("an empty pattern is dropped: %v %d", err, len(rules))
+	}
+}
+
+func TestFallbackTransport(t *testing.T) {
+	// A container target arrives as a rootfs tarball when the tool is missing.
+	j := &Job{Transport: "incus-migrate"}
+	j.Target.Type = "container"
+	got, err := fallbackTransport(j)
+	if err != nil || got != "rootfs-tar" {
+		t.Fatalf("container: got %q, %v", got, err)
+	}
+	// A VM cannot: the answer is to install the tool, and the message says so.
+	v := &Job{Transport: "incus-migrate"}
+	v.Target.Type = "virtual-machine"
+	if _, err := fallbackTransport(v); err == nil || !errors.Is(err, ErrNoMigrateTool) || !strings.Contains(err.Error(), "incus-extra") {
+		t.Fatalf("vm: expected the install hint, got %v", err)
+	}
+	// Only the incus-migrate transport has a fallback at all.
+	if _, err := fallbackTransport(&Job{Transport: "rootfs-tar"}); err == nil {
+		t.Fatal("rootfs-tar has nothing to fall back to")
 	}
 }

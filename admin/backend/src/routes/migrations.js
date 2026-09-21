@@ -133,6 +133,26 @@ migrationAgentRouter.put('/:token/artifact', wrap(async (req, res) => {
   res.json({ received: true, bytes: r.bytes, sha256: r.sha256, kind: r.kind });
 }));
 
+/**
+ * The agent asks to carry the transfer over a different transport — the
+ * source has no incus-migrate, and the rootfs can go as a tarball instead.
+ * The service decides (container target, transfer phase, tarball fits on
+ * the staging disk) and answers with the job for the new transport.
+ */
+const TransportBody = z.object({
+  transport: z.enum(['incus-migrate', 'rootfs-tar', 'file-sync']),
+  reason: z.string().max(500).optional(),
+});
+
+migrationAgentRouter.post('/:token/transport', wrap(async (req, res) => {
+  const a = agentAuth(req, res); if (!a) return;
+  const body = TransportBody.safeParse(req.body || {});
+  if (!body.success) return res.status(400).json({ error: body.error.issues[0]?.message || 'invalid transport request' });
+  const r = await a.svc.switchTransport(a.row, { transport: body.data.transport, reason: body.data.reason || null });
+  if (r.error) return res.status(409).json({ error: r.error, concerns: r.concerns, capacity: r.capacity });
+  res.json(r);
+}));
+
 migrationAgentRouter.post('/:token/finish', wrap(async (req, res) => {
   const a = agentAuth(req, res); if (!a) return;
   const ok = req.body?.ok !== false;

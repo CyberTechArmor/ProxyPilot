@@ -55,6 +55,43 @@ already talking to. Forcing `transport: "incus-migrate"` for a container
 source is allowed and works (it is how that path is tested), it just asks more
 of the source.
 
+### When the source has no `incus-migrate`
+
+A physical host or a VM defaults to `incus-migrate`, and the package is often
+not there (the first real whole-machine migration, a Debian 11 host into a
+container, died on exactly that: "neither incus-migrate nor lxd-migrate is
+installed on this source … re-create the migration with transport:
+rootfs-tar" — a new token, a new paste on the source, a new inventory and a
+new approval, for the guest the rootfs-tar path would have built from a tar
+the source already had). Two things now happen instead:
+
+- **The inventory says so before you approve.** The agent reports the
+  transfer tools it found (`manifest.tools`: `incus_migrate`, `lxd_migrate`,
+  `tar`, `zstd`), and the review carries the concern `incus-migrate-missing`:
+  a *warning* for a container target, naming the fallback below and how to
+  avoid it (`apt install incus-extra` on the source before approving); a
+  *block* for a virtual-machine target, because a tarball has no disk image
+  in it — install the tool, then approve (the agent looks again when the
+  transfer starts, so no new migration is needed; the override is for an
+  operator who has just installed it). An agent older than the field reports
+  nothing, and silence raises no concern.
+- **An approved transfer falls back by itself.** When the transfer starts and
+  the tool is still missing, the agent asks ProxyPilot to switch the
+  migration to `rootfs-tar` (`POST /api/migrations/agent/:token/transport`,
+  service `switchTransport`) and carries on with the job it gets back — the
+  rootfs streams to ProxyPilot as a tarball and is imported as a container,
+  exactly the Proxmox-LXC path. ProxyPilot decides: the migration must be
+  whole-machine, approved, in the transfer phase, `incus-migrate` → `rootfs-tar`
+  (nothing else has a fallback), the target a container, and the tarball must
+  **fit on ProxyPilot's own disk** — a place the approval never checked,
+  because `incus-migrate` stages nothing — so capacity is re-measured for the
+  new transport and a "will not fit" is a refusal with the numbers in it. On a
+  switch the row's transport and the stored capacity verdict change, the
+  Incus trust token minted for a client that will never connect is revoked,
+  and the log says `transport switched from incus-migrate to rootfs-tar by the
+  agent: …`. A refusal fails the migration with the reason and the install
+  hint, as before.
+
 ### Why application mode is not rsync
 
 The brief asked for rsync. rsync needs a reachable `sshd` and an authorized
@@ -343,7 +380,10 @@ and deletes the transfer's working directory. None of it can be undone.
 - **The source** needs `curl` and, per transport: `incus-migrate` — on
   Debian/Ubuntu that is **`apt install incus-extra`**, not `incus-tools`
   (the Zabbly packages use that name) — or `tar`, plus the database client for
-  a dump.
+  a dump. A container-bound whole-machine migration no longer needs
+  `incus-migrate` at all: without it the transfer falls back to the rootfs
+  tarball (see **When the source has no `incus-migrate`**). A VM-bound one
+  does, and the review blocks until it is there.
 - **Application mode** needs nothing in the guest: the copy arrives through
   `incus exec`. The guest does need the database engine installed if a dump
   is being restored into it (the restore says so plainly when it is missing).

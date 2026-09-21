@@ -380,15 +380,25 @@ test('a deploy that fails after the stop queues a post-failure verification; it 
 
 // ── F. ratchets on the wiring ─────────────────────────────────────────────
 
-test('ratchet: install.sh writes backend-allowed, promotes to runner-required only after the unit is active AND the runner opened the database, and errors loudly otherwise', () => {
+test('ratchet: install.sh writes backend-allowed on a fresh install, preserves an existing policy on re-run, promotes to runner-required only after the unit is active AND the runner opened the database, never downgrades, and errors loudly otherwise', () => {
   const s = readFileSync(`${REPO}install.sh`, 'utf8');
-  const heredoc = s.indexOf('SETUP_EXECUTOR_POLICY=backend-allowed');
+  const heredoc = s.indexOf('SETUP_EXECUTOR_POLICY=${setup_executor_policy:-backend-allowed}');
+  assert.ok(s.indexOf("setup_executor_policy=$(grep -E '^SETUP_EXECUTOR_POLICY=' \"${install_dir}/.env\"") > 0 && s.indexOf("setup_executor_policy=$(grep") < heredoc, 'an existing value is read before the heredoc rewrites .env');
+  assert.doesNotMatch(s, /^SETUP_EXECUTOR_POLICY=backend-allowed$/m, 'never written unconditionally');
+  const kept = s.indexOf('elif [ "$current_policy" = "runner-required" ]; then');
+  assert.ok(kept > 0 && s.slice(kept, kept + 600).includes('REQUIRES the runner'), 'a failed runner start on a runner-required install keeps the policy and says so');
+  assert.equal(s.slice(kept, s.indexOf('fi', kept)).includes('sed -i'), false, 'and rewrites nothing');
   const active = s.indexOf('systemctl is-active --quiet proxypilot-setup-runner.service');
   const status = s.indexOf('proxypilot setup-runner status --install-dir "$INSTALL_DIR" --json');
   const promote = s.indexOf("sed -i 's/^SETUP_EXECUTOR_POLICY=.*/SETUP_EXECUTOR_POLICY=runner-required/'");
   const error = s.indexOf('log_error "Setup runner did NOT start or cannot open the database');
   assert.ok(heredoc > 0 && active > heredoc && status > active && promote > status && error > promote, `order: ${[heredoc, active, status, promote, error]}`);
   assert.doesNotMatch(s, /^SETUP_EXECUTOR_POLICY=runner-required$/m, 'never written unconditionally');
+  const u = readFileSync(`${REPO}update.sh`, 'utf8').slice(readFileSync(`${REPO}update.sh`, 'utf8').indexOf('install_setup_runner()'));
+  const writes = u.match(/printf '[^']*SETUP_EXECUTOR_POLICY=runner-required/g) || [];
+  assert.equal(writes.length, 1, 'update.sh writes the line in exactly one place');
+  assert.ok(u.lastIndexOf("! grep -q '^SETUP_EXECUTOR_POLICY='", u.indexOf(writes[0])) > 0, 'and only when no line exists');
+  assert.equal(/sed[^\n]*SETUP_EXECUTOR_POLICY/.test(u), false, 'update.sh never rewrites an existing value: no downgrade is possible there');
   assert.match(s, /journalctl -u proxypilot-setup-runner/);
 });
 

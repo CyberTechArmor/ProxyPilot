@@ -227,7 +227,7 @@ test('executorPolicy: explicit values, the safe reading of an unknown value, the
   assert.match(example, /^SETUP_EXECUTOR_POLICY=runner-required$/m);
   // install.sh writes the safe default and promotes it to runner-required only
   // on host evidence (the closeout suite ratchets the gate itself).
-  assert.match(readFileSync(`${REPO}install.sh`, 'utf8'), /^SETUP_EXECUTOR_POLICY=backend-allowed$/m);
+  assert.match(readFileSync(`${REPO}install.sh`, 'utf8'), /^SETUP_EXECUTOR_POLICY=\$\{setup_executor_policy:-backend-allowed\}$/m);
   assert.match(readFileSync(`${REPO}install.sh`, 'utf8'), /sed -i 's\/\^SETUP_EXECUTOR_POLICY=\.\*\/SETUP_EXECUTOR_POLICY=runner-required\/'/);
   assert.match(readFileSync(`${REPO}update.sh`, 'utf8'), /grep -q '\^SETUP_EXECUTOR_POLICY=' "\$env_file"/);
 });

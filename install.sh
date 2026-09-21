@@ -1041,6 +1041,9 @@ create_env_file() {
     local jwt_secret=""
     local session_secret=""
     local totp_encryption_key=""
+    # The executor policy is an installation decision, preserved like a
+    # secret: a re-run never rewrites runner-required to backend-allowed.
+    local setup_executor_policy=""
     if [ -f "${install_dir}/.env" ]; then
         log_info "Existing .env detected — preserving secrets"
         # `|| true` on each pipe: install.sh runs under `set -euo pipefail`,
@@ -1057,6 +1060,7 @@ create_env_file() {
         vapid_public_key=$(grep -E '^VAPID_PUBLIC_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
         vapid_private_key=$(grep -E '^VAPID_PRIVATE_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
         vapid_subject=$(grep -E '^VAPID_SUBJECT=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
+        setup_executor_policy=$(grep -E '^SETUP_EXECUTOR_POLICY=' "${install_dir}/.env" | head -1 | cut -d= -f2- | tr -d '"' || true)
     fi
 
     [ -z "$jwt_secret" ]     && jwt_secret=$(generate_password 64)
@@ -1124,10 +1128,11 @@ DATABASE_PATH=/data/db/proxypilot.db
 # unavailable, and the dashboard container never executes one itself.
 # backend-allowed — the legacy / development executor: the backend runs
 # queued jobs in its own (privileged) process when no runner is live.
-# docs/features/setup-engine.md § "Who executes". Written as backend-allowed
-# here and switched to runner-required by install.sh once the runner unit is
-# verified active on this host (see "Setup runner" below).
-SETUP_EXECUTOR_POLICY=backend-allowed
+# docs/features/setup-engine.md § "Who executes". A fresh install starts as
+# backend-allowed and is switched to runner-required by install.sh once the
+# runner unit is verified active on this host (see "Setup runner" below); an
+# existing value is preserved on re-run and never downgraded.
+SETUP_EXECUTOR_POLICY=${setup_executor_policy:-backend-allowed}
 
 # Caddy Configuration Path
 CADDY_SITES_DIR=/etc/caddy/sites
@@ -1691,9 +1696,15 @@ EOF
             if [ "$runner_ok" = true ] && ! /usr/local/bin/proxypilot setup-runner status --install-dir "$INSTALL_DIR" --json >/dev/null 2>&1; then
                 runner_ok=false
             fi
+            local current_policy
+            current_policy=$(grep -E '^SETUP_EXECUTOR_POLICY=' "${INSTALL_DIR}/.env" | head -1 | cut -d= -f2- | tr -d '"' || true)
             if [ "$runner_ok" = true ]; then
                 sed -i 's/^SETUP_EXECUTOR_POLICY=.*/SETUP_EXECUTOR_POLICY=runner-required/' "${INSTALL_DIR}/.env"
                 log_success "Setup runner active — SETUP_EXECUTOR_POLICY=runner-required (deploys run in proxypilot-setup-runner.service)"
+            elif [ "$current_policy" = "runner-required" ]; then
+                # Never downgrade: the policy was the installation's decision.
+                log_error "Setup runner did NOT start or cannot open the database — this installation REQUIRES the runner (SETUP_EXECUTOR_POLICY=runner-required is kept): every deploy queues until it runs."
+                log_error "Fix: systemctl status proxypilot-setup-runner; journalctl -u proxypilot-setup-runner."
             else
                 log_error "Setup runner did NOT start or cannot open the database — SETUP_EXECUTOR_POLICY stays backend-allowed (the dashboard container executes deploys itself)."
                 log_error "Fix: journalctl -u proxypilot-setup-runner; then set SETUP_EXECUTOR_POLICY=runner-required in ${INSTALL_DIR}/.env and restart ProxyPilot."

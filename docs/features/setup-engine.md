@@ -341,14 +341,20 @@ and the container lock; a restore submitted while either executor holds
 the app is refused the same way.
 
 **How the policy is set, and on what evidence.** `install.sh` writes
-`SETUP_EXECUTOR_POLICY=backend-allowed` into the new `.env`, installs and
-starts `proxypilot-setup-runner.service`, waits up to 10 s for the unit to
+`SETUP_EXECUTOR_POLICY=backend-allowed` into a **new** `.env` (on a re-run
+the existing value is read first and preserved, like the secrets), installs
+and starts `proxypilot-setup-runner.service`, waits up to 10 s for the unit to
 be active, then runs `proxypilot setup-runner status --install-dir … --json`
 (root, opens the engine database). Only when both succeed does it rewrite
 the line to `runner-required` and log the success; otherwise it logs an
 **error** naming the fix (`journalctl -u proxypilot-setup-runner`, then set
-the line by hand and restart) and the installation keeps executing deploys
-in the container — visibly, never silently. `update.sh`
+the line by hand and restart) and a fresh installation keeps executing
+deploys in the container — visibly, never silently. **A failed runner start
+never downgrades:** an installation whose `.env` already says
+`runner-required` keeps it (install.sh re-run and update.sh alike: neither
+ever rewrites an existing value to `backend-allowed`), the error says the
+installation requires the runner and that every deploy queues until it
+runs, and the backend's five-minute warning repeats it. `update.sh`
 (`install_setup_runner`) does the same on every update: it appends
 `runner-required` only on the same evidence, and when the runner is not
 there it warns in red — and warns again, differently, when the `.env`
@@ -549,10 +555,23 @@ deploy script (`setsid sh -c 'while :; do date >> /tmp/w; sleep 1; done' &`)
 and confirm the next deploy's reap stops it and `journalctl` shows the
 `systemctl kill` of the `mock2-deploy-<job>-*` scope, with the mock2-dev
 service untouched (the systemd-scope mechanism is the one the sandbox
-cannot exercise); on a fresh install confirm `.env` reads `runner-required`
-only after `systemctl is-active proxypilot-setup-runner` is true, and that
-masking the unit before `update.sh` leaves the policy unchanged with the red
-warning printed; confirm `/var/backups/proxypilot-db/app-pre-deploy-<job>.sql`
+cannot exercise). Two further containment checks that must be kept apart:
+(a) **raw-cgroup fallback works** — in a guest where `systemd-run` cannot
+start a scope (mask `dbus` or run the deploy from a chroot without a
+systemd bus) but the cgroup tree is writable, the deploy proceeds and the
+job's `containment` event and `recovery.containment.kind` read `cgroup2`
+(or `cgroup1`), and the setsid writer above is still reaped; this is a
+supported mechanism, not degraded containment; (b) **no mechanism at all**
+— only with systemd unusable *and* the cgroup roots unwritable (e.g. an
+unprivileged guest whose cgroup tree is read-only) the deploy must end
+`recovery_required` / `containment_unavailable` with the reap and one
+refused wrapper as its only guest calls. Masking systemd alone is check
+(a), never (b). For the policy: on a fresh install confirm `.env` reads
+`runner-required` only after `systemctl is-active proxypilot-setup-runner`
+is true; re-run `install.sh` on that installation with the runner unit
+masked and confirm `.env` still reads `runner-required` and the error names
+the requirement; mask the unit before `update.sh` and confirm the policy is
+unchanged with the red warning printed; confirm `/var/backups/proxypilot-db/app-pre-deploy-<job>.sql`
 and the `.pre-<job>` copies exist after a deploy and `restore_project_db`
 accepts the dump by name.
 

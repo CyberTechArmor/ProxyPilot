@@ -30,6 +30,8 @@ export const AGENT_DIR = process.env.PROXYPILOT_MIGRATION_AGENT_DIR || '/var/lib
 export const WORK_DIR = process.env.PROXYPILOT_MIGRATION_WORK_DIR || '/var/lib/proxypilot/migration';
 const EVENT_LIMIT = 5000;           // per migration; the agent's log is trimmed, not unbounded
 const MAX_ARTIFACT_BYTES = 2 * 1024 ** 4;
+const STALL_FAIL_MS = 15 * 60 * 1000;
+const humanBytes = (n) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GiB` : n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MiB` : `${n} bytes`);
 /** Directories that must never travel in a whole-machine rootfs tar. */
 export const TAR_EXCLUDES = Object.freeze([
   './proc/*', './sys/*', './dev/*', './run/*', './tmp/*', './mnt/*', './media/*',
@@ -835,18 +837,35 @@ export function createMigrationService({
     const path = kind === 'rootfs' ? join(dir, 'rootfs.tar.gz') : join(dir, `${kind}-${safe}.bin`);
     const hash = createHash('sha256');
     let bytes = 0;
-    await new Promise((resolve, reject) => {
-      const out = createWriteStream(path, { mode: 0o600 });
-      stream.on('data', (c) => {
-        bytes += c.length;
-        if (bytes > MAX_ARTIFACT_BYTES) { stream.destroy(new Error('artifact exceeds the size limit')); return; }
-        hash.update(c);
+    let ended = false;
+    try {
+      await new Promise((resolve, reject) => {
+        const out = createWriteStream(path, { mode: 0o600 });
+        stream.on('data', (c) => {
+          bytes += c.length;
+          if (bytes > MAX_ARTIFACT_BYTES) { stream.destroy(new Error('artifact exceeds the size limit')); return; }
+          hash.update(c);
+        });
+        stream.on('end', () => { ended = true; });
+        stream.on('error', reject);
+        // A request whose socket closes before its body ended is an upload
+        // that broke — the agent died or lost the network — and depending
+        // on the Node version that surfaces as 'error' or only as 'close'.
+        stream.on('close', () => { if (!ended) reject(new Error('the connection closed before the upload finished')); });
+        out.on('error', reject);
+        out.on('finish', resolve);
+        stream.pipe(out);
       });
-      stream.on('error', reject);
-      out.on('error', reject);
-      out.on('finish', resolve);
-      stream.pipe(out);
-    });
+    } catch (e) {
+      // The upload is one stream with one hash at its end, so a break
+      // cannot be resumed; what CAN be done is to say so, now, instead of
+      // leaving the migration "running" until someone notices. Migration
+      // #12 sat at "running" for exactly that reason after an SSH session
+      // took the agent with it.
+      await rm(path, { force: true }).catch(() => null);
+      const reason = String(e?.message || e);
+      return fail(row.id, `the ${kind} upload from the source ended after ${humanBytes(bytes)} (${reason}) — the agent died or lost its connection. An upload cannot be resumed: create a new migration and run its command on the source again. (Agents from this version run detached from the terminal, so a closed SSH session no longer does this.)`);
+    }
     const sha = hash.digest('hex');
     if (expectedSha256 && expectedSha256.toLowerCase() !== sha) {
       await rm(path, { force: true });
@@ -1024,6 +1043,29 @@ export function createMigrationService({
     db().prepare('UPDATE migrations SET phase = ?, status = ?, updated_at = ?, guest_created = ? WHERE id = ?').run('post-import', 'ready', ts, madeIt, row.id);
     event(row.id, { kind: 'state', phase: 'post-import', message: `guest ${row.target_name} is present, stopped and fenced — the checklist is open` });
     return { imported: true, guest: row.target_name };
+  }
+
+  /**
+   * The watchdog for a source that simply vanished. A broken upload is
+   * caught above because the socket closes; a source that lost power, or
+   * an agent killed between two polls, leaves nothing to observe — so a
+   * running transfer whose agent has not been heard from for STALL_FAIL_MS
+   * is failed with the last-contact time in the message. The threshold is
+   * generous on purpose: progress lines arrive every 5 s while bytes move,
+   * and the agent polls every 5–15 s while it waits, so fifteen silent
+   * minutes is not a slow disk.
+   */
+  function sweepStalled({ maxSilenceMs = STALL_FAIL_MS } = {}) {
+    const cutoff = nowIso(now() - maxSilenceMs);
+    const rows = db().prepare(`SELECT * FROM migrations WHERE status = 'running' AND phase = 'transfer'
+                                 AND COALESCE(token_last_seen_at, updated_at) < ?`).all(cutoff);
+    const failed = [];
+    for (const row of rows) {
+      const last = row.token_last_seen_at || row.updated_at;
+      fail(row.id, `no contact from the agent since ${last} (${Math.round(maxSilenceMs / 60000)} minutes) — the source went away mid-transfer. An upload cannot be resumed: create a new migration and run its command on the source again.`);
+      failed.push(row.id);
+    }
+    return { failed };
   }
 
   function fail(id, message) {
@@ -1373,6 +1415,6 @@ export function createMigrationService({
     createMigration, authenticate, agentJob, recordManifest, approveTransfer, recordEvent, receiveArtifact,
     importRootfsTar, agentFinish, cancelMigration, setChecklistStep, decideEgress, listMigrations, listEvents,
     view, rowById, rowByTokenId, agentBinaries, tlsPin, fenceGuest, preflight, incusListener, enableIncusListener,
-    revokeToken, listTokens, cleanupMigration, measureCapacity, poolSpace, listPoolSpace, stagingSpace, defaultProfilePool, switchTransport, CHECKLIST,
+    revokeToken, listTokens, cleanupMigration, measureCapacity, poolSpace, listPoolSpace, stagingSpace, defaultProfilePool, switchTransport, sweepStalled, CHECKLIST,
   };
 }

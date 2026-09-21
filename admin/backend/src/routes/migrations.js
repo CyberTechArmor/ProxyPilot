@@ -369,7 +369,31 @@ GOT="$(sha256sum "$BIN" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$BIN" | cu
 [ "$GOT" = "$SHA" ] || { echo "proxypilot-migrate: REFUSED — the downloaded agent hashed $GOT, expected $SHA" >&2; exit 1; }
 chmod 0700 "$BIN"
 
+# The agent runs DETACHED from this terminal. A transfer is hours of work
+# on a machine you reached over SSH, and the first real one died at 15 GiB
+# when that session dropped: SIGHUP took the agent with it. A transient
+# systemd unit survives the session (and shows in journalctl); a host
+# without systemd gets setsid + nohup. PROXYPILOT_MIGRATE_FOREGROUND=1 keeps
+# it in this terminal, for a debugging session that wants the output here.
+# Either way the agent removes the binary itself when it ends (unless it
+# was asked to keep it), so the trap above is released once it is running.
+NAME="proxypilot-migrate-${migrationId}-$(date +%s)"
+LOG="/var/log/$NAME.log"
 echo "proxypilot-migrate: starting migration ${migrationId}"
-exec "$BIN" migrate --url "$URL" --token "$TOKEN" --pin "$PIN"${keepAgent ? ' --keep' : ''}
+if [ "\${PROXYPILOT_MIGRATE_FOREGROUND:-0}" = "1" ]; then
+  exec "$BIN" migrate --url "$URL" --token "$TOKEN" --pin "$PIN"${keepAgent ? ' --keep' : ''}
+fi
+if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  systemd-run --quiet --collect --unit "$NAME" --description "ProxyPilot migration ${migrationId}" \
+    "$BIN" migrate --url "$URL" --token "$TOKEN" --pin "$PIN"${keepAgent ? ' --keep' : ''}
+  trap - EXIT INT TERM
+  echo "proxypilot-migrate: running in the background as systemd unit $NAME — this session can be closed."
+  echo "proxypilot-migrate: follow it in ProxyPilot (Migrations → #${migrationId} → Log) or here: journalctl -u $NAME -f"
+else
+  setsid nohup "$BIN" migrate --url "$URL" --token "$TOKEN" --pin "$PIN"${keepAgent ? ' --keep' : ''} >"$LOG" 2>&1 </dev/null &
+  trap - EXIT INT TERM
+  echo "proxypilot-migrate: running in the background (pid $!) — this session can be closed."
+  echo "proxypilot-migrate: follow it in ProxyPilot (Migrations → #${migrationId} → Log) or here: tail -f $LOG"
+fi
 `;
 }

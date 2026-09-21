@@ -45,6 +45,7 @@ import { hydrate as hydrateCertExpiry } from './lib/cert-expiry-scheduler.js';
 import { hydrate as hydrateStorageMonitor } from './lib/storage-monitor.js';
 import { storageRouter } from './routes/storage.js';
 import { migrationRouter, migrationAgentRouter } from './routes/migrations.js';
+import { migrationService } from './lib/migration/index.js';
 import { seedTlsCertFromInstall } from './lib/tls-cert-seed.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer, setMock2TerminalAuthorizer } from './routes/terminal-ws.js';
@@ -539,6 +540,21 @@ app.use('/api/setup', authenticateToken, blockPendingRole, setupRouter);
 // operator half (Express matches in mount order) and outside authenticateToken.
 app.use('/api/migrations/agent', migrationAgentRouter);
 app.use('/api/migrations', authenticateToken, blockPendingRole, migrationRouter);
+// The migration watchdog: a running transfer whose agent has gone silent
+// (source lost power, agent killed between polls) is failed with the
+// last-contact time rather than left "running" for someone to notice.
+// A broken upload is caught on its own socket; this is for the case that
+// leaves nothing to observe.
+{
+  const sweepMigrations = () => {
+    try {
+      const { failed } = migrationService().sweepStalled();
+      if (failed.length) console.warn(`[migration] watchdog failed ${failed.length} silent transfer(s): ${failed.join(', ')}`);
+    } catch (err) { console.error('[migration] watchdog failed:', err?.message || err); }
+  };
+  setTimeout(sweepMigrations, 60_000).unref();
+  setInterval(sweepMigrations, 60_000).unref();
+}
 app.use('/api/notifications', authenticateToken, blockPendingRole, notificationsRouter);
 // Lean BEAF Pro — team-shared innovation project management. Deliberately
 // NOT admin-gated: every non-pending user is a workspace member (R01).

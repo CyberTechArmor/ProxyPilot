@@ -62,6 +62,11 @@ func Run(argv []string) error {
 	self, _ := os.Executable()
 	a := &Agent{client: c, keep: *keep, selfIn: self}
 
+	// The bootstrap script now starts the agent detached, but an operator
+	// who runs the binary by hand from an SSH session is one dropped
+	// connection away from a dead transfer: SIGHUP is not a request to
+	// stop copying, so it is ignored. SIGINT and SIGTERM still are.
+	signal.Ignore(syscall.SIGHUP)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() {

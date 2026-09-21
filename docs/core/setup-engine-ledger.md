@@ -56,6 +56,52 @@ of complete: A-16 (the MCP observe verbs), the seven remaining A-17 groups
 named in the platform ledger, and Phase F. Live-host acceptance is
 separate.
 
+## A-17.8 contract — the guest configuration verbs (recorded before the edit)
+
+Platform ledger A-17.8, group 3. Every row below is one caller moved behind
+the runner; the shared rules follow the table. Kinds: `config_set`,
+`device_add`, `device_remove`, `network_pin`, `forward_apply`,
+`forward_remove`, `egress_set` (`lib/setup-engine/config-logic.js`,
+`config-op.js`), submitted through `mock2/ops.js` `runGuestConfig` and the
+existing orchestrator / executor / store.
+
+| Caller | Authorized inputs (validated at the surface AND by the runner) | Affected resources | Snapshot | Locks | Execution steps (fixed argv) | Success read-back | Interruption / retry | Acceptance test |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Dashboard `POST /containers/:name/resize` (session; `validateName`) → `config_set` | `cpu` integer 1–256 → `limits.cpu`; `memory` integer MB 64–1048576 → `limits.memory=<n>MB`; the guest's identity read at submission (`expect`) | the guest's instance config | none (unchanged contract: limits are live and reversible); the PRIOR values of the changed keys recorded on the job | job claim → guest lease | `incus list` (bind); checkpoint `validated`, `issuing`; `incus config set <name> <key> <value>` per key | `incus list` reads every changed key at its value; a key that does not read back ends `failed at verify` with what was applied | idempotent: resumed by re-reading against the bound identity; the same command re-issued only for a key that does not yet read back; explicit retry the same | `setup-guest-config.test.js` (executor + ops); route source ratchet in `immediate-repairs.test.js` |
+| MCP `set_lxc_config` (`confirm: true`; `acknowledge_risk` for `security.privileged=true`; `LXC_CFG_POLICY`) → `config_set` | one allowlisted key + value shape (`CONFIG_KEY_ALLOWLIST` mirrors `lxc-config-allowlist.json`); `acknowledgeRisk` REQUIRED in the plan for `security.privileged=true` and re-checked by the runner; `expect` bound at submission | instance config; a pre-change snapshot | REQUIRED, named at submission (`pp-mcp-pre-<key>-<stamp>`), taken by the job, read back present (name + `created_at`) BEFORE the write; a failed snapshot = nothing changed | job claim → guest lease | as above, with `incus snapshot create` (legacy form discovered) first | as above + the snapshot present; `restart_required` from the policy on the result | as above; the snapshot recorded as generated and REUSED on resume / retry only when name and `created_at` still match (a recreated one refuses) | same file: MCP handler over a fake ctx cannot run (`routes/mcp.js` imports the native db) → source ratchet + the executor path |
+| MCP `set_lxc_network` (`confirm: true`; `mode` reserve-current / static; `validIpv4`) → `network_pin` | `ip` IPv4; `expect`; the previous address recorded from the read | the instance-level `eth0` device (`ipv4.address`) | REQUIRED (`pp-mcp-pre-network-<stamp>`) as above | job claim → guest lease | `incus config device override <name> eth0 ipv4.address=<ip>`; on "already exists" → `incus config device set <name> eth0 ipv4.address <ip>` | `incus list` reads `devices.eth0["ipv4.address"] === ip`; `restart_recommended` when the pin differs from the live address (the reservation applies at the next lease) | idempotent, as above | same |
+| MCP `set_lxc_resources` (`confirm`, `dry_run`) → `config_set` | `cpu` 1–256, `memory_mb` 64–1048576 (`MiB`), `disk_gb` 1–65536 (`rootSize`) | instance config; the root disk device size | REQUIRED (`pp-mcp-pre-resources-<stamp>`) | job claim → guest lease | the config keys, then `incus config device override <name> root size=<n>GiB` → fallback `device set root size` | every key at its value, `devices.root.size` at its value; a partial application is recorded per key (`applied`, `failed at`) and reported, never a success claim | idempotent | same |
+| MCP `add_lxc_device` / `remove_lxc_device` (`confirm`, `dry_run`; reserved names refused; disk source under `lxc_devices.disk_source_roots`; proxy listen port in range and not reserved) → `device_add` / `device_remove` | device name, type `disk` (`source`, `path`, `readonly`, `shift`) or `proxy` (`listen`, `connect`); the runner re-validates the roots and ports from the same policy file | one instance device | REQUIRED (`pp-mcp-pre-device-<stamp>`) | job claim → guest lease | `incus config device add <name> <dev> <type> k=v…` / `incus config device remove <name> <dev>`; an existing device with OTHER properties refuses an add (never replaced) | `incus list` reads the device present with every planned property / absent; the removed device's reference-only properties (`type`, `source`, `path`, `listen`, `connect`, …) recorded as `previous` | idempotent; an add whose device already reads as planned after the interrupted attempt finishes without re-issuing; a remove's absent device counts as this job's work only after `issued: true` | same file: handlers over the fake ctx with the real store + executor |
+| MCP `set_port_forward` add / remove (`confirm`, `dry_run`; ports; reserved listen ports) → DB row (backend step) + `forward_apply` / `forward_remove` | `forward` (id, proto, listen[-end], connect[-end], description), `bridgeIp`, `serviceTag`, `reserved` (every enabled UDP range row, recomputed after the row change) | `service_l4_forwards` row (backend); the `ppl4-<id>` proxy device; the `service-l4-<id>` firewall rule; the sysctl reserved-ports drop-in | none (the change is a device + a rule, reversed by `remove`) | job claim → guest lease → `@host/firewall` (waited 20 s, dead holder taken over, still held → `failed` / contended, nothing issued; renewed before every command) | add: `incus config device add … proxy listen= connect=` (exists → `present`), `proxypilot --json firewall add-service-l4 …` (exists → `present`), the reserved-ports refresh (fixed script under `sh -c` with positional arguments, or `rm` + `sysctl -p`); remove: the mirror, absent tolerated | the device read back with the planned listen / connect and the rule present in `proxypilot --json firewall list` (enabled) / both absent; the reserved value read back (`sysctl -n`); the row deleted by the tool on a DEFINITE failure (the record and the response name what the host still holds; the L4 reconciler sweeps the orphan device), kept on an uncertain one | idempotent (every command tolerates its end state); resumed by re-reading | same file, the reserved-ports script under real `sh` |
+| MCP `set_lxc_egress` (`confirm`, `dry_run`; `action`, `service`, `reason` ≤ 200) → `egress_set` | `action` allow / deny, `service` name shape, bounded printable `reason` | the firewall's `container_egress` state and the reconciled ruleset (host) | none (host firewall state; an instance snapshot never covers it — stated on the record) | job claim → guest lease → `@host/firewall` | `proxypilot --json firewall egress allow|deny <short-name> <service> [--reason r]` | `proxypilot --json firewall egress list` reads the service present in / absent from the guest's entry; the CLI's reconcile summary (`applied`, `checksum`, `rejection`) recorded | idempotent (allow adds to a set, deny removes) | same |
+
+Shared rules for the group: (1) the surfaces validate and submit, the runner
+validates again (`validateConfigParams`: names, allowlisted keys and value
+shapes, ports, roots, never a `command` / `argv` / `options` / `script`,
+never a secret-looking value) and renders every argv itself
+(`configArgv`); under `runner-required` with no live runner the job is
+refused (`cancelled` / `runner_unavailable`), never executed in the
+backend. (2) The executor holds the guest lease from the read through the
+snapshot, the mutation and the read-back; the shared `@host/firewall`
+lease is taken after it and released before it; a keep-alive renews the
+job claim, the guest lease and every held shared lease every 10 s during a
+long command, and a renewal that changes no row stops the job before its
+next command (`FencedError` / `SharedLeaseLostError`, the count of
+commands issued on the record). (3) Every job binds the guest's identity
+(`expect` = `volatile.uuid` + `created_at`, read at submission) and refuses
+a guest of another identity with nothing issued; a required snapshot is
+read back present before the first mutation and a failed one prevents it;
+the record states the coverage honestly: an instance snapshot restores
+the root disk only — not attached custom volumes (named), not
+ProxyPilot's database rows, not the host firewall state. (4) The
+`validated` and `issuing` checkpoints are mandatory; `issuing` records the
+target identity, the snapshot's identity and the per-step application so a
+resumed or retried job re-reads and converges without replaying blindly.
+(5) Results report what was verified: per-key / per-step `applied`,
+`partial` when something did not read back, `restart_required` /
+`restart_recommended`, `warnings` for a best-effort step (the reserved
+ports), and the `jobId` / `job_id` as the durable reference.
+
 ## Milestone B — setup APIs and the guided frontend wizard
 
 Not started (0 %). Server-side state only: the browser never declares an

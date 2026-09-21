@@ -155,7 +155,11 @@ type Job struct {
 	// this source's tar cannot do it, and the server sniffs the bytes it
 	// receives rather than trusting the label.
 	Compression string `json:"compression"`
-	Target      struct {
+	// InstallTools is the operator's spec (default on): the agent may
+	// install what the transfer needs on the source — today that is zstd.
+	// Absent from an older server, which reads as off.
+	InstallTools bool `json:"install_tools"`
+	Target       struct {
 		Name     string  `json:"name"`
 		Type     string  `json:"type"`
 		Pool     string  `json:"pool"`
@@ -253,10 +257,45 @@ func (c *Client) Log(format string, args ...any) {
 }
 
 // Fail reports a terminal error, then returns it so the caller can stop.
+// The server records the error line itself when it marks the migration
+// failed; sending an error event first printed every failure twice.
 func (c *Client) Fail(err error) error {
-	_ = c.Send(Event{Kind: "error", Message: err.Error()})
-	_, _ = c.do(http.MethodPost, "/finish", strings.NewReader(`{"ok":false,"message":`+jsonString(err.Error())+`}`), "application/json", 60*time.Second)
+	_, ferr := c.do(http.MethodPost, "/finish", strings.NewReader(`{"ok":false,"message":`+jsonString(err.Error())+`}`), "application/json", 60*time.Second)
+	if ferr != nil {
+		_ = c.Send(Event{Kind: "error", Message: err.Error()})
+	}
 	return err
+}
+
+// SwitchTransport asks ProxyPilot to carry this migration over a different
+// transport, and returns the job as it stands afterwards (with that
+// transport's own instructions in it). ProxyPilot decides: it re-measures
+// capacity for the new path and refuses what cannot work. An older
+// ProxyPilot without the endpoint answers 404, which is reported as such.
+func (c *Client) SwitchTransport(transport, reason string) (*Job, error) {
+	body := `{"transport":` + jsonString(transport) + `,"reason":` + jsonString(reason) + `}`
+	out, err := c.do(http.MethodPost, "/transport", strings.NewReader(body), "application/json", 120*time.Second)
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			return nil, errors.New("this ProxyPilot is older than the agent and cannot switch transports — update ProxyPilot, or re-create the migration with transport: rootfs-tar")
+		}
+		return nil, err
+	}
+	var r struct {
+		Switched bool   `json:"switched"`
+		Error    string `json:"error"`
+		Job      *Job   `json:"job"`
+	}
+	if err := json.Unmarshal(out, &r); err != nil {
+		return nil, fmt.Errorf("transport switch: %w", err)
+	}
+	if r.Error != "" {
+		return nil, errors.New(r.Error)
+	}
+	if r.Job == nil {
+		return nil, errors.New("transport switch: ProxyPilot returned no job")
+	}
+	return r.Job, nil
 }
 
 // Finish reports success and the byte count.

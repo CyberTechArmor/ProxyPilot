@@ -32,6 +32,7 @@ type Manifest struct {
 	DurationMs   int64       `json:"duration_ms"`
 	Source       Source      `json:"source"`
 	OS           OSInfo      `json:"os"`
+	Tools        Tools       `json:"tools"`
 	Disks        []Disk      `json:"disks"`
 	Mounts       []Mount     `json:"mounts"`
 	Units        []Unit      `json:"units"`
@@ -59,6 +60,16 @@ type Source struct {
 	Addresses     []string `json:"addresses,omitempty"`
 	RootFSBytes   int64    `json:"root_fs_bytes,omitempty"`
 	RootUsedBytes int64    `json:"root_used_bytes,omitempty"`
+}
+
+// Tools is which transfer tools the source has — reported so the operator
+// learns BEFORE approving that a transport cannot run here, instead of from
+// the failure line after the transfer has started.
+type Tools struct {
+	IncusMigrate bool `json:"incus_migrate"`
+	LxdMigrate   bool `json:"lxd_migrate"`
+	Tar          bool `json:"tar"`
+	Zstd         bool `json:"zstd"`
 }
 
 // OSInfo is the distribution and kernel.
@@ -199,6 +210,7 @@ func (c *Collector) Collect() *Manifest {
 	m.Docker.Containers = []DockerContaine{}
 
 	c.collectSource(m)
+	c.collectTools(m)
 	c.collectMounts(m)
 	c.collectDisks(m)
 	c.collectListeners(m)
@@ -237,6 +249,24 @@ func (c *Collector) collectSource(m *Manifest) {
 	}
 	for _, a := range c.addresses() {
 		m.Source.Addresses = append(m.Source.Addresses, a)
+	}
+}
+
+// collectTools records which transfer tools this source has. A missing
+// incus-migrate is not a failure of the inventory — the rootfs-tar transport
+// needs only tar — but it decides which transport can actually run.
+func (c *Collector) collectTools(m *Manifest) {
+	m.Tools = Tools{
+		IncusMigrate: c.has("incus-migrate"),
+		LxdMigrate:   c.has("lxd-migrate"),
+		Tar:          c.has("tar"),
+		Zstd:         c.has("zstd"),
+	}
+	if !m.Tools.IncusMigrate && !m.Tools.LxdMigrate {
+		m.Notes = append(m.Notes, "incus-migrate is not installed on this source: a whole-machine transfer will fall back to a rootfs tarball through ProxyPilot (a container), unless it is installed before the transfer is approved (Debian/Ubuntu: apt install incus-extra; the Zabbly packages call it incus-tools)")
+	}
+	if !m.Tools.Tar {
+		m.Warnings = append(m.Warnings, "tar is not installed on this source — the rootfs-tar and file-sync transports cannot run until it is")
 	}
 }
 

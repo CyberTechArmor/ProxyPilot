@@ -41,14 +41,12 @@ var migrateProgressRe = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(B|[KMGT]i?B)\
 // rather than being compiled in: adapting to a new incus-migrate is a
 // server-side edit, not a re-roll of every agent on every source host.
 func (a *Agent) RunIncusMigrate(job *Job) (int64, error) {
-	bin, err := exec.LookPath("incus-migrate")
+	bin, err := findMigrateBinary()
 	if err != nil {
-		if p, err2 := exec.LookPath("lxd-migrate"); err2 == nil {
-			bin = p
-			a.client.Log("incus-migrate is not installed; using lxd-migrate, which speaks the same protocol")
-		} else {
-			return 0, errors.New("neither incus-migrate nor lxd-migrate is installed on this source. Install it (Debian/Ubuntu: `apt install incus-extra`; the Zabbly packages call it `incus-tools`), or re-create the migration with transport: rootfs-tar")
-		}
+		return 0, err
+	}
+	if filepath.Base(bin) == "lxd-migrate" {
+		a.client.Log("incus-migrate is not installed; using lxd-migrate, which speaks the same protocol")
 	}
 	if job.Incus == nil || job.Incus.URL == "" || job.Incus.Token == "" {
 		return 0, errors.New("the server did not supply an Incus endpoint and trust token")
@@ -219,6 +217,44 @@ readLoop:
 		return lastBytes, fmt.Errorf("%s failed: %w — the lines above are its own output", filepath.Base(bin), waitErr)
 	}
 	return lastBytes, nil
+}
+
+// ErrNoMigrateTool is the one failure of the incus-migrate transport that is
+// not a failure of the transfer: the tool is simply not on this source. The
+// run loop turns it into a transport switch rather than a dead migration.
+var ErrNoMigrateTool = errors.New("neither incus-migrate nor lxd-migrate is installed on this source")
+
+// InstallMigrateHint is what an operator does about ErrNoMigrateTool.
+const InstallMigrateHint = "install it (Debian/Ubuntu: `apt install incus-extra`; the Zabbly packages call it `incus-tools`)"
+
+// findMigrateBinary locates the official tool, or lxd-migrate, which speaks
+// the same protocol.
+func findMigrateBinary() (string, error) {
+	if p, err := exec.LookPath("incus-migrate"); err == nil {
+		return p, nil
+	}
+	if p, err := exec.LookPath("lxd-migrate"); err == nil {
+		return p, nil
+	}
+	return "", ErrNoMigrateTool
+}
+
+// fallbackTransport says what to run when the incus-migrate tool is missing:
+// a container target can arrive as a rootfs tarball through ProxyPilot (the
+// same path a Proxmox LXC takes), which needs only tar. A virtual machine
+// cannot — a tarball has no disk image in it — so the answer is to install
+// the tool, and the migration says so.
+func fallbackTransport(job *Job) (string, error) {
+	if job == nil || job.Transport != "incus-migrate" {
+		return "", errors.New("no fallback: the transport is not incus-migrate")
+	}
+	if job.Target.Type == "virtual-machine" {
+		return "", fmt.Errorf("%w, and a virtual machine can only arrive through it — %s on the source, then approve the migration again (the agent checks again when the transfer starts)", ErrNoMigrateTool, InstallMigrateHint)
+	}
+	if _, err := exec.LookPath("tar"); err != nil {
+		return "", fmt.Errorf("%w, and tar is not installed either, so the rootfs cannot be streamed — %s, or install tar", ErrNoMigrateTool, InstallMigrateHint)
+	}
+	return "rootfs-tar", nil
 }
 
 // answerRule is a compiled AnswerRule plus how many times it has fired.

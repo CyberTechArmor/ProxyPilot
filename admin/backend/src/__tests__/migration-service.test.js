@@ -8,7 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -218,6 +218,12 @@ test('the job document: nothing to transport until approved, then exactly one tr
   assert.equal(job.approved, true);
   assert.ok(job.artifact.chunk_bytes > 0);
   assert.ok(job.artifact.exclude.includes('./proc/*'), 'the pseudo-filesystems never travel');
+  assert.equal(job.install_tools, true, 'the agent is told it may install zstd on the source');
+
+  const strict = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web2', source_kind: 'proxmox-lxc', install_tools: false } });
+  await svc.recordManifest(svc.rowById(strict.migration.id), MANIFEST);
+  await svc.approveTransfer(strict.migration.id, { actor: 'admin-1' });
+  assert.equal((await svc.agentJob(svc.rowById(strict.migration.id))).install_tools, false, 'and told not to when the operator said so');
 });
 
 test('the job document: incus-migrate gets a trust token and a server-owned answer script, or a refusal that says why', async () => {
@@ -1012,4 +1018,167 @@ test('MCP: cleanup is confirm-gated and dry-runnable, and the token tools carry 
   assert.equal(done.record_removed, false, 'the record is only removed when asked');
   assert.ok(seen.includes('incus delete pp-web'));
   assert.ok(svc.rowById(id), 'the migration stays as the record of what happened');
+});
+
+/* ---------------------------- transport switch --------------------------- */
+
+const NO_TOOL = { ...MANIFEST, source: { ...MANIFEST.source, kind: 'physical', root_used_bytes: 20 * GiB }, tools: { incus_migrate: false, lxd_migrate: false, tar: true, zstd: false } };
+
+test('a source without incus-migrate: the review warns, and the agent switches the approved transfer to rootfs-tar instead of dying', async () => {
+  const seen = [];
+  const { svc, calls, audit } = setup({ script: (bin, args) => {
+    seen.push([bin, ...args].join(' '));
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return { status: 1 };
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'get') return { status: 0, stdout: ':8443\n' };
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'trust' && args[2] === 'add') return { status: 0, stdout: 'tok\n' };
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'trust' && args[2] === 'list') return { status: 0, stdout: JSON.stringify([{ name: 'pp-migrate-1', fingerprint: 'deadbeef' }]) };
+    if (bin === 'incus' && args[0] === 'info') return { status: 0, stdout: 'certificate_fingerprint: abc123def456abc1\n' };
+    if (bin === 'incus' && args[0] === 'query' && String(args[1]).includes('/resources')) return { status: 0, stdout: JSON.stringify({ space: { total: 2000 * GiB, used: 100 * GiB } }) };
+    if (bin === 'incus' && args[0] === 'query') return { status: 0, stdout: JSON.stringify({ devices: { root: { pool: 'default' } } }) };
+    if (bin === 'df') return { status: 0, stdout: `Avail\n${900 * GiB}\n` };
+    return { status: 0 };
+  } });
+  // A physical source defaults to incus-migrate — the migration in the screenshot.
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web4', source_kind: 'physical' } });
+  const id = r.migration.id;
+  assert.equal(r.migration.transport, 'incus-migrate');
+
+  // Before the switch can be asked for: nothing is approved yet.
+  await svc.recordManifest(svc.rowById(id), NO_TOOL);
+  const review = svc.view(svc.rowById(id));
+  const warn = review.concerns.find((c) => c.id === 'incus-migrate-missing');
+  assert.equal(warn.level, 'warn', 'the operator learns at the review, and it does not block a container target');
+  assert.match(warn.text, /fall back to rootfs-tar/);
+  const early = await svc.switchTransport(svc.rowById(id), { transport: 'rootfs-tar' });
+  assert.match(early.error, /not approved yet/);
+
+  await svc.approveTransfer(id, { actor: 'admin-1' });
+  let job = await svc.agentJob(svc.rowById(id));
+  assert.equal(job.transport, 'incus-migrate');
+  assert.ok(job.incus.token, 'the trust token was minted for the tool that is not there');
+
+  // The agent finds no incus-migrate and asks for the fallback.
+  const sw = await svc.switchTransport(svc.rowById(id), { transport: 'rootfs-tar', reason: 'neither incus-migrate nor lxd-migrate is installed on this source' });
+  assert.equal(sw.error, undefined, sw.error);
+  assert.equal(sw.switched, true);
+  assert.equal(sw.job.transport, 'rootfs-tar');
+  assert.equal(sw.job.approved, true, 'the approval carries over — it was for the same guest');
+  assert.ok(sw.job.artifact.exclude.includes('./proc/*'), 'the job now carries the tarball instructions');
+  assert.equal(sw.job.incus, undefined, 'and no longer an Incus endpoint');
+  assert.equal(sw.capacity.transport, 'rootfs-tar');
+  assert.ok(sw.capacity.needs.staging_bytes > 0, 'the staging disk is now part of the picture');
+
+  const row = svc.rowById(id);
+  assert.equal(row.transport, 'rootfs-tar');
+  assert.equal(JSON.parse(row.spec_json).transport, 'rootfs-tar');
+  assert.equal(svc.view(row).transport, 'rootfs-tar', 'the page header follows');
+  assert.ok(!svc.view(row).concerns.some((c) => c.id === 'incus-migrate-missing'), 'the concern is gone with the transport that needed the tool');
+  assert.ok(argvOf(calls).some((c) => c === 'incus config trust remove deadbeef'), 'the trust certificate nothing will present is revoked');
+  assert.ok(svc.listEvents(id).some((e) => /transport switched from incus-migrate to rootfs-tar by the agent: neither incus-migrate/.test(e.message)));
+  assert.ok(audit.some((a) => a[1] === 'MIGRATION_TRANSPORT'));
+
+  // Only once: there is nothing further to fall back to.
+  assert.match((await svc.switchTransport(svc.rowById(id), { transport: 'rootfs-tar' })).error, /already transports with rootfs-tar/);
+  assert.match((await svc.switchTransport(svc.rowById(id), { transport: 'incus-migrate' })).error, /the one fallback is incus-migrate → rootfs-tar/);
+
+  // From here it is the Proxmox-LXC path: the tarball arrives and is imported.
+  const got = await svc.receiveArtifact(svc.rowById(id), Readable.from([Buffer.from('rootfs bytes')]));
+  assert.equal(got.kind, 'rootfs');
+  const fin = await svc.agentFinish(svc.rowById(id), { ok: true, bytes: 12 });
+  assert.equal(fin.imported, true);
+  assert.ok(argvOf(calls).some((c) => c.startsWith('incus image import')), 'the switched migration imports the tarball, not a guest incus-migrate never made');
+  assert.equal(svc.view(svc.rowById(id)).status, 'ready');
+});
+
+test('the switch is refused where a tarball cannot do the job: a VM target, a full staging disk, the wrong phase', async () => {
+  // A VM: the review blocks, and the switch says install the tool.
+  const vm = setup({ script: (bin, args) => {
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return { status: 1 };
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'get') return { status: 0, stdout: ':8443\n' };
+    if (bin === 'incus' && args[0] === 'config' && args[1] === 'trust' && args[2] === 'add') return { status: 0, stdout: 'tok\n' };
+    return { status: 0 };
+  } });
+  const v = await vm.svc.createMigration({ input: { mode: 'whole-machine', name: 'vm1', type: 'virtual-machine', disk_gb: 40, source_kind: 'vm' } });
+  await vm.svc.recordManifest(vm.svc.rowById(v.migration.id), NO_TOOL);
+  const blocked = vm.svc.view(vm.svc.rowById(v.migration.id)).concerns.find((c) => c.id === 'incus-migrate-missing');
+  assert.equal(blocked.level, 'block');
+  const refusedApproval = await vm.svc.approveTransfer(v.migration.id, { actor: 'a' });
+  assert.match(refusedApproval.error, /incus-migrate is not installed on the source/);
+  await vm.svc.approveTransfer(v.migration.id, { actor: 'a', override: true });
+  const noVM = await vm.svc.switchTransport(vm.svc.rowById(v.migration.id), { transport: 'rootfs-tar' });
+  assert.match(noVM.error, /virtual machine, which a rootfs tarball cannot become/);
+  assert.match(noVM.error, /apt install incus-extra/);
+  assert.equal(vm.svc.rowById(v.migration.id).transport, 'incus-migrate', 'nothing changed');
+
+  // A container, but ProxyPilot's own disk cannot hold the tarball: the
+  // approval never checked staging (incus-migrate stages nothing), so the
+  // switch does, and refuses with the numbers.
+  const tight = setup(withSpace({ poolFree: 1500 * GiB, stagingFree: 10 * GiB }));
+  const t = await tight.svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'physical', pool: 'Storage' } });
+  await tight.svc.recordManifest(tight.svc.rowById(t.migration.id), { ...NO_TOOL, source: { ...NO_TOOL.source, root_used_bytes: 400 * GiB } });
+  assert.equal(tight.svc.view(tight.svc.rowById(t.migration.id)).capacity.fits, true, 'incus-migrate fits: the pool has room and nothing is staged');
+  await tight.svc.approveTransfer(t.migration.id, { actor: 'a' });
+  const noRoom = await tight.svc.switchTransport(tight.svc.rowById(t.migration.id), { transport: 'rootfs-tar' });
+  assert.match(noRoom.error, /cannot switch to rootfs-tar/);
+  assert.equal(noRoom.concerns[0].id, 'capacity-staging');
+  assert.equal(tight.svc.rowById(t.migration.id).transport, 'incus-migrate', 'a refused switch changes nothing');
+  assert.equal(JSON.parse(tight.svc.rowById(t.migration.id).capacity_json).transport, 'incus-migrate', 'and the stored verdict is still the approved transport\'s');
+
+  // Application mode has no whole-machine transport to switch.
+  const app = setup({ script: (bin, args) => (bin === 'incus' && args[0] === 'config' && args[1] === 'show' ? { status: 1 } : { status: 0 }) });
+  const a = await app.svc.createMigration({ input: { mode: 'application', name: 'app', app_dirs: ['/srv/myapp'] } });
+  assert.match((await app.svc.switchTransport(app.svc.rowById(a.migration.id), { transport: 'rootfs-tar' })).error, /only a whole-machine migration/);
+});
+
+/* ------------------------- a source that goes away ------------------------ */
+
+test('a broken upload fails the migration loudly, with the byte count, and leaves no partial tarball', async () => {
+  const { svc, workDir } = setup({ script: (bin, args) => (bin === 'incus' && args[0] === 'config' && args[1] === 'show' ? { status: 1 } : { status: 0 }) });
+  const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
+  const id = r.migration.id;
+  await svc.recordManifest(svc.rowById(id), MANIFEST);
+  await svc.approveTransfer(id, { actor: 'admin-1' });
+
+  // 3 MiB arrive, then the socket dies — an SSH session took the agent.
+  const broken = new Readable({
+    read() {
+      this.push(Buffer.alloc(1024 * 1024));
+      this.push(Buffer.alloc(1024 * 1024));
+      this.push(Buffer.alloc(1024 * 1024));
+      this.destroy(new Error('aborted'));
+    },
+  });
+  const out = await svc.receiveArtifact(svc.rowById(id), broken);
+  assert.match(out.error, /upload from the source ended after \d+\.\d MiB \(aborted\)/, 'how much arrived, and why it stopped');
+  assert.match(out.error, /cannot be resumed/);
+  const row = svc.rowById(id);
+  assert.equal(row.status, 'failed', 'not left "running" for someone to notice');
+  assert.match(row.error, /the connection carrying it closed/);
+  assert.match(row.error, /journalctl -u proxypilot-migrate-\d+-\*/, 'points at the agent\'s own log for its side of the story');
+  assert.equal(existsSync(join(workDir, String(id), 'rootfs.tar.gz')), false, 'the partial tarball is not kept');
+  assert.ok(svc.listEvents(id).some((e) => e.kind === 'error' && /ended after/.test(e.message)));
+});
+
+test('the watchdog fails a running transfer whose agent has gone silent, and nothing else', async () => {
+  const { svc, db } = setup({ script: (bin, args) => (bin === 'incus' && args[0] === 'config' && args[1] === 'show' ? { status: 1 } : { status: 0 }) });
+  const mk = async (name) => {
+    const r = await svc.createMigration({ input: { mode: 'whole-machine', name, source_kind: 'proxmox-lxc' } });
+    await svc.recordManifest(svc.rowById(r.migration.id), MANIFEST);
+    return r.migration.id;
+  };
+  const silent = await mk('a');
+  const alive = await mk('b');
+  const waiting = await mk('c');   // awaiting_review: the agent polls slowly and nothing is moving — never the watchdog's business
+  await svc.approveTransfer(silent, { actor: 'x' });
+  await svc.approveTransfer(alive, { actor: 'x' });
+  const old = new Date(NOW - 20 * 60 * 1000).toISOString();
+  db.prepare('UPDATE migrations SET token_last_seen_at = ? WHERE id IN (?, ?)').run(old, silent, waiting);
+  db.prepare('UPDATE migrations SET token_last_seen_at = ? WHERE id = ?').run(new Date(NOW - 2 * 60 * 1000).toISOString(), alive);
+
+  assert.deepEqual(svc.sweepStalled(), { failed: [silent] });
+  assert.equal(svc.rowById(silent).status, 'failed');
+  assert.match(svc.rowById(silent).error, /no contact from the agent since .* \(15 minutes\)/);
+  assert.equal(svc.rowById(alive).status, 'running', 'two quiet minutes is a slow file, not a dead source');
+  assert.equal(svc.rowById(waiting).status, 'awaiting_review');
+  assert.deepEqual(svc.sweepStalled(), { failed: [] }, 'a failed row is terminal and not failed twice');
 });

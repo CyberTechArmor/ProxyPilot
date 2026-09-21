@@ -15,7 +15,7 @@ import { createWriteStream } from 'node:fs';
 import { join } from 'node:path';
 import {
   validateManifest, manifestSummary, manifestConcerns, observedEgress, suggestedRoutes, databasePlan,
-  capacityNeeds, capacityVerdict,
+  capacityNeeds, capacityVerdict, INSTALL_INCUS_MIGRATE,
 } from './manifest.js';
 import {
   validateTarget, guestConfig, installCommand, installCommandTwoStep, checklistFor, checklistComplete,
@@ -30,6 +30,8 @@ export const AGENT_DIR = process.env.PROXYPILOT_MIGRATION_AGENT_DIR || '/var/lib
 export const WORK_DIR = process.env.PROXYPILOT_MIGRATION_WORK_DIR || '/var/lib/proxypilot/migration';
 const EVENT_LIMIT = 5000;           // per migration; the agent's log is trimmed, not unbounded
 const MAX_ARTIFACT_BYTES = 2 * 1024 ** 4;
+const STALL_FAIL_MS = 15 * 60 * 1000;
+const humanBytes = (n) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GiB` : n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MiB` : `${n} bytes`);
 /** Directories that must never travel in a whole-machine rootfs tar. */
 export const TAR_EXCLUDES = Object.freeze([
   './proc/*', './sys/*', './dev/*', './run/*', './tmp/*', './mnt/*', './media/*',
@@ -88,7 +90,7 @@ export function createMigrationService({
       manifest: man, manifest_at: row.manifest_at,
       summary: man ? manifestSummary(man) : null,
       capacity: parse(row.capacity_json, null),
-      concerns: man ? manifestConcerns(man, { mode: row.mode, capacity: parse(row.capacity_json, null) }) : [],
+      concerns: man ? manifestConcerns(man, { mode: row.mode, capacity: parse(row.capacity_json, null), transport: row.transport, target_type: spec.type, install_tools: spec.install_tools !== false }) : [],
       approved_at: row.approved_at, approved_by: row.approved_by,
       egress: egress || (man ? observedEgress(man).map(defaultEgressDecision) : []),
       routes: man ? suggestedRoutes(man) : [],
@@ -212,6 +214,7 @@ export function createMigrationService({
     // cannot do what we asked, and the server sniffs the received bytes
     // rather than trusting this, so a mismatch is never fatal.
     job.compression = (await transferCompression()).compression;
+    job.install_tools = spec.install_tools !== false;
 
     if (row.transport === 'incus-migrate') {
       const t = await incusTrustToken(row);
@@ -547,11 +550,12 @@ export function createMigrationService({
    * Recorded on the row so the page, the MCP reader and the approval gate all
    * read the same numbers.
    */
-  async function measureCapacity(row, { manifest = null, store = true } = {}) {
+  async function measureCapacity(row, { manifest = null, store = true, transport = null } = {}) {
     const man = manifest || parse(row.manifest_json, null);
     if (!man) return null;
     const spec = parse(row.spec_json, {});
-    const needs = capacityNeeds(man, { mode: row.mode, transport: row.transport });
+    const via = transport || row.transport;
+    const needs = capacityNeeds(man, { mode: row.mode, transport: via });
     const [pool, staging] = await Promise.all([poolSpace(spec.pool), stagingSpace()]);
     const verdict = capacityVerdict({
       needs, pool: pool.pool,
@@ -559,7 +563,7 @@ export function createMigrationService({
       stagingFreeBytes: staging.free_bytes, stagingPath: staging.path,
     });
     const capacity = {
-      at: nowIso(now()), transport: row.transport, needs,
+      at: nowIso(now()), transport: via, needs,
       pool: { name: pool.pool, requested: spec.pool || null, free_bytes: pool.free_bytes, total_bytes: pool.total_bytes, error: pool.error || null },
       staging: { path: staging.path, free_bytes: staging.free_bytes, error: staging.error || null },
       ...verdict,
@@ -591,7 +595,7 @@ export function createMigrationService({
     const sum = manifestSummary(v.manifest);
     event(row.id, { kind: 'state', phase: 'inventory', message: `inventory received: ${sum.os || 'unknown OS'}, ${sum.counts.units} units, ${sum.counts.vhosts} vhosts, ${sum.counts.databases} database engine(s), ${sum.counts.egress} outbound host(s)` });
     if (!auto) event(row.id, { kind: 'state', phase: 'inventory', message: 'waiting for the operator to review the inventory and approve the transfer' });
-    return { manifest: v.manifest, summary: sum, capacity, concerns: manifestConcerns(v.manifest, { mode: row.mode, capacity }), auto_approved: auto };
+    return { manifest: v.manifest, summary: sum, capacity, concerns: manifestConcerns(v.manifest, { mode: row.mode, capacity, transport: row.transport, target_type: spec.type, install_tools: spec.install_tools !== false }), auto_approved: auto };
   }
 
   /* ------------------------------ approval ------------------------------ */
@@ -613,7 +617,7 @@ export function createMigrationService({
     const spec = parse(row.spec_json, {});
 
     const capacity = await measureCapacity(row).catch(() => null);
-    const blocking = manifestConcerns(parse(row.manifest_json, null) || {}, { mode: row.mode, capacity }).filter((c) => c.level === 'block');
+    const blocking = manifestConcerns(parse(row.manifest_json, null) || {}, { mode: row.mode, capacity, transport: row.transport, target_type: spec.type, install_tools: spec.install_tools !== false }).filter((c) => c.level === 'block');
     if (blocking.length && override !== true) {
       return {
         error: `refused: ${blocking.map((b) => b.text).join(' ')}`,
@@ -700,6 +704,61 @@ export function createMigrationService({
     return { fenced: true, removed };
   }
 
+  /* --------------------------- transport switch -------------------------- */
+
+  /**
+   * The agent asks to carry an approved transfer over a different transport.
+   *
+   * One case, and it is the one the first real whole-machine migration died
+   * on: `incus-migrate` was never installed on the source, and the failure
+   * line said "re-create the migration with transport: rootfs-tar" — a new
+   * token, a new paste, a new inventory and a new approval, for the guest
+   * the rootfs-tar path builds from a tar the source already has. Now the
+   * agent asks here instead, and the answer is yes when it can be:
+   *
+   *   - whole-machine, approved, still in the transfer phase, and the
+   *     current transport is incus-migrate (nothing else has a fallback);
+   *   - the target is a container — a tarball cannot become a VM disk;
+   *   - the tarball FITS on this host's staging disk, which incus-migrate
+   *     never needed and the approval therefore never checked. Measured
+   *     now, and a "will not fit" is a refusal with the numbers in it.
+   *
+   * The Incus trust token minted for incus-migrate is revoked: nothing will
+   * present it now. The row's transport changes, so the artifact endpoint
+   * accepts the rootfs and agentFinish imports it — the rest of the path is
+   * exactly the Proxmox-LXC one.
+   */
+  async function switchTransport(row, { transport, reason = null, actor = 'agent' } = {}) {
+    const to = String(transport || '');
+    const spec = parse(row.spec_json, {});
+    if (row.mode !== 'whole-machine') return { error: `only a whole-machine migration can change transport (this one is ${row.mode})` };
+    if (row.transport === to) return { error: `this migration already transports with ${to}` };
+    if (row.transport !== 'incus-migrate' || to !== 'rootfs-tar') return { error: `no switch from ${row.transport} to ${to || '(none)'}: the one fallback is incus-migrate → rootfs-tar, for a source without incus-migrate` };
+    if (TERMINAL.includes(row.status)) return { error: `migration ${row.id} is ${row.status}` };
+    if (!row.approved_at && spec.auto_transfer !== true) return { error: 'the transfer is not approved yet — the transport can change only once the operator has approved' };
+    if (row.phase !== 'transfer') return { error: `the transport can change only during the transfer phase (this migration is in ${row.phase})` };
+    if (spec.type === 'virtual-machine') return { error: `${row.target_name} is a virtual machine, which a rootfs tarball cannot become — ${INSTALL_INCUS_MIGRATE}, then approve again` };
+
+    // rootfs-tar stages the tarball here before Incus reads it; the
+    // approval checked the pool only, because incus-migrate stages nothing.
+    const capacity = await measureCapacity(row, { transport: to, store: false }).catch(() => null);
+    const blocking = (capacity?.concerns || []).filter((c) => c.level === 'block');
+    if (blocking.length) {
+      return { error: `cannot switch to ${to}: ${blocking.map((b) => b.text).join(' ')} ${INSTALL_INCUS_MIGRATE} instead, or free the space and approve again.`, concerns: blocking, capacity };
+    }
+
+    const ts = nowIso(now());
+    db().prepare('UPDATE migrations SET transport = ?, spec_json = ?, capacity_json = ?, updated_at = ? WHERE id = ?')
+      .run(to, JSON.stringify({ ...spec, transport: to }), capacity ? JSON.stringify(capacity) : row.capacity_json, ts, row.id);
+    event(row.id, { kind: 'state', phase: 'transfer', message: `transport switched from ${row.transport} to ${to} by the ${actor}${reason ? `: ${reason}` : ''} — the rootfs will arrive as a tarball through ProxyPilot and be imported as a container` });
+    for (const c of capacity?.concerns || []) event(row.id, { kind: 'log', message: `capacity (${to}): ${c.text}` });
+    // The trust token was minted for a client that will never connect now.
+    await revokeTrust(row).catch(() => null);
+    try { logAudit(actor, 'MIGRATION_TRANSPORT', 'migration', String(row.id), { from: row.transport, to, reason }, null); } catch { /* best effort */ }
+    const fresh = rowById(row.id);
+    return { switched: true, from: row.transport, to, capacity, job: await agentJob(fresh) };
+  }
+
   /* ------------------------------- events ------------------------------- */
 
   function event(migrationId, { kind = 'log', phase = null, bytes = null, message = null, detail = null } = {}) {
@@ -778,18 +837,35 @@ export function createMigrationService({
     const path = kind === 'rootfs' ? join(dir, 'rootfs.tar.gz') : join(dir, `${kind}-${safe}.bin`);
     const hash = createHash('sha256');
     let bytes = 0;
-    await new Promise((resolve, reject) => {
-      const out = createWriteStream(path, { mode: 0o600 });
-      stream.on('data', (c) => {
-        bytes += c.length;
-        if (bytes > MAX_ARTIFACT_BYTES) { stream.destroy(new Error('artifact exceeds the size limit')); return; }
-        hash.update(c);
+    let ended = false;
+    try {
+      await new Promise((resolve, reject) => {
+        const out = createWriteStream(path, { mode: 0o600 });
+        stream.on('data', (c) => {
+          bytes += c.length;
+          if (bytes > MAX_ARTIFACT_BYTES) { stream.destroy(new Error('artifact exceeds the size limit')); return; }
+          hash.update(c);
+        });
+        stream.on('end', () => { ended = true; });
+        stream.on('error', reject);
+        // A request whose socket closes before its body ended is an upload
+        // that broke — the agent died or lost the network — and depending
+        // on the Node version that surfaces as 'error' or only as 'close'.
+        stream.on('close', () => { if (!ended) reject(new Error('the connection closed before the upload finished')); });
+        out.on('error', reject);
+        out.on('finish', resolve);
+        stream.pipe(out);
       });
-      stream.on('error', reject);
-      out.on('error', reject);
-      out.on('finish', resolve);
-      stream.pipe(out);
-    });
+    } catch (e) {
+      // The upload is one stream with one hash at its end, so a break
+      // cannot be resumed; what CAN be done is to say so, now, instead of
+      // leaving the migration "running" until someone notices. Migration
+      // #12 sat at "running" for exactly that reason after an SSH session
+      // took the agent with it.
+      await rm(path, { force: true }).catch(() => null);
+      const reason = String(e?.message || e);
+      return fail(row.id, `the ${kind} upload from the source ended after ${humanBytes(bytes)} (${reason}) — the connection carrying it closed: the agent died, the network dropped, or something between the source and ProxyPilot cut the request. An upload cannot be resumed: create a new migration and run its command on the source again. The agent runs detached from the terminal, so a closed SSH session is not the cause; check the agent's own log on the source (journalctl -u proxypilot-migrate-${row.id}-*) for its side of it.`);
+    }
     const sha = hash.digest('hex');
     if (expectedSha256 && expectedSha256.toLowerCase() !== sha) {
       await rm(path, { force: true });
@@ -967,6 +1043,29 @@ export function createMigrationService({
     db().prepare('UPDATE migrations SET phase = ?, status = ?, updated_at = ?, guest_created = ? WHERE id = ?').run('post-import', 'ready', ts, madeIt, row.id);
     event(row.id, { kind: 'state', phase: 'post-import', message: `guest ${row.target_name} is present, stopped and fenced — the checklist is open` });
     return { imported: true, guest: row.target_name };
+  }
+
+  /**
+   * The watchdog for a source that simply vanished. A broken upload is
+   * caught above because the socket closes; a source that lost power, or
+   * an agent killed between two polls, leaves nothing to observe — so a
+   * running transfer whose agent has not been heard from for STALL_FAIL_MS
+   * is failed with the last-contact time in the message. The threshold is
+   * generous on purpose: progress lines arrive every 5 s while bytes move,
+   * and the agent polls every 5–15 s while it waits, so fifteen silent
+   * minutes is not a slow disk.
+   */
+  function sweepStalled({ maxSilenceMs = STALL_FAIL_MS } = {}) {
+    const cutoff = nowIso(now() - maxSilenceMs);
+    const rows = db().prepare(`SELECT * FROM migrations WHERE status = 'running' AND phase = 'transfer'
+                                 AND COALESCE(token_last_seen_at, updated_at) < ?`).all(cutoff);
+    const failed = [];
+    for (const row of rows) {
+      const last = row.token_last_seen_at || row.updated_at;
+      fail(row.id, `no contact from the agent since ${last} (${Math.round(maxSilenceMs / 60000)} minutes) — the source went away mid-transfer. An upload cannot be resumed: create a new migration and run its command on the source again.`);
+      failed.push(row.id);
+    }
+    return { failed };
   }
 
   function fail(id, message) {
@@ -1316,6 +1415,6 @@ export function createMigrationService({
     createMigration, authenticate, agentJob, recordManifest, approveTransfer, recordEvent, receiveArtifact,
     importRootfsTar, agentFinish, cancelMigration, setChecklistStep, decideEgress, listMigrations, listEvents,
     view, rowById, rowByTokenId, agentBinaries, tlsPin, fenceGuest, preflight, incusListener, enableIncusListener,
-    revokeToken, listTokens, cleanupMigration, measureCapacity, poolSpace, listPoolSpace, stagingSpace, defaultProfilePool, CHECKLIST,
+    revokeToken, listTokens, cleanupMigration, measureCapacity, poolSpace, listPoolSpace, stagingSpace, defaultProfilePool, switchTransport, sweepStalled, CHECKLIST,
   };
 }

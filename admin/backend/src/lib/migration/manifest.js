@@ -95,6 +95,12 @@ function normalizeManifest(j) {
       id: str(j.os?.id, 64), version_id: str(j.os?.version_id, 64), pretty_name: str(j.os?.pretty_name, 200),
       kernel: str(j.os?.kernel, 128), init: str(j.os?.init, 32),
     },
+    // Which transfer tools the source has. An agent older than this field
+    // sends none, and `null` keeps that distinct from "checked, and absent":
+    // a concern is raised on a reported absence, never on silence.
+    tools: j.tools && typeof j.tools === 'object' && !Array.isArray(j.tools)
+      ? { incus_migrate: bool(j.tools.incus_migrate), lxd_migrate: bool(j.tools.lxd_migrate), tar: bool(j.tools.tar), zstd: bool(j.tools.zstd) }
+      : null,
     disks: arr(j.disks).slice(0, 128).map((d) => ({ name: str(d.name, 128), size_bytes: num(d.size_bytes), type: str(d.type, 32), model: str(d.model, 128) })),
     mounts: arr(j.mounts).slice(0, 256).map((m) => ({ source: str(m.source, 256), target: str(m.target, 256), fstype: str(m.fstype, 32), options: str(m.options, 256), size_bytes: num(m.size_bytes), used_bytes: num(m.used_bytes) })),
     units: arr(j.units).slice(0, 512).map((u) => ({
@@ -402,17 +408,66 @@ export function capacityVerdict({ needs, pool, poolFreeBytes = null, poolTotalBy
   return out;
 }
 
+export const INSTALL_INCUS_MIGRATE = 'install it on the source: `apt install incus-extra` on Debian/Ubuntu (the Zabbly packages call it `incus-tools`)';
+
+/**
+ * Can the transport this migration was created with actually run on the
+ * source? The agent reports its tools with the inventory, so the answer is
+ * in front of the operator at the review — not on the failure line after
+ * the transfer has started, which is where the first real migration found
+ * it. A missing incus-migrate is a warning for a container target (the
+ * agent falls back to a rootfs tarball through ProxyPilot by itself) and a
+ * block for a VM (a tarball has no disk image in it; install the tool, and
+ * the agent checks again when the transfer starts — no new migration).
+ */
+export function transportConcerns(manifest, { mode, transport, targetType, installTools = true } = {}) {
+  const tools = manifest?.tools;
+  if (!tools) return [];
+  const out = [];
+  // Every transport but incus-migrate is a tar the source compresses, and
+  // without zstd that is gzip on ONE core: a 250 GiB rootfs takes five
+  // hours instead of one. The agent installs zstd before the transfer
+  // unless the spec says not to, in which case the operator should know
+  // what that costs.
+  if (transport !== 'incus-migrate' && tools.zstd === false) {
+    out.push(installTools
+      ? { level: 'warn', id: 'zstd-missing', text: 'zstd is not installed on the source. The agent will install it (apt/dnf/apk/zypper/pacman) when the transfer starts, so the copy compresses on every core; if that fails the transfer falls back to single-core gzip and the log says so.', remedy: 'Nothing to do. To keep the agent from installing packages, set install_tools: false on the migration and install zstd (or pigz) by hand.' }
+      : { level: 'warn', id: 'zstd-missing', text: 'zstd is not installed on the source and install_tools is off, so the transfer will compress with gzip on one core — expect roughly 5–10 MiB/s, hours for a large rootfs.', remedy: 'Install zstd (or pigz) on the source before approving: `apt install zstd`.' });
+  }
+  if (mode !== 'whole-machine') return out;
+  if (transport === 'incus-migrate' && !tools.incus_migrate && !tools.lxd_migrate) {
+    if (targetType === 'virtual-machine') {
+      out.push({
+        level: 'block', id: 'incus-migrate-missing',
+        text: 'incus-migrate is not installed on the source, and a virtual machine can only arrive through it.',
+        remedy: `${INSTALL_INCUS_MIGRATE}. The agent checks again when the transfer starts, so install it and approve — no new migration is needed. Approve over this only if it is installed now.`,
+      });
+    } else {
+      out.push({
+        level: 'warn', id: 'incus-migrate-missing',
+        text: 'incus-migrate is not installed on the source. The transfer will fall back to rootfs-tar: the rootfs is streamed to ProxyPilot as a tarball and imported as a container, which stages the tarball on this host first.',
+        remedy: `To stream straight into Incus instead, ${INSTALL_INCUS_MIGRATE} before approving.`,
+      });
+    }
+  }
+  if (transport !== 'incus-migrate' && tools.tar === false) {
+    out.push({ level: 'block', id: 'tar-missing', text: 'tar is not installed on the source, and the rootfs cannot be streamed without it.', remedy: 'Install tar on the source; the agent checks again when the transfer starts.' });
+  }
+  return out;
+}
+
 /**
  * Did the source look like something this migration can actually carry?
  * Returns blocking problems first — the operator sees them before approving
  * the transfer, not after it.
  */
-export function manifestConcerns(manifest, { mode, capacity = null } = {}) {
+export function manifestConcerns(manifest, { mode, capacity = null, transport = null, target_type: targetType = null, install_tools: installTools = true } = {}) {
   const out = [];
   // Capacity first: "it will not fit" is the one concern that makes every
   // other question moot, and it blocks the approval.
   for (const c of capacity?.concerns || []) out.push({ ...c, remedy: c.remedy ?? null });
   const push = (level, id, text, remedy = null) => out.push({ level, id, text, remedy });
+  for (const c of transportConcerns(manifest, { mode, transport, targetType, installTools })) out.push(c);
   if (!manifest.os?.id) push('warn', 'os-unknown', 'The source OS could not be identified (no /etc/os-release).');
   if (manifest.os?.init && manifest.os.init !== 'systemd') push('warn', 'init', `The source runs ${manifest.os.init}, not systemd — units and their ports were not collected.`);
   if (mode === 'application' && !(manifest.app_dirs || []).length) push('block', 'no-app-dirs', 'Application mode found no application directory to copy.', 'Name the directories explicitly in the migration target spec (app_dirs), or use whole-machine mode.');

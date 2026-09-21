@@ -40,6 +40,16 @@ actually do before it trusts that: a 2014 box with GNU tar 1.26 and no zstd
 package is exactly the machine someone is trying to get off, so the request
 is a preference and gzip is the floor. gzip is single-threaded at ~50 MB/s,
 which on a LAN makes it, not the network, the reason a migration takes hours.
+So the agent **installs zstd on the source** before the transfer when it is
+missing (`install_tools` on the spec, default on — through `apt-get`, `dnf`,
+`yum`, `apk`, `zypper` or `pacman`, whichever the source has; the outcome is
+a log line, and a failed install is the gzip fallback, never a failed
+migration). A source with `pigz` and no zstd gets gzip on every core. The
+inventory reports the source's tools, so the review says `zstd-missing` and
+what will happen about it before you approve; with `install_tools: false`
+the same concern says what single-core gzip will cost. The first real
+migration (249 GiB from a Debian 11 host) ran at 7 MiB/s on gzip — a
+five-hour copy that zstd on the same 16 cores does in well under one.
 The mysqldump is compressed too (it was going over the wire raw); the
 PostgreSQL dump is not, because `--format=custom` already is. ProxyPilot
 sniffs the first four bytes of what arrives rather than trusting the label,
@@ -54,6 +64,74 @@ Incus API *directly* while the tar goes through ProxyPilot, which the source is
 already talking to. Forcing `transport: "incus-migrate"` for a container
 source is allowed and works (it is how that path is tested), it just asks more
 of the source.
+
+### The agent survives the terminal
+
+The bootstrap script starts the agent **detached**: a transient systemd
+unit (`proxypilot-migrate-<id>-<epoch>`, follow it with `journalctl -u … -f`)
+where the source has systemd, `setsid nohup … > /var/log/proxypilot-migrate-…log`
+elsewhere. The script prints the unit or log name and returns; the SSH
+session can be closed. The agent also ignores SIGHUP. Migration #12 died at
+15 GiB when the session that had pasted the command dropped — the agent
+ran in that session's foreground and SIGHUP took it. Set
+`PROXYPILOT_MIGRATE_FOREGROUND=1` before the command to keep it in the
+terminal for a debugging session.
+
+The backend's HTTP server has **no clock on a request body**
+(`lib/http-server-timeouts.js`, applied in `index.js`): Node 20 defaults
+`requestTimeout` to 300 s, and migrations #12 and #14 — the same 249 GiB
+rootfs, 15 GiB in at 85 MiB/s — were both cut off 5 min 17 s and 5 min 24 s
+into the upload by that clock plus its 30 s check interval, with a failure
+line that blamed the agent. The headers clock (60 s) stays.
+
+Two things make a dead source visible instead of leaving the migration at
+"running" for someone to notice. A broken upload — the socket closes before
+the body ended — fails the migration with the byte count and the reason,
+and removes the partial tarball (an upload is one stream with one hash at
+the end, so it cannot be resumed; the remedy is a new migration). A source
+that leaves nothing to observe (power loss, an agent killed between two
+polls) is caught by the watchdog `sweepStalled`, run every minute from
+`index.js`: a running transfer whose agent has not been heard from for 15
+minutes is failed with the last-contact time. Progress lines arrive every
+5 s while bytes move and the agent polls every 5–15 s while it waits, so
+that silence is never a slow disk.
+
+### When the source has no `incus-migrate`
+
+A physical host or a VM defaults to `incus-migrate`, and the package is often
+not there (the first real whole-machine migration, a Debian 11 host into a
+container, died on exactly that: "neither incus-migrate nor lxd-migrate is
+installed on this source … re-create the migration with transport:
+rootfs-tar" — a new token, a new paste on the source, a new inventory and a
+new approval, for the guest the rootfs-tar path would have built from a tar
+the source already had). Two things now happen instead:
+
+- **The inventory says so before you approve.** The agent reports the
+  transfer tools it found (`manifest.tools`: `incus_migrate`, `lxd_migrate`,
+  `tar`, `zstd`), and the review carries the concern `incus-migrate-missing`:
+  a *warning* for a container target, naming the fallback below and how to
+  avoid it (`apt install incus-extra` on the source before approving); a
+  *block* for a virtual-machine target, because a tarball has no disk image
+  in it — install the tool, then approve (the agent looks again when the
+  transfer starts, so no new migration is needed; the override is for an
+  operator who has just installed it). An agent older than the field reports
+  nothing, and silence raises no concern.
+- **An approved transfer falls back by itself.** When the transfer starts and
+  the tool is still missing, the agent asks ProxyPilot to switch the
+  migration to `rootfs-tar` (`POST /api/migrations/agent/:token/transport`,
+  service `switchTransport`) and carries on with the job it gets back — the
+  rootfs streams to ProxyPilot as a tarball and is imported as a container,
+  exactly the Proxmox-LXC path. ProxyPilot decides: the migration must be
+  whole-machine, approved, in the transfer phase, `incus-migrate` → `rootfs-tar`
+  (nothing else has a fallback), the target a container, and the tarball must
+  **fit on ProxyPilot's own disk** — a place the approval never checked,
+  because `incus-migrate` stages nothing — so capacity is re-measured for the
+  new transport and a "will not fit" is a refusal with the numbers in it. On a
+  switch the row's transport and the stored capacity verdict change, the
+  Incus trust token minted for a client that will never connect is revoked,
+  and the log says `transport switched from incus-migrate to rootfs-tar by the
+  agent: …`. A refusal fails the migration with the reason and the install
+  hint, as before.
 
 ### Why application mode is not rsync
 
@@ -343,7 +421,10 @@ and deletes the transfer's working directory. None of it can be undone.
 - **The source** needs `curl` and, per transport: `incus-migrate` — on
   Debian/Ubuntu that is **`apt install incus-extra`**, not `incus-tools`
   (the Zabbly packages use that name) — or `tar`, plus the database client for
-  a dump.
+  a dump. A container-bound whole-machine migration no longer needs
+  `incus-migrate` at all: without it the transfer falls back to the rootfs
+  tarball (see **When the source has no `incus-migrate`**). A VM-bound one
+  does, and the review blocks until it is there.
 - **Application mode** needs nothing in the guest: the copy arrives through
   `incus exec`. The guest does need the database engine installed if a dump
   is being restored into it (the restore says so plainly when it is missing).

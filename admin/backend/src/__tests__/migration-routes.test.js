@@ -27,14 +27,21 @@ test('the bootstrap script verifies the binary before running it, and pins TLS',
   assert.match(s, /\[ "\$GOT" = "\$SHA" \] \|\| \{ echo "proxypilot-migrate: REFUSED/);
   assert.ok(s.includes(SHA) && s.includes('c'.repeat(64)), 'both architectures carry their own hash');
   assert.match(s, /PIN="sha256:b{64}"/);
-  assert.match(s, /exec "\$BIN" migrate --url "\$URL" --token "\$TOKEN" --pin "\$PIN"/);
+  // The agent runs DETACHED from the terminal: a transient systemd unit
+  // where there is one, setsid+nohup elsewhere, and in the foreground only
+  // when asked. The first real transfer died with the SSH session.
+  assert.match(s, /systemd-run --quiet --collect --unit "\$NAME" .*"\$BIN" migrate --url "\$URL" --token "\$TOKEN" --pin "\$PIN"/);
+  assert.match(s, /setsid nohup "\$BIN" migrate --url "\$URL" --token "\$TOKEN" --pin "\$PIN"/);
+  assert.match(s, /PROXYPILOT_MIGRATE_FOREGROUND[^\n]*\n\s*exec "\$BIN" migrate --url "\$URL" --token "\$TOKEN" --pin "\$PIN"/);
+  assert.match(s, /trap - EXIT INT TERM/, 'the cleanup trap is released once the agent is running detached');
+  assert.match(s, /this session can be closed/);
   // An unsupported CPU stops, rather than downloading something that cannot run.
   assert.match(s, /unsupported CPU/);
   assert.match(s, /rm -f "\$BIN"/, 'the binary is cleaned up on the way out');
   assert.ok(!s.includes('--keep'), 'keep_agent off means the flag is simply absent');
 
   const keep = bootstrapScript({ base: 'https://e.example.com', token: 't', migrationId: 1, pin: null, sums: { amd64: SHA }, keepAgent: true });
-  assert.match(keep, /--keep/);
+  assert.equal((keep.match(/--pin "\$PIN" --keep/g) || []).length, 3, 'every launch form carries --keep');
   assert.match(keep, /PIN=""/, 'no certificate to pin is stated, not faked');
 
   // No build for an architecture → the script says so instead of downloading a 404.
@@ -71,6 +78,7 @@ function fakeService(over = {}) {
     recordEvent: (r, e) => { calls.push(['event', e]); return { recorded: true, phase: 'transfer' }; },
     receiveArtifact: async () => ({ bytes: 4, sha256: SHA }),
     agentFinish: async () => ({ imported: true, guest: 'pp-web' }),
+    switchTransport: async (r, { transport, reason }) => { calls.push(['transport', { transport, reason }]); return transport === 'rootfs-tar' ? { switched: true, job: { transport } } : { error: 'the one fallback is incus-migrate → rootfs-tar' }; },
     rowById: () => row,
     view: () => ({ id: 3 }),
     listEvents: () => [],
@@ -131,6 +139,18 @@ test('the agent router: the inventory is validated by the service, events are sh
 
     const fin = await post('/finish', { ok: true, bytes: 10 });
     assert.equal((await fin.json()).remove_self, true, 'the agent is told to delete itself');
+
+    // The transport switch: shape-checked here, decided by the service, and
+    // a refusal is a 409 that carries the service's reason.
+    const badSwitch = await post('/transport', { transport: 'carrier-pigeon' });
+    assert.equal(badSwitch.status, 400);
+    const sw = await post('/transport', { transport: 'rootfs-tar', reason: 'no incus-migrate' });
+    assert.equal(sw.status, 200);
+    assert.equal((await sw.json()).job.transport, 'rootfs-tar');
+    assert.deepEqual(svc.calls.filter((c) => c[0] === 'transport').at(-1)[1], { transport: 'rootfs-tar', reason: 'no incus-migrate' });
+    const refused = await post('/transport', { transport: 'incus-migrate' });
+    assert.equal(refused.status, 409);
+    assert.match((await refused.json()).error, /one fallback/);
 
     // A migration that does not transport by tarball refuses the upload.
     const rsyncSvc = fakeService({ authenticate: () => ({ row: { id: 4, transport: 'rsync', spec_json: '{}' } }) });

@@ -30,13 +30,14 @@ import {
   runnerHeartbeat, requeueJob, recordVerificationRung,
 } from './store.js';
 import {
-  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, EXCLUSIVE_JOB_KINDS, parseJson, sanitizeReason, parseOwner,
+  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, EXCLUSIVE_JOB_KINDS, LIFECYCLE_JOB_KINDS, parseJson, sanitizeReason, parseOwner,
   FencedError, CancelledError, verificationState, CREDENTIAL_USE_OUTCOMES,
 } from './logic.js';
 import { runDeployOperation, PreviousWriterAliveError, ContainmentUnavailableError } from './deploy-op.js';
 import { runRestoreDbOperation } from './restore-db-op.js';
 import { runRestoreSnapshotOperation } from './restore-snapshot-op.js';
 import { runRetrySecretsOperation } from './retry-secrets-op.js';
+import { runLifecycleOperation } from './lifecycle-op.js';
 import {
   unitStatusScript, parseUnitStatus, startUnitScript, parseStartUnit, portProbeScript, parsePortProbe,
   healthScript, parseHealth, activeKeyScript, credentialProbeScript, credentialVerdict, verificationFromObservations, DEFAULT_UNIT,
@@ -67,6 +68,9 @@ export function reconcile({ db, owner, nowMs = Date.now(), log = () => {} } = {}
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
       if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
       summary.interrupted.push(job.id);
+    } else if (d.action === 'record_uncertain') {
+      recordUncertainLifecycle(db, { job, lock, owner, reason: d.reason, nowMs });
+      summary.interrupted.push(job.id);
     } else if (d.action === 'verify') {
       const spec = verifyJobFrom(job, { nowIso: new Date(nowMs).toISOString() });
       const verify = createJob(db, { kind: spec.kind, app: spec.app, plan: spec.plan, configRefs: { origin: spec.plan.params.origin }, requestedBy: spec.requested_by, via: spec.via, reason: spec.reason, nowMs });
@@ -96,6 +100,23 @@ export function reconcile({ db, owner, nowMs = Date.now(), log = () => {} } = {}
   }
   if (summary.requeued.length || summary.interrupted.length || summary.recoveryQueued.length) log('reconcile', summary);
   return summary;
+}
+
+// recordUncertainLifecycle — a lifecycle verb (restart, create) whose command
+// was issued by an owner that died before reading the result. Never replayed:
+// the record says exactly what is unknown and how to look; the lease is
+// released because recovery_required IS the established outcome (there is no
+// in-guest application to recover on behalf of a generic guest).
+export function recordUncertainLifecycle(db, { job, lock, owner, reason, nowMs }) {
+  const cp = parseJson(job.checkpoint_json) || {};
+  const container = cp.container || job.app;
+  recordJobOutcome(db, {
+    id: job.id, status: 'recovery_required', outcome: 'interrupted_uncertain',
+    reason: `${reason}; the ${job.kind} of ${container} may or may not have taken effect — read 'incus list ${container} --format json' and decide; submit a new request if the state is not what you want (nothing is replayed automatically)`,
+    verification: { state: 'recovery_required', failedAt: 'resource_state', note: 'not verified: the owner died after issuing the command and before reading the resource back', next: `incus list ${container} --format json` },
+    by: owner, nowMs,
+  });
+  if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
 }
 
 // ── execute ─────────────────────────────────────────────────────────────
@@ -130,7 +151,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       return { status: 'requeued', outcome: 'lock_held', verification: null };
     }
     // A restore never runs later under a state nobody looked at: refused.
-    if (EXCLUSIVE_JOB_KINDS.includes(job.kind)) return fin('refused', 'lock_held', `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; the restore was refused before any change — submit it again when the holder has finished`);
+    if (EXCLUSIVE_JOB_KINDS.includes(job.kind)) return fin('refused', 'lock_held', `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; the ${job.kind} was refused before any change — submit it again when the holder has finished`);
     return fin('deferred', 'lock_held', `the app's lease is held by ${holder}${operation ? ` (${operation})` : ''}; retry when it finishes`);
   };
   const got = acquireLock(db, { app: job.app, owner, operation: job.kind, jobId: job.id, leaseMs: LEASE_MS, nowMs: lockNow });
@@ -173,7 +194,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       event('step', left == null ? 'stale-writer count unavailable; proceeding' : `${left} stale process group(s)/script(s) of other jobs signalled; none remain`, null, 'reap_previous_writer');
     }
 
-    if (['deploy', 'restore_db', 'restore_snapshot', 'retry_secrets'].includes(job.kind)) {
+    if (['deploy', 'restore_db', 'restore_snapshot', 'retry_secrets'].includes(job.kind) || LIFECYCLE_JOB_KINDS.includes(job.kind)) {
       const handle = {
         id: job.id,
         fence,
@@ -192,6 +213,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         const originJob = p.envCopy?.originJobId ? getJob(db, String(p.envCopy.originJobId)) : null;
         result = await runRestoreDbOperation({ params: { ...p, runDir }, exec: fencedExec, job: handle, originJob, reuse, log });
       } else if (job.kind === 'restore_snapshot') result = await runRestoreSnapshotOperation({ params: p, exec: fencedExec, job: handle, reuse, log });
+      else if (LIFECYCLE_JOB_KINDS.includes(job.kind)) result = await runLifecycleOperation({ kind: job.kind, params: p, exec: fencedExec, job: handle, prior: parseJson(job.checkpoint_json), log });
       else result = await runRetrySecretsOperation({ params: { ...p, runDir }, exec: fencedExec, job: handle, reuse, log });
       const late = (parseJson(getJob(db, job.id)?.progress_json) || {}).cancel_requested;
       if (late) event('cancel_declined', `cancel by ${late.by} arrived after the disruptive step; the ${job.kind} finished bringing the app up instead of leaving it down`);
@@ -218,7 +240,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
           pub.verificationJobId = follow.id;
         }
         recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, verification_job_id: verificationJobId, execution: result.skipped ? 'skipped' : okOutcome }, nowMs: nowMs() });
-        const summary = job.kind === 'deploy' ? `${container}: serving` : job.kind === 'restore_db' ? `${container}: database restored from ${rest.restored?.dump} (${rest.errors ?? '?'} error line(s); ${rest.compatibility?.mode})` : job.kind === 'restore_snapshot' ? `${container}: restored to ${rest.restoredTo}${rest.partial ? ' (root disk only; custom volumes NOT restored)' : ''}; pre-restore ${rest.preRestore?.name}` : `${container}: ${(rest.minted || []).length} secret(s) minted, ${(rest.deferred || []).length} deferred, ${(rest.reused || []).length} reused`;
+        const summary = job.kind === 'deploy' ? `${container}: serving` : LIFECYCLE_JOB_KINDS.includes(job.kind) ? `${container}: ${job.kind.replace('_', ' ')} → ${rest.instanceState}${rest.alreadyInState ? ' (already in that state; nothing issued)' : ''}${rest.resumedAfterIssue ? ' (resumed after an interrupted attempt)' : ''}${rest.warnings?.length ? `; ${rest.warnings.join('; ')}` : ''}` : job.kind === 'restore_db' ? `${container}: database restored from ${rest.restored?.dump} (${rest.errors ?? '?'} error line(s); ${rest.compatibility?.mode})` : job.kind === 'restore_snapshot' ? `${container}: restored to ${rest.restoredTo}${rest.partial ? ' (root disk only; custom volumes NOT restored)' : ''}; pre-restore ${rest.preRestore?.name}` : `${container}: ${(rest.minted || []).length} secret(s) minted, ${(rest.deferred || []).length} deferred, ${(rest.reused || []).length} reused`;
         const r = fin(
           result.skipped ? 'succeeded' : (verification?.state === 'recovery_required' ? 'recovery_required' : 'succeeded'),
           result.skipped ? 'skipped' : okOutcome,
@@ -237,8 +259,11 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         verificationJobId = follow.id;
         pub.verificationJobId = follow.id;
       }
-      recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, failed_step: result.step, execution: 'failed', verification_job_id: verificationJobId }, nowMs: nowMs() });
-      const r = fin('failed', `failed at ${result.step}`, `${result.error}${verificationJobId ? ` (post-failure verification queued: job ${verificationJobId})` : ''}`, verification || null);
+      recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, failed_step: result.step, execution: result.refused ? 'refused' : 'failed', verification_job_id: verificationJobId }, nowMs: nowMs() });
+      // A refusal before anything was issued (an invalid plan, a target that
+      // is not the one confirmed, a create over an existing name) is recorded
+      // as such, distinct from a command that ran and failed.
+      const r = fin(result.refused ? 'refused' : 'failed', result.refused ? result.step : `failed at ${result.step}`, `${result.error}${verificationJobId ? ` (post-failure verification queued: job ${verificationJobId})` : ''}`, verification || null);
       return { ...r, result, verificationJobId };
     }
 

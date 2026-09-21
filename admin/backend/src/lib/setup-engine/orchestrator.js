@@ -20,6 +20,8 @@ import { createJob, getJob, readLock, openJobsFor, cancelQueuedJob } from './sto
 import { validateRunnerJob, EXCLUSIVE_JOB_KINDS, MUTATING_JOB_KINDS, lockVerdict, parseJson, TERMINAL_STATUS } from './logic.js';
 import { executionMode, drainRunnerJobsInProcess, waitForJob } from './backend.js';
 
+const describe = (kind) => (kind === 'restore_db' || kind === 'restore_snapshot' ? 'the restore' : `the ${String(kind).replace('_', ' ')}`);
+
 export function submitRunnerJob(db, { kind, app, params, configRefs = {}, requestedBy = null, via = 'system', retryOf = null, reason = null, nowMs = Date.now() }) {
   const spec = { kind, app, plan: { steps: [], params: { ...params, container: app } } };
   const v = validateRunnerJob(spec);
@@ -29,11 +31,11 @@ export function submitRunnerJob(db, { kind, app, params, configRefs = {}, reques
     if (lock) {
       const verdict = lockVerdict({ lock, owner: null, nowMs });
       const holder = `${lock.operation} (${lock.owner})`;
-      if (verdict.reason === 'stale') return { error: `a previous ${lock.operation} for ${app} did not finish (holder ${lock.owner}); recovery is required before a restore — see the setup jobs for this app`, code: 'CONTAINER_LOCK_STALE', holder };
-      return { error: `${holder} is in progress for ${app} — the restore was refused before any change; submit it again when it finishes`, code: 'CONTAINER_BUSY', holder };
+      if (verdict.reason === 'stale') return { error: `a previous ${lock.operation} for ${app} did not finish (holder ${lock.owner}); recovery is required before ${describe(kind)} — see the setup jobs for this app`, code: 'CONTAINER_LOCK_STALE', holder };
+      return { error: `${holder} is in progress for ${app} — ${describe(kind)} was refused before any change; submit it again when it finishes`, code: 'CONTAINER_BUSY', holder };
     }
     const open = openJobsFor(db, app, [...MUTATING_JOB_KINDS]);
-    if (open.length) return { error: `${open[0].kind} job ${open[0].id} is ${open[0].status} for ${app} — the restore was refused before any change; submit it again when it finishes`, code: 'CONTAINER_BUSY', holder: `${open[0].kind} (${open[0].status})` };
+    if (open.length) return { error: `${open[0].kind} job ${open[0].id} is ${open[0].status} for ${app} — ${describe(kind)} was refused before any change; submit it again when it finishes`, code: 'CONTAINER_BUSY', holder: `${open[0].kind} (${open[0].status})` };
   }
   const job = createJob(db, { kind, app, plan: spec.plan, configRefs, requestedBy, via, retryOf, reason, nowMs });
   return { job };
@@ -50,19 +52,29 @@ export function resolveRetryOf(db, { jobId, app, kind }) {
   return { job: prior };
 }
 
-// runSubmittedJob(db, job, { store, deps, env, detach, onEvent, waitMs })
+// runSubmittedJob(db, job, { store, deps, env, detach, awaitKick, onEvent, waitMs })
 //   → { ok, step, jobId, executor, policy, queued?, refused?, ...result }
-export async function runSubmittedJob(db, job, { store = null, deps = null, env = process.env, detach = false, onEvent = null, waitMs = null, nowMs = () => Date.now() } = {}) {
+export async function runSubmittedJob(db, job, { store = null, deps = null, env = process.env, detach = false, awaitKick = false, onEvent = null, waitMs = null, nowMs = () => Date.now() } = {}) {
   const mode = executionMode(db, { env, nowMs: nowMs() });
   const jobId = job.id;
   if (mode.executor === 'none') {
     if (EXCLUSIVE_JOB_KINDS.includes(job.kind)) {
-      cancelQueuedJob(db, { id: jobId, outcome: 'runner_unavailable', reason: `no host runner is live (policy ${mode.policy.mode}); a restore is not left queued to run later under a state nobody looked at — it was refused before any change`, by: 'orchestrator', nowMs: nowMs() });
-      return { ok: false, step: 'runner_unavailable', refused: true, jobId, policy: mode.policy.mode, executor: 'none', error: `no host runner is live (policy ${mode.policy.mode}); the ${job.kind} was refused before any change — start proxypilot-setup-runner.service and submit it again` };
+      cancelQueuedJob(db, { id: jobId, outcome: 'runner_unavailable', reason: `no host runner is live (policy ${mode.policy.mode}); ${describe(job.kind)} is not left queued to run later under a state nobody looked at — it was refused before any change`, by: 'orchestrator', nowMs: nowMs() });
+      return { ok: false, step: 'runner_unavailable', refused: true, jobId, policy: mode.policy.mode, executor: 'none', error: `no host runner is live (policy ${mode.policy.mode}); ${describe(job.kind)} was refused before any change — start proxypilot-setup-runner.service and submit it again` };
     }
     return { ok: false, step: 'runner_unavailable', queued: true, jobId, policy: mode.policy.mode, executor: 'none', error: `no host runner is live (policy ${mode.policy.mode}); ${job.kind} job ${jobId} is queued and will run when proxypilot-setup-runner.service is back — see /api/setup/jobs/${jobId}` };
   }
-  if (detach) return { ok: true, submitted: true, jobId, executor: mode.executor, policy: mode.policy.mode, runner: mode.runner?.owner || null };
+  if (detach) {
+    // A detached submission under the in-process executor still has to be
+    // run by somebody: kick the drain without waiting for it (the periodic
+    // drain in index.js would pick it up later anyway).
+    if (mode.executor === 'backend' && deps) {
+      const kick = (async () => { await drainRunnerJobsInProcess(db, { ...deps, env, max: 3, nowMs }); await drainRunnerJobsInProcess(db, { ...deps, env, max: 3, nowMs, kinds: ['verify_app'] }); })();
+      kick.catch(() => {});
+      if (awaitKick) await kick;
+    }
+    return { ok: true, submitted: true, jobId, executor: mode.executor, policy: mode.policy.mode, runner: mode.runner?.owner || null };
+  }
   if (mode.executor === 'backend') {
     if (!deps) return { ok: false, step: 'submit', jobId, error: 'no in-process executor dependencies were supplied' };
     await drainRunnerJobsInProcess(db, { ...deps, env, max: 3, nowMs });

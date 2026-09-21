@@ -17,7 +17,7 @@
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { ownerIdentity, reconcileDecision, recoveryJobFrom, verifyJobFrom, parseJson, runnerIsLive, RUNNER_LIVE_MS, validateRunnerJob, TERMINAL_STATUS, executorPolicy, RUNNER_JOB_KINDS } from './logic.js';
-import { runOnce } from './executor.js';
+import { runOnce, recordUncertainLifecycle } from './executor.js';
 import {
   staleRunningJobs, readLock, releaseLock, markLockStale, recordJobOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners,
 } from './store.js';
@@ -41,6 +41,9 @@ export function sweepSetupEngineOnBoot(db, { owner = backendOwner(), nowMs = Dat
     if (d.action === 'record_interrupted') {
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
       if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      summary.interrupted.push(job.id);
+    } else if (d.action === 'record_uncertain') {
+      recordUncertainLifecycle(db, { job, lock, owner, reason: d.reason, nowMs });
       summary.interrupted.push(job.id);
     } else if (d.action === 'verify') {
       const spec = verifyJobFrom(job, { nowIso: new Date(nowMs).toISOString() });

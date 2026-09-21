@@ -1,5 +1,6 @@
-// The three platform operations that moved into runner jobs (A-13, A-14,
-// A-15), as the calls their surfaces make: each resolves REFERENCES on the
+// The platform operations that moved into runner jobs — the two restores and
+// the retry mint (A-13, A-14, A-15), then the Incus lifecycle and snapshot
+// verbs (A-17.2 … A-17.5) — as the calls their surfaces make: each resolves REFERENCES on the
 // server (the project, its guard, the recovery set's origin job, the prior
 // attempt for a retry), records the job through the orchestrator and
 // observes it to its outcome. The MCP tools, the dashboard route and the
@@ -11,6 +12,7 @@ import { inProcessExecutorDeps, resolveDeployParams } from './deploy.js';
 import { submitRunnerJob, resolveRetryOf, runSubmittedJob } from '../lib/setup-engine/orchestrator.js';
 import { DUMP_NAME_RE, ENV_COPY_NAME_RE, recoverySetOf, bindRecoverySet } from '../lib/setup-engine/restore-logic.js';
 import { getJob } from '../lib/setup-engine/store.js';
+import { LIFECYCLE_JOB_KINDS, LIFECYCLE_PROFILE, validateLifecycleParams } from '../lib/setup-engine/lifecycle-logic.js';
 import { createHash } from 'node:crypto';
 
 const noStore = () => ({ ok: false, step: 'submit', error: 'the setup engine store is not configured; the operation cannot be recorded, so it is not run' });
@@ -112,4 +114,78 @@ export async function retryProjectSecrets({ containerName, retryOf = null, reque
     return { ...out, refused: true, queued: false };
   }
   return out;
+}
+
+// ── the Incus lifecycle and snapshot verbs (A-17.2 … A-17.5) ──────────────
+//
+// One entry for the seven kinds. The caller names the kind, the guest and the
+// few validated parameters (force, snapshot, note, the launch plan, the
+// identity it confirmed); the job renders the fixed command. A start or a
+// restart of a MANAGED application (a project guest) gets the verification
+// ladder as a follow-up; any other guest is reported as Incus reads it.
+
+export const LIFECYCLE_ACTIONS = Object.freeze({ start: 'instance_start', stop: 'instance_stop', restart: 'instance_restart', delete: 'instance_delete' });
+export { LIFECYCLE_JOB_KINDS };
+
+// resolveLifecyclePlan(db, { kind, containerName, … }) → { ok, plan, params,
+// digest } | { ok: false, error }. Pure: the plan is what a confirmation
+// token is bound to (kind, guest, snapshot, force, the confirmed identity,
+// the launch parameters), and params is what the job carries.
+export function resolveLifecyclePlan(db, { kind, containerName, force = false, snapshot = null, note = null, expect = null, managed = false, webPort = null, guard = null, image = null, profile = null, config = null, vm = false, network = null, rootSize = null }) {
+  if (!LIFECYCLE_JOB_KINDS.includes(kind)) return { ok: false, error: `unknown lifecycle operation '${kind}'` };
+  const prof = LIFECYCLE_PROFILE[kind];
+  const params = { container: String(containerName || '') };
+  if (['instance_stop', 'instance_restart', 'instance_delete'].includes(kind) && force === true) params.force = true;
+  if (prof.target === 'snapshot') params.snapshot = snapshot == null ? '' : String(snapshot);
+  if (kind === 'snapshot_create' && note != null && String(note).trim() !== '') params.note = String(note);
+  if (expect && (expect.uuid != null || expect.created_at != null)) params.expect = { ...(expect.uuid != null ? { uuid: String(expect.uuid) } : {}), ...(expect.created_at != null ? { created_at: String(expect.created_at) } : {}) };
+  if (kind === 'instance_create') {
+    params.image = image == null ? '' : String(image);
+    if (profile) params.profile = String(profile);
+    if (config && typeof config === 'object') params.config = Object.fromEntries(Object.entries(config).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]));
+    if (vm === true) params.vm = true;
+    if (network) params.network = String(network);
+    if (rootSize) params.rootSize = String(rootSize);
+  }
+  if (managed === true && (kind === 'instance_start' || kind === 'instance_restart')) {
+    params.managed = true; params.webPort = Number(webPort) || 3000; params.unit = 'mock2-dev.service'; params.environmentFile = '/etc/environment'; params.guard = guard || null;
+  }
+  const v = validateLifecycleParams(kind, params);
+  if (!v.ok) return { ok: false, error: v.reason };
+  const plan = { kind, container: params.container, ...(params.snapshot ? { snapshot: params.snapshot } : {}), force: params.force === true, expect: params.expect || null, ...(kind === 'instance_create' ? { image: params.image, profile: params.profile || 'default', config: params.config || {}, vm: params.vm === true, network: params.network || null, root_size: params.rootSize || null } : {}) };
+  return { ok: true, plan, params, digest: planDigest(plan) };
+}
+
+// runLifecycle({ kind, containerName, …, detach, onEvent }) → the outcome
+// every caller reports: { ok, step, jobId, instanceState, verified, … } or
+// { ok: false, step, error, code?, jobId? }. Refused (never queued) while the
+// guest's lease is held or a mutating job is open, and when no executor is
+// available. `managed` is resolved here from the project registry for a
+// start / restart: a project guest gets the ladder as a follow-up.
+export async function runLifecycle({ kind, containerName, force = false, snapshot = null, note = null, expect = null, image = null, profile = null, config = null, vm = false, network = null, rootSize = null, requestedBy = null, via = 'system', onEvent = null, detach = false, awaitKick = false, waitMs = null }) {
+  const store = containerLockStore();
+  if (!store) return noStore();
+  const db = store.getDb();
+  let managed = false; let webPort = null; let guard = null;
+  if (kind === 'instance_start' || kind === 'instance_restart') {
+    try { const refs = await resolveDeployParams({ containerName }); managed = refs.projectId != null; webPort = refs.webPort; guard = refs.guard || null; } catch { managed = false; }
+  }
+  const res = resolveLifecyclePlan(db, { kind, containerName, force, snapshot, note, expect, managed, webPort, guard, image, profile, config, vm, network, rootSize });
+  if (!res.ok) return { ok: false, step: 'plan', code: 'INVALID', error: res.error };
+  const sub = submitRunnerJob(db, { kind, app: res.params.container, params: res.params, configRefs: { ...res.plan, kind: undefined, managed }, requestedBy, via });
+  if (sub.error) return { ok: false, step: 'submit', error: sub.error, code: sub.code, holder: sub.holder };
+  return runSubmittedJob(db, sub.job, { store, deps: inProcessExecutorDeps(store), env: store.env || process.env, onEvent, detach, awaitKick, waitMs });
+}
+
+// lifecycleHttpStatus(out) → the HTTP status a REST route answers a failed
+// runLifecycle with: 409 for a held guest or a changed target, 503 for no
+// executor, 404 for a missing resource, 400 for an invalid plan, 500 else.
+export function lifecycleHttpStatus(out) {
+  if (!out || out.ok) return 200;
+  if (out.code === 'CONTAINER_BUSY' || out.code === 'CONTAINER_LOCK_STALE') return 409;
+  if (out.code === 'INVALID') return 400;
+  if (out.step === 'runner_unavailable') return 503;
+  if (out.notFound) return 404;
+  if (out.step === 'target' || (out.step === 'query' && out.refused)) return 409;
+  return 500;
 }

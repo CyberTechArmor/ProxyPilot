@@ -15,7 +15,7 @@ const PROXYPILOT_BIN = process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot'
 
 import { exportStore } from '../../lib/lxc-exports-instance.js';
 import { restoreHazards, restoreNotes } from '../../lib/lxc-exports.js';
-import { restoreSnapshot, resolveRestoreSnapshotPlan } from '../../mock2/ops.js';
+import { restoreSnapshot, resolveRestoreSnapshotPlan, runLifecycle, planDigest } from '../../mock2/ops.js';
 import { containerLockStore } from '../../mock2/container-lock.js';
 import { snapshotCoverage } from '../../lib/setup-engine/restore-logic.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../../lib/export-compression.js';
@@ -25,7 +25,7 @@ export function createLxcAdminHandlers(kit) {
   const {
     getDb, runHostCapture, LXC_PREFIX, LXC_NAME_REGEX, validLxcFilePath, validTargetDir,
     takeLxcSnapshot, fetchLxcInstance, lxcContainerDetail, defaultSnapshotName, validSnapshotName,
-    snapshotArgv, resolveSnapshotCliForm, takeUploadTicket, findOrCreateLxcService, regenerateDomainCaddyConfig,
+    takeUploadTicket, findOrCreateLxcService, regenerateDomainCaddyConfig,
     caddyReload, LXC_LIST_CAPTURE_CAP,
   } = ctx;
   // Export tarballs go to the managed ZFS exports dataset when one is mounted
@@ -111,9 +111,13 @@ export function createLxcAdminHandlers(kit) {
       return err(`Refusing to delete ${name}: it has no snapshot. Take one with snapshot_lxc_container first — the snapshot is what the export tarball is cut from, and deleting a guest that was never snapshotted leaves nothing to come back to.`);
     }
     const bound = getDb().prepare(`SELECT DISTINCT r.domain FROM service_http_routes r JOIN services s ON s.id = r.service_id WHERE s.lxc_container_name = ?`).all(name).map((r) => r.domain);
-    const plan = { container: name, status: inst.detail.status, snapshots: snapshots.map((s) => s.name), routes_removed: bound, export: wantExport ? `${EXPORTS}/lxc-${name}-<timestamp>.tar.zst (the exports.compression setting picks the compressor)` : 'SKIPPED (export: false)' };
+    // The identity the confirmation binds and the job revalidates before the
+    // delete: a guest recreated under the same name is a different guest.
+    const identity = { uuid: inst.instance?.config?.['volatile.uuid'] || null, created_at: inst.detail.created_at || null };
+    const digest = planDigest({ container: name, identity, export: wantExport, force: args.force === true });
+    const plan = { container: name, status: inst.detail.status, identity, snapshots: snapshots.map((s) => s.name), routes_removed: bound, export: wantExport ? `${EXPORTS}/lxc-${name}-<timestamp>.tar.zst (the exports.compression setting picks the compressor)` : 'SKIPPED (export: false)', then: 'a setup-engine job stops the guest (force: true stops it hard) and deletes it under its lease, verifying it is gone; refused while a deploy or restore holds it' };
     const d = dry(args, plan); if (d) return d;
-    const gate = confirmToken(args, auth, note, { tool: 'delete_lxc_container', subject: name, action: `delete container ${name} (${bound.length} route(s) removed, ${snapshots.length} snapshot(s) lost with it)`, preview: plan });
+    const gate = confirmToken(args, auth, note, { tool: 'delete_lxc_container', subject: `${name}/${digest}`, action: `delete container ${name} (${bound.length} route(s) removed, ${snapshots.length} snapshot(s) lost with it)`, preview: plan });
     if (gate) return gate;
     let exported = null;
     if (wantExport) {
@@ -123,12 +127,15 @@ export function createLxcAdminHandlers(kit) {
     } else {
       note.detail.export_skipped = true;
     }
-    if (inst.detail.status === 'Running') {
-      const stop = await runHostCapture('incus', ['stop', incus(name), ...(args.force === true ? ['--force'] : [])], { timeoutMs: 180000 });
-      if (stop.status !== 0) return err(`Could not stop ${name} cleanly (${tail(stop.stderr) || 'timed out'}). Pass force: true to stop it hard, or stop it yourself first.${exported ? ` Export kept at ${exported.file}.` : ''}`);
+    // Stop and delete as ONE runner job (`instance_delete`) under the guest's
+    // lease, bound to the identity confirmed above; the job reads the guest
+    // back as gone before it reports deleted, and its record outlives the guest.
+    const del = await runLifecycle({ kind: 'instance_delete', containerName: incus(name), force: args.force === true, expect: identity, requestedBy: auth?.name || null, via: 'mcp' });
+    if (!del.ok) {
+      if (del.step === 'stop') return err(`Could not stop ${name} cleanly (${del.error}). Pass force: true to stop it hard, or stop it yourself first.${exported ? ` Export kept at ${exported.file}.` : ''}`, { job_id: del.jobId || null });
+      return err(`${del.error}${del.jobId ? ` (job ${del.jobId})` : ''}${exported ? ` Export kept at ${exported.file}.` : ''}`, del.jobId ? { job_id: del.jobId, step: del.step, refused: !!del.refused } : null);
     }
-    const del = await runHostCapture('incus', ['delete', incus(name)], { timeoutMs: 300000 });
-    if (del.status !== 0) return err(`incus delete failed: ${tail(del.stderr)}${exported ? ` Export kept at ${exported.file}.` : ''}`);
+    note.detail.job_id = del.jobId;
     const db = getDb();
     const cleanup = { domains_rerendered: [], errors: [] };
     try {
@@ -141,7 +148,7 @@ export function createLxcAdminHandlers(kit) {
     } catch (e) { cleanup.errors.push(e?.message || String(e)); }
     note.summary = `deleted container ${name}`;
     note.detail = { ...note.detail, routes_removed: bound, export: exported?.file || null };
-    return ok({ deleted: true, container: name, export: exported, routes_removed: bound, ...cleanup, reverse_with: exported ? `import_lxc({ name: "${name}", file: "${exported.file.slice(EXPORTS.length + 1)}", confirm: true })` : null });
+    return ok({ deleted: true, container: name, job_id: del.jobId, export: exported, routes_removed: bound, ...cleanup, reverse_with: exported ? `import_lxc({ name: "${name}", file: "${exported.file.slice(EXPORTS.length + 1)}", confirm: true })` : null });
   });
 
   const clone_lxc_container = mutation('clone_lxc_container', { subjectType: 'lxc' }, async (args, auth, req, note) => {
@@ -308,16 +315,18 @@ export function createLxcAdminHandlers(kit) {
     if (!snap) return err('snapshot is required');
     const inst = await instanceOrError(name);
     if (inst.error) return err(inst.error);
-    if (!inst.detail.snapshots.some((s) => s.name === snap)) return err(`Snapshot ${snap} does not exist on ${name}`);
-    const plan = { container: name, delete: snap, remaining: inst.detail.snapshots.filter((s) => s.name !== snap).map((s) => s.name) };
+    const target = inst.detail.snapshots.find((s) => s.name === snap);
+    if (!target) return err(`Snapshot ${snap} does not exist on ${name}`);
+    const plan = { container: name, delete: snap, created_at: target.created_at || null, remaining: inst.detail.snapshots.filter((s) => s.name !== snap).map((s) => s.name), then: 'a setup-engine job deletes the snapshot under the guest\'s lease and reads it back as gone' };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmFlag(args, note, `This deletes snapshot ${snap} of ${name}; ${plan.remaining.length} snapshot(s) remain.`); if (gate) return gate;
-    const form = await resolveSnapshotCliForm();
-    const r = await runHostCapture('incus', snapshotArgv('delete', incus(name), snap, form), { timeoutMs: 5 * 60 * 1000 });
-    if (r.status !== 0) return err(`incus snapshot delete failed: ${tail(r.stderr) || 'unknown error'}`);
-    note.summary = `deleted snapshot ${snap} of ${name}`;
-    note.detail = plan;
-    return ok({ deleted: true, container: name, snapshot: snap, remaining: plan.remaining });
+    // The job (`snapshot_delete`) is bound to the snapshot's timestamp: a
+    // snapshot recreated under the same name since this listing is refused.
+    const out = await runLifecycle({ kind: 'snapshot_delete', containerName: incus(name), snapshot: snap, expect: target.created_at ? { created_at: target.created_at } : null, requestedBy: auth?.name || null, via: 'mcp' });
+    if (!out.ok) return err(`${out.error}${out.jobId ? ` (job ${out.jobId})` : ''}`, out.jobId ? { job_id: out.jobId, step: out.step, refused: !!out.refused } : null);
+    note.summary = `deleted snapshot ${snap} of ${name} (job ${out.jobId})`;
+    note.detail = { ...plan, job_id: out.jobId };
+    return ok({ deleted: true, container: name, snapshot: snap, job_id: out.jobId, remaining: plan.remaining });
   });
 
   /* -------------------------- resources / devices ------------------------- */

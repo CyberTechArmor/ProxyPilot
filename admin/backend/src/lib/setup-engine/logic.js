@@ -23,6 +23,8 @@
 //            the recorded failure to climb it. Nothing is "recovered" because
 //            a port opened.
 
+import { validateLifecycleParams } from './lifecycle-logic.js';
+
 export const HOLDER_KINDS = Object.freeze(['backend', 'runner', 'cli']);
 
 // Thrown by a job's fence when its owner or epoch moved: the executor stops
@@ -56,13 +58,18 @@ export const VIA = Object.freeze(['ui', 'cli', 'mcp', 'runner', 'system']);
 // claimed by it — the browser-facing API can only ask for one of these, and
 // none of them takes a command, a path outside the guest, or a value that is
 // a secret.
-export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets']);
-// The kinds that MUTATE a guest or its storage: one at a time per app, and a
-// restore is refused (never queued behind) while any of them is open.
-export const MUTATING_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets']);
-// A restore is destructive: it never waits for a held lease (it would run
-// minutes later under a state its operator never looked at) — refused.
-export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapshot']);
+// The Incus lifecycle and snapshot verbs (A-17.2 … A-17.5) are runner jobs
+// too; their parameters and fixed commands live in lifecycle-logic.js.
+export const LIFECYCLE_JOB_KINDS = Object.freeze(['instance_create', 'instance_start', 'instance_stop', 'instance_restart', 'instance_delete', 'snapshot_create', 'snapshot_delete']);
+export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS]);
+// The kinds that MUTATE a guest or its storage: one at a time per app, and an
+// exclusive kind is refused (never queued behind) while any of them is open.
+export const MUTATING_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS]);
+// A restore is destructive, and a lifecycle verb is an operator's immediate
+// action on a guest: neither waits for a held lease (it would run minutes
+// later under a state its operator never looked at) — refused, and refused
+// again rather than queued when no executor is available.
+export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapshot', ...LIFECYCLE_JOB_KINDS]);
 // Job kinds the BACKEND records for the operations it still executes itself
 // (they hold the same lock; the runner recovers them when the backend dies).
 // The two restores and the retry mint moved to the runner (A-13…A-15);
@@ -313,6 +320,14 @@ export function reconcileDecision({ job, lock = null, nowMs, canAct = true, runn
   if (runnerKinds.includes(job.kind) && cp.resumable === true && !disruptive && canAct) {
     return { action: 'resume', reason: `owner ${job.owner} is gone; checkpoint '${cp.phase || job.phase || '?'}' is resumable` };
   }
+  if (disruptive && cp.lifecycle === true) {
+    // A lifecycle verb whose command was issued and is never replayed
+    // (restart, create): the outcome is unknown to the record, no in-guest
+    // recovery applies (there may be no application at all), and nothing is
+    // issued again. Recovery required is the explicit outcome; the lease is
+    // released with it.
+    return { action: 'record_uncertain', reason: `owner ${job.owner} is gone after '${cp.phase || job.phase}' with the ${job.kind} command issued and its result unread; it is not replayed`, releaseLock: !!lock && lock.owner === job.owner };
+  }
   if (!disruptive && cp.unit_swapped === true && !cp.verification_state) {
     // The new unit was started and the owner died before verification: the
     // stopped-app marker is clear, but the verification is unfinished and the
@@ -429,6 +444,10 @@ export function validateRunnerJob(job) {
   if (job.kind === 'restore_snapshot') {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(String(p.snapshot || ''))) return { ok: false, reason: 'snapshot must be a snapshot name' };
     if (p.acceptPartial != null && typeof p.acceptPartial !== 'boolean') return { ok: false, reason: 'acceptPartial must be a boolean' };
+  }
+  if (LIFECYCLE_JOB_KINDS.includes(job.kind)) {
+    const lv = validateLifecycleParams(job.kind, p);
+    if (!lv.ok) return lv;
   }
   const flat = JSON.stringify(plan);
   if (flat !== JSON.stringify(redact(plan))) return { ok: false, reason: 'the plan carries a value that looks like a secret; plans carry references only' };

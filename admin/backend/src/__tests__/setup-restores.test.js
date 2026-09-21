@@ -233,8 +233,8 @@ test('artifacts: a failed capture is reported as none, never as an artifact; rev
 });
 
 test('validation: the new kinds are runner jobs with reference-only parameters; a path, a value or a missing origin is refused', () => {
-  assert.deepEqual([...RUNNER_JOB_KINDS].slice(4), ['restore_db', 'restore_snapshot', 'retry_secrets']);
-  assert.deepEqual([...EXCLUSIVE_JOB_KINDS], ['restore_db', 'restore_snapshot']);
+  assert.deepEqual([...RUNNER_JOB_KINDS].slice(4, 7), ['restore_db', 'restore_snapshot', 'retry_secrets'], 'the lifecycle kinds follow (A-17; setup-lifecycle.test.js)');
+  assert.deepEqual([...EXCLUSIVE_JOB_KINDS].slice(0, 2), ['restore_db', 'restore_snapshot']);
   const ok = (kind, params) => validateRunnerJob({ kind, app: 'pp-x', plan: { params: { container: 'pp-x', ...params } } });
   assert.equal(ok('restore_db', { dump: { name: 'app-x.sql' } }).ok, true);
   assert.match(ok('restore_db', { dump: { name: '../app-x.sql' } }).reason, /dump\.name/);

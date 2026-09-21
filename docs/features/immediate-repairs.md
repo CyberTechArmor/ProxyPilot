@@ -111,12 +111,17 @@ app's own role means the probe sees what that role sees, and a policy can
 hide rows without an error — a misleading empty result. So the probe first
 reads the table's flags and the role's standing (`relrowsecurity`,
 `relforcerowsecurity`, superuser or `BYPASSRLS`, ownership) and reports
-`off`, `bypass`, `owner` or `on`. On `on` it stops with its own state, the
-decision defers naming the remedy, and `MASTERKEY_ROWS` reads 500. The seed
-component does not enable row security on `auth_connections` and the app
-connects as the table's owner, so on a generated app the check reads `off`
-and the visibility question is closed; the check exists for the app that
-adds a policy later.
+`off`, `bypass`, `owner` or `on`. Ownership exempts a role only while
+`FORCE ROW LEVEL SECURITY` is off: on a forced table the owner is subject to
+the policies like anyone else, so the probe reads `on` for it unless the role
+independently bypasses (superuser or `BYPASSRLS`, which win first). On `on`
+it stops with its own state, the decision defers naming the remedy, and
+`MASTERKEY_ROWS` reads 500. The expression is executed in the suite over all
+32 combinations of those flags (`mock2-auth-data.test.js`, in-memory SQL),
+the owner-under-FORCE case included. The seed component does not enable row
+security on `auth_connections` and the app connects as the table's owner, so
+on a generated app the check reads `off` and the visibility question is
+closed; the check exists for the app that adds a policy later.
 
 "Newly provisioned" is a **positive** identification, not an inference: only
 the provision path may say it, and only for a container created in that run
@@ -332,7 +337,10 @@ and the question does not arise.
 Test evidence: full backend suite on this branch versus the same main commit
 (`83c0dff3`) in the same sandbox — **no additional failures compared with the
 baseline**; the ten documented `ERR_MODULE_NOT_FOUND` files fail on both
-(2653 of 2673 tests pass on the final tree). The probe shell is
+The final tree's tally is 2674 tests: 2654 pass, 10 fail, **10 skipped** —
+nine Playwright-driven tests that skip themselves when Playwright is not
+installed, and the ZFS loop-device integration test, which runs only with
+`PROXYPILOT_STORAGE_INTEGRATION=1`. The baseline on `main@83c0dff3` in the same sandbox is 2624 tests: 2604 pass, 10 fail, 10 skipped — the identical ten skipped tests and the identical ten failing files The probe shell is
 executed in the suite under `dash` with a stub `psql`, the same `/bin/sh` a
 Debian or Ubuntu guest runs it with.
 The component's `src/auth` (20 non-test files) typechecks under `strict` +

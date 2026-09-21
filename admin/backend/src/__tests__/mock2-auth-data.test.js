@@ -119,6 +119,39 @@ test('the probe shell parses a URL the way the app would (executed locally with 
   }
 });
 
+test('the row-security expression, executed: FORCE ROW LEVEL SECURITY subjects the owner unless the role independently bypasses', async (t) => {
+  // The CASE the probe sends to PostgreSQL is evaluated here, as SQL, over
+  // every combination of the five flags it reads — the same CASE/NOT/AND/OR
+  // semantics — so the owner-under-FORCE case is proven, not pattern-matched.
+  let DatabaseSync = null;
+  try { ({ DatabaseSync } = await import('node:sqlite')); } catch { /* older Node */ }
+  if (!DatabaseSync) { t.skip('node:sqlite not available'); return; }
+  const m = /rls=\$\(q "SELECT (CASE .*? END) FROM pg_class c, pg_roles r WHERE/.exec(authDataProbeScript(GUARD));
+  assert.ok(m, 'the probe reads the row-security standing before the rows');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE c (relrowsecurity INTEGER, relforcerowsecurity INTEGER, relowner INTEGER); CREATE TABLE r (oid INTEGER, rolsuper INTEGER, rolbypassrls INTEGER)');
+  const q = db.prepare(`SELECT ${m[1]} AS v FROM c, r`);
+  const seen = new Set();
+  for (let bits = 0; bits < 32; bits++) {
+    const rls = bits & 1, force = (bits >> 1) & 1, owner = (bits >> 2) & 1, sup = (bits >> 3) & 1, bypass = (bits >> 4) & 1;
+    db.exec('DELETE FROM c; DELETE FROM r');
+    db.prepare('INSERT INTO c VALUES (?, ?, ?)').run(rls, force, owner ? 10 : 20);
+    db.prepare('INSERT INTO r VALUES (10, ?, ?)').run(sup, bypass);
+    const expected = !rls ? 'off' : (sup || bypass) ? 'bypass' : (owner && !force) ? 'owner' : 'on';
+    const got = q.get().v;
+    assert.equal(got, expected, `rls=${rls} force=${force} owner=${owner} super=${sup} bypassrls=${bypass}`);
+    seen.add(got);
+  }
+  assert.deepEqual([...seen].sort(), ['bypass', 'off', 'on', 'owner']);
+  // The review's case, spelled out: owner of a FORCEd table with no bypass → on (the probe defers); with BYPASSRLS → bypass.
+  db.exec('DELETE FROM c; DELETE FROM r; INSERT INTO c VALUES (1, 1, 10); INSERT INTO r VALUES (10, 0, 0)');
+  assert.equal(q.get().v, 'on');
+  db.exec('UPDATE r SET rolbypassrls = 1');
+  assert.equal(q.get().v, 'bypass');
+  db.exec('UPDATE r SET rolbypassrls = 0; UPDATE c SET relforcerowsecurity = 0');
+  assert.equal(q.get().v, 'owner');
+});
+
 test('parseAuthDataProbe: no table, no database, empty, rows, remote, and the unknowns — with the database named', () => {
   assert.equal(parseAuthDataProbe('DB:app\nERR:ERROR:  relation "auth_connections" does not exist\nPROBE:error\n').state, 'no_table');
   assert.match(parseAuthDataProbe('DB:app\nERR:ERROR:  relation "auth_connections" does not exist\nPROBE:error\n').detail, /database app/);

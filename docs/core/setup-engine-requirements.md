@@ -69,21 +69,26 @@ process environment.
 
 ## Deliverables, in order
 
-1. **Non-destructive root recovery command**, tested independently of the
-   dashboard (replaces the destructive `reset.sh` path recorded in
-   `docs/known-issues.md`).
-2. **Persistent host runner**, shared operation locks (R1) and failure
-   recovery (R2, R4).
-3. **Saved setup plan and progress API**, including meaningful failed,
-   deferred and recovery states (R3, R4). Server-side state only: the browser
+1. **Non-destructive root recovery command** that preserves data and
+   encryption keys, tested independently of the dashboard (replaces the
+   destructive `reset.sh` path recorded in `docs/known-issues.md`).
+2. **Independent host runner**, with the planned privilege separation: the
+   runner, not the privileged backend container, is what executes host
+   operations.
+3. **Persistent setup engine and shared locks that survive backend
+   restarts** (R1, R2, R4): saved operations, resumption or recorded recovery
+   on start.
+4. **Setup APIs and the frontend wizard** (R3, R4): progress, deferred
+   actions, retries and recovery states. Server-side state only: the browser
    never declares an installation fresh or an operation complete.
-4. **Frontend wizard** using those operations (R3).
-5. **Service installation and identity migration** (Keycloak linking,
-   step-up), with activation gated on a successful login and the recovery
-   checks.
+5. **Service adapters and identity integration** (Keycloak linking, step-up,
+   with activation gated on a successful login and the recovery checks),
+   followed by **app provisioning automation** (registry, shared
+   integrations, coordinated lifecycle).
 
-Privilege separation for the backend remains a production prerequisite,
-outside this list.
+The persistent runner (2–3) is the main development focus once gate one's
+last check is resolved; the real-host acceptance work for gate one runs
+separately from these code milestones.
 
 ## Status
 

@@ -3893,9 +3893,15 @@ lxcRouter.post('/containers/:name/reboot', async (req, res) => {
 });
 
 // POST /containers/:name/resize - Resize container resource limits
+// A setup-engine job (`config_set`, docs/features/setup-engine.md § "The
+// guest configuration verbs"): the runner sets the allowlisted limits under
+// the guest's lease and reads every key back before it reports done; the
+// prior values are recorded on the job (a live limit, reversible — no
+// snapshot, as this route never took one). The inputs are validated here
+// and again by the runner; nothing is interpolated into a shell any more.
 lxcRouter.post('/containers/:name/resize', async (req, res) => {
   const { name } = req.params;
-  const { cpu, memory } = req.body;
+  const { cpu, memory } = req.body || {};
 
   if (!validateName(name)) {
     return res.status(400).json({
@@ -3904,30 +3910,41 @@ lxcRouter.post('/containers/:name/resize', async (req, res) => {
     });
   }
 
-  if (!cpu && !memory) {
+  if (cpu == null && memory == null) {
     return res.status(400).json({
       success: false,
       error: 'At least one of cpu or memory must be provided.',
     });
   }
+  const changes = [];
+  if (cpu != null) {
+    const n = Number(cpu);
+    if (!Number.isInteger(n) || n < 1 || n > 256) return res.status(400).json({ success: false, error: 'cpu must be a whole number of vCPUs (1–256).' });
+    changes.push({ key: 'limits.cpu', value: String(n) });
+  }
+  if (memory != null) {
+    const n = Number(memory);
+    if (!Number.isInteger(n) || n < 64 || n > 1048576) return res.status(400).json({ success: false, error: 'memory must be a whole number of MB (64–1048576).' });
+    changes.push({ key: 'limits.memory', value: `${n}MB` });
+  }
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-
-    if (cpu) {
-      await execOnHost(`incus config set ${incusName} limits.cpu=${cpu}`);
-    }
-    if (memory) {
-      await execOnHost(`incus config set ${incusName} limits.memory=${memory}MB`);
-    }
+    const { runGuestConfig } = await import('../mock2/ops.js');
+    const out = await runGuestConfig({ kind: 'config_set', containerName: incusName, changes, requestedBy: req.user?.username || null, via: 'ui' });
+    if (!out.ok) return lifecycleFailure(res, out, `Failed to resize container '${name}'`);
 
     res.json({
       success: true,
       message: `Container '${name}' resource limits updated.`,
       config: {
-        cpu: cpu || 'unchanged',
-        memory: memory ? `${memory}MB` : 'unchanged',
+        cpu: cpu != null ? String(Number(cpu)) : 'unchanged',
+        memory: memory != null ? `${Number(memory)}MB` : 'unchanged',
       },
+      jobId: out.jobId,
+      verified: true,
+      applied: out.applied || null,
+      previous: out.previous?.config || null,
     });
   } catch (error) {
     res.status(500).json({

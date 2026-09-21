@@ -14,6 +14,7 @@ import { DUMP_NAME_RE, ENV_COPY_NAME_RE, recoverySetOf, bindRecoverySet } from '
 import { getJob } from '../lib/setup-engine/store.js';
 import { LIFECYCLE_JOB_KINDS, LIFECYCLE_PROFILE, validateLifecycleParams } from '../lib/setup-engine/lifecycle-logic.js';
 import { SETUP_PHASES, validateSetupParams, createStatusView, normalizeServices, BACKEND_STEP_KINDS } from '../lib/setup-engine/setup-logic.js';
+import { CONFIG_JOB_KINDS, SNAPSHOT_KINDS, validateConfigParams } from '../lib/setup-engine/config-logic.js';
 import { drainBackendSteps, waitForJob } from '../lib/setup-engine/backend.js';
 import { listJobs, jobView } from '../lib/setup-engine/store.js';
 import { createHash } from 'node:crypto';
@@ -232,6 +233,86 @@ export async function runGuestSetup({ containerName, phases, expect = null, init
   return runSubmittedJob(db, sub.job, { store, deps: inProcessExecutorDeps(store), env: store.env || process.env, onEvent, detach, awaitKick, waitMs });
 }
 
+// ── the guest configuration verbs (A-17.8) ────────────────────────────────
+//
+// One entry for the seven kinds: the caller names the kind, the guest, the
+// identity it confirmed and the few validated parameters (allowlisted config
+// keys and values, a device's properties, the address, the forward's ports,
+// the egress service); the job renders every command, takes the pre-change
+// snapshot the plan names before it changes anything, and reads the
+// requested state back before it reports done. Exclusive like a lifecycle
+// verb: refused, never queued, while the guest is busy or no executor is
+// live.
+
+export { CONFIG_JOB_KINDS };
+
+const identityOf = (expect) => (expect && (expect.uuid != null || expect.created_at != null) ? { ...(expect.uuid != null ? { uuid: String(expect.uuid) } : {}), ...(expect.created_at != null ? { created_at: String(expect.created_at) } : {}) } : null);
+
+// resolveConfigPlan(db, { kind, containerName, … }) → { ok, plan, params,
+// digest, retryJob } | { ok: false, error }. Pure: the plan is what a
+// confirmation is bound to, params what the job carries.
+export function resolveConfigPlan(db, { kind, containerName, expect = null, changes = null, rootSize = null, acknowledgeRisk = false, snapshot = null, device = null, deviceType = null, props = null, ip = null, previous = null, forward = null, bridgeIp = null, serviceTag = null, reserved = null, action = null, service = null, reason = null, retryOf = null }) {
+  if (!CONFIG_JOB_KINDS.includes(kind)) return { ok: false, error: `unknown configuration operation '${kind}'` };
+  const r = resolveRetryOf(db, { jobId: retryOf, app: containerName, kind });
+  if (r.error) return { ok: false, error: r.error };
+  const params = { container: String(containerName || '') };
+  const id = identityOf(expect);
+  if (id) params.expect = id;
+  if (acknowledgeRisk === true) params.acknowledgeRisk = true;
+  if (snapshot && SNAPSHOT_KINDS.includes(kind)) params.snapshot = { name: String(typeof snapshot === 'object' ? snapshot.name : snapshot) };
+  switch (kind) {
+    case 'config_set':
+      if (Array.isArray(changes)) params.changes = changes.map((c) => ({ key: String(c?.key ?? ''), value: String(c?.value ?? '') }));
+      if (rootSize != null) params.rootSize = String(rootSize);
+      break;
+    case 'device_add':
+      params.device = String(device || ''); params.deviceType = String(deviceType || '');
+      params.props = Object.fromEntries(Object.entries(props || {}).filter(([, v]) => v != null && v !== false).map(([k, v]) => [k, v === true ? 'true' : String(v)]));
+      break;
+    case 'device_remove': params.device = String(device || ''); break;
+    case 'network_pin': params.ip = String(ip || ''); if (previous) params.previous = String(previous); break;
+    case 'forward_apply': case 'forward_remove': {
+      const f = forward || {};
+      params.forward = { id: String(f.id || ''), proto: f.proto, listen: Number(f.listen), connect: Number(f.connect), ...(f.listenEnd != null ? { listenEnd: Number(f.listenEnd) } : {}), ...(f.connectEnd != null ? { connectEnd: Number(f.connectEnd) } : {}), ...(f.description ? { description: String(f.description) } : {}) };
+      if (kind === 'forward_apply') params.bridgeIp = String(bridgeIp || '');
+      if (serviceTag) params.serviceTag = String(serviceTag);
+      params.reserved = Array.isArray(reserved) ? reserved.map((x) => [Number(x?.[0]), Number(x?.[1])]) : [];
+      break;
+    }
+    case 'egress_set': params.action = String(action || ''); params.service = String(service || ''); if (reason) params.reason = String(reason); break;
+    default: break;
+  }
+  if (r.job) params.retryOf = r.job.id;
+  const v = validateConfigParams(kind, params);
+  if (!v.ok) return { ok: false, error: v.reason };
+  const plan = {
+    kind, container: params.container, expect: params.expect || null, snapshot: params.snapshot?.name || null, retry_of: r.job?.id || null,
+    ...(kind === 'config_set' ? { changes: params.changes || [], root_size: params.rootSize || null, acknowledge_risk: params.acknowledgeRisk === true } : {}),
+    ...(kind === 'device_add' ? { device: params.device, type: params.deviceType, props: params.props } : {}),
+    ...(kind === 'device_remove' ? { device: params.device } : {}),
+    ...(kind === 'network_pin' ? { ip: params.ip, previous: params.previous || null } : {}),
+    ...(kind === 'forward_apply' || kind === 'forward_remove' ? { forward: params.forward, bridge_ip: params.bridgeIp || null, service_tag: params.serviceTag || null, reserved: params.reserved } : {}),
+    ...(kind === 'egress_set' ? { action: params.action, service: params.service, reason: params.reason || null } : {}),
+  };
+  return { ok: true, plan, params, retryJob: r.job, digest: planDigest(plan) };
+}
+
+// runGuestConfig({ kind, containerName, …, requestedBy, via }) → the outcome
+// every caller reports: { ok, step, jobId, applied, snapshot, previous,
+// instanceState, … } or { ok: false, step, error, code?, jobId? }. Refused
+// (never queued) while the guest's lease is held or a mutating job is open,
+// and when no executor is available.
+export async function runGuestConfig({ kind, containerName, requestedBy = null, via = 'system', onEvent = null, detach = false, awaitKick = false, waitMs = null, ...fields }) {
+  const store = containerLockStore();
+  if (!store) return noStore();
+  const db = store.getDb();
+  const res = resolveConfigPlan(db, { kind, containerName, ...fields });
+  if (!res.ok) return { ok: false, step: 'plan', code: 'INVALID', error: res.error };
+  const sub = submitRunnerJob(db, { kind, app: res.params.container, params: res.params, configRefs: { ...res.plan, kind: undefined }, requestedBy, via, retryOf: res.retryJob?.id || null });
+  if (sub.error) return { ok: false, step: 'submit', error: sub.error, code: sub.code, holder: sub.holder };
+  return runSubmittedJob(db, sub.job, { store, deps: inProcessExecutorDeps(store), env: store.env || process.env, onEvent, detach, awaitKick, waitMs });
+}
+
 // backendStepDeps(store) → { configureRoutes } — the route configurator the
 // backend-executed `configure_routes` step calls: ProxyPilot's own rows and
 // its Caddy render (lib/guest-routes.js over the services router's render
@@ -300,5 +381,8 @@ export function lifecycleHttpStatus(out) {
   if (out.step === 'runner_unavailable') return 503;
   if (out.notFound) return 404;
   if (out.step === 'target' || (out.step === 'query' && out.refused)) return 409;
+  // A configuration job refused before any change: a contended shared lease,
+  // a device that exists with other properties, a snapshot of unknown content.
+  if (out.refused && (out.contended || out.step === 'protect' || out.step === 'device' || out.step === 'lease')) return 409;
   return 500;
 }

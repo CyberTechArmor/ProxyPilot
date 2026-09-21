@@ -47,7 +47,7 @@ export const RESERVED_PORTS_PATH =
   process.env.PROXYPILOT_L4_RESERVED_PORTS_PATH ||
   '/etc/sysctl.d/99-proxypilot-l4-reserved.conf';
 
-const RESERVED_PORTS_HEADER = [
+export const RESERVED_PORTS_HEADER = [
   '# Managed by ProxyPilot. Do not edit.',
   '#',
   '# Reserves the listen ranges of every UDP L4 forward in',
@@ -98,6 +98,15 @@ export function buildReservedPortsValue(rows) {
 }
 
 /**
+ * The drop-in's whole body for a reserved-ports value: the header plus the
+ * one setting, or '' when there is nothing to reserve (the file is then
+ * removed). Pure; the setup engine's forward jobs render the same bytes.
+ */
+export function reservedPortsBody(value) {
+  return value ? `${RESERVED_PORTS_HEADER}net.ipv4.ip_local_reserved_ports = ${value}\n` : '';
+}
+
+/**
  * Reconcile /etc/sysctl.d/99-proxypilot-l4-reserved.conf to match the
  * desired reserved-ports value, applying the change live with
  * `sysctl -p` afterwards.
@@ -122,9 +131,7 @@ export async function reconcileReservedPorts({ db, execHost = defaultExecHost } 
     )
     .all();
   const value = buildReservedPortsValue(rows);
-  const desired = value
-    ? `${RESERVED_PORTS_HEADER}net.ipv4.ip_local_reserved_ports = ${value}\n`
-    : '';
+  const desired = reservedPortsBody(value);
 
   // Read the current contents from the *host* filesystem. The backend
   // runs in a container; node's fs APIs see only the container's local

@@ -6,7 +6,6 @@
 // one-time confirmation token on delete/restore, dry_run everywhere, and the
 // ledger row written by the server.
 
-import { reconcileServiceL4Forwards } from '../../lib/l4-reconciler.js';
 import {
   intIn, validOctalMode, UNIT_NAME_RE, APT_PACKAGE_RE, CRON_LINE_RE, stamp, pathUnder, LXC_NAME_RE, sha256Hex,
 } from '../../lib/mcp-ext/logic.js';
@@ -15,7 +14,9 @@ const PROXYPILOT_BIN = process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot'
 
 import { exportStore } from '../../lib/lxc-exports-instance.js';
 import { restoreHazards, restoreNotes } from '../../lib/lxc-exports.js';
-import { restoreSnapshot, resolveRestoreSnapshotPlan, runLifecycle, planDigest } from '../../mock2/ops.js';
+import { restoreSnapshot, resolveRestoreSnapshotPlan, runLifecycle, runGuestConfig, planDigest } from '../../mock2/ops.js';
+import { instanceIdentity } from '../../lib/setup-engine/lifecycle-logic.js';
+import { reservedRangesFromRows } from '../../lib/setup-engine/config-logic.js';
 import { containerLockStore } from '../../mock2/container-lock.js';
 import { snapshotCoverage } from '../../lib/setup-engine/restore-logic.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../../lib/export-compression.js';
@@ -24,7 +25,7 @@ export function createLxcAdminHandlers(kit) {
   const { ctx, ok, err, mutation, reader, confirmToken, confirmFlag, dry, guestSh, hostSh, tail, policy } = kit;
   const {
     getDb, runHostCapture, LXC_PREFIX, LXC_NAME_REGEX, validLxcFilePath, validTargetDir,
-    takeLxcSnapshot, fetchLxcInstance, lxcContainerDetail, defaultSnapshotName, validSnapshotName,
+    fetchLxcInstance, lxcContainerDetail, defaultSnapshotName, validSnapshotName,
     takeUploadTicket, findOrCreateLxcService, regenerateDomainCaddyConfig,
     caddyReload, LXC_LIST_CAPTURE_CAP,
   } = ctx;
@@ -346,26 +347,23 @@ export function createLxcAdminHandlers(kit) {
     const plan = { container: name, config: changes, root_disk_size: disk ? `${disk}GiB` : null, current: inst.detail.config, snapshot_first: true };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmFlag(args, note, `Resources on ${name}: ${changes.map((c) => `${c.key}=${c.value}`).join(', ')}${disk ? `, root disk ${disk}GiB` : ''}.`); if (gate) return gate;
-    const snap = await takeLxcSnapshot(incus(name), defaultSnapshotName(new Date(), 'pp-mcp-pre-resources'));
-    if (snap.error) return err(`Refusing to change resources without a snapshot: ${snap.error}`);
-    note.snapshot = snap.name;
-    const applied = [];
-    for (const c of changes) {
-      const r = await runHostCapture('incus', ['config', 'set', incus(name), c.key, c.value], { timeoutMs: 60000 });
-      if (r.status !== 0) return err(`incus config set ${c.key} failed: ${tail(r.stderr)} (applied so far: ${applied.join(', ') || 'none'}; snapshot ${snap.name})`);
-      applied.push(`${c.key}=${c.value}`);
-    }
-    if (disk) {
-      const r = await runHostCapture('incus', ['config', 'device', 'override', incus(name), 'root', `size=${disk}GiB`], { timeoutMs: 60000 });
-      if (r.status !== 0) {
-        const r2 = await runHostCapture('incus', ['config', 'device', 'set', incus(name), 'root', 'size', `${disk}GiB`], { timeoutMs: 60000 });
-        if (r2.status !== 0) return err(`root disk resize failed: ${tail(r2.stderr) || tail(r.stderr)} (config applied: ${applied.join(', ') || 'none'}; snapshot ${snap.name}). Shrinking a volume is refused by most storage drivers.`);
-      }
-      applied.push(`root.size=${disk}GiB`);
-    }
-    note.summary = `resources on ${name}: ${applied.join(', ')}`;
-    note.detail = { applied };
-    return ok({ applied, container: name, snapshot: snap.name, restart_required: false, note: 'limits.* take effect live; a disk grow is live too, shrinking is refused by the driver.' });
+    // A setup-engine job (`config_set`, docs/features/setup-engine.md § "The
+    // guest configuration verbs"): bound to the guest's identity as read
+    // above; the runner takes the pre-change snapshot named here and reads
+    // it back BEFORE any write, sets every key (and the root size) under the
+    // guest's lease and reads each back before it reports done. A key that
+    // does not read back stops the sequence and the result names what was
+    // applied — never a success claim.
+    const out = await runGuestConfig({
+      kind: 'config_set', containerName: incus(name), changes, rootSize: disk ? `${disk}GiB` : null,
+      snapshot: { name: defaultSnapshotName(new Date(), 'pp-mcp-pre-resources') }, expect: instanceIdentity(inst.instance), requestedBy: auth?.name || null, via: 'mcp',
+    });
+    note.snapshot = out.snapshot?.name || null;
+    if (!out.ok) return err(`${out.error}${out.jobId ? ` (job ${out.jobId})` : ''}`, out.jobId ? { job_id: out.jobId, step: out.step, refused: !!out.refused, partial: !!out.partial, applied: out.applied || null, snapshot: out.snapshot?.name || null } : null);
+    const applied = [...changes.map((c) => `${c.key}=${c.value}`), ...(disk ? [`root.size=${disk}GiB`] : [])];
+    note.summary = `resources on ${name}: ${applied.join(', ')} (job ${out.jobId})`;
+    note.detail = { applied, job_id: out.jobId, previous: out.previous || null };
+    return ok({ applied, container: name, snapshot: out.snapshot?.name || null, snapshot_covers: out.snapshot?.covers || null, previous: out.previous || null, job_id: out.jobId, verified: true, restart_required: false, ...(out.alreadyInState ? { note_applied: 'every value already read as requested; nothing was issued' } : {}), note: 'limits.* take effect live; a disk grow is live too, shrinking is refused by the driver.' });
   });
 
   const add_lxc_device = mutation('add_lxc_device', { subjectType: 'lxc' }, async (args, auth, req, note) => {
@@ -405,15 +403,20 @@ export function createLxcAdminHandlers(kit) {
     const plan = { container: name, device: dev, ...props };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmFlag(args, note, `Add ${type} device ${dev} to ${name}: ${JSON.stringify(props)}.`); if (gate) return gate;
-    const snap = await takeLxcSnapshot(incus(name), defaultSnapshotName(new Date(), 'pp-mcp-pre-device'));
-    if (snap.error) return err(`Refusing to add a device without a snapshot: ${snap.error}`);
-    note.snapshot = snap.name;
-    const kv = Object.entries(props).filter(([k]) => k !== 'type').map(([k, v]) => `${k}=${v}`);
-    const r = await runHostCapture('incus', ['config', 'device', 'add', incus(name), dev, props.type, ...kv], { timeoutMs: 60000 });
-    if (r.status !== 0) return err(`incus config device add failed: ${tail(r.stderr)} (snapshot ${snap.name})`);
-    note.summary = `added ${type} device ${dev} to ${name}`;
-    note.detail = { ...note.detail, ...plan };
-    return ok({ added: true, ...plan, snapshot: snap.name, reverse_with: `remove_lxc_device({ container: "${name}", device: "${dev}", confirm: true })` });
+    // A setup-engine job (`device_add`): bound to the guest's identity, the
+    // pre-change snapshot taken and read back first, the device added under
+    // the guest's lease and read back with every planned property. A device
+    // that exists with other properties is refused, never replaced.
+    const { type: deviceType, ...deviceProps } = props;
+    const out = await runGuestConfig({
+      kind: 'device_add', containerName: incus(name), device: dev, deviceType, props: deviceProps,
+      snapshot: { name: defaultSnapshotName(new Date(), 'pp-mcp-pre-device') }, expect: instanceIdentity(inst.instance), requestedBy: auth?.name || null, via: 'mcp',
+    });
+    note.snapshot = out.snapshot?.name || null;
+    if (!out.ok) return err(`${out.error}${out.jobId ? ` (job ${out.jobId})` : ''}`, out.jobId ? { job_id: out.jobId, step: out.step, refused: !!out.refused, snapshot: out.snapshot?.name || null } : null);
+    note.summary = `added ${type} device ${dev} to ${name} (job ${out.jobId})`;
+    note.detail = { ...note.detail, ...plan, job_id: out.jobId };
+    return ok({ added: true, ...plan, snapshot: out.snapshot?.name || null, snapshot_covers: out.snapshot?.covers || null, job_id: out.jobId, verified: true, ...(out.alreadyInState ? { note_device: 'the device already read exactly as planned; nothing was issued' } : {}), reverse_with: `remove_lxc_device({ container: "${name}", device: "${dev}", confirm: true })` });
   });
 
   const remove_lxc_device = mutation('remove_lxc_device', { subjectType: 'lxc' }, async (args, auth, req, note) => {
@@ -430,14 +433,19 @@ export function createLxcAdminHandlers(kit) {
     const plan = { container: name, device: dev, current };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmFlag(args, note, `Remove device ${dev} (${current.type}) from ${name}.`); if (gate) return gate;
-    const snap = await takeLxcSnapshot(incus(name), defaultSnapshotName(new Date(), 'pp-mcp-pre-device'));
-    if (snap.error) return err(`Refusing to remove a device without a snapshot: ${snap.error}`);
-    note.snapshot = snap.name;
-    const r = await runHostCapture('incus', ['config', 'device', 'remove', incus(name), dev], { timeoutMs: 60000 });
-    if (r.status !== 0) return err(`incus config device remove failed: ${tail(r.stderr)} (snapshot ${snap.name})`);
-    note.summary = `removed device ${dev} from ${name}`;
-    note.detail = plan;
-    return ok({ removed: true, container: name, device: dev, previous: current, snapshot: snap.name });
+    // A setup-engine job (`device_remove`): bound to the guest's identity,
+    // the pre-change snapshot taken and read back first, the device removed
+    // under the guest's lease and read back as absent; its reference-only
+    // properties are recorded as `previous` for reversal.
+    const out = await runGuestConfig({
+      kind: 'device_remove', containerName: incus(name), device: dev,
+      snapshot: { name: defaultSnapshotName(new Date(), 'pp-mcp-pre-device') }, expect: instanceIdentity(inst.instance), requestedBy: auth?.name || null, via: 'mcp',
+    });
+    note.snapshot = out.snapshot?.name || null;
+    if (!out.ok) return err(`${out.error}${out.jobId ? ` (job ${out.jobId})` : ''}`, out.jobId ? { job_id: out.jobId, step: out.step, refused: !!out.refused, snapshot: out.snapshot?.name || null } : null);
+    note.summary = `removed device ${dev} from ${name} (job ${out.jobId})`;
+    note.detail = { container: name, device: dev, previous: out.previous?.device || null, job_id: out.jobId };
+    return ok({ removed: true, container: name, device: dev, previous: out.previous?.device || null, snapshot: out.snapshot?.name || null, snapshot_covers: out.snapshot?.covers || null, job_id: out.jobId, verified: true });
   });
 
   const get_lxc_usage = reader('get_lxc_usage', async (args) => {
@@ -757,13 +765,16 @@ export function createLxcAdminHandlers(kit) {
     const plan = { container: name, action, service, reason };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmFlag(args, note, `${action} egress ${service} for ${name}.`); if (gate) return gate;
-    const argv = ['egress', action, name, service];
-    if (action === 'allow' && reason) argv.push('--reason', reason);
-    const r = await proxypilotCli(argv);
-    if (r.error) return err(`Egress ${action} failed: ${r.error}`);
-    note.summary = `egress ${action} ${service} for ${name}`;
-    note.detail = plan;
-    return ok({ applied: true, ...plan, reconcile: r.result.reconcile || null, reverse_with: `set_lxc_egress({ container: "${name}", action: "${action === 'allow' ? 'deny' : 'allow'}", service: "${service}", confirm: true })` });
+    // A setup-engine job (`egress_set`): under the guest's lease and the
+    // host-wide firewall lease, the runner issues the one fixed firewall
+    // command and reads the guest's egress entry back before it reports
+    // done; the CLI's reconcile summary is on the record. An instance
+    // snapshot never covers the host firewall, so none is taken.
+    const out = await runGuestConfig({ kind: 'egress_set', containerName: incus(name), action, service, reason, requestedBy: auth?.name || null, via: 'mcp' });
+    if (!out.ok) return err(`Egress ${action} failed: ${out.error}${out.jobId ? ` (job ${out.jobId})` : ''}`, out.jobId ? { job_id: out.jobId, step: out.step, refused: !!out.refused } : null);
+    note.summary = `egress ${action} ${service} for ${name} (job ${out.jobId})`;
+    note.detail = { ...plan, job_id: out.jobId };
+    return ok({ applied: true, ...plan, allow: out.allow || [], reconcile: out.reconcile || null, job_id: out.jobId, verified: true, ...(out.alreadyInState ? { note: `egress ${service} already ${action === 'allow' ? 'allowed' : 'denied'} for ${name}; nothing was issued` } : {}), reverse_with: `set_lxc_egress({ container: "${name}", action: "${action === 'allow' ? 'deny' : 'allow'}", service: "${service}", confirm: true })` });
   });
 
   /* ----------------------------- port forwards ---------------------------- */
@@ -785,14 +796,22 @@ export function createLxcAdminHandlers(kit) {
       if (!row) return err('forward_id not found on this container (action: "list" shows them)');
       const d = dry(args, { container: name, remove: row }); if (d) return d;
       const gate = confirmFlag(args, note, `Remove the ${row.proto}/${row.listen_port} forward from ${name}.`); if (gate) return gate;
+      // The row is ProxyPilot's (a backend step); the host side — the
+      // `ppl4-<id>` proxy device, the `service-l4-<id>` firewall rule and the
+      // reserved-ports drop-in recomputed from the rows that remain — is a
+      // setup-engine job (`forward_remove`) under the guest's lease and the
+      // host-wide firewall lease, every part read back as gone.
       db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(id);
       const inst = await instanceOrError(name);
-      const bridgeIp = inst.detail?.primary_address || service.target_ip || null;
-      let reconcile = null;
-      try { reconcile = await reconcileServiceL4Forwards({ db, serviceId: service.id, lxcName: name, bridgeIp, serviceTag: service.name || null }); } catch (e) { reconcile = { error: e?.message || String(e) }; }
-      note.summary = `removed ${row.proto}/${row.listen_port} forward on ${name}`;
-      note.detail = { removed: row };
-      return ok({ removed: true, container: name, forward: row, reconcile });
+      const reserved = reservedRangesFromRows(db.prepare(`SELECT proto, listen_port, listen_port_end, enabled FROM service_l4_forwards WHERE enabled = 1`).all());
+      const out = await runGuestConfig({
+        kind: 'forward_remove', containerName: incus(name), forward: { id: row.id, proto: row.proto, listen: row.listen_port, listenEnd: row.listen_port_end, connect: row.connect_port, connectEnd: row.connect_port_end },
+        reserved, ...(inst.instance ? { expect: instanceIdentity(inst.instance) } : {}), requestedBy: auth?.name || null, via: 'mcp',
+      });
+      note.summary = `removed ${row.proto}/${row.listen_port} forward on ${name}${out.jobId ? ` (job ${out.jobId})` : ''}`;
+      note.detail = { removed: row, job_id: out.jobId || null, host_cleared: !!out.ok };
+      if (!out.ok) return err(`The forward row was removed but the host side could not be cleared: ${out.error}${out.jobId ? ` (job ${out.jobId})` : ''} — retry the job to clear it; the L4 reconciler also removes an orphan device at its next pass`, { removed: true, forward: row, job_id: out.jobId || null, step: out.step, applied: out.applied || null });
+      return ok({ removed: true, container: name, forward: row, reconcile: { applied: [{ id: row.id, status: 'removed', detail: { incus: out.applied?.device?.state || null, firewall: out.applied?.rule?.state || null } }], reservedPorts: out.reserved || null }, job_id: out.jobId, verified: true, ...(out.warnings?.length ? { warnings: out.warnings } : {}) });
     }
     if (action !== 'add') return err("action must be 'add', 'remove' or 'list'");
     const proto = args.protocol === 'udp' ? 'udp' : 'tcp';
@@ -819,21 +838,30 @@ export function createLxcAdminHandlers(kit) {
       if (/UNIQUE constraint/i.test(e.message)) return err(`Another forward already binds ${proto}/${plan.listen}`);
       throw e;
     }
-    let reconcile;
-    try {
-      reconcile = await reconcileServiceL4Forwards({ db, serviceId: svc.id, lxcName: name, bridgeIp, serviceTag: svc.name || null });
-    } catch (e) {
-      db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(id);
-      return err(`L4 reconcile failed: ${e?.message || e} — the forward row was rolled back`);
+    // The row is ProxyPilot's (a backend step); the host side — the
+    // `ppl4-<id>` proxy device, the `service-l4-<id>` firewall rule and the
+    // reserved-ports drop-in recomputed from every enabled row — is a
+    // setup-engine job (`forward_apply`) under the guest's lease and the
+    // host-wide firewall lease, bound to the guest's identity, each part read
+    // back before it reports done. A DEFINITE failure or refusal rolls the
+    // row back as before, with the record and the response naming what the
+    // host still holds (the L4 reconciler sweeps an orphan device); an
+    // outcome the tool could not observe to its end keeps the row, and the
+    // job or the reconciler converges on it.
+    const reserved = reservedRangesFromRows(db.prepare(`SELECT proto, listen_port, listen_port_end, enabled FROM service_l4_forwards WHERE enabled = 1`).all());
+    const out = await runGuestConfig({
+      kind: 'forward_apply', containerName: incus(name), forward: { id, proto, listen, listenEnd, connect, connectEnd, description: plan.description },
+      bridgeIp, serviceTag: svc.name || null, reserved, expect: instanceIdentity(inst.instance), requestedBy: auth?.name || null, via: 'mcp',
+    });
+    if (!out.ok) {
+      const unobserved = out.step === 'wait';
+      if (!unobserved) db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(id);
+      return err(`L4 apply failed: ${out.error}${out.jobId ? ` (job ${out.jobId})` : ''} — ${unobserved ? 'the forward row is kept until the job is read (retry it, or re-reconcile)' : 'the forward row was rolled back'}`, { job_id: out.jobId || null, step: out.step, applied: out.applied || null, row_kept: unobserved });
     }
-    const mine = (reconcile.applied || []).find((o) => o.id === id);
-    if (mine && mine.status === 'error') {
-      db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(id);
-      return err(`L4 apply failed: ${mine.error} — the forward row was rolled back`);
-    }
-    note.summary = `forward ${proto}/${plan.listen} → ${name}:${plan.connect}`;
-    note.detail = plan;
-    return ok({ added: true, forward_id: id, ...plan, reconcile, reverse_with: `set_port_forward({ container: "${name}", action: "remove", forward_id: "${id}", confirm: true })` });
+    const reconcile = { applied: [{ id, status: 'applied', detail: { incus: out.applied?.device?.state === 'already' ? 'present' : 'applied', firewall: out.applied?.rule?.state === 'already' ? 'present' : 'applied' } }], reservedPorts: out.reserved || null };
+    note.summary = `forward ${proto}/${plan.listen} → ${name}:${plan.connect} (job ${out.jobId})`;
+    note.detail = { ...plan, job_id: out.jobId };
+    return ok({ added: true, forward_id: id, ...plan, reconcile, job_id: out.jobId, verified: true, ...(out.warnings?.length ? { warnings: out.warnings } : {}), reverse_with: `set_port_forward({ container: "${name}", action: "remove", forward_id: "${id}", confirm: true })` });
   });
 
   /* ---------------------------------- cron -------------------------------- */

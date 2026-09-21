@@ -327,7 +327,7 @@ export function recordGenerated(db, { id, owner, epoch, resource, nowMs = Date.n
   if (!row) return 0;
   const prog = parseJson(row.progress_json) || {};
   const generated = Array.isArray(prog.generated) ? prog.generated : [];
-  generated.push(redact({ kind: resource.kind, name: resource.name, where: resource.where || null, at: iso(nowMs) }));
+  generated.push(redact({ kind: resource.kind, name: resource.name, where: resource.where || null, ...(resource.sha256 ? { sha256: String(resource.sha256) } : {}), ...(resource.bytes != null ? { bytes: Number(resource.bytes) } : {}), ...(resource.created_at ? { created_at: String(resource.created_at) } : {}), at: iso(nowMs) }));
   return db.prepare(`UPDATE setup_jobs SET progress_json = ?, updated_at = ? WHERE id = ? AND owner = ? AND epoch = ? AND status = 'running'`)
     .run(JSON.stringify({ ...prog, generated }), iso(nowMs), String(id), owner, Number(epoch)).changes;
 }
@@ -370,6 +370,17 @@ export function recordJobOutcome(db, { id, status, outcome = null, reason = null
 // requestCancel(db, { id, by }) → changes. Recorded on a queued or running
 // job; the executor honours it at its next safe checkpoint (before the
 // disruptive step) and declines it after. A queued job is cancelled outright.
+// cancelQueuedJob(db, { id, outcome, reason, by }) — a job that never ran
+// (the orchestrator refused it before any executor took it) ends cancelled
+// with the outcome that says why; never touches a running job.
+export function cancelQueuedJob(db, { id, outcome = 'cancelled', reason = null, by = null, nowMs = Date.now() }) {
+  const now = iso(nowMs);
+  const r = db.prepare(`UPDATE setup_jobs SET status = 'cancelled', outcome = ?, reason = ?, finished_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'`)
+    .run(outcome, reason == null ? null : sanitizeReason(reason), now, now, String(id));
+  if (r.changes) insertEvent(db, { jobId: id, at: now, kind: 'cancelled', message: reason, data: { outcome, by } });
+  return r.changes;
+}
+
 export function requestCancel(db, { id, by, nowMs = Date.now() }) {
   const row = getJob(db, id);
   if (!row) return { ok: false, reason: 'no such job' };
@@ -403,6 +414,14 @@ export function fenceJob(db, { id, owner, epoch, safe = false, leaseMs = DEFAULT
 export function staleRunningJobs(db, { nowMs = Date.now(), ownerKind = null } = {}) {
   const rows = db.prepare(`SELECT * FROM setup_jobs WHERE status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`).all(iso(nowMs));
   return ownerKind ? rows.filter((r) => String(r.owner || '').startsWith(`${ownerKind}@`)) : rows;
+}
+
+// openJobsFor(db, app, kinds) → the queued/running jobs of these kinds for
+// the app (what a restore must not be queued behind).
+export function openJobsFor(db, app, kinds) {
+  if (!Array.isArray(kinds) || !kinds.length) return [];
+  const marks = kinds.map(() => '?').join(', ');
+  return db.prepare(`SELECT * FROM setup_jobs WHERE app = ? AND kind IN (${marks}) AND status IN ('queued', 'running') ORDER BY created_at`).all(String(app), ...kinds);
 }
 
 export function openRecoveryJobFor(db, app) {

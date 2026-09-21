@@ -108,7 +108,8 @@ test('store: claimNextJob is compare-and-swap — two claimants, one winner; onl
   assert.equal(claimNextJob(d, { owner: RUNNER, kinds: ['verify_app'], nowMs: T0 }), null, 'only the listed kinds are claimed');
   const won = claimNextJob(d, { owner: RUNNER, kinds: [...RUNNER_JOB_KINDS], nowMs: T0 + 2 });
   assert.equal(RUNNER_JOB_KINDS.includes('deploy'), true, 'the deploy is a runner job since the runner-owned deployment slice');
-  assert.equal(RUNNER_JOB_KINDS.includes('restore_snapshot'), false, 'a backend-executed kind is never in the runner list');
+  assert.equal(RUNNER_JOB_KINDS.includes('credential_migration'), false, 'a backend-executed kind is never in the runner list');
+  assert.equal(RUNNER_JOB_KINDS.includes('restore_snapshot'), true, 'the snapshot restore is a runner job since A-14');
   assert.equal(getJob(d, d.prepare(`SELECT id FROM setup_jobs WHERE kind = 'deploy'`).get().id).status, 'queued', 'one claim takes one job, in submission order');
   const second = claimNextJob(d, { owner: 'runner@pp#301:ssss', kinds: [...RUNNER_JOB_KINDS], nowMs: T0 + 3 });
   assert.equal(second.kind, 'deploy');
@@ -320,7 +321,8 @@ test('retryPlan keeps the approved plan and lists every generated resource for r
   assert.equal(plan.retryOf, j.id);
   assert.deepEqual(plan.steps, ['start_unit']);
   assert.deepEqual(plan.reuse, [{ kind: 'snapshot', name: 'pp-pre-recover-1', where: 'pp-x' }]);
-  assert.equal(validateRunnerJob({ kind: 'restore_snapshot', app: 'pp-x' }).ok, false);
+  assert.equal(validateRunnerJob({ kind: 'restore_project_db', app: 'pp-x' }).ok, false, 'the pre-move kind name is history, not a runner job');
+  assert.equal(validateRunnerJob({ kind: 'restore_snapshot', app: 'pp-x' }).ok, false, 'a snapshot restore without a snapshot name is invalid');
   assert.equal(validateRunnerJob({ kind: 'deploy', app: 'pp-x', plan: { params: { container: 'pp-x', contract: { hasContract: true, start: 'npm start', install: 'npm ci' } } } }).ok, true);
   assert.equal(validateRunnerJob({ kind: 'deploy', app: 'pp-x', plan: { params: { container: 'pp-x', contract: { hasContract: true, start: 'npm start\nrm -rf /' } } } }).ok, false, 'a contract command is one line');
   assert.equal(validateRunnerJob({ kind: 'deploy', app: 'pp-x', plan: { params: { container: 'pp-x', secrets: { configs: [{ key: 'AUTH_JWT_SECRET', value: 'x' }] } } } }).ok, false, 'a secret config carries no value');

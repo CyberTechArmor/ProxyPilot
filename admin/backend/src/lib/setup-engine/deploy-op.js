@@ -378,7 +378,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
 
 // ── the mint (a faithful port of component-install.ensureComponentSecrets) ──
 
-async function mintComponentSecrets({ guest, appDir, environmentFile, configs, newlyProvisioned, writersStopped, job }) {
+export async function mintComponentSecrets({ guest, appDir, environmentFile, configs, newlyProvisioned, writersStopped, job }) {
   const owned = (configs || []).filter((c) => c && c.secret === true && c.generate === true);
   if (!owned.length) return { ok: true, minted: [], deferred: [], required: [] };
   const deferred = [];

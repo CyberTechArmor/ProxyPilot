@@ -30,10 +30,25 @@ async function defaultOpenDb(dbPath) {
   return db;
 }
 
-// The guest executor: `incus exec <name> -- sh` with the script on stdin.
-// Root on the host; no nsenter (this is the host).
+// The guest executor: `incus exec <name> -- sh` with the script on stdin,
+// and the host channel: one argv array, spawned directly (never a shell
+// string — a snapshot restore is `['incus', 'snapshot', 'restore', name,
+// snap]`). Root on the host; no nsenter (this is the host).
 export function hostGuestExec({ spawnImpl = spawn, incusBin = 'incus' } = {}) {
   return {
+    host(argv, { timeoutMs = 120_000 } = {}) {
+      return new Promise((resolve) => {
+        if (!Array.isArray(argv) || !argv.length || argv.some((a) => typeof a !== 'string')) { resolve({ code: -1, stdout: '', stderr: 'host commands are argv arrays of strings' }); return; }
+        let child;
+        try { child = spawnImpl(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { resolve({ code: -1, stdout: '', stderr: e.message }); return; }
+        let stdout = ''; let stderr = ''; let done = false;
+        const timer = setTimeout(() => { if (!done) { done = true; try { child.kill('SIGKILL'); } catch { /* */ } resolve({ code: 124, stdout, stderr: `${stderr}\n[timeout after ${timeoutMs}ms]` }); } }, timeoutMs);
+        child.stdout.on('data', (d) => { stdout += d; });
+        child.stderr.on('data', (d) => { stderr += d; });
+        child.on('error', (e) => { if (!done) { done = true; clearTimeout(timer); resolve({ code: -1, stdout, stderr: e.message }); } });
+        child.on('close', (code) => { if (!done) { done = true; clearTimeout(timer); resolve({ code, stdout, stderr }); } });
+      });
+    },
     guest(container, script, { timeoutMs = 90_000 } = {}) {
       return new Promise((resolve) => {
         const child = spawnImpl(incusBin, ['exec', String(container), '--', 'sh'], { stdio: ['pipe', 'pipe', 'pipe'] });

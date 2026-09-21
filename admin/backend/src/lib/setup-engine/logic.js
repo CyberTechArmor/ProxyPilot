@@ -56,10 +56,19 @@ export const VIA = Object.freeze(['ui', 'cli', 'mcp', 'runner', 'system']);
 // claimed by it — the browser-facing API can only ask for one of these, and
 // none of them takes a command, a path outside the guest, or a value that is
 // a secret.
-export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe']);
+export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets']);
+// The kinds that MUTATE a guest or its storage: one at a time per app, and a
+// restore is refused (never queued behind) while any of them is open.
+export const MUTATING_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets']);
+// A restore is destructive: it never waits for a held lease (it would run
+// minutes later under a state its operator never looked at) — refused.
+export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapshot']);
 // Job kinds the BACKEND records for the operations it still executes itself
 // (they hold the same lock; the runner recovers them when the backend dies).
-export const BACKEND_JOB_KINDS = Object.freeze(['restore_project_db', 'restore_snapshot', 'retry-secrets', 'credential_migration']);
+// The two restores and the retry mint moved to the runner (A-13…A-15);
+// their pre-move records keep the old kind names in history.
+export const BACKEND_JOB_KINDS = Object.freeze(['credential_migration']);
+export const LEGACY_BACKEND_JOB_KINDS = Object.freeze(['restore_project_db', 'retry-secrets']);
 // A runner is live when its heartbeat is younger than this.
 export const RUNNER_LIVE_MS = 30_000;
 
@@ -195,6 +204,10 @@ export function redact(value, depth = 0) {
     // object is a record about it (walked), a number or boolean a fact.
     if (typeof v === 'string' && SECRET_KEY_RE.test(k) && !/_(name|names|path|paths|ref|refs|present|count|set|key_names|keys|column|columns|table|tables|file|files|dir|kind|state|id|ids)$/i.test(k) && !/^(has_|is_|n_)/i.test(k)) {
       out[k] = REDACTED;
+    } else if (typeof v === 'string' && /^(sha256|sha512|digest|fingerprint|[a-z_]*_sha256|[a-z_]*_digest)$/i.test(k) && /^[0-9a-f]{32,128}$/i.test(v)) {
+      // A content hash under a key that SAYS it is one is an identity (a
+      // protected copy's sha256, revalidated on retry), not a key value.
+      out[k] = v;
     } else {
       out[k] = redact(v, depth + 1);
     }
@@ -362,7 +375,9 @@ export function retryPlan(job) {
   return {
     ...plan,
     retryOf: job.id,
-    reuse: generated.map((g) => ({ kind: g.kind, name: g.name, where: g.where || null })),
+    // Identity travels with the record (sha256 / size / created_at) so a
+    // retry can REVALIDATE what it reuses, not merely find it.
+    reuse: generated.map((g) => ({ kind: g.kind, name: g.name, where: g.where || null, ...(g.sha256 ? { sha256: g.sha256 } : {}), ...(g.bytes != null ? { bytes: g.bytes } : {}), ...(g.created_at ? { created_at: g.created_at } : {}) })),
   };
 }
 
@@ -391,8 +406,29 @@ export function validateRunnerJob(job) {
         if ('value' in c || 'default' in c) return { ok: false, reason: 'a secret config carries no value' };
       }
     }
+  } else if (job.kind === 'retry_secrets') {
+    if (p.contract != null) return { ok: false, reason: 'a retry_secrets job carries no contract' };
+    if (!p.secrets || !Array.isArray(p.secrets.configs)) return { ok: false, reason: 'secrets.configs must be a list of contract config entries' };
+    for (const c of p.secrets.configs) {
+      if (!c || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(c.key || ''))) return { ok: false, reason: 'every secret config names an environment key' };
+      if ('value' in c || 'default' in c) return { ok: false, reason: 'a secret config carries no value' };
+    }
   } else if (p.contract != null || p.secrets != null) {
     return { ok: false, reason: `a ${job.kind} job carries no contract or secret configuration` };
+  }
+  if (job.kind === 'restore_db') {
+    if (!p.dump || !/^app-[A-Za-z0-9._-]{1,80}\.sql$/.test(String(p.dump.name || ''))) return { ok: false, reason: 'dump.name must be a dump file name (no path)' };
+    if (p.dump.sha256 != null && !/^[0-9a-f]{64}$/.test(String(p.dump.sha256))) return { ok: false, reason: 'dump.sha256 must be a hex digest' };
+    if (p.envCopy != null) {
+      if (!/^environment\.pre-[A-Za-z0-9-]{1,80}$/.test(String(p.envCopy.name || ''))) return { ok: false, reason: 'envCopy.name must be an environment copy name (no path)' };
+      if (!/^[A-Za-z0-9-]{1,64}$/.test(String(p.envCopy.originJobId || ''))) return { ok: false, reason: 'envCopy.originJobId must name the job that recorded the recovery set' };
+    }
+    if (p.dumpsDir != null && !/^\/[A-Za-z0-9._\/-]+$/.test(String(p.dumpsDir))) return { ok: false, reason: 'dumpsDir must be an absolute path inside the guest' };
+    if (p.guardKey != null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(p.guardKey))) return { ok: false, reason: 'guardKey must be an environment key name' };
+  }
+  if (job.kind === 'restore_snapshot') {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(String(p.snapshot || ''))) return { ok: false, reason: 'snapshot must be a snapshot name' };
+    if (p.acceptPartial != null && typeof p.acceptPartial !== 'boolean') return { ok: false, reason: 'acceptPartial must be a boolean' };
   }
   const flat = JSON.stringify(plan);
   if (flat !== JSON.stringify(redact(plan))) return { ok: false, reason: 'the plan carries a value that looks like a secret; plans carry references only' };

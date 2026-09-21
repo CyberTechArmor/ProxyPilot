@@ -323,6 +323,126 @@ it queues a `verify_credential_use` follow-up before it reports done
 recovery and on that deploy's record; the deploy's own verdict
 (`recovery_required`) does not change.
 
+## Restores and the retry mint as runner jobs (A-13, A-14, A-15)
+
+Since this slice the project database restore, the container snapshot
+restore and the retry path's secret mint are runner jobs like the deploy:
+`restore_db`, `restore_snapshot`, `retry_secrets` (`logic.js`
+`RUNNER_JOB_KINDS`). Their surfaces — the MCP tools `restore_project_db`
+and `restore_snapshot`, the dashboard's `POST /api/lxc/containers/:name/
+snapshot/:snapshot/restore` (now `requireSudo`), and the retry-deploy path
+in `mock2/runner.js` — resolve references on the server, submit through
+`lib/setup-engine/orchestrator.js` (`mock2/ops.js` wires the three calls)
+and observe the job; none of them runs a guest or host command itself any
+more. One operation per kind: `restore-db-op.js`, `restore-snapshot-op.js`,
+`retry-secrets-op.js`, over the same contained guest executor
+(`op-kit.js`) and, for the snapshot, the runner's **host channel**: one
+argv array spawned directly (`['incus', 'snapshot', 'restore', name,
+snap]`), never a shell string; the backend's in-process executor offers
+the same channel through its usual pivot.
+
+**Exclusive submission.** A restore is refused — at submission, before a
+job row exists — while the app's lease is held (live: "in progress";
+stale: "recovery is required"), or while any mutating job of the app
+(`deploy`, `recover_app`, `restore_db`, `restore_snapshot`,
+`retry_secrets`) is queued or running; and again at claim time if a lease
+appeared meanwhile (`refused` / `lock_held`). It is never queued behind
+another operation: a destructive restore must not start minutes later
+under a state its operator never looked at. With no executor available
+(`runner-required`, no live runner) a restore is refused too — the job is
+recorded `cancelled` / `runner_unavailable`, never left queued; a mint is
+refused the same way (the deploy that follows mints the same keys when it
+runs). The deploy keeps queueing, as before.
+
+**`restore_db`** (`restore_project_db`: `file`, optional
+`environment_copy`, optional `retry_of`):
+
+1. *bind* — the dump name must be one our tools write
+   (`app-<label>-<stamp>.sql` from `dump_project_db`,
+   `app-pre-deploy-<job>.sql` from a deploy, `app-pre-restore-<job>.sql`
+   from a restore). With `environment_copy` (`environment.pre-<job>`), the
+   pair is a **recovery set** only when a job record of THIS app recorded
+   them together (`bindRecoverySet`: the deploy's `recovery.protected`, or
+   a restore's); the dump's sha256 must match that record. A file name
+   alone binds nothing. Without a copy the mode is *current configuration*.
+2. *inspect* (read-only, one contained script): the dump's size, sha256
+   and header, the server version, the guard table's `COPY` block, and —
+   into the runner's memory only, never a row — the key that will be in
+   force after the restore (the copy's, or the current file's).
+3. *format and server*: plain pg_dump SQL only (`-- PostgreSQL database
+   dump`); a custom-format archive (`PGDMP`) or anything else is refused by
+   name; a dump from a newer PostgreSQL major than the guest runs is
+   refused.
+4. *compatibility, established or refused*: the dump's own protected rows
+   are decrypted in memory under that key (or the guard's legacy default);
+   one row nothing opens means the restored credentials would be unusable,
+   and the restore refuses **before anything is stopped**. No COPY block
+   for the guard table → not establishable → refused. An app with no guard
+   → not applicable, said so.
+5. *protect*: `app-pre-restore-<job>.sql` (written to a temp name; it
+   becomes the artifact only when `pg_dump` exited 0, the file is non-empty
+   and carries the header — a failed or interrupted capture is reported as
+   none and refuses the restore) and `/etc/environment.pre-restore-<job>`
+   (0600). Both are recorded with their identity (`generated`: path, size,
+   sha256). A `retry_of` reuses the prior attempt's dump only after
+   **revalidating** size and sha256 against the record; otherwise a new one
+   is taken and the record says why.
+6. **checkpoint** (`stopping_app`, `disruptive`, `restore_in_progress`)
+   → stop the unit → `psql -f` (errors counted; statement text only) →
+   in recovery-set mode the copy is put in force as `/etc/environment` →
+   start → port and health → the job ends `succeeded` / `restored` with the
+   ladder observed and the two credential rungs **pending**, and a
+   `verify_app` follow-up (unit, port, health, classifier, application-owned
+   check) queued before it reports done. Its outcome lands on the restore
+   record.
+
+Interrupted before the stop → resumed; after it → `recovery_required` /
+`interrupted_after_stop` with the reason naming the restore in flight and
+the pre-restore dump, the lease kept stale, a recovery job queued (start,
+verify, then the application check).
+
+**`restore_snapshot`** (`restore_snapshot`: `container`, `snapshot`,
+optional `accept_partial`, optional `retry_of`):
+
+1. *query and validate*: `incus list <name> --format json`; the snapshot
+   must exist. **Coverage**: an instance snapshot restores the root disk; a
+   custom storage volume attached as a disk device (`pool` + `source`, a
+   path other than `/`) is outside it. Such a guest is refused unless
+   `accept_partial: true`, and the result then says `complete: false` and
+   names the volumes not restored — never a claim of a complete restore.
+2. *protect*: the pre-restore snapshot `pp-pre-restore-<job>-<stamp>`,
+   confirmed present by a second list and recorded with its `created_at`.
+   A `retry_of` reuses the recorded one only when name **and** timestamp
+   still match.
+3. **checkpoint** (`restoring`, `disruptive`) → `incus snapshot restore`
+   → the guest is started again if it was running → a managed application
+   gets the full `verify_app` ladder as a follow-up; any other guest ends
+   with an explicit `not_applicable` ("not a managed application; Incus
+   reports it Running"). Every coordination record lives in the engine's
+   database on the host, outside the guest being restored. A failed
+   restore keeps the pre-restore snapshot on the record and queues a
+   post-failure verification.
+
+The legacy `incus snapshot <name> <snap>` client is discovered by the
+client's own "unknown command" answer, as before; everything else fails as
+itself.
+
+**`retry_secrets`** (the retry-deploy path): the deploy's own mint
+(`deploy-op.js` `mintComponentSecrets`: markers, the data guard, never
+overwrite, defer and say why) run alone under the lease, in the job's
+cgroup, recording key **names** only; a `retry_of` reports which recorded
+keys it found in place (`reused`) — a key already in the file is never
+replaced. Its verification is `not_applicable` by name: the deploy that
+follows verifies the application.
+
+**Confirmation covers the plan.** The MCP tools issue their one-time token
+against `<subject>/<digest>` where the digest is a canonical hash of the
+resolved plan (dump, environment copy, mode, snapshot, `accept_partial`,
+`retry_of`): a token issued for one plan cannot confirm another, and the
+plan is what the dry run shows. `retry_of`, `environment_copy` and the
+dump are resolved on the server with ownership checks (same app, same
+kind, a terminal prior job; a recovery set of this app).
+
 ## Who executes: the installation policy
 
 `SETUP_EXECUTOR_POLICY` in the installation's `.env` — read by the backend
@@ -428,9 +548,11 @@ the lock itself already binds every MCP mutation that goes through
   reads their environment files for the engine; the browser-facing API
   writes rows it reads. A request cannot make it run anything but its fixed
   scripts and the guest's own contract commands inside that guest.
-- What the deployment slice REMOVED from the container's path: on a
-  `runner-required` host (what install.sh / update.sh set once the runner
-  proved it starts and opens the database), the deploy's guest commands, the secret mint, the unit
+- What the deployment slice and the restores slice REMOVED from the
+  container's path: on a `runner-required` host (what install.sh /
+  update.sh set once the runner proved it starts and opens the database),
+  the deploy's guest commands, both restores (their dumps, `psql`, the
+  `incus snapshot` commands), the retry path's mint,, the secret mint, the unit
   swap, the recovery and every verification — the application-owned
   credential check included — never run in the backend container: they run
   in the runner, and with no runner they wait. Only a `backend-allowed`
@@ -438,8 +560,9 @@ the lock itself already binds every MCP mutation that goes through
   these operations.
 - What it did NOT remove: the container still has `privileged: true`,
   `pid: host` and the Docker socket, and every other feature (Incus
-  lifecycle, Caddy, storage, migration, restores, the retry-path mint, the
-  workspace terminal) still pivots through it. Dropping that reach is
+  lifecycle and snapshots other than the restore, the component
+  pre-install, Caddy, storage, migration, the workspace terminal) still
+  pivots through it. Dropping that reach is
   Phase F of `docs/features/security-completion/master-spec.md`; this
   slice reduces what depends on it by one operation, and does not claim
   more.
@@ -469,16 +592,48 @@ except where it says so; none needs a secret on a command line.
 | deploy `failed` with "post-failure verification queued: job …" | the failure happened after the stop; a full verification of whatever runs now is queued | read that job's outcome first: `succeeded` means the old app is serving and its credential is usable; `recovery_required` names the rung and the next step |
 | deploy `queued` with `step: runner_unavailable` at submission | policy `runner-required`, no runner heartbeat | `systemctl status proxypilot-setup-runner`, `journalctl -u proxypilot-setup-runner`; the job runs when the runner heartbeats — do not set `backend-allowed` to "unblock" a production host |
 | backend log `policy runner-required but no host runner heartbeat` every five minutes | the same, seen from the backend | the same |
+| restore `failed` at `bind`, `inspect`, `compatibility` or `protect` | refused before anything was stopped: the recovery set does not match a record, the dump is not a plain pg_dump, the guest's PostgreSQL is older, the dump's rows do not decrypt under the key that would be in force, or the pre-restore copy could not be taken | nothing to recover; read the reason. For a mismatch, restore the dump together with the environment copy of the same recovery set (`environment_copy`), or a dump made under the current configuration |
+| restore `recovery_required` / `interrupted_after_stop` with "A database restore was in flight" | the owner died between the stop and the start; the database may be partially restored | the recovery job starts the unit and verifies; if the application is wrong, restore the named pre-restore dump (`app-pre-restore-<job>.sql`, with its `environment.pre-restore-<job>` copy) |
+| restore `cancelled` / `runner_unavailable` | policy `runner-required`, no runner heartbeat: a restore is refused, never queued | start the runner, submit again |
+| restore_snapshot `failed` at `coverage` | the guest has custom storage volumes attached that an instance snapshot does not restore | pass `accept_partial: true` for a root-disk-only restore (the result says `complete: false`), or restore the volumes by other means |
+| restore_snapshot `succeeded` with `complete: false` | the root disk was restored; the named custom volumes were not | what the result names is still at its current state |
+| `retry_secrets` `cancelled` / `runner_unavailable` | the retry path's mint had no executor; not queued | the deploy that follows mints the same keys when the runner runs it |
 | install.sh / update.sh `Setup runner did NOT start …` (error) or the red update warning | the host stays (or is left) on `backend-allowed`: deploys execute in the container | fix the runner, then set `SETUP_EXECUTOR_POLICY=runner-required` in the install's `.env` and restart ProxyPilot; `update.sh` records it itself on the next update that finds the runner working |
 
 Restrictions that hold on every installation: a deploy, restore or retry
 mint on an app whose lease is held or flagged is refused, not queued behind
 it (the follow-up verification is the one job that waits); a cancel after
-the stop is declined; the engine never restores a database or rolls a
-migration back — the protected copies are named for the operator (and for
-`restore_project_db`, until that runs as a runner job in the next slice).
+the stop is declined; the engine never rolls a migration back — a restore
+is an operator's explicit, confirmed request naming the copy, and the
+copies a deploy or restore took are named on its record for that.
 
 ## Tests
+
+`setup-restores.test.js` (21 tests; two with real processes — the runner's
+host channel — and real AES-GCM rows for the compatibility check; the
+rest over scripted guest and host executors on `node:sqlite`): recovery-set
+binding by record, dump format and server verdicts, compatibility from the
+dump's own rows (established / not established / not applicable), snapshot
+coverage, artifact revalidation and the temp-name capture; `restore_db`
+end to end with the follow-up landing on the record; every refusal before
+disruption (compatibility, custom format, no COPY block, missing dump,
+older server, failed capture) with nothing stopped; the recovery set with
+the copy's key deciding and put in force, a broken set refused at bind, the
+same dump refused under the current key; retry reuse after revalidation and
+a tampered artifact not reused; interruption before (resumed) and after
+(recovery-required naming the restore, lease stale, recovery job, then the
+application check) the stop; conflicts refused at submission and at claim;
+runner-required refusing restores and the mint, handing over to a live
+runner; `restore_snapshot` with argv assertions, restart, follow-up, the
+non-managed explicit outcome, coverage refusal and accepted partial, a
+failed incus restore keeping the pre-restore snapshot, no host channel
+refused, retry reuse by name+timestamp, the legacy CLI form; `retry_secrets`
+minting a real value into the guest with names only on the record, reuse on
+retry without replacement; the MCP tools over a fake ctx and the real store
+and executor: the token bound to the exact plan (a token for one plan
+cannot confirm another), dry run, the run through the executor, busy
+refused, the ledger row; and the runner's host channel with a real process
+(argv only, metacharacters inert, timeout).
 
 `setup-deploy-closeout.test.js` (14 tests here; one real-process test per
 available cgroup mechanism plus one real-process refusal): the setsid() regression above on cgroup v2 and
@@ -574,6 +729,27 @@ the requirement; mask the unit before `update.sh` and confirm the policy is
 unchanged with the red warning printed; confirm `/var/backups/proxypilot-db/app-pre-deploy-<job>.sql`
 and the `.pre-<job>` copies exist after a deploy and `restore_project_db`
 accepts the dump by name.
+
+For the restores (A-13…A-15): on a `runner-required` host with an LDAPS
+app, `dump_project_db`, change a setting, `restore_project_db` the dump
+and confirm the job record reads `restored` with the compatibility event
+`current_configuration`, the app is serving and the follow-up ends
+`credential_use_verified`; deploy twice, then `restore_project_db` the
+first deploy's `app-pre-deploy-<job>.sql` **without** `environment_copy`
+and confirm the refusal at `compatibility` names the rows that do not
+decrypt, then with `environment_copy: environment.pre-<job>` and confirm
+the restore succeeds, `/etc/environment` is the copy, and the follow-up
+verifies; rename the dump and confirm the bind refusal; put a `PGDMP`
+archive under a dump name and confirm the format refusal; kill the runner
+between the stop and the start and confirm the record reads
+`interrupted_after_stop` with the restore named and the recovery brings
+the app up; attach a custom volume to a guest and confirm
+`restore_snapshot` refuses, then succeeds with `accept_partial` reporting
+`complete: false`; confirm the pre-restore snapshot exists with the
+recorded timestamp and a retry reuses it; on an Incus client with the
+legacy `snapshot` verb confirm the pre-restore snapshot is still taken;
+stop the runner and confirm a restore is refused (job `cancelled` /
+`runner_unavailable`), not queued.
 
 For the deploy: with the runner unit live, deploy a project from the
 dashboard and confirm the job is owned by `runner@…`, the runner's journal

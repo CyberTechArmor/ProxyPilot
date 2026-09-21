@@ -17,6 +17,7 @@ import { resolveInstall } from '../recovery/install.js';
 import { ensureSetupEngineSchema, listLocks, listJobs, jobView } from '../../../admin/backend/src/lib/setup-engine/store.js';
 import { ownerIdentity } from '../../../admin/backend/src/lib/setup-engine/logic.js';
 import { reconcile, runOnce, serve } from '../setup-runner/runner.js';
+import { hostReviewLogin } from '../setup-runner/review-login.js';
 import * as output from '../output.js';
 
 export const EXIT = Object.freeze({ OK: 0, ERROR: 1, REFUSED: 2, NOT_ROOT: 3 });
@@ -84,7 +85,10 @@ export async function setupRunnerCommand(action, opts = {}, globalOpts = {}, dep
       return o.code;
     }
     db = o.db;
-    const runDeps = { db, owner: o.owner, exec: deps.exec, log: json ? () => {} : deps.log, nowMs: deps.nowMs };
+    const runDeps = {
+      db, owner: o.owner, exec: deps.exec, log: json ? () => {} : deps.log, nowMs: deps.nowMs,
+      reviewLogin: deps.reviewLogin || hostReviewLogin({ dbPath: o.install.dbPath, envPath: o.install.envPath, log: json ? () => {} : deps.log }),
+    };
     switch (action) {
       case 'serve': {
         await serve(runDeps, { pollMs: Number(opts.pollMs) || 2000, shouldStop: deps.shouldStop || (() => false), sleep: deps.sleep });

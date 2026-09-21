@@ -179,24 +179,30 @@ test('ratchet: the deploy mints owned secrets and refuses to start without produ
   // starts the unit again before returning.
   assert.match(deploy, /mintComponentSecrets\(\{ guest, appDir, environmentFile, configs: p\.secrets\.configs, newlyProvisioned: p\.secrets\.newlyProvisioned, writersStopped: true, job \}\)/);
   assert.match(deploy, /const restartUnit = async \(\) => \{[\s\S]{0,400}`systemctl daemon-reload[^`]*systemctl start \$\{p\.unit\}[^`]*\$\{servingProbeScript\(webPort, 10\)\}`/);
-  assert.equal((deploy.match(/const back = await restartUnit\(\);/g) || []).length, 5, 'stop failure, mint failure, mint exception, validation failure, unit swap failure');
+  assert.equal((deploy.match(/const back = await restartUnit\(\);/g) || []).length, 6, 'stop failure, migration failure, mint failure, mint exception, validation failure, unit swap failure');
   // The swap failure path restarts too — the comment promise "every failure after this point" is kept by the code.
   assert.match(deploy, /if \(swap\.code !== 0\) \{[^}]*await restartUnit\(\);/);
   // "Restart attempted" and "recovered" are different states: the restart reports whether the app serves, and never claims recovery.
   assert.match(deploy, /const verdict = restartVerdict\(r\?\.stdout\);[\s\S]{0,400}return restartOutcomeText\(verdict\);/);
   assert.doesNotMatch(deploy, /the app was started again on its current unit/);
-  assert.equal((deploy.match(/\$\{back\}/g) || []).length, 5, 'every restart path reports its outcome');
+  assert.equal((deploy.match(/\$\{back\}/g) || []).length, 6, 'every restart path reports its outcome');
   // Deploys for one container are serialized on the container lock that the
   // restores and the retry-path mint share (container-lock.js).
   // Gate two: the deploy is a persisted job. A live host runner executes the
   // operation; otherwise the backend runs the SAME operation in-process under
   // the persistent container lock (mock2/deploy.js) — one implementation.
+  // The entry module submits the job and, under the backend-allowed policy
+  // with no live runner, drains it through the SAME executor the runner
+  // uses (lib/setup-engine/executor.js) — it carries no deploy of its own.
   const deployEntry = src('mock2/deploy.js');
-  assert.match(deployEntry, /withContainerLock\(containerName, 'deploy', async \(handle\) => \{/);
-  assert.match(deployEntry, /runDeployOperation\(\{ params, exec, job: jobHandle \}\)/);
   assert.match(deployEntry, /submitDeployJob\(db, \{ app: containerName, params, requestedBy, via \}\)/);
-  assert.doesNotMatch(deployEntry, /deployProjectUnqueued|deployQueues/);
+  assert.match(deployEntry, /const mode = executionMode\(db, \{ env: store\.env \|\| process\.env \}\);/);
+  assert.match(deployEntry, /if \(mode\.executor === 'none'\) \{/);
+  assert.match(deployEntry, /drainRunnerJobsInProcess\(db, \{ \.\.\.deps, env: store\.env \|\| process\.env, max: 3 \}\)/);
+  assert.doesNotMatch(deployEntry, /deployProjectUnqueued|deployQueues|runDeployOperation\(/);
   assert.doesNotMatch(deployEntry, /systemctl stop/, 'the entry module no longer carries a deploy of its own');
+  const executor = src('lib/setup-engine/executor.js');
+  assert.match(executor, /runDeployOperation\(\{ params: \{ \.\.\.p, reapOrphans: false, runDir \}/);
   const projectConfig = src('routes/mcp-tools/project-config.js');
   assert.match(projectConfig, /withContainerLock\(p\.incusName, 'restore_project_db', run, \{\s*wait: false,/, 'the database restore is refused while a deploy holds the container');
   assert.ok(projectConfig.indexOf("withContainerLock(p.incusName, 'restore_project_db'") > projectConfig.indexOf("tool: 'restore_project_db'"), 'the lock is taken after the confirmation gate, before the pre-restore dump');

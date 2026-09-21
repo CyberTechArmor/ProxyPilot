@@ -1314,6 +1314,15 @@ install_setup_runner() {
         systemctl restart "$unit" 2>/dev/null || true
     fi
     log "${GREEN}Setup runner ready (${unit} enabled)${NC}"
+    # The executor policy, retro-fitted once: an installation that now has
+    # the runner unit requires it. An operator who wants the legacy
+    # in-process executor sets SETUP_EXECUTOR_POLICY=backend-allowed
+    # explicitly; a line that exists is never rewritten.
+    local env_file="${INSTALL_DIR:-/opt/proxypilot}/.env"
+    if [ -f "$env_file" ] && ! grep -q '^SETUP_EXECUTOR_POLICY=' "$env_file" 2>/dev/null; then
+        printf '\n# Who executes setup jobs (docs/features/setup-engine.md § "Who executes").\nSETUP_EXECUTOR_POLICY=runner-required\n' >> "$env_file"
+        log "Recorded SETUP_EXECUTOR_POLICY=runner-required in ${env_file}"
+    fi
 }
 
 # Detect Docker deployment so we can skip the host-side backend npm

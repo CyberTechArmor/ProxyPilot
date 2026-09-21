@@ -16,7 +16,8 @@
 
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { ownerIdentity, reconcileDecision, recoveryJobFrom, verifyJobFrom, parseJson, runnerIsLive, RUNNER_LIVE_MS, validateRunnerJob, TERMINAL_STATUS } from './logic.js';
+import { ownerIdentity, reconcileDecision, recoveryJobFrom, verifyJobFrom, parseJson, runnerIsLive, RUNNER_LIVE_MS, validateRunnerJob, TERMINAL_STATUS, executorPolicy, RUNNER_JOB_KINDS } from './logic.js';
+import { runOnce } from './executor.js';
 import {
   staleRunningJobs, readLock, releaseLock, markLockStale, recordJobOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners,
 } from './store.js';
@@ -153,4 +154,33 @@ export function deployResultFromJob(row) {
   if (row.status === 'succeeded') return { ok: true, step: 'serving', jobId: row.id, status: row.status };
   if (row.status === 'cancelled') return { ok: false, step: 'cancelled', error: row.reason || 'cancelled', jobId: row.id, status: row.status };
   return { ok: false, step: progress.failed_step || row.phase || 'deploy', error: row.reason || `deploy ${row.status}`, jobId: row.id, status: row.status };
+}
+
+// ── who executes: the installation policy, never a request parameter ────
+
+// executionMode(db, { env, nowMs }) → { policy, runner, executor }:
+//   executor 'runner'   a live runner will execute (either policy)
+//   executor 'backend'  backend-allowed and no live runner: this process
+//                       executes with the same code (legacy / development)
+//   executor 'none'     runner-required and no live runner: submissions are
+//                       queued and reported unavailable; nothing runs here
+export function executionMode(db, { env = process.env, nowMs = Date.now() } = {}) {
+  const policy = executorPolicy(env);
+  const runner = runnerAvailable(db, { nowMs });
+  if (runner) return { policy, runner, executor: 'runner' };
+  if (policy.mode === 'backend-allowed') return { policy, runner: null, executor: 'backend' };
+  return { policy, runner: null, executor: 'none' };
+}
+
+// drainRunnerJobsInProcess(db, { owner, exec, reviewLogin, max, nowMs, env })
+// — the legacy / development executor: claim and execute queued runner jobs
+// in this backend process with the shared executor. Refuses (returns
+// { skipped }) unless the policy allows it AND no runner is live; the runner
+// is preferred whenever it exists. Heartbeats are not written (a backend is
+// not a runner).
+export async function drainRunnerJobsInProcess(db, { owner = backendOwner(), exec, reviewLogin = null, max = 5, nowMs = () => Date.now(), env = process.env, log = () => {}, kinds = [...RUNNER_JOB_KINDS] } = {}) {
+  const mode = executionMode(db, { env, nowMs: nowMs() });
+  if (mode.executor !== 'backend') return { skipped: mode.executor, policy: mode.policy.mode, ran: [] };
+  if (!exec) return { skipped: 'no_exec', policy: mode.policy.mode, ran: [] };
+  return runOnce({ db, owner, exec, reviewLogin, nowMs, log, heartbeat: false }, { max, reconcileFirst: false, kinds });
 }

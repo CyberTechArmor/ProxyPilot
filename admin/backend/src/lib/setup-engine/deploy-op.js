@@ -1,6 +1,7 @@
 // Setup engine — THE deploy operation (docs/features/setup-engine.md § "The
-// deploy"). One implementation of install → migrate → build → stop → mint →
-// unit → start → health → verify, over an injected guest executor, so the same
+// deploy"). One implementation of install → build → protected copies → stop
+// → migrate → mint → unit → start → health → verify, over an injected guest
+// executor, so the same
 // code runs in the host runner (`incus exec` as root on the host) and in the
 // backend's in-process fallback (the nsenter pivot) when no runner is live.
 // There is no second deploy path.
@@ -24,10 +25,23 @@
 // contract) live under checkpoint.recovery and are never cleared by the
 // operation — they outlive the stopped-app marker until verification is done.
 //
-// Before anything else, the operation reaps scripts a previous writer left in
-// the guest (every deploy script carries DEPLOY_MARKER in its command line)
-// and confirms none survive; a writer that cannot be stopped fails the
-// operation rather than racing it.
+// Order, and why (migration-aware checkpoints): install and build write only
+// the working tree and dist/ — the running old process never reloads them,
+// so they are safe under the old app. The DATABASE MIGRATION is the first
+// potentially incompatible mutation: an old process running against a
+// migrated schema is not a state anyone established as compatible, so the
+// maintenance boundary (stop) sits BEFORE it, after protected copies of the
+// database, the unit and the environment were taken. The checkpoint written
+// before the stop records those copies, the migration runner's retry class
+// (the platform runner is ledgered and per-file transactional: resume; an
+// unknown runner: recovery required), and the deployed commit.
+//
+// Containment: every guest script runs as its own session under the job's
+// id (guest-probes containedScript), so a takeover can kill everything a
+// dead job spawned — marked or not — by session, and never the app's own
+// service. Before anything else the operation reaps other jobs' sessions
+// and legacy marker scripts and confirms none survive; a writer that cannot
+// be stopped fails the operation rather than racing it.
 
 import { createHash } from 'node:crypto';
 import {
@@ -41,7 +55,10 @@ import { authDataProbeScript, parseAuthDataProbe, classifyRows, decideMasterSecr
 import { mergeEnvFile } from '../mcp-ext/logic.js';
 import { scaffoldPwaFiles } from '../../mock2/scaffold.js';
 import { installBrowserScript } from '../../mock2/scaffold-e2e.js';
-import { activeKeyScript, credentialProbeScript, credentialVerdict, healthScript, parseHealth, verificationFromObservations, parseUnitStatus } from './guest-probes.js';
+import {
+  activeKeyScript, credentialProbeScript, credentialVerdict, healthScript, parseHealth, verificationFromObservations, parseUnitStatus,
+  containedScript, reapStaleWritersScript, parseStaleWriters, protectedCopiesScript, parseProtectedCopies, classifyMigrateScript, CONTAINMENT_RUN_DIR,
+} from './guest-probes.js';
 import { sanitizeReason } from './logic.js';
 
 export const DEPLOY_MARKER = 'mock2_deploy_marker';
@@ -99,6 +116,8 @@ export function resolveDeployPlan(params = {}) {
     secrets: { configs: Array.isArray(params.secrets?.configs) ? params.secrets.configs : [], newlyProvisioned: params.secrets?.newlyProvisioned === true },
     guard: params.guard || null,
     reapOrphans: params.reapOrphans !== false,
+    runDir: String(params.runDir || CONTAINMENT_RUN_DIR),
+    previousDeployedCommit: params.previousDeployedCommit || null,
   };
 }
 
@@ -111,7 +130,10 @@ export function resolveDeployPlan(params = {}) {
 export async function runDeployOperation({ params, exec, job = noopJob(), log = () => {} }) {
   const p = resolveDeployPlan(params);
   const { container, appDir, webPort, environmentFile } = p;
-  const guestRaw = (script, timeoutMs) => exec.guest(container, script, { timeoutMs });
+  const jobId = String(job.id || 'adhoc');
+  // Every script the operation runs is contained under this job's id.
+  const contain = (script) => containedScript(jobId, script, { runDir: p.runDir });
+  const guestRaw = (script, timeoutMs) => exec.guest(container, contain(script), { timeoutMs });
   // Before the disruptive step every fence is a SAFE point: a requested
   // cancel is honoured there (CancelledError) and nothing has changed in the
   // guest but its build outputs. From the stop onward a cancel is not
@@ -126,14 +148,19 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   const report = (key, label) => { try { job.onStep?.(key, label || deployStepLabel(key)); } catch { /* */ } };
   const mark = (phase, data, message) => { try { job.checkpoint(phase, data, message); } catch { /* never fails the deploy */ } };
 
-  // 0) Nobody else's scripts may be running in this guest.
+  // 0) Nobody else's sessions may be running in this guest. The reap script
+  //    itself runs uncontained (it must not record a session of its own to
+  //    kill) and skips this job's id.
   if (p.reapOrphans) {
-    const reap = await guest('reap', reapOrphansScript(), 30_000);
-    const survivors = parseOrphans(reap.stdout);
-    if (survivors == null) log('reap', `could not count orphan scripts in ${container}: ${tail(reap)}`);
+    const reapScript = reapStaleWritersScript(jobId, { runDir: p.runDir });
+    job.fence({ safe: true });
+    const reap = await exec.guest(container, reapScript, { timeoutMs: 30_000 });
+    const survivors = parseStaleWriters(reap?.stdout);
+    if (survivors == null) log('reap', `could not count stale writers in ${container}: ${tail(reap)}`);
     else if (survivors > 0) {
-      const again = await guest('reap', reapOrphansScript(), 30_000);
-      const left = parseOrphans(again.stdout);
+      job.fence({ safe: true });
+      const again = await exec.guest(container, reapScript, { timeoutMs: 30_000 });
+      const left = parseStaleWriters(again?.stdout);
       if (left == null || left > 0) throw new PreviousWriterAliveError(container, left ?? survivors);
     }
   }
@@ -147,18 +174,24 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   if (!contract.hasContract) return { ok: true, skipped: true };
 
   const recovery = {
-    container, appDir, webPort, unit: p.unit, unitPath: UNIT_PATH, environmentFile,
+    container, appDir, webPort, unit: p.unit, unitPath: UNIT_PATH, environmentFile, runDir: p.runDir,
     contract: { install: contract.install || null, migrate: contract.migrate || null, build: contract.build || null, start: contract.start },
     guard: p.guard || null, generatedKeys: [],
+    previousDeployedCommit: p.previousDeployedCommit || null,
+    // Filled by the protected-copies step: retained versions, not live paths.
+    protected: null, migration: null,
+    completed: [],
   };
-  mark('starting', { app_stopped: false, resumable: true, container, webPort, unit: p.unit, recovery }, 'deploy started; install, migrate and build come first');
+  mark('starting', { app_stopped: false, resumable: true, container, webPort, unit: p.unit, recovery }, 'deploy started; install and build come first, under the running application');
 
-  // 1) install → migrate → build.
-  for (const step of deployPlan(contract)) {
+  const plan = deployPlan(contract);
+  const before = plan.filter((st) => st.key !== 'migrate');
+  const migrateStep = plan.find((st) => st.key === 'migrate') || null;
+  const runStep = async (step) => {
     report(step.key);
     if (step.key === 'install' && /npm/.test(step.command)) {
       const fresh = await runInApp(`hash=$(${MANIFEST_HASH_CMD})\n[ -d node_modules ] && [ -f '${INSTALL_STAMP_PATH}' ] && [ "$(cat '${INSTALL_STAMP_PATH}' 2>/dev/null)" = "$hash" ] && echo MOCK2_INSTALL_FRESH || true`, 30_000);
-      if (/MOCK2_INSTALL_FRESH/.test(fresh.stdout || '')) { report('install', 'Dependencies unchanged — install skipped.'); continue; }
+      if (/MOCK2_INSTALL_FRESH/.test(fresh.stdout || '')) { report('install', 'Dependencies unchanged — install skipped.'); return { ok: true, skipped: true }; }
     }
     let r = await runInApp(step.command, step.timeoutMs);
     if (r.code !== 0 && step.key === 'install' && /ETXTBSY|text file busy/i.test(tail(r))) {
@@ -167,9 +200,17 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
     }
     if (r.code !== 0) return { ok: false, step: step.key, error: deployFailureMessage(step.key, tail(r)) };
     if (step.key === 'install') await runInApp(`hash=$(${MANIFEST_HASH_CMD}); printf '%s' "$hash" > '${INSTALL_STAMP_PATH}'`, 15_000).catch((e) => { if (e?.code === 'FENCED' || e?.code === 'CANCELLED') throw e; });
-    mark(step.key, { app_stopped: false, resumable: true }, `${step.key} finished`);
-  }
+    return { ok: true };
+  };
 
+  // 1) install → build, under the running old application: only the working
+  //    tree and dist/ change, which the running process does not reload.
+  for (const step of before) {
+    const r = await runStep(step);
+    if (!r.ok) return r;
+    recovery.completed.push(step.key);
+    mark(step.key, { app_stopped: false, resumable: true, recovery }, `${step.key} finished`);
+  }
   // 1a) The e2e browser (best effort) and the PWA build stamp.
   // Best effort — except that a fence or a cancel raised inside them is the
   // operation's to honour, never to swallow.
@@ -178,9 +219,18 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   await retrofitPwaBuildPlumbing(guest, appDir).catch(control);
   const buildId = await stampBuildId(guest, appDir).catch((e) => { control(e); return null; });
 
-  // 1.5) The disruptive step. The checkpoint goes first.
+  // 1.5) Protected copies BEFORE the first incompatible mutation (the
+  //      migration), while the old application still runs: a database dump
+  //      where restore_project_db restores from, the unit and the environment
+  //      file as retained versions, the deployed commit, the migration
+  //      runner's retry class. Recorded on the checkpoint; nothing here
+  //      changes the app.
   report('start');
-  mark('build_done', { app_stopped: false, resumable: true, buildId: buildId?.buildId || null }, 'install, migrate and build finished; about to stop the application');
+  const copies = parseProtectedCopies((await guest('protect', protectedCopiesScript(jobId, { appDir, environmentFile, unitPath: UNIT_PATH, withDatabase: !!migrateStep }), 10 * 60 * 1000)).stdout);
+  recovery.protected = { dbDump: copies.dbDump, dbDumpNote: copies.dbDumpNote, unitCopy: copies.unitCopy, envCopy: copies.envCopy, sourceCommit: copies.commit, takenBefore: 'stop, migrate, mint, unit' };
+  recovery.migration = migrateStep ? classifyMigrateScript((await guest('migrate_class', `grep -o '"migrate"[[:space:]]*:[[:space:]]*"[^"]*"' '${appDir}/package.json' 2>/dev/null | head -1 | sed 's/^/MIGRATE_SCRIPT:/'; [ -d '${appDir}/migrations' ] && echo MIGRATIONS_DIR:yes || echo MIGRATIONS_DIR:no`, 15_000)).stdout, migrateStep.command) : { command: null, retry: 'none', note: 'no migration command' };
+  if (migrateStep && !copies.dbDump) job.event?.('warning', `no protected database copy before the migration (${copies.dbDumpNote || 'unknown'}); the migration runner's own ledger (${recovery.migration.ledger || 'none'}) is the only way back`, { dbDumpNote: copies.dbDumpNote });
+  mark('build_done', { app_stopped: false, resumable: true, buildId: buildId?.buildId || null, recovery }, `install and build finished; protected copies taken (${copies.dbDump ? 'db dump, ' : ''}${copies.unitCopy ? 'unit, ' : ''}${copies.envCopy ? 'env' : ''}); about to stop the application before the migration`);
   const restartUnit = async () => {
     const r = await guestRaw(`systemctl daemon-reload >/dev/null 2>&1 || true\nsystemctl start ${p.unit} >/dev/null 2>&1 || true\n${servingProbeScript(webPort, 10)}`, 90_000).catch(() => null);
     const verdict = restartVerdict(r?.stdout);
@@ -188,11 +238,29 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
     return restartOutcomeText(verdict);
   };
   disruptiveBegun = true;
-  mark('stopping_app', { app_stopped: true, resumable: false, disruptive: true }, 'stopping the application before the key check and mint');
+  mark('stopping_app', { app_stopped: true, resumable: false, disruptive: true, recovery }, `stopping the application before the migration${migrateStep ? ` (retry class: ${recovery.migration.retry})` : ''}, the key check and the mint`);
   const stop = await guest('stop', `: ${DEPLOY_MARKER}\nsystemctl stop ${p.unit} >/dev/null 2>&1 || true\n${freeWebPortScript(webPort)}\n`, DEPLOY_STEP_TIMEOUTS_MS.start);
   if (stop.code !== 0) {
     const back = await restartUnit();
-    return { ok: false, step: 'start', error: deployFailureMessage('start', `could not stop the running app before the key check: ${tail(stop)}. ${back}`) };
+    return { ok: false, step: 'start', error: deployFailureMessage('start', `could not stop the running app before the migration: ${tail(stop)}. ${back}`) };
+  }
+
+  // 1.6) The migration, with the old application stopped. The checkpoint
+  //      says a migration is in flight and how it may be retried; the
+  //      runner's ledger (when it has one) is what makes a resume safe.
+  if (migrateStep) {
+    mark('migrating', { app_stopped: true, resumable: false, disruptive: true, migration_in_progress: true, recovery }, `running the migration (${recovery.migration.retry === 'resume' ? 'ledgered; a retry resumes' : 'retry class ' + recovery.migration.retry})`);
+    const m = await runStep(migrateStep);
+    if (!m.ok) {
+      // The schema may be partly migrated (per-file transactions leave whole
+      // files applied or not). The old process is restarted on the new
+      // dist/: the same set the next retry starts from. Reported, never
+      // rolled back on its own.
+      const back = await restartUnit();
+      return { ...m, error: `${m.error}. ${back} The migration ledger (${recovery.migration.ledger || 'none'}) records what applied; ${recovery.protected?.dbDump ? `the pre-deploy dump ${recovery.protected.dbDump.path} is the protected copy` : 'no protected database copy was taken'}.`, verification: verificationFromObservations({ unit: parseUnitStatus('UNIT_LOADED:yes\nUNIT_ENABLED:enabled\nUNIT_ACTIVE:unknown\n') }) };
+    }
+    recovery.completed.push('migrate');
+    mark('migrated', { app_stopped: true, resumable: false, disruptive: true, migration_in_progress: false, recovery }, 'migration finished; key check and mint next');
   }
 
   // Mint the secrets the installed components own (the gate-one rules, in
@@ -275,9 +343,14 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   } else {
     obs.credential = { verified: null, code: null, detail: 'no data guard recorded for this app; the stored-credential check was not run' };
   }
-  const verification = verificationFromObservations({ ...obs, credentialUse: { verified: null, detail: 'application-owned credential check not run by the deploy (the server runs it after the job)' } });
-  mark('verified', { app_stopped: false, verification_state: verification.state }, `verification: ${verification.label}`);
-  return { ok: true, step: 'serving', buildStamp, verification, minted, deferred };
+  // The application-owned rung is a DURABLE follow-up (verify_app with the
+  // verify_credential_use step), queued by the executor before it reports
+  // this job finished, so a dead API or runner never loses the obligation.
+  // Without a data guard there is nothing to read back: not applicable.
+  const followUp = p.guard ? { kind: 'verify_app', steps: ['verify_credential_use'], rung: 'credential_use_verified' } : null;
+  const verification = verificationFromObservations({ ...obs, credentialUse: followUp ? null : { verified: null, detail: 'not applicable: no data guard, nothing to read back', outcome: 'not_applicable' } }, { pendingRungs: followUp ? ['credential_use_verified'] : [] });
+  mark('verified', { app_stopped: false, verification_state: verification.state, recovery }, `verification: ${verification.label}${followUp ? '; application-owned credential check pending' : ''}`);
+  return { ok: true, step: 'serving', buildStamp, verification, minted, deferred, followUp, recovery };
 }
 
 // ── the mint (a faithful port of component-install.ensureComponentSecrets) ──

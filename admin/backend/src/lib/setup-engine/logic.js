@@ -63,6 +63,37 @@ export const BACKEND_JOB_KINDS = Object.freeze(['restore_project_db', 'restore_s
 // A runner is live when its heartbeat is younger than this.
 export const RUNNER_LIVE_MS = 30_000;
 
+// ── who may execute (installation policy, never a request parameter) ────
+//
+// SETUP_EXECUTOR_POLICY in the installation's .env:
+//   runner-required   the host runner executes every job; with no live
+//                     runner a submission is QUEUED and reported unavailable —
+//                     the backend never executes in its own (privileged)
+//                     process. install.sh and update.sh write this.
+//   backend-allowed   the legacy / development executor: with no live runner
+//                     the backend claims and executes queued jobs itself, with
+//                     the same code, record and locking rules. The default
+//                     when the variable is absent (a checkout with no .env).
+export const EXECUTOR_POLICIES = Object.freeze(['runner-required', 'backend-allowed']);
+export const EXECUTOR_POLICY_KEY = 'SETUP_EXECUTOR_POLICY';
+export function executorPolicy(env = process.env) {
+  const raw = String(env?.[EXECUTOR_POLICY_KEY] || '').trim().toLowerCase();
+  if (raw === 'runner-required') return { mode: 'runner-required', source: 'env' };
+  if (raw === 'backend-allowed') return { mode: 'backend-allowed', source: 'env' };
+  if (raw) return { mode: 'runner-required', source: 'env', invalid: raw, note: `unknown ${EXECUTOR_POLICY_KEY} '${raw}': treated as runner-required (the safe reading)` };
+  return { mode: 'backend-allowed', source: 'default' };
+}
+
+// The application-owned credential check's outcomes — each a distinct fact.
+export const CREDENTIAL_USE_OUTCOMES = Object.freeze({
+  verified: 'verified',                               // the app read every stored credential back under its loaded key
+  failed: 'failed',                                   // the app reports unreadable or legacy rows, or refused the read
+  no_protected_credentials: 'no_protected_credentials', // nothing stored to read back (LDAPS not configured, inventory empty)
+  no_verification_credentials: 'no_verification_credentials', // no review-account login on this platform for this app
+  unreachable: 'unreachable',                         // the app did not answer the sign-in or the settings read
+  not_applicable: 'not_applicable',                   // no data guard: the app has no protected credential at all
+});
+
 export const CONTAINER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$/;
 
 // ── identity ────────────────────────────────────────────────────────────
@@ -193,7 +224,7 @@ export const VERIFY_STATES = Object.freeze(['unconfigured', 'configured', 'port_
 // APPLICATION reading its protected credential back through its own code
 // path with the key its process loaded. The first never becomes the second
 // by relabelling.
-export function verificationState({ unitConfigured = null, unitActive = null, portResponding = null, appHealthy = null, credentialDecryptable = null, credentialUseVerified = null, credentialVerified = undefined, deferredReason = null } = {}) {
+export function verificationState({ unitConfigured = null, unitActive = null, portResponding = null, appHealthy = null, credentialDecryptable = null, credentialUseVerified = null, credentialVerified = undefined, deferredReason = null, pendingRungs = [] } = {}) {
   // `credentialVerified` is the pre-split name for the classifier rung.
   if (credentialVerified !== undefined && credentialDecryptable === null) credentialDecryptable = credentialVerified;
   const facts = { unitConfigured, unitActive, portResponding, appHealthy, credentialDecryptable, credentialUseVerified };
@@ -206,14 +237,17 @@ export function verificationState({ unitConfigured = null, unitActive = null, po
   ];
   let state = 'unconfigured';
   let next = 'configure the application unit';
+  let pending = [];
   for (const [name, fact] of rungs) {
     if (fact === true) { state = name; next = nextStep(name); continue; }
-    if (fact === false) return { state: 'recovery_required', label: LABELS.recovery_required, facts, failedAt: name, next: recoveryStep(name), deferredReason: deferredReason || null };
-    // null: not checked — stop climbing, keep what is proven.
+    if (fact === false) return { state: 'recovery_required', label: LABELS.recovery_required, facts, failedAt: name, next: recoveryStep(name), deferredReason: deferredReason || null, pending: [] };
+    // null: not checked — stop climbing, keep what is proven. A rung that a
+    // follow-up job WILL check is listed as pending: the state is not final.
+    if (pendingRungs.includes(name)) { pending = pendingRungs.filter((r) => rungs.some(([n, f]) => n === r && f == null)); next = `${nextStep(state)} — pending: ${pending.join(', ')}`; break; }
     next = `${nextStep(state)} (${name.replace(/_/g, ' ')} was not checked${deferredReason ? `: ${deferredReason}` : ''})`;
     break;
   }
-  return { state, label: LABELS[state], facts, failedAt: null, next, deferredReason: deferredReason || null };
+  return { state, label: LABELS[state], facts, failedAt: null, next, deferredReason: deferredReason || null, pending };
 }
 
 const LABELS = Object.freeze({

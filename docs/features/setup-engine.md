@@ -74,12 +74,26 @@ instead of minting again.
 | `port_responding` | the web port answers below 500; **not** verified healthy |
 | `app_healthy` | root, login page and `/api/health` (when present) answer; credential **not** verified |
 | `credential_decryptable` | the platform's classifier opens the stored rows with the configured key (`MASTERKEY_ROWS` 200, or 204 with nothing stored — the vacuous case is marked). Evidence about the data and the file, not about the running process |
-| `credential_use_verified` | the **application** read its protected credential back through its own code path: the backend signs in as the review account and reads `/api/admin/ldaps` — `masterKey` current or rekeyed, inventory complete. Recorded on the job after it finishes (`verification.rungs.credential_use_verified`), by `backend`, without the login ever entering a job row. Nothing stored → unverified, by name |
+| `credential_use_verified` | the **application** read its protected credential back through its own code path: a `verify_app` job (step `verify_credential_use`) signs in as the review account and reads `/api/admin/ldaps` — `masterKey` current or rekeyed **and** the inventory complete with no legacy and no unreadable rows (a 200 that still reports unreadable rows is `failed`). The outcome is one of `verified`, `failed`, `no_protected_credentials` (nothing stored), `no_verification_credentials` (no review login on this host), `unreachable` (the app did not answer), `not_applicable` (no data guard). Recorded on the deploy record as `verification.rungs.credential_use_verified` with the outcome, and the deploy's state moves only then. The login is read by the executor's host (the runner from mock2.db + `.env`, the backend from the registry) and never enters a job row or an event |
 | `recovery_required` | a rung failed; the record names which and the procedure |
 
-A rung that was not checked caps the state and the next step says why (for
-example *credential verified was not checked: no data guard recorded*). A
-deferred operation finishes as `deferred`, never `succeeded`.
+A rung that was not checked caps the state and the next step says why. A
+rung a follow-up job will check is listed in `verification.pending` and the
+state is not final until it lands. **Execution status and verification
+status are separate facts:** a deploy job's `status`/`outcome`
+(`succeeded`/`serving`) says the operation ran to the end; its
+`verification.state` says how much is proven, and it reads
+`credential_decryptable` with `pending: [credential_use_verified]` until
+the follow-up records the application rung. A deferred operation finishes
+as `deferred`, never `succeeded`.
+
+**Durable verification.** The follow-up `verify_app` job is created by the
+executor **before** it marks the deploy finished (`progress.verification_job_id`
+points at it), so a browser that closed, an API process that exited or a
+runner that died cannot lose the obligation: the job is queued in the
+database and the next executor tick — the runner's, or the backend's under
+`backend-allowed` — claims it once (compare-and-swap). The boot sweep leaves
+a queued job alone.
 
 ## What happens when the backend dies mid-deploy
 
@@ -112,22 +126,31 @@ auto-cleared.
 
 ## The deploy (runner-owned since the deployment slice)
 
-The application deploy is ONE operation, `lib/setup-engine/deploy-op.js`:
-reap any previous writer's scripts and confirm none survive → install /
-migrate / build (install skipped on an unchanged manifest) → the e2e browser
-and the PWA build stamp (best effort) → **checkpoint** (`stopping_app`,
-`app_stopped: true`) → stop the unit and free the port → mint the installed
-components' owned secrets under the gate-one rules (source and built-artifact
-markers, the data probe as the app's role, never overwrite, defer and say
-why) → validate the environment → write the unit, start → health (45 polls)
-→ verify (application health, then the stored credential under the
-configured key). It runs over an injected guest executor, so the same code
-executes in two places and there is no second implementation:
+The application deploy is ONE operation, `lib/setup-engine/deploy-op.js`,
+run by ONE executor, `lib/setup-engine/executor.js`:
+reap every session another job left in the guest and confirm none survive →
+install / build under the running old application (install skipped on an
+unchanged manifest; only the working tree and `dist/` change, which the
+running process does not reload) → the e2e browser and the PWA build stamp
+(best effort) → **protected copies** (a database dump into the directory
+`restore_project_db` restores from, a copy of the unit file, a 0600 copy of
+the environment file, the deployed commit, the migration runner's retry
+class) → **checkpoint** (`stopping_app`, `app_stopped: true`) → stop the unit
+and free the port → **migrate** (the first potentially incompatible
+mutation, so it runs behind the maintenance boundary, never under the old
+process) → mint the installed components' owned secrets under the gate-one
+rules (source and built-artifact markers, the data probe as the app's role,
+never overwrite, defer and say why) → validate the environment → write the
+unit, start → health (45 polls) → verify (application health, then the
+stored credential under the configured key) → queue the **application-owned
+credential check** as a durable follow-up job. The executor runs in two
+places, and there is no second implementation:
 
 | Executor | When | Owner recorded |
 | --- | --- | --- |
-| The host runner (`proxypilot setup-runner serve`) | a runner has a heartbeat younger than 30 s in `setup_runners` (migration 1001) | `runner@…` |
-| The backend, in-process (nsenter pivot) | no live runner — a development checkout, or a host before `update.sh` installed the unit | `backend@…` |
+| The host runner (`proxypilot setup-runner serve`) | a runner has a heartbeat younger than 30 s in `setup_runners` (migration 1001) — under either policy | `runner@…` |
+| The backend, in-process (nsenter pivot) | no live runner **and** the installation policy is `backend-allowed` (see "Who executes") | `backend@…` |
+| Nobody | no live runner and the policy is `runner-required`: the job is queued and the caller is told the runner is unavailable | — |
 
 `mock2/deploy.js` `deployProject()` is the single entry every caller keeps
 using (the build cycle, connect, provision and rehydrate, the REST deploy
@@ -159,16 +182,39 @@ by the runner (on start and every minute) or the backend's boot sweep:
 
 | Last checkpoint | Meaning | Reconcile |
 | --- | --- | --- |
-| `starting`, `install`, `migrate`, `build`, `build_done` | nothing disruptive yet | **resume**: requeued and run again from the start (steps are idempotent; minted keys are reused) |
-| `stopping_app`, `secrets_minted`, `unit_written` | the app is stopped | **recover**: `recovery_required` on the dead job, a `recover_app` queued with the references (port, unit, environment file, the guard, the generated key names), the lease kept and flagged stale |
+| `starting`, `install`, `build`, `build_done` | nothing disruptive yet: no data changed, the old process still runs | **resume**: requeued and run again from the start (steps are idempotent; minted keys are reused; the protected copies are taken again under the new job's id) |
+| `stopping_app`, `migrating`, `migrated`, `secrets_minted`, `unit_written` | the app is stopped; from `migrating` on, the database may be partly or fully migrated | **recover**: `recovery_required` on the dead job with the migration's retry class in its reason, a `recover_app` queued with the references (port, unit, environment file, the guard, the generated key names) and the protected copies, the lease kept and flagged stale |
 | `app_started` | the new unit runs; verification unfinished | **verify**: a `verify_app` queued; the dead job records `interrupted_unverified` with its recovery references kept |
-| `verified` | done bar the record | interrupted, lease released |
+| `verified` | done bar the record (the application rung has its own job) | interrupted, lease released |
 
-`checkpoint.recovery` (unit path, environment file, contract commands, guard,
-generated key names, build id) is written at the start and never cleared;
-`app_stopped` is the only flag that flips. Nothing rolls an environment key
-back on its own — the recovery procedure for a credential mismatch says to
-restore the recovery set together.
+**What "recovered" restarts.** `recover_app` starts the unit as it is on
+disk — the new `dist/`, the current environment file, whatever the
+migration ledger already applied — and then *verifies*; it never rolls the
+environment key back on its own, never restores the old application over a
+migrated database, and never replays a dump. Those are operator decisions
+made from the record's references (below); the recovery procedure for a
+credential mismatch says to restore the recovery set — database and
+environment — together.
+
+**The migration.** `checkpoint.recovery.migration` classifies what `npm run
+migrate` runs: the platform's own `scripts/migrate.mjs` is ledgered
+(`_migrations`), one transaction per file, idempotent — an interrupted run
+left whole files applied or not, and a retry resumes at the first unapplied
+file (`retry: resume`); a framework migrator with a ledger reads the same;
+anything else is `retry: unknown`, and an interrupted unknown migration is
+recorded as recovery-required rather than re-run. A failed migration is its
+own step (`migrate`), restarts the old process on the new `dist/` and names
+the ledger and the protected dump; it does not roll anything back.
+
+**Recovery references are retained versions**, not live paths the deploy
+overwrites: `checkpoint.recovery.protected` names the pre-deploy dump
+(`/var/backups/proxypilot-db/app-pre-deploy-<job>.sql`, with size and
+sha256), the unit file copy (`…/mock2-dev.service.pre-<job>`), the
+environment file copy (`/etc/environment.pre-<job>`, mode 0600) and the
+source commit; `completed` lists the phases that finished; `generatedKeys`
+the secret names minted. A copy that could not be taken is recorded as such
+(`dbDumpNote`) — never assumed. `checkpoint.recovery` is written at the
+start and never cleared; `app_stopped` is the only flag that flips.
 
 **Cancel** (`POST /api/setup/jobs/:id/cancel`): a queued job is cancelled
 outright; a running deploy is cancelled at its next safe checkpoint — any
@@ -176,15 +222,47 @@ fence before the stop — and nothing has changed in the guest but its build
 outputs; a cancel that arrives after the stop is not honoured mid-way: the
 deploy finishes bringing the app up and records `cancel_declined`.
 
-**Before takeover.** The lease expiring is not proof the previous writer's
-guest commands stopped. Every deploy script carries `mock2_deploy_marker`;
-the runner (for a deploy and for a recovery) and the operation itself run
-`pkill -9 -f` on the marker, wait, count survivors with `pgrep`, try once
-more, and **refuse** (`PREVIOUS_WRITER_ALIVE`) if any remain — a job that
-starts never races a script it could not stop. This is containment for
-guest-side scripts; a dead backend's nsenter parent has no further effect
-once its guest script is gone. The suite kills a real marker-carrying child
-process with the same script.
+**Containment of every writer** (`guest-probes.js` `containedScript`,
+`reapStaleWritersScript`). The lease expiring is not proof the previous
+writer's guest commands stopped, and a marker on the parent shell says
+nothing about the children it spawned. So every script the deploy runs in
+the guest is wrapped: it runs as its **own session** (`setsid`) under the
+job's id, and the session id is recorded in `/run/mock2-deploy/<job>.sid`.
+Everything that script spawns — `npm`'s children, a build's helpers, an
+unmarked background process it left behind — shares that session id. Before
+a deploy or a recovery touches the guest (after it holds the lease), the
+executor kills every session recorded by **another** job (`pkill -9 -s`),
+then the legacy marker scripts that carry no job id, waits, and counts live
+survivors (zombies awaiting reap do not count); it tries once more and, if
+any remain, ends the job as `recovery_required` (`previous_writer_alive`)
+with the **lease kept and flagged stale**, so every conflicting operation is
+refused with that reason until the survivors are gone — nothing is silently
+cleared. The current job's own sessions and everything outside these
+sessions are untouched; the application's service runs in systemd's own
+cgroup and session and is never a target. The suite proves this with real
+processes: a contained marked shell spawns an unmarked child that outlives
+it and keeps writing; the reap by session kills it, the file stops growing,
+and a legitimate current holder's session survives. Limit: a process that
+calls `setsid` itself (a double-forking daemon) leaves the session and is
+outside this containment; the writer inventory in
+`docs/features/immediate-repairs.md` still applies to operator shells.
+
+## Who executes: the installation policy
+
+`SETUP_EXECUTOR_POLICY` in the installation's `.env` — read by the backend
+at boot (`logic.js executorPolicy`), never from a request:
+
+| Policy | No live runner | Live runner |
+| --- | --- | --- |
+| `runner-required` (written by `install.sh` and retro-fitted once by `update.sh` after the unit is installed) | the submission is **queued** and reported unavailable (`step: runner_unavailable`, HTTP 202 with a warning on the submission endpoint); nothing runs in the backend | the runner executes |
+| `backend-allowed` (the legacy / development executor; the default when the variable is absent, i.e. a checkout with no `.env`) | the backend claims and executes queued runner jobs in its own process — on submission, on boot and every 30 s — with the **same** executor, record and locks; owner `backend@…` | the runner executes (a live runner always wins) |
+
+An unknown value reads as `runner-required` (the safe reading). No request
+parameter, header or MCP argument can enable the in-process executor: the
+`deployProject` adapter ignores anything of the kind and decides from the
+store's environment only. The two modes share `lib/setup-engine/executor.js`
+and the container lock; a restore submitted while either executor holds
+the app is refused the same way.
 
 ## The runner
 
@@ -247,11 +325,14 @@ the lock itself already binds every MCP mutation that goes through
   reads their environment files for the engine; the browser-facing API
   writes rows it reads. A request cannot make it run anything but its fixed
   scripts and the guest's own contract commands inside that guest.
-- What this slice REMOVED from the container's path: on a host with the
-  runner unit installed and live, the deploy's guest commands, the secret
-  mint and the unit swap no longer run under the backend container's
-  nsenter pivot — they run in the runner. The fallback executor keeps the
-  pivot only where no runner exists.
+- What the deployment slice REMOVED from the container's path: on a
+  `runner-required` host (every install.sh / update.sh installation from
+  this version on), the deploy's guest commands, the secret mint, the unit
+  swap, the recovery and every verification — the application-owned
+  credential check included — never run in the backend container: they run
+  in the runner, and with no runner they wait. Only a `backend-allowed`
+  installation keeps the in-process executor and its nsenter pivot for
+  these operations.
 - What it did NOT remove: the container still has `privileged: true`,
   `pid: host` and the Docker socket, and every other feature (Incus
   lifecycle, Caddy, storage, migration, restores, the retry-path mint, the
@@ -271,6 +352,22 @@ the lock itself already binds every MCP mutation that goes through
   reads the same database.
 
 ## Tests
+
+`setup-deploy-finish.test.js`: the follow-up verification queued before the
+deploy is finished, surviving an API restart, running exactly once and
+landing on both records; the seven distinct outcomes of the application
+rung with the deploy's execution status unchanged; the maintenance boundary
+before the migration, protected copies as retained versions that a later
+deploy does not overwrite, a migration in flight reconciled with its retry
+class and its copies carried to the recovery job, a failed migration named
+and never rolled back; real-process containment (an unmarked child that
+outlives its marked parent is killed by session while a legitimate holder
+survives) and the recorded survivor state with the lease kept; the executor
+policy (explicit values, the safe reading, the default, `.env.example`,
+install.sh, update.sh), runner-required queueing with no backend mutation,
+backend-allowed running the same executor in-process with the follow-up
+verification, a live runner taking precedence under either policy, and the
+boot wiring.
 
 `setup-deploy.test.js`: the whole operation against a scripted guest (order
 of steps, the checkpoint before the stop, the mint with real values written
@@ -300,6 +397,18 @@ dead backend and runner jobs, the serve loop, the command, the exec wrapper,
 the unit and install wiring). Both against `node:sqlite`.
 
 ## Host acceptance (not yet run)
+
+For this slice's corrections: on a runner-required host, kill the runner
+between the stop and the start of a deploy of an app with an LDAPS
+credential and confirm the restarted runner recovers it and the deploy
+record ends `credential_use_verified` (not merely serving); stop the runner
+unit, submit a deploy and confirm the job is queued with no backend
+execution, then start the runner and confirm it runs; start a deploy and
+kill the guest-side `npm` tree's session leader mid-build, confirm the next
+deploy's reap kills the surviving children by session and the app service
+is untouched; confirm `/var/backups/proxypilot-db/app-pre-deploy-<job>.sql`
+and the `.pre-<job>` copies exist after a deploy and `restore_project_db`
+accepts the dump by name.
 
 For the deploy: with the runner unit live, deploy a project from the
 dashboard and confirm the job is owned by `runner@…`, the runner's journal

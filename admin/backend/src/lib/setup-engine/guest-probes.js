@@ -170,8 +170,9 @@ export function credentialVerdict({ guard, envKey = '', probeStdout = '' } = {})
 // verificationFromObservations({ unit, port, health, credential }) → the R4
 // state. Each observation may be missing (not run): a missing rung caps the
 // state, a failed rung is recovery required.
-export function verificationFromObservations({ unit = null, port = null, health = null, credential = null, credentialUse = null } = {}) {
+export function verificationFromObservations({ unit = null, port = null, health = null, credential = null, credentialUse = null } = {}, { pendingRungs = [] } = {}) {
   const facts = {
+    pendingRungs,
     unitConfigured: unit ? unit.loaded : null,
     unitActive: unit && unit.observed ? unit.isActive : null,
     portResponding: port && port.observed ? port.responding : null,
@@ -191,7 +192,195 @@ export function verificationFromObservations({ unit = null, port = null, health 
       port: port ? { responding: port.responding, code: port.code } : null,
       health: health ? { healthy: health.healthy, codes: health.codes, why: health.why } : null,
       credential: credential ? { verified: credential.verified, code: credential.code, detail: credential.detail, keyState: credential.keyState || null } : null,
-      credentialUse: credentialUse ? { verified: credentialUse.verified, detail: credentialUse.detail } : null,
+      credentialUse: credentialUse ? { verified: credentialUse.verified, outcome: credentialUse.outcome || null, detail: credentialUse.detail } : null,
     },
+  };
+}
+
+// ── the application-owned credential check (R4, top rung) ────────────────
+//
+// Signs in to the app as the platform's review account and reads the LDAPS
+// settings the app's own code path serves: masterKey (current / rekeyed /
+// legacy / unreadable / none) and masterKeyInventory (total, current,
+// legacy, unreadable, complete). Only the application decrypting the stored
+// credential with the key its process loaded reaches `verified`. The login
+// travels to curl through a private temporary file inside the guest, never
+// through argv, and never lands in a job row: this script is built by the
+// executor from a login it holds in memory.
+export function credentialUseScript(port, login) {
+  const p = portOrThrow(port);
+  if (!login || !login.email || !login.password) throw new Error('credentialUseScript needs a login');
+  const base = `http://127.0.0.1:${p}`;
+  const creds = JSON.stringify({ email: String(login.email), password: String(login.password) });
+  if (/PP_CRED_EOF/.test(creds)) throw new Error('login text collides with the heredoc delimiter');
+  return [
+    'umask 077', 'JAR=$(mktemp)', 'CRED=$(mktemp)', "trap 'rm -f \"$JAR\" \"$CRED\"' EXIT INT TERM",
+    `cat > "$CRED" <<'PP_CRED_EOF'`, creds, 'PP_CRED_EOF',
+    `C=$(curl -sS -o /dev/null -c "$JAR" -w '%{http_code}' --max-time 10 -X POST -H 'Content-Type: application/json' --data-binary @"$CRED" "${base}/api/auth/login" 2>/dev/null)`,
+    'echo "SIGNIN:${C:-000}"',
+    `BODY=$(curl -sS -b "$JAR" -w '\\nLDAPS:%{http_code}' --max-time 10 "${base}/api/admin/ldaps" 2>/dev/null)`,
+    'echo "$BODY"', '',
+  ].join('\n');
+}
+
+// interpretCredentialUse(stdout) → { verified: true|false|null, outcome, detail, masterKey }
+// with the distinct outcomes of logic.js CREDENTIAL_USE_OUTCOMES.
+export function interpretCredentialUse(stdout) {
+  const s = String(stdout || '');
+  const signin = Number((s.match(/^SIGNIN:(\d{3})/m) || [])[1] || 0);
+  const code = Number((s.match(/^LDAPS:(\d{3})/m) || [])[1] || 0);
+  if (!s.includes('SIGNIN:') || signin === 0) return { verified: null, outcome: 'unreachable', detail: 'the application did not answer the sign-in; the application-owned credential check could not run' };
+  if (signin >= 400) return { verified: null, outcome: 'no_verification_credentials', detail: `the review account could not sign in (HTTP ${signin}); the application-owned credential check could not run` };
+  if (code === 0) return { verified: null, outcome: 'unreachable', detail: 'the application did not answer the LDAPS settings read' };
+  if (code !== 200) return { verified: false, outcome: 'failed', detail: `the application refused the LDAPS settings read (HTTP ${code})` };
+  let body;
+  try {
+    const jsonText = s.slice(s.indexOf('SIGNIN:')).split('\n').slice(1).join('\n').replace(/\nLDAPS:\d{3}\s*$/, '').trim();
+    body = JSON.parse(jsonText);
+  } catch { return { verified: false, outcome: 'failed', detail: 'the LDAPS settings answered but not with JSON the check understands' }; }
+  const inv = body?.masterKeyInventory || {};
+  const key = body?.masterKey || null;
+  const total = Number(inv.total || 0);
+  if (total === 0 && (!body?.configured || key === 'none')) return { verified: null, outcome: 'no_protected_credentials', detail: 'no stored credential to read back through the application (LDAPS not configured, inventory empty)', masterKey: key };
+  const unreadable = Number(inv.unreadable || 0);
+  const legacy = Number(inv.legacy || 0);
+  if ((key === 'current' || key === 'rekeyed') && inv.complete === true && unreadable === 0 && legacy === 0 && Number(inv.current || 0) === total) {
+    return { verified: true, outcome: 'verified', detail: `the application read its LDAPS credential back under its loaded key (masterKey ${key}, inventory ${inv.current}/${total} current)`, masterKey: key };
+  }
+  return { verified: false, outcome: 'failed', detail: `the running application cannot use its credential as stored (masterKey ${key || 'unknown'}, inventory current ${inv.current ?? '?'}/${total}, legacy ${legacy}, unreadable ${unreadable})`, masterKey: key };
+}
+
+// ── the migration runner (migration-aware checkpoints) ──────────────────
+//
+// What `npm run migrate` actually runs decides how an interrupted migration
+// may be retried. The platform's own runner (scripts/migrate.mjs) applies
+// migrations/*.sql in order, one transaction per file, ledgered in a
+// `_migrations` table: a retry resumes at the first unapplied file and a
+// half-applied file was rolled back. Anything else is unknown, and an
+// interrupted unknown migration is a recovery-required condition, not a
+// retry.
+export function migrateScriptClassScript(appDir) {
+  const d = String(appDir || '/srv/app');
+  if (!/^\/[A-Za-z0-9._\/-]+$/.test(d)) throw new Error('appDir must be an absolute path');
+  return `grep -o '"migrate"[[:space:]]*:[[:space:]]*"[^"]*"' '${d}/package.json' 2>/dev/null | head -1 | sed 's/^/MIGRATE_SCRIPT:/'\n[ -d '${d}/migrations' ] && echo "MIGRATIONS_DIR:yes" || echo "MIGRATIONS_DIR:no"\n`;
+}
+
+export function classifyMigrateScript(stdout, contractMigrate = null) {
+  const s = String(stdout || '');
+  const m = s.match(/^MIGRATE_SCRIPT:"migrate"\s*:\s*"([^"]*)"/m);
+  const script = m ? m[1] : null;
+  const dir = /^MIGRATIONS_DIR:yes/m.test(s);
+  const cmd = script || contractMigrate || null;
+  if (!cmd) return { command: null, ledger: null, retry: 'none', note: 'no migration command' };
+  if (/scripts\/migrate\.mjs/.test(cmd)) return { command: cmd, ledger: '_migrations', perFileTransaction: true, retry: 'resume', note: 'the platform migration runner: ledgered, one transaction per file, idempotent — a retry resumes at the first unapplied file', migrationsDir: dir };
+  if (/drizzle-kit migrate|drizzle-orm\/migrator|prisma migrate deploy|knex migrate:latest/.test(cmd)) return { command: cmd, ledger: 'framework', perFileTransaction: null, retry: 'resume', note: 'a ledgered framework migrator; retries resume at the first unapplied migration', migrationsDir: dir };
+  return { command: cmd, ledger: null, perFileTransaction: null, retry: 'unknown', note: 'an unrecognised migration command: its idempotency is not established, so an interrupted migration is recovery-required rather than retried', migrationsDir: dir };
+}
+
+// ── containment of a job's transient processes ──────────────────────────
+//
+// Every deploy script runs as its own session (setsid) and records its session
+// id under RUN_DIR/<jobId>.sid, so everything it spawns — marked or not, npm's
+// children, a build's helpers, a background process a script left behind —
+// shares that session id and can be found and killed by it. The application's
+// own service is never in these sessions (systemd starts it in its own
+// cgroup), so cleanup never touches it. Cleanup targets OTHER jobs' sessions
+// only: a legitimate current holder's sessions are left alone by job id.
+export const CONTAINMENT_RUN_DIR = '/run/mock2-deploy';
+const JOB_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
+
+export function containedScript(jobId, body, { runDir = CONTAINMENT_RUN_DIR } = {}) {
+  const id = String(jobId || 'adhoc');
+  if (!JOB_ID_RE.test(id)) throw new Error('job id must be a plain identifier');
+  if (!/^\/[A-Za-z0-9._\/-]+$/.test(runDir)) throw new Error('runDir must be an absolute path');
+  const b64 = Buffer.from(String(body), 'utf8').toString('base64');
+  return [
+    `: ${'mock2_deploy_marker'} job=${id}`,
+    `mkdir -p '${runDir}' 2>/dev/null || true`,
+    `T=$(mktemp '${runDir}/${id}.XXXXXX' 2>/dev/null || mktemp)`,
+    `printf '%s' '${b64}' | base64 -d > "$T"`,
+    // Under setsid the new shell is a session leader: $$ is the session id.
+    `if command -v setsid >/dev/null 2>&1; then`,
+    `  exec setsid sh -c 'echo $$ >> "$2"; : mock2_deploy_marker job=$3; . "$1"; rc=$?; rm -f "$1"; exit $rc' sh "$T" '${runDir}/${id}.sid' '${id}'`,
+    `else`,
+    `  echo $$ >> '${runDir}/${id}.sid'; . "$T"; rc=$?; rm -f "$T"; exit $rc`,
+    `fi`,
+    '',
+  ].join('\n');
+}
+
+// reapStaleWritersScript(currentJobId) → kills every session another job
+// recorded, then the legacy marker scripts that carry no job id (or another
+// one), waits, and reports survivors as `STALE_WRITERS:<n>`. Files whose
+// sessions are all gone are removed. The current job's own sessions and
+// anything outside these sessions are untouched.
+export function reapStaleWritersScript(currentJobId, { runDir = CONTAINMENT_RUN_DIR } = {}) {
+  const id = String(currentJobId || 'adhoc');
+  if (!JOB_ID_RE.test(id)) throw new Error('job id must be a plain identifier');
+  if (!/^\/[A-Za-z0-9._\/-]+$/.test(runDir)) throw new Error('runDir must be an absolute path');
+  return [
+    `RUN='${runDir}'; CUR='${id}'; me=$$`,
+    'others() { for f in "$RUN"/*.sid; do [ -e "$f" ] || continue; b=$(basename "$f" .sid); [ "$b" = "$CUR" ] && continue; echo "$f"; done; }',
+    'for f in $(others); do for sid in $(cat "$f" 2>/dev/null); do [ -n "$sid" ] && [ "$sid" != "$me" ] && pkill -9 -s "$sid" 2>/dev/null || true; done; done',
+    // Legacy marker scripts from deploys that predate containment carry no job
+    // id; those of another job carry a different one. Never our own.
+    `for p in $(pgrep -f mock2_deploy_marker 2>/dev/null); do [ "$p" = "$me" ] && continue; c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null); case "$c" in *"job=$CUR"*) ;; *) kill -9 "$p" 2>/dev/null || true;; esac; done`,
+    'sleep 1',
+    // A killed process that nobody has reaped yet is a zombie, not a writer.
+    'alive() { st=$(sed -E "s/^[^)]*\\) //" /proc/$1/stat 2>/dev/null | cut -d" " -f1); [ -n "$st" ] && [ "$st" != "Z" ] && [ "$st" != "X" ]; }',
+    'n=0',
+    'for f in $(others); do left=0; for sid in $(cat "$f" 2>/dev/null); do [ -n "$sid" ] || continue; for p in $(pgrep -s "$sid" 2>/dev/null); do [ "$p" = "$me" ] && continue; alive "$p" && left=$((left + 1)); done; done; n=$((n + left)); [ "$left" -eq 0 ] && rm -f "$f"; done',
+    `for p in $(pgrep -f mock2_deploy_marker 2>/dev/null); do [ "$p" = "$me" ] && continue; alive "$p" || continue; c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null); case "$c" in *"job=$CUR"*) ;; *) n=$((n + 1));; esac; done`,
+    'echo "STALE_WRITERS:$n"',
+    '',
+  ].join('\n');
+}
+
+export function parseStaleWriters(stdout) {
+  const m = String(stdout || '').match(/^STALE_WRITERS:(\d+)/m);
+  return m ? Number(m[1]) : null;
+}
+
+// ── protected copies before the first incompatible mutation ─────────────
+//
+// Taken while the old application still runs and before the migration: a
+// database dump in the directory the existing restore_project_db primitive
+// restores from, a copy of the unit file and of the environment file (0600),
+// the deployed commit and the migration command. Every line is a marker, so
+// a copy that could not be taken is recorded as such, never assumed.
+export const DB_DUMPS_DIR = '/var/backups/proxypilot-db';
+export function protectedCopiesScript(jobId, { appDir = '/srv/app', unitPath = '/etc/systemd/system/mock2-dev.service', environmentFile = '/etc/environment', dumpsDir = DB_DUMPS_DIR, withDatabase = true } = {}) {
+  const id = String(jobId || 'adhoc');
+  if (!JOB_ID_RE.test(id)) throw new Error('job id must be a plain identifier');
+  for (const pth of [appDir, unitPath, environmentFile, dumpsDir]) if (!/^\/[A-Za-z0-9._\/-]+$/.test(pth)) throw new Error('paths must be absolute');
+  return [
+    withDatabase
+      ? `D='${dumpsDir}'; mkdir -p "$D" 2>/dev/null; f="$D/app-pre-deploy-${id}.sql"; if command -v pg_dump >/dev/null 2>&1; then if su - postgres -c "pg_dump --clean --if-exists app" > "$f.tmp" 2>/dev/null; then mv -f "$f.tmp" "$f" && chmod 600 "$f" && echo "DBDUMP:$f:$(wc -c < "$f" | tr -d ' '):$(sha256sum "$f" | cut -d' ' -f1)"; else rm -f "$f.tmp"; echo "DBDUMP:none:pg_dump failed"; fi; else echo "DBDUMP:none:no pg_dump"; fi`
+      : 'echo "DBDUMP:skipped:no migration command"',
+    `if [ -f '${unitPath}' ]; then cp -p '${unitPath}' '${unitPath}.pre-${id}' && echo "UNITCOPY:${unitPath}.pre-${id}"; else echo "UNITCOPY:none:no unit yet"; fi`,
+    `umask 077; if [ -f '${environmentFile}' ]; then cp -p '${environmentFile}' '${environmentFile}.pre-${id}' && chmod 600 '${environmentFile}.pre-${id}' && echo "ENVCOPY:${environmentFile}.pre-${id}"; else echo "ENVCOPY:none:no environment file"; fi`,
+    `git -C '${appDir}' rev-parse HEAD 2>/dev/null | sed 's/^/COMMIT:/'`,
+    migrateScriptClassScript(appDir),
+  ].join('\n');
+}
+
+export function parseProtectedCopies(stdout) {
+  const s = String(stdout || '');
+  const get = (k) => (s.match(new RegExp(`^${k}:(.*)$`, 'm')) || [])[1] || null;
+  const dump = get('DBDUMP');
+  let dbDump = null;
+  if (dump && !/^(none|skipped)/.test(dump)) {
+    const m = dump.match(/^(\/\S+):(\d+):([0-9a-f]{64})$/);
+    dbDump = m ? { path: m[1], bytes: Number(m[2]), sha256: m[3] } : { path: dump.split(':')[0], bytes: null, sha256: null };
+  }
+  const unit = get('UNITCOPY');
+  const env = get('ENVCOPY');
+  const commit = get('COMMIT');
+  return {
+    dbDump,
+    dbDumpNote: dump && /^(none|skipped)/.test(dump) ? dump : null,
+    unitCopy: unit && !/^none/.test(unit) ? unit : null,
+    envCopy: env && !/^none/.test(env) ? env : null,
+    commit: commit && /^[0-9a-f]{40}$/.test(commit) ? commit : null,
   };
 }

@@ -25,18 +25,22 @@ app provisioning 0–5 %; overall new platform repository work ≈ 20 %.
 | A5 | Restart / reboot reconciliation: saved state vs actual state, safe resume or recorded recovery-required; stale workers cannot change a target after ownership moved; retry reuses generated secrets and resources | **done**: the runner reconciles on start and every minute (a dead backend's stopped app → recovery job + stale kept lease; a dead runner's resumable job → requeued; anything else → interrupted and released), takes a stale lease over with an epoch bump, stops on a fenced heartbeat mid-run, and executes the queued recovery; the backend's boot sweep records the same conditions when it comes back first; `retryPlan` carries `reuse` | `cli/src/setup-runner/runner.js`, `lib/setup-engine/backend.js` |
 | A6 | Verification states: configured / port responding / application healthy / credential verified / recovery required, never conflated; deferral is an explicit sanitized outcome; gate-one probe safeguards retained | **done**: the runner's probes populate the ladder from the guest (unit, port, health, and the gate-one data probe + classifier for the credential — same role, protected password file, row-security check); a port answering is recorded as `port_responding`, never healthy; a missing guard defers the credential rung by name; every job outcome is one of succeeded / failed / deferred / refused / recovery_required | `cli/src/setup-runner/probes.js`, `lib/setup-engine/logic.js` |
 | A2a | Runner-owned deployment: ONE deploy operation (`deploy-op.js`) executed by the runner when live, else in-process by the backend under the same persistent record; every caller (build cycle, connect, provision, rehydrate, REST, `promote_release`, `redeploy_project`) submits and observes the job through `deployProject`; checkpoints before the stop and after the start with recovery references that outlive the stopped-app marker; interruption at every checkpoint reconciled to resume / recover / verify; cancel at a safe checkpoint, declined after the stop; a previous writer's guest scripts reaped and counted before any takeover; retry and repeat mint nothing new | **done** | `lib/setup-engine/deploy-op.js`, `mock2/deploy.js`, `routes/setup.js`, `setup-deploy.test.js`, `docs/features/setup-engine.md` § "The deploy" |
+| A2c | Deployment slice corrections: (1) the application-owned credential check is a durable `verify_app` follow-up queued before the deploy reports done, with six distinct outcomes, run once by whichever executor is live, landing on both records — execution status and verification status are separate; (2) the maintenance boundary sits before the migration, protected copies (dump in the restore directory, unit and env copies, commit, migration retry class) are retained versions on the record, a migration in flight is reconciled with its retry class, a failed one is named and never rolled back; (3) every deploy script runs as its own session under the job id and takeover kills other jobs' sessions (unmarked children included), keeps the lease and refuses on survivors, proven with real processes; (4) `SETUP_EXECUTOR_POLICY` (`runner-required` written by install/update; `backend-allowed` the legacy/development default) decides who executes — never a request parameter — and the backend's in-process mode runs the same executor | **done** | `lib/setup-engine/{executor,deploy-op,guest-probes,logic,backend}.js`, `mock2/deploy.js`, `cli/src/setup-runner/{runner,review-login}.js`, `install.sh`, `update.sh`, `.env.example`, `setup-deploy-finish.test.js` |
 | A2b | Verification rungs split: `credential_decryptable` (classifier) is distinct from `credential_use_verified` (the application reads its credential back through `/api/admin/ldaps` as the review account; recorded by the backend after the job, login never in a job row); nothing stored → unverified by name | **done** | `lib/setup-engine/logic.js`, `mock2/deploy.js` `verifyCredentialUse` |
 | A7 | Privilege-separation inventory: what the backend container can still do directly (privileged, `pid: host`, Docker socket, `nsenter -t 1`) and what moves behind the runner | **recorded** below and in `docs/features/setup-engine.md`; the reach itself is unchanged (Phase F of the security master-spec remains) | |
 
-**Milestone A estimate: ≈ 75 %** (the reviewer's re-baselined 60 % after
-the runner slice, plus the deployment slice). Basis: deployment execution —
-a substantive part of this milestone — now runs in the runner with
-persistent ownership, checkpointed interruption handling, compatible
-recovery and split verification rungs, all under executable tests. What
-keeps it short of complete is listed under "Remaining in milestone A"; the
-largest item is Phase F (the backend container's own reach), which this
-slice reduced by one operation and did not remove. Live-host acceptance is
-separate.
+**Deployment slice: complete in code** (the four review issues closed:
+durable verification, migration-aware checkpoints, containment, the
+explicit executor policy). Its live-host acceptance is outstanding and
+listed below.
+
+**Milestone A estimate: ≈ 78 %** (from the reviewer's 70–75 % after the
+deployment slice). Basis: the deploy path is now complete in code — the
+corrections above are what separated a runner-owned deploy from a finished
+one; the restore operations and the retry-path mint (the next slice), the
+remaining host operations still on the container's pivot, and Phase F are
+what keep the milestone short of complete, and each stays separately
+visible below. Live-host acceptance is separate.
 
 ## Milestone B — setup APIs and the guided frontend wizard
 
@@ -61,10 +65,11 @@ successful login and the recovery checks from A1.
 | Dashboard surface | A page or panel over `/api/setup` (stale locks, recovery-required apps, job events); belongs with the wizard (milestone B) but the recovery view is useful on its own |
 | Credential migration under the lock | The operation itself is milestone C; when it exists it takes the same lease (`withContainerLock`, kind `credential_migration`) |
 | Phase F, and the operations still on the container's pivot | With the runner live, the deploy no longer runs under the container's nsenter pivot. Still on it: Incus lifecycle and snapshots, both restores, the retry-path secret mint (`runner.js` `retry-secrets`), the component pre-install, Caddy, storage, migration, the workspace terminal. Each is a candidate for the same treatment (a job kind + the runner); `privileged: true`, `pid: host` and the Docker socket stay until they are all moved (master-spec Phase F) |
-| In-process fallback | On a host with no live runner the backend executes the same deploy operation itself. It is the identical code and record, not a second path, but it keeps the pivot in use there; once every install carries the unit, the fallback can be limited to development checkouts |
-| Guest-process containment beyond the marker | The reap covers every script the deploy runs (they carry the marker). A guest process the app itself spawns, or an operator's shell, is outside it — as documented in `docs/features/immediate-repairs.md` (writer inventory) |
+| Next slice: `restore_project_db`, `restore_snapshot`, the retry-path secret mint as runner job kinds | Today they run in the backend through `withContainerLock` (persistent lease, job record) with the nsenter pivot; the executor and the protected-copy primitives are ready to take them |
+| The legacy in-process executor | Exists only under `SETUP_EXECUTOR_POLICY=backend-allowed` (development checkouts, and an operator's explicit choice); every install.sh / update.sh installation is `runner-required`. Retiring it entirely is a later decision once no supported host needs it |
+| Guest-process containment beyond sessions | Every script the deploy runs is a session under its job id and its whole tree is reaped by session. A process that calls `setsid` itself (a double-forking daemon), the app's own service, and an operator's shell are outside it — as documented in `docs/features/setup-engine.md` and the writer inventory in `docs/features/immediate-repairs.md` |
 
-## Overall new-platform repository work: ≈ 34 % (the reviewer's re-baselined 30 % after the runner slice, plus the deployment slice)
+## Overall new-platform repository work: ≈ 35 % (from the reviewer's 33–34 % after the deployment slice)
 
 Basis for the increase: milestone A moved by roughly fifteen points and is
 one of four milestones of unequal size; the weighting keeps the runner /
@@ -88,9 +93,14 @@ What exists today, and must not be described as separation:
   `check`, `storage-install`), nothing caller-supplied reaches a command.
 
 The deployment slice moved one operation — the application deploy: its
-guest commands, the secret mint and the unit swap — off the container's
-pivot whenever a runner is live. It removed nothing from the container
-itself. Until the
+guest commands, the secret mint, the unit swap, the recovery and every
+verification — off the container's pivot on every `runner-required`
+installation (all of them from this version on; the in-process executor
+exists only under the explicit `backend-allowed` policy). It removed
+nothing from the container itself: `privileged: true`, `pid: host`, the
+Docker socket and the nsenter pivot remain for Incus lifecycle and
+snapshots, both restores, the retry-path mint, the component pre-install,
+Caddy, storage, migration and the workspace terminal. Until the
 container's `privileged: true` is dropped (Phase F of
 `docs/features/security-completion/master-spec.md`), "privilege separation"
 in this ledger means: the new engine's privileged steps run in the runner
@@ -105,7 +115,8 @@ its existing reach; that remains listed here until it is true.
 | Gate-one host acceptance table (`docs/features/immediate-repairs.md`) | outstanding |
 | A1: `recover status` and `recover admin --password --totp` on a real install, fresh-browser login, TOTP re-enrolment, password change, other accounts and services untouched, audit entry visible | outstanding |
 | A2–A6: unit active after install; kill the backend between a deploy's stop and start and confirm the runner recovers the app, the LDAPS credential decrypts, the records read as described in `docs/features/setup-engine.md`; an MCP restore during a deploy is refused naming the holder; a clean restart queues nothing | outstanding |
-| A2a: a dashboard deploy owned by `runner@…`; browser closed and backend restarted mid-deploy — the job completes; runner killed between stop and start — the restarted runner reconciles and the app comes up; cancel before and after the stop; runner unit stopped — the deploy runs in-process as `backend@…`; `credential_use_verified` recorded after a deploy of an app with an LDAPS credential | outstanding — a scripted guest is not evidence of this |
+| A2a: a dashboard deploy owned by `runner@…`; browser closed and backend restarted mid-deploy — the job completes; runner killed between stop and start — the restarted runner reconciles and the app comes up; cancel before and after the stop; on a `backend-allowed` host with the runner stopped the deploy runs in-process as `backend@…` | outstanding — a scripted guest is not evidence of this |
+| A2c: on a `runner-required` host, the deploy record ends `credential_use_verified` for an app with an LDAPS credential (the follow-up job ran in the runner with the login read from mock2.db); with the runner stopped a submission queues and nothing executes in the container; a killed guest-side build tree is reaped by session on the next deploy while the app service is untouched; the pre-deploy dump and the `.pre-<job>` copies exist and `restore_project_db` accepts the dump | outstanding |
 
 ## Suite evidence per slice
 
@@ -116,6 +127,7 @@ its existing reach; that remains listed here until it is true.
 | A3–A4 | after the engine core | 2799 | 2789 | 4 | 6 | same four files, same six skips; +19 tests from `setup-engine.test.js`; four gate-one source ratchets updated to the new lock call shapes (semantics unchanged) |
 | A2, A5, A6 | after the host runner | 2813 | 2803 | 4 | 6 | same four files, same six skips; +14 tests from `setup-runner.test.js` |
 | A2a, A2b | after the runner-owned deploy | 2831 | 2821 | 4 | 6 | same four files, same six skips; +18 tests from `setup-deploy.test.js` (two of them real child processes); four gate-one ratchets re-pointed at `deploy-op.js` (same assertions) |
+| A2c | after the deployment corrections | 2840 | 2830 | 4 | 6 | same four files, same six skips; +9 tests from `setup-deploy-finish.test.js` (one with real processes: an unmarked child surviving its marked parent, killed by session, a legitimate holder preserved); the gate-one ratchets updated for the migration-after-stop order (six restart paths) and the executor-driven adapter |
 
 The sandbox differs from the one the gate-one handoff reported (2674 tests,
 10 failing files there): this one has `ldapts` and the CLI's dependencies

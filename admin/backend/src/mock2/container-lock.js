@@ -66,6 +66,9 @@ export class ContainerLockStaleError extends Error {
 
 // configureContainerLockStore({ getDb, owner, leaseMs, renewMs }) — index.js
 // calls this once the main database is open. Passing null disables it (tests).
+// Accepted config: getDb, owner, leaseMs, renewMs, and for the legacy
+// in-process executor (mock2/deploy.js) optional overrides env, guestExec,
+// reviewLogin (tests inject a scripted guest and a fixed login).
 export function configureContainerLockStore(config) {
   store = config && typeof config.getDb === 'function' && config.owner ? { leaseMs: 30_000, renewMs: 10_000, ...config } : null;
 }
@@ -77,7 +80,7 @@ export function containerLockStoreConfigured() {
 // containerLockStore() → { getDb, owner } while configured (deploy.js asks it
 // whether a runner can be handed the job), else null.
 export function containerLockStore() {
-  return store ? { getDb: store.getDb, owner: store.owner } : null;
+  return store ? { getDb: store.getDb, owner: store.owner, env: store.env || null, guestExec: store.guestExec || null, reviewLogin: store.reviewLogin || null } : null;
 }
 
 // containerLockHolder(name) → { holder, since, waiting } | null

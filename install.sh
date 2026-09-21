@@ -1118,6 +1118,15 @@ ADMIN_TOTP_SECRET=${totp_secret}
 # data/ directory can stay world-traversable for Caddy.
 DATABASE_PATH=/data/db/proxypilot.db
 
+# Who executes setup jobs (deploys, recoveries, verifications):
+# runner-required — the root host runner (proxypilot-setup-runner.service)
+# executes every job; with no live runner a request is queued and reported
+# unavailable, and the dashboard container never executes one itself.
+# backend-allowed — the legacy / development executor: the backend runs
+# queued jobs in its own (privileged) process when no runner is live.
+# docs/features/setup-engine.md § "Who executes".
+SETUP_EXECUTOR_POLICY=runner-required
+
 # Caddy Configuration Path
 CADDY_SITES_DIR=/etc/caddy/sites
 CADDY_CONFIG_FILE=/etc/caddy/Caddyfile

@@ -58,12 +58,16 @@ function deployGuest(state) {
   const hooks = state.hooks || {};
   const g = {
     calls, state,
-    guest: async (container, script) => {
+    guest: async (container, raw) => {
+      const script = unwrapContained(raw);
       const phase = classify(script);
-      calls.push({ container, phase, script });
+      calls.push({ container, phase, script, raw });
       if (hooks[phase]) await hooks[phase](g);
       switch (phase) {
-        case 'reap': return { code: 0, stdout: `ORPHANS:${state.orphans ?? 0}\n` };
+        case 'reap': return { code: 0, stdout: `STALE_WRITERS:${state.orphans ?? 0}\n` };
+        case 'protect': state.protected = (state.protected || 0) + 1; return { code: 0, stdout: state.protectOut ?? `DBDUMP:/var/backups/proxypilot-db/app-pre-deploy-${jobIdOf(raw)}.sql:12345:${'ab'.repeat(32)}\nUNITCOPY:/etc/systemd/system/mock2-dev.service.pre-${jobIdOf(raw)}\nENVCOPY:/etc/environment.pre-${jobIdOf(raw)}\nCOMMIT:${'c'.repeat(40)}\nMIGRATE_SCRIPT:"migrate": "node scripts/migrate.mjs"\nMIGRATIONS_DIR:yes\n` };
+        case 'migrate_class': return { code: 0, stdout: state.migrateClassOut ?? 'MIGRATE_SCRIPT:"migrate": "node scripts/migrate.mjs"\nMIGRATIONS_DIR:yes\n' };
+        case 'credential_use': return { code: 0, stdout: state.credentialUseOut ?? 'SIGNIN:200\n{"configured":true,"masterKey":"current","masterKeyInventory":{"total":1,"current":1,"legacy":0,"unreadable":0,"complete":true}}\nLDAPS:200\n' };
         case 'contract': return { code: 0, stdout: state.yaml ?? 'run:\n  install: npm ci\n  migrate: npm run migrate\n  build: npm run build\n  start: npm run start\n' };
         case 'install_fresh': return { code: 0, stdout: state.installFresh ? 'MOCK2_INSTALL_FRESH\n' : '' };
         case 'install': case 'migrate': case 'build': return state.fail === phase ? { code: 1, stdout: '', stderr: `${phase} exploded` } : { code: 0, stdout: 'ok\n' };
@@ -92,8 +96,23 @@ function deployGuest(state) {
   return g;
 }
 
+// containedScript() base64-wraps every body under the job's session; the
+// scripted guest reads the body back (a real guest would run it under setsid).
+function unwrapContained(raw) {
+  const m = String(raw).match(/printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > "\$T"/);
+  return m ? Buffer.from(m[1], 'base64').toString('utf8') : String(raw);
+}
+function jobIdOf(raw) {
+  const m = String(raw).match(/mock2_deploy_marker job=([A-Za-z0-9-]+)/);
+  return m ? m[1] : 'adhoc';
+}
+
 function classify(script) {
+  if (/STALE_WRITERS:/.test(script)) return 'reap';
   if (/ORPHANS:/.test(script)) return 'reap';
+  if (/DBDUMP:/.test(script)) return 'protect';
+  if (/MIGRATE_SCRIPT:/.test(script)) return 'migrate_class';
+  if (/PP_CRED_EOF/.test(script)) return 'credential_use';
   if (/mock2\.yaml/.test(script)) return 'contract';
   if (/MOCK2_INSTALL_FRESH/.test(script)) return 'install_fresh';
   if (/\.mock2-install-stamp'\s*$/m.test(script) && /printf '%s' "\$hash"/.test(script)) return 'stamp_write';
@@ -151,13 +170,23 @@ test('deploy-op: the full path — reap, install/migrate/build, checkpoint BEFOR
   assert.equal(r.ok, true);
   assert.equal(r.step, 'serving');
   assert.deepEqual(r.minted, ['AUTH_JWT_SECRET', 'AUTH_MASTER_SECRET']);
-  assert.equal(r.verification.state, 'credential_decryptable', 'nothing stored → decryptable vacuously; the application rung is the server\'s');
-  assert.equal(r.verification.observations.credentialUse.verified, null);
+  assert.equal(r.verification.state, 'credential_decryptable', 'nothing stored → decryptable vacuously; the application rung is a pending follow-up');
+  assert.deepEqual(r.verification.pending, ['credential_use_verified']);
+  assert.deepEqual(r.followUp, { kind: 'verify_app', steps: ['verify_credential_use'], rung: 'credential_use_verified' });
   const phases = g.calls.map((c) => c.phase);
-  assert.deepEqual(phases.slice(0, 6), ['reap', 'install_fresh', 'install', 'stamp_write', 'migrate', 'build']);
+  assert.deepEqual(phases.slice(0, 5), ['reap', 'install_fresh', 'install', 'stamp_write', 'build'], 'install and build run under the old app; the migration does not');
   const stopAt = phases.indexOf('stop');
   assert.ok(stopAt > phases.indexOf('build'));
-  assert.ok(phases.indexOf('markers') > stopAt && phases.indexOf('env_write') > stopAt, 'the mint happens after the stop');
+  assert.ok(phases.indexOf('protect') < stopAt && phases.indexOf('protect') > phases.indexOf('build'), 'protected copies are taken after the build, before the stop');
+  assert.ok(phases.indexOf('migrate') > stopAt, 'the migration runs with the old app stopped');
+  assert.ok(phases.indexOf('markers') > phases.indexOf('migrate') && phases.indexOf('env_write') > stopAt, 'the mint happens after the migration');
+  assert.equal(r.recovery.migration.retry, 'resume');
+  assert.equal(r.recovery.migration.ledger, '_migrations');
+  assert.match(r.recovery.protected.dbDump.path, /app-pre-deploy-/);
+  assert.match(r.recovery.protected.unitCopy, /\.pre-/);
+  assert.match(r.recovery.protected.envCopy, /environment\.pre-/);
+  assert.equal(r.recovery.protected.sourceCommit, 'c'.repeat(40));
+  assert.deepEqual(r.recovery.completed, ['install', 'build', 'migrate']);
   assert.ok(phases.indexOf('unit_swap') > phases.indexOf('env_write'));
   assert.ok(phases.indexOf('health') > phases.indexOf('unit_swap'));
   assert.ok(g.calls.every((c) => c.container === 'pp-x'));
@@ -168,7 +197,7 @@ test('deploy-op: the full path — reap, install/migrate/build, checkpoint BEFOR
   assert.match(g.state.unit, /ExecStart=\/bin\/sh -lc 'cd \/srv\/app && exec npm run start'/);
   // The record: checkpoint order, the stopped marker cleared, the recovery references kept.
   const cps = listEvents(d, claimed.id).filter((e) => e.kind === 'checkpoint').map((e) => e.phase);
-  assert.deepEqual(cps, ['starting', 'install', 'migrate', 'build', 'build_done', 'stopping_app', 'secrets_minted', 'unit_written', 'app_started', 'verified']);
+  assert.deepEqual(cps, ['starting', 'install', 'build', 'build_done', 'stopping_app', 'migrating', 'migrated', 'secrets_minted', 'unit_written', 'app_started', 'verified']);
   const stopCallIdx = g.calls.findIndex((c) => c.phase === 'stop');
   const cpBeforeStop = listEvents(d, claimed.id).find((e) => e.phase === 'stopping_app');
   assert.ok(cpBeforeStop, 'the stopping_app checkpoint exists');
@@ -181,6 +210,9 @@ test('deploy-op: the full path — reap, install/migrate/build, checkpoint BEFOR
   assert.equal(cp.recovery.unitPath, '/etc/systemd/system/mock2-dev.service');
   assert.equal(cp.recovery.contract.start, 'npm run start');
   assert.deepEqual(cp.recovery.guard, GUARD);
+  assert.ok(cp.recovery.protected.dbDump && cp.recovery.protected.unitCopy && cp.recovery.protected.envCopy, 'retained copies, not live paths, on the record');
+  assert.notEqual(cp.recovery.protected.unitCopy, cp.recovery.unitPath);
+  assert.notEqual(cp.recovery.protected.envCopy, cp.recovery.environmentFile);
   const prog = parseJson(row.progress_json);
   assert.deepEqual(prog.generated.map((x) => x.name), ['AUTH_JWT_SECRET', 'AUTH_MASTER_SECRET']);
   // No secret value anywhere in the record.
@@ -223,7 +255,7 @@ test('deploy-op: failures are distinct and never leave the app down silently —
   assert.equal(g.calls.some((c) => c.phase === 'stop'), false, 'the app was never stopped');
   g = deployGuest({ env: '', active: true, fail: 'stop' });
   r = await runDeployOperation({ params: PARAMS(), exec: g });
-  assert.equal(r.step, 'start'); assert.match(r.error, /could not stop the running app/); assert.match(r.error, /Restart attempted/i);
+  assert.equal(r.step, 'start'); assert.match(r.error, /could not stop the running app before the migration/); assert.match(r.error, /Restart attempted/i);
   assert.equal(g.calls.some((c) => c.phase === 'restart'), true);
   g = deployGuest({ env: '', active: true, fail: 'start' });
   r = await runDeployOperation({ params: PARAMS(), exec: g });
@@ -247,6 +279,8 @@ test('deploy-op: a responding port with an unverified or failed credential is ex
   assert.equal(r1.ok, true);
   assert.equal(r1.verification.state, 'app_healthy');
   assert.match(r1.verification.next, /no data guard recorded/);
+  assert.equal(r1.followUp, null, 'no guard: nothing to read back, no follow-up');
+  assert.equal(r1.verification.observations.credentialUse.outcome, 'not_applicable');
   const mismatch = deployGuest({ env: 'AUTH_JWT_SECRET=x\nAUTH_MASTER_SECRET=configured-key-value\n', active: true, probe: probeRows([encryptUnder('some-other-key')]) });
   const r2 = await runDeployOperation({ params: PARAMS(), exec: mismatch });
   assert.equal(r2.ok, true, 'the app serves');
@@ -298,11 +332,19 @@ test('submitDeployJob validates and de-duplicates; the runner executes the job t
   assert.equal(again.job.id, first.job.id, 'a repeated submission observes the open job');
   const g = deployGuest({ env: '', active: true });
   const out = await runOnce({ db: d, owner: RUNNER, exec: g, nowMs: () => T0 + 2 }, { reconcileFirst: false });
-  assert.equal(out.ran.length, 1);
+  assert.equal(out.ran.length, 2, 'the deploy, then the follow-up verification it queued');
   assert.equal(out.ran[0].status, 'succeeded');
+  assert.equal(out.ran[1].kind, 'verify_app');
   const row = getJob(d, first.job.id);
   assert.equal(row.status, 'succeeded');
-  assert.equal(row.outcome, 'credential_decryptable');
+  assert.equal(row.outcome, 'serving', 'execution status, separate from verification');
+  assert.equal(JSON.parse(row.verification_json).state, 'credential_decryptable');
+  assert.deepEqual(JSON.parse(row.verification_json).pending, ['credential_use_verified']);
+  const follow = getJob(d, JSON.parse(row.progress_json).verification_job_id);
+  assert.equal(follow.kind, 'verify_app', 'the application-owned check is a persisted follow-up job');
+  assert.equal(follow.status, 'succeeded');
+  assert.equal(follow.outcome, 'no_verification_credentials', 'no review login was supplied to this executor: an explicit outcome, not a pass');
+  assert.equal(JSON.parse(row.verification_json).rungs.credential_use_verified.value, null, 'the deploy record carries the rung, unverified');
   assert.equal(row.owner, RUNNER);
   const result = deployResultFromJob(row);
   assert.equal(result.ok, true);
@@ -401,6 +443,7 @@ test('interruption at every checkpoint: a dead owner is reconciled to resume, re
     ['install', { app_stopped: false, resumable: true }, 'resume'],
     ['build_done', { app_stopped: false, resumable: true }, 'resume'],
     ['stopping_app', { app_stopped: true, resumable: false, disruptive: true }, 'recover'],
+    ['migrating', { app_stopped: true, resumable: false, disruptive: true, migration_in_progress: true, recovery: { migration: { retry: 'resume', ledger: '_migrations' } } }, 'recover'],
     ['secrets_minted', { app_stopped: true, resumable: false, recovery: { generatedKeys: ['AUTH_MASTER_SECRET'] } }, 'recover'],
     ['unit_written', { app_stopped: true, unit_swapped: true }, 'recover'],
     ['app_started', { app_stopped: false, unit_swapped: true }, 'verify'],
@@ -429,8 +472,9 @@ test('interruption at every checkpoint: a dead owner is reconciled to resume, re
       const rec = getJob(d, s.recoveryQueued[0].recovery);
       assert.equal(rec.kind, 'recover_app');
       assert.deepEqual(parseJson(rec.plan_json).params.guard, GUARD, 'the guard reference reaches the recovery');
-      if (cp.recovery) assert.deepEqual(parseJson(rec.plan_json).params.origin.generatedKeys, ['AUTH_MASTER_SECRET'], 'the minted names travel too');
+      if (cp.recovery?.generatedKeys) assert.deepEqual(parseJson(rec.plan_json).params.origin.generatedKeys, ['AUTH_MASTER_SECRET'], 'the minted names travel too');
       assert.equal(getJob(d, claimed.id).status, 'recovery_required');
+      if (cp.migration_in_progress) assert.match(getJob(d, claimed.id).reason, /A migration was in flight \(retry class: resume\)/);
       assert.ok(readLock(d, 'pp-x').stale_since, 'the lease is kept, flagged stale');
       const g = deployGuest({ env: 'AUTH_JWT_SECRET=a\nAUTH_MASTER_SECRET=b\n', active: false, probe: probeRows([encryptUnder('b')]) });
       const out = await runOnce({ db: d, owner: RUNNER, exec: g, nowMs: () => T0 + 61_000 }, { reconcileFirst: false });
@@ -559,6 +603,8 @@ test('every /api/setup mutation is admin + fresh sudo behind the global CSRF che
   const index = readFileSync(`${REPO}admin/backend/src/index.js`, 'utf8');
   assert.ok(index.indexOf("app.use('/api/', csrfProtection)") < index.indexOf("app.use('/api/setup', authenticateToken, blockPendingRole, setupRouter)"), 'CSRF is mounted before the setup routes');
   assert.deepEqual([...RUNNER_JOB_KINDS], ['deploy', 'recover_app', 'verify_app', 'probe']);
+  const executor = readFileSync(`${REPO}admin/backend/src/lib/setup-engine/executor.js`, 'utf8');
+  assert.ok(executor.indexOf('validateRunnerJob(job)') < executor.indexOf('acquireLock(db, { app: job.app'), 'validated before the lease is taken');
   const runner = readFileSync(`${REPO}cli/src/setup-runner/runner.js`, 'utf8');
-  assert.ok(runner.indexOf('validateRunnerJob(job)') < runner.indexOf('acquireLock(db, { app: job.app'), 'validated before the lease is taken');
+  assert.match(runner, /from '\.\.\/\.\.\/\.\.\/admin\/backend\/src\/lib\/setup-engine\/executor\.js'/, 'the runner runs the shared executor');
 });

@@ -84,9 +84,9 @@ setupRouter.post('/apps/:app/deploy', requireAdmin, requireSudo, async (req, res
   const { deployProject } = await import('../mock2/deploy.js');
   const out = await deployProject({ containerName: app, webPort: body.data.webPort, requestedBy: req.user?.username || null, via: 'ui', detach: true });
   logAudit(req.user?.id || null, 'SETUP_DEPLOY_REQUESTED', 'setup_job', out.jobId || null, { app, submitted: !!out.submitted, ok: !!out.ok, step: out.step || null }, req.ip);
+  if (out.step === 'runner_unavailable') return res.status(202).json({ jobId: out.jobId, created: out.created, runner: null, executor: 'none', policy: out.policy, status: 'queued', warning: out.error });
   if (!out.ok) return res.status(409).json({ error: out.error || 'deploy refused', step: out.step || null, jobId: out.jobId || null });
-  if (out.submitted) return res.status(out.created ? 202 : 200).json({ jobId: out.jobId, created: out.created, runner: out.runner, status: 'queued' });
-  // No live runner: the deploy ran in-process to completion.
+  if (out.submitted) return res.status(out.created ? 202 : 200).json({ jobId: out.jobId, created: out.created, runner: out.runner, executor: out.executor, policy: out.policy, status: 'queued' });
   return res.status(200).json({ jobId: out.jobId || null, created: true, runner: null, status: 'finished', result: { ok: out.ok, step: out.step || null, skipped: !!out.skipped } });
 });
 

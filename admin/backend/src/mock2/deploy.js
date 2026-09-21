@@ -28,11 +28,8 @@ import {
   LEGACY_SW_JS, BUILD_ID_PLACEHOLDER,
 } from './deploy-logic.js';
 import { parseDeclaredEgress } from './egress-logic.js';
-import { withContainerLock, containerLockStore } from './container-lock.js';
-import { runDeployOperation, UNIT_NAME } from '../lib/setup-engine/deploy-op.js';
-import { runnerAvailable, submitDeployJob, waitForJob, deployResultFromJob } from '../lib/setup-engine/backend.js';
-import { recordVerificationRung } from '../lib/setup-engine/store.js';
-import { verificationState } from '../lib/setup-engine/logic.js';
+import { containerLockStore } from './container-lock.js';
+import { submitDeployJob, waitForJob, deployResultFromJob, executionMode, drainRunnerJobsInProcess } from '../lib/setup-engine/backend.js';
 // The declared default port; a project row normally carries its own.
 import { DEFAULT_WEB_PORT } from './template.js';
 import { updateProject } from './projects.js';
@@ -96,24 +93,29 @@ export async function readDeclaredEgress(containerName, appDir = '/srv/app') {
 // deployProject(args) → { ok, step, error, skipped, buildStamp, verification, jobId }.
 //
 // Gate two: the deploy is a persisted job executed by ONE operation
-// (lib/setup-engine/deploy-op.js). Who executes it depends on the host:
+// (lib/setup-engine/deploy-op.js) through ONE executor (lib/setup-engine/
+// executor.js). Who runs the executor is the INSTALLATION'S policy
+// (SETUP_EXECUTOR_POLICY, logic.js executorPolicy), never a request parameter:
 //
 //   * a live host runner (proxypilot-setup-runner.service, heartbeat in
 //     setup_runners) → the job is submitted and this call WAITS for it,
 //     replaying the runner's step events to onStep. The browser, this API
-//     process and this promise can all go away; the runner finishes the job,
-//     and its record says what happened.
-//   * no live runner → the same operation runs here, in-process, under the
-//     persistent container lock (owner = this backend), with the nsenter
-//     guest pivot. Its record and checkpoints are identical; a backend that
-//     dies mid-way is reconciled by the boot sweep / the runner exactly as a
-//     runner-owned job would be.
+//     process and this promise can all go away; the runner finishes the job
+//     and queues the application-owned credential check as a durable
+//     follow-up before it reports done.
+//   * no live runner, policy `backend-allowed` (the legacy / development
+//     executor) → this process claims and executes the queued job — the
+//     same executor, the same record, the same lease — and drains the
+//     follow-up verification too.
+//   * no live runner, policy `runner-required` → the job stays QUEUED for the
+//     runner and the caller is told the runner is unavailable. Nothing runs
+//     in this process.
 //
 // Everything the operation needs about the project is resolved HERE into
 // references (the run contract from args or the guest's manifest, the
 // installed components' secret contracts and data guards from mock2.db, the
-// port, the app dir) — never a secret value. `detach: true` submits and
-// returns the job id without waiting (the /api/setup submission endpoint).
+// port, the app dir, the previously deployed commit) — never a secret value.
+// `detach: true` submits and returns the job id without waiting.
 export async function deployProject(args) {
   const containerName = String(args?.containerName || '');
   const params = await resolveDeployParams({ ...args, containerName });
@@ -121,67 +123,81 @@ export async function deployProject(args) {
   const requestedBy = args?.requestedBy || null;
   const via = args?.via || 'system';
   const onStep = typeof args?.onStep === 'function' ? args.onStep : null;
-
-  if (store) {
-    const db = store.getDb();
-    const runner = runnerAvailable(db);
-    if (runner) {
-      const sub = submitDeployJob(db, { app: containerName, params, requestedBy, via });
-      if (sub.error) return { ok: false, step: 'submit', error: sub.error };
-      if (args?.detach) return { ok: true, submitted: true, jobId: sub.job.id, created: sub.created, runner: runner.owner };
-      const row = await waitForJob(db, sub.job.id, {
-        onEvent: (e) => { if (e.kind === 'step' && onStep) onStep(e.phase || 'deploy', e.message || deployStepLabel(e.phase)); },
-      });
-      if (!row) return { ok: false, step: 'wait', error: `deploy job ${sub.job.id} did not finish in time; it may still be running — see /api/setup/jobs/${sub.job.id}`, jobId: sub.job.id };
-      const result = deployResultFromJob(row);
-      if (result.ok && !result.skipped) result.verification = await applyCredentialUseRung({ db, jobId: row.id, containerName, webPort: params.webPort, guard: params.guard, verification: result.verification, by: 'backend' });
-      return result;
-    }
+  if (!store) {
+    // No engine store (a test importing this module without configuring one):
+    // nothing can be recorded, so nothing runs.
+    return { ok: false, step: 'submit', error: 'the setup engine store is not configured; a deploy cannot be recorded, so it is not run' };
   }
+  const db = store.getDb();
+  const sub = submitDeployJob(db, { app: containerName, params, requestedBy, via });
+  if (sub.error) return { ok: false, step: 'submit', error: sub.error };
+  const jobId = sub.job.id;
+  const mode = executionMode(db, { env: store.env || process.env });
 
-  // In-process executor: the same operation, this backend as the owner.
-  const job = {
-    kind: 'deploy', plan: { steps: ['install', 'migrate', 'build', 'stop', 'mint', 'unit', 'start', 'health', 'verify'], params },
-    configRefs: { webPort: params.webPort, unit: UNIT_NAME, environmentFile: params.environmentFile, appDir: params.appDir, guard: params.guard || null },
-    requestedBy, via,
-  };
-  const out = await withContainerLock(containerName, 'deploy', async (handle) => {
-    const exec = { guest: (name, script, { timeoutMs } = {}) => containerSh(name, script, { timeoutMs }) };
-    const jobHandle = { fence: (o) => handle.fence(o), checkpoint: handle.checkpoint, generated: handle.generated, event: handle.event, onStep };
-    let result;
-    try {
-      result = await runDeployOperation({ params, exec, job: jobHandle });
-    } catch (e) {
-      if (e?.code === 'PREVIOUS_WRITER_ALIVE') result = { ok: false, step: 'reap', error: e.message };
-      else throw e;
-    }
-    handle.progress({ result: publicResult(result), failed_step: result.ok ? null : result.step });
-    return { ...result, jobId: handle.id };
-  }, { job });
-  // The job row is terminal now; the application-owned rung is added to it.
-  if (out.ok && !out.skipped && store) {
-    out.verification = await applyCredentialUseRung({ db: store.getDb(), jobId: out.jobId, containerName, webPort: params.webPort, guard: params.guard, verification: out.verification, by: 'backend' });
+  if (mode.executor === 'none') {
+    const msg = `no host runner is live (policy ${mode.policy.mode}); deploy job ${jobId} is queued and will run when proxypilot-setup-runner.service is back — see /api/setup/jobs/${jobId}`;
+    return { ok: false, step: 'runner_unavailable', error: msg, jobId, queued: true, created: sub.created, policy: mode.policy.mode };
   }
-  return out;
+  if (args?.detach) return { ok: true, submitted: true, jobId, created: sub.created, runner: mode.runner?.owner || null, executor: mode.executor, policy: mode.policy.mode };
+
+  if (mode.executor === 'backend') {
+    // Legacy / development: execute here. The drain claims THIS job (and any
+    // other queued runner job — the backend is the executor on this host),
+    // then the follow-up verification it queued.
+    const deps = inProcessExecutorDeps(store);
+    await drainRunnerJobsInProcess(db, { ...deps, env: store.env || process.env, max: 3 });
+    await drainRunnerJobsInProcess(db, { ...deps, env: store.env || process.env, max: 3, kinds: ['verify_app'] });
+  }
+  const row = await waitForJob(db, jobId, {
+    onEvent: (e) => { if (e.kind === 'step' && onStep) onStep(e.phase || 'deploy', e.message || deployStepLabel(e.phase)); },
+    timeoutMs: mode.executor === 'backend' ? 5_000 : 45 * 60 * 1000,
+  });
+  if (!row) return { ok: false, step: 'wait', error: `deploy job ${jobId} did not finish in time; it may still be running — see /api/setup/jobs/${jobId}`, jobId };
+  return deployResultFromJob(row);
 }
 
-function publicResult(r) {
-  if (!r) return null;
-  const { verification, ...rest } = r;
-  return { ...rest, verification: verification ? { state: verification.state, label: verification.label, failedAt: verification.failedAt || null, next: verification.next || null } : null };
+// inProcessExecutorDeps(store) → { exec, reviewLogin, owner } for the legacy
+// executor: the nsenter guest pivot and the registry's review login (the
+// same modules the backend's readiness probe uses). index.js configures the
+// store with overrides for tests.
+export function inProcessExecutorDeps(store = containerLockStore()) {
+  return {
+    owner: store?.owner,
+    exec: store?.guestExec || { guest: (name, script, { timeoutMs } = {}) => containerSh(name, script, { timeoutMs }) },
+    reviewLogin: store?.reviewLogin || (async (container) => {
+      try {
+        const [{ getProjectByContainerName }, { getReviewLogin }] = await Promise.all([import('./projects.js'), import('./review-account.js')]);
+        const project = getProjectByContainerName(container);
+        return project ? getReviewLogin(project.id) : null;
+      } catch { return null; }
+    }),
+  };
+}
+
+// drainInProcessNow(store) — the boot / interval drain for the legacy
+// executor (index.js): queued runner jobs (a detached deploy, a reconcile's
+// recovery, a pending verification) run here when no runner is live and the
+// policy allows it; otherwise nothing.
+export async function drainInProcessNow(store = containerLockStore(), { max = 3 } = {}) {
+  if (!store) return { skipped: 'no_store', ran: [] };
+  const deps = inProcessExecutorDeps(store);
+  return drainRunnerJobsInProcess(store.getDb(), { ...deps, env: store.env || process.env, max });
 }
 
 // resolveDeployParams(args) → the operation's REFERENCES. The components'
 // secret contracts come from mock2.db (dynamic import: this module stays
 // importable without it); a project the registry does not know gets no
 // secret configuration and no guard — the deploy then mints nothing.
-export async function resolveDeployParams({ containerName, appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, runContract = null, newlyProvisioned = false } = {}) {
+// `guard` and `secretConfigs` may be supplied by a SERVER caller that already
+// resolved them (provision, tests); a registry lookup fills them otherwise.
+// They are references (table and column names, key names), never values.
+export async function resolveDeployParams({ containerName, appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, runContract = null, newlyProvisioned = false, guard = null, secretConfigs = null } = {}) {
   const params = {
     container: String(containerName || ''), appDir: String(appDir || '/srv/app'), webPort: Number(webPort) || DEFAULT_WEB_PORT,
     environmentFile: '/etc/environment',
     contract: runContract && runContract.hasContract ? pickContract(runContract) : null,
-    secrets: { configs: [], newlyProvisioned: newlyProvisioned === true },
-    guard: null,
+    secrets: { configs: Array.isArray(secretConfigs) ? secretConfigs.map(secretConfigRef) : [], newlyProvisioned: newlyProvisioned === true },
+    guard: guard || null,
   };
   try {
     const [{ getProjectByContainerName }, { listProjectComponents }, { parseContractJson, secretDataGuards }] = await Promise.all([
@@ -190,6 +206,7 @@ export async function resolveDeployParams({ containerName, appDir = '/srv/app', 
     const project = getProjectByContainerName(containerName);
     if (project) {
       params.projectId = project.id;
+      params.previousDeployedCommit = project.deployed_commit || null;
       if (!webPort && project.web_port) params.webPort = Number(project.web_port) || params.webPort;
       for (const row of listProjectComponents(project.id)) {
         if (row?.status !== 'installed') continue;
@@ -199,7 +216,7 @@ export async function resolveDeployParams({ containerName, appDir = '/srv/app', 
         }
       }
       const guards = secretDataGuards(params.secrets.configs);
-      if (guards[0]?.guard) params.guard = guards[0].guard;
+      if (!params.guard && guards[0]?.guard) params.guard = guards[0].guard;
     }
   } catch { /* no mock2 registry here: nothing to mint, nothing to guard */ }
   return params;
@@ -220,70 +237,9 @@ function secretConfigRef(c) {
   return out;
 }
 
-// ── the application-owned credential rung ───────────────────────────────
-//
-// The classifier says the stored rows decrypt under the configured key. This
-// asks the APPLICATION: sign in as the platform's review account and read the
-// LDAPS settings its own code path serves (masterKey current, inventory
-// complete). Only then does the ladder reach credential_use_verified. The
-// review login never enters a job row: it is handed to curl inside the guest
-// through a private temporary file, as the readiness probe does.
-export async function verifyCredentialUse({ containerName, webPort, login, timeoutMs = 30000 }) {
-  if (!login?.email || !login?.password) return { verified: null, detail: 'no review account credentials on this platform; the application-owned credential check was not run' };
-  const base = `http://127.0.0.1:${Number(webPort)}`;
-  const creds = JSON.stringify({ email: String(login.email), password: String(login.password) });
-  const script = [
-    'umask 077', 'JAR=$(mktemp)', 'CRED=$(mktemp)', "trap 'rm -f \"$JAR\" \"$CRED\"' EXIT INT TERM",
-    `cat > "$CRED" <<'PP_CRED_EOF'`, creds, 'PP_CRED_EOF',
-    `C=$(curl -sS -o /dev/null -c "$JAR" -w '%{http_code}' --max-time 10 -X POST -H 'Content-Type: application/json' --data-binary @"$CRED" "${base}/api/auth/login" 2>/dev/null)`,
-    'echo "SIGNIN:${C:-000}"',
-    `BODY=$(curl -sS -b "$JAR" -w '\\nLDAPS:%{http_code}' --max-time 10 "${base}/api/admin/ldaps" 2>/dev/null)`,
-    'echo "$BODY"', '',
-  ].join('\n');
-  let r;
-  try { r = await containerSh(containerName, script, { timeoutMs }); } catch (e) { return { verified: null, detail: `the application check could not run: ${e?.message || e}` }; }
-  return interpretCredentialUse(r?.stdout || '');
-}
-
-// interpretCredentialUse(stdout) → { verified: true|false|null, detail }.
-export function interpretCredentialUse(stdout) {
-  const s = String(stdout || '');
-  const signin = Number((s.match(/^SIGNIN:(\d{3})/m) || [])[1] || 0);
-  const code = Number((s.match(/^LDAPS:(\d{3})/m) || [])[1] || 0);
-  if (!signin || signin >= 400) return { verified: null, detail: `the review account could not sign in (HTTP ${signin || '000'}); the application-owned credential check was not run` };
-  if (code !== 200) return { verified: code === 0 ? null : false, detail: code === 0 ? 'the LDAPS settings did not answer; the application-owned credential check was not run' : `the application refused the LDAPS settings read (HTTP ${code})` };
-  let body = null;
-  try {
-    const jsonText = s.slice(s.indexOf('SIGNIN:')).split('\n').slice(1).join('\n').replace(/\nLDAPS:\d{3}\s*$/, '').trim();
-    body = JSON.parse(jsonText);
-  } catch { return { verified: false, detail: 'the LDAPS settings answered but not with JSON the check understands' }; }
-  const inv = body?.masterKeyInventory || {};
-  const key = body?.masterKey;
-  if (!body?.configured && Number(inv.total || 0) === 0) return { verified: null, detail: 'no stored credential to read back through the application (LDAPS not configured); the rung stays unverified until one exists', masterKey: key || null };
-  if ((key === 'current' || key === 'rekeyed') && inv.complete === true) return { verified: true, detail: `the application read its LDAPS credential back (masterKey ${key}, inventory complete: ${inv.current}/${inv.total})`, masterKey: key };
-  return { verified: false, detail: `the application cannot use its credential as stored (masterKey ${key || 'unknown'}, inventory current ${inv.current ?? '?'}/${inv.total ?? '?'}, legacy ${inv.legacy ?? '?'}, unreadable ${inv.unreadable ?? '?'})`, masterKey: key || null };
-}
-
-async function applyCredentialUseRung({ db, jobId, containerName, webPort, guard, verification, by }) {
-  let use;
-  if (!guard) use = { verified: null, detail: 'no data guard recorded for this app; nothing to read back' };
-  else {
-    let login = null;
-    try {
-      const [{ getProjectByContainerName }, { getReviewLogin }] = await Promise.all([import('./projects.js'), import('./review-account.js')]);
-      const project = getProjectByContainerName(containerName);
-      login = project ? getReviewLogin(project.id) : null;
-    } catch { login = null; }
-    use = await verifyCredentialUse({ containerName, webPort, login });
-  }
-  const facts = verification?.facts || {};
-  const next = verificationState({ ...facts, credentialUseVerified: use.verified, deferredReason: use.verified == null ? use.detail : facts.deferredReason || null });
-  const merged = { ...(verification || {}), ...next, observations: { ...(verification?.observations || {}), credentialUse: { verified: use.verified, detail: use.detail } } };
-  if (db && jobId) {
-    try { recordVerificationRung(db, { id: jobId, rung: 'credential_use_verified', value: use.verified, detail: use.detail, by, state: next.state }); } catch { /* */ }
-  }
-  return merged;
-}
+// The application-owned credential check lives in the executor (verify_app
+// with verify_credential_use); its interpreter is re-exported for callers.
+export { interpretCredentialUse } from '../lib/setup-engine/guest-probes.js';
 
 // Record the commit the app is now SERVING (best-effort). Every successful
 // deploy path calls this; the runner's verified-no-op deploy skip compares it

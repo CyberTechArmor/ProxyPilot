@@ -12,6 +12,7 @@ import { initDatabase, getDb, getSetting, setSetting, logAudit } from './db.js';
 import { noteCompletedUpdateOnBoot } from './lib/self-update.js';
 import { configureContainerLockStore } from './mock2/container-lock.js';
 import { backendOwner, sweepSetupEngineOnBoot } from './lib/setup-engine/backend.js';
+import { executorPolicy } from './lib/setup-engine/logic.js';
 import { setupRouter } from './routes/setup.js';
 import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
@@ -275,6 +276,26 @@ try {
   if (swept.interrupted.length || swept.recoveryQueued.length) console.warn('[setup-engine] boot sweep:', JSON.stringify(swept));
 } catch (err) {
   console.error('[setup-engine] boot sweep failed:', err?.message || err);
+}
+// Who executes setup jobs is the installation's policy (SETUP_EXECUTOR_POLICY,
+// docs/features/setup-engine.md § "Who executes"). Under `backend-allowed`
+// (legacy / development) and only while no host runner is live, this process
+// drains queued runner jobs itself — on boot and every 30 s — with the same
+// executor the runner uses. Under `runner-required` it never does.
+{
+  const policy = executorPolicy();
+  console.log(`[setup-engine] executor policy: ${policy.mode} (${policy.source})${policy.note ? ` — ${policy.note}` : ''}`);
+  const drain = async () => {
+    try {
+      const { drainInProcessNow } = await import('./mock2/deploy.js');
+      const r = await drainInProcessNow();
+      if (r.ran?.length) console.log('[setup-engine] in-process executor ran:', r.ran.map((j) => `${j.kind} ${j.app} ${j.status}`).join(', '));
+    } catch (err) { console.error('[setup-engine] in-process drain failed:', err?.message || err); }
+  };
+  if (policy.mode === 'backend-allowed') {
+    setTimeout(drain, 15_000).unref();
+    setInterval(drain, 30_000).unref();
+  }
 }
 
 // Sweep orphan in_progress backup rows.  The create-backup

@@ -2108,3 +2108,10 @@ initialization requires recovery without data reset. No new backup framework,
 installer/updater change, G7–G10, A-17 continuation or Phase F is included.
 Guided progress stays **50%** pending G6 review and acceptance; runtime validation
 limits remain separate in [the evidence](../evidence/g6-acceptance.md).
+
+
+G6 review correction: before `setup-runner serve` or `once` opens the queue, it
+loads and validates the existing installation `TOTP_ENCRYPTION_KEY` using the
+resolved `.env`/`--env`. It never generates or rotates that key; missing,
+malformed or conflicting keys leave jobs unclaimed. Status and reconciliation remain available. A fresh-process regression covers the real
+command/executor without an inherited fixture key; see the G6 evidence record.

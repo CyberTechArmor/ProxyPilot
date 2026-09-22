@@ -165,3 +165,51 @@ milestone work or production action is authorized by this report.
 Operator steps and version-specific official references:
 [guided OpenBao](../features/guided-openbao.md). The repository slice stops here
 for review and acceptance at 50%.
+
+
+## Review correction — runner installation key (2026-09-22)
+
+The independent review reproduced a G6.5/G6.6 startup defect at published
+`582046a227609551d0e959a5dfe5d76882d698eb`: the runner resolved the installation
+`.env` to locate SQLite but did not load its `TOTP_ENCRYPTION_KEY`. The original
+G6 fixture seeded that variable in-process and therefore masked a fresh service
+start. A new child-process regression reproduced the same protected-credential
+failure before the correction ([before log](g6-runner-key-before.txt)).
+
+The bounded correction is in `cli/src/commands/setup-runner.js`: `serve` and
+`once` read only the existing encryption key from the resolved installation
+`.env` (including `--env`), validate 64 hex characters and initialize the shared
+secret module before opening the job database. A configured service-environment
+key remains supported; disagreement with the saved key is refused. Missing or
+malformed keys refuse startup before any job is claimed. There is no generated
+key, rotation, dotenv sourcing or change to the saved file/credential rows.
+`status` and `reconcile` remain available without the key for recovery.
+
+Three new tests run the **production runner command and executor in fresh Node
+processes**, explicitly deleting the inherited encryption key and importing no
+fixture that assigns it. Disposable file-backed SQLite contains a protected
+credential encrypted independently under a random installation key. Both `once`
+and the actual `serve` loop reuse it successfully, retain exactly the same
+ciphertext and `.env`, and emit no key/client/machine values into output or job
+records. Additional fresh-process cases cover missing/placeholder/malformed and
+conflicting keys, unchanged queued jobs, recovery inspection and `--env` selection.
+OpenBao transport, Keycloak probes and the PostgreSQL proof result are scripted;
+this regression proves startup/decryption, not new real-host integration.
+
+Validation after the correction:
+
+- **187 affected tests pass**, adding the three startup regressions to the prior
+  184-test command. Use the command above with
+  `src/__tests__/openbao-runner-startup.test.js` appended. The same existing
+  cgroup-host assertion is excluded; it remains a separate host limit.
+- Focused runner/startup execution: **17 pass**. See
+  [focused log](g6-runner-key-focused.txt) and
+  [affected log](g6-runner-key-affected.txt).
+- Frontend build passes ([build log](g6-runner-key-build.txt)); frontend source
+  is unchanged, so the already recorded desktop/360px checks remain applicable.
+- `install.sh`, `update.sh`, the service unit and accepted U1/U2 behavior are
+  unchanged. The affected U1/U2 tests pass. No live service was restarted.
+
+Published as a correction on the existing G6 branch/PR #618. Progress remains
+**50% pending correction acceptance**, then 60%. Real PostgreSQL, Keycloak/Caddy
+integration, compatible restore and all earlier host acceptance remain separate.

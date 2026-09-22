@@ -12,8 +12,10 @@
 
 import os from 'node:os';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { spawn } from 'node:child_process';
-import { resolveInstall } from '../recovery/install.js';
+import { resolveInstall, parseEnvFile } from '../recovery/install.js';
+import { assertEncryptionKey } from '../../../admin/backend/src/lib/secrets.js';
 import { ensureSetupEngineSchema, listLocks, listJobs, jobView } from '../../../admin/backend/src/lib/setup-engine/store.js';
 import { ownerIdentity } from '../../../admin/backend/src/lib/setup-engine/logic.js';
 import { setupInputsDir } from '../../../admin/backend/src/lib/setup-engine/setup-inputs.js';
@@ -79,10 +81,32 @@ function defaultDeps() {
   };
 }
 
-async function open(opts, deps) {
+// Load only the existing at-rest key, never source .env or generate/rotate it.
+// Do this before opening the queue: secrets.js caches its first loaded key.
+function loadInstallationKey(envPath, fsImpl = fs) {
+  let saved;
+  try { saved = parseEnvFile(fsImpl.readFileSync(envPath, 'utf8')).get('TOTP_ENCRYPTION_KEY'); } catch { /* inherited key may be explicitly configured by the service */ }
+  const inherited = process.env.TOTP_ENCRYPTION_KEY;
+  const key = saved ?? inherited;
+  if (!/^[0-9a-fA-F]{64}$/.test(key || '')) {
+    return 'Restore the existing TOTP_ENCRYPTION_KEY (64 hexadecimal characters) in the selected installation .env or service environment. The runner will not generate a key or process jobs without it.';
+  }
+  if (saved && inherited && saved.toLowerCase() !== inherited.toLowerCase()) {
+    return 'The service environment conflicts with the existing installation TOTP_ENCRYPTION_KEY. Restore the matching configuration before processing jobs; no key was changed.';
+  }
+  process.env.TOTP_ENCRYPTION_KEY = key;
+  assertEncryptionKey();
+  return null;
+}
+
+async function open(opts, deps, loadCredentials) {
   if (deps.getuid() !== 0) return { error: 'the setup runner must run as root on the ProxyPilot host', code: EXIT.NOT_ROOT };
   const install = resolveInstall({ installDir: opts.installDir, envPath: opts.env, dbPath: opts.db }, deps.fs);
   if (!install.ok) return { error: install.message, code: EXIT.REFUSED };
+  if (loadCredentials) {
+    const error = loadInstallationKey(install.envPath, deps.fs);
+    if (error) return { error, code: EXIT.REFUSED };
+  }
   const db = await deps.openDb(install.dbPath);
   ensureSetupEngineSchema(db);
   const owner = ownerIdentity({ kind: 'runner', host: deps.hostname(), pid: process.pid, instance: crypto.randomUUID().slice(0, 8) });
@@ -94,7 +118,7 @@ export async function setupRunnerCommand(action, opts = {}, globalOpts = {}, dep
   const json = !!globalOpts.json;
   let db = null;
   try {
-    const o = await open(opts, deps);
+    const o = await open(opts, deps, action === 'serve' || action === 'once');
     if (o.error) {
       if (json) deps.stdout(JSON.stringify({ ok: false, error: o.error }));
       else output.error(o.error);

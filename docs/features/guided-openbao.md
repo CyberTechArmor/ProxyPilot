@@ -164,6 +164,16 @@ backups. Follow the version-compatible OpenBao snapshot restore procedure using
 existing mechanisms; this slice adds no backup, upgrade or restore framework.
 After any restore/restart, manually unseal and reapply verification.
 
+The host runner's `serve` and `once` commands load and validate the **existing**
+`TOTP_ENCRYPTION_KEY` from the resolved installation `.env` before opening the
+queue (`--env` selects an alternate file). An explicitly configured service key
+is supported, but conflicting file/environment keys are refused. If startup
+reports a missing, malformed or conflicting key, restore the matching saved
+configuration; never generate a replacement for existing ciphertext. The runner
+does not rewrite the key or `.env`. `setup-runner status` and `reconcile` remain
+available for recovery inspection without decrypting credentials.
+
+
 ## API and implementation
 
 All routes below are under `/api/setup/platform/openbao` and administrator-only.

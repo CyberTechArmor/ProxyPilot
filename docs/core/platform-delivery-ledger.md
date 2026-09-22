@@ -672,3 +672,22 @@ cluster before mutations; the new button failed contrast; and the runner-kind
 assertion lacked the guided apply kinds. None changes U1/U2 or the installer.
 The existing containment-host requirement, earlier milestones' acceptance and
 unavailable real-host integrations remain separate. They authorize no rebuild.
+
+
+### G6 narrow review correction — runner key loading (2026-09-22)
+
+The independent review found a reproducible G6.5/G6.6 fresh-runner defect:
+`setup-runner` located `.env` but did not load its existing encryption key.
+The bounded command-startup correction now loads and validates that key before
+`serve`/`once` opens the queue, preserves the file and ciphertext, and refuses
+missing/malformed/conflicting keys without claiming jobs. Inspection and
+reconciliation remain available for recovery. No runner redesign or key rotation.
+
+Three fresh-process regressions reproduce the failure before the fix and pass
+after it, without an inherited key or fixture key cache. Current affected tests:
+**187 pass** (same separately excluded cgroup-host assertion); frontend build
+passes, with frontend source unchanged. Full evidence and precise scripted-service
+boundaries are in `docs/evidence/g6-acceptance.md` under the review correction.
+PR #618 remains unmerged. **50% (5/10)** remains accepted until this correction is
+reviewed and accepted, then **60% (6/10)**. Real PostgreSQL, Keycloak/Caddy and
+restore acceptance remain separate. No installer/updater/U1/U2 or live changes.

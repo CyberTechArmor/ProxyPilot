@@ -378,13 +378,15 @@ test('setup-runner command: root only; once/reconcile/status over the file-backe
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
   const root = mkdtempSync(join(tmpdir(), 'pp-runner-'));
+  const previousKey = process.env.TOTP_ENCRYPTION_KEY;
+  delete process.env.TOTP_ENCRYPTION_KEY;
   try {
     mkdirSync(join(root, 'data', 'db'), { recursive: true });
     const dbPath = join(root, 'data', 'db', 'proxypilot.db');
     const d0 = new DatabaseSync(dbPath); ensureSetupEngineSchema(d0);
     createJob(d0, { kind: 'verify_app', app: 'pp-x', plan: { steps: ['unit_status', 'probe_port'], params: { container: 'pp-x', webPort: 3000 } }, nowMs: T0 });
     d0.close();
-    writeFileSync(join(root, '.env'), 'DATABASE_PATH=/data/db/proxypilot.db\n');
+    writeFileSync(join(root, '.env'), `DATABASE_PATH=/data/db/proxypilot.db\nTOTP_ENCRYPTION_KEY=${'e'.repeat(64)}\n`);
     const lines = [];
     const deps = { openDb: async (p) => new DatabaseSync(p), getuid: () => 0, hostname: () => 'pp', exec: scriptedGuest({ loaded: true, active: true }), stdout: (l) => lines.push(l), log: () => {}, nowMs: () => T0 + 5000 };
     assert.equal(await setupRunnerCommand('once', { installDir: root }, { json: true }, { ...deps, getuid: () => 1000 }), EXIT.NOT_ROOT);
@@ -400,7 +402,11 @@ test('setup-runner command: root only; once/reconcile/status over the file-backe
     assert.equal(await setupRunnerCommand('status', { installDir: root }, {}, deps), EXIT.OK);
     assert.equal(await setupRunnerCommand('bogus', { installDir: root }, {}, deps), EXIT.REFUSED);
     assert.equal(await setupRunnerCommand('once', { installDir: join(root, 'nope') }, { json: true }, deps), EXIT.REFUSED);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    if (previousKey === undefined) delete process.env.TOTP_ENCRYPTION_KEY;
+    else process.env.TOTP_ENCRYPTION_KEY = previousKey;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('hostGuestExec runs `incus exec <guest> -- sh` with the script on stdin and bounds it with a timeout', async () => {

@@ -1,0 +1,71 @@
+✖ G6 fresh runner once/serve loads the saved installation key without an inherited key or fixture key cache (174.911047ms)
+✖ G6 runner invalid/missing/conflicting key refuses before database open or queue changes; inspection remains available (164.202618ms)
+✖ G6 runner honors the resolved --env installation file and preserves its key (166.51493ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 0
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 666.504985
+
+✖ failing tests:
+
+test at src/__tests__/openbao-runner-startup.test.js:62:1
+✖ G6 fresh runner once/serve loads the saved installation key without an inherited key or fixture key cache (174.911047ms)
+  AssertionError [ERR_ASSERTION]: Protected OpenBao credentials cannot be opened. Restore matching configuration and encryption key; do not regenerate credentials.
+  + actual - expected
+  
+  + 'recovery_required'
+  - 'succeeded'
+  
+      at TestContext.<anonymous> (file:///workspace/scratch/a19f39b01f4e/ProxyPilot/admin/backend/src/__tests__/openbao-runner-startup.test.js:69:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'recovery_required',
+    expected: 'succeeded',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at src/__tests__/openbao-runner-startup.test.js:81:1
+✖ G6 runner invalid/missing/conflicting key refuses before database open or queue changes; inspection remains available (164.202618ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  0 !== 2
+  
+      at TestContext.<anonymous> (file:///workspace/scratch/a19f39b01f4e/ProxyPilot/admin/backend/src/__tests__/openbao-runner-startup.test.js:88:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 0,
+    expected: 2,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at src/__tests__/openbao-runner-startup.test.js:105:1
+✖ G6 runner honors the resolved --env installation file and preserves its key (166.51493ms)
+  AssertionError [ERR_ASSERTION]: Protected OpenBao credentials cannot be opened. Restore matching configuration and encryption key; do not regenerate credentials.
+  + actual - expected
+  
+  + 'recovery_required'
+  - 'succeeded'
+  
+      at TestContext.<anonymous> (file:///workspace/scratch/a19f39b01f4e/ProxyPilot/admin/backend/src/__tests__/openbao-runner-startup.test.js:113:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'recovery_required',
+    expected: 'succeeded',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

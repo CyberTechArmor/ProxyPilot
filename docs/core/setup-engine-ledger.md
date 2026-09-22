@@ -192,8 +192,13 @@ on it before HA-11.
 
 ## Milestone B — setup APIs and the guided frontend wizard
 
-Not started (0 %). Server-side state only: the browser never declares an
-installation fresh or an operation complete. Depends on A3–A6.
+Partial: G1 (platform delivery ledger, bounded G1–G10 section) provides an
+admin-only planning/review page, SQLite draft (migration 1002), read-only
+preflight and existing-job observation. `platform-setup.test.js` and the browser
+verification script prove persistence across API restart, refusal boundaries and
+truthful states. The browser never declares a fresh installation or completion;
+service execution/activation and wizard retries remain later slices. Reuses
+A3–A6 without modifying the runner.
 
 ## Milestone C — service adapters and identity integration
 
@@ -210,7 +215,7 @@ successful login and the recovery checks from A1.
 | Item | Note |
 | --- | --- |
 | MCP verbs `list_setup_jobs`, `get_setup_job`, `request_app_recovery` | The lock already binds every MCP mutation through `withContainerLock`; the observe/request verbs are REST-only today |
-| Dashboard surface | A page or panel over `/api/setup` (stale locks, recovery-required apps, job events); belongs with the wizard (milestone B) but the recovery view is useful on its own |
+| Dashboard surface | G1 now observes `/api/setup` jobs, verification, locks and redacted events. Recovery/retry controls remain future B-05/G9 work. |
 | Credential migration under the lock | The operation itself is milestone C; when it exists it takes the same lease (`withContainerLock`, kind `credential_migration`) |
 | Phase F, and the operations still on the container's pivot | With the runner live, the deploy, both restores, the retry-path mint, the Incus lifecycle / snapshot verbs, the post-launch / post-start guest setup (NAT, the address wait, DNS, the init script) and the guest configuration verbs (config keys, resources, devices, the address pin, port forwards, egress, and their pre-mutation snapshot) of the dashboard and MCP no longer run under the container's nsenter pivot. Still on it, by group (platform ledger A-17.9…A-17.14, and A-17.8a for what group 3 left by file and verb): rename, clone, import / export and the transports' temp instances; project provisioning and the idle sweep (with `set_project_resources`' own config writes and snapshot, and the promote's snapshot); the component pre-install; Caddy and the services router's own L4 reconcile (`routes/services.js`, the boot-time `lib/l4-startup.js`), which is why the create-time route render and the forward ROW stay backend steps; storage and migration transports; the terminal, `run_lxc_command`, the file tools, host service control, the firewall page's writes and every read. Each is a candidate for the same treatment (a job kind + the runner, or the unprivileged agent); `privileged: true`, `pid: host` and the Docker socket stay until they are all moved (master-spec Phase F) |
 | The legacy in-process executor | Exists only under `SETUP_EXECUTOR_POLICY=backend-allowed`: development checkouts, an operator's explicit choice, and an installation whose runner did not verify at install/update time (install.sh writes `backend-allowed` first and promotes only on evidence, logging an error otherwise). Retiring it entirely is a later decision once no supported host needs it |

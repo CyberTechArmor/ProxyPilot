@@ -1,3 +1,4 @@
+import { platformSetupRouter } from './platform-setup.js';
 // /api/setup — the setup engine's browser-facing surface: OBSERVE jobs and
 // locks, and SUBMIT the narrow requests the host runner accepts. Nothing here
 // executes a host operation; the runner does (cli/src/setup-runner), and the
@@ -35,6 +36,7 @@ import { CONTAINER_NAME_RE, RUNNER_JOB_KINDS, retryPlan, validateRunnerJob, pars
 import { BACKEND_STEP_KINDS } from '../lib/setup-engine/setup-logic.js';
 
 export const setupRouter = Router();
+setupRouter.use('/platform', platformSetupRouter);
 
 setupRouter.get('/overview', requireAdmin, (req, res) => {
   res.json(engineOverview(getDb()));

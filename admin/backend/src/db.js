@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { repairStrayMigration912 } from './lib/migration-repair.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import { SETUP_ENGINE_SCHEMA, SETUP_RUNNERS_SCHEMA } from './lib/setup-engine/store.js';
+import { SETUP_ENGINE_SCHEMA, SETUP_RUNNERS_SCHEMA, PLATFORM_PLAN_SCHEMA } from './lib/setup-engine/store.js';
 import { mkdirSync, existsSync, chmodSync } from 'fs';
 import { dirname, resolve, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -2332,6 +2332,10 @@ export function initDatabase() {
   // Version 1001: the host runners' heartbeats (lib/setup-engine/store.js).
   runMigration(db, 1001, 'setup_engine_runners', (d) => {
     d.exec(SETUP_RUNNERS_SCHEMA);
+  });
+
+  runMigration(db, 1002, 'setup_platform_plan', (d) => {
+    d.exec(PLATFORM_PLAN_SCHEMA);
   });
 
   runMigration(db, 907, 'route_edge_options', (d) => {

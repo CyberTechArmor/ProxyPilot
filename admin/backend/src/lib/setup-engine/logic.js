@@ -25,6 +25,7 @@
 
 import { validateLifecycleParams } from './lifecycle-logic.js';
 import { validateSetupParams } from './setup-logic.js';
+import { validateConfigParams } from './config-logic.js';
 
 export const HOLDER_KINDS = Object.freeze(['backend', 'runner', 'cli']);
 
@@ -66,17 +67,21 @@ export const LIFECYCLE_JOB_KINDS = Object.freeze(['instance_create', 'instance_s
 // phases, parameters and scripts live in setup-logic.js. (Both lists are
 // spelled out here because of the import cycle; the suite checks they agree.)
 export const SETUP_JOB_KINDS = Object.freeze(['guest_setup']);
-export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS]);
+// The guest configuration verbs (A-17.8) — config keys, devices, the
+// address pin, port forwards, egress — are runner jobs too; their
+// parameters, fixed commands and read-backs live in config-logic.js.
+export const CONFIG_JOB_KINDS = Object.freeze(['config_set', 'device_add', 'device_remove', 'network_pin', 'forward_apply', 'forward_remove', 'egress_set']);
+export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS]);
 // The kinds that MUTATE a guest or its storage: one at a time per app, and an
 // exclusive kind is refused (never queued behind) while any of them is open.
-export const MUTATING_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, 'configure_routes']);
+export const MUTATING_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'configure_routes']);
 // A restore is destructive, and a lifecycle verb is an operator's immediate
 // action on a guest: neither waits for a held lease (it would run minutes
 // later under a state its operator never looked at) — refused, and refused
 // again rather than queued when no executor is available. A guest setup
 // submitted directly (a retry, an operator's request) is the same; queued as
 // a FOLLOW-UP of a create / start / restart it waits instead (executor).
-export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapshot', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS]);
+export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapshot', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS]);
 // Job kinds the BACKEND records for the operations it still executes itself
 // (they hold the same lock; the runner recovers them when the backend dies).
 // The two restores and the retry mint moved to the runner (A-13…A-15);
@@ -375,7 +380,11 @@ export function reconcileDecision({ job, lock = null, nowMs, canAct = true, runn
     return { action: 'verify', reason: `owner ${job.owner} is gone after '${cp.phase || job.phase}' with the application started but not verified`, releaseLock: !!lock && lock.owner === job.owner };
   }
   if (!disruptive) {
-    return { action: 'record_interrupted', reason: `owner ${job.owner} is gone; no disruptive step had begun (last phase '${job.phase || cp.phase || 'start'}')`, releaseLock: !!lock && lock.owner === job.owner };
+    // An idempotent command (a lifecycle or configuration verb) whose owner
+    // died after issuing it may have taken effect: said so, and the retry
+    // re-reads the guest and finishes or re-issues — never blindly.
+    const issued = cp.issued === true && (cp.lifecycle === true || cp.config === true) ? `; the ${job.kind} command had been issued and may have taken effect — a retry re-reads the guest and finishes or re-issues the same command against the same identity` : '';
+    return { action: 'record_interrupted', reason: `owner ${job.owner} is gone; no disruptive step had begun (last phase '${job.phase || cp.phase || 'start'}')${issued}`, releaseLock: !!lock && lock.owner === job.owner };
   }
   if (!canAct) {
     return { action: 'record_recovery_required', reason: `owner ${job.owner} is gone after '${cp.phase || job.phase}' with the application stopped; no runner can act — recovery required` };
@@ -492,6 +501,10 @@ export function validateRunnerJob(job) {
   if (SETUP_JOB_KINDS.includes(job.kind)) {
     const sv = validateSetupParams(p);
     if (!sv.ok) return sv;
+  }
+  if (CONFIG_JOB_KINDS.includes(job.kind)) {
+    const cv = validateConfigParams(job.kind, p);
+    if (!cv.ok) return cv;
   }
   const flat = JSON.stringify(plan);
   if (flat !== JSON.stringify(redact(plan))) return { ok: false, reason: 'the plan carries a value that looks like a secret; plans carry references only' };

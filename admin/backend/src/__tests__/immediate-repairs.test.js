@@ -270,6 +270,69 @@ test('ratchet (A-17.6): the Incus lifecycle and snapshot verbs of the dashboard 
   assert.match(logic, /p\.command != null \|\| p\.script != null \|\| p\.argv != null \|\| p\.args != null \|\| p\.options != null/);
 });
 
+test('ratchet (A-17.8): the guest configuration verbs and their pre-mutation snapshots are setup-engine jobs; the dashboard resize and the seven MCP tools build no incus config / firewall command and take no snapshot of their own', () => {
+  const lxcRoute = src('routes/lxc.js');
+  const resize = lxcRoute.slice(lxcRoute.indexOf("lxcRouter.post('/containers/:name/resize'"), lxcRoute.indexOf("// DELETE /containers/:name - Delete a container"));
+  assert.match(resize, /runGuestConfig\(\{ kind: 'config_set', containerName: incusName, changes, requestedBy/, 'the resize is a config_set job');
+  assert.doesNotMatch(resize, /execOnHost\(|spawnOnHost\(|runHostCapture\(/, 'the route runs no host command');
+  assert.doesNotMatch(lxcRoute, /incus config set \$\{incusName\} limits\.(cpu|memory)=\$\{/, 'the unquoted cpu / memory interpolation is gone');
+  assert.match(resize, /if \(!Number\.isInteger\(n\) \|\| n < 1 \|\| n > 256\)/, 'cpu validated'); assert.match(resize, /if \(!Number\.isInteger\(n\) \|\| n < 64 \|\| n > 1048576\)/, 'memory validated');
+  const mcp = src('routes/mcp.js');
+  assert.match(mcp, /runGuestConfig\(\{\n\s+kind: 'config_set', containerName: incusName, changes: \[\{ key: change\.key, value: change\.value \}\], acknowledgeRisk: args\.acknowledge_risk === true,\n\s+snapshot: \{ name: snapName \}, expect: instanceIdentity\(probe\.instance\)/, 'set_lxc_config is a config_set job with the planned snapshot and the bound identity');
+  assert.match(mcp, /runGuestConfig\(\{\n\s+kind: 'network_pin', containerName: incusName, ip, previous: current \|\| null,\n\s+snapshot: \{ name: defaultSnapshotName\(new Date\(\), 'pp-mcp-pre-network'\) \}, expect: instanceIdentity\(probe\.instance\)/, 'set_lxc_network is a network_pin job');
+  assert.doesNotMatch(mcp, /runHostCapture\('incus', \['config', 'set', incusName, change\.key, change\.value\]/, 'no config set in the tool');
+  assert.doesNotMatch(mcp, /runHostCapture\('incus', \['config', 'device', (override|set), incusName, 'eth0'/, 'no eth0 write in the tool');
+  assert.doesNotMatch(mcp, /takeLxcSnapshot\(incusName, defaultSnapshotName\(new Date\(\), (`pp-mcp-pre-\$\{change\.key|'pp-mcp-pre-network')/, 'the two tools take no snapshot of their own: the job does, before its first write');
+  // What is left of takeLxcSnapshot in routes/mcp.js: the project lifecycle's deps (A-17.10) and the ctx handed to the extended families (project-config's resources / promote, A-17.10 / A-17.11).
+  assert.equal((mcp.match(/takeLxcSnapshot\(/g) || []).length, 2, 'the definition and the lifecycle deps only');
+  assert.equal((src('routes/mcp-tools/project-config.js').match(/await takeLxcSnapshot\(/g) || []).length, 2, 'project resources and promote (A-17.10 / A-17.11) still snapshot in the tool — recorded in the ledger');
+  const lxcAdmin = src('routes/mcp-tools/lxc-admin.js');
+  for (const kind of ['config_set', 'device_add', 'device_remove', 'egress_set', 'forward_apply', 'forward_remove']) assert.match(lxcAdmin, new RegExp(`runGuestConfig\\(\\{\\n?\\s*kind: '${kind}'`), `${kind} goes through the engine`);
+  assert.doesNotMatch(lxcAdmin, /takeLxcSnapshot/, 'no snapshot taken by an lxc-admin tool');
+  assert.doesNotMatch(lxcAdmin, /runHostCapture\('incus', \['config', 'set'/, 'no config set in a tool');
+  assert.doesNotMatch(lxcAdmin, /runHostCapture\('incus', \['config', 'device', '(add|remove|override)'/, 'no device add / remove / override in a tool (the clone\'s eth0 unset is the transport group\'s)');
+  assert.doesNotMatch(lxcAdmin, /reconcileServiceL4Forwards|proxypilotCli\(\['egress', action/, 'no L4 reconcile and no egress write from a tool; the read (get_lxc_egress) keeps its CLI read');
+  // The engine side: fixed argv only, from the plan; the one host script is the reserved-ports write with positional arguments; every read goes through the lease-renewing runner.
+  const op = src('lib/setup-engine/config-op.js');
+  assert.doesNotMatch(op, /'sh', '-c'|spawn\(|execOnHost|runHostCapture|nsenter|exec\.guest\(/, 'the executor\'s host channel only; no shell of its own');
+  assert.match(op, /const r = await run\(instanceListArgv\(name\), \{ timeoutMs: TIMEOUTS\.list \}\);/, 'reads go through the lease-renewing runner');
+  assert.match(op, /if \(held && !lease\.renew\(HOST_FIREWALL_LOCK\)\) throw new SharedLeaseLostError\(HOST_FIREWALL_LOCK, `after \$\{issuedUnderLease\} command\(s\)`\);/, 'every command under the shared lease renews it first');
+  assert.match(op, /mark\('issuing', cp\(\{ issued: true, snapshot, applied \}\), `issuing \$\{kind\} for \$\{name\} \(\$\{step\.key\}\)`, \{ required: true \}\);/, 'the checkpoint before the first write is mandatory');
+  assert.match(op, /const c = await createSnapshotWithFallback\(host, name, want, \{ timeoutMs: TIMEOUTS\.snapshot \}\);\n\s+if \(!c\.ok\) return fail\('protect'/, 'a failed snapshot prevents the change');
+  assert.match(op, /if \(found && recorded && recorded\.created_at && recorded\.created_at === found\.created_at\) \{/, 'a recorded snapshot is reused only by name AND a recorded timestamp that matches — a missing timestamp is never a wildcard');
+  const logic = src('lib/setup-engine/config-logic.js');
+  assert.match(logic, /p\.command != null \|\| p\.script != null \|\| p\.argv != null \|\| p\.args != null \|\| p\.options != null/);
+  assert.equal((logic.match(/'sh', '-c'/g) || []).length, 1, 'one fixed host script: the reserved-ports write');
+  assert.match(logic, /export function reservedWriteArgv\(body, path = RESERVED_PORTS_PATH\) \{ return \['sh', '-c', RESERVED_WRITE_SCRIPT, 'sh', Buffer\.from\(String\(body\), 'utf8'\)\.toString\('base64'\), String\(path\)\]; \}/, 'its arguments are the rendered body and the constant path');
+  assert.match(logic, /if \(RISK_ACKNOWLEDGED_KEYS\[c\.key\] === c\.value && p\.acknowledgeRisk !== true\)/, 'the runner re-checks the risk acknowledgement');
+  // The review of ad1a638 (R-050…R-052): the row is the job's, the applied policy is verified separately from the saved configuration, the original snapshot is verified before any remaining write.
+  assert.doesNotMatch(lxcAdmin, /INSERT INTO service_l4_forwards|DELETE FROM service_l4_forwards/, 'the tool never writes the forward row: the job does, under the leases');
+  assert.match(op, /key: 'row', label: apply \? `record forward \$\{f\.id\} in service_l4_forwards`/, 'the row is the job\'s first step');
+  assert.match(op, /key: 'reconcile', label: 'apply the saved firewall configuration \(reconcile\)'/, 'the applied policy is its own step');
+  assert.match(op, /const ok = after\.ok && r\.code === 0;/, 'done needs the command AND the read-back');
+  assert.match(op, /const plan = reservedPlan\(store\.reservedRanges\(\)\);/, 'the reservation aggregate comes from the rows at execution time');
+  assert.match(logic, /if \(p\.reserved != null\) return \{ ok: false, reason: 'a forward job carries no reservation aggregate/);
+  assert.match(logic, /export function forwardRuleVerdict\(list, f, serviceTag, \{ present \}\)/); assert.match(logic, /export function reconcileEvidence\(status, dry\)/);
+  assert.match(op, /\} else if \(writeBegun\) \{/, 'after a write has begun the original snapshot must verify'); assert.match(op, /if \(!mutate\) \{/, 'no remaining write without it');
+  const executor = src('lib/setup-engine/executor.js');
+  assert.match(op, /rollback = await settleForward\(/, 'the failed apply\'s disposition is the job\'s');
+  // The review of e97a66a (R-053…R-055): ownership at the database boundary and in the rollback, and the protection across the retry chain.
+  assert.match(op, /const writeBegun = issuedBefore \|\| \(resumed && prior\.writeBegun === true\) \|\| deps\.originWriteBegun === true;/, 'a write begun anywhere in the retry chain keeps the original snapshot\'s protection');
+  assert.match(op, /writeBegun: writeBegun \|\| issuedAny, \.\.\.extra/, 'every checkpoint carries the flag');
+  assert.match(op, /mark\('applied', cp\(\{ issued: true, snapshot, applied \}\), `\$\{step\.key\}: \$\{applied\[step\.key\]\.state\}`, \{ required: true \}\);/, 'the step outcome is required on the record before anything acts on it');
+  assert.match(op, /if \(step\.creates && r\.code === 0 && !r\.tolerated && !owned\(step\.creates\)\) \{ ownedList\.push\(step\.creates\); job\.generated\(step\.creates\); \}/, 'a created change is recorded in the fenced progress record');
+  assert.match(op, /out\.row = !had \? 'absent' : unsure\('row'\) \? UNSURE : !owned\(\{ kind: 'forward_row', name: f\.id \}\) \? NOT_OURS : store\.delete\(f\.id\) > 0 \? 'removed' : 'kept';/, 'the rollback removes only what this operation created, and nothing whose ownership is uncertain');
+  assert.match(executor, /for \(const o of chain \|\| \[\]\) \{ if \(o\.status === 'succeeded'\) break; add\(o\); \}/, 'ownership never crosses a succeeded ancestor (R-056)');
+  assert.doesNotMatch(op.slice(op.indexOf('async function settleForward')), /catch \(e\) \{ out\./, 'no cleanup step converts an error into a best-effort note');
+  assert.match(executor, /forwardStore: fencedForwardStore\(db, \{ jobId: job\.id, owner, epoch, app: job\.app, lockEpoch, heldEpochs, lost: \(\) => lost, noteLost: \(n\) => \{ lost = n; \}, nowMs \}\),/, 'the forward store is fenced at the database boundary');
+  assert.match(executor, /db\.exec\('BEGIN IMMEDIATE'\);\n\s+let out;\n\s+try \{ const gone = renew\(\); if \(gone\) raise\(gone\);/, 'each write renews the claim and every lease inside its own transaction');
+  assert.match(executor, /originWriteBegun: chain\.some\(/, 'the executor walks the whole retry chain');
+
+  assert.match(src('lib/setup-engine/logic.js'), /EXCLUSIVE_JOB_KINDS = Object\.freeze\(\['restore_db', 'restore_snapshot', \.\.\.LIFECYCLE_JOB_KINDS, \.\.\.SETUP_JOB_KINDS, \.\.\.CONFIG_JOB_KINDS\]\)/);
+  assert.match(executor, /keepAlive = setInterval\(\(\) => \{ try \{ const gone = renewAll\(\); if \(gone\) lost = gone; \}/, 'the claim, the guest\'s lease and every held shared lease are heart-beaten during a long command');
+  assert.match(executor, /const jobFence = isConfig \? configFence : fence;/, 'and checked before every command');
+});
+
 test('ratchet (A-17.7): the post-launch and post-start fix-ups are setup-engine phases; the dashboard and MCP run no NAT / DNS / init-script command and keep no in-memory creation state', () => {
   const lxcRoute = src('routes/lxc.js');
   assert.doesNotMatch(lxcRoute, /async function ensureDns|export async function ensureNetworkNat|function ensureNetworkNat/, 'the NAT and DNS fix-ups are phases of the guest_setup job');

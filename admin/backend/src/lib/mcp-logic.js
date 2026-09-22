@@ -1276,7 +1276,7 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'set_lxc_config',
-    description: 'Set one allowlisted Incus config key on a guest: security.nesting, security.privileged, limits.cpu, limits.memory, boot.autostart (the allowlist in lib/mcp-policy/lxc-config-allowlist.json is the source of truth — anything else, notably raw.lxc and device passthrough, is rejected). Takes an automatic snapshot before every write and reports whether a restart is needed. security.privileged=true additionally requires acknowledge_risk: true and returns the warning that container root becomes host root — prefer raising kernel.keys.* sysctls on the host for Docker keyring failures. Requires confirm: true.',
+    description: 'Set one allowlisted Incus config key on a guest: security.nesting, security.privileged, limits.cpu, limits.memory, boot.autostart (the allowlist in lib/mcp-policy/lxc-config-allowlist.json is the source of truth — anything else, notably raw.lxc and device passthrough, is rejected). Runs as a setup-engine job under the guest\'s lease: takes an automatic snapshot before the write (the job reads it back first), sets the key and reads it back, and reports whether a restart is needed (job_id on the result). security.privileged=true additionally requires acknowledge_risk: true and returns the warning that container root becomes host root — prefer raising kernel.keys.* sysctls on the host for Docker keyring failures. Requires confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1292,7 +1292,7 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'set_lxc_network',
-    description: 'Pin a guest\'s IPv4 address: reserve-current converts the address the guest holds now into a static reservation (recommended — a working deployment on a dynamic lease reproduces its edge 502 at the next renewal); static assigns a specific address. Snapshots first, warns when routed domains still target an address the change abandons, and says when a restart is needed for the lease to apply. Requires confirm: true.',
+    description: 'Pin a guest\'s IPv4 address: reserve-current converts the address the guest holds now into a static reservation (recommended — a working deployment on a dynamic lease reproduces its edge 502 at the next renewal); static assigns a specific address. Runs as a setup-engine job under the guest\'s lease (snapshots first, the reservation read back; job_id on the result), warns when routed domains still target an address the change abandons, and says when a restart is needed for the lease to apply. Requires confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {

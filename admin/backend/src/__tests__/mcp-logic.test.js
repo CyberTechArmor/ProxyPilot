@@ -2181,10 +2181,16 @@ test('routes/mcp.js takes every snapshot through the shared helper, in the new f
   assert.equal(/runHostCapture\('incus', \['snapshot', [A-Za-z]/.test(MCP_ROUTE_SRC), false,
     'a bare `incus snapshot <instance> <name>` shell-out is back');
   assert.match(MCP_ROUTE_SRC, /snapshotArgv\('create', incusName, snapName, form\)/);
-  // Every pre-change snapshot goes through the one helper, so fixing it once
-  // fixes set_lxc_config, set_lxc_network and snapshot_lxc_container together.
+  // Every pre-change snapshot the router still takes itself goes through the
+  // one helper. Since A-17.8 set_lxc_config and set_lxc_network take theirs
+  // through their setup-engine job (config-op.js createSnapshotWithFallback,
+  // the same form discovery from the client's answer), and
+  // snapshot_lxc_container is a snapshot_create job (A-17.5): what is left
+  // here is the helper and the project lifecycle's deps (A-17.10).
   const callers = MCP_ROUTE_SRC.match(/takeLxcSnapshot\(/g) || [];
-  assert.ok(callers.length >= 4, `expected the shared helper plus its callers, saw ${callers.length}`);
+  assert.equal(callers.length, 2, `expected the shared helper plus the lifecycle deps, saw ${callers.length}`);
+  assert.match(MCP_ROUTE_SRC, /kind: 'config_set', containerName: incusName, changes: \[\{ key: change\.key, value: change\.value \}\][^\n]*\n\s+snapshot: \{ name: snapName \}/, 'set_lxc_config plans its snapshot for the job');
+  assert.match(MCP_ROUTE_SRC, /kind: 'network_pin', containerName: incusName, ip, previous: current \|\| null,\n\s+snapshot: \{ name: defaultSnapshotName\(new Date\(\), 'pp-mcp-pre-network'\) \}/, 'set_lxc_network plans its snapshot for the job');
   // The probe is cached, not re-run per snapshot.
   assert.match(MCP_ROUTE_SRC, /if \(snapshotCliForm\) return snapshotCliForm;/);
 });

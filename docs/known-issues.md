@@ -382,3 +382,21 @@ resumes or records recovery on start — requirements R1–R4 in
 `docs/core/setup-engine-requirements.md` (gate two). Until then, after a
 backend restart during a deploy, check the project's readiness lines and start
 the unit by hand if the app is down.
+
+## Forward rollback: ownership of uncertain resources is reported, not reconstructed
+
+Recorded 2026-09-28 with the closing corrections of A-17.8 (platform
+ledger R-057). A `forward_apply` interrupted between creating a resource
+(the row, the proxy device, the firewall rule) and persisting its
+ownership record resumes with that resource `present` and
+`ownership: uncertain`; a later definite failure leaves it in place and
+ends `rollback.state: unresolved` with the operator action on the record
+(decide whether it belongs to the forward, remove it by hand, retry).
+
+Deferred, deliberately: reconstructing ownership from the guest (for
+example by matching the device's listen / connect to the plan, or the
+rule's saved properties) and cleaning such a resource up automatically.
+Both would turn an honest "not recorded" into an inference, which is
+what R-054 forbids for the rollback. If it is ever wanted, the safe form
+is an explicit operator verb that shows the evidence and asks for
+confirmation, not a change to the settlement.

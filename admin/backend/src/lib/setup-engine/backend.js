@@ -261,9 +261,9 @@ export function executionMode(db, { env = process.env, nowMs = Date.now() } = {}
 // { skipped }) unless the policy allows it AND no runner is live; the runner
 // is preferred whenever it exists. Heartbeats are not written (a backend is
 // not a runner).
-export async function drainRunnerJobsInProcess(db, { owner = backendOwner(), exec, reviewLogin = null, max = 5, nowMs = () => Date.now(), env = process.env, log = () => {}, kinds = [...RUNNER_JOB_KINDS], inputsDir = null, sleep = null } = {}) {
+export async function drainRunnerJobsInProcess(db, { owner = backendOwner(), exec, reviewLogin = null, max = 5, nowMs = () => Date.now(), env = process.env, log = () => {}, kinds = [...RUNNER_JOB_KINDS], inputsDir = null, sleep = null, reservedPortsPath = null } = {}) {
   const mode = executionMode(db, { env, nowMs: nowMs() });
   if (mode.executor !== 'backend') return { skipped: mode.executor, policy: mode.policy.mode, ran: [] };
   if (!exec) return { skipped: 'no_exec', policy: mode.policy.mode, ran: [] };
-  return runOnce({ db, owner, exec, reviewLogin, nowMs, log, heartbeat: false, inputsDir, sleep }, { max, reconcileFirst: false, kinds });
+  return runOnce({ db, owner, exec, reviewLogin, nowMs, log, heartbeat: false, inputsDir, sleep, reservedPortsPath }, { max, reconcileFirst: false, kinds });
 }

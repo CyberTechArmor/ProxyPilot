@@ -571,7 +571,8 @@ in-process drain rather than waiting for the 30 s interval.
 What this group did NOT move (each recorded as a later A-17 group in the
 platform ledger): the guest configuration verbs (`resize`,
 `set_lxc_config`, `set_lxc_resources`, `set_lxc_network`, devices, port
-forwards) and the pre-mutation `takeLxcSnapshot` they lean on; rename,
+forwards) and the pre-mutation `takeLxcSnapshot` they lean on — moved by
+A-17.8, two sections below; rename,
 clone, import / export and their post-import start, the zip-import start
 and cleanup, the prepared-download and S3-export temp instances; the
 project provisioning launch / delete and the idle sweep's stop / start
@@ -781,6 +782,280 @@ minute), reporting `setup_job_id` and what the setup recorded when it ended
 otherwise.
 
 
+## The guest configuration verbs (A-17.8)
+
+Since this slice the dashboard's `POST /containers/:name/resize` and the
+MCP tools `set_lxc_config`, `set_lxc_network`, `set_lxc_resources`,
+`add_lxc_device`, `remove_lxc_device`, `set_port_forward` (add / remove)
+and `set_lxc_egress` submit runner jobs through `mock2/ops.js`
+`runGuestConfig`, and the pre-mutation snapshot the MCP tools always took
+is taken by the job itself, under the guest's lease, before its first
+write. None of them builds an `incus config …` or `proxypilot firewall …`
+command any more; the resize route used to interpolate the operator's
+`cpu` and `memory` unquoted into a shell string. Seven kinds
+(`config-logic.js` `CONFIG_JOB_KINDS`, mirrored in `logic.js`), each
+idempotent, each over the host executor's argv channel:
+
+| Kind | Caller | Commands (fixed argv) | Verified afterwards |
+| --- | --- | --- | --- |
+| `config_set` | resize (dashboard), `set_lxc_config`, `set_lxc_resources` | `incus config set <name> <key> <value>` per allowlisted key; `incus config device override <name> root size=<n>` (fallback `device set`) for a root size | every key reads at its value in `incus list`; `devices.root.size` at its value |
+| `device_add` | `add_lxc_device` | `incus config device add <name> <dev> disk\|proxy k=v…` | the device present with every planned property |
+| `device_remove` | `remove_lxc_device` | `incus config device remove <name> <dev>` | absent; the removed device's reference-only properties recorded as `previous` |
+| `network_pin` | `set_lxc_network` | `incus config device override <name> eth0 ipv4.address=<ip>`, on "already exists" `device set … ipv4.address <ip>` | `devices.eth0["ipv4.address"] === ip` |
+| `forward_apply` / `forward_remove` | `set_port_forward` add / remove | the `service_l4_forwards` row written / removed (the job's first step, through the store the executor hands it); `incus config device add <name> ppl4-<id> proxy listen= connect=` / `remove`; `proxypilot --json firewall add-service-l4 --id service-l4-<id> …` / `remove-service-l4`; `proxypilot --json firewall reconcile` when the applied policy does not match; the reserved-ports drop-in refreshed from the rows (below) | the row with the plan's fields; the device with its listen / connect; the SAVED rule with every property (`source`, `proto`, `port_start`, `port_end`, `scope`, `service`, `enabled`) in `firewall list` — or all absent; the APPLIED policy: `firewall status`'s last reconcile applied with the checksum `reconcile --dry-run` reports for the saved configuration; the drop-in body and `sysctl -n net.ipv4.ip_local_reserved_ports` |
+| `egress_set` | `set_lxc_egress` | `proxypilot --json firewall egress allow\|deny <guest> <service> [--reason r]`; `proxypilot --json firewall reconcile` when the applied policy does not match | the service present in / absent from the guest's SAVED entry in `egress list`; the APPLIED policy as above; the CLI's reconcile summary on the record |
+
+**Validation at both ends.** The surface validates (the MCP policy files,
+`confirm: true`, `dry_run`, `acknowledge_risk`; the resize route's ranges)
+and submits; the runner validates the claimed row again
+(`validateConfigParams`): a config key must be on `CONFIG_KEY_ALLOWLIST`
+(the five keys of `lxc-config-allowlist.json`, each with its value shape),
+`security.privileged=true` must carry `acknowledgeRisk: true` in the plan,
+a disk device's source must lie under `mcp-extended-policy.json`
+`lxc_devices.disk_source_roots` and its proxy listen port within the
+policy's range and off its reserved list (the runner reads the same file),
+ports and range widths are checked, a device named `root`, `eth0`,
+`ppl4-*`, `ppcert-*` or `reporepo` is refused, and a plan carrying a
+`command`, `argv`, `args`, `options` or `script`, or a value that looks
+like a secret, is refused at submission and again at claim. Every argv
+comes from the renderers in `config-logic.js` and from nothing else. Under
+`runner-required` with no live runner every kind is refused — `cancelled`
+/ `runner_unavailable`, never executed in the backend, never left queued.
+
+**Saved is not applied.** The firewall CLI writes the desired
+configuration to `firewall.json` BEFORE it reconciles, and a rejected
+reconcile (a lockout, an `nft` failure) leaves the saved configuration in
+place with `egress list` / `firewall list` showing it. The review of the
+first revision (R-050) found the job reading that saved configuration as
+proof. Since the correction the saved configuration (`egress` / `rule`)
+and the applied policy (`reconcile`) are two steps: the write step
+tolerates the CLI's exit 1 only when its JSON shows the save with a
+`reconcile.rejection`, recording the rejection; the `reconcile` step then
+reads the evidence — `proxypilot --json firewall status` (the last
+recorded reconcile: applied, and its checksum) against `proxypilot --json
+firewall reconcile --dry-run` (the desired ruleset's checksum) — and
+issues `proxypilot --json firewall reconcile` when they differ, `done`
+only when it reports ok and applied. A saved-but-rejected change ends
+`failed at reconcile`, never verified; a repeated request never skips
+application because the reconcile step reads the evidence, not the saved
+entry; a retry after the cause is fixed issues no second write and
+reconciles once. A forward's saved rule is compared property by property
+(`forwardRuleVerdict`): the expected id with another port, protocol,
+range end, scope, service tag or source, or disabled, is `present with
+other properties` and never verifies (R-051). And in every kind a step is
+`done` only when its command succeeded (or was tolerated by name) AND its
+read-back holds: an exit 1 behind a matching read-back is `failed` with
+the exit on the record.
+
+**Read, then issue only what is missing, then read back.** Every step
+reads its own state first and issues its command only when the state does
+not hold: a request whose whole state already holds ends `alreadyInState`
+with nothing issued and *no snapshot taken* (there is nothing to protect);
+a device that exists with other properties, or a remove of a device that is
+not there, is refused before any snapshot or lease. Then the pre-change
+snapshot (the MCP kinds), then — for the firewall kinds — the shared
+`@host/firewall` lease (waited for 20 s, a dead holder taken over,
+contended → refused with nothing issued; renewed before every command, a
+lost lease stopping the job before its next command with the count issued
+on the record), then the steps in order: the mandatory `issuing`
+checkpoint before the first write, a read-back after each, the per-step
+state (`already`, `done`, `failed`, `unverified`) on the record. A step
+that does not read back — an exit 0 whose value is not there as much as a
+nonzero exit — stops the sequence: the job ends `failed at <step>` naming
+what was applied before it and what was not run, never a success claim.
+The reserved-ports step of a forward is best effort like the reconciler's
+(`lib/l4-reserved-ports.js`): its failure is a warning on a forward that
+is otherwise complete, with the step's state on the record.
+
+**The snapshot is the job's, named at submission, bound by timestamp.**
+The tool plans the name (`pp-mcp-pre-<key>-<stamp>`) and the job creates it
+(the legacy CLI form discovered as before), reads it back present and
+records it as generated with its `created_at`; a snapshot that fails or
+does not read back prevents the change. A snapshot already there under the
+planned name that this request did not take is refused (its content is
+unknown). A resumed attempt, or a retry (`retryOf`, `reuse`), reuses the
+recorded snapshot only when name AND `created_at` still match. Once a
+write has begun — this job's interrupted attempt had issued, or the origin
+it retries had (`originIssued`) — the ORIGINAL snapshot's identity must be
+verifiable before anything further is written: `issuedBefore` proves that
+a write began, not that every requested change completed (R-052, the
+review of the first revision, which let a job resumed after changing CPU
+change memory with its snapshot gone). Missing, replaced under its name
+or unrecorded, the job reads the completed changes back (`done`), issues
+NO remaining change (`not_run`) and ends `failed at protect` with
+`protection: { state: missing | replaced | unverifiable }`, `partial:
+true`, the prior values in `previous` and the guidance: revert from those
+values, or submit a new request deliberately — it takes a fresh snapshot
+of the guest as it is now, which is not the original pre-change point. No
+replacement snapshot is ever taken and presented as the original. A
+resumed job whose remaining state already holds completes read-only, the
+unverifiable snapshot a warning on the record. The protection follows the
+INTENT, not the attempt (R-055, the second review): every checkpoint of a
+job carries `writeBegun` once a write began anywhere in its chain, the
+executor walks the whole `retry_of` chain (same app and kind) for
+`issued` / `writeBegun` and for the recorded snapshot identity (the chain's
+generated records), so a retry of a retry — and a resume of that retry
+after a dead owner — refuses the remaining write exactly as the first
+retry did, at any depth; a retry that was itself refused at protection
+never becomes the origin of a fresh write. And the identity must be usable:
+a recorded name without a timestamp is `unverifiable`, never a wildcard,
+after the first write (no further write) and before it (refused: the
+snapshot on the guest cannot be certified as this job's). A request
+submitted without `retryOf` is a new intent with its own snapshot name and
+its own fresh snapshot — distinct from retrying the original. The record
+and every result state the coverage honestly (`snapshot.covers`): an
+instance snapshot restores the guest's root disk and configuration only —
+attached custom volumes are named as not covered — and never ProxyPilot's
+own rows (services, routes, forwards) or the host firewall's state. The
+resize route keeps its old contract (no snapshot: a live, reversible
+limit) and records the prior values of the keys it changes instead;
+egress and forwards take none (host firewall state, reversed by the
+opposite verb). The prior state a job records is references only: the
+changed keys' previous values, a device's addresses and paths
+(`RECORDED_DEVICE_PROPS`), the previous reservation.
+
+**Identity.** The MCP tools read the guest before their confirmation and
+bind the job to its identity (`expect` = `volatile.uuid` + `created_at`);
+the runner refuses a guest of another identity under the name with nothing
+issued, and a resumed attempt refuses one that changed since it bound it.
+The dashboard resize binds by name (it has no confirmation step to bind)
+and runs at once or is refused busy.
+
+**Leases and the keep-alive.** The executor holds the guest's lease from
+the first read through the snapshot, every write and the last read-back;
+the firewall kinds take `@host/firewall` after it and release it before it
+(the documented order: job claim → guest → `@host/firewall`; the NAT phase's
+`@host/network` is a different resource and is never held together with
+it). A keep-alive renews the job CLAIM, the guest's lease and every held
+shared lease every 10 s while one command runs long (`incus snapshot
+create` on a large guest, a slow firewall reconcile), and the fence before
+every command checks all three: a renewal that changes no row — the claim
+ended or re-claimed by the reconciler, a lease taken over — stops the job
+before its next command (`FencedError`, `SharedLeaseLostError`), revives
+nothing and releases only what it holds at its epochs. The step under way
+when a lease is lost is recorded `unverified` when its command had been
+issued (its read-back was not done under the lease), the steps after it
+`not run`; a retry re-reads every step.
+
+**Interruption.** Every kind is idempotent, so an owner dying at any point
+is RESUMED by the runner's reconcile: the requeued job re-reads the guest
+against the identity the dead attempt bound (`checkpoint.target`), reuses
+its recorded snapshot, reads each applied step as done and issues only the
+steps whose state does not hold — nothing is replayed blindly. The
+backend's boot sweep (a dead in-process executor, nothing able to act)
+records such a job `interrupted` with the honest reason — "the command had
+been issued and may have taken effect; a retry re-reads the guest and
+finishes or re-issues the same command against the same identity" — and
+releases the lease: an idempotent command holds nothing. The explicit
+retry (`POST /api/setup/jobs/:id/retry`) is its recovery path; there is no
+hold and no acknowledgement for this group, because no step of it has an
+outcome the next read cannot establish.
+
+**Forwards: the row and its disposition are the job's.** The first
+revision wrote the `service_l4_forwards` row in the request before the job
+was admitted and rolled it back in the request (R-050 of the review: a
+busy refusal deleted the row with no removal job; a retry of a partial
+addition could end with host resources and no row; an older retry
+replayed a stale reservation aggregate over newer forwards). Since the
+correction `set_port_forward` only validates, confirms and submits — a
+refusal at submission changes nothing — and the row is the job's FIRST
+step (`row`), written for an apply and removed for a remove through the
+store the executor hands the operation (`forwardStore`, the same database
+the setup engine's rows live in), under the guest's lease and
+`@host/firewall`, before the device, the saved rule, the applied policy and
+the reserved ranges. The reserved UDP ranges are recomputed from the
+enabled rows under the lease at the moment of the check and of the write
+(the plan carries no aggregate; the validator refuses one), so an older
+retry keeps what newer forwards reserved. The store is fenced AT the
+database boundary (R-053, the second review): each insert / delete runs
+under `BEGIN IMMEDIATE` and, inside that transaction, renews the job
+claim, the guest's lease and every held shared lease at the epochs this
+worker holds; a renewal that changes no row rolls the transaction back and
+raises (`FencedError` for the claim, `SharedLeaseLostError` for a lease) —
+a takeover bumps the epoch under its own `BEGIN IMMEDIATE`, so it can never
+interleave with the write; reads fence the same way. A worker whose claim
+the runner's reconcile expired and requeued while another owner completed
+the job returns `fenced` and touches nothing: the per-step `applied`
+checkpoint is required before anything acts on a step's outcome (a
+checkpoint that changes no row raises the fence; an unrecorded outcome
+ends `failed at checkpoint` with no rollback attempted), and the
+settlement lets a fencing, ownership-loss or cancellation error propagate
+at once — only a host read-back failure is best effort, recorded
+`unknown`. A definite failure after the row was written is settled by the
+job itself (`settleForward`), and the settlement removes ONLY what this
+operation CREATED (R-054): ownership is a persisted engine record, never
+inferred from an id, an `already` state or an issued command — the job
+records `forward_row`, `proxy_device` and `firewall_rule` as generated
+(the fenced progress record) only after the create reported success and
+was not tolerated by name; a resumed attempt reads its own records; a
+retry inherits the records of the failed attempts newer than the first
+succeeded ancestor in its chain and nothing older (R-056: a succeeded
+origin's changes are the operator's working state, and what an older
+failed attempt created under the same names was superseded by that
+success — the snapshot history is separate and still walks the whole
+chain); every step carries `owned: true | false`. A resource present on a
+resume after a write had begun, with no record of its step and no
+ownership record, may have been created by the interrupted attempt just
+before its record persisted: it is `present` with `ownership: uncertain`
+(`owned: null`), never `already` (R-057); the settlement leaves it
+(`unresolved … — not removed`), ends `rollback.state: unresolved` and
+`partial: true`, and the reason and the recovery-required verification
+name the resource and the operator action (decide whether it belongs to
+the forward, remove it by hand if it does, retry). Reconstructing
+ownership from the guest or cleaning such a resource up automatically is
+deferred (`docs/known-issues.md`).
+A retry of a completed forward that fails at the reconcile because an
+unrelated saved policy is rejected keeps the row, the device and the rule
+(`kept (not created by this operation)`, `rollback.state: none`) and
+reports the policy as unresolved with the rejection on the record; a fresh
+forward that fails after its row and device were created still removes
+both, also when it was interrupted between them and resumed. The response
+names what could not be removed (the L4 reconciler sweeps an orphan device
+at its next pass) — the disposition settles whether or not the request is
+still alive. A retry
+re-records the row before it touches the host; a row that can no longer be
+written because another forward binds the port (the executor's store
+checks the port NULL-safely, as `UNIQUE` ignores a NULL range end) is
+refused as `superseded` with this id's orphans removed — never a success
+without an authoritative row. The drop-in
+`/etc/sysctl.d/99-proxypilot-l4-reserved.conf` is refreshed with the
+reconciler's exact body — the one host script of this group, a fixed text
+under `sh -c` whose only arguments are the base64 of the rendered body and
+the drop-in's constant path (`reservedWriteArgv`), applied with `sysctl
+-p` and read back through `sysctl -n`; an empty set removes the file and
+reloads `/etc/sysctl.conf`. The response keeps its shape
+(`reconcile.applied[].detail.{incus,firewall,policy}`,
+`reconcile.reservedPorts`) with `job_id` and `verified: true` beside it.
+
+**Truthful results.** Every result carries `applied` per step (with
+`owned` on a forward's row, device and rule), `previous`,
+`snapshot` (name, timestamp, reused, verified, covers), `partial` and
+`notRun` on a failure, `protection` when the original snapshot could not
+be verified, `row` (with `owned`; `rolled_back` only when the row was in
+fact removed), `firewallPolicy` and `rollback` (per change `removed`,
+`absent`, `kept (…)` with the reason, `unresolved` for a policy the
+reconcile could not apply; `applied.rollback.state` `done`, `partial` or
+`none`) for a forward,
+`warnings` for a best-effort step, the executor's `jobId`; the MCP
+results keep their fields (`applied`, `snapshot`, `restart_required`,
+`restart_recommended`, `previous`, `reconcile`, `reverse_with`) and add
+`job_id`, `verified`, `snapshot_covers`, `previous_value` /
+`previous_reservation`; the resize route answers `success`, `message`,
+`config` as before plus `jobId`, `applied`, `previous`, `verified`. A
+refusal maps to 409 (busy, stale, changed identity, a contended firewall
+lease, a foreign snapshot, a device that exists otherwise), 503 (no
+executor), 404 (no such guest), 400 (an invalid plan)
+(`lifecycleHttpStatus`).
+
+What this group did NOT move (each recorded in the platform ledger):
+`set_project_resources` and the promote's snapshot in
+`routes/mcp-tools/project-config.js` (project provisioning, A-17.10 /
+A-17.11), the clone's `eth0` unset (A-17.9), the L4 reconciler's own runs
+from the services router and the boot-time `lib/l4-startup.js` (the
+services surface, A-17.12's neighbour), the firewall page's own writes,
+and the reads. `takeLxcSnapshot` in `routes/mcp.js` remains for the
+project lifecycle's deps and the ctx those out-of-scope tools use.
+
 ## Who executes: the installation policy
 
 `SETUP_EXECUTOR_POLICY` in the installation's `.env` — read by the backend
@@ -906,13 +1181,18 @@ the lock itself already binds every MCP mutation that goes through
   script an input file by reference, never a row); only the route rows and
   their Caddy render stay in the backend, as its own `configure_routes`
   step, because Caddy is A-17.12's.
+- The configuration slice (A-17.8) moved the guest configuration verbs the
+  same way: the dashboard resize and the MCP config, network, resources,
+  device, port-forward and egress writes — and the pre-mutation snapshot
+  the MCP verbs take — run in the runner as the seven configuration kinds
+  (the `service_l4_forwards` row stays a backend step, as the routes do).
 - What it did NOT remove: the container still has `privileged: true`,
-  `pid: host` and the Docker socket, and every other feature (the guest
-  configuration verbs and their pre-mutation snapshots, rename / clone /
-  import / export and the transports' temp instances, project
-  provisioning and the idle sweep, the component pre-install, Caddy,
-  storage, migration, the workspace terminal, every read) still pivots
-  through it. Dropping that reach is Phase F of
+  `pid: host` and the Docker socket, and every other feature (rename /
+  clone / import / export and the transports' temp instances, project
+  provisioning and the idle sweep with their own resource and snapshot
+  writes, the component pre-install, Caddy and the services router's L4
+  reconcile, storage, migration, the workspace terminal, every read)
+  still pivots through it. Dropping that reach is Phase F of
   `docs/features/security-completion/master-spec.md`; each slice reduces
   what depends on it, and does not claim more.
 - The dashboard backend still runs `privileged: true`, `pid: host`, with the
@@ -966,6 +1246,99 @@ is an operator's explicit, confirmed request naming the copy, and the
 copies a deploy or restore took are named on its record for that.
 
 ## Tests
+
+`setup-guest-config-review-2.test.js` (5 tests): the review of `e97a66a`
+(R-053…R-055), imports only symbols that exist at the reviewed head and was
+run against it in a worktree first (the four reproductions fail there for
+the reviewer's reasons; the non-regression case passes on both): a
+forward job whose device command fails, expired and requeued by the
+runner's actual `reconcile()` during the following read and completed by
+another owner meanwhile — the old worker `fenced`, nothing further issued,
+the new owner's row, job record and host state preserved; a retry of a
+completed forward failing at the reconcile behind an unrelated rejected
+policy keeping the row, the device and the rule with the policy reported
+unresolved, and a fresh partial forward (also one interrupted between its
+device and its rule) still removing its own creations; the retry, the
+retry of the retry and a resume of that retry after a partial change with
+the original snapshot lost, each refusing the remaining write with no
+replacement snapshot, then a deliberately new request applying with its
+own snapshot; a recorded snapshot without a timestamp refusing the
+remaining write as `unverifiable` and refusing to proceed before any
+write. The main suite gained the store-level test (the executor's
+`fencedForwardStore` refusing a delete, an insert and a read after a
+takeover of the guest's lease and after a re-claim, inside its own
+transaction, the row untouched, no transaction left open) and the chain /
+ownership helpers (`originChain`, `ownedFrom`).
+
+`setup-guest-config-review.test.js` (8 tests): the review of the first
+revision's seven reproductions — a rejected egress application not
+verified and applied by the retry; a saved rule under the expected id with
+the wrong port or protocol never verified; a refused forward removal
+preserving its row and host state; a retry of a partially failed addition
+ending with row AND host, or refused superseded with the orphans removed;
+an older retry preserving a newer forward's reservation; a missing and a
+replaced original snapshot after the first write preventing the remaining
+one — plus the row-settlement path interrupted after its row and device
+(resumed once, settled once) and a resumed job completing read-only. Every
+symbol it imports exists at the reviewed head, and the file was run
+against `ad1a638` in a worktree: the seven fail there for the reviewer's
+reasons (verified success with exit 1; `added: true` with the wrong port;
+the row removed on a refusal; the device left with no row; the newer
+range lost; memory changed) and pass on the correction. Its fixture,
+shared with the main suite (`helpers/scripted-config-host.js`), models the
+CLI's save-before-reconcile order with `status`, `reconcile --dry-run` and
+`reconcile` as the evidence.
+
+`setup-guest-config.test.js` (28 tests, the last two the closing
+corrections R-056 / R-057; the reserved-ports drop-in written
+under the sandbox's real `sh` against a temp file, twice — once alone, once
+through the executor from a forward job; the rest over a scripted host —
+`incus`, the firewall CLI by its path, a `sysctl` that reads the temp file
+— and the real store, executor and orchestrator on `node:sqlite`, the MCP
+tools over the real `services` / `service_l4_forwards` / `mcp_ledger`
+schema). Covered: the registry and the strict validation (allowlisted keys
+and shapes, the risk acknowledgement, the device policy's roots and ports,
+range widths, never a command or a secret-looking value), every argv
+renderer, the read-back verdicts and the reference-only prior state;
+`config_set` with and without its snapshot (taken and read back before the
+first write, recorded as generated with the coverage naming a custom
+volume; a failed snapshot changing nothing; a foreign snapshot under the
+planned name refused), a key whose write exits 0 but does not read back
+(failed at that key, the rest not run, the applied ones reported), a
+changed identity refused with nothing issued, devices added / refused when
+present otherwise / removed with `previous` recorded / a remove of an
+absent device refused before any command, the address pin with its
+override-then-set fallback, the forward (device + rule + drop-in, the
+tolerated present device and rule, a firewall refusal leaving the device
+on the record as applied, the remove recomputing the reservation and
+removing the drop-in, a failed `sysctl` as a warning), egress allow / deny
+with the CLI's reconcile summary, a deny of a service not allowed issuing
+nothing; exclusivity at submission, at claim and under `runner-required`
+(cancelled, nothing run in the backend) and a lifecycle verb refused while
+a configuration job is open; the shared firewall lease waited for and the
+job refused contended with nothing issued, a dead holder taken over, a
+lease lost between two commands stopping the job with the count issued
+(the device `unverified`, the rule and the drop-in not run); the claim, the
+guest's lease and the shared lease heart-beaten through one long command
+while the runner's actual `reconcile()` runs from another owner with the
+clock past the lease period three times (nothing interrupted, every lock
+live, the job completes) and a claim the reconciler requeued under the
+command fencing the worker before its next write; interruption before and
+after the first write (resumed by the reconcile, the snapshot reused by
+name and timestamp, the applied key read as done, only the missing key
+issued; a recreated guest refused; a gone snapshot a warning), the boot
+sweep's honest `interrupted` record with the lease released, an explicit
+retry reusing the origin's snapshot and refusing one replaced under its
+name, the mandatory `issuing` checkpoint; the ops layer's plan digest and
+HTTP mapping; the MCP tools' dry-run and confirm gates, ledger rows naming
+the job and the snapshot, a guest replaced between the tool's read and the
+job refused, a definite forward failure rolling the row back with the
+host's state named; the runner's host channel handed each rendered argv
+verbatim. `immediate-repairs.test.js` gained the A-17.8 ratchet (no `incus
+config` / firewall command and no snapshot in the callers; the op with no
+shell of its own; the one fixed host script; the keep-alive and the fence
+in the executor). The resize route and the two tools in `routes/mcp.js`
+import the native database module and are covered by that ratchet.
 
 `setup-post-launch.test.js` (32 tests; three run the generated guest scripts
 under the sandbox's real `sh` with a real detached child for the timeout
@@ -1221,6 +1594,41 @@ dead backend and runner jobs, the serve loop, the command, the exec wrapper,
 the unit and install wiring). Both against `node:sqlite`.
 
 ## Host acceptance (not yet run)
+
+For the configuration group (A-17.8, platform ledger HA-11): on a
+`runner-required` host, `set_lxc_config` (`security.nesting=true`,
+`confirm: true`) on a running guest — the job owned by `runner@…`, the
+snapshot `pp-mcp-pre-security_nesting-<stamp>` in `incus snapshot list`
+with the `created_at` the job recorded, `incus config get` reading `true`,
+`restart_required: true` on the result; the same call again reporting
+`nothing was issued` with no new snapshot; `set_lxc_config` with
+`security.privileged=true` refused without `acknowledge_risk` at the tool
+and — a hand-made row without `acknowledgeRisk` — at the runner; the
+dashboard's Resize dialog changing CPU and memory with `jobId` on the
+answer and no snapshot; `set_lxc_network` reserve-current and the
+reservation in `incus config device get <name> eth0 ipv4.address`;
+`add_lxc_device` with a disk under `/srv/shares` mounted in the guest and
+refused for `/etc`; `remove_lxc_device` with `previous` on the result;
+`set_port_forward` add of a UDP range: the `ppl4-<id>` device, the
+`service-l4-<id>` rule in `proxypilot firewall list`, the drop-in
+`/etc/sysctl.d/99-proxypilot-l4-reserved.conf` carrying the range and
+`sysctl net.ipv4.ip_local_reserved_ports` agreeing, the remove clearing all
+three; `set_lxc_egress` allow / deny reflected in `proxypilot firewall
+egress list` and the nftables ruleset — and, with `proxypilot firewall`
+in a rejecting state (a lockout the dry-run reports), an allow that ends
+`failed at reconcile` with the entry saved in `firewall.json`, the
+ruleset unchanged (`nft list table inet proxypilot`) and a retry after the
+cause is fixed applying it with one reconcile; `set_port_forward` add
+with the guest busy (a deploy running) refused with NO row in
+`service_l4_forwards` and nothing on the host; two forwards submitted at once (two
+MCP calls) serialized on `@host/firewall` (the second's job waiting, both
+applied); the runner killed during a `set_lxc_resources` after its first
+key — the restarted runner's record reading `resumed after an interrupted
+attempt` with the snapshot `(reused)` and only the remaining key issued
+(`journalctl -u proxypilot-setup-runner`); a Stop refused (409) while a
+configuration job runs; with the runner stopped, `set_lxc_config` refused
+(`runner_unavailable`) and `incus config get` unchanged; no line of any
+job row, event or the runner's journal carrying a guest's `user.*` value.
 
 For the post-launch group (A-17.7, platform ledger HA-10): on a
 `runner-required` host, create a container from the dashboard with an init

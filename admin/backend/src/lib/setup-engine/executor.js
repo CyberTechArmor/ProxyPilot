@@ -30,7 +30,7 @@ import {
   runnerHeartbeat, requeueJob, recordVerificationRung, annotateJobProgress,
 } from './store.js';
 import {
-  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, EXCLUSIVE_JOB_KINDS, LIFECYCLE_JOB_KINDS, leaseHold, parseJson, sanitizeReason, parseOwner,
+  validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, EXCLUSIVE_JOB_KINDS, LIFECYCLE_JOB_KINDS, CONFIG_JOB_KINDS, leaseHold, parseJson, sanitizeReason, parseOwner,
   FencedError, CancelledError, verificationState, CREDENTIAL_USE_OUTCOMES,
 } from './logic.js';
 import { runDeployOperation, PreviousWriterAliveError, ContainmentUnavailableError } from './deploy-op.js';
@@ -38,7 +38,9 @@ import { runRestoreDbOperation } from './restore-db-op.js';
 import { runRestoreSnapshotOperation } from './restore-snapshot-op.js';
 import { runRetrySecretsOperation } from './retry-secrets-op.js';
 import { runLifecycleOperation } from './lifecycle-op.js';
-import { runGuestSetupOperation } from './setup-op.js';
+import { runGuestSetupOperation, SharedLeaseLostError } from './setup-op.js';
+import { runConfigOperation } from './config-op.js';
+import { reservedRangesFromRows } from './config-logic.js';
 import { SETUP_JOB_KINDS, setupOutcome } from './setup-logic.js';
 import { readInitScriptInput, consumeInitScriptInput } from './setup-inputs.js';
 import {
@@ -161,9 +163,13 @@ export function recordUncertainSetup(db, { job, lock, owner, reason, nowMs }) {
 
 // ── execute ─────────────────────────────────────────────────────────────
 
-export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null }) {
+const KEEPALIVE_MS = 10_000;
+const JOB_CLAIM = Symbol('job claim');
+
+export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null }) {
   const epoch = Number(job.epoch);
   let keepLease = false;
+  let keepAlive = null;
   const fin = (status, outcome, reason, verification = null) => {
     finishJob(db, { id: job.id, owner, epoch, status, outcome, reason, verification, nowMs: nowMs() });
     return { status, outcome, verification };
@@ -269,20 +275,47 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       event('step', left == null ? 'stale-writer count unavailable; proceeding' : `${left} stale process group(s)/script(s) of other jobs signalled; none remain`, null, 'reap_previous_writer');
     }
 
-    if (['deploy', 'restore_db', 'restore_snapshot', 'retry_secrets'].includes(job.kind) || LIFECYCLE_JOB_KINDS.includes(job.kind) || SETUP_JOB_KINDS.includes(job.kind)) {
+    if (['deploy', 'restore_db', 'restore_snapshot', 'retry_secrets'].includes(job.kind) || LIFECYCLE_JOB_KINDS.includes(job.kind) || SETUP_JOB_KINDS.includes(job.kind) || CONFIG_JOB_KINDS.includes(job.kind)) {
+      // A configuration job (A-17.8) holds the guest's lease and, for the
+      // firewall kinds, the shared `@host/firewall` lease through every
+      // command; a keep-alive renews the job CLAIM, the guest's lease and
+      // every held shared lease every KEEPALIVE_MS while a single command
+      // runs long, and the fence before every command checks all of them:
+      // a renewal that changes no row (the claim ended or re-claimed, a
+      // lease taken over) stops the job before its next write.
+      const isConfig = CONFIG_JOB_KINDS.includes(job.kind);
+      const heldEpochs = new Map();
+      let lost = null;
+      const renewAll = () => {
+        if (!(heartbeat(db, { id: job.id, owner, epoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) return JOB_CLAIM;
+        if (!(renewLock(db, { app: job.app, owner, epoch: lockEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) return job.app;
+        for (const [n, ep] of heldEpochs) if (!(renewLock(db, { app: n, owner, epoch: ep, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) return n;
+        return null;
+      };
+      const configFence = (opts = {}) => {
+        fence(opts);
+        const gone = lost || renewAll();
+        if (gone) { lost = gone; if (gone === JOB_CLAIM) throw new FencedError(job.id); throw new SharedLeaseLostError(gone === job.app ? `guest ${job.app}` : gone, 'its renewal changed no row'); }
+      };
+      const jobFence = isConfig ? configFence : fence;
+      if (isConfig) {
+        keepAlive = setInterval(() => { try { const gone = renewAll(); if (gone) lost = gone; } catch { /* the next fence decides */ } }, Math.max(20, Number(keepAliveMs) || KEEPALIVE_MS));
+        if (typeof keepAlive.unref === 'function') keepAlive.unref();
+      }
       const handle = {
         id: job.id,
-        fence,
+        fence: jobFence,
         checkpoint: (phase, data, message) => checkpoint(db, { id: job.id, owner, epoch, phase, checkpoint: data, message, nowMs: nowMs() }),
         generated: (resource) => recordGenerated(db, { id: job.id, owner, epoch, resource, nowMs: nowMs() }),
         progress: (data) => recordProgress(db, { id: job.id, owner, epoch, progress: data, nowMs: nowMs() }),
         event: (kind, message, data = null) => event(kind, message, data),
         onStep: (key, label) => event('step', label, null, key),
       };
-      const fencedExec = { guest: (c, script, o) => { fence(); return exec.guest(c, script, o); }, ...(typeof exec.host === 'function' ? { host: (argv, o) => { fence(); return exec.host(argv, o); } } : {}) };
+      const fencedExec = { guest: (c, script, o) => { jobFence(); return exec.guest(c, script, o); }, ...(typeof exec.host === 'function' ? { host: (argv, o) => { jobFence(); return exec.host(argv, o); } } : {}) };
       // What a previous attempt recorded (a retry's origin, and this job's own
       // progress when it was resumed): reused only after revalidation.
-      const reuse = reuseFrom(db, job, p);
+      const chain = isConfig ? originChain(db, job, p) : null;
+      const reuse = reuseFrom(db, job, p, chain);
       let result;
       if (job.kind === 'deploy') result = await runDeployOperation({ params: { ...p, reapOrphans: false, runDir }, exec: fencedExec, job: handle, log });
       else if (job.kind === 'restore_db') {
@@ -290,6 +323,33 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         result = await runRestoreDbOperation({ params: { ...p, runDir }, exec: fencedExec, job: handle, originJob, reuse, log });
       } else if (job.kind === 'restore_snapshot') result = await runRestoreSnapshotOperation({ params: p, exec: fencedExec, job: handle, reuse, log });
       else if (LIFECYCLE_JOB_KINDS.includes(job.kind)) result = await runLifecycleOperation({ kind: job.kind, params: p, exec: fencedExec, job: handle, prior: parseJson(job.checkpoint_json), log });
+      else if (isConfig) {
+        const configDeps = {
+          hostLease: {
+            acquire: (name, operation) => { const r = acquireLock(db, { app: name, owner, operation, jobId: job.id, leaseMs: LEASE_MS, nowMs: nowMs() }); if (r.ok) heldEpochs.set(name, Number(r.lock.epoch)); return r; },
+            takeover: (name, operation, reason) => { const r = takeoverLock(db, { app: name, by: owner, operation, jobId: job.id, reason, leaseMs: LEASE_MS, nowMs: nowMs() }); if (r.ok) heldEpochs.set(name, Number(r.lock.epoch)); return r; },
+            renew: (name) => { if (lost) return false; const ep = heldEpochs.get(name); if (ep == null) return false; const ok = renewLock(db, { app: name, owner, epoch: ep, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0; if (!ok) lost = name; return ok; },
+            release: (name) => { const ep = heldEpochs.get(name); heldEpochs.delete(name); if (ep != null) releaseLock(db, { app: name, owner, epoch: ep }); },
+          },
+          // The forward's authoritative row lives in the same database this
+          // executor opened: the job writes it under the leases, and reads
+          // the enabled rows for the reservation aggregate at execution time.
+          // Every write is fenced AT the database boundary (the claim, the
+          // guest's lease and every held shared lease renewed inside the
+          // same transaction, R-053).
+          forwardStore: fencedForwardStore(db, { jobId: job.id, owner, epoch, app: job.app, lockEpoch, heldEpochs, lost: () => lost, noteLost: (n) => { lost = n; }, nowMs }),
+          // A retry of an origin chain in which a write had begun: the
+          // original snapshot must be verifiable before anything further is
+          // written — at every depth of the chain (R-055).
+          originWriteBegun: chain.some((o) => { const c = parseJson(o.checkpoint_json) || {}; return c.issued === true || c.writeBegun === true; }),
+          // What this operation CREATED, as recorded by its own attempts and
+          // by the origins it retries that did not complete (R-054): the
+          // only changes its rollback may remove.
+          owned: ownedFrom(db, job, chain),
+          sleep: sleep || undefined, nowMs, ...(reservedPortsPath ? { reservedPortsPath } : {}),
+        };
+        result = await runConfigOperation({ kind: job.kind, params: p, exec: fencedExec, job: handle, prior: parseJson(job.checkpoint_json), reuse, deps: configDeps, log });
+      }
       else if (SETUP_JOB_KINDS.includes(job.kind)) {
         // The script input by reference (the directory next to the database
         // this executor opened); the host-wide leases through the store.
@@ -366,7 +426,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         }
         const verificationJobId = queued.verification_job_id;
         recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub, verification_job_id: verificationJobId, ...(queued.setup_job_id ? { setup_job_id: queued.setup_job_id } : {}), ...(queued.routes_job_id ? { routes_job_id: queued.routes_job_id } : {}), ...(pub.phases ? { phases: pub.phases } : {}), ...(result.completion ? { completion: result.completion } : {}), execution: result.skipped ? 'skipped' : result.ok ? okOutcome : result.outcome || 'failed' }, nowMs: nowMs() });
-        const summary = job.kind === 'deploy' ? `${container}: serving` : LIFECYCLE_JOB_KINDS.includes(job.kind) ? `${container}: ${job.kind.replace('_', ' ')} → ${rest.instanceState}${rest.alreadyInState ? ' (already in that state; nothing issued)' : ''}${rest.resumedAfterIssue ? ' (resumed after an interrupted attempt)' : ''}${rest.warnings?.length ? `; ${rest.warnings.join('; ')}` : ''}${queued.setup_job_id ? `; guest setup queued → job ${queued.setup_job_id}` : ''}` : SETUP_JOB_KINDS.includes(job.kind) ? `${container}: ${Object.entries(result.phases || {}).map(([k, v]) => `${k} ${v.state}`).join(', ')}${queued.routes_job_id ? ` (routes → job ${queued.routes_job_id})` : ''}${rest.warnings?.length ? `; ${rest.warnings.join('; ')}` : ''}${!result.ok && verification?.next ? `; ${verification.next}` : ''}` : job.kind === 'restore_db' ? `${container}: database restored from ${rest.restored?.dump} (${rest.errors ?? '?'} error line(s); ${rest.compatibility?.mode})` : job.kind === 'restore_snapshot' ? `${container}: restored to ${rest.restoredTo}${rest.partial ? ' (root disk only; custom volumes NOT restored)' : ''}; pre-restore ${rest.preRestore?.name}` : `${container}: ${(rest.minted || []).length} secret(s) minted, ${(rest.deferred || []).length} deferred, ${(rest.reused || []).length} reused`;
+        const summary = job.kind === 'deploy' ? `${container}: serving` : CONFIG_JOB_KINDS.includes(job.kind) ? `${container}: ${job.kind.replace('_', ' ')} → ${Object.entries(rest.applied || {}).map(([k, a]) => `${k} ${a.state}`).join(', ')}${rest.alreadyInState ? ' (already in that state; nothing issued)' : ''}${rest.resumedAfterIssue ? ' (resumed after an interrupted attempt)' : ''}${rest.snapshot ? `; pre-change snapshot ${rest.snapshot.name}${rest.snapshot.reused ? ' (reused)' : ''}` : ''}${rest.warnings?.length ? `; ${rest.warnings.join('; ')}` : ''}` : LIFECYCLE_JOB_KINDS.includes(job.kind) ? `${container}: ${job.kind.replace('_', ' ')} → ${rest.instanceState}${rest.alreadyInState ? ' (already in that state; nothing issued)' : ''}${rest.resumedAfterIssue ? ' (resumed after an interrupted attempt)' : ''}${rest.warnings?.length ? `; ${rest.warnings.join('; ')}` : ''}${queued.setup_job_id ? `; guest setup queued → job ${queued.setup_job_id}` : ''}` : SETUP_JOB_KINDS.includes(job.kind) ? `${container}: ${Object.entries(result.phases || {}).map(([k, v]) => `${k} ${v.state}`).join(', ')}${queued.routes_job_id ? ` (routes → job ${queued.routes_job_id})` : ''}${rest.warnings?.length ? `; ${rest.warnings.join('; ')}` : ''}${!result.ok && verification?.next ? `; ${verification.next}` : ''}` : job.kind === 'restore_db' ? `${container}: database restored from ${rest.restored?.dump} (${rest.errors ?? '?'} error line(s); ${rest.compatibility?.mode})` : job.kind === 'restore_snapshot' ? `${container}: restored to ${rest.restoredTo}${rest.partial ? ' (root disk only; custom volumes NOT restored)' : ''}; pre-restore ${rest.preRestore?.name}` : `${container}: ${(rest.minted || []).length} secret(s) minted, ${(rest.deferred || []).length} deferred, ${(rest.reused || []).length} reused`;
         const status = result.skipped ? 'succeeded' : result.uncertain ? 'recovery_required' : !result.ok ? 'failed' : (verification?.state === 'recovery_required' ? 'recovery_required' : 'succeeded');
         const r = fin(
           status,
@@ -547,20 +607,107 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
     const verification = verificationFromObservations(obs);
     return fin('failed', 'error', sanitizeReason(e?.message || String(e)), verification);
   } finally {
+    if (keepAlive) clearInterval(keepAlive);
     if (!keepLease) releaseLock(db, { app: job.app, owner, epoch: lockEpoch });
   }
 }
 
 // reuseFrom(db, job, params) → the artifacts a retry's origin and this job's
 // own earlier attempt recorded, with their identity, for revalidation.
-function reuseFrom(db, job, params) {
+// With `chain` (the configuration kinds) every origin of the retry chain
+// contributes, so a retry of a retry still finds the identity the first
+// attempt recorded.
+function reuseFrom(db, job, params, chain = null) {
   const out = [];
   const add = (row) => { for (const g of (parseJson(row?.progress_json) || {}).generated || []) out.push({ kind: g.kind, name: g.name, where: g.where || null, sha256: g.sha256 || null, bytes: g.bytes ?? null, created_at: g.created_at || null }); };
-  const originId = job.retry_of || params?.retryOf || null;
-  if (originId) { const origin = getJob(db, String(originId)); if (origin && origin.app === job.app && origin.kind === job.kind) add(origin); }
+  if (chain) for (const origin of chain) add(origin);
+  else {
+    const originId = job.retry_of || params?.retryOf || null;
+    if (originId) { const origin = getJob(db, String(originId)); if (origin && origin.app === job.app && origin.kind === job.kind) add(origin); }
+  }
   add(getJob(db, job.id));
   for (const r of Array.isArray(params?.reuse) ? params.reuse : []) if (r && r.kind && r.name && !out.some((o) => o.kind === r.kind && o.name === r.name)) out.push({ kind: r.kind, name: r.name, where: r.where || null, sha256: r.sha256 || null, bytes: r.bytes ?? null, created_at: r.created_at || null });
   return out;
+}
+
+// originChain(db, job, params) → the origins this job retries, nearest
+// first, following `retry_of` while the app and kind match (bounded; a
+// cycle stops it). The chain is the INTENT a retry continues.
+export function originChain(db, job, params, { max = 32 } = {}) {
+  const out = []; const seen = new Set([String(job.id)]);
+  let oid = job.retry_of || params?.retryOf || null;
+  while (oid && out.length < max && !seen.has(String(oid))) {
+    seen.add(String(oid));
+    const o = getJob(db, String(oid));
+    if (!o || o.app !== job.app || o.kind !== job.kind) break;
+    out.push(o);
+    oid = o.retry_of || (parseJson(o.plan_json) || {}).retryOf || null;
+  }
+  return out;
+}
+
+// ownedFrom(db, job, chain) → the changes this operation created, from the
+// fenced generated records of its own attempts and of the origins it
+// retries back to — and excluding — the first succeeded ancestor: a
+// succeeded origin's changes are the operator's working state, and what an
+// older failed attempt created under the same names was superseded by that
+// success (R-056), so ownership never crosses it.
+const OWNED_KINDS = Object.freeze(['forward_row', 'proxy_device', 'firewall_rule']);
+export function ownedFrom(db, job, chain = []) {
+  const out = [];
+  const add = (row) => { for (const g of (parseJson(row?.progress_json) || {}).generated || []) if (OWNED_KINDS.includes(g.kind) && g.name && !out.some((o) => o.kind === g.kind && o.name === g.name)) out.push({ kind: g.kind, name: g.name, where: g.where || null }); };
+  add(getJob(db, job.id));
+  for (const o of chain || []) { if (o.status === 'succeeded') break; add(o); }
+  return out;
+}
+
+// fencedForwardStore(db, guard) → the store a configuration job writes the
+// forward's row through. Ownership is enforced AT the mutation: each write
+// runs under BEGIN IMMEDIATE and, inside that transaction, renews the job
+// claim, the guest's lease and every held shared lease at the epochs this
+// worker holds; a renewal that changes no row rolls the transaction back
+// and raises (FencedError for the claim, SharedLeaseLostError for a lease)
+// — a takeover, which bumps the epoch under its own BEGIN IMMEDIATE, can
+// never interleave with the write. The keep-alive's recorded loss refuses
+// at once; reads fence the same way before they read.
+export function fencedForwardStore(db, { jobId, owner, epoch, app, lockEpoch, heldEpochs = new Map(), lost = () => null, noteLost = () => {}, nowMs = () => Date.now(), leaseMs = LEASE_MS }) {
+  const renew = () => {
+    const gone = lost();
+    if (gone) return gone;
+    if (!(heartbeat(db, { id: jobId, owner, epoch, leaseMs, nowMs: nowMs() }) > 0)) return JOB_CLAIM;
+    if (lockEpoch != null && !(renewLock(db, { app, owner, epoch: lockEpoch, leaseMs, nowMs: nowMs() }) > 0)) return app;
+    for (const [n, ep] of heldEpochs) if (!(renewLock(db, { app: n, owner, epoch: ep, leaseMs, nowMs: nowMs() }) > 0)) return n;
+    return null;
+  };
+  const raise = (gone) => { noteLost(gone); if (gone === JOB_CLAIM) throw new FencedError(jobId); throw new SharedLeaseLostError(gone === app ? `guest ${app}` : gone, 'its renewal changed no row at the database boundary'); };
+  const guarded = () => { const gone = renew(); if (gone) raise(gone); };
+  const write = (fn) => {
+    db.exec('BEGIN IMMEDIATE');
+    let out;
+    try { const gone = renew(); if (gone) raise(gone); out = fn(); } catch (e) { try { db.exec('ROLLBACK'); } catch { /* */ } throw e; }
+    db.exec('COMMIT');
+    return out;
+  };
+  return {
+    get: (id) => { guarded(); return db.prepare(`SELECT * FROM service_l4_forwards WHERE id = ?`).get(String(id)) || null; },
+    insert: (row) => write(() => {
+      // The port is the conflict key (UNIQUE ignores a NULL range end, so
+      // it is checked here, NULL-safe): a row for another forward on this
+      // port means this intent was superseded.
+      const other = db.prepare(`SELECT id FROM service_l4_forwards WHERE id <> ? AND proto = ? AND listen_port = ? AND (listen_port_end IS ? OR (listen_port_end IS NULL AND ? IS NULL))`).get(String(row.id), row.proto, row.listen_port, row.listen_port_end ?? null, row.listen_port_end ?? null);
+      if (other) return { ok: false, conflict: `another forward (${other.id}) binds ${row.proto}/${row.listen_port}${row.listen_port_end ? `-${row.listen_port_end}` : ''}` };
+      try {
+        db.prepare(`INSERT INTO service_l4_forwards (id, service_id, proto, listen_port, listen_port_end, connect_port, connect_port_end, description, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`)
+          .run(String(row.id), String(row.service_id), row.proto, row.listen_port, row.listen_port_end ?? null, row.connect_port, row.connect_port_end ?? null, row.description ?? null);
+        return { ok: true };
+      } catch (e) {
+        if (/UNIQUE constraint/i.test(e?.message || '')) { const taken = db.prepare(`SELECT id FROM service_l4_forwards WHERE proto = ? AND listen_port = ? AND (listen_port_end IS ? OR listen_port_end = ?)`).get(row.proto, row.listen_port, row.listen_port_end ?? null, row.listen_port_end ?? null); return { ok: false, conflict: `another forward${taken?.id ? ` (${taken.id})` : ''} binds ${row.proto}/${row.listen_port}${row.listen_port_end ? `-${row.listen_port_end}` : ''}` }; }
+        return { ok: false, error: e?.message || String(e) };
+      }
+    }),
+    delete: (id) => write(() => db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(String(id)).changes),
+    reservedRanges: () => { guarded(); return reservedRangesFromRows(db.prepare(`SELECT proto, listen_port, listen_port_end, enabled FROM service_l4_forwards WHERE enabled = 1`).all()); },
+  };
 }
 
 function defaultSteps(kind) {

@@ -165,6 +165,8 @@ export function inProcessExecutorDeps(store = containerLockStore()) {
     owner: store?.owner,
     // The init-script input store next to the database (setup-inputs.js).
     inputsDir: store?.inputsDir || null,
+    // The reserved-ports drop-in a forward job refreshes (tests point it at a temp file).
+    reservedPortsPath: store?.reservedPortsPath || null,
     exec: store?.guestExec || {
       guest: (name, script, { timeoutMs } = {}) => containerSh(name, script, { timeoutMs }),
       // Host commands as argv arrays (a snapshot restore); through the same

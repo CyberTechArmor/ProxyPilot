@@ -80,6 +80,7 @@ import { agentCall } from '../lib/agent.js';
 import { storageService } from '../lib/storage/index.js';
 import { migrationService } from '../lib/migration/index.js';
 import { createExtendedHandlers } from './mcp-tools/index.js';
+import { instanceIdentity } from '../lib/setup-engine/lifecycle-logic.js';
 import { createConfirmationStore, parseTokenScope, scopeRefusal, filterCatalogForScope } from '../lib/mcp-ext/logic.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
@@ -1332,6 +1333,12 @@ async function toolGetLxcStartup(args) {
 // — because they all snapshot before they change anything, and
 // set_lxc_network refuses to run without its snapshot at all.
 //
+// Since A-17.8 the config verbs (set_lxc_config, set_lxc_network and the
+// lxc-admin resources / device tools) no longer call this: their snapshot is
+// the setup-engine job's, taken under the guest's lease before its first
+// write and read back (lib/setup-engine/config-op.js). It remains for the
+// project lifecycle's deps and the project-config tools (A-17.10 / A-17.11).
+//
 // One probe, cached for the life of the process: the client cannot change
 // under a running daemon, so paying a guaranteed-failed call per snapshot to
 // rediscover it would be pure waste. The probe never blocks a snapshot — an
@@ -1457,24 +1464,39 @@ async function toolSetLxcConfig(args, auth) {
     });
   }
   const incusName = `${LXC_PREFIX}${name}`;
+  const probe = await fetchLxcInstance(incusName);
+  if (probe.error) return toolResult(`Could not inspect ${name}: ${probe.error}`, { isError: true });
+  if (probe.notFound) return toolResult(`Container ${name} not found`, { isError: true });
 
-  // Snapshot BEFORE the write — the undo path must exist before the change.
-  const snap = await takeLxcSnapshot(incusName, defaultSnapshotName(new Date(), `pp-mcp-pre-${change.key.replace(/[^A-Za-z0-9]/g, '_')}`));
-  if (snap.error) {
-    return toolResult(`Refusing to change config without a snapshot: ${snap.error}`, { isError: true });
-  }
-  const r = await runHostCapture('incus', ['config', 'set', incusName, change.key, change.value], { timeoutMs: 60000 });
-  if (r.status !== 0) {
-    return toolResult(`incus config set failed: ${(r.stderr || '').trim().slice(-300) || 'unknown error'} (pre-change snapshot ${snap.name} was taken)`, { isError: true });
+  // A setup-engine job (`config_set`, docs/features/setup-engine.md § "The
+  // guest configuration verbs"): bound to the guest's identity as read here,
+  // the runner takes the pre-change snapshot named below and reads it back
+  // BEFORE the write (a failed snapshot changes nothing), sets the key under
+  // the guest's lease and reads the key back before it reports done. The
+  // snapshot's coverage — root disk and config, never ProxyPilot's rows or
+  // the host firewall — is stated on the record and the result.
+  const snapName = defaultSnapshotName(new Date(), `pp-mcp-pre-${change.key.replace(/[^A-Za-z0-9]/g, '_')}`);
+  const { runGuestConfig } = await import('../mock2/ops.js');
+  const out = await runGuestConfig({
+    kind: 'config_set', containerName: incusName, changes: [{ key: change.key, value: change.value }], acknowledgeRisk: args.acknowledge_risk === true,
+    snapshot: { name: snapName }, expect: instanceIdentity(probe.instance), requestedBy: auth.created_by ?? null, via: 'mcp',
+  });
+  if (!out.ok) {
+    return toolResult(`Could not set ${change.key} on ${name}: ${out.error}${out.jobId ? ` (job ${out.jobId})` : ''}${out.snapshot?.name ? `; pre-change snapshot ${out.snapshot.name} was taken` : out.step === 'protect' ? '' : '; no snapshot was taken'}`, { isError: true });
   }
   logAudit(auth.created_by, 'LXC_CONFIG_SET', 'lxc', name, {
-    via: 'mcp', key: change.key, value: change.value, snapshot: snap.name,
+    via: 'mcp', key: change.key, value: change.value, snapshot: out.snapshot?.name || null, job_id: out.jobId,
     ...(change.warning ? { acknowledged_risk: true } : {}),
   }, null);
   return toolResult({
     applied: true, container: name, key: change.key, value: change.value,
-    snapshot: snap.name,
+    previous_value: out.previous?.config?.[change.key] ?? null,
+    snapshot: out.snapshot?.name || null,
+    snapshot_covers: out.snapshot?.covers || null,
+    job_id: out.jobId,
+    verified: true,
     restart_required: change.restartRequired,
+    ...(out.alreadyInState ? { note: `${change.key} already read ${change.value}; nothing was issued` } : {}),
     ...(change.restartRequired ? { next: `Apply it with control_lxc_container action=restart (confirm: true).` } : {}),
     ...(change.warning ? { warning: change.warning } : {}),
   });
@@ -1628,24 +1650,31 @@ async function toolSetLxcNetwork(args, auth) {
     });
   }
 
-  const snap = await takeLxcSnapshot(incusName, defaultSnapshotName(new Date(), 'pp-mcp-pre-network'));
-  if (snap.error) return toolResult(`Refusing to change addressing without a snapshot: ${snap.error}`, { isError: true });
-
-  // Instance-level eth0 usually comes from the profile → override creates it;
-  // if a previous pin already made it instance-level, set updates it.
-  let w = await runHostCapture('incus', ['config', 'device', 'override', incusName, 'eth0', `ipv4.address=${ip}`], { timeoutMs: 30000 });
-  if (w.status !== 0 && /already exists/i.test(w.stderr || '')) {
-    w = await runHostCapture('incus', ['config', 'device', 'set', incusName, 'eth0', 'ipv4.address', ip], { timeoutMs: 30000 });
+  // A setup-engine job (`network_pin`): bound to the guest's identity as
+  // read above, the runner takes the pre-change snapshot named here and reads
+  // it back BEFORE the write, then pins the instance-level eth0 reservation
+  // (override, or set when a previous pin already made it instance-level)
+  // under the guest's lease and reads the reservation back before it
+  // reports done. The previous reservation and address are on the record.
+  const { runGuestConfig } = await import('../mock2/ops.js');
+  const out = await runGuestConfig({
+    kind: 'network_pin', containerName: incusName, ip, previous: current || null,
+    snapshot: { name: defaultSnapshotName(new Date(), 'pp-mcp-pre-network') }, expect: instanceIdentity(probe.instance), requestedBy: auth.created_by ?? null, via: 'mcp',
+  });
+  if (!out.ok) {
+    return toolResult(`Could not pin the address: ${out.error}${out.jobId ? ` (job ${out.jobId})` : ''}${out.snapshot?.name ? `; pre-change snapshot ${out.snapshot.name} was taken` : ''}. Note: pinning requires the guest's NIC to come from a managed Incus bridge.`, { isError: true });
   }
-  if (w.status !== 0) {
-    return toolResult(`Could not pin the address: ${(w.stderr || '').trim().slice(-300)} (pre-change snapshot ${snap.name} was taken). Note: pinning requires the guest's NIC to come from a managed Incus bridge.`, { isError: true });
-  }
-  logAudit(auth.created_by, 'LXC_NETWORK_PINNED', 'lxc', name, { via: 'mcp', mode, ip, previous: current, snapshot: snap.name }, null);
+  logAudit(auth.created_by, 'LXC_NETWORK_PINNED', 'lxc', name, { via: 'mcp', mode, ip, previous: current, snapshot: out.snapshot?.name || null, job_id: out.jobId }, null);
   return toolResult({
     applied: true, container: name, ip, mode,
     previous_address: current,
-    snapshot: snap.name,
+    previous_reservation: out.previous?.pin ?? null,
+    snapshot: out.snapshot?.name || null,
+    snapshot_covers: out.snapshot?.covers || null,
+    job_id: out.jobId,
+    verified: true,
     restart_recommended: ip !== current,
+    ...(out.alreadyInState ? { note_reservation: `eth0 was already reserved at ${ip}; nothing was issued` } : {}),
     ...(abandoned.length ? { warning: `Routed domains still targeting ${current}: ${abandoned.join(', ')} — update them with set_route.` } : {}),
     note: ip === current
       ? 'The current address is now a static reservation — future lease renewals cannot move it.'

@@ -1,3 +1,4 @@
+import { reauthenticateSso } from '@/lib/sso';
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { onSudoOpen, resolveSudo, rejectSudo } from '@/lib/sudo';
@@ -32,6 +33,7 @@ import { ShieldCheck, Loader2, Fingerprint } from 'lucide-react';
 // it can show a normal toast.
 export default function SudoProvider({ children }) {
   const [open, setOpen] = useState(false);
+  const [canSso, setCanSso] = useState(false);
   const [hasPasskey, setHasPasskey] = useState(false);
   const [usePasskey, setUsePasskey] = useState(false);
   const [password, setPassword] = useState('');
@@ -42,7 +44,9 @@ export default function SudoProvider({ children }) {
   const [lockedUntil, setLockedUntil] = useState(null);
 
   useEffect(() => {
-    return onSudoOpen(async () => {
+    return onSudoOpen(async (event) => {
+      setCanSso(false);
+      if (!event.detail?.localOnly) { try { const state = await api.ssoSession(); setCanSso(state.canReauthenticate); } catch {} }
       setPassword('');
       setTotpCode('');
       setError('');
@@ -111,7 +115,7 @@ export default function SudoProvider({ children }) {
     <>
       {children}
       <Dialog open={open} onOpenChange={(v) => { if (!v) handleCancel(); }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <ShieldCheck className="h-5 w-5 text-cyan-500" />
@@ -123,11 +127,12 @@ export default function SudoProvider({ children }) {
             </DialogDescription>
           </DialogHeader>
 
+          {canSso && <Button className="min-h-11" disabled={submitting} onClick={async () => { setSubmitting(true); setError(''); try { await reauthenticateSso(); setOpen(false); resolveSudo(); } catch (e) { setError(e.message); } finally { setSubmitting(false); } }}>Reauthenticate with Keycloak</Button>}
           {usePasskey ? (
             <div className="space-y-3">
               <Button
                 type="button"
-                className="w-full"
+                className="w-full min-h-11 bg-foreground text-background hover:bg-foreground/90"
                 onClick={handlePasskey}
                 disabled={verifyingPasskey}
               >
@@ -151,7 +156,7 @@ export default function SudoProvider({ children }) {
                 </div>
               )}
               <DialogFooter className="gap-2">
-                <Button type="button" variant="outline" onClick={handleCancel} disabled={verifyingPasskey}>
+                <Button className="min-h-11" type="button" variant="outline" onClick={handleCancel} disabled={verifyingPasskey}>
                   Cancel
                 </Button>
               </DialogFooter>
@@ -210,10 +215,10 @@ export default function SudoProvider({ children }) {
               )}
 
               <DialogFooter className="gap-2">
-                <Button type="button" variant="outline" onClick={handleCancel} disabled={submitting}>
+                <Button className="min-h-11" type="button" variant="outline" onClick={handleCancel} disabled={submitting}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={submitting || !!lockedUntil || password.length === 0 || totpCode.length !== 6}>
+                <Button className="min-h-11 bg-foreground text-background hover:bg-foreground/90" type="submit" disabled={submitting || !!lockedUntil || password.length === 0 || totpCode.length !== 6}>
                   {submitting ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Verifying…</> : 'Confirm'}
                 </Button>
               </DialogFooter>

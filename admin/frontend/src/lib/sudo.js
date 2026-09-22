@@ -15,13 +15,13 @@
 const target = new EventTarget();
 let pending = null;
 
-export function requestSudo() {
+export function requestSudo(options = {}) {
   if (pending) return pending.promise;
   pending = {};
   pending.promise = new Promise((resolve, reject) => {
     pending.resolve = resolve;
     pending.reject = reject;
-    target.dispatchEvent(new Event('open'));
+    target.dispatchEvent(new CustomEvent('open', { detail: options }));
   }).finally(() => { pending = null; });
   return pending.promise;
 }

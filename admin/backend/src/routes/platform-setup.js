@@ -1,3 +1,4 @@
+import { ssoSetupRouter } from './sso.js';
 import { keycloakApplySchema } from '../lib/setup-engine/keycloak-logic.js';
 import { applyKeycloak, keycloakState, reviewedKeycloak } from '../lib/setup-engine/keycloak-store.js';
 import { runnerAvailable } from '../lib/setup-engine/backend.js';
@@ -9,6 +10,7 @@ import { SERVICES, planInputSchema, savePlanSchema, readPlatformPlan, platformSt
 
 export const platformSetupRouter = Router();
 platformSetupRouter.use(requireAdmin);
+platformSetupRouter.use('/sso', ssoSetupRouter);
 platformSetupRouter.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 const invalid = (res) => res.status(400).json({ error: 'Invalid plan: choose install, connect or skip for each service, with non-secret http(s) origins for selected services. Unknown fields, credentials, URL paths, query strings and fragments are not accepted.' });
 

@@ -48,6 +48,18 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 **Verification:**
 
+- [x] G3 SSO guide, SSO/local login, account linking and local recovery
+      (2026-09-22): no horizontal scroll at 360/375/390/768/1280/1920 px with
+      the global guard disabled and responsive transitions settled. Primary
+      actions ≥44 px; local sudo dialog completed at 375 px. Desktop/360 px
+      screenshots inspected. Axe violations 0 on all five surfaces; Lighthouse
+      mobile: guide 98, recovery 100, SSO login 100, account linking 100, local
+      login 100. Existing Platform Setup restart/reopen/non-admin checks pass,
+      Lighthouse 99. Real disposable Keycloak 26.7.4 with virtual passkey used;
+      production host/network limits remain separate. Reproduce with
+      `verify-sso-live.mjs`; metrics in `docs/evidence/g3-browser.json` and
+      `docs/evidence/g3-platform-browser.json`.
+
 - [x] G2 Keycloak guide (2026-09-22): existing Platform Setup choose/review
       flow audited at 360/375/390/768/1280/1920 px; apply review at
       360/375/768/1280/1920 px; no overflow with the global guard disabled,

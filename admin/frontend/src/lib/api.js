@@ -143,6 +143,13 @@ function uploadZipWithProgress(endpoint, fields, file, onProgress) {
 }
 
 export const api = {
+  getSsoSetup: () => request('/setup/platform/sso'),
+  saveSsoSetup: (body) => request('/setup/platform/sso', { method: 'PUT', body: JSON.stringify(body) }),
+  ssoSetupAction: (action, body) => request(`/setup/platform/sso/${action}`, { method: 'POST', body: JSON.stringify(body) }),
+  ssoStatus: () => request('/auth/sso/status'),
+  ssoSession: () => request('/auth/sso/session'),
+  beginSso: (body) => request('/auth/sso/begin', { method: 'POST', body: JSON.stringify(body) }),
+  ssoRecoveryAction: (action) => request(`/auth/sso/${action}`, { method: 'POST', body: '{}' }),
   reviewKeycloak: (revision) => request(`/setup/platform/keycloak/review?revision=${revision}`),
   applyKeycloak: (body) => request('/setup/platform/keycloak/apply', { method: 'POST', body: JSON.stringify(body) }),
   getPlatformSetup: () => request('/setup/platform'),

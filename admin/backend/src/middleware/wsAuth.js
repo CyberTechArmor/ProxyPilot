@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import { requestOrigin } from '../lib/sso/sessions.js';
 import { validateSession } from './auth.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'development-secret-change-in-production';
@@ -58,11 +59,12 @@ export function verifyWsUpgrade(req) {
   // logout / revoke-all-others flow would leave any open WS pinhole
   // unaffected, and a stolen pre-revocation cookie could still
   // upgrade.
-  const result = validateSession(decoded.jti);
+  const result = validateSession(decoded.jti, requestOrigin(req));
   if (!result.ok) {
     const err = new Error(result.error);
     err.statusCode = result.status;
     throw err;
   }
-  return { user: decoded, session: result.session };
+  if (result.session.linkOnly) { const err = new Error('Complete Keycloak linking before opening a terminal.'); err.statusCode = 403; throw err; }
+  return { user: { ...decoded, role: result.session.currentRole }, session: result.session };
 }

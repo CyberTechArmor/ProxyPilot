@@ -35,7 +35,7 @@ try {
   await page.getByRole('button', { name: 'Run available checks' }).click(); await page.getByText('Setup runner', { exact: false }).first().waitFor();
   await page.getByRole('button', { name: '2. Review and save' }).click();
   assert.equal(await page.getByRole('button', { name: 'Review Keycloak changes' }).isDisabled(), true);
-  assert.equal(await page.getByRole('button', { name: 'Activate login — unavailable' }).isDisabled(), true);
+  await page.getByRole('heading', { name: 'ProxyPilot SSO, passkeys & recovery' }).waitFor();
   await page.getByRole('button', { name: 'Save reviewed plan' }).click();
   await page.getByRole('status').filter({ hasText: 'Saved plan · revision 1' }).waitFor();
   await page.reload(); await page.getByLabel('Keycloak origin', { exact: true }).waitFor();
@@ -91,7 +91,11 @@ try {
   let lighthouseScore = null;
   if (process.env.G1_LIGHTHOUSE_MODULE) {
     const { default: lighthouse } = await import(process.env.G1_LIGHTHOUSE_MODULE);
+    // Lighthouse opens its own default-context tab; seed that context explicitly.
+    const browserCdp = await browser.newBrowserCDPSession();
+    await browserCdp.send('Storage.setCookies', {cookies:[{name:'pp_token',value:server.tokens.admin,url:server.url},{name:'pp_csrf',value:'g1-browser-csrf',url:server.url}]});
     const result = await lighthouse(`${server.url}/platform-setup`, { port: 9222, onlyCategories: ['accessibility'], output: 'json', logLevel: 'error', formFactor: 'mobile', screenEmulation: { mobile: true, width: 360, height: 800, deviceScaleFactor: 1, disabled: false }, extraHeaders: { Cookie: `pp_token=${server.tokens.admin}; pp_csrf=g1-browser-csrf` }, disableStorageReset: true });
+    assert.equal(new URL(result.lhr.finalDisplayedUrl).pathname, "/platform-setup");
     lighthouseScore = result.lhr.categories.accessibility.score * 100;
     writeFileSync(join(output, 'lighthouse.json'), result.report);
     assert.ok(lighthouseScore >= 90, `Lighthouse mobile accessibility ${lighthouseScore}`);

@@ -1,3 +1,5 @@
+import AccountSso from '@/components/AccountSso';
+import LocalRecovery, { SsoComplete } from '@/pages/LocalRecovery';
 import PlatformSetup from '@/pages/PlatformSetup';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
@@ -53,10 +55,12 @@ function ProtectedRoute({ children }) {
     return <Navigate to="/login" replace />;
   }
 
+  if (user?.linkOnly && location.pathname !== '/link-sso') return <Navigate to="/link-sso" replace />;
+
   // Accounts without an assigned role (LDAP sign-ins awaiting an admin)
   // only get their profile page. The backend enforces the same rule on
   // every non-profile API surface.
-  if (user?.role === 'pending' && location.pathname !== '/profile') {
+  if (!user?.linkOnly && user?.role === 'pending' && location.pathname !== '/profile') {
     return <Navigate to="/profile" replace />;
   }
 
@@ -76,9 +80,11 @@ function App() {
 
   return (
     <Routes>
+      <Route path="/link-sso" element={<ProtectedRoute><main className="max-w-xl mx-auto p-4"><h1 className="text-xl font-semibold mb-4">Link your existing account</h1><p className="mb-4">This local proof session has no application access. Complete both identity checks to sign in through Keycloak.</p><AccountSso /></main></ProtectedRoute>} />
+      <Route path="/sso-complete" element={<SsoComplete />} />
       <Route
         path="/login"
-        element={isAuthenticated ? <Navigate to="/" replace /> : <Login />}
+        element={isAuthenticated ? <Navigate to={sessionStorage.getItem('pp_recovery') ? '/local-recovery' : '/'} replace /> : <Login />}
       />
       <Route
         path="/"
@@ -104,6 +110,7 @@ function App() {
         <Route path="mcp-access" element={<McpAccess />} />
         <Route path="troubleshooting" element={<Troubleshooting />} />
         <Route path="housekeeping" element={<Housekeeping />} />
+        <Route path="local-recovery" element={<LocalRecovery />} />
         <Route path="platform-setup" element={<PlatformSetup />} />
         {/* Host drives + ZFS pools/datasets/snapshots/replication (admin only;
             the page self-guards and the backend requires an admin session). */}

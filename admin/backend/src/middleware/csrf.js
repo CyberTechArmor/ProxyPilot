@@ -57,6 +57,9 @@ const CSRF_EXEMPT_PREFIXES = [
 
 export function csrfProtection(req, res, next) {
   if (SAFE_METHODS.has(req.method)) return next();
+  // OIDC form_post is bound by a single-use state, nonce, PKCE and secure
+  // browser cookie in the callback handler. Keep this exemption exact.
+  if (req.method === 'POST' && req.originalUrl === '/api/auth/sso/callback') return next();
 
   // Use req.originalUrl rather than req.path: this middleware is
   // mounted on '/api/' in index.js, which means Express strips the

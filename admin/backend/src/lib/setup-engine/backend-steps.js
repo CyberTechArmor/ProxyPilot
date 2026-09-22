@@ -1,3 +1,4 @@
+import { assertCurrent, SSO_APP } from '../sso/store.js';
 import { readKeycloak } from './keycloak-store.js';
 import { keycloakRouteParams } from './keycloak-routes.js';
 // Setup engine — the BACKEND-executed steps (A-17.7): job kinds the backend
@@ -90,12 +91,18 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
   if (!BACKEND_STEP_KINDS.includes(job.kind)) return fin('refused', 'invalid', `${job.kind} is not a backend step`);
   let p = (parseJson(job.plan_json) || {}).params || {};
   const isKeycloak = job.kind === 'configure_keycloak_route';
+  const isSso = ['verify_sso','configure_recovery_route'].includes(job.kind);
+  if (isSso) { try {
+    const r = assertCurrent(db, p.fingerprint);
+    if (Object.keys(p).length !== 1 || job.app !== SSO_APP || r[job.kind === 'verify_sso' ? 'job_id' : 'route_job_id'] !== job.id) throw new Error('Superseded');
+    p = { ...p, container: SSO_APP, services: [], ip: '127.0.0.1' };
+  } catch { return fin('refused','invalid','Invalid or superseded SSO configuration reference.'); } }
   if (isKeycloak) { try {
     const installation = readKeycloak(db, p.installationId);
     if (installation?.route_job_id !== job.id || !['queued', 'running'].includes(getJob(db, installation.last_job_id)?.status)) throw new Error('Superseded or cancelled');
     p = keycloakRouteParams(db, p);
   } catch { return fin('refused', 'invalid', 'Invalid, cancelled or superseded Keycloak route reference.'); } }
-  const v = isKeycloak ? { ok: job.app === p.container, reason: 'Keycloak route app mismatch' } : validateRoutesParams(p);
+  const v = (isKeycloak || isSso) ? { ok: job.app === p.container, reason: 'Keycloak route app mismatch' } : validateRoutesParams(p);
   if (!v.ok) return fin('refused', 'invalid', v.reason);
   const origin = p.origin || {};
   const noteOrigin = (state, extra = {}) => {
@@ -140,7 +147,7 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     fenceJob(db, { id: job.id, owner, epoch, safe: true, leaseMs: LEASE_MS, nowMs: nowMs() });
     const ck = checkpoint(db, { id: job.id, owner, epoch, phase: 'routes', checkpoint: { resumable: false, disruptive: false, routes: true, container: p.container, domains: p.services.map((s) => s.domain) }, message: `configuring ${p.services.length} route(s) for ${p.container} → ${p.ip}`, nowMs: nowMs() });
     if (!(Number(ck) > 0)) throw new FencedError(job.id);
-    if (typeof (isKeycloak ? deps.configureKeycloakRoute : deps.configureRoutes) !== 'function') { noteOrigin('failed', { detail: 'no route configurator is available in this process' }); return fin('failed', 'error', 'no route configurator is available in this process; retry the job'); }
+    if (typeof (isSso ? deps.ssoStep : isKeycloak ? deps.configureKeycloakRoute : deps.configureRoutes) !== 'function') { noteOrigin('failed', { detail: 'no route configurator is available in this process' }); return fin('failed', 'error', 'no route configurator is available in this process; retry the job'); }
     // Before every write the configurator makes, THREE leases are renewed at
     // the epochs this step holds them — the job claim itself (`setup_jobs`,
     // the store's fenced heartbeat: owner + epoch + still running), the
@@ -170,7 +177,7 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     keepAlive = setInterval(() => { try { const gone = renewAll(); if (gone) lost = gone; } catch { /* the next fence decides */ } }, Math.max(20, Number(keepAliveMs) || KEEPALIVE_MS));
     if (typeof keepAlive.unref === 'function') keepAlive.unref();
     fence();
-    const res = isKeycloak ? await deps.configureKeycloakRoute({ installationId: p.installationId, fence }) : await deps.configureRoutes({ container: p.container, name: p.serviceName, ip: p.ip, services: p.services, fence });
+    const res = isSso ? await deps.ssoStep({ kind: job.kind, fingerprint: p.fingerprint, fence }) : isKeycloak ? await deps.configureKeycloakRoute({ installationId: p.installationId, fence }) : await deps.configureRoutes({ container: p.container, name: p.serviceName, ip: p.ip, services: p.services, fence });
     fence();
     const pub = { created: res.created || [], existing: res.existing || [], conflicts: res.conflicts || [], rendered: res.rendered || [], renderWarning: res.renderWarning || null, upstreamWarning: res.upstreamWarning || null, ip: p.ip };
     recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub }, nowMs: nowMs() });
@@ -191,6 +198,7 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
       noteOrigin('failed', { detail: `${e.message}; retry the job` });
       return fin('failed', 'lease_lost', `${e.message}; the routes were not completed by this job — retry it`, { state: 'not_applicable', label: e.message, failedAt: 'routes', next: 'retry the job' });
     }
+    if (isSso) return fin('failed','sso_check_failed', e?.ssoSafe ? e.message : 'SSO verification failed. Check observer access, TLS and the configured client.');
     noteOrigin('failed', { detail: sanitizeReason(e?.message || String(e), 300) });
     return fin('failed', 'error', sanitizeReason(e?.message || String(e)));
   } finally {

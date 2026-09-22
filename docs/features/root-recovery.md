@@ -141,3 +141,16 @@ test administrator with `--password --totp`, sign in in a fresh browser with
 the printed password, be walked through TOTP enrolment and the password
 change, confirm the dashboard's other accounts and every service are as
 they were, and confirm the audit entry appears on the Security page.
+
+
+## G3 SSO recovery
+
+This command is unchanged by G3. The guided SSO setup retains local credentials and
+adds a separate administrator-network-restricted recovery hostname through Caddy.
+Use this command if necessary, then sign in locally on that hostname and open
+**Local administrator recovery** to disable SSO with fresh local password/TOTP or
+a separately enrolled local recovery passkey. Keycloak may be unavailable. A public
+Keycloak or ProxyPilot passkey is not automatically a recovery-host credential.
+See [guided SSO recovery](guided-sso.md#independent-local-recovery-and-disabling-sso)
+for hostname/RP settings, activation checks and the outage contract. The production
+root-console acceptance above remains distinct from disposable browser evidence.

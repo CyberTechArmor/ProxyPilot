@@ -158,7 +158,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | accepted — six fixed criteria; corrected head `6c3bdcb`, PR #616; real stack and host execution limits below |
 | G5 | Infisical with Agent Proxy adapter | C-03 | accepted published recovery `31d0c87`; merged by #617 as `e9430a2`; host acceptance separate |
 | G6 | OpenBao adapter | C-04 | accepted — six fixed criteria and runner-key correction at `6e48d89`, PR #618; host acceptance separate |
-| G7 | Vaultwarden adapter | C-05 | planned — not authorized |
+| G7 | Vaultwarden adapter | C-05 | accepted at 04820930; PR #619 authorized for merge; 70% (7/10); recorded runtime limits unchanged |
 | G8 | Application connection automation | D-01/D-02, C-06; reuse existing contracts, deployment and verification | planned — not authorized |
 | G9 | Guided maintenance | B-04, D-03/D-04/D-05; reuse restores and verification | planned — not authorized |
 | G10 | End-to-end completion and evidence across the guided flow | B-02/B-03/B-05 and C/D acceptance, keeping live-host acceptance separate | planned — not authorized |
@@ -712,3 +712,78 @@ restore remain separate host-acceptance items, alongside earlier recorded limits
 and the existing cgroup-host exclusion. This merge authorizes no production
 rollout, live DNS/database/identity changes, credential rotation, service restart,
 infrastructure rebuild or G7–G10 work.
+
+
+## G7 — guided Vaultwarden (authorized 2026-09-22; review pending)
+
+Accepted G6 head `6e48d89dedb058b8d760556b448d00042909b057` is an ancestor
+of current main `24ba567eea4a5bd6f469b1f3fa30c0857201dfae` (PR #618 merged).
+Branch `feat/g7-guided-vaultwarden` starts from that main with no unmerged
+G6 dependency. Its runner installation-key correction is preserved.
+Accepted progress stays **60% (6/10)** until G7 review acceptance, then **70% (7/10)**.
+
+These six criteria are fixed before implementation:
+
+| Criterion | Required result | Status |
+| --- | --- | --- |
+| G7.1 | Administrator-reviewed install/connect/skip; official version-specific deployment/OIDC/client review; private persistent independent managed service with supported embedded DB; Caddy retains public ports/TLS; inert save and explicit apply; existing instances checked read-only first, with vault data/keys/unrelated settings preserved. | implemented; adapter passes; real install pending |
+| G7.2 | Verified Keycloak provider, separate exact-callback OIDC/PKCE client, protected reusable credentials, effective Vaultwarden configuration including persisted overrides checked; only reviewed owned changes; exact operator handoff verified; existing SSO/recovery/clients/passkey policy preserved. | implemented; source/adapter checks pass; real identity/config readback pending |
+| G7.3 | Distinguish authentication from vault decryption; disposable browser SSO and supported unlock/test item plus out-of-policy refusal; documented account linking without account/key replacement; existing login preserved; SSO-only off by default and any activation separately reviewed with supported recovery; no vault-unlock secrets/items in ProxyPilot storage/logs; client limits documented. | guide and protected observation flow implemented; actual SSO/unlock/denial/account linking unexecuted |
+| G7.4 | Existing durable jobs/locks for apply/failure/retry across browser/API/runner restart; reuse owned resources/credentials and configuration-bound verification; honest unavailable/unhealthy/unverified states; no automatic install/rotation/reset on retry. | implemented; process/adapter retry and preservation checks pass |
+| G7.5 | Release-compatible database/data/attachment/config/server-key backup set and restart/restore/Keycloak-outage/lost-device guidance via existing mechanisms; no claim to recover unknown unlock secrets; independent ProxyPilot recovery; real restore remains separate host acceptance. | documented; preservation checks pass; real restore remains separate host acceptance |
+| G7.6 | Production-adapter install/connect/skip/config/SSO/unlock/denial/repeat/restart/preservation/redaction acceptance, existing admin/CSRF/fresh-auth, affected tests/build/desktop/360px; actual disposable execution distinguished from scripted responses; existing host exclusions retained. | 208 affected passes; build and responsive checks pass; real-service limits explicitly retained |
+
+Only G7.1–G7.6: no G8–G10, import/migration, general provisioning, A-17,
+Phase F, infrastructure rebuild, install.sh/update.sh or accepted U1/U2 changes.
+Only reproduced G7 blockers justify prerequisite fixes. Optional improvements
+remain backlog; no added acceptance gates. Feature-branch checkpoints and PR
+publication are authorized; no merge, deployment, live infrastructure/identity/
+database/DNS changes, credential rotation or live restarts. Stop after G7.
+
+
+### G7 implementation and evidence checkpoint (2026-09-22)
+
+Repository implementation is submitted for review; **60% remains accepted**.
+[The execution record](../evidence/g7-acceptance.md) maps the same six criteria to
+production adapters, 208 affected test passes, successful frontend build, 20
+responsive audits including 360px/desktop, zero axe violations and accessibility
+score 95. [Operator guidance](../features/guided-vaultwarden.md) gives the selected
+1.37.3 profile, exact Keycloak handoff, separate authentication/unlock/account
+preservation ceremony, SSO-only-off behavior and compatible backup/recovery set.
+
+Published scope checkpoint `bcf5412a` and implementation checkpoint `7238a831` on
+`feat/g7-guided-vaultwarden`; the final PR head adds the guidance and execution
+record. Remote trees are fetched and compared before reporting publication.
+G6's runner key loading and install.sh/update.sh/U1/U2 behavior are unchanged.
+No extra prerequisite fix or later milestone work was added.
+
+Actual Vaultwarden/Keycloak SSO, vault unlock/test-item/denial/account linking,
+Docker/Caddy lifecycle/TLS and compatible restore were unavailable in this
+execution environment. Docker/Incus/Caddy/Rust are absent; the attempted registry
+read returned HTTP 403. Scripted upstream responses and operator checkbox tests
+are explicitly **not** actual service ceremony passes. Native database/full boot
+and the existing containment-host exclusion remain separate, as do all earlier
+recorded host limitations. This does not change the ten-milestone denominator or
+add completion gates. No merge, deployment or live operation was performed.
+
+
+## G7 review acceptance (2026-09-22)
+
+The user accepted G7 repository head
+`04820930cf7d467e40b756e398ed7382a10e6f38` and authorized merging PR #619.
+Accepted guided progress is now **70% (7/10: G1–G7)**. This supersedes the
+pending-review status and no-merge restriction for this PR in the records above.
+The six fixed G7 criteria and ten-milestone denominator are unchanged.
+
+Acceptance preserves the recorded evidence: 208 affected test passes, 21 G7
+passes repeated on the fetched final commit, a successful frontend build and
+20 responsive audits including desktop/360px. This acceptance change touches
+only documentation after the tested code at `04820930`.
+
+Actual Vaultwarden/Keycloak browser SSO, separate vault unlock/test item,
+denied-user access and existing-account linking remain unexecuted. Real
+Docker/Caddy/TLS and compatible restore remain separate host acceptance, along
+with the existing containment exclusion and native database/full-boot limits.
+Acceptance does not turn scripted responses into real-service passes and does
+not authorize deployment, live DNS/database/identity changes, credential
+rotation, live restarts, infrastructure rebuild or G8–G10 work. Stop after G7.

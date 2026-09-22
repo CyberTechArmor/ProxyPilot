@@ -532,3 +532,70 @@ restore remain separate host-acceptance items, alongside earlier recorded limits
 and the existing cgroup-host exclusion. This merge authorizes no production
 rollout, live DNS/database/identity changes, credential rotation, service restart,
 infrastructure rebuild or G7–G10 work.
+
+
+### G7 authorization and accepted G6 ancestry (2026-09-22)
+
+PR #618 merged as `24ba567eea4a5bd6f469b1f3fa30c0857201dfae`; accepted
+`6e48d89dedb058b8d760556b448d00042909b057` is an ancestor. G7 branches from
+that current main on `feat/g7-guided-vaultwarden`. The six fixed criteria and
+stopping rule are recorded in the platform delivery ledger. Reuse saved plans,
+runner/jobs/leases, protected credential references and Caddy; preserve G6's
+fresh-runner key loading. Accepted progress **60%**, then **70% only after G7
+review acceptance**. Existing host exclusions/acceptance remain separate.
+
+
+### G7 repository implementation and focused evidence (2026-09-22; review pending)
+
+Migration 1008 adds saved Vaultwarden intent and encrypted credential references.
+The reviewed install/connect/skip UI uses existing platform choices;
+`vaultwarden_apply` uses the host runner and `configure_vaultwarden_route` the
+existing backend drain/Caddy locks. Managed 1.37.3 has independent private
+listeners, persistent SQLite data and owned config. Connect only reads. Exact
+Keycloak client/passkey/role and effective Vaultwarden settings are verified;
+persisted overrides fail without overwrite. Retry preserves credentials, data,
+server keys and attempted resources across API/browser/runner restart.
+
+Authentication and vault unlock are separate in UI and guidance. SSO-only stays
+off; the observation endpoint accepts only configuration-bound boolean facts,
+explicitly labeled operator-observed. No vault secret or item content enters
+plans/jobs/logs/frontend storage. Existing account/key and independent recovery
+preservation, client limits and compatible backup/restore steps are documented.
+
+[Evidence](../evidence/g7-acceptance.md): **208 affected passes**, frontend build,
+20 responsive audits at 360/375/768/1280/1920px, zero axe violations, accessibility
+95. Production adapters use scripted Docker/Caddy/Vaultwarden/Keycloak responses;
+actual local HTTP/SQLite/crypto and API/fresh-runner process execution are
+identified separately. No actual Vaultwarden SSO/unlock/test-item/denial or
+account-linking execution was possible here. Real host/Caddy/Keycloak/restore,
+native better-sqlite3/full boot and the existing containment-host exclusion are
+not passes. [Operator guidance](../features/guided-vaultwarden.md) supplies the
+exact disposable acceptance steps without a new framework or extra gate.
+
+Published checkpoints `bcf5412a` and `7238a831` on
+`feat/g7-guided-vaultwarden`; final code/evidence is submitted in its PR. G6's
+accepted runner-key correction is preserved. Accepted progress stays **60%**;
+G7 acceptance would make **70% (7/10)**. No merge, deployment/live change,
+installer/updater/U1/U2 change, G8–G10, A-17, Phase F or migration/import. Stop G7.
+
+
+## G7 review acceptance (2026-09-22)
+
+The user accepted G7 repository head
+`04820930cf7d467e40b756e398ed7382a10e6f38` and authorized merging PR #619.
+Accepted guided progress is now **70% (7/10: G1–G7)**. This supersedes the
+pending-review status and no-merge restriction for this PR in the records above.
+The six fixed G7 criteria and ten-milestone denominator are unchanged.
+
+Acceptance preserves the recorded evidence: 208 affected test passes, 21 G7
+passes repeated on the fetched final commit, a successful frontend build and
+20 responsive audits including desktop/360px. This acceptance change touches
+only documentation after the tested code at `04820930`.
+
+Actual Vaultwarden/Keycloak browser SSO, separate vault unlock/test item,
+denied-user access and existing-account linking remain unexecuted. Real
+Docker/Caddy/TLS and compatible restore remain separate host acceptance, along
+with the existing containment exclusion and native database/full-boot limits.
+Acceptance does not turn scripted responses into real-service passes and does
+not authorize deployment, live DNS/database/identity changes, credential
+rotation, live restarts, infrastructure rebuild or G8–G10 work. Stop after G7.

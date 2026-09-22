@@ -1,3 +1,5 @@
+import { readVaultwarden } from './vaultwarden-store.js';
+import { runVaultwardenOperation } from './vaultwarden-op.js';
 import { runOpenBaoOperation } from './openbao-op.js';
 import { readOpenBao } from './openbao-store.js';
 import { runInfisicalOperation } from './infisical-op.js';
@@ -180,7 +182,7 @@ export function recordUncertainSetup(db, { job, lock, owner, reason, nowMs }) {
 const KEEPALIVE_MS = 10_000;
 const JOB_CLAIM = Symbol('job claim');
 
-export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null, keycloakDeps = {}, pomeriumDeps = {}, infisicalDeps = {}, openbaoDeps = {} }) {
+export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null, keycloakDeps = {}, pomeriumDeps = {}, infisicalDeps = {}, openbaoDeps = {}, vaultwardenDeps = {} }) {
   const epoch = Number(job.epoch);
   let keepLease = false;
   let keepAlive = null;
@@ -262,6 +264,9 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
     // Caddy handoff owns the app lease. Do not treat unrelated holders or
     // unresolved holds as this dependency, or acquire/release the route locks.
     // Use the acquisition verdict's job id: Caddy may finish just after it.
+    if (job.kind === 'vaultwarden_apply' && got.reason === 'held' && got.operation === 'configure_vaultwarden_route') {
+      const r=readVaultwarden(db);if(r?.last_job_id===job.id && r.edge_job_id===got.jobId){requeueJob(db,{id:job.id,by:owner,reason:'Waiting for the recorded Vaultwarden Caddy step.',notBeforeMs:nowMs()+KEYCLOAK_ROUTE_RETRY_MS,nowMs:nowMs()});return {status:'requeued',outcome:'waiting_for_route'};}
+    }
     if (job.kind === 'openbao_apply' && got.reason === 'held' && got.operation === 'configure_openbao_route') {
       const r=readOpenBao(db);if(r?.last_job_id===job.id && r.edge_job_id===got.jobId){requeueJob(db,{id:job.id,by:owner,reason:'Waiting for the recorded OpenBao Caddy step.',notBeforeMs:nowMs()+KEYCLOAK_ROUTE_RETRY_MS,nowMs:nowMs()});return {status:'requeued',outcome:'waiting_for_route'};}
     }
@@ -304,7 +309,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
   };
 
   try {
-    if (['keycloak_setup','pomerium_apply','infisical_apply','openbao_apply'].includes(job.kind)) {
+    if (['keycloak_setup','pomerium_apply','infisical_apply','openbao_apply','vaultwarden_apply'].includes(job.kind)) {
       // Managed files belong on the host, not the backend container. A narrower
       // runner-only adapter honors runner-required and never weakens either policy.
       if (parseOwner(owner)?.kind !== 'runner') {
@@ -323,7 +328,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         generated: resource => { guard(); recordGenerated(db, { id: job.id, owner, epoch, resource, nowMs: nowMs() }); },
         progress: progress => { guard(); recordProgress(db, { id: job.id, owner, epoch, progress, nowMs: nowMs() }); },
         onStep: (phase, message) => event('step', message, null, phase) };
-      const result = job.kind==='openbao_apply' ? await runOpenBaoOperation({db,params:p,exec,job:handle,...openbaoDeps}).catch(e=>{if(e.openbaoSafe||['FENCED','CANCELLED'].includes(e.code))throw e;throw new Error('OpenBao operation failed; upstream details withheld. Review its saved phase before retrying.');}) : job.kind==='infisical_apply' ? await runInfisicalOperation({db,params:p,exec,job:handle,...infisicalDeps}).catch(e=>{if(e.infisicalSafe||['FENCED','CANCELLED'].includes(e.code))throw e;throw new Error('Infisical operation failed; raw adapter output withheld. Inspect its saved phase and retry.');}) : job.kind==='pomerium_apply' ? await runPomeriumOperation({db,params:p,exec,job:handle,...pomeriumDeps}) : await runKeycloakOperation({ db, params: p, exec, job: handle, ...keycloakDeps });
+      const result = job.kind==='vaultwarden_apply' ? await runVaultwardenOperation({db,params:p,exec,job:handle,...vaultwardenDeps}).catch(e=>{if(e.vaultwardenSafe||['FENCED','CANCELLED'].includes(e.code))throw e;throw new Error('Vaultwarden operation failed; upstream details withheld. Review its saved phase before retrying.');}) : job.kind==='openbao_apply' ? await runOpenBaoOperation({db,params:p,exec,job:handle,...openbaoDeps}).catch(e=>{if(e.openbaoSafe||['FENCED','CANCELLED'].includes(e.code))throw e;throw new Error('OpenBao operation failed; upstream details withheld. Review its saved phase before retrying.');}) : job.kind==='infisical_apply' ? await runInfisicalOperation({db,params:p,exec,job:handle,...infisicalDeps}).catch(e=>{if(e.infisicalSafe||['FENCED','CANCELLED'].includes(e.code))throw e;throw new Error('Infisical operation failed; raw adapter output withheld. Inspect its saved phase and retry.');}) : job.kind==='pomerium_apply' ? await runPomeriumOperation({db,params:p,exec,job:handle,...pomeriumDeps}) : await runKeycloakOperation({ db, params: p, exec, job: handle, ...keycloakDeps });
       guard();
       if (result.waiting) {
         requeueJob(db, { id: job.id, by: owner, reason: result.reason, notBeforeMs: nowMs() + KEYCLOAK_ROUTE_RETRY_MS, nowMs: nowMs() });
@@ -675,7 +680,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       markLockStale(db, { app: job.app, nowMs: nowMs(), recoveryJobId: job.id });
       return r;
     }
-    const verification = ['keycloak_setup','pomerium_apply','infisical_apply','openbao_apply'].includes(job.kind) ? { state: 'not_verified', failedAt: getJob(db, job.id)?.phase, next: 'Correct the reported issue and retry from the reviewed Platform Setup plan. Existing resources and credentials are retained.' } : verificationFromObservations(obs);
+    const verification = ['keycloak_setup','pomerium_apply','infisical_apply','openbao_apply','vaultwarden_apply'].includes(job.kind) ? { state: 'not_verified', failedAt: getJob(db, job.id)?.phase, next: 'Correct the reported issue and retry from the reviewed Platform Setup plan. Existing resources and credentials are retained.' } : verificationFromObservations(obs);
     return fin(job.kind==='openbao_apply'?'recovery_required':'failed', 'error', sanitizeReason(e?.message || String(e)), verification);
   } finally {
     if (keepAlive) clearInterval(keepAlive);

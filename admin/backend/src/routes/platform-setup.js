@@ -1,3 +1,4 @@
+import { vaultwardenRouter } from './vaultwarden.js';
 import { openbaoRouter } from './openbao.js';
 import { infisicalRouter } from './infisical.js';
 import { pomeriumRouter } from './pomerium.js';
@@ -17,6 +18,7 @@ platformSetupRouter.use('/sso', ssoSetupRouter);
 platformSetupRouter.use('/pomerium', pomeriumRouter);
 platformSetupRouter.use('/infisical', infisicalRouter);
 platformSetupRouter.use('/openbao', openbaoRouter);
+platformSetupRouter.use('/vaultwarden', vaultwardenRouter);
 platformSetupRouter.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 const invalid = (res) => res.status(400).json({ error: 'Invalid plan: choose install, connect or skip for each service, with non-secret http(s) origins for selected services. Unknown fields, credentials, URL paths, query strings and fragments are not accepted.' });
 

@@ -1,0 +1,116 @@
+{
+  "date": "2026-09-22",
+  "execution": "Built frontend + real local API/SQLite; host completion scripted; no real gateway stack",
+  "audits": [
+    {
+      "state": "configuration",
+      "width": 360,
+      "scrollWidth": 360,
+      "clientWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "configuration",
+      "width": 375,
+      "scrollWidth": 375,
+      "clientWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "configuration",
+      "width": 768,
+      "scrollWidth": 768,
+      "clientWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "configuration",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "configuration",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "clientWidth": 1920,
+      "shortButtons": []
+    },
+    {
+      "state": "route-review",
+      "width": 360,
+      "scrollWidth": 360,
+      "clientWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "route-review",
+      "width": 375,
+      "scrollWidth": 375,
+      "clientWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "route-review",
+      "width": 768,
+      "scrollWidth": 768,
+      "clientWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "route-review",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "route-review",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "clientWidth": 1920,
+      "shortButtons": []
+    },
+    {
+      "state": "removal-review",
+      "width": 360,
+      "scrollWidth": 360,
+      "clientWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "removal-review",
+      "width": 375,
+      "scrollWidth": 375,
+      "clientWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "removal-review",
+      "width": 768,
+      "scrollWidth": 768,
+      "clientWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "removal-review",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "removal-review",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "clientWidth": 1920,
+      "shortButtons": []
+    }
+  ],
+  "errors": [],
+  "apiRestart": "pending intent and job reopened",
+  "explicitRemoval": "review and submit through real API",
+  "axeViolations": [],
+  "lighthouseScore": 95
+}

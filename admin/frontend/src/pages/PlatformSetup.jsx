@@ -1,3 +1,4 @@
+import PomeriumSetup from '@/components/PomeriumSetup';
 import SsoSetup from '@/components/SsoSetup';
 import KeycloakSetup from '@/components/KeycloakSetup';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -123,11 +124,11 @@ function PlatformSetupContent() {
           <fieldset disabled={!!busy} className="min-w-0"><legend className="sr-only">{service.name} choice</legend><div className="flex flex-col sm:flex-row flex-wrap gap-2">{Object.entries(modeLabel).map(([mode, label]) => <label key={mode} className={`flex items-center gap-2 min-h-11 px-3 py-2 rounded-md border cursor-pointer text-sm ${selected.mode === mode ? 'border-primary bg-primary/10' : ''}`}><input type="radio" name={`${service.id}-mode`} value={mode} checked={selected.mode === mode} onChange={() => change(service.id, 'mode', mode)} />{label}</label>)}</div></fieldset>
           {selected.mode !== 'skip' && <div className="space-y-3">{(service.id === 'infisical' ? ['url', 'agentProxyUrl'] : ['url']).map((field) => <div key={field} className="space-y-2"><Label htmlFor={`${service.id}-${field}`}>{field === 'agentProxyUrl' ? 'Agent Proxy origin' : `${service.name} origin`}</Label><Input id={`${service.id}-${field}`} type="url" value={selected[field]} disabled={!!busy} autoComplete="off" spellCheck={false} placeholder={field === 'agentProxyUrl' ? 'https://agent-proxy.example.com' : `https://${service.id}.example.com`} onChange={(e) => change(service.id, field, e.target.value)} /><p className="text-xs text-muted-foreground">Domain with http(s); optional port. No credentials, paths or tokens.</p></div>)}</div>}
           {service.id === 'keycloak' && selected.mode !== 'skip' && <div className="space-y-2"><Label htmlFor="keycloak-realm">Keycloak realm</Label><Input id="keycloak-realm" value={selected.realm || ''} disabled={!!busy} placeholder="proxypilot" autoComplete="off" spellCheck={false} onChange={e => change(service.id, 'realm', e.target.value)} /><p className="text-xs text-muted-foreground">Realm name only. The issuer is the HTTPS origin followed by /realms/ and this name. Managed installation uses port 443 and a new realm other than master.</p></div>}
-          <p className="text-xs text-muted-foreground">{service.id === 'keycloak' ? 'Verified connection and progress are shown below.' : 'Verified installed state: not checked. A service-specific adapter is required.'}</p>
+          <p className="text-xs text-muted-foreground">{['keycloak','pomerium'].includes(service.id) ? 'Verified connection and progress are shown below.' : 'Verified installed state: not checked. A service-specific adapter is required.'}</p>
         </CardContent></Card>;
       })}</div> : <Card><CardHeader><CardTitle>Review your plan</CardTitle><CardDescription>These are intended additions and connections. Unresolved checks can be saved for later.</CardDescription></CardHeader><CardContent className="space-y-4">
         <ul className="divide-y">{data.services.map((service) => <li key={service.id} className="py-3 min-w-0 break-words"><p className="font-medium">{service.name} · {modeLabel[choices[service.id].mode]}</p>{choices[service.id].mode !== 'skip' && <><p className="text-sm break-all">{choices[service.id].url || 'Endpoint required'}</p>{service.id === 'keycloak' && <p className="text-sm break-all">Realm: {choices.keycloak.realm || 'Realm required before applying'}</p>}{service.id === 'infisical' && <p className="text-sm break-all">Agent Proxy: {choices.infisical.agentProxyUrl || 'Endpoint required'}</p>}</>}<p className="text-xs text-muted-foreground">Installation / connection unverified</p></li>)}</ul>
-        <div className="rounded-lg border p-3 text-sm">Keycloak has a separate review and apply step below. Other selected services remain saved intentions. Login activation is unavailable.</div>
+        <div className="rounded-lg border p-3 text-sm">Keycloak and Pomerium have separate review and apply steps below. Other services remain saved intentions. ProxyPilot SSO has its own activation guide.</div>
         <div className="flex flex-col sm:flex-row flex-wrap gap-2"><Button className="min-h-11 bg-foreground text-background hover:bg-foreground/90" disabled={!!busy} onClick={save}>{busy === 'save' ? 'Saving plan…' : 'Save reviewed plan'}</Button></div>
         <p className="text-xs text-muted-foreground">Saving refreshes available checks and requires the existing administrator re-authentication when needed. It does not queue installation.</p>
       </CardContent></Card>}
@@ -137,6 +138,7 @@ function PlatformSetupContent() {
         {checks && <ul className="space-y-2">{checks.checks.map((check) => <CheckResult key={check.id} check={check} />)}</ul>}
       </CardContent></Card>
       <SsoSetup connections={data.keycloak || []} />
+      <PomeriumSetup revision={data.plan.revision} dirty={dirty} mode={choices.pomerium.mode} origin={choices.pomerium.url} connections={data.keycloak || []} />
       <SetupJobs />
     </>}
   </div>;

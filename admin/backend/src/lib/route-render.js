@@ -116,6 +116,7 @@ export async function renderDomains({
   writeConfig,
   removeConfig,
   fence = null,
+  rollbackOnFailure = true,
 }) {
   const targets = [...new Set(domains.filter(Boolean))];
   if (targets.length === 0) return { domains: [] };
@@ -143,7 +144,7 @@ export async function renderDomains({
   };
   const failWith = async (err, message) => {
     if (isLeaseLost(err)) throw err;
-    try { await restore(); } catch (e) { if (isLeaseLost(e)) throw e; }
+    if (rollbackOnFailure) { try { await restore(); } catch (e) { if (isLeaseLost(e)) throw e; } }
     throw new Error(message);
   };
 

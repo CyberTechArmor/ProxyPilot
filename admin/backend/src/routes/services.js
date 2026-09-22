@@ -1,3 +1,4 @@
+import { protectionForRoute, pomeriumHandlerLines } from '../lib/setup-engine/pomerium-routes.js';
 import { readSystemStats } from '../lib/system-stats.js';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -5999,6 +6000,8 @@ function formatBytesForCaddy(bytes) {
 // both are present — once D.14 drops the legacy columns, `type` will be gone
 // and `kind` will be the only decider.
 function generateServiceHandlerBody(entry, indent = '    ') {
+  const gateway = pomeriumHandlerLines(entry.protection, indent);
+  if (gateway) return gateway;
   // Field name normalization: accept DB snake_case, JS camelCase, and both
   // Phase 2 legacy (`port`, `target`) and Phase 2b (`target_port`/`targetPort`,
   // `target_ip`/`targetIp`) names.
@@ -6312,6 +6315,7 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frame
       // Migration 907 (set_route_options over MCP): headers / CSP / basic
       // auth / IP allowlist / rate limit. null when the row carries none, so
       // the rendered body is unchanged for every pre-907 route.
+      protection: s.protection || null,
       edgeOptions: parseRouteEdgeOptions(s),
       routeId: s.route_id ?? s.routeId ?? s.id ?? null,
     };
@@ -6644,6 +6648,7 @@ async function regenerateDomainCaddyConfig(db, domain) {
   // The dashboard's own origin — the one embedder every site may allow.
   let frameAncestor = null;
   try { frameAncestor = dashboardFrameAncestor(getAdminDomain()); } catch { frameAncestor = null; }
+  for (const row of allRows) row.protection = protectionForRoute(db, row.route_id || row.id);
   const merged = buildDomainCaddyConfig(allRows, domain, tlsDecision, { frameAncestor });
   if (merged === null) {
     await unlink(configPath).catch(() => {});

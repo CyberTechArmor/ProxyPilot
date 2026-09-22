@@ -225,8 +225,9 @@ Keycloak 26.7.4/Chromium virtual-passkey ceremonies and an IdP-stopped local rec
 are separate from scripted Caddy/host execution. Frontend build and responsive
 browser checks pass; final accessibility metrics are in `docs/evidence/g3-browser.json`.
 The user accepted G3 `4e7b257` and authorized its merge in PR #615 on 2026-09-22.
-Accepted guided progress is **30% (3/10: G1, G2 and G3)**. Other adapters remain
-planned; the milestone denominator is unchanged. Live-host acceptance limitations
+At G3 acceptance, guided progress was **30% (3/10: G1, G2 and G3)**. With G4
+accepted below, current progress is **40% (4/10)**; G5–G10 remain planned and
+the milestone denominator is unchanged. Live-host acceptance limitations
 remain separate; this merge does not authorize deployment or live-service changes.
 
 ## Milestone D — platform-aware app provisioning and maintenance
@@ -345,3 +346,70 @@ The sandbox differs from the one the gate-one handoff reported (2674 tests,
 installed, so `ldap.test.js` and `vpn-mtu.test.js` run. Compare like with
 like: the baseline row above was produced in this sandbox on the exact
 base commit.
+
+## G4 contract recorded before implementation (2026-09-22)
+
+G4 only, `feat/g4-guided-pomerium` from `main@66624b5`, with accepted G3
+`4e7b257` verified merged. The six fixed criteria are recorded in the existing
+platform-delivery ledger's G4 table. Reuse this engine's jobs, leases, fencing,
+backend Caddy drain, saved platform plan and protected secret references.
+Accepted progress stays 30% until G4 review; no A-17 or Phase F continuation.
+
+
+### G4 implementation evidence (2026-09-22; review pending)
+
+Added runner kind `pomerium_apply` and backend kind `configure_pomerium_routes`.
+Both carry only the saved revision reference (backend also records deny/gateway
+stage). They reuse the application's lock, host route lease, heartbeat/fencing,
+durable progress and reconciliation. Secrets are encrypted references; private
+revision files and owned resource labels preserve retry identity. Changes never
+restore an unprotected upstream on failure; explicit removal is separately
+reviewed. An unsuccessful initial denial reload names the remaining running
+upstream risk and does not certify protection.
+
+Twenty focused G4 tests pass, including a real API process restart, interrupted
+runner retry, external read-only inspection, failed gateway probe followed by a
+durable denial child, failed initial Caddy denial, and explicit removal. The
+affected set is 188 tests / 187 pass / one existing host-containment skip. The
+additional closeout sentinel reports no writable cgroup/systemd; it is not a G4
+regression or authorization for A-17 work. Frontend build and 15 responsive
+checks pass; axe zero and Lighthouse 95. Host commands are scripted, while
+HTTP/SQLite/crypto and Chromium execute for real. Docker/Core, Keycloak through
+Core and actual Caddy execution remain outstanding as explicitly described in
+`docs/evidence/g4-acceptance.md`. Backup references use existing DB/env and
+companion encrypted file packs; no new backup engine. Accepted progress remains
+30% pending G4 review. No later milestone, installer/updater or live changes.
+
+
+### G4 review correction — pinned image environment compatibility
+
+The official image fixture now includes its inherited CA setting. Two regression
+paths failed against `dff6e18`: managed runtime reinspection after first install
+and existing-container connection. The runtime guard now accepts exactly
+`SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`, without relaxing the remaining
+image/command/environment ownership checks. Tests also refuse changed, empty or
+conflicting CA settings and unrelated overrides before runtime mutation.
+
+Managed install → repeat adapter apply → route protection reuses resources and
+secrets; external connection/retry stays read-only. **22 focused tests pass;
+affected 190 total / 189 pass / one existing containment skip; frontend build
+passes.** Actual Core parser acceptance was reported by the user's independent
+review; full startup/login encountered a sandbox socket restriction. Existing
+real login/Caddy integration checks remain outstanding. No engine redesign,
+installer/updater, A-17, Phase F or later G work. Accepted progress stays **30%**
+until G4 acceptance, then **40%**. Evidence: `docs/evidence/g4-acceptance.md`.
+
+### G4 review acceptance (2026-09-22)
+
+The user accepted corrected head `6c3bdcb` and authorized merge in PR #616.
+Accepted guided progress is now **40% (4/10)**, superseding the pending entries
+above. The six fixed G4 criteria remain the contract; this follow-up records
+acceptance only and changes no tested runtime code.
+
+Evidence remains 22 focused passes, affected 189 pass / one existing containment
+skip, successful frontend build and retained responsive checks. Actual Core
+parser acceptance was reported by the independent review; full startup hit an
+Envoy sandbox socket restriction. Real Pomerium–Keycloak allowed/denied login and
+Caddy execution remain outstanding integration checks. Separate production host
+and outage limits remain in `docs/evidence/g4-acceptance.md`. Merge authorizes no
+deployment or live changes. No G5–G10, A-17 or Phase F continuation; stop at G4.

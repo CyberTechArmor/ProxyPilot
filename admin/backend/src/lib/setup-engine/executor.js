@@ -648,14 +648,16 @@ export function originChain(db, job, params, { max = 32 } = {}) {
 
 // ownedFrom(db, job, chain) → the changes this operation created, from the
 // fenced generated records of its own attempts and of the origins it
-// retries that did not complete — a succeeded origin's changes are the
-// operator's working state and are never inherited for a rollback.
+// retries back to — and excluding — the first succeeded ancestor: a
+// succeeded origin's changes are the operator's working state, and what an
+// older failed attempt created under the same names was superseded by that
+// success (R-056), so ownership never crosses it.
 const OWNED_KINDS = Object.freeze(['forward_row', 'proxy_device', 'firewall_rule']);
 export function ownedFrom(db, job, chain = []) {
   const out = [];
   const add = (row) => { for (const g of (parseJson(row?.progress_json) || {}).generated || []) if (OWNED_KINDS.includes(g.kind) && g.name && !out.some((o) => o.kind === g.kind && o.name === g.name)) out.push({ kind: g.kind, name: g.name, where: g.where || null }); };
   add(getJob(db, job.id));
-  for (const o of chain || []) if (o.status !== 'succeeded') add(o);
+  for (const o of chain || []) { if (o.status === 'succeeded') break; add(o); }
   return out;
 }
 

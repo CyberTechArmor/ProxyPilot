@@ -988,9 +988,22 @@ inferred from an id, an `already` state or an issued command — the job
 records `forward_row`, `proxy_device` and `firewall_rule` as generated
 (the fenced progress record) only after the create reported success and
 was not tolerated by name; a resumed attempt reads its own records; a
-retry inherits the records of the origins in its chain that did NOT
-succeed (a succeeded origin's changes are the operator's working state,
-never a rollback subject); every step carries `owned: true | false`.
+retry inherits the records of the failed attempts newer than the first
+succeeded ancestor in its chain and nothing older (R-056: a succeeded
+origin's changes are the operator's working state, and what an older
+failed attempt created under the same names was superseded by that
+success — the snapshot history is separate and still walks the whole
+chain); every step carries `owned: true | false`. A resource present on a
+resume after a write had begun, with no record of its step and no
+ownership record, may have been created by the interrupted attempt just
+before its record persisted: it is `present` with `ownership: uncertain`
+(`owned: null`), never `already` (R-057); the settlement leaves it
+(`unresolved … — not removed`), ends `rollback.state: unresolved` and
+`partial: true`, and the reason and the recovery-required verification
+name the resource and the operator action (decide whether it belongs to
+the forward, remove it by hand if it does, retry). Reconstructing
+ownership from the guest or cleaning such a resource up automatically is
+deferred (`docs/known-issues.md`).
 A retry of a completed forward that fails at the reconcile because an
 unrelated saved policy is rejected keeps the row, the device and the rule
 (`kept (not created by this operation)`, `rollback.state: none`) and
@@ -1276,7 +1289,8 @@ shared with the main suite (`helpers/scripted-config-host.js`), models the
 CLI's save-before-reconcile order with `status`, `reconcile --dry-run` and
 `reconcile` as the evidence.
 
-`setup-guest-config.test.js` (26 tests; the reserved-ports drop-in written
+`setup-guest-config.test.js` (28 tests, the last two the closing
+corrections R-056 / R-057; the reserved-ports drop-in written
 under the sandbox's real `sh` against a temp file, twice — once alone, once
 through the executor from a forward job; the rest over a scripted host —
 `incus`, the firewall CLI by its path, a `sysctl` that reads the temp file

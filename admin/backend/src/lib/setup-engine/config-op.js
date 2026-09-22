@@ -280,7 +280,14 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
         // claimed); after an interrupted issue it is this job's work.
         const already = step.refuseAlready ? step.refuseAlready(before, { issuedBefore }) : null;
         if (already) { stopped = { step: step.key, refused: true, notFound: !!before.notFound, error: already }; break; }
-        applied[step.key] = { state: issuedBefore && applied[step.key]?.issued ? 'done' : 'already', observed: before.observed, issued: false, ...(step.creates ? { owned: owned(step.creates) } : {}), ...(before.extra || {}) };
+        // A resource present after an interrupted attempt that had begun
+        // writing, with no record of this step and no ownership record, may
+        // have been created by that attempt just before its record was
+        // persisted: `present` with ownership uncertain — never claimed as
+        // pre-existing, never removed by the settlement (R-057).
+        const rec = applied[step.key];
+        const uncertain = issuedBefore && !rec && !!step.creates && !owned(step.creates);
+        applied[step.key] = { state: rec?.issued ? 'done' : uncertain ? 'present' : 'already', observed: before.observed, issued: false, ...(step.creates ? (uncertain ? { owned: null, ownership: 'uncertain', detail: `present after an interrupted attempt that had begun writing, with no record of this step: whether that attempt created it is not recorded` } : { owned: owned(step.creates) }) : {}), ...(before.extra || {}) };
         continue;
       }
       const refusal = step.refuse ? step.refuse(before, { issuedBefore }) : null;
@@ -360,7 +367,7 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
   const ok = !stopped && failedSteps.length === 0 && notRun.length === 0;
   if (ok && protection) warnings.push(`${protection.detail}; no further change was needed — the completed changes were read back only`);
   const summary = summarize(applied);
-  const partial = !ok && Object.values(applied).some((a) => a.state === 'done');
+  const partial = !ok && (Object.values(applied).some((a) => a.state === 'done') || rollback?.unresolvedOwnership?.length > 0);
   const extras = collect(kind, applied);
   mark('verified', cp({ issued: issuedAny, snapshot, applied, ok, ...(rollback ? { rollback } : {}), ...(protection ? { protection } : {}) }), ok ? `${name}: ${summary}; verified` : `${name}: ${summary}; ${stopped?.error || 'not verified'}`);
   log(kind, `${name}: ${summary}${warnings.length ? `; ${warnings.join('; ')}` : ''}`);
@@ -370,7 +377,7 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
       refused: !!stopped?.refused, notFound: !!stopped?.notFound, notIssued: !!stopped?.notIssued, superseded: !!stopped?.superseded, issued: issuedAny, partial, applied, notRun, snapshot, previous, instanceState: inst?.status || null, identity, ...extras,
       ...(protection ? { protection } : {}), ...(rollback ? { rollback } : {}),
       ...(warnings.length ? { warnings } : {}),
-      verification: configVerification(kind, false, { container: name, label: `${name}: ${summary}`, failedAt: stopped?.step || failedSteps[0] || 'verify', facts: { applied: Object.fromEntries(Object.entries(applied).map(([k, a]) => [k, a.state])) } }),
+      verification: configVerification(kind, false, { container: name, label: `${name}: ${summary}`, failedAt: stopped?.step || failedSteps[0] || 'verify', ...(rollback?.unresolvedOwnership?.length ? { next: `ownership unresolved after an interrupted attempt: ${rollback.unresolvedOwnership.join(', ')} — read the guest ('incus list ${name} --format json') and the firewall ('proxypilot --json firewall list'), decide whether each belongs to forward ${p.forward?.id}, remove it by hand if it does, then retry` } : {}), facts: { applied: Object.fromEntries(Object.entries(applied).map(([k, a]) => [k, a.state])), ...(rollback?.unresolvedOwnership?.length ? { unresolvedOwnership: rollback.unresolvedOwnership } : {}) } }),
     });
   }
   return {
@@ -538,18 +545,22 @@ function buildSteps(kind, p, { name, run, instance, reservedPath, store }) {
 // could not be removed (the L4 reconciler sweeps an orphan device).
 async function settleForward({ p, name, run, instance, applied, store, owned, job, report }) {
   const f = p.forward; const dev = forwardDeviceName(f.id); const ruleId = forwardRuleId(f.id);
-  const out = { row: null, device: null, rule: null, reconcile: null, reserved: null, unresolved: null, summary: '' };
+  const out = { row: null, device: null, rule: null, reconcile: null, reserved: null, unresolved: null, unresolvedOwnership: [], summary: '' };
   const NOT_OURS = 'kept (not created by this operation)';
+  // Ownership uncertain (R-057): not removed, and never reported settled.
+  const UNSURE = 'unresolved (present after the interrupted attempt; its creation is not recorded) — not removed';
+  const unsure = (key) => applied[key]?.ownership === 'uncertain';
   report('rollback', `settling forward ${f.id}…`);
   job.fence({ safe: false });
   const readBack = async (fn) => { try { return await fn(); } catch (e) { if (e instanceof ReadBackError) return { unknown: e.message }; throw e; } };
   // The row: through the fenced store, and only when this operation wrote it.
   const had = !!store.get(f.id);
-  out.row = !had ? 'absent' : !owned({ kind: 'forward_row', name: f.id }) ? NOT_OURS : store.delete(f.id) > 0 ? 'removed' : 'kept';
+  out.row = !had ? 'absent' : unsure('row') ? UNSURE : !owned({ kind: 'forward_row', name: f.id }) ? NOT_OURS : store.delete(f.id) > 0 ? 'removed' : 'kept';
   // The device: only when this operation added it.
   const i = await readBack(instance);
   if (i?.unknown) out.device = `unknown: ${sanitizeReason(i.unknown, 120)}`;
   else if (!(i?.devices || {})[dev]) out.device = 'absent';
+  else if (unsure('device')) out.device = UNSURE;
   else if (!owned({ kind: 'proxy_device', name: dev })) out.device = NOT_OURS;
   else {
     const r = await run(forwardDeviceRemoveArgv(name, f.id), { timeoutMs: TIMEOUTS.incus });
@@ -560,6 +571,7 @@ async function settleForward({ p, name, run, instance, applied, store, owned, jo
   const l = await run(firewallListArgv(), { timeoutMs: TIMEOUTS.firewall }); const list = l.code === 0 ? parseCliJson(l.stdout) : null;
   if (!Array.isArray(list)) out.rule = 'unreadable';
   else if (!list.some((r) => r && r.id === ruleId)) out.rule = 'absent';
+  else if (unsure('rule')) out.rule = UNSURE;
   else if (!owned({ kind: 'firewall_rule', name: ruleId })) out.rule = NOT_OURS;
   else {
     const r = await run(firewallRemoveArgv(f.id), { timeoutMs: TIMEOUTS.firewall }); const c = firewallCliResult(r);
@@ -570,8 +582,10 @@ async function settleForward({ p, name, run, instance, applied, store, owned, jo
   if (applied.reconcile?.state === 'failed') out.unresolved = `the applied firewall policy is unresolved: ${applied.reconcile.reconcile?.rejection || applied.reconcile.detail || 'the reconcile did not apply'}`;
   const removed = ['row', 'device', 'rule'].filter((k) => out[k] === 'removed');
   const leftovers = ['device', 'rule'].filter((k) => out[k] && /^(kept \(exit|unknown|unreadable)/.test(out[k]));
-  out.summary = `${removed.length ? 'rolled back' : 'nothing rolled back'}: row ${out.row}, device ${out.device}, rule ${out.rule}${out.reconcile ? ` (reconcile ${out.reconcile})` : ''}${leftovers.length ? ` — ${leftovers.join(' and ')} could not be removed by this job; the L4 reconciler sweeps an orphan device at its next pass, or retry` : ''}${out.unresolved ? `; ${out.unresolved}` : ''}`;
-  applied.rollback = { state: leftovers.length ? 'partial' : removed.length ? 'done' : 'none', ...out };
+  out.unresolvedOwnership = ['row', 'device', 'rule'].filter((k) => out[k] === UNSURE);
+  const named = { row: `the row of forward ${f.id} in service_l4_forwards`, device: `proxy device ${dev} on ${name}`, rule: `firewall rule ${ruleId}` };
+  out.summary = `${removed.length ? 'rolled back' : 'nothing rolled back'}: row ${out.row}, device ${out.device}, rule ${out.rule}${out.reconcile ? ` (reconcile ${out.reconcile})` : ''}${leftovers.length ? ` — ${leftovers.join(' and ')} could not be removed by this job; the L4 reconciler sweeps an orphan device at its next pass, or retry` : ''}${out.unresolvedOwnership.length ? `; ownership unresolved: ${out.unresolvedOwnership.map((k) => named[k]).join(', ')} — decide whether it belongs to forward ${f.id} and remove it by hand if it does, or retry once the forward is wanted; this job removed nothing whose ownership it could not establish` : ''}${out.unresolved ? `; ${out.unresolved}` : ''}`;
+  applied.rollback = { state: out.unresolvedOwnership.length ? 'unresolved' : leftovers.length ? 'partial' : removed.length ? 'done' : 'none', ...out };
   job.event?.('step', out.summary, { rollback: out }, 'rollback');
   return out;
 }

@@ -47,7 +47,7 @@ import {
 import { scriptedConfigHost as scriptedHost, forwardsSchema, forwardRows, mcpCtx, parse, AUTH } from './helpers/scripted-config-host.js';
 import { runConfigOperation } from '../lib/setup-engine/config-op.js';
 import { ownerIdentity, parseJson, validateRunnerJob, reconcileDecision, RUNNER_JOB_KINDS, MUTATING_JOB_KINDS, EXCLUSIVE_JOB_KINDS, CONFIG_JOB_KINDS } from '../lib/setup-engine/logic.js';
-import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, createJob, claimNextJob, checkpoint, runnerHeartbeat, listJobs, releaseLock, requeueJob, takeoverLock } from '../lib/setup-engine/store.js';
+import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, createJob, claimNextJob, checkpoint, runnerHeartbeat, listJobs, releaseLock, requeueJob, takeoverLock, recordGenerated } from '../lib/setup-engine/store.js';
 import { runOnce, reconcile, fencedForwardStore, originChain, ownedFrom } from '../lib/setup-engine/executor.js';
 import { submitRunnerJob, runSubmittedJob, resultFromJob } from '../lib/setup-engine/orchestrator.js';
 import { sweepSetupEngineOnBoot } from '../lib/setup-engine/backend.js';
@@ -895,4 +895,49 @@ test('the retry chain and the ownership records: originChain follows retry_of ac
   assert.deepEqual(originChain(d, getJob(d, 'k1'), {}), [], 'another kind: no chain');
   d.prepare(`UPDATE setup_jobs SET retry_of = 'j3' WHERE id = 'j0'`).run();
   assert.deepEqual(originChain(d, getJob(d, 'j3'), {}).map((o) => o.id), ['j2', 'j1', 'j0'], 'a cycle stops the walk');
+});
+
+// ── the closing corrections (R-056, R-057) ────────────────────────────────
+
+const FWD_PARAMS = { container: 'pp-x', forward: { id: 'f1', proto: 'tcp', listen: 7881, connect: 7881 }, bridgeIp: '10.10.10.5', serviceId: 'svc-x', serviceTag: 'x', expect: IDENTITY };
+
+test('rollback ownership stops at a successful retry (R-056): an initial forward fails, its retry succeeds, a later retry fails at the reconcile — the working forward\'s row, device and rule remain; the old failed ancestor\'s records authorize nothing', async () => {
+  const d = db(); const c = clock(); const st = { instances: [inst()], fwAddFails: true }; const h = scriptedHost(st);
+  const initial = submit(d, 'forward_apply', FWD_PARAMS); await runAll(d, exec(h), c);
+  const i0 = getJob(d, initial.job.id); assert.equal(i0.status, 'failed', i0.reason); assert.match(i0.reason, /rolled back: row removed, device removed/);
+  assert.ok((JSON.parse(i0.progress_json).generated || []).some((g) => g.kind === 'proxy_device' && g.name === 'ppl4-f1'), 'the failed ancestor recorded the device it created (and removed)');
+  st.fwAddFails = false;
+  const retry1 = createJob(d, { kind: 'forward_apply', app: 'pp-x', plan: retryPlan(i0), retryOf: i0.id, nowMs: c.nowMs() }); await runAll(d, exec(h), c);
+  assert.equal(getJob(d, retry1.id).status, 'succeeded', getJob(d, retry1.id).reason);
+  st.rules.push({ id: 'operator-ssh', source: 'manual', port_start: 2222, port_end: null, proto: 'tcp', scope: 'public', enabled: true }); st.rejectReconcile = 'lockout: the SSH source would be blocked'; h.calls.length = 0;
+  const retry2 = createJob(d, { kind: 'forward_apply', app: 'pp-x', plan: retryPlan(getJob(d, retry1.id)), retryOf: retry1.id, nowMs: c.nowMs() }); await runAll(d, exec(h), c);
+  const r2 = getJob(d, retry2.id); assert.equal(r2.status, 'failed', r2.reason); assert.equal(r2.outcome, 'failed at reconcile');
+  assert.deepEqual(forwardRows(d).map((r) => r.id), ['f1'], 'the working forward\'s row remains'); assert.equal(st.instances[0].devices['ppl4-f1']?.type, 'proxy', 'its device remains'); assert.ok(st.rules.some((r) => r.id === 'service-l4-f1'), 'its rule remains');
+  assert.deepEqual(mutations(h).map((a) => a[3]), ['reconcile'], 'nothing removed');
+  const r = resultFromJob(r2); assert.equal(r.applied.rollback.state, 'none'); assert.equal(r.applied.row.owned, false); assert.equal(r.applied.device.owned, false);
+});
+
+test('uncertain creation is reported, not resolved (R-057): interrupted between the proxy device\'s creation and its ownership record, resumed, then failed at the rule — the device is `present` with ownership uncertain, never pre-existing; the settlement removes the owned row, leaves the device, and reports the unresolved ownership with the operator action instead of a completed rollback', async () => {
+  const d = db(); const c = clock();
+  const st = { instances: [inst({ devices: { 'ppl4-f1': { type: 'proxy', listen: 'tcp:0.0.0.0:7881', connect: 'tcp:10.10.10.5:7881' } } })], fwAddFails: true }; const h = scriptedHost(st);
+  d.prepare(`INSERT INTO service_l4_forwards (id, service_id, proto, listen_port, connect_port, enabled) VALUES ('f1', 'svc-x', 'tcp', 7881, 7881, 1)`).run();
+  createJob(d, { id: 'dead-fwd', kind: 'forward_apply', app: 'pp-x', plan: { steps: [], params: FWD_PARAMS }, nowMs: T0 - 100_000 });
+  const claimed = claimNextJob(d, { owner: DEAD, kinds: ['forward_apply'], nowMs: T0 - 99_000 });
+  // The row's ownership was recorded and its step checkpointed; the device
+  // add had returned but the owner died before `recordGenerated` ran.
+  recordGenerated(d, { id: 'dead-fwd', owner: DEAD, epoch: claimed.epoch, resource: { kind: 'forward_row', name: 'f1', where: 'pp-x' }, nowMs: T0 - 98_600 });
+  checkpoint(d, { id: 'dead-fwd', owner: DEAD, epoch: claimed.epoch, phase: 'applied', checkpoint: { config: true, resumable: true, disruptive: false, issued: true, target: IDENTITY, container: 'pp-x', kind: 'forward_apply', applied: { row: { state: 'done', issued: true, owned: true } } }, nowMs: T0 - 98_000 });
+  assert.deepEqual(reconcile({ db: d, owner: RUNNER, nowMs: T0 }).requeued, ['dead-fwd']);
+  await runAll(d, exec(h), c);
+  const row = getJob(d, 'dead-fwd'); assert.equal(row.status, 'failed', row.reason); assert.equal(row.outcome, 'failed at rule');
+  const r = resultFromJob(row);
+  assert.equal(r.applied.device.state, 'present'); assert.equal(r.applied.device.ownership, 'uncertain'); assert.equal(r.applied.device.owned, null); assert.notEqual(r.applied.device.state, 'already', 'never pre-existing');
+  assert.equal(st.instances[0].devices['ppl4-f1']?.type, 'proxy', 'the device of uncertain ownership is NOT removed');
+  assert.deepEqual(forwardRows(d), [], 'the owned row is removed');
+  assert.equal(r.applied.rollback.state, 'unresolved'); assert.deepEqual(r.rollback.unresolvedOwnership, ['device']); assert.match(r.rollback.device, /^unresolved/); assert.equal(r.rollback.row, 'removed');
+  assert.equal(r.partial, true); assert.match(row.reason, /ownership unresolved: proxy device ppl4-f1 on pp-x — decide whether it belongs to forward f1/);
+  assert.doesNotMatch(row.reason, /rolled back: row removed, device removed/);
+  const v = JSON.parse(row.verification_json); assert.match(v.next, /ownership unresolved after an interrupted attempt: device/);
+  assert.equal(v.state, 'recovery_required'); assert.deepEqual(v.facts.unresolvedOwnership, ['device']);
+  assert.deepEqual(mutations(h).map((a) => a[3]), ['add-service-l4'], 'the rule attempted once; no removal issued');
 });

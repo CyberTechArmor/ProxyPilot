@@ -321,12 +321,13 @@ test('ratchet (A-17.8): the guest configuration verbs and their pre-mutation sna
   assert.match(op, /writeBegun: writeBegun \|\| issuedAny, \.\.\.extra/, 'every checkpoint carries the flag');
   assert.match(op, /mark\('applied', cp\(\{ issued: true, snapshot, applied \}\), `\$\{step\.key\}: \$\{applied\[step\.key\]\.state\}`, \{ required: true \}\);/, 'the step outcome is required on the record before anything acts on it');
   assert.match(op, /if \(step\.creates && r\.code === 0 && !r\.tolerated && !owned\(step\.creates\)\) \{ ownedList\.push\(step\.creates\); job\.generated\(step\.creates\); \}/, 'a created change is recorded in the fenced progress record');
-  assert.match(op, /out\.row = !had \? 'absent' : !owned\(\{ kind: 'forward_row', name: f\.id \}\) \? NOT_OURS : store\.delete\(f\.id\) > 0 \? 'removed' : 'kept';/, 'the rollback removes only what this operation created');
+  assert.match(op, /out\.row = !had \? 'absent' : unsure\('row'\) \? UNSURE : !owned\(\{ kind: 'forward_row', name: f\.id \}\) \? NOT_OURS : store\.delete\(f\.id\) > 0 \? 'removed' : 'kept';/, 'the rollback removes only what this operation created, and nothing whose ownership is uncertain');
+  assert.match(executor, /for \(const o of chain \|\| \[\]\) \{ if \(o\.status === 'succeeded'\) break; add\(o\); \}/, 'ownership never crosses a succeeded ancestor (R-056)');
   assert.doesNotMatch(op.slice(op.indexOf('async function settleForward')), /catch \(e\) \{ out\./, 'no cleanup step converts an error into a best-effort note');
   assert.match(executor, /forwardStore: fencedForwardStore\(db, \{ jobId: job\.id, owner, epoch, app: job\.app, lockEpoch, heldEpochs, lost: \(\) => lost, noteLost: \(n\) => \{ lost = n; \}, nowMs \}\),/, 'the forward store is fenced at the database boundary');
   assert.match(executor, /db\.exec\('BEGIN IMMEDIATE'\);\n\s+let out;\n\s+try \{ const gone = renew\(\); if \(gone\) raise\(gone\);/, 'each write renews the claim and every lease inside its own transaction');
   assert.match(executor, /originWriteBegun: chain\.some\(/, 'the executor walks the whole retry chain');
-  assert.match(executor, /for \(const o of chain \|\| \[\]\) if \(o\.status !== 'succeeded'\) add\(o\);/, 'a succeeded origin\'s changes are never inherited for a rollback');
+
   assert.match(src('lib/setup-engine/logic.js'), /EXCLUSIVE_JOB_KINDS = Object\.freeze\(\['restore_db', 'restore_snapshot', \.\.\.LIFECYCLE_JOB_KINDS, \.\.\.SETUP_JOB_KINDS, \.\.\.CONFIG_JOB_KINDS\]\)/);
   assert.match(executor, /keepAlive = setInterval\(\(\) => \{ try \{ const gone = renewAll\(\); if \(gone\) lost = gone; \}/, 'the claim, the guest\'s lease and every held shared lease are heart-beaten during a long command');
   assert.match(executor, /const jobFence = isConfig \? configFence : fence;/, 'and checked before every command');

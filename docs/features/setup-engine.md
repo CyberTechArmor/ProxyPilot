@@ -1164,6 +1164,10 @@ the #611 policy/restart corrections were already present and are retained.
   do not overwrite a database the update has not yet changed. The existing
   explicit policy values, generic-sync exclusion, readiness-only promotion
   and refused-restart checks remain in force.
+  Native updates also arm recovery before PM2 or nohup startup, since startup
+  can migrate the database before failing readiness. Recovery stops the PM2
+  application and checks its reported PIDs, or terminates the recorded nohup
+  child and waits for its exit; an unconfirmed stop refuses restoration.
 - **U2 — existing host writes.** The only new `ReadWritePaths` are
   `/root/.proxypilot` and `/etc/sysctl.d`. `HOME=/root` plus
   `cli/src/config.js` resolves the existing CLI database to
@@ -1193,6 +1197,15 @@ The additional `self-update-runner` / `self-update-driver` checks had 17
 passes and 5 environment failures: this sandbox denies Unix socket listeners
 (`listen EPERM` in the stub agent). `bash -n update.sh`, `bash -n install.sh`
 and `git diff --check` passed.
+
+Native-recovery follow-up: **43/43 passed** across `update-runner-maintenance`,
+`update-runner-policy` and `setup-runner`. One added regression test executes
+the actual native startup stanza and error handler with real temporary
+SQLite connections: failed PM2 startup, refused stop, falsely successful
+stop with a live PID, and nohup failure with an actual temporary child.
+It proves rollback removes startup changes only after the writer closes;
+users, keys and configuration are preserved. Both shell syntax checks and
+the diff check passed. Actual PM2/systemd host execution remains unverified.
 
 Outside these two corrections: the pre-existing raw-copy backup mechanism
 is not an atomic snapshot of concurrent writes, and the existing Docker

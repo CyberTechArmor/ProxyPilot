@@ -23,10 +23,12 @@ const lift = (name) => {
 };
 const maintenance = SOURCE.slice(SOURCE.indexOf('        # Do not enter maintenance'), SOURCE.indexOf('        $DC_CMD up -d') + '        $DC_CMD up -d'.length);
 assert.ok(maintenance.includes('migrate_db_layout'));
+const nativeStartup = SOURCE.slice(SOURCE.indexOf('    # Check if PM2 is available', SOURCE.indexOf('    # Non-Docker deployment:')), SOURCE.indexOf('    # Second gate:'));
+assert.ok(nativeStartup.includes('pm2 start src/index.js'));
 const traps = SOURCE.match(/^trap 'on_error' EXIT\ntrap 'exit 130' INT\ntrap 'exit 143' TERM/m)?.[0];
 assert.ok(traps, 'the production exit/signal handlers');
 
-function harness(t, { legacy = false, refuseStop = false, falseStop = false, queryFail = false, absent = false, failBuild = false, failDown = false, restartFail = false, staleSidecars = false, failEnvWrite = false } = {}) {
+function harness(t, { legacy = false, refuseStop = false, falseStop = false, queryFail = false, absent = false, failBuild = false, failDown = false, restartFail = false, staleSidecars = false, failEnvWrite = false, nativeStop = 'stopped', nativeMode = 'pm2' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pp-maintenance-'));
   const install = join(root, 'opt/proxypilot');
   const bin = join(root, 'bin');
@@ -62,7 +64,10 @@ function harness(t, { legacy = false, refuseStop = false, falseStop = false, que
     }
     rmSync(join(state, 'active'), { force: true });
   }
-  function closeBackend() { if (backend) { backend.close(); backend = null; trace.push('backend closed'); } }
+  function closeBackend() {
+    if (backend) { backend.close(); backend = null; trace.push('backend closed'); }
+    rmSync(join(state, 'backend-active'), { force: true });
+  }
   function openRunner(path = envDb()) {
     assert.equal(runner, null);
     runner = open(path);
@@ -88,6 +93,12 @@ function harness(t, { legacy = false, refuseStop = false, falseStop = false, que
       }
       if (action === 'down') { assert.equal(runner, null, 'runner must stop before Docker down'); closeBackend(); }
       if (action === 'up') { closeBackend(); backend = open(envDb()); }
+      if (action === 'native-start') {
+        backend = open(envDb());
+        backend.exec("INSERT INTO changes VALUES ('failed-native-start');");
+        writeFileSync(join(state, 'backend-active'), '1');
+      }
+      if (action === 'native-stop') closeBackend();
       if (action === 'status') {
         assert.ok(runner, 'a real runner connection exists at readiness');
         assert.equal(runner.location(), envDb(), 'readiness is for the final database path');
@@ -121,7 +132,32 @@ case "$2" in
 esac
 `);
   writeExe('proxypilot', bridge + 'request status\n');
-  writeExe('sleep', 'exit 0\n');
+  writeExe('pm2', bridge + `echo "pm2 $*" >> "$FAKE_STATE/calls"
+case "$1" in
+ delete) exit 0 ;;
+ start) request native-start; exit 31 ;;
+ stop) ${nativeStop === 'refused' ? 'exit 1' : nativeStop === 'still-running' ? 'exit 0' : 'request native-stop'} ;;
+ pid) if [ -f "$FAKE_STATE/backend-active" ]; then echo 424242; else echo 0; fi ;;
+ *) exit 97 ;;
+esac
+`);
+  // An actual child process stands in for nohup. Its signal handler closes
+  // the real SQLite writer via the same bridge as the PM2 test double.
+  writeExe('nohup', bridge + `echo $$ > "$FAKE_STATE/native-pid"
+trap 'request native-stop; exit 0' TERM
+request native-start
+while :; do /bin/sleep 0.01; done
+`);
+  writeExe('sleep', nativeMode === 'nohup' ? `
+if [ "$1" = 3 ]; then
+ for i in $(seq 1 500); do
+  if [ -f "$FAKE_STATE/backend-active" ]; then exit 0; fi
+  /bin/sleep 0.01
+ done
+ exit 98
+fi
+/bin/sleep 0.01
+` : 'exit 0\n');
   // Observe actual cp/mv/rm targets, rejecting any destructive database
   // operation while the simulated service still has its real connection.
   for (const name of ['cp', 'mv', 'rm']) writeExe(name, `
@@ -130,6 +166,7 @@ for p in "$@"; do
   if [ "${name}" != cp ] || [ "$p" = "\${!#}" ]; then
    echo "${name} $p" >> "$FAKE_STATE/calls"
    if [ -f "$FAKE_STATE/active" ]; then echo 'UNSAFE database mutation with active runner' >&2; exit 96; fi
+   if [ -f "$FAKE_STATE/backend-active" ]; then echo 'UNSAFE database mutation with active backend' >&2; exit 96; fi
   fi ;;
  esac
 done
@@ -137,7 +174,7 @@ exec /bin/${name} "$@"
 `);
   // Inject a failure after the DB moved but before its .env was rewritten.
   if (failEnvWrite) writeExe('awk', `if [[ "$*" == *DATABASE_PATH* ]]; then exit 27; fi\nexec /usr/bin/awk "$@"\n`);
-  const functions = ['log', 'log_verbose', 'backup_db', 'stop_setup_runner', 'stop_update_writers', 'migrate_db_layout', 'restore_db', 'on_error', 'install_setup_runner'].map(lift).join('\n')
+  const functions = ['log', 'log_verbose', 'backup_db', 'stop_setup_runner', 'stop_native_backend', 'stop_update_writers', 'migrate_db_layout', 'restore_db', 'on_error', 'install_setup_runner'].map(lift).join('\n')
     .replaceAll('/opt/proxypilot', install)
     .replaceAll('/etc/systemd/system', join(root, 'etc/systemd/system'))
     .replaceAll('/usr/local/bin/proxypilot', join(bin, 'proxypilot'))
@@ -153,6 +190,7 @@ VERBOSE=false
 RED='' GREEN='' YELLOW='' BLUE='' NC=''
 DB_BACKUP_FILE='' DB_BACKUP_SOURCE='' BACKUPS_TO_KEEP=5
 DB_MAINTENANCE_STARTED=false DB_LAYOUT_NEW_PATH='' DB_LAYOUT_ENV_BACKUP='' DB_LAYOUT_ENV_PATH=''
+NATIVE_BACKEND_MODE=''
 DC_CMD='docker compose'
 ${functions}
 `;
@@ -164,13 +202,49 @@ ${functions}
   });
   const snapshot = `backup_db ${quote(original)}\n`;
   const rows = (path = original) => { const d = new DatabaseSync(path); try { return d.prepare('SELECT value FROM changes').all().map((r) => r.value); } finally { d.close(); } };
-  t.after(() => { clearInterval(timer); closeRunner(); closeBackend(); rmSync(root, { recursive: true, force: true }); });
+  t.after(() => {
+    clearInterval(timer);
+    if (existsSync(join(state, 'native-pid'))) {
+      try { process.kill(Number(readFileSync(join(state, 'native-pid'), 'utf8')), 'SIGKILL'); } catch { /* child already reaped */ }
+    }
+    closeRunner(); closeBackend(); rmSync(root, { recursive: true, force: true });
+  });
   return { root, original, current, env, originalEnv, run, snapshot, trace, rows, openRunner,
     mutate: () => runner.exec("INSERT INTO changes VALUES ('post-backup');"),
     runnerOpen: () => runner !== null,
     calls: () => existsSync(join(state, 'calls')) ? readFileSync(join(state, 'calls'), 'utf8') : '',
   };
 }
+
+test('U1: failed PM2/native startup restores the backup only after its database writer stops', { skip }, async (t) => {
+  for (const [nativeMode, nativeStop] of [['pm2', 'stopped'], ['pm2', 'refused'], ['pm2', 'still-running'], ['nohup', 'stopped']]) {
+    const h = harness(t, { nativeStop, nativeMode }); h.openRunner();
+    // Execute the real startup branch and handlers with no Docker install.
+    // PM2 writes to real SQLite and reports a failed start while still open.
+    const selectNohup = nativeMode === 'nohup' ? 'command() { if [ "$*" = "-v pm2" ]; then return 1; fi; builtin command "$@"; }\n' : '';
+    const startup = nativeStartup.replaceAll('/tmp/proxypilot.log', join(h.root, 'native.log'));
+    const r = await h.run(h.snapshot + 'INSTALL_DIR=""\n' + traps + '\n' + selectNohup + startup + '\nexit 31');
+    assert.equal(r.status, 31, r.stdout + r.stderr);
+    assert.ok(h.trace.includes('native-start'));
+    if (nativeMode === 'pm2') assert.ok(h.calls().includes('pm2 stop proxypilot'));
+    assert.doesNotMatch(h.calls(), /docker compose/);
+    assert.doesNotMatch(r.stderr, /UNSAFE/);
+    assert.equal(readFileSync(h.env, 'utf8'), h.originalEnv);
+    if (nativeStop === 'stopped') {
+      assert.match(r.stdout, /Database restored/);
+      assert.deepEqual(h.rows(), ['backup-state'], 'failed-start changes must not survive rollback');
+      const calls = h.calls();
+      if (nativeMode === 'pm2') assert.ok(calls.indexOf('pm2 stop proxypilot') < calls.indexOf(`cp ${h.original}`), 'stop before real restore copy');
+      assert.ok(h.trace.indexOf('backend closed') < h.trace.indexOf('restart'), 'writer closed before runner recovery');
+      assert.ok(h.trace.includes('status'), 'runner readiness checked after recovery');
+    } else {
+      assert.match(r.stdout, /Recovery refused or failed/);
+      assert.doesNotMatch(r.stdout, /Database restored/);
+      assert.deepEqual(h.rows(), ['backup-state', 'failed-native-start']);
+      assert.ok(!h.trace.includes('restart'));
+    }
+  }
+});
 
 for (const legacy of [false, true]) {
   test(`U1: ${legacy ? 'legacy' : 'current'} layout stops an open runner, rebuilds, restarts and checks the final path`, { skip }, async (t) => {

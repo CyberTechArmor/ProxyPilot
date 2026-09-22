@@ -15,6 +15,7 @@ DB_BACKUP_FILE=""
 DB_BACKUP_SOURCE=""
 BACKUPS_TO_KEEP=5
 DB_MAINTENANCE_STARTED=false
+NATIVE_BACKEND_MODE=""
 DB_LAYOUT_NEW_PATH=""
 DB_LAYOUT_ENV_BACKUP=""
 DB_LAYOUT_ENV_PATH=""
@@ -767,8 +768,40 @@ stop_setup_runner() {
     fi
 }
 
+stop_native_backend() {
+    local pids i
+    case "${NATIVE_BACKEND_MODE:-}" in
+        pm2)
+            # Stop through PM2 so its supervisor cannot respawn the writer.
+            # A failed start may still have registered/running processes.
+            if pm2 stop proxypilot >>"$LOG_FILE" 2>&1 &&
+                pids="$(pm2 pid proxypilot 2>>"$LOG_FILE")" &&
+                [[ "$pids" =~ ^[0[:space:]]*$ ]]; then
+                return 0
+            fi
+            ;;
+        nohup)
+            # Only signal the child this update launched, not other Node apps.
+            if [[ "${NEW_PID:-}" =~ ^[0-9]+$ ]] && [ "$NEW_PID" -gt 1 ]; then
+                kill -TERM "$NEW_PID" 2>/dev/null || true
+                for i in 1 2 3 4 5 6 7 8 9 10; do
+                    if ! kill -0 "$NEW_PID" 2>/dev/null; then
+                        wait "$NEW_PID" 2>/dev/null || true
+                        return 0
+                    fi
+                    sleep 1
+                done
+            fi
+            ;;
+        *) return 0 ;;
+    esac
+    log "${RED}Cannot confirm the native backend stopped; refusing database maintenance (see $LOG_FILE)${NC}"
+    return 1
+}
+
 stop_update_writers() {
     stop_setup_runner || return 1
+    stop_native_backend || return 1
     if [ -n "${INSTALL_DIR:-}" ] && [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
         local compose="docker compose"
         if ! docker compose version &>/dev/null; then compose="docker-compose"; fi
@@ -2158,14 +2191,20 @@ PYEOF
     mkdir -p "$(dirname "$DATABASE_PATH")"
 
     # Check if PM2 is available
+    # Either startup can migrate the database before readiness fails: arm
+    # rollback before launching and remember which writer recovery must stop.
     if command -v pm2 &> /dev/null; then
         log "Using PM2..."
         pm2 delete proxypilot 2>/dev/null || true
+        NATIVE_BACKEND_MODE=pm2
+        DB_MAINTENANCE_STARTED=true
         pm2 start src/index.js --name proxypilot
         pm2 save
         log "${GREEN}Started with PM2${NC}"
     else
         log "Using nohup..."
+        NATIVE_BACKEND_MODE=nohup
+        DB_MAINTENANCE_STARTED=true
         nohup $NODE_CMD src/index.js > /tmp/proxypilot.log 2>&1 &
         NEW_PID=$!
         sleep 3
@@ -2206,7 +2245,7 @@ PYEOF
         log "${RED}Backend did not respond to /api/health within 60s.${NC}"
         log "${YELLOW}Last 30 lines from /tmp/proxypilot.log:${NC}"
         tail -30 /tmp/proxypilot.log 2>/dev/null || log "  (no log output)"
-        log "${RED}Update will be rolled back via the ERR trap.${NC}"
+        log "${RED}Update will be rolled back via the EXIT trap.${NC}"
         exit 1
     fi
     log "${GREEN}Backend is healthy on port ${PORT_TO_FREE}${NC}"

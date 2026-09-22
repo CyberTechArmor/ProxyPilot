@@ -226,7 +226,8 @@ are separate from scripted Caddy/host execution. Frontend build and responsive
 browser checks pass; final accessibility metrics are in `docs/evidence/g3-browser.json`.
 The user accepted G3 `4e7b257` and authorized its merge in PR #615 on 2026-09-22.
 At G3 acceptance, guided progress was **30% (3/10: G1, G2 and G3)**. With G4
-accepted below, current progress is **40% (4/10)**; G5–G10 remain planned and
+accepted below and historical G5 acceptance recorded in the recovery section,
+current accepted progress is **50% (5/10)**; G6–G10 remain planned and
 the milestone denominator is unchanged. Live-host acceptance limitations
 remain separate; this merge does not authorize deployment or live-service changes.
 
@@ -413,3 +414,39 @@ Envoy sandbox socket restriction. Real Pomerium–Keycloak allowed/denied login 
 Caddy execution remain outstanding integration checks. Separate production host
 and outage limits remain in `docs/evidence/g4-acceptance.md`. Merge authorizes no
 deployment or live changes. No G5–G10, A-17 or Phase F continuation; stop at G4.
+
+
+### G5 accepted-work recovery (2026-09-22)
+
+G5 was accepted at unavailable `a436546`; accepted guided progress is **50%
+(5/10)**, not another milestone. This branch reconstructs missing pieces on
+`main@d2ca73a`, which already contains accepted G4/PR #616. The original full tree
+cannot be certified identical. All 24 surviving source/test files, including this
+engine's recovered integrations, are unchanged and SHA256-verified against
+`docs/evidence/g5-recovered-files.json`. Remote checkpoint `ee3845f` preserves them
+before reconstruction. The original six G5 criteria are recorded in the platform
+ledger; no new completion gate is added.
+
+Recovered engine paths remain the implementation: migration 1006, encrypted
+`setup_infisical_credentials`, immutable reviewed configuration, `infisical_apply`
+runner operation, `configure_infisical_route` backend child, shared app/route/VM
+leases and existing restart reconciliation. Only the missing frontend API/page/
+component, guidance and current verification artifacts are restored. No runner,
+installer, updater, existing credential or later milestone redesign.
+
+Fresh affected execution: **210 tests / 209 pass / zero fail / one existing
+containment skip**. This includes 19 recovered G5 setup tests and actual pinned
+CLI 0.43.133 substitution/denial with a real Python consumer/destination but
+scripted upstream Infisical responses. UI and API restart, failure/retry, install/
+connect/skip, redaction, current production build and responsive checks are in
+[the current acceptance record](../evidence/g5-acceptance.md). Initial missing CLI
+bcryptjs was resolved by installing the locked CLI test dependencies, with no
+source/package changes. Native better-sqlite3/full entrypoint boot remains untested;
+fixtures use node:sqlite and actual production route/auth/job code.
+
+[Operator guidance](../features/guided-infisical.md) names the external bootstrap
+handoff, exact policies, supported proxy isolation, and matching service-data/
+encryption-key backup set through existing packs. Real Docker/Incus/Caddy/
+Infisical/PostgreSQL/Redis host acceptance remains outstanding separately; G4's
+real login/Caddy limits are unchanged. The recovery is published for PR review,
+not merged or deployed. No live services, DNS, databases or credentials changed.

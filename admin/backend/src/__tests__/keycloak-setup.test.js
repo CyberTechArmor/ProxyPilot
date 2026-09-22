@@ -132,7 +132,7 @@ test('actual API → saved revision → durable external job → runner verifica
     const state = (await request(server, '/api/setup/platform')).body;
     assert.equal(state.keycloak[0].verification.issuerExact, true);
     assert.equal(state.installation.verifiedServices.find(s=>s.id==='keycloak').state,'keycloak_connected');
-    assert.deepEqual(state.installation.installableServices,['keycloak','pomerium']); assert.equal(state.installation.loginActivationAvailable,false);
+    assert.deepEqual(state.installation.installableServices,['keycloak','pomerium','infisical']); assert.equal(state.installation.loginActivationAvailable,false);
     const skip = save(2); skip.choices.keycloak = { mode: 'skip', url: '' };
     await request(server, '/api/setup/platform', { method: 'PUT', body: skip });
     assert.equal((await request(server, '/api/setup/platform/keycloak/apply', { method: 'POST', body: { expectedRevision: 3, reviewed: true } })).body.code, 'KEYCLOAK_SKIPPED');

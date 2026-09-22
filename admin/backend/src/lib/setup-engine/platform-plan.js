@@ -1,3 +1,4 @@
+import { readInfisical } from './infisical-store.js';
 import { readPomerium } from './pomerium-store.js';
 // Saved intentions remain separate from G2 applied, immutable installation records.
 import { z } from 'zod';
@@ -16,7 +17,7 @@ export { PLATFORM_PLAN_SCHEMA } from './store.js';
 export const SERVICES = [
   { id: 'keycloak', name: 'Keycloak', description: 'Identity provider for shared sign-in. Login activation requires the later identity and recovery adapters.' },
   { id: 'pomerium', name: 'Pomerium', description: 'Access gateway: Caddy → Pomerium → application. Requires a verified identity provider; selecting Keycloak only records that intention.' },
-  { id: 'infisical', name: 'Infisical with Agent Proxy', description: 'Application secrets through Agent Proxy. Both endpoints are planned together; no credentials are collected.' },
+  { id: 'infisical', name: 'Infisical with Agent Proxy', description: 'Application secrets and a separate Agent Proxy for brokered credentials. Save choices first, then review the bounded guide.' },
   { id: 'openbao', name: 'OpenBao', description: 'Secrets and policy service. Initialization, unseal and recovery material are handled by a later adapter.' },
   { id: 'vaultwarden', name: 'Vaultwarden', description: 'Password vault. TLS, backup and recovery checks are required before a later installation can be activated.' },
 ];
@@ -34,13 +35,14 @@ const endpoint = z.string().trim().max(300).refine((value) => {
   .transform((value) => value ? new URL(value).origin.toLowerCase().replace(/\.(?=:\d+$|$)/, '') : '');
 const choice = z.object({ mode: z.enum(['install', 'connect', 'skip']), url: endpoint }).strict();
 const keycloakChoice = choice.extend({ realm: realmSchema.optional() }).strict();
-const infisicalChoice = choice.extend({ agentProxyUrl: endpoint }).strict();
+const infisicalChoice = choice.extend({ agentProxyUrl: endpoint, agentProxyMode:z.enum(['install','connect','skip']).optional() }).strict();
 export const choicesSchema = z.object(Object.fromEntries(SERVICES.map(({ id }) => [id, id === 'keycloak' ? keycloakChoice : id === 'infisical' ? infisicalChoice : choice]))).strict().superRefine((choices, ctx) => {
   for (const { id } of SERVICES) {
     const c = choices[id];
     for (const field of id === 'infisical' ? ['url', 'agentProxyUrl'] : ['url']) {
-      if (c.mode !== 'skip' && !c[field]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [id, field], message: 'An endpoint is required for an install or connection plan.' });
-      if (c.mode === 'skip' && c[field]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [id, field], message: 'Skipped services must not retain endpoints.' });
+      const selectedMode=id==='infisical'&&field==='agentProxyUrl' ? (c.mode==='skip'?'skip':c.agentProxyMode||c.mode) : c.mode;
+      if (selectedMode !== 'skip' && !c[field]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [id, field], message: 'An endpoint is required for an install or connection plan.' });
+      if (selectedMode === 'skip' && c[field]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [id, field], message: 'Skipped services must not retain endpoints.' });
     }
   }
 });
@@ -81,11 +83,12 @@ export function platformState(db) {
   const { services, routes, adminDomain } = platformInventory(db);
   const verified = keycloakState(db).filter(r => r.verification).sort((a, b) => b.verifiedAt.localeCompare(a.verifiedAt))[0];
   const gateway=readPomerium(db), gv=gateway?.verified_json?JSON.parse(gateway.verified_json):null;
+  const secrets=readInfisical(db),sv=secrets?.verified_json?JSON.parse(secrets.verified_json):null;
   return {
     classification: services.length || routes.length || adminDomain ? 'existing_configuration' : 'unknown',
     reason: services.length || routes.length || adminDomain ? 'Existing ProxyPilot configuration is recorded. Service installation and health are not inferred from it.' : 'No managed routes are recorded. This does not establish a fresh installation; unmanaged or external services may exist.',
-    verifiedServices: SERVICES.map(({ id, name }) => id === 'keycloak' && verified ? { id, name, state: verified.verification.state, connectionRef: verified.id, verifiedAt: verified.verifiedAt, reason: verified.verification.label } : id==='pomerium' && gv ? {id,name,state:gv.state,connectionRef:gateway.credential_ref,verifiedAt:gv.verifiedAt,reason:gv.label} : { id, name, state: 'not_checked', reason: id==='pomerium' ? 'Open guided Pomerium setup to verify its private runtime and selected routes.' : id === 'keycloak' ? 'No verified Keycloak connection is recorded.' : 'A service-specific verification adapter is not available.' }),
-    installationAvailable: true, installableServices: ['keycloak','pomerium'], loginActivationAvailable: false,
+    verifiedServices: SERVICES.map(({ id, name }) => id === 'keycloak' && verified ? { id, name, state: verified.verification.state, connectionRef: verified.id, verifiedAt: verified.verifiedAt, reason: verified.verification.label } : id==='pomerium' && gv ? {id,name,state:gv.state,connectionRef:gateway.credential_ref,verifiedAt:gv.verifiedAt,reason:gv.label} : id==='infisical'&&sv ? {id,name,state:sv.state,connectionRef:secrets.credential_ref,verifiedAt:sv.verifiedAt,reason:sv.label} : { id, name, state: 'not_checked', reason: id==='infisical' ? 'Open guided Infisical setup to verify the selected disposable credential flows.' : id==='pomerium' ? 'Open guided Pomerium setup to verify its private runtime and selected routes.' : id === 'keycloak' ? 'No verified Keycloak connection is recorded.' : 'A service-specific verification adapter is not available.' }),
+    installationAvailable: true, installableServices: ['keycloak','pomerium','infisical'], loginActivationAvailable: false,
   };
 }
 

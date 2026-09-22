@@ -1,0 +1,151 @@
+{
+  "date": "2026-09-22",
+  "execution": "Built frontend + real local API/SQLite; no host execution; no real secrets stack",
+  "audits": [
+    {
+      "state": "configuration",
+      "width": 360,
+      "scrollWidth": 360,
+      "clientWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "configuration",
+      "width": 375,
+      "scrollWidth": 375,
+      "clientWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "configuration",
+      "width": 768,
+      "scrollWidth": 768,
+      "clientWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "configuration",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "configuration",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "clientWidth": 1920,
+      "shortButtons": []
+    },
+    {
+      "state": "identity-form",
+      "width": 360,
+      "scrollWidth": 360,
+      "clientWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "identity-form",
+      "width": 375,
+      "scrollWidth": 375,
+      "clientWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "identity-form",
+      "width": 768,
+      "scrollWidth": 768,
+      "clientWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "identity-form",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "identity-form",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "clientWidth": 1920,
+      "shortButtons": []
+    },
+    {
+      "state": "identity-review",
+      "width": 360,
+      "scrollWidth": 360,
+      "clientWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "identity-review",
+      "width": 375,
+      "scrollWidth": 375,
+      "clientWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "identity-review",
+      "width": 768,
+      "scrollWidth": 768,
+      "clientWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "identity-review",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "identity-review",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "clientWidth": 1920,
+      "shortButtons": []
+    },
+    {
+      "state": "pending-reopened",
+      "width": 360,
+      "scrollWidth": 360,
+      "clientWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "pending-reopened",
+      "width": 375,
+      "scrollWidth": 375,
+      "clientWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "pending-reopened",
+      "width": 768,
+      "scrollWidth": 768,
+      "clientWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "pending-reopened",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "pending-reopened",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "clientWidth": 1920,
+      "shortButtons": []
+    }
+  ],
+  "errors": [],
+  "apiRestart": "encrypted references, reviewed identities and queued job reopened",
+  "redaction": "saved credentials absent from rendered state",
+  "axeViolations": [],
+  "lighthouseScore": 94
+}

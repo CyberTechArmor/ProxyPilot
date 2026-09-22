@@ -1,0 +1,27 @@
+✔ G5.1 production HTTP admin, CSRF, fresh-auth, strict inputs; save is inert and encrypted (163.500669ms)
+✔ G5.1 independent Agent Proxy skip and full skip install nothing (11.499574ms)
+✔ G5.2 retry refuses identity/credential rotation and stale or mutable target configuration (12.936039ms)
+✔ G5.2 audited exact effective rules reject broader and hidden folder grants (24.024227ms)
+✔ G5.1/.5 managed production runtime and Caddy adapters create once, reuse keys and preserve unrelated state (205.193333ms)
+✔ G5.2 incomplete handoff fails truthfully and retry preserves services and credentials (165.814393ms)
+✔ G5.3 conflicting existing disposable secret is never overwritten (46.300917ms)
+✔ G5.1 connect Infisical leaves its runtime/Caddy untouched; Agent Proxy skipped reports application only (19.758901ms)
+✔ G5.1 existing Agent Proxy verification is read-only and refuses changed command/environment/listeners (8.9861ms)
+✔ G5.5 foreign Docker collision and missing protected keys fail without replacement (8.197699ms)
+✔ G5.5 failed runtime and Caddy failures retry with the same references; raw failures redacted (126.558205ms)
+✔ G5.5 runner interruption reconciles and resumes from saved keys; backend never runs host setup (55.955733ms)
+✔ G5.5 recorded slow route child keeps parent queued; unrelated VM lock prevents delivery (56.15031ms)
+✔ G5.4 isolation refuses containers, shared devices, raw VM options and non-local private listeners (0.620063ms)
+✔ G5.5 job schema refuses commands/secrets; review token and platform intention are mandatory (8.913583ms)
+✔ G5 transport pins DNS, refuses redirects and strips error bodies (1.261959ms)
+✔ G5.5 real API process restart preserves encrypted references and queued job (1144.396776ms)
+✔ G5.4 retry rejects volume driver and private network drift before proxy start (9.775173ms)
+✔ G5.1 Connect accepts an existing dedicated bridge/volume without renaming or writing external resources (11.587643ms)
+ℹ tests 19
+ℹ suites 0
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2555.557024

@@ -39,7 +39,7 @@ import { CONTAINMENT_RUN_DIR } from './guest-probes.js';
 
 export const SETUP_JOB_KINDS = Object.freeze(['guest_setup']);
 // Executed by the backend whatever the executor policy (ProxyPilot's own rows and its Caddy render).
-export const BACKEND_STEP_KINDS = Object.freeze(['configure_pomerium_routes', 'configure_routes', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route']);
+export const BACKEND_STEP_KINDS = Object.freeze(['configure_infisical_route', 'configure_pomerium_routes', 'configure_routes', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route']);
 export const SETUP_PHASES = Object.freeze(['network_nat', 'await_address', 'dns', 'init_script', 'routes']);
 export const FIXUP_PHASES = Object.freeze(['network_nat', 'dns']);
 export const GUEST_PHASES = Object.freeze(['dns', 'init_script']);

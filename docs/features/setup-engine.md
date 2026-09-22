@@ -2067,3 +2067,28 @@ three-service/host acceptance. G4 is accepted at corrected head `6c3bdcb`
 (PR #616); accepted progress is **40% (4/10)**. Deployment has not been performed;
 the recorded integration and host checks remain outstanding. No installer/updater,
 A-17, Phase F or G5–G10 work.
+
+
+## G5 — guided Infisical and Agent Proxy
+
+Platform Setup independently selects Infisical and Agent Proxy install/connect/
+skip, saves inert plans and reviewed immutable test targets, protects identity
+credentials, shows the administrator handoff and exact scoped policies, and
+queues explicit apply/retry. `infisical_apply` runs in the existing host runner;
+`configure_infisical_route` uses the existing backend drain/Caddy locks. Progress,
+failed handoffs and configuration-bound verification survive browser/API/runner
+restart. Existing external resources and all current application credentials are
+preserved. Agent Proxy is separate from the secret-rendering Infisical Agent.
+
+Follow [the G5 operator guide](guided-infisical.md) for release/edition limits,
+first-administrator and identity handoffs, the one disposable application secret,
+proxy placeholder/denial flow, VM boundary and matching data/key backup references.
+[Current reconstruction evidence](../evidence/g5-acceptance.md) distinguishes actual
+CLI/HTTP/Python/SQLite/browser execution from scripted Docker/Incus/Caddy and
+Infisical responses. Full-stack host acceptance and G4 runtime limits stay separate.
+
+G5 was accepted at unavailable `a436546`: **50% (5/10)**. Its reconstructed tree
+has a new identity, preserves all 24 supplied source/test files unchanged and
+requires current verification. Recovery is submitted for review, not merged or
+deployed. No G6–G10, credential migration, installer/update changes or new restore
+framework is included.

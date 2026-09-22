@@ -154,7 +154,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | --- | --- | --- | --- |
 | G1 | Admin Platform Setup page; install/connect/skip intentions; validated versioned server draft; available read-only checks; review/save/reopen; existing jobs and redacted events. Installation/login activation unavailable. | B-01, bounded B-03 and observation portion of B-05; reuse A-04/A-05 and `/api/setup` | done — evidence below |
 | G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | accepted — 6/6 criteria, including slow Caddy handoff correction; `a039761` merged by #614; execution limits below |
-| G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | implemented — G3 only; repository checks and disposable ceremonies below; pending review, no accepted-progress credit |
+| G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | accepted — 7/7 criteria; `4e7b257`, PR #615; repository checks, disposable ceremonies and separate live-host limitations below |
 | G4 | Pomerium adapter and route integration | C-02 | planned — not authorized |
 | G5 | Infisical with Agent Proxy adapter | C-03 | planned — not authorized |
 | G6 | OpenBao adapter | C-04 | planned — not authorized |
@@ -235,8 +235,9 @@ install.sh/update.sh, resume A-17.9/Phase F, activate SSO (G3), or deploy.
 Additional prerequisites must cite the blocked criterion and concrete evidence;
 make only the smallest correction. Optional improvements stay backlog. Disposable
 repository tests only; no production DNS, database, credential or service changes.
-G2 repository completion: **6/6 criteria**. Guided milestones complete:
-**2/10 (G1 and G2)**. G3–G10 remain unimplemented; no SSO activation.
+G2 repository completion: **6/6 criteria**. At G2 acceptance, guided milestones
+complete were **2/10 (G1 and G2)**; G3–G10 were unimplemented. Current accepted
+guided progress is **30% (3/10: G1, G2 and G3)**; G4–G10 remain planned.
 
 G2.4 merge-review correction (2026-09-22): c180d2f could finish the Keycloak
 parent as `deferred` when its recorded Caddy job still held the shared app
@@ -315,7 +316,8 @@ acceptance below.
 Authorized: G3 only on `feat/g3-guided-sso`, based on `main@efa95c7`.
 Accepted G2 `a039761` is merged by PR #614. Accepted U1/U2 `e8445d2`
 is an ancestor. Existing worktrees are preserved. No dependency merge needed.
-Progress stays **20% accepted (2/10)** until G3 passes review, then **30% (3/10)**.
+The fixed progress rule was **20% accepted (2/10)** until G3 passes review,
+then **30% (3/10)**. G3 acceptance is recorded below.
 The denominator remains ten; repository evidence and live acceptance stay separate.
 
 | Criterion | Fixed completion requirement | Status / evidence |
@@ -331,7 +333,10 @@ The denominator remains ten; repository evidence and live acceptance stay separa
 Scope excludes G4–G10, A-17, Phase F, unrelated host operations and generated-app
 authentication. Preserve install.sh, update.sh and accepted U1/U2. Only concrete
 G3-blocking defects justify prerequisite fixes; optional improvements go to backlog.
-No merge, deployment, live identity mutation, credential rotation or service restart.
+Original implementation authorization excluded merge, deployment, live identity
+mutation, credential rotation and service restart. The subsequent user instruction
+"Please merge" authorizes the merge in PR #615 only; the live-operation exclusions
+remain in force.
 
 ## Host acceptance (separate from the code figures)
 
@@ -420,9 +425,11 @@ scope** (needs agreement before it becomes a row above).
 
 ### G3 implementation and evidence (2026-09-22)
 
-The seven criteria above remain the completion contract. G3 is implemented for
-review; accepted progress stays **20% (2/10)** until review accepts G3, then
-**30% (3/10)**. No G4–G10, A-17 or Phase F work is included.
+The seven criteria above remain the completion contract. The user accepted G3
+`4e7b257` and authorized its merge in PR #615 on 2026-09-22. Accepted guided
+progress is **30% (3/10: G1, G2 and G3)**; the denominator remains ten.
+No G4–G10, A-17 or Phase F work is included. This acceptance adds no completion
+gates and does not claim live-host acceptance or authorize deployment.
 
 Migration 1004 stores configuration, protected credential references, explicit
 identity links, transient encrypted flows, per-session identity context and

@@ -224,8 +224,10 @@ G3 fixed criteria/evidence are in the platform ledger; operator guidance is in
 Keycloak 26.7.4/Chromium virtual-passkey ceremonies and an IdP-stopped local recovery
 are separate from scripted Caddy/host execution. Frontend build and responsive
 browser checks pass; final accessibility metrics are in `docs/evidence/g3-browser.json`.
-Accepted guided progress remains **20% (2/10)** until G3 passes review, then
-**30% (3/10)**. Other adapters remain planned; the milestone denominator is unchanged.
+The user accepted G3 `4e7b257` and authorized its merge in PR #615 on 2026-09-22.
+Accepted guided progress is **30% (3/10: G1, G2 and G3)**. Other adapters remain
+planned; the milestone denominator is unchanged. Live-host acceptance limitations
+remain separate; this merge does not authorize deployment or live-service changes.
 
 ## Milestone D — platform-aware app provisioning and maintenance
 

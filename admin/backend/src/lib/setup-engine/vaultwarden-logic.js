@@ -13,7 +13,7 @@ const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,99}$/);
 const secret = z.string().min(16).max(8192).regex(/^[^\r\n\0]+$/);
 export const configSchema = z.object({
   expectedPlanRevision: z.number().int().positive(), expectedRevision: z.number().int().nonnegative(),
-  connectionId: name, clientId: name, clientSecret: secret.optional(), adminToken: secret.optional(),
+  connectionId: name, clientId: name, clientSecret: secret.optional(), adminToken: z.string().min(1).max(8192).regex(/^[^\r\n\0]+$/).optional(),
   accessRole: name, matchExistingEmail: z.boolean(),
   allowedIps: z.array(z.string().refine(v => isIP(v) === 4)).max(16).default([]), reviewed: z.literal(true),
 }).strict();

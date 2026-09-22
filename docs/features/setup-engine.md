@@ -2116,3 +2116,33 @@ loads and validates the existing installation `TOTP_ENCRYPTION_KEY` using the
 resolved `.env`/`--env`. It never generates or rotates that key; missing,
 malformed or conflicting keys leave jobs unclaimed. Status and reconciliation remain available. A fresh-process regression covers the real
 command/executor without an inherited fixture key; see the G6 evidence record.
+
+
+## G7 — guided Vaultwarden (review pending)
+
+G6's accepted head `6e48d89` is included in main `24ba567e` after PR #618.
+G7 adds the [Vaultwarden guide](guided-vaultwarden.md): reviewed install/connect/
+skip, an inert save and explicit apply, a private independent persistent SQLite
+service, and read-only connection to an existing 1.37.3 instance. The dedicated
+Keycloak client handoff verifies exact callbacks, PKCE, role denial and the
+accepted passkey policy without changing other clients. Effective Vaultwarden
+configuration is read back including persisted overrides; client/admin credentials
+use the existing protected references and are preserved on retry.
+
+Migration 1008, `vaultwarden_apply` and `configure_vaultwarden_route` use the
+existing saved plans, host runner, backend drain and Caddy locks. Retry does not
+replace missing data, server keys or attempted resources. The accepted G6 runner
+key-loading correction remains unchanged. Browser/API/runner process checks and
+configuration-bound verification are covered in [G7 evidence](../evidence/g7-acceptance.md).
+
+Keycloak authentication is separate from vault unlock. The UI records explicitly
+operator-observed disposable browser SSO/unlock/item/denial/account-preservation
+checks, with no master password, recovery code or item content accepted.
+SSO-only stays off. Recovery guidance covers the matching database, attachments,
+configuration and signing keys through existing mechanisms; real restore remains
+separate host acceptance. Actual Vaultwarden/Keycloak ceremony and Caddy runtime
+were unavailable here and are not claimed as passes.
+
+Accepted progress stays **60% (6/10)** until G7 review acceptance, then **70%**.
+No G8–G10, migration/import, A-17, Phase F, installer/updater/U1/U2 change or live
+operation is included. This slice stops after G7.

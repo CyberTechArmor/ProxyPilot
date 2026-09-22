@@ -1,0 +1,177 @@
+{
+  "date": "2026-09-22T21:05:23.765Z",
+  "execution": "Built UI, production HTTP/auth/CSRF/SQLite and runner; scripted Vaultwarden and Keycloak upstreams. Operator observations are scripted, NOT actual SSO/unlock.",
+  "audits": [
+    {
+      "state": "install-form",
+      "width": 360,
+      "scrollWidth": 360,
+      "cardWidth": 326,
+      "cardScrollWidth": 326,
+      "shortButtons": []
+    },
+    {
+      "state": "install-form",
+      "width": 375,
+      "scrollWidth": 375,
+      "cardWidth": 341,
+      "cardScrollWidth": 341,
+      "shortButtons": []
+    },
+    {
+      "state": "install-form",
+      "width": 768,
+      "scrollWidth": 768,
+      "cardWidth": 446,
+      "cardScrollWidth": 446,
+      "shortButtons": []
+    },
+    {
+      "state": "install-form",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "cardWidth": 958,
+      "cardScrollWidth": 958,
+      "shortButtons": []
+    },
+    {
+      "state": "install-form",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "cardWidth": 1150,
+      "cardScrollWidth": 1150,
+      "shortButtons": []
+    },
+    {
+      "state": "connect-form",
+      "width": 360,
+      "scrollWidth": 360,
+      "cardWidth": 326,
+      "cardScrollWidth": 326,
+      "shortButtons": []
+    },
+    {
+      "state": "connect-form",
+      "width": 375,
+      "scrollWidth": 375,
+      "cardWidth": 341,
+      "cardScrollWidth": 341,
+      "shortButtons": []
+    },
+    {
+      "state": "connect-form",
+      "width": 768,
+      "scrollWidth": 768,
+      "cardWidth": 446,
+      "cardScrollWidth": 446,
+      "shortButtons": []
+    },
+    {
+      "state": "connect-form",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "cardWidth": 958,
+      "cardScrollWidth": 958,
+      "shortButtons": []
+    },
+    {
+      "state": "connect-form",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "cardWidth": 1150,
+      "cardScrollWidth": 1150,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "width": 360,
+      "scrollWidth": 360,
+      "cardWidth": 326,
+      "cardScrollWidth": 326,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "width": 375,
+      "scrollWidth": 375,
+      "cardWidth": 341,
+      "cardScrollWidth": 341,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "width": 768,
+      "scrollWidth": 768,
+      "cardWidth": 446,
+      "cardScrollWidth": 446,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "cardWidth": 958,
+      "cardScrollWidth": 958,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "cardWidth": 1150,
+      "cardScrollWidth": 1150,
+      "shortButtons": []
+    },
+    {
+      "state": "ceremony-form",
+      "width": 360,
+      "scrollWidth": 360,
+      "cardWidth": 326,
+      "cardScrollWidth": 326,
+      "shortButtons": []
+    },
+    {
+      "state": "ceremony-form",
+      "width": 375,
+      "scrollWidth": 375,
+      "cardWidth": 341,
+      "cardScrollWidth": 341,
+      "shortButtons": []
+    },
+    {
+      "state": "ceremony-form",
+      "width": 768,
+      "scrollWidth": 768,
+      "cardWidth": 446,
+      "cardScrollWidth": 446,
+      "shortButtons": []
+    },
+    {
+      "state": "ceremony-form",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "cardWidth": 958,
+      "cardScrollWidth": 958,
+      "shortButtons": []
+    },
+    {
+      "state": "ceremony-form",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "cardWidth": 1150,
+      "cardScrollWidth": 1150,
+      "shortButtons": []
+    }
+  ],
+  "checks": [
+    "skip inert and no deletion",
+    "save inert, protected credentials absent from rendered state",
+    "real API-process restart preserves configuration and queued job",
+    "persisted SSO-only override fails; explicit retry uses production runner/readback and preserved credentials",
+    "operator-only observations separately labeled and bound to verified configuration; NOT actual vault unlock",
+    "no service credentials or vault secrets in local/session storage or rendered output"
+  ],
+  "errors": [],
+  "axeViolations": [],
+  "lighthouseScore": 95
+}

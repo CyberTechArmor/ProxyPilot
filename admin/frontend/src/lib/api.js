@@ -143,6 +143,11 @@ function uploadZipWithProgress(endpoint, fields, file, onProgress) {
 }
 
 export const api = {
+  getPlatformSetup: () => request('/setup/platform'),
+  checkPlatformPlan: (plan) => request('/setup/platform/checks', { method: 'POST', body: JSON.stringify(plan) }),
+  savePlatformPlan: (plan) => request('/setup/platform', { method: 'PUT', body: JSON.stringify(plan) }),
+  getSetupOverview: () => request('/setup/overview'),
+  getSetupJob: (id) => request(`/setup/jobs/${encodeURIComponent(id)}`),
   // Auth
   login: (credentials) => request('/auth/login', {
     method: 'POST',

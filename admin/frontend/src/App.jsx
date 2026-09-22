@@ -1,3 +1,4 @@
+import PlatformSetup from '@/pages/PlatformSetup';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import Login from '@/pages/Login';
@@ -103,6 +104,7 @@ function App() {
         <Route path="mcp-access" element={<McpAccess />} />
         <Route path="troubleshooting" element={<Troubleshooting />} />
         <Route path="housekeeping" element={<Housekeeping />} />
+        <Route path="platform-setup" element={<PlatformSetup />} />
         {/* Host drives + ZFS pools/datasets/snapshots/replication (admin only;
             the page self-guards and the backend requires an admin session). */}
         <Route path="storage" element={<Storage />} />

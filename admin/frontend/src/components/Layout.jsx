@@ -284,6 +284,7 @@ export default function Layout() {
     { name: 'CVEs', href: '/cves', icon: BugPlay, adminOnly: true, badge: cveUnread },
     { name: 'Troubleshooting', href: '/troubleshooting', icon: LifeBuoy, adminOnly: true },
     { name: 'Housekeeping', href: '/housekeeping', icon: HardDrive, adminOnly: true },
+    { name: 'Platform Setup', href: '/platform-setup', icon: Plug, adminOnly: true },
     { name: 'Storage', href: '/storage', icon: Database, adminOnly: true },
     { name: 'Migrations', href: '/migrations', icon: MoveRight, adminOnly: true },
     { name: 'Notifications', href: '/notifications', icon: Bell, adminOnly: true },

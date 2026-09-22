@@ -1235,6 +1235,51 @@ tools for the same three verbs are listed as remaining work in the ledger;
 the lock itself already binds every MCP mutation that goes through
 `withContainerLock`.
 
+### Guided Platform Setup (G1)
+
+Administrators open **Platform Setup** from the existing sidebar
+(`/platform-setup`). Choose install, connect existing or skip for Keycloak,
+Pomerium, Infisical with Agent Proxy, OpenBao and Vaultwarden. Origins include
+scheme and optional port; credentials, paths, query parameters, fragments and
+unknown fields are refused. No bootstrap credentials are accepted.
+
+| Endpoint | Purpose / authorization |
+| --- | --- |
+| `GET /api/setup/platform` | Admin: saved plan, catalog and separate installation evidence; no-store |
+| `POST /api/setup/platform/checks` | Admin + global CSRF: check supplied choices without saving or executing; no sudo needed for read-only observation |
+| `PUT /api/setup/platform` | Admin + global CSRF + existing fresh sudo: `{schemaVersion:1, expectedRevision, reviewed:true, choices}`; validate, recompute checks and save; stale revision returns 409 |
+
+Migration 1002 stores one shared draft with monotonically increasing revision,
+schema version, reviewer/time and server-generated check snapshot. This is a
+`saved_plan`, never an executable job, installed service or changed login.
+The plan survives API restart. Empty inventory reads `unknown`, never fresh;
+recorded routes show existing configuration but cannot verify a service.
+
+Preflight uses the existing system-stats reader (API-visible CPU/memory/disk,
+not target-host suitability), runner heartbeats, safe `agent.ping` and
+`caddy.version` calls with bounded timeouts, and recorded services/routes/admin
+domain conflict checks. Existing connector URL and egress host/port validators
+are reused. Service URL reachability, DNS/TLS/identity, unmanaged Caddy state
+and target sizing remain **not checked**: no policy-approved service adapter
+exists, no arbitrary URL probe or host-shell fallback is introduced, and no
+egress grant is created. Conflicts and unresolved dependencies can be saved
+for later. Editing choices clears the displayed check snapshot; saving checks
+the exact choices again on the server. Installation/login activation stay
+disabled until later adapters exist.
+
+Existing jobs and their redacted events come from the existing `/api/setup`
+endpoints and refresh every 10 seconds. Execution status, outcome and
+verification/pending rungs are shown separately; saving does not create a job.
+
+Verification and limits: platform delivery ledger G1 evidence. Run
+`node --test src/__tests__/platform-setup.test.js` from the backend, then
+`npm run build` from the frontend. Browser verification after the build:
+`CHROMIUM_EXECUTABLE_PATH=/path/to/chromium G1_EVIDENCE_DIR=/tmp/g1-evidence node
+admin/frontend/scripts/verify-platform-setup.mjs` from the repository root.
+Optionally provide `G1_LIGHTHOUSE_MODULE` as an installed Lighthouse module path
+for the mobile accessibility gate. The script uses a disposable SQLite/HTTP
+fixture; it never starts the production boot sweep or contacts live services.
+
 ## Privilege separation, stated exactly
 
 - The runner is the process that deploys, starts units inside guests and

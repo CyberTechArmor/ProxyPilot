@@ -47,6 +47,15 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 **Spec references:** None — this phase predates the core infrastructure spec. The Tailwind breakpoints, shadcn primitives, and existing page layouts are the only inputs.
 
 **Verification:**
+
+- [x] G1 Platform Setup (2026-09-22): choose/review pages audited at
+      360/375/390/768/1280/1920 px with the global overflow guard disabled;
+      no horizontal scroll, primary actions ≥44 px, desktop/360 px screenshots
+      inspected. Browser save/reload/API-restart/reopen and non-admin redirect
+      passed. No new dialogs. Axe page violations: 0; Lighthouse mobile
+      accessibility: 98. Reproduce with `scripts/verify-platform-setup.mjs` in
+      the frontend (see setup-engine.md for the disposable fixture/limits).
+
 - [x] Layout sidebar collapses into a drawer at `<md` and can be opened/closed via a hamburger button — `Layout.jsx` now has a slide-out `aside` with `-translate-x-full md:translate-x-0`, a `md:hidden` hamburger button in a top bar, a `md:hidden` black/50 backdrop that closes on click, and route-change auto-close.
 - [x] Main content has zero horizontal scroll at 360px width on every route (`/`, `/incus`, `/users`, `/profile`, `/login`) — audited statically for all five routes; defensive `html, body { overflow-x: hidden }` also applied in `index.css` as a backstop. *Live browser check at 360/375/390/768 pending operator sign-off via `npm run dev`.*
 - [x] Every dialog that was previously `max-w-md`/`max-w-lg`/`max-w-4xl` renders full-screen on `<sm` and returns to original width at `sm+` — Dialog base primitive no longer caps width/height unconditionally; **every** `DialogContent` in Dashboard (Add Service, delete, destroy, composeCreate, terminal, editor, settings, removeCert, export, import, killSwitch, discover, removeSite, nano, oneClick, folder), LxcContainers (create, info, delete x3), IncusManagement (editNet, delete), Users (create, delete, access), and Profile (revoke, revokeAll) has been updated with the `max-w-full h-full rounded-none sm:… sm:…` pattern.

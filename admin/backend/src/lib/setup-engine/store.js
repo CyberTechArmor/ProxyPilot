@@ -484,3 +484,15 @@ export function jobView(row) {
     plan_json: undefined, progress_json: undefined, checkpoint_json: undefined, config_refs_json: undefined, verification_json: undefined,
   };
 }
+
+// G1: reviewed intentions, separate from executable jobs (migration 1002).
+export const PLATFORM_PLAN_SCHEMA = `
+CREATE TABLE IF NOT EXISTS setup_platform_plan (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  schema_version INTEGER NOT NULL,
+  choices_json TEXT NOT NULL,
+  checks_json TEXT NOT NULL,
+  reviewed_at TEXT NOT NULL,
+  reviewed_by TEXT NOT NULL
+);`;

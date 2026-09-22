@@ -105,14 +105,16 @@ provisioning's setup script, the component pre-install) reuse.
 
 | ID | Deliverable | Completion criteria | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| B-01 | Server-side setup plan and state API | the server decides "fresh" / "partial" / "complete" from the database, never the browser; a plan is a persisted record with steps, each with a state | planned | requirements R3 |
+| B-01 | Server-side setup plan and state API | the server decides "fresh" / "partial" / "complete" from the database, never the browser; a plan is a persisted record with steps, each with a state | partial — G1 reviewed plan | G1; migration 1002, `platform-setup.test.js`; executable wizard steps remain B-02 |
 | B-02 | Persistent progress, retries and recovery for wizard steps | every wizard step is a setup job (A-04) or a lock-holding operation; a closed browser or restarted backend changes nothing about progress; retry reuses generated resources | planned | depends on A-03, A-04, A-06 |
-| B-03 | Guided setup wizard (dashboard) | first-run flow: admin, TLS, first app, identity; completable on a 360 px screen (`MOBILE_FIRST.md`); every action goes through `lib/api.js` | planned | |
+| B-03 | Guided setup wizard (dashboard) | first-run flow: admin, TLS, first app, identity; completable on a 360 px screen (`MOBILE_FIRST.md`); every action goes through `lib/api.js` | partial — G1 service planning page | G1; `PlatformSetup.jsx`; first-run activation remains G2/G3/G10 |
 | B-04 | Guided upgrade flow | update readiness, protected copies named before the disruptive step, post-update verification with the ladder, rollback pointer | planned | depends on A-10, A-13 |
-| B-05 | Recovery and jobs panel | stale locks, recovery-required apps, job events and the operator table of `docs/features/setup-engine.md` § "Operating it" rendered in the dashboard | planned (useful before B-03) | `/api/setup` exists (`routes/setup.js`) |
+| B-05 | Recovery and jobs panel | stale locks, recovery-required apps, job events and the operator table of `docs/features/setup-engine.md` § "Operating it" rendered in the dashboard | partial — G1 observation | G1 displays jobs, verification, locks and redacted events; recovery actions remain out of G1 scope |
 
-Milestone B code completion: **0 %** (the REST surface `/api/setup` exists
-and is tested, but no plan model or wizard).
+Milestone B is **partial**: G1 supplies a persisted reviewed plan and the
+admin planning/job-observation page. Executable service steps, recovery actions
+and the upgrade flow remain in the later bounded slices; no new percentage is
+asserted.
 
 ## Milestone C — connected services
 
@@ -138,6 +140,79 @@ Milestone C code completion: **0 %**.
 | D-05 | Coordinated lifecycle and maintenance | shared integrations, scheduled maintenance windows, dependency ordering | planned | |
 
 Milestone D code completion: **≈ 5 %**.
+
+## Guided platform delivery — bounded G1–G10
+
+Recorded before implementation on `feat/g1-platform-setup`, based on
+`main@84dfc52` (PR #612 includes accepted U1/U2, `e8445d2`). These are
+conversation-sized delivery slices, cross-referencing the existing milestones,
+not replacements for accepted A/B/C/D evidence. **Only G1 is authorized here.**
+No installer/update changes, A-17.9, Phase F, host-operation migration, live
+service/DNS/credential changes, authentication replacement or app redeployment.
+
+| ID | Bounded deliverable | Reuse / cross-reference | Status |
+| --- | --- | --- | --- |
+| G1 | Admin Platform Setup page; install/connect/skip intentions; validated versioned server draft; available read-only checks; review/save/reopen; existing jobs and redacted events. Installation/login activation unavailable. | B-01, bounded B-03 and observation portion of B-05; reuse A-04/A-05 and `/api/setup` | done — evidence below |
+| G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | planned — not authorized |
+| G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | planned — not authorized |
+| G4 | Pomerium adapter and route integration | C-02 | planned — not authorized |
+| G5 | Infisical with Agent Proxy adapter | C-03 | planned — not authorized |
+| G6 | OpenBao adapter | C-04 | planned — not authorized |
+| G7 | Vaultwarden adapter | C-05 | planned — not authorized |
+| G8 | Application connection automation | D-01/D-02, C-06; reuse existing contracts, deployment and verification | planned — not authorized |
+| G9 | Guided maintenance | B-04, D-03/D-04/D-05; reuse restores and verification | planned — not authorized |
+| G10 | End-to-end completion and evidence across the guided flow | B-02/B-03/B-05 and C/D acceptance, keeping live-host acceptance separate | planned — not authorized |
+
+G1 acceptance is fixed for this conversation: G1.1 admin-only navigation/page;
+G1.2 five service choices, non-secret URLs, dependencies/conflicts;
+G1.3 durable versioned validated draft, intended versus verified state, no
+fresh-install inference from an empty inventory or browser flag; G1.4 truthful
+read-only checks through existing safe capabilities; G1.5 review/save with
+unavailable install/login actions and no bootstrap secrets; G1.6 existing setup
+job status/events. Additional prerequisites require concrete evidence tied to
+one of these criteria. Optional improvements are recorded, not blockers.
+
+G1 implementation/evidence (2026-09-22, commit containing this entry on
+`feat/g1-platform-setup`):
+
+| Criterion | Status | Evidence |
+| --- | --- | --- |
+| G1.1 | pass | `/platform-setup`, admin-only navigation and page; production auth/CSRF middleware exercised through real HTTP; non-admin browser redirected with no setup link |
+| G1.2 | pass | Five service choices, Infisical + Agent Proxy origins, strict non-secret validation, dependency/duplicate-endpoint checks, route conflict checks; `platform-setup.test.js` |
+| G1.3 | pass | SQLite migration 1002, schema version 1 and optimistic revision check; save → reload → separate API process restart → reopen in API and browser; inventory-empty state is `unknown`, never fresh; settings/services/users/jobs unchanged |
+| G1.4 | pass | Existing system-stats reader, runner heartbeat, `agent.ping` and `caddy.version`; database route/admin-domain checks and reused URL/egress validators. No URL is probed or egress grant made; absent capabilities say `not_checked` with reasons |
+| G1.5 | pass | Review/save works with unresolved checks; server recomputes evidence; installation/login buttons visibly disabled, no runner job queued; invalid/secret-bearing input refused |
+| G1.6 | pass | Existing `/api/setup/overview` and job-detail events; queued/running/succeeded/failed/deferred/recovery-required fixture states; execution, outcome, pending verification and redacted events remain distinct |
+
+Validation: 79 affected tests passed across `platform-setup.test.js`,
+`setup-engine.test.js`, `setup-deploy.test.js`, `setup-runner.test.js` and
+`update-runner-maintenance.test.js` (including accepted PM2/nohup U1 and U2).
+Frontend production build and Vite development-server JSX transform passed. Browser driver:
+`admin/frontend/scripts/verify-platform-setup.mjs`; both steps passed horizontal
+scroll audits with the global guard disabled at 360/375/390/768/1280/1920 px;
+primary buttons ≥44 px; 360 px and 1280 px screenshots inspected; no new dialogs.
+Axe WCAG checks: no violations in the page; Lighthouse mobile accessibility: 98.
+The saved-plan API was restarted while the same browser retained its plan.
+
+Verification limits: isolated Node SQLite (`node:sqlite`) and HTTP fixture with
+production setup routes, auth and CSRF middleware; native `better-sqlite3` is
+not built in this environment, so the full production entrypoint/native-driver
+boot was not run. Browser shell background endpoints use fixtures; G1 routes
+and persistence are real. Live systemd/Incus/Caddy, actual service installation,
+DNS, TLS and service identity were not exercised or changed. Successful host
+agent responses are adapter fixtures; unavailable-agent behavior is exercised
+against an absent local socket. The UI reports these unavailable capabilities
+truthfully. These limits do not introduce G2–G10 work.
+
+G1.4 required a bounded extraction: `/services/system/stats` previously kept
+its read-only capacity collector inline (`routes/services.js`). It now calls
+`lib/system-stats.js` unchanged in response shape, also used by preflight; its
+local `df` gets a 2.5 s timeout. No new host interface, service or migration of
+host operations. This is the only supporting correction beyond the plan/API/UI.
+Optional follow-ups (not implemented, not G1 blockers): service-specific runtime,
+capacity and network probes belong with their adapters; unmanaged Caddy/project
+reservation discovery can extend future adapter checks; recovery action controls
+remain B-05/G9. Accepted U1/U2 files, install.sh and update.sh are unchanged.
 
 ## Overall
 

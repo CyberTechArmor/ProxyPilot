@@ -450,3 +450,13 @@ encryption-key backup set through existing packs. Real Docker/Incus/Caddy/
 Infisical/PostgreSQL/Redis host acceptance remains outstanding separately; G4's
 real login/Caddy limits are unchanged. The recovery is published for PR review,
 not merged or deployed. No live services, DNS, databases or credentials changed.
+
+### G6 authorization and G5 acceptance (2026-09-22)
+
+G5 accepted recovery `31d0c87b2b1fd4e00c24773e6ae0435e387c70a3` is published and
+merged by PR #617 as `e9430a2314c881c23fbecc74c25acf8ac62661c2`. G6 branches
+from that current main. The six fixed G6.1–G6.6 criteria and scope are recorded
+in `platform-delivery-ledger.md` before implementation. Reuse the existing
+plan, runner, jobs, leases, credential references and Caddy path. Guided
+progress stays **50% (5/10)** pending G6 acceptance; earlier host acceptance
+remains separately pending. No merge, deployment, live changes or later slice.

@@ -157,7 +157,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | accepted — 7/7 criteria; `4e7b257`, PR #615; repository checks, disposable ceremonies and separate live-host limitations below |
 | G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | accepted — six fixed criteria; corrected head `6c3bdcb`, PR #616; real stack and host execution limits below |
 | G5 | Infisical with Agent Proxy adapter | C-03 | historically accepted at unavailable `a436546`; reconstructed on `feat/g5-guided-infisical-recovery`, current evidence below; merge and host acceptance separate |
-| G6 | OpenBao adapter | C-04 | planned — not authorized |
+| G6 | OpenBao adapter | C-04 | authorized — six fixed criteria below; review pending |
 | G7 | Vaultwarden adapter | C-05 | planned — not authorized |
 | G8 | Application connection automation | D-01/D-02, C-06; reuse existing contracts, deployment and verification | planned — not authorized |
 | G9 | Guided maintenance | B-04, D-03/D-04/D-05; reuse restores and verification | planned — not authorized |
@@ -629,3 +629,30 @@ scripted adapters. The actual CLI/HTTP/Python test is explicitly narrower. G4's
 real Pomerium–Keycloak allowed/denied login and Caddy acceptance remain outstanding
 and unchanged. No G6–G10, A-17, Phase F, migration, installer/updater or live work.
 Stop at reconstructed G5; optional improvements remain backlog.
+
+## G6 — guided OpenBao (authorized 2026-09-22; review pending)
+
+G5 acceptance is the published recovery `31d0c87b2b1fd4e00c24773e6ae0435e387c70a3`,
+branch `feat/g5-guided-infisical-recovery`, PR #617. GitHub confirms #617 merged
+as `e9430a2314c881c23fbecc74c25acf8ac62661c2`. G6 starts from that current main,
+in an isolated checkout on `feat/g6-guided-openbao`. The unavailable `a436546`
+is not a base. Accepted guided progress remains **50% (5/10)** until G6 review
+and acceptance, then **60% (6/10)**. Earlier host acceptance stays separate.
+
+These six criteria are fixed before implementation:
+
+| Criterion | Required result | Status |
+| --- | --- | --- |
+| G6.1 | Reviewed install/connect/skip; version-specific official deployment/API review; persistent single-node integrated storage, private listeners, independent lifecycle, Caddy public ports/certificates; inert save, explicit apply; external checks read-only first and writes only to reviewed owned resources. | in progress |
+| G6.2 | Distinguish uninitialized/sealed/unsealed/unavailable; initialize only confirmed uninitialized managed instance, never on retry; protected recovery handoff and acknowledgement; manual unseal after restart; preserve external seal; no KMS/HSM/auto-unseal; unseal material separate from application backups; transient submitted shares/bootstrap tokens never in plans/jobs/events/logs/browser storage; no runtime root token; lost initialization handoff means recovery required, no reset. | in progress |
+| G6.3 | Human access through verified Keycloak, dedicated client, exact callbacks and explicit policies; unmapped denied; separately scoped supported machine identity with protected credentials preserved on retry and permitted/denied proof; preserve ProxyPilot login/recovery/service identities. | in progress |
+| G6.4 | One selected dynamic flow, disposable PostgreSQL by default: limited credential issued, used and revoked/expired with subsequent access denied; credentials absent from evidence/browser storage; only explicitly selected test resources, no database move/production listener/credential migration; no other engines configured. | in progress |
+| G6.5 | Existing jobs/locks, progress/failure/retry across browser/API/runner restart, resource/key reuse and verification bound to saved configuration; sealed/unavailable never healthy/verified; restart restoration guidance; compatible data/config backup plus separately held unseal material; no new backup/upgrade/restore framework. | in progress |
+| G6.6 | Focused adapter acceptance for all choices, initialization/interrupted handoff, sealed/restart/unseal, scoped access, dynamic flow, denial/retry/redaction; admin/CSRF/fresh-auth; affected tests/build/desktop/360px; distinguish real disposable execution from scripted responses and precise environment limits. | in progress |
+
+Only G6 is authorized. No G7–G10, HA, KMS/HSM, general provisioning,
+existing-secret migration, A-17 continuation, Phase F, infrastructure rebuild,
+installer/updater changes or accepted U1/U2 changes. Prerequisite corrections
+require a reproducible defect blocking a named criterion. Optional improvements
+are backlog items, not additional completion gates. Publication is authorized;
+merge, production deployment and live infrastructure/identity changes are not.

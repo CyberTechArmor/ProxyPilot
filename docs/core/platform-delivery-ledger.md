@@ -155,7 +155,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | G1 | Admin Platform Setup page; install/connect/skip intentions; validated versioned server draft; available read-only checks; review/save/reopen; existing jobs and redacted events. Installation/login activation unavailable. | B-01, bounded B-03 and observation portion of B-05; reuse A-04/A-05 and `/api/setup` | done — evidence below |
 | G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | accepted — 6/6 criteria, including slow Caddy handoff correction; `a039761` merged by #614; execution limits below |
 | G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | accepted — 7/7 criteria; `4e7b257`, PR #615; repository checks, disposable ceremonies and separate live-host limitations below |
-| G4 | Pomerium adapter and route integration | C-02 | planned — not authorized |
+| G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | implemented for review — real stack acceptance outstanding; not accepted |
 | G5 | Infisical with Agent Proxy adapter | C-03 | planned — not authorized |
 | G6 | OpenBao adapter | C-04 | planned — not authorized |
 | G7 | Vaultwarden adapter | C-05 | planned — not authorized |
@@ -489,3 +489,48 @@ Operator steps, revocation/outage timing, role policy, local recovery, configura
 invalidation and version-specific official sources: `docs/features/guided-sso.md`.
 Optional follow-ups (additional version profiles, authorized client provisioning,
 extra explicit non-admin mappings and obsolete-secret cleanup) are backlog only.
+
+### G4 — fixed acceptance checklist (recorded before implementation, 2026-09-22)
+
+Authorized G4 only on `feat/g4-guided-pomerium`, from current
+`main@66624b5`. Verified accepted G3 `4e7b257` is an ancestor of that main
+(PR #615; accepted branch also contains the subsequent ledger acceptance).
+No unmerged dependency. Existing worktrees and unrelated work are preserved.
+Accepted guided progress remains **30% (3/10)** until review accepts G4,
+then **40% (4/10)**. The denominator remains ten.
+
+| ID | Fixed completion criteria | Status / evidence |
+| --- | --- | --- |
+| G4.1 | Working guided install/connect/skip; pinned supported Pomerium Core, self-hosted authentication, private listeners, independent lifecycle; Caddy owns 80/443 and certificates; reusable credentials; existing connection and owned configuration verified without taking over unrelated configuration; honest guided handoff/capability limits | implemented: guided API/UI, private pinned Core and read-only handoff tests; actual Docker pending |
+| G4.2 | Verified G2 Keycloak, separate Pomerium client, exact callbacks, protected credentials and guided settings checked against chosen version's official docs; real login where environment permits; preserve G3 client/passkeys/sessions/recovery; no hosted authentication or permanent realm-admin credentials | implemented: dedicated client validation, encrypted refs, G3 preserved; Core→Keycloak login pending |
+| G4.3 | Explicit administrator route/upstream/policy review; Caddy → Pomerium → app, no forward_auth; small explicit verified-identity allow policy, deny others; preserve restrictions/behavior or refuse unsupported combinations; verify bypass prevention or block naming bypass; replace untrusted identity headers; signed assertion contract demonstrated in test app, no G8 scaffolding | implemented: reviewed intent, exact subject policy, route ownership and spoof/bypass checks; actual PPL acceptance pending |
+| G4.4 | Same saved route intent generates both configurations through existing durable jobs/locks/ownership; validate before applying; persistent progress/failure/retry; protected only after verification; failed changes preserve valid protection or deny, never direct fallback; removal separately reviewed; retry reuses resources/secrets/routes | implemented: durable jobs, denial, retry/restart/removal tests pass; real Caddy apply pending |
+| G4.5 | Dashboard/native SSO/local recovery outside Pomerium; Keycloak identity endpoints reachable; MCP/delegated editing/provisioning/migration/terminal/health keep their own authentication without new browser redirects; callback routes avoid loops; document actual session/revocation/outage behavior separately from G3's 60 seconds | implemented: independent route regression/recovery tests and session guidance; live machine/outage exercises pending |
+| G4.6 | One test app: unauthenticated redirect, authorized access, authenticated denial, spoof refusal, bypass prevention; invalid config/failed/repeat apply/restart/retry/explicit removal; independent recovery and named machine endpoints; affected tests/frontend build/desktop and 360px inspection; scripted versus real execution distinguished; existing backup references documented | 20 focused tests; affected 187 pass/1 skip; build and 15 layout checks pass; real stack acceptance outstanding |
+
+Only a reproducible defect blocking one of these six criteria permits the smallest
+prerequisite correction. Excludes G5–G10, A-17 continuation, Phase F, general
+host/network rebuild, generated-app framework changes, install.sh/update.sh and
+accepted U1/U2 changes. No merge, deploy, live DNS/identity/database change,
+live credential rotation or live service restart. Stop after G4.
+
+
+### G4 — implementation submitted for review (2026-09-22)
+
+The fixed six criteria above are implemented with evidence and execution limits in
+`docs/evidence/g4-acceptance.md`; operator instructions are in
+`docs/features/guided-pomerium.md`. New code reuses the saved plan, existing
+secret encryption, runner/backend jobs, leases/fencing, route rows and Caddy
+renderer. It does not change G3, U1/U2, install.sh/update.sh, or live services.
+
+Real API/SQLite/crypto/test-app HTTP and built-frontend browser checks ran. Docker
+and Caddy are absent here: real Core startup/parser, Core→Keycloak login, PPL
+authorized/denied users and Caddy TLS/reload are not represented as passing.
+The evidence file names these concrete integration blockers separately from
+production DNS/network/physical-passkey/database/backup-restore host acceptance.
+The existing containment sentinel also reports the missing cgroup/systemd host
+capability; no prerequisite host rebuild was attempted.
+
+Accepted progress stays **30% (3/10)**. Only review acceptance of G4 changes it
+to **40% (4/10)**. Optional additional runtime/claim/management profiles and
+continuous host-drift checks are backlog, not new gates. Work stops at G4.

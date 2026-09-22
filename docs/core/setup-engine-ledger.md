@@ -345,3 +345,36 @@ The sandbox differs from the one the gate-one handoff reported (2674 tests,
 installed, so `ldap.test.js` and `vpn-mtu.test.js` run. Compare like with
 like: the baseline row above was produced in this sandbox on the exact
 base commit.
+
+## G4 contract recorded before implementation (2026-09-22)
+
+G4 only, `feat/g4-guided-pomerium` from `main@66624b5`, with accepted G3
+`4e7b257` verified merged. The six fixed criteria are recorded in the existing
+platform-delivery ledger's G4 table. Reuse this engine's jobs, leases, fencing,
+backend Caddy drain, saved platform plan and protected secret references.
+Accepted progress stays 30% until G4 review; no A-17 or Phase F continuation.
+
+
+### G4 implementation evidence (2026-09-22; review pending)
+
+Added runner kind `pomerium_apply` and backend kind `configure_pomerium_routes`.
+Both carry only the saved revision reference (backend also records deny/gateway
+stage). They reuse the application's lock, host route lease, heartbeat/fencing,
+durable progress and reconciliation. Secrets are encrypted references; private
+revision files and owned resource labels preserve retry identity. Changes never
+restore an unprotected upstream on failure; explicit removal is separately
+reviewed. An unsuccessful initial denial reload names the remaining running
+upstream risk and does not certify protection.
+
+Twenty focused G4 tests pass, including a real API process restart, interrupted
+runner retry, external read-only inspection, failed gateway probe followed by a
+durable denial child, failed initial Caddy denial, and explicit removal. The
+affected set is 188 tests / 187 pass / one existing host-containment skip. The
+additional closeout sentinel reports no writable cgroup/systemd; it is not a G4
+regression or authorization for A-17 work. Frontend build and 15 responsive
+checks pass; axe zero and Lighthouse 95. Host commands are scripted, while
+HTTP/SQLite/crypto and Chromium execute for real. Docker/Core, Keycloak through
+Core and actual Caddy execution remain outstanding as explicitly described in
+`docs/evidence/g4-acceptance.md`. Backup references use existing DB/env and
+companion encrypted file packs; no new backup engine. Accepted progress remains
+30% pending G4 review. No later milestone, installer/updater or live changes.

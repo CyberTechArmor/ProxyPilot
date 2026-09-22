@@ -324,6 +324,11 @@ export async function runGuestConfig({ kind, containerName, requestedBy = null, 
 export function backendStepDeps(store = containerLockStore()) {
   if (store?.configureRoutes) return { configureRoutes: store.configureRoutes };
   return {
+    pomeriumStep: async ({revision,stage,fence}) => {
+      const {configurePomeriumRoutes}=await import('../lib/setup-engine/pomerium-routes.js');
+      const render=store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;
+      return configurePomeriumRoutes(store.getDb(),{revision,stage,fence,render});
+    },
     ssoStep: async ({ kind, fingerprint, fence }) => {
       const { assertCurrent } = await import('../lib/sso/store.js');
       fence(); const r = assertCurrent(store.getDb(), fingerprint);

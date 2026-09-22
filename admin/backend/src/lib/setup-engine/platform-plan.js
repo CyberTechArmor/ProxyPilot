@@ -1,3 +1,4 @@
+import { readPomerium } from './pomerium-store.js';
 // Saved intentions remain separate from G2 applied, immutable installation records.
 import { z } from 'zod';
 import { keycloakState } from './keycloak-store.js';
@@ -50,7 +51,7 @@ export function emptyChoices() {
 }
 export function planDependencies(choices) {
   const issues = [];
-  if (choices.pomerium.mode !== 'skip' && choices.keycloak.mode === 'skip') issues.push('Pomerium needs a verified identity provider. Keycloak is skipped; an existing provider must be verified by the later Pomerium adapter.');
+  if (choices.pomerium.mode !== 'skip' && choices.keycloak.mode === 'skip') issues.push('Pomerium needs a verified identity provider. Keycloak is skipped; an existing provider must be verified in guided Pomerium setup.');
   const hosts = new Map();
   for (const { id, name } of SERVICES) {
     const c = choices[id];
@@ -79,11 +80,12 @@ export function platformInventory(db) {
 export function platformState(db) {
   const { services, routes, adminDomain } = platformInventory(db);
   const verified = keycloakState(db).filter(r => r.verification).sort((a, b) => b.verifiedAt.localeCompare(a.verifiedAt))[0];
+  const gateway=readPomerium(db), gv=gateway?.verified_json?JSON.parse(gateway.verified_json):null;
   return {
     classification: services.length || routes.length || adminDomain ? 'existing_configuration' : 'unknown',
     reason: services.length || routes.length || adminDomain ? 'Existing ProxyPilot configuration is recorded. Service installation and health are not inferred from it.' : 'No managed routes are recorded. This does not establish a fresh installation; unmanaged or external services may exist.',
-    verifiedServices: SERVICES.map(({ id, name }) => id === 'keycloak' && verified ? { id, name, state: verified.verification.state, connectionRef: verified.id, verifiedAt: verified.verifiedAt, reason: verified.verification.label } : { id, name, state: 'not_checked', reason: id === 'keycloak' ? 'No verified Keycloak connection is recorded.' : 'A service-specific verification adapter is not available.' }),
-    installationAvailable: true, installableServices: ['keycloak'], loginActivationAvailable: false,
+    verifiedServices: SERVICES.map(({ id, name }) => id === 'keycloak' && verified ? { id, name, state: verified.verification.state, connectionRef: verified.id, verifiedAt: verified.verifiedAt, reason: verified.verification.label } : id==='pomerium' && gv ? {id,name,state:gv.state,connectionRef:gateway.credential_ref,verifiedAt:gv.verifiedAt,reason:gv.label} : { id, name, state: 'not_checked', reason: id==='pomerium' ? 'Open guided Pomerium setup to verify its private runtime and selected routes.' : id === 'keycloak' ? 'No verified Keycloak connection is recorded.' : 'A service-specific verification adapter is not available.' }),
+    installationAvailable: true, installableServices: ['keycloak','pomerium'], loginActivationAvailable: false,
   };
 }
 

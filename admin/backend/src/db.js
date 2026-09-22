@@ -1,3 +1,4 @@
+import { POMERIUM_SCHEMA } from './lib/setup-engine/pomerium-store.js';
 import { SSO_SCHEMA } from './lib/sso/store.js';
 import { KEYCLOAK_SCHEMA } from './lib/setup-engine/keycloak-store.js';
 import Database from 'better-sqlite3';
@@ -150,6 +151,7 @@ export function getDb() {
 //               an operator revokes them) rather than on a clock, and the
 //               cleanup verb needs to know whether ProxyPilot created the
 //               guest it is offering to delete.
+//   1005 G4 — Pomerium setup, encrypted credentials and route protection ownership.
 //   1001 Setup engine — setup_runners: the host runners' heartbeats.
 //   1000 Setup engine — setup_locks, setup_jobs, setup_job_events: the
 //               persistent per-app lease every platform operation holds
@@ -2338,6 +2340,7 @@ export function initDatabase() {
 
   runMigration(db, 1003, 'setup_keycloak', (d) => d.exec(KEYCLOAK_SCHEMA));
   runMigration(db, 1004, 'guided_sso', (d) => d.exec(SSO_SCHEMA));
+  runMigration(db, 1005, 'setup_pomerium', (d) => d.exec(POMERIUM_SCHEMA));
 
   runMigration(db, 1002, 'setup_platform_plan', (d) => {
     d.exec(PLATFORM_PLAN_SCHEMA);

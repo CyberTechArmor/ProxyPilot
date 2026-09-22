@@ -2049,3 +2049,19 @@ job/app/route leases, fencing and restart reconciliation. Save/open do not execu
 jobs. Results and prerequisites are bound to the saved configuration fingerprint.
 The recovery route uses existing Caddy source-IP controls; no VPN or new recovery
 command is introduced. Live-host limitations and evidence remain in the G3 ledger.
+
+
+## G4 — guided Pomerium and selected application routes
+
+Platform Setup now adds a separate Pomerium guide after verified G2/G3 identity.
+The host runner executes `pomerium_apply`; recorded `configure_pomerium_routes`
+children use the existing backend drain and `@host/routes` lock. Both configurations
+come from the saved route intent. Initial denial precedes Core startup, probes
+precede the protected label, failures retain gateway/denial, and removal needs a
+separate explicit review. Existing native login, recovery and machine routes
+stay outside Core. Follow [the G4 operator guide](guided-pomerium.md) for the
+supported private profile, external handoff, session timing, retries and existing
+backup references. [G4 evidence](../evidence/g4-acceptance.md) separates scripted
+host checks from real HTTP/crypto/browser execution and the unperformed real
+three-service/host acceptance. G4 is submitted for review; accepted progress
+remains 30%. No installer/updater, A-17, Phase F or G5–G10 work.

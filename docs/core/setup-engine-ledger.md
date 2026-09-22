@@ -207,8 +207,27 @@ checklist and evidence in `platform-delivery-ledger.md` and the G2 operator
 section of `docs/features/setup-engine.md`. It adds migration 1003,
 `keycloak_setup` to the existing runner and `configure_keycloak_route` to the
 existing backend drain. Both reuse the saved jobs, leases, fencing and restart
-reconciliation. Other service adapters and identity activation remain planned;
-SSO/client registration is G3. No milestone percentage is inferred.
+reconciliation. G2 `a039761` is accepted and merged by #614.
+
+G3 extends the existing frontend guide and local authentication with explicit
+issuer/subject linking, Keycloak passkeys, OIDC sudo, restricted local recovery and
+server-enforced activation. Migration 1004 stores configuration/links/evidence and
+encrypted credential references. `verify_sso` and `configure_recovery_route` are
+bounded backend-drain jobs, using the existing job/app/route leases, fencing,
+keep-alive and restart reconciliation. They carry configuration fingerprints, not
+secrets. No host runner kind, installer/update behavior, A-17 or Phase F is added.
+The existing root recovery command and machine authentication remain unchanged.
+
+G3 fixed criteria/evidence are in the platform ledger; operator guidance is in
+`docs/features/guided-sso.md`. Affected sequential verification: 232 tests,
+231 pass / 0 fail / 1 existing process-reap skip; focused G3: 12 pass. Real disposable
+Keycloak 26.7.4/Chromium virtual-passkey ceremonies and an IdP-stopped local recovery
+are separate from scripted Caddy/host execution. Frontend build and responsive
+browser checks pass; final accessibility metrics are in `docs/evidence/g3-browser.json`.
+The user accepted G3 `4e7b257` and authorized its merge in PR #615 on 2026-09-22.
+Accepted guided progress is **30% (3/10: G1, G2 and G3)**. Other adapters remain
+planned; the milestone denominator is unchanged. Live-host acceptance limitations
+remain separate; this merge does not authorize deployment or live-service changes.
 
 ## Milestone D — platform-aware app provisioning and maintenance
 

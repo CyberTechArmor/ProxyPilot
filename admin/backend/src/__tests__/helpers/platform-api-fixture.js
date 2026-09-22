@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 const db = new DatabaseSync(process.env.PLATFORM_TEST_DB);
 globalThis.__platformTestDb = db;
 registerHooks({ resolve(specifier, context, next) {
-  if (specifier.endsWith('/db.js') && context.parentURL?.includes('/admin/backend/src/')) return { url: 'data:text/javascript,' + encodeURIComponent(`export const getDb = () => globalThis.__platformTestDb; export function logAudit(user, action, type, id, data) { getDb().prepare('INSERT INTO audit (action, data) VALUES (?, ?)').run(action, JSON.stringify(data)); }`), shortCircuit: true };
+  if (specifier.endsWith('/db.js') && context.parentURL?.includes('/admin/backend/src/')) return { url: 'data:text/javascript,' + encodeURIComponent(`export const getDb = () => globalThis.__platformTestDb; export const getSetting = k => getDb().prepare('SELECT value FROM app_settings WHERE key = ?').get(k)?.value; export function logAudit(user, action, type, id, data) { getDb().prepare('INSERT INTO audit (action, data) VALUES (?, ?)').run(action, JSON.stringify(data)); }`), shortCircuit: true };
   return next(specifier, context);
 } });
 const { PLATFORM_PLAN_SCHEMA } = await import('../../lib/setup-engine/platform-plan.js');
@@ -20,6 +20,7 @@ const { authenticateToken, blockPendingRole, generateToken } = await import('../
 const { csrfProtection } = await import('../../middleware/csrf.js');
 const { setupRouter } = await import('../../routes/setup.js');
 ensureSetupEngineSchema(db); db.exec(PLATFORM_PLAN_SCHEMA);
+const { SSO_SCHEMA } = await import('../../lib/sso/store.js'); db.exec(SSO_SCHEMA);
 const { KEYCLOAK_SCHEMA } = await import('../../lib/setup-engine/keycloak-store.js'); db.exec(KEYCLOAK_SCHEMA);
 db.exec(`CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, name TEXT);
 CREATE TABLE IF NOT EXISTS service_http_routes (id TEXT PRIMARY KEY, domain TEXT);

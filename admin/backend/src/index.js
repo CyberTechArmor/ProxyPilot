@@ -1,3 +1,5 @@
+import { ssoRouter } from './routes/sso.js';
+import { recoveryBoundary } from './lib/sso/sessions.js';
 import express from 'express';
 import http from 'http';
 import cors from 'cors';
@@ -187,6 +189,8 @@ const authLimiter = rateLimit({
   message: { error: 'Too many login attempts, please try again later.' },
 });
 app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/sso/login', authLimiter);
+app.use('/api/auth/sso/callback', authLimiter);
 
 // First-time setup endpoints — even tighter cap. These are only used once
 // per install but are unauthenticated, so brute-forcing them must be
@@ -543,6 +547,8 @@ app.get('/api/health', (req, res) => {
 // yet) may authenticate and manage their own profile (which /api/user
 // serves — its admin-only endpoints carry requireAdmin themselves), but
 // see nothing else until an admin assigns them a role.
+app.use(recoveryBoundary(getDb()));
+app.use('/api/auth/sso', ssoRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/services', authenticateToken, blockPendingRole, servicesRouter);
 app.use('/api/user', authenticateToken, userRouter);

@@ -1,0 +1,94 @@
+{
+  "audits": [
+    {
+      "width": 360,
+      "step": "1. Choose services",
+      "scrollWidth": 360,
+      "clientWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "width": 360,
+      "step": "2. Review and save",
+      "scrollWidth": 360,
+      "clientWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "width": 375,
+      "step": "1. Choose services",
+      "scrollWidth": 375,
+      "clientWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "width": 375,
+      "step": "2. Review and save",
+      "scrollWidth": 375,
+      "clientWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "width": 390,
+      "step": "1. Choose services",
+      "scrollWidth": 390,
+      "clientWidth": 390,
+      "shortButtons": []
+    },
+    {
+      "width": 390,
+      "step": "2. Review and save",
+      "scrollWidth": 390,
+      "clientWidth": 390,
+      "shortButtons": []
+    },
+    {
+      "width": 768,
+      "step": "1. Choose services",
+      "scrollWidth": 768,
+      "clientWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "width": 768,
+      "step": "2. Review and save",
+      "scrollWidth": 768,
+      "clientWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "width": 1280,
+      "step": "1. Choose services",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "width": 1280,
+      "step": "2. Review and save",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "width": 1920,
+      "step": "1. Choose services",
+      "scrollWidth": 1920,
+      "clientWidth": 1920,
+      "shortButtons": []
+    },
+    {
+      "width": 1920,
+      "step": "2. Review and save",
+      "scrollWidth": 1920,
+      "clientWidth": 1920,
+      "shortButtons": []
+    }
+  ],
+  "axeViolations": [],
+  "lighthouseScore": 99,
+  "apiRestart": "passed",
+  "nonAdmin": "passed",
+  "errors": [],
+  "date": "2026-09-22"
+}

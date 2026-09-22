@@ -1,3 +1,4 @@
+import SsoSetup from '@/components/SsoSetup';
 import KeycloakSetup from '@/components/KeycloakSetup';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Navigate } from 'react-router-dom';
@@ -110,7 +111,7 @@ function PlatformSetupContent() {
       <div className="rounded-lg border bg-muted/30 p-4 space-y-2 text-sm">
         <p className="font-medium">{dirty ? 'Unsaved changes' : data.plan.status === 'saved_plan' ? `Saved plan · revision ${data.plan.revision}` : 'No saved plan yet'}{data.plan.reviewedAt ? ` · Last saved ${timestamp(data.plan.reviewedAt)}` : ''}</p>
         <p>{data.installation.reason}</p>
-        <p>Your current login and running applications stay in place. Keycloak can be installed or connected after a separate review and explicit application. ProxyPilot SSO is not activated.</p>
+        <p>Your current login and running applications stay in place. Keycloak can be installed or connected after a separate review and explicit application. Configure and test SSO in the guide below before explicit activation.</p>
       </div>
       <nav aria-label="Setup steps" className="flex flex-col sm:flex-row gap-2">
         <Button variant={stage === 'choose' ? 'secondary' : 'outline'} className="min-h-11" aria-current={stage === 'choose' ? 'step' : undefined} disabled={!!busy} onClick={() => setStage('choose')}>1. Choose services</Button>
@@ -127,7 +128,7 @@ function PlatformSetupContent() {
       })}</div> : <Card><CardHeader><CardTitle>Review your plan</CardTitle><CardDescription>These are intended additions and connections. Unresolved checks can be saved for later.</CardDescription></CardHeader><CardContent className="space-y-4">
         <ul className="divide-y">{data.services.map((service) => <li key={service.id} className="py-3 min-w-0 break-words"><p className="font-medium">{service.name} · {modeLabel[choices[service.id].mode]}</p>{choices[service.id].mode !== 'skip' && <><p className="text-sm break-all">{choices[service.id].url || 'Endpoint required'}</p>{service.id === 'keycloak' && <p className="text-sm break-all">Realm: {choices.keycloak.realm || 'Realm required before applying'}</p>}{service.id === 'infisical' && <p className="text-sm break-all">Agent Proxy: {choices.infisical.agentProxyUrl || 'Endpoint required'}</p>}</>}<p className="text-xs text-muted-foreground">Installation / connection unverified</p></li>)}</ul>
         <div className="rounded-lg border p-3 text-sm">Keycloak has a separate review and apply step below. Other selected services remain saved intentions. Login activation is unavailable.</div>
-        <div className="flex flex-col sm:flex-row flex-wrap gap-2"><Button className="min-h-11 bg-foreground text-background hover:bg-foreground/90" disabled={!!busy} onClick={save}>{busy === 'save' ? 'Saving plan…' : 'Save reviewed plan'}</Button><Button variant="outline" className="min-h-11" disabled>Activate login — unavailable</Button></div>
+        <div className="flex flex-col sm:flex-row flex-wrap gap-2"><Button className="min-h-11 bg-foreground text-background hover:bg-foreground/90" disabled={!!busy} onClick={save}>{busy === 'save' ? 'Saving plan…' : 'Save reviewed plan'}</Button></div>
         <p className="text-xs text-muted-foreground">Saving refreshes available checks and requires the existing administrator re-authentication when needed. It does not queue installation.</p>
       </CardContent></Card>}
       <KeycloakSetup revision={data.plan.revision} dirty={dirty} mode={choices.keycloak.mode} />
@@ -135,6 +136,7 @@ function PlatformSetupContent() {
         {checks?.dependencies?.length > 0 && <div role="status" className="rounded-lg border border-destructive p-3"><p className="font-medium">Unresolved dependencies or conflicts</p><ul className="list-disc pl-5 text-sm space-y-1">{checks.dependencies.map((issue) => <li key={issue} className="break-words">{issue}</li>)}</ul></div>}
         {checks && <ul className="space-y-2">{checks.checks.map((check) => <CheckResult key={check.id} check={check} />)}</ul>}
       </CardContent></Card>
+      <SsoSetup connections={data.keycloak || []} />
       <SetupJobs />
     </>}
   </div>;

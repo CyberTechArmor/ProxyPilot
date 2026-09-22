@@ -1,3 +1,4 @@
+import { recordLocalSession, stampLocalProof } from '../lib/sso/sessions.js';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import * as OTPAuth from 'otpauth';
@@ -127,7 +128,7 @@ function csrfCookieOptions() {
   };
 }
 
-function setAuthCookies(res, token) {
+export function setAuthCookies(res, token) {
   res.cookie('pp_token', token, authCookieOptions());
   res.cookie('pp_csrf', crypto.randomBytes(32).toString('hex'), csrfCookieOptions());
 }
@@ -282,6 +283,7 @@ authRouter.post('/initial-setup', async (req, res) => {
 
     // Generate token so user is logged in immediately (still needs TOTP setup)
     const token = generateToken(user, { ip: req.ip, userAgent: req.headers["user-agent"] });
+    recordLocalSession(db, token, req, user);
     setAuthCookies(res, token);
 
     res.json({
@@ -296,6 +298,7 @@ authRouter.post('/initial-setup', async (req, res) => {
         username: user.username,
         displayName: user.display_name,
         role: user.role || 'admin',
+        linkOnly: !!req.linkOnly,
         totpEnabled: false,
         passwordChangeRequired: false,
       },
@@ -380,6 +383,7 @@ authRouter.post('/complete-totp-setup', authenticateToken, async (req, res) => {
     // Generate fresh token with updated user info
     const freshUser = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
     const token = generateToken(freshUser, { ip: req.ip, userAgent: req.headers["user-agent"] });
+    recordLocalSession(db, token, req, user);
     setAuthCookies(res, token);
 
     res.json({
@@ -391,6 +395,7 @@ authRouter.post('/complete-totp-setup', authenticateToken, async (req, res) => {
         username: freshUser.username,
         displayName: freshUser.display_name,
         role: freshUser.role || 'admin',
+        linkOnly: !!req.linkOnly,
         totpEnabled: true,
         passwordChangeRequired: false,
       },
@@ -508,7 +513,7 @@ authRouter.post('/login', async (req, res) => {
     // Check if user has TOTP set up
     if (user.totp_enabled && user.totp_secret) {
       // If trusted device, allow login without TOTP
-      if (trustedDevice) {
+      if (trustedDevice && !req.localRecovery) {
         // Update last used timestamp
         db.prepare(`
           UPDATE authenticated_devices
@@ -519,6 +524,7 @@ authRouter.post('/login', async (req, res) => {
         // Generate token + set cookies (canonical browser path)
         resetLoginFailures(db, user.id);
         const token = generateToken(user, { ip: req.ip, userAgent: req.headers["user-agent"] });
+        recordLocalSession(db, token, req, user);
         setAuthCookies(res, token);
         logAudit(user.id, 'LOGIN_SUCCESS_TRUSTED_DEVICE', 'user', user.id, { deviceName: trustedDevice.device_name }, req.ip);
 
@@ -529,6 +535,7 @@ authRouter.post('/login', async (req, res) => {
             username: user.username,
             displayName: user.display_name,
             role: user.role || 'admin',
+            linkOnly: !!req.linkOnly,
             authSource: user.auth_source || 'local',
             permissions: getUserPermissions(user.id),
             totpEnabled: true,
@@ -657,6 +664,7 @@ authRouter.post('/login', async (req, res) => {
     // Generate token + set cookies (canonical browser path)
     resetLoginFailures(db, user.id);
     const token = generateToken(user, { ip: req.ip, userAgent: req.headers["user-agent"] });
+    recordLocalSession(db, token, req, user);
     setAuthCookies(res, token);
 
     logAudit(user.id, 'LOGIN_SUCCESS', 'user', user.id, {}, req.ip);
@@ -668,6 +676,7 @@ authRouter.post('/login', async (req, res) => {
         username: user.username,
         displayName: user.display_name,
         role: user.role || 'admin',
+        linkOnly: !!req.linkOnly,
         authSource: user.auth_source || 'local',
         permissions: getUserPermissions(user.id),
         totpEnabled: true, // Always true after successful login
@@ -749,6 +758,7 @@ authRouter.post('/sudo', authenticateToken, async (req, res) => {
     db.prepare(
       `UPDATE sessions SET sudo_until = ? WHERE id = ? AND revoked_at IS NULL`
     ).run(sudoUntilISO, req.user.jti);
+    stampLocalProof(db, req.user.jti);
     logAudit(req.user.id, 'SUDO_GRANTED', 'session', req.user.jti, { sudo_until: sudoUntilISO }, req.ip);
 
     res.json({ success: true, sudoUntil: sudoUntilISO });
@@ -773,6 +783,7 @@ authRouter.get('/verify', authenticateToken, (req, res) => {
       username: user.username,
       displayName: user.display_name,
       role: user.role || 'admin',
+      linkOnly: !!req.user.linkOnly,
       authSource: user.auth_source || 'local',
       permissions: getUserPermissions(user.id),
       totpEnabled: !!user.totp_enabled,
@@ -892,6 +903,7 @@ authRouter.post('/sudo/passkey/verify', authenticateToken, async (req, res) => {
     db.prepare(
       `UPDATE sessions SET sudo_until = ? WHERE id = ? AND revoked_at IS NULL`
     ).run(sudoUntilISO, req.user.jti);
+    stampLocalProof(db, req.user.jti);
     logAudit(user.id, 'SUDO_GRANTED', 'session', req.user.jti, { sudo_until: sudoUntilISO, factor: 'passkey' }, req.ip);
 
     res.json({ success: true, sudoUntil: sudoUntilISO });
@@ -1212,6 +1224,7 @@ authRouter.post('/passkey/authenticate/verify', async (req, res) => {
     // every other session (migration 605 cleared the grants this path had
     // already handed out).
     const token = generateToken(user, { ip: req.ip, userAgent: req.headers['user-agent'] });
+    recordLocalSession(db, token, req, user);
     setAuthCookies(res, token);
 
     logAudit(user.id, 'PASSKEY_LOGIN_SUCCESS', 'user', user.id, { credentialId: stored.credential_id }, req.ip);
@@ -1223,6 +1236,7 @@ authRouter.post('/passkey/authenticate/verify', async (req, res) => {
         username: user.username,
         displayName: user.display_name,
         role: user.role || 'admin',
+        linkOnly: !!req.linkOnly,
         authSource: user.auth_source || 'local',
         permissions: getUserPermissions(user.id),
         totpEnabled: !!user.totp_enabled,

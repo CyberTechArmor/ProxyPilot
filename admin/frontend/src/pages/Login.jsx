@@ -68,6 +68,8 @@ export default function Login() {
 
   const { login } = useAuth();
   const navigate = useNavigate();
+  const [ssoStatus, setSsoStatus] = useState(null);
+  useEffect(() => { api.ssoStatus().then(value => { setSsoStatus(value); if (value.recovery) sessionStorage.setItem('pp_recovery', '1'); else sessionStorage.removeItem('pp_recovery'); }).catch(() => {}); }, []);
   const { toast } = useToast();
 
   // One-time sign-in link (/login#link=<token>, issued from User Management):
@@ -207,7 +209,7 @@ export default function Login() {
       } else {
         // No TOTP needed (shouldn't happen but handle gracefully)
         localStorage.setItem('user', JSON.stringify(result.user));
-        window.location.href = '/';
+        window.location.href = sessionStorage.getItem('pp_recovery') ? '/local-recovery' : '/';
       }
     } catch (error) {
       toast({ variant: 'destructive', title: 'Setup failed', description: error.message });
@@ -232,7 +234,7 @@ export default function Login() {
       // cookies. Cache user metadata for fast initial render.
       localStorage.setItem('user', JSON.stringify(result.user));
       toast({ title: 'Setup complete!', description: `Welcome to ${branding.name}.` });
-      window.location.href = '/';
+      window.location.href = sessionStorage.getItem('pp_recovery') ? '/local-recovery' : '/';
     } catch (error) {
       toast({ variant: 'destructive', title: 'Error', description: error.message });
     } finally {
@@ -260,7 +262,7 @@ export default function Login() {
       }
 
       await login(loginData);
-      navigate('/');
+      navigate(sessionStorage.getItem('pp_recovery') ? '/local-recovery' : '/');
     } catch (error) {
       // Capture device fingerprint from response
       if (error.deviceFingerprint) {
@@ -338,7 +340,7 @@ export default function Login() {
       }
       localStorage.setItem('user', JSON.stringify(result.user));
       localStorage.setItem('pp_has_passkey', 'true');
-      window.location.href = '/';
+      window.location.href = sessionStorage.getItem('pp_recovery') ? '/local-recovery' : '/';
     } finally {
       setPasskeyLoading(false);
     }
@@ -625,7 +627,7 @@ export default function Login() {
                 <Switch checked={rememberDevice} onCheckedChange={setRememberDevice} />
               </div>
 
-              <Button type="submit" className="w-full" disabled={loading || totpCode.length !== 6}>
+              <Button type="submit" className="w-full min-h-11" disabled={loading || totpCode.length !== 6}>
                 {loading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -644,7 +646,7 @@ export default function Login() {
 
   // ========== NORMAL LOGIN FLOW ==========
   return (
-    <div className="min-h-viewport flex items-center justify-center bg-background p-4">
+    <main className="min-h-viewport flex items-center justify-center bg-background p-4">
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <div className="flex justify-center mb-4">
@@ -671,7 +673,10 @@ export default function Login() {
               </div>
             </div>
           )}
-          <form onSubmit={handleSubmit} className="space-y-4">
+          {ssoStatus?.enabled && <p className="mb-4 text-sm">SSO is active. Local administrators can use <a className="underline" href={`${ssoStatus.recoveryOrigin}/login?recovery=1`}>restricted recovery</a>. Existing users can <a className="underline" href="/login?link=1">prove local identity to link an account</a>; this grants no application access.</p>}
+          {ssoStatus?.enabled && <a href="/api/auth/sso/login" className="flex items-center justify-center rounded-md bg-green-700 text-white min-h-11 px-4 mb-4">Sign in with Keycloak passkey</a>}
+          {ssoStatus?.recovery && <p className="mb-4 text-sm">Local administrator recovery. Use local credentials; Keycloak is not contacted.</p>}
+          <form onSubmit={handleSubmit} className={ssoStatus?.enabled && !totpRequired && !totpSetup && !new URLSearchParams(window.location.search).has('link') ? 'hidden' : 'space-y-4'}>
             {/* Username/Password fields - hidden during TOTP steps */}
             {!totpRequired && !totpSetup && (
               <>
@@ -721,6 +726,7 @@ export default function Login() {
                       variant="ghost"
                       size="sm"
                       className="absolute right-0 top-0 h-full px-3"
+                      aria-label={showPassword ? "Hide password" : "Show password"}
                       onClick={() => setShowPassword(!showPassword)}
                     >
                       {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -826,7 +832,7 @@ export default function Login() {
               </div>
             )}
 
-            <Button type="submit" className="w-full" disabled={loading}>
+            <Button type="submit" className="w-full min-h-11 bg-green-700 text-white hover:bg-green-800" disabled={loading}>
               {loading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -853,6 +859,6 @@ export default function Login() {
           </form>
         </CardContent>
       </Card>
-    </div>
+    </main>
   );
 }

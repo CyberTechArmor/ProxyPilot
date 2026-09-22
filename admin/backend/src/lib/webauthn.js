@@ -1,3 +1,5 @@
+import { readConfig } from './sso/store.js';
+import { hasSsoSchema, requestOrigin } from './sso/sessions.js';
 // WebAuthn / passkey backend helpers. Wraps @simplewebauthn/server with
 // the bits we need to register, verify, and persist credentials.
 //
@@ -63,6 +65,7 @@ setInterval(() => {
 
 export function getRpId(req) {
   // req.hostname strips the :port, which is what WebAuthn wants.
+  if (hasSsoSchema(getDb())) { const r = readConfig(getDb()); if (r && requestOrigin(req) === r.config.recoveryOrigin) return r.config.recoveryRpId; }
   return req.hostname;
 }
 
@@ -71,6 +74,7 @@ export function getRpName() {
 }
 
 export function getExpectedOrigins(req) {
+  if (hasSsoSchema(getDb())) { const r = readConfig(getDb()); if (r && requestOrigin(req) === r.config.recoveryOrigin) return [r.config.recoveryOrigin]; }
   const raw = getSetting('passkey_origin_allowlist');
   if (raw) {
     try {

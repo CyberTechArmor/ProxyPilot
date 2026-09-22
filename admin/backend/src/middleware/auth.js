@@ -1,3 +1,4 @@
+import { checkSessionContext, refreshCentralCheck, requestOrigin, sessionContext } from '../lib/sso/sessions.js';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db.js';
@@ -70,7 +71,7 @@ export function sweepStaleSessions() {
 // existed). Used by both the HTTP authenticateToken middleware below
 // and the WebSocket upgrade path in middleware/wsAuth.js so the two
 // can't drift.
-export function validateSession(jti) {
+export function validateSession(jti, origin = null) {
   if (!jti) {
     return { ok: false, status: 401, error: 'Session re-authentication required' };
   }
@@ -82,6 +83,12 @@ export function validateSession(jti) {
   if (!session || session.revoked_at) {
     return { ok: false, status: 401, error: 'Session revoked' };
   }
+  const contextVerdict = checkSessionContext(db, session, origin);
+  if (!contextVerdict.ok) return contextVerdict;
+  const currentUser = db.prepare('SELECT id, role FROM users WHERE id = ?').get(session.user_id);
+  if (!currentUser) return { ok: false, status: 401, error: 'Account no longer exists' };
+  session.currentRole = currentUser.role;
+  session.linkOnly = sessionContext(db, session.id)?.method === 'link-only';
   const nowMs = Date.now();
   const expiresAtMs = Date.parse(session.expires_at);
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
@@ -100,7 +107,7 @@ export function validateSession(jti) {
   return { ok: true, session };
 }
 
-export function authenticateToken(req, res, next) {
+export async function authenticateToken(req, res, next) {
   // Prefer the httpOnly cookie set by the login flow; fall back to the
   // Authorization header so non-browser clients (curl, scripts that
   // POSTed /api/auth/login and grabbed the token from the response)
@@ -125,12 +132,24 @@ export function authenticateToken(req, res, next) {
     return res.status(403).json({ error: 'Invalid token' });
   }
 
-  const result = validateSession(decoded.jti);
+  try { await refreshCentralCheck(getDb(), decoded.jti); } catch { return res.status(503).json({error:'Session verification unavailable'}); }
+  const result = validateSession(decoded.jti, requestOrigin(req));
   if (!result.ok) {
     return res.status(result.status).json({ error: result.error });
   }
 
-  req.user = decoded;
+  if (decoded.id !== result.session.user_id) return res.status(401).json({ error: 'Session identity mismatch' });
+  const context = sessionContext(getDb(), decoded.jti);
+  const linkOnly = context?.method === 'link-only';
+  if (linkOnly) {
+    const path = req.originalUrl.split('?')[0];
+    const reads = ['/api/auth/verify','/api/auth/sso/session','/api/user/profile'];
+    const writes = ['/api/auth/logout','/api/auth/sudo','/api/auth/sudo/passkey/begin','/api/auth/sudo/passkey/verify','/api/auth/sso/begin'];
+    if (!(req.method==='GET' && reads.includes(path)) && !(req.method==='POST' && writes.includes(path))) return res.status(403).json({ error: 'This local proof session can only link your account to Keycloak.', link_only: true });
+    if (path==='/api/auth/sso/begin' && req.body?.action!=='link') return res.status(403).json({error:'Complete account linking, then sign in through Keycloak.',link_only:true});
+  }
+  req.user = { ...decoded, role: result.session.currentRole, linkOnly };
+  if (req.localRecovery && req.user.role !== 'admin') return res.status(403).json({ error: 'Recovery requires a local administrator' });
   req.session = result.session;
   next();
 }

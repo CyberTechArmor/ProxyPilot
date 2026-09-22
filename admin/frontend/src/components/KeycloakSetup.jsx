@@ -31,7 +31,7 @@ export default function KeycloakSetup({ revision, dirty, mode }) {
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   }
   return <Card>
-    <CardHeader><CardTitle>Set up Keycloak</CardTitle><CardDescription>Install a separate service or verify an existing realm. ProxyPilot SSO remains inactive.</CardDescription></CardHeader>
+    <CardHeader><CardTitle>Set up Keycloak</CardTitle><CardDescription>Install a separate service or verify an existing realm. SSO activation is managed separately in the SSO guide.</CardDescription></CardHeader>
     <CardContent className="space-y-4 min-w-0">
       <p className="text-sm">{mode === 'skip' ? 'Keycloak is skipped. No operation is submitted.' : dirty || !revision ? 'Save the reviewed plan before reviewing Keycloak changes.' : `Saved revision ${revision} is ready for review. Other service choices remain saved intentions.`}</p>
       <Button className="min-h-11" variant="outline" disabled={busy || dirty || !revision || mode === 'skip'} onClick={prepare}>Review Keycloak changes</Button>
@@ -50,7 +50,7 @@ export default function KeycloakSetup({ revision, dirty, mode }) {
         <h3 className="font-semibold break-all">{record.origin}/realms/{record.realm}</h3>
         <p>Ownership: {record.ownership} · Job: {record.job?.status || 'Not submitted'} · Phase: {(record.job?.phase || 'Not started').replaceAll('_', ' ')}</p>
         {record.job?.reason && <p className="break-words">{record.job.reason}</p>}
-        {record.verification && <><p className="font-medium">Keycloak ready/connected; ProxyPilot SSO not activated.</p><p>Verified at {new Date(record.verifiedAt).toLocaleString()}. Discovery, exact issuer and signing keys passed.{record.ownership === 'managed' ? ' Database and service readiness passed.' : ' Service/database health and administrative permission were not checked.'}</p></>}
+        {record.verification && <><p className="font-medium">Keycloak ready/connected. Continue in the SSO guide.</p><p>Verified at {new Date(record.verifiedAt).toLocaleString()}. Discovery, exact issuer and signing keys passed.{record.ownership === 'managed' ? ' Database and service readiness passed.' : ' Service/database health and administrative permission were not checked.'}</p></>}
         {!record.verification && <p>Connection not verified. Container startup alone is not completion.</p>}
         <p className="text-xs break-all">Connection reference: {record.id}{record.job ? ` · Job reference: ${record.job.id}` : ''}</p>
         {record.ownership === 'managed' && record.resources && <details><summary className="cursor-pointer min-h-11 flex items-center">Initial administration and recovery</summary><div className="space-y-2">

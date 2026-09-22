@@ -1,3 +1,5 @@
+import { validateSession } from '../middleware/auth.js';
+import { refreshCentralCheck, requestOrigin } from '../lib/sso/sessions.js';
 import { WebSocketServer } from 'ws';
 import { exec } from 'child_process';
 import { promisify } from 'util';
@@ -5,6 +7,7 @@ import { existsSync } from 'fs';
 import { verifyWsUpgrade } from '../middleware/wsAuth.js';
 import { spawnTerminalPty } from '../lib/pty.js';
 import {
+  getDb,
   logAudit,
   AUDIT_TERMINAL_SESSION_START,
   AUDIT_TERMINAL_SESSION_END,
@@ -249,6 +252,9 @@ async function handleSession(ws, req, user, target) {
     remoteIp,
   );
 
+  const authTimer = setInterval(() => {
+    refreshCentralCheck(getDb(), user.jti).then(() => { if (!validateSession(user.jti, requestOrigin(req)).ok) cleanup('session-revoked'); }).catch(() => cleanup('session-unavailable'));
+  }, 5000);
   const idleTimer = setInterval(() => {
     if (closed) return;
     if (Date.now() - lastActivity >= IDLE_TIMEOUT_MS) {
@@ -293,6 +299,7 @@ async function handleSession(ws, req, user, target) {
 
   const onPtyData = (data) => {
     lastActivity = Date.now();
+    if (!validateSession(user.jti, requestOrigin(req)).ok) { cleanup('session-revoked'); return; }
     const buf = Buffer.from(data, 'utf8');
     bytesOut += buf.length;
     if (ws.readyState !== ws.OPEN) return;
@@ -322,6 +329,7 @@ async function handleSession(ws, req, user, target) {
   });
 
   ws.on('message', (raw, isBinary) => {
+    if (!validateSession(user.jti, requestOrigin(req)).ok) { cleanup('session-revoked'); return; }
     lastActivity = Date.now();
     bytesIn += raw.length;
 
@@ -362,6 +370,7 @@ async function handleSession(ws, req, user, target) {
   function cleanup(reason) {
     if (closed) return;
     closed = true;
+    clearInterval(authTimer);
     clearInterval(idleTimer);
     clearInterval(heartbeatTimer);
     if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }

@@ -324,6 +324,17 @@ export async function runGuestConfig({ kind, containerName, requestedBy = null, 
 export function backendStepDeps(store = containerLockStore()) {
   if (store?.configureRoutes) return { configureRoutes: store.configureRoutes };
   return {
+    ssoStep: async ({ kind, fingerprint, fence }) => {
+      const { assertCurrent } = await import('../lib/sso/store.js');
+      fence(); const r = assertCurrent(store.getDb(), fingerprint);
+      if (kind === 'verify_sso') {
+        const { verifySettings } = await import('../lib/sso/oidc.js');
+        await verifySettings(store.getDb(), r, { fence }); fence(); return {};
+      }
+      const { configureRecoveryRoute } = await import('../lib/sso/recovery-route.js');
+      const render = store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;
+      return configureRecoveryRoute(store.getDb(), { fingerprint, fence, render });
+    },
     configureKeycloakRoute: async ({ installationId, fence }) => {
       const { configureKeycloakRoute } = await import('../lib/setup-engine/keycloak-routes.js');
       const render = store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;

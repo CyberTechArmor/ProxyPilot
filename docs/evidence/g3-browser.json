@@ -1,0 +1,265 @@
+{
+  "keycloak": "26.7.4",
+  "database": "disposable H2",
+  "browser": "headless Chromium with virtual CTAP2 UV/discoverable authenticator",
+  "ceremonies": [
+    "actual Keycloak passkey registration",
+    "actual signed authorization-code + PKCE linking",
+    "actual passkey SSO login without elevation",
+    "actual fresh same-subject OIDC sudo",
+    "actual central disable observed by read-only admin API",
+    "separate-browser local password/TOTP recovery and sudo",
+    "explicit frontend activation after all server prerequisites",
+    "local disable with disposable Keycloak stopped"
+  ],
+  "audits": [
+    {
+      "width": 360,
+      "scroll": 360,
+      "client": 360
+    },
+    {
+      "width": 375,
+      "scroll": 375,
+      "client": 375
+    },
+    {
+      "width": 390,
+      "scroll": 390,
+      "client": 390
+    },
+    {
+      "width": 768,
+      "scroll": 768,
+      "client": 768
+    },
+    {
+      "width": 1280,
+      "scroll": 1280,
+      "client": 1280
+    },
+    {
+      "width": 1920,
+      "scroll": 1920,
+      "client": 1920
+    },
+    {
+      "page": "guide",
+      "width": 360,
+      "scroll": 360,
+      "client": 360
+    },
+    {
+      "page": "guide",
+      "width": 375,
+      "scroll": 375,
+      "client": 375
+    },
+    {
+      "page": "guide",
+      "width": 390,
+      "scroll": 390,
+      "client": 390
+    },
+    {
+      "page": "guide",
+      "width": 768,
+      "scroll": 768,
+      "client": 768
+    },
+    {
+      "page": "guide",
+      "width": 1280,
+      "scroll": 1280,
+      "client": 1280
+    },
+    {
+      "page": "guide",
+      "width": 1920,
+      "scroll": 1920,
+      "client": 1920
+    },
+    {
+      "page": "recovery",
+      "width": 360,
+      "scroll": 360,
+      "client": 360
+    },
+    {
+      "page": "recovery",
+      "width": 375,
+      "scroll": 375,
+      "client": 375
+    },
+    {
+      "page": "recovery",
+      "width": 390,
+      "scroll": 390,
+      "client": 390
+    },
+    {
+      "page": "recovery",
+      "width": 768,
+      "scroll": 768,
+      "client": 768
+    },
+    {
+      "page": "recovery",
+      "width": 1280,
+      "scroll": 1280,
+      "client": 1280
+    },
+    {
+      "page": "recovery",
+      "width": 1920,
+      "scroll": 1920,
+      "client": 1920
+    },
+    {
+      "page": "sso-login",
+      "width": 360,
+      "scroll": 360,
+      "client": 360
+    },
+    {
+      "page": "sso-login",
+      "width": 375,
+      "scroll": 375,
+      "client": 375
+    },
+    {
+      "page": "sso-login",
+      "width": 390,
+      "scroll": 390,
+      "client": 390
+    },
+    {
+      "page": "sso-login",
+      "width": 768,
+      "scroll": 768,
+      "client": 768
+    },
+    {
+      "page": "sso-login",
+      "width": 1280,
+      "scroll": 1280,
+      "client": 1280
+    },
+    {
+      "page": "sso-login",
+      "width": 1920,
+      "scroll": 1920,
+      "client": 1920
+    },
+    {
+      "page": "account-link",
+      "width": 360,
+      "scroll": 360,
+      "client": 360
+    },
+    {
+      "page": "account-link",
+      "width": 375,
+      "scroll": 375,
+      "client": 375
+    },
+    {
+      "page": "account-link",
+      "width": 390,
+      "scroll": 390,
+      "client": 390
+    },
+    {
+      "page": "account-link",
+      "width": 768,
+      "scroll": 768,
+      "client": 768
+    },
+    {
+      "page": "account-link",
+      "width": 1280,
+      "scroll": 1280,
+      "client": 1280
+    },
+    {
+      "page": "account-link",
+      "width": 1920,
+      "scroll": 1920,
+      "client": 1920
+    },
+    {
+      "page": "local-login",
+      "width": 360,
+      "scroll": 360,
+      "client": 360
+    },
+    {
+      "page": "local-login",
+      "width": 375,
+      "scroll": 375,
+      "client": 375
+    },
+    {
+      "page": "local-login",
+      "width": 390,
+      "scroll": 390,
+      "client": 390
+    },
+    {
+      "page": "local-login",
+      "width": 768,
+      "scroll": 768,
+      "client": 768
+    },
+    {
+      "page": "local-login",
+      "width": 1280,
+      "scroll": 1280,
+      "client": 1280
+    },
+    {
+      "page": "local-login",
+      "width": 1920,
+      "scroll": 1920,
+      "client": 1920
+    }
+  ],
+  "lighthouseScores": {
+    "guide": 98,
+    "recovery": 100,
+    "sso-login": 100,
+    "account-link": 100,
+    "local-login": 100
+  },
+  "accessibility": [
+    {
+      "page": "guide",
+      "violations": []
+    },
+    {
+      "page": "recovery",
+      "violations": []
+    },
+    {
+      "page": "sso-login",
+      "violations": []
+    },
+    {
+      "page": "account-link",
+      "violations": []
+    },
+    {
+      "page": "local-login",
+      "violations": []
+    }
+  ],
+  "pageErrors": [],
+  "limitations": [
+    "loopback transport mapping and locally generated TLS certificate",
+    "virtual authenticator, not physical device",
+    "Caddy route job uses production SQL/job code but scripted binary responses; production administrator-network controls not exercised",
+    "no production changes"
+  ],
+  "date": "2026-09-22",
+  "centralRevocationTiming": "Live service disable checked at forced local cache expiry; the backend suite verifies the exact 60-second cutoff and outage deadline."
+}

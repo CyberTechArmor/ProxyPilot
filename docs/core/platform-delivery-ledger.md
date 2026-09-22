@@ -146,15 +146,15 @@ Milestone D code completion: **≈ 5 %**.
 Recorded before implementation on `feat/g1-platform-setup`, based on
 `main@84dfc52` (PR #612 includes accepted U1/U2, `e8445d2`). These are
 conversation-sized delivery slices, cross-referencing the existing milestones,
-not replacements for accepted A/B/C/D evidence. **Only G1 is authorized here.**
+not replacements for accepted A/B/C/D evidence. **The original authorization here was G1 only; G2 and G3 are separately authorized below.**
 No installer/update changes, A-17.9, Phase F, host-operation migration, live
 service/DNS/credential changes, authentication replacement or app redeployment.
 
 | ID | Bounded deliverable | Reuse / cross-reference | Status |
 | --- | --- | --- | --- |
 | G1 | Admin Platform Setup page; install/connect/skip intentions; validated versioned server draft; available read-only checks; review/save/reopen; existing jobs and redacted events. Installation/login activation unavailable. | B-01, bounded B-03 and observation portion of B-05; reuse A-04/A-05 and `/api/setup` | done — evidence below |
-| G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | done — 6/6 repository criteria, including slow Caddy handoff correction; ready for merge review; execution limits below |
-| G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | planned — not authorized |
+| G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | accepted — 6/6 criteria, including slow Caddy handoff correction; `a039761` merged by #614; execution limits below |
+| G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | accepted — 7/7 criteria; `4e7b257`, PR #615; repository checks, disposable ceremonies and separate live-host limitations below |
 | G4 | Pomerium adapter and route integration | C-02 | planned — not authorized |
 | G5 | Infisical with Agent Proxy adapter | C-03 | planned — not authorized |
 | G6 | OpenBao adapter | C-04 | planned — not authorized |
@@ -235,8 +235,9 @@ install.sh/update.sh, resume A-17.9/Phase F, activate SSO (G3), or deploy.
 Additional prerequisites must cite the blocked criterion and concrete evidence;
 make only the smallest correction. Optional improvements stay backlog. Disposable
 repository tests only; no production DNS, database, credential or service changes.
-G2 repository completion: **6/6 criteria**. Guided milestones complete:
-**2/10 (G1 and G2)**. G3–G10 remain unimplemented; no SSO activation.
+G2 repository completion: **6/6 criteria**. At G2 acceptance, guided milestones
+complete were **2/10 (G1 and G2)**; G3–G10 were unimplemented. Current accepted
+guided progress is **30% (3/10: G1, G2 and G3)**; G4–G10 remain planned.
 
 G2.4 merge-review correction (2026-09-22): c180d2f could finish the Keycloak
 parent as `deferred` when its recorded Caddy job still held the shared app
@@ -309,6 +310,33 @@ about one point and the overall figure by well under one, so the rounding
 now lands on 40; it does not represent newly delivered functionality
 beyond A-17.8. Code completion only; rollout readiness requires the host
 acceptance below.
+
+### G3 — fixed acceptance checklist (recorded before implementation, 2026-09-22)
+
+Authorized: G3 only on `feat/g3-guided-sso`, based on `main@efa95c7`.
+Accepted G2 `a039761` is merged by PR #614. Accepted U1/U2 `e8445d2`
+is an ancestor. Existing worktrees are preserved. No dependency merge needed.
+The fixed progress rule was **20% accepted (2/10)** until G3 passes review,
+then **30% (3/10)**. G3 acceptance is recorded below.
+The denominator remains ten; repository evidence and live acceptance stay separate.
+
+| Criterion | Fixed completion requirement | Status / evidence |
+| --- | --- | --- |
+| G3.1 | Dedicated ProxyPilot client on verified G2; exact redirects, protected credential references; administrator-provided external client without realm takeover; maintained OIDC code + PKCE/state/nonce/signature/issuer/audience/time validation; local sessions; no tokens/secrets in bundles/jobs/logs | pass — maintained openid-client 6.8.8; encrypted credential refs and single-use form_post transactions; production TLS restriction and RSA-signed negative-callback tests; real Keycloak code/PKCE ceremony |
+| G3.2 | Explicit proof of both identities links issuer + subject to existing local IDs, never email; preserve administrator/data; unlinked users pending without access; explicit role/group mapping, no silent administration | pass — explicit local proof plus fresh Keycloak passkey; issuer/subject uniqueness, conflicting identity refusal, pending/no session, local-only role mapping; unchanged account-data assertions |
+| G3.3 | Guided Keycloak enrollment/test on stable explicit hostname; required user verification and discoverable credentials; version-specific official settings; separate local enrollment; external realm validation/guidance without unauthorized global changes | pass — official 26.7.4 policy/representation checked; read-only policy and client-flow validation; actual virtual UV/discoverable CTAP2 enrollment and login; local passkeys remain separate |
+| G3.4 | OIDC reauthentication satisfies existing sudo gate only for same issuer/subject, fresh authentication and required assurance; SSO session alone insufficient; local recovery step-up and gated routes retained | pass — same issuer/subject, fresh signed auth_time and ACR plus passkey-only flow; negative stale/insufficient/other-subject tests; real frontend popup and existing sudo grant; login has no elevation |
+| G3.5 | Existing root recovery; independent Caddy local recovery route under existing administrator-network/WireGuard controls, host cookie, local password/TOTP or separate local passkeys with explicit RP/origin; server-validated configuration-bound linking/login/step-up/separate-browser recovery checks before explicit activation; preserve migration access; recovery admin can disable SSO offline; never remove local credentials | pass — existing root command, managed Caddy allowlist route, host-scoped local recovery and explicit RP/origin; server-bound prerequisite/refusal and route-drift tests; browser activation, separate-profile recovery and disable with disposable Keycloak stopped |
+| G3.6 | Immediate local disable/delete revokes sessions/elevation/MCP keys; one supported central revocation method with enforced/documented maximum delay and outage behavior; machine authentication unchanged | pass — existing immediate local/MCP revocation paths retained; 60-second read-only central account-state deadline, fail closed on outage; timer-boundary tests plus real Keycloak disable; machine authentication unchanged |
+| G3.7 | Behavioral tests for linking/pending/callback validity/replay/step-up/activation/offline recovery/disable/revocation; changed frontend verified and built; scripted versus actual ceremony/live evidence distinguished; ledgers and guidance updated | pass — 12 focused G3 tests; 231 pass / 0 fail / 1 existing skip across 232 affected tests; frontend build and browser evidence below; operator guidance and both ledgers updated |
+
+Scope excludes G4–G10, A-17, Phase F, unrelated host operations and generated-app
+authentication. Preserve install.sh, update.sh and accepted U1/U2. Only concrete
+G3-blocking defects justify prerequisite fixes; optional improvements go to backlog.
+Original implementation authorization excluded merge, deployment, live identity
+mutation, credential rotation and service restart. The subsequent user instruction
+"Please merge" authorizes the merge in PR #615 only; the live-operation exclusions
+remain in force.
 
 ## Host acceptance (separate from the code figures)
 
@@ -394,3 +422,70 @@ scope** (needs agreement before it becomes a row above).
 | R-057 | 2026-09-28 | A-17.8 | closing correction: a resource created by an interrupted attempt just before its ownership record was persisted read back as `already` (pre-existing) on the resume, and a settlement that kept it reported the rollback complete | `config-op.js` resume path and `settleForward` before the correction | defect in scope (materially false completion) | fix | on a resume after a write had begun, a present resource with no record of its step and no ownership record is `present` with `ownership: uncertain` (`owned: null`), never `already`; the settlement leaves it (`unresolved … — not removed`), ends `rollback.state: unresolved`, `partial: true`, the reason and the recovery-required verification naming the resource and the operator action (decide whether it belongs to the forward, remove by hand, retry); automatic ownership reconstruction and automatic cleanup are deferred (`docs/known-issues.md`); regression in `setup-guest-config.test.js` |
 | R-049 | 2026-09-26 | A-17.8 | the job claim through a long single command: the lifecycle and setup kinds renew only between commands (R-040 fixed the backend step) | requirement 2 ("heartbeat the job claim and every held lock during long operations") | scope decision | the configuration kinds get the keep-alive; the earlier kinds keep theirs | executor `keepAlive` + `configFence` for `CONFIG_JOB_KINDS` (claim, guest lease, held shared leases every 10 s; all three checked before every command); extending it to the lifecycle / setup kinds is a follow-up outside this slice |
 | R-022 | 2026-09-21 | evidence | the full backend suite run on base and branch concurrently in this sandbox made the cgroup real-process regression fail once on each side (both runs used the real `/sys/fs/cgroup/*/mock2-deploy/dead-job` group) | `suite-base.log` / `suite-branch.log` of the session; the sequential re-runs | measurement note | re-run sequentially | the like-for-like rows in the setup-engine ledger come from the sequential runs; the cgroup2 form of that regression is intermittent under the FULL parallel run on this host (failed on the base run and the branch's first two runs, passed on the third) and passes when its file runs alone (13 pass / 1 skip) — an environment condition of this sandbox, seen on both sides, recorded not fixed |
+
+### G3 implementation and evidence (2026-09-22)
+
+The seven criteria above remain the completion contract. The user accepted G3
+`4e7b257` and authorized its merge in PR #615 on 2026-09-22. Accepted guided
+progress is **30% (3/10: G1, G2 and G3)**; the denominator remains ten.
+No G4–G10, A-17 or Phase F work is included. This acceptance adds no completion
+gates and does not claim live-host acceptance or authorize deployment.
+
+Migration 1004 stores configuration, protected credential references, explicit
+identity links, transient encrypted flows, per-session identity context and
+configuration-bound evidence. Existing authentication, recovery CLI, Platform Setup,
+API client, sudo modal and gated routes are reused. Two bounded backend job kinds,
+`verify_sso` and `configure_recovery_route`, reuse durable jobs, lease/fencing and
+restart reconciliation. Only openid-client and its two transitive packages are added.
+No install/update/runner-unit or generated-app/machine-authentication code changed.
+
+Concrete G3 defects found and fixed during implementation: public local/LDAP logins
+must become linking-only proof sessions after activation (including HTTP and WS
+refusal); offline disable must not depend on G2 verification remaining valid;
+activation must refuse a changed recovery route/allowlist; Keycloak 26.7.4's new
+resident-key field takes precedence over the deprecated field. The touched login
+page's accessibility audit exposed a missing password-toggle name and insufficient
+primary-button contrast; those were fixed locally. Accepted unrelated work was not
+reopened.
+
+**Scripted/contract evidence.** `guided-sso.test.js` (11 behavioral tests with
+multiple negative cases) and `sso-transport.test.js` (real HTTPS) pass. The affected
+sequential run includes those, immediate-repairs, root-recovery, keycloak-setup,
+platform-setup, setup-engine, setup-runner, setup-deploy, setup-post-launch,
+setup-guest-config, setup-restores and update-runner-maintenance: **232 total,
+231 pass, 0 fail, 1 existing process-reap skip** (pkill/pgrep unavailable). The
+12 focused G3 tests pass with no skips. Existing root recovery has 29 passing tests;
+U1/U2 regressions pass. Production SQL, middleware, OIDC validation and job logic
+execute; node:sqlite substitutes for unavailable native better-sqlite3. Caddy
+binary responses are scripted. Build passes with the existing chunk-size warning;
+`git diff --check` passes.
+
+**Disposable browser/service evidence.** The opt-in `verify-sso-live.mjs` runs a
+real Keycloak 26.7.4 with H2, Chromium and a virtual CTAP2 authenticator requiring
+UV and discoverable credentials. Actual enrollment, explicit linking through the
+local sudo modal, passkey SSO, popup reauthentication, separate-profile local
+password/TOTP recovery, explicit activation, central account disable and disabling
+SSO after stopping Keycloak passed. The service disable check forces local cache
+expiry; exact 60-second boundaries are tested separately in the backend suite.
+Tokens are real Keycloak-signed tokens. The
+fixture maps only transport to loopback and uses test TLS certificates; the Caddy
+route step uses production SQL/jobs with scripted binary calls. No production
+service or identity was changed. Final mobile/accessibility metrics are recorded
+in `docs/evidence/g3-browser.json` and the mobile verification log: no overflow at
+360/375/390/768/1280/1920; axe 0 on all five G3 surfaces; Lighthouse guide 98,
+recovery/SSO login/account linking/local login 100. Existing Platform Setup
+restart/reopen/non-admin checks pass with Lighthouse 99. Local sudo completed at
+375 px; primary G3 actions are ≥44 px; desktop and 360 px screenshots inspected.
+
+**Live-host acceptance limitations, separate from code review.** Physical device
+passkeys, production Keycloak/PostgreSQL, real Caddy reload/DNS/public TLS and
+administrator-network/WireGuard enforcement, native better-sqlite3 on the host,
+and an actual root-console recovery/restore drill were not exercised. Existing G2
+host-install limits remain. Production activation has no sandbox exception: its
+server checks always apply. These are the requested live-host limitations, not
+new G3 completion gates.
+
+Operator steps, revocation/outage timing, role policy, local recovery, configuration
+invalidation and version-specific official sources: `docs/features/guided-sso.md`.
+Optional follow-ups (additional version profiles, authorized client provisioning,
+extra explicit non-admin mappings and obsolete-secret cleanup) are backlog only.

@@ -2033,3 +2033,19 @@ decrypt the credential, `GET /api/setup/jobs` shows the dead deploy as
 Also: request `restore_project_db` through MCP during a deploy and confirm
 the refusal names the holder; restart the backend with nothing running and
 confirm the sweep queues nothing.
+
+
+## G3 — guided ProxyPilot SSO and independent recovery
+
+After G2 verification, Platform Setup offers dedicated-client configuration,
+Keycloak passkey enrollment, explicit local-account linking, SSO/sudo tests,
+a separate-browser local recovery check and explicit activation. This applies to
+fresh and existing installations. Follow [the G3 operator guide](guided-sso.md)
+for Keycloak 26.7.4 client/policy settings, protected credentials, local-only role
+mapping, the 60-second central revocation/outage contract and offline disable.
+
+`verify_sso` and `configure_recovery_route` use this existing backend drain and its
+job/app/route leases, fencing and restart reconciliation. Save/open do not execute
+jobs. Results and prerequisites are bound to the saved configuration fingerprint.
+The recovery route uses existing Caddy source-IP controls; no VPN or new recovery
+command is introduced. Live-host limitations and evidence remain in the G3 ledger.

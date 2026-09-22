@@ -1,3 +1,4 @@
+import { SSO_SCHEMA } from './lib/sso/store.js';
 import { KEYCLOAK_SCHEMA } from './lib/setup-engine/keycloak-store.js';
 import Database from 'better-sqlite3';
 import { repairStrayMigration912 } from './lib/migration-repair.js';
@@ -2336,6 +2337,7 @@ export function initDatabase() {
   });
 
   runMigration(db, 1003, 'setup_keycloak', (d) => d.exec(KEYCLOAK_SCHEMA));
+  runMigration(db, 1004, 'guided_sso', (d) => d.exec(SSO_SCHEMA));
 
   runMigration(db, 1002, 'setup_platform_plan', (d) => {
     d.exec(PLATFORM_PLAN_SCHEMA);

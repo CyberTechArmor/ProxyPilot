@@ -506,7 +506,7 @@ then **40% (4/10)**. The denominator remains ten.
 | G4.3 | Explicit administrator route/upstream/policy review; Caddy → Pomerium → app, no forward_auth; small explicit verified-identity allow policy, deny others; preserve restrictions/behavior or refuse unsupported combinations; verify bypass prevention or block naming bypass; replace untrusted identity headers; signed assertion contract demonstrated in test app, no G8 scaffolding | implemented: reviewed intent, exact subject policy, route ownership and spoof/bypass checks; actual PPL acceptance pending |
 | G4.4 | Same saved route intent generates both configurations through existing durable jobs/locks/ownership; validate before applying; persistent progress/failure/retry; protected only after verification; failed changes preserve valid protection or deny, never direct fallback; removal separately reviewed; retry reuses resources/secrets/routes | implemented: durable jobs, denial, retry/restart/removal tests pass; real Caddy apply pending |
 | G4.5 | Dashboard/native SSO/local recovery outside Pomerium; Keycloak identity endpoints reachable; MCP/delegated editing/provisioning/migration/terminal/health keep their own authentication without new browser redirects; callback routes avoid loops; document actual session/revocation/outage behavior separately from G3's 60 seconds | implemented: independent route regression/recovery tests and session guidance; live machine/outage exercises pending |
-| G4.6 | One test app: unauthenticated redirect, authorized access, authenticated denial, spoof refusal, bypass prevention; invalid config/failed/repeat apply/restart/retry/explicit removal; independent recovery and named machine endpoints; affected tests/frontend build/desktop and 360px inspection; scripted versus real execution distinguished; existing backup references documented | 20 focused tests; affected 187 pass/1 skip; build and 15 layout checks pass; real stack acceptance outstanding |
+| G4.6 | One test app: unauthenticated redirect, authorized access, authenticated denial, spoof refusal, bypass prevention; invalid config/failed/repeat apply/restart/retry/explicit removal; independent recovery and named machine endpoints; affected tests/frontend build/desktop and 360px inspection; scripted versus real execution distinguished; existing backup references documented | 22 focused tests; affected 189 pass/1 skip after the CA-default correction; build passes; prior 15 layout checks retained; real stack acceptance outstanding |
 
 Only a reproducible defect blocking one of these six criteria permits the smallest
 prerequisite correction. Excludes G5–G10, A-17 continuation, Phase F, general
@@ -534,3 +534,25 @@ capability; no prerequisite host rebuild was attempted.
 Accepted progress stays **30% (3/10)**. Only review acceptance of G4 changes it
 to **40% (4/10)**. Optional additional runtime/claim/management profiles and
 continuous host-drift checks are backlog, not new gates. Work stops at G4.
+
+
+### G4 — bounded review correction: inherited CA bundle default
+
+Review of `dff6e18` found that the official v0.33.3 image's exact inherited
+`SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` was rejected on reinspection.
+Updated official-image fixtures reproduced failures for repeat managed runtime
+apply and existing-container connection before the fix. The guard now permits
+only that exact additional value; changed/empty/duplicate-conflicting CA settings
+and unrelated environment overrides remain blocked before mutation.
+
+The regression covers install → runtime repeat → protect a selected route,
+preserving the container, route records, keys and ownership marker. External
+connection/retry preserves its config/keys/unrelated route without restarting it.
+**22 focused passes; affected 189 pass / one existing containment skip; frontend
+build passes.** Existing UI layout evidence is retained (no frontend code change).
+The independent review supplied by the user reported actual Core parser acceptance;
+full startup was blocked by Envoy's sandbox socket restriction. Actual
+Pomerium–Keycloak allowed/denied login and Caddy execution remain the recorded
+integration checks, not new completion gates. Details:
+`docs/evidence/g4-acceptance.md`. G4 remains pending, accepted progress **30%**;
+review acceptance would make it **40%**. No merge, deploy or live service changes.

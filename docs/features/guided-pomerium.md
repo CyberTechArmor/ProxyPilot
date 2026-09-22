@@ -32,8 +32,11 @@ host execution. Missing Docker, occupied private ports, failed image pull or
 startup, unsafe files and incompatible resources stop verification.
 
 **Connect existing** supports this exact local, single-process Core image/profile
-with an inspectable JSON config, fixed command, no environment overrides, private
+with an inspectable JSON config, fixed command, no unauthorized environment overrides, private
 listeners and a read-only bind at `/pomerium/config.json` (or its parent directory).
+The pinned image's inherited
+`SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` is accepted exactly; a custom or
+empty CA path and other unauthorized overrides are still refused.
 It performs read-only Docker inspection and health checks. Authentication settings
 must already match the reviewed client. Existing explicit shared/cookie/signing
 keys are preserved in a protected reference, not rotated. The runner creates its

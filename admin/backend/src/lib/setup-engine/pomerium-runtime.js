@@ -68,7 +68,8 @@ export async function ensurePomeriumRuntime(db,r,intents,{exec,job,root=POMERIUM
   let actual=null;
   if(exists) {try{actual=JSON.parse((await must(['container','inspect',name,'--format',inspectFormat],'read-only configuration inspection')).stdout);}catch(e){if(e.pomeriumSafe)throw e;throw fail('Cannot read existing Pomerium container configuration.');}}
   if(actual) {
-    if(actual.image!==POMERIUM_IMAGE || actual.network!=='host' || Object.keys(actual.ports||{}).length || JSON.stringify(actual.command)!==JSON.stringify(['--config','/pomerium/config.json']) || JSON.stringify(actual.entrypoint)!==JSON.stringify(['/bin/pomerium']) || (actual.env||[]).some(e=>!e.startsWith('PATH=') && e!=='AUTOCERT_DIR=/data/autocert')) throw fail('Existing Core image, private network configuration, command or environment overrides are unsupported. No resource was taken over.');
+    // v0.33.3 inherits this exact CA bundle path; custom trust overrides remain unsupported.
+    if(actual.image!==POMERIUM_IMAGE || actual.network!=='host' || Object.keys(actual.ports||{}).length || JSON.stringify(actual.command)!==JSON.stringify(['--config','/pomerium/config.json']) || JSON.stringify(actual.entrypoint)!==JSON.stringify(['/bin/pomerium']) || (actual.env||[]).some(e=>!e.startsWith('PATH=') && e!=='AUTOCERT_DIR=/data/autocert' && e!=='SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt')) throw fail('Existing Core image, private network configuration, command or environment overrides are unsupported. No resource was taken over.');
     if(r.config.mode==='install' && actual.labels?.['io.proxypilot.pomerium']!==r.credential_ref) throw fail('Pomerium container name is owned by another installation.');
   }
   if(r.config.mode==='connect') {

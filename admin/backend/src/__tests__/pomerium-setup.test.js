@@ -21,6 +21,8 @@ import { validateRunnerJob,reconcileDecision,FencedError } from '../lib/setup-en
 import { verifyAssertion,testApp } from '../../scripts/g4-test-app.mjs';
 const {buildDomainCaddyConfig}=await import('../routes/services.js');
 
+// The pinned official image inherits its CA bundle path from its base image.
+const pinnedImageEnv=['PATH=/bin','AUTOCERT_DIR=/data/autocert','SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt'];
 const jobHandle={id:'test',fence(){},checkpoint(){},generated(){},progress(){},onStep(){}};
 function protect(db) {
   const input={expectedRevision:readPomerium(db).revision,routeId:'test-route',subjects:['subject-alice'],action:'protect'};
@@ -47,7 +49,7 @@ function docker() {
     if(a[0]==='container' && a[1]==='inspect') return ok(JSON.stringify(container));
     if(a[0]==='create') {
       assert(!container,'duplicate container');const source=a[a.indexOf('--mount')+1].match(/source=([^,]+)/)[1];
-      container={image:POMERIUM_IMAGE,entrypoint:['/bin/pomerium'],command:['--config','/pomerium/config.json'],env:['PATH=/bin','AUTOCERT_DIR=/data/autocert'],network:'host',ports:{},mounts:[{Type:'bind',Source:source,Destination:'/pomerium',RW:false}],labels:{'io.proxypilot.pomerium':a[a.indexOf('--label')+1].split('=')[1]},running:false,startedAt:'0001-01-01T00:00:00Z'};return ok(POMERIUM_APP);
+      container={image:POMERIUM_IMAGE,entrypoint:['/bin/pomerium'],command:['--config','/pomerium/config.json'],env:[...pinnedImageEnv],network:'host',ports:{},mounts:[{Type:'bind',Source:source,Destination:'/pomerium',RW:false}],labels:{'io.proxypilot.pomerium':a[a.indexOf('--label')+1].split('=')[1]},running:false,startedAt:'0001-01-01T00:00:00Z'};return ok(POMERIUM_APP);
     }
     if(['start','restart'].includes(a[0])) {if(failStart){failStart=false;return {code:1,stderr:'raw secret'};}container.running=true;container.startedAt=new Date(Date.now()+20).toISOString();if(interrupt){interrupt=false;throw new FencedError('test');}return ok();}
     if(a[0]==='exec' && a.includes('health')) return ok();
@@ -209,7 +211,7 @@ test('G4.1 existing Core connection is read-only, preserves its keys and unrelat
   const r=readPomerium(db),secrets=pomeriumSecrets(db,r),existingKeys={...secrets,shared:Buffer.alloc(32,1).toString('base64'),cookie:Buffer.alloc(32,2).toString('base64')};
   const actual=renderPomeriumConfig(r.config,pomeriumIntents(db),existingKeys);actual.routes.push({name:'unrelated',from:'https://other.example.net',to:'https://192.168.30.10:8080',allow_any_authenticated_user:true});
   const path=join(dir,'external.json');writeFileSync(path,JSON.stringify(actual),{mode:0o600});const before=readFileSync(path,'utf8'),calls=[];
-  const instance={image:POMERIUM_IMAGE,entrypoint:['/bin/pomerium'],command:['--config','/pomerium/config.json'],env:['PATH=/bin','AUTOCERT_DIR=/data/autocert'],network:'host',ports:{},mounts:[{Type:'bind',Source:path,Destination:'/pomerium/config.json',RW:false}],labels:{},running:true,startedAt:new Date(Date.now()+1000).toISOString()};
+  const instance={image:POMERIUM_IMAGE,entrypoint:['/bin/pomerium'],command:['--config','/pomerium/config.json'],env:[...pinnedImageEnv],network:'host',ports:{},mounts:[{Type:'bind',Source:path,Destination:'/pomerium/config.json',RW:false}],labels:{},running:true,startedAt:new Date(Date.now()+1000).toISOString()};
   const exec={host:async args=>{calls.push(args);return {code:0,stdout:args[2]==='ls'?'external-core':args[2]==='inspect'?JSON.stringify(instance):''};}};
   const opts={exec,job:jobHandle,root:join(dir,'pm'),attempts:1};
   assert.equal((await ensurePomeriumRuntime(db,r,pomeriumIntents(db),opts)).ownership,'external');
@@ -245,4 +247,43 @@ test('G4.5 dashboard, identity, recovery and machine API route rendering remains
   // MCP/delegated editing/provisioning/migration/terminal/health all retain this
   // backend route and their existing middleware; no path-level gateway is added.
   assert(before['pilot.example.com'].includes('127.0.0.1:3001'));
+}));
+
+
+test('G4.1 official image supports repeat runtime apply and protecting a route after installation',()=>withDb(async(db,dir)=>{
+  savePomerium(db,configInput);applyPomerium(db,1,'admin');const h=harness(db,dir);
+  assert.equal((await h.finish()).status,'succeeded','initial managed installation');
+  const r=readPomerium(db),secrets=pomeriumSecrets(db,r),owner=readFileSync(join(dir,'pomerium','owner.json'),'utf8');
+  const callsBefore=h.runtime.calls.length;
+  await ensurePomeriumRuntime(db,r,[],{exec:h.runtime,job:jobHandle,root:join(dir,'pomerium'),attempts:1});
+  assert.deepEqual(h.runtime.calls.slice(callsBefore).map(a=>a.slice(1,3)),[['container','ls'],['container','inspect'],['exec',POMERIUM_APP]],'repeat runtime apply inspects the inherited environment without creating or restarting');
+  protect(db);assert.equal((await h.finish()).status,'succeeded','protection after installation must not stop at denied');
+  assert.equal(pomeriumState(db).intents[0].state,'protected');
+  assert.equal(h.runtime.calls.filter(a=>a[1]==='create').length,1);
+  assert.equal(h.runtime.calls.filter(a=>a[1]==='restart').length,1,'only the changed route configuration restarts the owned container');
+  assert.deepEqual(pomeriumSecrets(db,readPomerium(db)),secrets);
+  assert.equal(readFileSync(join(dir,'pomerium','owner.json'),'utf8'),owner);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM service_http_routes').get().n,2);
+}));
+test('G4.1 only the exact pinned CA default is allowed; unauthorized environment overrides remain blocked',()=>withDb(async(db,dir)=>{
+  savePomerium(db,configInput);const r=readPomerium(db),runtime=docker(),root=join(dir,'pm');
+  const opts={exec:runtime,job:jobHandle,root,attempts:1};
+  await ensurePomeriumRuntime(db,r,[],opts);
+  const before=readFileSync(join(root,'config.json'),'utf8'),secrets=pomeriumSecrets(db,r);
+  const cases=[
+    pinnedImageEnv.map(e=>e.startsWith('SSL_CERT_FILE=')?'SSL_CERT_FILE=/tmp/untrusted-ca.pem':e),
+    pinnedImageEnv.map(e=>e.startsWith('SSL_CERT_FILE=')?'SSL_CERT_FILE=':e),
+    [...pinnedImageEnv,'SSL_CERT_FILE=/tmp/untrusted-ca.pem'],
+    [...pinnedImageEnv,'SSL_CERT_DIR=/tmp/untrusted-certs'],
+    [...pinnedImageEnv,'AUTOCERT_DIR=/tmp/other'],
+    [...pinnedImageEnv,'ADDRESS=0.0.0.0:443'],
+    [...pinnedImageEnv,'AUTHENTICATE_SERVICE_URL=https://unreviewed.example.com'],
+  ];
+  for(const env of cases) {
+    runtime.container.env=env;const start=runtime.calls.length;
+    await assert.rejects(ensurePomeriumRuntime(db,r,[],opts),/environment overrides are unsupported/);
+    assert.deepEqual(runtime.calls.slice(start).map(a=>a.slice(1,3)),[['container','ls'],['container','inspect']],'reject before runtime mutation or health execution');
+    assert.equal(readFileSync(join(root,'config.json'),'utf8'),before);
+    assert.deepEqual(pomeriumSecrets(db,r),secrets);
+  }
 }));

@@ -10,7 +10,7 @@ review; accepting G4 would make it 40% (4/10).
 
 | Criterion | Implemented and checked here | Execution limit |
 | --- | --- | --- |
-| G4.1 | Real admin API install/connect/skip, encrypted refs and retry identity; fixed v0.33.3 Docker argv; exact read-only existing-container/config verification; preservation of external keys/unrelated routes; owner-only revision files and drift refusal | Docker is absent; real image pull, Core startup/parser/health not executed |
+| G4.1 | Real admin API install/connect/skip, encrypted refs and retry identity; fixed v0.33.3 Docker argv; exact read-only existing-container/config verification; preservation of external keys/unrelated routes; owner-only revision files and drift refusal | Docker is absent here; independent review reports parser acceptance, while Core startup/health remain unverified |
 | G4.2 | G2 verification requirement; separate client/observer refusal; exact callback/origin, confidential flow, S256 checks; protected credentials; G3 regression suite | Pomerium-to-Keycloak login has not executed here; no claim that a reader check validates the supplied client secret |
 | G4.3 | Actual route review/API, policy/route digest, production Caddy renderer, SQLite ownership triggers; alias/native listener refusals; signed test app runs over real HTTP and crypto | Socket/HTTP host observations scripted; real PPL authorized/denied browser flows and off-host bypass probe outstanding |
 | G4.4 | Existing runner/backend jobs, locks/fences/reconcile; failed runtime, invalid Caddy, failed probe → durable denial, unavailable-Caddy honesty, repeat apply, interruption/retry, separate API process restart, explicit removal | Caddy adapt/reload and Docker responses scripted; their real failure behavior requires isolated host execution |
@@ -34,7 +34,7 @@ node --test --test-concurrency=1 \
   src/__tests__/caddy-site-file.test.js
 ```
 
-The affected set contains **188 tests: 187 pass, one existing containment test
+The original submission affected set contains **188 tests: 187 pass, one existing containment test
 skipped** because this environment has neither writable cgroups nor systemd.
 The 20 G4 tests pass. Two existing registry expectations now include Pomerium's
 new job/service capability. During verification, a new preservation assertion
@@ -71,10 +71,13 @@ No database, identity or host-command fixture result is represented as real Core
 This workspace has neither `docker` nor `caddy` installed. Binary download through
 the available repository connector is unsupported; the permitted command network
 did not provide those release binaries. No disposable three-service environment
-was therefore started. The real Core parser, private listeners, Keycloak login,
-authorized access, authenticated denial and Caddy TLS/reload are **unverified**.
-These are substantive integration limits, not passing results or optional polish.
-No live environment was used to work around them.
+was therefore started during implementation. The independent review supplied by
+the user subsequently ran the actual Core parser and reported that it accepted
+the generated configuration. Full startup did not complete: Envoy encountered a
+sandbox socket restriction. That parser result is review evidence, not an
+execution repeated in this correction. Private listeners, Keycloak login,
+authorized access, authenticated denial and Caddy TLS/reload remain **unverified**.
+No live environment was used to work around these limits.
 
 ## Isolated host acceptance matrix (not performed)
 
@@ -109,3 +112,35 @@ installer/updater behavior, live credential rotation, deployment or merge.
 
 Optional broader runtime profiles, richer claim selection, automatic external
 management and continuous host-drift monitoring are backlog only. Stop at G4.
+
+
+## G4 review correction — pinned image CA environment
+
+The review of `dff6e18` identified the official v0.33.3 image's inherited
+`SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`. The runtime inspection guard
+previously rejected it. The Docker fixtures now include that literal default.
+Before changing production code, the existing-container and new managed-repeat
+regressions both failed with the reported unsupported-environment error; initial
+managed installation succeeded before its repeat inspection failed.
+
+The bounded correction permits only that exact additional value. Changed/empty
+CA paths, a conflicting duplicate, SSL_CERT_DIR and unrelated Core/autocert
+settings still fail before file writes, lifecycle commands or health execution.
+No environment-prefix exemption, image change or configuration redesign.
+
+The managed regression executes initial installation, actual adapter reinspection
+(no extra create/start/restart), then a new route-protection apply. The latter
+reuses the container, owner marker and credentials and finishes protected rather
+than denied. The existing connection test reinspects the official environment
+twice while preserving the external file, keys and unrelated route; no external
+restart or write is issued. These host responses remain scripted.
+
+Correction validation: **22 focused tests pass; affected suite 190 tests / 189
+pass / one existing containment skip; frontend build passes** with its existing
+chunk-size warning. Frontend code is unchanged, so the previous layout evidence
+is retained. The user's independent review also reported 187 pass / one skip and
+a passing build for the original submission, plus actual parser acceptance;
+full startup/login stopped at the sandbox socket restriction described above.
+Real Pomerium–Keycloak allowed/denied login and Caddy execution remain the same
+recorded integration checks. Accepted progress is **30%**, G4 pending; acceptance
+would make it **40%**. No merge, deployment, live service or later-milestone work.

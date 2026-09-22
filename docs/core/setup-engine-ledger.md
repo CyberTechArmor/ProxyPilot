@@ -378,3 +378,22 @@ Core and actual Caddy execution remain outstanding as explicitly described in
 `docs/evidence/g4-acceptance.md`. Backup references use existing DB/env and
 companion encrypted file packs; no new backup engine. Accepted progress remains
 30% pending G4 review. No later milestone, installer/updater or live changes.
+
+
+### G4 review correction — pinned image environment compatibility
+
+The official image fixture now includes its inherited CA setting. Two regression
+paths failed against `dff6e18`: managed runtime reinspection after first install
+and existing-container connection. The runtime guard now accepts exactly
+`SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`, without relaxing the remaining
+image/command/environment ownership checks. Tests also refuse changed, empty or
+conflicting CA settings and unrelated overrides before runtime mutation.
+
+Managed install → repeat adapter apply → route protection reuses resources and
+secrets; external connection/retry stays read-only. **22 focused tests pass;
+affected 190 total / 189 pass / one existing containment skip; frontend build
+passes.** Actual Core parser acceptance was reported by the user's independent
+review; full startup/login encountered a sandbox socket restriction. Existing
+real login/Caddy integration checks remain outstanding. No engine redesign,
+installer/updater, A-17, Phase F or later G work. Accepted progress stays **30%**
+until G4 acceptance, then **40%**. Evidence: `docs/evidence/g4-acceptance.md`.

@@ -16,6 +16,9 @@ export async function verifyMachine(r,v,api){const n=namesFor(r);if(!v.roleId)th
     return token;
   }catch(e){await api('/v1/auth/token/revoke-self',{method:'POST',token}).catch(()=>{});throw e;}}
 export async function bootstrap(db,r,input,api,{job,verifyDatabase}){const current=await requireReady(api,r),n=namesFor(r),v=secrets(db,r),token=input.bootstrapToken;
+  // Bind the first observed ready cluster before any remote mutation. Even an
+  // interrupted bootstrap must never adopt a replacement instance on retry.
+  job.fence();db.prepare('UPDATE setup_openbao SET resources_json=? WHERE id=1').run(JSON.stringify({...r.resources,clusterId:current.clusterId,seal:current.seal}));
   // Read-only audit of ALL intended names precedes the first write, even on connect.
   const mounts=ok(await api('/v1/sys/mounts',{token})).data,auth=ok(await api('/v1/sys/auth',{token})).data;
   const owned=[{map:mounts,name:n.database,type:'database',path:'sys/mounts'},{map:auth,name:n.oidc,type:'oidc',path:'sys/auth'},{map:auth,name:n.approle,type:'approle',path:'sys/auth'}];
@@ -49,7 +52,7 @@ export async function bootstrap(db,r,input,api,{job,verifyDatabase}){const curre
   // explicitly revoked after the separately protected machine identity works.
   ok(await api('/v1/auth/token/revoke-self',{method:'POST',token}),'Bootstrap token revocation');
   if((await api('/v1/auth/token/lookup-self',{token})).status!==403)throw fail('Bootstrap token revocation could not be verified.');
-  job.fence();db.prepare('UPDATE setup_openbao SET bootstrap_complete=1,resources_json=?,verified_json=NULL WHERE id=1').run(JSON.stringify({...r.resources,clusterId:current.clusterId}));
+  job.fence();db.prepare('UPDATE setup_openbao SET bootstrap_complete=1,resources_json=?,verified_json=NULL WHERE id=1').run(JSON.stringify({...r.resources,clusterId:current.clusterId,seal:current.seal}));
   return {state:'bootstrap_complete',label:'Owned human/machine access configured. Bootstrap token revoked; apply verifies the disposable credential flow.'};
 }
 export async function verifyAccess(r,token,api){const n=namesFor(r);const get=async path=>ok(await api('/v1/'+path,{token}),'Owned access readback')?.data;

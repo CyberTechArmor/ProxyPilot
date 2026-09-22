@@ -1,0 +1,9 @@
+✔ G6 real OpenBao 2.6.2: PGP init/handoff, restart/seal/unseal, AppRole allow/deny and OIDC mapped/unmapped (10836.522223ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 11005.056784

@@ -460,3 +460,35 @@ in `platform-delivery-ledger.md` before implementation. Reuse the existing
 plan, runner, jobs, leases, credential references and Caddy path. Guided
 progress stays **50% (5/10)** pending G6 acceptance; earlier host acceptance
 remains separately pending. No merge, deployment, live changes or later slice.
+
+
+### G6 repository delivery — review pending (2026-09-22)
+
+OpenBao now uses the existing saved platform plan, runner, persistent jobs/leases,
+protected references and Caddy renderer. Migration 1007 adds only OpenBao state
+and encrypted identity references. Saving is inert; `openbao_apply` carries only
+a saved revision. `openbao_operator` holds the same service lease while handling
+transient share/bootstrap inputs, and interruption records recovery required
+without replay or a guest-recovery job. Owned Caddy children retain their job
+reference through runner/API restarts.
+
+The fixed G6.1–G6.6 contract remains in `platform-delivery-ledger.md`. All six have
+repository implementation and focused acceptance evidence: install/connect/skip;
+PGP-protected initialization/acknowledgement and manual unseal; exact Keycloak
+mapping plus separate AppRole; selected disposable PostgreSQL reader/revocation;
+configuration/cluster-bound retry and backup guidance; auth/redaction, affected
+regressions and responsive UI checks. Actual 2.6.2 initialization, restart/unseal,
+AppRole and OIDC engine execution passed; its OIDC provider was scripted. Real
+Docker/Caddy/Keycloak and PostgreSQL credential execution remain pending here.
+
+[G6 execution evidence](../evidence/g6-acceptance.md) separates real services from
+scripted production adapters and documents initial failures, corrections and
+precise environment limits. [Operator guidance](../features/guided-openbao.md)
+covers the dedicated client, public database CA, separate recovery custody,
+manual restart recovery and compatible snapshot/configuration backups using
+existing mechanisms. No new backup, restore or upgrade framework.
+
+Published on `feat/g6-guided-openbao` for review. **50% (5/10)** remains accepted;
+G6 acceptance would make **60% (6/10)**. No merge, production/live changes,
+G7–G10, A-17, Phase F or installer/updater/U1/U2 changes. Earlier host acceptance
+items are unchanged and are not new G6 completion gates.

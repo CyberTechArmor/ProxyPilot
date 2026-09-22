@@ -156,7 +156,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | accepted — 6/6 criteria, including slow Caddy handoff correction; `a039761` merged by #614; execution limits below |
 | G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | accepted — 7/7 criteria; `4e7b257`, PR #615; repository checks, disposable ceremonies and separate live-host limitations below |
 | G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | accepted — six fixed criteria; corrected head `6c3bdcb`, PR #616; real stack and host execution limits below |
-| G5 | Infisical with Agent Proxy adapter | C-03 | historically accepted at unavailable `a436546`; reconstructed on `feat/g5-guided-infisical-recovery`, current evidence below; merge and host acceptance separate |
+| G5 | Infisical with Agent Proxy adapter | C-03 | accepted published recovery `31d0c87`; merged by #617 as `e9430a2`; host acceptance separate |
 | G6 | OpenBao adapter | C-04 | authorized — six fixed criteria below; review pending |
 | G7 | Vaultwarden adapter | C-05 | planned — not authorized |
 | G8 | Application connection automation | D-01/D-02, C-06; reuse existing contracts, deployment and verification | planned — not authorized |
@@ -643,12 +643,12 @@ These six criteria are fixed before implementation:
 
 | Criterion | Required result | Status |
 | --- | --- | --- |
-| G6.1 | Reviewed install/connect/skip; version-specific official deployment/API review; persistent single-node integrated storage, private listeners, independent lifecycle, Caddy public ports/certificates; inert save, explicit apply; external checks read-only first and writes only to reviewed owned resources. | in progress |
-| G6.2 | Distinguish uninitialized/sealed/unsealed/unavailable; initialize only confirmed uninitialized managed instance, never on retry; protected recovery handoff and acknowledgement; manual unseal after restart; preserve external seal; no KMS/HSM/auto-unseal; unseal material separate from application backups; transient submitted shares/bootstrap tokens never in plans/jobs/events/logs/browser storage; no runtime root token; lost initialization handoff means recovery required, no reset. | in progress |
-| G6.3 | Human access through verified Keycloak, dedicated client, exact callbacks and explicit policies; unmapped denied; separately scoped supported machine identity with protected credentials preserved on retry and permitted/denied proof; preserve ProxyPilot login/recovery/service identities. | in progress |
-| G6.4 | One selected dynamic flow, disposable PostgreSQL by default: limited credential issued, used and revoked/expired with subsequent access denied; credentials absent from evidence/browser storage; only explicitly selected test resources, no database move/production listener/credential migration; no other engines configured. | in progress |
-| G6.5 | Existing jobs/locks, progress/failure/retry across browser/API/runner restart, resource/key reuse and verification bound to saved configuration; sealed/unavailable never healthy/verified; restart restoration guidance; compatible data/config backup plus separately held unseal material; no new backup/upgrade/restore framework. | in progress |
-| G6.6 | Focused adapter acceptance for all choices, initialization/interrupted handoff, sealed/restart/unseal, scoped access, dynamic flow, denial/retry/redaction; admin/CSRF/fresh-auth; affected tests/build/desktop/360px; distinguish real disposable execution from scripted responses and precise environment limits. | in progress |
+| G6.1 | Reviewed install/connect/skip; version-specific official deployment/API review; persistent single-node integrated storage, private listeners, independent lifecycle, Caddy public ports/certificates; inert save, explicit apply; external checks read-only first and writes only to reviewed owned resources. | implemented — reviewed 2.6.2; inert choices, private Raft/Docker ownership and Caddy adapter checks pass; real Docker/Caddy pending |
+| G6.2 | Distinguish uninitialized/sealed/unsealed/unavailable; initialize only confirmed uninitialized managed instance, never on retry; protected recovery handoff and acknowledgement; manual unseal after restart; preserve external seal; no KMS/HSM/auto-unseal; unseal material separate from application backups; transient submitted shares/bootstrap tokens never in plans/jobs/events/logs/browser storage; no runtime root token; lost initialization handoff means recovery required, no reset. | implemented — actual 2.6.2 PGP handoff, acknowledgement, restart/seal/manual unseal; interrupted/lost handoff and redaction adapter checks pass |
+| G6.3 | Human access through verified Keycloak, dedicated client, exact callbacks and explicit policies; unmapped denied; separately scoped supported machine identity with protected credentials preserved on retry and permitted/denied proof; preserve ProxyPilot login/recovery/service identities. | implemented — dedicated Keycloak observer/mapping and preserved scoped AppRole; actual OpenBao allowed/denied OIDC and machine checks pass with scripted provider; real Keycloak pending |
+| G6.4 | One selected dynamic flow, disposable PostgreSQL by default: limited credential issued, used and revoked/expired with subsequent access denied; credentials absent from evidence/browser storage; only explicitly selected test resources, no database move/production listener/credential migration; no other engines configured. | implemented — selected PostgreSQL TLS/SCRAM issue/use/write-denial/revocation adapter checks pass; actual OpenBao database API accepts configuration; real PostgreSQL credential execution pending |
+| G6.5 | Existing jobs/locks, progress/failure/retry across browser/API/runner restart, resource/key reuse and verification bound to saved configuration; sealed/unavailable never healthy/verified; restart restoration guidance; compatible data/config backup plus separately held unseal material; no new backup/upgrade/restore framework. | implemented — jobs/leases, restart/retry, cluster/config binding and key/resource preservation pass; compatible backup and separate unseal custody guidance added |
+| G6.6 | Focused adapter acceptance for all choices, initialization/interrupted handoff, sealed/restart/unseal, scoped access, dynamic flow, denial/retry/redaction; admin/CSRF/fresh-auth; affected tests/build/desktop/360px; distinguish real disposable execution from scripted responses and precise environment limits. | implemented — focused/affected results, real-vs-scripted limits, build and five-width browser evidence recorded in g6-acceptance.md; review pending |
 
 Only G6 is authorized. No G7–G10, HA, KMS/HSM, general provisioning,
 existing-secret migration, A-17 continuation, Phase F, infrastructure rebuild,
@@ -656,3 +656,19 @@ installer/updater changes or accepted U1/U2 changes. Prerequisite corrections
 require a reproducible defect blocking a named criterion. Optional improvements
 are backlog items, not additional completion gates. Publication is authorized;
 merge, production deployment and live infrastructure/identity changes are not.
+
+Repository delivery and focused evidence are complete for G6 review; this is
+not milestone acceptance. See [G6 acceptance evidence](../evidence/g6-acceptance.md)
+and [operator guidance](../features/guided-openbao.md). The published branch is
+`feat/g6-guided-openbao`; checkpoints include `0f01ca7`, `686a3c2` and `aa95e34a`.
+The final PR head records the complete tested tree. Accepted progress remains
+**50% (5/10)**, with no merge or deployment performed.
+
+G6 corrections were limited to reproduced blockers: real 2.6.2 initialization
+needed a longer bounded deadline; AppRole missing-SecretID lookup returns 204;
+the operator lease helper owns its SQL transaction; private database TLS needed
+an explicit public CA handoff; a first interrupted bootstrap must bind its
+cluster before mutations; the new button failed contrast; and the runner-kind
+assertion lacked the guided apply kinds. None changes U1/U2 or the installer.
+The existing containment-host requirement, earlier milestones' acceptance and
+unavailable real-host integrations remain separate. They authorize no rebuild.

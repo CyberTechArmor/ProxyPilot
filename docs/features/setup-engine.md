@@ -2092,3 +2092,19 @@ has a new identity, preserves all 24 supplied source/test files unchanged and
 requires current verification. Recovery is submitted for review, not merged or
 deployed. No G6–G10, credential migration, installer/update changes or new restore
 framework is included.
+
+## G6 — guided OpenBao
+
+The accepted G5 recovery is `31d0c87b2b1fd4e00c24773e6ae0435e387c70a3`, merged
+by #617 as `e9430a2314c881c23fbecc74c25acf8ac62661c2`. G6 builds from that main.
+The [OpenBao guide](guided-openbao.md) covers install/connect/skip, reviewed
+PGP initialization and separate recovery handoff, manual unseal, dedicated
+Keycloak/group access, preserved AppRole references and one selected disposable
+PostgreSQL credential flow. Migration 1007 and `openbao_apply`,
+`configure_openbao_route`, `openbao_operator` reuse the existing store, runner,
+leases and route render. Transient operator inputs are not queued or replayed.
+A sealed/unavailable service never appears currently verified. Lost handoff after
+initialization requires recovery without data reset. No new backup framework,
+installer/updater change, G7–G10, A-17 continuation or Phase F is included.
+Guided progress stays **50%** pending G6 review and acceptance; runtime validation
+limits remain separate in [the evidence](../evidence/g6-acceptance.md).

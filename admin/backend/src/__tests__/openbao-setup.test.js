@@ -54,3 +54,10 @@ test('G6.4 managed public CA mount is read-only, reused and drift-protected',()=
   await ensureRuntime(r,{exec:d,job:handle,root});assert.equal(d.calls.filter(a=>a[1]==='create').length,before);
   writeFileSync(join(root,'postgres-ca.pem'),'drift');await assert.rejects(ensureRuntime(r,{exec:d,job:handle,root}),/public CA file drifted/);
 }));
+
+test('G6.5 failed first bootstrap still binds the observed cluster before retry',()=>withDb(async(db,dir)=>{
+  const h=harness(db,dir,{initialized:true,sealed:false}),r=readOpenBao(db);h.api.mounts[namesFor(r).database+'/']={type:'database',description:'foreign'};
+  await assert.rejects(bootstrapReady(db,h),/belongs/);assert.equal(readOpenBao(db).resources.clusterId,'g6-cluster');
+  delete h.api.mounts[namesFor(r).database+'/'];h.api.cluster='replacement';await assert.rejects(bootstrapReady(db,h),/identity changed/);
+  assert(!h.api.calls.some(c=>['POST','PUT'].includes(c.method)));
+},'connect'));

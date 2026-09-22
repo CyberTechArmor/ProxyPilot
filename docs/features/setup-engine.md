@@ -889,7 +889,20 @@ values, or submit a new request deliberately — it takes a fresh snapshot
 of the guest as it is now, which is not the original pre-change point. No
 replacement snapshot is ever taken and presented as the original. A
 resumed job whose remaining state already holds completes read-only, the
-unverifiable snapshot a warning on the record. The record
+unverifiable snapshot a warning on the record. The protection follows the
+INTENT, not the attempt (R-055, the second review): every checkpoint of a
+job carries `writeBegun` once a write began anywhere in its chain, the
+executor walks the whole `retry_of` chain (same app and kind) for
+`issued` / `writeBegun` and for the recorded snapshot identity (the chain's
+generated records), so a retry of a retry — and a resume of that retry
+after a dead owner — refuses the remaining write exactly as the first
+retry did, at any depth; a retry that was itself refused at protection
+never becomes the origin of a fresh write. And the identity must be usable:
+a recorded name without a timestamp is `unverifiable`, never a wildcard,
+after the first write (no further write) and before it (refused: the
+snapshot on the guest cannot be certified as this job's). A request
+submitted without `retryOf` is a new intent with its own snapshot name and
+its own fresh snapshot — distinct from retrying the original. The record
 and every result state the coverage honestly (`snapshot.covers`): an
 instance snapshot restores the guest's root disk and configuration only —
 attached custom volumes are named as not covered — and never ProxyPilot's
@@ -953,12 +966,40 @@ the setup engine's rows live in), under the guest's lease and
 the reserved ranges. The reserved UDP ranges are recomputed from the
 enabled rows under the lease at the moment of the check and of the write
 (the plan carries no aggregate; the validator refuses one), so an older
-retry keeps what newer forwards reserved. A definite failure after the row
-was written is settled by the job itself (`settleForward`): the row, the
-device and the rule this id holds are removed (each best effort, each
-recorded as `rollback`), the response naming what could not be removed
-(the L4 reconciler sweeps an orphan device at its next pass) — the
-disposition settles whether or not the request is still alive. A retry
+retry keeps what newer forwards reserved. The store is fenced AT the
+database boundary (R-053, the second review): each insert / delete runs
+under `BEGIN IMMEDIATE` and, inside that transaction, renews the job
+claim, the guest's lease and every held shared lease at the epochs this
+worker holds; a renewal that changes no row rolls the transaction back and
+raises (`FencedError` for the claim, `SharedLeaseLostError` for a lease) —
+a takeover bumps the epoch under its own `BEGIN IMMEDIATE`, so it can never
+interleave with the write; reads fence the same way. A worker whose claim
+the runner's reconcile expired and requeued while another owner completed
+the job returns `fenced` and touches nothing: the per-step `applied`
+checkpoint is required before anything acts on a step's outcome (a
+checkpoint that changes no row raises the fence; an unrecorded outcome
+ends `failed at checkpoint` with no rollback attempted), and the
+settlement lets a fencing, ownership-loss or cancellation error propagate
+at once — only a host read-back failure is best effort, recorded
+`unknown`. A definite failure after the row was written is settled by the
+job itself (`settleForward`), and the settlement removes ONLY what this
+operation CREATED (R-054): ownership is a persisted engine record, never
+inferred from an id, an `already` state or an issued command — the job
+records `forward_row`, `proxy_device` and `firewall_rule` as generated
+(the fenced progress record) only after the create reported success and
+was not tolerated by name; a resumed attempt reads its own records; a
+retry inherits the records of the origins in its chain that did NOT
+succeed (a succeeded origin's changes are the operator's working state,
+never a rollback subject); every step carries `owned: true | false`.
+A retry of a completed forward that fails at the reconcile because an
+unrelated saved policy is rejected keeps the row, the device and the rule
+(`kept (not created by this operation)`, `rollback.state: none`) and
+reports the policy as unresolved with the rejection on the record; a fresh
+forward that fails after its row and device were created still removes
+both, also when it was interrupted between them and resumed. The response
+names what could not be removed (the L4 reconciler sweeps an orphan device
+at its next pass) — the disposition settles whether or not the request is
+still alive. A retry
 re-records the row before it touches the host; a row that can no longer be
 written because another forward binds the port (the executor's store
 checks the port NULL-safely, as `UNIQUE` ignores a NULL range end) is
@@ -973,10 +1014,15 @@ reloads `/etc/sysctl.conf`. The response keeps its shape
 (`reconcile.applied[].detail.{incus,firewall,policy}`,
 `reconcile.reservedPorts`) with `job_id` and `verified: true` beside it.
 
-**Truthful results.** Every result carries `applied` per step, `previous`,
+**Truthful results.** Every result carries `applied` per step (with
+`owned` on a forward's row, device and rule), `previous`,
 `snapshot` (name, timestamp, reused, verified, covers), `partial` and
 `notRun` on a failure, `protection` when the original snapshot could not
-be verified, `row`, `firewallPolicy` and `rollback` for a forward,
+be verified, `row` (with `owned`; `rolled_back` only when the row was in
+fact removed), `firewallPolicy` and `rollback` (per change `removed`,
+`absent`, `kept (…)` with the reason, `unresolved` for a policy the
+reconcile could not apply; `applied.rollback.state` `done`, `partial` or
+`none`) for a forward,
 `warnings` for a best-effort step, the executor's `jobId`; the MCP
 results keep their fields (`applied`, `snapshot`, `restart_required`,
 `restart_recommended`, `previous`, `reconcile`, `reverse_with`) and add
@@ -1188,6 +1234,29 @@ copies a deploy or restore took are named on its record for that.
 
 ## Tests
 
+`setup-guest-config-review-2.test.js` (5 tests): the review of `e97a66a`
+(R-053…R-055), imports only symbols that exist at the reviewed head and was
+run against it in a worktree first (the four reproductions fail there for
+the reviewer's reasons; the non-regression case passes on both): a
+forward job whose device command fails, expired and requeued by the
+runner's actual `reconcile()` during the following read and completed by
+another owner meanwhile — the old worker `fenced`, nothing further issued,
+the new owner's row, job record and host state preserved; a retry of a
+completed forward failing at the reconcile behind an unrelated rejected
+policy keeping the row, the device and the rule with the policy reported
+unresolved, and a fresh partial forward (also one interrupted between its
+device and its rule) still removing its own creations; the retry, the
+retry of the retry and a resume of that retry after a partial change with
+the original snapshot lost, each refusing the remaining write with no
+replacement snapshot, then a deliberately new request applying with its
+own snapshot; a recorded snapshot without a timestamp refusing the
+remaining write as `unverifiable` and refusing to proceed before any
+write. The main suite gained the store-level test (the executor's
+`fencedForwardStore` refusing a delete, an insert and a read after a
+takeover of the guest's lease and after a re-claim, inside its own
+transaction, the row untouched, no transaction left open) and the chain /
+ownership helpers (`originChain`, `ownedFrom`).
+
 `setup-guest-config-review.test.js` (8 tests): the review of the first
 revision's seven reproductions — a rejected egress application not
 verified and applied by the retry; a saved rule under the expected id with
@@ -1207,7 +1276,7 @@ shared with the main suite (`helpers/scripted-config-host.js`), models the
 CLI's save-before-reconcile order with `status`, `reconcile --dry-run` and
 `reconcile` as the evidence.
 
-`setup-guest-config.test.js` (24 tests; the reserved-ports drop-in written
+`setup-guest-config.test.js` (26 tests; the reserved-ports drop-in written
 under the sandbox's real `sh` against a temp file, twice — once alone, once
 through the executor from a forward job; the rest over a scripted host —
 `incus`, the firewall CLI by its path, a `sysctl` that reads the temp file

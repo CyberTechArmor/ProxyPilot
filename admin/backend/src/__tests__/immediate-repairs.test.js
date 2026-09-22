@@ -299,7 +299,7 @@ test('ratchet (A-17.8): the guest configuration verbs and their pre-mutation sna
   assert.match(op, /if \(held && !lease\.renew\(HOST_FIREWALL_LOCK\)\) throw new SharedLeaseLostError\(HOST_FIREWALL_LOCK, `after \$\{issuedUnderLease\} command\(s\)`\);/, 'every command under the shared lease renews it first');
   assert.match(op, /mark\('issuing', cp\(\{ issued: true, snapshot, applied \}\), `issuing \$\{kind\} for \$\{name\} \(\$\{step\.key\}\)`, \{ required: true \}\);/, 'the checkpoint before the first write is mandatory');
   assert.match(op, /const c = await createSnapshotWithFallback\(host, name, want, \{ timeoutMs: TIMEOUTS\.snapshot \}\);\n\s+if \(!c\.ok\) return fail\('protect'/, 'a failed snapshot prevents the change');
-  assert.match(op, /if \(found && recorded && \(!recorded\.created_at \|\| recorded\.created_at === found\.created_at\)\) \{/, 'a recorded snapshot is reused only by name AND timestamp');
+  assert.match(op, /if \(found && recorded && recorded\.created_at && recorded\.created_at === found\.created_at\) \{/, 'a recorded snapshot is reused only by name AND a recorded timestamp that matches — a missing timestamp is never a wildcard');
   const logic = src('lib/setup-engine/config-logic.js');
   assert.match(logic, /p\.command != null \|\| p\.script != null \|\| p\.argv != null \|\| p\.args != null \|\| p\.options != null/);
   assert.equal((logic.match(/'sh', '-c'/g) || []).length, 1, 'one fixed host script: the reserved-ports write');
@@ -314,9 +314,20 @@ test('ratchet (A-17.8): the guest configuration verbs and their pre-mutation sna
   assert.match(logic, /if \(p\.reserved != null\) return \{ ok: false, reason: 'a forward job carries no reservation aggregate/);
   assert.match(logic, /export function forwardRuleVerdict\(list, f, serviceTag, \{ present \}\)/); assert.match(logic, /export function reconcileEvidence\(status, dry\)/);
   assert.match(op, /\} else if \(writeBegun\) \{/, 'after a write has begun the original snapshot must verify'); assert.match(op, /if \(!mutate\) \{/, 'no remaining write without it');
-  assert.match(op, /rollback = await settleForward\(/, 'the failed apply\'s disposition is the job\'s');
-  assert.match(src('lib/setup-engine/logic.js'), /EXCLUSIVE_JOB_KINDS = Object\.freeze\(\['restore_db', 'restore_snapshot', \.\.\.LIFECYCLE_JOB_KINDS, \.\.\.SETUP_JOB_KINDS, \.\.\.CONFIG_JOB_KINDS\]\)/);
   const executor = src('lib/setup-engine/executor.js');
+  assert.match(op, /rollback = await settleForward\(/, 'the failed apply\'s disposition is the job\'s');
+  // The review of e97a66a (R-053…R-055): ownership at the database boundary and in the rollback, and the protection across the retry chain.
+  assert.match(op, /const writeBegun = issuedBefore \|\| \(resumed && prior\.writeBegun === true\) \|\| deps\.originWriteBegun === true;/, 'a write begun anywhere in the retry chain keeps the original snapshot\'s protection');
+  assert.match(op, /writeBegun: writeBegun \|\| issuedAny, \.\.\.extra/, 'every checkpoint carries the flag');
+  assert.match(op, /mark\('applied', cp\(\{ issued: true, snapshot, applied \}\), `\$\{step\.key\}: \$\{applied\[step\.key\]\.state\}`, \{ required: true \}\);/, 'the step outcome is required on the record before anything acts on it');
+  assert.match(op, /if \(step\.creates && r\.code === 0 && !r\.tolerated && !owned\(step\.creates\)\) \{ ownedList\.push\(step\.creates\); job\.generated\(step\.creates\); \}/, 'a created change is recorded in the fenced progress record');
+  assert.match(op, /out\.row = !had \? 'absent' : !owned\(\{ kind: 'forward_row', name: f\.id \}\) \? NOT_OURS : store\.delete\(f\.id\) > 0 \? 'removed' : 'kept';/, 'the rollback removes only what this operation created');
+  assert.doesNotMatch(op.slice(op.indexOf('async function settleForward')), /catch \(e\) \{ out\./, 'no cleanup step converts an error into a best-effort note');
+  assert.match(executor, /forwardStore: fencedForwardStore\(db, \{ jobId: job\.id, owner, epoch, app: job\.app, lockEpoch, heldEpochs, lost: \(\) => lost, noteLost: \(n\) => \{ lost = n; \}, nowMs \}\),/, 'the forward store is fenced at the database boundary');
+  assert.match(executor, /db\.exec\('BEGIN IMMEDIATE'\);\n\s+let out;\n\s+try \{ const gone = renew\(\); if \(gone\) raise\(gone\);/, 'each write renews the claim and every lease inside its own transaction');
+  assert.match(executor, /originWriteBegun: chain\.some\(/, 'the executor walks the whole retry chain');
+  assert.match(executor, /for \(const o of chain \|\| \[\]\) if \(o\.status !== 'succeeded'\) add\(o\);/, 'a succeeded origin\'s changes are never inherited for a rollback');
+  assert.match(src('lib/setup-engine/logic.js'), /EXCLUSIVE_JOB_KINDS = Object\.freeze\(\['restore_db', 'restore_snapshot', \.\.\.LIFECYCLE_JOB_KINDS, \.\.\.SETUP_JOB_KINDS, \.\.\.CONFIG_JOB_KINDS\]\)/);
   assert.match(executor, /keepAlive = setInterval\(\(\) => \{ try \{ const gone = renewAll\(\); if \(gone\) lost = gone; \}/, 'the claim, the guest\'s lease and every held shared lease are heart-beaten during a long command');
   assert.match(executor, /const jobFence = isConfig \? configFence : fence;/, 'and checked before every command');
 });

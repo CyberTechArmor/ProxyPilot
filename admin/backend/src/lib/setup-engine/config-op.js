@@ -41,10 +41,15 @@
 //              reserved UDP ranges are recomputed from the authoritative
 //              rows at execution time, never carried in the plan
 //   settle     a forward_apply that failed definitively after its row was
-//              written rolls back — the row, the device and the rule this
-//              attempt added — as the job's own disposition; a row that can
-//              no longer be written (superseded on its port) is refused with
-//              this id's orphans removed, never a success without a row
+//              written rolls back — ONLY the row, the device and the rule
+//              this operation CREATED (its fenced generated records, its
+//              own attempts' and those of the origins it retries that did
+//              not complete), never a change that was there before it —
+//              as the job's own disposition, fenced at every write; a row
+//              that can no longer be written (superseded on its port) is
+//              refused with this id's orphans removed, never a success
+//              without a row; a policy the reconcile could not apply is
+//              reported unresolved, not rolled back
 //   verify     the whole requested state read back, or `failed` naming the
 //              step: exit 0 is never the proof
 //
@@ -78,10 +83,12 @@ const TIMEOUTS = Object.freeze({ list: 30_000, incus: 60_000, snapshot: 30 * 60_
 //   { ok: true, step, instanceState, identity, snapshot, previous, applied, warnings, verification, alreadyInState?, resumedAfterIssue? }
 //   { ok: false, step, error, refused?, notFound?, contended?, partial?, protection?, rollback?, applied, snapshot, verification? }
 // `prior` is this job's own checkpoint from an interrupted attempt; `reuse`
-// the resources the retry's origin recorded (a snapshot by name +
+// the resources the retry's origin chain recorded (a snapshot by name +
 // created_at); deps: hostLease { acquire, takeover, renew, release },
-// forwardStore { get, insert, delete, reservedRanges }, originIssued (the
-// retry's origin had begun writing), sleep, nowMs, reservedPortsPath.
+// forwardStore { get, insert, delete, reservedRanges } (fenced at the
+// database boundary), originWriteBegun (a write had begun somewhere in the
+// retry chain), owned (the changes this operation created, as the engine
+// recorded them), sleep, nowMs, reservedPortsPath.
 export async function runConfigOperation({ kind, params, exec, job = noopJob(), prior = null, reuse = [], deps = {}, log = () => {} }) {
   const v = validateConfigParams(kind, params);
   if (!v.ok) return { ok: false, step: 'validate', refused: true, error: v.reason };
@@ -119,10 +126,19 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
   };
   const resumed = !!(prior && prior.config === true);
   const issuedBefore = resumed && prior.issued === true;
-  // A write has begun — by this job's interrupted attempt, or by the origin
-  // this job retries — so the ORIGINAL snapshot must still be verifiable
-  // before anything further is written.
-  const writeBegun = issuedBefore || deps.originIssued === true;
+  // A write has begun — by this job's interrupted attempt, by an earlier
+  // attempt of this job that recorded it, or anywhere in the chain of
+  // origins this job retries — so the ORIGINAL snapshot must still be
+  // verifiable before anything further is written. The flag follows the
+  // intent, not the attempt: every checkpoint of the chain carries it.
+  const writeBegun = issuedBefore || (resumed && prior.writeBegun === true) || deps.originWriteBegun === true;
+  let issuedAny = issuedBefore;
+  // What this operation created (the engine's fenced generated records:
+  // this job's own attempts and the origins it retries that did not
+  // complete), extended as this attempt creates; the only changes its
+  // rollback may remove. Never inferred from an id or an observed state.
+  const ownedList = Array.isArray(deps.owned) ? deps.owned.map((g) => ({ kind: g.kind, name: g.name, where: g.where || null })) : [];
+  const owned = (g) => !!g && ownedList.some((o) => o.kind === g.kind && o.name === g.name);
   const needsInstance = kind !== 'egress_set';
   const warnings = [];
   if (FIREWALL_KINDS.includes(kind) && kind !== 'egress_set' && !deps.forwardStore) return { ok: false, step: 'executor', error: 'this executor offers no forward store; a forward job writes its row under the leases' };
@@ -145,7 +161,7 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
     }
   }
   const previous = resumed && prior.previous ? prior.previous : priorState(kind, p, inst);
-  const cp = (extra = {}) => ({ config: true, resumable: true, disruptive: false, kind, container: name, target: identity, previous, ...extra });
+  const cp = (extra = {}) => ({ config: true, resumable: true, disruptive: false, kind, container: name, target: identity, previous, writeBegun: writeBegun || issuedAny, ...extra });
   try {
     mark('validated', cp({ issued: issuedBefore, snapshot: prior?.snapshot || null, applied: prior?.applied || null }), `${kind} of ${name} validated${p.expect ? ' against the confirmed identity' : ''}${resumed ? ' (resumed)' : ''}`, { required: true });
   } catch (e) { if (e?.code === 'FENCED' || e?.code === 'CANCELLED') throw e; return fail('checkpoint', `${e.message}; nothing was changed`, { notIssued: true, instanceState: inst?.status || null, identity }); }
@@ -200,19 +216,21 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
     const recorded = (prior?.snapshot && prior.snapshot.name === want ? prior.snapshot : null) || reuse.find((g) => g.kind === 'snapshot' && g.where === name && g.name === want) || null;
     const found = (inst.snapshots || []).find((s) => s && s.name === want) || null;
     const coverage = snapshotCoverage(inst);
-    if (found && recorded && (!recorded.created_at || recorded.created_at === found.created_at)) {
+    if (found && recorded && recorded.created_at && recorded.created_at === found.created_at) {
       snapshot = { name: want, created_at: found.created_at || null, reused: true, verified: true, coverage };
       job.event?.('reuse', `pre-change snapshot ${want} from the previous attempt still exists with its recorded timestamp and is reused`, { name: want });
     } else if (writeBegun) {
       // A write began under the original snapshot. Its identity cannot be
       // verified now: the completed changes are read back below, the
       // remaining ones are not issued, and no replacement is taken.
-      const state = found ? 'replaced' : recorded ? 'missing' : 'unverifiable';
+      // A recorded name without a timestamp is not an identity: it can
+      // certify nothing, so it is `unverifiable`, never a wildcard.
+      const state = !found ? (recorded ? 'missing' : 'unverifiable') : recorded?.created_at ? 'replaced' : 'unverifiable';
       snapshot = { name: want, created_at: recorded?.created_at || null, reused: false, verified: false, [state]: true, ...(found ? { onGuest: { created_at: found.created_at || null } } : {}), coverage };
-      protection = { state, snapshot: want, detail: state === 'replaced' ? `snapshot ${want} on ${name} is not the one this change recorded (timestamp ${found.created_at}, recorded ${recorded?.created_at || 'unknown'})` : state === 'missing' ? `the pre-change snapshot ${want} recorded for this change is no longer on ${name}` : `no pre-change snapshot identity was recorded for the write that began` };
+      protection = { state, snapshot: want, detail: state === 'replaced' ? `snapshot ${want} on ${name} is not the one this change recorded (timestamp ${found.created_at}, recorded ${recorded.created_at})` : state === 'missing' ? `the pre-change snapshot ${want} recorded for this change is no longer on ${name}` : recorded ? `the pre-change snapshot ${want} was recorded for this change without a timestamp; the one on ${name} cannot be certified as it` : `no pre-change snapshot identity was recorded for the write that began` };
       job.event?.('step', `${protection.detail}; the changes already applied are read back, the remaining ones are NOT issued, and no replacement snapshot is taken`, { snapshot: want, state }, 'protect');
     } else if (found) {
-      return fail('protect', `snapshot ${want} already exists on ${name}${recorded ? ` with a different timestamp than the one this job recorded (${recorded.created_at})` : ' and was not taken by this request'}; refusing to change ${name} behind a pre-change snapshot of unknown content — delete it or submit a new request`, { refused: true, instanceState: inst.status || null, identity });
+      return fail('protect', `snapshot ${want} already exists on ${name}${recorded ? (recorded.created_at ? ` with a different timestamp than the one this job recorded (${recorded.created_at})` : ' and this job recorded it without a timestamp, so it cannot be certified') : ' and was not taken by this request'}; refusing to change ${name} behind a pre-change snapshot of unknown content — delete it or submit a new request`, { refused: true, instanceState: inst.status || null, identity });
     } else {
       const c = await createSnapshotWithFallback(host, name, want, { timeoutMs: TIMEOUTS.snapshot });
       if (!c.ok) return fail('protect', `refusing to change ${name} without its pre-change snapshot: ${c.error}`, { instanceState: inst.status || null, identity });
@@ -248,7 +266,6 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
   }
 
   // 5) the steps: read again (the state may have moved), issue when needed, read back.
-  let issuedAny = issuedBefore;
   let current = null; let issuedThisStep = false;
   let rollback = null;
   try {
@@ -263,7 +280,7 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
         // claimed); after an interrupted issue it is this job's work.
         const already = step.refuseAlready ? step.refuseAlready(before, { issuedBefore }) : null;
         if (already) { stopped = { step: step.key, refused: true, notFound: !!before.notFound, error: already }; break; }
-        applied[step.key] = { state: issuedBefore && applied[step.key]?.issued ? 'done' : 'already', observed: before.observed, issued: false, ...(before.extra || {}) };
+        applied[step.key] = { state: issuedBefore && applied[step.key]?.issued ? 'done' : 'already', observed: before.observed, issued: false, ...(step.creates ? { owned: owned(step.creates) } : {}), ...(before.extra || {}) };
         continue;
       }
       const refusal = step.refuse ? step.refuse(before, { issuedBefore }) : null;
@@ -284,14 +301,25 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
       }
       const r = await step.issue(before);
       issuedThisStep = true;
+      // A change this command CREATED (it succeeded and was not tolerated
+      // by name — a resource already there is somebody else's) is recorded
+      // as this operation's before its read-back, in the fenced progress
+      // record: the only evidence its rollback may act on.
+      if (step.creates && r.code === 0 && !r.tolerated && !owned(step.creates)) { ownedList.push(step.creates); job.generated(step.creates); }
       const after = await step.check();
       // Done only when the command succeeded (or was tolerated by name) AND
       // the state reads back: a saved configuration behind a nonzero exit is
       // recorded with the exit, never as done.
       const ok = after.ok && r.code === 0;
       const detail = ok ? null : `${step.label} exited ${r.code}${r.code === 124 ? ' (timed out)' : ''}${tailOf(r, 200) ? `: ${tailOf(r, 200)}` : ''}; reads ${after.observed} afterwards`;
-      applied[step.key] = { state: ok ? 'done' : 'failed', observed: after.observed, issued: true, exit: r.code, ...(r.tolerated ? { tolerated: true } : {}), ...(r.superseded ? { superseded: true } : {}), ...(r.reconcile ? { reconcile: r.reconcile } : {}), ...(detail ? { detail } : {}), ...(after.extra || {}) };
-      mark('applied', cp({ issued: true, snapshot, applied }), `${step.key}: ${applied[step.key].state}`);
+      applied[step.key] = { state: ok ? 'done' : 'failed', observed: after.observed, issued: true, exit: r.code, ...(r.tolerated ? { tolerated: true } : {}), ...(r.saved ? { saved: true } : {}), ...(r.superseded ? { superseded: true } : {}), ...(r.reconcile ? { reconcile: r.reconcile } : {}), ...(step.creates ? { owned: owned(step.creates) } : {}), ...(detail ? { detail } : {}), ...(after.extra || {}) };
+      // The step's outcome is REQUIRED on the record before anything acts on
+      // it: a checkpoint that changes no row means the claim moved (the
+      // fence raises FencedError) or the outcome is unrecorded — in either
+      // case no cleanup follows from it.
+      try {
+        mark('applied', cp({ issued: true, snapshot, applied }), `${step.key}: ${applied[step.key].state}`, { required: true });
+      } catch (e) { if (e?.code === 'FENCED' || e?.code === 'CANCELLED') throw e; stopped = { step: 'checkpoint', unrecorded: true, error: `${e.message}; the outcome of ${step.key} (${applied[step.key].state}) could not be recorded — no rollback is attempted from an unrecorded outcome; retry it (every step re-reads before it issues)` }; break; }
       if (!ok) {
         if (step.required === false) { warnings.push(`${step.key}: ${detail}`); continue; }
         stopped = { step: step.key, error: detail, refused: !!r.superseded, superseded: !!r.superseded };
@@ -303,7 +331,7 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
     // a row that could not be written (superseded) leaves this id's orphans
     // removed — never host resources without an authoritative row.
     if (kind === 'forward_apply' && stopped && !stopped.notIssued && stopped.step !== 'checkpoint' && (issuedAny || stopped.superseded)) {
-      rollback = await settleForward({ p, name, run, instance, applied, store: deps.forwardStore, job, report });
+      rollback = await settleForward({ p, name, run, instance, applied, store: deps.forwardStore, owned, job, report });
     }
   } catch (e) {
     if (e instanceof SharedLeaseLostError || e?.code === 'SHARED_LEASE_LOST') {
@@ -395,7 +423,8 @@ function buildSteps(kind, p, { name, run, instance, reservedPath, store }) {
   // A firewall write the CLI SAVED but could not apply (its JSON carries the
   // rule / payload with a reconcile rejection) is a saved configuration:
   // tolerated here, and the reconcile step then fails on the evidence.
-  const savedBehindRejection = (r) => { const c = firewallCliResult(r); return c.saved && c.reconcile && !c.reconcile.applied ? { ...r, code: 0, tolerated: true, reconcile: c.reconcile } : { ...r, ...(c.reconcile ? { reconcile: c.reconcile } : {}) }; };
+  // (`saved`, not `tolerated`: the write IS this operation's creation.)
+  const savedBehindRejection = (r) => { const c = firewallCliResult(r); return c.saved && c.reconcile && !c.reconcile.applied ? { ...r, code: 0, saved: true, reconcile: c.reconcile } : { ...r, ...(c.reconcile ? { reconcile: c.reconcile } : {}) }; };
   switch (kind) {
     case 'config_set': {
       const steps = (p.changes || []).map((c) => ({
@@ -437,6 +466,7 @@ function buildSteps(kind, p, { name, run, instance, reservedPath, store }) {
           // for an apply, removed before the host for a remove (the L4
           // reconciler treats the rows as authoritative and sweeps orphans).
           key: 'row', label: apply ? `record forward ${f.id} in service_l4_forwards` : `remove forward ${f.id} from service_l4_forwards`,
+          ...(apply ? { creates: { kind: 'forward_row', name: f.id, where: name } } : {}),
           check: async () => { const row = store.get(f.id); if (apply) { const v = rowVerdict(row, f, p.serviceId); return { ok: v.ok, observed: v.observed, other: !!v.other }; } return { ok: !row, observed: row ? 'present' : 'absent' }; },
           refuse: (before) => (apply && before.other ? `forward ${f.id} is recorded ${before.observed}; a row is never rewritten — remove the forward and add it again` : null),
           issue: async () => {
@@ -448,12 +478,14 @@ function buildSteps(kind, p, { name, run, instance, reservedPath, store }) {
         },
         {
           key: 'device', label: apply ? `add proxy device ${dev} (${props.listen} → ${props.connect})` : `remove proxy device ${dev}`,
+          ...(apply ? { creates: { kind: 'proxy_device', name: dev, where: name } } : {}),
           check: async () => { const v = deviceVerdict(await instance(), dev, apply ? { present: true, type: 'proxy', props } : { present: false }); return { ok: v.ok, observed: v.observed, device: v.device }; },
           refuse: (before, { issuedBefore }) => (apply && before.device && !issuedBefore ? `proxy device ${dev} already exists on ${name} ${before.observed}; it is never replaced — remove the forward and add it again` : null),
           issue: async () => { const r = await incus(apply ? forwardDeviceAddArgv(name, f, p.bridgeIp) : forwardDeviceRemoveArgv(name, f.id)); if (r.code !== 0 && (apply ? /already exists|conflict/i : /not found|doesn't exist|does not exist/i).test(r.stderr || '')) return { ...r, code: 0, tolerated: true }; return r; },
         },
         {
           key: 'rule', label: apply ? `save firewall rule ${forwardRuleId(f.id)}` : `remove firewall rule ${forwardRuleId(f.id)}`,
+          ...(apply ? { creates: { kind: 'firewall_rule', name: forwardRuleId(f.id), where: name } } : {}),
           check: async () => { const r = await fw(firewallListArgv()); const list = r.code === 0 ? parseCliJson(r.stdout) : null; const v = forwardRuleVerdict(list, f, p.serviceTag || null, { present: apply }); return { ok: v.ok, observed: v.observed, ...(v.mismatched?.length ? { extra: { mismatched: v.mismatched } } : {}) }; },
           issue: async () => { const r = await fw(apply ? firewallAddArgv(f, p.serviceTag || null) : firewallRemoveArgv(f.id)); const text = `${r.stdout || ''}\n${r.stderr || ''}`; if (r.code !== 0 && (apply ? /already exists/i : /not found|NOT_FOUND|already_absent/i).test(text)) return { ...r, code: 0, tolerated: true }; return r.code !== 0 ? savedBehindRejection(r) : { ...r, ...(firewallCliResult(r).reconcile ? { reconcile: firewallCliResult(r).reconcile } : {}) }; },
         },
@@ -495,27 +527,51 @@ function buildSteps(kind, p, { name, run, instance, reservedPath, store }) {
 }
 
 // settleForward — a forward_apply's disposition after a definite failure
-// or a superseded row: the row (when this job wrote it), the device and the
-// rule this id holds are removed, the firewall reconciled and the
-// reservation recomputed, each best effort and recorded; the summary names
-// what could not be removed (the L4 reconciler sweeps an orphan device).
-async function settleForward({ p, name, run, instance, applied, store, job, report }) {
-  const f = p.forward; const dev = forwardDeviceName(f.id);
-  const out = { row: null, device: null, rule: null, reconcile: null, reserved: null, summary: '' };
-  report('rollback', `rolling forward ${f.id} back…`);
-  try { const had = !!store.get(f.id); out.row = had ? (store.delete(f.id) > 0 ? 'removed' : 'kept') : 'absent'; } catch (e) { out.row = `error: ${sanitizeReason(e?.message || String(e), 120)}`; }
-  try {
-    const i = await instance();
-    if ((i?.devices || {})[dev]) { const r = await run(forwardDeviceRemoveArgv(name, f.id), { timeoutMs: TIMEOUTS.incus }); const again = await instance(); out.device = (again?.devices || {})[dev] ? `kept (exit ${r.code})` : 'removed'; } else out.device = 'absent';
-  } catch (e) { out.device = `unknown: ${sanitizeReason(e?.message || String(e), 120)}`; }
-  try {
-    const l = await run(firewallListArgv(), { timeoutMs: TIMEOUTS.firewall }); const list = l.code === 0 ? parseCliJson(l.stdout) : null;
-    if (Array.isArray(list) && list.some((r) => r && r.id === forwardRuleId(f.id))) { const r = await run(firewallRemoveArgv(f.id), { timeoutMs: TIMEOUTS.firewall }); const c = firewallCliResult(r); out.rule = c.saved || r.code === 0 ? 'removed' : `kept (exit ${r.code})`; out.reconcile = c.reconcile ? (c.reconcile.applied ? 'applied' : `rejected: ${c.reconcile.rejection || 'unknown'}`) : null; } else out.rule = Array.isArray(list) ? 'absent' : 'unreadable';
-  } catch (e) { out.rule = `unknown: ${sanitizeReason(e?.message || String(e), 120)}`; }
-  try { const plan = reservedPlan(store.reservedRanges()); out.reserved = plan.value || '(none)'; } catch { out.reserved = null; }
-  const leftovers = ['device', 'rule'].filter((k) => out[k] && !/^(removed|absent)$/.test(out[k]));
-  out.summary = `rolled back: row ${out.row}, device ${out.device}, rule ${out.rule}${out.reconcile ? ` (reconcile ${out.reconcile})` : ''}${leftovers.length ? ` — ${leftovers.join(' and ')} could not be removed by this job; the L4 reconciler sweeps an orphan device at its next pass, or retry` : ''}`;
-  applied.rollback = { state: leftovers.length ? 'partial' : 'done', ...out };
+// or a superseded row: of the row, the device and the rule this id holds,
+// ONLY those this operation created (`owned`: the engine's fenced generated
+// records) are removed; a change that was there before it is kept and
+// named as such; the reservation is recomputed; a policy the reconcile
+// could not apply is reported unresolved. Fenced at every write: the
+// store refuses a write once the claim or a lease moved, and a fencing,
+// ownership-loss or cancellation error propagates at once — only a host
+// read-back failure is best effort (`unknown`). The summary names what
+// could not be removed (the L4 reconciler sweeps an orphan device).
+async function settleForward({ p, name, run, instance, applied, store, owned, job, report }) {
+  const f = p.forward; const dev = forwardDeviceName(f.id); const ruleId = forwardRuleId(f.id);
+  const out = { row: null, device: null, rule: null, reconcile: null, reserved: null, unresolved: null, summary: '' };
+  const NOT_OURS = 'kept (not created by this operation)';
+  report('rollback', `settling forward ${f.id}…`);
+  job.fence({ safe: false });
+  const readBack = async (fn) => { try { return await fn(); } catch (e) { if (e instanceof ReadBackError) return { unknown: e.message }; throw e; } };
+  // The row: through the fenced store, and only when this operation wrote it.
+  const had = !!store.get(f.id);
+  out.row = !had ? 'absent' : !owned({ kind: 'forward_row', name: f.id }) ? NOT_OURS : store.delete(f.id) > 0 ? 'removed' : 'kept';
+  // The device: only when this operation added it.
+  const i = await readBack(instance);
+  if (i?.unknown) out.device = `unknown: ${sanitizeReason(i.unknown, 120)}`;
+  else if (!(i?.devices || {})[dev]) out.device = 'absent';
+  else if (!owned({ kind: 'proxy_device', name: dev })) out.device = NOT_OURS;
+  else {
+    const r = await run(forwardDeviceRemoveArgv(name, f.id), { timeoutMs: TIMEOUTS.incus });
+    const again = await readBack(instance);
+    out.device = again?.unknown ? `unknown: ${sanitizeReason(again.unknown, 120)}` : (again?.devices || {})[dev] ? `kept (exit ${r.code})` : 'removed';
+  }
+  // The rule: only when this operation saved it.
+  const l = await run(firewallListArgv(), { timeoutMs: TIMEOUTS.firewall }); const list = l.code === 0 ? parseCliJson(l.stdout) : null;
+  if (!Array.isArray(list)) out.rule = 'unreadable';
+  else if (!list.some((r) => r && r.id === ruleId)) out.rule = 'absent';
+  else if (!owned({ kind: 'firewall_rule', name: ruleId })) out.rule = NOT_OURS;
+  else {
+    const r = await run(firewallRemoveArgv(f.id), { timeoutMs: TIMEOUTS.firewall }); const c = firewallCliResult(r);
+    out.rule = c.saved || r.code === 0 ? 'removed' : `kept (exit ${r.code})`;
+    out.reconcile = c.reconcile ? (c.reconcile.applied ? 'applied' : `rejected: ${c.reconcile.rejection || 'unknown'}`) : null;
+  }
+  out.reserved = reservedPlan(store.reservedRanges()).value || '(none)';
+  if (applied.reconcile?.state === 'failed') out.unresolved = `the applied firewall policy is unresolved: ${applied.reconcile.reconcile?.rejection || applied.reconcile.detail || 'the reconcile did not apply'}`;
+  const removed = ['row', 'device', 'rule'].filter((k) => out[k] === 'removed');
+  const leftovers = ['device', 'rule'].filter((k) => out[k] && /^(kept \(exit|unknown|unreadable)/.test(out[k]));
+  out.summary = `${removed.length ? 'rolled back' : 'nothing rolled back'}: row ${out.row}, device ${out.device}, rule ${out.rule}${out.reconcile ? ` (reconcile ${out.reconcile})` : ''}${leftovers.length ? ` — ${leftovers.join(' and ')} could not be removed by this job; the L4 reconciler sweeps an orphan device at its next pass, or retry` : ''}${out.unresolved ? `; ${out.unresolved}` : ''}`;
+  applied.rollback = { state: leftovers.length ? 'partial' : removed.length ? 'done' : 'none', ...out };
   job.event?.('step', out.summary, { rollback: out }, 'rollback');
   return out;
 }
@@ -526,7 +582,7 @@ function summarize(applied) {
 
 // The kind-specific extras a result carries beside `applied`.
 function collect(kind, applied) {
-  if (kind === 'forward_apply' || kind === 'forward_remove') return { reserved: applied.reserved ? { state: applied.reserved.state, value: applied.reserved.value ?? null, file: applied.reserved.file ?? null, live: applied.reserved.live ?? null, ...(applied.reserved.detail ? { detail: applied.reserved.detail } : {}) } : null, row: applied.row ? { state: applied.rollback ? 'rolled_back' : applied.row.state, observed: applied.row.observed ?? null } : null, firewallPolicy: applied.reconcile ? { state: applied.reconcile.state, observed: applied.reconcile.observed ?? null } : null };
+  if (kind === 'forward_apply' || kind === 'forward_remove') return { reserved: applied.reserved ? { state: applied.reserved.state, value: applied.reserved.value ?? null, file: applied.reserved.file ?? null, live: applied.reserved.live ?? null, ...(applied.reserved.detail ? { detail: applied.reserved.detail } : {}) } : null, row: applied.row ? { state: applied.rollback?.row === 'removed' ? 'rolled_back' : applied.row.state, observed: applied.row.observed ?? null, ...(applied.row.owned != null ? { owned: applied.row.owned } : {}) } : null, firewallPolicy: applied.reconcile ? { state: applied.reconcile.state, observed: applied.reconcile.observed ?? null } : null };
   if (kind === 'egress_set') return { allow: applied.egress?.allow || [], reconcile: applied.reconcile?.reconcile || applied.egress?.reconcile || null, firewallPolicy: applied.reconcile ? { state: applied.reconcile.state, observed: applied.reconcile.observed ?? null } : null };
   return {};
 }

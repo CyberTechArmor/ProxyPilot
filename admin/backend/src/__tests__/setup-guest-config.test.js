@@ -44,11 +44,11 @@ import {
   egressArgv, egressListArgv, reservedWriteArgv, reservedRemoveArgv, reservedReadArgv, sysctlApplyArgv, reservedPlan, reservedRangesFromRows, RESERVED_WRITE_SCRIPT,
   configKeyVerdict, deviceVerdict, networkVerdict, ruleVerdict, egressVerdict, recordedDevice, priorConfig, parseCliJson, shortGuestName, loadDevicePolicy,
 } from '../lib/setup-engine/config-logic.js';
-import { scriptedConfigHost as scriptedHost, forwardsSchema, mcpCtx, parse, AUTH } from './helpers/scripted-config-host.js';
+import { scriptedConfigHost as scriptedHost, forwardsSchema, forwardRows, mcpCtx, parse, AUTH } from './helpers/scripted-config-host.js';
 import { runConfigOperation } from '../lib/setup-engine/config-op.js';
 import { ownerIdentity, parseJson, validateRunnerJob, reconcileDecision, RUNNER_JOB_KINDS, MUTATING_JOB_KINDS, EXCLUSIVE_JOB_KINDS, CONFIG_JOB_KINDS } from '../lib/setup-engine/logic.js';
-import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, createJob, claimNextJob, checkpoint, runnerHeartbeat, listJobs, releaseLock } from '../lib/setup-engine/store.js';
-import { runOnce, reconcile } from '../lib/setup-engine/executor.js';
+import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, createJob, claimNextJob, checkpoint, runnerHeartbeat, listJobs, releaseLock, requeueJob, takeoverLock } from '../lib/setup-engine/store.js';
+import { runOnce, reconcile, fencedForwardStore, originChain, ownedFrom } from '../lib/setup-engine/executor.js';
 import { submitRunnerJob, runSubmittedJob, resultFromJob } from '../lib/setup-engine/orchestrator.js';
 import { sweepSetupEngineOnBoot } from '../lib/setup-engine/backend.js';
 import { retryPlan } from '../lib/setup-engine/logic.js';
@@ -839,3 +839,60 @@ test('the runner\'s host channel receives the rendered argv as one spawn — no 
   assert.equal(spawned[3][8], 'mail relay; please', 'the reason with shell characters is one argument');
 });
 
+
+// ── the review of e97a66a: ownership at the database boundary ─────────────
+
+test('the executor\'s forward store enforces ownership AT the write: a delete or an insert after the claim was re-claimed, or after the guest\'s lease was taken over, is refused inside its own transaction (FencedError / SharedLeaseLostError) and changes no row; the keep-alive\'s recorded loss refuses at once', () => {
+  const d = db(); forwardsSchema(d);
+  const T = Date.parse('2026-09-27T12:00:00.000Z'); let now = T;
+  createJob(d, { id: 'fwd-job', kind: 'forward_apply', app: 'pp-x', plan: { steps: [], params: {} }, nowMs: T });
+  const claimed = claimNextJob(d, { owner: RUNNER, kinds: ['forward_apply'], leaseMs: 30_000, nowMs: T });
+  const lock = acquireLock(d, { app: 'pp-x', owner: RUNNER, operation: 'forward_apply', jobId: 'fwd-job', leaseMs: 30_000, nowMs: T });
+  const held = new Map(); let lost = null;
+  const store = fencedForwardStore(d, { jobId: 'fwd-job', owner: RUNNER, epoch: claimed.epoch, app: 'pp-x', lockEpoch: Number(lock.lock.epoch), heldEpochs: held, lost: () => lost, noteLost: (n) => { lost = n; }, nowMs: () => now });
+  const row = { id: 'f1', service_id: 'svc-x', proto: 'tcp', listen_port: 7881, listen_port_end: null, connect_port: 7881, connect_port_end: null, description: null };
+  assert.deepEqual(store.insert(row), { ok: true }); assert.equal(store.get('f1').id, 'f1');
+  assert.deepEqual(store.insert({ ...row, id: 'f2' }), { ok: false, conflict: 'another forward (f1) binds tcp/7881' }, 'the NULL-safe port conflict, inside the fenced write');
+  assert.ok(Date.parse(getJob(d, 'fwd-job').lease_expires_at) > T, 'each write renewed the claim');
+  // The guest's lease taken over by another owner after it expired: the
+  // worker's next write is refused with the row untouched.
+  now = T + 31_000;
+  const t = takeoverLock(d, { app: 'pp-x', by: OTHER, operation: 'forward_apply', jobId: 'other', reason: 'expired', leaseMs: 30_000, nowMs: now });
+  assert.equal(t.ok, true);
+  assert.throws(() => store.delete('f1'), (e) => e.code === 'SHARED_LEASE_LOST' && /guest pp-x/.test(e.message) && /database boundary/.test(e.message));
+  assert.deepEqual(forwardRows(d).map((r) => r.id), ['f1'], 'the row is untouched'); assert.throws(() => store.get('f1'), (e) => e.code === 'SHARED_LEASE_LOST', 'a read fences the same way');
+  assert.equal(lost, 'pp-x', 'the loss is recorded for the fence');
+  assert.throws(() => store.insert({ ...row, id: 'f3', listen_port: 7882 }), (e) => e.code === 'SHARED_LEASE_LOST', 'refused at once from the recorded loss');
+  assert.deepEqual(forwardRows(d).map((r) => r.id), ['f1']);
+  // The claim re-claimed (requeued by the reconcile, claimed by another
+  // owner): FencedError, the row untouched, no transaction left open.
+  lost = null; releaseLock(d, { app: 'pp-x', owner: OTHER, epoch: Number(t.lock.epoch) });
+  const back = acquireLock(d, { app: 'pp-x', owner: RUNNER, operation: 'forward_apply', jobId: 'fwd-job', leaseMs: 30_000, nowMs: now });
+  const store2 = fencedForwardStore(d, { jobId: 'fwd-job', owner: RUNNER, epoch: claimed.epoch, app: 'pp-x', lockEpoch: Number(back.lock.epoch), heldEpochs: held, lost: () => lost, noteLost: (n) => { lost = n; }, nowMs: () => now });
+  assert.equal(store2.delete('nope'), 0, 'a live claim writes (nothing to delete)');
+  requeueJob(d, { id: 'fwd-job', by: OTHER, reason: 'expired', nowMs: now });
+  assert.equal(claimNextJob(d, { owner: OTHER, kinds: ['forward_apply'], leaseMs: 30_000, nowMs: now }).id, 'fwd-job');
+  assert.throws(() => store2.delete('f1'), (e) => e.code === 'FENCED');
+  assert.throws(() => store2.reservedRanges(), (e) => e.code === 'FENCED', 'reads fence too');
+  assert.deepEqual(forwardRows(d).map((r) => r.id), ['f1'], 'the row is untouched');
+  d.exec('BEGIN IMMEDIATE'); d.exec('ROLLBACK'); // no transaction was left open by the refused writes
+  // The new owner's own store writes.
+  const other = fencedForwardStore(d, { jobId: 'fwd-job', owner: OTHER, epoch: getJob(d, 'fwd-job').epoch, app: 'pp-x', lockEpoch: null, nowMs: () => now });
+  assert.equal(other.delete('f1'), 1);
+});
+
+test('the retry chain and the ownership records: originChain follows retry_of across the chain (same app and kind, bounded, a cycle stops it); ownedFrom collects the created changes of this job and of the origins that did not succeed, never those of a succeeded origin', () => {
+  const d = db();
+  const mk = (id, retryOf, status, generated) => { createJob(d, { id, kind: 'forward_apply', app: 'pp-x', plan: { steps: [], params: {} }, retryOf, nowMs: T0 }); d.prepare(`UPDATE setup_jobs SET status = ?, progress_json = ? WHERE id = ?`).run(status, JSON.stringify({ generated }), id); return getJob(d, id); };
+  mk('j0', null, 'succeeded', [{ kind: 'forward_row', name: 'f0', where: 'pp-x' }, { kind: 'proxy_device', name: 'ppl4-f0', where: 'pp-x' }]);
+  mk('j1', 'j0', 'failed', [{ kind: 'forward_row', name: 'f1', where: 'pp-x' }, { kind: 'snapshot', name: 's', where: 'pp-x' }]);
+  mk('j2', 'j1', 'failed', []);
+  const j3 = mk('j3', 'j2', 'queued', [{ kind: 'firewall_rule', name: 'service-l4-f1', where: 'pp-x' }]);
+  const chain = originChain(d, j3, {});
+  assert.deepEqual(chain.map((o) => o.id), ['j2', 'j1', 'j0']);
+  assert.deepEqual(ownedFrom(d, j3, chain), [{ kind: 'firewall_rule', name: 'service-l4-f1', where: 'pp-x' }, { kind: 'forward_row', name: 'f1', where: 'pp-x' }], 'j0 succeeded: its row and device are the operator\'s working state; the snapshot is not a rollback subject');
+  createJob(d, { id: 'k1', kind: 'config_set', app: 'pp-x', plan: { steps: [], params: {} }, retryOf: 'j1', nowMs: T0 });
+  assert.deepEqual(originChain(d, getJob(d, 'k1'), {}), [], 'another kind: no chain');
+  d.prepare(`UPDATE setup_jobs SET retry_of = 'j3' WHERE id = 'j0'`).run();
+  assert.deepEqual(originChain(d, getJob(d, 'j3'), {}).map((o) => o.id), ['j2', 'j1', 'j0'], 'a cycle stops the walk');
+});

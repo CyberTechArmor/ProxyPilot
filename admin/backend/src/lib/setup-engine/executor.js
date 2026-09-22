@@ -314,7 +314,8 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       const fencedExec = { guest: (c, script, o) => { jobFence(); return exec.guest(c, script, o); }, ...(typeof exec.host === 'function' ? { host: (argv, o) => { jobFence(); return exec.host(argv, o); } } : {}) };
       // What a previous attempt recorded (a retry's origin, and this job's own
       // progress when it was resumed): reused only after revalidation.
-      const reuse = reuseFrom(db, job, p);
+      const chain = isConfig ? originChain(db, job, p) : null;
+      const reuse = reuseFrom(db, job, p, chain);
       let result;
       if (job.kind === 'deploy') result = await runDeployOperation({ params: { ...p, reapOrphans: false, runDir }, exec: fencedExec, job: handle, log });
       else if (job.kind === 'restore_db') {
@@ -333,29 +334,18 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
           // The forward's authoritative row lives in the same database this
           // executor opened: the job writes it under the leases, and reads
           // the enabled rows for the reservation aggregate at execution time.
-          forwardStore: {
-            get: (id) => db.prepare(`SELECT * FROM service_l4_forwards WHERE id = ?`).get(String(id)) || null,
-            insert: (row) => {
-              // The port is the conflict key (UNIQUE ignores a NULL range end,
-              // so it is checked here, NULL-safe): a row for another forward on
-              // this port means this intent was superseded.
-              const other = db.prepare(`SELECT id FROM service_l4_forwards WHERE id <> ? AND proto = ? AND listen_port = ? AND (listen_port_end IS ? OR (listen_port_end IS NULL AND ? IS NULL))`).get(String(row.id), row.proto, row.listen_port, row.listen_port_end ?? null, row.listen_port_end ?? null);
-              if (other) return { ok: false, conflict: `another forward (${other.id}) binds ${row.proto}/${row.listen_port}${row.listen_port_end ? `-${row.listen_port_end}` : ''}` };
-              try {
-                db.prepare(`INSERT INTO service_l4_forwards (id, service_id, proto, listen_port, listen_port_end, connect_port, connect_port_end, description, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`)
-                  .run(String(row.id), String(row.service_id), row.proto, row.listen_port, row.listen_port_end ?? null, row.connect_port, row.connect_port_end ?? null, row.description ?? null);
-                return { ok: true };
-              } catch (e) {
-                if (/UNIQUE constraint/i.test(e?.message || '')) { const other = db.prepare(`SELECT id FROM service_l4_forwards WHERE proto = ? AND listen_port = ? AND (listen_port_end IS ? OR listen_port_end = ?)`).get(row.proto, row.listen_port, row.listen_port_end ?? null, row.listen_port_end ?? null); return { ok: false, conflict: `another forward${other?.id ? ` (${other.id})` : ''} binds ${row.proto}/${row.listen_port}${row.listen_port_end ? `-${row.listen_port_end}` : ''}` }; }
-                return { ok: false, error: e?.message || String(e) };
-              }
-            },
-            delete: (id) => db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(String(id)).changes,
-            reservedRanges: () => reservedRangesFromRows(db.prepare(`SELECT proto, listen_port, listen_port_end, enabled FROM service_l4_forwards WHERE enabled = 1`).all()),
-          },
-          // A retry of an origin that had begun writing: the original
-          // snapshot must be verifiable before anything further is written.
-          originIssued: (() => { const oid = job.retry_of || p.retryOf || null; const o = oid ? getJob(db, String(oid)) : null; return !!o && o.app === job.app && o.kind === job.kind && (parseJson(o.checkpoint_json) || {}).issued === true; })(),
+          // Every write is fenced AT the database boundary (the claim, the
+          // guest's lease and every held shared lease renewed inside the
+          // same transaction, R-053).
+          forwardStore: fencedForwardStore(db, { jobId: job.id, owner, epoch, app: job.app, lockEpoch, heldEpochs, lost: () => lost, noteLost: (n) => { lost = n; }, nowMs }),
+          // A retry of an origin chain in which a write had begun: the
+          // original snapshot must be verifiable before anything further is
+          // written — at every depth of the chain (R-055).
+          originWriteBegun: chain.some((o) => { const c = parseJson(o.checkpoint_json) || {}; return c.issued === true || c.writeBegun === true; }),
+          // What this operation CREATED, as recorded by its own attempts and
+          // by the origins it retries that did not complete (R-054): the
+          // only changes its rollback may remove.
+          owned: ownedFrom(db, job, chain),
           sleep: sleep || undefined, nowMs, ...(reservedPortsPath ? { reservedPortsPath } : {}),
         };
         result = await runConfigOperation({ kind: job.kind, params: p, exec: fencedExec, job: handle, prior: parseJson(job.checkpoint_json), reuse, deps: configDeps, log });
@@ -624,14 +614,98 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
 
 // reuseFrom(db, job, params) → the artifacts a retry's origin and this job's
 // own earlier attempt recorded, with their identity, for revalidation.
-function reuseFrom(db, job, params) {
+// With `chain` (the configuration kinds) every origin of the retry chain
+// contributes, so a retry of a retry still finds the identity the first
+// attempt recorded.
+function reuseFrom(db, job, params, chain = null) {
   const out = [];
   const add = (row) => { for (const g of (parseJson(row?.progress_json) || {}).generated || []) out.push({ kind: g.kind, name: g.name, where: g.where || null, sha256: g.sha256 || null, bytes: g.bytes ?? null, created_at: g.created_at || null }); };
-  const originId = job.retry_of || params?.retryOf || null;
-  if (originId) { const origin = getJob(db, String(originId)); if (origin && origin.app === job.app && origin.kind === job.kind) add(origin); }
+  if (chain) for (const origin of chain) add(origin);
+  else {
+    const originId = job.retry_of || params?.retryOf || null;
+    if (originId) { const origin = getJob(db, String(originId)); if (origin && origin.app === job.app && origin.kind === job.kind) add(origin); }
+  }
   add(getJob(db, job.id));
   for (const r of Array.isArray(params?.reuse) ? params.reuse : []) if (r && r.kind && r.name && !out.some((o) => o.kind === r.kind && o.name === r.name)) out.push({ kind: r.kind, name: r.name, where: r.where || null, sha256: r.sha256 || null, bytes: r.bytes ?? null, created_at: r.created_at || null });
   return out;
+}
+
+// originChain(db, job, params) → the origins this job retries, nearest
+// first, following `retry_of` while the app and kind match (bounded; a
+// cycle stops it). The chain is the INTENT a retry continues.
+export function originChain(db, job, params, { max = 32 } = {}) {
+  const out = []; const seen = new Set([String(job.id)]);
+  let oid = job.retry_of || params?.retryOf || null;
+  while (oid && out.length < max && !seen.has(String(oid))) {
+    seen.add(String(oid));
+    const o = getJob(db, String(oid));
+    if (!o || o.app !== job.app || o.kind !== job.kind) break;
+    out.push(o);
+    oid = o.retry_of || (parseJson(o.plan_json) || {}).retryOf || null;
+  }
+  return out;
+}
+
+// ownedFrom(db, job, chain) → the changes this operation created, from the
+// fenced generated records of its own attempts and of the origins it
+// retries that did not complete — a succeeded origin's changes are the
+// operator's working state and are never inherited for a rollback.
+const OWNED_KINDS = Object.freeze(['forward_row', 'proxy_device', 'firewall_rule']);
+export function ownedFrom(db, job, chain = []) {
+  const out = [];
+  const add = (row) => { for (const g of (parseJson(row?.progress_json) || {}).generated || []) if (OWNED_KINDS.includes(g.kind) && g.name && !out.some((o) => o.kind === g.kind && o.name === g.name)) out.push({ kind: g.kind, name: g.name, where: g.where || null }); };
+  add(getJob(db, job.id));
+  for (const o of chain || []) if (o.status !== 'succeeded') add(o);
+  return out;
+}
+
+// fencedForwardStore(db, guard) → the store a configuration job writes the
+// forward's row through. Ownership is enforced AT the mutation: each write
+// runs under BEGIN IMMEDIATE and, inside that transaction, renews the job
+// claim, the guest's lease and every held shared lease at the epochs this
+// worker holds; a renewal that changes no row rolls the transaction back
+// and raises (FencedError for the claim, SharedLeaseLostError for a lease)
+// — a takeover, which bumps the epoch under its own BEGIN IMMEDIATE, can
+// never interleave with the write. The keep-alive's recorded loss refuses
+// at once; reads fence the same way before they read.
+export function fencedForwardStore(db, { jobId, owner, epoch, app, lockEpoch, heldEpochs = new Map(), lost = () => null, noteLost = () => {}, nowMs = () => Date.now(), leaseMs = LEASE_MS }) {
+  const renew = () => {
+    const gone = lost();
+    if (gone) return gone;
+    if (!(heartbeat(db, { id: jobId, owner, epoch, leaseMs, nowMs: nowMs() }) > 0)) return JOB_CLAIM;
+    if (lockEpoch != null && !(renewLock(db, { app, owner, epoch: lockEpoch, leaseMs, nowMs: nowMs() }) > 0)) return app;
+    for (const [n, ep] of heldEpochs) if (!(renewLock(db, { app: n, owner, epoch: ep, leaseMs, nowMs: nowMs() }) > 0)) return n;
+    return null;
+  };
+  const raise = (gone) => { noteLost(gone); if (gone === JOB_CLAIM) throw new FencedError(jobId); throw new SharedLeaseLostError(gone === app ? `guest ${app}` : gone, 'its renewal changed no row at the database boundary'); };
+  const guarded = () => { const gone = renew(); if (gone) raise(gone); };
+  const write = (fn) => {
+    db.exec('BEGIN IMMEDIATE');
+    let out;
+    try { const gone = renew(); if (gone) raise(gone); out = fn(); } catch (e) { try { db.exec('ROLLBACK'); } catch { /* */ } throw e; }
+    db.exec('COMMIT');
+    return out;
+  };
+  return {
+    get: (id) => { guarded(); return db.prepare(`SELECT * FROM service_l4_forwards WHERE id = ?`).get(String(id)) || null; },
+    insert: (row) => write(() => {
+      // The port is the conflict key (UNIQUE ignores a NULL range end, so
+      // it is checked here, NULL-safe): a row for another forward on this
+      // port means this intent was superseded.
+      const other = db.prepare(`SELECT id FROM service_l4_forwards WHERE id <> ? AND proto = ? AND listen_port = ? AND (listen_port_end IS ? OR (listen_port_end IS NULL AND ? IS NULL))`).get(String(row.id), row.proto, row.listen_port, row.listen_port_end ?? null, row.listen_port_end ?? null);
+      if (other) return { ok: false, conflict: `another forward (${other.id}) binds ${row.proto}/${row.listen_port}${row.listen_port_end ? `-${row.listen_port_end}` : ''}` };
+      try {
+        db.prepare(`INSERT INTO service_l4_forwards (id, service_id, proto, listen_port, listen_port_end, connect_port, connect_port_end, description, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`)
+          .run(String(row.id), String(row.service_id), row.proto, row.listen_port, row.listen_port_end ?? null, row.connect_port, row.connect_port_end ?? null, row.description ?? null);
+        return { ok: true };
+      } catch (e) {
+        if (/UNIQUE constraint/i.test(e?.message || '')) { const taken = db.prepare(`SELECT id FROM service_l4_forwards WHERE proto = ? AND listen_port = ? AND (listen_port_end IS ? OR listen_port_end = ?)`).get(row.proto, row.listen_port, row.listen_port_end ?? null, row.listen_port_end ?? null); return { ok: false, conflict: `another forward${taken?.id ? ` (${taken.id})` : ''} binds ${row.proto}/${row.listen_port}${row.listen_port_end ? `-${row.listen_port_end}` : ''}` }; }
+        return { ok: false, error: e?.message || String(e) };
+      }
+    }),
+    delete: (id) => write(() => db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(String(id)).changes),
+    reservedRanges: () => { guarded(); return reservedRangesFromRows(db.prepare(`SELECT proto, listen_port, listen_port_end, enabled FROM service_l4_forwards WHERE enabled = 1`).all()); },
+  };
 }
 
 function defaultSteps(kind) {

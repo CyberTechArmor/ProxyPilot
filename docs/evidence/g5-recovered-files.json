@@ -1,0 +1,129 @@
+{
+  "status": "PARTIAL \u2014 NOT MERGE READY",
+  "original_reviewed_commit": "a4365466acf6df50cd0204d96a335f27d7f80b10",
+  "base_commit": "d2ca73abf874f08a05c1a8121aa25ea39837af1d",
+  "original_git_metadata_recovered": false,
+  "original_diff_file_count_from_review_record": 35,
+  "surviving_files": [
+    {
+      "path": "admin/backend/scripts/g5-browser-check.mjs",
+      "sha256": "b054a5bea074dd0a83673ff866a272390c6da4e036353413319986379057df1c",
+      "bytes": 6335
+    },
+    {
+      "path": "admin/backend/src/__tests__/helpers/infisical-api-process.js",
+      "sha256": "5d69d4507ce9f125d1defbebd70dc5675e07d916f1aa5ad6c2ed5653f5069dd7",
+      "bytes": 1381
+    },
+    {
+      "path": "admin/backend/src/__tests__/helpers/infisical-fixture.js",
+      "sha256": "cc28b8927d80746565217119221eeb992f0064c8a001251238258cad1e6f619d",
+      "bytes": 7269
+    },
+    {
+      "path": "admin/backend/src/__tests__/infisical-live-proxy.test.js",
+      "sha256": "f8a7d2d7bb5642ce4ff65b19fa3b3324d2ea963919450bbe234a63916c6bf977",
+      "bytes": 6668
+    },
+    {
+      "path": "admin/backend/src/__tests__/infisical-setup.test.js",
+      "sha256": "a99cf52741aaa6cbe2992c8bab6e7393bca2d4ce2331105503e025e5d6d53401",
+      "bytes": 21314
+    },
+    {
+      "path": "admin/backend/src/__tests__/keycloak-setup.test.js",
+      "sha256": "a7dccc1fb90a452b8b6380f1ec101db27e0a14e09cfbd2d60eee78df515e0079",
+      "bytes": 31438
+    },
+    {
+      "path": "admin/backend/src/__tests__/setup-post-launch.test.js",
+      "sha256": "4004f7ac31d04e1379de67c9de43c1a4efe08d0d5969f2d5a1d422e3956fdb62",
+      "bytes": 160319
+    },
+    {
+      "path": "admin/backend/src/db.js",
+      "sha256": "4e706a5b76338255f33b716efdd73ee74233af329a85cd70dcc3af43cbd179ea",
+      "bytes": 123669
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/backend-steps.js",
+      "sha256": "87ee46e82d07b68c2ff043bfeae05253825faabd41fd14d80ed4119823276b5f",
+      "bytes": 18259
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/executor.js",
+      "sha256": "71e193d5e9e75ea1cfb880dcd9351e9d79c96fe28cb10ec534c706e31fbe2b46",
+      "bytes": 66372
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/infisical-api.js",
+      "sha256": "11e1291cdf9d4542fc7fe53cddd15ee246e294d5f670bffbe13153062381aa93",
+      "bytes": 8467
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/infisical-flows.js",
+      "sha256": "800c81e03986c67778e8eb5a9178d17cf980208bf9a1670da1d4e4886c75d99b",
+      "bytes": 6072
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/infisical-logic.js",
+      "sha256": "b7f7fde0dbf4dd1cf009d5c5f8c2e938504cab7fb0ee983afe22539c7c2c7bc2",
+      "bytes": 3731
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/infisical-op.js",
+      "sha256": "eeebfa9eb9e9aa66ad93bd3bf5c7a02d99081fbe7642bf036862dfaedbfac8f3",
+      "bytes": 6585
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/infisical-routes.js",
+      "sha256": "2744790ed360e1eba1503267df076977df1879ec479f4a6353528653fd397857",
+      "bytes": 4832
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/infisical-runtime.js",
+      "sha256": "b2edb42f8f10625e356a28d6633a6279edc3252c4894510a27ec1ba3dbb17d4c",
+      "bytes": 15674
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/infisical-store.js",
+      "sha256": "52a4e7c9aebd9c2425c07f84b4739ba09f584639bc91c29332a4d252f65a696e",
+      "bytes": 10371
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/logic.js",
+      "sha256": "022af7ba217e9074c4ee4f106e2e9694ed5fe716b90802daaccffe353604fb76",
+      "bytes": 38635
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/platform-plan.js",
+      "sha256": "2abe15827e57a6703413b7fbdaeb93685ef27bc56376876093e9cffb706f6dfd",
+      "bytes": 12883
+    },
+    {
+      "path": "admin/backend/src/lib/setup-engine/setup-logic.js",
+      "sha256": "bbd437278e66b4120542429ae599a506c38e1a1745ee469d183abd0dca8c044f",
+      "bytes": 37020
+    },
+    {
+      "path": "admin/backend/src/mock2/ops.js",
+      "sha256": "08a15774879d8a34a4f929f57566768af018be93e513cf7ea5c4d0b278727f14",
+      "bytes": 31788
+    },
+    {
+      "path": "admin/backend/src/routes/infisical.js",
+      "sha256": "948b4e113aa8a787fa1deefd6e63bdb866a0436c537f567141cb4c8c9ab22da0",
+      "bytes": 2071
+    },
+    {
+      "path": "admin/backend/src/routes/platform-setup.js",
+      "sha256": "f0ff6d5c096c86588751ba289a06d2bfd220c1addb069d0d68ab9b21727857ba",
+      "bytes": 3989
+    },
+    {
+      "path": "admin/backend/src/routes/setup.js",
+      "sha256": "8ce0db7763ecd9a2672f48083f15e1459530af571d5c5358c5673558cb4ae76e",
+      "bytes": 9791
+    }
+  ]
+}

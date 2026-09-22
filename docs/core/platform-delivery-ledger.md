@@ -146,7 +146,7 @@ Milestone D code completion: **≈ 5 %**.
 Recorded before implementation on `feat/g1-platform-setup`, based on
 `main@84dfc52` (PR #612 includes accepted U1/U2, `e8445d2`). These are
 conversation-sized delivery slices, cross-referencing the existing milestones,
-not replacements for accepted A/B/C/D evidence. **The original authorization here was G1 only; G2, G3 and G4 are separately authorized below.**
+not replacements for accepted A/B/C/D evidence. **The original authorization here was G1 only; G2, G3, G4 and bounded G5 recovery are separately authorized below.**
 No installer/update changes, A-17.9, Phase F, host-operation migration, live
 service/DNS/credential changes, authentication replacement or app redeployment.
 
@@ -156,7 +156,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | accepted — 6/6 criteria, including slow Caddy handoff correction; `a039761` merged by #614; execution limits below |
 | G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | accepted — 7/7 criteria; `4e7b257`, PR #615; repository checks, disposable ceremonies and separate live-host limitations below |
 | G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | accepted — six fixed criteria; corrected head `6c3bdcb`, PR #616; real stack and host execution limits below |
-| G5 | Infisical with Agent Proxy adapter | C-03 | planned — not authorized |
+| G5 | Infisical with Agent Proxy adapter | C-03 | historically accepted at unavailable `a436546`; reconstructed on `feat/g5-guided-infisical-recovery`, current evidence below; merge and host acceptance separate |
 | G6 | OpenBao adapter | C-04 | planned — not authorized |
 | G7 | Vaultwarden adapter | C-05 | planned — not authorized |
 | G8 | Application connection automation | D-01/D-02, C-06; reuse existing contracts, deployment and verification | planned — not authorized |
@@ -237,7 +237,8 @@ make only the smallest correction. Optional improvements stay backlog. Disposabl
 repository tests only; no production DNS, database, credential or service changes.
 G2 repository completion: **6/6 criteria**. At G2 acceptance, guided milestones
 complete were **2/10 (G1 and G2)**; G3–G10 were unimplemented. Current accepted
-guided progress is **40% (4/10: G1, G2, G3 and G4)**; G5–G10 remain planned.
+guided progress is **50% (5/10: G1–G5)** following historical G5 acceptance;
+G5 reconstruction/publication is tracked separately below. G6–G10 remain planned.
 
 G2.4 merge-review correction (2026-09-22): c180d2f could finish the Keycloak
 parent as `deferred` when its recorded Caddy job still held the shared app
@@ -577,3 +578,54 @@ restriction. Production DNS/network, physical passkeys, native database,
 backup restore and live machine/outage exercises remain separate host acceptance
 limits in `docs/evidence/g4-acceptance.md`. No deployment or live changes are
 authorized by this merge. No new gates, G5–G10, A-17 or Phase F work; stop at G4.
+
+
+### G5 recovery — fixed original contract and current evidence (2026-09-22)
+
+G4 acceptance at `6c3bdcb` is retained; PR #616 merged it into recorded base
+`d2ca73abf874f08a05c1a8121aa25ea39837af1d`. Current main still equals that base
+when recovery begins. No dependency merge or unrelated change is required.
+G5 was repository-complete and accepted at `a436546`, but that original commit
+and complete tree are unavailable. Its historic acceptance counts once: **50%
+(5/10)**. This new reconstruction is not the lost commit and does not add 10%.
+
+Input archive SHA256:
+`ae5cb3e4106ab57ff775bfb96dccd0b10a43d36527112b60218df2010c34f93d`.
+All 24 packaged source/test files match their manifest hashes, before and after
+reconstruction. They were immediately checkpointed and published as
+`ee3845f49775b61d7a89774c0e7f399e7f8cfa07` on
+`feat/g5-guided-infisical-recovery`; remote tree
+`654050aec95a810e2be9c79f2ad38dbbdb10b1b2` matched the local checkpoint.
+No recovered backend/test file was rebuilt or edited.
+
+Actual missing-piece checklist (reconstructed in this slice):
+- InfisicalSetup UI, four frontend API methods, independent Agent Proxy choices
+  and PlatformSetup integration.
+- Operator handoff, permission/edition, isolation and matching backup guidance.
+- Existing ledger/feature entries and fresh acceptance logs/screenshots.
+- Supplemental browser coverage of the restored choice controls and failed-job
+  retry, preserving the recovered browser driver unchanged.
+
+| ID | Fixed original criterion | Current reconstruction evidence |
+| --- | --- | --- |
+| G5.1 | Reviewed Infisical/Agent Proxy install/connect/skip; inert save; private persistent independent services; Caddy retains public ports/certificates; preserve external resources | pass — real saved-plan/API and browser choice checks; production Docker/Caddy adapters with scripted commands; independent proxy skip and read-only external-container tests; recovered pins unchanged |
+| G5.2 | Bounded organization/project/environment and separate workload/proxy/agent identities; exact scoped permissions; no agent value reads; reviewed handoff; preserve credentials/resources; optional edition-dependent human SSO | pass — protected identity form and exact review; effective-policy audit and broader/folder-grant refusals; incomplete handoff and retry tests; actual external identity engine remains host acceptance |
+| G5.3 | One disposable application secret delivered to its permitted consumer; denied access; references/redaction; preserve existing credentials | pass — actual Python consumer/private HTTP receipt through existing stdin delivery; scoped production API adapter fixtures; anonymous/agent read refusal and job/event/audit redaction assertions |
+| G5.4 | Actual Agent Proxy substitution while agent uses placeholder; unauthorized/unapproved requests receive no real credential; proxy credentials isolated | pass — real CLI 0.43.133 against scripted Infisical auth/CA/secret/permission responses; permitted receipts and denied requests; agent payload excludes real values/proxy token; VM isolation checks scripted |
+| G5.5 | Existing durable jobs/locks and explicit retry across restarts; configuration-bound verification; owned resources/keys; matching backup references | pass — current runner/backend reconciliation, slow route child, failure/retry, collision, lost-key and VM-lock tests; separate real API process restart; backup set documented using existing mechanisms |
+| G5.6 | Current focused/affected tests, frontend build, desktop/360px checks; preserve auth/CSRF/fresh-auth and G1–G4 | pass — current affected 210 tests: 209 pass, zero fail, one existing containment skip; 20 of those are G5 (19 setup + actual CLI); built UI, responsive/axe/Lighthouse and supplemental browser evidence linked below |
+
+Fresh results and exact commands are in [G5 recovery evidence](../evidence/g5-acceptance.md).
+Operator steps are in [guided Infisical](../features/guided-infisical.md).
+No historical passing count, screenshot or runtime claim is reused as current
+verification. Reconstruction, publication and merge are separate statuses:
+checkpoint published; final tested recovery is submitted on this branch for PR
+review, **not merged or deployed**. The PR and remote commit identify publication.
+
+Separate host acceptance: this environment has no Docker, Incus, Caddy,
+PostgreSQL or Redis server binaries. Real full-stack boot, effective permission
+engine, Incus VM isolation and Caddy route execution are not established by
+scripted adapters. The actual CLI/HTTP/Python test is explicitly narrower. G4's
+real Pomerium–Keycloak allowed/denied login and Caddy acceptance remain outstanding
+and unchanged. No G6–G10, A-17, Phase F, migration, installer/updater or live work.
+Stop at reconstructed G5; optional improvements remain backlog.

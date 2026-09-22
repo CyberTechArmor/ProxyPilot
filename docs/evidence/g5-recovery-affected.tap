@@ -1,0 +1,1366 @@
+TAP version 13
+# Subtest: isIpv4
+    # Subtest: accepts well-formed addresses
+    ok 1 - accepts well-formed addresses
+      ---
+      duration_ms: 0.649997
+      type: 'test'
+      ...
+    # Subtest: rejects malformed addresses
+    ok 2 - rejects malformed addresses
+      ---
+      duration_ms: 0.16345
+      type: 'test'
+      ...
+    1..2
+ok 1 - isIpv4
+  ---
+  duration_ms: 1.703669
+  type: 'suite'
+  ...
+# Subtest: sameHost — the prefix-collision regression
+    # Subtest: does not treat a prefix as a match
+    ok 1 - does not treat a prefix as a match
+      ---
+      duration_ms: 0.233233
+      type: 'test'
+      ...
+    # Subtest: the second live collision pair is also distinct
+    ok 2 - the second live collision pair is also distinct
+      ---
+      duration_ms: 0.140767
+      type: 'test'
+      ...
+    # Subtest: matches identical addresses, trimming whitespace
+    ok 3 - matches identical addresses, trimming whitespace
+      ---
+      duration_ms: 0.097774
+      type: 'test'
+      ...
+    # Subtest: never matches on missing input
+    ok 4 - never matches on missing input
+      ---
+      duration_ms: 0.077985
+      type: 'test'
+      ...
+    1..4
+ok 2 - sameHost — the prefix-collision regression
+  ---
+  duration_ms: 0.777134
+  type: 'suite'
+  ...
+# Subtest: parseUpstreamToken
+    # Subtest: splits host and port
+    ok 1 - splits host and port
+      ---
+      duration_ms: 1.053411
+      type: 'test'
+      ...
+    # Subtest: handles a bare host
+    ok 2 - handles a bare host
+      ---
+      duration_ms: 0.177772
+      type: 'test'
+      ...
+    # Subtest: strips a scheme
+    ok 3 - strips a scheme
+      ---
+      duration_ms: 0.221206
+      type: 'test'
+      ...
+    # Subtest: handles bracketed IPv6 with and without a port
+    ok 4 - handles bracketed IPv6 with and without a port
+      ---
+      duration_ms: 0.191261
+      type: 'test'
+      ...
+    # Subtest: treats a bare IPv6 literal as a host, not host:port
+    ok 5 - treats a bare IPv6 literal as a host, not host:port
+      ---
+      duration_ms: 0.16314
+      type: 'test'
+      ...
+    # Subtest: returns null for empty input
+    ok 6 - returns null for empty input
+      ---
+      duration_ms: 0.08159
+      type: 'test'
+      ...
+    1..6
+ok 3 - parseUpstreamToken
+  ---
+  duration_ms: 2.18677
+  type: 'suite'
+  ...
+# Subtest: parseCaddySiteFile
+    # Subtest: reads domain and upstream from a merged site file
+    ok 1 - reads domain and upstream from a merged site file
+      ---
+      duration_ms: 1.299464
+      type: 'test'
+      ...
+    # Subtest: reads healthpath marker and tls internal from a legacy site file
+    ok 2 - reads healthpath marker and tls internal from a legacy site file
+      ---
+      duration_ms: 0.410745
+      type: 'test'
+      ...
+    # Subtest: collects EVERY upstream on a multi-route domain
+    ok 3 - collects EVERY upstream on a multi-route domain
+      ---
+      duration_ms: 0.127468
+      type: 'test'
+      ...
+    # Subtest: handles several site addresses on one block
+    ok 4 - handles several site addresses on one block
+      ---
+      duration_ms: 0.154657
+      type: 'test'
+      ...
+    # Subtest: strips an http:// scheme from the site address
+    ok 5 - strips an http:// scheme from the site address
+      ---
+      duration_ms: 0.089301
+      type: 'test'
+      ...
+    # Subtest: returns an empty shape for junk input
+    ok 6 - returns an empty shape for junk input
+      ---
+      duration_ms: 0.145694
+      type: 'test'
+      ...
+    # Subtest: ignores a static-site block with no reverse_proxy
+    ok 7 - ignores a static-site block with no reverse_proxy
+      ---
+      duration_ms: 0.076192
+      type: 'test'
+      ...
+    1..7
+ok 4 - parseCaddySiteFile
+  ---
+  duration_ms: 2.550466
+  type: 'suite'
+  ...
+# Subtest: siteFileTargetsHost
+    # Subtest: is true only for the exact upstream host
+    ok 1 - is true only for the exact upstream host
+      ---
+      duration_ms: 0.13612
+      type: 'test'
+      ...
+    # Subtest: is false for a prefix of the upstream host — the incident
+    ok 2 - is false for a prefix of the upstream host — the incident
+      ---
+      duration_ms: 0.072767
+      type: 'test'
+      ...
+    # Subtest: is false for an unrelated host and for missing input
+    ok 3 - is false for an unrelated host and for missing input
+      ---
+      duration_ms: 0.074009
+      type: 'test'
+      ...
+    1..3
+ok 5 - siteFileTargetsHost
+  ---
+  duration_ms: 0.379519
+  type: 'suite'
+  ...
+# Subtest: siteSecurityHeaderLines
+    # Subtest: default (no admin domain): SAMEORIGIN, unchanged
+    ok 1 - default (no admin domain): SAMEORIGIN, unchanged
+      ---
+      duration_ms: 0.247965
+      type: 'test'
+      ...
+    # Subtest: admin domain known: dashboard-only framing, deferred, rewrite + add
+    ok 2 - admin domain known: dashboard-only framing, deferred, rewrite + add
+      ---
+      duration_ms: 0.21083
+      type: 'test'
+      ...
+    # Subtest: a malformed frame ancestor falls back to SAMEORIGIN
+    ok 3 - a malformed frame ancestor falls back to SAMEORIGIN
+      ---
+      duration_ms: 0.249707
+      type: 'test'
+      ...
+    # Subtest: operator allowFraming wins over the dashboard default
+    ok 4 - operator allowFraming wins over the dashboard default
+      ---
+      duration_ms: 0.156911
+      type: 'test'
+      ...
+    # Subtest: dashboardFrameAncestor: https origin from a hostname, null otherwise
+    ok 5 - dashboardFrameAncestor: https origin from a hostname, null otherwise
+      ---
+      duration_ms: 0.129431
+      type: 'test'
+      ...
+    1..5
+ok 6 - siteSecurityHeaderLines
+  ---
+  duration_ms: 1.145727
+  type: 'suite'
+  ...
+# Subtest: G3 configuration requires verified G2, exact host, explicit role policy and protected refs; stale revision refuses
+ok 7 - G3 configuration requires verified G2, exact host, explicit role policy and protected refs; stale revision refuses
+  ---
+  duration_ms: 56.245307
+  type: 'test'
+  ...
+# Subtest: G3 explicit account proof links issuer+subject without changing account data; no email auto-link or silent admin
+ok 8 - G3 explicit account proof links issuer+subject without changing account data; no email auto-link or silent admin
+  ---
+  duration_ms: 56.94637
+  type: 'test'
+  ...
+# Subtest: G3 real OIDC validation rejects bad signature, issuer, audience, expiry, nonce, state, PKCE and replay
+ok 9 - G3 real OIDC validation rejects bad signature, issuer, audience, expiry, nonce, state, PKCE and replay
+  ---
+  duration_ms: 106.249195
+  type: 'test'
+  ...
+# Subtest: G3 sudo requires the linked subject, fresh required assurance and live initiating session; SSO login never elevates
+ok 10 - G3 sudo requires the linked subject, fresh required assurance and live initiating session; SSO login never elevates
+  ---
+  duration_ms: 50.690368
+  type: 'test'
+  ...
+# Subtest: G3 passkey settings and exact client are checked read-only using 26.7.4 resident-key precedence
+ok 11 - G3 passkey settings and exact client are checked read-only using 26.7.4 resident-key precedence
+  ---
+  duration_ms: 11.666218
+  type: 'test'
+  ...
+# Subtest: G3 revocation permits at most 60 seconds; disable/delete and outage deny SSO while local recovery stays valid
+ok 12 - G3 revocation permits at most 60 seconds; disable/delete and outage deny SSO while local recovery stays valid
+  ---
+  duration_ms: 35.789928
+  type: 'test'
+  ...
+# Subtest: G3 activation enforces configuration-bound administrator, SSO, sudo, route and separate-browser recovery; offline disable works
+ok 13 - G3 activation enforces configuration-bound administrator, SSO, sudo, route and separate-browser recovery; offline disable works
+  ---
+  duration_ms: 49.74365
+  type: 'test'
+  ...
+# Subtest: G3 saved configuration invalidates old callback and activation evidence; jobs carry references only and resume safely
+ok 14 - G3 saved configuration invalidates old callback and activation evidence; jobs carry references only and resume safely
+  ---
+  duration_ms: 16.5039
+  type: 'test'
+  ...
+# Subtest: G3 Caddy recovery route reuses protected IP options, rejects collisions and has a fenced durable job
+ok 15 - G3 Caddy recovery route reuses protected IP options, rejects collisions and has a fenced durable job
+  ---
+  duration_ms: 7.163919
+  type: 'test'
+  ...
+# Subtest: G3 actual local password/TOTP login and step-up work offline on recovery; trusted devices cannot skip its second factor
+ok 16 - G3 actual local password/TOTP login and step-up work offline on recovery; trusted devices cannot skip its second factor
+  ---
+  duration_ms: 26.080998
+  type: 'test'
+  ...
+# Subtest: G3 activation closes public local-login bypass while retaining independent local recovery and credentials
+ok 17 - G3 activation closes public local-login bypass while retaining independent local recovery and credentials
+  ---
+  duration_ms: 638.773916
+  type: 'test'
+  ...
+# Subtest: G5.3/.4 real pinned CLI: placeholder substitution, consumer and denied HTTP requests (scripted Infisical API)
+ok 18 - G5.3/.4 real pinned CLI: placeholder substitution, consumer and denied HTTP requests (scripted Infisical API)
+  ---
+  duration_ms: 1169.430187
+  type: 'test'
+  ...
+# Subtest: G5.1 production HTTP admin, CSRF, fresh-auth, strict inputs; save is inert and encrypted
+ok 19 - G5.1 production HTTP admin, CSRF, fresh-auth, strict inputs; save is inert and encrypted
+  ---
+  duration_ms: 134.619435
+  type: 'test'
+  ...
+# Subtest: G5.1 independent Agent Proxy skip and full skip install nothing
+ok 20 - G5.1 independent Agent Proxy skip and full skip install nothing
+  ---
+  duration_ms: 11.558241
+  type: 'test'
+  ...
+# Subtest: G5.2 retry refuses identity/credential rotation and stale or mutable target configuration
+ok 21 - G5.2 retry refuses identity/credential rotation and stale or mutable target configuration
+  ---
+  duration_ms: 10.730511
+  type: 'test'
+  ...
+# Subtest: G5.2 audited exact effective rules reject broader and hidden folder grants
+ok 22 - G5.2 audited exact effective rules reject broader and hidden folder grants
+  ---
+  duration_ms: 13.905798
+  type: 'test'
+  ...
+# Subtest: G5.1/.5 managed production runtime and Caddy adapters create once, reuse keys and preserve unrelated state
+ok 23 - G5.1/.5 managed production runtime and Caddy adapters create once, reuse keys and preserve unrelated state
+  ---
+  duration_ms: 234.90491
+  type: 'test'
+  ...
+# Subtest: G5.2 incomplete handoff fails truthfully and retry preserves services and credentials
+ok 24 - G5.2 incomplete handoff fails truthfully and retry preserves services and credentials
+  ---
+  duration_ms: 147.920251
+  type: 'test'
+  ...
+# Subtest: G5.3 conflicting existing disposable secret is never overwritten
+ok 25 - G5.3 conflicting existing disposable secret is never overwritten
+  ---
+  duration_ms: 42.49643
+  type: 'test'
+  ...
+# Subtest: G5.1 connect Infisical leaves its runtime/Caddy untouched; Agent Proxy skipped reports application only
+ok 26 - G5.1 connect Infisical leaves its runtime/Caddy untouched; Agent Proxy skipped reports application only
+  ---
+  duration_ms: 16.733141
+  type: 'test'
+  ...
+# Subtest: G5.1 existing Agent Proxy verification is read-only and refuses changed command/environment/listeners
+ok 27 - G5.1 existing Agent Proxy verification is read-only and refuses changed command/environment/listeners
+  ---
+  duration_ms: 10.272788
+  type: 'test'
+  ...
+# Subtest: G5.5 foreign Docker collision and missing protected keys fail without replacement
+ok 28 - G5.5 foreign Docker collision and missing protected keys fail without replacement
+  ---
+  duration_ms: 8.386259
+  type: 'test'
+  ...
+# Subtest: G5.5 failed runtime and Caddy failures retry with the same references; raw failures redacted
+ok 29 - G5.5 failed runtime and Caddy failures retry with the same references; raw failures redacted
+  ---
+  duration_ms: 114.857959
+  type: 'test'
+  ...
+# Subtest: G5.5 runner interruption reconciles and resumes from saved keys; backend never runs host setup
+ok 30 - G5.5 runner interruption reconciles and resumes from saved keys; backend never runs host setup
+  ---
+  duration_ms: 53.555235
+  type: 'test'
+  ...
+# Subtest: G5.5 recorded slow route child keeps parent queued; unrelated VM lock prevents delivery
+ok 31 - G5.5 recorded slow route child keeps parent queued; unrelated VM lock prevents delivery
+  ---
+  duration_ms: 76.53141
+  type: 'test'
+  ...
+# Subtest: G5.4 isolation refuses containers, shared devices, raw VM options and non-local private listeners
+ok 32 - G5.4 isolation refuses containers, shared devices, raw VM options and non-local private listeners
+  ---
+  duration_ms: 0.665069
+  type: 'test'
+  ...
+# Subtest: G5.5 job schema refuses commands/secrets; review token and platform intention are mandatory
+ok 33 - G5.5 job schema refuses commands/secrets; review token and platform intention are mandatory
+  ---
+  duration_ms: 7.634593
+  type: 'test'
+  ...
+# Subtest: G5 transport pins DNS, refuses redirects and strips error bodies
+ok 34 - G5 transport pins DNS, refuses redirects and strips error bodies
+  ---
+  duration_ms: 1.00481
+  type: 'test'
+  ...
+# Subtest: G5.5 real API process restart preserves encrypted references and queued job
+ok 35 - G5.5 real API process restart preserves encrypted references and queued job
+  ---
+  duration_ms: 1096.997884
+  type: 'test'
+  ...
+# Subtest: G5.4 retry rejects volume driver and private network drift before proxy start
+ok 36 - G5.4 retry rejects volume driver and private network drift before proxy start
+  ---
+  duration_ms: 11.170455
+  type: 'test'
+  ...
+# Subtest: G5.1 Connect accepts an existing dedicated bridge/volume without renaming or writing external resources
+ok 37 - G5.1 Connect accepts an existing dedicated bridge/volume without renaming or writing external resources
+  ---
+  duration_ms: 9.167089
+  type: 'test'
+  ...
+# Subtest: actual API → saved revision → durable external job → runner verification; auth, CSRF, fresh auth, stale and skip refusals; no takeover
+ok 38 - actual API → saved revision → durable external job → runner verification; auth, CSRF, fresh auth, stale and skip refusals; no takeover
+  ---
+  duration_ms: 1039.363508
+  type: 'test'
+  ...
+# Subtest: managed operation uses actual executor, protected files and route SQL/render handoff; readiness + discovery required; no duplicate resources or rotation
+ok 39 - managed operation uses actual executor, protected files and route SQL/render handoff; readiness + discovery required; no duplicate resources or rotation
+  ---
+  duration_ms: 571.569014
+  type: 'test'
+  ...
+# Subtest: slow recorded Caddy handoff keeps Keycloak queued under the route locks and automatically completes verification
+ok 40 - slow recorded Caddy handoff keeps Keycloak queued under the route locks and automatically completes verification
+  ---
+  duration_ms: 20.943516
+  type: 'test'
+  ...
+# Subtest: dead runner after database creation is reconciled and resumed using the same credentials/resources; failed public verification remains failed and retry reuses
+ok 41 - dead runner after database creation is reconciled and resumed using the same credentials/resources; failed public verification remains failed and retry reuses
+  ---
+  duration_ms: 51.950169
+  type: 'test'
+  ...
+# Subtest: runner validation, collision refusal, unavailable runtime and backend policy do not mutate unrelated resources
+ok 42 - runner validation, collision refusal, unavailable runtime and backend policy do not mutate unrelated resources
+  ---
+  duration_ms: 6.540499
+  type: 'test'
+  ...
+# Subtest: discovery refuses wrong issuer, cross-origin keys and unusable keys; network rejects loopback, link-local, mapped IPv6
+ok 43 - discovery refuses wrong issuer, cross-origin keys and unusable keys; network rejects loopback, link-local, mapped IPv6
+  ---
+  duration_ms: 2.849034
+  type: 'test'
+  ...
+# Subtest: real HTTPS transport: TLS hostname/CA validation, pinned DNS, no redirects, bounded body and successful discovery/key parsing
+ok 44 - real HTTPS transport: TLS hostname/CA validation, pinned DNS, no redirects, bounded body and successful discovery/key parsing
+  ---
+  duration_ms: 168.687702
+  type: 'test'
+  ...
+# Subtest: current D.14 service schema works; Caddy collisions and render failure preserve other routes; lease loss stops writes
+ok 45 - current D.14 service schema works; Caddy collisions and render failure preserve other routes; lease loss stops writes
+  ---
+  duration_ms: 4.588025
+  type: 'test'
+  ...
+# Subtest: actual loss of runner epoch fences the operation before further runtime writes; long operations renew runner and job evidence
+ok 46 - actual loss of runner epoch fences the operation before further runtime writes; long operations renew runner and job evidence
+  ---
+  duration_ms: 2.744691
+  type: 'test'
+  ...
+# Subtest: API restart reconciliation resumes an interrupted Caddy handoff with the same route and no new credentials
+ok 47 - API restart reconciliation resumes an interrupted Caddy handoff with the same route and no new credentials
+  ---
+  duration_ms: 21.552323
+  type: 'test'
+  ...
+# Subtest: database readiness failure never schedules a public route or records verified state
+ok 48 - database readiness failure never schedules a public route or records verified state
+  ---
+  duration_ms: 7.258197
+  type: 'test'
+  ...
+# Subtest: strict non-secret schema: all five choices, origins, no browser state or credentials
+ok 49 - strict non-secret schema: all five choices, origins, no browser state or credentials
+  ---
+  duration_ms: 6.687556
+  type: 'test'
+  ...
+# Subtest: empty inventory never declares fresh or installed; intended state remains separate
+ok 50 - empty inventory never declares fresh or installed; intended state remains separate
+  ---
+  duration_ms: 2.564315
+  type: 'test'
+  ...
+# Subtest: preflight uses existing read interfaces, reports missing capabilities and route/dependency conflicts truthfully
+ok 51 - preflight uses existing read interfaces, reports missing capabilities and route/dependency conflicts truthfully
+  ---
+  duration_ms: 8.017465
+  type: 'test'
+  ...
+# Subtest: live and stale runner evidence; runtime responses; missing capacity never reads as pass
+ok 52 - live and stale runner evidence; runtime responses; missing capacity never reads as pass
+  ---
+  duration_ms: 1.378941
+  type: 'test'
+  ...
+# Subtest: real HTTP save → reload → separate API process restart → reopen; auth, CSRF, fresh auth, CAS and unchanged settings
+ok 53 - real HTTP save → reload → separate API process restart → reopen; auth, CSRF, fresh auth, CAS and unchanged settings
+  ---
+  duration_ms: 934.663728
+  type: 'test'
+  ...
+# Subtest: G4 API enforces admin, CSRF, sudo, strict inputs and secret-free inert save; skip is inert
+ok 54 - G4 API enforces admin, CSRF, sudo, strict inputs and secret-free inert save; skip is inert
+  ---
+  duration_ms: 107.319012
+  type: 'test'
+  ...
+# Subtest: G4 preserves G3 and refuses its client, missing verification, stale revisions and secret rotation
+ok 55 - G4 preserves G3 and refuses its client, missing verification, stale revisions and secret rotation
+  ---
+  duration_ms: 4.757134
+  type: 'test'
+  ...
+# Subtest: G4.2 validates exact dedicated Keycloak client, callbacks, flow and S256; wildcards fail
+ok 56 - G4.2 validates exact dedicated Keycloak client, callbacks, flow and S256; wildcards fail
+  ---
+  duration_ms: 0.315635
+  type: 'test'
+  ...
+# Subtest: G4.3 review binds full route and small verified subject allow list; machine and unsupported routes refuse
+ok 57 - G4.3 review binds full route and small verified subject allow list; machine and unsupported routes refuse
+  ---
+  duration_ms: 4.911121
+  type: 'test'
+  ...
+# Subtest: G4.3 SQL route ownership prevents aliases, edits, delete and moving the protected upstream
+ok 58 - G4.3 SQL route ownership prevents aliases, edits, delete and moving the protected upstream
+  ---
+  duration_ms: 4.161868
+  type: 'test'
+  ...
+# Subtest: G4.3 native private listener proof rejects wildcard, duplicate public listener, Docker publish and missing process identity
+ok 59 - G4.3 native private listener proof rejects wildcard, duplicate public listener, Docker publish and missing process identity
+  ---
+  duration_ms: 0.494007
+  type: 'test'
+  ...
+# Subtest: G4.4 API → durable runner → existing Caddy renderer; repeat apply reuses credentials and routes
+ok 60 - G4.4 API → durable runner → existing Caddy renderer; repeat apply reuses credentials and routes
+  ---
+  duration_ms: 43.662737
+  type: 'test'
+  ...
+# Subtest: G4.4 failed runtime leaves denied route; retry uses same resource/credentials and succeeds
+ok 61 - G4.4 failed runtime leaves denied route; retry uses same resource/credentials and succeeds
+  ---
+  duration_ms: 28.046094
+  type: 'test'
+  ...
+# Subtest: G4.4 invalid Caddy apply retains denial, does not restore old direct file, and retries durably
+ok 62 - G4.4 invalid Caddy apply retains denial, does not restore old direct file, and retries durably
+  ---
+  duration_ms: 27.713934
+  type: 'test'
+  ...
+# Subtest: G4.4 restart/retry resumes saved intent and fenced writer issues no later mutation
+ok 63 - G4.4 restart/retry resumes saved intent and fenced writer issues no later mutation
+  ---
+  duration_ms: 21.244028
+  type: 'test'
+  ...
+# Subtest: G4.4 explicit removal requires new review, preserves route restrictions and never drops native app authentication
+ok 64 - G4.4 explicit removal requires new review, preserves route restrictions and never drops native app authentication
+  ---
+  duration_ms: 34.684377
+  type: 'test'
+  ...
+# Subtest: G4.1 external handoff verification preserves unrelated routes and refuses overlapping/weakening policy
+ok 65 - G4.1 external handoff verification preserves unrelated routes and refuses overlapping/weakening policy
+  ---
+  duration_ms: 4.110793
+  type: 'test'
+  ...
+# Subtest: G4.1 protected files retain credentials, reject drift/missing marker, and never emit secrets to state/jobs
+ok 66 - G4.1 protected files retain credentials, reject drift/missing marker, and never emit secrets to state/jobs
+  ---
+  duration_ms: 2.996662
+  type: 'test'
+  ...
+# Subtest: G4.6 probes perform real HTTP command contracts, reject direct success and inspect spoof refusal
+ok 67 - G4.6 probes perform real HTTP command contracts, reject direct success and inspect spoof refusal
+  ---
+  duration_ms: 0.759098
+  type: 'test'
+  ...
+# Subtest: G4.6 test app executes signed assertion contract: authorized identity, forgery, spoof, audience, issuer, expiry and direct access
+ok 68 - G4.6 test app executes signed assertion contract: authorized identity, forgery, spoof, audience, issuer, expiry and direct access
+  ---
+  duration_ms: 9.518415
+  type: 'test'
+  ...
+# Subtest: G4.4 failed gateway verification queues durable denial before reporting failure
+ok 69 - G4.4 failed gateway verification queues durable denial before reporting failure
+  ---
+  duration_ms: 21.724085
+  type: 'test'
+  ...
+# Subtest: G4.4 unavailable Caddy never certifies initial denial and names the remaining runtime bypass
+ok 70 - G4.4 unavailable Caddy never certifies initial denial and names the remaining runtime bypass
+  ---
+  duration_ms: 5.876603
+  type: 'test'
+  ...
+# Subtest: G4.1 existing Core connection is read-only, preserves its keys and unrelated route, and retries without restart
+ok 71 - G4.1 existing Core connection is read-only, preserves its keys and unrelated route, and retries without restart
+  ---
+  duration_ms: 5.361724
+  type: 'test'
+  ...
+# Subtest: G4.4 real API process restart retains encrypted references, policy and queued job; repeat submission is idempotent
+ok 72 - G4.4 real API process restart retains encrypted references, policy and queued job; repeat submission is idempotent
+  ---
+  duration_ms: 808.901207
+  type: 'test'
+  ...
+# Subtest: G4.5 dashboard, identity, recovery and machine API route rendering remains byte-identical
+ok 73 - G4.5 dashboard, identity, recovery and machine API route rendering remains byte-identical
+  ---
+  duration_ms: 23.200448
+  type: 'test'
+  ...
+# Subtest: G4.1 official image supports repeat runtime apply and protecting a route after installation
+ok 74 - G4.1 official image supports repeat runtime apply and protecting a route after installation
+  ---
+  duration_ms: 33.707851
+  type: 'test'
+  ...
+# Subtest: G4.1 only the exact pinned CA default is allowed; unauthorized environment overrides remain blocked
+ok 75 - G4.1 only the exact pinned CA default is allowed; unauthorized environment overrides remain blocked
+  ---
+  duration_ms: 5.172015
+  type: 'test'
+  ...
+# Subtest: parseEnvFile reads the file install.sh writes: comments, quotes, export
+ok 76 - parseEnvFile reads the file install.sh writes: comments, quotes, export
+  ---
+  duration_ms: 1.125667
+  type: 'test'
+  ...
+# Subtest: databaseCandidates maps the container path onto the bind mount and tries the backend default
+ok 77 - databaseCandidates maps the container path onto the bind mount and tries the backend default
+  ---
+  duration_ms: 0.702985
+  type: 'test'
+  ...
+# Subtest: resolveInstall finds the live database through .env, prefers it over the legacy file, and never carries a key value
+ok 78 - resolveInstall finds the live database through .env, prefers it over the legacy file, and never carries a key value
+  ---
+  duration_ms: 1.412399
+  type: 'test'
+  ...
+# Subtest: generated passwords meet the login minimum, are unique, and hash the way routes/auth.js verifies
+ok 79 - generated passwords meet the login minimum, are unique, and hash the way routes/auth.js verifies
+  ---
+  duration_ms: 1175.568459
+  type: 'test'
+  ...
+# Subtest: the password source is a file or stdin, trailing newline dropped; never argv
+ok 80 - the password source is a file or stdin, trailing newline dropped; never argv
+  ---
+  duration_ms: 2.459601
+  type: 'test'
+  ...
+# Subtest: inspectSchema accepts the current backend shape and names what an old one lacks
+ok 81 - inspectSchema accepts the current backend shape and names what an old one lacks
+  ---
+  duration_ms: 2.941962
+  type: 'test'
+  ...
+# Subtest: readAccount never returns the hash or the TOTP secret
+ok 82 - readAccount never returns the hash or the TOTP secret
+  ---
+  duration_ms: 0.780299
+  type: 'test'
+  ...
+# Subtest: planRecovery refuses an unknown account, a directory account, a non-admin without --promote, and an empty request
+ok 83 - planRecovery refuses an unknown account, a directory account, a non-admin without --promote, and an empty request
+  ---
+  duration_ms: 1.532557
+  type: 'test'
+  ...
+# Subtest: planRecovery for an administrator lists exactly the requested steps plus the always-on revocations, and warns about what it leaves
+ok 84 - planRecovery for an administrator lists exactly the requested steps plus the always-on revocations, and warns about what it leaves
+  ---
+  duration_ms: 2.145639
+  type: 'test'
+  ...
+# Subtest: planRecovery warns about a locked account and a passwordless administrator, and --promote on a user
+ok 85 - planRecovery warns about a locked account and a passwordless administrator, and --promote on a user
+  ---
+  duration_ms: 2.321028
+  type: 'test'
+  ...
+# Subtest: planRecovery --create refuses an existing name, a bad name and meaningless companions
+ok 86 - planRecovery --create refuses an existing name, a bad name and meaningless companions
+  ---
+  duration_ms: 1.549952
+  type: 'test'
+  ...
+# Subtest: planRecovery on an old database without the optional tables skips them with a note
+ok 87 - planRecovery on an old database without the optional tables skips them with a note
+  ---
+  duration_ms: 2.192979
+  type: 'test'
+  ...
+# Subtest: applyRecovery restores the one account and leaves every other row byte-identical
+ok 88 - applyRecovery restores the one account and leaves every other row byte-identical
+  ---
+  duration_ms: 621.203242
+  type: 'test'
+  ...
+# Subtest: applyRecovery with only --password keeps the second factor and the passkeys, but still revokes sessions and trusted devices
+ok 89 - applyRecovery with only --password keeps the second factor and the passkeys, but still revokes sessions and trusted devices
+  ---
+  duration_ms: 283.774187
+  type: 'test'
+  ...
+# Subtest: applyRecovery --totp alone clears exactly what the login handler keys its re-enrolment on
+ok 90 - applyRecovery --totp alone clears exactly what the login handler keys its re-enrolment on
+  ---
+  duration_ms: 1.615529
+  type: 'test'
+  ...
+# Subtest: applyRecovery --promote makes a local user an administrator; --create makes a new one
+ok 91 - applyRecovery --promote makes a local user an administrator; --create makes a new one
+  ---
+  duration_ms: 593.046681
+  type: 'test'
+  ...
+# ✘ root recovery must run as root on the ProxyPilot host (sudo proxypilot recover …)
+# ✘ root recovery must run as root on the ProxyPilot host (sudo proxypilot recover …)
+# ⚠ 2 passkey(s) stay enrolled (add --passkeys to remove them)
+# ⚠ 1 MCP key(s) minted by this account stay valid (add --revoke-mcp-keys to revoke them)
+# ⚠ 2 passkey(s) stay enrolled (add --passkeys to remove them)
+# ⚠ 1 MCP key(s) minted by this account stay valid (add --revoke-mcp-keys to revoke them)
+# ⚠ 2 passkey(s) stay enrolled (add --passkeys to remove them)
+# ⚠ 1 MCP key(s) minted by this account stay valid (add --revoke-mcp-keys to revoke them)
+# ⚠ 2 passkey(s) stay enrolled (add --passkeys to remove them)
+# ⚠ 1 MCP key(s) minted by this account stay valid (add --revoke-mcp-keys to revoke them)
+# ⚠ 2 passkey(s) stay enrolled (add --passkeys to remove them)
+# ⚠ 1 MCP key(s) minted by this account stay valid (add --revoke-mcp-keys to revoke them)
+# Subtest: applyRecovery refuses a row that changed between plan and apply, and rolls back completely
+ok 92 - applyRecovery refuses a row that changed between plan and apply, and rolls back completely
+  ---
+  duration_ms: 322.91297
+  type: 'test'
+  ...
+# Subtest: applyRecovery refuses to run without a bcrypt hash when a password is to be set, and without an accepted plan
+ok 93 - applyRecovery refuses to run without a bcrypt hash when a password is to be set, and without an accepted plan
+  ---
+  duration_ms: 1.462413
+  type: 'test'
+  ...
+# Subtest: accountInventory reports standing without secrets and flags the passwordless administrator
+ok 94 - accountInventory reports standing without secrets and flags the passwordless administrator
+  ---
+  duration_ms: 1.250561
+  type: 'test'
+  ...
+# Subtest: recover admin: refused unless root, and nothing is opened or changed
+ok 95 - recover admin: refused unless root, and nothing is opened or changed
+  ---
+  duration_ms: 3.940282
+  type: 'test'
+  ...
+# Subtest: recover admin: a plan is printed and --dry-run changes nothing, writes no backup
+ok 96 - recover admin: a plan is printed and --dry-run changes nothing, writes no backup
+  ---
+  duration_ms: 3.801408
+  type: 'test'
+  ...
+# Subtest: recover admin: without a terminal and without --yes it refuses before touching anything
+ok 97 - recover admin: without a terminal and without --yes it refuses before touching anything
+  ---
+  duration_ms: 3.71447
+  type: 'test'
+  ...
+# Subtest: recover admin: on a terminal the typed username is the confirmation; a mismatch changes nothing
+ok 98 - recover admin: on a terminal the typed username is the confirmation; a mismatch changes nothing
+  ---
+  duration_ms: 4.623919
+  type: 'test'
+  ...
+# ⚠ 1 passkey(s) stay enrolled (add --passkeys to remove them)
+# ⚠ 1 MCP key(s) minted by this account stay valid (add --revoke-mcp-keys to revoke them)
+# Subtest: recover admin --password --yes: generates, hashes, backs up, applies, audits; the password is shown exactly once
+ok 99 - recover admin --password --yes: generates, hashes, backs up, applies, audits; the password is shown exactly once
+  ---
+  duration_ms: 672.550421
+  type: 'test'
+  ...
+# ⚠ 2 passkey(s) stay enrolled (add --passkeys to remove them)
+# ⚠ 1 MCP key(s) minted by this account stay valid (add --revoke-mcp-keys to revoke them)
+# ⚠ 2 passkey(s) stay enrolled (add --passkeys to remove them)
+# ⚠ 1 MCP key(s) minted by this account stay valid (add --revoke-mcp-keys to revoke them)
+# Subtest: recover admin --password-file / --password-stdin: the supplied password is used, validated before any write, never printed
+ok 100 - recover admin --password-file / --password-stdin: the supplied password is used, validated before any write, never printed
+  ---
+  duration_ms: 1243.183218
+  type: 'test'
+  ...
+# ✔ Recovered 'alice' — audit f1eb3570-9d66-494d-9f3c-6730fb461185
+# USERNAME  ROLE   SOURCE  PASSWORD  TOTP      LOCKED  SESSIONS  PASSKEYS  MCP KEYS
+# ─────────────────────────────────────────────────────────────────────────────────
+# alice     admin  local   set       enrolled  no      2         2         1
+# bob       admin  local   NONE      enrolled  no      1         1         1
+# carol     admin  ldap    NONE      none      no      0         0         0
+# erin      admin  local   set       enrolled  yes     0         0         0
+# dave      user   local   set       enrolled  no      0         0         0
+# ⚠ administrator(s) with no password — claimable through the public initial-setup endpoint: bob. Run: proxypilot recover admin <name> --password
+# Subtest: recover admin: refusals come back as exit 2 with the reason, and the human output never carries a hash
+ok 101 - recover admin: refusals come back as exit 2 with the reason, and the human output never carries a hash
+  ---
+  duration_ms: 296.666329
+  type: 'test'
+  ...
+# Subtest: recover status: read-only inventory over the file, with the passwordless warning
+ok 102 - recover status: read-only inventory over the file, with the passwordless warning
+  ---
+  duration_ms: 5.192786
+  type: 'test'
+  ...
+# Subtest: initial-setup and setup-status select LOCAL passwordless administrators only (the query from routes/auth.js, executed)
+ok 103 - initial-setup and setup-status select LOCAL passwordless administrators only (the query from routes/auth.js, executed)
+  ---
+  duration_ms: 0.994814
+  type: 'test'
+  ...
+# Subtest: reset.sh delegates password/TOTP recovery to `proxypilot recover` and never removes the database
+ok 104 - reset.sh delegates password/TOTP recovery to `proxypilot recover` and never removes the database
+  ---
+  duration_ms: 0.315395
+  type: 'test'
+  ...
+# Subtest: domainsForService
+    # Subtest: returns every domain the service serves, deduped
+    ok 1 - returns every domain the service serves, deduped
+      ---
+      duration_ms: 1.204203
+      type: 'test'
+      ...
+    # Subtest: returns empty rather than throwing when the query fails
+    ok 2 - returns empty rather than throwing when the query fails
+      ---
+      duration_ms: 0.184471
+      type: 'test'
+      ...
+    1..2
+ok 105 - domainsForService
+  ---
+  duration_ms: 2.441094
+  type: 'suite'
+  ...
+# Subtest: renderDomains
+    # Subtest: renders, validates, then reloads — in that order
+    ok 1 - renders, validates, then reloads — in that order
+      ---
+      duration_ms: 0.618992
+      type: 'test'
+      ...
+    # Subtest: never reloads a config that failed validation
+    ok 2 - never reloads a config that failed validation
+      ---
+      duration_ms: 0.616748
+      type: 'test'
+      ...
+    # Subtest: deduplicates and ignores empty domains
+    ok 3 - deduplicates and ignores empty domains
+      ---
+      duration_ms: 0.256207
+      type: 'test'
+      ...
+    # Subtest: is a no-op with no domains — no adapt, no reload
+    ok 4 - is a no-op with no domains — no adapt, no reload
+      ---
+      duration_ms: 0.166234
+      type: 'test'
+      ...
+    1..4
+ok 106 - renderDomains
+  ---
+  duration_ms: 1.934167
+  type: 'suite'
+  ...
+# Subtest: applyServiceUpstream
+    # Subtest: THE REGRESSION: moving the address re-renders EVERY domain on the service
+    ok 1 - THE REGRESSION: moving the address re-renders EVERY domain on the service
+      ---
+      duration_ms: 0.794439
+      type: 'test'
+      ...
+    # Subtest: no-ops when the address is unchanged — no DB write, no Caddy touch
+    ok 2 - no-ops when the address is unchanged — no DB write, no Caddy touch
+      ---
+      duration_ms: 0.175719
+      type: 'test'
+      ...
+    # Subtest: no-ops on a missing address rather than writing null
+    ok 3 - no-ops on a missing address rather than writing null
+      ---
+      duration_ms: 0.215206
+      type: 'test'
+      ...
+    # Subtest: reverts the DB row when the render fails — both stores stay in agreement
+    ok 4 - reverts the DB row when the render fails — both stores stay in agreement
+      ---
+      duration_ms: 0.634209
+      type: 'test'
+      ...
+    # Subtest: reverts the DB row when validation fails
+    ok 5 - reverts the DB row when validation fails
+      ---
+      duration_ms: 0.343286
+      type: 'test'
+      ...
+    # Subtest: reverts the DB row when the reload fails
+    ok 6 - reverts the DB row when the reload fails
+      ---
+      duration_ms: 0.374351
+      type: 'test'
+      ...
+    # Subtest: throws for an unknown service rather than silently doing nothing
+    ok 7 - throws for an unknown service rather than silently doing nothing
+      ---
+      duration_ms: 0.187426
+      type: 'test'
+      ...
+    # Subtest: a service with no routes still moves its address
+    ok 8 - a service with no routes still moves its address
+      ---
+      duration_ms: 0.136521
+      type: 'test'
+      ...
+    1..8
+ok 107 - applyServiceUpstream
+  ---
+  duration_ms: 4.861463
+  type: 'suite'
+  ...
+# Subtest: owner identity round-trips and a fresh instance is a different owner
+ok 108 - owner identity round-trips and a fresh instance is a different owner
+  ---
+  duration_ms: 2.186299
+  type: 'test'
+  ...
+# Subtest: lockVerdict: free, reasserted by the same owner, held by a live one, STALE when the lease lapsed — and stale is not free
+ok 109 - lockVerdict: free, reasserted by the same owner, held by a live one, STALE when the lease lapsed — and stale is not free
+  ---
+  duration_ms: 0.703776
+  type: 'test'
+  ...
+# Subtest: store: acquire, renew, release are fenced by owner and epoch; a stale lease refuses an ordinary acquirer
+ok 110 - store: acquire, renew, release are fenced by owner and epoch; a stale lease refuses an ordinary acquirer
+  ---
+  duration_ms: 1.409806
+  type: 'test'
+  ...
+# Subtest: store: a takeover bumps the epoch, fences the dead holder, and is recorded on the job
+ok 111 - store: a takeover bumps the epoch, fences the dead holder, and is recorded on the job
+  ---
+  duration_ms: 2.760064
+  type: 'test'
+  ...
+# Subtest: store: claimNextJob is compare-and-swap — two claimants, one winner; only listed kinds; the epoch moves
+ok 112 - store: claimNextJob is compare-and-swap — two claimants, one winner; only listed kinds; the epoch moves
+  ---
+  duration_ms: 1.345281
+  type: 'test'
+  ...
+# Subtest: store: checkpoint, generated resources, finish — fenced; a finished job takes no more writes
+ok 113 - store: checkpoint, generated resources, finish — fenced; a finished job takes no more writes
+  ---
+  duration_ms: 1.600346
+  type: 'test'
+  ...
+# Subtest: redaction: secret-looking keys and values never land in a job row or an event
+ok 114 - redaction: secret-looking keys and values never land in a job row or an event
+  ---
+  duration_ms: 1.367453
+  type: 'test'
+  ...
+# Subtest: verification ladder: states are distinct, a port answering is never "healthy", an unchecked rung caps the state, a failed rung is recovery required
+ok 115 - verification ladder: states are distinct, a port answering is never "healthy", an unchecked rung caps the state, a failed rung is recovery required
+  ---
+  duration_ms: 0.512665
+  type: 'test'
+  ...
+# Subtest: reconcileDecision: live lease → nothing; dead before the stop → record interrupted; dead after the stop → recover (or record recovery required when nothing can act)
+ok 116 - reconcileDecision: live lease → nothing; dead before the stop → record interrupted; dead after the stop → recover (or record recovery required when nothing can act)
+  ---
+  duration_ms: 2.212628
+  type: 'test'
+  ...
+# Subtest: recoveryJobFrom carries references only, from the checkpoint and the config refs
+ok 117 - recoveryJobFrom carries references only, from the checkpoint and the config refs
+  ---
+  duration_ms: 3.308582
+  type: 'test'
+  ...
+# Subtest: boot sweep: the successor records what its predecessor left — interrupted-and-released, or recovery-required with a queued recover_app and a stale, kept lease
+ok 118 - boot sweep: the successor records what its predecessor left — interrupted-and-released, or recovery-required with a queued recover_app and a stale, kept lease
+  ---
+  duration_ms: 3.580142
+  type: 'test'
+  ...
+# Subtest: boot sweep never touches a runner's jobs or a job whose lease is live
+ok 119 - boot sweep never touches a runner's jobs or a job whose lease is live
+  ---
+  duration_ms: 0.993673
+  type: 'test'
+  ...
+# Subtest: retryPlan keeps the approved plan and lists every generated resource for reuse; runner jobs are validated
+ok 120 - retryPlan keeps the approved plan and lists every generated resource for reuse; runner jobs are validated
+  ---
+  duration_ms: 1.286654
+  type: 'test'
+  ...
+# Subtest: requestAppRecovery does not duplicate an open recovery job, and verify-only is its own kind
+ok 121 - requestAppRecovery does not duplicate an open recovery job, and verify-only is its own kind
+  ---
+  duration_ms: 0.861429
+  type: 'test'
+  ...
+# Subtest: withContainerLock (persistent): the lease and the job exist while fn runs, fn gets a checkpoint handle, and both are closed with the outcome
+ok 122 - withContainerLock (persistent): the lease and the job exist while fn runs, fn gets a checkpoint handle, and both are closed with the outcome
+  ---
+  duration_ms: 124.163087
+  type: 'test'
+  ...
+# Subtest: withContainerLock (persistent): a failed result and a throw are both recorded, sanitized, and the lease released
+ok 123 - withContainerLock (persistent): a failed result and a throw are both recorded, sanitized, and the lease released
+  ---
+  duration_ms: 2.81117
+  type: 'test'
+  ...
+# Subtest: withContainerLock (persistent): refused by another live holder (the runner), and refused with the RECORDED condition when a dead holder's lease is stale
+ok 124 - withContainerLock (persistent): refused by another live holder (the runner), and refused with the RECORDED condition when a dead holder's lease is stale
+  ---
+  duration_ms: 1.214698
+  type: 'test'
+  ...
+# Subtest: withContainerLock without a configured store behaves as before: in-process only, fn gets a no-op handle
+ok 125 - withContainerLock without a configured store behaves as before: in-process only, fn gets a no-op handle
+  ---
+  duration_ms: 0.110292
+  type: 'test'
+  ...
+# Subtest: the migration text is the store's schema, registered as 1000 in db.js
+ok 126 - the migration text is the store's schema, registered as 1000 in db.js
+  ---
+  duration_ms: 0.961145
+  type: 'test'
+  ...
+# Subtest: registry: guest_setup is a runner, mutating and exclusive kind (the two modules agree); configure_routes is the backend's; the phases are fixed and ordered
+ok 127 - registry: guest_setup is a runner, mutating and exclusive kind (the two modules agree); configure_routes is the backend's; the phases are fixed and ordered
+  ---
+  duration_ms: 1.736406
+  type: 'test'
+  ...
+# Subtest: validation is strict: a script REFERENCE (ref, sha256, bytes) and never its text; phases in order; services validated; nothing that looks like a command or a secret
+ok 128 - validation is strict: a script REFERENCE (ref, sha256, bytes) and never its text; phases in order; services validated; nothing that looks like a command or a secret
+  ---
+  duration_ms: 3.538264
+  type: 'test'
+  ...
+# Subtest: the NAT phase renders fixed argv; a bridge name the host reports is validated before it becomes an argument; the address pick is host-reachable only
+ok 129 - the NAT phase renders fixed argv; a bridge name the host reports is validated before it becomes an argument; the address pick is host-reachable only
+  ---
+  duration_ms: 1.35113
+  type: 'test'
+  ...
+# Subtest: scripts, markers and the record's reading: parseDns, parseInitResult, the phase table, the outcome and the create-status view
+ok 130 - scripts, markers and the record's reading: parseDns, parseInitResult, the phase table, the outcome and the create-status view
+  ---
+  duration_ms: 2.436748
+  type: 'test'
+  ...
+# Subtest: dnsScript under sh: writes the resolvers when the marker is absent (replacing a symlink), leaves the file alone when present, reports a write failure
+ok 131 - dnsScript under sh: writes the resolvers when the marker is absent (replacing a symlink), leaves the file alone when present, reports a write failure
+  ---
+  duration_ms: 14.095573
+  type: 'test'
+  ...
+# Subtest: initScriptWrapper under sh (umask 022): the script runs from base64; its exit code and output are recorded in the guest as 0600 files; the wrapper prints markers only — a credential the script echoes stays in the log; the read-back finds the exit; the temp script is gone
+ok 132 - initScriptWrapper under sh (umask 022): the script runs from base64; its exit code and output are recorded in the guest as 0600 files; the wrapper prints markers only — a credential the script echoes stays in the log; the read-back finds the exit; the temp script is gone
+  ---
+  duration_ms: 22.115302
+  type: 'test'
+  ...
+# Subtest: a timed-out init under sh with NO containment record: the client is killed, the script keeps running in its own session, the read-back finds no exit code; the kill script kills the recorded session best-effort but reports norecord — a session-group kill establishes nothing about a setsid descendant
+ok 133 - a timed-out init under sh with NO containment record: the client is killed, the script keeps running in its own session, the read-back finds no exit code; the kill script kills the recorded session best-effort but reports norecord — a session-group kill establishes nothing about a setsid descendant
+  ---
+  duration_ms: 2821.241711
+  type: 'test'
+  ...
+# Subtest: REAL PROCESSES through the store and the executor: an init script whose setsid descendant keeps writing after its recorded parent is gone — the timeout kill stops the WHOLE containment group, issued outside it, and only then records timed_out with no hold; with the containment record missing the kill is inconclusive, the guest is HELD, conflicting work is refused, and only the writer-stopped acknowledgement releases it
+ok 134 - REAL PROCESSES through the store and the executor: an init script whose setsid descendant keeps writing after its recorded parent is gone — the timeout kill stops the WHOLE containment group, issued outside it, and only then records timed_out with no hold; with the containment record missing the kill is inconclusive, the guest is HELD, conflicting work is refused, and only the writer-stopped acknowledgement releases it # SKIP no real containment mechanism here (no writable cgroup tree or systemd), or /var/log, /tmp, /run not writable
+  ---
+  duration_ms: 11.608133
+  type: 'test'
+  ...
+# Subtest: setup inputs: a 0600 file next to the database, written once by reference, read and verified by digest, consumed once, swept when nobody consumed it
+ok 135 - setup inputs: a 0600 file next to the database, written once by reference, read and verified by digest, consumed once, swept when nobody consumed it
+  ---
+  duration_ms: 2.024741
+  type: 'test'
+  ...
+# Subtest: dashboard create: the launch job carries the plan; its executor queues the guest setup BOUND to the launched guest; every phase runs and is recorded on the one setup record; the script reaches the guest and never a row; the routes step lands on the record; create-status reads it all
+ok 136 - dashboard create: the launch job carries the plan; its executor queues the guest setup BOUND to the launched guest; every phase runs and is recorded on the one setup record; the script reaches the guest and never a row; the routes step lands on the record; create-status reads it all
+  ---
+  duration_ms: 25.370779
+  type: 'test'
+  ...
+# Subtest: a create with no script and no services queues the three-phase setup; a launch that fails queues no setup and the input is consumed; the create-status of a failed launch says so
+ok 137 - a create with no script and no services queues the three-phase setup; a launch that fails queues no setup and the input is consumed; the create-status of a failed launch says so
+  ---
+  duration_ms: 9.762125
+  type: 'test'
+  ...
+# Subtest: MCP create: the launch carries the NAT + address plan (no script, no routes); the tool waits on the setup RECORD for the host-reachable address
+ok 138 - MCP create: the launch carries the NAT + address plan (no script, no routes); the tool waits on the setup RECORD for the host-reachable address
+  ---
+  duration_ms: 5.735205
+  type: 'test'
+  ...
+# Subtest: start / restart / reboot with fixup: the NAT + DNS setup is a follow-up of the job, bound to the guest, recorded — a start of an already-Running guest still gets it; a managed restart queues the setup and then the ladder
+ok 139 - start / restart / reboot with fixup: the NAT + DNS setup is a follow-up of the job, bound to the guest, recorded — a start of an already-Running guest still gets it; a managed restart queues the setup and then the ladder
+  ---
+  duration_ms: 33.056166
+  type: 'test'
+  ...
+# Subtest: no address: the wait ends at its bound, DNS and the init script still run, the routes are skipped and say why; the job is setup_partial; the guest is Running and never deleted; create-status is ready with the warning
+ok 140 - no address: the wait ends at its bound, DNS and the init script still run, the routes are skipped and say why; the job is setup_partial; the guest is Running and never deleted; create-status is ready with the warning
+  ---
+  duration_ms: 7.581413
+  type: 'test'
+  ...
+# Subtest: an init script that exits nonzero: recorded with its code and the log's reference (never its output), the input consumed, the guest kept; a RETRY redoes NAT and DNS, never runs the script again, and KEEPS the failure — it is still a failed setup
+ok 141 - an init script that exits nonzero: recorded with its code and the log's reference (never its output), the input consumed, the guest kept; a RETRY redoes NAT and DNS, never runs the script again, and KEEPS the failure — it is still a failed setup
+  ---
+  duration_ms: 13.751009
+  type: 'test'
+  ...
+# Subtest: an init script that times out: the exec client dies at the bound; the kill script establishes the writer stopped → timed_out with the log named and no hold; a writer still alive after the kill → uncertain and the guest is HELD
+ok 142 - an init script that times out: the exec client dies at the bound; the kill script establishes the writer stopped → timed_out with the log named and no hold; a writer still alive after the kill → uncertain and the guest is HELD
+  ---
+  duration_ms: 10.64152
+  type: 'test'
+  ...
+# Subtest: containment unavailable in the guest: the host phases run, the guest phases are refused by name (nothing run), the guest is kept; a script input the executor cannot run is refused when its digest differs from the plan
+ok 143 - containment unavailable in the guest: the host phases run, the guest phases are refused by name (nothing run), the guest is kept; a script input the executor cannot run is refused when its digest differs from the plan
+  ---
+  duration_ms: 7.268263
+  type: 'test'
+  ...
+# Subtest: identity: a setup bound to one guest refuses a guest recreated under the same name (nothing run); a guest that is not Running is refused; an absent guest is not found
+ok 144 - identity: a setup bound to one guest refuses a guest recreated under the same name (nothing run); a guest that is not Running is refused; an absent guest is not found
+  ---
+  duration_ms: 3.590117
+  type: 'test'
+  ...
+# Subtest: NAT is best effort where the host lacks a piece and says so: no Docker chain is a note, a refused sysctl or bridge NAT is a failed phase; a bridge name the host reports that is not a name is never issued
+ok 145 - NAT is best effort where the host lacks a piece and says so: no Docker chain is a note, a refused sysctl or bridge NAT is a failed phase; a bridge name the host reports that is not a name is never issued
+  ---
+  duration_ms: 4.555468
+  type: 'test'
+  ...
+# Subtest: interruption BEFORE the script was issued: the dead owner's setup is resumed by the runner's reconcile, the idempotent phases run again, the script runs exactly once
+ok 146 - interruption BEFORE the script was issued: the dead owner's setup is resumed by the runner's reconcile, the idempotent phases run again, the script runs exactly once
+  ---
+  duration_ms: 4.925833
+  type: 'test'
+  ...
+# Subtest: interruption AFTER the script was issued: the resumed job READS the exit code the guest recorded and never runs the script again; with nothing recorded it ends recovery_required / init_uncertain with the lease released and the origin annotated; the boot sweep records the same for a dead backend
+ok 147 - interruption AFTER the script was issued: the resumed job READS the exit code the guest recorded and never runs the script again; with nothing recorded it ends recovery_required / init_uncertain with the lease released and the origin annotated; the boot sweep records the same for a dead backend
+  ---
+  duration_ms: 28.359921
+  type: 'test'
+  ...
+# Subtest: a dead backend mid-routes: the boot sweep records the routes job interrupted, marks the setup's routes phase failed and settles the setup PARTIAL (its lifecycle parent too); a retry of the routes job re-renders, never duplicates a row, and settles it COMPLETE (real schema, fake render)
+ok 148 - a dead backend mid-routes: the boot sweep records the routes job interrupted, marks the setup's routes phase failed and settles the setup PARTIAL (its lifecycle parent too); a retry of the routes job re-renders, never duplicates a row, and settles it COMPLETE (real schema, fake render)
+  ---
+  duration_ms: 10.045072
+  type: 'test'
+  ...
+# Subtest: a failed route render keeps the setup PARTIAL on every record; a render that succeeds later settles it complete; a routes job that loses a lease mid-way writes nothing further (fenced)
+ok 149 - a failed route render keeps the setup PARTIAL on every record; a render that succeeds later settles it complete; a routes job that loses a lease mid-way writes nothing further (fenced)
+  ---
+  duration_ms: 19.662364
+  type: 'test'
+  ...
+# Subtest: route ownership through the PRODUCTION adapter (ops backendStepDeps → guest-routes → route-render, real tables, a Caddy over a temp dir): the site files are rendered from the rows, validated and reloaded once, and the setup settles complete
+ok 150 - route ownership through the PRODUCTION adapter (ops backendStepDeps → guest-routes → route-render, real tables, a Caddy over a temp dir): the site files are rendered from the rows, validated and reloaded once, and the setup settles complete
+  ---
+  duration_ms: 10.911288
+  type: 'test'
+  ...
+# Subtest: route ownership through the PRODUCTION adapter: the lease taken BEFORE any mutation → nothing is written (no row, no file, no adapt); taken DURING a multi-domain render → the next domain is not rendered, nothing is validated or reloaded, NO rollback touches what is now the new owner's, and the new owner's lease is untouched; the setup settles partial and truthfully names the lost lease
+ok 151 - route ownership through the PRODUCTION adapter: the lease taken BEFORE any mutation → nothing is written (no row, no file, no adapt); taken DURING a multi-domain render → the next domain is not rendered, nothing is validated or reloaded, NO rollback touches what is now the new owner's, and the new owner's lease is untouched; the setup settles partial and truthfully names the lost lease
+  ---
+  duration_ms: 5.761104
+  type: 'test'
+  ...
+# Subtest: route ownership through the PRODUCTION adapter, the failure path: a render that fails with ownership INTACT rolls every site file back and reloads the known-good config (routes_recorded_render_failed, rows kept); a render that fails AFTER the lease was taken rolls nothing back — the new owner's files and its upstream row are not overwritten by the stale worker — and is recorded as the lease loss it is
+ok 152 - route ownership through the PRODUCTION adapter, the failure path: a render that fails with ownership INTACT rolls every site file back and reloads the known-good config (routes_recorded_render_failed, rows kept); a render that fails AFTER the lease was taken rolls nothing back — the new owner's files and its upstream row are not overwritten by the stale worker — and is recorded as the lease loss it is
+  ---
+  duration_ms: 13.909072
+  type: 'test'
+  ...
+# Subtest: route ownership through the PRODUCTION adapter: both leases are RENEWED while a legitimately long validation runs (the clock passes the lease period many times over) — no other job can take either meanwhile, and the step completes; a renewal that fails between writes stops the next write
+ok 153 - route ownership through the PRODUCTION adapter: both leases are RENEWED while a legitimately long validation runs (the clock passes the lease period many times over) — no other job can take either meanwhile, and the step completes; a renewal that fails between writes stops the next write
+  ---
+  duration_ms: 429.743252
+  type: 'test'
+  ...
+# Subtest: the JOB CLAIM is heart-beaten with the locks (production adapter, real timer keep-alive, the runner's actual reconcile): a render that outlives the claim period three times over keeps the claim and both locks live, reconcile leaves the active job untouched, the reload runs once and the setup settles complete; a claim ended by the reconciler, or re-claimed at a new epoch, while the render waits stops every later write, revives nothing and releases no other owner's lock
+ok 154 - the JOB CLAIM is heart-beaten with the locks (production adapter, real timer keep-alive, the runner's actual reconcile): a render that outlives the claim period three times over keeps the claim and both locks live, reconcile leaves the active job untouched, the reload runs once and the setup settles complete; a claim ended by the reconciler, or re-claimed at a new epoch, while the render waits stops every later write, revives nothing and releases no other owner's lock
+  ---
+  duration_ms: 496.398346
+  type: 'test'
+  ...
+# Subtest: the shared network lease is RENEWED through a slow live sequence (each command longer than the lease period): no other job can take it over meanwhile and every command is issued; a worker whose lease was taken over issues no further mutation
+ok 155 - the shared network lease is RENEWED through a slow live sequence (each command longer than the lease period): no other job can take it over meanwhile and every command is issued; a worker whose lease was taken over issues no further mutation
+  ---
+  duration_ms: 7.829459
+  type: 'test'
+  ...
+# Subtest: a credential the init script echoes never enters a job row, an event, a verification or the create-status answer — through the real wrapper under a real sh with the guest's umask at 022 — and the guest's artifacts are owner-only
+ok 156 - a credential the init script echoes never enters a job row, an event, a verification or the create-status answer — through the real wrapper under a real sh with the guest's umask at 022 — and the guest's artifacts are owner-only
+  ---
+  duration_ms: 26.345404
+  type: 'test'
+  ...
+# Subtest: configureGuestRoutes over the real tables: rows first, the render second; a domain routed to ANOTHER service is a conflict that is never clobbered; a render failure keeps the rows and says so; the upstream move re-renders what the service already served
+ok 157 - configureGuestRoutes over the real tables: rows first, the render second; a domain routed to ANOTHER service is a conflict that is never clobbered; a render failure keeps the rows and says so; the upstream move re-renders what the service already served
+  ---
+  duration_ms: 1.832118
+  type: 'test'
+  ...
+# Subtest: runner-required with no runner: a direct setup is refused (cancelled / runner_unavailable, nothing run) and a create is refused before any launch; with a live runner the create and its setup queue for it and the runner runs both
+ok 158 - runner-required with no runner: a direct setup is refused (cancelled / runner_unavailable, nothing run) and a create is refused before any launch; with a live runner the create and its setup queue for it and the runner runs both
+  ---
+  duration_ms: 10.420015
+  type: 'test'
+  ...
+# Subtest: unresolved holds: a guest whose restart ended interrupted_uncertain refuses a direct setup at submission (lock stale) and at the executor; a setup FOLLOW-UP meeting the hold is requeued with the lease untouched; after the acknowledgement it runs
+ok 159 - unresolved holds: a guest whose restart ended interrupted_uncertain refuses a direct setup at submission (lock stale) and at the executor; a setup FOLLOW-UP meeting the hold is requeued with the lease untouched; after the acknowledgement it runs
+  ---
+  duration_ms: 4.392017
+  type: 'test'
+  ...
+# Subtest: contention on the shared network lease: a live holder is waited for and the phase is skipped (contended) when it never lets go — the retry redoes it; a dead holder is taken over; the lease is released afterwards
+ok 160 - contention on the shared network lease: a live holder is waited for and the phase is skipped (contended) when it never lets go — the retry redoes it; a dead holder is taken over; the lease is released afterwards
+  ---
+  duration_ms: 6.917026
+  type: 'test'
+  ...
+# Subtest: contention on the routes: a configure_routes job meeting the guest's live lease, or the route store's, is requeued with a not-before and runs later; two guests' routes never interleave
+ok 161 - contention on the routes: a configure_routes job meeting the guest's live lease, or the route store's, is requeued with a not-before and runs later; two guests' routes never interleave
+  ---
+  duration_ms: 4.587375
+  type: 'test'
+  ...
+# Subtest: a lifecycle verb is refused while a guest setup is open, and a setup is refused while a lifecycle verb runs — never queued behind
+ok 162 - a lifecycle verb is refused while a guest setup is open, and a setup is refused while a lifecycle verb runs — never queued behind
+  ---
+  duration_ms: 1.6709
+  type: 'test'
+  ...
+# Subtest: the direct setup surface (a re-run of the setup of a guest that is there): the plan and its digest, an invalid request never reaches the store, the executor runs it and the record shows every phase
+ok 163 - the direct setup surface (a re-run of the setup of a guest that is there): the plan and its digest, an invalid request never reaches the store, the executor runs it and the record shows every phase
+  ---
+  duration_ms: 3.751274
+  type: 'test'
+  ...
+# Subtest: the executor accepts only what it validates: a guest_setup row carrying the script text, a command, or an unordered plan is refused at claim with nothing run
+ok 164 - the executor accepts only what it validates: a guest_setup row carrying the script text, a command, or an unordered plan is refused at claim with nothing run
+  ---
+  duration_ms: 2.09136
+  type: 'test'
+  ...
+# APP  OWNER  OPERATION  EPOCH  STALE  RECOVERY JOB
+# ─────────────────────────────────────────────────
+# ID        KIND        APP   STATUS     PHASE       STATE            REASON
+# ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+# 1c3b7d11  verify_app  pp-x  succeeded  probe_port  port_responding  pp-x: running: port responding (not verified healthy)
+# ✘ unknown action 'bogus' (serve, once, reconcile, status)
+# Subtest: probe scripts refuse unsafe unit names, ports and env paths, and parse their own markers
+ok 165 - probe scripts refuse unsafe unit names, ports and env paths, and parse their own markers
+  ---
+  duration_ms: 2.697932
+  type: 'test'
+  ...
+# Subtest: credentialVerdict follows the gate-one MASTERKEY_ROWS codes and never returns the key
+ok 166 - credentialVerdict follows the gate-one MASTERKEY_ROWS codes and never returns the key
+  ---
+  duration_ms: 1.98307
+  type: 'test'
+  ...
+# Subtest: verificationFromObservations climbs the ladder only as far as what was observed, and a port answering after an inactive status read is the port's call
+ok 167 - verificationFromObservations climbs the ladder only as far as what was observed, and a port answering after an inactive status read is the port's call
+  ---
+  duration_ms: 0.58385
+  type: 'test'
+  ...
+# Subtest: executeJob recover_app: starts the stopped unit, probes, verifies the credential, records credential_decryptable and releases the lease
+ok 168 - executeJob recover_app: starts the stopped unit, probes, verifies the credential, records credential_decryptable and releases the lease
+  ---
+  duration_ms: 10.938908
+  type: 'test'
+  ...
+# Subtest: executeJob: a port that never answers is recovery_required with the procedure, never "recovered"; an unhealthy app likewise; a mismatched key is recovery_required at the credential rung
+ok 169 - executeJob: a port that never answers is recovery_required with the procedure, never "recovered"; an unhealthy app likewise; a mismatched key is recovery_required at the credential rung
+  ---
+  duration_ms: 5.853169
+  type: 'test'
+  ...
+# Subtest: executeJob: no data guard → app_healthy with the deferral named; verify_app never starts the unit; a refused job kind or a plan with a command is refused before any guest command
+ok 170 - executeJob: no data guard → app_healthy with the deferral named; verify_app never starts the unit; a refused job kind or a plan with a command is refused before any guest command
+  ---
+  duration_ms: 2.286166
+  type: 'test'
+  ...
+# Subtest: executeJob: a live foreign lease defers the job; a dead backend's lease is taken over (epoch bumped) and the origin job gets the result
+ok 171 - executeJob: a live foreign lease defers the job; a dead backend's lease is taken over (epoch bumped) and the origin job gets the result
+  ---
+  duration_ms: 4.132124
+  type: 'test'
+  ...
+# Subtest: executeJob: the fence — when ownership moves mid-run, the runner stops before the next guest command and writes nothing more
+ok 172 - executeJob: the fence — when ownership moves mid-run, the runner stops before the next guest command and writes nothing more
+  ---
+  duration_ms: 1.611163
+  type: 'test'
+  ...
+# Subtest: reconcile: a dead backend that stopped an app gets a recovery job and a stale, kept lease; one that had not gets interrupted and released; a dead runner's resumable job is requeued and then runs
+ok 173 - reconcile: a dead backend that stopped an app gets a recovery job and a stale, kept lease; one that had not gets interrupted and released; a dead runner's resumable job is requeued and then runs
+  ---
+  duration_ms: 7.597648
+  type: 'test'
+  ...
+# Subtest: the backend boot sweep and the runner reconcile agree: a sweep-queued recovery is what the runner executes, once
+ok 174 - the backend boot sweep and the runner reconcile agree: a sweep-queued recovery is what the runner executes, once
+  ---
+  duration_ms: 3.139423
+  type: 'test'
+  ...
+# Subtest: serve: reconciles on start, drains the queue each tick, stops when asked
+ok 175 - serve: reconciles on start, drains the queue each tick, stops when asked
+  ---
+  duration_ms: 1.960246
+  type: 'test'
+  ...
+# Subtest: setup-runner command: root only; once/reconcile/status over the file-backed database
+ok 176 - setup-runner command: root only; once/reconcile/status over the file-backed database
+  ---
+  duration_ms: 7.668062
+  type: 'test'
+  ...
+# Subtest: hostGuestExec runs `incus exec <guest> -- sh` with the script on stdin and bounds it with a timeout
+ok 177 - hostGuestExec runs `incus exec <guest> -- sh` with the script on stdin and bounds it with a timeout
+  ---
+  duration_ms: 25.761244
+  type: 'test'
+  ...
+# Subtest: the unit runs the installed CLI as root with Restart=always, and install.sh / update.sh install and enable it
+ok 178 - the unit runs the installed CLI as root with Restart=always, and install.sh / update.sh install and enable it
+  ---
+  duration_ms: 1.154159
+  type: 'test'
+  ...
+1..178
+# tests 210
+# suites 9
+# pass 209
+# fail 0
+# cancelled 0
+# skipped 1
+# todo 0
+# duration_ms 20549.31281

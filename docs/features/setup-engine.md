@@ -1091,7 +1091,17 @@ runs, and the backend's five-minute warning repeats it. `update.sh`
 (`install_setup_runner`) does the same on every update: it appends
 `runner-required` only on the same evidence, and when the runner is not
 there it warns in red — and warns again, differently, when the `.env`
-already says `runner-required`, because every deploy is then queueing. At
+already says `runner-required`, because every deploy is then queueing.
+Two rules keep that evidence honest on an update
+(`update-runner-policy.test.js` drives the real functions in the script's
+order): the generic env sync (`sync_env_keys`, which runs first) skips
+`SETUP_EXECUTOR_POLICY` — the example's `runner-required` is never copied
+into a `.env` that had no line, so a previously unset installation is
+promoted only by the readiness step; and the runner is restarted on every
+update, unit file changed or not, because the update refreshed the modules
+it imports — a restart the service manager refuses is reported in red and
+never reads as ready (the old process may still be active, on the previous
+code). At
 boot under `runner-required` the backend logs the policy and, from 60 s on
 and every five minutes while no runner has a fresh heartbeat, warns
 `policy runner-required but no host runner heartbeat: N queued job(s)

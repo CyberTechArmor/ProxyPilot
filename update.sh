@@ -203,6 +203,15 @@ sync_env_keys() {
         local key="${line%%=*}"
         key="${key// }"
         [ -z "$key" ] && continue
+        # The executor policy is NOT a generic key: .env.example carries
+        # runner-required, and copying it here — before install_setup_runner
+        # has started the runner and opened the database — flipped an
+        # installation that never had the line to runner-required on evidence
+        # nobody had checked (every deploy then queued until the runner was
+        # fixed). The line is install_setup_runner's to record, on the
+        # readiness evidence, and only when it is absent; an existing value is
+        # an operator's choice and is left alone there as well.
+        case "$key" in SETUP_EXECUTOR_POLICY) continue ;; esac
         if ! grep -qE "^[[:space:]]*${key}=" "$deployed"; then
             missing_keys+=("$key")
         fi
@@ -1284,7 +1293,7 @@ log ""
 # verifies managed apps and reconciles leases a crashed backend left behind.
 # Runs the installed CLI (/usr/local/bin/proxypilot setup-runner serve), so it
 # is installed after the CLI below is refreshed; the unit is enabled and
-# restarted whenever its file changed.
+# restarted on every update so the running process is on the refreshed code.
 install_setup_runner() {
     local unit="proxypilot-setup-runner.service"
     local src="${SCRIPT_DIR}/deploy/${unit}"
@@ -1307,28 +1316,43 @@ install_setup_runner() {
     if ! systemctl is-enabled --quiet "$unit" 2>/dev/null; then
         systemctl enable "$unit" 2>&1 | tee -a "$LOG_FILE"
     fi
-    # The runner imports the backend's pure modules from this checkout's copy
-    # under the install dir; restart it so a changed runner or a changed rule
-    # is what runs. Its first act on start is the reconcile.
-    if [ "$changed" = true ] || ! systemctl is-active --quiet "$unit" 2>/dev/null; then
-        systemctl restart "$unit" 2>/dev/null || true
+    # The runner imports the backend's pure modules from this checkout, and
+    # this update has just refreshed that code and the CLI it runs through:
+    # an ACTIVE runner is still executing the previous version's modules
+    # until it is restarted, whether or not its unit file changed. So the
+    # restart is unconditional here (a stopped runner is started the same
+    # way); its first act on start is the reconcile, which records a job
+    # the restart interrupted and resumes or recovers it. A restart the
+    # service manager refuses is a failure of THIS step: the old process
+    # may well still be active, but it is not running the updated code, so
+    # it is never reported ready below.
+    local restart_ok=true restart_out=""
+    # Captured, not piped through tee: without pipefail a pipeline's status
+    # is tee's, and a refused restart would read as a success.
+    if ! restart_out="$(systemctl restart "$unit" 2>&1)"; then
+        restart_ok=false
+        log "${RED}Could not restart ${unit}${restart_out:+: ${restart_out}} — the runner is still on the previous version's code.${NC}"
     fi
     # The executor policy follows the EVIDENCE, retro-fitted once: an
     # installation whose runner unit is active and can open the database
     # requires the runner from now on. If the runner did not come up, the
     # line is NOT written (the legacy in-process executor keeps working) and
     # the failure is printed in red with the fix. A line that already exists
-    # is never rewritten: an operator's explicit choice stands.
+    # is never rewritten: an operator's explicit choice stands — and
+    # sync_env_keys, which runs earlier, deliberately skips this key so the
+    # example's runner-required never lands here ahead of this evidence.
     local env_file="${INSTALL_DIR:-/opt/proxypilot}/.env" runner_ok=false i
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-        if systemctl is-active --quiet "$unit" 2>/dev/null; then runner_ok=true; break; fi
-        sleep 1
-    done
+    if [ "$restart_ok" = true ]; then
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            if systemctl is-active --quiet "$unit" 2>/dev/null; then runner_ok=true; break; fi
+            sleep 1
+        done
+    fi
     if [ "$runner_ok" = true ] && ! /usr/local/bin/proxypilot setup-runner status --install-dir "${INSTALL_DIR:-/opt/proxypilot}" --json >/dev/null 2>&1; then
         runner_ok=false
     fi
     if [ "$runner_ok" = true ]; then
-        log "${GREEN}Setup runner ready (${unit} active)${NC}"
+        log "${GREEN}Setup runner ready (${unit} active, restarted onto the updated code)${NC}"
         if [ -f "$env_file" ] && ! grep -q '^SETUP_EXECUTOR_POLICY=' "$env_file" 2>/dev/null; then
             printf '\n# Who executes setup jobs (docs/features/setup-engine.md § "Who executes").\nSETUP_EXECUTOR_POLICY=runner-required\n' >> "$env_file"
             log "Recorded SETUP_EXECUTOR_POLICY=runner-required in ${env_file}"

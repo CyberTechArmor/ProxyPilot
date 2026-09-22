@@ -202,9 +202,13 @@ A3–A6 without modifying the runner.
 
 ## Milestone C — service adapters and identity integration
 
-Not started (0 %). Keycloak, Pomerium (Caddy → Pomerium → app; no forward
-auth), Infisical + Agent Proxy, OpenBao, Vaultwarden. Activation gated on a
-successful login and the recovery checks from A1.
+G2 provides the bounded Keycloak install/connect adapter; see the fixed G2
+checklist and evidence in `platform-delivery-ledger.md` and the G2 operator
+section of `docs/features/setup-engine.md`. It adds migration 1003,
+`keycloak_setup` to the existing runner and `configure_keycloak_route` to the
+existing backend drain. Both reuse the saved jobs, leases, fencing and restart
+reconciliation. Other service adapters and identity activation remain planned;
+SSO/client registration is G3. No milestone percentage is inferred.
 
 ## Milestone D — platform-aware app provisioning and maintenance
 

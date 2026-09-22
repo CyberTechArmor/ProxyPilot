@@ -1280,6 +1280,140 @@ Optionally provide `G1_LIGHTHOUSE_MODULE` as an installed Lighthouse module path
 for the mobile accessibility gate. The script uses a disposable SQLite/HTTP
 fixture; it never starts the production boot sweep or contacts live services.
 
+### Guided Keycloak setup (G2)
+
+G2 extends the saved G1 plan. Choose **Keycloak → Install / Connect existing /
+Skip**, enter an HTTPS **origin** and a separate **realm name**, save, then
+**Review Keycloak changes**. Inspect the target, issuer, ownership and changes;
+**Apply Keycloak installation** or **Verify and record connection** is the only
+execution boundary. It uses existing admin authorization, CSRF and fresh sudo.
+Saving, opening, checking and skipping never submit an operation. Revision
+conflicts return 409; reopen, review and apply the current revision.
+
+| API | Behavior |
+| --- | --- |
+| `GET /api/setup/platform/keycloak/review?revision=N` | Admin-only, no-store; exact saved revision and planned changes, no execution |
+| `POST /api/setup/platform/keycloak/apply` | Admin + CSRF + fresh sudo; `{expectedRevision:N, reviewed:true, retry?:true}`; durable job or existing attempt; no credential input |
+| `GET /api/setup/platform` | Intended plan plus separate `keycloak` records: ownership, resource references, latest job, verified connection and verification time |
+| Existing `/api/setup/jobs/:id` | Persistent phases, outcome, verification and redacted events; generic retry refuses Keycloak because reviewed revision is required |
+
+Migration 1003 stores immutable installation identities and verified evidence
+separately from intentions. The adapter is deliberately runner-only under either
+existing executor policy: protected host files must never be generated inside
+the API container. No runner means a queued `runner_unavailable` result, never a
+host-shell fallback. Start/repair the existing `proxypilot-setup-runner` service;
+do not weaken `SETUP_EXECUTOR_POLICY`. Its existing reconciliation and leases
+resume interrupted operations. The API's existing periodic backend-step drain
+performs the Caddy handoff under the app and shared routes leases; a restarted
+API requeues an interrupted Keycloak route step and reads its owned rows back.
+
+**Managed installation.** Requires host Docker, the existing runner and managed
+Caddy routing. Supported target is one DNS HTTPS origin on port 443 with a
+dedicated root-context realm other than `master`. The pinned images are
+`quay.io/keycloak/keycloak:26.7.4` and `postgres:17.9-bookworm`. They have distinct
+`pp-kc-<id>-server` / `-db` containers, an isolated Docker network, persistent
+`-data` volume and `unless-stopped` restart policies. They carry no ProxyPilot
+Compose project labels, so update.sh's application `compose down --remove-orphans`
+does not own them. No changes to install.sh, update.sh or the accepted U1/U2 unit.
+
+Only Keycloak's HTTP port is published, at **127.0.0.1:18080**. Caddy retains
+ports 80/443 and certificates, using the existing route rows, rendering,
+validation and reload. PostgreSQL and management port 9000 are not published.
+Hostname conflicts (including current route records, legacy services,
+admin domain and unmanaged managed/custom/main Caddy files), foreign Docker
+ownership labels and altered owned container configuration are refused.
+A fixed Keycloak hostname and realm belong to the recorded installation; G2
+does not retarget it, adopt another service or replace its volume.
+
+The realm is imported only on initial creation; subsequent startup skips it.
+A realm ownership attribute is checked in this installation's database before
+routing. Readiness requires PostgreSQL readiness, Keycloak `/health/ready`
+with database metrics enabled, then discovery at the **public HTTPS issuer**,
+exact issuer equality and parseable public signing keys at that realm's certs
+endpoint. Starting a container alone never reports ready. Certificate/trust,
+DNS or public reachability failures remain failed verification with resources
+retained. The initial master realm is Keycloak's own bootstrap requirement;
+no ProxyPilot client or user is provisioned.
+
+**Existing connection.** G2 reads only the selected realm's discovery and keys.
+It records `external` ownership and the time/checks actually performed. This
+proves the issuer connection, **not administrative permission or DB health**.
+No admin API, credentials, clients, users or realm mutation is involved. G3
+will own ProxyPilot client registration and login activation.
+
+The network reader reuses the existing operator egress host/port validator and
+restricts reads to the explicitly reviewed HTTPS origin. It pins DNS for each
+request, retains TLS certificate/hostname validation, refuses redirects and
+cross-origin key URLs, limits bodies to 1 MiB and bounds DNS/HTTP time. G2
+supports IPv4 (including explicitly reviewed RFC1918 destinations); loopback,
+link-local/metadata and other special-use addresses are blocked. IPv6-only
+issuers and installations under a non-root context such as `/auth` are not
+supported in this slice. No firewall grant or arbitrary URL probe is created.
+
+**Initial administration.** The guide displays only the protected reference:
+`/var/lib/proxypilot/keycloak/kc-<id>/credentials.json`. As root on the host,
+read its `bootstrap` field in a private terminal (never paste it into a job,
+issue or log). Open `https://<selected-host>/admin/`, sign in as
+`bootstrap-admin`, create a permanent Keycloak administrator, confirm that
+account works, then remove the temporary bootstrap account. Keycloak creates
+bootstrap administrators only before its master realm exists; restarting the
+container does not recreate a removed account. This does not change the
+ProxyPilot administrator, local credentials or active sessions.
+
+**Protected backup/recovery set.** Retain a PostgreSQL-consistent backup of the
+owned Keycloak database (for example `pg_dump -Fc -U keycloak -d keycloak` run
+inside its recorded DB container), the entire **0700** installation directory
+(including **0600** credentials/env/owner files and the realm import), and a
+consistent ProxyPilot SQLite backup including its installation/job/route
+records. Protect dumps as secrets; Keycloak's DB includes user data, realm keys
+and sessions. Record the pinned image versions and existing Caddy certificate
+references. A raw copy of a running PG volume is not a consistent backup.
+Restore matching data, configuration and ownership references together; never
+restore or delete one side and regenerate credentials to compensate.
+
+For lost Keycloak administration, use its documented `bootstrap-admin user`
+command with all Keycloak nodes stopped, the **same DB options** and a protected
+environment password (`--password:env ...`, not a password on argv). The pinned
+image and recorded network/env files provide those options. Restart only the
+owned Keycloak service after recovery, establish permanent access, and remove
+the temporary account. This is an operator recovery procedure, not a G2 button;
+no recovery command or live restart was executed during implementation.
+
+**Interrupted setup.** Reopen the saved target and inspect its existing job.
+Runner/API restart resumes durable work. After a definite failure, correct the
+reported collision, runner, TLS or readiness problem, review again and apply;
+the guide submits a retry referencing the same installation. Resources and
+credentials are reused, never automatically replaced or rotated. Missing or
+unsafe protected files require restoring the recovery set. An orphan partial
+file set without an ownership marker requires host inspection; G2 refuses to
+claim it. Skip saves an intention; it does not uninstall an existing service or
+cancel an already approved operation. Successful output is:
+**“Keycloak ready/connected; ProxyPilot SSO not activated.”**
+
+Official configuration references checked 2026-09-22:
+[release/downloads](https://www.keycloak.org/downloads),
+[container configuration](https://www.keycloak.org/server/containers),
+[reverse proxy and hostname](https://www.keycloak.org/server/reverseproxy),
+[supported databases](https://www.keycloak.org/server/db),
+[startup realm import](https://www.keycloak.org/server/importExport),
+[health and DB metrics](https://www.keycloak.org/observability/health),
+[bootstrap administration and recovery](https://www.keycloak.org/server/bootstrap-admin-recovery),
+[PostgreSQL 17.9](https://www.postgresql.org/docs/release/17.9/).
+
+**Verification limits.** `keycloak-setup.test.js` drives production HTTP routes,
+auth/CSRF, SQL, jobs, leases, reconciliation, runtime command construction,
+protected files, Caddy route SQL/render orchestration and discovery parsing.
+Docker command responses and the external discovery service are scripted for
+the end-to-end install/connect tests. A separate local HTTPS contract test uses
+real TLS and public-key parsing; its sole network seam maps a validated private
+test address to loopback because the sandbox exposes no external interface.
+The browser fixture uses production setup endpoints and node:sqlite, with
+background shell endpoints stubbed. Native better-sqlite3 production boot,
+real Docker/Keycloak/PostgreSQL, Caddy binary, public DNS/TLS issuance and
+systemd were unavailable, not claimed as executed. There was no production
+deployment or live service/DNS/database/credential change. Full maintenance UI
+and restore drill remain outside G2.
+
 ## Privilege separation, stated exactly
 
 - The runner is the process that deploys, starts units inside guests and

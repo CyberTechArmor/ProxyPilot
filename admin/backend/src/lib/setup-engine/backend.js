@@ -22,7 +22,7 @@ import { runOnce, recordUncertainLifecycle, recordUncertainSetup } from './execu
 import { runBackendSteps, settleSetupRecord } from './backend-steps.js';
 import { BACKEND_STEP_KINDS, SETUP_JOB_KINDS } from './setup-logic.js';
 import {
-  staleRunningJobs, readLock, releaseLock, markLockStale, clearStaleLock, recordJobOutcome, annotateTerminalOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners, appendEvent, annotateJobProgress,
+  requeueJob, staleRunningJobs, readLock, releaseLock, markLockStale, clearStaleLock, recordJobOutcome, annotateTerminalOutcome, createJob, openRecoveryJobFor, listLocks, listJobs, getJob, listEvents, jobView, liveRunners, appendEvent, annotateJobProgress,
 } from './store.js';
 
 let identity = null;
@@ -41,7 +41,11 @@ export function sweepSetupEngineOnBoot(db, { owner = backendOwner(), nowMs = Dat
     if (job.owner === owner) continue; // cannot be: fresh identity, but never touch our own
     const lock = readLock(db, job.app);
     const d = reconcileDecision({ job, lock, nowMs, canAct: false });
-    if (d.action === 'record_interrupted') {
+    if (d.action === 'resume') {
+      requeueJob(db, { id: job.id, by: owner, reason: d.reason, nowMs });
+      if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      summary.skipped.push(job.id); // requeued for the existing backend drain
+    } else if (d.action === 'record_interrupted') {
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
       if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
       // A backend step that died leaves its phase on the record it served.

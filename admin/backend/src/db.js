@@ -1,3 +1,4 @@
+import { KEYCLOAK_SCHEMA } from './lib/setup-engine/keycloak-store.js';
 import Database from 'better-sqlite3';
 import { repairStrayMigration912 } from './lib/migration-repair.js';
 import bcrypt from 'bcryptjs';
@@ -2333,6 +2334,8 @@ export function initDatabase() {
   runMigration(db, 1001, 'setup_engine_runners', (d) => {
     d.exec(SETUP_RUNNERS_SCHEMA);
   });
+
+  runMigration(db, 1003, 'setup_keycloak', (d) => d.exec(KEYCLOAK_SCHEMA));
 
   runMigration(db, 1002, 'setup_platform_plan', (d) => {
     d.exec(PLATFORM_PLAN_SCHEMA);

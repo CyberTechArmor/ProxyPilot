@@ -1,3 +1,4 @@
+import { runKeycloakOperation } from './keycloak-op.js';
 // Setup engine — the job EXECUTOR: what claims a queued job, takes (or takes
 // over) the app's lease, runs the kind's steps against a guest, and records
 // the outcome. One implementation, two hosts:
@@ -166,7 +167,7 @@ export function recordUncertainSetup(db, { job, lock, owner, reason, nowMs }) {
 const KEEPALIVE_MS = 10_000;
 const JOB_CLAIM = Symbol('job claim');
 
-export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null }) {
+export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null, keycloakDeps = {} }) {
   const epoch = Number(job.epoch);
   let keepLease = false;
   let keepAlive = null;
@@ -260,6 +261,33 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
   };
 
   try {
+    if (job.kind === 'keycloak_setup') {
+      // Managed files belong on the host, not the backend container. A narrower
+      // runner-only adapter honors runner-required and never weakens either policy.
+      if (parseOwner(owner)?.kind !== 'runner') {
+        requeueJob(db, { id: job.id, by: owner, reason: 'runner_unavailable: Keycloak requires the independent host runner', notBeforeMs: nowMs() + 30000, nowMs: nowMs() });
+        return { status: 'requeued', outcome: 'runner_unavailable' };
+      }
+      let lost = false;
+      const renew = () => {
+        const who = parseOwner(owner); runnerHeartbeat(db, { owner, host: who.host, pid: who.pid, nowMs: nowMs() });
+        if (!(heartbeat(db, { id: job.id, owner, epoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0) || !(renewLock(db, { app: job.app, owner, epoch: lockEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) lost = true;
+      };
+      const guard = () => { if (lost) throw new FencedError(job.id); renew(); if (lost) throw new FencedError(job.id); fence({ safe: true }); };
+      keepAlive = setInterval(() => { try { renew(); } catch { lost = true; } }, Math.max(20, keepAliveMs)); keepAlive.unref?.();
+      const handle = { id: job.id, fence: guard,
+        checkpoint: (phase, data) => { guard(); checkpoint(db, { id: job.id, owner, epoch, phase, checkpoint: data, message: phase, nowMs: nowMs() }); },
+        generated: resource => { guard(); recordGenerated(db, { id: job.id, owner, epoch, resource, nowMs: nowMs() }); },
+        progress: progress => { guard(); recordProgress(db, { id: job.id, owner, epoch, progress, nowMs: nowMs() }); },
+        onStep: (phase, message) => event('step', message, null, phase) };
+      const result = await runKeycloakOperation({ db, params: p, exec, job: handle, ...keycloakDeps });
+      guard();
+      if (result.waiting) {
+        requeueJob(db, { id: job.id, by: owner, reason: result.reason, notBeforeMs: nowMs() + 15000, nowMs: nowMs() });
+        return { status: 'requeued', outcome: 'waiting_for_route' };
+      }
+      return fin('succeeded', result.verification.state, result.verification.label, result.verification);
+    }
     // Containment before anything that touches the guest: other jobs'
     // groups and legacy marker scripts are killed and counted. A survivor
     // is recorded and the job stops here with the lease kept.
@@ -604,7 +632,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       markLockStale(db, { app: job.app, nowMs: nowMs(), recoveryJobId: job.id });
       return r;
     }
-    const verification = verificationFromObservations(obs);
+    const verification = job.kind === 'keycloak_setup' ? { state: 'not_verified', failedAt: getJob(db, job.id)?.phase, next: 'Correct the reported issue and retry from the reviewed Platform Setup plan. Existing resources and credentials are retained.' } : verificationFromObservations(obs);
     return fin('failed', 'error', sanitizeReason(e?.message || String(e)), verification);
   } finally {
     if (keepAlive) clearInterval(keepAlive);

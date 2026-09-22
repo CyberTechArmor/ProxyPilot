@@ -1,3 +1,5 @@
+import { readKeycloak } from './keycloak-store.js';
+import { keycloakRouteParams } from './keycloak-routes.js';
 // Setup engine — the BACKEND-executed steps (A-17.7): job kinds the backend
 // runs itself, whatever the executor policy, because they are ProxyPilot's
 // own work and not a host privilege: today `configure_routes` — the route
@@ -85,9 +87,15 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
   const epoch = Number(job.epoch);
   const fin = (status, outcome, reason, verification = null) => { finishJob(db, { id: job.id, owner, epoch, status, outcome, reason, verification, nowMs: nowMs() }); return { status, outcome }; };
   const event = (kind, message, data = null, phase = null) => appendEvent(db, { jobId: job.id, kind, phase, message, data, nowMs: nowMs() });
-  if (job.kind !== 'configure_routes') return fin('refused', 'invalid', `${job.kind} is not a backend step`);
-  const p = (parseJson(job.plan_json) || {}).params || {};
-  const v = validateRoutesParams(p);
+  if (!BACKEND_STEP_KINDS.includes(job.kind)) return fin('refused', 'invalid', `${job.kind} is not a backend step`);
+  let p = (parseJson(job.plan_json) || {}).params || {};
+  const isKeycloak = job.kind === 'configure_keycloak_route';
+  if (isKeycloak) { try {
+    const installation = readKeycloak(db, p.installationId);
+    if (installation?.route_job_id !== job.id || !['queued', 'running'].includes(getJob(db, installation.last_job_id)?.status)) throw new Error('Superseded or cancelled');
+    p = keycloakRouteParams(db, p);
+  } catch { return fin('refused', 'invalid', 'Invalid, cancelled or superseded Keycloak route reference.'); } }
+  const v = isKeycloak ? { ok: job.app === p.container, reason: 'Keycloak route app mismatch' } : validateRoutesParams(p);
   if (!v.ok) return fin('refused', 'invalid', v.reason);
   const origin = p.origin || {};
   const noteOrigin = (state, extra = {}) => {
@@ -132,7 +140,7 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     fenceJob(db, { id: job.id, owner, epoch, safe: true, leaseMs: LEASE_MS, nowMs: nowMs() });
     const ck = checkpoint(db, { id: job.id, owner, epoch, phase: 'routes', checkpoint: { resumable: false, disruptive: false, routes: true, container: p.container, domains: p.services.map((s) => s.domain) }, message: `configuring ${p.services.length} route(s) for ${p.container} → ${p.ip}`, nowMs: nowMs() });
     if (!(Number(ck) > 0)) throw new FencedError(job.id);
-    if (typeof deps.configureRoutes !== 'function') { noteOrigin('failed', { detail: 'no route configurator is available in this process' }); return fin('failed', 'error', 'no route configurator is available in this process; retry the job'); }
+    if (typeof (isKeycloak ? deps.configureKeycloakRoute : deps.configureRoutes) !== 'function') { noteOrigin('failed', { detail: 'no route configurator is available in this process' }); return fin('failed', 'error', 'no route configurator is available in this process; retry the job'); }
     // Before every write the configurator makes, THREE leases are renewed at
     // the epochs this step holds them — the job claim itself (`setup_jobs`,
     // the store's fenced heartbeat: owner + epoch + still running), the
@@ -162,7 +170,7 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     keepAlive = setInterval(() => { try { const gone = renewAll(); if (gone) lost = gone; } catch { /* the next fence decides */ } }, Math.max(20, Number(keepAliveMs) || KEEPALIVE_MS));
     if (typeof keepAlive.unref === 'function') keepAlive.unref();
     fence();
-    const res = await deps.configureRoutes({ container: p.container, name: p.serviceName, ip: p.ip, services: p.services, fence });
+    const res = isKeycloak ? await deps.configureKeycloakRoute({ installationId: p.installationId, fence }) : await deps.configureRoutes({ container: p.container, name: p.serviceName, ip: p.ip, services: p.services, fence });
     fence();
     const pub = { created: res.created || [], existing: res.existing || [], conflicts: res.conflicts || [], rendered: res.rendered || [], renderWarning: res.renderWarning || null, upstreamWarning: res.upstreamWarning || null, ip: p.ip };
     recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub }, nowMs: nowMs() });

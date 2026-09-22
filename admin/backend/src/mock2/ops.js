@@ -324,6 +324,11 @@ export async function runGuestConfig({ kind, containerName, requestedBy = null, 
 export function backendStepDeps(store = containerLockStore()) {
   if (store?.configureRoutes) return { configureRoutes: store.configureRoutes };
   return {
+    configureKeycloakRoute: async ({ installationId, fence }) => {
+      const { configureKeycloakRoute } = await import('../lib/setup-engine/keycloak-routes.js');
+      const render = store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;
+      return configureKeycloakRoute(store.getDb(), { installationId, fence, render });
+    },
     configureRoutes: async ({ name, ip, services, fence = null }) => {
       const { configureGuestRoutes } = await import('../lib/guest-routes.js');
       const render = store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;

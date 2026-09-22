@@ -1,3 +1,4 @@
+import { jobSchema as openbaoJobSchema, OPENBAO_APP } from './openbao-logic.js';
 import { infisicalJobSchema, INFISICAL_APP } from './infisical-logic.js';
 import { pomeriumJobSchema, POMERIUM_APP } from './pomerium-logic.js';
 // Setup engine — the PURE decision layer (docs/core/setup-engine-requirements.md
@@ -74,10 +75,10 @@ export const SETUP_JOB_KINDS = Object.freeze(['guest_setup']);
 // address pin, port forwards, egress — are runner jobs too; their
 // parameters, fixed commands and read-backs live in config-logic.js.
 export const CONFIG_JOB_KINDS = Object.freeze(['config_set', 'device_add', 'device_remove', 'network_pin', 'forward_apply', 'forward_remove', 'egress_set']);
-export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'keycloak_setup', 'pomerium_apply', 'infisical_apply']);
+export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'keycloak_setup', 'pomerium_apply', 'infisical_apply', 'openbao_apply']);
 // The kinds that MUTATE a guest or its storage: one at a time per app, and an
 // exclusive kind is refused (never queued behind) while any of them is open.
-export const MUTATING_JOB_KINDS = Object.freeze(['infisical_apply', 'configure_infisical_route', 'pomerium_apply', 'configure_pomerium_routes', 'keycloak_setup', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route', 'deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'configure_routes']);
+export const MUTATING_JOB_KINDS = Object.freeze(['openbao_apply', 'openbao_operator', 'configure_openbao_route', 'infisical_apply', 'configure_infisical_route', 'pomerium_apply', 'configure_pomerium_routes', 'keycloak_setup', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route', 'deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'configure_routes']);
 // A restore is destructive, and a lifecycle verb is an operator's immediate
 // action on a guest: neither waits for a held lease (it would run minutes
 // later under a state its operator never looked at) — refused, and refused
@@ -91,7 +92,7 @@ export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapsho
 // their pre-move records keep the old kind names in history. `configure_routes`
 // (A-17.7) is the backend's by design: ProxyPilot's own route rows and its
 // Caddy render, queued by the guest setup and drained by the backend.
-export const BACKEND_JOB_KINDS = Object.freeze(['configure_infisical_route', 'configure_pomerium_routes', 'credential_migration', 'configure_routes', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route']);
+export const BACKEND_JOB_KINDS = Object.freeze(['configure_openbao_route', 'configure_infisical_route', 'configure_pomerium_routes', 'credential_migration', 'configure_routes', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route']);
 export const LEGACY_BACKEND_JOB_KINDS = Object.freeze(['restore_project_db', 'retry-secrets']);
 // A runner is live when its heartbeat is younger than this.
 export const RUNNER_LIVE_MS = 30_000;
@@ -357,6 +358,8 @@ export function reconcileDecision({ job, lock = null, nowMs, canAct = true, runn
   if (!leaseExpired(lease, nowMs)) return { action: 'nothing', reason: 'lease is live' };
   const cp = parseJson(job.checkpoint_json) || {};
   if (['verify_sso', 'configure_recovery_route'].includes(job.kind)) return { action: 'resume', reason: 'Revalidate the saved SSO reference and resume the idempotent guided step' };
+  if (job.kind === 'openbao_operator') return { action:'record_uncertain', reason:'OpenBao operator request interrupted. Submitted material was transient. Read service state, then deliberately resubmit; no automatic secret replay.', releaseLock:true, keepStale:false };
+  if (['openbao_apply','configure_openbao_route'].includes(job.kind)) return {action:'resume',reason:'Re-read owned OpenBao state; never repeat initialization or regenerate keys.'};
   if (['infisical_apply','configure_infisical_route'].includes(job.kind)) return { action: 'resume', reason: 'Re-read saved Infisical references and verify owned resources before retry.' };
   if (['pomerium_apply','configure_pomerium_routes'].includes(job.kind)) return { action: 'resume', reason: 'Re-read the saved Pomerium intent and resume fail-closed route configuration.' };
   if (job.kind === 'configure_keycloak_route') return { action: 'resume', reason: 'Interrupted Keycloak route step; re-read owned rows and render before reporting success' };
@@ -461,6 +464,7 @@ export function validateRunnerJob(job) {
   if (!CONTAINER_NAME_RE.test(String(job.app || ''))) return { ok: false, reason: 'app must be an Incus guest name' };
   const plan = parseJson(job.plan_json) || job.plan || {};
   const p = plan.params || {};
+  if (job.kind === 'openbao_apply') return openbaoJobSchema.safeParse(p).success && job.app === OPENBAO_APP && Object.keys(plan).every(k => k === 'params') ? {ok:true} : {ok:false,reason:'OpenBao jobs carry only a saved revision reference.'};
   if (job.kind === 'infisical_apply') return infisicalJobSchema.safeParse(p).success && job.app === INFISICAL_APP && Object.keys(plan).every(k => k === 'params') ? { ok: true } : { ok: false, reason: 'Infisical jobs carry only a saved revision reference.' };
   if (job.kind === 'pomerium_apply') return pomeriumJobSchema.safeParse(p).success && job.app === POMERIUM_APP && Object.keys(plan).every(k => k === 'params') ? { ok: true } : { ok: false, reason: 'Pomerium jobs carry only a saved revision reference.' };
   if (job.kind === 'keycloak_setup') return keycloakJobSchema.safeParse(p).success && job.app === KEYCLOAK_APP && Object.keys(plan).every(k => k === 'params') ? { ok: true } : { ok: false, reason: 'Keycloak jobs carry only an installation reference and reviewed revision.' };

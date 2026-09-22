@@ -156,8 +156,8 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | accepted — 6/6 criteria, including slow Caddy handoff correction; `a039761` merged by #614; execution limits below |
 | G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | accepted — 7/7 criteria; `4e7b257`, PR #615; repository checks, disposable ceremonies and separate live-host limitations below |
 | G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | accepted — six fixed criteria; corrected head `6c3bdcb`, PR #616; real stack and host execution limits below |
-| G5 | Infisical with Agent Proxy adapter | C-03 | historically accepted at unavailable `a436546`; reconstructed on `feat/g5-guided-infisical-recovery`, current evidence below; merge and host acceptance separate |
-| G6 | OpenBao adapter | C-04 | planned — not authorized |
+| G5 | Infisical with Agent Proxy adapter | C-03 | accepted published recovery `31d0c87`; merged by #617 as `e9430a2`; host acceptance separate |
+| G6 | OpenBao adapter | C-04 | accepted — six fixed criteria and runner-key correction at `6e48d89`, PR #618; host acceptance separate |
 | G7 | Vaultwarden adapter | C-05 | planned — not authorized |
 | G8 | Application connection automation | D-01/D-02, C-06; reuse existing contracts, deployment and verification | planned — not authorized |
 | G9 | Guided maintenance | B-04, D-03/D-04/D-05; reuse restores and verification | planned — not authorized |
@@ -629,3 +629,86 @@ scripted adapters. The actual CLI/HTTP/Python test is explicitly narrower. G4's
 real Pomerium–Keycloak allowed/denied login and Caddy acceptance remain outstanding
 and unchanged. No G6–G10, A-17, Phase F, migration, installer/updater or live work.
 Stop at reconstructed G5; optional improvements remain backlog.
+
+## G6 — guided OpenBao (authorized 2026-09-22; review pending)
+
+G5 acceptance is the published recovery `31d0c87b2b1fd4e00c24773e6ae0435e387c70a3`,
+branch `feat/g5-guided-infisical-recovery`, PR #617. GitHub confirms #617 merged
+as `e9430a2314c881c23fbecc74c25acf8ac62661c2`. G6 starts from that current main,
+in an isolated checkout on `feat/g6-guided-openbao`. The unavailable `a436546`
+is not a base. Accepted guided progress remains **50% (5/10)** until G6 review
+and acceptance, then **60% (6/10)**. Earlier host acceptance stays separate.
+
+These six criteria are fixed before implementation:
+
+| Criterion | Required result | Status |
+| --- | --- | --- |
+| G6.1 | Reviewed install/connect/skip; version-specific official deployment/API review; persistent single-node integrated storage, private listeners, independent lifecycle, Caddy public ports/certificates; inert save, explicit apply; external checks read-only first and writes only to reviewed owned resources. | implemented — reviewed 2.6.2; inert choices, private Raft/Docker ownership and Caddy adapter checks pass; real Docker/Caddy pending |
+| G6.2 | Distinguish uninitialized/sealed/unsealed/unavailable; initialize only confirmed uninitialized managed instance, never on retry; protected recovery handoff and acknowledgement; manual unseal after restart; preserve external seal; no KMS/HSM/auto-unseal; unseal material separate from application backups; transient submitted shares/bootstrap tokens never in plans/jobs/events/logs/browser storage; no runtime root token; lost initialization handoff means recovery required, no reset. | implemented — actual 2.6.2 PGP handoff, acknowledgement, restart/seal/manual unseal; interrupted/lost handoff and redaction adapter checks pass |
+| G6.3 | Human access through verified Keycloak, dedicated client, exact callbacks and explicit policies; unmapped denied; separately scoped supported machine identity with protected credentials preserved on retry and permitted/denied proof; preserve ProxyPilot login/recovery/service identities. | implemented — dedicated Keycloak observer/mapping and preserved scoped AppRole; actual OpenBao allowed/denied OIDC and machine checks pass with scripted provider; real Keycloak pending |
+| G6.4 | One selected dynamic flow, disposable PostgreSQL by default: limited credential issued, used and revoked/expired with subsequent access denied; credentials absent from evidence/browser storage; only explicitly selected test resources, no database move/production listener/credential migration; no other engines configured. | implemented — selected PostgreSQL TLS/SCRAM issue/use/write-denial/revocation adapter checks pass; actual OpenBao database API accepts configuration; real PostgreSQL credential execution pending |
+| G6.5 | Existing jobs/locks, progress/failure/retry across browser/API/runner restart, resource/key reuse and verification bound to saved configuration; sealed/unavailable never healthy/verified; restart restoration guidance; compatible data/config backup plus separately held unseal material; no new backup/upgrade/restore framework. | implemented — jobs/leases, restart/retry, cluster/config binding and key/resource preservation pass; compatible backup and separate unseal custody guidance added |
+| G6.6 | Focused adapter acceptance for all choices, initialization/interrupted handoff, sealed/restart/unseal, scoped access, dynamic flow, denial/retry/redaction; admin/CSRF/fresh-auth; affected tests/build/desktop/360px; distinguish real disposable execution from scripted responses and precise environment limits. | implemented — focused/affected results, real-vs-scripted limits, build and five-width browser evidence recorded in g6-acceptance.md; review pending |
+
+Only G6 is authorized. No G7–G10, HA, KMS/HSM, general provisioning,
+existing-secret migration, A-17 continuation, Phase F, infrastructure rebuild,
+installer/updater changes or accepted U1/U2 changes. Prerequisite corrections
+require a reproducible defect blocking a named criterion. Optional improvements
+are backlog items, not additional completion gates. Publication is authorized;
+merge, production deployment and live infrastructure/identity changes are not.
+
+Repository delivery and focused evidence are complete for G6 review; this is
+not milestone acceptance. See [G6 acceptance evidence](../evidence/g6-acceptance.md)
+and [operator guidance](../features/guided-openbao.md). The published branch is
+`feat/g6-guided-openbao`; checkpoints include `0f01ca7`, `686a3c2` and `aa95e34a`.
+The final PR head records the complete tested tree. Accepted progress remains
+**50% (5/10)**, with no merge or deployment performed.
+
+G6 corrections were limited to reproduced blockers: real 2.6.2 initialization
+needed a longer bounded deadline; AppRole missing-SecretID lookup returns 204;
+the operator lease helper owns its SQL transaction; private database TLS needed
+an explicit public CA handoff; a first interrupted bootstrap must bind its
+cluster before mutations; the new button failed contrast; and the runner-kind
+assertion lacked the guided apply kinds. None changes U1/U2 or the installer.
+The existing containment-host requirement, earlier milestones' acceptance and
+unavailable real-host integrations remain separate. They authorize no rebuild.
+
+
+### G6 narrow review correction — runner key loading (2026-09-22)
+
+The independent review found a reproducible G6.5/G6.6 fresh-runner defect:
+`setup-runner` located `.env` but did not load its existing encryption key.
+The bounded command-startup correction now loads and validates that key before
+`serve`/`once` opens the queue, preserves the file and ciphertext, and refuses
+missing/malformed/conflicting keys without claiming jobs. Inspection and
+reconciliation remain available for recovery. No runner redesign or key rotation.
+
+Three fresh-process regressions reproduce the failure before the fix and pass
+after it, without an inherited key or fixture key cache. Current affected tests:
+**187 pass** (same separately excluded cgroup-host assertion); frontend build
+passes, with frontend source unchanged. Full evidence and precise scripted-service
+boundaries are in `docs/evidence/g6-acceptance.md` under the review correction.
+PR #618 remains unmerged. **50% (5/10)** remains accepted until this correction is
+reviewed and accepted, then **60% (6/10)**. Real PostgreSQL, Keycloak/Caddy and
+restore acceptance remain separate. No installer/updater/U1/U2 or live changes.
+
+
+### G6 review acceptance (2026-09-22)
+
+The user accepted the corrected G6 head
+`6e48d89dedb058b8d760556b448d00042909b057` and authorized merging PR #618.
+Accepted guided progress is now **60% (6/10: G1–G6)**. This supersedes the
+pending-review status and no-merge restriction for this PR in the records above.
+The six fixed G6 criteria and ten-milestone denominator are unchanged.
+
+The accepted correction loads and validates the existing installation encryption
+key before runner jobs, preserving the key and ciphertext. Evidence: 187 affected
+passes, three fresh-process startup regressions, successful frontend build, and
+the recorded OpenBao/adapter/browser checks. This acceptance commit changes
+only documentation after the tested code at `6e48d89`.
+
+Real PostgreSQL credential execution, Keycloak/Caddy integration and compatible
+restore remain separate host-acceptance items, alongside earlier recorded limits
+and the existing cgroup-host exclusion. This merge authorizes no production
+rollout, live DNS/database/identity changes, credential rotation, service restart,
+infrastructure rebuild or G7–G10 work.

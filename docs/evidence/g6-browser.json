@@ -1,0 +1,138 @@
+{
+  "date": "2026-09-22T19:33:38.351Z",
+  "execution": "Built UI; production HTTP/auth/CSRF/SQLite; scripted upstream seal responses and runner transitions. No live services.",
+  "audits": [
+    {
+      "state": "install-form",
+      "width": 360,
+      "scrollWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "install-form",
+      "width": 375,
+      "scrollWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "install-form",
+      "width": 768,
+      "scrollWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "install-form",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "install-form",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "shortButtons": []
+    },
+    {
+      "state": "connect-form",
+      "width": 360,
+      "scrollWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "connect-form",
+      "width": 375,
+      "scrollWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "connect-form",
+      "width": 768,
+      "scrollWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "connect-form",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "connect-form",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "width": 360,
+      "scrollWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "width": 375,
+      "scrollWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "width": 768,
+      "scrollWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "shortButtons": []
+    },
+    {
+      "state": "unsealed-bootstrap",
+      "width": 360,
+      "scrollWidth": 360,
+      "shortButtons": []
+    },
+    {
+      "state": "unsealed-bootstrap",
+      "width": 375,
+      "scrollWidth": 375,
+      "shortButtons": []
+    },
+    {
+      "state": "unsealed-bootstrap",
+      "width": 768,
+      "scrollWidth": 768,
+      "shortButtons": []
+    },
+    {
+      "state": "unsealed-bootstrap",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "shortButtons": []
+    },
+    {
+      "state": "unsealed-bootstrap",
+      "width": 1920,
+      "scrollWidth": 1920,
+      "shortButtons": []
+    }
+  ],
+  "checks": [
+    "skip is inert",
+    "connect offers no initialization controls",
+    "saved configuration inert; credential absent from returned/rendered data",
+    "API process restart preserves saved configuration, protected reference and pending job",
+    "protected handoff receipt acknowledgement works at 375px",
+    "transient share form clears after each submit; sealed to unsealed transition uses production API with scripted service",
+    "credentials/shares/receipt absent from local/session storage and rendered output"
+  ],
+  "errors": [],
+  "axeViolations": [],
+  "lighthouseScore": 95
+}

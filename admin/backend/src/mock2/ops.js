@@ -324,6 +324,11 @@ export async function runGuestConfig({ kind, containerName, requestedBy = null, 
 export function backendStepDeps(store = containerLockStore()) {
   if (store?.configureRoutes) return { configureRoutes: store.configureRoutes };
   return {
+    openbaoStep: async ({revision,fence}) => {
+      const {configureOpenBaoRoute}=await import('../lib/setup-engine/openbao-routes.js');
+      const render=store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;
+      return configureOpenBaoRoute(store.getDb(),{revision,fence,render});
+    },
     infisicalStep: async ({revision,fence}) => {
       const {configureInfisicalRoute}=await import('../lib/setup-engine/infisical-routes.js');
       const render=store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;

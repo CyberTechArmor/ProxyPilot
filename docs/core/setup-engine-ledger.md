@@ -450,3 +450,85 @@ encryption-key backup set through existing packs. Real Docker/Incus/Caddy/
 Infisical/PostgreSQL/Redis host acceptance remains outstanding separately; G4's
 real login/Caddy limits are unchanged. The recovery is published for PR review,
 not merged or deployed. No live services, DNS, databases or credentials changed.
+
+### G6 authorization and G5 acceptance (2026-09-22)
+
+G5 accepted recovery `31d0c87b2b1fd4e00c24773e6ae0435e387c70a3` is published and
+merged by PR #617 as `e9430a2314c881c23fbecc74c25acf8ac62661c2`. G6 branches
+from that current main. The six fixed G6.1–G6.6 criteria and scope are recorded
+in `platform-delivery-ledger.md` before implementation. Reuse the existing
+plan, runner, jobs, leases, credential references and Caddy path. Guided
+progress stays **50% (5/10)** pending G6 acceptance; earlier host acceptance
+remains separately pending. No merge, deployment, live changes or later slice.
+
+
+### G6 repository delivery — review pending (2026-09-22)
+
+OpenBao now uses the existing saved platform plan, runner, persistent jobs/leases,
+protected references and Caddy renderer. Migration 1007 adds only OpenBao state
+and encrypted identity references. Saving is inert; `openbao_apply` carries only
+a saved revision. `openbao_operator` holds the same service lease while handling
+transient share/bootstrap inputs, and interruption records recovery required
+without replay or a guest-recovery job. Owned Caddy children retain their job
+reference through runner/API restarts.
+
+The fixed G6.1–G6.6 contract remains in `platform-delivery-ledger.md`. All six have
+repository implementation and focused acceptance evidence: install/connect/skip;
+PGP-protected initialization/acknowledgement and manual unseal; exact Keycloak
+mapping plus separate AppRole; selected disposable PostgreSQL reader/revocation;
+configuration/cluster-bound retry and backup guidance; auth/redaction, affected
+regressions and responsive UI checks. Actual 2.6.2 initialization, restart/unseal,
+AppRole and OIDC engine execution passed; its OIDC provider was scripted. Real
+Docker/Caddy/Keycloak and PostgreSQL credential execution remain pending here.
+
+[G6 execution evidence](../evidence/g6-acceptance.md) separates real services from
+scripted production adapters and documents initial failures, corrections and
+precise environment limits. [Operator guidance](../features/guided-openbao.md)
+covers the dedicated client, public database CA, separate recovery custody,
+manual restart recovery and compatible snapshot/configuration backups using
+existing mechanisms. No new backup, restore or upgrade framework.
+
+Published on `feat/g6-guided-openbao` for review. **50% (5/10)** remains accepted;
+G6 acceptance would make **60% (6/10)**. No merge, production/live changes,
+G7–G10, A-17, Phase F or installer/updater/U1/U2 changes. Earlier host acceptance
+items are unchanged and are not new G6 completion gates.
+
+
+### G6 narrow review correction — runner key loading (2026-09-22)
+
+The independent review found a reproducible G6.5/G6.6 fresh-runner defect:
+`setup-runner` located `.env` but did not load its existing encryption key.
+The bounded command-startup correction now loads and validates that key before
+`serve`/`once` opens the queue, preserves the file and ciphertext, and refuses
+missing/malformed/conflicting keys without claiming jobs. Inspection and
+reconciliation remain available for recovery. No runner redesign or key rotation.
+
+Three fresh-process regressions reproduce the failure before the fix and pass
+after it, without an inherited key or fixture key cache. Current affected tests:
+**187 pass** (same separately excluded cgroup-host assertion); frontend build
+passes, with frontend source unchanged. Full evidence and precise scripted-service
+boundaries are in `docs/evidence/g6-acceptance.md` under the review correction.
+PR #618 remains unmerged. **50% (5/10)** remains accepted until this correction is
+reviewed and accepted, then **60% (6/10)**. Real PostgreSQL, Keycloak/Caddy and
+restore acceptance remain separate. No installer/updater/U1/U2 or live changes.
+
+
+### G6 review acceptance (2026-09-22)
+
+The user accepted the corrected G6 head
+`6e48d89dedb058b8d760556b448d00042909b057` and authorized merging PR #618.
+Accepted guided progress is now **60% (6/10: G1–G6)**. This supersedes the
+pending-review status and no-merge restriction for this PR in the records above.
+The six fixed G6 criteria and ten-milestone denominator are unchanged.
+
+The accepted correction loads and validates the existing installation encryption
+key before runner jobs, preserving the key and ciphertext. Evidence: 187 affected
+passes, three fresh-process startup regressions, successful frontend build, and
+the recorded OpenBao/adapter/browser checks. This acceptance commit changes
+only documentation after the tested code at `6e48d89`.
+
+Real PostgreSQL credential execution, Keycloak/Caddy integration and compatible
+restore remain separate host-acceptance items, alongside earlier recorded limits
+and the existing cgroup-host exclusion. This merge authorizes no production
+rollout, live DNS/database/identity changes, credential rotation, service restart,
+infrastructure rebuild or G7–G10 work.

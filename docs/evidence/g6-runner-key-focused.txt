@@ -1,0 +1,31 @@
+✔ G6 fresh runner once/serve loads the saved installation key without an inherited key or fixture key cache (387.524189ms)
+✔ G6 runner invalid/missing/conflicting key refuses before database open or queue changes; inspection remains available (918.875316ms)
+✔ G6 runner honors the resolved --env installation file and preserves its key (184.36239ms)
+APP  OWNER  OPERATION  EPOCH  STALE  RECOVERY JOB
+─────────────────────────────────────────────────
+ID        KIND        APP   STATUS     PHASE       STATE            REASON                                               
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+0d07b268  verify_app  pp-x  succeeded  probe_port  port_responding  pp-x: running: port responding (not verified healthy)
+✘ unknown action 'bogus' (serve, once, reconcile, status)
+✔ probe scripts refuse unsafe unit names, ports and env paths, and parse their own markers (2.850335ms)
+✔ credentialVerdict follows the gate-one MASTERKEY_ROWS codes and never returns the key (1.855771ms)
+✔ verificationFromObservations climbs the ladder only as far as what was observed, and a port answering after an inactive status read is the port's call (0.568737ms)
+✔ executeJob recover_app: starts the stopped unit, probes, verifies the credential, records credential_decryptable and releases the lease (8.111028ms)
+✔ executeJob: a port that never answers is recovery_required with the procedure, never "recovered"; an unhealthy app likewise; a mismatched key is recovery_required at the credential rung (6.269078ms)
+✔ executeJob: no data guard → app_healthy with the deferral named; verify_app never starts the unit; a refused job kind or a plan with a command is refused before any guest command (2.011481ms)
+✔ executeJob: a live foreign lease defers the job; a dead backend's lease is taken over (epoch bumped) and the origin job gets the result (4.95272ms)
+✔ executeJob: the fence — when ownership moves mid-run, the runner stops before the next guest command and writes nothing more (1.83418ms)
+✔ reconcile: a dead backend that stopped an app gets a recovery job and a stale, kept lease; one that had not gets interrupted and released; a dead runner's resumable job is requeued and then runs (7.682949ms)
+✔ the backend boot sweep and the runner reconcile agree: a sweep-queued recovery is what the runner executes, once (3.521243ms)
+✔ serve: reconciles on start, drains the queue each tick, stops when asked (2.288388ms)
+✔ setup-runner command: root only; once/reconcile/status over the file-backed database (9.279719ms)
+✔ hostGuestExec runs `incus exec <guest> -- sh` with the script on stdin and bounds it with a timeout (25.36939ms)
+✔ the unit runs the installed CLI as root with Restart=always, and install.sh / update.sh install and enable it (1.405759ms)
+ℹ tests 17
+ℹ suites 0
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1901.439206

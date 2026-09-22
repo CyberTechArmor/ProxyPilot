@@ -28,12 +28,13 @@ try {
   await page.goto(`${server.url}/platform-setup`); await page.getByRole('heading', { name: 'Platform Setup', exact: true }).waitFor();
   await page.getByRole('group', { name: 'Keycloak choice' }).getByRole('radio', { name: 'Install', exact: true }).check();
   await page.getByLabel('Keycloak origin', { exact: true }).fill('https://identity.example.com');
+  await page.getByLabel('Keycloak realm', { exact: true }).fill('proxypilot');
   await page.getByRole('group', { name: 'Infisical with Agent Proxy choice' }).getByRole('radio', { name: 'Connect existing', exact: true }).check();
   await page.getByLabel('Infisical with Agent Proxy origin', { exact: true }).fill('https://secrets.example.com');
   await page.getByLabel('Agent Proxy origin', { exact: true }).fill('https://agent.example.com');
   await page.getByRole('button', { name: 'Run available checks' }).click(); await page.getByText('Setup runner', { exact: false }).first().waitFor();
   await page.getByRole('button', { name: '2. Review and save' }).click();
-  assert.equal(await page.getByRole('button', { name: 'Install services — unavailable' }).isDisabled(), true);
+  assert.equal(await page.getByRole('button', { name: 'Review Keycloak changes' }).isDisabled(), true);
   assert.equal(await page.getByRole('button', { name: 'Activate login — unavailable' }).isDisabled(), true);
   await page.getByRole('button', { name: 'Save reviewed plan' }).click();
   await page.getByRole('status').filter({ hasText: 'Saved plan · revision 1' }).waitFor();
@@ -61,6 +62,20 @@ try {
       }
     }
   }
+  await page.getByRole('button', { name: 'Review Keycloak changes', exact: true }).click();
+  await page.getByRole('region', { name: 'Reviewed Keycloak changes' }).waitFor();
+  for (const width of [360, 375, 768, 1280, 1920]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.getByRole('button', { name: 'Apply Keycloak installation', exact: true }).scrollIntoViewIfNeeded();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), false);
+    assert.ok(await page.getByRole('button', { name: 'Apply Keycloak installation' }).evaluate(el => el.getBoundingClientRect().height >= 44));
+    if ([360,1280].includes(width)) await page.getByRole('region', { name: 'Reviewed Keycloak changes' }).screenshot({path:join(output, `${width}-keycloak-review.png`)});
+  }
+  await page.getByRole('button', { name: 'Apply Keycloak installation', exact: true }).click();
+  await page.getByRole('status').filter({hasText:'Runner unavailable'}).waitFor();
+  await page.reload();
+  await page.getByRole('heading', {name:'Set up Keycloak',exact:true}).waitFor();
+  await page.getByText('runner_unavailable:',{exact:false}).first().waitFor();
   // Inspect persisted engine states and server-redacted events in the real UI.
   await page.getByRole('button', { name: 'View events for example-succeeded' }).click();
   await page.getByRole('region', { name: 'Selected job events' }).waitFor();

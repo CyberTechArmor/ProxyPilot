@@ -1,3 +1,5 @@
+import { runKeycloakOperation } from './keycloak-op.js';
+import { readKeycloak } from './keycloak-store.js';
 // Setup engine — the job EXECUTOR: what claims a queued job, takes (or takes
 // over) the app's lease, runs the kind's steps against a guest, and records
 // the outcome. One implementation, two hosts:
@@ -50,6 +52,7 @@ import {
 } from './guest-probes.js';
 
 const FOLLOW_UP_RETRY_MS = 30_000;
+const KEYCLOAK_ROUTE_RETRY_MS = 15_000;
 // A follow-up that meets an unresolved hold waits longer between looks: the
 // hold ends when an operator acts, not by itself.
 const HOLD_RETRY_MS = 5 * 60_000;
@@ -166,7 +169,7 @@ export function recordUncertainSetup(db, { job, lock, owner, reason, nowMs }) {
 const KEEPALIVE_MS = 10_000;
 const JOB_CLAIM = Symbol('job claim');
 
-export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null }) {
+export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null, keycloakDeps = {} }) {
   const epoch = Number(job.epoch);
   let keepLease = false;
   let keepAlive = null;
@@ -244,6 +247,19 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
     if (!t.ok) return busy(t.holder, null);
     lockEpoch = Number(t.lock.epoch);
   } else {
+    // The managed Keycloak parent must remain pending while its recorded
+    // Caddy handoff owns the app lease. Do not treat unrelated holders or
+    // unresolved holds as this dependency, or acquire/release the route locks.
+    // Use the acquisition verdict's job id: Caddy may finish just after it.
+    if (job.kind === 'keycloak_setup' && got.reason === 'held' && got.operation === 'configure_keycloak_route') {
+      const installation = readKeycloak(db, p.installationId);
+      const route = installation?.route_job_id ? getJob(db, installation.route_job_id) : null;
+      if (installation?.ownership === 'managed' && installation.last_job_id === job.id &&
+          route?.kind === 'configure_keycloak_route' && route.app === job.app && got.jobId === route.id) {
+        requeueJob(db, { id: job.id, by: owner, reason: `Waiting for recorded Caddy route job ${route.id}; Keycloak verification will resume automatically.`, notBeforeMs: nowMs() + KEYCLOAK_ROUTE_RETRY_MS, nowMs: nowMs() });
+        return { status: 'requeued', outcome: 'waiting_for_route' };
+      }
+    }
     return busy(got.holder, got.operation);
   }
 
@@ -260,6 +276,33 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
   };
 
   try {
+    if (job.kind === 'keycloak_setup') {
+      // Managed files belong on the host, not the backend container. A narrower
+      // runner-only adapter honors runner-required and never weakens either policy.
+      if (parseOwner(owner)?.kind !== 'runner') {
+        requeueJob(db, { id: job.id, by: owner, reason: 'runner_unavailable: Keycloak requires the independent host runner', notBeforeMs: nowMs() + 30000, nowMs: nowMs() });
+        return { status: 'requeued', outcome: 'runner_unavailable' };
+      }
+      let lost = false;
+      const renew = () => {
+        const who = parseOwner(owner); runnerHeartbeat(db, { owner, host: who.host, pid: who.pid, nowMs: nowMs() });
+        if (!(heartbeat(db, { id: job.id, owner, epoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0) || !(renewLock(db, { app: job.app, owner, epoch: lockEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) lost = true;
+      };
+      const guard = () => { if (lost) throw new FencedError(job.id); renew(); if (lost) throw new FencedError(job.id); fence({ safe: true }); };
+      keepAlive = setInterval(() => { try { renew(); } catch { lost = true; } }, Math.max(20, keepAliveMs)); keepAlive.unref?.();
+      const handle = { id: job.id, fence: guard,
+        checkpoint: (phase, data) => { guard(); checkpoint(db, { id: job.id, owner, epoch, phase, checkpoint: data, message: phase, nowMs: nowMs() }); },
+        generated: resource => { guard(); recordGenerated(db, { id: job.id, owner, epoch, resource, nowMs: nowMs() }); },
+        progress: progress => { guard(); recordProgress(db, { id: job.id, owner, epoch, progress, nowMs: nowMs() }); },
+        onStep: (phase, message) => event('step', message, null, phase) };
+      const result = await runKeycloakOperation({ db, params: p, exec, job: handle, ...keycloakDeps });
+      guard();
+      if (result.waiting) {
+        requeueJob(db, { id: job.id, by: owner, reason: result.reason, notBeforeMs: nowMs() + KEYCLOAK_ROUTE_RETRY_MS, nowMs: nowMs() });
+        return { status: 'requeued', outcome: 'waiting_for_route' };
+      }
+      return fin('succeeded', result.verification.state, result.verification.label, result.verification);
+    }
     // Containment before anything that touches the guest: other jobs'
     // groups and legacy marker scripts are killed and counted. A survivor
     // is recorded and the job stops here with the lease kept.
@@ -604,7 +647,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       markLockStale(db, { app: job.app, nowMs: nowMs(), recoveryJobId: job.id });
       return r;
     }
-    const verification = verificationFromObservations(obs);
+    const verification = job.kind === 'keycloak_setup' ? { state: 'not_verified', failedAt: getJob(db, job.id)?.phase, next: 'Correct the reported issue and retry from the reviewed Platform Setup plan. Existing resources and credentials are retained.' } : verificationFromObservations(obs);
     return fin('failed', 'error', sanitizeReason(e?.message || String(e)), verification);
   } finally {
     if (keepAlive) clearInterval(keepAlive);

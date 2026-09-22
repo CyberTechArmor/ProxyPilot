@@ -153,7 +153,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | ID | Bounded deliverable | Reuse / cross-reference | Status |
 | --- | --- | --- | --- |
 | G1 | Admin Platform Setup page; install/connect/skip intentions; validated versioned server draft; available read-only checks; review/save/reopen; existing jobs and redacted events. Installation/login activation unavailable. | B-01, bounded B-03 and observation portion of B-05; reuse A-04/A-05 and `/api/setup` | done — evidence below |
-| G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | planned — not authorized |
+| G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | done — 6/6 repository criteria, including slow Caddy handoff correction; ready for merge review; execution limits below |
 | G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | planned — not authorized |
 | G4 | Pomerium adapter and route integration | C-02 | planned — not authorized |
 | G5 | Infisical with Agent Proxy adapter | C-03 | planned — not authorized |
@@ -215,6 +215,92 @@ reservation discovery can extend future adapter checks; recovery action controls
 remain B-05/G9. Accepted U1/U2 files, install.sh and update.sh are unchanged.
 
 ## Overall
+
+### G2 — fixed acceptance checklist (recorded before implementation, 2026-09-22)
+
+Authorized scope: G2 only, branch `feat/g2-keycloak-setup` from
+`main@d6b7cf9`; accepted G1 `681768d` is merged via PR #613. Main also
+contains accepted U1/U2. No dependency merge is needed. Do not change
+install.sh/update.sh, resume A-17.9/Phase F, activate SSO (G3), or deploy.
+
+| Criterion | Fixed completion requirement | Status / evidence |
+| --- | --- | --- |
+| G2.1 | Existing page: install/connect/skip; origin separate from realm; explicit fresh-auth apply of the reviewed revision; stale refusal; save/open never executes | pass — production HTTP auth/CSRF/sudo/revision tests; browser save → review → apply → reopen; no job on save/skip |
+| G2.2 | Narrow runner operation; pinned Keycloak + persistent independent DB; existing Caddy managed HTTPS route; owned resources only; protected reusable credentials; administration/recovery instructions | pass — keycloak-runtime.js, keycloak-routes.js; fixed images/argv, ownership/config read-back, 0700/0600 files, collision tests, dedicated lifecycle; operator section in setup-engine.md; Docker/Caddy responses scripted |
+| G2.3 | Existing realm discovery, exact issuer and signing keys verified through network safeguards; separate verified connection; no external mutation or administrative-permission claim | pass — keycloak-discovery.js; real local TLS contract and scripted OIDC fixtures; exact issuer/keys, pinned DNS, redirects/body/TLS restrictions; external API-to-job test issues no runtime writes |
+| G2.4 | Existing durable jobs, leases and executor policy; persistent phases/redacted events; interruption/retry reuses resources and credentials; truthful unavailable/failed states | pass — production executor/reconciliation tests; same credentials/resources across interruption + failed verification + retry; API restart, epoch fencing and runner policy; slow recorded Caddy lock overlap now stays queued and automatically resumes public verification (regression below) |
+| G2.5 | Managed DB/service readiness + public issuer/key verification; ownership/references/time recorded; “Keycloak ready/connected; ProxyPilot SSO not activated.”; existing authentication/apps unchanged except approved route | pass — separate setup_keycloak evidence (migration 1003); database-unready and failed-issuer tests never record ready; install/connect API results, unchanged settings/users/app routes; no auth/client/session mutations |
+| G2.6 | Actual API-to-job tests, auth/stale/save/skip/failure/unavailability/interruption/retry invariants; affected tests/build; desktop/360px inspection; real versus scripted execution identified; concise operator instructions | pass — 176 affected passes, 1 pre-existing environment skip; frontend build; browser widths/axe/Lighthouse 98; precise limitations and administration/backup/recovery guidance below |
+
+Additional prerequisites must cite the blocked criterion and concrete evidence;
+make only the smallest correction. Optional improvements stay backlog. Disposable
+repository tests only; no production DNS, database, credential or service changes.
+G2 repository completion: **6/6 criteria**. Guided milestones complete:
+**2/10 (G1 and G2)**. G3–G10 remain unimplemented; no SSO activation.
+
+G2.4 merge-review correction (2026-09-22): c180d2f could finish the Keycloak
+parent as `deferred` when its recorded Caddy job still held the shared app
+lease after 15 seconds. G2 was reopened pending this correction. The executor
+now matches the current managed installation and its route job against the
+atomic lock-acquisition verdict, requeues only that dependency with a durable
+15-second not-before, and resumes verification on the next eligible runner
+pass after routing finishes. It does not acquire or release Caddy's locks;
+unrelated holders, stale leases and unresolved holds retain existing handling.
+One regression fails as `deferred` on c180d2f and passes with the correction:
+the real store, runner and backend route executor overlap for 16 simulated
+seconds inside a scripted Caddy reload, both lock records stay unchanged,
+verification waits, and the same parent then succeeds without manual retry,
+duplicate jobs/resources or changed credential bytes. This closes the G2.4
+correction for merge review; it is not another engine milestone. No frontend
+source changed, so the existing desktop/360px evidence remains applicable.
+
+Focused verification (2026-09-22): `keycloak-setup.test.js` has 11 passing
+behavioral tests, including actual install/connect HTTP-to-job paths; the final
+affected run has **176 pass / 0 fail / 1 skipped (177 total)** across that file,
+`platform-setup`, `setup-engine`, `setup-deploy`, `setup-runner`,
+`setup-post-launch`, `setup-guest-config`, `setup-restores` and
+`update-runner-maintenance`. The skipped existing deploy process-reap test needs
+pkill/pgrep unavailable in this sandbox; it is unrelated to G2. Frontend
+`npm run build` passed (existing large-chunk warning). `git diff --check` passed.
+`install.sh`, `update.sh`, update runner scripts/unit and authentication/session
+implementation are unchanged; U1/U2 regressions pass.
+
+Browser: `admin/frontend/scripts/verify-platform-setup.mjs` now exercises realm
+entry, review and apply, queued runner-unavailable feedback and reopen as well
+as G1 save/reload/API-restart and non-admin refusal. Choose/review layouts have
+no horizontal scroll at 360/375/390/768/1280/1920 px with the global guard
+disabled; Keycloak apply review audited at 360/375/768/1280/1920. Primary actions
+are ≥44 px. Desktop and 360 px screenshots inspected. Axe violations: 0;
+Lighthouse mobile accessibility: 98; browser page errors: 0.
+
+Execution limits: the production SQL/API/job/lease/reconcile/protected-file and
+route-render orchestration paths are real; node:sqlite replaces the unavailable
+native better-sqlite3 driver. Docker/Keycloak/PostgreSQL and Caddy binary responses
+are **scripted**, not a real service installation. The separate TLS test runs a
+real local HTTPS server and public-key parser; it maps its validated test IP to
+loopback at the transport seam because only loopback is exposed here. No Docker
+binary/daemon, disposable Keycloak environment, systemd, public DNS or certificate
+issuance was available. Those live-host checks remain unperformed, not silently
+counted as real execution. This is the explicitly permitted G2.6 verification
+limitation, not a production deployment claim. No live services, DNS, database
+or credentials changed.
+
+Bounded plumbing: one runner kind and one existing-backend-drain route kind;
+no adapter framework. The latter is necessary because the accepted runner unit
+cannot write Caddy configuration under ProtectSystem, while the established
+backend route mechanism already owns it (G2.2/G2.4). Its requeue on API restart
+preserves the approved route operation. Initial administration and the protected
+backup/recovery set are documented in the existing setup-engine feature guide,
+with the official pinned-version configuration sources. Real rollout and a full
+restore drill are not claimed or performed; maintenance remains outside G2.
+
+Bounded prerequisite found during G2 (blocks G2.1/G2.2): migration 3 / D.14
+in `db.js` drops `services.domain`, while G1 `platformInventory()` selected it
+unconditionally. A current-schema Platform Setup GET therefore fails with
+`no such column: domain`. The inventory now detects the legacy column and uses
+`service_http_routes` on the current schema. The real HTTP fixture uses that
+current schema; legacy inventory tests remain. No migration or unrelated route
+behavior was changed to fix this.
 
 Overall new-platform repository work: **≈ 40 %** (weights: A the largest
 share, B and C the bulk of what remains, D built on both). The 40 % rounds

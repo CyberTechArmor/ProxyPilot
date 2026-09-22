@@ -143,6 +143,8 @@ function uploadZipWithProgress(endpoint, fields, file, onProgress) {
 }
 
 export const api = {
+  reviewKeycloak: (revision) => request(`/setup/platform/keycloak/review?revision=${revision}`),
+  applyKeycloak: (body) => request('/setup/platform/keycloak/apply', { method: 'POST', body: JSON.stringify(body) }),
   getPlatformSetup: () => request('/setup/platform'),
   checkPlatformPlan: (plan) => request('/setup/platform/checks', { method: 'POST', body: JSON.stringify(plan) }),
   savePlatformPlan: (plan) => request('/setup/platform', { method: 'PUT', body: JSON.stringify(plan) }),

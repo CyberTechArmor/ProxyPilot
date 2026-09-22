@@ -1,5 +1,7 @@
-// G1 stores intentions only. These records are never runner inputs.
+// Saved intentions remain separate from G2 applied, immutable installation records.
 import { z } from 'zod';
+import { keycloakState } from './keycloak-store.js';
+import { realmSchema } from './keycloak-logic.js';
 import { validateConnectorInput } from '../../mock2/connector-logic.js';
 import { validateOperatorEgressInput } from '../../mock2/egress-logic.js';
 import { evaluateBaseDomain } from '../../mock2/domain-logic.js';
@@ -30,8 +32,9 @@ const endpoint = z.string().trim().max(300).refine((value) => {
 }, 'Use an http(s) origin such as https://identity.example.com, without credentials, paths, query parameters or fragments.')
   .transform((value) => value ? new URL(value).origin.toLowerCase().replace(/\.(?=:\d+$|$)/, '') : '');
 const choice = z.object({ mode: z.enum(['install', 'connect', 'skip']), url: endpoint }).strict();
+const keycloakChoice = choice.extend({ realm: realmSchema.optional() }).strict();
 const infisicalChoice = choice.extend({ agentProxyUrl: endpoint }).strict();
-export const choicesSchema = z.object(Object.fromEntries(SERVICES.map(({ id }) => [id, id === 'infisical' ? infisicalChoice : choice]))).strict().superRefine((choices, ctx) => {
+export const choicesSchema = z.object(Object.fromEntries(SERVICES.map(({ id }) => [id, id === 'keycloak' ? keycloakChoice : id === 'infisical' ? infisicalChoice : choice]))).strict().superRefine((choices, ctx) => {
   for (const { id } of SERVICES) {
     const c = choices[id];
     for (const field of id === 'infisical' ? ['url', 'agentProxyUrl'] : ['url']) {
@@ -66,18 +69,21 @@ export function readPlatformPlan(db) {
     { schemaVersion: 1, revision: 0, status: 'not_saved', choices: emptyChoices(), checks: null, reviewedAt: null, reviewedBy: null };
 }
 export function platformInventory(db) {
-  const services = db.prepare('SELECT id, name, domain FROM services').all();
+  // Migration D.14 removed services.domain; legacy checkouts still have it.
+  const legacyDomain = db.prepare('PRAGMA table_info(services)').all().some(c => c.name === 'domain');
+  const services = db.prepare(`SELECT id, name${legacyDomain ? ', domain' : ''} FROM services`).all();
   const routes = db.prepare('SELECT id, domain FROM service_http_routes').all();
   const adminDomain = db.prepare("SELECT value FROM app_settings WHERE key = 'admin_domain'").get()?.value || null;
   return { services, routes, adminDomain };
 }
 export function platformState(db) {
   const { services, routes, adminDomain } = platformInventory(db);
+  const verified = keycloakState(db).filter(r => r.verification).sort((a, b) => b.verifiedAt.localeCompare(a.verifiedAt))[0];
   return {
     classification: services.length || routes.length || adminDomain ? 'existing_configuration' : 'unknown',
     reason: services.length || routes.length || adminDomain ? 'Existing ProxyPilot configuration is recorded. Service installation and health are not inferred from it.' : 'No managed routes are recorded. This does not establish a fresh installation; unmanaged or external services may exist.',
-    verifiedServices: SERVICES.map(({ id, name }) => ({ id, name, state: 'not_checked', reason: 'A service-specific verification adapter is not available.' })),
-    installationAvailable: false, loginActivationAvailable: false,
+    verifiedServices: SERVICES.map(({ id, name }) => id === 'keycloak' && verified ? { id, name, state: verified.verification.state, connectionRef: verified.id, verifiedAt: verified.verifiedAt, reason: verified.verification.label } : { id, name, state: 'not_checked', reason: id === 'keycloak' ? 'No verified Keycloak connection is recorded.' : 'A service-specific verification adapter is not available.' }),
+    installationAvailable: true, installableServices: ['keycloak'], loginActivationAvailable: false,
   };
 }
 
@@ -115,7 +121,7 @@ export async function checkPlatformPlan(db, choices, { callAgent = agentCall, sy
   for (const { id, name } of SERVICES) {
     const c = choices[id];
     if (c.mode === 'skip') continue;
-    for (const [field, url] of Object.entries(c).filter(([key, value]) => key !== 'mode' && value)) {
+    for (const [field, url] of Object.entries(c).filter(([key, value]) => ['url', 'agentProxyUrl'].includes(key) && value)) {
       const verdict = evaluateBaseDomain({ domain: new URL(url).hostname, ...inventory });
       add(`${id}-${field}-route`, `${name}${field === 'agentProxyUrl' ? ' Agent Proxy' : ''}: recorded routes`, verdict.available ? 'pass' : c.mode === 'install' ? 'fail' : 'not_checked', verdict.available ? 'No conflict in ProxyPilot’s recorded services, routes or admin domain. Unmanaged Caddy configuration is not checked.' : c.mode === 'install' ? verdict.reason : `${verdict.reason}. A connect plan preserves it; ownership and service identity need verification.`);
       add(`${id}-${field}-network`, `${name}${field === 'agentProxyUrl' ? ' Agent Proxy' : ''}: endpoint verification`, 'not_checked', 'URL syntax and the existing egress host/port validator passed. No service-specific probe with an approved network-access policy exists; DNS, TLS, reachability and identity were not checked. No egress grant was created.');

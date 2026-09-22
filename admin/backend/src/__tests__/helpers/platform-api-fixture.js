@@ -20,13 +20,14 @@ const { authenticateToken, blockPendingRole, generateToken } = await import('../
 const { csrfProtection } = await import('../../middleware/csrf.js');
 const { setupRouter } = await import('../../routes/setup.js');
 ensureSetupEngineSchema(db); db.exec(PLATFORM_PLAN_SCHEMA);
-db.exec(`CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, name TEXT, domain TEXT);
+const { KEYCLOAK_SCHEMA } = await import('../../lib/setup-engine/keycloak-store.js'); db.exec(KEYCLOAK_SCHEMA);
+db.exec(`CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, name TEXT);
 CREATE TABLE IF NOT EXISTS service_http_routes (id TEXT PRIMARY KEY, domain TEXT);
 CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT, role TEXT, password_hash TEXT);
 CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT, expires_at TEXT, last_used_at TEXT DEFAULT CURRENT_TIMESTAMP, revoked_at TEXT, sudo_until TEXT, ip TEXT, user_agent TEXT);
 CREATE TABLE IF NOT EXISTS audit (action TEXT, data TEXT);`);
-db.exec(`INSERT OR IGNORE INTO services VALUES ('existing', 'Existing app', 'app.example.com');
+db.exec(`INSERT OR IGNORE INTO services (id, name) VALUES ('existing', 'Existing app');
 INSERT OR IGNORE INTO service_http_routes VALUES ('existing-route', 'route.example.com');
 INSERT OR IGNORE INTO app_settings VALUES ('admin_domain', 'pilot.example.com'), ('auth_provider', 'unchanged-local'), ('tls_mode', 'manual');
 INSERT OR IGNORE INTO users VALUES ('admin', 'test-admin', 'admin', 'existing-hash'), ('user', 'test-user', 'user', 'existing-hash');`);

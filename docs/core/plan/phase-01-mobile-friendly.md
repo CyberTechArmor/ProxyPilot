@@ -48,6 +48,14 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 **Verification:**
 
+- [x] G2 Keycloak guide (2026-09-22): existing Platform Setup choose/review
+      flow audited at 360/375/390/768/1280/1920 px; apply review at
+      360/375/768/1280/1920 px; no overflow with the global guard disabled,
+      primary actions ≥44 px, desktop/360 px screenshots inspected. Actual
+      browser save/review/apply/queued-reopen and non-admin redirect passed.
+      Axe violations 0; Lighthouse mobile accessibility 98. G2 API/runner
+      tests distinguish scripted services from real execution; see G2 ledger.
+
 - [x] G1 Platform Setup (2026-09-22): choose/review pages audited at
       360/375/390/768/1280/1920 px with the global overflow guard disabled;
       no horizontal scroll, primary actions ≥44 px, desktop/360 px screenshots

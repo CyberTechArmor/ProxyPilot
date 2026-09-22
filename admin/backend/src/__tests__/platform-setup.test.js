@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { KEYCLOAK_SCHEMA } from '../lib/setup-engine/keycloak-store.js';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -12,7 +13,7 @@ import { ensureSetupEngineSchema, runnerHeartbeat } from '../lib/setup-engine/st
 const draft = () => ({ schemaVersion: 1, choices: { ...emptyChoices(), keycloak: { mode: 'install', url: 'https://identity.example.com' }, infisical: { mode: 'connect', url: 'https://secrets.example.com', agentProxyUrl: 'https://proxy.example.com' } } });
 const saveBody = (revision = 0) => ({ ...draft(), expectedRevision: revision, reviewed: true });
 function memoryDb() {
-  const db = new DatabaseSync(':memory:'); ensureSetupEngineSchema(db); db.exec(PLATFORM_PLAN_SCHEMA);
+  const db = new DatabaseSync(':memory:'); ensureSetupEngineSchema(db); db.exec(PLATFORM_PLAN_SCHEMA); db.exec(KEYCLOAK_SCHEMA);
   db.exec('CREATE TABLE services (id TEXT, name TEXT, domain TEXT); CREATE TABLE service_http_routes (id TEXT, domain TEXT); CREATE TABLE app_settings (key TEXT, value TEXT)');
   return db;
 }
@@ -35,7 +36,7 @@ test('strict non-secret schema: all five choices, origins, no browser state or c
 
 test('empty inventory never declares fresh or installed; intended state remains separate', () => {
   const db = memoryDb(); const state = platformState(db);
-  assert.equal(state.classification, 'unknown'); assert.equal(state.installationAvailable, false); assert.equal(state.loginActivationAvailable, false);
+  assert.equal(state.classification, 'unknown'); assert.equal(state.installationAvailable, true); assert.equal(state.loginActivationAvailable, false);
   assert.ok(state.verifiedServices.every(s => s.state === 'not_checked'));
   savePlatformPlan(db, savePlanSchema.parse(saveBody()), { checks: [] }, 'admin');
   assert.deepEqual(platformState(db), state); db.close();

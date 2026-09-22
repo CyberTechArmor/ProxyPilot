@@ -1,3 +1,4 @@
+import VaultwardenSetup from '@/components/VaultwardenSetup';
 import OpenBaoSetup from '@/components/OpenBaoSetup';
 import InfisicalSetup from '@/components/InfisicalSetup';
 import PomeriumSetup from '@/components/PomeriumSetup';
@@ -137,7 +138,7 @@ function PlatformSetupContent() {
             </>}
           </div>}
           {service.id === 'keycloak' && selected.mode !== 'skip' && <div className="space-y-2"><Label htmlFor="keycloak-realm">Keycloak realm</Label><Input id="keycloak-realm" value={selected.realm || ''} disabled={!!busy} placeholder="proxypilot" autoComplete="off" spellCheck={false} onChange={e => change(service.id, 'realm', e.target.value)} /><p className="text-xs text-muted-foreground">Realm name only. The issuer is the HTTPS origin followed by /realms/ and this name. Managed installation uses port 443 and a new realm other than master.</p></div>}
-          <p className="text-xs text-muted-foreground">{['keycloak','pomerium','infisical','openbao'].includes(service.id) ? 'Verified connection and progress are shown below.' : 'Verified installed state: not checked. A service-specific adapter is required.'}</p>
+          <p className="text-xs text-muted-foreground">{['keycloak','pomerium','infisical','openbao','vaultwarden'].includes(service.id) ? 'Verified connection and progress are shown below.' : 'Verified installed state: not checked. A service-specific adapter is required.'}</p>
         </CardContent></Card>;
       })}</div> : <Card><CardHeader><CardTitle>Review your plan</CardTitle><CardDescription>These are intended additions and connections. Unresolved checks can be saved for later.</CardDescription></CardHeader><CardContent className="space-y-4">
         <ul className="divide-y">{data.services.map((service) => <li key={service.id} className="py-3 min-w-0 break-words"><p className="font-medium">{service.name} · {modeLabel[choices[service.id].mode]}</p>{choices[service.id].mode !== 'skip' && <><p className="text-sm break-all">{choices[service.id].url || 'Endpoint required'}</p>{service.id === 'keycloak' && <p className="text-sm break-all">Realm: {choices.keycloak.realm || 'Realm required before applying'}</p>}{service.id === 'infisical' && <p className="text-sm break-all">Agent Proxy: {modeLabel[choices.infisical.agentProxyMode || choices.infisical.mode]}{(choices.infisical.agentProxyMode || choices.infisical.mode) !== 'skip' && ` · ${choices.infisical.agentProxyUrl || 'Endpoint required'}`}</p>}</>}<p className="text-xs text-muted-foreground">Installation / connection unverified</p></li>)}</ul>
@@ -152,6 +153,7 @@ function PlatformSetupContent() {
       </CardContent></Card>
       <SsoSetup connections={data.keycloak || []} />
       <PomeriumSetup revision={data.plan.revision} dirty={dirty} mode={choices.pomerium.mode} origin={choices.pomerium.url} connections={data.keycloak || []} />
+      <VaultwardenSetup revision={data.plan.revision} dirty={dirty} choice={choices.vaultwarden} connections={data.keycloak} />
       <OpenBaoSetup revision={data.plan.revision} dirty={dirty} choice={choices.openbao} connections={data.keycloak} />
       <InfisicalSetup revision={data.plan.revision} dirty={dirty} choice={choices.infisical} />
       <SetupJobs />

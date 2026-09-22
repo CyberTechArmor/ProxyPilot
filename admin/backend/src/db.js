@@ -1,3 +1,4 @@
+import { VAULTWARDEN_SCHEMA } from './lib/setup-engine/vaultwarden-store.js';
 import { OPENBAO_SCHEMA } from './lib/setup-engine/openbao-store.js';
 import { INFISICAL_SCHEMA } from './lib/setup-engine/infisical-store.js';
 import { POMERIUM_SCHEMA } from './lib/setup-engine/pomerium-store.js';
@@ -2346,6 +2347,7 @@ export function initDatabase() {
   runMigration(db, 1005, 'setup_pomerium', (d) => d.exec(POMERIUM_SCHEMA));
   runMigration(db, 1006, 'setup_infisical', (d) => d.exec(INFISICAL_SCHEMA));
   runMigration(db, 1007, 'setup_openbao', (d) => d.exec(OPENBAO_SCHEMA));
+  runMigration(db, 1008, 'setup_vaultwarden', (d) => d.exec(VAULTWARDEN_SCHEMA));
 
   runMigration(db, 1002, 'setup_platform_plan', (d) => {
     d.exec(PLATFORM_PLAN_SCHEMA);

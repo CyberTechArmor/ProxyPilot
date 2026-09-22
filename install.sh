@@ -1680,6 +1680,8 @@ EOF
         # managed apps and reconciles leases a crashed backend left behind
         # (docs/features/setup-engine.md). Runs the CLI just installed.
         if [[ -f "${SCRIPT_DIR}/deploy/proxypilot-setup-runner.service" ]]; then
+            # Writable namespace exceptions must exist before service startup.
+            mkdir -p /opt/proxypilot/data /var/lib/proxypilot /root/.proxypilot /etc/sysctl.d
             cp "${SCRIPT_DIR}/deploy/proxypilot-setup-runner.service" /etc/systemd/system/proxypilot-setup-runner.service
             chmod 0644 /etc/systemd/system/proxypilot-setup-runner.service
             systemctl daemon-reload

@@ -34,12 +34,14 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/s
 StandardOutput=journal
 StandardError=journal
 # Hardening that still allows `incus exec` (a socket call) and the database
-# under /opt/proxypilot/data. No new privileges are needed.
+# under /opt/proxypilot/data. The CLI firewall commands also use their
+# existing root-owned SQLite database; UDP reservations atomically replace
+# a drop-in (temporary file + rename) within /etc/sysctl.d.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
 ProtectSystem=full
-ReadWritePaths=/opt/proxypilot/data /var/lib/proxypilot
+ReadWritePaths=/opt/proxypilot/data /var/lib/proxypilot /root/.proxypilot /etc/sysctl.d
 
 [Install]
 WantedBy=multi-user.target

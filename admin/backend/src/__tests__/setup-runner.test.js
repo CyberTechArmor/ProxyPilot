@@ -442,6 +442,7 @@ test('the unit runs the installed CLI as root with Restart=always, and install.s
   assert.match(install, /systemctl enable proxypilot-setup-runner\.service/);
   const update = readFileSync(`${REPO}update.sh`, 'utf8');
   assert.match(update, /install_setup_runner\(\) \{/);
-  assert.ok(update.indexOf('install_setup_runner() {') < update.indexOf('\n    install_setup_runner\n'), 'defined before it is called');
-  assert.ok(update.indexOf('chmod 0755 /usr/local/bin/proxypilot') < update.indexOf('\n    install_setup_runner\n'), 'called after the CLI wrapper exists');
+  const readiness = update.indexOf('\n        install_setup_runner\n', update.indexOf('# Restart\n'));
+  assert.ok(readiness > update.indexOf('install_setup_runner() {'), 'defined before the update reaches readiness (recovery also calls it)');
+  assert.ok(readiness > update.indexOf('chmod 0755 /usr/local/bin/proxypilot'), 'called after the CLI wrapper exists');
 });

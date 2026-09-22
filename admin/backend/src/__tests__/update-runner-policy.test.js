@@ -98,7 +98,7 @@ function setup({ env, unitInstalled = true, active = true, enabled = true, resta
   writeFileSync(log, '');
   // The functions, verbatim, with the hard-coded absolute paths redirected.
   const lifted = ['log', 'log_verbose', 'resolve_env_path', 'sync_env_keys', 'install_setup_runner']
-    .map((fn) => `source <(sed -n '/^${fn}()/,/^}/p' ${JSON.stringify(UPDATE_SH)} | sed -e "s#/opt/proxypilot#${install}#g" -e "s#/etc/systemd/system#${systemd}#g" -e "s#/usr/local/bin/proxypilot#${bin}/proxypilot#g")`)
+    .map((fn) => `source <(sed -n '/^${fn}()/,/^}/p' ${JSON.stringify(UPDATE_SH)} | sed -e "s#/opt/proxypilot#${install}#g" -e "s#/etc/systemd/system#${systemd}#g" -e "s#/usr/local/bin/proxypilot#${bin}/proxypilot#g" -e "s#/root/.proxypilot#${root}/root/.proxypilot#g" -e "s#/etc/sysctl.d#${root}/etc/sysctl.d#g" -e "s#/var/lib/proxypilot#${root}/var/lib/proxypilot#g")`)
     .join('\n');
   const run = (body) => {
     const script = `
@@ -226,6 +226,6 @@ test('ratchet: the policy key is excluded from the generic env sync, and the run
   assert.doesNotMatch(fn, /if \[ "\$changed" = true \] \|\| ! systemctl is-active/, 'the conditional restart is gone');
   assert.match(fn, /if ! restart_out="\$\(systemctl restart "\$unit" 2>&1\)"; then/, 'the restart is unconditional and its status is read (no tee pipeline: set -e without pipefail)');
   assert.match(fn, /if \[ "\$restart_ok" = true \]; then\n\s+for i in 1 2 3 4 5 6 7 8 9 10; do/, 'readiness is only checked after a restart the service manager accepted');
-  assert.ok(s.indexOf('sync_env_keys\n', s.indexOf('# After pulling, sync .env')) < s.indexOf('    install_setup_runner\n'), 'the order that made the defect possible is unchanged: the sync runs first, so the exclusion is what protects the policy');
+  assert.ok(s.indexOf('sync_env_keys\n', s.indexOf('# After pulling, sync .env')) < s.indexOf('        install_setup_runner\n', s.indexOf('# Restart\n')), 'the sync still runs before the Docker-path readiness step, so the exclusion protects the policy');
   assert.match(readFileSync(join(REPO, '.env.example'), 'utf8'), /^SETUP_EXECUTOR_POLICY=runner-required$/m, '.env.example still carries runner-required (a fresh install reads it after its own readiness check); the exclusion above is what keeps it out of an updated .env');
 });

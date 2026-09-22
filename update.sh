@@ -14,6 +14,11 @@ LOG_FILE="/tmp/proxypilot-update.log"
 DB_BACKUP_FILE=""
 DB_BACKUP_SOURCE=""
 BACKUPS_TO_KEEP=5
+DB_MAINTENANCE_STARTED=false
+NATIVE_BACKEND_MODE=""
+DB_LAYOUT_NEW_PATH=""
+DB_LAYOUT_ENV_BACKUP=""
+DB_LAYOUT_ENV_PATH=""
 
 # Globally-set during the restart phase so on_error can attempt docker
 # compose up -d on the existing image after a failed rebuild.
@@ -593,16 +598,13 @@ resolve_db_path() {
 # Order:
 #   1. Detect legacy layout (DB file directly under data/, no data/db/).
 #   2. Make data/db/, set 0700.
-#   3. Move DB + WAL + SHM into data/db/ (atomic per-file mv on the
-#      same filesystem — open file descriptors held by the running
-#      backend follow the inode, so this is safe even if the backend
-#      hasn't been stopped yet).
+#   3. With the backend and host runner stopped, move DB + WAL + SHM
+#      into data/db/. Moving SQLite sidecars with an open writer is unsafe.
 #   4. Rewrite DATABASE_PATH in the deployed .env to the new path.
 #   5. Loosen `data/` to 0755 so Caddy can traverse to services/.
 #
-# On failure between steps the originals stay where they were —
-# DATABASE_PATH is rewritten LAST, so if anything before that fails
-# the next backend boot still finds the DB at the legacy path.
+# Recovery restores the pre-update database at its original path and the
+# pre-layout .env together, including a failure partway through the move.
 migrate_db_layout() {
     local install_dir
     if [ -d "/opt/proxypilot" ] && [ -f "/opt/proxypilot/.env" ]; then
@@ -648,6 +650,19 @@ migrate_db_layout() {
     log "  Old: $legacy_db"
     log "  New: $new_db"
 
+    stop_update_writers || return 1
+    # Keep configuration paired with the original database path on rollback.
+    # This copy is private and preserves all existing keys verbatim.
+    if [ "$DB_BACKUP_SOURCE" != "$legacy_db" ] || [ ! -f "$DB_BACKUP_FILE" ]; then
+        log "${RED}migrate_db_layout: no matching backup for $legacy_db; refusing relocation${NC}"
+        return 1
+    fi
+    DB_LAYOUT_ENV_PATH="$deployed_env"
+    DB_LAYOUT_ENV_BACKUP="${DB_BACKUP_FILE}.env-before-layout"
+    (umask 077; cp "$deployed_env" "$DB_LAYOUT_ENV_BACKUP") || return 1
+    chmod 600 "$DB_LAYOUT_ENV_BACKUP" || return 1
+    DB_LAYOUT_NEW_PATH="$new_db"
+
     mkdir -p "$new_dir" || { log "${RED}migrate_db_layout: mkdir $new_dir failed${NC}"; return 1; }
     chmod 0700 "$new_dir" 2>/dev/null || true
 
@@ -655,8 +670,8 @@ migrate_db_layout() {
         log "${RED}migrate_db_layout: failed to move $legacy_db -> $new_db${NC}"
         return 1
     fi
-    [ -f "${legacy_db}-wal" ] && mv "${legacy_db}-wal" "${new_db}-wal" || true
-    [ -f "${legacy_db}-shm" ] && mv "${legacy_db}-shm" "${new_db}-shm" || true
+    if [ -f "${legacy_db}-wal" ]; then mv "${legacy_db}-wal" "${new_db}-wal" || return 1; fi
+    if [ -f "${legacy_db}-shm" ]; then mv "${legacy_db}-shm" "${new_db}-shm" || return 1; fi
 
     # Migrate any pre-update DB backups that lived alongside the legacy
     # file (e.g. "proxypilot.db.backup-*") into the new dir as well —
@@ -672,7 +687,7 @@ migrate_db_layout() {
     # the line to point at /data/db/proxypilot.db inside the container.
     if [ -f "$deployed_env" ]; then
         local tmp_env
-        tmp_env=$(mktemp)
+        tmp_env=$(mktemp) || return 1
         # Preserve a sentinel so the awk script can tell whether the
         # key existed at all and append it if missing.
         awk '
@@ -680,8 +695,8 @@ migrate_db_layout() {
           /^[[:space:]]*DATABASE_PATH=/ { print "DATABASE_PATH=/data/db/proxypilot.db"; found = 1; next }
           { print }
           END { if (!found) print "DATABASE_PATH=/data/db/proxypilot.db" }
-        ' "$deployed_env" > "$tmp_env"
-        cat "$tmp_env" > "$deployed_env"
+        ' "$deployed_env" > "$tmp_env" || { rm -f "$tmp_env"; return 1; }
+        cat "$tmp_env" > "$deployed_env" || { rm -f "$tmp_env"; return 1; }
         rm -f "$tmp_env"
         chmod 600 "$deployed_env" 2>/dev/null || true
         log "  Rewrote DATABASE_PATH in $deployed_env"
@@ -723,12 +738,79 @@ backup_db() {
     # Rotate: keep most recent BACKUPS_TO_KEEP
     if command -v ls &>/dev/null; then
         ls -t "${backup_dir}"/proxypilot.db.pre-update-* 2>/dev/null \
-            | grep -v '\-wal$\|\-shm$' \
+            | grep -v '\-wal$\|\-shm$\|\.env-before-layout$' \
             | tail -n +$((BACKUPS_TO_KEEP + 1)) \
             | while read -r old; do
-                rm -f "$old" "${old}-wal" "${old}-shm"
+                rm -f "$old" "${old}-wal" "${old}-shm" "${old}.env-before-layout"
                 log_verbose "Pruned old backup: $old"
             done
+    fi
+}
+
+stop_setup_runner() {
+    local unit="proxypilot-setup-runner.service" state stop_out
+    # A missing unit is expected on installations predating the runner.
+    # An unavailable service manager is not evidence that a writer stopped.
+    if ! state="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"; then
+        log "${RED}Cannot inspect $unit; refusing database maintenance${NC}"
+        return 1
+    fi
+    [ "$state" = not-found ] && return 0
+    if ! stop_out="$(systemctl stop "$unit" 2>&1)"; then
+        log "${RED}Cannot stop $unit: $stop_out; refusing database maintenance${NC}"
+        return 1
+    fi
+    # stop is synchronous and the unit uses systemd's default KillMode=control-group.
+    # Reject activating/deactivating/failed/unknown too, not just 'active'.
+    if ! state="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" || [ "$state" != inactive ]; then
+        log "${RED}$unit is not confirmed stopped ($state); refusing database maintenance${NC}"
+        return 1
+    fi
+}
+
+stop_native_backend() {
+    local pids i
+    case "${NATIVE_BACKEND_MODE:-}" in
+        pm2)
+            # Stop through PM2 so its supervisor cannot respawn the writer.
+            # A failed start may still have registered/running processes.
+            if pm2 stop proxypilot >>"$LOG_FILE" 2>&1 &&
+                pids="$(pm2 pid proxypilot 2>>"$LOG_FILE")" &&
+                [[ "$pids" =~ ^[0[:space:]]*$ ]]; then
+                return 0
+            fi
+            ;;
+        nohup)
+            # Only signal the child this update launched, not other Node apps.
+            if [[ "${NEW_PID:-}" =~ ^[0-9]+$ ]] && [ "$NEW_PID" -gt 1 ]; then
+                kill -TERM "$NEW_PID" 2>/dev/null || true
+                for i in 1 2 3 4 5 6 7 8 9 10; do
+                    if ! kill -0 "$NEW_PID" 2>/dev/null; then
+                        wait "$NEW_PID" 2>/dev/null || true
+                        return 0
+                    fi
+                    sleep 1
+                done
+            fi
+            ;;
+        *) return 0 ;;
+    esac
+    log "${RED}Cannot confirm the native backend stopped; refusing database maintenance (see $LOG_FILE)${NC}"
+    return 1
+}
+
+stop_update_writers() {
+    stop_setup_runner || return 1
+    stop_native_backend || return 1
+    if [ -n "${INSTALL_DIR:-}" ] && [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
+        local compose="docker compose"
+        if ! docker compose version &>/dev/null; then compose="docker-compose"; fi
+        # Recovery may run after the replacement backend has opened the DB.
+        # Do not hide a failed down behind tee or '|| true'.
+        if ! (cd "$INSTALL_DIR" && $compose down --remove-orphans >>"$LOG_FILE" 2>&1); then
+            log "${RED}Cannot stop the dashboard; refusing database maintenance (see $LOG_FILE)${NC}"
+            return 1
+        fi
     fi
 }
 
@@ -741,7 +823,11 @@ restore_db() {
         log_verbose "No source path recorded — cannot restore"
         return 0
     fi
+    stop_update_writers || return 1
     log "${YELLOW}Restoring database from: ${DB_BACKUP_FILE}${NC}"
+    # A backup without a WAL must not inherit the failed update's WAL.
+    # SHM is a disposable index: SQLite rebuilds it from the matching WAL.
+    rm -f "${DB_BACKUP_SOURCE}-wal" "${DB_BACKUP_SOURCE}-shm" || return 1
     # Guard each cp explicitly. If the restore itself fails, surface
     # the path the operator must hand-restore from rather than letting
     # the trap exit silently.
@@ -750,15 +836,31 @@ restore_db() {
         log "${RED}!! Hand-restore: cp \"$DB_BACKUP_FILE\" \"$DB_BACKUP_SOURCE\"${NC}"
         return 1
     fi
-    [ -f "${DB_BACKUP_FILE}-wal" ] && cp "${DB_BACKUP_FILE}-wal" "${DB_BACKUP_SOURCE}-wal" || true
-    [ -f "${DB_BACKUP_FILE}-shm" ] && cp "${DB_BACKUP_FILE}-shm" "${DB_BACKUP_SOURCE}-shm" || true
+    if [ -f "${DB_BACKUP_FILE}-wal" ]; then
+        cp "${DB_BACKUP_FILE}-wal" "${DB_BACKUP_SOURCE}-wal" || return 1
+    fi
+    if [ -n "${DB_LAYOUT_NEW_PATH:-}" ]; then
+        rm -f "$DB_LAYOUT_NEW_PATH" "${DB_LAYOUT_NEW_PATH}-wal" "${DB_LAYOUT_NEW_PATH}-shm" || return 1
+        cp "$DB_LAYOUT_ENV_BACKUP" "$DB_LAYOUT_ENV_PATH" || return 1
+    fi
     log "${YELLOW}Database restored. Operator should investigate the failure before retrying.${NC}"
 }
 
 on_error() {
     local exit_code=$?
+    trap - EXIT ERR INT TERM
+    # EXIT covers explicit 'exit 1' and signals as well as errexit. Before
+    # maintenance starts, no database was relocated or migrated by this run.
+    [ "$exit_code" -ne 0 ] || exit 0
+    [ "$DB_MAINTENANCE_STARTED" = true ] || exit "$exit_code"
     log "${RED}Update failed (exit ${exit_code}). Attempting recovery...${NC}"
-    restore_db
+    if ! restore_db; then
+        log "${RED}Recovery refused or failed; services are not restarted. Backup: $DB_BACKUP_FILE${NC}"
+        exit "$exit_code"
+    fi
+    # The layout and its .env now match again. Apply the same restart and
+    # readiness/policy rules as success, before the backend reads the .env.
+    install_setup_runner
 
     # If we got far enough to set INSTALL_DIR (i.e. past npm install/build
     # and into the docker rebuild phase) AND there's a docker-compose.yml,
@@ -897,8 +999,9 @@ else
     log "${BLUE}[0/7] Backing up database...${NC}"
     backup_db "$DB_PATH_FOUND"
 fi
-trap 'on_error' ERR
-trap 'log "${YELLOW}Update interrupted${NC}"; restore_db; exit 130' INT TERM
+trap 'on_error' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Fetch latest changes
 log "${BLUE}[1/7] Fetching latest changes...${NC}"
@@ -1305,6 +1408,9 @@ install_setup_runner() {
         log "${YELLOW}Not root; skipping setup runner install${NC}"
         return 0
     fi
+    # ReadWritePaths must exist before systemd constructs the namespace.
+    # mkdir preserves an existing CLI database and configuration.
+    mkdir -p /opt/proxypilot/data /var/lib/proxypilot /root/.proxypilot /etc/sysctl.d
     local changed=false
     if ! cmp -s "$src" "/etc/systemd/system/${unit}" 2>/dev/null; then
         cp "$src" "/etc/systemd/system/${unit}"
@@ -1455,7 +1561,6 @@ if [[ -d "$SCRIPT_DIR/cli" ]]; then
 exec /usr/bin/env node "${SCRIPT_DIR}/cli/bin/proxypilot.js" "\$@"
 EOF
     chmod 0755 /usr/local/bin/proxypilot
-    install_setup_runner
     cd "$SCRIPT_DIR"
 
     if [[ -x "$SCRIPT_DIR/scripts/install-firewall.sh" ]]; then
@@ -1889,7 +1994,11 @@ PYEOF
             DC_CMD="docker-compose"
         fi
 
-        $DC_CMD down --remove-orphans 2>/dev/null || true
+        # Do not enter maintenance (including its recovery trap) when the
+        # host writer cannot stop. It must stay stopped across the rebuild.
+        stop_setup_runner
+        DB_MAINTENANCE_STARTED=true
+        stop_update_writers
 
         # Backend is now stopped — safe window to relocate the SQLite
         # DB into its own subdirectory if this install is on the legacy
@@ -1914,6 +2023,9 @@ PYEOF
             log "Building with --no-cache..."
             $DC_CMD build --no-cache
         fi
+        # The database is now at its final path. Restart on refreshed code
+        # and record readiness before the backend reads the executor policy.
+        install_setup_runner
         $DC_CMD up -d
 
         # docker compose up -d returns 0 once the daemon accepts the
@@ -1944,8 +2056,7 @@ PYEOF
         if [ "$HEALTHY" != "true" ]; then
             log "${RED}Container did not become healthy within 60s. Last 50 log lines:${NC}"
             docker logs proxypilot-admin --tail 50 2>&1 || true
-            log "${RED}Update will be rolled back via the ERR trap.${NC}"
-            # Exit non-zero so the trap fires and restore_db runs.
+            log "${RED}Update will be rolled back via the EXIT trap.${NC}"
             exit 1
         fi
 
@@ -1955,7 +2066,7 @@ PYEOF
         log "${GREEN}Docker container rebuilt and restarted (healthy)${NC}"
 
         # Post-update cleanup. Only runs after the new build is
-        # confirmed healthy — a failed update goes through the ERR
+        # confirmed healthy — a failed update goes through the EXIT
         # trap which restores the DB and tries to bring the OLD
         # container back, so we must NOT prune anything that might
         # be needed for that recovery path. By the time we reach
@@ -2011,7 +2122,7 @@ PYEOF
         log ""
         # Disarm the trap before the early exit (the trap-disarm at
         # the bottom of the script is unreachable on the Docker path).
-        trap - ERR INT TERM
+        trap - EXIT ERR INT TERM
         if [ -n "$DB_BACKUP_FILE" ]; then
             log "Database backup retained at: $DB_BACKUP_FILE"
             log "To roll back manually: stop ProxyPilot, then cp \"$DB_BACKUP_FILE\" \"$DB_BACKUP_SOURCE\""
@@ -2080,14 +2191,20 @@ PYEOF
     mkdir -p "$(dirname "$DATABASE_PATH")"
 
     # Check if PM2 is available
+    # Either startup can migrate the database before readiness fails: arm
+    # rollback before launching and remember which writer recovery must stop.
     if command -v pm2 &> /dev/null; then
         log "Using PM2..."
         pm2 delete proxypilot 2>/dev/null || true
+        NATIVE_BACKEND_MODE=pm2
+        DB_MAINTENANCE_STARTED=true
         pm2 start src/index.js --name proxypilot
         pm2 save
         log "${GREEN}Started with PM2${NC}"
     else
         log "Using nohup..."
+        NATIVE_BACKEND_MODE=nohup
+        DB_MAINTENANCE_STARTED=true
         nohup $NODE_CMD src/index.js > /tmp/proxypilot.log 2>&1 &
         NEW_PID=$!
         sleep 3
@@ -2128,7 +2245,7 @@ PYEOF
         log "${RED}Backend did not respond to /api/health within 60s.${NC}"
         log "${YELLOW}Last 30 lines from /tmp/proxypilot.log:${NC}"
         tail -30 /tmp/proxypilot.log 2>/dev/null || log "  (no log output)"
-        log "${RED}Update will be rolled back via the ERR trap.${NC}"
+        log "${RED}Update will be rolled back via the EXIT trap.${NC}"
         exit 1
     fi
     log "${GREEN}Backend is healthy on port ${PORT_TO_FREE}${NC}"
@@ -2143,10 +2260,13 @@ PYEOF
     log "${GREEN}ProxyPilot restart complete!${NC}"
 fi
 
+# Non-Docker / --no-restart updates perform no database relocation here.
+if [[ -d "$SCRIPT_DIR/cli" ]]; then install_setup_runner; fi
+
 # Update succeeded — disarm the restore trap. The backup is kept on disk
 # (subject to rotation) so the operator can roll back manually if a
 # regression surfaces after the fact.
-trap - ERR INT TERM
+trap - EXIT ERR INT TERM
 
 log ""
 log "Update log saved to: $LOG_FILE"

@@ -153,7 +153,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | ID | Bounded deliverable | Reuse / cross-reference | Status |
 | --- | --- | --- | --- |
 | G1 | Admin Platform Setup page; install/connect/skip intentions; validated versioned server draft; available read-only checks; review/save/reopen; existing jobs and redacted events. Installation/login activation unavailable. | B-01, bounded B-03 and observation portion of B-05; reuse A-04/A-05 and `/api/setup` | done — evidence below |
-| G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | done — 6/6 repository criteria; evidence and execution limits below |
+| G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | done — 6/6 repository criteria, including slow Caddy handoff correction; ready for merge review; execution limits below |
 | G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | planned — not authorized |
 | G4 | Pomerium adapter and route integration | C-02 | planned — not authorized |
 | G5 | Infisical with Agent Proxy adapter | C-03 | planned — not authorized |
@@ -228,9 +228,9 @@ install.sh/update.sh, resume A-17.9/Phase F, activate SSO (G3), or deploy.
 | G2.1 | Existing page: install/connect/skip; origin separate from realm; explicit fresh-auth apply of the reviewed revision; stale refusal; save/open never executes | pass — production HTTP auth/CSRF/sudo/revision tests; browser save → review → apply → reopen; no job on save/skip |
 | G2.2 | Narrow runner operation; pinned Keycloak + persistent independent DB; existing Caddy managed HTTPS route; owned resources only; protected reusable credentials; administration/recovery instructions | pass — keycloak-runtime.js, keycloak-routes.js; fixed images/argv, ownership/config read-back, 0700/0600 files, collision tests, dedicated lifecycle; operator section in setup-engine.md; Docker/Caddy responses scripted |
 | G2.3 | Existing realm discovery, exact issuer and signing keys verified through network safeguards; separate verified connection; no external mutation or administrative-permission claim | pass — keycloak-discovery.js; real local TLS contract and scripted OIDC fixtures; exact issuer/keys, pinned DNS, redirects/body/TLS restrictions; external API-to-job test issues no runtime writes |
-| G2.4 | Existing durable jobs, leases and executor policy; persistent phases/redacted events; interruption/retry reuses resources and credentials; truthful unavailable/failed states | pass — production executor and reconciliation tests; same credential bytes and four resources across interruption + failed verification + retry; API restart/Caddy handoff; epoch fencing; no runner means queued, no backend host fallback |
+| G2.4 | Existing durable jobs, leases and executor policy; persistent phases/redacted events; interruption/retry reuses resources and credentials; truthful unavailable/failed states | pass — production executor/reconciliation tests; same credentials/resources across interruption + failed verification + retry; API restart, epoch fencing and runner policy; slow recorded Caddy lock overlap now stays queued and automatically resumes public verification (regression below) |
 | G2.5 | Managed DB/service readiness + public issuer/key verification; ownership/references/time recorded; “Keycloak ready/connected; ProxyPilot SSO not activated.”; existing authentication/apps unchanged except approved route | pass — separate setup_keycloak evidence (migration 1003); database-unready and failed-issuer tests never record ready; install/connect API results, unchanged settings/users/app routes; no auth/client/session mutations |
-| G2.6 | Actual API-to-job tests, auth/stale/save/skip/failure/unavailability/interruption/retry invariants; affected tests/build; desktop/360px inspection; real versus scripted execution identified; concise operator instructions | pass — 175 affected passes, 1 pre-existing environment skip; frontend build; browser widths/axe/Lighthouse 98; precise limitations and administration/backup/recovery guidance below |
+| G2.6 | Actual API-to-job tests, auth/stale/save/skip/failure/unavailability/interruption/retry invariants; affected tests/build; desktop/360px inspection; real versus scripted execution identified; concise operator instructions | pass — 176 affected passes, 1 pre-existing environment skip; frontend build; browser widths/axe/Lighthouse 98; precise limitations and administration/backup/recovery guidance below |
 
 Additional prerequisites must cite the blocked criterion and concrete evidence;
 make only the smallest correction. Optional improvements stay backlog. Disposable
@@ -238,9 +238,25 @@ repository tests only; no production DNS, database, credential or service change
 G2 repository completion: **6/6 criteria**. Guided milestones complete:
 **2/10 (G1 and G2)**. G3–G10 remain unimplemented; no SSO activation.
 
-Focused verification (2026-09-22): `keycloak-setup.test.js` has 10 passing
+G2.4 merge-review correction (2026-09-22): c180d2f could finish the Keycloak
+parent as `deferred` when its recorded Caddy job still held the shared app
+lease after 15 seconds. G2 was reopened pending this correction. The executor
+now matches the current managed installation and its route job against the
+atomic lock-acquisition verdict, requeues only that dependency with a durable
+15-second not-before, and resumes verification on the next eligible runner
+pass after routing finishes. It does not acquire or release Caddy's locks;
+unrelated holders, stale leases and unresolved holds retain existing handling.
+One regression fails as `deferred` on c180d2f and passes with the correction:
+the real store, runner and backend route executor overlap for 16 simulated
+seconds inside a scripted Caddy reload, both lock records stay unchanged,
+verification waits, and the same parent then succeeds without manual retry,
+duplicate jobs/resources or changed credential bytes. This closes the G2.4
+correction for merge review; it is not another engine milestone. No frontend
+source changed, so the existing desktop/360px evidence remains applicable.
+
+Focused verification (2026-09-22): `keycloak-setup.test.js` has 11 passing
 behavioral tests, including actual install/connect HTTP-to-job paths; the final
-affected run has **175 pass / 0 fail / 1 skipped (176 total)** across that file,
+affected run has **176 pass / 0 fail / 1 skipped (177 total)** across that file,
 `platform-setup`, `setup-engine`, `setup-deploy`, `setup-runner`,
 `setup-post-launch`, `setup-guest-config`, `setup-restores` and
 `update-runner-maintenance`. The skipped existing deploy process-reap test needs

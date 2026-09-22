@@ -8,7 +8,7 @@ import { fork, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import https from 'node:https';
 import { generateKeyPairSync } from 'node:crypto';
-import { ensureSetupEngineSchema, getJob, startJob, runnerHeartbeat } from '../lib/setup-engine/store.js';
+import { ensureSetupEngineSchema, getJob, startJob, runnerHeartbeat, readLock } from '../lib/setup-engine/store.js';
 import { emptyChoices, savePlatformPlan, PLATFORM_PLAN_SCHEMA } from '../lib/setup-engine/platform-plan.js';
 import { KEYCLOAK_SCHEMA, applyKeycloak, readKeycloak } from '../lib/setup-engine/keycloak-store.js';
 import { KEYCLOAK_APP, keycloakTargetSchema, KEYCLOAK_IMAGE, KEYCLOAK_DB_IMAGE, resourceNames } from '../lib/setup-engine/keycloak-logic.js';
@@ -78,7 +78,7 @@ function renderFixture(dir) {
 }
 function dependencies(db, dir, docker, opts = {}) {
   let clock = Date.now();
-  return { db, owner: runner, exec: docker, nowMs: () => clock, advance: () => { clock += 20000; },
+  return { db, owner: runner, exec: docker, nowMs: () => clock, advance: (ms = 20000) => { clock += ms; },
     keycloakDeps: { runtime: (row, { exec, job }) => ensureKeycloakRuntime(row, { exec, job, root: join(dir, 'protected'), attempts: 1, sleep: async () => {} }), verify: t => verifyKeycloak(t, { readJson: discoveryReader(opts) }) } };
 }
 async function completeManaged(db, deps, dir) {
@@ -165,6 +165,62 @@ test('managed operation uses actual executor, protected files and route SQL/rend
     assert.ok(docker.calls.some(a => a.includes(KEYCLOAK_IMAGE))); assert.ok(docker.calls.some(a => a.includes(KEYCLOAK_DB_IMAGE)));
     assert.ok(!docker.calls.some(a => a.includes('down') || a.includes('rm')));
   } finally { if(server) await server.stop(); db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('slow recorded Caddy handoff keeps Keycloak queued under the route locks and automatically completes verification', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'g2-slow-route-')); const db = new DatabaseSync(':memory:'); schema(db);
+  let routeRun, releaseReload;
+  try {
+    plan(db); const submitted = applyKeycloak(db, { expectedRevision: 1, reviewed: true }, 'admin', true);
+    const id = submitted.job.plan.params.installationId;
+    const docker = dockerFixture(), deps = dependencies(db, dir, docker);
+    let verifications = 0;
+    const verify = deps.keycloakDeps.verify;
+    deps.keycloakDeps.verify = async t => { verifications++; return verify(t); };
+    await runOnce(deps, { max: 1, kinds: ['keycloak_setup'] });
+    assert.equal(getJob(db, submitted.job.id).status, 'queued');
+    const routeId = readKeycloak(db, id).route_job_id;
+    const path = join(dir, 'protected', id, 'credentials.json'), credentials = readFileSync(path, 'utf8');
+    const render = renderFixture(join(dir, 'sites'));
+    const reloadBlocked = new Promise(resolve => { releaseReload = resolve; });
+    let signalReload;
+    const reloadEntered = new Promise(resolve => { signalReload = resolve; });
+    routeRun = runBackendSteps({ db, owner: backend, nowMs: deps.nowMs, max: 1,
+      deps: { configureKeycloakRoute: args => configureKeycloakRoute(db, { ...args, render: {
+        ...render, reload: async () => { signalReload(); await reloadBlocked; await render.reload(); },
+      } }) } });
+    await reloadEntered;
+    assert.equal(getJob(db, routeId).status, 'running');
+    const appLock = readLock(db, KEYCLOAK_APP), routesLock = readLock(db, '@host/routes');
+    assert.equal(appLock.job_id, routeId); assert.equal(routesLock.job_id, routeId);
+    const callsBeforeWait = docker.calls.length;
+    // The parent is due after 15 seconds; the backend still owns both live locks.
+    deps.advance(16000);
+    const overlap = await runOnce(deps, { max: 1, kinds: ['keycloak_setup'] });
+    assert.equal(overlap.ran.length, 1);
+    const pending = getJob(db, submitted.job.id);
+    assert.equal(pending.status, 'queued');
+    assert.equal(pending.finished_at, null);
+    assert.ok(Date.parse(JSON.parse(pending.progress_json).not_before) > deps.nowMs());
+    assert.equal(pending.phase, 'public_route');
+    assert.deepEqual(readLock(db, KEYCLOAK_APP), appLock);
+    assert.deepEqual(readLock(db, '@host/routes'), routesLock);
+    assert.equal(docker.calls.length, callsBeforeWait); assert.equal(verifications, 0);
+    assert.equal(readKeycloak(db, id).verified_at, null);
+    releaseReload(); await routeRun;
+    assert.equal(getJob(db, routeId).status, 'succeeded');
+    deps.advance(); await runOnce(deps, { max: 1, kinds: ['keycloak_setup'] });
+    assert.equal(getJob(db, submitted.job.id).status, 'succeeded');
+    assert.equal(verifications, 1); assert.ok(readKeycloak(db, id).verified_at);
+    assert.equal(readKeycloak(db, id).route_job_id, routeId);
+    assert.equal(db.prepare('SELECT count(*) n FROM setup_jobs').get().n, 2);
+    assert.equal(db.prepare('SELECT count(*) n FROM service_http_routes').get().n, 1);
+    assert.equal(docker.objects.size, 4); assert.equal(render.reloads, 1);
+    assert.equal(readFileSync(path, 'utf8'), credentials);
+  } finally {
+    releaseReload?.(); if (routeRun) await routeRun;
+    db.close(); rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('dead runner after database creation is reconciled and resumed using the same credentials/resources; failed public verification remains failed and retry reuses', async () => {

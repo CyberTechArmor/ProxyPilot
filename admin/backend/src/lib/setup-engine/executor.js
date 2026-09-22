@@ -1,4 +1,5 @@
 import { runKeycloakOperation } from './keycloak-op.js';
+import { readKeycloak } from './keycloak-store.js';
 // Setup engine — the job EXECUTOR: what claims a queued job, takes (or takes
 // over) the app's lease, runs the kind's steps against a guest, and records
 // the outcome. One implementation, two hosts:
@@ -51,6 +52,7 @@ import {
 } from './guest-probes.js';
 
 const FOLLOW_UP_RETRY_MS = 30_000;
+const KEYCLOAK_ROUTE_RETRY_MS = 15_000;
 // A follow-up that meets an unresolved hold waits longer between looks: the
 // hold ends when an operator acts, not by itself.
 const HOLD_RETRY_MS = 5 * 60_000;
@@ -245,6 +247,19 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
     if (!t.ok) return busy(t.holder, null);
     lockEpoch = Number(t.lock.epoch);
   } else {
+    // The managed Keycloak parent must remain pending while its recorded
+    // Caddy handoff owns the app lease. Do not treat unrelated holders or
+    // unresolved holds as this dependency, or acquire/release the route locks.
+    // Use the acquisition verdict's job id: Caddy may finish just after it.
+    if (job.kind === 'keycloak_setup' && got.reason === 'held' && got.operation === 'configure_keycloak_route') {
+      const installation = readKeycloak(db, p.installationId);
+      const route = installation?.route_job_id ? getJob(db, installation.route_job_id) : null;
+      if (installation?.ownership === 'managed' && installation.last_job_id === job.id &&
+          route?.kind === 'configure_keycloak_route' && route.app === job.app && got.jobId === route.id) {
+        requeueJob(db, { id: job.id, by: owner, reason: `Waiting for recorded Caddy route job ${route.id}; Keycloak verification will resume automatically.`, notBeforeMs: nowMs() + KEYCLOAK_ROUTE_RETRY_MS, nowMs: nowMs() });
+        return { status: 'requeued', outcome: 'waiting_for_route' };
+      }
+    }
     return busy(got.holder, got.operation);
   }
 
@@ -283,7 +298,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
       const result = await runKeycloakOperation({ db, params: p, exec, job: handle, ...keycloakDeps });
       guard();
       if (result.waiting) {
-        requeueJob(db, { id: job.id, by: owner, reason: result.reason, notBeforeMs: nowMs() + 15000, nowMs: nowMs() });
+        requeueJob(db, { id: job.id, by: owner, reason: result.reason, notBeforeMs: nowMs() + KEYCLOAK_ROUTE_RETRY_MS, nowMs: nowMs() });
         return { status: 'requeued', outcome: 'waiting_for_route' };
       }
       return fin('succeeded', result.verification.state, result.verification.label, result.verification);

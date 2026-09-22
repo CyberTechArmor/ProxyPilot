@@ -532,3 +532,14 @@ restore remain separate host-acceptance items, alongside earlier recorded limits
 and the existing cgroup-host exclusion. This merge authorizes no production
 rollout, live DNS/database/identity changes, credential rotation, service restart,
 infrastructure rebuild or G7–G10 work.
+
+
+### G7 authorization and accepted G6 ancestry (2026-09-22)
+
+PR #618 merged as `24ba567eea4a5bd6f469b1f3fa30c0857201dfae`; accepted
+`6e48d89dedb058b8d760556b448d00042909b057` is an ancestor. G7 branches from
+that current main on `feat/g7-guided-vaultwarden`. The six fixed criteria and
+stopping rule are recorded in the platform delivery ledger. Reuse saved plans,
+runner/jobs/leases, protected credential references and Caddy; preserve G6's
+fresh-runner key loading. Accepted progress **60%**, then **70% only after G7
+review acceptance**. Existing host exclusions/acceptance remain separate.

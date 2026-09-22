@@ -158,7 +158,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | accepted — six fixed criteria; corrected head `6c3bdcb`, PR #616; real stack and host execution limits below |
 | G5 | Infisical with Agent Proxy adapter | C-03 | accepted published recovery `31d0c87`; merged by #617 as `e9430a2`; host acceptance separate |
 | G6 | OpenBao adapter | C-04 | accepted — six fixed criteria and runner-key correction at `6e48d89`, PR #618; host acceptance separate |
-| G7 | Vaultwarden adapter | C-05 | planned — not authorized |
+| G7 | Vaultwarden adapter | C-05 | authorized — six fixed criteria below; implementation in progress |
 | G8 | Application connection automation | D-01/D-02, C-06; reuse existing contracts, deployment and verification | planned — not authorized |
 | G9 | Guided maintenance | B-04, D-03/D-04/D-05; reuse restores and verification | planned — not authorized |
 | G10 | End-to-end completion and evidence across the guided flow | B-02/B-03/B-05 and C/D acceptance, keeping live-host acceptance separate | planned — not authorized |
@@ -712,3 +712,30 @@ restore remain separate host-acceptance items, alongside earlier recorded limits
 and the existing cgroup-host exclusion. This merge authorizes no production
 rollout, live DNS/database/identity changes, credential rotation, service restart,
 infrastructure rebuild or G7–G10 work.
+
+
+## G7 — guided Vaultwarden (authorized 2026-09-22; review pending)
+
+Accepted G6 head `6e48d89dedb058b8d760556b448d00042909b057` is an ancestor
+of current main `24ba567eea4a5bd6f469b1f3fa30c0857201dfae` (PR #618 merged).
+Branch `feat/g7-guided-vaultwarden` starts from that main with no unmerged
+G6 dependency. Its runner installation-key correction is preserved.
+Accepted progress stays **60% (6/10)** until G7 review acceptance, then **70% (7/10)**.
+
+These six criteria are fixed before implementation:
+
+| Criterion | Required result | Status |
+| --- | --- | --- |
+| G7.1 | Administrator-reviewed install/connect/skip; official version-specific deployment/OIDC/client review; private persistent independent managed service with supported embedded DB; Caddy retains public ports/TLS; inert save and explicit apply; existing instances checked read-only first, with vault data/keys/unrelated settings preserved. | in progress |
+| G7.2 | Verified Keycloak provider, separate exact-callback OIDC/PKCE client, protected reusable credentials, effective Vaultwarden configuration including persisted overrides checked; only reviewed owned changes; exact operator handoff verified; existing SSO/recovery/clients/passkey policy preserved. | in progress |
+| G7.3 | Distinguish authentication from vault decryption; disposable browser SSO and supported unlock/test item plus out-of-policy refusal; documented account linking without account/key replacement; existing login preserved; SSO-only off by default and any activation separately reviewed with supported recovery; no vault-unlock secrets/items in ProxyPilot storage/logs; client limits documented. | in progress |
+| G7.4 | Existing durable jobs/locks for apply/failure/retry across browser/API/runner restart; reuse owned resources/credentials and configuration-bound verification; honest unavailable/unhealthy/unverified states; no automatic install/rotation/reset on retry. | in progress |
+| G7.5 | Release-compatible database/data/attachment/config/server-key backup set and restart/restore/Keycloak-outage/lost-device guidance via existing mechanisms; no claim to recover unknown unlock secrets; independent ProxyPilot recovery; real restore remains separate host acceptance. | in progress |
+| G7.6 | Production-adapter install/connect/skip/config/SSO/unlock/denial/repeat/restart/preservation/redaction acceptance, existing admin/CSRF/fresh-auth, affected tests/build/desktop/360px; actual disposable execution distinguished from scripted responses; existing host exclusions retained. | in progress |
+
+Only G7.1–G7.6: no G8–G10, import/migration, general provisioning, A-17,
+Phase F, infrastructure rebuild, install.sh/update.sh or accepted U1/U2 changes.
+Only reproduced G7 blockers justify prerequisite fixes. Optional improvements
+remain backlog; no added acceptance gates. Feature-branch checkpoints and PR
+publication are authorized; no merge, deployment, live infrastructure/identity/
+database/DNS changes, credential rotation or live restarts. Stop after G7.

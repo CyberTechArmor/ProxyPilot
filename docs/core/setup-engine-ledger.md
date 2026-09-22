@@ -511,3 +511,24 @@ boundaries are in `docs/evidence/g6-acceptance.md` under the review correction.
 PR #618 remains unmerged. **50% (5/10)** remains accepted until this correction is
 reviewed and accepted, then **60% (6/10)**. Real PostgreSQL, Keycloak/Caddy and
 restore acceptance remain separate. No installer/updater/U1/U2 or live changes.
+
+
+### G6 review acceptance (2026-09-22)
+
+The user accepted the corrected G6 head
+`6e48d89dedb058b8d760556b448d00042909b057` and authorized merging PR #618.
+Accepted guided progress is now **60% (6/10: G1–G6)**. This supersedes the
+pending-review status and no-merge restriction for this PR in the records above.
+The six fixed G6 criteria and ten-milestone denominator are unchanged.
+
+The accepted correction loads and validates the existing installation encryption
+key before runner jobs, preserving the key and ciphertext. Evidence: 187 affected
+passes, three fresh-process startup regressions, successful frontend build, and
+the recorded OpenBao/adapter/browser checks. This acceptance commit changes
+only documentation after the tested code at `6e48d89`.
+
+Real PostgreSQL credential execution, Keycloak/Caddy integration and compatible
+restore remain separate host-acceptance items, alongside earlier recorded limits
+and the existing cgroup-host exclusion. This merge authorizes no production
+rollout, live DNS/database/identity changes, credential rotation, service restart,
+infrastructure rebuild or G7–G10 work.

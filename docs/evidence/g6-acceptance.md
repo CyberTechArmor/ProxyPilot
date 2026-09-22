@@ -1,7 +1,10 @@
 # G6 guided OpenBao — repository acceptance evidence
 
-Date: 2026-09-22. Review pending; accepted progress remains **50% (5/10)**.
-G6 acceptance, when supplied, makes 60% (6/10). No merge or deployment performed.
+Date: 2026-09-22. G6 is accepted at corrected head
+`6e48d89dedb058b8d760556b448d00042909b057`; PR #618 is authorized for merge.
+Accepted guided progress is **60% (6/10)**. No production deployment is authorized.
+The historical pending-review/publication records below describe their original
+execution time and are superseded by this acceptance; runtime limits are unchanged.
 
 ## Base, scope and publication
 

@@ -157,7 +157,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | accepted — 7/7 criteria; `4e7b257`, PR #615; repository checks, disposable ceremonies and separate live-host limitations below |
 | G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | accepted — six fixed criteria; corrected head `6c3bdcb`, PR #616; real stack and host execution limits below |
 | G5 | Infisical with Agent Proxy adapter | C-03 | accepted published recovery `31d0c87`; merged by #617 as `e9430a2`; host acceptance separate |
-| G6 | OpenBao adapter | C-04 | authorized — six fixed criteria below; review pending |
+| G6 | OpenBao adapter | C-04 | accepted — six fixed criteria and runner-key correction at `6e48d89`, PR #618; host acceptance separate |
 | G7 | Vaultwarden adapter | C-05 | planned — not authorized |
 | G8 | Application connection automation | D-01/D-02, C-06; reuse existing contracts, deployment and verification | planned — not authorized |
 | G9 | Guided maintenance | B-04, D-03/D-04/D-05; reuse restores and verification | planned — not authorized |
@@ -691,3 +691,24 @@ boundaries are in `docs/evidence/g6-acceptance.md` under the review correction.
 PR #618 remains unmerged. **50% (5/10)** remains accepted until this correction is
 reviewed and accepted, then **60% (6/10)**. Real PostgreSQL, Keycloak/Caddy and
 restore acceptance remain separate. No installer/updater/U1/U2 or live changes.
+
+
+### G6 review acceptance (2026-09-22)
+
+The user accepted the corrected G6 head
+`6e48d89dedb058b8d760556b448d00042909b057` and authorized merging PR #618.
+Accepted guided progress is now **60% (6/10: G1–G6)**. This supersedes the
+pending-review status and no-merge restriction for this PR in the records above.
+The six fixed G6 criteria and ten-milestone denominator are unchanged.
+
+The accepted correction loads and validates the existing installation encryption
+key before runner jobs, preserving the key and ciphertext. Evidence: 187 affected
+passes, three fresh-process startup regressions, successful frontend build, and
+the recorded OpenBao/adapter/browser checks. This acceptance commit changes
+only documentation after the tested code at `6e48d89`.
+
+Real PostgreSQL credential execution, Keycloak/Caddy integration and compatible
+restore remain separate host-acceptance items, alongside earlier recorded limits
+and the existing cgroup-host exclusion. This merge authorizes no production
+rollout, live DNS/database/identity changes, credential rotation, service restart,
+infrastructure rebuild or G7–G10 work.

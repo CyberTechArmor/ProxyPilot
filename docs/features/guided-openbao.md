@@ -2,8 +2,9 @@
 
 G6 adds the OpenBao section to **Platform Setup**, using its saved plan,
 independent host runner, existing jobs/leases, protected credential references
-and Caddy route renderer. Accepted guided progress remains **50% (5/10)** until
-G6 is reviewed and accepted. This guide does not authorize a production change.
+and Caddy route renderer. G6 is accepted at corrected head `6e48d89` in PR #618;
+accepted guided progress is **60% (6/10)**. Host acceptance remains separate.
+This guide does not authorize a production change.
 
 ## Release contract
 

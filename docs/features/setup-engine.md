@@ -2106,8 +2106,9 @@ leases and route render. Transient operator inputs are not queued or replayed.
 A sealed/unavailable service never appears currently verified. Lost handoff after
 initialization requires recovery without data reset. No new backup framework,
 installer/updater change, G7–G10, A-17 continuation or Phase F is included.
-Guided progress stays **50%** pending G6 review and acceptance; runtime validation
-limits remain separate in [the evidence](../evidence/g6-acceptance.md).
+G6 is accepted at corrected head `6e48d89`, PR #618. Accepted guided progress
+is **60% (6/10)**; runtime validation limits remain separate in
+[the evidence](../evidence/g6-acceptance.md).
 
 
 G6 review correction: before `setup-runner serve` or `once` opens the queue, it

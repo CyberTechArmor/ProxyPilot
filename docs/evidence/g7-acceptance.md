@@ -1,7 +1,9 @@
 # G7 guided Vaultwarden — repository evidence
 
-Date: 2026-09-22. Repository implementation is submitted for G7 review. Accepted
-progress stays **60% (G1–G6, 6/10)** and becomes **70% only on G7 acceptance**.
+Date: 2026-09-22. G7 repository implementation is accepted at
+`04820930cf7d467e40b756e398ed7382a10e6f38`; PR #619 is authorized for merge.
+Accepted progress is **70% (G1–G7, 7/10)**. Historical pending-review and no-merge
+records below are superseded by this acceptance; runtime limits are unchanged.
 Actual Vaultwarden/Keycloak browser SSO, vault unlock and denied-user execution
 could not run here; they are explicitly unverified, not inferred from fixtures.
 

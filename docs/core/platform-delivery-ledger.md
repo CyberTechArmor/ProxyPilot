@@ -158,7 +158,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | accepted — six fixed criteria; corrected head `6c3bdcb`, PR #616; real stack and host execution limits below |
 | G5 | Infisical with Agent Proxy adapter | C-03 | accepted published recovery `31d0c87`; merged by #617 as `e9430a2`; host acceptance separate |
 | G6 | OpenBao adapter | C-04 | accepted — six fixed criteria and runner-key correction at `6e48d89`, PR #618; host acceptance separate |
-| G7 | Vaultwarden adapter | C-05 | repository implementation submitted for review; actual service limits recorded; 60% remains accepted |
+| G7 | Vaultwarden adapter | C-05 | accepted at 04820930; PR #619 authorized for merge; 70% (7/10); recorded runtime limits unchanged |
 | G8 | Application connection automation | D-01/D-02, C-06; reuse existing contracts, deployment and verification | planned — not authorized |
 | G9 | Guided maintenance | B-04, D-03/D-04/D-05; reuse restores and verification | planned — not authorized |
 | G10 | End-to-end completion and evidence across the guided flow | B-02/B-03/B-05 and C/D acceptance, keeping live-host acceptance separate | planned — not authorized |
@@ -765,3 +765,25 @@ are explicitly **not** actual service ceremony passes. Native database/full boot
 and the existing containment-host exclusion remain separate, as do all earlier
 recorded host limitations. This does not change the ten-milestone denominator or
 add completion gates. No merge, deployment or live operation was performed.
+
+
+## G7 review acceptance (2026-09-22)
+
+The user accepted G7 repository head
+`04820930cf7d467e40b756e398ed7382a10e6f38` and authorized merging PR #619.
+Accepted guided progress is now **70% (7/10: G1–G7)**. This supersedes the
+pending-review status and no-merge restriction for this PR in the records above.
+The six fixed G7 criteria and ten-milestone denominator are unchanged.
+
+Acceptance preserves the recorded evidence: 208 affected test passes, 21 G7
+passes repeated on the fetched final commit, a successful frontend build and
+20 responsive audits including desktop/360px. This acceptance change touches
+only documentation after the tested code at `04820930`.
+
+Actual Vaultwarden/Keycloak browser SSO, separate vault unlock/test item,
+denied-user access and existing-account linking remain unexecuted. Real
+Docker/Caddy/TLS and compatible restore remain separate host acceptance, along
+with the existing containment exclusion and native database/full-boot limits.
+Acceptance does not turn scripted responses into real-service passes and does
+not authorize deployment, live DNS/database/identity changes, credential
+rotation, live restarts, infrastructure rebuild or G8–G10 work. Stop after G7.

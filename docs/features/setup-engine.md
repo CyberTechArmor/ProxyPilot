@@ -2118,7 +2118,7 @@ malformed or conflicting keys leave jobs unclaimed. Status and reconciliation re
 command/executor without an inherited fixture key; see the G6 evidence record.
 
 
-## G7 — guided Vaultwarden (review pending)
+## G7 — guided Vaultwarden (accepted)
 
 G6's accepted head `6e48d89` is included in main `24ba567e` after PR #618.
 G7 adds the [Vaultwarden guide](guided-vaultwarden.md): reviewed install/connect/
@@ -2143,6 +2143,7 @@ configuration and signing keys through existing mechanisms; real restore remains
 separate host acceptance. Actual Vaultwarden/Keycloak ceremony and Caddy runtime
 were unavailable here and are not claimed as passes.
 
-Accepted progress stays **60% (6/10)** until G7 review acceptance, then **70%**.
+G7 is accepted at `04820930`, PR #619 authorized for merge. Accepted progress
+is **70% (7/10)**; the recorded runtime validation limits remain unchanged.
 No G8–G10, migration/import, A-17, Phase F, installer/updater/U1/U2 change or live
 operation is included. This slice stops after G7.

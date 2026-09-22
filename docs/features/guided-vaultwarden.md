@@ -2,8 +2,9 @@
 
 G7 adds reviewed install/connect/skip to Platform Setup. Saving records an inert
 plan. Only **Apply / retry Vaultwarden verification** queues work in the existing
-host runner. G1–G6 remain accepted at **60%**; G7 is submitted for review and would
-make **70% (7/10)** only on acceptance. No live deployment is authorized here.
+host runner. G7 is accepted at `04820930`, with PR #619 authorized for merge.
+Accepted progress is **70% (7/10: G1–G7)**. Recorded runtime limits remain
+unchanged; no live deployment is authorized here.
 
 ## Selected release and boundaries
 

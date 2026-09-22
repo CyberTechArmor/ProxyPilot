@@ -2,7 +2,7 @@ import pg from 'pg';
 import { checkServerIdentity } from 'node:tls';
 import { fail,namesFor } from './openbao-logic.js';
 import { ok } from './openbao-api.js';
-export function postgresClient(r,user,password,{Client=pg.Client}={}){return new Client({host:r.config.database.host,port:r.config.database.port,database:r.config.database.name,user,password,ssl:{rejectUnauthorized:true,checkServerIdentity:(_host,cert)=>checkServerIdentity(r.config.database.host,cert)},connectionTimeoutMillis:7000,query_timeout:7000,statement_timeout:5000,application_name:'proxypilot-g6-disposable-proof'});}
+export function postgresClient(r,user,password,{Client=pg.Client}={}){return new Client({host:r.config.database.host,port:r.config.database.port,database:r.config.database.name,user,password,ssl:{rejectUnauthorized:true,...(r.config.database.caPem?{ca:r.config.database.caPem}:{}),checkServerIdentity:(_host,cert)=>checkServerIdentity(r.config.database.host,cert)},connectionTimeoutMillis:7000,query_timeout:7000,statement_timeout:5000,application_name:'proxypilot-g6-disposable-proof'});}
 export async function verifyDatabase(r,password,{makeClient=postgresClient}={}){const c=makeClient(r,r.config.database.username,password);try{await c.connect();const d=(await c.query("SELECT current_database() AS db, current_user AS usr, rolsuper, rolcreaterole FROM pg_roles WHERE rolname=current_user")).rows[0];
   if(d.db!==r.config.database.name||d.usr!==r.config.database.username||d.rolsuper||!d.rolcreaterole)throw fail('Select a dedicated non-superuser PostgreSQL role with CREATEROLE for the reviewed disposable database.');
   await c.query('SELECT marker FROM public.g6_probe LIMIT 1');

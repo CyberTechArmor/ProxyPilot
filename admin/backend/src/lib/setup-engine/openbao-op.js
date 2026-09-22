@@ -11,7 +11,7 @@ import { credentialFlow } from './openbao-postgres.js';
 import { assertOpenBaoRouteAvailable } from './openbao-routes.js';
 import { createJob,getJob } from './store.js';
 export async function runOpenBaoOperation({db,params,exec,job,root=OPENBAO_ROOT,recoveryRoot,send,runtime=ensureRuntime,clientProbe=verifyClient,providerProbe=verifyKeycloak,flow=credentialFlow,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),attempts=30}){
-  jobSchema.parse(params);let r=readOpenBao(db);if(!r||r.revision!==params.revision||r.last_job_id!==job.id)throw fail('The OpenBao operation was superseded.');currentPlan(db,r);
+  jobSchema.parse(params);const originalJob=job;job={...originalJob,fence(){originalJob.fence();const current=readOpenBao(db);if(!current||current.revision!==params.revision||current.last_job_id!==job.id)throw fail('OpenBao operation was superseded.');currentPlan(db,current);}};let r=readOpenBao(db);if(!r||r.revision!==params.revision||r.last_job_id!==job.id)throw fail('The OpenBao operation was superseded.');currentPlan(db,r);
   const phase=name=>job.checkpoint(name,{resumable:true,openbao:true});
   if(r.config.mode==='install'){
     phase('owned_private_runtime');assertOpenBaoRouteAvailable(db,r);const resources=await runtime(r,{exec,job,root});job.fence();db.prepare('UPDATE setup_openbao SET resources_json=? WHERE id=1').run(JSON.stringify({...r.resources,...resources}));r=readOpenBao(db);

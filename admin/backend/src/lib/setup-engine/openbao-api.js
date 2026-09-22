@@ -13,16 +13,17 @@ export async function openbaoRequest(origin,path,{method='GET',token,body,resolv
   try{addresses=local?[{address:'127.0.0.1',family:4}]:await Promise.race([resolve(u.hostname,{all:true,family:4}),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error()),5000);t.unref();})]);}catch{throw fail('OpenBao DNS could not be verified.');}
   if(!addresses.length||(!local&&addresses.some(a=>!allowedAddress(a.address))))throw fail('OpenBao DNS points to a blocked special-use address.');
   const data=body===undefined?null:JSON.stringify(body);
+  const timeout=u.pathname==='/v1/sys/init'?60000:7000;
   return new Promise((done,reject)=>{
     let bytes=0;const chunks=[];
-    const req=(local&&request===https.request?http.request:request)(u,{method,agent:false,timeout:7000,lookup:(_h,o,cb)=>o.all?cb(null,[addresses[0]]):cb(null,addresses[0].address,4),headers:{Accept:'application/json',...(token?{'X-Vault-Token':token} :{}),...(data?{'Content-Type':'application/json','Content-Length':Buffer.byteLength(data)}:{})}},res=>{
+    const req=(local&&request===https.request?http.request:request)(u,{method,agent:false,timeout,lookup:(_h,o,cb)=>o.all?cb(null,[addresses[0]]):cb(null,addresses[0].address,4),headers:{Accept:'application/json',...(token?{'X-Vault-Token':token} :{}),...(data?{'Content-Type':'application/json','Content-Length':Buffer.byteLength(data)}:{})}},res=>{
       res.on('data',b=>{bytes+=b.length;if(bytes>1024*1024)req.destroy();else chunks.push(b);});
       res.on('error',()=>reject(fail('OpenBao response failed; details withheld.')));
       res.on('end',()=>{let value=null;try{value=JSON.parse(Buffer.concat(chunks));}catch{}
         // Bodies for denial/error never leave the transport layer.
         done({status:res.statusCode,body:res.statusCode>=200&&res.statusCode<300?value:null});});
     });
-    const timer=setTimeout(()=>req.destroy(),10000);timer.unref();req.on('close',()=>clearTimeout(timer));req.on('timeout',()=>req.destroy());
+    const timer=setTimeout(()=>req.destroy(),timeout+3000);timer.unref();req.on('close',()=>clearTimeout(timer));req.on('timeout',()=>req.destroy());
     req.on('error',()=>reject(fail('OpenBao HTTPS failed (DNS, TLS, timeout or reachability); details withheld.')));req.end(data);
   });
 }

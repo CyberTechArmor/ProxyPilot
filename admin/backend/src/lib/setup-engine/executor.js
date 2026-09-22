@@ -129,6 +129,11 @@ export function reconcile({ db, owner, nowMs = Date.now(), log = () => {} } = {}
 // POST /api/setup/jobs/:id/acknowledge). No recovery job is queued: a
 // generic guest has no in-guest application to recover on behalf of.
 export function recordUncertainLifecycle(db, { job, lock, owner, reason, nowMs }) {
+  if (job.kind === 'openbao_operator') {
+    recordJobOutcome(db,{id:job.id,status:'recovery_required',outcome:'operator_retry_required',reason,verification:{state:'not_verified',next:'Read OpenBao state and deliberately resubmit the transient operator action.'},by:owner,nowMs});
+    if(lock?.owner===job.owner)releaseLock(db,{app:job.app,owner:lock.owner,epoch:lock.epoch});
+    return;
+  }
   const cp = parseJson(job.checkpoint_json) || {};
   const container = cp.container || job.app;
   recordJobOutcome(db, {

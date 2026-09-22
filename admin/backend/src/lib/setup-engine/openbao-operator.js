@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes,randomUUID } from 'node:crypto';
 import { readOpenBao,assertReview,idle } from './openbao-store.js';
 import { createJob,startJob,acquireLock,releaseLock,renewLock,heartbeat,fenceJob,finishJob,checkpoint,jobView } from './store.js';
 import { OPENBAO_APP,fail } from './openbao-logic.js';
@@ -13,12 +13,13 @@ import { verifiedProvider } from './pomerium-store.js';
 // the saved checkpoint asks for a deliberate resubmission, not secret replay.
 export async function operatorAction(db,action,input,by,{send,clientProbe=verifyClient,providerProbe=verifyKeycloak,databaseProbe=verifyDatabase}={}){let r=assertReview(db,input);idle(db,r);
   if(action==='bootstrap'&&r.config.mode==='install'&&!r.handoff_ack)throw fail('Acknowledge the separately held recovery handoff before bootstrap.');
-  const owner=`backend@openbao#${process.pid}:${randomBytes(5).toString('hex')}`;let job,lease;
+  const owner=`backend@openbao#${process.pid}:${randomBytes(5).toString('hex')}`,id=randomUUID();let job;
+  const lease=acquireLock(db,{app:OPENBAO_APP,owner,operation:'openbao_operator',jobId:id,leaseMs:30000});if(!lease.ok)throw fail('OpenBao has a held or unresolved lease. Reopen its existing job before retrying.');
   db.exec('BEGIN IMMEDIATE');try{
-    job=createJob(db,{app:OPENBAO_APP,kind:'openbao_operator',plan:{params:{revision:r.revision,action}},configRefs:{credentials:r.credential_ref},requestedBy:by,via:'ui',retryOf:r.last_job_id});
-    lease=acquireLock(db,{app:OPENBAO_APP,owner,operation:'openbao_operator',jobId:job.id,leaseMs:30000});if(!lease.ok)throw fail('OpenBao has a held or unresolved lease. Reopen its existing job before retrying.');
+    r=assertReview(db,input);idle(db,r);
+    job=createJob(db,{id,app:OPENBAO_APP,kind:'openbao_operator',plan:{params:{revision:r.revision,action}},configRefs:{credentials:r.credential_ref},requestedBy:by,via:'ui',retryOf:r.last_job_id});
     job=startJob(db,{id:job.id,owner,leaseMs:30000});db.prepare('UPDATE setup_openbao SET last_job_id=?,verified_json=NULL WHERE id=1').run(job.id);db.exec('COMMIT');
-  }catch(e){db.exec('ROLLBACK');throw e;}
+  }catch(e){db.exec('ROLLBACK');releaseLock(db,{app:OPENBAO_APP,owner,epoch:lease.lock.epoch});throw e;}
   let lost=false;const renew=()=>{if(!heartbeat(db,{id:job.id,owner,epoch:job.epoch,leaseMs:30000})||!renewLock(db,{app:OPENBAO_APP,owner,epoch:lease.lock.epoch,leaseMs:30000}))lost=true;};
   const fence=()=>{renew();if(lost)throw fail('OpenBao operator lease was lost. Resubmit only after reviewing the recorded state.');fenceJob(db,{id:job.id,owner,epoch:job.epoch,safe:true});assertReview(db,input);};
   const timer=setInterval(()=>{try{renew();}catch{lost=true;}},10000);timer.unref();

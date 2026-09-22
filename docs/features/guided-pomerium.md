@@ -3,8 +3,10 @@
 G4 adds a separate guide inside **Platform Setup**. It reuses the saved platform
 plan, administrator/CSRF/fresh-auth gates, encrypted secret references, setup
 runner, durable backend route jobs, route store and Caddy renderer. It does not
-activate Pomerium for ProxyPilot itself. Accepted progress is still **30% (3/10)**;
-G4 is submitted for review, not accepted or deployed.
+activate Pomerium for ProxyPilot itself. G4 is accepted at corrected head
+`6c3bdcb` (PR #616); guided progress is **40% (4/10)**. Deployment has not been
+performed. Real Pomerium–Keycloak login, Caddy execution and the separate host
+acceptance limits remain recorded in [the evidence](../evidence/g4-acceptance.md).
 
 ## Supported contract and choices
 

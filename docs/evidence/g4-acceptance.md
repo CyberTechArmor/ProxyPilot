@@ -1,10 +1,13 @@
-# G4 submission evidence — 2026-09-22
+# G4 acceptance evidence — 2026-09-22
 
 Branch `feat/g4-guided-pomerium` starts at `main@66624b5`. The accepted G3 head
 `4e7b257` is merged through PR #615: GitHub main metadata and local
 `git merge-base --is-ancestor 4e7b257 66624b5` agreed. No dependency was merged by
-this work. Other worktrees were preserved. Accepted progress remains 30% pending
-review; accepting G4 would make it 40% (4/10).
+this work. Other worktrees were preserved. The user accepted corrected head
+`6c3bdcb` and authorized merge in PR #616. Accepted guided progress is
+**40% (4/10)**. The acceptance follow-up changes documentation only; the
+integration and host execution limits below remain outstanding. No deployment
+or live-service changes are authorized by this merge.
 
 ## Execution evidence
 

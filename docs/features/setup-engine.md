@@ -2063,5 +2063,7 @@ stay outside Core. Follow [the G4 operator guide](guided-pomerium.md) for the
 supported private profile, external handoff, session timing, retries and existing
 backup references. [G4 evidence](../evidence/g4-acceptance.md) separates scripted
 host checks from real HTTP/crypto/browser execution and the unperformed real
-three-service/host acceptance. G4 is submitted for review; accepted progress
-remains 30%. No installer/updater, A-17, Phase F or G5–G10 work.
+three-service/host acceptance. G4 is accepted at corrected head `6c3bdcb`
+(PR #616); accepted progress is **40% (4/10)**. Deployment has not been performed;
+the recorded integration and host checks remain outstanding. No installer/updater,
+A-17, Phase F or G5–G10 work.

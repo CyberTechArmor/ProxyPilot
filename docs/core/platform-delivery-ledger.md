@@ -146,7 +146,7 @@ Milestone D code completion: **≈ 5 %**.
 Recorded before implementation on `feat/g1-platform-setup`, based on
 `main@84dfc52` (PR #612 includes accepted U1/U2, `e8445d2`). These are
 conversation-sized delivery slices, cross-referencing the existing milestones,
-not replacements for accepted A/B/C/D evidence. **The original authorization here was G1 only; G2 and G3 are separately authorized below.**
+not replacements for accepted A/B/C/D evidence. **The original authorization here was G1 only; G2, G3 and G4 are separately authorized below.**
 No installer/update changes, A-17.9, Phase F, host-operation migration, live
 service/DNS/credential changes, authentication replacement or app redeployment.
 
@@ -155,7 +155,7 @@ service/DNS/credential changes, authentication replacement or app redeployment.
 | G1 | Admin Platform Setup page; install/connect/skip intentions; validated versioned server draft; available read-only checks; review/save/reopen; existing jobs and redacted events. Installation/login activation unavailable. | B-01, bounded B-03 and observation portion of B-05; reuse A-04/A-05 and `/api/setup` | done — evidence below |
 | G2 | Keycloak install/connect adapter and verification | C-01; reuse A runner/jobs | accepted — 6/6 criteria, including slow Caddy handoff correction; `a039761` merged by #614; execution limits below |
 | G3 | SSO, passkeys and recovery integration, gated activation | C-01; reuse A-01 recovery and existing authentication | accepted — 7/7 criteria; `4e7b257`, PR #615; repository checks, disposable ceremonies and separate live-host limitations below |
-| G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | implemented for review — real stack acceptance outstanding; not accepted |
+| G4 | Pomerium adapter and route integration | C-02; existing runner/jobs/routes/secrets | accepted — six fixed criteria; corrected head `6c3bdcb`, PR #616; real stack and host execution limits below |
 | G5 | Infisical with Agent Proxy adapter | C-03 | planned — not authorized |
 | G6 | OpenBao adapter | C-04 | planned — not authorized |
 | G7 | Vaultwarden adapter | C-05 | planned — not authorized |
@@ -237,7 +237,7 @@ make only the smallest correction. Optional improvements stay backlog. Disposabl
 repository tests only; no production DNS, database, credential or service changes.
 G2 repository completion: **6/6 criteria**. At G2 acceptance, guided milestones
 complete were **2/10 (G1 and G2)**; G3–G10 were unimplemented. Current accepted
-guided progress is **30% (3/10: G1, G2 and G3)**; G4–G10 remain planned.
+guided progress is **40% (4/10: G1, G2, G3 and G4)**; G5–G10 remain planned.
 
 G2.4 merge-review correction (2026-09-22): c180d2f could finish the Keycloak
 parent as `deferred` when its recorded Caddy job still held the shared app
@@ -556,3 +556,24 @@ Pomerium–Keycloak allowed/denied login and Caddy execution remain the recorded
 integration checks, not new completion gates. Details:
 `docs/evidence/g4-acceptance.md`. G4 remains pending, accepted progress **30%**;
 review acceptance would make it **40%**. No merge, deploy or live service changes.
+
+### G4 — review acceptance (2026-09-22)
+
+The user accepted corrected G4 head `6c3bdcb` and authorized its merge in
+PR #616. Accepted guided progress is **40% (4/10: G1, G2, G3 and G4)**.
+This supersedes the pending-review status and original no-merge restriction
+above; the six fixed criteria and denominator remain unchanged.
+
+The accepted evidence includes the exact official-image CA default correction,
+repeat managed apply and existing-container connection, 22 focused passes,
+affected 189 pass / one existing containment skip, the successful frontend build
+and retained responsive checks. This acceptance record changes documentation
+only after the tested code at `6c3bdcb`.
+
+Real Pomerium–Keycloak allowed/denied login and actual Caddy execution remain
+outstanding integration checks. The independent review's Core parser acceptance
+does not establish full startup, which encountered an Envoy sandbox socket
+restriction. Production DNS/network, physical passkeys, native database,
+backup restore and live machine/outage exercises remain separate host acceptance
+limits in `docs/evidence/g4-acceptance.md`. No deployment or live changes are
+authorized by this merge. No new gates, G5–G10, A-17 or Phase F work; stop at G4.

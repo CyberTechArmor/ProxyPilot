@@ -225,8 +225,9 @@ Keycloak 26.7.4/Chromium virtual-passkey ceremonies and an IdP-stopped local rec
 are separate from scripted Caddy/host execution. Frontend build and responsive
 browser checks pass; final accessibility metrics are in `docs/evidence/g3-browser.json`.
 The user accepted G3 `4e7b257` and authorized its merge in PR #615 on 2026-09-22.
-Accepted guided progress is **30% (3/10: G1, G2 and G3)**. Other adapters remain
-planned; the milestone denominator is unchanged. Live-host acceptance limitations
+At G3 acceptance, guided progress was **30% (3/10: G1, G2 and G3)**. With G4
+accepted below, current progress is **40% (4/10)**; G5–G10 remain planned and
+the milestone denominator is unchanged. Live-host acceptance limitations
 remain separate; this merge does not authorize deployment or live-service changes.
 
 ## Milestone D — platform-aware app provisioning and maintenance
@@ -397,3 +398,18 @@ review; full startup/login encountered a sandbox socket restriction. Existing
 real login/Caddy integration checks remain outstanding. No engine redesign,
 installer/updater, A-17, Phase F or later G work. Accepted progress stays **30%**
 until G4 acceptance, then **40%**. Evidence: `docs/evidence/g4-acceptance.md`.
+
+### G4 review acceptance (2026-09-22)
+
+The user accepted corrected head `6c3bdcb` and authorized merge in PR #616.
+Accepted guided progress is now **40% (4/10)**, superseding the pending entries
+above. The six fixed G4 criteria remain the contract; this follow-up records
+acceptance only and changes no tested runtime code.
+
+Evidence remains 22 focused passes, affected 189 pass / one existing containment
+skip, successful frontend build and retained responsive checks. Actual Core
+parser acceptance was reported by the independent review; full startup hit an
+Envoy sandbox socket restriction. Real Pomerium–Keycloak allowed/denied login and
+Caddy execution remain outstanding integration checks. Separate production host
+and outage limits remain in `docs/evidence/g4-acceptance.md`. Merge authorizes no
+deployment or live changes. No G5–G10, A-17 or Phase F continuation; stop at G4.

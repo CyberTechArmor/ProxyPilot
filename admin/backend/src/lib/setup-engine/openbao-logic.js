@@ -37,4 +37,19 @@ export const databaseDetails=r=>({connection_url:databaseUrl(r),username:r.confi
 export const policyFor=r=>{const n=namesFor(r);if(r.config.basic)return `path "${n.prefix}-kv/data/health" { capabilities = ["read"] }\npath "sys/capabilities-self" { capabilities = ["update"] }\npath "auth/token/lookup-self" { capabilities = ["read"] }\npath "auth/token/revoke-self" { capabilities = ["update"] }\n` + [`auth/${n.oidc}/config`,`auth/${n.oidc}/role/mapped`,`auth/${n.approle}/role/workload`,`sys/policies/acl/${n.machine}`,`sys/policies/acl/${n.human}`].map(p=>`path "${p}" { capabilities = ["read"] }\n`).join('');return `path "${n.database}/creds/reader" { capabilities = ["read"] }\npath "sys/capabilities-self" { capabilities = ["update"] }\npath "auth/token/lookup-self" { capabilities = ["read"] }\npath "auth/token/revoke-self" { capabilities = ["update"] }\n` + [`auth/${n.oidc}/config`,`auth/${n.oidc}/role/mapped`,`auth/${n.approle}/role/workload`,`${n.database}/roles/reader`,`${n.database}/config/selected`,`sys/policies/acl/${n.machine}`,`sys/policies/acl/${n.human}`].map(p=>`path "${p}" { capabilities = ["read"] }\n`).join('');};
 export const roleFor=r=>({db_name:'selected',creation_statements:[`CREATE ROLE "{{name}}" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}'; GRANT CONNECT ON DATABASE "${r.config.database.name}" TO "{{name}}"; GRANT USAGE ON SCHEMA public TO "{{name}}"; GRANT SELECT ON TABLE public.g6_probe TO "{{name}}";`],revocation_statements:[`REVOKE ALL ON TABLE public.g6_probe FROM "{{name}}"; REVOKE USAGE ON SCHEMA public FROM "{{name}}"; REVOKE CONNECT ON DATABASE "${r.config.database.name}" FROM "{{name}}"; DROP ROLE "{{name}}";`],default_ttl:60,max_ttl:120});
 export const machineRoleFor=r=>({bind_secret_id:true,secret_id_num_uses:0,secret_id_ttl:0,token_policies:[namesFor(r).machine],token_no_default_policy:true,token_ttl:120,token_max_ttl:120,token_type:'service'});
-export const humanRoleFor=r=>({role_type:'oidc',user_claim:'sub',bound_audiences:[r.config.clientId],bound_claims:{groups:[r.config.group]},bound_claims_type:'string',allowed_redirect_uris:[callbackFor(r)],oidc_scopes:['profile'],token_policies:[namesFor(r).human],token_no_default_policy:true,token_ttl:120,token_max_ttl:120});
+const humanRoleWith=(r,ttl)=>({role_type:'oidc',user_claim:'sub',bound_audiences:[r.config.clientId],bound_claims:{groups:[r.config.group]},bound_claims_type:'string',allowed_redirect_uris:[callbackFor(r)],oidc_scopes:['profile'],token_policies:[namesFor(r).human],token_no_default_policy:true,token_ttl:ttl,token_max_ttl:ttl});
+// Basic profile: a person signed in through Keycloak gets a working session
+// (8 h) on the shared team area; the advanced profile keeps its 2-minute proof.
+export const HUMAN_TTL=28800;
+export const humanRoleFor=r=>humanRoleWith(r,r.config.basic?HUMAN_TTL:120);
+// The team workspace: read/write under <kv>/team/, plus what the web UI needs to
+// list the engine. Nothing else in the vault; the machine policy is unchanged.
+export const humanPolicyFor=r=>{if(!r.config.basic)return policyFor(r);const kv=`${namesFor(r).prefix}-kv`;return [
+  [`${kv}/data/team/*`,'"create", "read", "update", "delete", "list"'],[`${kv}/metadata/team/*`,'"read", "list", "delete"'],[`${kv}/delete/team/*`,'"update"'],[`${kv}/undelete/team/*`,'"update"'],
+  [`${kv}/metadata/`,'"list"'],[`${kv}/config`,'"read"'],[`${kv}/data/health`,'"read"'],['sys/internal/ui/mounts','"read"'],[`sys/internal/ui/mounts/${kv}`,'"read"'],
+  ['sys/capabilities-self','"update"'],['auth/token/lookup-self','"read"'],['auth/token/renew-self','"update"'],['auth/token/revoke-self','"update"'],
+].map(([p,c])=>`path "${p}" { capabilities = [${c}] }\n`).join('');};
+// What ProxyPilot wrote for the human side before the workspace existed. An
+// exact match is upgraded in place (openbao-custody.js upgradeHumanAccess);
+// any other difference is drift.
+export const priorHumanFor=r=>({policy:policyFor(r),role:humanRoleWith(r,120)});

@@ -35,7 +35,7 @@ export default function PlatformLinks({ services, realm }) {
       <p>{PURPOSE[s.id]}</p>
       {s.id === 'keycloak' && <>{link(`${s.url}/admin/master/console/`, 'Administration console')}<br />{realm && link(`${s.url}/realms/${encodeURIComponent(realm)}/account/`, `Your account in ${realm} (passkeys, sessions)`)}</>}
       {s.id === 'openbao' && <>{link(bao?.url || `${s.url}/ui/`, 'Open OpenBao')}
-        {bao && <ol className="list-decimal pl-5 space-y-1"><li>Method <b>OIDC</b> → <b>More options</b> → Mount path: <Copyable value={bao.mountPath} /></li><li>Role: <code>{bao.role}</code> (or blank) → Sign in with Keycloak.</li></ol>}
+        {bao && <ol className="list-decimal pl-5 space-y-1"><li>Method <b>OIDC</b> → <b>More options</b> → Mount path: <Copyable value={bao.mountPath} /></li><li>Role: <code>{bao.role}</code> (or blank) → Sign in with Keycloak.</li>{bao.workspace && <li>To add a secret: Secrets engines → <code className="break-all">{bao.workspace.engine}</code> → Create secret → path <code>{bao.workspace.path}your-name</code>.</li>}</ol>}
         {bao?.scope && <p className="text-muted-foreground">{bao.scope}</p>}</>}
       {['infisical', 'vaultwarden'].includes(s.id) && link(s.url, `Open ${s.name}`)}
       {s.state !== 'verified' && <p className="text-muted-foreground">Setup still has a step to finish for this service (see its stage above).</p>}

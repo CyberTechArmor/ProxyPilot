@@ -2,7 +2,7 @@ import { localEdge } from './local-edge.js';
 import { assertUpstreamListening } from './owned-runtime.js';
 import { readOpenBao,secrets,currentPlan } from './openbao-store.js';
 import { OPENBAO_ROOT,OPENBAO_PORT,OPENBAO_APP,jobSchema,digest,fail,autoCustody } from './openbao-logic.js';
-import { autoUnseal,autoBootstrap } from './openbao-custody.js';
+import { autoUnseal,autoBootstrap,upgradeHumanAccess,humanAccessState } from './openbao-custody.js';
 import { ensureRuntime } from './openbao-runtime.js';
 import { initialize } from './openbao-handoff.js';
 import { createClient,status,requireReady } from './openbao-api.js';
@@ -37,6 +37,7 @@ export async function runOpenBaoOperation({db,params,exec,job,root=OPENBAO_ROOT,
   if(autoCustody(r)&&!r.bootstrap_complete){phase('automatic_bootstrap');if(await autoBootstrap(db,r,api,{job,providerProbe,clientProbe}))r=readOpenBao(db);else return {verification:{state:'awaiting_user_action',label:'ProxyPilot no longer holds the initial root token. Submit it from your recovery kit to configure owned scoped access; it will be revoked after verification.',complete:false}};}
   if(r.config.basic&&!r.bootstrap_complete)return {verification:{state:'awaiting_user_action',label:'Submit the transient initial root token to configure owned scoped access; it will be revoked after verification.',complete:false}};
   if(!r.bootstrap_complete)throw fail('Complete the reviewed transient bootstrap handoff, then apply again. No root token is retained as a runtime identity.');
+  if(r.config.basic){phase('human_workspace');if(autoCustody(r))await upgradeHumanAccess(db,r,api);else if(await humanAccessState(db,r,api)==='prior')return {verification:{state:'awaiting_user_action',label:'The OpenBao team workspace needs a one-time transient root token: generate one from 2 recovery shares and submit it with the bootstrap action. It is revoked right after.',complete:false}};job.fence();}
   phase('keycloak_and_access_verification');let provider;try{provider=verifiedProvider(db,r.config.connectionId);await providerProbe({mode:'connect',url:provider.origin,realm:provider.realm});}catch{throw fail('The saved Keycloak provider is unavailable or unverified.');}job.fence();const client=await clientProbe(db,r);job.fence();
   const token=await verifyMachine(r,secrets(db,r),api);let access,proof;
   try{access=await verifyAccess(r,token,api);phase('selected_postgresql_credential');proof=r.config.basic?{state:'scoped_read_and_denial_verified',advancedEngines:'not_configured'}:await flow(r,token,api,{job});}finally{await api('/v1/auth/token/revoke-self',{method:'POST',token}).catch(()=>{});}

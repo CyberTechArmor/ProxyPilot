@@ -113,6 +113,20 @@ retired. No permanent user's password is offered for reveal.
   checks a temporary owned local destination with allowed and denied requests.
   It does not request a disposable VM. If no private address is available, setup
   pauses for host configuration; it does not create a VPN or public listener.
+- **OpenBao — team workspace (basic profile).** People in the OpenBao group sign
+  in through Keycloak (OIDC, mount `pp-g6-<ref12>-oidc`, role `mapped`; the
+  dashboard's *Use your platform* card shows the steps) and get an 8-hour
+  token with the workspace policy (`humanPolicyFor`): create, read, update and
+  delete under `pp-g6-<ref12>-kv/team/`, plus what the web UI needs to list the
+  engine. The machine AppRole policy is unchanged. An install made before the
+  workspace existed is upgraded on its next apply (`upgradeHumanAccess`): only
+  when the live human policy and role are exactly the earlier ProxyPilot
+  rendering (`priorHumanFor`), ProxyPilot generates a transient root token from
+  the 2 automatic-custody shares it already holds (`withTransientRoot`,
+  generate-root with a one-time pad), writes the two values, revokes the token
+  and proves the revocation. Any other difference is refused as drift, and a
+  root generation somebody else started is never cancelled. PGP custody: the
+  job asks for a transient root token through the bootstrap action instead.
 - **OpenBao — recovery custody.** Two choices under *OpenBao recovery custody*:
   - **Set up OpenBao automatically (default).** `POST /full/openbao/recovery`
     with `{ revision, custody: 'auto', reviewed: true }` (no keys) saves

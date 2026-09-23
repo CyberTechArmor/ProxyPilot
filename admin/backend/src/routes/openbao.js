@@ -10,8 +10,9 @@ import { reachableStatus } from '../lib/setup-engine/openbao-custody.js';
 export const openbaoRouter=Router();
 // How a person signs in through the OpenBao web UI: the OIDC method is mounted at
 // an owned path, not the UI's default "oidc", so a blank mount gives "Invalid role".
-const signInFor=r=>{const n=namesFor(r);return {url:`${r.config.origin}/ui/`,method:'OIDC',mountPath:n.oidc,role:'mapped',group:r.config.group,tokenMinutes:2,
-  scope:r.config.basic?`Read-only proof access: the ${n.prefix}-kv/data/health marker and the owned auth/policy settings. It cannot create or read other secrets, and the token lasts 2 minutes.`:`Read-only proof access: ${n.database}/creds/reader and the owned auth/policy settings; the token lasts 2 minutes.`};};
+const signInFor=r=>{const n=namesFor(r);return {url:`${r.config.origin}/ui/`,method:'OIDC',mountPath:n.oidc,role:'mapped',group:r.config.group,tokenMinutes:r.config.basic?480:2,
+  workspace:r.config.basic?{engine:`${n.prefix}-kv`,path:'team/'}:null,
+  scope:r.config.basic?`Members of ${r.config.group} share a team area: create, read, update and delete secrets under ${n.prefix}-kv → team/. Nothing else in the vault is visible. Sessions last 8 hours.`:`Read-only proof access: ${n.database}/creds/reader and the owned auth/policy settings; the token lasts 2 minutes.`};};
 openbaoRouter.use(requireAdmin,(_req,res,next)=>{res.set('Cache-Control','no-store');next();});
 const respond=async(res,fn)=>{try{await fn();}catch(e){res.status(e.openbaoSafe?e.status:500).json({error:e.openbaoSafe?e.message:'OpenBao setup could not be completed. Credentials and upstream details withheld.'});}};
 openbaoRouter.get('/',(_req,res)=>respond(res,async()=>{const db=getDb(),r=readOpenBao(db),s=state(db);let {api,health}=r?await reachableStatus(db,r):{health:{state:'not_configured'}},matches=true;try{if(r)currentPlan(db,r);}catch{matches=false;}

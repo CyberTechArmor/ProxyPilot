@@ -7,6 +7,7 @@ import { createJob, getJob, jobView } from './store.js';
 import { validateRouteEdgeOptions } from '../caddy-site-file.js';
 import { vpnNetworks, additionalOf, effectiveNetworks, effectiveFor } from './platform-networks.js';
 import { dnsRefusal } from './platform-dns.js';
+import { AGENT_ROLE_RISK } from './infisical-logic.js';
 
 export const FULL_PLATFORM_APP = 'pp-full-platform';
 export const RESET_ROUTES_APP = 'pp-platform-reset-routes';
@@ -246,7 +247,7 @@ export function fullPlatformState(db) {
     const needsCeremony = id === 'vaultwarden' && verification && ceremony?.configurationFingerprint !== verification.configurationFingerprint;
     const removed = r?.state?.removed?.[id];
     const state = removed ? 'runtime_removed' : !available ? 'dependency_required' : current && ['failed', 'recovery_required', 'refused'].includes(current.status) ? 'failed' : current && ['queued', 'running'].includes(current.status) ? current.status : needsCeremony || observed?.state === 'awaiting_user_action' ? 'awaiting_user_action' : verification ? 'verified' : row?.resources_json ? 'installed' : row ? 'awaiting_user_action' : 'planned';
-    return { id, name, stage: STAGE_OF[id], state, available, ownership: t?.mode === 'install' ? 'managed' : t ? 'external' : null, url: config.services[id].url, job: current, verification, action: !available ? 'Waiting for G7 Vaultwarden adapter' : state === 'verified' ? verification.label : needsCeremony ? 'Complete the vault sign-in, unlock and denial checks directly in Vaultwarden.' : observed?.label || r?.state?.actions?.[id] || current?.reason || null };
+    return { id, name, stage: STAGE_OF[id], state, available, risk: id === 'infisical' && (t?.mode === 'install' || !t) ? AGENT_ROLE_RISK : null, ownership: t?.mode === 'install' ? 'managed' : t ? 'external' : null, url: config.services[id].url, job: current, verification, action: !available ? 'Waiting for G7 Vaultwarden adapter' : state === 'verified' ? verification.label : needsCeremony ? 'Complete the vault sign-in, unlock and denial checks directly in Vaultwarden.' : observed?.label || r?.state?.actions?.[id] || current?.reason || null };
   });
   // A successful coordinator job is not evidence of service or access completion.
   const sso = one(db, 'sso_config');

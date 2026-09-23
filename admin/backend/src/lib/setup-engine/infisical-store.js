@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { encryptSecret,decryptSecret,isEncrypted } from '../secrets.js';
 import { createJob,getJob,jobView } from './store.js';
+import { builtinRolesFor, AGENT_ROLE_RISK } from './infisical-logic.js';
 import { INFISICAL_APP,INFISICAL_ROOT,INFISICAL_IMAGE,AGENT_PROXY_IMAGE,TEST_ENV,TEST_PATH,TEST_KEY,PROXY_KEY,digest,privateIp,infisicalError as fail,infisicalConfigSchema,infisicalIdentitiesSchema,expectedPolicies,desiredProxiedService } from './infisical-logic.js';
 export const INFISICAL_SCHEMA=`
 CREATE TABLE IF NOT EXISTS setup_infisical(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL,config_json TEXT NOT NULL,identities_json TEXT,credential_ref TEXT NOT NULL,last_job_id TEXT,edge_job_id TEXT,resources_json TEXT,verified_json TEXT,created_at TEXT NOT NULL);
@@ -48,7 +49,7 @@ export function saveInfisicalIdentities(db,raw){const input=infisicalIdentitiesS
 export function reviewInfisical(db){const r=readInfisical(db);if(!r)return null;
   const handoff={organization:'Create or select one dedicated test organization. Preserve unrelated organizations.',project:'Create or select one dedicated Secret Management project; use the environment and folder below only.',environment:TEST_ENV,path:TEST_PATH,secretName:TEST_KEY,proxySecretName:PROXY_KEY,
     identityInstructions:'Create separate machine identities with organization No Access and project No Access. Enable Universal Auth; use a 300-second access-token TTL/max TTL. Add exactly the scoped policies shown. Do not grant Admin, Member, Viewer, wildcards, dynamic-secret leases or additional memberships.',
-    policies:r.identities?expectedPolicies(r.identities,r.config.agentMode):null,proxiedService:r.identities&&r.config.agentMode!=='skip'?desiredProxiedService(r.config,r.identities.projectId):null,
+    policies:r.identities&&!r.config.basic?expectedPolicies(r.identities,r.config.agentMode):null,builtinRoles:r.config.basic?builtinRolesFor(r.config.agentMode):null,risk:r.config.basic&&r.config.agentMode!=='skip'?AGENT_ROLE_RISK:null,proxiedService:r.identities&&r.config.agentMode!=='skip'?desiredProxiedService(r.config,r.identities.projectId):null,
     edition:'Static Agent Proxy is available in the self-hosted default. Scoped permissions depend on edition/entitlements; a denied permission-audit or policy capability blocks verification. Keycloak human SSO is optional and requires oidcSSO; it is never a base-flow prerequisite.',
     proxyRuntime:{network:r.config.agentMode==='connect'?'Existing dedicated bridge, inspected without changes':`pp-if-${r.credential_ref.slice(-12)}-proxy-net`,volume:r.config.agentMode==='connect'?'Existing named volume at /root/.infisical, inspected without changes':`pp-if-${r.credential_ref.slice(-12)}-proxy-state`,container:r.config.externalProxyContainer||`pp-if-${r.credential_ref.slice(-12)}-proxy`,environmentRef:`${INFISICAL_ROOT}/agent-proxy.env`,command:['secrets','agent-proxy','start','--unmatched-host=block','--poll-interval=30','--telemetry=false'],logging:'none'},
     protectedDirectory:INFISICAL_ROOT,backup:'Keep the PostgreSQL-consistent data backup, Redis data, protected directory, ProxyPilot SQLite/encryption key and Caddy references together. The standard configuration pack alone omits service data.'};

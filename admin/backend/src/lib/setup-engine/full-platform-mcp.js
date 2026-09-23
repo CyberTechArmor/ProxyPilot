@@ -144,7 +144,7 @@ export function platformSetupView(db) {
   const opRunning = !!(operation && OPEN.includes(operation.status));
   const services = s.services.map((x) => ({
     id: x.id, name: x.name, stage: x.stage, url: x.url, ownership: x.ownership, state: x.state,
-    job: x.job ? jobSummary(x.job) : null, action: x.action ? redactText(x.action) : null, removed: !!s.state?.removed?.[x.id],
+    job: x.job ? jobSummary(x.job) : null, action: x.action ? redactText(x.action) : null, removed: !!s.state?.removed?.[x.id], ...(x.risk ? { risk: x.risk } : {}),
   }));
   const failures = [];
   if (operation && FAILED.includes(operation.status)) failures.push({ scope: 'operation', job_id: operation.id, job: operation.kind, reason_code: operation.phase || operation.outcome, reason: operation.reason, ...pick(classify(db, operation.reason, { phase: operation.phase })) });
@@ -384,7 +384,7 @@ export function platformServiceView(db, service, { runtime = null, runtimeError 
   const connectionId = service === 'keycloak' ? row?.id : row?.config?.connectionId;
   const out = {
     service, name: entry.name, selected: entry.state !== 'skipped', mode: s.config.services[service].mode, url: entry.url, state: entry.state,
-    ownership, record: !!row, removed: !!s.state?.removed?.[service],
+    ownership, record: !!row, removed: !!s.state?.removed?.[service], ...(entry.risk ? { risk: entry.risk } : {}),
     images_expected: IMAGES[service], loopback_ports: PORTS[service],
     containers: names.map((n) => { const pending = runtime && !runtime[n] ? pendingContainer(service, row, n) : null; return { name: n, ...(runtime?.[n] || { present: runtime ? false : null }), ...(pending ? { pending: true, status: pending } : {}) }; }),
     networks: ownership === 'owned' ? ownedNetworks(service, row) : [],

@@ -1,7 +1,7 @@
 import { mkdirSync,lstatSync,existsSync,readdirSync,readFileSync,chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { readPrivate,atomicPrivate } from './pomerium-runtime.js';
-import { LOG_ARGS,dockerFailure,startOwnedContainer } from './owned-runtime.js';
+import { LOG_ARGS,dockerFailure,startOwnedContainer,sameArgv,sameUser } from './owned-runtime.js';
 import { OPENBAO_ROOT,OPENBAO_IMAGE,OPENBAO_PORT,POSTGRES_CA_PATH,fail,namesFor,digest } from './openbao-logic.js';
 const OWNER='io.proxypilot.openbao';
 export function privateDir(path){mkdirSync(path,{recursive:true,mode:0o700});const s=lstatSync(path);if(!s.isDirectory()||s.isSymbolicLink()||s.uid!==process.getuid()||(s.mode&0o077))throw fail('OpenBao protected directory ownership or permissions are unsafe.');}
@@ -31,7 +31,7 @@ export async function ensureRuntime(r,{exec,job,root=OPENBAO_ROOT,sleep,startTim
   const mounts=[['volume',n.volume,'/openbao/file',true],['volume',n.logs,'/openbao/logs',true],['bind',files.config,'/openbao/config/server.json',false],...(files.ca?[['bind',files.ca,POSTGRES_CA_PATH,false]]:[])];
   if(c.Image!==OPENBAO_IMAGE||c.Labels?.[OWNER]!==owner||digest(c.Cmd)!==digest(['server'])||h.NetworkMode!==n.network||h.RestartPolicy?.Name!=='unless-stopped'||h.Memory!==536870912||h.MemorySwap!==536870912||h.Privileged||h.CapAdd?.length||h.Devices?.length||h.PidMode||h.IpcMode==='host'||digest(h.PortBindings||{})!==digest(ports)||m.length!==mounts.length||mounts.some(([type,source,target,rw])=>!m.some(x=>x.Type===type&&(type==='volume'?x.Name:x.Source)===source&&x.Destination===target&&x.RW===rw))||Object.keys(a.NetworkSettings?.Networks||{}).some(x=>x!==n.network))throw fail('OpenBao runtime differs from its reviewed private, persistent single-node profile. No replacement was attempted.');
   const image=JSON.parse(await call(['image','inspect',OPENBAO_IMAGE]))[0];
-  if(a.Image!==image.Id||digest(c.Entrypoint)!==digest(image.Config.Entrypoint)||digest(c.Env)!==digest(image.Config.Env)||c.User!==image.Config.User)throw fail('OpenBao runtime has an unreviewed image, entrypoint, environment or user override.');
+  if(a.Image!==image.Id||!sameArgv(c.Entrypoint,image.Config?.Entrypoint)||digest(c.Env||[])!==digest(image.Config?.Env||[])||!sameUser(c.User,image.Config?.User))throw fail('OpenBao runtime has an unreviewed image, entrypoint, environment or user override.');
   // OpenBao starts sealed; running is the readiness this step can prove (3b).
   await startOwnedContainer({run:argv=>exec.host(argv,{timeoutMs:120000}),name:n.server,fail,job,label:'OpenBao server',requireHealth:false,sleep,startTimeoutMs});
   job.generated({kind:'openbao_data_configuration',name:owner,where:root});return {...n,directory:root,config:files.config,image:OPENBAO_IMAGE};

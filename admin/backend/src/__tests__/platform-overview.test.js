@@ -332,7 +332,9 @@ test('the overview: health from inspect, broken when the upstream is not listeni
   const by = Object.fromEntries(o.services.map((s) => [s.id, s]));
   assert.equal(o.docker.default_log_driver, 'journald');
   assert.equal(by.infisical.health.status, 'broken');
-  assert.match(by.infisical.health.reason, /missing: .*proxy/); assert.match(by.infisical.health.reason, /127\.0\.0\.1:18085 is not listening/);
+  // The Agent Proxy is created after the Infisical bootstrap: pending, not missing.
+  assert.ok(!by.infisical.health.missing.some((n) => /proxy/.test(n))); assert.match(by.infisical.health.reason, /proxy: pending — created after bootstrap/);
+  assert.equal(by.infisical.health.pending[0].status, 'pending — created after bootstrap'); assert.match(by.infisical.health.reason, /127\.0\.0\.1:18085 is not listening/);
   assert.equal(by.vaultwarden.route.recorded, false);
   assert.equal(by.vaultwarden.dns.ok, false); assert.equal(by.vaultwarden.dns.agree, false);
   const retry = by.vaultwarden.actions.find((a) => a.id === 'retry');

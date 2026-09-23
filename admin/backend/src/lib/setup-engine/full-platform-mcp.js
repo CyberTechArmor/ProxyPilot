@@ -317,6 +317,35 @@ export function containerNames(service, row) {
   return [vaultNames(row).server];
 }
 
+/** The owned Docker networks of one service, with what each is for (reset and drift use the same names). */
+export function ownedNetworks(service, row) {
+  if (!row) return [];
+  if (service === 'keycloak') return [{ name: resourceNames(row.id).network, internal: false, members: containerNames(service, row), purpose: 'Keycloak and its database' }];
+  if (service === 'infisical') {
+    const n = infisicalNames(row);
+    return [
+      { name: n.network, internal: true, members: [n.database, n.redis, n.server], purpose: 'private data network (no route out)' },
+      { name: n.edgeNetwork, internal: false, masquerade: false, members: [n.server], purpose: `published port 127.0.0.1:${INFISICAL_PORT} only — Docker publishes nothing for a container on internal networks alone` },
+      { name: n.proxyNetwork, internal: false, members: [n.proxy], purpose: 'Agent Proxy' },
+    ];
+  }
+  if (service === 'openbao') return [{ name: baoNames(row).network, internal: false, members: [baoNames(row).server], purpose: 'OpenBao server' }];
+  if (service === 'vaultwarden') return [{ name: vaultNames(row).network, internal: false, members: [vaultNames(row).server], purpose: 'Vaultwarden server' }];
+  return [];
+}
+
+/**
+ * An expected container that is absent only because the step that creates it
+ * has not run yet — reported as pending, not as missing/broken. Today: the
+ * Infisical Agent Proxy, created after the Infisical bootstrap handoff.
+ */
+export function pendingContainer(service, row, name) {
+  if (service !== 'infisical' || !row) return null;
+  const n = infisicalNames(row);
+  if (name === n.proxy && row.config?.agentMode !== 'skip' && !row.resources?.proxy?.container) return 'pending — created after bootstrap';
+  return null;
+}
+
 export function rowFor(db, service) {
   const t = installedTargets(db)[service];
   return t ? { target: t, row: service === 'keycloak' ? t.row : serviceReaders[service](db) } : { target: null, row: null };
@@ -347,7 +376,8 @@ export function platformServiceView(db, service, { runtime = null, runtimeError 
     service, name: entry.name, selected: entry.state !== 'skipped', mode: s.config.services[service].mode, url: entry.url, state: entry.state,
     ownership, record: !!row, removed: !!s.state?.removed?.[service],
     images_expected: IMAGES[service], loopback_ports: PORTS[service],
-    containers: names.map((n) => ({ name: n, ...(runtime?.[n] || { present: runtime ? false : null }) })),
+    containers: names.map((n) => { const pending = runtime && !runtime[n] ? pendingContainer(service, row, n) : null; return { name: n, ...(runtime?.[n] || { present: runtime ? false : null }), ...(pending ? { pending: true, status: pending } : {}) }; }),
+    networks: ownership === 'owned' ? ownedNetworks(service, row) : [],
     runtime_error: runtimeError,
     route: route ? { hostname: host, route_id: route.route_id, recorded: !!routeRow, upstream: `127.0.0.1:${route.port}`, restricted_networks: routeRow?.ip_allowlist_json ? parseJson(routeRow.ip_allowlist_json) : null, other_routes_on_hostname: foreign } : { hostname: host, recorded: false, other_routes_on_hostname: foreign },
     verification,
@@ -386,6 +416,7 @@ export function runtimeFacts(service, row, inspected) {
     out[name] = { present: true, id: String(c.Id || '').slice(0, 12), image: c.Config?.Image || null, running: !!c.State?.Running, status: c.State?.Status || null,
       health: c.State?.Health?.Status || (c.State?.Running ? 'running (no healthcheck)' : 'stopped'), started_at: c.State?.StartedAt || null, owned_label: c.Config?.Labels?.[label] === ref,
       ...(c.State?.Running ? {} : { exit_code: c.State?.ExitCode ?? null, error: c.State?.Error ? redactLogText(String(c.State.Error)).slice(0, 300) : null, finished_at: c.State?.FinishedAt || null }),
+      networks: Object.keys(c.NetworkSettings?.Networks || {}),
       log_driver: driver, logs_readable: driver ? driver !== 'none' : null };
   }
   return out;

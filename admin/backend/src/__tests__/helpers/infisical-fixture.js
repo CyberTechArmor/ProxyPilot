@@ -12,14 +12,19 @@ export function dockerFixture(){const objects={container:new Map(),network:new M
   const images=Object.fromEntries([INFISICAL_IMAGE,INFISICAL_DB_IMAGE,INFISICAL_REDIS_IMAGE,AGENT_PROXY_IMAGE].map(image=>[image,{Id:'sha256:'+image,Config:{Env:['PATH=/bin'],Entrypoint:image===AGENT_PROXY_IMAGE?['/sbin/tini','--','/bin/infisical']:['entrypoint'],Cmd:['default']}}]));
   const host=async argv=>{calls.push(argv);if(argv[0]==='incus')return {code:0,stdout:JSON.stringify([vm])};
     // Listening sockets: the published ports of running containers.
-    if(argv[0]==='ss')return {code:0,stdout:[...objects.container.values()].filter(c=>c.State?.Running).flatMap(c=>Object.values(c.HostConfig?.PortBindings||{}).flat()).map(b=>`LISTEN 0 4096 ${b.HostIp}:${b.HostPort} 0.0.0.0:*`).join('\n'),stderr:''};const a=argv.slice(1),ok=s=>({code:0,stdout:s||'',stderr:''});
+    // As Docker does: a published port binds only for a container attached to
+    // at least one NON-internal network (internal-only → --publish is inert).
+    if(argv[0]==='ss')return {code:0,stdout:[...objects.container.values()].filter(c=>c.State?.Running&&Object.keys(c.NetworkSettings.Networks).some(n=>objects.network.get(n)&&!objects.network.get(n).Internal)).flatMap(c=>Object.values(c.HostConfig?.PortBindings||{}).flat()).map(b=>`LISTEN 0 4096 ${b.HostIp}:${b.HostPort} 0.0.0.0:*`).join('\n'),stderr:''};const a=argv.slice(1),ok=s=>({code:0,stdout:s||'',stderr:''});
     if(failure?.(a)){failure=null;return {code:1,stdout:'',stderr:'DO-NOT-LOG-RAW-RUNTIME-CREDENTIAL'};}
     if(a[0]==='version')return ok('28.0');
     if(a[0]==='image'&&a[1]==='inspect')return ok(JSON.stringify([images[a[2]]]));
     if(objects[a[0]]&&a[1]==='ls')return ok([...objects[a[0]].keys()].join('\n'));
     if(objects[a[0]]&&a[1]==='inspect'){const v=objects[a[0]].get(String(a[2]).replace(/^id-/,''));return v?ok(JSON.stringify([v])):{code:1,stdout:'',stderr:'No such object'};}
     const labels=()=>Object.fromEntries(a.flatMap((x,i)=>x==='--label'?[a[i+1].split('=')]:[]));
-    if(['network','volume'].includes(a[0])&&a[1]==='create'){objects[a[0]].set(a.at(-1),{Name:a.at(-1),Labels:labels(),Internal:a.includes('--internal'),Driver:a[0]==='network'?'bridge':'local',Options:{}});return ok(a.at(-1));}
+    if(['network','volume'].includes(a[0])&&a[1]==='create'){objects[a[0]].set(a.at(-1),{Name:a.at(-1),Labels:labels(),Internal:a.includes('--internal'),Driver:a[0]==='network'?'bridge':'local',Options:Object.fromEntries(a.flatMap((x,i)=>x==='--opt'?[a[i+1].split('=')]:[])),Containers:{}});return ok(a.at(-1));}
+    if(a[0]==='network'&&a[1]==='connect'){const c=objects.container.get(String(a[3]).replace(/^id-/,''));c.NetworkSettings.Networks[a[2]]={};return ok('');}
+    if(a[0]==='stop'){const c=objects.container.get(String(a.at(-1)).replace(/^id-/,''));c.State.Running=false;c.State.Status='exited';return ok(a.at(-1));}
+    if(a[0]==='rm'){objects.container.delete(String(a.at(-1)).replace(/^id-/,''));return ok(a.at(-1));}
     if(a[0]==='create'){
       const imageIndex=a.findIndex(x=>images[x]),image=a[imageIndex],defaults=images[image];if(imageIndex<0)throw Error('unknown fixture image');
       const mounts=a.flatMap((x,i)=>{if(x!=='--mount')return [];const v=Object.fromEntries(a[i+1].split(',').map(p=>p.split('=')));return [{Type:v.type,Name:v.source,Source:v.source,Destination:v.target,RW:!('readonly'in v)}];});

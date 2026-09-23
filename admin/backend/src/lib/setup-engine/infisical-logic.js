@@ -16,7 +16,7 @@ export const PROXY_KEY = 'PP_G5_PROXY_CREDENTIAL';
 export const TEST_PATH = '/proxypilot-g5';
 export const TEST_ENV = 'g5';
 export const PLACEHOLDER = 'pp-g5-placeholder-not-a-credential';
-export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const digest = value => createHash('sha256').update(JSON.stringify(value) ?? 'undefined').digest('hex');
 export const infisicalError = message => Object.assign(new Error(message), { status:409, infisicalSafe:true });
 export function privateIp(ip) { if(isIP(ip)!==4)return false; const [a,b]=ip.split('.').map(Number);return a===10 || (a===172&&b>=16&&b<=31) || (a===192&&b===168); }
 const id=z.string().uuid();

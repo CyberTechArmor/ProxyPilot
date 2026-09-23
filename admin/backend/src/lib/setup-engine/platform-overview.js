@@ -164,7 +164,10 @@ export async function serviceOverview(db, service, { run, resolvers, fresh = fal
   const port = recordedPort || SERVICE_PORTS[service][0];
   const upstream = { address: `127.0.0.1:${port}`, port, listening: listen ? listen.includes(Number(port)) : null };
   const containers = view.containers;
-  const missing = rt.runtime ? containers.filter((c) => c.present === false).map((c) => c.name) : [];
+  // A pending container (not created yet by design, e.g. the Agent Proxy
+  // before bootstrap) is neither missing nor a reason for "broken".
+  const missing = rt.runtime ? containers.filter((c) => c.present === false && !c.pending).map((c) => c.name) : [];
+  const pending = containers.filter((c) => c.pending).map((c) => ({ name: c.name, status: c.status }));
   const notRunning = containers.filter((c) => c.present && !c.running);
   const unhealthy = containers.filter((c) => c.running && c.health === 'unhealthy');
   let health = 'unknown', healthReason = null;
@@ -172,21 +175,22 @@ export async function serviceOverview(db, service, { run, resolvers, fresh = fal
   else if (!row) { health = 'not_installed'; healthReason = 'No saved service record yet; the coordinator prepares it.'; }
   else if (rt.runtimeError) { health = 'unknown'; healthReason = `Docker unreachable: ${rt.runtimeError}`; }
   else if (!rt.runtime) { health = 'unknown'; }
-  else if (missing.length === containers.length) { health = 'not_installed'; healthReason = 'No owned container exists yet.'; }
+  else if (missing.length + pending.length === containers.length && !containers.some((c) => c.present)) { health = 'not_installed'; healthReason = 'No owned container exists yet.'; }
   else {
     const reasons = [];
     if (missing.length) reasons.push(`expected but missing: ${missing.join(', ')}`);
     for (const c of notRunning) reasons.push(`${c.name} is ${c.status}${c.exit_code != null ? ` (exit ${c.exit_code})` : ''}${c.error ? `: ${c.error}` : ''}`);
     for (const c of unhealthy) reasons.push(`${c.name} is unhealthy`);
     if (view.route?.recorded && upstream.listening === false) reasons.push(`the route's upstream ${upstream.address} is not listening`);
-    health = reasons.length ? 'broken' : 'healthy'; healthReason = reasons.join('; ') || null;
+    health = reasons.length ? 'broken' : 'healthy';
+    healthReason = [...reasons, ...pending.map((p) => `${p.name}: ${p.status}`)].join('; ') || null;
   }
   const dns = hostname ? (dnsResults?.[hostname] || (await checkHostnames(db, [hostname], { resolvers, fresh })).results[hostname]) : null;
   const op = operationRunning(db, service);
   const entry = s.services.find((x) => x.id === service);
   return redact({
     id: service, name: NAMES[service], url: entry.url || null, selected, mode, ownership, state: entry.state,
-    health: { status: health, reason: healthReason, containers, missing, runtime_error: rt.runtimeError, verification: view.verification, live_check: liveCheck(db, service) },
+    health: { status: health, reason: healthReason, containers, missing, pending, runtime_error: rt.runtimeError, verification: view.verification, live_check: liveCheck(db, service) },
     upstream,
     route: { hostname, route_id: view.route?.route_id || null, recorded: !!view.route?.recorded, restricted_networks: view.route?.restricted_networks || null, other_routes_on_hostname: view.route?.other_routes_on_hostname || [], created_by: 'the service adapter' },
     dns: dns ? { ...dns, links: dnsLinks(dns) } : null,

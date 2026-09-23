@@ -62,7 +62,7 @@ const CREDENTIAL_TABLE = { pomerium: 'setup_pomerium_credentials', infisical: 's
 
 function networksFor(service, row) {
   if (service === 'keycloak') return [resourceNames(row.id).network];
-  if (service === 'infisical') { const n = infisicalNames(row); return [n.network, n.proxyNetwork]; }
+  if (service === 'infisical') { const n = infisicalNames(row); return [n.network, n.edgeNetwork, n.proxyNetwork]; }
   if (service === 'openbao') return [baoNames(row).network];
   if (service === 'vaultwarden') return [vaultNames(row).network];
   return []; // Pomerium runs on the host network

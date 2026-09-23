@@ -8,7 +8,7 @@ export const VAULTWARDEN_IMAGE = 'vaultwarden/server:1.37.3';
 export const VAULTWARDEN_APP = 'pp-platform-vaultwarden';
 export const VAULTWARDEN_ROOT = '/var/lib/proxypilot/vaultwarden';
 export const VAULTWARDEN_PORT = 18380;
-export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const digest = value => createHash('sha256').update(JSON.stringify(value) ?? 'undefined').digest('hex');
 export const fail = message => Object.assign(new Error(message), { status: 409, vaultwardenSafe: true });
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,99}$/);
 const secret = z.string().min(16).max(8192).regex(/^[^\r\n\0]+$/);

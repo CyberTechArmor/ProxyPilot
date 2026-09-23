@@ -10,7 +10,7 @@ export const OPENBAO_ROOT='/var/lib/proxypilot/openbao';
 export const RECOVERY_ROOT='/var/lib/proxypilot-openbao-recovery';
 export const OPENBAO_PORT=18200;
 export const POSTGRES_CA_PATH='/openbao/config/postgres-ca.pem';
-export const digest=v=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
+export const digest=v=>createHash('sha256').update(JSON.stringify(v) ?? 'undefined').digest('hex');
 export const fail=message=>Object.assign(new Error(message),{status:409,openbaoSafe:true});
 const name=z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,99}$/);
 const value=z.string().min(16).max(8192).regex(/^[^\r\n\0]+$/);

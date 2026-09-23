@@ -3,10 +3,19 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
 import { readPrivate,atomicPrivate } from './pomerium-runtime.js';
-import { LOG_ARGS,dockerFailure,startOwnedContainer } from './owned-runtime.js';
+import { LOG_ARGS,dockerFailure,startOwnedContainer,sameArgv } from './owned-runtime.js';
 import { INFISICAL_ROOT,INFISICAL_IMAGE,INFISICAL_DB_IMAGE,INFISICAL_REDIS_IMAGE,AGENT_PROXY_IMAGE,INFISICAL_PORT,infisicalError as fail,digest } from './infisical-logic.js';
 const OWNER='io.proxypilot.infisical';
-export const namesFor=r=>{const prefix=`pp-if-${r.credential_ref.slice(-12)}`;return {network:`${prefix}-data-net`,proxyNetwork:`${prefix}-proxy-net`,database:`${prefix}-db`,redis:`${prefix}-redis`,server:`${prefix}-server`,proxy:`${prefix}-proxy`,databaseVolume:`${prefix}-pg`,redisVolume:`${prefix}-redis-data`,proxyVolume:`${prefix}-proxy-state`};};
+// Networks: `network` (data-net) is --internal and carries db, redis and the
+// server; `edgeNetwork` is a second owned bridge that ONLY the server joins, so
+// its published port binds. Docker publishes no port for a container whose
+// every network is internal (the --publish is accepted and silently inert).
+// The edge bridge has IP masquerade off: the published loopback port works,
+// but the server still has no outbound route, as on the internal-only profile.
+export const EDGE_NETWORK_OPTIONS=Object.freeze({'com.docker.network.bridge.enable_ip_masquerade':'false'});
+// Options a daemon may report on its own for a plain bridge; nothing else is tolerated.
+const DAEMON_DEFAULT_OPTIONS={'com.docker.network.enable_ipv4':'true','com.docker.network.enable_ipv6':'false'};
+export const namesFor=r=>{const prefix=`pp-if-${r.credential_ref.slice(-12)}`;return {network:`${prefix}-data-net`,edgeNetwork:`${prefix}-edge-net`,proxyNetwork:`${prefix}-proxy-net`,database:`${prefix}-db`,redis:`${prefix}-redis`,server:`${prefix}-server`,proxy:`${prefix}-proxy`,databaseVolume:`${prefix}-pg`,redisVolume:`${prefix}-redis-data`,proxyVolume:`${prefix}-proxy-state`};};
 function privateDir(path){mkdirSync(path,{recursive:true,mode:0o700});const s=lstatSync(path);if(!s.isDirectory()||s.isSymbolicLink()||s.uid!==process.getuid()||(s.mode&0o077))throw fail('Infisical protected directory has unsafe ownership or permissions.');}
 function immutableFile(path,content){if(existsSync(path)){if(readPrivate(path)!==content)throw fail('Protected Infisical configuration drifted; restore its matching backup set.');}else atomicPrivate(path,content);}
 export function prepareInfisicalFiles(r,{root=INFISICAL_ROOT,resourcesExist=false}={}) {
@@ -44,7 +53,10 @@ export function dockerAdapter(exec,job){
 export function assertContainer(actual,spec,{external=false}={}) {
   const c=actual.Config||{},h=actual.HostConfig||{},ports=h.PortBindings||{},mounts=actual.Mounts||[];
   const samePorts=digest(ports)===digest(spec.ports||{});
-  if(c.Image!==spec.image||(!external&&c.Labels?.[OWNER]!==spec.owner)||h.NetworkMode!==spec.network||h.RestartPolicy?.Name!=='unless-stopped'||h.Privileged||h.PidMode||h.IpcMode==='host'||h.CapAdd?.length||h.Devices?.length||!samePorts||mounts.length!==spec.mounts.length||spec.mounts.some(m=>!mounts.some(a=>a.Type===m.Type&&a.Destination===m.Destination&&(m.Type==='volume'?a.Name===m.Name:a.Source===m.Source)&&a.RW===m.RW))||Object.keys(actual.NetworkSettings?.Networks||{}).some(n=>n!==spec.network))throw fail('Docker container configuration or isolation differs from the reviewed profile. No adoption, replacement or restart was attempted.');
+  // spec.network is the primary (NetworkMode); spec.networks every network the
+  // container must be on — exactly those, no more.
+  const wanted=[...new Set([spec.network,...(spec.networks||[])])].sort(),attached=Object.keys(actual.NetworkSettings?.Networks||{}).sort();
+  if(c.Image!==spec.image||(!external&&c.Labels?.[OWNER]!==spec.owner)||h.NetworkMode!==spec.network||h.RestartPolicy?.Name!=='unless-stopped'||h.Privileged||h.PidMode||h.IpcMode==='host'||h.CapAdd?.length||h.Devices?.length||!samePorts||mounts.length!==spec.mounts.length||spec.mounts.some(m=>!mounts.some(a=>a.Type===m.Type&&a.Destination===m.Destination&&(m.Type==='volume'?a.Name===m.Name:a.Source===m.Source)&&a.RW===m.RW))||digest(attached)!==digest(wanted))throw fail('Docker container configuration or isolation differs from the reviewed profile. No adoption, replacement or restart was attempted.');
   if(spec.command&&digest(c.Cmd)!==digest(spec.command))throw fail('Agent Proxy command differs from the pinned start/block profile.');
   const env=Object.fromEntries((c.Env||[]).map(x=>{const p=x.indexOf('=');return [x.slice(0,p),x.slice(p+1)];}));
   for(const [k,v] of Object.entries(spec.env||{}))if(env[k]!==v)throw fail('Docker credential/configuration environment differs from the protected reference.');
@@ -54,27 +66,53 @@ const envObject=text=>Object.fromEntries(text.trim().split('\n').filter(Boolean)
 export async function ensureInfisicalRuntime(r,{exec,job,root=INFISICAL_ROOT,attempts=45,sleep=ms=>new Promise(done=>setTimeout(done,ms))}={}) {
   const d=dockerAdapter(exec,job),names=namesFor(r),owner=r.credential_ref;
   await d.must(['version','--format','{{.Server.Version}}'],'Docker availability');
-  const inventory={};for(const [key,kind] of [['network','network'],['databaseVolume','volume'],['redisVolume','volume'],['database','container'],['redis','container'],['server','container']]){inventory[key]=await d.inspect(kind,names[key]);const v=inventory[key];if(v&&(kind==='container'?v.Config?.Labels:v.Labels)?.[OWNER]!==owner)throw fail(`Resource collision: ${names[key]}. Unrelated resources were preserved.`);}
+  const inventory={};for(const [key,kind] of [['network','network'],['edgeNetwork','network'],['databaseVolume','volume'],['redisVolume','volume'],['database','container'],['redis','container'],['server','container']]){inventory[key]=await d.inspect(kind,names[key]);const v=inventory[key];if(v&&(kind==='container'?v.Config?.Labels:v.Labels)?.[OWNER]!==owner)throw fail(`Resource collision: ${names[key]}. Unrelated resources were preserved.`);}
   const files=prepareInfisicalFiles(r,{root,resourcesExist:Object.values(inventory).some(Boolean)});
   const labels=['--label',`${OWNER}=${owner}`];
   if(inventory.network&&(!inventory.network.Internal||inventory.network.Driver!=='bridge'))throw fail('Owned Infisical data network is no longer private.');
   for(const key of ['databaseVolume','redisVolume'])if(inventory[key]&&(inventory[key].Driver!=='local'||Object.keys(inventory[key].Options||{}).length))throw fail('Owned Infisical volume driver/options changed. No data was replaced.');
+  if(inventory.edgeNetwork&&!edgeNetworkCurrent(inventory.edgeNetwork,names))throw fail('Owned Infisical edge network drifted (it must be a non-internal bridge with masquerade off, joined only by the server). Nothing was changed.');
   if(!inventory.network)await d.must(['network','create','--internal',...labels,names.network],'private network create');
+  if(!inventory.edgeNetwork)await d.must(['network','create','--driver','bridge',...Object.entries(EDGE_NETWORK_OPTIONS).flatMap(([k,v])=>['--opt',`${k}=${v}`]),...labels,names.edgeNetwork],'edge network create');
+  // A server created by the internal-only profile never binds its published
+  // port. It holds no data (no mounts; its state is in db/redis and the
+  // protected env file), so it is recreated on the new profile — by inspected
+  // ID, owner label already established above.
+  if(inventory.server&&isLegacyServer(inventory.server,names)){
+    const id=inventory.server.Id;job.event?.('runtime_migration','Infisical server: recreating on the edge-network profile so its published port binds (no data is stored in this container).',{container:names.server,from:[names.network],to:[names.edgeNetwork,names.network]});
+    if(inventory.server.State?.Running)await d.must(['stop','--time','30',id],'legacy server stop');
+    await d.must(['rm',id],'legacy server remove');inventory.server=null;
+  }
   for(const key of ['databaseVolume','redisVolume'])if(!inventory[key])await d.must(['volume','create',...labels,names[key]],'persistent volume create');
   const specs=[
     {key:'database',image:INFISICAL_DB_IMAGE,env:envObject(readPrivate(files.dbEnv)),envFile:files.dbEnv,mounts:[{Type:'volume',Name:names.databaseVolume,Destination:'/var/lib/postgresql/data',RW:true}]},
     {key:'redis',image:INFISICAL_REDIS_IMAGE,command:['redis-server','--appendonly','yes'],mounts:[{Type:'volume',Name:names.redisVolume,Destination:'/data',RW:true}]},
     {key:'server',image:INFISICAL_IMAGE,env:envObject(readPrivate(files.serverEnv)),envFile:files.serverEnv,ports:{'8080/tcp':[{HostIp:'127.0.0.1',HostPort:String(INFISICAL_PORT)}]},mounts:[]}
   ];
-  for(const spec of specs){spec.owner=owner;spec.network=names.network;
-    if(!inventory[spec.key]){const args=['create','--name',names[spec.key],...labels,'--restart','unless-stopped','--network',names.network,...LOG_ARGS];if(spec.envFile)args.push('--env-file',spec.envFile);for(const m of spec.mounts)args.push('--mount',`type=volume,source=${m.Name},target=${m.Destination}`);if(spec.ports)args.push('--publish',`127.0.0.1:${INFISICAL_PORT}:8080`);args.push(spec.image,...(spec.command||[]));await d.must(args,`${spec.key} create`);}
-    const actual=await d.inspect('container',names[spec.key]);await verifyImageDefaults(d,actual,spec);assertContainer(actual,spec);
+  for(const spec of specs){spec.owner=owner;
+    // The server's primary network is the edge bridge (its published port);
+    // it joins data-net second to reach db and redis by name.
+    spec.network=spec.key==='server'?names.edgeNetwork:names.network;spec.networks=spec.key==='server'?[names.edgeNetwork,names.network]:[names.network];
+    if(!inventory[spec.key]){const args=['create','--name',names[spec.key],...labels,'--restart','unless-stopped','--network',spec.network,...LOG_ARGS];if(spec.envFile)args.push('--env-file',spec.envFile);for(const m of spec.mounts)args.push('--mount',`type=volume,source=${m.Name},target=${m.Destination}`);if(spec.ports)args.push('--publish',`127.0.0.1:${INFISICAL_PORT}:8080`);args.push(spec.image,...(spec.command||[]));await d.must(args,`${spec.key} create`);}
+    let actual=await d.inspect('container',names[spec.key]);
+    for(const extra of spec.networks.filter(n=>n!==spec.network&&!Object.hasOwn(actual.NetworkSettings?.Networks||{},n))){await d.must(['network','connect',extra,actual.Id||names[spec.key]],`${spec.key} network connect`);actual=await d.inspect('container',names[spec.key]);}
+    await verifyImageDefaults(d,actual,spec);assertContainer(actual,spec);
     await startOwnedContainer({run:argv=>exec.host(argv,{timeoutMs:120000}),name:names[spec.key],fail,job,label:`Infisical ${spec.key}`,requireHealth:false,sleep});
     const probe=spec.key==='database'?['exec',names.database,'pg_isready','-U','infisical','-d','infisical']:spec.key==='redis'?['exec',names.redis,'redis-cli','ping']:['exec',names.server,'node','-e',"fetch('http://127.0.0.1:8080/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"];
     let ready=false;for(let i=0;i<attempts;i++){if((await d.call(probe)).code===0){ready=true;break;}await sleep(2000);}if(!ready)throw fail(`Infisical ${spec.key} readiness was not established. Retry preserves data and keys.`);
   }
   job.generated({kind:'infisical_backup_set',where:files.root,name:owner});
   return {...names,directory:files.root,protectedRef:files.bundle,serverImage:INFISICAL_IMAGE,databaseImage:INFISICAL_DB_IMAGE,redisImage:INFISICAL_REDIS_IMAGE};
+}
+/** The edge bridge as reviewed: owned, bridge, NOT internal, masquerade off, only the server attached. */
+export function edgeNetworkCurrent(n,names){
+  const opts={...(n.Options||{})};for(const [k,v] of Object.entries(DAEMON_DEFAULT_OPTIONS))if(opts[k]===v)delete opts[k];
+  return n.Driver==='bridge'&&!n.Internal&&digest(opts)===digest({...EDGE_NETWORK_OPTIONS})&&Object.values(n.Containers||{}).every(c=>c.Name===names.server);
+}
+/** A server from the internal-only profile: on data-net alone, nothing else changed. */
+export function isLegacyServer(c,names){
+  const nets=Object.keys(c.NetworkSettings?.Networks||{});
+  return c.HostConfig?.NetworkMode===names.network&&nets.length===1&&nets[0]===names.network&&!(c.Mounts||[]).length;
 }
 export async function ensureAgentProxyRuntime(r,values,{exec,job,root=INFISICAL_ROOT,sleep}={}) {
   if(r.config.agentMode==='skip')return {state:'skipped'};
@@ -111,7 +149,7 @@ export async function ensureAgentProxyRuntime(r,values,{exec,job,root=INFISICAL_
 async function verifyImageDefaults(d,actual,spec) {
   const response=await d.must(['image','inspect',spec.image],'pinned image metadata');let image;
   try{image=JSON.parse(response.stdout)[0];}catch{throw fail('Pinned image metadata unavailable.');}
-  if(!image?.Id || actual.Image!==image.Id || digest(actual.Config?.Entrypoint)!==digest(image.Config?.Entrypoint) || (!spec.command && digest(actual.Config?.Cmd)!==digest(image.Config?.Cmd)))throw fail('Container executable/image differs from the pinned image.');
+  if(!image?.Id || actual.Image!==image.Id || !sameArgv(actual.Config?.Entrypoint,image.Config?.Entrypoint) || (!spec.command && !sameArgv(actual.Config?.Cmd,image.Config?.Cmd)))throw fail('Container executable/image differs from the pinned image.');
   const defaults=envObject((image.Config?.Env||[]).join('\n'));
   const desired={...defaults,...spec.env};
   if(digest(Object.entries(envObject((actual.Config?.Env||[]).join('\n'))).sort())!==digest(Object.entries(desired).sort()))throw fail('Container has changed or unreviewed environment settings.');

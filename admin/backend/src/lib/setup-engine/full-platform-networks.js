@@ -79,7 +79,7 @@ export function queueNetworksChange(db, raw, by, { via = 'ui' } = {}) {
     const full = readFullPlatform(db), review = networksReview(db, p.networks);
     if (!full || p.revision !== full.revision || p.reviewToken !== review.reviewToken) throw fail('The network change preview is stale. Review it again.', 'NETWORKS_REVIEW_STALE');
     if (review.blockers.length) throw fail(review.blockers.join(' '), 'NETWORKS_BLOCKED');
-    const job = createJob(db, { app: NETWORKS_APP, kind: NETWORKS_KIND, plan: { params: { revision: full.revision, reviewToken: p.reviewToken } }, requestedBy: by, via, retryOf: full.last_job_id, reason: `Reviewed restricted-network change: ${review.after.join(', ')}.` });
+    const job = createJob(db, { app: NETWORKS_APP, kind: NETWORKS_KIND, plan: { params: { revision: full.revision } }, requestedBy: by, via, retryOf: full.last_job_id, reason: `Reviewed restricted-network change: ${review.after.join(', ')}.` });
     const state = { ...full.state, networksChange: { networks: review.after, reviewToken: p.reviewToken, job: job.id } };
     db.prepare('UPDATE setup_full_platform SET state_json=?,last_job_id=? WHERE id=1').run(JSON.stringify(state), job.id);
     db.exec('COMMIT');

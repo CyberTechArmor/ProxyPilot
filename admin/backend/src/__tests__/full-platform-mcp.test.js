@@ -375,7 +375,7 @@ test('reset purge_data: flag-gated (off by default); a verified backup set is wr
     settings.set('feature_flag:mcp.platform.purge', '1');
     const first = body(await call('reset_platform_setup', { purge_data: true }));
     const p = first.preview;
-    assert.equal(p.remove.directories.length, 5); assert.equal(p.remove.volumes.length, 6); assert.equal(p.remove.networks.length, 5);
+    assert.equal(p.remove.directories.length, 5); assert.equal(p.remove.volumes.length, 6); assert.equal(p.remove.networks.length, 6); // Infisical: data, edge, proxy
     assert.ok(p.remove.records.some((r) => r.table === 'setup_vaultwarden_credentials'));
     assert.match(p.backup.directory, /platform-reset-<job id>$/);
     // A default-mode token cannot confirm a purge (different subject), and vice versa.

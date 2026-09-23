@@ -38,6 +38,16 @@ export const LOG_OPTS = Object.freeze({ 'max-size': '10m', 'max-file': '3' });
 export const LOG_ARGS = Object.freeze(['--log-driver', LOG_DRIVER, ...Object.entries(LOG_OPTS).flatMap(([k, v]) => ['--log-opt', `${k}=${v}`])]);
 export const REASON_CODES = Object.freeze(['image_pull', 'port_bind', 'mount_permission', 'start_timeout', 'health_timeout', 'exited', 'upstream_not_listening', 'dns_mismatch']);
 
+// Image defaults as `docker image inspect` reports them. Newer engines omit
+// empty Config fields (no Cmd, no Entrypoint, no User → the key is absent),
+// while `docker container inspect` reports null or "". Compare through these:
+// absent, null and [] are the same argv; absent and "" the same user. (A raw
+// digest() of an absent field is digest(undefined) — JSON.stringify returns
+// undefined and createHash().update throws a TypeError.)
+export const argvOf = (v) => (Array.isArray(v) && v.length ? v : null);
+export const sameArgv = (a, b) => JSON.stringify(argvOf(a)) === JSON.stringify(argvOf(b));
+export const sameUser = (a, b) => String(a ?? '') === String(b ?? '');
+
 export function logConfigCurrent(hostConfig) {
   const l = hostConfig?.LogConfig;
   return l?.Type === LOG_DRIVER && Object.entries(LOG_OPTS).every(([k, v]) => l.Config?.[k] === v);

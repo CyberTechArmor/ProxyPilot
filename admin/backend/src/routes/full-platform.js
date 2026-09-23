@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { getDb, logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { localProofRefusal, requestOrigin } from '../lib/sso/sessions.js';
-import { fullPlatformState, saveFullPlatform, applyFullPlatform, reviewFullPlatform, configSchema, readFullPlatform, fail } from '../lib/setup-engine/full-platform-store.js';
+import { fullPlatformState, saveFullPlatform, applyFullPlatform, approvalDnsRefusal, reviewFullPlatform, configSchema, readFullPlatform, fail } from '../lib/setup-engine/full-platform-store.js';
 import { protectedValue, storeProtected } from '../lib/setup-engine/full-platform-keycloak.js';
 import { personalSchema, personalRef } from '../lib/setup-engine/full-platform-infisical.js';
 import { readInfisical } from '../lib/setup-engine/infisical-store.js';
@@ -50,7 +50,9 @@ fullPlatformRouter.put('/', requireSudo, handle((req, res) => {
   import('./platform-overview.js').then(({ pushVpnDnsSoon }) => pushVpnDnsSoon()).catch(() => {});
   res.json(fullPlatformState(getDb()));
 }));
-fullPlatformRouter.post('/apply', requireSudo, handle((req, res) => {
+fullPlatformRouter.post('/apply', requireSudo, handle(async (req, res) => {
+  const blocked = await approvalDnsRefusal(getDb());
+  if (blocked) return res.status(409).json({ code: blocked.code, error: blocked.error, hostnames: blocked.hostnames.map(h => h.hostname) });
   const result = applyFullPlatform(getDb(), req.body, req.user.id);
   logAudit(req.user.id, 'FULL_PLATFORM_APPLIED', 'setup_job', result.job.id, { revision: req.body.revision, created: result.created }, req.ip);
   res.status(result.created ? 202 : 200).json(result);

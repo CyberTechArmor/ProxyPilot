@@ -21,7 +21,7 @@
 // every call writes an mcp_ledger row, and every accepted write an audit entry.
 
 import { lookup } from 'node:dns/promises';
-import { saveSchema, saveFullPlatform, readFullPlatform, reviewFullPlatform, validateExisting, changes, defaults, applyFullPlatform, installedTargets, normalizeConfig } from '../../lib/setup-engine/full-platform-store.js';
+import { saveSchema, saveFullPlatform, readFullPlatform, reviewFullPlatform, validateExisting, changes, defaults, applyFullPlatform, approvalDnsRefusal, installedTargets, normalizeConfig } from '../../lib/setup-engine/full-platform-store.js';
 import { applyService, serviceReaders } from '../../lib/setup-engine/full-platform-services.js';
 import { lifecycleReview, queueLifecycle } from '../../lib/setup-engine/full-platform-lifecycle.js';
 import { resetReview, queueReset } from '../../lib/setup-engine/full-platform-reset.js';
@@ -205,6 +205,7 @@ export function createPlatformHandlers(kit) {
     }
     const refusal = applyRefusal(d, { kind, revision, reviewToken });
     if (refusal) { note.refused = true; return err(refusal.error, refusal); }
+    if (kind === 'apply') { const dnsBlock = await approvalDnsRefusal(d, { resolvers }); if (dnsBlock) { note.refused = true; return err(dnsBlock.error, dnsBlock); } }
     const stageNow = platformSetupView(d).current_stage;
     if (args.dry_run === true) return ok({ dry_run: true, would: kind === 'apply' ? `apply revision ${revision}: queue the Full Platform coordinator for stage B (Keycloak) only` : `continue revision ${revision}: re-queue the coordinator for stage ${stageNow} only, keeping completed work`, note: 'Nothing was queued.' });
     const gate = confirmFlag(args, note, kind === 'apply' ? 'Applying installs and connects the selected services on this host.' : 'Continuing re-queues the saved setup on the host runner.');

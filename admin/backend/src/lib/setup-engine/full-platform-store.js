@@ -6,6 +6,7 @@ import { SERVICES } from './platform-catalog.js';
 import { createJob, getJob, jobView } from './store.js';
 import { validateRouteEdgeOptions } from '../caddy-site-file.js';
 import { vpnNetworks, additionalOf, effectiveNetworks, effectiveFor } from './platform-networks.js';
+import { dnsRefusal } from './platform-dns.js';
 
 export const FULL_PLATFORM_APP = 'pp-full-platform';
 export const RESET_ROUTES_APP = 'pp-platform-reset-routes';
@@ -154,6 +155,20 @@ export function reviewFullPlatform(db, config = null) {
     managed: 'Callback URLs, private ports, resource names and protected client references are derived. Caddy retains public ports and TLS.',
     humanSteps: ['B: reveal the bootstrap password, create the permanent administrator and enroll a passkey, link the ProxyPilot account, test SSO login, step-up and separate-browser recovery, retire the bootstrap account', 'D: the Infisical personal administrator, OpenBao recovery custody and manual unseal, Vaultwarden sign-in/unlock checks', 'E: activate SSO'],
   };
+}
+// The ProxyPilot and recovery hostnames are fixed at the first apply (changing
+// them needs a separate migration, FULL_PLATFORM_MIGRATION_REQUIRED), so both
+// must resolve to this Caddy host BEFORE it: a hostname pointing elsewhere
+// (e.g. an apex served by another machine) never gets a certificate here, and
+// the plan would be stuck with a recovery page nobody can open. Services are
+// checked per stage by the coordinator; these two only here.
+export const approvalDeps = { check: dnsRefusal }; // tests replace check
+export async function approvalDnsRefusal(db, { check = approvalDeps.check, ...opts } = {}) {
+  const r = readFullPlatform(db);
+  if (!r || r.approved_revision === r.revision) return null;
+  const hosts = [r.config.publicOrigin, r.config.recoveryOrigin].filter(Boolean).map(u => new URL(u).hostname);
+  const refusal = await check(db, hosts, opts);
+  return refusal ? { ...refusal, error: `${refusal.error} The ProxyPilot and recovery hostnames cannot change after apply, so apply waits until they resolve to this host (or save a hostname that does).` } : null;
 }
 export function applyFullPlatform(db, raw, by, { via = 'ui' } = {}) {
   const p = applySchema.parse(raw); db.exec('BEGIN IMMEDIATE');

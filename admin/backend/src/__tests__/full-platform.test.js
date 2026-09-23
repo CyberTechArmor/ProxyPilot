@@ -4,7 +4,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeDb, config, approved, handle, keycloakWire, apiFixture, driveStages, completeStageB, continueJob } from './helpers/full-platform-fixture.js';
-import { saveFullPlatform, readFullPlatform, fullPlatformState, configSchema, reviewFullPlatform, applyFullPlatform } from '../lib/setup-engine/full-platform-store.js';
+import { saveFullPlatform, readFullPlatform, fullPlatformState, configSchema, reviewFullPlatform, applyFullPlatform, approvalDnsRefusal, approvalDeps } from '../lib/setup-engine/full-platform-store.js';
+// The apply route checks DNS for the fixed hostnames; these fixtures use example.com.
+approvalDeps.check = async () => null;
 import { connectManagedKeycloak, keycloakAdmin, reconcileOwnedIdentity, protectedValue, storeProtected } from '../lib/setup-engine/full-platform-keycloak.js';
 import { runFullPlatformOperation } from '../lib/setup-engine/full-platform-op.js';
 import { queueAdministrator, runAdministrator } from '../lib/setup-engine/full-platform-admin.js';
@@ -126,4 +128,17 @@ test('FP-4 reviewed Vaultwarden runtime removal/reinstall retains SQLite, signin
     await vaultRuntime(readVaultwarden(db),original,{exec:docker,job:handle(q.job.id),root});assert.deepEqual(readFileSync(join(resources.data,'db.sqlite3')),data);assert.deepEqual(readFileSync(join(resources.data,'rsa_key.pem')),key);assert.deepEqual(vaultSecrets(db,readVaultwarden(db)),original);assert(!JSON.parse(readFileSync(join(root,'owner.json'))).reinstall);
     docker.objects.container.delete(name);await assert.rejects(vaultRuntime(readVaultwarden(db),original,{exec:docker,job:handle(q.job.id),root}),/never reinstalls/);
   }finally{rmSync(dir,{recursive:true,force:true});}
+}));
+
+test('first apply is refused while the ProxyPilot or recovery hostname does not resolve here; later continues are not re-checked', () => withDb(async db => {
+  const wanted = { ...config(), recoveryOrigin: 'https://example.com' };
+  saveFullPlatform(db, { expectedRevision: 0, config: wanted, reviewed: true }, 'admin');
+  const seen = [];
+  const check = async (_db, hosts) => { seen.push(hosts); return hosts.includes('example.com') ? { error: 'DNS does not point at the Caddy host. example.com: the host resolves 198.51.100.9.', code: 'DNS_NOT_READY', hostnames: [{ hostname: 'example.com' }] } : null; };
+  const refusal = await approvalDnsRefusal(db, { check });
+  assert.deepEqual(seen[0], ['pilot.example.com', 'example.com']);
+  assert.equal(refusal.code, 'DNS_NOT_READY');
+  assert.match(refusal.error, /cannot change after apply/);
+  applyFullPlatform(db, { revision: 1, reviewToken: reviewFullPlatform(db).reviewToken, reviewed: true }, 'admin');
+  assert.equal(await approvalDnsRefusal(db, { check }), null, 'an approved plan is not re-checked');
 }));

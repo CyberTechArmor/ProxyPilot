@@ -15,6 +15,7 @@ function fixture(){
  const ok=body=>({status:200,body}),missing=()=>({status:404,body:null});let project;
  const api=async(path,{method='GET',body,token:authority}={})=>{
   if(method!=='GET')state.writes.push({path,method});
+  if(state.seedProject&&!project)project={id:ids.project,orgId:ids.org,slug:`proxypilot-${r.credential_ref.slice(-12)}`,description:`ProxyPilot ${r.credential_ref}`,environments:[]};
   const kind=Object.keys(state.identities).find(k=>authority===token({identityId:state.identities[k].id}));
   if(path==='/api/v1/admin/config')return ok({config:{initialized:state.initialized}});
   if(path==='/api/v1/admin/bootstrap'){state.initialized=true;return ok({organization:{id:ids.org},user:{id:ids.workload},identity:{id:ids.agent,credentials:{token:state.original}}});}
@@ -26,9 +27,13 @@ function fixture(){
    if(method==='DELETE'){state.detached=true;if(state.fault==='retire'){state.fault=null;throw Error('response lost after remote retirement');}return ok({});}
   }
   if(path==='/api/v1/projects'){
+   if(method==='POST'&&project)return {status:400,body:{message:`A project with the slug "${body.slug}" already exists in your organization.`}};
    if(method==='POST'){project={id:ids.project,orgId:ids.org,slug:body.slug,description:body.projectDescription,environments:[]};return ok({project});}
-   return ok({projects:project?[project]:[]});
+   return ok({projects:project&&!state.hiddenProject?[project]:[]});
   }
+  // Organization-admin routes: every org project, and joining one as the calling admin.
+  if(path.startsWith('/api/v1/organization-admin/projects?'))return ok({projects:project?[project]:[],count:project?1:0});
+  if(path===`/api/v1/organization-admin/projects/${ids.project}/grant-admin-access`){state.hiddenProject=false;state.granted=(state.granted||0)+1;return ok({membership:{projectId:ids.project}});}
   if(path===`/api/v1/projects/${ids.project}`)return ok({project});
   if(path.endsWith('/environments')){project.environments.push({slug:body.slug});return ok({});}
   if(path.startsWith('/api/v2/folders')){if(method==='POST')state.folders.push(body);return ok({folders:state.folders});}
@@ -76,5 +81,15 @@ test('free edition: an identity holding a different or extra role is corrected t
   assert(!sameBuiltinRole({identityMembership:{roles:[{role:'admin',isTemporary:true}]}},'admin'));
   const { reviewInfisical } = await import('../lib/setup-engine/infisical-store.js');
   const review=reviewInfisical(f.db);assert.match(review.handoff.risk,/Admin of the dedicated ProxyPilot project/);assert.deepEqual(review.handoff.builtinRoles,{workload:'member',proxy:'viewer',agent:'admin'});
+ }finally{f.db.close();}
+});
+
+test('resume: a project the caller cannot list is found organization-wide and joined, never created twice',async()=>{
+ const f=fixture();try{
+  // The project already exists (made on an earlier run by another Infisical identity) and the caller is not a member.
+  f.state.seedProject=true;f.state.hiddenProject=true;
+  assert((await f.run()).ready);
+  assert.equal(f.state.writes.filter(w=>w.path==='/api/v1/projects'&&w.method==='POST').length,0,'no second project creation');
+  assert.equal(f.state.granted,1,'joined the existing project as organization admin');
  }finally{f.db.close();}
 });

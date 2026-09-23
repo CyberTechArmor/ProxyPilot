@@ -72,6 +72,22 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
   {
     let projects = requireOk(await request('/api/v1/projects'), 'Owned project inventory').projects;
     let project = projects?.find(p => p.slug === slug);
+    if (!project) {
+      // /api/v1/projects lists only projects the CALLER belongs to. A resume
+      // under the personal login cannot see the project the bootstrap
+      // identity created on the first run, and creating it again fails with
+      // "slug already exists". Find it organization-wide, then join it as the
+      // organization admin, before the ownership checks below.
+      const all = requireOk(await request(`/api/v1/organization-admin/projects?${new URLSearchParams({ search: slug, limit: '100' })}`), 'Organization project inventory').projects;
+      const existing = all?.find(p => p.slug === slug);
+      if (existing) {
+        if (existing.orgId && existing.orgId !== s.organizationId || s.projectId && s.projectId !== existing.id) throw fail('The intended Infisical project is not this installation’s recorded resource.');
+        requireOk(await request(`/api/v1/organization-admin/projects/${uuid(existing.id)}/grant-admin-access`, { method: 'POST', body: {} }), 'Administrator access to the owned project');
+        projects = requireOk(await request('/api/v1/projects'), 'Owned project inventory').projects;
+        project = projects?.find(p => p.slug === slug);
+        if (!project) throw fail('The owned Infisical project exists but is still not visible to this administrator after joining it.');
+      }
+    }
     if (!project) project = requireOk(await request('/api/v1/projects', { method: 'POST', body: { projectName: 'ProxyPilot', slug, projectDescription: owned, type: 'secret-manager', shouldCreateDefaultEnvs: false } }), 'Dedicated project creation').project;
     if (project?.orgId !== s.organizationId || project.description !== owned || s.projectId && s.projectId !== project.id) throw fail('The intended Infisical project is not this installation’s recorded resource.');
     s.projectId = uuid(project.id); persist();

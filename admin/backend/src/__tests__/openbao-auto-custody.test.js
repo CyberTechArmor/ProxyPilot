@@ -9,8 +9,8 @@ import { save,apply,review,readOpenBao,state,acknowledge,custody,putCustody,hasC
 import { runOnce } from '../lib/setup-engine/executor.js';
 import { runBackendSteps } from '../lib/setup-engine/backend-steps.js';
 import { backendStepDeps } from '../mock2/ops.js';
-import { sweepOpenBaoAutoUnseal } from '../lib/setup-engine/openbao-custody.js';
-import { digest } from '../lib/setup-engine/openbao-logic.js';
+import { sweepOpenBaoAutoUnseal,decodeRoot,withTransientRoot } from '../lib/setup-engine/openbao-custody.js';
+import { digest,namesFor,policyFor,humanPolicyFor,priorHumanFor,HUMAN_TTL } from '../lib/setup-engine/openbao-logic.js';
 import { getJob } from '../lib/setup-engine/store.js';
 import { makeDb as fullDb,apiFixture,driveStages } from './helpers/full-platform-fixture.js';
 import { readFullPlatform } from '../lib/setup-engine/full-platform-store.js';
@@ -134,3 +134,46 @@ test('Full Platform: recovery route accepts custody auto without keys; kit route
     assert.equal((await f.request('/full/openbao/recovery-kit')).status,410,'one time: gone after acknowledgement');
   }finally{await f.close();}
 }finally{db.close();}});
+
+test('team workspace: a fresh install writes the workspace policy and the 8 h role with no root generation',()=>withDb(async(db,dir)=>{
+  const h=harness(db,dir);apply(db,approval(db),'admin');const j=await h.finish();assert.equal(j.status,'succeeded',j.reason);
+  const r=readOpenBao(db),n=namesFor(r);
+  assert.equal(h.api.policies.get(n.human),humanPolicyFor(r));assert.equal(h.api.policies.get(n.machine),policyFor(r),'machine scope unchanged');
+  assert.match(h.api.policies.get(n.human),/-kv\/data\/team\/\*" \{ capabilities = \["create", "read", "update", "delete", "list"\]/);
+  assert.equal(h.api.resources.get(`/v1/auth/${n.oidc}/role/mapped`).token_ttl,HUMAN_TTL);assert.equal(h.api.genStarts,0);
+}));
+
+test('team workspace: an install carrying the earlier rendering is upgraded with a transient root that is revoked; drift and a foreign generation are refused',()=>withDb(async(db,dir)=>{
+  const h=harness(db,dir);apply(db,approval(db),'admin');assert.equal((await h.finish()).status,'succeeded');
+  const r=readOpenBao(db),n=namesFor(r),rolePath=`/v1/auth/${n.oidc}/role/mapped`,prior=priorHumanFor(r);
+  // What ProxyPilot wrote before the workspace existed.
+  h.api.policies.set(n.human,prior.policy);h.api.resources.set(rolePath,{...h.api.resources.get(rolePath),token_ttl:120,token_max_ttl:120});
+  apply(db,approval(db),'admin');const up=await h.finish();assert.equal(up.status,'succeeded',up.reason);
+  assert.equal(h.api.policies.get(n.human),humanPolicyFor(r));assert.equal(h.api.resources.get(rolePath).token_ttl,HUMAN_TTL);
+  assert.equal(h.api.genStarts,1);assert.equal(h.api.genRevocations,1);assert.equal(h.api.genRoots.size,0,'no root token left valid');
+  // Current → nothing privileged happens on the next apply.
+  apply(db,approval(db),'admin');assert.equal((await h.finish()).status,'succeeded');assert.equal(h.api.genStarts,1);
+  // Someone else's policy text is never overwritten, and no root is generated for it.
+  h.api.policies.set(n.human,'path "secret/*" { capabilities = ["read"] }\n');
+  apply(db,approval(db),'admin');const drift=await h.finish();assert.match(drift.reason,/differs from what ProxyPilot wrote/);assert.equal(h.api.genStarts,1);
+  assert.equal(h.api.policies.get(n.human),'path "secret/*" { capabilities = ["read"] }\n');
+}));
+
+test('transient root: refuses an in-progress generation, cancels its own failed attempt, decodes the one-time pad',async()=>{
+  const otp='abcdefghijklmnopqrstuvwxyz',tok='s.0123456789ABCDEFGHIJKLMN';
+  assert.equal(decodeRoot(Buffer.from([...Buffer.from(tok)].map((x,i)=>x^otp.charCodeAt(i))).toString('base64'),otp),tok);
+  assert.throws(()=>decodeRoot('YWJj',otp),/one-time pad/);
+  const r={config:{basic:true,mode:'install',custody:'auto'},credential_ref:'x'};
+  const db={prepare:()=>({get:()=>null})};
+  await assert.rejects(withTransientRoot(db,{...r,config:{...r.config,custody:undefined}},async()=>({}),async()=>{}),/PGP custody/);
+});
+
+test('transient root: a generation somebody else started is refused, not cancelled',()=>withDb(async(db,dir)=>{
+  const h=harness(db,dir);apply(db,approval(db),'admin');assert.equal((await h.finish()).status,'succeeded');
+  const r=readOpenBao(db),n=namesFor(r),rolePath=`/v1/auth/${n.oidc}/role/mapped`,prior=priorHumanFor(r);
+  h.api.policies.set(n.human,prior.policy);h.api.resources.set(rolePath,{...h.api.resources.get(rolePath),token_ttl:120,token_max_ttl:120});
+  await h.api.send(r.config.origin,'/v1/sys/generate-root/attempt',{method:'PUT',body:{}});const starts=h.api.genStarts;
+  apply(db,approval(db),'admin');const j=await h.finish();assert.match(j.reason,/already in progress/);
+  assert.equal(h.api.genStarts,starts);assert.equal(h.api.policies.get(n.human),prior.policy,'nothing written');
+  assert.equal((await h.api.send(r.config.origin,'/v1/sys/generate-root/attempt',{method:'GET'})).body.started,true,'their attempt was left alone');
+}));

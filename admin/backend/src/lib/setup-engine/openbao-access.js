@@ -1,4 +1,4 @@
-import { fail,digest,namesFor,policyFor,humanRoleFor,machineRoleFor,roleFor,databaseDetails } from './openbao-logic.js';
+import { fail,digest,namesFor,policyFor,humanPolicyFor,priorHumanFor,humanRoleFor,machineRoleFor,roleFor,databaseDetails } from './openbao-logic.js';
 import { secrets,putSecrets } from './openbao-store.js';
 import { ok,requireReady } from './openbao-api.js';
 // Compare only documented readback fields; default-valued fields are checked
@@ -15,6 +15,20 @@ export async function verifyMachine(r,v,api){const n=namesFor(r);if(!v.roleId)th
     for(const path of paths.slice(1))if((await api('/v1/'+path,{token})).status!==403)throw fail('OpenBao did not enforce a selected denied operation.');
     return token;
   }catch(e){await api('/v1/auth/token/revoke-self',{method:'POST',token}).catch(()=>{});throw e;}}
+// Each owned policy's reviewed text: the human workspace and the machine scope.
+export const ownedPolicies=r=>{const n=namesFor(r);return [[n.human,humanPolicyFor(r)],[n.machine,policyFor(r)]];};
+export const fieldsMatch=(actual,wanted)=>!!actual&&Object.entries(wanted).every(([k,v])=>same(actual[k],v));
+// Write, keep or upgrade the human side (policy + OIDC role). Missing → write; the
+// current rendering → keep; the exact earlier ProxyPilot rendering → upgrade;
+// anything else is someone else's change and is refused. → {upgraded}
+export async function applyHumanAccess(r,api,token){const n=namesFor(r),prior=priorHumanFor(r),policy=humanPolicyFor(r),role=humanRoleFor(r);let upgraded=false;
+  const pp=`/v1/sys/policies/acl/${n.human}`,pr=await api(pp,{token});const text=pr.status===200?pr.body?.data?.policy:null;
+  if(pr.status===404||pr.status===200&&text!==policy&&text===prior.policy){ok(await api(pp,{method:'PUT',token,body:{policy}}),'Human policy');upgraded||=pr.status===200;}
+  else if(pr.status!==200||text!==policy)throw fail('The OpenBao human policy differs from what ProxyPilot wrote. Nothing was overwritten.');
+  const rp=`/v1/auth/${n.oidc}/role/mapped`,rr=await api(rp,{token}),live=rr.status===200?rr.body?.data:null;
+  if(rr.status===404||rr.status===200&&!live||!fieldsMatch(live,role)&&fieldsMatch(live,prior.role)){ok(await api(rp,{method:'POST',token,body:role}),'Human policy mapping');upgraded||=!!live;}
+  else if(rr.status!==200||!fieldsMatch(live,role))throw fail('The OpenBao human sign-in role differs from what ProxyPilot wrote. Nothing was overwritten.');
+  const after=ok(await api(rp,{token}),'Human policy mapping')?.data;assertFields(after,role,'Human policy mapping');return {upgraded,role:after};}
 export async function bootstrap(db,r,input,api,{job,verifyDatabase}){const current=await requireReady(api,r),n=namesFor(r),v=secrets(db,r),token=input.bootstrapToken;
   // Bind the first observed ready cluster before any remote mutation. Even an
   // interrupted bootstrap must never adopt a replacement instance on retry.
@@ -23,14 +37,14 @@ export async function bootstrap(db,r,input,api,{job,verifyDatabase}){const curre
   const mounts=ok(await api('/v1/sys/mounts',{token})).data,auth=ok(await api('/v1/sys/auth',{token})).data;
   const owned=[{map:mounts,name:r.config.basic?n.prefix+'-kv':n.database,type:r.config.basic?'kv':'database',path:'sys/mounts'},{map:auth,name:n.oidc,type:'oidc',path:'sys/auth'},{map:auth,name:n.approle,type:'approle',path:'sys/auth'}];
   for(const x of owned){const a=x.map?.[x.name+'/'];if(a&&(a.type!==x.type||a.description!==r.credential_ref))throw fail('An intended mount belongs to another configuration. External resources were preserved.');}
-  for(const p of [n.human,n.machine]){const res=await api(`/v1/sys/policies/acl/${p}`,{token});if(res.status!==404&&(res.status!==200||res.body?.data?.policy!==policyFor(r)))throw fail('A policy name collides with different existing rules. Nothing was overwritten.');}
+  {const prior=priorHumanFor(r).policy;for(const [p,text] of ownedPolicies(r)){const res=await api(`/v1/sys/policies/acl/${p}`,{token});if(res.status!==404&&(res.status!==200||res.body?.data?.policy!==text&&!(p===n.human&&res.body?.data?.policy===prior)))throw fail('A policy name collides with different existing rules. Nothing was overwritten.');}}
   if(!r.config.basic){if(!input.databasePassword)throw fail('The advanced database flow requires its transient database credential.');await verifyDatabase(r,input.databasePassword);}job.fence();
   for(const x of owned)if(!x.map?.[x.name+'/'])ok(await api(`/v1/${x.path}/${x.name}`,{method:'POST',token,body:{type:x.type,description:r.credential_ref,...(x.type==='kv'?{options:{version:'2'}}:{})}}),'Owned mount creation');
-  for(const p of [n.human,n.machine]){const path=`/v1/sys/policies/acl/${p}`,res=await api(path,{token});if(res.status===404)ok(await api(path,{method:'PUT',token,body:{policy:policyFor(r)}}));else if(res.body?.data?.policy!==policyFor(r))throw fail('Owned policy drifted.');}
+  {const path=`/v1/sys/policies/acl/${n.machine}`,res=await api(path,{token});if(res.status===404)ok(await api(path,{method:'PUT',token,body:{policy:policyFor(r)}}));else if(res.body?.data?.policy!==policyFor(r))throw fail('Owned policy drifted.');}
   const ensure=async(path,wanted,label,write=wanted)=>{const res=await api('/v1/'+path,{token});if(res.status===404||res.status===200&&!res.body?.data)ok(await api('/v1/'+path,{method:'POST',token,body:write}),label);else if(res.status!==200)throw fail(`${label} readback failed.`);const after=ok(await api('/v1/'+path,{token}),label)?.data;assertFields(after,wanted,label);return after;};
   const oidc={oidc_discovery_url:r.config.issuer,oidc_client_id:r.config.clientId,default_role:'mapped',bound_issuer:r.config.issuer};
   await ensure(`auth/${n.oidc}/config`,oidc,'Human OIDC configuration',{...oidc,oidc_client_secret:v.client});
-  const human=await ensure(`auth/${n.oidc}/role/mapped`,humanRoleFor(r),'Human policy mapping');
+  const human=(await applyHumanAccess(r,api,token)).role;
   if(human.token_policies_template_claims||human.bound_subject||human.groups_claim||human.claim_mappings&&Object.keys(human.claim_mappings).length)throw fail('Human role has unreviewed identity/template mappings.');
   const machine=await ensure(`auth/${n.approle}/role/workload`,machineRoleFor(r),'Machine AppRole');
   if(machine.token_period||machine.token_num_uses||machine.local_secret_ids)throw fail('Machine AppRole has unreviewed token restrictions.');
@@ -63,7 +77,7 @@ export async function bootstrap(db,r,input,api,{job,verifyDatabase}){const curre
   return {state:'bootstrap_complete',label:'Owned human/machine access configured. Bootstrap token revoked; apply verifies the disposable credential flow.'};
 }
 export async function verifyAccess(r,token,api){const n=namesFor(r);const get=async path=>ok(await api('/v1/'+path,{token}),'Owned access readback')?.data;
-  for(const p of [n.human,n.machine])if((await get(`sys/policies/acl/${p}`))?.policy!==policyFor(r))throw fail('Owned OpenBao policies drifted; verification is withheld.');
+  for(const [p,text] of ownedPolicies(r))if((await get(`sys/policies/acl/${p}`))?.policy!==text)throw fail('Owned OpenBao policies drifted; verification is withheld.');
   assertFields(await get(`auth/${n.oidc}/config`),{oidc_discovery_url:r.config.issuer,oidc_client_id:r.config.clientId,default_role:'mapped',bound_issuer:r.config.issuer},'Human OIDC connection');
   assertFields(await get(`auth/${n.oidc}/role/mapped`),humanRoleFor(r),'Human group mapping');
   assertFields(await get(`auth/${n.approle}/role/workload`),machineRoleFor(r),'Machine AppRole');

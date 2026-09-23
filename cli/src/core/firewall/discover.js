@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+
+export const SS_MAX_BUFFER = 64 * 1024 * 1024;
 import { readState, writeState } from './state.js';
 import { audit } from '../../db/audit.js';
 import { listInstances } from '../../incus/client.js';
@@ -58,7 +60,9 @@ function parseSsLine(line) {
  * Run `ss` on the host and return the de-duplicated listener set.
  */
 export function scanHost() {
-  const out = spawnSync('ss', ['-H', '-tulnp'], { encoding: 'utf-8' });
+  // ss lists every socket with its processes; on a busy host that is well past
+  // spawnSync's 1 MiB default and fails with ENOBUFS.
+  const out = spawnSync('ss', ['-H', '-tulnp'], { encoding: 'utf-8', maxBuffer: SS_MAX_BUFFER });
   if (out.status !== 0) {
     throw new Error(`ss failed: ${out.stderr || out.error?.message || 'unknown'}`);
   }
@@ -172,7 +176,7 @@ export async function scanLxc() {
   for (const inst of instances) {
     if (inst.status !== 'Running') continue;
     const r = spawnSync('incus', ['exec', inst.name, '--', 'ss', '-H', '-tulnp'], {
-      encoding: 'utf-8',
+      encoding: 'utf-8', maxBuffer: SS_MAX_BUFFER,
     });
     if (r.status !== 0) continue;
     const seen = new Set();
@@ -205,7 +209,7 @@ export async function scanLxc() {
  * as `port_end`.
  */
 export function scanDocker() {
-  const r = spawnSync('docker', ['ps', '--format', '{{json .}}'], { encoding: 'utf-8' });
+  const r = spawnSync('docker', ['ps', '--format', '{{json .}}'], { encoding: 'utf-8', maxBuffer: SS_MAX_BUFFER });
   if (r.status !== 0) return [];
   const out = [];
   for (const line of r.stdout.split('\n')) {

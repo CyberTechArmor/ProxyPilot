@@ -42,7 +42,7 @@ import {
 } from './store.js';
 import {
   validateRunnerJob, reconcileDecision, recoveryJobFrom, verifyJobFrom, RUNNER_JOB_KINDS, EXCLUSIVE_JOB_KINDS, LIFECYCLE_JOB_KINDS, CONFIG_JOB_KINDS, leaseHold, parseJson, sanitizeReason, parseOwner,
-  FencedError, CancelledError, verificationState, CREDENTIAL_USE_OUTCOMES,
+  FencedError, CancelledError, verificationState, CREDENTIAL_USE_OUTCOMES, adapterErrorDiagnostic,
 } from './logic.js';
 import { runDeployOperation, PreviousWriterAliveError, ContainmentUnavailableError } from './deploy-op.js';
 import { runRestoreDbOperation } from './restore-db-op.js';
@@ -331,7 +331,19 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         onStep: (phase, message) => event('step', message, null, phase),
         // Redacted on write (appendEvent); used for reason-coded runtime failures.
         event: (kind, message, data = null) => { guard(); event(kind, message, data); } };
-      const result = job.kind==='full_platform_apply' ? await runFullPlatformOperation({db,params:p,exec,job:handle,...fullPlatformDeps}).catch(e=>{if(e.fullPlatformSafe||['FENCED','CANCELLED'].includes(e.code))throw e;throw new Error('Full Platform connection failed; private upstream details withheld. Reopen the saved step.');}) : job.kind==='vaultwarden_apply' ? await runVaultwardenOperation({db,params:p,exec,job:handle,...vaultwardenDeps}).catch(e=>{if(e.vaultwardenSafe||['FENCED','CANCELLED'].includes(e.code))throw e;throw new Error('Vaultwarden operation failed; upstream details withheld. Review its saved phase before retrying.');}) : job.kind==='openbao_apply' ? await runOpenBaoOperation({db,params:p,exec,job:handle,...openbaoDeps}).catch(e=>{if(e.openbaoSafe||['FENCED','CANCELLED'].includes(e.code))throw e;throw new Error('OpenBao operation failed; upstream details withheld. Review its saved phase before retrying.');}) : job.kind==='infisical_apply' ? await runInfisicalOperation({db,params:p,exec,job:handle,...infisicalDeps}).catch(e=>{if(e.infisicalSafe||['FENCED','CANCELLED'].includes(e.code))throw e;throw new Error('Infisical operation failed; raw adapter output withheld. Inspect its saved phase and retry.');}) : job.kind==='pomerium_apply' ? await runPomeriumOperation({db,params:p,exec,job:handle,...pomeriumDeps}) : await runKeycloakOperation({ db, params: p, exec, job: handle, ...keycloakDeps });
+      // An adapter's own safe failure passes through as the job reason. Anything
+      // else (TypeError, fs error, …) keeps the generic reason, but its class,
+      // one redacted message line and the phase it was thrown in are recorded
+      // as an `adapter_error` job event — without it the cause is invisible.
+      const masked = (label, generic, safeFlag) => (e) => {
+        if (e?.[safeFlag] || ['FENCED', 'CANCELLED'].includes(e?.code)) throw e;
+        try {
+          const phase = getJob(db, job.id)?.phase || null, d = adapterErrorDiagnostic(e);
+          event('adapter_error', `${label} adapter raised ${d.error_class}${d.code ? ` (${d.code})` : ''} in phase ${phase || 'unknown'}${d.message ? `: ${d.message}` : ' (message withheld: a plain Error may carry upstream text)'}`, { ...d, phase, adapter: label }, phase);
+        } catch { /* the event is best effort; the generic reason below is the record */ }
+        throw new Error(generic);
+      };
+      const result = job.kind==='full_platform_apply' ? await runFullPlatformOperation({db,params:p,exec,job:handle,...fullPlatformDeps}).catch(masked('Full Platform','Full Platform connection failed; private upstream details withheld. Reopen the saved step.','fullPlatformSafe')) : job.kind==='vaultwarden_apply' ? await runVaultwardenOperation({db,params:p,exec,job:handle,...vaultwardenDeps}).catch(masked('Vaultwarden','Vaultwarden operation failed; upstream details withheld. Review its saved phase before retrying.','vaultwardenSafe')) : job.kind==='openbao_apply' ? await runOpenBaoOperation({db,params:p,exec,job:handle,...openbaoDeps}).catch(masked('OpenBao','OpenBao operation failed; upstream details withheld. Review its saved phase before retrying.','openbaoSafe')) : job.kind==='infisical_apply' ? await runInfisicalOperation({db,params:p,exec,job:handle,...infisicalDeps}).catch(masked('Infisical','Infisical operation failed; raw adapter output withheld. Inspect its saved phase and retry.','infisicalSafe')) : job.kind==='pomerium_apply' ? await runPomeriumOperation({db,params:p,exec,job:handle,...pomeriumDeps}) : await runKeycloakOperation({ db, params: p, exec, job: handle, ...keycloakDeps });
       guard();
       if (result.waiting) {
         requeueJob(db, { id: job.id, by: owner, reason: result.reason, notBeforeMs: nowMs() + KEYCLOAK_ROUTE_RETRY_MS, nowMs: nowMs() });

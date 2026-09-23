@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { stageRefusal } from '../lib/setup-engine/full-platform-store.js';
 import { getDb,logAudit } from '../db.js';
 import { requireSudo } from '../middleware/auth.js';
 import { pomeriumState,readPomerium,savePomerium,applyPomerium,reviewPomeriumRoute,savePomeriumRoute,routeSnapshot,subjectChoices } from '../lib/setup-engine/pomerium-store.js';
@@ -27,7 +28,7 @@ pomeriumRouter.put('/',requireSudo,handle((req,res)=>{
   logAudit(req.user.id,'POMERIUM_CONFIG_SAVED','setup_pomerium','1',{revision:state.revision,mode:state.config.mode},req.ip);
   res.json({state});
 }));
-pomeriumRouter.post('/apply',requireSudo,handle((req,res)=>{
+pomeriumRouter.post('/apply',requireSudo,handle((req,res)=>{{const why=stageRefusal(getDb(),'pomerium');if(why)return res.status(409).json({code:'STAGE_LOCKED',error:why});}
   const input=pomeriumApplySchema.parse(req.body),result=applyPomerium(getDb(),input.expectedRevision,req.user.id);
   logAudit(req.user.id,'POMERIUM_APPLY','setup_job',result.job.id,{revision:input.expectedRevision},req.ip);
   res.status(result.created?202:200).json(result);

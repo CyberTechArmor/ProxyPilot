@@ -264,6 +264,27 @@ export function redact(value, depth = 0) {
   return out;
 }
 
+// adapterErrorDiagnostic(error) → { error_class, code, message, message_withheld }
+// for an exception a platform adapter raised that is NOT one of its own safe
+// failures. The job reason stays generic; this goes into one job event so the
+// real cause is findable. The message line is kept only for LOCAL error
+// classes — a TypeError/RangeError/ReferenceError/SyntaxError raised by
+// ProxyPilot's own code, or a Node system error (ENOENT, EACCES, ERR_*…).
+// A plain Error may wrap upstream response text, so its message is withheld
+// (class + phase only). A kept line is ONE line, redacted, with quoted text
+// that is not an absolute path blanked (JSON.parse errors quote the input
+// they choked on, which may be protected content), and bounded.
+const LOCAL_ERROR_CLASSES = new Set(['TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError', 'EvalError']);
+export function adapterErrorDiagnostic(e) {
+  const errorClass = String(e?.constructor?.name && e.constructor.name !== 'Object' ? e.constructor.name : e?.name || typeof e).slice(0, 60);
+  const code = typeof e?.code === 'string' && /^[A-Z][A-Z0-9_]{1,60}$/.test(e.code) ? e.code : null;
+  const local = LOCAL_ERROR_CLASSES.has(errorClass) || (code && (/^E[A-Z]{2,}$/.test(code) || code.startsWith('ERR_')) && typeof e?.syscall === 'string') || (code && code.startsWith('ERR_') && LOCAL_ERROR_CLASSES.has(e?.name));
+  if (!local) return { error_class: errorClass, code, message: null, message_withheld: true };
+  const first = String(e?.message ?? '').split('\n').map((l) => l.trim()).find(Boolean) || '';
+  const unquoted = first.replace(/(["'`])([^"'`]*)\1/g, (m, q, body) => (/^\/[\w.@+\/-]*$/.test(body) || body.length <= 12 ? m : `${q}${REDACTED}${q}`));
+  return { error_class: errorClass, code, message: redactText(unquoted).replace(/\s+/g, ' ').slice(0, 240), message_withheld: false };
+}
+
 // sanitizeReason(text) → a redacted, single-paragraph reason of bounded size.
 export function sanitizeReason(text, max = 600) {
   const s = redactText(text).replace(/\s+/g, ' ').trim();

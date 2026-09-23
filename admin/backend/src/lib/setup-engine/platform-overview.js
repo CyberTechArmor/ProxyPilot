@@ -164,7 +164,10 @@ export async function serviceOverview(db, service, { run, resolvers, fresh = fal
   const port = recordedPort || SERVICE_PORTS[service][0];
   const upstream = { address: `127.0.0.1:${port}`, port, listening: listen ? listen.includes(Number(port)) : null };
   const containers = view.containers;
-  const missing = rt.runtime ? containers.filter((c) => c.present === false).map((c) => c.name) : [];
+  // A pending container (not created yet by design, e.g. the Agent Proxy
+  // before bootstrap) is neither missing nor a reason for "broken".
+  const missing = rt.runtime ? containers.filter((c) => c.present === false && !c.pending).map((c) => c.name) : [];
+  const pending = containers.filter((c) => c.pending).map((c) => ({ name: c.name, status: c.status }));
   const notRunning = containers.filter((c) => c.present && !c.running);
   const unhealthy = containers.filter((c) => c.running && c.health === 'unhealthy');
   let health = 'unknown', healthReason = null;
@@ -172,21 +175,22 @@ export async function serviceOverview(db, service, { run, resolvers, fresh = fal
   else if (!row) { health = 'not_installed'; healthReason = 'No saved service record yet; the coordinator prepares it.'; }
   else if (rt.runtimeError) { health = 'unknown'; healthReason = `Docker unreachable: ${rt.runtimeError}`; }
   else if (!rt.runtime) { health = 'unknown'; }
-  else if (missing.length === containers.length) { health = 'not_installed'; healthReason = 'No owned container exists yet.'; }
+  else if (missing.length + pending.length === containers.length && !containers.some((c) => c.present)) { health = 'not_installed'; healthReason = 'No owned container exists yet.'; }
   else {
     const reasons = [];
     if (missing.length) reasons.push(`expected but missing: ${missing.join(', ')}`);
     for (const c of notRunning) reasons.push(`${c.name} is ${c.status}${c.exit_code != null ? ` (exit ${c.exit_code})` : ''}${c.error ? `: ${c.error}` : ''}`);
     for (const c of unhealthy) reasons.push(`${c.name} is unhealthy`);
     if (view.route?.recorded && upstream.listening === false) reasons.push(`the route's upstream ${upstream.address} is not listening`);
-    health = reasons.length ? 'broken' : 'healthy'; healthReason = reasons.join('; ') || null;
+    health = reasons.length ? 'broken' : 'healthy';
+    healthReason = [...reasons, ...pending.map((p) => `${p.name}: ${p.status}`)].join('; ') || null;
   }
   const dns = hostname ? (dnsResults?.[hostname] || (await checkHostnames(db, [hostname], { resolvers, fresh })).results[hostname]) : null;
   const op = operationRunning(db, service);
   const entry = s.services.find((x) => x.id === service);
   return redact({
     id: service, name: NAMES[service], url: entry.url || null, selected, mode, ownership, state: entry.state,
-    health: { status: health, reason: healthReason, containers, missing, runtime_error: rt.runtimeError, verification: view.verification, live_check: liveCheck(db, service) },
+    health: { status: health, reason: healthReason, containers, missing, pending, runtime_error: rt.runtimeError, verification: view.verification, live_check: liveCheck(db, service) },
     upstream,
     route: { hostname, route_id: view.route?.route_id || null, recorded: !!view.route?.recorded, restricted_networks: view.route?.restricted_networks || null, other_routes_on_hostname: view.route?.other_routes_on_hostname || [], created_by: 'the service adapter' },
     dns: dns ? { ...dns, links: dnsLinks(dns) } : null,
@@ -197,8 +201,8 @@ export async function serviceOverview(db, service, { run, resolvers, fresh = fal
     dependencies: view.dependencies,
     kept_elsewhere: {
       secrets: { page: '/platform-setup', where: 'Platform Setup → the service\'s own form (client secrets, admin tokens, Infisical personal password, OpenBao PGP keys, unseal shares, root/bootstrap token, vault passwords)' },
-      sso_activation: service === 'keycloak' ? { page: '/platform-setup', where: 'Platform Setup → step 5. Verify and activate' } : null,
-      reset: { page: '/platform-setup', where: 'Platform Setup → Custom / Advanced → Reset Full Platform' },
+      sso_activation: service === 'keycloak' ? { page: '/platform-setup', where: 'Platform Setup → E. Verify everything and activate SSO' } : null,
+      reset: { page: '/platform-setup', where: 'Platform Setup → Reset Full Platform' },
     },
   });
 }
@@ -225,7 +229,7 @@ async function recoveryOverview(db, { run, resolvers, fresh, ports }) {
 export async function platformOverview(db, { run, resolvers, fresh = false } = {}) {
   const full = readFullPlatform(db);
   const flag = platformFlagState(db);
-  if (!full) return redact({ saved: false, flag, mcp_access: mcpAccess(db), services: [], note: 'No Full Platform plan is saved yet. Start in Platform Setup → 1. Domains and realm.' });
+  if (!full) return redact({ saved: false, flag, mcp_access: mcpAccess(db), services: [], note: 'No Full Platform plan is saved yet. Start in Platform Setup → A. Domains, realm and networks.' });
   const docker = await dockerInfo(run, { fresh });
   const ports = await listening(run, { fresh });
   const s = fullPlatformState(db);
@@ -236,14 +240,17 @@ export async function platformOverview(db, { run, resolvers, fresh = false } = {
   services.push(await recoveryOverview(db, { run, resolvers, fresh, ports }));
   const op = operationRunning(db);
   let resync = null; try { resync = resyncReview(db); } catch { resync = null; }
-  const sso = has(db, 'sso_config') ? db.prepare('SELECT active FROM sso_config WHERE id=1').get() : null;
-  const netBlock = op ? `Operation ${op.id} is ${op.status}${op.phase ? ` (${op.phase})` : ''}.` : sso?.active ? 'SSO is active; disable it from local recovery before changing the restricted networks.' : null;
+  // Additional addresses can be changed at any time — also after SSO is
+  // active (the networks are outside the SSO fingerprint). Only a running
+  // operation, or no applied setup yet (save them in stage A), blocks it.
+  const netBlock = op ? `Operation ${op.id} is ${op.status}${op.phase ? ` (${op.phase})` : ''}.` : !full.approved_revision ? 'Not applied yet: the additional addresses are part of the saved plan (stage A).' : null;
   return redact({
     saved: true, revision: full.revision, approved_revision: full.approved_revision, flag, mcp_access: mcpAccess(db),
-    docker, caddy_host: dnsAll.expected, operation: op, restricted_networks: s.config.recoveryNetworks,
+    docker, caddy_host: dnsAll.expected, operation: op,
+    vpn_networks: s.networks.vpn, additional_networks: s.networks.additional, restricted_networks: s.networks.effective, restricted_networks_applied: s.networks.applied,
     shared_plan: { in_sync: resync ? resync.in_sync : true, shared_revision: resync?.shared_plan_revision || null, recorded_revision: resync?.recorded_plan_revision || null },
     section_actions: [
-      action('edit_networks', 'Edit restricted networks', !netBlock, netBlock, { preview: true }),
+      action('edit_networks', 'Edit additional addresses', !netBlock, netBlock, { preview: true }),
       action('resync_plan', 'Resync shared plan', resync && !resync.blockers.length, resync ? resync.blockers.join(' ') : 'No saved plan.', { preview: true }),
     ],
     services, generated_at: new Date().toISOString(), cache_seconds: OVERVIEW_TTL_MS / 1000,

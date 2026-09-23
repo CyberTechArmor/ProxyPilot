@@ -127,7 +127,11 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     // Read directly, for the same load-order reason as the reset step above.
     const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='setup_full_platform'").get() && db.prepare('SELECT last_job_id, state_json FROM setup_full_platform WHERE id=1').get();
     const change = row ? (parseJson(row.state_json) || {}).networksChange : null;
-    if (Object.keys(p).length !== 2 || !Number.isInteger(p.revision) || job.app !== 'pp-platform-networks' || row?.last_job_id !== job.id || change?.job !== job.id || change.reviewToken !== p.reviewToken) throw new Error('Superseded');
+    // The review token lives only in state_json.networksChange: a job plan is
+    // redacted on write (SECRET_KEY_RE matches "token"), so a token carried
+    // there would read back as "[redacted]" and never compare equal.
+    // applyNetworksChange re-checks it against a fresh review.
+    if (Object.keys(p).length !== 1 || !Number.isInteger(p.revision) || job.app !== 'pp-platform-networks' || row?.last_job_id !== job.id || change?.job !== job.id || !/^[a-f0-9]{64}$/.test(change.reviewToken || '')) throw new Error('Superseded');
     p = { ...p, container: 'pp-platform-networks', services: [], ip: '127.0.0.1' };
   } catch { return fin('refused', 'invalid', 'Invalid or superseded restricted-network change.'); } }
   const isKeycloak = job.kind === 'configure_keycloak_route';

@@ -84,11 +84,14 @@ platformOverviewRouter.post('/services/:service/containers', requireSudo, handle
 
 /* ---------------------------- section-level actions ----------------------- */
 
-platformOverviewRouter.post('/networks/review', handle((req, res) => res.json(networksReview(getDb(), req.body?.networks))));
+// Additional addresses (the VPN networks are derived and not editable here).
+// Allowed at any time — also after SSO is active — behind fresh local step-up
+// (local password + TOTP or local passkey), with an audit record per change.
+platformOverviewRouter.post('/networks/review', handle((req, res) => res.json(networksReview(getDb(), req.body?.additionalNetworks))));
 platformOverviewRouter.post('/networks', requireSudo, handle(async (req, res) => {
   if (!localProof(req, res, 'Changing the restricted networks')) return;
   const out = queueNetworksChange(getDb(), req.body, req.user.id);
-  logAudit(req.user.id, 'FULL_PLATFORM_NETWORKS_CHANGE', 'setup_job', out.job.id, { before: out.review.before, after: out.review.after, via: 'ui' }, req.ip);
+  logAudit(req.user.id, 'FULL_PLATFORM_NETWORKS_CHANGE', 'setup_job', out.job.id, { vpn: out.review.vpn_networks, additional_before: out.review.before_additional, additional_after: out.review.additional_networks, before: out.review.before, after: out.review.after, via: 'ui' }, req.ip);
   import('../mock2/ops.js').then(({ drainBackendStepsNow }) => drainBackendStepsNow?.()).catch(() => {});
   res.status(202).json({ job: out.job, created: out.created });
 }));

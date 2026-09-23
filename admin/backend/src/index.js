@@ -333,6 +333,17 @@ try {
   };
   setTimeout(backendSteps, 10_000).unref();
   setInterval(backendSteps, 15_000).unref();
+  // Platform restricted networks follow the built-in VPN ranges (derived from
+  // the VPN configuration; the operator's additional addresses are kept).
+  const vpnNetworksSync = async (reason) => {
+    try {
+      const { syncPlatformVpnNetworks } = await import('./lib/platform-vpn-sync.js');
+      const r = await syncPlatformVpnNetworks({ reason });
+      if (r.changed || r.queued) console.log(`[setup-engine] VPN networks ${JSON.stringify(r.before ?? null)} -> ${JSON.stringify(r.observed)}${r.queued ? `; restricted-network step ${r.queued.job.id} queued` : ''}`);
+    } catch (err) { console.error('[setup-engine] VPN network sync failed:', err?.message || err); }
+  };
+  setTimeout(() => vpnNetworksSync('boot'), 20_000).unref();
+  setInterval(() => vpnNetworksSync('interval'), 5 * 60_000).unref();
   const sweepInputs = () => { try { const gone = sweepSetupInputs(setupInputsDir(databasePath())); if (gone.length) console.log(`[setup-engine] swept ${gone.length} unconsumed setup input(s)`); } catch (err) { console.error('[setup-engine] input sweep failed:', err?.message || err); } };
   setTimeout(sweepInputs, 5 * 60_000).unref();
   setInterval(sweepInputs, 60 * 60_000).unref();

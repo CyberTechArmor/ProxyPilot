@@ -1,9 +1,11 @@
 import { makeDb as baseDb, apiFixture } from './pomerium-fixture.js';
-import { FULL_PLATFORM_SCHEMA, saveFullPlatform, reviewFullPlatform, applyFullPlatform } from '../../lib/setup-engine/full-platform-store.js';
+import { FULL_PLATFORM_SCHEMA, saveFullPlatform, reviewFullPlatform, applyFullPlatform, readFullPlatform } from '../../lib/setup-engine/full-platform-store.js';
+import { keycloakAdmin, reconcileOwnedIdentity, storeProtected } from '../../lib/setup-engine/full-platform-keycloak.js';
+import { runFullPlatformOperation } from '../../lib/setup-engine/full-platform-op.js';
 import { INFISICAL_SCHEMA } from '../../lib/setup-engine/infisical-store.js';
 import { OPENBAO_SCHEMA } from '../../lib/setup-engine/openbao-store.js';
 import { VAULTWARDEN_SCHEMA } from '../../lib/setup-engine/vaultwarden-store.js';
-import { createJob } from '../../lib/setup-engine/store.js';
+import { createJob, startJob } from '../../lib/setup-engine/store.js';
 export { apiFixture };
 export const config = () => ({ experience: 'full', publicOrigin: 'https://pilot.example.com', recoveryOrigin: 'https://recovery.example.com', realm: 'proxypilot', recoveryNetworks: ['10.20.30.0/24'],
   services: Object.fromEntries(Object.entries({ keycloak:'identity',pomerium:'access',infisical:'secrets',openbao:'bao',vaultwarden:'vault' }).map(([id,host])=>[id,{mode:'install',url:`https://${host}.example.com`}])) });
@@ -81,4 +83,55 @@ export function keycloakWire(k) {
     throw Error('Unscripted Keycloak API: '+method+' '+path);
   };
   return {send,realms,calls,passwords};
+}
+
+/* ------------------------------ the stages ------------------------------ */
+// The coordinator runs ONE stage per job (A→B on apply, then C, then D on
+// each continue) and nothing past B until the person finishes B. These drive
+// it the way the runner and a person would, with every child job scripted.
+
+const scripted = (db, id, status, verification) => db.prepare('UPDATE setup_jobs SET status=?,owner=NULL,verification_json=? WHERE id=?').run(status, verification ? JSON.stringify(verification) : null, id);
+
+/** Stage B's human part, as the retire step records it: permanent administration, linked SSO and recovery verified. */
+export function completeStageB(db) {
+  const full = readFullPlatform(db), sso = db.prepare('SELECT fingerprint FROM sso_config WHERE id=1').get();
+  const state = { ...full.state, administrator: { username: 'admin', email: 'admin@example.com', firstName: 'A', lastName: 'D', localUserId: 'admin', masterId: 'master-id', applicationId: 'app-id', ...(full.state.administrator || {}) },
+    administratorVerified: true, recoveryVerified: true, handoffFingerprint: sso?.fingerprint || null };
+  db.prepare('UPDATE setup_full_platform SET state_json=? WHERE id=1').run(JSON.stringify(state));
+}
+/** Continue the applied revision (a new coordinator job for the current stage). */
+export function continueJob(db, by = 'admin') { const r = readFullPlatform(db); return applyFullPlatform(db, { revision: r.revision, reviewToken: reviewFullPlatform(db).reviewToken, reviewed: true }, by).job; }
+
+/**
+ * Drive the coordinator through stage `through` ('B' | 'C' | 'D'). Service
+ * children finish "succeeded / awaiting user action" (their human steps are
+ * pending); Pomerium is additionally recorded verified when it is its stage,
+ * so stage C completes. Returns the LAST coordinator job and its args.
+ */
+export async function driveStages(db, { through = 'D', owner = 'runner@fixture#1:a', identity = null, dnsCheck = async () => null, interfaces = { test: [{ address: '10.20.30.40', internal: false }] } } = {}) {
+  const k = db.prepare('SELECT * FROM setup_keycloak').get(), wire = keycloakWire(k);
+  storeProtected(db, `keycloak-bootstrap-${k.id}`, { installationId: k.id, password: 'b'.repeat(43), retired: false });
+  const connect = identity || (async (d, kk, full, { job: j }) => { const a = await keycloakAdmin(kk, 'b'.repeat(43), { send: wire.send, job: j }); try { return await reconcileOwnedIdentity(d, kk, full, a.api, j); } finally { await a.close(); } });
+  let job = approved(db), args, result;
+  const settle = async (stage) => {
+    startJob(db, { id: job.id, owner });
+    args = { db, params: { revision: readFullPlatform(db).revision }, job: handle(job.id), identity: connect, interfaces, dnsCheck };
+    for (let i = 0; i < 8; i++) {
+      result = await runFullPlatformOperation(args);
+      for (const c of db.prepare("SELECT id,kind FROM setup_jobs WHERE id!=? AND status='queued'").all(job.id)) {
+        scripted(db, c.id, 'succeeded', { state: 'awaiting_user_action', label: 'Scripted handoff pending' });
+        if (c.kind === 'verify_sso') db.prepare('UPDATE sso_config SET verified_at=?,verified_json=?').run(new Date().toISOString(), JSON.stringify({ valid: true }));
+        if (c.kind === 'pomerium_apply' && stage === 'C') { db.prepare('UPDATE setup_pomerium SET verified_json=? WHERE id=1').run(JSON.stringify({ state: 'verified', label: 'Scripted Pomerium verification' })); scripted(db, c.id, 'succeeded', { state: 'verified', label: 'Scripted Pomerium verification' }); }
+      }
+      if (!result.waiting) { scripted(db, job.id, 'succeeded', result.verification); return; }
+    }
+    throw Error(`Coordinator did not settle in stage ${stage}`);
+  };
+  await settle('B');
+  if (through !== 'B') {
+    completeStageB(db);
+    job = continueJob(db); await settle('C');
+    if (through !== 'C') { job = continueJob(db); await settle('D'); }
+  }
+  return { job, args, result, k, wire };
 }

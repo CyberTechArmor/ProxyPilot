@@ -1,37 +1,67 @@
 # Full Platform setup
 
-Open **Platform Setup** for the saved six-step flow. **Custom / Advanced** keeps
-the individual adapters available. Existing managed installations are reused;
-an external connection never authorizes changes to its runtime or realm.
+**Platform Setup** has one path: Keycloak, Pomerium, Infisical, OpenBao and
+Vaultwarden are installed and managed as one system. The former Custom /
+Advanced experience and the per-service install/connect/skip choices were
+removed (dashboard and MCP). Existing managed installations are reused; a
+saved external connection is refused with a reason.
 
-1. **Domains and realm.** Choose linked parent domains and optional subdomains,
-   or enter custom hostnames. ProxyPilot retains its current administrator
-   hostname. Existing service names and realm are prefilled. Point each selected
-   name directly at the Caddy host; saving a name does not establish DNS or TLS.
-2. **Review.** Confirm the addresses and restricted administrator/VPN networks.
-   Save is inert. **Apply saved setup** queues the existing independent runner.
-   Keycloak, recovery/SSO checks, and dependent adapters run in dependency order.
-3. **Install and connect.** Reopen this page after a reload or restart to see the
-   same operation and service records. **Continue saved setup** resumes pending
-   work with the saved clients, data and protected credentials. Resolve the
-   reported service failure before retrying; uncertainty is not success.
-4. **Administrator and recovery.** The named administrator defaults to the
-   current ProxyPilot account. Enter the person's names, email and permanent
-   Keycloak password. ProxyPilot creates distinct master-realm administration
-   and application-realm identities. It preserves the local account, password,
-   roles and sessions. Existing users are not adopted by matching email/name.
-   Existing identities need the explicit identity-proof/linking path; a
-   conflicting username is preserved and reported.
-5. **Verify and activate.** Enroll the application identity's discoverable
-   passkey in Keycloak Account Console. Prove the ProxyPilot account link,
-   test SSO login and step-up, and separately test restricted local recovery.
-   Return to the administrator form, supply a fresh permanent master login
-   (and its OTP if configured), then **Verify administration and retire
-   bootstrap**. Any failed check retains the working bootstrap path. Only after
-   that handoff can the administrator explicitly activate SSO.
-6. **Complete.** The server requires every selected service's verification,
-   permanent administration, recovery, current Vaultwarden observations and
-   active SSO. A running process or a successful coordinator job is insufficient.
+The setup runs in stages. Each is actionable only when the one before it is
+verified: the coordinator refuses to queue a later stage early, every
+per-service entry point (`applyService`, the service routers' `/apply`, the
+overview retry and MCP `continue_platform_setup` with `service`) refuses with
+`STAGE_LOCKED`, and the page shows later stages locked with the reason. A
+failed stage names the failing service and its reason. One coordinator job
+(apply or **Continue**) works on one stage and ends when that stage is
+verified; the next continue starts the next stage.
+
+- **A. Domains, realm and networks → review.** Choose linked parent domains
+  and optional subdomains, or enter custom hostnames. ProxyPilot retains its
+  current administrator hostname. Add any **additional addresses** (below).
+  Save is inert. **Apply** completes A and queues stage B only.
+- **B. Keycloak.** Install and verify Keycloak, the managed identity (all
+  service clients are created here from inert service records — nothing else is
+  installed), the SSO record and the restricted recovery route. Then the
+  person: reveal the bootstrap password → create the permanent administrator
+  (names, email, permanent password) and enroll a passkey → link the ProxyPilot
+  account → SSO login test, step-up test, separate-browser recovery check →
+  **Verify administration and retire bootstrap**. Any failed check retains the
+  working bootstrap path. Stage C unlocks only after the retirement.
+- **C. Pomerium.**
+- **D. Infisical, OpenBao, Vaultwarden**, each with its human steps (Infisical
+  personal administrator, OpenBao recovery custody and manual unseal,
+  Vaultwarden sign-in/unlock observations).
+- **E. Verify everything → Activate SSO → Complete.** The server requires every
+  service's verification, permanent administration, recovery, current
+  Vaultwarden observations and active SSO. A running process or a successful
+  coordinator job is insufficient.
+
+Stages are computed (`stagesFrom` in `full-platform-store.js`), never stored:
+`fullPlatformState(db).stages` / `.stage`, MCP `get_platform_setup.stages` /
+`current_stage`.
+
+## Restricted networks
+
+The allowlist for local recovery and every restricted service route is
+**(ProxyPilot's built-in VPN networks) ∪ (additional addresses)**.
+
+- VPN networks are derived from the VPN configuration (`vpn_config.cidr` in the
+  host CLI database, read through `proxypilot --json vpn status`), recorded in
+  `app_settings` (`platform.vpn_networks`), always present and not editable.
+  They are re-read at boot, every five minutes and after the VPN
+  enable/disable routes (`lib/platform-vpn-sync.js`); when they change, the
+  `update_platform_networks` step is queued by the system (audit
+  `PLATFORM_VPN_NETWORKS_FOLLOWED`) and every restricted route follows.
+- Additional addresses are the operator's list (`additionalNetworks` in the
+  saved plan). Before apply they are part of stage A; after apply they are
+  edited at any time — **including after SSO is active** — in **Restricted
+  networks** (VPN rows locked, extras add/remove), with a review, fresh local
+  step-up (local password + TOTP or local passkey) and an audit record
+  (`FULL_PLATFORM_NETWORKS_CHANGE`). The change is live when its Caddy step
+  finishes. `/0` and an empty effective list are refused.
+- The networks are not part of the SSO fingerprint: the change rewrites the
+  SSO record's list and the recovery route together in place, and SSO
+  verification and activation stand.
 
 **Reveal initial Keycloak password** requires an administrator, CSRF protection,
 sudo and actual local authentication within five minutes. It reads the original
@@ -82,8 +112,8 @@ Active Keycloak and Pomerium dependencies block removal/reinstallation.
 
 ## Reset: start over
 
-**Custom / Advanced → Reset Full Platform** (and the MCP tool
-`reset_platform_setup`) blows the setup out so **1. Domains and realm** starts
+**Platform Setup → Reset Full Platform** (and the MCP tool
+`reset_platform_setup`) blows the setup out so **A. Domains, realm and networks** starts
 clean. **Review reset** is inert and lists everything the reset touches: every
 owned container (with its ownership label), every owned Caddy route, and every
 database row it discards. The reset itself needs the same fresh local
@@ -180,17 +210,18 @@ its reason while an operation runs or a precondition fails:
 - **Re-run preflight** for the service's hostname and ports.
 - **Recover bootstrap administrator** (Keycloak only) — see below.
 
-Section actions: **Restricted networks** (a reviewed change: preview listing
-every route and record with before → after, one-time token/fresh local proof,
-then a backend step rewrites exactly those rows and re-renders; `/0` and an
-empty list are refused; refused while SSO is active) and **Resync shared plan**
-(when Custom / Advanced saved the shared plan after this Full Platform revision:
+Section actions: **Restricted networks** (VPN rows locked, additional
+addresses editable; a reviewed change: preview listing every route and record
+with before → after, one-time token/fresh local proof, then a backend step
+rewrites exactly those rows and re-renders; `/0` and an empty effective list
+are refused; allowed while SSO is active — see *Restricted networks* above) and
+**Resync shared plan** (when the shared plan changed after this Full Platform revision:
 a new Full Platform revision from the saved values; the next continue writes
 the shared plan again — no reset needed).
 
 Kept out of the overview, with links: secret inputs stay in their Platform Setup
-forms, SSO activation in step 5, reset (data kept or purge) in Custom /
-Advanced behind its own preview, DNS edits in the DNS tools (or at the external
+forms, SSO activation in stage E, reset (data kept or purge) in Platform
+Setup → Reset Full Platform behind its own preview, DNS edits in the DNS tools (or at the external
 DNS host).
 
 **Routes page.** Owned platform routes are listed read-only, labelled with
@@ -200,6 +231,25 @@ hostname in the saved Full Platform plan (dashboard, `set_route`,
 hand-made one would block it.
 
 ## Runtime behaviour (2026-09-23 fixes)
+
+- **Infisical published port.** Docker publishes no port for a container
+  whose every network is `--internal`. The Infisical server's primary network
+  is therefore a second owned bridge, `pp-if-<ref>-edge-net` (non-internal, IP
+  masquerade off, the server only), and it joins the internal data network for
+  db/redis, which stay internal-only. A server left by the internal-only
+  profile holds no data and is recreated by a plain retry. Reset lists the edge
+  network; `get_platform_service` lists each owned network and each
+  container's networks. The Agent Proxy reads **pending — created after
+  bootstrap** until the bootstrap handoff creates it.
+- **Masked adapter errors.** When an adapter throws something other than its
+  own safe failure, the job reason stays generic and an `adapter_error` job
+  event records the error class, the phase, and — for local errors only
+  (TypeError, fs/system errors) — one redacted message line.
+- **Image defaults.** Newer Docker omits empty image `Config` fields; container
+  inspect reports `null`/`""`. The runtimes compare `Cmd`/`Entrypoint`/`User`
+  through `sameArgv`/`sameUser` (owned-runtime.js). Vaultwarden (no image
+  `CMD`) failed here with a `TypeError` between `docker create` and `docker
+  start`; a retry now starts the created container without a reset.
 
 - **Logs.** Owned containers are created with `--log-driver local --log-opt
   max-size=10m --log-opt max-file=3` whatever the daemon default is (they used
@@ -236,22 +286,28 @@ hand-made one would block it.
   (`--optimized`, falling back to a plain run) with a ProxyPilot-generated
   credential that is stored encrypted before use, passed only through a 0600
   env file deleted right after, and verified with a token grant; the saved
-  setup then continues in the same job. Retiring the bootstrap (step 4) removes
+  setup then continues in the same job. Retiring the bootstrap (stage B) removes
   both temporary accounts. No purge is needed.
 
 ## Over MCP
 
 The `platform` MCP family (`docs/features/mcp.md`) calls the same store
 functions as this page. `get_platform_setup` returns the saved revision and
-`review_digest`, domains, realm, services, restricted networks, the status of
-steps 1–6, the current operation and service jobs, each failure's job,
+`review_digest`, domains, realm, `vpn_networks` (derived), `additional_networks`,
+`restricted_networks` (their union), `current_stage` and `stages` (done /
+current / running / failed with `failing` / locked with `locked_reason`), the
+current operation and service jobs, each failure's job,
 `reason_code` (the phase it failed at) and plain reason, the read-only Keycloak
-observer's status, and ordered `next_actions`. Each action says whether an MCP
+observer's status, and ordered `next_actions` — for the current stage only. Each action says whether an MCP
 client can do it (with the tool and arguments) or a person must, and where
 (page, step, control). `save_platform_setup` is inert and CAS-guarded by
 `if_revision`; `apply_platform_setup` / `continue_platform_setup` require the
-reviewed `revision` and `review_digest` and `confirm: true`, and refuse while an
-operation runs or when the next step needs a person. `continue_platform_setup
+reviewed `revision` and `review_digest` and `confirm: true`, advance ONE stage
+per job, and refuse while an operation runs, when the next step needs a person,
+and in stage E. `save_platform_setup` takes `domains`, `realm` and
+`additional_networks`; `services`, `experience` and `restricted_networks` are
+refused (`ONE_PATH`, `NETWORKS_DERIVED`). `set_platform_restricted_networks`
+takes `additional_networks`. `continue_platform_setup
 ({ service })` retries one service adapter with its stored encrypted inputs.
 `manage_platform_service` is Repair / Reinstall / Remove through the same review.
 The overview's actions have tools too: `control_platform_container`,
@@ -282,7 +338,7 @@ cannot reach them.
 existing read-only G3 observer (the `pp-<keycloak>-observer` client named by
 the ProxyPilot SSO record). The Full Platform coordinator creates it in its
 `connect_managed_identity` step, before any service job is queued. A service
-applied before that step (for example from Custom / Advanced) fails at
+applied before that step fails at
 `dedicated_keycloak_handoff` with "The existing read-only Keycloak observer for
 this provider is required."; `get_platform_setup` reports that, and continuing
 the saved setup lets the coordinator create it.

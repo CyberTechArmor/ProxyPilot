@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { stageRefusal } from '../lib/setup-engine/full-platform-store.js';
 import { getDb, logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { configSchema, applySchema, ceremonySchema, digest } from '../lib/setup-engine/vaultwarden-logic.js';
@@ -21,7 +22,7 @@ vaultwardenRouter.put('/', requireSudo, (req, res) => respond(res, async () => {
   const p = configSchema.safeParse(req.body); req.body = {}; if (!p.success) return res.status(400).json({ error: 'Invalid reviewed Vaultwarden settings; unknown fields are refused.' });
   const s = save(getDb(), p.data); logAudit(req.user.id, 'VAULTWARDEN_SETTINGS_SAVED', 'setup_vaultwarden', '1', { revision: s.revision }, req.ip); res.json({ state: s, review: review(getDb()) });
 }));
-vaultwardenRouter.post('/apply', requireSudo, (req, res) => respond(res, async () => {
+vaultwardenRouter.post('/apply', requireSudo, (req, res) => respond(res, async () => {{const why=stageRefusal(getDb(),'vaultwarden');if(why)return res.status(409).json({code:'STAGE_LOCKED',error:why});}
   const p = applySchema.safeParse(req.body); if (!p.success) return res.status(400).json({ error: 'Review the current saved Vaultwarden configuration.' });
   const result = apply(getDb(), p.data, req.user.id); logAudit(req.user.id, 'VAULTWARDEN_PLAN_APPLIED', 'setup_job', result.job.id, { created: result.created }, req.ip); res.status(result.created ? 202 : 200).json(result);
 }));

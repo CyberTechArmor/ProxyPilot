@@ -11,7 +11,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeDb, approved, handle, keycloakWire } from './helpers/full-platform-fixture.js';
+import { makeDb, approved, handle, keycloakWire, driveStages, completeStageB, continueJob } from './helpers/full-platform-fixture.js';
 import { readFullPlatform } from '../lib/setup-engine/full-platform-store.js';
 import { keycloakAdmin, reconcileOwnedIdentity, storeProtected, protectedValue } from '../lib/setup-engine/full-platform-keycloak.js';
 import { runFullPlatformOperation } from '../lib/setup-engine/full-platform-op.js';
@@ -63,22 +63,8 @@ function tools(db, { now = () => Date.now(), flags = {}, host = null, resolvers 
 }
 
 // The coordinator driven to its administrator handoff (as in full-platform.test.js).
-async function connected(db) {
-  const job = approved(db), k = db.prepare('SELECT * FROM setup_keycloak').get(), wire = keycloakWire(k);
-  storeProtected(db, `keycloak-bootstrap-${k.id}`, { installationId: k.id, password: 'b'.repeat(43), retired: false });
-  const identity = async (db, k, full, { job }) => { const admin = await keycloakAdmin(k, 'b'.repeat(43), { send: wire.send, job }); try { return await reconcileOwnedIdentity(db, k, full, admin.api, job); } finally { await admin.close(); } };
-  startJob(db, { id: job.id, owner: 'runner@fp-mcp#1:a' });
-  const args = { db, params: { revision: 1 }, job: handle(job.id), identity, interfaces: { test: [{ address: '10.20.30.40', internal: false }] }, dnsCheck: async () => null };
-  for (let i = 0; i < 6; i++) {
-    const result = await runFullPlatformOperation(args);
-    for (const c of db.prepare("SELECT id,kind FROM setup_jobs WHERE id!=? AND status='queued'").all(job.id)) {
-      terminal(db, c.id, 'succeeded', { state: 'awaiting_user_action', label: 'Scripted handoff pending' });
-      if (c.kind === 'verify_sso') db.prepare('UPDATE sso_config SET verified_at=?,verified_json=?').run(new Date().toISOString(), JSON.stringify({ valid: true }));
-    }
-    if (!result.waiting) { terminal(db, job.id, 'succeeded', result.verification); return { job, k }; }
-  }
-  throw Error('Coordinator did not settle');
-}
+// The coordinator driven through stage D (B's human part scripted), every child scripted.
+async function connected(db, through = 'D') { return driveStages(db, { owner: 'runner@fp-mcp#1:a', through }); }
 const withDb = async (fn) => { const db = makeDb(); try { await fn(db); } finally { db.close(); } };
 
 /* ------------------------------ the observer ---------------------------- */
@@ -109,12 +95,16 @@ test('get_platform_setup explains the Vaultwarden observer failure: job, reason 
   assert.match(f.remedy, /coordinator \(connect_managed_identity\)/);
   assert.equal(v.observer.present, false); assert.match(v.observer.created_by, /connect_managed_identity/);
   assert.equal(v.services.find((s) => s.id === 'vaultwarden').state, 'failed');
-  assert.equal(v.steps.find((s) => s.step === 3).status, 'failed');
+  // Stage D is current and failed, naming the failing service; later stages are locked.
+  assert.equal(v.current_stage, 'D');
+  const d = v.stages.find((x) => x.id === 'D');
+  assert.equal(d.status, 'failed'); assert.equal(d.failing[0].service, 'vaultwarden');
+  assert.equal(v.stages.find((x) => x.id === 'E').status, 'locked'); assert.match(v.stages.find((x) => x.id === 'E').locked_reason, /stage D/);
+  for (const id of ['A', 'B', 'C']) assert.equal(v.stages.find((x) => x.id === id).status, 'done');
   const action = v.next_actions.find((a) => a.id === 'fix_vaultwarden');
-  assert.ok(action.mcp_can_do); assert.equal(action.reason_code, 'dedicated_keycloak_handoff');
-  // A human step is named with its dashboard place.
-  const admin = v.next_actions.find((a) => a.id === 'administrator');
-  assert.equal(admin.by, 'human'); assert.equal(admin.where.control, 'Create or resume permanent administrator');
+  assert.ok(action.mcp_can_do); assert.equal(action.reason_code, 'dedicated_keycloak_handoff'); assert.equal(action.stage, 'D');
+  // next_actions lists only the current stage: nothing from B, C or E.
+  assert.ok(!v.next_actions.some((a) => ['administrator', 'passkey', 'retire_bootstrap', 'activate_sso'].includes(a.id)));
   assert.ok(v.human_only.some((x) => x.where.control === 'Activate SSO'));
   // The shared plan drifting (a Custom save after apply) is diagnosed and routes to reset.
   db.prepare('UPDATE setup_platform_plan SET revision=revision+1').run();
@@ -152,13 +142,17 @@ test('save_platform_setup is inert, CAS on if_revision, dry_run writes nothing, 
   const empty = body(await call('get_platform_setup'));
   assert.equal(empty.saved, false); assert.equal(empty.next_actions[0].tool, 'save_platform_setup');
   const jobs = () => db.prepare('SELECT count(*) n FROM setup_jobs').get().n, n = jobs();
-  const dry = body(await call('save_platform_setup', { if_revision: 0, domains: { recovery: 'https://recovery.example.com', keycloak: 'https://identity.example.com', pomerium: 'https://access.example.com', infisical: 'https://secrets.example.com', openbao: 'https://bao.example.com', vaultwarden: 'https://vault.example.com' }, restricted_networks: ['10.20.30.0/24'], dry_run: true }));
+  const dry = body(await call('save_platform_setup', { if_revision: 0, domains: { recovery: 'https://recovery.example.com', keycloak: 'https://identity.example.com', pomerium: 'https://access.example.com', infisical: 'https://secrets.example.com', openbao: 'https://bao.example.com', vaultwarden: 'https://vault.example.com' }, additional_networks: ['10.20.30.0/24'], dry_run: true }));
   assert.equal(dry.dry_run, true); assert.equal(dry.next_revision, 1); assert.equal(readFullPlatform(db), null);
-  const bad = await call('save_platform_setup', { if_revision: 0, restricted_networks: ['0.0.0.0/0'] });
-  assert.ok(bad.isError); assert.match(text(bad), /Use restricted administrator\/VPN networks; unrestricted access is refused\./);
-  const moved = await call('save_platform_setup', { if_revision: 0, domains: { proxypilot: 'https://elsewhere.example.com', recovery: 'https://recovery.example.com', keycloak: 'https://identity.example.com', pomerium: 'https://access.example.com', infisical: 'https://secrets.example.com', openbao: 'https://bao.example.com', vaultwarden: 'https://vault.example.com' }, restricted_networks: ['10.20.30.0/24'] });
+  const bad = await call('save_platform_setup', { if_revision: 0, additional_networks: ['0.0.0.0/0'] });
+  assert.ok(bad.isError); assert.match(text(bad), /unrestricted access \(\/0\) is refused\./);
+  // One path: no per-service choices, no Custom experience, no hand-edited effective list.
+  for (const extra of [{ services: { pomerium: 'skip' } }, { experience: 'custom' }]) { const r = await call('save_platform_setup', { if_revision: 0, ...extra }); assert.ok(r.isError); assert.equal(body(r).code, 'ONE_PATH'); }
+  const derived = await call('save_platform_setup', { if_revision: 0, restricted_networks: ['10.20.30.0/24'] });
+  assert.ok(derived.isError); assert.equal(body(derived).code, 'NETWORKS_DERIVED');
+  const moved = await call('save_platform_setup', { if_revision: 0, domains: { proxypilot: 'https://elsewhere.example.com', recovery: 'https://recovery.example.com', keycloak: 'https://identity.example.com', pomerium: 'https://access.example.com', infisical: 'https://secrets.example.com', openbao: 'https://bao.example.com', vaultwarden: 'https://vault.example.com' }, additional_networks: ['10.20.30.0/24'] });
   assert.ok(moved.isError); assert.match(text(moved), /ProxyPilot must use its current administrator hostname/);
-  const saved = body(await call('save_platform_setup', { if_revision: 0, domains: { recovery: 'https://recovery.example.com', keycloak: 'https://identity.example.com', pomerium: 'https://access.example.com', infisical: 'https://secrets.example.com', openbao: 'https://bao.example.com', vaultwarden: 'https://vault.example.com' }, restricted_networks: ['10.20.30.0/24'] }));
+  const saved = body(await call('save_platform_setup', { if_revision: 0, domains: { recovery: 'https://recovery.example.com', keycloak: 'https://identity.example.com', pomerium: 'https://access.example.com', infisical: 'https://secrets.example.com', openbao: 'https://bao.example.com', vaultwarden: 'https://vault.example.com' }, additional_networks: ['10.20.30.0/24'] }));
   assert.equal(saved.revision, 1); assert.match(saved.review_digest, /^[a-f0-9]{64}$/); assert.equal(jobs(), n, 'save queues nothing');
   assert.equal(readFullPlatform(db).created_by, 'admin', 'the plan names the key owner, so the dashboard handoff stays available to them');
   const stale = await call('save_platform_setup', { if_revision: 0, realm: 'other' });
@@ -171,7 +165,7 @@ test('save_platform_setup is inert, CAS on if_revision, dry_run writes nothing, 
 
 test('apply_platform_setup: confirm, stale revision, stale digest, running operation and already-applied refusals; queues with mcp attribution', () => withDb(async (db) => {
   const { call } = tools(db);
-  await call('save_platform_setup', { if_revision: 0, domains: { recovery: 'https://recovery.example.com', keycloak: 'https://identity.example.com', pomerium: 'https://access.example.com', infisical: 'https://secrets.example.com', openbao: 'https://bao.example.com', vaultwarden: 'https://vault.example.com' }, restricted_networks: ['10.20.30.0/24'] });
+  await call('save_platform_setup', { if_revision: 0, domains: { recovery: 'https://recovery.example.com', keycloak: 'https://identity.example.com', pomerium: 'https://access.example.com', infisical: 'https://secrets.example.com', openbao: 'https://bao.example.com', vaultwarden: 'https://vault.example.com' }, additional_networks: ['10.20.30.0/24'] });
   const s = body(await call('get_platform_setup'));
   assert.equal(s.next_actions[0].tool, 'apply_platform_setup');
   assert.match(body(await call('apply_platform_setup', { revision: s.revision, review_digest: s.review_digest })), /confirm: true/);
@@ -361,7 +355,7 @@ test('reset (default): owned containers and routes go, records are discarded, da
     assert.deepEqual(['setup_full_credentials', 'setup_vaultwarden_credentials', 'setup_openbao_credentials', 'setup_infisical_credentials', 'setup_pomerium_credentials'].map((t) => db.prepare(`SELECT count(*) n FROM ${t}`).get().n), credentialRows);
     assert.equal(getJob(db, queued.job.id).id, queued.job.id, 'the reset job is kept as the record');
     const after = body(await call('get_platform_setup'));
-    assert.equal(after.saved, false); assert.equal(after.steps[0].status, 'pending'); assert.equal(after.next_actions[0].tool, 'save_platform_setup');
+    assert.equal(after.saved, false); assert.equal(after.stages[0].status, 'current'); assert.equal(after.current_stage, 'A'); assert.equal(after.next_actions[0].tool, 'save_platform_setup');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }));
 
@@ -375,7 +369,7 @@ test('reset purge_data: flag-gated (off by default); a verified backup set is wr
     settings.set('feature_flag:mcp.platform.purge', '1');
     const first = body(await call('reset_platform_setup', { purge_data: true }));
     const p = first.preview;
-    assert.equal(p.remove.directories.length, 5); assert.equal(p.remove.volumes.length, 6); assert.equal(p.remove.networks.length, 5);
+    assert.equal(p.remove.directories.length, 5); assert.equal(p.remove.volumes.length, 6); assert.equal(p.remove.networks.length, 6); // Infisical: data, edge, proxy
     assert.ok(p.remove.records.some((r) => r.table === 'setup_vaultwarden_credentials'));
     assert.match(p.backup.directory, /platform-reset-<job id>$/);
     // A default-mode token cannot confirm a purge (different subject), and vice versa.

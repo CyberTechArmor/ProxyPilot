@@ -8,7 +8,7 @@ export const POMERIUM_ROOT = '/var/lib/proxypilot/pomerium';
 export const POMERIUM_PORT = 18081;
 export const POMERIUM_GRPC_PORT = 18082;
 export const POMERIUM_METRICS_PORT = 18083;
-export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const digest = value => createHash('sha256').update(JSON.stringify(value) ?? 'undefined').digest('hex');
 export const pomeriumError = message => Object.assign(new Error(message), { status: 409, pomeriumSafe: true });
 export const pomeriumJobSchema = z.object({ revision: z.number().int().positive() }).strict();
 export const pomeriumConfigSchema = z.object({

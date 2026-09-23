@@ -39,7 +39,7 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
     if (!s.originalToken) throw fail('Infisical bootstrap did not return its one-time authority. Recover administration without resetting the service.');
     persist();
   }
-  if (!s.organizationId) throw fail('This Infisical instance is already initialized without this installation’s bootstrap receipt. Use the explicit Custom connection; existing organizations and users were preserved.');
+  if (!s.organizationId) throw fail('This Infisical instance is already initialized without this installation’s bootstrap receipt. Restore the matching protected Infisical set; existing organizations and users were preserved.');
   const request = async (path, options = {}) => api(path, { ...options, token: options.token || s.token });
   // Upstream bootstrap creates an unrestricted token. Replace it immediately
   // with a 15-minute token, revoke the original, and retain no refresh token.
@@ -64,7 +64,7 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
     if (input.email !== s.email) throw fail('Resume as the recorded Infisical administrator. No account is selected by an unverified matching email.');
     const login = requireOk(await api('/api/v3/auth/login', { method: 'POST', body: { email: input.email, password: input.password } }), 'Fresh Infisical administrator login');
     const selected = requireOk(await api('/api/v3/auth/select-organization', { method: 'POST', token: login.accessToken, body: { organizationId: s.organizationId } }), 'Recorded organization administration');
-    if (selected.isMfaEnabled || !selected.token) throw fail('Infisical requires its interactive MFA ceremony. Complete the owner-authorized Custom handoff; no MFA bypass is attempted.');
+    if (selected.isMfaEnabled || !selected.token) throw fail('Infisical requires its interactive MFA ceremony. Complete the owner-authorized handoff in Infisical; no MFA bypass is attempted.');
     if (jwt(selected.token).userId !== s.userId) throw fail('The fresh Infisical administrator differs from the recorded bootstrap identity.');
     s.token = selected.token; s.tokenExpiresAt = Math.min(jwt(selected.token).exp * 1000, now + 900_000); s.personalAuthority = true; persist();
   }

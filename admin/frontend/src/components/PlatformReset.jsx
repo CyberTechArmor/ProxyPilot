@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 
-// Custom / Advanced → Reset Full Platform. The same review and queue the MCP
+// Platform Setup → Reset Full Platform. The same review and queue the MCP
 // tool reset_platform_setup uses: an inert preview listing everything that
 // will be removed, then the reset itself behind fresh local authentication.
 export default function PlatformReset() {
@@ -16,7 +16,7 @@ export default function PlatformReset() {
   const preview = (purge) => run('review', async () => { setConfirmed(false); setQueued(null); setReview(await api.fullPlatformResetReview({ purgeData: purge })); });
   const list = (title, items, render) => items?.length ? <div className="space-y-1"><p className="font-medium">{title}</p><ul className="list-disc pl-5 space-y-1">{items.map((x, i) => <li key={i} className="break-all">{render(x)}</li>)}</ul></div> : null;
   return <div className="space-y-4 text-sm">
-    <p>Start Platform Setup over. Owned containers and their Caddy routes are removed and the saved plan, platform operations and owned service records are discarded, so step 1 starts clean. External services are never touched. Reset is refused while SSO is active, while Pomerium application policies are active, or while an operation is running.</p>
+    <p>Start Platform Setup over. Owned containers and their Caddy routes are removed and the saved plan, platform operations and owned service records are discarded, so stage A starts clean. External services are never touched. Reset is refused while SSO is active, while Pomerium application policies are active, or while an operation is running.</p>
     <label className="flex gap-2 items-start min-h-11"><input type="checkbox" className="mt-1" checked={purgeData} disabled={!!busy} onChange={e => { setPurgeData(e.target.checked); setReview(null); setConfirmed(false); }} /><span>Also delete owned data (directories, volumes, networks and protected credentials). A backup set is written to the exports directory and verified first.</span></label>
     <Button variant="outline" className="min-h-11 w-full sm:w-auto" disabled={!!busy} onClick={() => preview(purgeData)}>{busy === 'review' ? 'Reviewing…' : 'Review reset'}</Button>
     {error && <p role="alert" className="text-destructive break-words">{error}</p>}

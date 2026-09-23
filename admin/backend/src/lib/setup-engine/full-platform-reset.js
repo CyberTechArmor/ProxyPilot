@@ -62,7 +62,7 @@ const CREDENTIAL_TABLE = { pomerium: 'setup_pomerium_credentials', infisical: 's
 
 function networksFor(service, row) {
   if (service === 'keycloak') return [resourceNames(row.id).network];
-  if (service === 'infisical') { const n = infisicalNames(row); return [n.network, n.proxyNetwork]; }
+  if (service === 'infisical') { const n = infisicalNames(row); return [n.network, n.edgeNetwork, n.proxyNetwork]; }
   if (service === 'openbao') return [baoNames(row).network];
   if (service === 'vaultwarden') return [vaultNames(row).network];
   return []; // Pomerium runs on the host network
@@ -85,7 +85,7 @@ function ssoFor(db, ownedKeycloakId) {
 /** The inventory, blockers and preview. Throws only when there is nothing to review. */
 export function resetReview(db, { purgeData = false, ignoreJobs = [] } = {}) {
   const full = readFullPlatform(db);
-  if (!full) throw fail('No Full Platform setup is saved. Individual Custom / Advanced adapters are not reset here.');
+  if (!full) throw fail('No Full Platform setup is saved. Nothing to reset.');
   const targets = installedTargets(db), owned = [], external = [];
   for (const id of SERVICE_IDS) {
     const t = targets[id]; if (!t) continue;
@@ -98,7 +98,7 @@ export function resetReview(db, { purgeData = false, ignoreJobs = [] } = {}) {
   const blockers = [];
   const open = db.prepare(`SELECT * FROM setup_jobs WHERE app IN (${resetApps().map(() => '?').join(',')}) AND status IN ('queued','running')`).all(...resetApps()).filter((j) => !ignoreJobs.includes(j.id));
   for (const j of open) blockers.push(`Operation ${j.id} (${j.kind}) is ${j.status}. Wait for it before resetting.`);
-  if (sso?.row.active) blockers.push('SSO is active and ProxyPilot sign-in depends on this identity provider. Disable SSO from local recovery first (Platform Setup → Custom / Advanced → Single sign-on).');
+  if (sso?.row.active) blockers.push('SSO is active and ProxyPilot sign-in depends on this identity provider. Disable SSO from local recovery first (Platform Setup → E. Verify everything and activate SSO → Disable SSO).');
   if (owned.some((o) => o.service === 'pomerium') && has(db, 'setup_route_protection') && db.prepare("SELECT 1 FROM setup_route_protection WHERE state!='removed' LIMIT 1").get()) blockers.push('Saved application policies depend on Pomerium. Retire those access dependencies before resetting.');
 
   const services = owned.map(({ service, row }) => {

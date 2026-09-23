@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { RefreshCw, ExternalLink, ShieldCheck, ShieldAlert, HelpCircle as CircleHelp, Ban as CircleSlash, Loader2 } from 'lucide-react';
+import { RefreshCw, ExternalLink, ShieldCheck, ShieldAlert, HelpCircle as CircleHelp, Ban as CircleSlash, Loader2, Lock, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -164,7 +164,7 @@ function ServicePanel({ id, onClose, onChanged, openJob }) {
             <Field title="Last job">{s.last_job ? <><span>{label(s.last_job.status)}{s.last_job.phase ? ` · ${label(s.last_job.phase)}` : ''}{s.last_job.reason_code ? ` · ${s.last_job.reason_code}` : ''} · {when(s.last_job.updated_at)}</span><span className="block text-xs break-words">{s.last_job.reason}</span>{s.last_job.dns_blocked && <span className="block text-xs text-destructive break-words">{s.last_job.dns_blocked}</span>}<button type="button" className="text-xs underline min-h-11 sm:min-h-0" onClick={() => openJob(s.last_job.id)}>View job log</button></> : '—'}</Field>
           </section>
           {s.health.containers?.length > 0 && <section className="space-y-2"><h4 className="font-semibold">Containers</h4><ul className="space-y-2">{s.health.containers.map((c) => <li key={c.name} className="rounded-lg border p-3 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 min-w-0">
-            <div className="min-w-0 text-sm"><p className="font-medium break-all">{c.name}</p><p className="text-xs text-muted-foreground break-all">{c.present === false ? 'Expected but missing' : c.present === null ? 'Not inspected' : `${c.id || ''} · ${label(c.status)} · ${c.health}${c.exit_code != null ? ` · exit ${c.exit_code}` : ''}${c.log_driver ? ` · logs: ${c.log_driver}` : ''}`}</p>{c.error && <p className="text-xs text-destructive break-words">{c.error}</p>}</div>
+            <div className="min-w-0 text-sm"><p className="font-medium break-all">{c.name}</p><p className="text-xs text-muted-foreground break-all">{c.pending ? label(c.status) : c.present === false ? 'Expected but missing' : c.present === null ? 'Not inspected' : `${c.id || ''} · ${label(c.status)} · ${c.health}${c.exit_code != null ? ` · exit ${c.exit_code}` : ''}${c.log_driver ? ` · logs: ${c.log_driver}` : ''}`}</p>{c.error && <p className="text-xs text-destructive break-words">{c.error}</p>}</div>
             <div className="flex flex-col sm:flex-row gap-2 shrink-0">{['start', 'stop', 'restart'].map((verb) => { const a = act(`${verb}:${c.name}`); return a ? <Button key={verb} variant="outline" className="min-h-11 capitalize" disabled={!a.enabled || !!busy} title={a.reason || undefined} onClick={() => reviewContainer(c.name, verb)}>{verb}</Button> : null; })}</div>
           </li>)}</ul>{s.actions.some((a) => a.kind === 'container' && !a.enabled && a.reason?.includes('dependents')) && <p className="text-xs text-muted-foreground break-words">{s.actions.find((a) => a.kind === 'container' && a.reason?.includes('dependents')).reason}</p>}</section>}
           <section className="space-y-3"><h4 className="font-semibold">Actions</h4>
@@ -179,7 +179,7 @@ function ServicePanel({ id, onClose, onChanged, openJob }) {
           </section>
           {review && <Confirm review={review} busy={busy === 'confirm'} destructive={['stop', 'remove'].includes(review.action)}
             title={review.kind === 'container' ? `${review.action} ${review.container}` : review.kind === 'recover' ? 'Recover the Keycloak bootstrap administrator' : `${review.action} ${s.name}`}
-            confirmText={review.kind === 'recover' ? 'I reviewed this recovery. ProxyPilot generates and stores the new credential; I will retire the bootstrap in step 4.' : 'I reviewed the affected runtime and the downtime. Keep all persistent data and credentials.'}
+            confirmText={review.kind === 'recover' ? 'I reviewed this recovery. ProxyPilot generates and stores the new credential; I will retire the bootstrap in stage B.' : 'I reviewed the affected runtime and the downtime. Keep all persistent data and credentials.'}
             onCancel={() => setReview(null)} onConfirm={confirm} />}
           {verify && <section className="rounded-lg border p-4 space-y-2 text-sm min-w-0"><h4 className="font-semibold">Verification {verify.ok ? 'passed' : 'failed'} · {when(verify.at)}</h4><ul className="space-y-1">{verify.checks.map((c) => <li key={c.id} className={`break-words ${c.ok ? '' : 'text-destructive'}`}>{c.ok ? '✓' : '✗'} {label(c.id)}: {c.detail}</li>)}</ul></section>}
           {preflight && <section className="rounded-lg border p-4 space-y-2 text-sm min-w-0"><h4 className="font-semibold">Preflight {preflight.ready ? 'ready' : 'not ready'}</h4><ul className="space-y-1">{preflight.checks.map((c) => <li key={c.id} className={`break-words ${c.ok ? '' : 'text-destructive'}`}>{c.ok ? '✓' : '✗'} {c.id}: {c.detail}</li>)}</ul></section>}
@@ -187,34 +187,60 @@ function ServicePanel({ id, onClose, onChanged, openJob }) {
             {logs.reason && <p className="text-sm text-destructive break-words">{logs.reason}</p>}
             {logs.containers.map((c) => <div key={c.container} className="rounded-lg border min-w-0"><p className="px-3 py-2 text-xs font-medium border-b break-all">{c.container}{c.driver ? ` · ${c.driver}` : ''}{c.source ? ` · ${c.source}` : ''}</p>{c.readable === false ? <p className="p-3 text-sm text-destructive break-words">Logs cannot be read: {c.reason}</p> : <pre className="max-h-80 overflow-auto p-3 text-xs whitespace-pre">{c.lines.length ? c.lines.join('\n') : 'No log lines.'}</pre>}</div>)}
           </section>}
-          <section className="rounded-lg border p-4 text-sm space-y-1"><h4 className="font-semibold">Kept out of this view</h4><p>Secret inputs stay in their Platform Setup forms · SSO activation is Platform Setup step 5 · Reset (data kept or purge) is Custom / Advanced → Reset Full Platform, behind its own preview.</p><p className="text-xs text-muted-foreground">MCP: {s.mcp?.summary}</p></section>
+          <section className="rounded-lg border p-4 text-sm space-y-1"><h4 className="font-semibold">Kept out of this view</h4><p>Secret inputs stay in their Platform Setup forms · SSO activation is Platform Setup stage E · Reset (data kept or purge) is Platform Setup → Reset Full Platform, behind its own preview.</p><p className="text-xs text-muted-foreground">MCP: {s.mcp?.summary}</p></section>
         </>}
       </div>
     </DialogContent>
   </Dialog>;
 }
 
+/**
+ * The restricted allowlist = built-in VPN networks (derived from the VPN
+ * configuration: locked rows) ∪ additional addresses (an editable list).
+ * A change is reviewed, needs fresh local step-up, and is live when its
+ * Caddy step finishes — also after SSO is active.
+ */
+export function RestrictedNetworks({ vpn = [], additional = [], edit, onChanged }) {
+  const [list, setList] = useState(additional), [draft, setDraft] = useState(''), [review, setReview] = useState(null);
+  const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('');
+  useEffect(() => { setList(additional); setReview(null); }, [additional.join(',')]);
+  const run = async (name, fn) => { setBusy(name); setError(''); setNotice(''); try { await fn(); } catch (e) { setError(e.message); } finally { setBusy(''); } };
+  const dirty = list.join(',') !== additional.join(',');
+  const disabled = !edit?.enabled || !!busy;
+  const add = () => { const v = draft.trim(); if (!v) return; if (/\/0$/.test(v)) { setError('Unrestricted access (/0) is refused.'); return; } if (!list.includes(v)) setList([...list, v]); setDraft(''); setReview(null); setError(''); };
+  return <div className="rounded-lg border p-4 space-y-3 min-w-0">
+    <h3 className="font-semibold">Restricted networks</h3>
+    <p className="text-sm text-muted-foreground">Local recovery and every restricted service route accept these addresses only: the VPN networks plus any additional addresses.</p>
+    <ul className="space-y-2" aria-label="Restricted networks">
+      {vpn.map((n) => <li key={`vpn-${n}`} className="flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 min-h-11 min-w-0"><span className="font-mono text-sm break-all">{n}</span><span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"><Lock className="h-3.5 w-3.5" aria-hidden="true" />VPN · automatic</span></li>)}
+      {vpn.length === 0 && <li className="rounded-md border px-3 py-2 text-sm text-muted-foreground">The VPN is not enabled on this host, so the additional addresses are the whole allowlist.</li>}
+      {list.map((n) => <li key={`extra-${n}`} className="flex items-center justify-between gap-3 rounded-md border px-3 min-h-11 min-w-0"><span className="font-mono text-sm break-all">{n}</span><Button variant="ghost" className="min-h-11 min-w-11 shrink-0" disabled={disabled} aria-label={`Remove ${n}`} onClick={() => { setList(list.filter((x) => x !== n)); setReview(null); }}><X className="h-4 w-4" aria-hidden="true" /></Button></li>)}
+    </ul>
+    <div className="flex flex-col sm:flex-row gap-2">
+      <div className="flex-1 min-w-0"><Label htmlFor="platform-additional-network" className="sr-only">Additional address or CIDR</Label><Input id="platform-additional-network" value={draft} placeholder="203.0.113.7 or 203.0.113.0/28" disabled={disabled} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} autoComplete="off" spellCheck={false} className="min-h-11" /></div>
+      <Button variant="outline" className="min-h-11" disabled={disabled || !draft.trim()} onClick={add}>Add address</Button>
+    </div>
+    {!edit?.enabled && edit?.reason && <p className="text-xs text-muted-foreground break-words">{edit.reason}</p>}
+    <Button className="min-h-11 w-full sm:w-auto" disabled={disabled || !dirty} onClick={() => run('review', async () => setReview(await api.platformNetworksReview(list)))}>Save additional addresses</Button>
+    {review && <>
+      {review.routes?.length > 0 && <ul className="text-xs space-y-1">{review.routes.map((r) => <li key={r.route_id} className="break-all">{r.hostname}: {(r.before || []).join(', ') || '—'} → {r.after.join(', ')}</li>)}</ul>}
+      <Confirm review={review} title="Change the additional addresses" busy={busy === 'save'} confirmText="I reviewed every route and record listed above. This needs a fresh local password + TOTP or passkey." onCancel={() => setReview(null)} onConfirm={() => run('save', async () => { const r = await api.platformNetworksChange({ revision: review.revision, reviewToken: review.reviewToken, additionalNetworks: review.additional_networks, reviewed: true }); setReview(null); setNotice(`Change queued as ${r.job.id}; it is live once the Caddy step finishes.`); onChanged?.(); })} />
+    </>}
+    {error && <p role="alert" className="text-sm text-destructive break-words">{error}</p>}
+    {notice && <p role="status" className="text-sm break-words">{notice}</p>}
+  </div>;
+}
+
 function SectionActions({ overview, onChanged }) {
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('');
-  const [networks, setNetworks] = useState(''), [netReview, setNetReview] = useState(null), [resync, setResync] = useState(null);
-  useEffect(() => { setNetworks((overview.restricted_networks || []).join(', ')); }, [overview.restricted_networks?.join(',')]);
+  const [resync, setResync] = useState(null);
   const run = async (name, fn) => { setBusy(name); setError(''); setNotice(''); try { await fn(); } catch (e) { setError(e.message); } finally { setBusy(''); } };
   const edit = overview.section_actions?.find((a) => a.id === 'edit_networks'), rs = overview.section_actions?.find((a) => a.id === 'resync_plan');
   return <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-    <div className="rounded-lg border p-4 space-y-3 min-w-0">
-      <h3 className="font-semibold">Restricted networks</h3>
-      <Label htmlFor="platform-networks">Approved administrator / VPN networks (comma separated)</Label>
-      <Input id="platform-networks" value={networks} disabled={!edit?.enabled || !!busy} onChange={(e) => { setNetworks(e.target.value); setNetReview(null); }} autoComplete="off" spellCheck={false} />
-      {!edit?.enabled && edit?.reason && <p className="text-xs text-muted-foreground break-words">{edit.reason}</p>}
-      <Button variant="outline" className="min-h-11" disabled={!edit?.enabled || !!busy} onClick={() => run('net-review', async () => setNetReview(await api.platformNetworksReview(networks.split(',').map((x) => x.trim()).filter(Boolean))))}>Review network change</Button>
-      {netReview && <>
-        {netReview.routes?.length > 0 && <ul className="text-xs space-y-1">{netReview.routes.map((r) => <li key={r.route_id} className="break-all">{r.hostname}: {(r.before || []).join(', ') || '—'} → {r.after.join(', ')}</li>)}</ul>}
-        <Confirm review={netReview} title="Change the restricted networks" busy={busy === 'net'} confirmText="I reviewed every route and record listed above." onCancel={() => setNetReview(null)} onConfirm={() => run('net', async () => { const r = await api.platformNetworksChange({ revision: netReview.revision, reviewToken: netReview.reviewToken, networks: netReview.after, reviewed: true }); setNetReview(null); setNotice(`Network change queued as ${r.job.id}.`); onChanged(); })} />
-      </>}
-    </div>
+    <RestrictedNetworks vpn={overview.vpn_networks || []} additional={overview.additional_networks || []} edit={edit} onChanged={onChanged} />
     <div className="rounded-lg border p-4 space-y-3 min-w-0">
       <h3 className="font-semibold">Shared service plan</h3>
-      <p className="text-sm">{overview.shared_plan?.in_sync ? 'In sync with the Full Platform revision.' : `Custom / Advanced saved shared plan revision ${overview.shared_plan?.shared_revision} after this Full Platform revision recorded ${overview.shared_plan?.recorded_revision}.`}</p>
+      <p className="text-sm">{overview.shared_plan?.in_sync ? 'In sync with the Full Platform revision.' : `The shared plan changed to revision ${overview.shared_plan?.shared_revision} after this Full Platform revision recorded ${overview.shared_plan?.recorded_revision}.`}</p>
       {!rs?.enabled && rs?.reason && <p className="text-xs text-muted-foreground break-words">{rs.reason}</p>}
       <Button variant="outline" className="min-h-11" disabled={!rs?.enabled || !!busy} onClick={() => run('resync-review', async () => setResync(await api.platformResyncReview()))}>Resync shared plan</Button>
       {resync && <Confirm review={resync} title="Resync the shared plan" busy={busy === 'resync'} confirmText="Create a new Full Platform revision from the saved values." onCancel={() => setResync(null)} onConfirm={() => run('resync', async () => { const r = await api.platformResync(resync.revision); setResync(null); setNotice(`Revision ${r.revision} created. Continue the saved setup to write the shared plan again.`); onChanged(); })} />}

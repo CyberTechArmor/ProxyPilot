@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { EventEmitter } from 'node:events';
-import { makeDb, approved, handle, keycloakWire } from './helpers/full-platform-fixture.js';
+import { makeDb, approved, handle, keycloakWire, driveStages, completeStageB, continueJob } from './helpers/full-platform-fixture.js';
 import { readFullPlatform, resyncReview, resyncSharedPlan } from '../lib/setup-engine/full-platform-store.js';
 import { keycloakAdmin, reconcileOwnedIdentity, storeProtected } from '../lib/setup-engine/full-platform-keycloak.js';
 import { runFullPlatformOperation } from '../lib/setup-engine/full-platform-op.js';
@@ -57,22 +57,8 @@ function tools(db, { host = null, resolvers = okResolvers } = {}) {
 const setFlag = (db, name, on) => db.prepare('INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(`feature_flag:${name}`, on ? '1' : '0');
 
 // The coordinator driven to its handoff so every service record exists.
-async function connected(db) {
-  const job = approved(db), k = db.prepare('SELECT * FROM setup_keycloak').get(), wire = keycloakWire(k);
-  storeProtected(db, `keycloak-bootstrap-${k.id}`, { installationId: k.id, password: 'b'.repeat(43), retired: false });
-  const identity = async (db2, kk, full, { job: j }) => { const a = await keycloakAdmin(kk, 'b'.repeat(43), { send: wire.send, job: j }); try { return await reconcileOwnedIdentity(db2, kk, full, a.api, j); } finally { await a.close(); } };
-  startJob(db, { id: job.id, owner: 'runner@overview#1:a' });
-  const args = { db, params: { revision: 1 }, job: handle(job.id), identity, interfaces: { test: [{ address: '10.20.30.40', internal: false }] }, dnsCheck: async () => null };
-  for (let i = 0; i < 6; i++) {
-    const result = await runFullPlatformOperation(args);
-    for (const c of db.prepare("SELECT id,kind FROM setup_jobs WHERE id!=? AND status='queued'").all(job.id)) {
-      terminal(db, c.id, 'succeeded', { state: 'awaiting_user_action', label: 'Scripted handoff pending' });
-      if (c.kind === 'verify_sso') db.prepare('UPDATE sso_config SET verified_at=?,verified_json=?').run(new Date().toISOString(), JSON.stringify({ valid: true }));
-    }
-    if (!result.waiting) { terminal(db, job.id, 'succeeded', result.verification); return { job, k }; }
-  }
-  throw Error('Coordinator did not settle');
-}
+// The coordinator driven through stage D (B's human part scripted), every child scripted.
+async function connected(db, through = 'D') { return driveStages(db, { owner: 'runner@overview#1:a', through }); }
 const withDb = async (fn) => { const db = makeDb(); try { await fn(db); } finally { db.close(); } };
 
 /* -------------------------------- Part 1 -------------------------------- */
@@ -83,7 +69,7 @@ test('every Platform MCP tool refuses before any work while mcp.platform is off,
   assert.equal(names.length, 16);
   const argsFor = { get_platform_service: { service: 'vaultwarden' }, get_platform_job: { id: 'x' }, verify_platform_service: { service: 'vaultwarden' }, get_platform_service_logs: { service: 'vaultwarden' },
     control_platform_container: { service: 'vaultwarden', container: 'x', action: 'stop' }, manage_platform_service: { service: 'vaultwarden', action: 'repair', dry_run: true },
-    set_platform_restricted_networks: { restricted_networks: ['10.9.0.0/24'], dry_run: true }, resync_platform_plan: { revision: 1, dry_run: true }, save_platform_setup: { if_revision: 1, dry_run: true },
+    set_platform_restricted_networks: { additional_networks: ['10.9.0.0/24'], dry_run: true }, resync_platform_plan: { revision: 1, dry_run: true }, save_platform_setup: { if_revision: 1, dry_run: true },
     apply_platform_setup: { revision: 1, review_digest: 'x', dry_run: true }, continue_platform_setup: { revision: 1, review_digest: 'x', dry_run: true }, reset_platform_setup: { dry_run: true }, recover_keycloak_bootstrap: { dry_run: true } };
   const jobsBefore = db.prepare('SELECT count(*) n FROM setup_jobs').get().n;
   setFlag(db, 'mcp.platform', false);
@@ -276,15 +262,16 @@ test('3e: DNS verdict needs both resolvers on the Caddy host, names a disagreeme
   assert.equal(results['vault.example.com'].ok, false);
 }));
 
-test('3f: restricted networks change through a review; /0 and an empty list are refused; active SSO blocks', () => withDb(async (db) => {
+test('3f: restricted networks change through a review; /0 and an empty effective list are refused; active SSO no longer blocks', () => withDb(async (db) => {
   await connected(db);
+  // No VPN recorded on this host: the additional list is the whole allowlist.
   assert.throws(() => networksReview(db, []), /At least one/);
   assert.throws(() => networksReview(db, ['0.0.0.0/0']), /\/0/);
   const r = networksReview(db, ['10.9.0.0/24']);
   assert.deepEqual(r.after, ['10.9.0.0/24']); assert.match(r.reviewToken, /^[a-f0-9]{64}$/);
   assert.ok(r.records.some((x) => x.record === 'setup_vaultwarden'));
   db.prepare('UPDATE sso_config SET active=1').run();
-  assert.ok(networksReview(db, ['10.9.0.0/24']).blockers.some((b) => /SSO is active/.test(b)));
+  assert.deepEqual(networksReview(db, ['10.9.0.0/24']).blockers, []);
 }));
 
 test('3g: resync creates a new Full Platform revision from the saved values and keeps it applied', () => withDb(async (db) => {
@@ -332,7 +319,9 @@ test('the overview: health from inspect, broken when the upstream is not listeni
   const by = Object.fromEntries(o.services.map((s) => [s.id, s]));
   assert.equal(o.docker.default_log_driver, 'journald');
   assert.equal(by.infisical.health.status, 'broken');
-  assert.match(by.infisical.health.reason, /missing: .*proxy/); assert.match(by.infisical.health.reason, /127\.0\.0\.1:18085 is not listening/);
+  // The Agent Proxy is created after the Infisical bootstrap: pending, not missing.
+  assert.ok(!by.infisical.health.missing.some((n) => /proxy/.test(n))); assert.match(by.infisical.health.reason, /proxy: pending — created after bootstrap/);
+  assert.equal(by.infisical.health.pending[0].status, 'pending — created after bootstrap'); assert.match(by.infisical.health.reason, /127\.0\.0\.1:18085 is not listening/);
   assert.equal(by.vaultwarden.route.recorded, false);
   assert.equal(by.vaultwarden.dns.ok, false); assert.equal(by.vaultwarden.dns.agree, false);
   const retry = by.vaultwarden.actions.find((a) => a.id === 'retry');

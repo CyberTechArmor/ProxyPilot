@@ -2,7 +2,7 @@ import { mkdirSync, lstatSync, existsSync, readdirSync, readFileSync } from 'nod
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readPrivate, atomicPrivate } from './pomerium-runtime.js';
-import { LOG_ARGS, dockerFailure, startOwnedContainer } from './owned-runtime.js';
+import { LOG_ARGS, dockerFailure, startOwnedContainer, sameArgv, sameUser } from './owned-runtime.js';
 import { VAULTWARDEN_ROOT, VAULTWARDEN_IMAGE, VAULTWARDEN_PORT, fail, namesFor, expectedSettings, digest } from './vaultwarden-logic.js';
 const OWNER = 'io.proxypilot.vaultwarden';
 const privateDir = path => { mkdirSync(path, { recursive: true, mode: 0o700 }); const s = lstatSync(path); if (!s.isDirectory() || s.isSymbolicLink() || s.uid !== process.getuid() || s.mode & 0o077) throw fail('Vaultwarden directory ownership or permissions are unsafe.'); };
@@ -60,11 +60,12 @@ export async function ensureRuntime(r, credentials, { exec, job, root = VAULTWAR
     '--publish', `127.0.0.1:${VAULTWARDEN_PORT}:80`, '--mount', `type=bind,source=${files.data},target=/data`,
     '--mount', `type=bind,source=${files.config},target=/etc/vaultwarden/setup.json,readonly`, ...env.flatMap(e => ['--env', e]), VAULTWARDEN_IMAGE]);
   const a = await inspect('container', n.server), c = a?.Config || {}, h = a?.HostConfig || {}, m = a?.Mounts || [];
-  const image = JSON.parse(await call(['image', 'inspect', VAULTWARDEN_IMAGE]))[0];
+  let image; try { image = JSON.parse(await call(['image', 'inspect', VAULTWARDEN_IMAGE]))[0]; } catch (e) { if (e.vaultwardenSafe) throw e; throw fail('Vaultwarden pinned image metadata could not be read.'); }
+  if (!image?.Id) throw fail('Vaultwarden pinned image metadata could not be read.');
   const actualEnv = Object.fromEntries((c.Env || []).map(e => [e.slice(0, e.indexOf('=')), e.slice(e.indexOf('=') + 1)]));
-  const expectedEnv = Object.fromEntries([...(image.Config.Env || []), ...env].map(e => [e.slice(0, e.indexOf('=')), e.slice(e.indexOf('=') + 1)]));
+  const expectedEnv = Object.fromEntries([...(image.Config?.Env || []), ...env].map(e => [e.slice(0, e.indexOf('=')), e.slice(e.indexOf('=') + 1)]));
   const sameEnv = Object.keys(actualEnv).length === Object.keys(expectedEnv).length && Object.entries(expectedEnv).every(([k, v]) => actualEnv[k] === v);
-  if (c.Image !== VAULTWARDEN_IMAGE || a.Image !== image.Id || c.Labels?.[OWNER] !== owner || digest(c.Cmd) !== digest(image.Config.Cmd) || digest(c.Entrypoint) !== digest(image.Config.Entrypoint) || c.User !== image.Config.User || !sameEnv ||
+  if (c.Image !== VAULTWARDEN_IMAGE || a.Image !== image.Id || c.Labels?.[OWNER] !== owner || !sameArgv(c.Cmd, image.Config?.Cmd) || !sameArgv(c.Entrypoint, image.Config?.Entrypoint) || !sameUser(c.User, image.Config?.User) || !sameEnv ||
     h.NetworkMode !== n.network || h.RestartPolicy?.Name !== 'unless-stopped' || h.Privileged || h.CapAdd?.length || h.Devices?.length || h.PidMode || h.IpcMode === 'host' ||
     digest(h.PortBindings || {}) !== digest({ '80/tcp': [{ HostIp: '127.0.0.1', HostPort: String(VAULTWARDEN_PORT) }] }) || m.length !== 2 ||
     !m.some(x => x.Type === 'bind' && x.Source === files.data && x.Destination === '/data' && x.RW === true) ||

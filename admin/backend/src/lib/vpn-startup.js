@@ -56,7 +56,7 @@ async function defaultExecHost(command, { timeout = 30_000 } = {}) {
 // recoverable failures (and exits non-zero); execHost throws in that
 // case but still leaves the JSON in err.stdout. Returns the parsed
 // payload either way; callers check `.ok`.
-async function callProxypilot(args, { execHost = defaultExecHost, timeout = 60_000 } = {}) {
+export async function callProxypilot(args, { execHost = defaultExecHost, timeout = 60_000 } = {}) {
   const cmd = [
     shellSingleQuote(PROXYPILOT_BIN),
     '--json',

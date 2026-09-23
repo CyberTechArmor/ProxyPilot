@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { makeDb, config, approved, handle, keycloakWire, apiFixture } from './helpers/full-platform-fixture.js';
+import { makeDb, config, approved, handle, keycloakWire, apiFixture, driveStages, completeStageB, continueJob } from './helpers/full-platform-fixture.js';
 import { saveFullPlatform, readFullPlatform, fullPlatformState, configSchema, reviewFullPlatform, applyFullPlatform } from '../lib/setup-engine/full-platform-store.js';
 import { connectManagedKeycloak, keycloakAdmin, reconcileOwnedIdentity, protectedValue, storeProtected } from '../lib/setup-engine/full-platform-keycloak.js';
 import { runFullPlatformOperation } from '../lib/setup-engine/full-platform-op.js';
@@ -23,20 +23,8 @@ import { namesFor as vaultNames } from '../lib/setup-engine/vaultwarden-logic.js
 
 const terminal=(db,id,verification=null)=>db.prepare("UPDATE setup_jobs SET status='succeeded',owner=NULL,verification_json=? WHERE id=?").run(verification?JSON.stringify(verification):null,id);
 const withDb=async fn=>{const db=makeDb();try{await fn(db);}finally{db.close();}};
-async function connected(db) {
-  const job=approved(db), k=db.prepare('SELECT * FROM setup_keycloak').get(),wire=keycloakWire(k);
-  storeProtected(db,`keycloak-bootstrap-${k.id}`,{installationId:k.id,password:'b'.repeat(43),retired:false});
-  const identity=async(db,k,full,{job})=>{const admin=await keycloakAdmin(k,'b'.repeat(43),{send:wire.send,job});try{return await reconcileOwnedIdentity(db,k,full,admin.api,job);}finally{await admin.close();}};
-  startJob(db,{id:job.id,owner:'runner@full-test#1:a'});
-  const args={db,params:{revision:1},job:handle(job.id),identity,interfaces:{test:[{address:'10.20.30.40',internal:false}]},dnsCheck:async()=>null};
-  for(let i=0;i<5;i++){
-    const result=await runFullPlatformOperation(args);
-    const children=db.prepare("SELECT id,kind FROM setup_jobs WHERE id!=? AND status='queued'").all(job.id);
-    for(const c of children){terminal(db,c.id,{state:'awaiting_user_action',label:'Scripted handoff pending'});if(c.kind==='verify_sso')db.prepare("UPDATE sso_config SET verified_at=?,verified_json=?").run(new Date().toISOString(),JSON.stringify({valid:true}));}
-    if(!result.waiting){terminal(db,job.id,result.verification);return {job,k,wire,args,result};}
-  }
-  throw Error('Coordinator did not settle');
-}
+// The coordinator driven through stage D (B's human part scripted), every child scripted.
+async function connected(db, through = 'D') { return driveStages(db, { owner: 'runner@full-test#1:a', through }); }
 test('FP-1 inert CAS save, exact domains, restrictive networks and migration boundaries',()=>withDb(db=>{
   const n=db.prepare('SELECT count(*) n FROM setup_jobs').get().n;
   const input={expectedRevision:0,config:config(),reviewed:true};saveFullPlatform(db,input,'admin');assert.equal(db.prepare('SELECT count(*) n FROM setup_jobs').get().n,n);
@@ -61,7 +49,7 @@ test('FP-2 existing managed Keycloak continuation connects all clients without r
   await args.identity(db,k,readFullPlatform(db),{job:args.job});
   assert.equal(wire.calls.filter(c=>['PUT','POST','DELETE'].includes(c.method)&&!c.path.includes('protocol/openid-connect')).length,mutations);
   assert.deepEqual([baoSecrets(db,readOpenBao(db)),vaultSecrets(db,readVaultwarden(db))],before);
-  assert(!fullPlatformState(db).complete);assert.equal(fullPlatformState(db).stage,'administrator');
+  assert(!fullPlatformState(db).complete);assert.equal(fullPlatformState(db).stage,'D');
   const publicState=JSON.stringify(fullPlatformState(db));for(const v of before)assert(!publicState.includes(v.client));
   const client=realm.clients.find(c=>c.clientId.endsWith('-proxypilot'));client.secret='foreign-new-value';await assert.rejects(args.identity(db,k,readFullPlatform(db),{job:args.job}),/will not rotate/);assert.equal(client.secret,'foreign-new-value');
 }));
@@ -96,7 +84,7 @@ function proof(db,applicationId){const sso=readConfig(db);db.prepare('INSERT OR 
   assert(activationReadiness(db,readConfig(db),'admin').ready);
 }
 test('FP-3 permanent master/application users resume without replacement; retirement requires fresh administration, linked SSO and separate recovery',()=>withDb(async db=>{
-  const {wire}=await connected(db),localBefore=db.prepare('SELECT * FROM users').all();const input={revision:1,action:'create',email:'alice@example.com',firstName:'Alice',lastName:'Administrator',useCurrent:true,password:'personal-password-unchanged',reviewed:true},user={id:'admin',username:'Alice'};
+  const {wire}=await connected(db,'B'),localBefore=db.prepare('SELECT * FROM users').all();const input={revision:1,action:'create',email:'alice@example.com',firstName:'Alice',lastName:'Administrator',useCurrent:true,password:'personal-password-unchanged',reviewed:true},user={id:'admin',username:'Alice'};
   const create=async()=>{const queued=queueAdministrator(db,input,user);startJob(db,{id:queued.job.id,owner:'runner@full-admin#1:a'});const result=await runAdministrator(db,readFullPlatform(db),'administrator',handle(queued.job.id),{send:wire.send});terminal(db,queued.job.id,result.verification);};
   await create();const profile=readFullPlatform(db).state.administrator;await create();assert.deepEqual(readFullPlatform(db).state.administrator,profile);assert.equal(profile.username,'alice');assert.equal(wire.realms.get('master').users.length,2);assert.equal(wire.realms.get('proxypilot').users.length,1);assert.equal(wire.passwords.get('master:alice'),input.password);
   assert.deepEqual(db.prepare('SELECT * FROM users').all(),localBefore);assert.throws(()=>queueAdministrator(db,{...input,action:'verify_and_retire'},user),/SSO/);

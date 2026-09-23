@@ -9,6 +9,12 @@ import { shellSingleQuote } from '../lib/shell-quote.js';
 
 const execAsync = promisify(exec);
 
+// The platform's restricted allowlist includes the VPN ranges: re-read them
+// after an enable/disable (best effort; the periodic sync catches up).
+function followVpnNetworks(reason) {
+  import('../lib/platform-vpn-sync.js').then(({ syncPlatformVpnNetworks }) => syncPlatformVpnNetworks({ reason })).catch(() => {});
+}
+
 // The backend runs in a Docker container with `pid: host` and
 // `privileged: true`; the CLI source tree (cli/) is NOT inside the
 // container, only on the host at $INSTALL_DIR/cli/. To stay
@@ -158,6 +164,7 @@ vpnRouter.post('/enable', requireSudo, async (req, res) => {
       dns: body.dns ?? null,
       public_key: result?.public_key ?? null,
     }, req.ip);
+    followVpnNetworks('vpn_enable');
     res.json(result);
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -171,6 +178,7 @@ vpnRouter.post('/disable', requireSudo, async (req, res) => {
     logAudit(req.user.id, 'VPN_DISABLE', 'vpn', null, {
       already_disabled: !!result?.already_disabled,
     }, req.ip);
+    followVpnNetworks('vpn_disable');
     res.json(result);
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { stageRefusal } from '../lib/setup-engine/full-platform-store.js';
 import { getDb,logAudit } from '../db.js';
 import { requireAdmin,requireSudo } from '../middleware/auth.js';
 import { infisicalConfigSchema,infisicalIdentitiesSchema,infisicalApplySchema } from '../lib/setup-engine/infisical-logic.js';
@@ -11,5 +12,5 @@ for(const [path,schema,handler,action] of [['/',infisicalConfigSchema,saveInfisi
   infisicalRouter.put(path,requireSudo,(req,res)=>{const parsed=schema.safeParse(req.body);if(!parsed.success)return res.status(400).json({error:'Invalid reviewed Infisical settings. Check required fields and remove unsupported fields.'});
     return respond(res,()=>{const state=handler(getDb(),parsed.data);logAudit(req.user.id,action,'setup_infisical','1',{revision:state.revision},req.ip);res.json({state,review:reviewInfisical(getDb())});});});
 }
-infisicalRouter.post('/apply',requireSudo,(req,res)=>{const parsed=infisicalApplySchema.safeParse(req.body);if(!parsed.success)return res.status(400).json({error:'Review the current saved configuration before applying.'});
+infisicalRouter.post('/apply',requireSudo,(req,res)=>{{const why=stageRefusal(getDb(),'infisical');if(why)return res.status(409).json({code:'STAGE_LOCKED',error:why});}const parsed=infisicalApplySchema.safeParse(req.body);if(!parsed.success)return res.status(400).json({error:'Review the current saved configuration before applying.'});
   return respond(res,()=>{const result=applyInfisical(getDb(),parsed.data,req.user.id);logAudit(req.user.id,'INFISICAL_PLAN_APPLIED','setup_job',result.job.id,{revision:parsed.data.revision,created:result.created},req.ip);res.status(result.created?202:200).json(result);});});

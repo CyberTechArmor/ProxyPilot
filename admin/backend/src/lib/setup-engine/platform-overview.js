@@ -201,8 +201,8 @@ export async function serviceOverview(db, service, { run, resolvers, fresh = fal
     dependencies: view.dependencies,
     kept_elsewhere: {
       secrets: { page: '/platform-setup', where: 'Platform Setup → the service\'s own form (client secrets, admin tokens, Infisical personal password, OpenBao PGP keys, unseal shares, root/bootstrap token, vault passwords)' },
-      sso_activation: service === 'keycloak' ? { page: '/platform-setup', where: 'Platform Setup → step 5. Verify and activate' } : null,
-      reset: { page: '/platform-setup', where: 'Platform Setup → Custom / Advanced → Reset Full Platform' },
+      sso_activation: service === 'keycloak' ? { page: '/platform-setup', where: 'Platform Setup → E. Verify everything and activate SSO' } : null,
+      reset: { page: '/platform-setup', where: 'Platform Setup → Reset Full Platform' },
     },
   });
 }
@@ -229,7 +229,7 @@ async function recoveryOverview(db, { run, resolvers, fresh, ports }) {
 export async function platformOverview(db, { run, resolvers, fresh = false } = {}) {
   const full = readFullPlatform(db);
   const flag = platformFlagState(db);
-  if (!full) return redact({ saved: false, flag, mcp_access: mcpAccess(db), services: [], note: 'No Full Platform plan is saved yet. Start in Platform Setup → 1. Domains and realm.' });
+  if (!full) return redact({ saved: false, flag, mcp_access: mcpAccess(db), services: [], note: 'No Full Platform plan is saved yet. Start in Platform Setup → A. Domains, realm and networks.' });
   const docker = await dockerInfo(run, { fresh });
   const ports = await listening(run, { fresh });
   const s = fullPlatformState(db);
@@ -240,14 +240,17 @@ export async function platformOverview(db, { run, resolvers, fresh = false } = {
   services.push(await recoveryOverview(db, { run, resolvers, fresh, ports }));
   const op = operationRunning(db);
   let resync = null; try { resync = resyncReview(db); } catch { resync = null; }
-  const sso = has(db, 'sso_config') ? db.prepare('SELECT active FROM sso_config WHERE id=1').get() : null;
-  const netBlock = op ? `Operation ${op.id} is ${op.status}${op.phase ? ` (${op.phase})` : ''}.` : sso?.active ? 'SSO is active; disable it from local recovery before changing the restricted networks.' : null;
+  // Additional addresses can be changed at any time — also after SSO is
+  // active (the networks are outside the SSO fingerprint). Only a running
+  // operation, or no applied setup yet (save them in stage A), blocks it.
+  const netBlock = op ? `Operation ${op.id} is ${op.status}${op.phase ? ` (${op.phase})` : ''}.` : !full.approved_revision ? 'Not applied yet: the additional addresses are part of the saved plan (stage A).' : null;
   return redact({
     saved: true, revision: full.revision, approved_revision: full.approved_revision, flag, mcp_access: mcpAccess(db),
-    docker, caddy_host: dnsAll.expected, operation: op, restricted_networks: s.config.recoveryNetworks,
+    docker, caddy_host: dnsAll.expected, operation: op,
+    vpn_networks: s.networks.vpn, additional_networks: s.networks.additional, restricted_networks: s.networks.effective, restricted_networks_applied: s.networks.applied,
     shared_plan: { in_sync: resync ? resync.in_sync : true, shared_revision: resync?.shared_plan_revision || null, recorded_revision: resync?.recorded_plan_revision || null },
     section_actions: [
-      action('edit_networks', 'Edit restricted networks', !netBlock, netBlock, { preview: true }),
+      action('edit_networks', 'Edit additional addresses', !netBlock, netBlock, { preview: true }),
       action('resync_plan', 'Resync shared plan', resync && !resync.blockers.length, resync ? resync.blockers.join(' ') : 'No saved plan.', { preview: true }),
     ],
     services, generated_at: new Date().toISOString(), cache_seconds: OVERVIEW_TTL_MS / 1000,

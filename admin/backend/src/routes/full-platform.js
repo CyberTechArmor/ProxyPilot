@@ -32,7 +32,7 @@ fullPlatformRouter.post('/lifecycle', requireSudo, handle((req, res) => {
   logAudit(req.user.id, 'FULL_PLATFORM_RUNTIME_ACTION', 'setup_job', result.job.id, { service: req.body.service, action: req.body.action, retainData: true }, req.ip);
   res.status(202).json(result);
 }));
-// Reset (Custom / Advanced): the preview is inert; the reset itself needs the
+// Reset (Platform Setup → Reset Full Platform): the preview is inert; the reset itself needs the
 // same fresh local proof as the other runtime actions. The MCP tool
 // reset_platform_setup calls the same resetReview/queueReset.
 fullPlatformRouter.post('/reset/review', handle((req, res) => {

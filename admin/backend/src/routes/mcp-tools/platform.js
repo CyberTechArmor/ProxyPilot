@@ -21,7 +21,7 @@
 // every call writes an mcp_ledger row, and every accepted write an audit entry.
 
 import { lookup } from 'node:dns/promises';
-import { saveSchema, saveFullPlatform, readFullPlatform, reviewFullPlatform, validateExisting, changes, defaults, applyFullPlatform, installedTargets } from '../../lib/setup-engine/full-platform-store.js';
+import { saveSchema, saveFullPlatform, readFullPlatform, reviewFullPlatform, validateExisting, changes, defaults, applyFullPlatform, installedTargets, normalizeConfig } from '../../lib/setup-engine/full-platform-store.js';
 import { applyService, serviceReaders } from '../../lib/setup-engine/full-platform-services.js';
 import { lifecycleReview, queueLifecycle } from '../../lib/setup-engine/full-platform-lifecycle.js';
 import { resetReview, queueReset } from '../../lib/setup-engine/full-platform-reset.js';
@@ -80,7 +80,7 @@ export function createPlatformHandlers(kit) {
   };
 
   /** A write: kit.mutation (ledger + audit) behind mcp.platform, plus any extra flags. */
-  const write = (name, { audit, extraFlags = [] }, fn) => mutation(name, { subjectType: 'platform', flag: PLATFORM_FLAG, audit, keepArgs: ['revision', 'service', 'action', 'container', 'restricted_networks', 'purge_data', 'if_revision', 'dry_run', 'confirm'] }, async (args, auth, req, note) => {
+  const write = (name, { audit, extraFlags = [] }, fn) => mutation(name, { subjectType: 'platform', flag: PLATFORM_FLAG, audit, keepArgs: ['revision', 'service', 'action', 'container', 'additional_networks', 'purge_data', 'if_revision', 'dry_run', 'confirm'] }, async (args, auth, req, note) => {
     for (const f of extraFlags) { const g = flagRefusal(f); if (g) { note.refused = true; return err(g); } }
     note.detail = { requested_by: requestedBy(auth) };
     try { return scrub(await fn(args, auth, req, note)); }
@@ -154,16 +154,17 @@ export function createPlatformHandlers(kit) {
     const domains = args.domains || {};
     if (domains.proxypilot !== undefined) config.publicOrigin = String(domains.proxypilot);
     if (domains.recovery !== undefined) config.recoveryOrigin = String(domains.recovery);
+    // One path: all five services are installed and managed as one system.
+    if (args.services !== undefined || args.experience !== undefined) { note.refused = true; return err('Full Platform installs and manages all five services as one system; per-service connect/skip choices and the Custom experience were removed. Pass only domains, realm and additional_networks.', { code: 'ONE_PATH' }); }
+    if (args.restricted_networks !== undefined) { note.refused = true; return err('restricted_networks is derived (built-in VPN networks + additional addresses). Pass additional_networks — the extra administrator addresses only.', { code: 'NETWORKS_DERIVED' }); }
     for (const id of SERVICE_IDS) {
+      config.services[id].mode = 'install';
       if (domains[id] !== undefined) config.services[id].url = String(domains[id]);
-      if (args.services?.[id] !== undefined) config.services[id].mode = String(args.services[id]);
-      if (config.services[id].mode === 'skip') config.services[id].url = '';
     }
     for (const k of Object.keys(domains)) if (!['proxypilot', 'recovery', ...SERVICE_IDS].includes(k)) { note.refused = true; return err(`Unknown domain key "${k}".`); }
-    for (const k of Object.keys(args.services || {})) if (!SERVICE_IDS.includes(k)) { note.refused = true; return err(`Unknown service "${k}".`); }
     if (args.realm !== undefined) config.realm = String(args.realm);
-    if (args.restricted_networks !== undefined) config.recoveryNetworks = Array.isArray(args.restricted_networks) ? args.restricted_networks.map(String) : args.restricted_networks;
-    if (args.experience !== undefined) config.experience = String(args.experience);
+    if (args.additional_networks !== undefined) { config.additionalNetworks = Array.isArray(args.additional_networks) ? args.additional_networks.map(String) : args.additional_networks; delete config.recoveryNetworks; }
+    config.experience = 'full';
     const input = { expectedRevision: Number(args.if_revision), config, reviewed: true };
     if (args.dry_run === true) {
       // The save's own checks, in its order, without its write.
@@ -171,15 +172,16 @@ export function createPlatformHandlers(kit) {
       if ((old?.revision || 0) !== p.expectedRevision) { note.refused = true; return err('Setup changed in another session. Reopen the saved plan.', { code: 'PLAN_REVISION_CONFLICT', saved_revision: old?.revision || 0 }); }
       const prior = old?.last_job_id && getJob(d, old.last_job_id);
       if (prior && ['queued', 'running'].includes(prior.status)) { note.refused = true; return err('Wait for the current setup operation before editing this plan.'); }
-      validateExisting(d, p.config);
-      const review = reviewFullPlatform(d, p.config);
-      return ok({ dry_run: true, would_save: !old || changes(old.config, p.config).length > 0, next_revision: old && !changes(old.config, p.config).length ? old.revision : (old?.revision || 0) + 1, changes: review.changes, dns: review.dns, dependencies: review.dependencies, human_steps: review.humanSteps, note: 'Nothing was saved. Re-call without dry_run to save; saving is inert.' });
+      const normalized = normalizeConfig(d, p.config, old);
+      validateExisting(d, normalized);
+      const review = reviewFullPlatform(d, normalized);
+      return ok({ dry_run: true, would_save: !old || changes(old.config, normalized).length > 0, next_revision: old && !changes(old.config, normalized).length ? old.revision : (old?.revision || 0) + 1, changes: review.changes, networks: review.networks, stages: review.stages, dns: review.dns, dependencies: review.dependencies, human_steps: review.humanSteps, note: 'Nothing was saved. Re-call without dry_run to save; saving is inert.' });
     }
     const saved = saveFullPlatform(d, input, auth.created_by);
     const review = reviewFullPlatform(d);
     note.summary = `saved Full Platform revision ${saved.revision}`;
     note.detail = { ...note.detail, revision: saved.revision };
-    return ok({ saved: true, revision: saved.revision, review_digest: review.reviewToken, changes: review.changes, dns: review.dns, next: `Review, then apply_platform_setup({ revision: ${saved.revision}, review_digest, confirm: true }). Saving queued nothing.` });
+    return ok({ saved: true, revision: saved.revision, review_digest: review.reviewToken, changes: review.changes, networks: review.networks, dns: review.dns, next: `Review, then apply_platform_setup({ revision: ${saved.revision}, review_digest, confirm: true }) — that completes stage A and starts stage B (Keycloak) only. Saving queued nothing.` });
   });
 
   const queueApply = (kind) => write(`${kind}_platform_setup`, { audit: kind === 'apply' ? 'FULL_PLATFORM_APPLIED' : 'FULL_PLATFORM_CONTINUED' }, async (args, auth, _req, note) => {
@@ -203,12 +205,13 @@ export function createPlatformHandlers(kit) {
     }
     const refusal = applyRefusal(d, { kind, revision, reviewToken });
     if (refusal) { note.refused = true; return err(refusal.error, refusal); }
-    if (args.dry_run === true) return ok({ dry_run: true, would: kind === 'apply' ? `apply revision ${revision}: queue the Full Platform coordinator on the host runner` : `continue revision ${revision}: re-queue the coordinator, keeping completed work`, note: 'Nothing was queued.' });
+    const stageNow = platformSetupView(d).current_stage;
+    if (args.dry_run === true) return ok({ dry_run: true, would: kind === 'apply' ? `apply revision ${revision}: queue the Full Platform coordinator for stage B (Keycloak) only` : `continue revision ${revision}: re-queue the coordinator for stage ${stageNow} only, keeping completed work`, note: 'Nothing was queued.' });
     const gate = confirmFlag(args, note, kind === 'apply' ? 'Applying installs and connects the selected services on this host.' : 'Continuing re-queues the saved setup on the host runner.');
     if (gate) return gate;
     const r = applyFullPlatform(d, { revision, reviewToken, reviewed: true }, requestedBy(auth), { via: 'mcp' });
     note.summary = `${kind} Full Platform revision ${revision} (${r.job.id})`; note.detail = { ...note.detail, revision, job_id: r.job.id, created: r.created };
-    return ok({ queued: r.created, operation: jobSummary(r.job), next: `get_platform_setup() / get_platform_job({ id: "${r.job.id}" }) to follow it.` });
+    return ok({ queued: r.created, operation: jobSummary(r.job), stage: kind === 'apply' ? 'B' : stageNow, next: `get_platform_setup() / get_platform_job({ id: "${r.job.id}" }) to follow it. The job works on this one stage; continue again once it is verified.` });
   });
 
   const manage_platform_service = write('manage_platform_service', { audit: 'FULL_PLATFORM_RUNTIME_ACTION', extraFlags: ['mcp.destructive'] }, async (args, auth, _req, note) => {
@@ -274,15 +277,16 @@ export function createPlatformHandlers(kit) {
 
   const set_platform_restricted_networks = write('set_platform_restricted_networks', { audit: 'FULL_PLATFORM_NETWORKS_CHANGE', extraFlags: ['mcp.destructive'] }, async (args, auth, _req, note) => {
     const d = db(); note.subject_id = 'full-platform:networks';
-    const review = networksReview(d, args.restricted_networks);
-    const preview = { revision: review.revision, before: review.before, after: review.after, routes: review.routes, records: review.records, effects: review.effects, blockers: review.blockers };
+    if (args.restricted_networks !== undefined) { note.refused = true; return err('restricted_networks is derived (built-in VPN networks + additional addresses). Pass additional_networks — the complete list of extra administrator addresses (may be empty when the VPN is enabled).', { code: 'NETWORKS_DERIVED' }); }
+    const review = networksReview(d, args.additional_networks);
+    const preview = { revision: review.revision, vpn_networks: review.vpn_networks, additional_before: review.before_additional, additional_after: review.additional_networks, before: review.before, after: review.after, routes: review.routes, records: review.records, effects: review.effects, blockers: review.blockers };
     if (review.blockers.length) { note.refused = true; return err(`Refused: ${review.blockers.join(' ')}`, { preview }); }
     if (args.dry_run === true) return ok({ dry_run: true, preview, note: 'Nothing was queued and no confirmation token was issued.' });
-    const gate = confirmToken(args, auth, note, { tool: 'set_platform_restricted_networks', subject: review.reviewToken, action: `change the restricted networks to ${review.after.join(', ')}`, preview: { preview } });
+    const gate = confirmToken(args, auth, note, { tool: 'set_platform_restricted_networks', subject: review.reviewToken, action: `set the additional addresses to ${review.additional_networks.join(', ') || '(none)'} — effective ${review.after.join(', ')}`, preview: { preview } });
     if (gate) return gate;
-    const r = queueNetworksChange(d, { revision: review.revision, reviewToken: review.reviewToken, networks: review.after, reviewed: true }, requestedBy(auth), { via: 'mcp' });
+    const r = queueNetworksChange(d, { revision: review.revision, reviewToken: review.reviewToken, additionalNetworks: review.additional_networks, reviewed: true }, requestedBy(auth), { via: 'mcp' });
     ctx.drainBackendStepsNow?.();
-    note.summary = `restricted networks → ${review.after.join(', ')} (${r.job.id})`; note.detail = { ...note.detail, before: review.before, after: review.after, job_id: r.job.id };
+    note.summary = `additional networks → ${review.additional_networks.join(', ') || '(none)'} (${r.job.id})`; note.detail = { ...note.detail, vpn: review.vpn_networks, additional_before: review.before_additional, additional_after: review.additional_networks, before: review.before, after: review.after, job_id: r.job.id };
     return ok({ queued: true, job: jobSummary(r.job), preview, next: `get_platform_job({ id: "${r.job.id}" })` });
   });
 

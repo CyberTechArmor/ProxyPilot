@@ -202,7 +202,13 @@ export function saveConfig(db, input, userId) {
     };
     const revision = expectedRevision + 1;
     // Revision is included: re-saving cannot reuse any previous ceremony.
-    const fingerprint = hash(JSON.stringify({ revision, config }));
+    // The restricted recovery networks are NOT: they are (VPN networks) ∪
+    // (operator's additional addresses), edited at any time — also after
+    // activation — through the reviewed, step-up-gated, audited networks
+    // change, which rewrites this record's list and the recovery route
+    // together (activationReadiness still checks the two agree).
+    const { recoveryNetworks: _networks, ...bound } = config;
+    const fingerprint = hash(JSON.stringify({ revision, config: bound }));
     db.prepare(
       `INSERT INTO sso_config(id,revision,config_json,fingerprint,created_by,created_at) VALUES (1,?,?,?,?,?)
    ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,config_json=excluded.config_json,fingerprint=excluded.fingerprint,

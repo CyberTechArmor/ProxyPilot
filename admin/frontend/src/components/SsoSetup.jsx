@@ -39,7 +39,10 @@ const fields = [
     "Existing administrator / WireGuard IPs or CIDRs (comma separated)",
   ],
 ];
-export default function SsoSetup({ connections = [], managed = false, administratorVerified = false }) {
+// `part` (managed Full Platform only): "checks" renders the verify/link/test/
+// recovery sections (stage B), "activate" only the activation (stage E).
+export default function SsoSetup({ connections = [], managed = false, administratorVerified = false, part = "all" }) {
+  const showChecks = part !== "activate", showActivate = part !== "checks";
   const [state, setState] = useState(null),
     [form, setForm] = useState(initial),
     [busy, setBusy] = useState(""),
@@ -249,6 +252,7 @@ export default function SsoSetup({ connections = [], managed = false, administra
         </fieldset>}
         {config && (
           <>
+            {showChecks && <>
             <section className="space-y-3">
               <h3 className="font-semibold">
                 2. Verify settings and prepare recovery
@@ -396,8 +400,9 @@ export default function SsoSetup({ connections = [], managed = false, administra
                 </div>
               )}
             </section>
-            <section className="space-y-3">
-              <h3 className="font-semibold">5. Explicitly activate SSO</h3>{managed && !administratorVerified && <p className="text-sm">After these checks pass, return to Administrator and recovery to verify permanent administration and retire the bootstrap account. Then activate here.</p>}
+            </>}
+            {showActivate && <section className="space-y-3">
+              <h3 className="font-semibold">{managed ? "Activate SSO" : "5. Explicitly activate SSO"}</h3>{managed && !administratorVerified && <p className="text-sm">After these checks pass, verify permanent administration and retire the bootstrap account (stage B). Then activate here.</p>}
               <p className="text-sm">
                 Activation closes public local sign-in and its existing
                 sessions. Local credentials remain on the restricted recovery
@@ -436,7 +441,7 @@ export default function SsoSetup({ connections = [], managed = false, administra
                   Open local recovery
                 </a>
               </div>
-            </section>
+            </section>}
           </>
         )}
       </CardContent>

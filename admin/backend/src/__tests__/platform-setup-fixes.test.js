@@ -11,7 +11,7 @@ import net from 'node:net';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { makeDb, approved, handle, keycloakWire } from './helpers/full-platform-fixture.js';
+import { makeDb, approved, handle, keycloakWire, driveStages, completeStageB, continueJob } from './helpers/full-platform-fixture.js';
 import { keycloakAdmin, reconcileOwnedIdentity, storeProtected } from '../lib/setup-engine/full-platform-keycloak.js';
 import { runFullPlatformOperation } from '../lib/setup-engine/full-platform-op.js';
 import { readFullPlatform } from '../lib/setup-engine/full-platform-store.js';
@@ -34,22 +34,8 @@ const terminal = (db, id, status = 'succeeded', verification = null) => db.prepa
 const withDb = async (fn) => { const db = makeDb(), dir = mkdtempSync(join(tmpdir(), 'pp-fixes-')); try { await fn(db, dir); } finally { db.close(); rmSync(dir, { recursive: true, force: true }); } };
 
 /** The coordinator driven to its handoff so the service records exist. */
-async function connected(db) {
-  const job = approved(db), k = db.prepare('SELECT * FROM setup_keycloak').get(), wire = keycloakWire(k);
-  storeProtected(db, `keycloak-bootstrap-${k.id}`, { installationId: k.id, password: 'b'.repeat(43), retired: false });
-  const identity = async (db2, kk, full, { job: j }) => { const a = await keycloakAdmin(kk, 'b'.repeat(43), { send: wire.send, job: j }); try { return await reconcileOwnedIdentity(db2, kk, full, a.api, j); } finally { await a.close(); } };
-  startJob(db, { id: job.id, owner: 'runner@fixes#1:a' });
-  const args = { db, params: { revision: 1 }, job: handle(job.id), identity, interfaces: { test: [{ address: '10.20.30.40', internal: false }] }, dnsCheck: async () => null };
-  for (let i = 0; i < 8; i++) {
-    const result = await runFullPlatformOperation(args);
-    for (const c of db.prepare("SELECT id,kind FROM setup_jobs WHERE id!=? AND status='queued'").all(job.id)) {
-      terminal(db, c.id, 'succeeded', { state: 'awaiting_user_action', label: 'Scripted handoff pending' });
-      if (c.kind === 'verify_sso') db.prepare('UPDATE sso_config SET verified_at=?,verified_json=?').run(new Date().toISOString(), JSON.stringify({ valid: true }));
-    }
-    if (!result.waiting) { terminal(db, job.id, 'succeeded', result.verification); return { job, k }; }
-  }
-  throw Error('Coordinator did not settle');
-}
+// The coordinator driven through stage D (B's human part scripted), every child scripted.
+async function connected(db, through = 'D') { return driveStages(db, { owner: 'runner@fixes#1:a', through }); }
 
 function renderer(dir) {
   mkdirSync(join(dir, 'sites'), { recursive: true });
@@ -71,7 +57,7 @@ test('1: queueNetworksChange → executeBackendStep succeeds and rewrites the ro
   db.prepare("INSERT INTO service_http_routes (id, service_id, domain, path_prefix, target_port, websocket_enabled, ssl_enabled, force_https, max_upload_size, strip_prefix, ip_allowlist_json) VALUES (?, ?, 'vault.example.com', '/', 18380, 1, 1, 1, '1G', 0, '[\"10.20.30.0/24\"]')").run(routeId, `vaultwarden-${vw.credential_ref}`);
   const review = networksReview(db, ['10.9.0.0/24']);
   assert.deepEqual(review.blockers, []);
-  const { job } = queueNetworksChange(db, { revision: review.revision, reviewToken: review.reviewToken, networks: review.after, reviewed: true }, 'admin');
+  const { job } = queueNetworksChange(db, { revision: review.revision, reviewToken: review.reviewToken, additionalNetworks: review.additional_networks, reviewed: true }, 'admin');
   // The plan carries nothing the redactor rewrites: the token lives in state only.
   const plan = JSON.parse(db.prepare('SELECT plan_json FROM setup_jobs WHERE id=?').get(job.id).plan_json);
   assert.deepEqual(plan, { params: { revision: review.revision } });
@@ -268,4 +254,199 @@ test('3b: Vaultwarden runtime accepts a newer Docker\'s image inspect (Cmd/User 
   // The comparisons themselves.
   assert.ok(sameArgv(null, undefined)); assert.ok(sameArgv([], undefined)); assert.ok(!sameArgv(['/start.sh'], undefined));
   assert.ok(sameUser('', undefined)); assert.ok(!sameUser('root', undefined));
+}));
+
+/* ---------------------------------- 4 ---------------------------------- */
+
+const { recordVpnNetworks, vpnNetworks, vpnFromStatus, effectiveNetworks } = await import('../lib/setup-engine/platform-networks.js');
+const { refreshVpnNetworks } = await import('../lib/setup-engine/full-platform-networks.js');
+const { fullPlatformState } = await import('../lib/setup-engine/full-platform-store.js');
+const { readConfig, activationReadiness } = await import('../lib/sso/store.js');
+const { platformSetupView } = await import('../lib/setup-engine/full-platform-mcp.js');
+const { apiFixture } = await import('./helpers/full-platform-fixture.js');
+
+/** The production recovery route row, as configure_recovery_route leaves it. */
+function recoveryRoute(db) {
+  const sso = readConfig(db), domain = new URL(sso.config.recoveryOrigin).hostname;
+  db.prepare("INSERT OR IGNORE INTO services(id,name,kind,runtime,target_ip,type,status) VALUES ('proxypilot-local-recovery','proxypilot-local-recovery','container_service','docker','127.0.0.1','proxy','active')").run();
+  db.prepare("INSERT OR REPLACE INTO service_http_routes(id,service_id,domain,path_prefix,target_port,websocket_enabled,ssl_enabled,force_https,max_upload_size,strip_prefix,ip_allowlist_json) VALUES ('proxypilot-local-recovery','proxypilot-local-recovery',?,'/',?,0,1,1,'1G',0,?)").run(domain, Number(process.env.PORT || 3001), JSON.stringify(sso.config.recoveryNetworks));
+  return domain;
+}
+const drain = (db, dir) => runBackendSteps({ db, owner: 'backend@fixes#4:a', sleep: async () => {}, deps: backendStepDeps({ getDb: () => db, renderDeps: renderer(join(dir, 'caddy')) }) });
+const allowlist = (db, id) => JSON.parse(db.prepare('SELECT ip_allowlist_json FROM service_http_routes WHERE id=?').get(id).ip_allowlist_json);
+
+test('4: the VPN networks are derived from the VPN status; the effective list is VPN ∪ additional', () => withDb(async (db) => {
+  assert.deepEqual(vpnFromStatus({ ok: true, enabled: true, cidr: '10.100.0.0/24' }), ['10.100.0.0/24']);
+  assert.deepEqual(vpnFromStatus({ ok: true, enabled: false, cidr: '10.100.0.0/24' }), []);
+  assert.equal(vpnFromStatus({ ok: false, error: 'no cli' }), null, 'an unreadable status makes no claim');
+  assert.equal(vpnFromStatus({ ok: true, enabled: true, cidr: '0.0.0.0/0' }), null);
+  assert.deepEqual(effectiveNetworks(['10.100.0.0/24'], ['96.88.158.113', '10.100.0.0/24']), ['10.100.0.0/24', '96.88.158.113']);
+  recordVpnNetworks(db, ['10.100.0.0/24']);
+  await connected(db);
+  const s = fullPlatformState(db);
+  assert.deepEqual(s.networks.vpn, ['10.100.0.0/24']); assert.deepEqual(s.networks.additional, ['10.20.30.0/24']);
+  const v = platformSetupView(db);
+  assert.deepEqual(v.vpn_networks, ['10.100.0.0/24']); assert.deepEqual(v.additional_networks, ['10.20.30.0/24']);
+  assert.deepEqual(v.restricted_networks, ['10.100.0.0/24', '10.20.30.0/24']);
+}));
+
+test('4: additional addresses change after SSO is active: live on every restricted route, SSO fingerprint, verification and activation untouched', () => withDb(async (db, dir) => {
+  recordVpnNetworks(db, ['10.100.0.0/24']);
+  await connected(db);
+  const domain = recoveryRoute(db);
+  db.prepare("UPDATE sso_config SET active=1, verified_at=?, verified_json='{\"valid\":true}'").run(new Date().toISOString());
+  const before = db.prepare('SELECT revision, fingerprint, verified_at, verified_json, active FROM sso_config').get();
+  // Add one address …
+  let review = networksReview(db, ['10.20.30.0/24', '198.51.100.7']);
+  assert.deepEqual(review.blockers, []); assert.deepEqual(review.vpn_networks, ['10.100.0.0/24']);
+  assert.ok(review.routes.some((r) => r.route_id === 'proxypilot-local-recovery'));
+  queueNetworksChange(db, { revision: review.revision, reviewToken: review.reviewToken, additionalNetworks: review.additional_networks, reviewed: true }, 'admin');
+  let ran = await drain(db, dir);
+  assert.equal(ran.ran[0].status, 'succeeded', getJob(db, ran.ran[0].id).reason);
+  assert.deepEqual(allowlist(db, 'proxypilot-local-recovery'), ['10.100.0.0/24', '10.20.30.0/24', '198.51.100.7']);
+  assert.match(readFileSync(join(dir, 'caddy', 'sites', `${domain}.caddy`), 'utf8'), /198\.51\.100\.7/);
+  assert.deepEqual(db.prepare('SELECT revision, fingerprint, verified_at, verified_json, active FROM sso_config').get(), before);
+  assert.deepEqual(readConfig(db).config.recoveryNetworks, ['10.100.0.0/24', '10.20.30.0/24', '198.51.100.7']);
+  assert.ok(!activationReadiness(db, readConfig(db), 'admin').missing.includes('recovery_route'), 'the SSO record and the recovery route agree');
+  assert.deepEqual(readFullPlatform(db).config.additionalNetworks, ['10.20.30.0/24', '198.51.100.7']);
+  // … and remove every extra: the VPN stays.
+  review = networksReview(db, []);
+  queueNetworksChange(db, { revision: review.revision, reviewToken: review.reviewToken, additionalNetworks: [], reviewed: true }, 'admin');
+  ran = await drain(db, dir);
+  assert.equal(ran.ran[0].status, 'succeeded');
+  assert.deepEqual(allowlist(db, 'proxypilot-local-recovery'), ['10.100.0.0/24']);
+  assert.deepEqual({ ...db.prepare('SELECT revision, fingerprint, active FROM sso_config').get() }, { revision: before.revision, fingerprint: before.fingerprint, active: 1 });
+  assert.throws(() => networksReview(db, ['0.0.0.0/0']), /\/0/);
+}));
+
+test('4: a VPN subnet change is followed automatically, keeping the additional addresses; a disabled VPN with no extras is refused', () => withDb(async (db, dir) => {
+  await connected(db);
+  recoveryRoute(db);
+  let status = { ok: true, enabled: true, cidr: '10.100.0.0/24' };
+  let out = await refreshVpnNetworks(db, { readStatus: async () => status });
+  assert.equal(out.changed, true); assert.ok(out.queued, 'first observation on an existing install re-renders');
+  await drain(db, dir);
+  assert.deepEqual(allowlist(db, 'proxypilot-local-recovery'), ['10.100.0.0/24', '10.20.30.0/24']);
+  out = await refreshVpnNetworks(db, { readStatus: async () => status });
+  assert.equal(out.changed, false); assert.equal(out.queued, null, 'nothing to follow');
+  status = { ok: true, enabled: true, cidr: '10.200.0.0/24' };
+  out = await refreshVpnNetworks(db, { readStatus: async () => status });
+  assert.equal(out.changed, true); assert.ok(out.queued);
+  assert.equal(getJob(db, out.queued.job.id).via, 'system');
+  await drain(db, dir);
+  assert.deepEqual(allowlist(db, 'proxypilot-local-recovery'), ['10.200.0.0/24', '10.20.30.0/24']);
+  assert.deepEqual(vpnNetworks(db), ['10.200.0.0/24']);
+  // An unreadable status changes nothing.
+  out = await refreshVpnNetworks(db, { readStatus: async () => { throw new Error('nsenter failed'); } });
+  assert.equal(out.observed, null); assert.deepEqual(vpnNetworks(db), ['10.200.0.0/24']);
+  // VPN disabled: the additional list alone must not be empty.
+  recordVpnNetworks(db, []);
+  assert.throws(() => networksReview(db, []), /At least one/);
+}));
+
+test('4: the dashboard change needs fresh local step-up and writes an audit record', () => withDb(async (db) => {
+  recordVpnNetworks(db, ['10.100.0.0/24']);
+  await connected(db);
+  const f = await apiFixture(db);
+  try {
+    const review = await f.request('/overview/networks/review', { method: 'POST', body: { additionalNetworks: ['198.51.100.7'] } });
+    assert.equal(review.status, 200); assert.deepEqual(review.body.vpn_networks, ['10.100.0.0/24']);
+    const input = { revision: review.body.revision, reviewToken: review.body.reviewToken, additionalNetworks: ['198.51.100.7'], reviewed: true };
+    const refused = await f.request('/overview/networks', { method: 'POST', body: input });
+    assert.equal(refused.status, 403); assert.equal(refused.body.sudo_required, true);
+    const session = db.prepare("SELECT id FROM sessions WHERE user_id='admin' AND sudo_until IS NOT NULL").get();
+    db.prepare("INSERT INTO sso_session_context(session_id,user_id,origin,method,authenticated_at,local_proof_at) VALUES (?,'admin',?,'local',?,?)").run(session.id, f.url.replace('http:', 'https:'), Date.now(), Date.now());
+    const ok = await f.request('/overview/networks', { method: 'POST', body: input });
+    assert.equal(ok.status, 202, JSON.stringify(ok.body));
+    const audit = db.prepare("SELECT * FROM audit WHERE action='FULL_PLATFORM_NETWORKS_CHANGE'").all();
+    assert.equal(audit.length, 1); assert.match(JSON.stringify(audit[0]), /198\.51\.100\.7/);
+  } finally { await f.close(); }
+}));
+
+/* ---------------------------------- 5 ---------------------------------- */
+
+const { applyService } = await import('../lib/setup-engine/full-platform-services.js');
+const { applyRefusal } = await import('../lib/setup-engine/full-platform-mcp.js');
+const { configSchema, reviewFullPlatform, saveFullPlatform, stageRefusal } = await import('../lib/setup-engine/full-platform-store.js');
+const { config: fixtureConfig } = await import('./helpers/full-platform-fixture.js');
+const serviceJobs = (db) => db.prepare("SELECT kind FROM setup_jobs WHERE kind IN ('pomerium_apply','infisical_apply','openbao_apply','vaultwarden_apply')").all().map((r) => r.kind);
+
+test('5: one path — the per-service connect/skip choices and the Custom experience are refused', () => withDb(async (db) => {
+  const c = fixtureConfig();
+  assert.ok(configSchema.safeParse(c).success);
+  const skip = configSchema.safeParse({ ...c, services: { ...c.services, pomerium: { mode: 'skip', url: '' } } });
+  assert.ok(!skip.success); assert.match(skip.error.issues.map((i) => i.message).join(' '), /all five services/);
+  assert.ok(!configSchema.safeParse({ ...c, services: { ...c.services, openbao: { mode: 'connect', url: 'https://bao.example.com' } } }).success);
+  assert.ok(!configSchema.safeParse({ ...c, experience: 'custom' }).success);
+  // A client that sends no mode/experience still saves the one path.
+  const bare = { ...c, services: Object.fromEntries(Object.entries(c.services).map(([id, s]) => [id, { url: s.url }])) }; delete bare.experience;
+  const saved = saveFullPlatform(db, { expectedRevision: 0, config: configSchema.parse(bare), reviewed: true }, 'admin');
+  assert.equal(saved.config.experience, 'full'); assert.ok(Object.values(saved.config.services).every((s) => s.mode === 'install'));
+}));
+
+test('5: apply runs stage B only — Keycloak first; nothing else is installed until B is verified', () => withDb(async (db) => {
+  await connected(db, 'B');
+  assert.deepEqual(serviceJobs(db), [], 'no Pomerium/Infisical/OpenBao/Vaultwarden job before B is complete');
+  const v = platformSetupView(db);
+  assert.equal(v.current_stage, 'B');
+  assert.deepEqual(v.stages.map((s) => s.status), ['done', 'current', 'locked', 'locked', 'locked']);
+  assert.match(v.stages[2].locked_reason, /stage B/);
+  assert.deepEqual(v.next_actions.map((a) => a.id), ['reveal_bootstrap', 'administrator']);
+  assert.ok(v.next_actions.every((a) => a.by === 'human' && a.stage === 'B'));
+  // Every entry point refuses a later stage early.
+  assert.throws(() => applyService(db, 'pomerium', 'admin'), (e) => e.code === 'STAGE_LOCKED' && /stage C .*current stage is B/.test(e.message));
+  assert.match(stageRefusal(db, 'vaultwarden'), /locked until/); assert.equal(stageRefusal(db, 'keycloak'), null);
+  const refused = applyRefusal(db, { kind: 'continue', revision: v.revision, reviewToken: v.review_digest });
+  assert.equal(refused.code, 'HUMAN_STEP_REQUIRED');
+  // The per-service dashboard routes refuse too.
+  const f = await apiFixture(db);
+  try {
+    const r = await f.request('/vaultwarden/apply', { method: 'POST', body: { revision: 1, reviewToken: 'a'.repeat(64), reviewed: true } });
+    assert.equal(r.status, 409); assert.equal(r.body.code, 'STAGE_LOCKED');
+  } finally { await f.close(); }
+}));
+
+test('5: after B, continue runs stage C (Pomerium) only and stops when it is verified; the next continue runs D', () => withDb(async (db) => {
+  const { args: bArgs } = await connected(db, 'C');
+  void bArgs;
+  assert.deepEqual(serviceJobs(db), ['pomerium_apply'], 'stage C queued Pomerium only');
+  const last = db.prepare("SELECT verification_json FROM setup_jobs WHERE kind='full_platform_apply' ORDER BY rowid DESC LIMIT 1").get();
+  assert.match(JSON.parse(last.verification_json).label, /Stage C \(Pomerium\) is verified\. Continue the saved setup to start stage D/);
+  let v = platformSetupView(db);
+  assert.equal(v.current_stage, 'D'); assert.deepEqual(v.stages.map((s) => s.status).slice(0, 3), ['done', 'done', 'done']);
+  assert.ok(v.next_actions.some((a) => a.id === 'continue' && a.stage === 'D'));
+  // D.
+  const job = continueJob(db);
+  startJob(db, { id: job.id, owner: 'runner@fixes#5:a' });
+  const d = { db, params: { revision: readFullPlatform(db).revision }, job: handle(job.id), identity: async () => { throw new Error('identity is not re-run after B'); }, interfaces: { test: [{ address: '10.20.30.40', internal: false }] }, dnsCheck: async () => null };
+  const res = await runFullPlatformOperation(d);
+  assert.equal(res.waiting, true);
+  assert.deepEqual(serviceJobs(db).sort(), ['infisical_apply', 'openbao_apply', 'pomerium_apply', 'vaultwarden_apply']);
+  // A failed D service is named with its reason.
+  const vw = db.prepare("SELECT id FROM setup_jobs WHERE kind='vaultwarden_apply'").get().id;
+  terminal(db, vw, 'failed'); db.prepare("UPDATE setup_jobs SET reason='Vaultwarden did not come up (reason code: port_bind).', phase='owned_private_runtime' WHERE id=?").run(vw);
+  for (const r of db.prepare("SELECT id FROM setup_jobs WHERE kind IN ('infisical_apply','openbao_apply') AND status='queued'").all()) terminal(db, r.id, 'succeeded', { state: 'awaiting_user_action', label: 'handoff' });
+  const settled = await runFullPlatformOperation(d);
+  assert.equal(settled.verification.state, 'awaiting_user_action');
+  assert.match(settled.verification.label, /Stage D .* failed: vaultwarden — .*port_bind/);
+  terminal(db, job.id, 'succeeded', settled.verification);
+  v = platformSetupView(db);
+  const stageD = v.stages.find((s) => s.id === 'D');
+  assert.equal(stageD.status, 'failed'); assert.equal(stageD.failing[0].service, 'vaultwarden'); assert.match(stageD.failing[0].reason, /port_bind/);
+}));
+
+test('5: stage E — every service verified: continue is refused (activation is human); next_actions lists only Activate SSO', () => withDb(async (db) => {
+  await connected(db, 'D');
+  const ceremony = (r) => JSON.stringify({ configurationFingerprint: JSON.parse(r.verified_json || '{}').configurationFingerprint || 'x' });
+  for (const id of ['infisical', 'openbao', 'vaultwarden']) {
+    db.prepare(`UPDATE setup_${id} SET verified_json=? WHERE id=1`).run(JSON.stringify({ state: 'verified', label: `${id} verified`, configurationFingerprint: 'x' }));
+    const last = db.prepare(`SELECT last_job_id FROM setup_${id}`).get().last_job_id;
+    terminal(db, last, 'succeeded', { state: 'verified', label: 'ok' });
+  }
+  db.prepare("UPDATE setup_vaultwarden SET ceremony_json=? WHERE id=1").run(ceremony(db.prepare('SELECT verified_json FROM setup_vaultwarden').get()));
+  const v = platformSetupView(db);
+  assert.equal(v.current_stage, 'E', JSON.stringify(v.stages));
+  assert.deepEqual(v.next_actions.map((a) => a.id), ['activate_sso']);
+  assert.equal(applyRefusal(db, { kind: 'continue', revision: v.revision, reviewToken: v.review_digest }).code, 'HUMAN_STEP_REQUIRED');
+  assert.equal(completeStageB.length, 1);
 }));

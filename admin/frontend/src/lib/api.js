@@ -196,6 +196,7 @@ export const api = {
   fullPlatformAdministrator: (body) => request('/setup/platform/full/administrator', { method: 'POST', body: JSON.stringify(body) }),
   fullPlatformInfisicalAdministrator: (body) => request('/setup/platform/full/infisical/administrator', { method: 'POST', body: JSON.stringify(body) }),
   fullPlatformBaoRecovery: (body) => request('/setup/platform/full/openbao/recovery', { method: 'POST', body: JSON.stringify(body) }),
+  fullPlatformBaoRecoveryKit: () => request('/setup/platform/full/openbao/recovery-kit'),
   fullPlatformResetReview: (body) => request('/setup/platform/full/reset/review', { method: 'POST', body: JSON.stringify(body) }),
   fullPlatformReset: (body) => request('/setup/platform/full/reset', { method: 'POST', body: JSON.stringify(body) }),
   revealKeycloakBootstrap: () => request('/setup/platform/full/keycloak/reveal', { method: 'POST', body: '{}' }),

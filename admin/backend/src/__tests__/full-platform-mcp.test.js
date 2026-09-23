@@ -41,8 +41,10 @@ const body = (r) => { try { return JSON.parse(r.content[0].text); } catch { retu
 const text = (r) => r.content[0].text;
 const terminal = (db, id, status = 'succeeded', verification = null) => db.prepare('UPDATE setup_jobs SET status=?,owner=NULL,verification_json=? WHERE id=?').run(status, verification ? JSON.stringify(verification) : null, id);
 
-function tools(db, { now = () => Date.now(), flags = {}, host = null } = {}) {
-  const settings = new Map(Object.entries(flags).map(([k, v]) => [`feature_flag:${k}`, v ? '1' : '0']));
+function tools(db, { now = () => Date.now(), flags = {}, host = null, resolvers = null } = {}) {
+  // mcp.platform is off on a new install; these tests model an install where an
+  // administrator turned it on (or migration 915 kept it on).
+  const settings = new Map(Object.entries({ 'mcp.platform': true, ...flags }).map(([k, v]) => [`feature_flag:${k}`, v ? '1' : '0']));
   const ledger = [], audit = [];
   db.exec(`CREATE TABLE IF NOT EXISTS mcp_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, token_id INTEGER, actor TEXT, tool TEXT NOT NULL, subject_type TEXT, subject_id TEXT, project_id INTEGER, args_json TEXT,
     outcome TEXT NOT NULL CHECK(outcome IN ('ok','error','dry_run','refused','needs_confirmation')), dry_run INTEGER NOT NULL DEFAULT 0, confirmation_used INTEGER NOT NULL DEFAULT 0, snapshot TEXT, summary TEXT, detail_json TEXT, duration_ms INTEGER)`);
@@ -51,6 +53,8 @@ function tools(db, { now = () => Date.now(), flags = {}, host = null } = {}) {
     toolResult, policy: POLICY, confirmations: createConfirmationStore({ now }),
     runHostCapture: host || (async () => ({ status: 1, stdout: '', stderr: 'no host in this test' })),
     resolveHost: async (h) => (h.endsWith('example.com') ? ['203.0.113.10'] : []),
+    // Host resolver and 1.1.1.1 both answer the Caddy host for example.com (3e).
+    platformResolvers: resolvers || { host: async (h) => (h.endsWith('example.com') ? ['203.0.113.10'] : []), public: async (h) => (h.endsWith('example.com') ? ['203.0.113.10'] : []) },
   };
   const kit = createToolkit(ctx);
   const h = createPlatformHandlers(kit);
@@ -466,8 +470,10 @@ test('no secret, credential, password or key material appears in any platform to
 
 test('human-only actions have no MCP tool; platform tools take no secret input; scoped keys and job validation know the family', () => {
   const names = MCP_EXT_TOOL_GROUPS.platform.map((t) => t.name);
-  assert.deepEqual(names.sort(), ['apply_platform_setup', 'continue_platform_setup', 'get_platform_job', 'get_platform_service', 'get_platform_setup', 'list_platform_jobs', 'manage_platform_service', 'platform_preflight', 'reset_platform_setup', 'save_platform_setup']);
-  for (const t of MCP_EXT_TOOLS) assert.doesNotMatch(t.name, /reveal|bootstrap|activate_sso|unseal|keycloak_admin|retire/, `${t.name} must not exist`);
+  assert.deepEqual(names.sort(), ['apply_platform_setup', 'continue_platform_setup', 'control_platform_container', 'get_platform_job', 'get_platform_service', 'get_platform_service_logs', 'get_platform_setup', 'list_platform_jobs', 'manage_platform_service', 'platform_preflight', 'recover_keycloak_bootstrap', 'reset_platform_setup', 'resync_platform_plan', 'save_platform_setup', 'set_platform_restricted_networks', 'verify_platform_service']);
+  // recover_keycloak_bootstrap is the one reviewed exception: it generates its
+  // own credential and takes none (the property check below covers that).
+  for (const t of MCP_EXT_TOOLS) if (t.name !== 'recover_keycloak_bootstrap') assert.doesNotMatch(t.name, /reveal|bootstrap|activate_sso|unseal|keycloak_admin|retire/, `${t.name} must not exist`);
   for (const t of MCP_EXT_TOOL_GROUPS.platform) {
     for (const prop of Object.keys(t.inputSchema.properties)) assert.doesNotMatch(prop, /password|secret|otp|share|pgp|root|admin_token|client_secret|^token$/i, `${t.name}.${prop}`);
   }

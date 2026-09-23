@@ -316,7 +316,7 @@ export function containerNames(service, row) {
   return [vaultNames(row).server];
 }
 
-function rowFor(db, service) {
+export function rowFor(db, service) {
   const t = installedTargets(db)[service];
   return t ? { target: t, row: service === 'keycloak' ? t.row : serviceReaders[service](db) } : { target: null, row: null };
 }
@@ -359,7 +359,7 @@ export function platformServiceView(db, service, { runtime = null, runtimeError 
   return redact(out);
 }
 
-function verificationView(db, service, row) {
+export function verificationView(db, service, row) {
   if (!row) return { status: 'not_verified', label: 'No saved service record.' };
   const raw = service === 'keycloak' ? (row.verified_json ? parseJson(row.verified_json) : null) : (row.verified_json ? parseJson(row.verified_json) : null);
   if (!raw) return { status: 'not_verified', label: 'No configuration verification is recorded.' };
@@ -381,8 +381,11 @@ export function runtimeFacts(service, row, inspected) {
   const out = {};
   for (const c of inspected || []) {
     const name = String(c.Name || '').replace(/^\//, '');
+    const driver = c.HostConfig?.LogConfig?.Type || null;
     out[name] = { present: true, id: String(c.Id || '').slice(0, 12), image: c.Config?.Image || null, running: !!c.State?.Running, status: c.State?.Status || null,
-      health: c.State?.Health?.Status || (c.State?.Running ? 'running (no healthcheck)' : 'stopped'), started_at: c.State?.StartedAt || null, owned_label: c.Config?.Labels?.[label] === ref };
+      health: c.State?.Health?.Status || (c.State?.Running ? 'running (no healthcheck)' : 'stopped'), started_at: c.State?.StartedAt || null, owned_label: c.Config?.Labels?.[label] === ref,
+      ...(c.State?.Running ? {} : { exit_code: c.State?.ExitCode ?? null, error: c.State?.Error ? redactText(String(c.State.Error)).slice(0, 300) : null, finished_at: c.State?.FinishedAt || null }),
+      log_driver: driver, logs_readable: driver ? driver !== 'none' : null };
   }
   return out;
 }

@@ -30,6 +30,11 @@ import {
   applyRefusal, serviceRetryRefusal, jobSummary, scrubKnownSecrets, SERVICE_IDS, SERVICE_PORTS,
 } from '../../lib/setup-engine/full-platform-mcp.js';
 import { getJob } from '../../lib/setup-engine/store.js';
+import { inspectServiceRuntime, containerControlReview, controlContainer, verifyService, serviceLogs, servicePreflight, retryService } from '../../lib/setup-engine/platform-overview.js';
+import { checkHostnames, dnsRefusal } from '../../lib/setup-engine/platform-dns.js';
+import { networksReview, queueNetworksChange } from '../../lib/setup-engine/full-platform-networks.js';
+import { resyncReview, resyncSharedPlan } from '../../lib/setup-engine/full-platform-store.js';
+import { recoveryReview, queueRecovery } from '../../lib/setup-engine/full-platform-kc-recovery.js';
 import { isEncrypted, decryptSecret } from '../../lib/secrets.js';
 import { nowIso } from '../../lib/mcp-ext/logic.js';
 
@@ -46,6 +51,9 @@ export function storeMessage(e) {
 export function createPlatformHandlers(kit) {
   const { ctx, ok, err, mutation, confirmToken, confirmFlag, flagRefusal, writeLedger } = kit;
   const db = () => ctx.getDb();
+  // One host-command seam for every platform tool (the backend's nsenter-aware runner).
+  const run = (argv, timeoutMs = 30000) => ctx.runHostCapture(argv[0], argv.slice(1), { timeoutMs });
+  const resolvers = ctx.platformResolvers || undefined;
   const requestedBy = (auth) => `mcp:${auth?.id ?? 'unknown'}`;
   // Last line of defence on every result: no protected value this install
   // holds may leave through this family, whatever a job event recorded.
@@ -61,8 +69,10 @@ export function createPlatformHandlers(kit) {
     const t0 = Date.now();
     let result;
     const gate = flagRefusal(PLATFORM_FLAG);
-    if (gate) result = err(gate);
-    else {
+    // Off: refuse before ANY work — no platform read, no host command, and no
+    // secret scrub (that would decrypt the credential tables).
+    if (gate) { writeLedger({ ts: nowIso(), token_id: auth?.id ?? null, actor: auth?.created_by ?? null, tool: name, subject_type: 'platform', subject_id: 'platform', args: {}, outcome: 'refused', dry_run: false, confirmation_used: false, summary: `refused: ${PLATFORM_FLAG} is off`, detail: { requested_by: requestedBy(auth) }, duration_ms: Date.now() - t0 }); return err(gate); }
+    {
       try { result = await fn(args || {}, auth, req); } catch (e) { result = err(e?.fullPlatformSafe || e?.name === 'ZodError' ? storeMessage(e) : `Tool failed: ${e?.message || 'unknown error'}`); }
     }
     writeLedger({ ts: nowIso(), token_id: auth?.id ?? null, actor: auth?.created_by ?? null, tool: name, subject_type: 'platform', subject_id: args?.service || args?.id || 'platform',
@@ -72,7 +82,7 @@ export function createPlatformHandlers(kit) {
   };
 
   /** A write: kit.mutation (ledger + audit) behind mcp.platform, plus any extra flags. */
-  const write = (name, { audit, extraFlags = [] }, fn) => mutation(name, { subjectType: 'platform', flag: PLATFORM_FLAG, audit, keepArgs: ['revision', 'service', 'action', 'purge_data', 'if_revision', 'dry_run', 'confirm'] }, async (args, auth, req, note) => {
+  const write = (name, { audit, extraFlags = [] }, fn) => mutation(name, { subjectType: 'platform', flag: PLATFORM_FLAG, audit, keepArgs: ['revision', 'service', 'action', 'container', 'restricted_networks', 'purge_data', 'if_revision', 'dry_run', 'confirm'] }, async (args, auth, req, note) => {
     for (const f of extraFlags) { const g = flagRefusal(f); if (g) { note.refused = true; return err(g); } }
     note.detail = { requested_by: requestedBy(auth) };
     try { return scrub(await fn(args, auth, req, note)); }
@@ -86,24 +96,9 @@ export function createPlatformHandlers(kit) {
   const get_platform_service = read('get_platform_service', async (args) => {
     const service = String(args.service || '');
     if (!SERVICE_IDS.includes(service)) return err(`Unknown service "${service}". Known: ${SERVICE_IDS.join(', ')}.`);
-    let runtime = null, runtimeError = null;
-    const t = installedTargets(db())[service];
-    const row = t ? (service === 'keycloak' ? t.row : serviceReaders[service](db())) : null;
-    const names = t?.mode === 'install' ? containerNames(service, row) : [];
-    if (args.runtime !== false && names.length) {
-      try {
-        const listed = await ctx.runHostCapture('docker', ['container', 'ls', '-a', '--format', '{{.Names}}'], { timeoutMs: 20000 });
-        if (listed.status !== 0) throw new Error('docker is unavailable on the host');
-        const present = names.filter((n) => listed.stdout.split('\n').includes(n));
-        runtime = {};
-        if (present.length) {
-          const r = await ctx.runHostCapture('docker', ['container', 'inspect', ...present], { timeoutMs: 20000 });
-          if (r.status !== 0) throw new Error('docker inspect failed');
-          runtime = runtimeFacts(service, row, JSON.parse(r.stdout));
-        }
-      } catch (e) { runtime = null; runtimeError = String(e?.message || e).slice(0, 200); }
-    }
-    return ok(platformServiceView(db(), service, { runtime, runtimeError }));
+    // The same docker inspect path the Platform overview uses.
+    const rt = args.runtime === false ? { runtime: null, runtimeError: null } : await inspectServiceRuntime(db(), service, run, { fresh: true });
+    return ok(platformServiceView(db(), service, { runtime: rt.runtime, runtimeError: rt.runtimeError }));
   });
 
   const list_platform_jobs = read('list_platform_jobs', async (args) => {
@@ -117,7 +112,12 @@ export function createPlatformHandlers(kit) {
     return ok(d);
   });
 
-  const platform_preflight = read('platform_preflight', async () => {
+  const platform_preflight = read('platform_preflight', async (args) => {
+    if (args.service) {
+      const service = String(args.service);
+      if (!SERVICE_IDS.includes(service)) return err(`Unknown service "${service}". Known: ${SERVICE_IDS.join(', ')}.`);
+      return ok(await servicePreflight(db(), service, { run, resolvers }));
+    }
     const d = db(), s = readFullPlatform(d)?.config || defaults(d);
     const origins = [s.publicOrigin, s.recoveryOrigin, ...SERVICE_IDS.filter((id) => s.services[id].mode !== 'skip').map((id) => s.services[id].url)].filter(Boolean);
     const resolveHost = ctx.resolveHost || (async (h) => (await lookup(h, { all: true })).map((a) => a.address));
@@ -139,7 +139,11 @@ export function createPlatformHandlers(kit) {
     for (const table of ['setup_vaultwarden_credentials', 'setup_full_credentials', 'setup_openbao_credentials']) {
       try { const v = d.prepare(`SELECT value FROM ${table} LIMIT 1`).get()?.value; if (v && isEncrypted(v)) { decryptSecret(v); decrypts = true; break; } } catch { decrypts = false; break; }
     }
-    return ok({ ...evaluatePreflight(d, { resolve, caddyAddresses, docker, listening, key: { configured, decrypts } }), ports_expected: SERVICE_PORTS });
+    // Host resolver AND 1.1.1.1 against the Caddy host, with the zone's manageability (3e).
+    const dns = await checkHostnames(d, Object.keys(resolve), { resolvers, fresh: true });
+    const evaluated = evaluatePreflight(d, { resolve, caddyAddresses, docker, listening, key: { configured, decrypts } });
+    const checks = evaluated.checks.map((c) => { const h = c.id.startsWith('dns:') ? dns.results[c.id.slice(4)] : null; return h ? { ...c, ok: h.ok, detail: h.ok ? 'resolves to the Caddy host from this host and from 1.1.1.1' : h.reason, remedy: h.zone?.managed ? 'set_dns_record (the zone is on the stored Cloudflare token)' : `Set at the external DNS host: ${h.record || 'an A record for the Caddy host'}` } : c; });
+    return ok({ ...evaluated, checks, ready: checks.every((c) => c.ok), dns: Object.values(dns.results), caddy_host: dns.expected, ports_expected: SERVICE_PORTS });
   });
 
   /* -------------------------------- writes ------------------------------- */
@@ -189,6 +193,9 @@ export function createPlatformHandlers(kit) {
       const service = String(args.service);
       const refusal = serviceRetryRefusal(d, service);
       if (refusal) { note.refused = true; return err(refusal.error, refusal); }
+      // 3e: never queue a service whose hostname does not point at the Caddy host.
+      const dnsBlock = await dnsRefusal(d, [new URL(full.config.services[service].url).hostname], { resolvers });
+      if (dnsBlock) { note.refused = true; return err(dnsBlock.error, dnsBlock); }
       if (args.dry_run === true) return ok({ dry_run: true, would: `queue ${service}'s own adapter job again, reusing its stored encrypted inputs`, note: 'Nothing was queued.' });
       const gate = confirmFlag(args, note, `This re-queues ${service}'s adapter job on the host runner.`);
       if (gate) return gate;
@@ -238,7 +245,76 @@ export function createPlatformHandlers(kit) {
     return ok({ queued: true, job: jobSummary(r.job), preview, next: `get_platform_job({ id: "${r.job.id}" }); when it succeeds get_platform_setup starts at step 1.` });
   });
 
+  /* --------------------------- Part 2: service actions --------------------------- */
+
+  const verify_platform_service = read('verify_platform_service', async (args) => {
+    const service = String(args.service || '');
+    if (!SERVICE_IDS.includes(service)) return err(`Unknown service "${service}". Known: ${SERVICE_IDS.join(', ')}.`);
+    return ok(await verifyService(db(), service, { run, resolvers }));
+  });
+
+  const get_platform_service_logs = read('get_platform_service_logs', async (args) => {
+    const service = String(args.service || '');
+    if (!SERVICE_IDS.includes(service)) return err(`Unknown service "${service}". Known: ${SERVICE_IDS.join(', ')}.`);
+    return ok(await serviceLogs(db(), service, { run, lines: args.lines, container: args.container ? String(args.container) : null }));
+  });
+
+  const control_platform_container = write('control_platform_container', { audit: 'PLATFORM_CONTAINER_CONTROL', extraFlags: ['mcp.destructive'] }, async (args, auth, _req, note) => {
+    const d = db(), service = String(args.service || ''), container = String(args.container || ''), verb = String(args.action || '');
+    note.subject_id = `${service}:${container}:${verb}`;
+    if (!SERVICE_IDS.includes(service)) { note.refused = true; return err(`Unknown service "${service}".`); }
+    const review = await containerControlReview(d, { service, container, action: verb }, run);
+    const preview = { service, container, action: verb, container_id: review.container_id, running: review.running, effects: review.effects, blockers: review.blockers };
+    if (review.blockers.length) { note.refused = true; return err(`Refused: ${review.blockers.join(' ')}`, { preview }); }
+    if (args.dry_run === true) return ok({ dry_run: true, preview, note: 'Nothing was changed.' });
+    const gate = confirmToken(args, auth, note, { tool: 'control_platform_container', subject: `${service}:${container}:${verb}:${review.reviewToken}`, action: `${verb} ${container}`, preview: { preview } });
+    if (gate) return gate;
+    const r = await controlContainer(d, { service, container, action: verb, reviewToken: review.reviewToken }, run);
+    note.summary = `${verb} ${container}`; note.detail = { ...note.detail, service, container, action: verb, container_id: r.container_id };
+    return ok({ applied: true, ...r });
+  });
+
+  const set_platform_restricted_networks = write('set_platform_restricted_networks', { audit: 'FULL_PLATFORM_NETWORKS_CHANGE', extraFlags: ['mcp.destructive'] }, async (args, auth, _req, note) => {
+    const d = db(); note.subject_id = 'full-platform:networks';
+    const review = networksReview(d, args.restricted_networks);
+    const preview = { revision: review.revision, before: review.before, after: review.after, routes: review.routes, records: review.records, effects: review.effects, blockers: review.blockers };
+    if (review.blockers.length) { note.refused = true; return err(`Refused: ${review.blockers.join(' ')}`, { preview }); }
+    if (args.dry_run === true) return ok({ dry_run: true, preview, note: 'Nothing was queued and no confirmation token was issued.' });
+    const gate = confirmToken(args, auth, note, { tool: 'set_platform_restricted_networks', subject: review.reviewToken, action: `change the restricted networks to ${review.after.join(', ')}`, preview: { preview } });
+    if (gate) return gate;
+    const r = queueNetworksChange(d, { revision: review.revision, reviewToken: review.reviewToken, networks: review.after, reviewed: true }, requestedBy(auth), { via: 'mcp' });
+    ctx.drainBackendStepsNow?.();
+    note.summary = `restricted networks → ${review.after.join(', ')} (${r.job.id})`; note.detail = { ...note.detail, before: review.before, after: review.after, job_id: r.job.id };
+    return ok({ queued: true, job: jobSummary(r.job), preview, next: `get_platform_job({ id: "${r.job.id}" })` });
+  });
+
+  const resync_platform_plan = write('resync_platform_plan', { audit: 'FULL_PLATFORM_PLAN_RESYNCED', extraFlags: ['mcp.destructive'] }, async (args, auth, _req, note) => {
+    const d = db(); note.subject_id = 'full-platform:resync';
+    const review = resyncReview(d);
+    if (review.blockers.length) { note.refused = true; return err(`Refused: ${review.blockers.join(' ')}`, { preview: review }); }
+    if (Number(args.revision) !== review.revision) { note.refused = true; return err(`The saved revision is ${review.revision}, not ${args.revision}. Re-read get_platform_setup.`, { code: 'STALE_REVISION' }); }
+    if (args.dry_run === true) return ok({ dry_run: true, preview: review, note: 'Nothing was changed.' });
+    const gate = confirmFlag(args, note, `This creates Full Platform revision ${review.next_revision} from the saved values.`); if (gate) return gate;
+    const r = resyncSharedPlan(d, { revision: review.revision }, requestedBy(auth));
+    note.summary = `resynced shared plan: revision ${review.revision} → ${r.revision}`; note.detail = { ...note.detail, from: review.revision, revision: r.revision };
+    return ok({ resynced: true, revision: r.revision, applied: r.approved_revision === r.revision, next: `continue_platform_setup({ revision: ${r.revision}, review_digest, confirm: true }) — re-read get_platform_setup for the review_digest.` });
+  });
+
+  const recover_keycloak_bootstrap = write('recover_keycloak_bootstrap', { audit: 'KEYCLOAK_BOOTSTRAP_RECOVERY_REQUESTED', extraFlags: ['mcp.destructive'] }, async (args, auth, _req, note) => {
+    const d = db(); note.subject_id = 'keycloak:bootstrap-recovery';
+    const review = recoveryReview(d);
+    const preview = { revision: review.revision, installation: review.installation, container: review.container, failed_job: review.failed_job, effects: review.effects, blockers: review.blockers };
+    if (review.blockers.length) { note.refused = true; return err(`Refused: ${review.blockers.join(' ')}`, { preview }); }
+    if (args.dry_run === true) return ok({ dry_run: true, preview, note: 'Nothing was queued and no confirmation token was issued.' });
+    const gate = confirmToken(args, auth, note, { tool: 'recover_keycloak_bootstrap', subject: review.reviewToken, action: 'recover the Keycloak bootstrap administrator and continue the saved setup', preview: { preview } });
+    if (gate) return gate;
+    const r = queueRecovery(d, { revision: review.revision, reviewToken: review.reviewToken, reviewed: true }, requestedBy(auth), { via: 'mcp' });
+    note.summary = `Keycloak bootstrap recovery queued (${r.job.id})`; note.detail = { ...note.detail, job_id: r.job.id };
+    return ok({ queued: true, job: jobSummary(r.job), preview, next: `get_platform_job({ id: "${r.job.id}" })` });
+  });
+
   return {
+    verify_platform_service, get_platform_service_logs, control_platform_container, set_platform_restricted_networks, resync_platform_plan, recover_keycloak_bootstrap,
     get_platform_setup, get_platform_service, list_platform_jobs, get_platform_job, platform_preflight,
     save_platform_setup, apply_platform_setup: queueApply('apply'), continue_platform_setup: queueApply('continue'),
     manage_platform_service, reset_platform_setup,

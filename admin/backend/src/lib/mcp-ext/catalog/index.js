@@ -56,4 +56,5 @@ export const MCP_EXT_INSTRUCTIONS = [
   'manage_platform_service, reset_platform_setup): get_platform_setup returns next_actions — follow the mcp ones and',
   'hand the human ones (administrator password, passkey, SSO activation, any secret) to the person with the dashboard',
   'location it names; those are never callable over MCP. Apply/continue carry the revision and review_digest you read.',
+  'Every platform tool needs the human-only mcp.platform flag (an administrator turns it on in the dashboard; set_feature_flag cannot).',
 ].join(' ');

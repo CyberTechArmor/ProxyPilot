@@ -145,6 +145,8 @@ export function getDb() {
 //               (REST or MCP): op, subject, the sha256 plan token, the plan,
 //               outcome, per-step detail. Feeds the Storage page history and
 //               export_grc_evidence (lib/storage/service.js).
+//   915 Platform MCP — feature_flag:mcp.platform written ON for installs that
+//               existed before it (new installs default OFF); audited.
 //   912 Prepared downloads — lxc_exports: a guest tarball built once in the
 //               background and downloadable many times (Range-resumable),
 //               with byte progress while it builds and retention after.
@@ -312,6 +314,19 @@ export function runMigration(db, version, name, fn, opts = {}) {
   return true;
 }
 
+/** Migration 915's body (exported for its test). */
+export function migrateMcpPlatformFlag(d, { existingInstall }) {
+  if (!existingInstall) return;
+  const hasSettings = d.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'").get();
+  if (!hasSettings) return;
+  const key = 'feature_flag:mcp.platform';
+  if (d.prepare('SELECT 1 FROM app_settings WHERE key = ?').get(key)) return;
+  d.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?)').run(key, '1');
+  const hasAudit = d.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'").get();
+  if (hasAudit) d.prepare('INSERT INTO audit_log (id, user_id, action, resource_type, resource_id, details, ip_address) VALUES (?, NULL, ?, ?, ?, ?, NULL)')
+    .run(uuidv4(), 'FEATURE_FLAG_CHANGED', 'feature_flag', 'mcp.platform', JSON.stringify({ flag: 'mcp.platform', previous: false, enabled: true, via: 'migration 915', reason: 'existing install keeps Platform MCP access; new installs start with it off' }));
+}
+
 export function initDatabase() {
   const db = getDb();
 
@@ -320,6 +335,11 @@ export function initDatabase() {
   // guard here so the server refuses to boot rather than silently
   // running until something tries to encrypt.
   assertEncryptionKey();
+
+  // Was this database already an install before this boot? (Migration 915
+  // keeps mcp.platform on for existing installs only.) Read before the
+  // registry table is created: a brand-new file has neither table yet.
+  const existingInstall = !!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('schema_migrations','users') LIMIT 1").get();
 
   // Bootstrap the migrations registry first so backfill + future
   // runMigration() calls have somewhere to write.
@@ -2327,6 +2347,12 @@ export function initDatabase() {
     const cols = d.prepare(`PRAGMA table_info(mcp_tokens)`).all().map((c) => c.name);
     if (!cols.includes('expires_at')) d.exec(`ALTER TABLE mcp_tokens ADD COLUMN expires_at TEXT`);
   });
+
+  // Version 915: the mcp.platform master flag (every Platform MCP tool) is
+  // OFF by default on new installs. An install that already existed keeps
+  // its current behaviour: the flag is written ON, unless someone already
+  // set it explicitly, and the change is recorded in the audit log.
+  runMigration(db, 915, 'mcp_platform_flag_existing_installs', (d) => migrateMcpPlatformFlag(d, { existingInstall }));
 
   // Version 1000: the setup engine's persistent state (gate two). One lease
   // per app that survives a backend restart — an expired lease with a dead

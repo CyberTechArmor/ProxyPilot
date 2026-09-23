@@ -153,3 +153,12 @@ test('GET /full reports whether this browser session can do local-proof actions'
     assert.ok('method' in body.session && 'origin' in body.session);
   } finally { await f.close(); }
 }));
+test('FP-removed: a personal credential is refused (not silently stored) while a runtime is removed', async () => {
+  const { removedRefusal } = await import('../lib/setup-engine/full-platform-store.js');
+  assert.equal(removedRefusal({ state: {} }), null);
+  assert.equal(removedRefusal({ state: { removed: {} } }), null);
+  const one = removedRefusal({ state: { removed: { vaultwarden: true } } });
+  assert.match(one, /^Vaultwarden was removed/); assert.match(one, /Reinstall on it/); assert.match(one, /not stored/);
+  const both = removedRefusal({ state: { removed: { vaultwarden: true, infisical: true } } });
+  assert.match(both, /Vaultwarden and Infisical were removed/); assert.match(both, /asks for this password again/);
+});

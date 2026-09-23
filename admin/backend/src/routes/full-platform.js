@@ -2,7 +2,7 @@ import { queueAdministrator } from '../lib/setup-engine/full-platform-admin.js';
 import { Router } from 'express';
 import { getDb, logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
-import { localProofRefusal, requestOrigin } from '../lib/sso/sessions.js';
+import { localProofRefusal, requestOrigin, sessionContext } from '../lib/sso/sessions.js';
 import { fullPlatformState, saveFullPlatform, applyFullPlatform, approvalDnsRefusal, reviewFullPlatform, configSchema, readFullPlatform, fail } from '../lib/setup-engine/full-platform-store.js';
 import { protectedValue, storeProtected } from '../lib/setup-engine/full-platform-keycloak.js';
 import { personalSchema, personalRef } from '../lib/setup-engine/full-platform-infisical.js';
@@ -19,7 +19,14 @@ const handle = fn => async (req, res) => {
   try { await fn(req, res); }
   catch (e) { res.status(e.status || 400).json({ code: e.code || 'FULL_PLATFORM_INPUT', error: e.fullPlatformSafe || e.ssoSafe || e.openbaoSafe || e.infisicalSafe ? e.message : e.name === 'ZodError' ? e.issues.map(i => i.message).join(' ') : 'Setup could not continue. Reopen the saved plan and check the current service step; private provider details are withheld.' }); }
 };
-fullPlatformRouter.get('/', handle((req, res) => res.json({ ...fullPlatformState(getDb()), administrator: { id: req.user.id, username: req.user.username, email: req.user.email || '' } })));
+// session.localActions: whether this browser session can perform the
+// local-proof actions (reveal, handoffs, runtime actions, reset). A session
+// minted by the SSO login test cannot; the page says so up front.
+fullPlatformRouter.get('/', handle((req, res) => {
+  const db = getDb(), ctx = sessionContext(db, req.session?.id), origin = requestOrigin(req);
+  const localActions = !!ctx && ['local', 'link-only'].includes(ctx.method) && ctx.origin === origin;
+  res.json({ ...fullPlatformState(db), administrator: { id: req.user.id, username: req.user.username, email: req.user.email || '' }, session: { localActions, method: ctx?.method || null, origin } });
+}));
 fullPlatformRouter.post('/review', handle((req, res) => res.json(reviewFullPlatform(getDb(), configSchema.parse(req.body)))));
 fullPlatformRouter.post('/lifecycle/review', handle((req, res) => {
   const p = z.object({ service: z.enum(['keycloak','pomerium','infisical','openbao','vaultwarden']), action: z.enum(['repair','reinstall','remove']) }).strict().parse(req.body);

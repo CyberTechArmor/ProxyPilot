@@ -142,3 +142,14 @@ test('first apply is refused while the ProxyPilot or recovery hostname does not 
   applyFullPlatform(db, { revision: 1, reviewToken: reviewFullPlatform(db).reviewToken, reviewed: true }, 'admin');
   assert.equal(await approvalDnsRefusal(db, { check }), null, 'an approved plan is not re-checked');
 }));
+
+test('GET /full reports whether this browser session can do local-proof actions', () => withDb(async db => {
+  const f = await apiFixture(db);
+  try {
+    const r = await f.request('/full');
+    assert.equal(r.status, 200);
+    const body = r.body ?? await r.json?.();
+    assert.equal(typeof body.session.localActions, 'boolean');
+    assert.ok('method' in body.session && 'origin' in body.session);
+  } finally { await f.close(); }
+}));

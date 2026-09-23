@@ -113,6 +113,15 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     if(!r || r.revision!==p.revision || r.edge_job_id!==job.id || !['queued','running'].includes(getJob(db,r.last_job_id)?.status) || Object.keys(p).length!==2 || !['deny','gateway'].includes(p.stage)) throw new Error('Superseded');
     p={...p,container:POMERIUM_APP,services:[],ip:'127.0.0.1'};
   } catch {return fin('refused','invalid','Invalid or superseded Pomerium route intent.');} }
+  const isReset = job.kind === 'remove_platform_routes';
+  if (isReset) { try {
+    // Read directly: importing full-platform-store here would pull the platform
+    // plan (and its route/mock2 modules) into every backend step's load order.
+    const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='setup_full_platform'").get() && db.prepare('SELECT last_job_id, state_json FROM setup_full_platform WHERE id=1').get();
+    const full = row ? { last_job_id: row.last_job_id, state: parseJson(row.state_json) || {} } : null;
+    if (Object.keys(p).length !== 1 || typeof p.resetJob !== 'string' || job.app !== 'pp-platform-reset-routes' || full?.last_job_id !== p.resetJob || full.state?.reset?.routesJob !== job.id || !['queued', 'running'].includes(getJob(db, p.resetJob)?.status)) throw new Error('Superseded');
+    p = { ...p, container: 'pp-platform-reset-routes', services: [], ip: '127.0.0.1' };
+  } catch { return fin('refused', 'invalid', 'Invalid or superseded Full Platform reset route step.'); } }
   const isKeycloak = job.kind === 'configure_keycloak_route';
   const isSso = ['verify_sso','configure_recovery_route'].includes(job.kind);
   if (isSso) { try {
@@ -125,7 +134,7 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     if (installation?.route_job_id !== job.id || !['queued', 'running'].includes(getJob(db, installation.last_job_id)?.status)) throw new Error('Superseded or cancelled');
     p = keycloakRouteParams(db, p);
   } catch { return fin('refused', 'invalid', 'Invalid, cancelled or superseded Keycloak route reference.'); } }
-  const v = (isKeycloak || isSso || isPomerium || isInfisical || isOpenBao || isVaultwarden) ? { ok: job.app === p.container, reason: 'Keycloak route app mismatch' } : validateRoutesParams(p);
+  const v = (isReset || isKeycloak || isSso || isPomerium || isInfisical || isOpenBao || isVaultwarden) ? { ok: job.app === p.container, reason: 'Keycloak route app mismatch' } : validateRoutesParams(p);
   if (!v.ok) return fin('refused', 'invalid', v.reason);
   const origin = p.origin || {};
   const noteOrigin = (state, extra = {}) => {
@@ -170,7 +179,7 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     fenceJob(db, { id: job.id, owner, epoch, safe: true, leaseMs: LEASE_MS, nowMs: nowMs() });
     const ck = checkpoint(db, { id: job.id, owner, epoch, phase: 'routes', checkpoint: { resumable: false, disruptive: false, routes: true, container: p.container, domains: p.services.map((s) => s.domain) }, message: `configuring ${p.services.length} route(s) for ${p.container} → ${p.ip}`, nowMs: nowMs() });
     if (!(Number(ck) > 0)) throw new FencedError(job.id);
-    if (typeof (isVaultwarden ? deps.vaultwardenStep : isOpenBao ? deps.openbaoStep : isInfisical ? deps.infisicalStep : isPomerium ? deps.pomeriumStep : isSso ? deps.ssoStep : isKeycloak ? deps.configureKeycloakRoute : deps.configureRoutes) !== 'function') { noteOrigin('failed', { detail: 'no route configurator is available in this process' }); return fin('failed', 'error', 'no route configurator is available in this process; retry the job'); }
+    if (typeof (isReset ? deps.platformResetRoutesStep : isVaultwarden ? deps.vaultwardenStep : isOpenBao ? deps.openbaoStep : isInfisical ? deps.infisicalStep : isPomerium ? deps.pomeriumStep : isSso ? deps.ssoStep : isKeycloak ? deps.configureKeycloakRoute : deps.configureRoutes) !== 'function') { noteOrigin('failed', { detail: 'no route configurator is available in this process' }); return fin('failed', 'error', 'no route configurator is available in this process; retry the job'); }
     // Before every write the configurator makes, THREE leases are renewed at
     // the epochs this step holds them — the job claim itself (`setup_jobs`,
     // the store's fenced heartbeat: owner + epoch + still running), the
@@ -200,7 +209,7 @@ export async function executeBackendStep(job, { db, owner, deps = {}, nowMs = ()
     keepAlive = setInterval(() => { try { const gone = renewAll(); if (gone) lost = gone; } catch { /* the next fence decides */ } }, Math.max(20, Number(keepAliveMs) || KEEPALIVE_MS));
     if (typeof keepAlive.unref === 'function') keepAlive.unref();
     fence();
-    const res = isVaultwarden ? await deps.vaultwardenStep({revision:p.revision,fence}) : isOpenBao ? await deps.openbaoStep({revision:p.revision,fence}) : isInfisical ? await deps.infisicalStep({revision:p.revision,fence}) : isPomerium ? await deps.pomeriumStep({revision:p.revision,stage:p.stage,fence}) : isSso ? await deps.ssoStep({ kind: job.kind, fingerprint: p.fingerprint, fence }) : isKeycloak ? await deps.configureKeycloakRoute({ installationId: p.installationId, fence }) : await deps.configureRoutes({ container: p.container, name: p.serviceName, ip: p.ip, services: p.services, fence });
+    const res = isReset ? await deps.platformResetRoutesStep({ resetJob: p.resetJob, fence }) : isVaultwarden ? await deps.vaultwardenStep({revision:p.revision,fence}) : isOpenBao ? await deps.openbaoStep({revision:p.revision,fence}) : isInfisical ? await deps.infisicalStep({revision:p.revision,fence}) : isPomerium ? await deps.pomeriumStep({revision:p.revision,stage:p.stage,fence}) : isSso ? await deps.ssoStep({ kind: job.kind, fingerprint: p.fingerprint, fence }) : isKeycloak ? await deps.configureKeycloakRoute({ installationId: p.installationId, fence }) : await deps.configureRoutes({ container: p.container, name: p.serviceName, ip: p.ip, services: p.services, fence });
     fence();
     const pub = { created: res.created || [], existing: res.existing || [], conflicts: res.conflicts || [], rendered: res.rendered || [], renderWarning: res.renderWarning || null, upstreamWarning: res.upstreamWarning || null, ip: p.ip };
     recordProgress(db, { id: job.id, owner, epoch, progress: { result: pub }, nowMs: nowMs() });

@@ -11,6 +11,7 @@ import { createProjectConfigHandlers } from './project-config.js';
 import { createSelfEditHandlers } from './self-edit.js';
 import { createStorageHandlers } from './storage.js';
 import { createMigrationHandlers } from './migration.js';
+import { createPlatformHandlers } from './platform.js';
 
 export function createExtendedHandlers(ctx) {
   const kit = createToolkit(ctx);
@@ -24,6 +25,7 @@ export function createExtendedHandlers(ctx) {
     createSelfEditHandlers(kit),
     createStorageHandlers(kit),
     createMigrationHandlers(kit),
+    createPlatformHandlers(kit),
   ];
   const out = {};
   for (const fam of families) {

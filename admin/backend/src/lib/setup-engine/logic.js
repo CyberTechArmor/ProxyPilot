@@ -79,7 +79,7 @@ export const CONFIG_JOB_KINDS = Object.freeze(['config_set', 'device_add', 'devi
 export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'keycloak_setup', 'pomerium_apply', 'infisical_apply', 'openbao_apply', 'full_platform_apply', 'vaultwarden_apply']);
 // The kinds that MUTATE a guest or its storage: one at a time per app, and an
 // exclusive kind is refused (never queued behind) while any of them is open.
-export const MUTATING_JOB_KINDS = Object.freeze(['vaultwarden_apply', 'configure_vaultwarden_route', 'openbao_apply', 'full_platform_apply', 'openbao_operator', 'configure_openbao_route', 'infisical_apply', 'configure_infisical_route', 'pomerium_apply', 'configure_pomerium_routes', 'keycloak_setup', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route', 'deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'configure_routes']);
+export const MUTATING_JOB_KINDS = Object.freeze(['vaultwarden_apply', 'configure_vaultwarden_route', 'remove_platform_routes', 'openbao_apply', 'full_platform_apply', 'openbao_operator', 'configure_openbao_route', 'infisical_apply', 'configure_infisical_route', 'pomerium_apply', 'configure_pomerium_routes', 'keycloak_setup', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route', 'deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'configure_routes']);
 // A restore is destructive, and a lifecycle verb is an operator's immediate
 // action on a guest: neither waits for a held lease (it would run minutes
 // later under a state its operator never looked at) — refused, and refused
@@ -93,7 +93,7 @@ export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapsho
 // their pre-move records keep the old kind names in history. `configure_routes`
 // (A-17.7) is the backend's by design: ProxyPilot's own route rows and its
 // Caddy render, queued by the guest setup and drained by the backend.
-export const BACKEND_JOB_KINDS = Object.freeze(['configure_vaultwarden_route', 'configure_openbao_route', 'configure_infisical_route', 'configure_pomerium_routes', 'credential_migration', 'configure_routes', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route']);
+export const BACKEND_JOB_KINDS = Object.freeze(['configure_vaultwarden_route', 'remove_platform_routes', 'configure_openbao_route', 'configure_infisical_route', 'configure_pomerium_routes', 'credential_migration', 'configure_routes', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route']);
 export const LEGACY_BACKEND_JOB_KINDS = Object.freeze(['restore_project_db', 'retry-secrets']);
 // A runner is live when its heartbeat is younger than this.
 export const RUNNER_LIVE_MS = 30_000;
@@ -468,7 +468,7 @@ export function validateRunnerJob(job) {
   const plan = parseJson(job.plan_json) || job.plan || {};
   const p = plan.params || {};
   if (job.kind === 'vaultwarden_apply') return vaultwardenJobSchema.safeParse(p).success && job.app === VAULTWARDEN_APP && Object.keys(plan).every(k => k === 'params') ? {ok:true} : {ok:false,reason:'Vaultwarden jobs carry only a saved revision reference.'};
-  if (job.kind === 'full_platform_apply') return job.app === 'pp-full-platform' && Number.isInteger(p?.revision) && p.revision > 0 && Object.keys(p).every(k => ['revision', 'operation'].includes(k)) && (p.operation === undefined || ['administrator', 'retire', 'lifecycle'].includes(p.operation)) && Object.keys(plan).every(k => k === 'params') ? { ok: true } : { ok: false, reason: 'Full Platform jobs carry only an approved revision reference.' };
+  if (job.kind === 'full_platform_apply') return job.app === 'pp-full-platform' && Number.isInteger(p?.revision) && p.revision > 0 && Object.keys(p).every(k => ['revision', 'operation'].includes(k)) && (p.operation === undefined || ['administrator', 'retire', 'lifecycle', 'reset'].includes(p.operation)) && Object.keys(plan).every(k => k === 'params') ? { ok: true } : { ok: false, reason: 'Full Platform jobs carry only an approved revision reference.' };
   if (job.kind === 'openbao_apply') return openbaoJobSchema.safeParse(p).success && job.app === OPENBAO_APP && Object.keys(plan).every(k => k === 'params') ? {ok:true} : {ok:false,reason:'OpenBao jobs carry only a saved revision reference.'};
   if (job.kind === 'infisical_apply') return infisicalJobSchema.safeParse(p).success && job.app === INFISICAL_APP && Object.keys(plan).every(k => k === 'params') ? { ok: true } : { ok: false, reason: 'Infisical jobs carry only a saved revision reference.' };
   if (job.kind === 'pomerium_apply') return pomeriumJobSchema.safeParse(p).success && job.app === POMERIUM_APP && Object.keys(plan).every(k => k === 'params') ? { ok: true } : { ok: false, reason: 'Pomerium jobs carry only a saved revision reference.' };

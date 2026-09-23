@@ -7,6 +7,7 @@ import { createJob, getJob, jobView } from './store.js';
 import { validateRouteEdgeOptions } from '../caddy-site-file.js';
 
 export const FULL_PLATFORM_APP = 'pp-full-platform';
+export const RESET_ROUTES_APP = 'pp-platform-reset-routes';
 export const FULL_PLATFORM_SCHEMA = `
 CREATE TABLE IF NOT EXISTS setup_full_platform (
  id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL,
@@ -37,7 +38,7 @@ export const configSchema = z.object({
   if (c.recoveryNetworks.length && (network.error || c.recoveryNetworks.some(n => /\/0$/.test(n)))) ctx.addIssue({ code: 'custom', message: 'Use restricted administrator/VPN networks; unrestricted access is refused.' });
 });
 export const saveSchema = z.object({ expectedRevision: z.number().int().nonnegative(), config: configSchema, reviewed: z.literal(true) }).strict();
-export const jobSchema = z.object({ revision: z.number().int().positive(), operation: z.enum(['administrator', 'retire', 'lifecycle']).optional() }).strict();
+export const jobSchema = z.object({ revision: z.number().int().positive(), operation: z.enum(['administrator', 'retire', 'lifecycle', 'reset']).optional() }).strict();
 export const applySchema = z.object({ revision: z.number().int().positive() }).extend({ reviewToken: z.string().regex(/^[a-f0-9]{64}$/), reviewed: z.literal(true) }).strict();
 const has = (db, table) => !!db.prepare('SELECT name FROM sqlite_master WHERE type=\'table\' AND name=?').get(table);
 const one = (db, table) => has(db, table) ? db.prepare(`SELECT * FROM ${table} WHERE id=1`).get() : null;
@@ -124,7 +125,7 @@ export function reviewFullPlatform(db, config = null) {
     humanSteps: ['Confirm restricted recovery access', 'Create and prove the permanent administrator; enroll a passkey', 'Retain and acknowledge OpenBao recovery material, then manually unseal', 'Complete supported vault unlock and recovery checks'],
   };
 }
-export function applyFullPlatform(db, raw, by) {
+export function applyFullPlatform(db, raw, by, { via = 'ui' } = {}) {
   const p = applySchema.parse(raw); db.exec('BEGIN IMMEDIATE');
   try {
     const r = readFullPlatform(db);
@@ -133,7 +134,7 @@ export function applyFullPlatform(db, raw, by) {
     if (!r.config.recoveryNetworks.length) throw fail('Confirm at least one approved administrator/VPN recovery network before applying. None was found in the existing configuration.');
     const prior = r.last_job_id && getJob(db, r.last_job_id);
     if (prior && ['queued', 'running'].includes(prior.status)) { db.exec('COMMIT'); return { job: jobView(prior), created: false }; }
-    const job = createJob(db, { app: FULL_PLATFORM_APP, kind: 'full_platform_apply', plan: { params: { revision: r.revision } }, requestedBy: by, via: 'ui', retryOf: r.last_job_id, reason: 'Reviewed Full Platform setup queued for the existing host runner.' });
+    const job = createJob(db, { app: FULL_PLATFORM_APP, kind: 'full_platform_apply', plan: { params: { revision: r.revision } }, requestedBy: by, via, retryOf: r.last_job_id, reason: 'Reviewed Full Platform setup queued for the existing host runner.' });
     db.prepare('UPDATE setup_full_platform SET approved_revision=revision,last_job_id=? WHERE id=1').run(job.id);
     db.exec('COMMIT'); return { job: jobView(job), created: true };
   } catch (e) { db.exec('ROLLBACK'); throw e; }

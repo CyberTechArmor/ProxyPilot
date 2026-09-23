@@ -80,11 +80,82 @@ does not undo an explicit removal. Reinstall reuses compatible retained data;
 missing SQLite/key/configuration files fail before a replacement vault starts.
 Active Keycloak and Pomerium dependencies block removal/reinstallation.
 
-There is no data-delete/reset or automatic credential-rotation operation here.
-Use the existing compatible backup/recovery mechanisms before separate operator
-maintenance. Hostname, issuer, realm, passkey RP-ID and approved recovery-network
-changes require a separately reviewed migration/access change. Unsupported
-migrations preserve the current working path and explain the boundary.
+## Reset: start over
+
+**Custom / Advanced → Reset Full Platform** (and the MCP tool
+`reset_platform_setup`) blows the setup out so **1. Domains and realm** starts
+clean. **Review reset** is inert and lists everything the reset touches: every
+owned container (with its ownership label), every owned Caddy route, and every
+database row it discards. The reset itself needs the same fresh local
+authentication as the other runtime actions (MCP: a one-time confirmation token
+bound to that exact preview, plus `mcp.destructive`). It is refused while SSO is
+active (disable it from local recovery first), while Pomerium application
+policies are active, or while any platform operation is queued or running.
+External services are never touched: their records and runtime stay.
+
+- **Default (data kept).** The host runner stops and removes the owned
+  containers by inspected ID after checking every container's ownership label
+  and data mounts — for all services before the first change. A backend step
+  removes the owned route rows and re-renders their hostnames. Then the saved
+  Full Platform plan, the shared service plan, the platform operations and the
+  owned service records (managed Keycloak, Pomerium, Infisical, OpenBao,
+  Vaultwarden, and the inactive ProxyPilot SSO record that named the owned
+  Keycloak) are discarded. Data directories, volumes, networks, keys and the
+  protected credential rows stay in place. A later managed install at the same
+  fixed paths (Vaultwarden, OpenBao, Infisical, Pomerium) finds the retained
+  ownership marker of the discarded record and refuses to adopt it; restore that
+  record, or reset with data purge to reuse those paths.
+- **Delete owned data too** (`purge_data`; over MCP additionally the
+  `mcp.platform.purge` flag, **off by default**). The preview also lists every
+  directory, volume and network. Containers are stopped first, then a backup set
+  is written to `/var/lib/proxypilot/mcp-exports/platform-reset-<job id>/`,
+  following the backup table in `guided-vaultwarden.md`: a tar of each owned
+  directory (Vaultwarden's stopped SQLite database with any WAL, attachments,
+  sends, `rsa_key.*`, `config.json`/`credentials.json`/`owner.json`), a tar of
+  each owned volume (Keycloak/Infisical PostgreSQL, Redis, OpenBao Raft and
+  logs), `proxypilot-records.json` (the discarded rows; protected values remain
+  ciphertext under the installation key, which is not copied) and
+  `manifest.json` (size and sha256 of every file). Every file is re-hashed and
+  every archive listed back with tar; any mismatch stops the reset with nothing
+  deleted. Only then are the owned directories, volumes, networks and protected
+  credential rows removed. The OpenBao recovery-package directory is kept.
+
+Credential rotation remains unsupported. Hostname, issuer, realm, passkey RP-ID
+and approved recovery-network changes still require a separately reviewed
+migration/access change (or a reset). Unsupported migrations preserve the
+current working path and explain the boundary.
+
+## Over MCP
+
+The `platform` MCP family (`docs/features/mcp.md`) calls the same store
+functions as this page. `get_platform_setup` returns the saved revision and
+`review_digest`, domains, realm, services, restricted networks, the status of
+steps 1–6, the current operation and service jobs, each failure's job,
+`reason_code` (the phase it failed at) and plain reason, the read-only Keycloak
+observer's status, and ordered `next_actions`. Each action says whether an MCP
+client can do it (with the tool and arguments) or a person must, and where
+(page, step, control). `save_platform_setup` is inert and CAS-guarded by
+`if_revision`; `apply_platform_setup` / `continue_platform_setup` require the
+reviewed `revision` and `review_digest` and `confirm: true`, and refuse while an
+operation runs or when the next step needs a person. `continue_platform_setup
+({ service })` retries one service adapter with its stored encrypted inputs.
+`manage_platform_service` is Repair / Reinstall / Remove through the same review.
+
+These stay on this page and have **no** MCP tool: **Reveal initial Keycloak
+password**, the administrator/recovery password, the fresh permanent master
+login that retires the bootstrap account, **Activate SSO**, and any secret
+(client secrets, admin tokens, the Infisical personal password, PGP keys, unseal
+shares, root token). They keep the fresh-local-proof requirement; an MCP key
+cannot reach them.
+
+**Observer.** Vaultwarden and OpenBao verify their dedicated client through the
+existing read-only G3 observer (the `pp-<keycloak>-observer` client named by
+the ProxyPilot SSO record). The Full Platform coordinator creates it in its
+`connect_managed_identity` step, before any service job is queued. A service
+applied before that step (for example from Custom / Advanced) fails at
+`dedicated_keycloak_handoff` with "The existing read-only Keycloak observer for
+this provider is required."; `get_platform_setup` reports that, and continuing
+the saved setup lets the coordinator create it.
 
 ## Verification and limits
 
@@ -115,7 +186,7 @@ the audit JSON and reproducible checks without publishing the image payloads.
 Reproduce from `admin/backend`:
 
 ```sh
-node --test src/__tests__/full-platform.test.js src/__tests__/full-platform-infisical.test.js
+node --test src/__tests__/full-platform.test.js src/__tests__/full-platform-infisical.test.js src/__tests__/full-platform-mcp.test.js
 FP_KEYCLOAK_HOME=/path/keycloak-26.7.4 FP_JAVA_HOME=/path/java21 node --test src/__tests__/full-platform-keycloak-live.test.js
 G6_BAO_BINARY=/path/bao node --test src/__tests__/full-platform-openbao-live.test.js
 G6_BAO_BINARY=/path/bao G6_OPENPGP_MODULE=/path/openpgp.mjs node --test src/__tests__/openbao-live.test.js

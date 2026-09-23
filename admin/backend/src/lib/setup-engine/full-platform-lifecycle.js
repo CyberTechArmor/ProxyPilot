@@ -11,6 +11,52 @@ import { namesFor as baoNames, OPENBAO_ROOT } from './openbao-logic.js';
 import { namesFor as vaultNames, VAULTWARDEN_ROOT } from './vaultwarden-logic.js';
 import { readPrivate, atomicPrivate } from './pomerium-runtime.js';
 
+// Resolved per service: only Keycloak's root is per installation (its id is
+// the kc-… string). Building every entry eagerly joined the other services'
+// integer row id (1) and threw for all of them.
+export const ownedRoot = (service, row) => (service === 'keycloak' ? join(KEYCLOAK_ROOT, String(row?.id || '')) : { pomerium: POMERIUM_ROOT, infisical: INFISICAL_ROOT, openbao: OPENBAO_ROOT, vaultwarden: VAULTWARDEN_ROOT }[service]);
+export const ownerRef = (service, row) => (service === 'keycloak' ? row.id : row.credential_ref);
+
+/** The protected ownership marker under the service root, checked against the saved record. */
+export function readOwnedMarker(service, row, root) {
+  const marker = JSON.parse(readPrivate(join(root, service === 'infisical' ? 'protected.json' : 'owner.json')));
+  const identity = service === 'infisical' ? marker.identity : marker;
+  if (identity.origin !== (row.config?.origin || row.origin) || (identity.ref || identity.id) !== ownerRef(service, row) || service === 'keycloak' && identity.realm !== row.realm) throw fail('Protected ownership differs from the reviewed installation.');
+  return marker;
+}
+
+/**
+ * Stop and remove the named owned containers of one service, by inspected
+ * immutable ID. Every present container's ownership label (and its data
+ * mounts, when retaining data) is established BEFORE the first stop/removal;
+ * one foreign or drifted container refuses the whole set. Never --volumes;
+ * no volume, network or file is touched here. `call(args)` runs `docker args`.
+ */
+export async function removeOwnedContainers({ service, row, names, root, call, checkMounts = true, stopOnly = false }) {
+  const marker = readOwnedMarker(service, row, root);
+  const present = (await call(['container', 'ls', '-a', '--format', '{{.Names}}'])).trim().split('\n');
+  const inspected = [];
+  for (const name of names.filter(n => present.includes(n))) {
+    let actual; try { actual = JSON.parse(await call(['container', 'inspect', name]))[0]; } catch (e) { if (e.fullPlatformSafe) throw e; throw fail('Container ownership could not be read.'); }
+    if (actual?.Config?.Labels?.[`io.proxypilot.${service}`] !== ownerRef(service, row) || !actual.Id) throw fail('A listed runtime belongs to another installation. Nothing was removed.');
+    if (checkMounts) {
+      const n = service === 'keycloak' ? resourceNames(row.id) : service === 'infisical' ? infisicalNames(row) : service === 'openbao' ? baoNames(row) : null;
+      const dataMounts = service === 'keycloak' && name === n.database ? [['volume', n.volume, '/var/lib/postgresql/data']]
+        : service === 'infisical' ? (name === n.database ? [['volume', n.databaseVolume, '/var/lib/postgresql/data']] : name === n.redis ? [['volume', n.redisVolume, '/data']] : name === n.proxy ? [['volume', n.proxyVolume, '/root/.infisical']] : [])
+        : service === 'openbao' ? [['volume', n.volume, '/openbao/file'], ['volume', n.logs, '/openbao/logs']]
+        : service === 'vaultwarden' ? [['bind', join(root, 'data'), '/data']] : [];
+      if (dataMounts.some(([type, source, target]) => !actual.Mounts?.some(m => m.Type === type && (type === 'volume' ? m.Name : m.Source) === source && m.Destination === target && m.RW))) throw fail('Runtime data mounts differ from the retained-data review. Restore the recorded storage configuration before removing runtime.');
+    }
+    inspected.push({ name, id: actual.Id, running: actual.State?.Running });
+  }
+  for (const c of inspected) {
+    // Operate on the inspected immutable ID, never a name that could change.
+    if (c.running) await call(['stop', '--time', '30', c.id]);
+    if (!stopOnly) await call(['rm', c.id]); // no --volumes, no volume/network/file deletion
+  }
+  return { marker, containers: inspected };
+}
+
 export const lifecycleSchema = z.object({ revision: z.number().int().positive(), service: z.enum(['keycloak', 'pomerium', 'infisical', 'openbao', 'vaultwarden']), action: z.enum(['repair', 'reinstall', 'remove']), reviewToken: z.string().regex(/^[a-f0-9]{64}$/), reviewed: z.literal(true), retainData: z.literal(true) }).strict();
 export function lifecycleReview(db, service, action) {
   const full = readFullPlatform(db), t = installedTargets(db)[service];
@@ -30,13 +76,13 @@ export function lifecycleReview(db, service, action) {
     effects: action === 'repair' ? ['Repeat the existing adapter’s owned checks and missing-resource reconciliation.'] : ['Stop and remove only the listed owned containers. Existing Caddy routes remain fail-closed.', 'Persistent volumes, directories, databases, realm, vault keys, recovery material, networks and protected credentials are retained.', action === 'reinstall' ? 'Recreate compatible runtime through the existing adapter using the retained configuration and data.' : 'The service remains unavailable until an explicitly reviewed reinstall.'],
     unsupported: 'Data deletion, credential rotation and hostname/realm migration are not part of these actions.' };
 }
-export function queueLifecycle(db, raw, by) {
+export function queueLifecycle(db, raw, by, { via = 'ui' } = {}) {
   const p = lifecycleSchema.parse(raw); db.exec('BEGIN IMMEDIATE');
   try {
     const full = readFullPlatform(db), review = lifecycleReview(db, p.service, p.action);
     if (!full || p.revision !== full.revision || p.reviewToken !== review.reviewToken || review.blockers.length) throw fail(review.blockers.join(' ') || 'Review the current saved runtime action.');
     if (full.last_job_id && ['queued', 'running'].includes(getJob(db, full.last_job_id)?.status)) throw fail('Wait for the current platform operation before requesting a runtime action.');
-    const job = createJob(db, { app: 'pp-full-platform', kind: 'full_platform_apply', plan: { params: { revision: p.revision, operation: 'lifecycle' } }, requestedBy: by, via: 'ui', reason: `Reviewed ${p.service} ${p.action}; all data and credentials retained.` });
+    const job = createJob(db, { app: 'pp-full-platform', kind: 'full_platform_apply', plan: { params: { revision: p.revision, operation: 'lifecycle' } }, requestedBy: by, via, reason: `Reviewed ${p.service} ${p.action}; all data and credentials retained.` });
     const state = { ...full.state, lifecycle: { service: p.service, action: p.action, reviewToken: p.reviewToken } };
     db.prepare('UPDATE setup_full_platform SET state_json=?,last_job_id=? WHERE id=1').run(JSON.stringify(state), job.id);
     db.exec('COMMIT'); return { job: jobView(job), created: true };
@@ -56,29 +102,8 @@ export async function runLifecycle(db, full, job, exec, { roots = {} } = {}) {
     const fence = () => { job.fence(); if (!renewLock(db, { app, owner, epoch: lock.lock.epoch, leaseMs: 120000 })) throw fail('The service lifecycle lease was lost.'); };
     const call = async args => { fence(); const result = await exec.host(['docker', ...args], { timeoutMs: 60000 }); fence(); if (result.code !== 0) throw fail('The owned runtime operation failed. Private runtime output is withheld; data and credentials are retained.'); return result.stdout; };
     try {
-      const root = roots[service] || { keycloak: join(KEYCLOAK_ROOT, row.id || ''), pomerium: POMERIUM_ROOT, infisical: INFISICAL_ROOT, openbao: OPENBAO_ROOT, vaultwarden: VAULTWARDEN_ROOT }[service];
-      const marker = JSON.parse(readPrivate(join(root, service === 'infisical' ? 'protected.json' : 'owner.json')));
-      const identity = service === 'infisical' ? marker.identity : marker;
-      if (identity.origin !== (row.config?.origin || row.origin) || (identity.ref || identity.id) !== (row.credential_ref || row.id) || service === 'keycloak' && identity.realm !== row.realm) throw fail('Protected ownership differs from the reviewed installation.');
-      const present = (await call(['container', 'ls', '-a', '--format', '{{.Names}}'])).trim().split('\n');
-      const inspected = [];
-      // Establish every container's ownership before the first stop/removal.
-      for (const name of review.containers.filter(n => present.includes(n))) {
-        let actual; try { actual = JSON.parse(await call(['container', 'inspect', name]))[0]; } catch (e) { if (e.fullPlatformSafe) throw e; throw fail('Container ownership could not be read.'); }
-        if (actual?.Config?.Labels?.[`io.proxypilot.${service}`] !== (row.credential_ref || row.id) || !actual.Id) throw fail('A listed runtime belongs to another installation. Nothing was removed.');
-        const n = service === 'keycloak' ? resourceNames(row.id) : service === 'infisical' ? infisicalNames(row) : service === 'openbao' ? baoNames(row) : null;
-        const dataMounts = service === 'keycloak' && name === n.database ? [['volume', n.volume, '/var/lib/postgresql/data']]
-          : service === 'infisical' ? (name === n.database ? [['volume', n.databaseVolume, '/var/lib/postgresql/data']] : name === n.redis ? [['volume', n.redisVolume, '/data']] : name === n.proxy ? [['volume', n.proxyVolume, '/root/.infisical']] : [])
-          : service === 'openbao' ? [['volume', n.volume, '/openbao/file'], ['volume', n.logs, '/openbao/logs']]
-          : service === 'vaultwarden' ? [['bind', join(root, 'data'), '/data']] : [];
-        if (dataMounts.some(([type, source, target]) => !actual.Mounts?.some(m => m.Type === type && (type === 'volume' ? m.Name : m.Source) === source && m.Destination === target && m.RW))) throw fail('Runtime data mounts differ from the retained-data review. Restore the recorded storage configuration before removing runtime.');
-        inspected.push({ name, id: actual.Id, running: actual.State?.Running });
-      }
-      for (const c of inspected) {
-        // Operate on the inspected immutable ID, never a name that could change.
-        if (c.running) await call(['stop', '--time', '30', c.id]);
-        await call(['rm', c.id]); // no --volumes, no volume/network/file deletion
-      }
+      const root = roots[service] || ownedRoot(service, row);
+      const { marker } = await removeOwnedContainers({ service, row, names: review.containers, root, call });
       if (service === 'vaultwarden') {
         // The G7 adapter otherwise correctly refuses missing attempted runtime.
         // Permit only this reviewed recreation, after it rechecks retained keys/data.

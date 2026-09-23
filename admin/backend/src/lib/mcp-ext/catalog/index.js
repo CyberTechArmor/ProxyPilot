@@ -8,6 +8,7 @@ import { ADMIN_TOOLS, SELF_EDIT_CATALOG } from './admin.js';
 import { BUILD_TOOLS, PROJECT_CONFIG_TOOLS } from './builds.js';
 import { STORAGE_TOOLS } from './storage.js';
 import { MIGRATION_TOOLS } from './migration.js';
+import { PLATFORM_TOOLS } from './platform.js';
 
 export const MCP_EXT_TOOL_GROUPS = Object.freeze({
   builds: BUILD_TOOLS,
@@ -19,6 +20,7 @@ export const MCP_EXT_TOOL_GROUPS = Object.freeze({
   self_edit: SELF_EDIT_CATALOG,
   storage: STORAGE_TOOLS,
   migration: MIGRATION_TOOLS,
+  platform: PLATFORM_TOOLS,
 });
 
 export const MCP_EXT_TOOLS = Object.freeze(Object.values(MCP_EXT_TOOL_GROUPS).flat());
@@ -50,4 +52,8 @@ export const MCP_EXT_INSTRUCTIONS = [
   'plan/confirm — dry_run: true returns the exact command plan and a plan_token (sha256 of the plan); the real call',
   'carries confirm: true and that token, and a changed plan invalidates it. The OS device is refused with no override;',
   'other signatures need wipe: true. Devices are named by /dev/disk/by-id path only.',
+  'PLATFORM SETUP (get_platform_setup → save_platform_setup → apply_platform_setup / continue_platform_setup;',
+  'manage_platform_service, reset_platform_setup): get_platform_setup returns next_actions — follow the mcp ones and',
+  'hand the human ones (administrator password, passkey, SSO activation, any secret) to the person with the dashboard',
+  'location it names; those are never callable over MCP. Apply/continue carry the revision and review_digest you read.',
 ].join(' ');

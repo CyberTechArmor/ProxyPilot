@@ -400,3 +400,28 @@ Both would turn an honest "not recorded" into an inference, which is
 what R-054 forbids for the rollback. If it is ever wanted, the safe form
 is an explicit operator verb that shows the evidence and asks for
 confirmation, not a change to the settlement.
+
+## Full Platform: a Custom plan save after apply wedges the coordinator
+
+Found 2026-09-23 while adding the Platform Setup MCP family. The coordinator
+refuses to continue when the shared service plan's revision differs from the
+one the Full Platform revision recorded ("Custom setup changed the shared
+service plan…"), and it re-records the shared plan only when a NEW Full
+Platform revision is saved. Saving an unchanged Full Platform plan does not
+create one, so after a Custom / Advanced plan save there is no way forward
+except changing a field or resetting. `get_platform_setup` now reports this as
+`shared_plan_changed` and routes to `reset_platform_setup` (data kept).
+Proper fix: let an explicit re-review of the same Full Platform revision
+re-record the current shared plan (it is the operator's reviewed choice).
+
+## Full Platform: service records are written before the G3 observer exists
+
+`prepareServiceConnections` saves the Vaultwarden/OpenBao/Infisical records
+before the coordinator's `connect_managed_identity` step creates the read-only
+observer and saves the ProxyPilot SSO record. From then on Custom / Advanced →
+Vaultwarden → Apply is enabled and fails deterministically at
+`dedicated_keycloak_handoff` ("The existing read-only Keycloak observer for this
+provider is required.") until the coordinator gets past that step.
+`continue_platform_setup({ service })` refuses such a retry with the reason;
+the dashboard's Apply button does not. Fix: prepare those records after the SSO
+record is saved, or gate the per-service Apply on the observer.

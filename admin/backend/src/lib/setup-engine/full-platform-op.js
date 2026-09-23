@@ -1,4 +1,5 @@
 import { runLifecycle } from './full-platform-lifecycle.js';
+import { runReset } from './full-platform-reset.js';
 import { prepareServiceConnections, serviceReaders, applyService } from './full-platform-services.js';
 import { runAdministrator, withKeycloakLease } from './full-platform-admin.js';
 import { networkInterfaces } from 'node:os';
@@ -11,9 +12,15 @@ import { readPomerium, savePomerium, applyPomerium } from './pomerium-store.js';
 import { getJob } from './store.js';
 
 const privateIp = ip => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip);
-export async function runFullPlatformOperation({ db, params, exec, job, identity = connectManagedKeycloak, interfaces = networkInterfaces(), administratorDeps = {}, lifecycleDeps = {} }) {
+export async function runFullPlatformOperation({ db, params, exec, job, identity = connectManagedKeycloak, interfaces = networkInterfaces(), administratorDeps = {}, lifecycleDeps = {}, resetDeps = {} }) {
   jobSchema.parse(params);
   let full = readFullPlatform(db);
+  // A reset may discard a saved-but-never-applied plan, so it is bound to the
+  // saved revision and its own queued review, not to approved_revision.
+  if (params.operation === 'reset') {
+    if (!full || full.revision !== params.revision || full.last_job_id !== job.id || !full.state?.reset) throw fail('The reviewed Full Platform reset was superseded.');
+    return runReset(db, full, job, exec, resetDeps);
+  }
   if (!full || full.revision !== params.revision || full.approved_revision !== params.revision || full.last_job_id !== job.id) throw fail('The reviewed Full Platform operation was superseded.');
   if (params.operation === 'lifecycle') return runLifecycle(db, full, job, exec, lifecycleDeps);
   if (params.operation) return runAdministrator(db, full, params.operation, job, administratorDeps);

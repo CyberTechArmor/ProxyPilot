@@ -11,6 +11,7 @@ import { readOpenBao, save as saveBao, idle as baoIdle } from '../lib/setup-engi
 import { getJob } from '../lib/setup-engine/store.js';
 import { z } from 'zod';
 import { lifecycleReview, queueLifecycle } from '../lib/setup-engine/full-platform-lifecycle.js';
+import { resetReview, queueReset } from '../lib/setup-engine/full-platform-reset.js';
 export const fullPlatformRouter = Router();
 fullPlatformRouter.use(requireAdmin);
 fullPlatformRouter.use((_req, res, next) => { res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' }); next(); });
@@ -29,6 +30,20 @@ fullPlatformRouter.post('/lifecycle', requireSudo, handle((req, res) => {
   catch { return res.status(403).json({ error: 'sudo_required', sudo_required: true, message: 'Runtime actions require fresh local administrator proof.' }); }
   const result = queueLifecycle(getDb(), req.body, req.user.id);
   logAudit(req.user.id, 'FULL_PLATFORM_RUNTIME_ACTION', 'setup_job', result.job.id, { service: req.body.service, action: req.body.action, retainData: true }, req.ip);
+  res.status(202).json(result);
+}));
+// Reset (Custom / Advanced): the preview is inert; the reset itself needs the
+// same fresh local proof as the other runtime actions. The MCP tool
+// reset_platform_setup calls the same resetReview/queueReset.
+fullPlatformRouter.post('/reset/review', handle((req, res) => {
+  const p = z.object({ purgeData: z.boolean().default(false) }).strict().parse(req.body || {});
+  res.json(resetReview(getDb(), p));
+}));
+fullPlatformRouter.post('/reset', requireSudo, handle((req, res) => {
+  try { requireLocalProof(getDb(), req.session.id, requestOrigin(req)); }
+  catch { return res.status(403).json({ error: 'sudo_required', sudo_required: true, message: 'Reset requires fresh local administrator proof within five minutes.' }); }
+  const result = queueReset(getDb(), req.body, req.user.id);
+  logAudit(req.user.id, 'FULL_PLATFORM_RESET_REQUESTED', 'setup_job', result.job.id, { purgeData: req.body.purgeData === true }, req.ip);
   res.status(202).json(result);
 }));
 fullPlatformRouter.put('/', requireSudo, handle((req, res) => {

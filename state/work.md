@@ -1,3 +1,36 @@
+# Work — MCP tools for Full Platform setup and management (size L)
+
+Branch: `claude/mcp-platform-setup-tools-sny7bk` (against the release installed from PR #620)
+
+## Authorized scope
+
+- **Outcome:** an MCP client can read the full setup state and next required action, save and apply the plan, continue after a failure, repair/reinstall/remove owned services, and reset the setup. Every step that needs a human is named, with where to do it.
+- **Done when:** items 1–6 of the brief are demonstrated (read tools; save; apply/continue; per-service repair/reinstall/remove; reset incl. `purge_data`; the human-only boundary).
+- **Excluded:** revealing credentials, entering the administrator password, activating SSO, typing vault secrets. These stay dashboard-only.
+
+Findings are labelled **IN SCOPE**, **PREREQUISITE** or **FOLLOW-UP**.
+
+## Tasks
+
+| # | Task | Status |
+|---|---|---|
+| 1 | `lib/setup-engine/full-platform-mcp.js` — the read model (setup state, next_actions, service detail, jobs, preflight) over the dashboard's own stores | done |
+| 2 | `lib/setup-engine/full-platform-reset.js` — reset review (preview + token), queue, runner op, route-removal backend step, purge backup set | done |
+| 3 | `routes/mcp-tools/platform.js` + `lib/mcp-ext/catalog/platform.js` + policy flags `mcp.platform`, `mcp.platform.purge` | done |
+| 4 | Dashboard: Custom / Advanced → Reset Full Platform (fresh local auth) | done — rendered at 360/375/768 in Chromium, no overflow, buttons ≥44 px |
+| 5 | Tests alongside `full-platform.test.js` | done — `full-platform-mcp.test.js`, 13 cases |
+| 6 | Docs: full-platform-setup.md reset section, mcp.md, CLAUDE.md count; change record | done |
+
+## Findings
+
+- **IN SCOPE (fixed):** PR #620 runtime actions threw `ERR_INVALID_ARG_TYPE` for every non-Keycloak service on a real host (eager `join(KEYCLOAK_ROOT, row.id)` with integer id 1). Fixed in `ownedRoot`; regression test.
+- **IN SCOPE (fixed):** reset draft checked container labels per service; now all before the first change.
+- **IN SCOPE (fixed):** a new import in `backend-steps.js` reordered module evaluation and broke `guided-sso.test.js`; removed.
+- **FOLLOW-UP — observer on this host.** Evidence (read-only, installed ProxyPilot MCP, 2026-09-23 UTC): `FULL_PLATFORM_APPLIED` rev 2 at 06:12:59; `VAULTWARDEN_PLAN_APPLIED` (the Custom / Advanced G7 route — the coordinator never writes that audit action) at 06:17:48, 06:18:20 and 06:21:54; `PLATFORM_PLAN_SAVED` rev 3 (a Custom plan save) at 06:20:03, then three `FULL_PLATFORM_APPLIED` in 13 s (06:20:17/23/30), each `created: true`, so each prior coordinator job had already ended. The route inventory has the Keycloak route (`iam.fractionate.ai`) but **no `proxypilot-local-recovery` route**; the coordinator creates that route only after it saves the SSO record that names the observer. Reading: the 06:12:59 coordinator got past `prepareServiceConnections` (the Vaultwarden record existed for the 06:17 Custom apply) but not past saving the SSO record, so no observer exists; the Vaultwarden applies were run from Custom / Advanced before the coordinator had created it, and since 06:20:03 the coordinator refuses because the shared plan changed. The Full Platform flow **is** supposed to create the observer (`connect_managed_identity`); it did not get that far. Why the first run stopped is in that coordinator job's reason, which the new `get_platform_setup` / `get_platform_job` will show. Not fixed here: items 1–6 do not depend on it. Two related defects are in `docs/known-issues.md`.
+- **FOLLOW-UP:** the step-up boundary. Items 4–5 ask for MCP runtime actions and reset, which the dashboard guards with fresh local proof. Over MCP they are guarded instead by the one-time confirmation token bound to the previewed digest plus `mcp.destructive` (and `mcp.platform.purge`). The actions listed in item 6 have no MCP tool at all.
+
+---
+
 # Work — Migration agent (size L)
 
 Copy a running web application from another server, VM or container onto a

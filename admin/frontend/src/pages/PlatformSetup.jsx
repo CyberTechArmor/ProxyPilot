@@ -5,6 +5,7 @@ import InfisicalSetup from '@/components/InfisicalSetup';
 import PomeriumSetup from '@/components/PomeriumSetup';
 import SsoSetup from '@/components/SsoSetup';
 import KeycloakSetup from '@/components/KeycloakSetup';
+import PlatformReset from '@/components/PlatformReset';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { CheckCircle2, HelpCircle, ClipboardList, RefreshCw, XCircle } from 'lucide-react';
@@ -158,6 +159,7 @@ function PlatformSetupContent() {
       <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">OpenBao</summary><div className="pt-3"><OpenBaoSetup revision={data.plan.revision} dirty={dirty} choice={choices.openbao} connections={data.keycloak} /></div></details>
       <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">Infisical and Agent Proxy</summary><div className="pt-3"><InfisicalSetup revision={data.plan.revision} dirty={dirty} choice={choices.infisical} /></div></details>
       <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">Operation history</summary><div className="pt-3"><SetupJobs /></div></details>
+      <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">Reset Full Platform</summary><div className="pt-3"><PlatformReset /></div></details>
     </>}
   </div>;
 }

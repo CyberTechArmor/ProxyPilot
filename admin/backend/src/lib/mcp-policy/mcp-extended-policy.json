@@ -10,7 +10,16 @@
     "mcp.dns": { "default": true, "description": "Cloudflare DNS record tools (need the DNS-01 Cloudflare token)." },
     "mcp.webhooks": { "default": true, "description": "Outbound webhook notifications (list_webhooks / set_webhook and their dispatch)." },
     "mcp.storage": { "default": true, "description": "The storage family's mutating verbs (create_zpool, datasets, snapshots, replace_disk, scrub, import/export, the Incus binding, sanoid/syncoid policy and replication). destroy_dataset, zfs_rollback, destroy_zfs_snapshot and rollback_guest_dataset are additionally behind mcp.destructive. Readers (list_disks, zpool_status, zfs_list, …) are never gated." },
-    "mcp.migration": { "default": true, "description": "The migration family's mutating verbs (create_migration, approve_migration, migration_cutover, cancel_migration). Turning it off leaves the readers (get_migration, list_migrations) working and stops any new migration token from being minted." }
+    "mcp.migration": { "default": true, "description": "The migration family's mutating verbs (create_migration, approve_migration, migration_cutover, cancel_migration). Turning it off leaves the readers (get_migration, list_migrations) working and stops any new migration token from being minted." },
+    "mcp.platform": { "default": true, "description": "The platform family (Platform Setup / Full Platform): the readers (get_platform_setup, get_platform_service, list_platform_jobs, get_platform_job, platform_preflight) and the writes (save_platform_setup, apply_platform_setup, continue_platform_setup). manage_platform_service and reset_platform_setup are additionally behind mcp.destructive." },
+    "mcp.platform.purge": { "default": false, "description": "reset_platform_setup with purge_data: true — deletes the owned platform data (directories, volumes, networks, protected credential rows) after a verified backup set. OFF by default; without it a reset keeps all data." }
+  },
+  "platform": {
+    "$comment": "Platform Setup over MCP (routes/mcp-tools/platform.js). Every tool calls the dashboard's own store functions; the tools below are the whole surface. Runtime actions and reset use the one-time confirmation_token bound to the review digest they previewed; reset's purge backup set is written under exports_dir/platform-reset-<job id> and verified before any deletion. The human_only actions are step-up-gated in the dashboard and have NO MCP tool — get_platform_setup.next_actions points the person at them.",
+    "tools": ["get_platform_setup", "get_platform_service", "list_platform_jobs", "get_platform_job", "platform_preflight", "save_platform_setup", "apply_platform_setup", "continue_platform_setup", "manage_platform_service", "reset_platform_setup"],
+    "flags": { "all": "mcp.platform", "manage_platform_service": "mcp.destructive", "reset_platform_setup": "mcp.destructive", "reset_platform_setup.purge_data": "mcp.platform.purge" },
+    "human_only": ["reveal the initial Keycloak password", "administrator/recovery password entry", "permanent master login for bootstrap retirement", "SSO activation", "any secret input: client secrets, admin tokens, the Infisical personal password, PGP material, unseal shares, root/bootstrap token"],
+    "requested_by": "mcp:<key id>"
   },
   "exports_dir": "/var/lib/proxypilot/mcp-exports",
   "migration": {

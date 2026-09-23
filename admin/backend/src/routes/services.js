@@ -27,6 +27,7 @@ import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { checkRouteDrift } from '../lib/route-drift.js';
 import { parseCaddySiteFile, siteSecurityHeaderLines, dashboardFrameAncestor, CADDY_SITE_RENDER_CONTRACT, parseRouteEdgeOptions, routeEdgeOptionLines, wrapRouteBody } from '../lib/caddy-site-file.js';
+import { selfCheckForRoute, SELF_CHECK_HEADER, LOOPBACK_SOURCES } from '../lib/setup-engine/local-edge.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { detectServicePorts } from '../lib/port-detector.js';
@@ -44,6 +45,15 @@ import {
 } from '../lib/cert-mount-reconciler.js';
 
 const execAsync = promisify(exec);
+
+// Owned platform routes let the adapter's own loopback self-check through
+// their restricted matcher (lib/setup-engine/local-edge.js); any other route,
+// or a render with no database, gets the plain matcher.
+function platformSelfCheck(routeId) {
+  let db = null; try { db = getDb(); } catch { return null; }
+  const token = selfCheckForRoute(db, routeId);
+  return token ? { token, header: SELF_CHECK_HEADER, sources: LOOPBACK_SOURCES } : null;
+}
 
 export const servicesRouter = Router();
 
@@ -6438,7 +6448,7 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frame
     const directive = s.stripPrefix ? 'handle_path' : 'handle';
     lines.push(`    ${directive} ${s.pathPrefix}* {`);
     lines.push(...wrapRouteBody(
-      routeEdgeOptionLines(s.edgeOptions, '        ', { routeId: s.routeId }),
+      routeEdgeOptionLines(s.edgeOptions, '        ', { routeId: s.routeId, selfCheck: platformSelfCheck(s.routeId) }),
       generateServiceHandlerBody(s, '        '),
       s.edgeOptions,
     ));
@@ -6453,7 +6463,7 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frame
   if (rootService) {
     lines.push(`    handle {`);
     lines.push(...wrapRouteBody(
-      routeEdgeOptionLines(rootService.edgeOptions, '        ', { routeId: rootService.routeId }),
+      routeEdgeOptionLines(rootService.edgeOptions, '        ', { routeId: rootService.routeId, selfCheck: platformSelfCheck(rootService.routeId) }),
       generateServiceHandlerBody(rootService, '        '),
       rootService.edgeOptions,
     ));

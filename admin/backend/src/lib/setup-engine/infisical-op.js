@@ -6,6 +6,7 @@ import { ensureInfisicalRuntime,ensureAgentProxyRuntime,prepareInfisicalFiles,as
 import { createInfisicalClient,requireOk,verifyInfisicalIdentities,ensureTestSecret,verifyServiceHandoff } from './infisical-api.js';
 import { verifyCredentialFlows } from './infisical-flows.js';
 import { assertInfisicalRouteAvailable } from './infisical-routes.js';
+import { localEdge } from './local-edge.js';
 import { createJob,getJob,acquireLock,renewLock,releaseLock,takeoverLock,readLock } from './store.js';
 
 export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_ROOT,send,runtime=ensureInfisicalRuntime,proxyRuntime=ensureAgentProxyRuntime,hostProbe=assertLocalTestHost,vmProbe=assertIsolatedAgentVm,flows=verifyCredentialFlows,basicFlows=verifyBasicFlows,provision=provisionManagedInfisical}) {
@@ -24,7 +25,10 @@ export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_R
     if(child.status!=='succeeded')throw fail('The Infisical Caddy step failed. Correct its reported conflict and retry the reviewed plan.');
   }
   phase('infisical_bootstrap');
-  const api=createInfisicalClient(r.config.origin,{send,job});
+  // An owned instance is checked through this host's Caddy (3c): the host's
+  // own hostname would hairpin through the firewall and meet the restricted
+  // route from the firewall's LAN address.
+  const api=createInfisicalClient(r.config.origin,{send,job,edge:r.config.mode==='install'?localEdge(db):null});
   requireOk(await api('/api/status'),'Infisical status');
   const initialized=requireOk(await api('/api/v1/admin/config'),'Infisical administrator initialization').config?.initialized;
   if(r.config.basic&&r.config.mode==='install') {

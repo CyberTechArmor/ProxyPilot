@@ -45,6 +45,8 @@ function dockerFixture() {
     const a = argv.slice(1), ok = stdout => ({ code: 0, stdout: stdout || '', stderr: '' });
     if (a[0] === 'version') return ok('28.0');
     if (a[1] === 'ls') return ok([...objects.values()].filter(x => x.kind === a[0]).map(x => x.name).join('\n'));
+    // Full inspect (no --format): the start helper's view — immutable Id, state, log config.
+    if (a[0] === 'container' && a[1] === 'inspect' && a.length === 3) { const o = objects.get(a[2]); return o ? ok(JSON.stringify([{ Id: `id-${o.name}`, Name: `/${o.name}`, State: { Running: !!o.running, Status: o.running ? 'running' : 'created' }, HostConfig: { LogConfig: { Type: 'local', Config: { 'max-size': '10m', 'max-file': '3' } } } }])) : { code: 1, stdout: '', stderr: 'No such container' }; }
     if (a[1] === 'inspect') return ok(JSON.stringify(a.at(-1).includes('.Config.Image') ? objects.get(a[2]).config : objects.get(a[2]).labels));
     if (a[1] === 'create' || a[0] === 'create') {
       const kind = a[0] === 'create' ? 'container' : a[0];
@@ -60,7 +62,7 @@ function dockerFixture() {
       } : null;
       objects.set(name, { kind, name, labels, config }); return ok(name);
     }
-    if (a[0] === 'start') { assert.ok(objects.has(a[1])); return ok(a[1]); }
+    if (a[0] === 'start') { const o = objects.get(String(a[1]).replace(/^id-/, '')); assert.ok(o); o.running = true; return ok(a[1]); }
     if (a[0] === 'exec') {
       if (a.includes('psql')) return ok(objects.get(a[1]).labels['io.proxypilot.keycloak']);
       return ok();

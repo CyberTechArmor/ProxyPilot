@@ -15,7 +15,7 @@ export function dockerFixture(){const objects={container:new Map(),network:new M
     if(a[0]==='version')return ok('28.0');
     if(a[0]==='image'&&a[1]==='inspect')return ok(JSON.stringify([images[a[2]]]));
     if(objects[a[0]]&&a[1]==='ls')return ok([...objects[a[0]].keys()].join('\n'));
-    if(objects[a[0]]&&a[1]==='inspect')return ok(JSON.stringify([objects[a[0]].get(a[2])]));
+    if(objects[a[0]]&&a[1]==='inspect'){const v=objects[a[0]].get(String(a[2]).replace(/^id-/,''));return v?ok(JSON.stringify([v])):{code:1,stdout:'',stderr:'No such object'};}
     const labels=()=>Object.fromEntries(a.flatMap((x,i)=>x==='--label'?[a[i+1].split('=')]:[]));
     if(['network','volume'].includes(a[0])&&a[1]==='create'){objects[a[0]].set(a.at(-1),{Name:a.at(-1),Labels:labels(),Internal:a.includes('--internal'),Driver:a[0]==='network'?'bridge':'local',Options:{}});return ok(a.at(-1));}
     if(a[0]==='create'){
@@ -24,9 +24,10 @@ export function dockerFixture(){const objects={container:new Map(),network:new M
       const ports={};if(a.includes('--publish')){const [ip,port,internal]=a[a.indexOf('--publish')+1].split(':');ports[internal+'/tcp']=[{HostIp:ip,HostPort:port}];}
       const env=a.includes('--env-file')?readFileSync(a[a.indexOf('--env-file')+1],'utf8').trim().split('\n'):[];
       const network=a[a.indexOf('--network')+1],name=a[a.indexOf('--name')+1];
-      objects.container.set(name,{Image:defaults.Id,Config:{Image:image,Labels:labels(),Env:[...defaults.Config.Env,...env],Entrypoint:defaults.Config.Entrypoint,Cmd:a.slice(imageIndex+1).length?a.slice(imageIndex+1):defaults.Config.Cmd},HostConfig:{NetworkMode:network,RestartPolicy:{Name:'unless-stopped'},PortBindings:ports,LogConfig:{Type:'none'}},Mounts:mounts,NetworkSettings:{Networks:{[network]:{}}},State:{Running:false}});return ok(name);
+      const logOpts=Object.fromEntries(a.flatMap((x,i)=>x==='--log-opt'?[a[i+1].split('=')]:[]));objects.container.set(name,{Id:'id-'+name,Name:'/'+name,Image:defaults.Id,Config:{Image:image,Labels:labels(),Env:[...defaults.Config.Env,...env],Entrypoint:defaults.Config.Entrypoint,Cmd:a.slice(imageIndex+1).length?a.slice(imageIndex+1):defaults.Config.Cmd},HostConfig:{NetworkMode:network,RestartPolicy:{Name:'unless-stopped'},PortBindings:ports,LogConfig:{Type:a.includes('--log-driver')?a[a.indexOf('--log-driver')+1]:'json-file',Config:logOpts}},Mounts:mounts,NetworkSettings:{Networks:{[network]:{}}},State:{Running:false}});return ok(name);
     }
-    if(a[0]==='start'){objects.container.get(a[1]).State.Running=true;return ok(a[1]);}
+    // Containers are started by inspected Id (id-<name>); the name still works.
+    if(a[0]==='start'){const c=objects.container.get(String(a[1]).replace(/^id-/,''));c.State.Running=true;c.State.Status='running';return ok(a[1]);}
     if(a[0]==='exec')return ok('ready');
     throw Error('Unexpected fixture command: '+JSON.stringify(a));
   };return {host,objects,calls,images,failOnce(fn){failure=fn;}};

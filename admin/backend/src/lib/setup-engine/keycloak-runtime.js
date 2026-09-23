@@ -1,6 +1,7 @@
 import { mkdirSync, readdirSync, lstatSync, readFileSync, writeFileSync, linkSync, unlinkSync, existsSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
+import { LOG_ARGS, dockerFailure, startOwnedContainer } from './owned-runtime.js';
 import { KEYCLOAK_ROOT, KEYCLOAK_IMAGE, KEYCLOAK_DB_IMAGE, KEYCLOAK_PORT, resourceNames } from './keycloak-logic.js';
 const OWNER = 'io.proxypilot.keycloak';
 const CONFIG = 'io.proxypilot.keycloak-config';
@@ -58,7 +59,7 @@ export async function ensureKeycloakRuntime(row, { exec, job, root = KEYCLOAK_RO
   const fingerprint = createHash('sha256').update(JSON.stringify([row.id, row.origin, row.realm, KEYCLOAK_IMAGE, KEYCLOAK_DB_IMAGE, KEYCLOAK_PORT])).digest('hex');
   const labels = ['--label', `${OWNER}=${row.id}`, '--label', `${CONFIG}=${fingerprint}`];
   const call = async (args, timeoutMs = 120000) => { job.fence(); const r = await exec.host(['docker', ...args], { timeoutMs }); job.fence(); return r; };
-  const must = async (args, step, timeoutMs) => { const r = await call(args, timeoutMs); if (r.code !== 0) throw new Error(`Keycloak ${step} failed. Inspect the owned Docker resource locally; raw runtime output is withheld.`); return r; };
+  const must = async (args, step, timeoutMs) => { const r = await call(args, timeoutMs); if (r.code !== 0) throw dockerFailure(m => new Error(m), `Keycloak ${step}`, r); return r; };
   const phase = name => { job.fence(); job.checkpoint(name, { resumable: true, keycloak: true }); job.onStep(name, name.replaceAll('_', ' ')); };
   phase('runtime_preflight');
   await must(['version', '--format', '{{.Server.Version}}'], 'Docker availability');
@@ -89,18 +90,18 @@ export async function ensureKeycloakRuntime(row, { exec, job, root = KEYCLOAK_RO
   phase('database_service');
   if (!present.network) await must(['network', 'create', ...labels, names.network], 'network create');
   if (!present.volume) await must(['volume', 'create', ...labels, names.volume], 'volume create');
-  if (!present.database) await must(['create', '--name', names.database, ...labels, '--restart', 'unless-stopped', '--network', names.network, '--env-file', files.dbEnv, '--mount', `type=volume,source=${names.volume},target=/var/lib/postgresql/data`, KEYCLOAK_DB_IMAGE], 'database create', 600000);
+  if (!present.database) await must(['create', '--name', names.database, ...labels, '--restart', 'unless-stopped', '--network', names.network, ...LOG_ARGS, '--env-file', files.dbEnv, '--mount', `type=volume,source=${names.volume},target=/var/lib/postgresql/data`, KEYCLOAK_DB_IMAGE], 'database create', 600000);
   await verifyContainer(names.database, false);
-  await must(['start', names.database], 'database start');
+  await startOwnedContainer({ run: argv => argv[0] === 'docker' ? call(argv.slice(1)) : exec.host(argv, { timeoutMs: 120000 }), name: names.database, fail: m => new Error(m), job, label: 'Keycloak database', requireHealth: false, sleep });
   const wait = async (args, label) => {
     for (let i = 0; i < attempts; i++) { if ((await call(args, 10000)).code === 0) return; await sleep(2000); }
     throw new Error(`${label} readiness was not established; retry retains the same resources and credentials.`);
   };
   await wait(['exec', names.database, 'pg_isready', '-U', 'keycloak', '-d', 'keycloak'], 'Database');
   phase('keycloak_service');
-  if (!present.server) await must(['create', '--name', names.server, ...labels, '--restart', 'unless-stopped', '--network', names.network, '--env-file', files.kcEnv, '--publish', `127.0.0.1:${KEYCLOAK_PORT}:8080`, '--mount', `type=bind,source=${files.realmPath},target=/opt/keycloak/data/import/${row.realm}-realm.json,readonly`, KEYCLOAK_IMAGE, 'start', '--import-realm'], 'server create', 600000);
+  if (!present.server) await must(['create', '--name', names.server, ...labels, '--restart', 'unless-stopped', '--network', names.network, ...LOG_ARGS, '--env-file', files.kcEnv, '--publish', `127.0.0.1:${KEYCLOAK_PORT}:8080`, '--mount', `type=bind,source=${files.realmPath},target=/opt/keycloak/data/import/${row.realm}-realm.json,readonly`, KEYCLOAK_IMAGE, 'start', '--import-realm'], 'server create', 600000);
   await verifyContainer(names.server, true);
-  await must(['start', names.server], 'server start');
+  await startOwnedContainer({ run: argv => argv[0] === 'docker' ? call(argv.slice(1)) : exec.host(argv, { timeoutMs: 120000 }), name: names.server, fail: m => new Error(m), job, label: 'Keycloak server', requireHealth: false, sleep });
   // Keycloak's image intentionally has no curl. Its documented bash TCP probe
   // checks /health/ready on the unexposed management interface, including DB.
   await wait(['exec', names.server, 'bash', '-ec', 'exec 3<>/dev/tcp/127.0.0.1/9000; printf "GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n" >&3; head -n 1 <&3 | grep -q " 200 "'], 'Keycloak/database');

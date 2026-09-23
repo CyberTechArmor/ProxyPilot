@@ -5,16 +5,20 @@ import { infisicalError as fail,expectedPolicies,TEST_ENV,TEST_PATH,TEST_KEY,des
 
 // Fixed origin, pinned DNS, TLS validation, no redirects, bounded bodies/deadline.
 // Never attach raw upstream bodies/errors to jobs, audit records or the UI.
-export async function infisicalRequest(origin,path,{method='GET',token,body,resolve=lookup,request=https.request}={}) {
+// `edge` ({ address, headers }, lib/setup-engine/local-edge.js) pins the
+// connection to this host's Caddy for an OWNED instance's self-checks; the URL
+// (TLS SNI, certificate name, Host header) stays the reviewed hostname.
+export async function infisicalRequest(origin,path,{method='GET',token,body,resolve=lookup,request=https.request,edge=null}={}) {
   const u=new URL(path,origin);
   if(u.origin!==origin||u.protocol!=='https:'||u.username||u.password||u.hash||!u.pathname.startsWith('/api/'))throw fail('Infisical endpoint is outside the reviewed HTTPS origin.');
   let addresses;
-  try{addresses=await Promise.race([resolve(u.hostname,{all:true,family:4}),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error()),5000);t.unref();})]);}catch{throw fail('Infisical DNS could not be verified.');}
-  if(!addresses.length||addresses.some(a=>!allowedAddress(a.address)))throw fail('Infisical DNS points to a blocked special-use address.');
+  if(edge)addresses=[{address:edge.address,family:4}];
+  else{try{addresses=await Promise.race([resolve(u.hostname,{all:true,family:4}),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error()),5000);t.unref();})]);}catch{throw fail('Infisical DNS could not be verified.');}
+  if(!addresses.length||addresses.some(a=>!allowedAddress(a.address)))throw fail('Infisical DNS points to a blocked special-use address.');}
   const data=body===undefined?null:JSON.stringify(body);
   return new Promise((done,reject)=>{
     let bytes=0;const chunks=[];
-    const req=request(u,{method,agent:false,timeout:7000,lookup:(_h,o,cb)=>o.all?cb(null,[addresses[0]]):cb(null,addresses[0].address,4),headers:{'User-Agent':'ProxyPilot-managed-setup',Accept:'application/json',...(token?{Authorization:`Bearer ${token}`} :{}),...(data?{'Content-Type':'application/json','Content-Length':Buffer.byteLength(data)}:{})}},res=>{
+    const req=request(u,{method,agent:false,timeout:7000,lookup:(_h,o,cb)=>o.all?cb(null,[addresses[0]]):cb(null,addresses[0].address,4),headers:{...(edge?.headers||{}),'User-Agent':'ProxyPilot-managed-setup',Accept:'application/json',...(token?{Authorization:`Bearer ${token}`} :{}),...(data?{'Content-Type':'application/json','Content-Length':Buffer.byteLength(data)}:{})}},res=>{
       res.on('data',b=>{bytes+=b.length;if(bytes>1024*1024)req.destroy();else chunks.push(b);});
       res.on('error',()=>reject(fail('Infisical response failed; details withheld.')));
       res.on('end',()=>{let value=null;try{value=JSON.parse(Buffer.concat(chunks));}catch{}
@@ -25,8 +29,8 @@ export async function infisicalRequest(origin,path,{method='GET',token,body,reso
     req.on('error',()=>reject(fail('Infisical HTTPS failed (DNS, TLS, timeout or reachability); details withheld.')));req.end(data);
   });
 }
-export function createInfisicalClient(origin,{send=infisicalRequest,job}={}) {
-  return async(path,options={})=>{job?.fence();const out=await send(origin,path,options);job?.fence();return out;};
+export function createInfisicalClient(origin,{send=infisicalRequest,job,edge=null}={}) {
+  return async(path,options={})=>{job?.fence();const out=await send(origin,path,edge?{...options,edge}:options);job?.fence();return out;};
 }
 export function requireOk(result,label){if(result.status!==200||!result.body)throw fail(`${label} unavailable (HTTP ${result.status}). Complete the documented handoff; no capability is assumed.`);return result.body;}
 export const scopeQuery=projectId=>new URLSearchParams({projectId,environment:TEST_ENV,secretPath:TEST_PATH}).toString();

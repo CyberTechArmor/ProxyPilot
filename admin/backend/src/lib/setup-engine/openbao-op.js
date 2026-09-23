@@ -1,3 +1,4 @@
+import { localEdge } from './local-edge.js';
 import { readOpenBao,secrets,currentPlan } from './openbao-store.js';
 import { OPENBAO_ROOT,OPENBAO_PORT,OPENBAO_APP,jobSchema,digest,fail } from './openbao-logic.js';
 import { ensureRuntime } from './openbao-runtime.js';
@@ -26,7 +27,7 @@ export async function runOpenBaoOperation({db,params,exec,job,root=OPENBAO_ROOT,
     if(r.config.basic&&!r.handoff_ack)return {verification:{state:'awaiting_user_action',label:'Retrieve the encrypted OpenBao recovery package and acknowledge its receipt before manual unseal.',complete:false}};
     if(!r.handoff_ack)throw fail('Recovery handoff acknowledgement is required. Retrieve and decrypt the protected package, keep shares separately, then acknowledge its receipt.');
   }
-  const api=createClient(r.config.origin,{send,job});phase('seal_and_cluster_check');if(r.config.basic&&(await status(api)).state==='sealed')return {verification:{state:'awaiting_user_action',label:'OpenBao requires manual unseal with the separately retained recovery shares.',complete:false}};const ready=await requireReady(api,r);job.fence();
+  const api=createClient(r.config.origin,{send,job,edge:r.config.mode==='install'?localEdge(db):null});phase('seal_and_cluster_check');if(r.config.basic&&(await status(api)).state==='sealed')return {verification:{state:'awaiting_user_action',label:'OpenBao requires manual unseal with the separately retained recovery shares.',complete:false}};const ready=await requireReady(api,r);job.fence();
   // External seal parameters and cluster identity are observed, never configured.
   if(r.resources?.seal&&r.resources.seal!==ready.seal)throw fail('External seal configuration changed; review with its owner. No seal migration was attempted.');
   db.prepare('UPDATE setup_openbao SET resources_json=? WHERE id=1').run(JSON.stringify({...r.resources,clusterId:ready.clusterId,seal:ready.seal}));r=readOpenBao(db);

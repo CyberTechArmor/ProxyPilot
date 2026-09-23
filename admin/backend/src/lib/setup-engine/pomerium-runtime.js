@@ -1,3 +1,4 @@
+import { LOG_ARGS, dockerFailure, startOwnedContainer } from './owned-runtime.js';
 import { mkdirSync, lstatSync, readFileSync, writeFileSync, existsSync, renameSync, readdirSync, openSync, closeSync, fsyncSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -58,7 +59,7 @@ export function assertExternalConfig(actual, desired) {
 const inspectFormat = '{"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"command":{{json .Config.Cmd}},"env":{{json .Config.Env}},"network":{{json .HostConfig.NetworkMode}},"ports":{{json .HostConfig.PortBindings}},"mounts":{{json .Mounts}},"labels":{{json .Config.Labels}},"running":{{json .State.Running}},"startedAt":{{json .State.StartedAt}}}';
 export async function ensurePomeriumRuntime(db,r,intents,{exec,job,root=POMERIUM_ROOT,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),attempts=30}) {
   const call=async args=>{job.fence();const res=await exec.host(['docker',...args],{timeoutMs:120000});job.fence();return res;};
-  const must=async(args,step)=>{const res=await call(args);if(res.code!==0)throw fail(`Pomerium ${step} failed; inspect the named resource locally. Runtime output is withheld.`);return res;};
+  const must=async(args,step)=>{const res=await call(args);if(res.code!==0)throw dockerFailure(fail,`Pomerium ${step}`,res);return res;};
   job.fence();
   let files;
   job.checkpoint('runtime_validation',{resumable:true,pomerium:true});
@@ -94,11 +95,12 @@ export async function ensurePomeriumRuntime(db,r,intents,{exec,job,root=POMERIUM
     // Every selected route is already denied by the Caddy stage. No direct
     // upstream is restored on parser/start/reload failure.
     if(changed) {job.fence();atomicPrivate(files.active,files.content);}
-    if(!actual) await must(['create','--name',name,'--label',`io.proxypilot.pomerium=${r.credential_ref}`,'--restart','unless-stopped','--network','host','--user','0:0','--cap-drop','ALL','--security-opt','no-new-privileges','--mount',`type=bind,source=${root},target=/pomerium,readonly`,POMERIUM_IMAGE,'--config','/pomerium/config.json'],'owned service creation');
+    if(!actual) await must(['create','--name',name,'--label',`io.proxypilot.pomerium=${r.credential_ref}`,'--restart','unless-stopped','--network','host',...LOG_ARGS,'--user','0:0','--cap-drop','ALL','--security-opt','no-new-privileges','--mount',`type=bind,source=${root},target=/pomerium,readonly`,POMERIUM_IMAGE,'--config','/pomerium/config.json'],'owned service creation');
     // A restart after changed config is intentional, narrowly owned and only
     // occurs through the runner. On retry an already-consumed config is reused.
     const needsRestart=actual?.running && (changed || Date.parse(actual.startedAt)<lstatSync(files.active).mtimeMs);
-    if(!actual?.running || needsRestart) await must([needsRestart?'restart':'start',name],'owned service startup');
+    if(needsRestart) await must(['restart',name],'owned service restart');
+    if(!actual?.running) await startOwnedContainer({run:argv=>argv[0]==='docker'?call(argv.slice(1)):exec.host(argv,{timeoutMs:120000}),name,fail,job,label:'Pomerium',requireHealth:false,sleep});
   }
   for(let i=0;i<attempts;i++) {
     const health=await call(['exec',name,'/bin/pomerium','health','--health-addr','127.0.0.1:18084']);

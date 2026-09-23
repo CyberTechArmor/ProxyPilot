@@ -21,7 +21,17 @@
 // (the host runner's exec.host); `runHostCapture` results ({ status }) are
 // accepted too.
 
-import { redactText } from './logic.js';
+import { redactText as baseRedact, REDACTED } from './logic.js';
+
+// Container output and daemon errors are free text: beyond the setup
+// engine's redactText, blank the value of anything that looks like a
+// credential assignment (password=…, "token": "…", Authorization: Bearer …).
+const CREDENTIAL_KEY = '(?:[A-Za-z0-9_.-]*(?:pass(?:word|wd)?|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth|cookie|session)[A-Za-z0-9_.-]*)';
+const ASSIGNMENT = new RegExp(`(["']?${CREDENTIAL_KEY}["']?\\s*[:=]\\s*["']?)([^\\s"',;&]+)`, 'gi');
+const BEARER = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/gi;
+export function redactText(text) {
+  return baseRedact(text).replace(BEARER, `$1 ${REDACTED}`).replace(ASSIGNMENT, (_, k) => `${k}${REDACTED}`);
+}
 
 export const LOG_DRIVER = 'local';
 export const LOG_OPTS = Object.freeze({ 'max-size': '10m', 'max-file': '3' });

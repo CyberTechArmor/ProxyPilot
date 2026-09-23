@@ -22,6 +22,7 @@ import { readPlatformPlan } from './platform-plan.js';
 import { getJob, jobView, listEvents } from './store.js';
 import { redact, redactText, parseJson, REDACTED } from './logic.js';
 import { decryptSecret, isEncrypted } from '../secrets.js';
+import { redactText as redactLogText } from './owned-runtime.js';
 import { KEYCLOAK_IMAGE, KEYCLOAK_DB_IMAGE, KEYCLOAK_PORT, KEYCLOAK_APP, resourceNames } from './keycloak-logic.js';
 import { POMERIUM_IMAGE, POMERIUM_APP, POMERIUM_PORT, POMERIUM_GRPC_PORT, POMERIUM_METRICS_PORT } from './pomerium-logic.js';
 import { INFISICAL_IMAGE, INFISICAL_DB_IMAGE, INFISICAL_REDIS_IMAGE, AGENT_PROXY_IMAGE, INFISICAL_APP, INFISICAL_PORT, TEST_PORT } from './infisical-logic.js';
@@ -384,7 +385,7 @@ export function runtimeFacts(service, row, inspected) {
     const driver = c.HostConfig?.LogConfig?.Type || null;
     out[name] = { present: true, id: String(c.Id || '').slice(0, 12), image: c.Config?.Image || null, running: !!c.State?.Running, status: c.State?.Status || null,
       health: c.State?.Health?.Status || (c.State?.Running ? 'running (no healthcheck)' : 'stopped'), started_at: c.State?.StartedAt || null, owned_label: c.Config?.Labels?.[label] === ref,
-      ...(c.State?.Running ? {} : { exit_code: c.State?.ExitCode ?? null, error: c.State?.Error ? redactText(String(c.State.Error)).slice(0, 300) : null, finished_at: c.State?.FinishedAt || null }),
+      ...(c.State?.Running ? {} : { exit_code: c.State?.ExitCode ?? null, error: c.State?.Error ? redactLogText(String(c.State.Error)).slice(0, 300) : null, finished_at: c.State?.FinishedAt || null }),
       log_driver: driver, logs_readable: driver ? driver !== 'none' : null };
   }
   return out;

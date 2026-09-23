@@ -75,12 +75,14 @@ export function setPlatformFlag(db, enabled, user, ip = null) {
   if (typeof enabled !== 'boolean') throw Object.assign(new Error('enabled must be true or false.'), { status: 400 });
   if (user?.role !== 'admin') throw Object.assign(new Error('Only an administrator can change Platform MCP access.'), { status: 403 });
   const previous = readFlag(db, PLATFORM_FLAG);
-  const tx = db.transaction(() => {
+  // The setting and its audit row are written together or not at all.
+  db.exec('BEGIN IMMEDIATE');
+  try {
     db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(`feature_flag:${PLATFORM_FLAG}`, enabled ? '1' : '0');
     db.prepare('INSERT INTO audit_log (id, user_id, action, resource_type, resource_id, details, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(uuidv4(), user.id, FLAG_AUDIT_ACTION, 'feature_flag', PLATFORM_FLAG, JSON.stringify({ flag: PLATFORM_FLAG, previous, enabled, via: 'dashboard', active_platform_jobs: activePlatformJobs(db).length }), ip);
-  });
-  tx();
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
   return platformFlagState(db);
 }
 

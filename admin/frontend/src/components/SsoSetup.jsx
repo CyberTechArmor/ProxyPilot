@@ -405,6 +405,19 @@ export default function SsoSetup({ connections = [], managed = false, administra
                 </div>
               )}
             </section>
+            {managed && part === "checks" && (
+              <section className="space-y-2" aria-live="polite">
+                <h3 className="font-semibold">Before retiring the bootstrap account</h3>
+                {state.readiness?.ready ? (
+                  <p className="text-sm">All checks are recorded. Retire the bootstrap account below within the hour.</p>
+                ) : (
+                  <ul className="list-disc pl-5 space-y-1 text-sm break-words">
+                    {(state.readiness?.stillNeeded || []).map((x) => <li key={x}>{x}</li>)}
+                  </ul>
+                )}
+                <p className="text-xs text-muted-foreground">Checks count for one hour and only while the browser session that made them stays signed in.</p>
+              </section>
+            )}
             </>}
             {showActivate && <section className="space-y-3">
               <h3 className="font-semibold">{managed ? "Activate SSO" : "5. Explicitly activate SSO"}</h3>{managed && !administratorVerified && <p className="text-sm">After these checks pass, verify permanent administration and retire the bootstrap account (stage B). Then activate here.</p>}

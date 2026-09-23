@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { approvedFetch } from '../sso/oidc.js';
-import { readConfig, activationReadiness } from '../sso/store.js';
+import { readConfig, activationReadiness, readinessText } from '../sso/store.js';
 import { protectedValue, storeProtected, keycloakAdmin } from './full-platform-keycloak.js';
 import { readFullPlatform, fail } from './full-platform-store.js';
 import { createJob, getJob, jobView, acquireLock, releaseLock, renewLock, readLock, takeoverLock } from './store.js';
@@ -25,7 +25,9 @@ export function queueAdministrator(db, raw, user) {
     if (p.action === 'verify_and_retire') {
       for (const kind of ['proxypilot','observer','pomerium','openbao','vaultwarden']) if ((['proxypilot','observer'].includes(kind) || full.config.services[kind].mode !== 'skip') && !full.state.identity.clients?.[kind]) throw fail('Connect all selected identity clients before retiring bootstrap administration.');
       const sso = readConfig(db);
-      if (!full.state.administrator?.masterId || !sso || !activationReadiness(db, sso, user.id).ready) throw fail('Prove permanent administration, ProxyPilot SSO login/step-up and separate local recovery before retiring the bootstrap account.');
+      if (!full.state.administrator?.masterId || !sso) throw fail('Prove permanent administration, ProxyPilot SSO login/step-up and separate local recovery before retiring the bootstrap account.');
+      const readiness = activationReadiness(db, sso, user.id);
+      if (!readiness.ready) throw fail(`Before retiring the bootstrap account: ${readinessText(readiness.missing)}.`);
       const link = db.prepare('SELECT subject FROM sso_links WHERE issuer=? AND user_id=?').get(sso.config.issuer, user.id);
       if (link?.subject !== full.state.administrator.applicationId) throw fail('The proven application identity is not the permanent administrator named in this handoff.');
     }

@@ -37,8 +37,9 @@ export function keycloakWire(k) {
     const u=new URL(url),path=u.pathname,method=options.method||'GET'; const body=options.body&&String(options.headers?.['Content-Type']).includes('json')?JSON.parse(options.body):null;
     calls.push({path,method});
     if(path.endsWith('/protocol/openid-connect/logout'))return yes({},204);
-    if(path.endsWith('/protocol/openid-connect/token')){const p=new URLSearchParams(options.body),username=p.get('username');if(passwords.get('master:'+username)!==p.get('password'))return yes({},401);return yes({access_token:username,refresh_token:'refresh'});}
-    if(path.endsWith('/protocol/openid-connect/userinfo')){const name=options.headers.Authorization.slice(7);return yes({sub:realms.get('master').users.find(u=>u.username===name)?.id});}
+    if(path.endsWith('/protocol/openid-connect/token')){const p=new URLSearchParams(options.body),username=p.get('username');if(passwords.get('master:'+username)!==p.get('password'))return yes({},401);return yes({access_token:username,refresh_token:'refresh',session_state:'sess-'+username});}
+    // Keycloak 26: admin-cli issues lightweight access tokens, which userinfo refuses.
+    if(path.endsWith('/protocol/openid-connect/userinfo'))return yes({error:'invalid_token',error_description:'Lightweight access token not allowed for userinfo endpoint'},401);
     const parts=path.split('/').filter(Boolean);if(parts[0]!=='admin'||parts[1]!=='realms')return yes({},404);
     const r=realms.get(decodeURIComponent(parts[2]));if(!r)return yes({},404);const p=parts.slice(3).map(decodeURIComponent);
     if(!p.length){if(method==='PUT')Object.assign(r.realm,body);return yes(r.realm,method==='PUT'?204:200);}
@@ -73,6 +74,7 @@ export function keycloakWire(k) {
       const g=r.groups.find(g=>g.id===p[1]);if(!g)return yes({},404);
       if(p[2]==='role-mappings'){if(method==='POST'){g.roles.push(...body);return yes({},204);}return yes(g.roles);}return yes(g);
     }
+    if(p[0]==='users'&&p[2]==='sessions'&&method==='GET'){const user=r.users.find(u=>u.id===p[1]);return user?yes([{id:'sess-'+user.username,username:user.username,userId:user.id}]):yes({},404);}
     if(p[0]==='users'){
       if(p[1]==='profile'){r.profile ||= {attributes:[]};if(method==='PUT'){r.profile=body;return yes(body);}return yes(r.profile);}
       if(p.length===1){if(method==='POST'){const {credentials,...user}=body;r.users.push({...user,id:uid()});passwords.set(parts[2]+':'+user.username,credentials[0].value);return yes({},201);}return yes(r.users.filter(x=>x.username===u.searchParams.get('username')));}

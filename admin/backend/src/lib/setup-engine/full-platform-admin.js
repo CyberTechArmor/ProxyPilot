@@ -67,7 +67,7 @@ export async function runAdministrator(db, full, operation, job, { send } = {}) 
       job = guarded;
       if (operation === 'administrator') {
         if (bootstrap.retired) throw fail('The bootstrap account is already retired. Use permanent administration; it will not be recreated.');
-        const authority = await keycloakAdmin(k, bootstrap.password, { send, job });
+        const authority = await keycloakAdmin(k, bootstrap.password, { send, job, ...(bootstrap.username ? { username: bootstrap.username } : {}) });
         try {
           const ensureUser = async (realm, key) => {
             const base = `/admin/realms/${encodeURIComponent(realm)}`, query = `${base}/users?username=${encodeURIComponent(profile.username)}&exact=true`;
@@ -125,17 +125,22 @@ export async function runAdministrator(db, full, operation, job, { send } = {}) 
         if (!roles.ok || !(await roles.json()).some(r => r.name === 'admin')) throw fail('Permanent master administration privileges were not proved.');
         const subject = await call('/realms/master/protocol/openid-connect/userinfo');
         if (!subject.ok || (await subject.json()).sub !== profile.masterId) throw fail('The fresh administrator login belongs to a different identity.');
-        const users = await call('/admin/realms/master/users?username=bootstrap-admin&exact=true');
-        if (!users.ok) throw fail('Permanent administration could not inspect the temporary account.');
-        const temporary = (await users.json()).find(u => u.username === 'bootstrap-admin');
-        if (temporary) {
-          if (temporary.id === profile.masterId) throw fail('The permanent account cannot be the bootstrap account.');
-          state.bootstrapRetirementAttempted = true; persist();
-          const removed = await call(`/admin/realms/master/users/${temporary.id}`, 'DELETE');
-          if (removed.status !== 204 && removed.status !== 404) throw fail('Temporary account retirement failed. Reopen the current administrator state.');
-        } else if (!state.bootstrapRetirementAttempted && !bootstrap.retired) throw fail('The bootstrap account is unexpectedly absent. Review its ownership before accepting this handoff.');
-        const after = await call('/admin/realms/master/users?username=bootstrap-admin&exact=true');
-        if (!after.ok || (await after.json()).some(u => u.username === 'bootstrap-admin')) throw fail('Temporary administrator removal was not verified.');
+        // After a reviewed recovery (3h) there are two temporary accounts: the
+        // original bootstrap-admin and the recovery account. Both are retired.
+        const temporaries = [...new Set([bootstrap.username || 'bootstrap-admin', ...(bootstrap.recovered ? ['bootstrap-admin'] : [])])];
+        for (const [index, name] of temporaries.entries()) {
+          const users = await call(`/admin/realms/master/users?username=${encodeURIComponent(name)}&exact=true`);
+          if (!users.ok) throw fail('Permanent administration could not inspect the temporary account.');
+          const temporary = (await users.json()).find(u => u.username === name);
+          if (temporary) {
+            if (temporary.id === profile.masterId) throw fail('The permanent account cannot be the bootstrap account.');
+            state.bootstrapRetirementAttempted = true; persist();
+            const removed = await call(`/admin/realms/master/users/${temporary.id}`, 'DELETE');
+            if (removed.status !== 204 && removed.status !== 404) throw fail('Temporary account retirement failed. Reopen the current administrator state.');
+          } else if (index === 0 && !state.bootstrapRetirementAttempted && !bootstrap.retired) throw fail('The bootstrap account is unexpectedly absent. Review its ownership before accepting this handoff.');
+          const after = await call(`/admin/realms/master/users?username=${encodeURIComponent(name)}&exact=true`);
+          if (!after.ok || (await after.json()).some(u => u.username === name)) throw fail('Temporary administrator removal was not verified.');
+        }
         storeProtected(db, full.state.identity.bootstrapRef, { installationId: k.id, retired: true });
         state.handoffFingerprint = sso.fingerprint; state.administratorVerified = true; state.recoveryVerified = true; state.stage = 'verify';
         state.actions = { ...state.actions, administrator: 'Permanent administration, linked SSO and independent recovery verified. The bootstrap credential is retired. Confirm SSO activation to continue.' }; persist();

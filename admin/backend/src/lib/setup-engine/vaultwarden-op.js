@@ -1,4 +1,5 @@
 import { localEdge } from './local-edge.js';
+import { assertUpstreamListening } from './owned-runtime.js';
 import { readVaultwarden, secrets, currentPlan } from './vaultwarden-store.js';
 import { VAULTWARDEN_ROOT, VAULTWARDEN_PORT, VAULTWARDEN_APP, jobSchema, digest, fail } from './vaultwarden-logic.js';
 import { ensureRuntime, keyEvidence } from './vaultwarden-runtime.js';
@@ -36,6 +37,7 @@ export async function runVaultwardenOperation({ db, params, exec, job, root = VA
       db.prepare('UPDATE setup_vaultwarden SET edge_job_id=? WHERE id=1').run(child.id); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; } }
     phase('caddy_route'); if (['queued', 'running'].includes(child.status)) return { waiting: true, reason: 'Waiting for the recorded Vaultwarden Caddy route step.' };
     if (child.status !== 'succeeded') throw fail('Vaultwarden Caddy configuration failed. Resolve its conflict and explicitly retry.');
+    await assertUpstreamListening({ run: argv => exec.host(argv, { timeoutMs: 15000 }), port: VAULTWARDEN_PORT, fail, label: 'Vaultwarden' }); job.fence();
   }
   phase('effective_configuration');
   const effective = await verifyEffective(createClient(r.config.origin, { send, job, edge: r.config.mode === 'install' ? localEdge(db) : null }), r, credentials); job.fence();

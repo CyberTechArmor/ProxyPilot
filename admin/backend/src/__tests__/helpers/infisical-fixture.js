@@ -10,7 +10,9 @@ export function makeDb(path=':memory:',{mode='install',agentMode=mode}={}){const
 export const vm={name:'g5-disposable',type:'virtual-machine',status:'Running',config:{'volatile.uuid':'vm-fixed-id'},expanded_devices:{root:{type:'disk',path:'/',pool:'test'},eth0:{type:'nic',network:'incusbr0'}}};
 export function dockerFixture(){const objects={container:new Map(),network:new Map(),volume:new Map()},calls=[];let failure=null;
   const images=Object.fromEntries([INFISICAL_IMAGE,INFISICAL_DB_IMAGE,INFISICAL_REDIS_IMAGE,AGENT_PROXY_IMAGE].map(image=>[image,{Id:'sha256:'+image,Config:{Env:['PATH=/bin'],Entrypoint:image===AGENT_PROXY_IMAGE?['/sbin/tini','--','/bin/infisical']:['entrypoint'],Cmd:['default']}}]));
-  const host=async argv=>{calls.push(argv);if(argv[0]==='incus')return {code:0,stdout:JSON.stringify([vm])};const a=argv.slice(1),ok=s=>({code:0,stdout:s||'',stderr:''});
+  const host=async argv=>{calls.push(argv);if(argv[0]==='incus')return {code:0,stdout:JSON.stringify([vm])};
+    // Listening sockets: the published ports of running containers.
+    if(argv[0]==='ss')return {code:0,stdout:[...objects.container.values()].filter(c=>c.State?.Running).flatMap(c=>Object.values(c.HostConfig?.PortBindings||{}).flat()).map(b=>`LISTEN 0 4096 ${b.HostIp}:${b.HostPort} 0.0.0.0:*`).join('\n'),stderr:''};const a=argv.slice(1),ok=s=>({code:0,stdout:s||'',stderr:''});
     if(failure?.(a)){failure=null;return {code:1,stdout:'',stderr:'DO-NOT-LOG-RAW-RUNTIME-CREDENTIAL'};}
     if(a[0]==='version')return ok('28.0');
     if(a[0]==='image'&&a[1]==='inspect')return ok(JSON.stringify([images[a[2]]]));

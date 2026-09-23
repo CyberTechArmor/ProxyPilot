@@ -28,7 +28,7 @@
 // (ProxyPilot login depends on it), active Pomerium application policies,
 // and any queued or running platform operation.
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, rmSync, lstatSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, rmSync, lstatSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -52,6 +52,12 @@ const OPEN = ['queued', 'running'];
 // Lazy: this module sits on an import cycle with full-platform-mcp.js (through
 // the executor), so its bindings are read at call time, never at load time.
 const resetApps = () => [...PLATFORM_APPS, RESET_ROUTES_APP];
+// 3i: services whose owned directory is a FIXED path. A data-kept reset moves
+// it aside to a dated sibling so a later managed install starts clean instead
+// of finding the discarded record's ownership marker and refusing. Keycloak
+// uses a per-installation directory and is left in place.
+export const FIXED_PATH_SERVICES = Object.freeze(['pomerium', 'infisical', 'openbao', 'vaultwarden']);
+export const retainedPath = (dir, jobId, date = new Date()) => `${dir}.retained-${date.toISOString().slice(0, 10).replaceAll('-', '')}-${String(jobId).replace(/[^A-Za-z0-9]/g, '').slice(-12)}`;
 const CREDENTIAL_TABLE = { pomerium: 'setup_pomerium_credentials', infisical: 'setup_infisical_credentials', openbao: 'setup_openbao_credentials', vaultwarden: 'setup_vaultwarden_credentials' };
 
 function networksFor(service, row) {
@@ -119,15 +125,16 @@ export function resetReview(db, { purgeData = false, ignoreJobs = [] } = {}) {
     },
     retain: purgeData
       ? { note: 'Nothing owned is retained on the host except the backup set. External services, the OpenBao recovery package directory, the installation key and ProxyPilot users/sessions are untouched.' }
-      : { directories: services.map((s) => ({ service: s.service, path: s.directory })), volumes: services.flatMap((s) => s.volumes), networks: services.flatMap((s) => s.networks), credentials: 'Protected credential rows (setup_full_credentials, setup_*_credentials, sso_credentials) and the installation key stay in place.',
-        note: 'A later managed install at the same fixed paths (Vaultwarden, OpenBao, Infisical, Pomerium) finds the retained ownership marker of the discarded record and refuses to adopt it; restore that record or reset again with purge_data to reuse those paths. Keycloak uses a new per-installation directory.' },
+      : { directories: services.map((s) => (FIXED_PATH_SERVICES.includes(s.service) ? { service: s.service, path: s.directory, moved_to: `${s.directory}.retained-<YYYYMMDD>-<reset job>`, action: 'moved aside' } : { service: s.service, path: s.directory, action: 'kept in place' })), volumes: services.flatMap((s) => s.volumes), networks: services.flatMap((s) => s.networks), credentials: 'Protected credential rows (setup_full_credentials, setup_*_credentials, sso_credentials) and the installation key stay in place.',
+        data_handling: 'moved_aside',
+        note: 'The fixed-path data directories (Pomerium, Infisical, OpenBao, Vaultwarden) are MOVED ASIDE to a dated directory next to the original (nothing is deleted), so a later managed install starts clean instead of refusing on the old ownership marker. The Infisical/OpenBao Docker volumes keep their per-installation names and stay in place; a new install uses new names. Keycloak keeps its per-installation directory in place. To reuse retained data, move a directory back before reinstalling from a restored record.' },
     backup: purgeData ? { directory: `${RESET_EXPORTS_DIR}/platform-reset-<job id>`, contents: ['<service>-files.tar.gz for every owned directory', '<volume>.tar.gz for every owned volume', 'proxypilot-records.json (the discarded rows; protected values remain ciphertext under the installation key)', 'manifest.json (sha256 and size of every file)'], verified: 'Every archive is listed back with tar and re-hashed before the first deletion; any mismatch stops the reset with nothing deleted.' } : null,
     effects: [
       'Refuses to start while any platform operation is queued or running, while SSO is active, or while Pomerium application policies are active.',
       'Stops and removes only the listed owned containers, by inspected immutable ID, after checking each ownership label (and, without purge, its data mounts).',
       'Removes the owned Caddy routes through the backend route step and re-renders their hostnames.',
       'Discards the saved Full Platform plan, the shared service plan, platform operations and the owned service records, so Platform Setup starts at step 1.',
-      purgeData ? 'Writes and verifies the backup set, then deletes the owned directories, volumes and networks.' : 'Keeps data directories, volumes, networks, keys and protected credentials in place.',
+      purgeData ? 'Writes and verifies the backup set, then deletes the owned directories, volumes and networks.' : 'Keeps all data: the fixed-path service directories are moved aside to dated directories (not deleted); volumes, networks, keys and protected credentials stay in place.',
     ],
   };
 }
@@ -272,6 +279,14 @@ export async function runReset(db, full, job, exec, { roots = {}, exportsDir = R
       for (const s of plan) {
         if (reset.done[`runtime:${s.service}`]) continue;
         if (s.markerOk) await removeOwnedContainers({ service: s.service, row: s.row, names: s.containers, root: s.directory, call: docker, checkMounts: !reset.purgeData });
+        if (!reset.purgeData && s.markerOk && FIXED_PATH_SERVICES.includes(s.service) && existsSync(s.directory)) {
+          const target = resolve(s.directory), st = lstatSync(target);
+          if (!st.isDirectory() || st.isSymbolicLink() || target.split('/').filter(Boolean).length < 3) throw fail(`${s.service}: refusing to move ${target}.`);
+          const aside = retainedPath(target, job.id);
+          if (existsSync(aside)) throw fail(`${s.service}: ${aside} already exists; nothing was moved.`);
+          fence(); renameSync(target, aside);
+          reset.done[`moved:${s.service}`] = aside;
+        }
         if (reset.purgeData) {
           for (const v of s.volumes) await docker(['volume', 'rm', v.name]);
           for (const n of s.networks) await docker(['network', 'rm', n.name]);
@@ -304,14 +319,15 @@ export async function runReset(db, full, job, exec, { roots = {}, exportsDir = R
   // 4. Discard the records. The setup row goes last, in the same transaction.
   job.fence();
   const plan = resetRecordPlan(db, full.revision, reset.purgeData);
-  const summary = { purgeData: reset.purgeData, backup: reset.done.backup || null, services: reset.plan.services.map((s) => s.service), routes: reset.plan.routes.map((r) => r.hostname) };
+  const moved = Object.fromEntries(Object.entries(reset.done).filter(([k]) => k.startsWith('moved:')).map(([k, v]) => [k.slice(6), v]));
+  const summary = { purgeData: reset.purgeData, backup: reset.done.backup || null, moved, services: reset.plan.services.map((s) => s.service), routes: reset.plan.routes.map((r) => r.hostname) };
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const r of plan) if (has(db, r.table)) db.prepare(`DELETE FROM ${r.table} WHERE ${r.where}`).run(...r.args);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   return { verification: { state: 'platform_reset', complete: true, ...summary,
-    label: `Full Platform reset finished: ${summary.services.length} owned service(s) removed${reset.purgeData ? ` and their data deleted after the verified backup set at ${summary.backup?.directory}` : '; data directories, volumes, keys and credentials retained'}. Platform Setup starts at step 1.` } };
+    label: `Full Platform reset finished: ${summary.services.length} owned service(s) removed${reset.purgeData ? ` and their data deleted after the verified backup set at ${summary.backup?.directory}` : `; data retained${Object.keys(summary.moved).length ? ` (moved aside: ${Object.values(summary.moved).join(', ')})` : ''}`}. Platform Setup starts at step 1.` } };
 }
 
 // The record plan is rebuilt at the end from the frozen reset state rather

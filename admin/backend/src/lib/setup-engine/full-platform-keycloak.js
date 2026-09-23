@@ -26,10 +26,10 @@ export function protectedValue(db, id, create) {
 export function storeProtected(db, id, value) {
   db.prepare('INSERT INTO setup_full_credentials VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(id, encryptSecret(JSON.stringify(value)));
 }
-export async function keycloakAdmin(k, password, { send = approvedFetch(k.origin), job } = {}) {
+export async function keycloakAdmin(k, password, { send = approvedFetch(k.origin), job, username = 'bootstrap-admin' } = {}) {
   const request = async (path, options) => { job?.fence(); const response = await send(k.origin + path, options); job?.fence(); return response; };
-  const response = await request('/realms/master/protocol/openid-connect/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: 'admin-cli', grant_type: 'password', username: 'bootstrap-admin', password }).toString() });
-  if (!response.ok) throw fail('The existing Keycloak bootstrap administrator cannot authenticate. Keep the realm and restore administration through its documented recovery path.');
+  const response = await request('/realms/master/protocol/openid-connect/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: 'admin-cli', grant_type: 'password', username, password }).toString() });
+  if (!response.ok) throw fail('The existing Keycloak bootstrap administrator cannot authenticate. Keep the realm and use the reviewed bootstrap-administrator recovery (Platform overview → Keycloak → Recover bootstrap administrator, or recover_keycloak_bootstrap); no purge is needed.');
   const grant = await response.json();
   if (!grant.access_token) throw fail('Keycloak did not issue a bootstrap access token.');
   const token = grant.access_token;
@@ -58,12 +58,15 @@ export async function connectManagedKeycloak(db, k, full, { job, root = KEYCLOAK
   const credentialRef = `keycloak-bootstrap-${k.id}`;
   job.fence();
   const prior = db.prepare('SELECT value FROM setup_full_credentials WHERE id=?').get(credentialRef);
-  if (prior && protectedValue(db, credentialRef).password !== credentials.bootstrap) throw fail('Recorded bootstrap credentials differ from the host recovery set. No rotation was attempted.');
+  const recorded = prior ? protectedValue(db, credentialRef) : null;
+  // After a reviewed bootstrap recovery (3h) the protected reference holds the
+  // recovered account; the host file still holds the original, lost one.
+  if (recorded && !recorded.recovered && recorded.password !== credentials.bootstrap) throw fail('Recorded bootstrap credentials differ from the host recovery set. No rotation was attempted.');
   if (!prior) storeProtected(db, credentialRef, { password: credentials.bootstrap, installationId: k.id, retired: false });
   // Make the initial credential available even if a later service connection
   // pauses. Persist only its protected reference under this operation's fence.
   db.prepare('UPDATE setup_full_platform SET state_json=? WHERE id=1 AND revision=? AND last_job_id=?').run(JSON.stringify({ ...full.state, identity: { ...full.state.identity, bootstrapRef: credentialRef } }), full.revision, job.id);
-  const admin = await keycloakAdmin(k, credentials.bootstrap, { job, send });
+  const admin = recorded?.recovered ? await keycloakAdmin(k, recorded.password, { job, send, username: recorded.username }) : await keycloakAdmin(k, credentials.bootstrap, { job, send });
   try { return await reconcileOwnedIdentity(db, k, full, admin.api, job); }
   finally { await admin.close(); }
 }

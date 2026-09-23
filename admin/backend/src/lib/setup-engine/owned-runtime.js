@@ -158,6 +158,19 @@ export async function readContainerLogs({ run, name, id = null, lines = 50, insp
   return { readable: true, driver, source: 'docker logs', lines: clean(merged.join('\n')) };
 }
 
+/**
+ * 3d: a recorded route must not point at a port nothing listens on without a
+ * failure saying so. `ss` unavailable → no claim either way (null), no throw.
+ */
+export async function assertUpstreamListening({ run, port, fail, label }) {
+  const listening = await portListening(run, port);
+  if (listening === false) {
+    const e = fail(`${label}: the route's upstream 127.0.0.1:${port} is not listening (reason code: upstream_not_listening). The route is recorded but nothing serves it yet; check the owned container that publishes this port.`);
+    e.reasonCode = 'upstream_not_listening'; throw e;
+  }
+  return listening;
+}
+
 /** Is anything listening on 127.0.0.1:<port>? (`ss -ltnH` on the host.) → true | false | null */
 export async function portListening(run, port) {
   const r = norm(await run(['ss', '-ltnH']));

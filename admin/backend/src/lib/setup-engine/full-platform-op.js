@@ -10,9 +10,11 @@ import { applyKeycloak, readKeycloak } from './keycloak-store.js';
 import { readConfig, saveConfig, queueSsoJob } from '../sso/store.js';
 import { readPomerium, savePomerium, applyPomerium } from './pomerium-store.js';
 import { getJob } from './store.js';
+import { dnsRefusal } from './platform-dns.js';
+import { runKeycloakRecovery } from './full-platform-kc-recovery.js';
 
 const privateIp = ip => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip);
-export async function runFullPlatformOperation({ db, params, exec, job, identity = connectManagedKeycloak, interfaces = networkInterfaces(), administratorDeps = {}, lifecycleDeps = {}, resetDeps = {} }) {
+export async function runFullPlatformOperation({ db, params, exec, job, identity = connectManagedKeycloak, interfaces = networkInterfaces(), administratorDeps = {}, lifecycleDeps = {}, resetDeps = {}, dnsCheck = dnsRefusal, recoveryDeps = {} }) {
   jobSchema.parse(params);
   let full = readFullPlatform(db);
   // A reset may discard a saved-but-never-applied plan, so it is bound to the
@@ -23,7 +25,12 @@ export async function runFullPlatformOperation({ db, params, exec, job, identity
   }
   if (!full || full.revision !== params.revision || full.approved_revision !== params.revision || full.last_job_id !== job.id) throw fail('The reviewed Full Platform operation was superseded.');
   if (params.operation === 'lifecycle') return runLifecycle(db, full, job, exec, lifecycleDeps);
-  if (params.operation) return runAdministrator(db, full, params.operation, job, administratorDeps);
+  if (params.operation === 'keycloak_recovery') {
+    // 3h: recover the bootstrap administrator, then resume the coordinator
+    // from connect_managed_identity in this same job.
+    if (full.state?.keycloakRecovery) await runKeycloakRecovery(db, full, job, exec, recoveryDeps);
+    full = readFullPlatform(db);
+  } else if (params.operation) return runAdministrator(db, full, params.operation, job, administratorDeps);
   const state = { ...full.state, actions: { ...full.state.actions }, dispatched: { ...full.state.dispatched } };
   const remember = () => { job.fence(); db.prepare('UPDATE setup_full_platform SET state_json=? WHERE id=1 AND revision=? AND last_job_id=?').run(JSON.stringify(state), params.revision, job.id); };
   const wait = reason => { remember(); return { waiting: true, reason }; };
@@ -97,6 +104,13 @@ export async function runFullPlatformOperation({ db, params, exec, job, identity
     if (row?.verified_json && previous?.status === 'succeeded') { delete state.actions[id]; continue; }
     if (previous && ['queued','running'].includes(previous.status)) { pending = true; state.actions[id] = 'The recorded service operation is running.'; continue; }
     if (state.dispatched[id]?.coordinator !== job.id) {
+      // 3e: a service whose hostname does not resolve to the Caddy host (from
+      // this host AND from a public resolver) is not queued; the reason names
+      // both answers, the expected address and where the record is changed.
+      const refusal = await dnsCheck(db, [new URL(full.config.services[id].url).hostname]);
+      job.fence();
+      if (refusal) { state.actions[id] = refusal.error; state.dnsBlocked = { ...(state.dnsBlocked || {}), [id]: refusal.error }; continue; }
+      if (state.dnsBlocked?.[id]) { const { [id]: _cleared, ...rest } = state.dnsBlocked; state.dnsBlocked = rest; }
       const queued = applyService(db, id, full.created_by);
       state.dispatched[id] = { coordinator: job.id, jobId: queued.job.id }; pending = true;
       state.actions[id] = 'Installing and connecting through the existing service adapter.';

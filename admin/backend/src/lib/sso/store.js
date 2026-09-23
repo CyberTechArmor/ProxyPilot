@@ -251,6 +251,18 @@ export function queueSsoJob(db, r, kind, userId) {
   ).run(job.id, r.fingerprint);
   return jobView(job);
 }
+// What each missing readiness item means to the operator, in the order the
+// dashboard's checks are done. Shared by the retire refusal and the dashboard.
+export const READINESS_STEPS = {
+  administrator_link: 'link your ProxyPilot account to Keycloak ("Link my existing account")',
+  client_and_passkey_settings: 'verify the client and passkey settings',
+  login: 'test passkey SSO login within the last hour, and keep that browser session signed in',
+  sudo: 'test Keycloak step-up within the last hour',
+  recovery: 'complete a separate-browser recovery check within the last hour, and keep that recovery session signed in',
+  separate_recovery_session: 'do the recovery check in a different browser from the SSO login',
+  recovery_route: 'apply the restricted recovery route',
+};
+export const readinessText = (missing) => missing.map((m) => READINESS_STEPS[m] || m).join('; ');
 export function activationReadiness(db, r, userId, now = Date.now()) {
   const checks = Object.fromEntries(
     db
@@ -325,7 +337,7 @@ export function publicState(db, userId) {
     config: r.config,
     verification: r.verification,
     verifiedAt: r.verified_at,
-    readiness: activationReadiness(db, r, userId),
+    readiness: ((x) => ({ ...x, stillNeeded: x.missing.map((m) => READINESS_STEPS[m] || m) }))(activationReadiness(db, r, userId)),
     job: r.job_id ? jobView(getJob(db, r.job_id)) : null,
     routeJob: r.route_job_id ? jobView(getJob(db, r.route_job_id)) : null,
     revocation: {

@@ -473,3 +473,13 @@ test('local proof: a Keycloak (OIDC) session is told to use a local sign-in inst
   assert.equal(localProofRefusal(db, 's-local', 'https://recovery.example.com', 'x').body.code, 'LOCAL_SESSION_REQUIRED');
   assert.equal(localProofRefusal(db, 's-none', origin, 'x').body.code, 'LOCAL_SESSION_REQUIRED');
 }));
+
+test('retire refusal names each missing readiness item in operator words', async () => {
+  const { readinessText, READINESS_STEPS } = await import('../lib/sso/store.js');
+  const text = readinessText(['administrator_link', 'login', 'sudo', 'recovery']);
+  assert.match(text, /Link my existing account/);
+  assert.match(text, /SSO login within the last hour/);
+  assert.match(text, /step-up/);
+  assert.match(text, /separate-browser recovery check/);
+  for (const k of ['administrator_link', 'client_and_passkey_settings', 'login', 'sudo', 'recovery', 'separate_recovery_session', 'recovery_route']) assert.ok(READINESS_STEPS[k], k);
+});

@@ -208,6 +208,15 @@ export const STAGE_OF = Object.freeze(Object.fromEntries(STAGES.flatMap(st => st
 const OPEN_STATES = ['queued', 'running'];
 // A service counts as verified for its stage while a re-verification runs;
 // a failure or an outstanding human step does not.
+// The coordinator stops at any removed runtime, so a personal credential entered
+// then would be stored and silently never used. Refuse it and name what to reinstall.
+const SERVICE_NAMES = { keycloak: 'Keycloak', pomerium: 'Pomerium', infisical: 'Infisical', openbao: 'OpenBao', vaultwarden: 'Vaultwarden' };
+export function removedRefusal(full) {
+  const removed = Object.keys(full?.state?.removed || {}).map(s => SERVICE_NAMES[s] || s);
+  if (!removed.length) return null;
+  const many = removed.length > 1;
+  return `${removed.join(' and ')} ${many ? 'were' : 'was'} removed, and setup does not continue past a removed service. Use Reinstall on ${many ? 'them' : 'it'} first${full.state.removed.infisical ? ' (Infisical asks for this password again after its reinstall)' : ''}. The password was not stored.`;
+}
 const serviceDone = s => !!s?.verification && !['failed', 'awaiting_user_action', 'runtime_removed'].includes(s.state);
 
 export function stagesFrom(r, services, { active, complete }) {

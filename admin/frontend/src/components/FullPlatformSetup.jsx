@@ -29,7 +29,7 @@ const STATUS = {
   locked: ['Locked', Lock, 'text-muted-foreground'],
 };
 
-function Address({ id, title, value, domains, onChange, disabled }) {
+function Address({ id, title, value, domains, onChange, disabled, apexNote = false }) {
   const hostname = value.replace(/^https:\/\//, '');
   const match = domains.find(d => hostname === d.domain || hostname.endsWith(`.${d.domain}`));
   const [selected, setSelected] = useState(match?.domain || 'other');
@@ -44,6 +44,7 @@ function Address({ id, title, value, domains, onChange, disabled }) {
     </select>
     {selected === 'other' ? <><Label htmlFor={`${id}-hostname`}>{title} hostname</Label><Input id={`${id}-hostname`} className="min-h-11" value={hostname} autoComplete="off" spellCheck={false} placeholder="service.example.com" onChange={e => onChange(e.target.value ? `https://${e.target.value.replace(/^https:\/\//, '')}` : '')} /></> : <><Label htmlFor={`${id}-subdomain`}>{title} subdomain (optional)</Label><Input id={`${id}-subdomain`} className="min-h-11" autoComplete="off" spellCheck={false} value={subdomain} onChange={e => { setSubdomain(e.target.value); onChange(`https://${e.target.value ? `${e.target.value}.` : ''}${selected}`); }} /></>}
     <p className="text-sm text-muted-foreground break-all">{value || 'Choose a hostname'}</p>
+    {apexNote && match && hostname === match.domain && <p role="note" className="text-sm text-amber-600 dark:text-amber-400 break-words">This is the bare domain {match.domain}. It works only if {match.domain} itself points at this server; it usually points at the main website. Use a subdomain such as recovery.{match.domain}. It cannot be changed after apply.</p>}
   </fieldset>;
 }
 
@@ -116,6 +117,12 @@ export default function FullPlatformSetup() {
     return () => { clearTimeout(timer); document.removeEventListener('visibilitychange', hide); };
   }, [revealed]);
   function change(next) { setConfig(next); setDirty(true); setReview(null); setNotice(''); }
+  // Suggest recovery.<domain of the ProxyPilot hostname> while the plan is unapproved and recovery is empty.
+  useEffect(() => {
+    if (!config || config.recoveryOrigin || data?.approvedRevision || !domains.length || !config.publicOrigin) return;
+    const host = config.publicOrigin.replace(/^https:\/\//, ''), d = domains.find(x => host === x.domain || host.endsWith(`.${x.domain}`));
+    if (d) change({ ...config, recoveryOrigin: `https://recovery.${d.domain}` });
+  }, [config?.publicOrigin, config?.recoveryOrigin, domains, data?.approvedRevision]);
   async function run(name, fn) {
     setBusy(name); setError(''); setNotice('');
     try { await fn(); } catch (e) { setError(e.message); } finally { setBusy(''); }
@@ -139,7 +146,7 @@ export default function FullPlatformSetup() {
         <p className="text-sm text-muted-foreground">Keycloak, Pomerium, Infisical, OpenBao and Vaultwarden are installed and managed as one system. Existing installations are prefilled; connection values and private service settings are managed automatically.</p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Address id="full-public" title="ProxyPilot" value={config.publicOrigin} domains={domains} disabled={locked} onChange={v => change({ ...config, publicOrigin: v })} />
-          <Address id="full-recovery" title="Local recovery" value={config.recoveryOrigin} domains={domains} disabled={locked} onChange={v => change({ ...config, recoveryOrigin: v })} />
+          <Address id="full-recovery" title="Local recovery" apexNote value={config.recoveryOrigin} domains={domains} disabled={locked} onChange={v => change({ ...config, recoveryOrigin: v })} />
           {Object.entries(config.services).map(([id, s]) => <Address key={id} id={`full-${id}`} title={names[id]} value={s.url} domains={domains} disabled={locked} onChange={v => change({ ...config, services: { ...config.services, [id]: { ...s, url: v } } })} />)}
         </div>
         <div className="space-y-2"><Label htmlFor="full-realm">Realm name</Label><Input id="full-realm" className="min-h-11" value={config.realm} disabled={locked} onChange={e => change({ ...config, realm: e.target.value })} /></div>

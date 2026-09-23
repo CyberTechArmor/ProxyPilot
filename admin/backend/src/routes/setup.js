@@ -76,7 +76,7 @@ setupRouter.post('/jobs/:id/retry', requireAdmin, requireSudo, (req, res) => {
   const db = getDb();
   const prior = getJob(db, String(req.params.id));
   if (!prior) return res.status(404).json({ error: 'No such job' });
-  if (['vaultwarden_apply', 'configure_vaultwarden_route', 'keycloak_setup', 'configure_keycloak_route', 'infisical_apply', 'configure_infisical_route', 'openbao_apply', 'configure_openbao_route', 'openbao_operator'].includes(prior.kind)) return res.status(409).json({ error: 'Review the saved platform service plan and retry from Platform Setup; its revision is required.' });
+  if (['vaultwarden_apply', 'configure_vaultwarden_route', 'keycloak_setup', 'configure_keycloak_route', 'infisical_apply', 'configure_infisical_route', 'openbao_apply', 'configure_openbao_route', 'openbao_operator', 'keycloak_ldap'].includes(prior.kind)) return res.status(409).json({ error: 'Review the saved platform service plan and retry from Platform Setup; its revision is required.' });
   if (!RUNNER_JOB_KINDS.includes(prior.kind) && !BACKEND_STEP_KINDS.includes(prior.kind)) return res.status(400).json({ error: `only runner jobs (${RUNNER_JOB_KINDS.join(', ')}) and backend steps (${BACKEND_STEP_KINDS.join(', ')}) can be retried here; a ${prior.kind} is retried from its own surface` });
   if (['queued', 'running'].includes(prior.status)) return res.status(409).json({ error: `job ${prior.id} is ${prior.status}` });
   const plan = retryPlan(prior);

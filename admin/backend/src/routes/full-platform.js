@@ -13,6 +13,7 @@ import { getJob } from '../lib/setup-engine/store.js';
 import { z } from 'zod';
 import { lifecycleReview, queueLifecycle } from '../lib/setup-engine/full-platform-lifecycle.js';
 import { resetReview, queueReset } from '../lib/setup-engine/full-platform-reset.js';
+import { ldapState, queueLdap } from '../lib/setup-engine/keycloak-ldap.js';
 export const fullPlatformRouter = Router();
 fullPlatformRouter.use(requireAdmin);
 fullPlatformRouter.use((_req, res, next) => { res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' }); next(); });
@@ -81,6 +82,17 @@ fullPlatformRouter.post('/infisical/administrator', requireSudo, handle((req, re
   const result = applyFullPlatform(db, { revision: full.revision, reviewToken: reviewFullPlatform(db).reviewToken, reviewed: true }, req.user.id);
   storeProtected(db, personalRef(r), { email: p.email, password: p.password, expiresAt: Date.now() + 900_000 });
   logAudit(req.user.id, 'INFISICAL_PERSONAL_HANDOFF_REQUESTED', 'setup_job', result.job.id, {}, req.ip);
+  res.status(202).json(result);
+}));
+// Quick LDAP Link (docs/features/keycloak-ldap.md): the Keycloak administrator
+// and bind passwords are a personal credential entry — fresh local proof, no
+// MCP tool, audited without values; the job deletes ProxyPilot's copies.
+fullPlatformRouter.get('/ldap', handle((_req, res) => res.json(ldapState(getDb()))));
+for (const [path, operation] of [['/ldap', 'link'], ['/ldap/remove', 'remove']]) fullPlatformRouter.post(path, requireSudo, handle((req, res) => {
+  const db = getDb();
+  { const refusal = localProofRefusal(db, req.session.id, requestOrigin(req), 'Entering a personal credential'); if (refusal) return res.status(refusal.status).json(refusal.body); }
+  const result = queueLdap(db, req.body, req.user, operation), c = result.ldap.config;
+  logAudit(req.user.id, operation === 'link' ? 'KEYCLOAK_LDAP_LINK_REQUESTED' : 'KEYCLOAK_LDAP_REMOVE_REQUESTED', 'setup_job', result.job.id, operation === 'link' ? { connectionUrl: c.connectionUrl, vendor: c.vendor, usersDn: c.usersDn, groupMapping: !!c.groupName } : { componentId: result.ldap.componentId }, req.ip);
   res.status(202).json(result);
 }));
 fullPlatformRouter.post('/openbao/recovery', requireSudo, handle((req, res) => {

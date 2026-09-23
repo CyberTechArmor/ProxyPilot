@@ -1,5 +1,6 @@
 import { VAULTWARDEN_SCHEMA } from './lib/setup-engine/vaultwarden-store.js';
 import { FULL_PLATFORM_SCHEMA } from './lib/setup-engine/full-platform-store.js';
+import { KEYCLOAK_LDAP_SCHEMA } from './lib/setup-engine/keycloak-ldap-schema.js';
 import { OPENBAO_SCHEMA } from './lib/setup-engine/openbao-store.js';
 import { INFISICAL_SCHEMA } from './lib/setup-engine/infisical-store.js';
 import { POMERIUM_SCHEMA } from './lib/setup-engine/pomerium-store.js';
@@ -157,6 +158,9 @@ export function getDb() {
 //               an operator revokes them) rather than on a clock, and the
 //               cleanup verb needs to know whether ProxyPilot created the
 //               guest it is offering to delete.
+//   1010 Quick LDAP Link — setup_keycloak_ldap: the one Keycloak directory
+//               link (non-secret config, recorded component id, sync counts;
+//               passwords only as short-lived protected references).
 //   1006 G5 — Infisical saved setup and protected credential references.
 //   1005 G4 — Pomerium setup, encrypted credentials and route protection ownership.
 //   1001 Setup engine — setup_runners: the host runners' heartbeats.
@@ -2377,6 +2381,8 @@ export function initDatabase() {
   runMigration(db, 1008, 'setup_vaultwarden', (d) => d.exec(VAULTWARDEN_SCHEMA));
   // 1008 belongs to the independent G7 branch.
   runMigration(db, 1009, 'setup_full_platform', (d) => d.exec(FULL_PLATFORM_SCHEMA));
+  // 1010: Quick LDAP Link — the one Keycloak directory link (non-secret config, recorded component id, sync counts).
+  runMigration(db, 1010, 'setup_keycloak_ldap', (d) => d.exec(KEYCLOAK_LDAP_SCHEMA));
 
   runMigration(db, 1002, 'setup_platform_plan', (d) => {
     d.exec(PLATFORM_PLAN_SCHEMA);

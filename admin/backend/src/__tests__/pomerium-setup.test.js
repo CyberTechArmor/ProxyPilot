@@ -46,6 +46,8 @@ function docker() {
     calls.push(argv);const a=argv.slice(1),ok=stdout=>({code:0,stdout:stdout||'',stderr:''});
     if(argv[0]!=='docker')throw new Error('Unexpected fixture command');
     if(a[0]==='container' && a[1]==='ls') return ok(container?POMERIUM_APP:'');
+    // The start helper's full inspect (no --format): immutable Id and state.
+    if(a[0]==='container' && a[1]==='inspect' && a.length===3) return container?ok(JSON.stringify([{Id:'id-pomerium',Name:'/'+POMERIUM_APP,State:{Running:container.running,Status:container.running?'running':'created'},HostConfig:{LogConfig:{Type:'local',Config:{'max-size':'10m','max-file':'3'}}}}])):{code:1,stdout:'',stderr:'No such container'};
     if(a[0]==='container' && a[1]==='inspect') return ok(JSON.stringify(container));
     if(a[0]==='create') {
       assert(!container,'duplicate container');const source=a[a.indexOf('--mount')+1].match(/source=([^,]+)/)[1];

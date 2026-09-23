@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import LxcContainers from './LxcContainers';
@@ -1160,7 +1161,13 @@ export default function Dashboard() {
             >
               <Folder className="h-4 w-4" />
             </Button>
-            {!service.isAdmin && (
+            {/* Owned platform routes are created by their service adapter: read-only here. */}
+            {service.platform && (
+              <Link to={service.platform.link} className="inline-flex items-center min-h-11 sm:min-h-9 px-2 rounded-md text-xs font-medium border border-primary/40 text-primary hover:bg-primary/10" title={service.platform.note} onClick={(e) => e.stopPropagation()}>
+                Platform · {service.platform.name}
+              </Link>
+            )}
+            {!service.isAdmin && !service.platform && (
               <>
                 {/* Settings button for all service types */}
                 <Button variant="ghost" size="icon" onClick={() => openSettings(service)} title="Service Settings">

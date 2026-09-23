@@ -38,7 +38,7 @@ export const configSchema = z.object({
   if (c.recoveryNetworks.length && (network.error || c.recoveryNetworks.some(n => /\/0$/.test(n)))) ctx.addIssue({ code: 'custom', message: 'Use restricted administrator/VPN networks; unrestricted access is refused.' });
 });
 export const saveSchema = z.object({ expectedRevision: z.number().int().nonnegative(), config: configSchema, reviewed: z.literal(true) }).strict();
-export const jobSchema = z.object({ revision: z.number().int().positive(), operation: z.enum(['administrator', 'retire', 'lifecycle', 'reset']).optional() }).strict();
+export const jobSchema = z.object({ revision: z.number().int().positive(), operation: z.enum(['administrator', 'retire', 'lifecycle', 'reset', 'keycloak_recovery']).optional() }).strict();
 export const applySchema = z.object({ revision: z.number().int().positive() }).extend({ reviewToken: z.string().regex(/^[a-f0-9]{64}$/), reviewed: z.literal(true) }).strict();
 const has = (db, table) => !!db.prepare('SELECT name FROM sqlite_master WHERE type=\'table\' AND name=?').get(table);
 const one = (db, table) => has(db, table) ? db.prepare(`SELECT * FROM ${table} WHERE id=1`).get() : null;
@@ -93,7 +93,7 @@ export function validateExisting(db, config) {
     if (selected.mode !== 'skip' && (selected.url !== target.url || selected.mode !== target.mode || id === 'keycloak' && config.realm !== target.realm)) throw fail(`${id}: hostname, ownership or realm migration requires a separate reviewed replacement. Keep this working target; its data and credentials will be retained.`, 'FULL_PLATFORM_MIGRATION_REQUIRED');
   }
   const old = readFullPlatform(db);
-  if (old?.approved_revision && digest(old.config.recoveryNetworks) !== digest(config.recoveryNetworks)) throw fail('Recovery restrictions are already bound to the saved service routes. Review their access change and re-verification through the existing route workflow first; this flow preserves the working recovery route.', 'FULL_PLATFORM_MIGRATION_REQUIRED');
+  if (old?.approved_revision && digest(old.config.recoveryNetworks) !== digest(config.recoveryNetworks)) throw fail('Recovery restrictions are already bound to the saved service routes. Change them with the reviewed restricted-network change (Platform overview → Edit restricted networks, or set_platform_restricted_networks); saving the plan never rewrites the working routes.', 'FULL_PLATFORM_MIGRATION_REQUIRED');
   if (old?.approved_revision && ['publicOrigin', 'recoveryOrigin', 'realm'].some(k => old.config[k] !== config[k])) throw fail('Issuer, recovery hostname and passkey RP-ID changes require a separate verified replacement. The current access path is preserved.', 'FULL_PLATFORM_MIGRATION_REQUIRED');
   const routes = db.prepare('SELECT id, domain FROM service_http_routes').all();
   for (const [id, selected] of Object.entries(config.services)) {
@@ -160,4 +160,33 @@ export function fullPlatformState(db) {
   const complete = r?.approved_revision === r?.revision && services.every(s => s.state === 'skipped' || s.state === 'verified') && r?.state?.administratorVerified === true && r?.state?.recoveryVerified === true && active;
   const stage = complete ? 'complete' : r?.state?.stage || (r?.approved_revision ? 'install' : r ? 'review' : 'domains');
   return { revision: r?.revision || 0, config, review: reviewFullPlatform(db), job, services, stage, complete, state: r?.state || {}, approvedRevision: r?.approved_revision || null, planRevision: r?.plan_revision || null, active };
+}
+
+// 3g: Custom / Advanced saved the shared service plan after this Full Platform
+// revision recorded it, so the coordinator refuses to continue. The
+// coordinator re-syncs the shared plan only for a NEW Full Platform revision,
+// and an unchanged save creates none. Resync creates that revision from the
+// saved values (nothing else changes); an applied revision stays applied, so
+// the next continue re-writes the shared plan from the Full Platform values.
+export function resyncReview(db) {
+  const full = readFullPlatform(db);
+  if (!full) throw fail('No Full Platform setup is saved.');
+  const shared = readPlatformPlan(db), blockers = [];
+  const inSync = !full.plan_revision || shared.revision === full.plan_revision;
+  if (inSync) blockers.push('The shared service plan already matches the one this Full Platform revision recorded; nothing to resync.');
+  const prior = full.last_job_id && getJob(db, full.last_job_id);
+  if (prior && ['queued', 'running'].includes(prior.status)) blockers.push(`Operation ${prior.id} is ${prior.status}. Wait for it.`);
+  return { revision: full.revision, next_revision: full.revision + 1, applied: full.approved_revision === full.revision, shared_plan_revision: shared.revision || null, recorded_plan_revision: full.plan_revision || null, in_sync: inSync, blockers,
+    effects: [`Creates Full Platform revision ${full.revision + 1} from the saved values (domains, realm, services and networks unchanged).`, 'On the next continue the coordinator writes the shared service plan from those values again, replacing what Custom / Advanced saved.', 'No service, route or credential changes until that continue.'] };
+}
+export function resyncSharedPlan(db, { revision }, by) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const review = resyncReview(db);
+    if (Number(revision) !== review.revision) throw fail(`The saved revision is ${review.revision}, not ${revision}. Reopen the saved plan.`, 'PLAN_REVISION_CONFLICT');
+    if (review.blockers.length) throw fail(review.blockers.join(' '), 'RESYNC_NOT_NEEDED');
+    db.prepare("UPDATE setup_full_platform SET revision=revision+1, approved_revision=CASE WHEN approved_revision=revision THEN revision+1 ELSE approved_revision END, updated_at=? WHERE id=1 AND revision=?").run(new Date().toISOString(), review.revision);
+    db.exec('COMMIT');
+    return { ...readFullPlatform(db), by: String(by) };
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
 }

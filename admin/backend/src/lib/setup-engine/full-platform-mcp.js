@@ -22,6 +22,7 @@ import { readPlatformPlan } from './platform-plan.js';
 import { getJob, jobView, listEvents } from './store.js';
 import { redact, redactText, parseJson, REDACTED } from './logic.js';
 import { decryptSecret, isEncrypted } from '../secrets.js';
+import { redactText as redactLogText } from './owned-runtime.js';
 import { KEYCLOAK_IMAGE, KEYCLOAK_DB_IMAGE, KEYCLOAK_PORT, KEYCLOAK_APP, resourceNames } from './keycloak-logic.js';
 import { POMERIUM_IMAGE, POMERIUM_APP, POMERIUM_PORT, POMERIUM_GRPC_PORT, POMERIUM_METRICS_PORT } from './pomerium-logic.js';
 import { INFISICAL_IMAGE, INFISICAL_DB_IMAGE, INFISICAL_REDIS_IMAGE, AGENT_PROXY_IMAGE, INFISICAL_APP, INFISICAL_PORT, TEST_PORT } from './infisical-logic.js';
@@ -31,7 +32,8 @@ import { VAULTWARDEN_IMAGE, VAULTWARDEN_APP, VAULTWARDEN_PORT, namesFor as vault
 
 export const FULL_PLATFORM_APP = 'pp-full-platform';
 export const SSO_APP = 'proxypilot-sso';
-export const PLATFORM_APPS = Object.freeze([FULL_PLATFORM_APP, KEYCLOAK_APP, POMERIUM_APP, INFISICAL_APP, OPENBAO_APP, VAULTWARDEN_APP, SSO_APP]);
+export const NETWORKS_APP = 'pp-platform-networks';
+export const PLATFORM_APPS = Object.freeze([FULL_PLATFORM_APP, KEYCLOAK_APP, POMERIUM_APP, INFISICAL_APP, OPENBAO_APP, VAULTWARDEN_APP, SSO_APP, NETWORKS_APP]);
 export const SERVICE_IDS = Object.freeze(SERVICES.map((s) => s.id));
 const APP_OF = { keycloak: KEYCLOAK_APP, pomerium: POMERIUM_APP, infisical: INFISICAL_APP, openbao: OPENBAO_APP, vaultwarden: VAULTWARDEN_APP };
 
@@ -110,14 +112,14 @@ function classify(db, reason, { service = null, phase = null } = {}) {
     }
     if (!obs.present) {
       const planDrift = full?.plan_revision && readPlatformPlan(db).revision !== full.plan_revision;
-      return { code: 'observer_missing', by: 'mcp', tool: planDrift ? 'reset_platform_setup' : 'continue_platform_setup',
+      return { code: 'observer_missing', by: 'mcp', tool: planDrift ? 'resync_platform_plan' : 'continue_platform_setup',
         need: `The observer is created by the Full Platform coordinator (connect_managed_identity), not by the ${service || 'service'} adapter; it does not exist yet, so the service was applied before the coordinator reached that step.${planDrift ? ' The coordinator cannot reach it while the shared plan differs from the one it saved (see shared_plan_changed).' : ' Continue the saved setup to let the coordinator create it, then retry the service.'}` };
     }
     return { code: 'observer_unverified', by: 'mcp', tool: 'continue_platform_setup', need: 'The observer exists but is not verified yet; continuing lets the coordinator re-run its SSO checks before retrying the service.' };
   }
   if (/Custom setup changed the shared service plan/.test(text)) {
-    return { code: 'shared_plan_changed', by: 'mcp', tool: 'reset_platform_setup',
-      need: 'The shared service plan was saved from Custom / Advanced after this Full Platform revision recorded it. The coordinator re-syncs the shared plan only when a NEW Full Platform revision is saved, and an unchanged save does not create one; start over with reset_platform_setup (data kept), or save a changed Full Platform plan.' };
+    return { code: 'shared_plan_changed', by: 'mcp', tool: 'resync_platform_plan',
+      need: 'The shared service plan was saved from Custom / Advanced after this Full Platform revision recorded it. Resync it (resync_platform_plan, or Platform overview → Resync shared plan): that creates a new Full Platform revision from the saved values, and the next continue writes the shared plan again. No reset is needed.' };
   }
   if (/No private runner address/.test(text)) return { code: 'agent_proxy_address', by: 'human', need: text, where: HUMAN.host };
   if (/confirm the existing Pomerium|external owner must complete|External Keycloak|explicit Custom connection/.test(text)) return { code: 'external_connection', by: 'human', need: text, where: HUMAN.custom };
@@ -262,8 +264,8 @@ export function applyRefusal(db, { kind, revision, reviewToken }) {
   if (first?.id === 'recovery_networks') return { error: first.need, code: 'RECOVERY_NETWORK_REQUIRED', next_action: first };
   if (kind === 'continue' && first && !first.mcp_can_do && !mcpWork) return { error: `The next step needs a human: ${first.need}`, code: 'HUMAN_STEP_REQUIRED', next_action: first };
   if (kind === 'continue') {
-    const reset = view.next_actions.find((a) => a.tool === 'reset_platform_setup');
-    if (reset) return { error: `Continuing cannot succeed: ${reset.need}`, code: 'SHARED_PLAN_CHANGED', next_action: reset };
+    const resync = view.next_actions.find((a) => a.tool === 'resync_platform_plan');
+    if (resync) return { error: `Continuing cannot succeed: ${resync.need}`, code: 'SHARED_PLAN_CHANGED', next_action: resync };
   }
   return null;
 }
@@ -315,7 +317,7 @@ export function containerNames(service, row) {
   return [vaultNames(row).server];
 }
 
-function rowFor(db, service) {
+export function rowFor(db, service) {
   const t = installedTargets(db)[service];
   return t ? { target: t, row: service === 'keycloak' ? t.row : serviceReaders[service](db) } : { target: null, row: null };
 }
@@ -358,7 +360,7 @@ export function platformServiceView(db, service, { runtime = null, runtimeError 
   return redact(out);
 }
 
-function verificationView(db, service, row) {
+export function verificationView(db, service, row) {
   if (!row) return { status: 'not_verified', label: 'No saved service record.' };
   const raw = service === 'keycloak' ? (row.verified_json ? parseJson(row.verified_json) : null) : (row.verified_json ? parseJson(row.verified_json) : null);
   if (!raw) return { status: 'not_verified', label: 'No configuration verification is recorded.' };
@@ -380,8 +382,11 @@ export function runtimeFacts(service, row, inspected) {
   const out = {};
   for (const c of inspected || []) {
     const name = String(c.Name || '').replace(/^\//, '');
+    const driver = c.HostConfig?.LogConfig?.Type || null;
     out[name] = { present: true, id: String(c.Id || '').slice(0, 12), image: c.Config?.Image || null, running: !!c.State?.Running, status: c.State?.Status || null,
-      health: c.State?.Health?.Status || (c.State?.Running ? 'running (no healthcheck)' : 'stopped'), started_at: c.State?.StartedAt || null, owned_label: c.Config?.Labels?.[label] === ref };
+      health: c.State?.Health?.Status || (c.State?.Running ? 'running (no healthcheck)' : 'stopped'), started_at: c.State?.StartedAt || null, owned_label: c.Config?.Labels?.[label] === ref,
+      ...(c.State?.Running ? {} : { exit_code: c.State?.ExitCode ?? null, error: c.State?.Error ? redactLogText(String(c.State.Error)).slice(0, 300) : null, finished_at: c.State?.FinishedAt || null }),
+      log_driver: driver, logs_readable: driver ? driver !== 'none' : null };
   }
   return out;
 }

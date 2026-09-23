@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
 import { readPrivate,atomicPrivate } from './pomerium-runtime.js';
+import { LOG_ARGS,dockerFailure,startOwnedContainer } from './owned-runtime.js';
 import { INFISICAL_ROOT,INFISICAL_IMAGE,INFISICAL_DB_IMAGE,INFISICAL_REDIS_IMAGE,AGENT_PROXY_IMAGE,INFISICAL_PORT,infisicalError as fail,digest } from './infisical-logic.js';
 const OWNER='io.proxypilot.infisical';
 export const namesFor=r=>{const prefix=`pp-if-${r.credential_ref.slice(-12)}`;return {network:`${prefix}-data-net`,proxyNetwork:`${prefix}-proxy-net`,database:`${prefix}-db`,redis:`${prefix}-redis`,server:`${prefix}-server`,proxy:`${prefix}-proxy`,databaseVolume:`${prefix}-pg`,redisVolume:`${prefix}-redis-data`,proxyVolume:`${prefix}-proxy-state`};};
@@ -35,7 +36,7 @@ export async function assertIsolatedAgentVm(config,{exec,job}) {
 }
 export function dockerAdapter(exec,job){
   const call=async args=>{job.fence();const r=await exec.host(['docker',...args],{timeoutMs:120000});job.fence();return r;};
-  const must=async(args,label)=>{const r=await call(args);if(r.code!==0)throw fail(`Infisical ${label} failed. Inspect the named owned resource locally; raw runtime output is withheld.`);return r;};
+  const must=async(args,label)=>{const r=await call(args);if(r.code!==0)throw dockerFailure(fail,`Infisical ${label}`,r);return r;};
   const inspect=async(kind,name)=>{const list=await must(kind==='container'?['container','ls','-a','--format','{{.Names}}']:[kind,'ls','--format','{{.Name}}'],`${kind} inventory`);if(!list.stdout.trim().split('\n').includes(name))return null;
     const r=await must([kind,'inspect',name],`${kind} inspection`);try{const v=JSON.parse(r.stdout);if(!Array.isArray(v)||v.length!==1)throw Error();return v[0];}catch{throw fail('Docker inspection could not establish resource identity.');}};
   return {call,must,inspect};
@@ -43,7 +44,7 @@ export function dockerAdapter(exec,job){
 export function assertContainer(actual,spec,{external=false}={}) {
   const c=actual.Config||{},h=actual.HostConfig||{},ports=h.PortBindings||{},mounts=actual.Mounts||[];
   const samePorts=digest(ports)===digest(spec.ports||{});
-  if(c.Image!==spec.image||(!external&&c.Labels?.[OWNER]!==spec.owner)||h.NetworkMode!==spec.network||h.RestartPolicy?.Name!=='unless-stopped'||h.Privileged||h.LogConfig?.Type!=='none'||h.PidMode||h.IpcMode==='host'||h.CapAdd?.length||h.Devices?.length||!samePorts||mounts.length!==spec.mounts.length||spec.mounts.some(m=>!mounts.some(a=>a.Type===m.Type&&a.Destination===m.Destination&&(m.Type==='volume'?a.Name===m.Name:a.Source===m.Source)&&a.RW===m.RW))||Object.keys(actual.NetworkSettings?.Networks||{}).some(n=>n!==spec.network))throw fail('Docker container configuration or isolation differs from the reviewed profile. No adoption, replacement or restart was attempted.');
+  if(c.Image!==spec.image||(!external&&c.Labels?.[OWNER]!==spec.owner)||h.NetworkMode!==spec.network||h.RestartPolicy?.Name!=='unless-stopped'||h.Privileged||h.PidMode||h.IpcMode==='host'||h.CapAdd?.length||h.Devices?.length||!samePorts||mounts.length!==spec.mounts.length||spec.mounts.some(m=>!mounts.some(a=>a.Type===m.Type&&a.Destination===m.Destination&&(m.Type==='volume'?a.Name===m.Name:a.Source===m.Source)&&a.RW===m.RW))||Object.keys(actual.NetworkSettings?.Networks||{}).some(n=>n!==spec.network))throw fail('Docker container configuration or isolation differs from the reviewed profile. No adoption, replacement or restart was attempted.');
   if(spec.command&&digest(c.Cmd)!==digest(spec.command))throw fail('Agent Proxy command differs from the pinned start/block profile.');
   const env=Object.fromEntries((c.Env||[]).map(x=>{const p=x.indexOf('=');return [x.slice(0,p),x.slice(p+1)];}));
   for(const [k,v] of Object.entries(spec.env||{}))if(env[k]!==v)throw fail('Docker credential/configuration environment differs from the protected reference.');
@@ -66,16 +67,16 @@ export async function ensureInfisicalRuntime(r,{exec,job,root=INFISICAL_ROOT,att
     {key:'server',image:INFISICAL_IMAGE,env:envObject(readPrivate(files.serverEnv)),envFile:files.serverEnv,ports:{'8080/tcp':[{HostIp:'127.0.0.1',HostPort:String(INFISICAL_PORT)}]},mounts:[]}
   ];
   for(const spec of specs){spec.owner=owner;spec.network=names.network;
-    if(!inventory[spec.key]){const args=['create','--name',names[spec.key],...labels,'--restart','unless-stopped','--network',names.network,'--log-driver','none'];if(spec.envFile)args.push('--env-file',spec.envFile);for(const m of spec.mounts)args.push('--mount',`type=volume,source=${m.Name},target=${m.Destination}`);if(spec.ports)args.push('--publish',`127.0.0.1:${INFISICAL_PORT}:8080`);args.push(spec.image,...(spec.command||[]));await d.must(args,`${spec.key} create`);}
+    if(!inventory[spec.key]){const args=['create','--name',names[spec.key],...labels,'--restart','unless-stopped','--network',names.network,...LOG_ARGS];if(spec.envFile)args.push('--env-file',spec.envFile);for(const m of spec.mounts)args.push('--mount',`type=volume,source=${m.Name},target=${m.Destination}`);if(spec.ports)args.push('--publish',`127.0.0.1:${INFISICAL_PORT}:8080`);args.push(spec.image,...(spec.command||[]));await d.must(args,`${spec.key} create`);}
     const actual=await d.inspect('container',names[spec.key]);await verifyImageDefaults(d,actual,spec);assertContainer(actual,spec);
-    if(!actual.State?.Running)await d.must(['start',names[spec.key]],`${spec.key} start`);
+    await startOwnedContainer({run:argv=>exec.host(argv,{timeoutMs:120000}),name:names[spec.key],fail,job,label:`Infisical ${spec.key}`,requireHealth:false,sleep});
     const probe=spec.key==='database'?['exec',names.database,'pg_isready','-U','infisical','-d','infisical']:spec.key==='redis'?['exec',names.redis,'redis-cli','ping']:['exec',names.server,'node','-e',"fetch('http://127.0.0.1:8080/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"];
     let ready=false;for(let i=0;i<attempts;i++){if((await d.call(probe)).code===0){ready=true;break;}await sleep(2000);}if(!ready)throw fail(`Infisical ${spec.key} readiness was not established. Retry preserves data and keys.`);
   }
   job.generated({kind:'infisical_backup_set',where:files.root,name:owner});
   return {...names,directory:files.root,protectedRef:files.bundle,serverImage:INFISICAL_IMAGE,databaseImage:INFISICAL_DB_IMAGE,redisImage:INFISICAL_REDIS_IMAGE};
 }
-export async function ensureAgentProxyRuntime(r,values,{exec,job,root=INFISICAL_ROOT}={}) {
+export async function ensureAgentProxyRuntime(r,values,{exec,job,root=INFISICAL_ROOT,sleep}={}) {
   if(r.config.agentMode==='skip')return {state:'skipped'};
   const d=dockerAdapter(exec,job),n=namesFor(r),external=r.config.agentMode==='connect';
   const name=external?r.config.externalProxyContainer:n.proxy,actual=await d.inspect('container',name);
@@ -99,11 +100,11 @@ export async function ensureAgentProxyRuntime(r,values,{exec,job,root=INFISICAL_
     if(kind==='network'&&Object.values(resource?.Containers||{}).some(c=>c.Name!==name))throw fail('Agent Proxy bridge is shared with another container. Nothing was changed.');
   }
   if(!actual){
-    await d.must(['create','--name',name,'--label',`${OWNER}=${r.credential_ref}`,'--restart','unless-stopped','--network',spec.network,'--log-driver','none','--env-file',envFile,'--publish',`${new URL(r.config.proxyOrigin).hostname}:17322:17322`,'--mount',`type=volume,source=${n.proxyVolume},target=/root/.infisical`,AGENT_PROXY_IMAGE,...command],'Agent Proxy create');
+    await d.must(['create','--name',name,'--label',`${OWNER}=${r.credential_ref}`,'--restart','unless-stopped','--network',spec.network,...LOG_ARGS,'--env-file',envFile,'--publish',`${new URL(r.config.proxyOrigin).hostname}:17322:17322`,'--mount',`type=volume,source=${n.proxyVolume},target=/root/.infisical`,AGENT_PROXY_IMAGE,...command],'Agent Proxy create');
   }
   const verified=await d.inspect('container',name);await verifyImageDefaults(d,verified,spec);assertContainer(verified,spec,{external});
   if(external&&!verified.State?.Running)throw fail('Existing Agent Proxy is stopped. The operator must start it; Connect does not restart services.');
-  if(!external&&!verified.State?.Running)await d.must(['start',name],'Agent Proxy start');
+  if(!external)await startOwnedContainer({run:argv=>exec.host(argv,{timeoutMs:120000}),name,fail,job,label:'Infisical Agent Proxy',requireHealth:false,sleep});
   return {container:name,network:spec.network,volume:spec.mounts[0].Name,image:AGENT_PROXY_IMAGE,ownership:external?'external':'managed',endpoint:r.config.proxyOrigin,credentialRef:r.credential_ref};
 }
 

@@ -269,7 +269,7 @@ export function createAdminHandlers(kit) {
   });
 
   const list_feature_flags = reader('list_feature_flags', async () => {
-    const flags = Object.entries(policy.feature_flags).filter(([k]) => !k.startsWith('$')).map(([name, def]) => ({ name, enabled: flag(name), default: def.default !== false, description: def.description }));
+    const flags = Object.entries(policy.feature_flags).filter(([k]) => !k.startsWith('$')).map(([name, def]) => ({ name, enabled: flag(name), default: def.default !== false, ...(def.human_only ? { human_only: true, changed_by: 'an administrator in the dashboard only' } : {}), description: def.description }));
     return ok({ flags });
   });
 
@@ -277,6 +277,9 @@ export function createAdminHandlers(kit) {
     const name = String(args.name || '');
     note.subject_id = name;
     if (!policy.feature_flags[name] || name.startsWith('$')) return err(`Unknown flag ${name}. list_feature_flags shows them.`);
+    // Human-only flags (mcp.platform) are refused in BOTH directions, so an MCP
+    // client can never re-enable, or toggle, its own access.
+    if (policy.feature_flags[name].human_only) { note.refused = true; return err(`${name} is human-only and cannot be changed over MCP, on or off. An administrator changes it in the dashboard: Platform Setup → Platform MCP access (audited).`); }
     if (typeof args.enabled !== 'boolean') return err('enabled must be a boolean');
     const current = flag(name);
     const d = dry(args, { name, current, enabled: args.enabled }); if (d) return d;
@@ -385,7 +388,9 @@ export function createAdminHandlers(kit) {
       certificates: q('SELECT id, label, covered_names, not_before, not_after, created_at FROM tls_certificates'),
       routes: q('SELECT r.domain, r.path_prefix, r.ssl_enabled, r.force_https, s.name AS service FROM service_http_routes r JOIN services s ON s.id = r.service_id'),
       notification_channels: q('SELECT kind, enabled, test_status, test_at FROM notification_channels'),
-      feature_flags: Object.keys(policy.feature_flags).filter((k) => !k.startsWith('$')).map((name) => ({ name, enabled: flag(name) })),
+      feature_flags: Object.keys(policy.feature_flags).filter((k) => !k.startsWith('$')).map((name) => ({ name, enabled: flag(name), ...(policy.feature_flags[name].human_only ? { human_only: true } : {}) })),
+      // Every recorded flag change (dashboard toggle, migration, MCP) regardless of `since`: who, old, new, when.
+      feature_flag_changes: q("SELECT a.created_at, a.action, a.resource_id AS flag, a.user_id, u.username, a.details FROM audit_log a LEFT JOIN users u ON u.id = a.user_id WHERE a.resource_type = 'feature_flag' ORDER BY a.created_at").map((r) => { let d = {}; try { d = JSON.parse(r.details || '{}'); } catch { d = {}; } return { at: r.created_at, flag: r.flag, by: r.username || r.user_id || d.via || null, previous: d.previous ?? null, enabled: d.enabled ?? null, via: d.via || (r.action === 'MCP_SET_FEATURE_FLAG' ? 'mcp' : null) }; }),
       security_reports: [],
     };
     try { evidence.security_reports = (await readdir(REPORTS_DIR)).filter((f) => /^(lynis|trivy)-/.test(f)).sort().slice(-20); } catch { /* none */ }

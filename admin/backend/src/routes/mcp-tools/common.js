@@ -50,6 +50,8 @@ export function createToolkit(ctx) {
 
   function flagRefusal(name) {
     if (flag(name)) return null;
+    // A human-only flag (mcp.platform) is never changed over MCP; say where a person turns it on.
+    if (policy.feature_flags?.[name]?.human_only) return `The feature flag ${name} is off on this install, so this tool refuses before doing any work. An administrator turns it on in the dashboard: Platform Setup → the Platform MCP access switch at the top of the Platform section. It cannot be changed over MCP.`;
     return `The feature flag ${name} is off on this install — set_feature_flag({ name: "${name}", enabled: true }) turns it back on.`;
   }
 

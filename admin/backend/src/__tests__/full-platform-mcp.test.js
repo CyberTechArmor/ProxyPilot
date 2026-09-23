@@ -21,7 +21,7 @@ import { readInfisical } from '../lib/setup-engine/infisical-store.js';
 import { readPomerium } from '../lib/setup-engine/pomerium-store.js';
 import { verifyClient } from '../lib/setup-engine/vaultwarden-identity.js';
 import { createJob, getJob, startJob, appendEvent } from '../lib/setup-engine/store.js';
-import { removeResetRoutes } from '../lib/setup-engine/full-platform-reset.js';
+import { removeResetRoutes, FIXED_PATH_SERVICES } from '../lib/setup-engine/full-platform-reset.js';
 import { validateRunnerJob } from '../lib/setup-engine/logic.js';
 import { BACKEND_STEP_KINDS } from '../lib/setup-engine/setup-logic.js';
 import { resourceNames } from '../lib/setup-engine/keycloak-logic.js';
@@ -41,8 +41,10 @@ const body = (r) => { try { return JSON.parse(r.content[0].text); } catch { retu
 const text = (r) => r.content[0].text;
 const terminal = (db, id, status = 'succeeded', verification = null) => db.prepare('UPDATE setup_jobs SET status=?,owner=NULL,verification_json=? WHERE id=?').run(status, verification ? JSON.stringify(verification) : null, id);
 
-function tools(db, { now = () => Date.now(), flags = {}, host = null } = {}) {
-  const settings = new Map(Object.entries(flags).map(([k, v]) => [`feature_flag:${k}`, v ? '1' : '0']));
+function tools(db, { now = () => Date.now(), flags = {}, host = null, resolvers = null } = {}) {
+  // mcp.platform is off on a new install; these tests model an install where an
+  // administrator turned it on (or migration 915 kept it on).
+  const settings = new Map(Object.entries({ 'mcp.platform': true, ...flags }).map(([k, v]) => [`feature_flag:${k}`, v ? '1' : '0']));
   const ledger = [], audit = [];
   db.exec(`CREATE TABLE IF NOT EXISTS mcp_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, token_id INTEGER, actor TEXT, tool TEXT NOT NULL, subject_type TEXT, subject_id TEXT, project_id INTEGER, args_json TEXT,
     outcome TEXT NOT NULL CHECK(outcome IN ('ok','error','dry_run','refused','needs_confirmation')), dry_run INTEGER NOT NULL DEFAULT 0, confirmation_used INTEGER NOT NULL DEFAULT 0, snapshot TEXT, summary TEXT, detail_json TEXT, duration_ms INTEGER)`);
@@ -51,6 +53,8 @@ function tools(db, { now = () => Date.now(), flags = {}, host = null } = {}) {
     toolResult, policy: POLICY, confirmations: createConfirmationStore({ now }),
     runHostCapture: host || (async () => ({ status: 1, stdout: '', stderr: 'no host in this test' })),
     resolveHost: async (h) => (h.endsWith('example.com') ? ['203.0.113.10'] : []),
+    // Host resolver and 1.1.1.1 both answer the Caddy host for example.com (3e).
+    platformResolvers: resolvers || { host: async (h) => (h.endsWith('example.com') ? ['203.0.113.10'] : []), public: async (h) => (h.endsWith('example.com') ? ['203.0.113.10'] : []) },
   };
   const kit = createToolkit(ctx);
   const h = createPlatformHandlers(kit);
@@ -64,7 +68,7 @@ async function connected(db) {
   storeProtected(db, `keycloak-bootstrap-${k.id}`, { installationId: k.id, password: 'b'.repeat(43), retired: false });
   const identity = async (db, k, full, { job }) => { const admin = await keycloakAdmin(k, 'b'.repeat(43), { send: wire.send, job }); try { return await reconcileOwnedIdentity(db, k, full, admin.api, job); } finally { await admin.close(); } };
   startJob(db, { id: job.id, owner: 'runner@fp-mcp#1:a' });
-  const args = { db, params: { revision: 1 }, job: handle(job.id), identity, interfaces: { test: [{ address: '10.20.30.40', internal: false }] } };
+  const args = { db, params: { revision: 1 }, job: handle(job.id), identity, interfaces: { test: [{ address: '10.20.30.40', internal: false }] }, dnsCheck: async () => null };
   for (let i = 0; i < 6; i++) {
     const result = await runFullPlatformOperation(args);
     for (const c of db.prepare("SELECT id,kind FROM setup_jobs WHERE id!=? AND status='queued'").all(job.id)) {
@@ -116,8 +120,8 @@ test('get_platform_setup explains the Vaultwarden observer failure: job, reason 
   db.prepare('UPDATE setup_platform_plan SET revision=revision+1').run();
   const drift = body(await call('get_platform_setup'));
   assert.equal(drift.shared_plan_in_sync, false);
-  assert.equal(drift.failures.find((x) => x.scope === 'vaultwarden').tool, 'reset_platform_setup');
-  assert.ok(drift.next_actions.some((a) => a.id === 'shared_plan_changed' && a.tool === 'reset_platform_setup'));
+  assert.equal(drift.failures.find((x) => x.scope === 'vaultwarden').tool, 'resync_platform_plan');
+  assert.ok(drift.next_actions.some((a) => a.id === 'shared_plan_changed' && a.tool === 'resync_platform_plan'));
 }));
 
 test('retrying Vaultwarden is refused while the observer is missing; with it present the retry reuses the stored encrypted inputs', () => withDb(async (db) => {
@@ -342,7 +346,14 @@ test('reset (default): owned containers and routes go, records are discarded, da
     assert.equal(result.verification.state, 'platform_reset');
     assert.equal(host.containers.size, 0);
     assert.equal(host.volumes.size, 6); assert.equal(host.networks.size, 5);
-    for (const root of Object.values(host.roots)) assert.ok(existsSync(join(root, 'sentinel')));
+    // 3i: fixed-path data is moved aside to a dated sibling (nothing deleted),
+    // so a later managed install starts clean; Keycloak's per-installation
+    // directory stays where it is.
+    for (const [service, root] of Object.entries(host.roots)) {
+      const aside = result.verification.moved?.[service];
+      if (FIXED_PATH_SERVICES.includes(service)) { assert.ok(aside && aside.startsWith(`${root}.retained-`), `${service} moved aside`); assert.ok(existsSync(join(aside, 'sentinel'))); assert.ok(!existsSync(root)); }
+      else assert.ok(existsSync(join(root, 'sentinel')));
+    }
     assert.ok(!host.calls.some((c) => c.includes('--volumes') || (c[1] === 'volume' && c[2] === 'rm')));
     assert.deepEqual(db.prepare('SELECT id FROM service_http_routes').all().map((r) => r.id), ['test-route']);
     assert.equal(readFullPlatform(db), null); assert.equal(readVaultwarden(db), null); assert.equal(db.prepare('SELECT count(*) n FROM sso_config').get().n, 0);
@@ -459,8 +470,10 @@ test('no secret, credential, password or key material appears in any platform to
 
 test('human-only actions have no MCP tool; platform tools take no secret input; scoped keys and job validation know the family', () => {
   const names = MCP_EXT_TOOL_GROUPS.platform.map((t) => t.name);
-  assert.deepEqual(names.sort(), ['apply_platform_setup', 'continue_platform_setup', 'get_platform_job', 'get_platform_service', 'get_platform_setup', 'list_platform_jobs', 'manage_platform_service', 'platform_preflight', 'reset_platform_setup', 'save_platform_setup']);
-  for (const t of MCP_EXT_TOOLS) assert.doesNotMatch(t.name, /reveal|bootstrap|activate_sso|unseal|keycloak_admin|retire/, `${t.name} must not exist`);
+  assert.deepEqual(names.sort(), ['apply_platform_setup', 'continue_platform_setup', 'control_platform_container', 'get_platform_job', 'get_platform_service', 'get_platform_service_logs', 'get_platform_setup', 'list_platform_jobs', 'manage_platform_service', 'platform_preflight', 'recover_keycloak_bootstrap', 'reset_platform_setup', 'resync_platform_plan', 'save_platform_setup', 'set_platform_restricted_networks', 'verify_platform_service']);
+  // recover_keycloak_bootstrap is the one reviewed exception: it generates its
+  // own credential and takes none (the property check below covers that).
+  for (const t of MCP_EXT_TOOLS) if (t.name !== 'recover_keycloak_bootstrap') assert.doesNotMatch(t.name, /reveal|bootstrap|activate_sso|unseal|keycloak_admin|retire/, `${t.name} must not exist`);
   for (const t of MCP_EXT_TOOL_GROUPS.platform) {
     for (const prop of Object.keys(t.inputSchema.properties)) assert.doesNotMatch(prop, /password|secret|otp|share|pgp|root|admin_token|client_secret|^token$/i, `${t.name}.${prop}`);
   }

@@ -80,6 +80,7 @@ import { agentCall } from '../lib/agent.js';
 import { storageService } from '../lib/storage/index.js';
 import { migrationService } from '../lib/migration/index.js';
 import { createExtendedHandlers } from './mcp-tools/index.js';
+import { platformRouteRefusal } from '../lib/setup-engine/platform-hostnames.js';
 import { instanceIdentity } from '../lib/setup-engine/lifecycle-logic.js';
 import { createConfirmationStore, parseTokenScope, scopeRefusal, filterCatalogForScope } from '../lib/mcp-ext/logic.js';
 import {
@@ -2259,6 +2260,8 @@ async function toolTestRoute(args, auth) {
 async function toolSetRoute(args, auth) {
   const domain = validDomainName(args.domain);
   if (!domain) return toolResult('domain must be a fully qualified hostname, e.g. web.example.com', { isError: true });
+  // A hostname in the saved Full Platform plan is routed by its service adapter.
+  { const pr = platformRouteRefusal(getDb(), { hostname: domain }); if (pr) return toolResult(pr, { isError: true }); }
   const port = normalizePort(args.upstream_port);
   if (!port) return toolResult('upstream_port must be a port number (1–65535)', { isError: true });
   const hasContainer = args.upstream_container != null && String(args.upstream_container).trim() !== '';
@@ -4512,6 +4515,8 @@ const extended = createExtendedHandlers({
   listBackupsRunning: null,
   storage: storageService,
   migration: migrationService,
+  // A queued backend step (the reviewed restricted-network change) runs now, not on the next interval.
+  drainBackendStepsNow: () => { import('../mock2/ops.js').then((m) => m.drainBackendStepsNow?.()).catch(() => {}); },
 });
 export const EXTENDED_TOOL_NAMES = Object.freeze(Object.keys(extended.handlers));
 

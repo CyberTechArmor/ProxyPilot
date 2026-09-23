@@ -4,20 +4,20 @@ import { lookup } from 'node:dns/promises';
 import { allowedAddress } from './keycloak-discovery.js';
 import { fail, VAULTWARDEN_PORT, VAULTWARDEN_VERSION, expectedSettings, digest } from './vaultwarden-logic.js';
 // Only fixed read endpoints and admin authentication, never admin mutations.
-export async function vaultwardenRequest(origin, path, { adminToken, resolve = lookup, request = https.request, local = false } = {}) {
+export async function vaultwardenRequest(origin, path, { adminToken, resolve = lookup, request = https.request, local = false, edge = null } = {}) {
   const u = new URL(path, origin);
   if (u.origin !== origin || u.username || u.password || u.search || u.hash || !['/api/version', '/alive', '/admin/'].includes(u.pathname) ||
       (local ? origin !== `http://127.0.0.1:${VAULTWARDEN_PORT}` : u.protocol !== 'https:')) throw fail('Vaultwarden request is outside its reviewed origin or read-only endpoints.');
   let addresses;
-  try { addresses = local ? [{ address: '127.0.0.1', family: 4 }] : await Promise.race([resolve(u.hostname, { all: true, family: 4 }), new Promise((_, reject) => { const t = setTimeout(() => reject(Error()), 5000); t.unref(); })]); }
+  try { addresses = local ? [{ address: '127.0.0.1', family: 4 }] : edge ? [{ address: edge.address, family: 4 }] : await Promise.race([resolve(u.hostname, { all: true, family: 4 }), new Promise((_, reject) => { const t = setTimeout(() => reject(Error()), 5000); t.unref(); })]); }
   catch { throw fail('Vaultwarden DNS could not be verified.'); }
-  if (!addresses.length || !local && addresses.some(a => !allowedAddress(a.address))) throw fail('Vaultwarden DNS points to a blocked special-use address.');
+  if (!addresses.length || !local && !edge && addresses.some(a => !allowedAddress(a.address))) throw fail('Vaultwarden DNS points to a blocked special-use address.');
   const form = path === '/admin/' && adminToken ? new URLSearchParams({ token: adminToken }).toString() : null;
   return new Promise((done, reject) => {
     let size = 0; const chunks = [];
     const req = (local && request === https.request ? http.request : request)(u, { method: form ? 'POST' : 'GET', agent: false, timeout: 7000,
       lookup: (_h, o, cb) => o.all ? cb(null, [addresses[0]]) : cb(null, addresses[0].address, 4),
-      headers: { Accept: path === '/admin/' ? 'text/html' : 'application/json', ...(form ? { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(form) } : {}) } }, res => {
+      headers: { ...(edge?.headers || {}), Accept: path === '/admin/' ? 'text/html' : 'application/json', ...(form ? { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(form) } : {}) } }, res => {
       res.on('data', b => { size += b.length; if (size > 1024 * 1024) req.destroy(); else chunks.push(b); });
       res.on('error', () => reject(fail('Vaultwarden response failed; upstream details withheld.')));
       res.on('end', () => { let body = null; if (res.statusCode === 200) { const text = Buffer.concat(chunks).toString('utf8'); if (path === '/admin/') body = text; else try { body = JSON.parse(text); } catch {} } done({ status: res.statusCode, body }); });
@@ -26,8 +26,8 @@ export async function vaultwardenRequest(origin, path, { adminToken, resolve = l
     req.on('error', () => reject(fail('Vaultwarden is unavailable (DNS, TLS, timeout or reachability); upstream details withheld.'))); req.end(form);
   });
 }
-export function createClient(origin, { send = vaultwardenRequest, job, local = false } = {}) {
-  return async (path, options = {}) => { job?.fence(); const out = await send(origin, path, { ...options, local }); job?.fence(); return out; };
+export function createClient(origin, { send = vaultwardenRequest, job, local = false, edge = null } = {}) {
+  return async (path, options = {}) => { job?.fence(); const out = await send(origin, path, { ...options, local, ...(edge ? { edge } : {}) }); job?.fence(); return out; };
 }
 export async function health(api) {
   try { const v = await api('/api/version'); if (v.status !== 200 || typeof v.body !== 'string') return { state: 'unavailable' };

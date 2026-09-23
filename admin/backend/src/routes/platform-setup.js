@@ -1,5 +1,6 @@
 import { vaultwardenRouter } from './vaultwarden.js';
 import { fullPlatformRouter } from './full-platform.js';
+import { platformOverviewRouter } from './platform-overview.js';
 import { openbaoRouter } from './openbao.js';
 import { infisicalRouter } from './infisical.js';
 import { pomeriumRouter } from './pomerium.js';
@@ -16,6 +17,7 @@ import { SERVICES, planInputSchema, savePlanSchema, readPlatformPlan, platformSt
 export const platformSetupRouter = Router();
 platformSetupRouter.use(requireAdmin);
 platformSetupRouter.use('/full', fullPlatformRouter);
+platformSetupRouter.use('/overview', platformOverviewRouter);
 platformSetupRouter.use('/sso', ssoSetupRouter);
 platformSetupRouter.use('/pomerium', pomeriumRouter);
 platformSetupRouter.use('/infisical', infisicalRouter);

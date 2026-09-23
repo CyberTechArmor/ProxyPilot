@@ -2,6 +2,7 @@ import { mkdirSync, lstatSync, existsSync, readdirSync, readFileSync } from 'nod
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readPrivate, atomicPrivate } from './pomerium-runtime.js';
+import { LOG_ARGS, dockerFailure, startOwnedContainer } from './owned-runtime.js';
 import { VAULTWARDEN_ROOT, VAULTWARDEN_IMAGE, VAULTWARDEN_PORT, fail, namesFor, expectedSettings, digest } from './vaultwarden-logic.js';
 const OWNER = 'io.proxypilot.vaultwarden';
 const privateDir = path => { mkdirSync(path, { recursive: true, mode: 0o700 }); const s = lstatSync(path); if (!s.isDirectory() || s.isSymbolicLink() || s.uid !== process.getuid() || s.mode & 0o077) throw fail('Vaultwarden directory ownership or permissions are unsafe.'); };
@@ -35,9 +36,9 @@ export function keyEvidence(data, prior) {
   if (prior && digest(prior) !== digest(fingerprints)) throw fail('Vaultwarden server keys changed. Restore the original data/key set; retry will not accept replacement keys.');
   return fingerprints;
 }
-export async function ensureRuntime(r, credentials, { exec, job, root = VAULTWARDEN_ROOT } = {}) {
+export async function ensureRuntime(r, credentials, { exec, job, root = VAULTWARDEN_ROOT, sleep, startTimeoutMs, healthTimeoutMs } = {}) {
   const n = namesFor(r), owner = r.credential_ref;
-  const call = async args => { job.fence(); const v = await exec.host(['docker', ...args], { timeoutMs: 120000 }); job.fence(); if (v.code !== 0) throw fail('Vaultwarden Docker operation failed. Inspect the named owned resource locally; runtime output is withheld.'); return v.stdout; };
+  const call = async args => { job.fence(); const v = await exec.host(['docker', ...args], { timeoutMs: 120000 }); job.fence(); if (v.code !== 0) throw dockerFailure(fail, `Vaultwarden docker ${args[0]}`, v); return v.stdout; };
   const inspect = async (kind, name) => { const list = await call(kind === 'container' ? ['container', 'ls', '-a', '--format', '{{.Names}}'] : [kind, 'ls', '--format', '{{.Name}}']);
     if (!list.trim().split('\n').includes(name)) return null; try { return JSON.parse(await call([kind, 'inspect', name]))[0]; } catch { throw fail('Vaultwarden Docker identity could not be read.'); } };
   await call(['version', '--format', '{{.Server.Version}}']);
@@ -55,7 +56,7 @@ export async function ensureRuntime(r, credentials, { exec, job, root = VAULTWAR
   if (network && (network.Driver !== 'bridge' || network.Internal || Object.keys(network.Options || {}).length || Object.values(network.Containers || {}).some(c => c.Name !== n.server))) throw fail('Vaultwarden dedicated network drifted.');
   await createOnce('network', network, ['network', 'create', ...labels, n.network]);
   const env = [`CONFIG_FILE=/etc/vaultwarden/setup.json`, 'ROCKET_ADDRESS=0.0.0.0', 'ROCKET_PORT=80', 'DATA_FOLDER=/data'];
-  await createOnce('server', server, ['create', '--name', n.server, ...labels, '--restart', 'unless-stopped', '--network', n.network, '--log-driver', 'none',
+  await createOnce('server', server, ['create', '--name', n.server, ...labels, '--restart', 'unless-stopped', '--network', n.network, ...LOG_ARGS,
     '--publish', `127.0.0.1:${VAULTWARDEN_PORT}:80`, '--mount', `type=bind,source=${files.data},target=/data`,
     '--mount', `type=bind,source=${files.config},target=/etc/vaultwarden/setup.json,readonly`, ...env.flatMap(e => ['--env', e]), VAULTWARDEN_IMAGE]);
   const a = await inspect('container', n.server), c = a?.Config || {}, h = a?.HostConfig || {}, m = a?.Mounts || [];
@@ -64,12 +65,15 @@ export async function ensureRuntime(r, credentials, { exec, job, root = VAULTWAR
   const expectedEnv = Object.fromEntries([...(image.Config.Env || []), ...env].map(e => [e.slice(0, e.indexOf('=')), e.slice(e.indexOf('=') + 1)]));
   const sameEnv = Object.keys(actualEnv).length === Object.keys(expectedEnv).length && Object.entries(expectedEnv).every(([k, v]) => actualEnv[k] === v);
   if (c.Image !== VAULTWARDEN_IMAGE || a.Image !== image.Id || c.Labels?.[OWNER] !== owner || digest(c.Cmd) !== digest(image.Config.Cmd) || digest(c.Entrypoint) !== digest(image.Config.Entrypoint) || c.User !== image.Config.User || !sameEnv ||
-    h.NetworkMode !== n.network || h.RestartPolicy?.Name !== 'unless-stopped' || h.LogConfig?.Type !== 'none' || h.Privileged || h.CapAdd?.length || h.Devices?.length || h.PidMode || h.IpcMode === 'host' ||
+    h.NetworkMode !== n.network || h.RestartPolicy?.Name !== 'unless-stopped' || h.Privileged || h.CapAdd?.length || h.Devices?.length || h.PidMode || h.IpcMode === 'host' ||
     digest(h.PortBindings || {}) !== digest({ '80/tcp': [{ HostIp: '127.0.0.1', HostPort: String(VAULTWARDEN_PORT) }] }) || m.length !== 2 ||
     !m.some(x => x.Type === 'bind' && x.Source === files.data && x.Destination === '/data' && x.RW === true) ||
     !m.some(x => x.Type === 'bind' && x.Source === files.config && x.Destination === '/etc/vaultwarden/setup.json' && x.RW === false) ||
     Object.keys(a.NetworkSettings?.Networks || {}).some(x => x !== n.network)) throw fail('Vaultwarden runtime differs from the reviewed private persistent profile. No replacement was attempted.');
-  if (!a.State?.Running) { job.fence(); files.identity.started = true; atomicPrivate(files.marker, JSON.stringify(files.identity)); await call(['start', n.server]); }
+  // Start by inspected ID and wait for running, then the image's HEALTHCHECK;
+  // an already running and healthy server is left as it is (3b).
+  if (!a.State?.Running) { job.fence(); files.identity.started = true; atomicPrivate(files.marker, JSON.stringify(files.identity)); }
+  await startOwnedContainer({ run: argv => exec.host(argv, { timeoutMs: 120000 }), name: n.server, fail, job, label: 'Vaultwarden server', sleep, startTimeoutMs, healthTimeoutMs });
   if (files.identity.reinstall) { delete files.identity.reinstall; job.fence(); atomicPrivate(files.marker, JSON.stringify(files.identity)); }
   job.generated({ kind: 'vaultwarden_data_configuration', name: owner, where: root });
   return { ...n, directory: root, data: files.data, config: files.config, image: VAULTWARDEN_IMAGE, ...(r.resources?.serverKeys ? { serverKeys: r.resources.serverKeys } : {}) };

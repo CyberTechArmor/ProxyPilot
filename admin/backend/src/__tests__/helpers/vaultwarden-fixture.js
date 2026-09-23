@@ -13,7 +13,7 @@ export function makeDb(path=':memory:',{mode='install'}={}) {
 export function dockerFixture(){const d=baseDocker();d.images[VAULTWARDEN_IMAGE]={Id:'sha256:g7-fixture-image',Config:{Env:['PATH=/bin'],Entrypoint:['/start.sh'],Cmd:['/vaultwarden']}};const host=d.host;
   d.host=async argv=>{const result=await host(argv);
     if(argv[1]==='create'&&result.code===0)d.objects.container.get(argv[argv.indexOf('--name')+1]).Config.Env.push(...argv.flatMap((x,i)=>x==='--env'?[argv[i+1]]:[]));
-    if(argv[1]==='start'&&result.code===0){const data=d.objects.container.get(argv[2]).Mounts.find(m=>m.Destination==='/data').Source;
+    if(argv[1]==='start'&&result.code===0){const data=d.objects.container.get(String(argv[2]).replace(/^id-/,'')).Mounts.find(m=>m.Destination==='/data').Source;
       // Scripted startup writes markers, NOT evidence of a real vault engine.
       for(const [name,value] of [['rsa_key.pem','G7-FIXTURE-SERVER-KEY'],['db.sqlite3','G7-FIXTURE-VAULT-DATA']])try{writeFileSync(join(data,name),value,{flag:'wx',mode:0o600});}catch(e){if(e.code!=='EEXIST')throw e;}}
     return result;};return d;

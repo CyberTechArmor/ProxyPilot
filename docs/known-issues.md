@@ -6,6 +6,28 @@ scope. Anyone picking up a future session should treat this file
 as a punch list, not a roadmap — items here are meant to be
 addressed individually, not bundled.
 
+## OpenBao dashboard operator actions still dial the public hostname
+
+Found while fixing the Infisical bootstrap 403 (2026-09-23). Adapter
+self-checks that run on the **host runner** now go to the local Caddy with
+SNI/Host pinned (`lib/setup-engine/local-edge.js`), and owned restricted
+routes admit only that loopback self-check. The OpenBao **operator** actions
+(manual unseal share, bootstrap token — `lib/setup-engine/openbao-operator.js`)
+run inside the backend process instead, which may be a Docker container where
+127.0.0.1 is not the host's Caddy, so they were left on the public hostname.
+Behind a NAT firewall that hairpins, they can meet the restricted route from
+the firewall's LAN address and get 403. Fix: move them onto the runner (or
+give the backend the host's edge address via `PROXYPILOT_LOCAL_EDGE` on a
+host-network install) and pass `edge: localEdge(db)` like `openbao-op.js`.
+
+## Full-suite timing flakes in the real-process containment tests
+
+`setup-deploy.test.js` ("a guest script carrying the deploy marker is really
+killed…") and `setup-deploy-closeout.test.js` ("containment (real processes,
+cgroup2…)") spawn real processes and occasionally fail under full-suite load
+in the sandbox; each passes when its file runs alone. Not caused by the
+Platform overview work (2026-09-23), which touches neither.
+
 ## Backend test runner: 6 test files fail under `node --test` in a
 fresh sandbox
 

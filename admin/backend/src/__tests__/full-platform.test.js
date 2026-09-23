@@ -28,7 +28,7 @@ async function connected(db) {
   storeProtected(db,`keycloak-bootstrap-${k.id}`,{installationId:k.id,password:'b'.repeat(43),retired:false});
   const identity=async(db,k,full,{job})=>{const admin=await keycloakAdmin(k,'b'.repeat(43),{send:wire.send,job});try{return await reconcileOwnedIdentity(db,k,full,admin.api,job);}finally{await admin.close();}};
   startJob(db,{id:job.id,owner:'runner@full-test#1:a'});
-  const args={db,params:{revision:1},job:handle(job.id),identity,interfaces:{test:[{address:'10.20.30.40',internal:false}]}};
+  const args={db,params:{revision:1},job:handle(job.id),identity,interfaces:{test:[{address:'10.20.30.40',internal:false}]},dnsCheck:async()=>null};
   for(let i=0;i<5;i++){
     const result=await runFullPlatformOperation(args);
     const children=db.prepare("SELECT id,kind FROM setup_jobs WHERE id!=? AND status='queued'").all(job.id);
@@ -124,7 +124,7 @@ test('FP-1 fresh HTTP plan/apply coordinates exactly one new Keycloak job before
   db.exec('DELETE FROM setup_keycloak');const f=await apiFixture(db);try{
     assert.equal((await f.request('/full',{method:'PUT',body:{expectedRevision:0,config:config(),reviewed:true}})).status,200);
     const review=reviewFullPlatform(db),result=await f.request('/full/apply',{method:'POST',body:{revision:1,reviewToken:review.reviewToken,reviewed:true}});assert.equal(result.status,202);
-    const deps={db,owner:'runner@fp-fresh#1:a',exec:{host(){throw Error('The coordinator must dispatch through the owned adapter');}},fullPlatformDeps:{interfaces:{test:[{address:'10.20.30.40',internal:false}]}}};
+    const deps={db,owner:'runner@fp-fresh#1:a',exec:{host(){throw Error('The coordinator must dispatch through the owned adapter');}},fullPlatformDeps:{interfaces:{test:[{address:'10.20.30.40',internal:false}]},dnsCheck:async()=>null}};
     await runOnce(deps,{max:1,kinds:['full_platform_apply'],reconcileFirst:false});const children=db.prepare("SELECT * FROM setup_jobs WHERE kind='keycloak_setup' AND status='queued'").all();assert.equal(children.length,1);assert.equal(db.prepare('SELECT count(*) n FROM setup_keycloak').get().n,1);assert.equal(readInfisical(db),null);
     await runOnce({...deps,nowMs:()=>Date.now()+35000},{max:1,kinds:['full_platform_apply'],reconcileFirst:false});assert.equal(db.prepare("SELECT count(*) n FROM setup_jobs WHERE kind='keycloak_setup' AND status='queued'").get().n,1);
   }finally{await f.close();}

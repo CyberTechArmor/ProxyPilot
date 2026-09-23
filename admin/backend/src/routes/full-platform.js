@@ -99,5 +99,5 @@ fullPlatformRouter.post('/keycloak/reveal', requireSudo, handle((req, res) => {
   const k = db.prepare('SELECT * FROM setup_keycloak WHERE id=?').get(value.installationId);
   if (!k || k.ownership !== 'managed') throw fail('Only this installation’s managed bootstrap credential can be revealed.');
   logAudit(req.user.id, 'KEYCLOAK_BOOTSTRAP_REVEALED', 'setup_keycloak', k.id, {}, req.ip);
-  res.json({ username: 'bootstrap-admin', password: value.password, expiresInSeconds: 30 });
+  res.json({ username: value.username || 'bootstrap-admin', password: value.password, expiresInSeconds: 30 });
 }));

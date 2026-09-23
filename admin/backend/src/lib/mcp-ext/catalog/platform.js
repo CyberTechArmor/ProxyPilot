@@ -29,7 +29,7 @@ export const PLATFORM_TOOLS = Object.freeze([
     { id: { type: 'string', description: 'Job id (get_platform_setup / list_platform_jobs).' }, tail: { type: 'number', description: 'How many of the latest events to include (default 50, max 500).' } }, ['id']),
 
   tool('platform_preflight',
-    'Before apply: does each selected hostname resolve to the Caddy host (compared with what ProxyPilot\'s own administrator hostname resolves to), does another route already serve it, is Docker available on the host, which loopback port each owned service uses and whether something already listens there, and is the installation key present and able to open the saved protected credentials (reported as present/absent only). Read-only.',
+    'Before apply (optionally for one service): does each selected hostname resolve to the Caddy host — from this host\'s resolver AND from the public resolver 1.1.1.1, with any disagreement named and whether the zone is on the stored Cloudflare token (else the exact record to set at the external DNS host) — does another route already serve it, is Docker available on the host, which loopback port each owned service uses and whether something already listens there, and is the installation key present and able to open the saved protected credentials (reported as present/absent only). Read-only.',
     {}),
 
   tool('save_platform_setup',
@@ -55,6 +55,30 @@ export const PLATFORM_TOOLS = Object.freeze([
   tool('manage_platform_service',
     'Repair, reinstall or remove the runtime of one OWNED platform service, through the dashboard\'s own review: the first call returns the preview (containers affected, effects, what is retained) and a one-time confirmation_token bound to that exact review; the second call with the token queues it. Remove and reinstall stop/remove only the inspected owned container IDs; volumes, directories, databases, keys, credentials, networks and routes are kept (routes fail closed). External services are refused. Active Keycloak/Pomerium dependents refuse remove/reinstall, as in the dashboard. Behind mcp.destructive.',
     { service, action: { type: 'string', enum: ['repair', 'reinstall', 'remove'] }, dry_run: P.dry_run, confirmation_token: P.confirmation_token }, ['service', 'action']),
+
+  tool('control_platform_container',
+    'Start, stop or restart ONE owned platform container (get_platform_service lists them), by its inspected immutable ID after its ownership label is checked. start waits until the container is running and, when its image has a HEALTHCHECK, healthy (bounded), and reports a reason code when it does not come up. The first call returns a short preview (the inspected container ID, what stops, the expected downtime) and a one-time confirmation_token bound to that container ID; the second call with the token acts. stop and restart are refused while that service has active dependents (Keycloak: ProxyPilot SSO/recovery and the services connected to it; Pomerium: saved application policies), while an operation is running, and for an external service. Behind mcp.destructive.',
+    { service, container: { type: 'string', description: 'Container name exactly as get_platform_service lists it.' }, action: { type: 'string', enum: ['start', 'stop', 'restart'] }, dry_run: P.dry_run, confirmation_token: P.confirmation_token }, ['service', 'container', 'action']),
+
+  tool('verify_platform_service',
+    'Re-run verification only, without reapplying anything: inspect the owned containers (running, health, exit code, State.Error), check that the route\'s loopback upstream port is listening, check DNS from the host and from 1.1.1.1 against the Caddy host, and probe the route through this host\'s own Caddy with SNI/Host pinned to the service hostname (the adapter self-check path). Records the result and its time as the service\'s last live check. Changes no container, route or record of the service. Read-only as far as the service is concerned; not behind mcp.destructive.',
+    { service }, ['service']),
+
+  tool('get_platform_service_logs',
+    'The last 50 (or 200) log lines of each owned container of one service, redacted (and scrubbed of this installation\'s protected values). Uses docker logs for the local driver and journalctl CONTAINER_NAME=… for journald; when a container\'s logs cannot be read (for example log driver "none" on a container created before the readable-log fix) it says why and that Repair recreates it with the readable driver. Read-only.',
+    { service, lines: { type: 'number', enum: [50, 200], description: 'Lines per container (default 50).' }, container: { type: 'string', description: 'Only this container.' } }, ['service']),
+
+  tool('set_platform_restricted_networks',
+    'Change the restricted administrator/VPN networks after apply — a reviewed change. The first call returns the preview: every route whose allowlist changes (before → after) and every record that carries the list, plus a one-time confirmation_token bound to it; the second call with the token queues the backend route step, which rewrites exactly those rows and re-renders the hostnames (validated before Caddy reloads). An empty list and /0 are refused. Refused while an operation is running and while SSO is active (disable it from local recovery first). Behind mcp.destructive.',
+    { restricted_networks: { type: 'array', items: { type: 'string' }, description: 'The new approved administrator/VPN IPs or CIDRs.' }, dry_run: P.dry_run, confirmation_token: P.confirmation_token }, ['restricted_networks']),
+
+  tool('resync_platform_plan',
+    'When Custom / Advanced saved the shared service plan after this Full Platform revision (reason code shared_plan_changed): create a new Full Platform revision from the saved values, so the next continue writes the shared plan again. Nothing else changes and nothing is queued. Refused when the shared plan is already in sync or an operation is running. dry_run previews. Behind mcp.destructive.',
+    { revision, dry_run: P.dry_run, confirm: P.confirm }, ['revision']),
+
+  tool('recover_keycloak_bootstrap',
+    'Keycloak only: when connect_managed_identity recorded that the bootstrap administrator can no longer authenticate, recover it without a purge. Runs Keycloak 26\'s kc.sh bootstrap-admin inside the OWNED Keycloak server container to create a new temporary master-realm administrator; ProxyPilot generates the credential, stores it encrypted before use, passes it to the container only through a private env file removed right after, verifies it with a real token grant, and then continues the saved setup in the same job. No credential is accepted from or returned to the caller. The first call returns the preview and a one-time confirmation_token; the second queues it. Behind mcp.destructive.',
+    { dry_run: P.dry_run, confirmation_token: P.confirmation_token }),
 
   tool('reset_platform_setup',
     'Start Platform Setup over. Default: stop and remove every OWNED container, remove the owned Caddy routes, and discard the saved plan, platform operations and owned service records so step 1 starts clean — data directories, volumes, networks, keys and protected credentials stay in place. purge_data: true also deletes the owned data (directories, volumes, networks, protected credential rows) AFTER writing a backup set into the exports directory and verifying it (tar listing + sha256 manifest); it needs the mcp.platform.purge flag, off by default. The first call returns the preview listing every container, route, DB row (and with purge every path, volume and network) and a one-time confirmation_token bound to that exact inventory; the second call with the token queues the reset on the host runner. Always refused: external services (left untouched), anything without this installation\'s ownership label, active SSO (disable it from local recovery first), active Pomerium application policies, and a running operation. Behind mcp.destructive.',

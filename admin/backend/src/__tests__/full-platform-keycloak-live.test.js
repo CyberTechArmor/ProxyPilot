@@ -23,7 +23,7 @@ test('FP real Keycloak 26.7.4: coordinator clients/flows/readback, permanent use
   await authority.api('/admin/realms',{method:'POST',body:{realm:k.realm,enabled:true,attributes:{'proxypilot.installation':k.id}}});await authority.close();
   mkdirSync(join(dir,k.id),{mode:0o700});for(const [file,value]of Object.entries({'owner.json':{id:k.id,origin:k.origin,realm:k.realm},'credentials.json':{bootstrap:'b'.repeat(43),database:'d'.repeat(43)}}))writeFileSync(join(dir,k.id,file),JSON.stringify(value),{mode:0o600});
   const job=approved(db),identity=(db,k,full,{job})=>connectManagedKeycloak(db,k,full,{job,root:dir,send});
-  const deps={db,owner:'runner@fp-real#1:a',exec:{host(){throw Error('No Docker or live host mutation in loopback test');}},fullPlatformDeps:{identity,interfaces:{test:[{address:'10.20.30.40',internal:false}]},administratorDeps:{send}}};
+  const deps={db,owner:'runner@fp-real#1:a',exec:{host(){throw Error('No Docker or live host mutation in loopback test');}},fullPlatformDeps:{identity,interfaces:{test:[{address:'10.20.30.40',internal:false}]},administratorDeps:{send},dnsCheck:async()=>null}};
   await runOnce(deps,{max:1,kinds:['full_platform_apply'],reconcileFirst:false});
   const full=readFullPlatform(db);assert(full.state.identity?.clients?.vaultwarden,JSON.stringify(getJob(db,job.id)));const refs=Object.values(full.state.identity.clients).map(c=>[c.ref,protectedValue(db,c.ref)]);
   await identity(db,k,full,{job:handle(job.id)});assert.deepEqual(refs.map(([ref])=>[ref,protectedValue(db,ref)]),refs);

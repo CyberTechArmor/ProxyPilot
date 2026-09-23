@@ -9,6 +9,7 @@
 //   list_dns_records / set_dns_record — Cloudflare, through the DNS-01 token
 //   the domains card already stores (the only DNS integration ProxyPilot has).
 
+import { platformRouteRefusal } from '../../lib/setup-engine/platform-hostnames.js';
 import bcrypt from 'bcryptjs';
 import { validateRouteEdgeOptions, parseRouteEdgeOptions } from '../../lib/caddy-site-file.js';
 import { parseCertificate, validateCertKeyPair, assembleServedChain, daysUntil, expiryStatus, redactKeyMaterial } from '../../lib/tls-certs.js';
@@ -97,6 +98,7 @@ export function createEdgeHandlers(kit) {
     const prefix = prefixOf(args.path_prefix);
     if (!prefix || prefix === '/') return err('path_prefix must be a sub-path like /api — set_route manages the root path');
     note.subject_id = `${domain}${prefix}`;
+    { const pr = platformRouteRefusal(getDb(), { hostname: domain }); if (pr) { note.refused = true; return err(pr.error, pr); } }
     const port = normalizePort(args.upstream_port);
     if (!port) return err('upstream_port must be 1–65535');
     const hasContainer = args.upstream_container != null && String(args.upstream_container).trim() !== '';

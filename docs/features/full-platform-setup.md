@@ -100,11 +100,15 @@ External services are never touched: their records and runtime stay.
   Full Platform plan, the shared service plan, the platform operations and the
   owned service records (managed Keycloak, Pomerium, Infisical, OpenBao,
   Vaultwarden, and the inactive ProxyPilot SSO record that named the owned
-  Keycloak) are discarded. Data directories, volumes, networks, keys and the
-  protected credential rows stay in place. A later managed install at the same
-  fixed paths (Vaultwarden, OpenBao, Infisical, Pomerium) finds the retained
-  ownership marker of the discarded record and refuses to adopt it; restore that
-  record, or reset with data purge to reuse those paths.
+  Keycloak) are discarded. Nothing is deleted: the fixed-path service
+  directories (Pomerium, Infisical, OpenBao, Vaultwarden) are **moved aside** to
+  `<directory>.retained-<YYYYMMDD>-<reset job>` next to the original, so a later
+  managed install starts clean instead of refusing on the discarded record's
+  ownership marker (the preview lists each move). Keycloak's per-installation
+  directory, the Docker volumes (Infisical/OpenBao volume names are per
+  installation, so a new install uses new ones), networks, keys and the
+  protected credential rows stay where they are. To reuse retained data, move a
+  directory back before reinstalling from a restored record.
 - **Delete owned data too** (`purge_data`; over MCP additionally the
   `mcp.platform.purge` flag, **off by default**). The preview also lists every
   directory, volume and network. Containers are stopped first, then a backup set
@@ -120,10 +124,120 @@ External services are never touched: their records and runtime stay.
   deleted. Only then are the owned directories, volumes, networks and protected
   credential rows removed. The OpenBao recovery-package directory is kept.
 
-Credential rotation remains unsupported. Hostname, issuer, realm, passkey RP-ID
-and approved recovery-network changes still require a separately reviewed
-migration/access change (or a reset). Unsupported migrations preserve the
+Credential rotation remains unsupported. Hostname, issuer, realm and passkey
+RP-ID changes still require a separately reviewed migration (or a reset). The
+approved recovery networks change through **Platform overview → Restricted
+networks** (below), not by saving the plan. Unsupported migrations preserve the
 current working path and explain the boundary.
+
+## Platform overview
+
+The top of the Platform section is the **Platform MCP access** switch, then the
+**Platform overview**: one row per service (Keycloak, Pomerium, Infisical,
+OpenBao, Vaultwarden) plus the ProxyPilot recovery route. One endpoint
+(`GET /api/setup/platform/overview`, `lib/setup-engine/platform-overview.js`)
+builds the whole view from the same functions the MCP tools use; it never
+returns a secret, credential or protected reference. Refresh button, plus an
+automatic refresh every 30 s while the page is visible; docker inspect, the
+listening ports and DNS are cached for 15 s; logs load only when opened.
+
+Per row: the service URL; ownership (managed / external / not selected); health
+per owned container from the same `docker inspect` as `get_platform_service`
+(running state, health, exit code and `State.Error` when stopped, expected but
+missing containers, log driver) and the verification state and time (current or
+previously verified, plus the last live check); the route's loopback upstream
+and whether it is listening — a recorded route whose upstream nothing listens on
+is **broken** even when every present container runs; the route's hostname,
+restricted networks and whether it exists yet; DNS from the host resolver and
+from 1.1.1.1 against the Caddy host, whether they agree, and whether the zone is
+on the stored Cloudflare token (else the exact record to set at the external DNS
+host); the last job with status, phase, reason and reason code, linking to its
+job log; and the effective MCP access (`mcp.platform`, `mcp.destructive`,
+`mcp.platform.purge`) with the callable tools.
+
+**Service panel** (a full-screen sheet on phones). Every action is admin-only,
+audited, calls the same backend function as its MCP tool, and is disabled with
+its reason while an operation runs or a precondition fails:
+
+- **Start / Stop / Restart** one owned container, by inspected ID after its
+  ownership label is checked; a short preview first (the token binds the
+  container ID). Stop/restart are refused while the service has active
+  dependents (Keycloak: SSO/recovery and the services connected to it; Pomerium:
+  saved application policies). Start waits for running and then the image's
+  healthcheck.
+- **Retry this service's adapter** — the per-service continue with its stored
+  encrypted inputs; disabled while its hostname fails the DNS check (the reason
+  names both resolver answers and the expected address).
+- **Re-run verification only** — runtime, upstream, DNS, and a probe through the
+  local Caddy with SNI/Host pinned (the adapter self-check path); recorded as the
+  last live check; nothing is reapplied.
+- **Repair / Reinstall / Remove** — the existing review. Repair also recreates,
+  by inspected ID with data retained, any owned container still on a log driver
+  other than `local`, so its logs become readable.
+- **View logs** — last 50 / 200 redacted lines per container (`docker logs`, or
+  `journalctl CONTAINER_NAME=…` for journald); a container whose logs cannot be
+  read says why.
+- **Re-run preflight** for the service's hostname and ports.
+- **Recover bootstrap administrator** (Keycloak only) — see below.
+
+Section actions: **Restricted networks** (a reviewed change: preview listing
+every route and record with before → after, one-time token/fresh local proof,
+then a backend step rewrites exactly those rows and re-renders; `/0` and an
+empty list are refused; refused while SSO is active) and **Resync shared plan**
+(when Custom / Advanced saved the shared plan after this Full Platform revision:
+a new Full Platform revision from the saved values; the next continue writes
+the shared plan again — no reset needed).
+
+Kept out of the overview, with links: secret inputs stay in their Platform Setup
+forms, SSO activation in step 5, reset (data kept or purge) in Custom /
+Advanced behind its own preview, DNS edits in the DNS tools (or at the external
+DNS host).
+
+**Routes page.** Owned platform routes are listed read-only, labelled with
+their service and linking to its panel. Creating or editing a route on any
+hostname in the saved Full Platform plan (dashboard, `set_route`,
+`set_route_path`) is refused: the service adapter creates that route, and a
+hand-made one would block it.
+
+## Runtime behaviour (2026-09-23 fixes)
+
+- **Logs.** Owned containers are created with `--log-driver local --log-opt
+  max-size=10m --log-opt max-file=3` whatever the daemon default is (they used
+  to be created with `none`, which `docker logs` cannot read). Repair migrates
+  existing ones.
+- **Start.** Every adapter starts its containers by inspected ID and waits for
+  running, then healthy (image `HEALTHCHECK`, bounded). A failure records a
+  reason code — `image_pull`, `port_bind`, `mount_permission`, `start_timeout`,
+  `health_timeout`, `exited:<code>` — with `State.Error` and the last redacted
+  log lines in the job events. A container already running and healthy on a
+  retry is continued from, never recreated. A local cause is never reported as
+  "upstream details withheld".
+- **Self-checks behind restricted routes.** An owned Infisical/OpenBao/
+  Vaultwarden instance is checked through the local Caddy (`127.0.0.1`,
+  override `PROXYPILOT_LOCAL_EDGE`) with TLS SNI and Host kept as the service
+  hostname — the host's own hostname would hairpin through the firewall and
+  arrive from its LAN address. The restricted matcher of an owned platform
+  route admits the loopback source only together with the installation's
+  self-check header; the firewall's LAN address and the host's public address
+  are never added to the allowlist.
+- **Upstreams.** Before its bootstrap check an adapter proves its route's
+  upstream is listening (`upstream_not_listening` otherwise). Infisical's
+  route targets the server's published port 18085; the Agent Proxy listens on
+  the private runner address (:17322) and is created after bootstrap.
+- **DNS.** The coordinator does not queue a service whose hostname fails the DNS
+  check, and a per-service retry is refused, with a reason naming the hostname,
+  both resolver answers, the expected address, a disagreement between them
+  (cache or local override), and where the record is changed (`set_dns_record`
+  on the stored Cloudflare token, or the exact record at the external DNS host).
+- **Keycloak bootstrap recovery.** When `connect_managed_identity` finds the
+  bootstrap administrator cannot authenticate, **Recover bootstrap
+  administrator** (MCP `recover_keycloak_bootstrap`) runs Keycloak 26's
+  `kc.sh bootstrap-admin user` inside the owned server container
+  (`--optimized`, falling back to a plain run) with a ProxyPilot-generated
+  credential that is stored encrypted before use, passed only through a 0600
+  env file deleted right after, and verified with a token grant; the saved
+  setup then continues in the same job. Retiring the bootstrap (step 4) removes
+  both temporary accounts. No purge is needed.
 
 ## Over MCP
 
@@ -140,6 +254,22 @@ reviewed `revision` and `review_digest` and `confirm: true`, and refuse while an
 operation runs or when the next step needs a person. `continue_platform_setup
 ({ service })` retries one service adapter with its stored encrypted inputs.
 `manage_platform_service` is Repair / Reinstall / Remove through the same review.
+The overview's actions have tools too: `control_platform_container`,
+`verify_platform_service`, `get_platform_service_logs`,
+`set_platform_restricted_networks`, `resync_platform_plan`,
+`recover_keycloak_bootstrap`.
+
+**The `mcp.platform` master flag** gates every tool of the family, the readers
+included: off, each refuses before any work (no DB read, no docker inspect, no
+job) and names where a person turns it on. It is **human-only**:
+`set_feature_flag` refuses to change it in either direction; only an
+administrator flips it, with the switch at the top of this section, and each
+change is audited (who, old, new, when; `FEATURE_FLAG_CHANGED`) and exported by
+`export_grc_evidence` (`feature_flag_changes`). Turning it off cancels nothing
+already queued or running on the host runner; dashboard actions are never gated
+by it. `mcp.destructive` and `mcp.platform.purge` only take effect behind it.
+Off on new installs; installs that existed before it were migrated on
+(migration 915).
 
 These stay on this page and have **no** MCP tool: **Reveal initial Keycloak
 password**, the administrator/recovery password, the fresh permanent master

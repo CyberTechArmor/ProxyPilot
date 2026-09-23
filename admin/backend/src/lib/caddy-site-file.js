@@ -325,11 +325,24 @@ export function validateRouteEdgeOptions(input = {}, { bcryptHash = null, rateLi
 }
 
 /** Caddyfile lines for a route's edge options, to go INSIDE the handle block before the proxy/file_server body. */
-export function routeEdgeOptionLines(opts, indent = '        ', { routeId = 'r' } = {}) {
+export function routeEdgeOptionLines(opts, indent = '        ', { routeId = 'r', selfCheck = null } = {}) {
   if (!opts) return [];
   const lines = [];
   const i2 = `${indent}    `;
-  if (opts.ip_allowlist) {
+  if (opts.ip_allowlist && selfCheck && /^[a-f0-9]{48}$/.test(selfCheck.token || '')) {
+    // A platform adapter's own self-check (lib/setup-engine/local-edge.js):
+    // loopback source AND the installation's self-check header. Nothing else
+    // is let through — not other loopback traffic, not the firewall's LAN
+    // address, not the host's public address.
+    lines.push(`${indent}@pp_denied {`);
+    lines.push(`${i2}not remote_ip ${opts.ip_allowlist.join(' ')}`);
+    lines.push(`${i2}not {`);
+    lines.push(`${i2}    remote_ip ${(selfCheck.sources || ['127.0.0.1/32', '::1/128']).join(' ')}`);
+    lines.push(`${i2}    header ${selfCheck.header || 'X-ProxyPilot-Self-Check'} ${selfCheck.token}`);
+    lines.push(`${i2}}`);
+    lines.push(`${indent}}`);
+    lines.push(`${indent}respond @pp_denied 403`);
+  } else if (opts.ip_allowlist) {
     lines.push(`${indent}@pp_denied not remote_ip ${opts.ip_allowlist.join(' ')}`);
     lines.push(`${indent}respond @pp_denied 403`);
   }

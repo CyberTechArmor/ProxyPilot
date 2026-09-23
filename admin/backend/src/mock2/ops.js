@@ -324,6 +324,11 @@ export async function runGuestConfig({ kind, containerName, requestedBy = null, 
 export function backendStepDeps(store = containerLockStore()) {
   if (store?.configureRoutes) return { configureRoutes: store.configureRoutes };
   return {
+    platformNetworksStep: async ({ jobId, fence }) => {
+      const { applyNetworksChange } = await import('../lib/setup-engine/full-platform-networks.js');
+      const render = store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;
+      return applyNetworksChange(store.getDb(), { jobId, fence, render });
+    },
     platformResetRoutesStep: async ({ resetJob, fence }) => {
       const { removeResetRoutes } = await import('../lib/setup-engine/full-platform-reset.js');
       const render = store?.renderDeps || (await import('../routes/services.js')).caddyRenderDeps;

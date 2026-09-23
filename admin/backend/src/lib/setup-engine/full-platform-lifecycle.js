@@ -10,6 +10,7 @@ import { INFISICAL_ROOT } from './infisical-logic.js';
 import { namesFor as baoNames, OPENBAO_ROOT } from './openbao-logic.js';
 import { namesFor as vaultNames, VAULTWARDEN_ROOT } from './vaultwarden-logic.js';
 import { readPrivate, atomicPrivate } from './pomerium-runtime.js';
+import { logConfigCurrent } from './owned-runtime.js';
 
 // Resolved per service: only Keycloak's root is per installation (its id is
 // the kc-… string). Building every entry eagerly joined the other services'
@@ -73,7 +74,7 @@ export function lifecycleReview(db, service, action) {
   if (action !== 'repair' && service === 'pomerium' && db.prepare("SELECT name FROM sqlite_master WHERE name='setup_route_protection'").get() && db.prepare("SELECT 1 FROM setup_route_protection WHERE state!='removed' LIMIT 1").get()) blockers.push('Saved application policies depend on Pomerium. Review and retire those access dependencies before runtime removal.');
   const fingerprint = digest([full.revision, service, action, owner, row.config || [row.origin, row.realm], containers, blockers]);
   return { revision: full.revision, service, action, containers, retainData: true, blockers, reviewToken: fingerprint,
-    effects: action === 'repair' ? ['Repeat the existing adapter’s owned checks and missing-resource reconciliation.'] : ['Stop and remove only the listed owned containers. Existing Caddy routes remain fail-closed.', 'Persistent volumes, directories, databases, realm, vault keys, recovery material, networks and protected credentials are retained.', action === 'reinstall' ? 'Recreate compatible runtime through the existing adapter using the retained configuration and data.' : 'The service remains unavailable until an explicitly reviewed reinstall.'],
+    effects: action === 'repair' ? ['Repeat the existing adapter’s owned checks and missing-resource reconciliation.', 'Owned containers created before the readable-log fix (log driver other than “local”) are stopped and recreated by inspected ID with the same data, so their logs can be read. Containers already on the local driver are not touched.'] : ['Stop and remove only the listed owned containers. Existing Caddy routes remain fail-closed.', 'Persistent volumes, directories, databases, realm, vault keys, recovery material, networks and protected credentials are retained.', action === 'reinstall' ? 'Recreate compatible runtime through the existing adapter using the retained configuration and data.' : 'The service remains unavailable until an explicitly reviewed reinstall.'],
     unsupported: 'Data deletion, credential rotation and hostname/realm migration are not part of these actions.' };
 }
 export function queueLifecycle(db, raw, by, { via = 'ui' } = {}) {
@@ -114,6 +115,33 @@ export async function runLifecycle(db, full, job, exec, { roots = {} } = {}) {
       if (service === 'keycloak') db.prepare('UPDATE setup_keycloak SET verified_json=NULL,verified_at=NULL WHERE id=?').run(row.id);
       else db.prepare(`UPDATE setup_${service} SET verified_json=NULL WHERE id=1`).run();
       state.removed[service] = true; state.lifecycle.removed = true; persist();
+    } finally { releaseLock(db, { app, owner, epoch: lock.lock.epoch }); }
+  }
+  // Repair migrates containers still on an unreadable log driver (3a): only
+  // those are stopped and removed by inspected ID (labels and data mounts
+  // checked first); the adapter below recreates them with LOG_ARGS.
+  if (request.action === 'repair' && !state.lifecycle.logsChecked) {
+    let lock = acquireLock(db, { app, owner, jobId: job.id, operation: 'retained_runtime_log_migration', leaseMs: 120000 });
+    if (!lock.ok && lock.reason === 'stale' && readLock(db, app)?.job_id === job.id) lock = takeoverLock(db, { app, by: owner, jobId: job.id, operation: 'retained_runtime_log_migration', leaseMs: 120000, reason: 'Resume this reviewed repair.' });
+    if (!lock.ok) throw fail('The selected service has an active or unresolved operation.');
+    const fence = () => { job.fence(); if (!renewLock(db, { app, owner, epoch: lock.lock.epoch, leaseMs: 120000 })) throw fail('The service lifecycle lease was lost.'); };
+    const call = async args => { fence(); const result = await exec.host(['docker', ...args], { timeoutMs: 60000 }); fence(); if (result.code !== 0) throw fail('The owned runtime operation failed. Data and credentials are retained.'); return result.stdout; };
+    try {
+      const present = (await call(['container', 'ls', '-a', '--format', '{{.Names}}'])).trim().split('\n');
+      const legacy = [];
+      for (const name of review.containers.filter(n => present.includes(n))) {
+        let actual; try { actual = JSON.parse(await call(['container', 'inspect', name]))[0]; } catch (e) { if (e.fullPlatformSafe) throw e; throw fail('Container ownership could not be read.'); }
+        if (!logConfigCurrent(actual?.HostConfig)) legacy.push(name);
+      }
+      if (legacy.length) {
+        const root = roots[service] || ownedRoot(service, row);
+        const { marker } = await removeOwnedContainers({ service, row, names: legacy, root, call });
+        if (service === 'vaultwarden') {
+          marker.reinstall = job.id; fence(); atomicPrivate(join(root, 'owner.json'), JSON.stringify(marker));
+          db.prepare('UPDATE setup_vaultwarden SET resources_json=? WHERE id=1').run(JSON.stringify({ ...(row.resources || {}), retainedReinstall: job.id }));
+        }
+      }
+      state.lifecycle.logsChecked = true; state.lifecycle.logsMigrated = legacy; persist();
     } finally { releaseLock(db, { app, owner, epoch: lock.lock.epoch }); }
   }
   if (request.action === 'remove') return { verification: { state: 'runtime_removed_data_retained', label: `${service} runtime removed. Data, credentials, recovery material and fail-closed routes retained.`, complete: false } };

@@ -27,6 +27,8 @@ import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { checkRouteDrift } from '../lib/route-drift.js';
 import { parseCaddySiteFile, siteSecurityHeaderLines, dashboardFrameAncestor, CADDY_SITE_RENDER_CONTRACT, parseRouteEdgeOptions, routeEdgeOptionLines, wrapRouteBody } from '../lib/caddy-site-file.js';
+import { selfCheckForRoute, SELF_CHECK_HEADER, LOOPBACK_SOURCES } from '../lib/setup-engine/local-edge.js';
+import { platformRouteRefusal, platformOwnerOfRoute, platformHostnames, platformPanelLink } from '../lib/setup-engine/platform-hostnames.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { detectServicePorts } from '../lib/port-detector.js';
@@ -44,6 +46,15 @@ import {
 } from '../lib/cert-mount-reconciler.js';
 
 const execAsync = promisify(exec);
+
+// Owned platform routes let the adapter's own loopback self-check through
+// their restricted matcher (lib/setup-engine/local-edge.js); any other route,
+// or a render with no database, gets the plain matcher.
+function platformSelfCheck(routeId) {
+  let db = null; try { db = getDb(); } catch { return null; }
+  const token = selfCheckForRoute(db, routeId);
+  return token ? { token, header: SELF_CHECK_HEADER, sources: LOOPBACK_SOURCES } : null;
+}
 
 export const servicesRouter = Router();
 
@@ -1251,6 +1262,13 @@ servicesRouter.get('/', (req, res) => {
       };
     });
 
+    // Owned platform routes are listed read-only, labelled with the service
+    // whose adapter created them and a link to its Platform overview panel.
+    const planHosts = platformHostnames(db);
+    for (const svc of formattedServices) {
+      const owner = platformOwnerOfRoute((routesByService.get(svc.id) || [])[0]?.id, svc.id) || (routesByService.get(svc.id) || []).map((r) => planHosts[String(r.domain || '').toLowerCase()]).find(Boolean) || null;
+      if (owner) svc.platform = { service: owner.service, name: owner.name, readOnly: true, link: platformPanelLink(owner.service), note: `Created and owned by the ${owner.name} service adapter. Manage it from the Platform overview.` };
+    }
     res.json({ services: formattedServices });
   } catch (error) {
     console.error('Error fetching services:', error);
@@ -1396,6 +1414,8 @@ servicesRouter.post('/:id/favorite', (req, res) => {
 servicesRouter.post('/', async (req, res) => {
   try {
     const data = createServiceSchema.parse(req.body);
+    // Owned platform hostnames/routes are created by their service adapter (read-only here).
+    { const pr = platformRouteRefusal(getDb(), { hostname: data.domain }); if (pr) return res.status(409).json(pr); }
     // Normalize path prefix (strip trailing slashes, default to '/') so the
     // same canonical value is used across validation, Caddy config, and DB.
     data.pathPrefix = normalizePathPrefix(data.pathPrefix);
@@ -1759,6 +1779,8 @@ services:
 servicesRouter.put('/:id', async (req, res) => {
   try {
     const data = createServiceSchema.partial().parse(req.body);
+    // Owned platform hostnames/routes are created by their service adapter (read-only here).
+    { const pr = platformRouteRefusal(getDb(), { hostname: data.domain, serviceId: req.params.id }); if (pr) return res.status(409).json(pr); }
     const db = getDb();
 
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
@@ -2879,6 +2901,8 @@ servicesRouter.post('/:id/routes', async (req, res) => {
     }
 
     const data = createRouteSchema.parse(req.body);
+    // Owned platform hostnames/routes are created by their service adapter (read-only here).
+    { const pr = platformRouteRefusal(getDb(), { hostname: data.domain, serviceId: req.params.id }); if (pr) return res.status(409).json(pr); }
     data.pathPrefix = normalizePathPrefix(data.pathPrefix);
 
     // (1) Uniqueness check against service_http_routes. The DB UNIQUE
@@ -3123,6 +3147,8 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
     }
 
     const data = createRouteSchema.partial().parse(req.body);
+    // Owned platform hostnames/routes are created by their service adapter (read-only here).
+    { const pr = platformRouteRefusal(getDb(), { hostname: data.domain, routeId: req.params.routeId, serviceId: req.params.id }); if (pr) return res.status(409).json(pr); }
     if (data.pathPrefix !== undefined) {
       data.pathPrefix = normalizePathPrefix(data.pathPrefix);
     }
@@ -3478,6 +3504,7 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
 // a service with zero routes is legal in Phase 2b; the operator can add
 // routes back without recreating the service.
 servicesRouter.delete('/:id/routes/:routeId', async (req, res) => {
+  { const pr = platformRouteRefusal(getDb(), { routeId: req.params.routeId, serviceId: req.params.id }); if (pr) return res.status(409).json(pr); }
   try {
     const db = getDb();
     const service = db
@@ -6438,7 +6465,7 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frame
     const directive = s.stripPrefix ? 'handle_path' : 'handle';
     lines.push(`    ${directive} ${s.pathPrefix}* {`);
     lines.push(...wrapRouteBody(
-      routeEdgeOptionLines(s.edgeOptions, '        ', { routeId: s.routeId }),
+      routeEdgeOptionLines(s.edgeOptions, '        ', { routeId: s.routeId, selfCheck: platformSelfCheck(s.routeId) }),
       generateServiceHandlerBody(s, '        '),
       s.edgeOptions,
     ));
@@ -6453,7 +6480,7 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frame
   if (rootService) {
     lines.push(`    handle {`);
     lines.push(...wrapRouteBody(
-      routeEdgeOptionLines(rootService.edgeOptions, '        ', { routeId: rootService.routeId }),
+      routeEdgeOptionLines(rootService.edgeOptions, '        ', { routeId: rootService.routeId, selfCheck: platformSelfCheck(rootService.routeId) }),
       generateServiceHandlerBody(rootService, '        '),
       rootService.edgeOptions,
     ));

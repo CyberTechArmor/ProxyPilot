@@ -1,11 +1,13 @@
 import { provisionManagedInfisical } from './full-platform-infisical.js';
 import { verifyBasicFlows } from './infisical-basic-flows.js';
 import { readInfisical,infisicalSecrets } from './infisical-store.js';
-import { INFISICAL_APP,INFISICAL_ROOT,PROXY_KEY,infisicalJobSchema,infisicalError as fail,digest } from './infisical-logic.js';
+import { INFISICAL_PORT,INFISICAL_APP,INFISICAL_ROOT,PROXY_KEY,infisicalJobSchema,infisicalError as fail,digest } from './infisical-logic.js';
 import { ensureInfisicalRuntime,ensureAgentProxyRuntime,prepareInfisicalFiles,assertLocalTestHost,assertIsolatedAgentVm } from './infisical-runtime.js';
 import { createInfisicalClient,requireOk,verifyInfisicalIdentities,ensureTestSecret,verifyServiceHandoff } from './infisical-api.js';
 import { verifyCredentialFlows } from './infisical-flows.js';
 import { assertInfisicalRouteAvailable } from './infisical-routes.js';
+import { localEdge } from './local-edge.js';
+import { assertUpstreamListening } from './owned-runtime.js';
 import { createJob,getJob,acquireLock,renewLock,releaseLock,takeoverLock,readLock } from './store.js';
 
 export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_ROOT,send,runtime=ensureInfisicalRuntime,proxyRuntime=ensureAgentProxyRuntime,hostProbe=assertLocalTestHost,vmProbe=assertIsolatedAgentVm,flows=verifyCredentialFlows,basicFlows=verifyBasicFlows,provision=provisionManagedInfisical}) {
@@ -22,9 +24,16 @@ export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_R
     if(!child){job.fence();db.exec('BEGIN IMMEDIATE');try{child=createJob(db,{app:INFISICAL_APP,kind:'configure_infisical_route',plan:{params},requestedBy:'infisical_apply',via:'system'});db.prepare('UPDATE setup_infisical SET edge_job_id=? WHERE id=1').run(child.id);db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}}
     phase('infisical_caddy_route');if(['queued','running'].includes(child.status))return {waiting:true,reason:'Waiting for the recorded restricted Caddy route step. Progress survives browser/API restart.'};
     if(child.status!=='succeeded')throw fail('The Infisical Caddy step failed. Correct its reported conflict and retry the reviewed plan.');
+    // The route targets the SERVER's published port (INFISICAL_PORT), not the
+    // Agent Proxy (that listens on the private runner address, :17322, and is
+    // created after bootstrap). Prove the upstream before the bootstrap check.
+    phase('infisical_upstream');await assertUpstreamListening({run:argv=>exec.host(argv,{timeoutMs:15000}),port:INFISICAL_PORT,fail,label:'Infisical'});job.fence();
   }
   phase('infisical_bootstrap');
-  const api=createInfisicalClient(r.config.origin,{send,job});
+  // An owned instance is checked through this host's Caddy (3c): the host's
+  // own hostname would hairpin through the firewall and meet the restricted
+  // route from the firewall's LAN address.
+  const api=createInfisicalClient(r.config.origin,{send,job,edge:r.config.mode==='install'?localEdge(db):null});
   requireOk(await api('/api/status'),'Infisical status');
   const initialized=requireOk(await api('/api/v1/admin/config'),'Infisical administrator initialization').config?.initialized;
   if(r.config.basic&&r.config.mode==='install') {

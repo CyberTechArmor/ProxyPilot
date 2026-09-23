@@ -17,7 +17,7 @@ import {
   SELF_EDIT_TOOLS, redactArgs, readOnlySqlError, envFileKeys, mergeEnvFile, validateEnvVars, parseChecklist, recordChecklistItem,
   resolveBuildMode, parseSystemctlUnits, parseDpkgList, parseAptUpgradable, validGitRefName, validOctalMode, pathUnder, parseReleases, renderReleases,
 } from '../lib/mcp-ext/logic.js';
-import { validateRouteEdgeOptions, routeEdgeOptionLines, wrapRouteBody, parseRouteEdgeOptions } from '../lib/caddy-site-file.js';
+import { validateRouteEdgeOptions, routeEdgeOptionLines, wrapRouteBody, parseRouteEdgeOptions, DENIED_BODY } from '../lib/caddy-site-file.js';
 import { createExtendedHandlers } from '../routes/mcp-tools/index.js';
 
 const POLICY = JSON.parse(readFileSync(new URL('../lib/mcp-policy/mcp-extended-policy.json', import.meta.url), 'utf8'));
@@ -293,7 +293,8 @@ test('route edge options render inside the handle block, wrapped in route {} onl
   const lines = routeEdgeOptionLines(opts, '    ', { routeId: 'r1' });
   assert.deepEqual(lines, [
     '    @pp_denied not remote_ip 10.0.0.0/8',
-    '    respond @pp_denied 403',
+    '    header @pp_denied Content-Type "text/plain; charset=utf-8"',
+    `    respond @pp_denied "${DENIED_BODY}" 403`,
     '    basic_auth {', '        ops $2b$x', '    }',
     '    header {', '        X-A "b c"', '        -X-Gone', '        Content-Security-Policy "default-src \'self\'"', '    }',
   ]);

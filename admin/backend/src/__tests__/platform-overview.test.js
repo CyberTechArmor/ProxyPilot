@@ -169,7 +169,7 @@ test('3c: a service route restricted to one external IP still passes its own boo
   assert.equal(seen.opts.headers[SELF_CHECK_HEADER], token);
   assert.equal(denied(lines, { remote: seen.address, headers: seen.opts.headers }), false, 'the bootstrap check passes the restricted route');
   // Other restricted routes keep the plain matcher.
-  assert.doesNotMatch(routeEdgeOptionLines({ ip_allowlist: ['198.51.100.7'] }, '  ', { routeId: 'app-route' }).join('\n'), /header/);
+  assert.doesNotMatch(routeEdgeOptionLines({ ip_allowlist: ['198.51.100.7'] }, '  ', { routeId: 'app-route' }).join('\n'), /X-ProxyPilot-Self-Check|not {/);
 }));
 
 function fakeDocker(state) {

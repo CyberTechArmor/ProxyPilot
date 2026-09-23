@@ -223,7 +223,7 @@ export function siteSecurityHeaderLines({ allowFramingRoute = null, frameAncesto
 // Bump when the rendered site-file shape changes in a way every existing file
 // must pick up. The backend compares it with app_settings.caddy_site_render_contract
 // at boot and regenerates all site files once (index.js).
-export const CADDY_SITE_RENDER_CONTRACT = '2';
+export const CADDY_SITE_RENDER_CONTRACT = '3'; // 3: allowlist refusals carry DENIED_BODY
 
 
 // ---- per-route edge options (migration 907; set_route_options over MCP) ----
@@ -324,6 +324,12 @@ export function validateRouteEdgeOptions(input = {}, { bcryptHash = null, rateLi
   return { options: out };
 }
 
+// The body of an allowlist refusal. A bare 403 renders as the browser's own
+// "access denied" page and says nothing; this names the source address Caddy
+// saw, which is what tells a VPN user their device resolved the hostname to
+// the public address (fix: the tunnel's DNS setting, see cli/src/core/vpn/dns.js).
+export const DENIED_BODY = 'Access denied (403). This hostname admits only its restricted networks, and this request came from {remote_host}. If you are connected to the VPN, your device resolved this name to the public address instead of through the tunnel: add DNS = 10.100.0.1 under [Interface] in the WireGuard config, reconnect, and retry.';
+
 /** Caddyfile lines for a route's edge options, to go INSIDE the handle block before the proxy/file_server body. */
 export function routeEdgeOptionLines(opts, indent = '        ', { routeId = 'r', selfCheck = null } = {}) {
   if (!opts) return [];
@@ -341,10 +347,12 @@ export function routeEdgeOptionLines(opts, indent = '        ', { routeId = 'r',
     lines.push(`${i2}    header ${selfCheck.header || 'X-ProxyPilot-Self-Check'} ${selfCheck.token}`);
     lines.push(`${i2}}`);
     lines.push(`${indent}}`);
-    lines.push(`${indent}respond @pp_denied 403`);
+    lines.push(`${indent}header @pp_denied Content-Type "text/plain; charset=utf-8"`);
+    lines.push(`${indent}respond @pp_denied ${q(DENIED_BODY)} 403`);
   } else if (opts.ip_allowlist) {
     lines.push(`${indent}@pp_denied not remote_ip ${opts.ip_allowlist.join(' ')}`);
-    lines.push(`${indent}respond @pp_denied 403`);
+    lines.push(`${indent}header @pp_denied Content-Type "text/plain; charset=utf-8"`);
+    lines.push(`${indent}respond @pp_denied ${q(DENIED_BODY)} 403`);
   }
   if (opts.basic_auth) {
     lines.push(`${indent}basic_auth {`);

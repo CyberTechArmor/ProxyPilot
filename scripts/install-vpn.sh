@@ -71,6 +71,24 @@ if [[ -x "${SCRIPT_DIR}/patch-wg-mtu.sh" ]]; then
         log "WARNING: patch-wg-mtu.sh exited non-zero; wg0.conf may need a manual MTU line."
 fi
 
+# ── 6. VPN DNS resolver (proxypilot-vpn-dns.service) ───────────────
+# Answers the platform hostnames (and the operator's extra domains) with
+# 10.100.0.1 so VPN peers reach them through the tunnel. Installed and
+# enabled on every install/update; it waits (restarting every 10 s) until
+# wg0 carries 10.100.0.1. Peer configs issued from now on carry
+# DNS = 10.100.0.1; existing peers add that line by hand.
+UNIT_SRC="${SCRIPT_DIR}/../deploy/proxypilot-vpn-dns.service"
+if [[ -f "$UNIT_SRC" ]] && command -v systemctl >/dev/null 2>&1; then
+    [[ -f /var/lib/proxypilot/vpn-dns.json ]] || printf '{"managed":[],"extra":[]}\n' > /var/lib/proxypilot/vpn-dns.json
+    chmod 0644 /var/lib/proxypilot/vpn-dns.json
+    install -m 0644 "$UNIT_SRC" /etc/systemd/system/proxypilot-vpn-dns.service
+    systemctl daemon-reload
+    systemctl enable proxypilot-vpn-dns.service >/dev/null 2>&1 || true
+    systemctl restart proxypilot-vpn-dns.service >/dev/null 2>&1 || \
+        log "WARNING: proxypilot-vpn-dns.service did not start (it retries until wg0 is up)."
+    log "VPN DNS resolver installed (10.100.0.1:53; names: proxypilot vpn dns status)."
+fi
+
 log "VPN module installed."
 log "  enable:    proxypilot vpn enable --endpoint <host:port>"
 log "  status:    wg show wg0  (after enable)"

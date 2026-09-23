@@ -231,6 +231,39 @@ export function RestrictedNetworks({ vpn = [], additional = [], edit, onChanged 
   </div>;
 }
 
+/**
+ * Names the VPN resolver (10.100.0.1) answers with the VPN address, so VPN
+ * peers reach them through the tunnel and the restricted routes see their VPN
+ * address: the Full Platform hostnames (locked) plus extra domains (editable).
+ */
+export function VpnDnsNames({ view, onChanged }) {
+  const extraNow = view?.extra || [];
+  const [list, setList] = useState(extraNow), [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
+  useEffect(() => { setList(extraNow); }, [extraNow.join(',')]);
+  if (!view) return null;
+  const dirty = list.join(',') !== extraNow.join(',');
+  const add = () => { const v = draft.trim().toLowerCase(); if (!v) return; if (!list.includes(v)) setList([...list, v]); setDraft(''); setError(''); };
+  const save = async () => { setBusy(true); setError(''); setNotice(''); try { const r = await api.platformVpnDnsSave(list); setNotice(r.push?.ok ? 'Saved and sent to the VPN resolver.' : `Saved; the host resolver was not updated yet (${r.push?.error || 'unknown error'}). It retries every five minutes.`); onChanged?.(); } catch (e) { setError(e.message); } finally { setBusy(false); } };
+  return <div className="rounded-lg border p-4 space-y-3 min-w-0">
+    <h3 className="font-semibold">Reached through the VPN</h3>
+    <p className="text-sm text-muted-foreground">On the VPN, these names resolve to {view.address}, so the browser goes through the tunnel and restricted routes see its VPN address. Other names resolve normally.</p>
+    <ul className="space-y-2" aria-label="Names resolved through the VPN">
+      {view.managed.map((n) => <li key={`m-${n}`} className="flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 min-h-11 min-w-0"><span className="font-mono text-sm break-all">{n}</span><span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"><Lock className="h-3.5 w-3.5" aria-hidden="true" /><span className="sm:hidden">auto</span><span className="hidden sm:inline">Platform · automatic</span></span></li>)}
+      {list.map((n) => <li key={`x-${n}`} className="flex items-center justify-between gap-3 rounded-md border px-3 min-h-11 min-w-0"><span className="font-mono text-sm break-all">{n}</span><Button variant="ghost" className="min-h-11 min-w-11 shrink-0" disabled={busy} aria-label={`Remove ${n}`} onClick={() => setList(list.filter((x) => x !== n))}><X className="h-4 w-4" aria-hidden="true" /></Button></li>)}
+    </ul>
+    {view.skipped?.length > 0 && <ul className="text-xs text-muted-foreground space-y-1">{view.skipped.map((x) => <li key={x.name} className="break-words">Not sent through the VPN: {x.name} — {x.reason}</li>)}</ul>}
+    <div className="flex flex-col sm:flex-row gap-2">
+      <div className="flex-1 min-w-0"><Label htmlFor="platform-vpn-dns-name" className="sr-only">Extra hostname</Label><Input id="platform-vpn-dns-name" value={draft} placeholder="app.example.com or *.example.com" disabled={busy} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} autoComplete="off" spellCheck={false} className="min-h-11" /></div>
+      <Button variant="outline" className="min-h-11" disabled={busy || !draft.trim()} onClick={add}>Add domain</Button>
+    </div>
+    <Button className="min-h-11 w-full sm:w-auto" disabled={busy || !dirty} onClick={save}>{busy ? 'Saving…' : 'Save extra domains'}</Button>
+    <p className="text-xs text-muted-foreground break-words">{view.peer_config}{view.pushed ? ` Resolver ${view.pushed.in_sync ? 'up to date' : view.pushed.ok ? 'update pending' : `not updated: ${view.pushed.error}`}.` : ''}</p>
+    {error && <p role="alert" className="text-sm text-destructive break-words">{error}</p>}
+    {notice && <p role="status" className="text-sm break-words">{notice}</p>}
+  </div>;
+}
+
 function SectionActions({ overview, onChanged }) {
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [resync, setResync] = useState(null);
@@ -238,6 +271,7 @@ function SectionActions({ overview, onChanged }) {
   const edit = overview.section_actions?.find((a) => a.id === 'edit_networks'), rs = overview.section_actions?.find((a) => a.id === 'resync_plan');
   return <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
     <RestrictedNetworks vpn={overview.vpn_networks || []} additional={overview.additional_networks || []} edit={edit} onChanged={onChanged} />
+    <VpnDnsNames view={overview.vpn_dns} onChanged={onChanged} />
     <div className="rounded-lg border p-4 space-y-3 min-w-0">
       <h3 className="font-semibold">Shared service plan</h3>
       <p className="text-sm">{overview.shared_plan?.in_sync ? 'In sync with the Full Platform revision.' : `The shared plan changed to revision ${overview.shared_plan?.shared_revision} after this Full Platform revision recorded ${overview.shared_plan?.recorded_revision}.`}</p>

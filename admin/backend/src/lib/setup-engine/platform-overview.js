@@ -11,6 +11,7 @@
 // read only when asked for. Every returned object passes through redact():
 // no secret, credential or protected reference leaves this module.
 
+import { vpnDnsView } from './platform-vpn-dns.js';
 import { fullPlatformState, readFullPlatform, installedTargets, digest, fail, resyncReview } from './full-platform-store.js';
 import { applyService, serviceReaders } from './full-platform-services.js';
 import { lifecycleReview } from './full-platform-lifecycle.js';
@@ -248,6 +249,7 @@ export async function platformOverview(db, { run, resolvers, fresh = false } = {
     saved: true, revision: full.revision, approved_revision: full.approved_revision, flag, mcp_access: mcpAccess(db),
     docker, caddy_host: dnsAll.expected, operation: op,
     vpn_networks: s.networks.vpn, additional_networks: s.networks.additional, restricted_networks: s.networks.effective, restricted_networks_applied: s.networks.applied,
+    vpn_dns: vpnDnsView(db),
     shared_plan: { in_sync: resync ? resync.in_sync : true, shared_revision: resync?.shared_plan_revision || null, recorded_revision: resync?.recorded_plan_revision || null },
     section_actions: [
       action('edit_networks', 'Edit additional addresses', !netBlock, netBlock, { preview: true }),

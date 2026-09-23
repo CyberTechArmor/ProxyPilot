@@ -341,6 +341,12 @@ try {
       const r = await syncPlatformVpnNetworks({ reason });
       if (r.changed || r.queued) console.log(`[setup-engine] VPN networks ${JSON.stringify(r.before ?? null)} -> ${JSON.stringify(r.observed)}${r.queued ? `; restricted-network step ${r.queued.job.id} queued` : ''}`);
     } catch (err) { console.error('[setup-engine] VPN network sync failed:', err?.message || err); }
+    // The VPN resolver's names follow the saved plan and the extra list.
+    try {
+      const { pushPlatformVpnDns } = await import('./lib/platform-vpn-sync.js');
+      const d = await pushPlatformVpnDns();
+      if (!d.ok) console.error('[setup-engine] VPN DNS push failed:', d.error);
+    } catch (err) { console.error('[setup-engine] VPN DNS push failed:', err?.message || err); }
   };
   setTimeout(() => vpnNetworksSync('boot'), 20_000).unref();
   setInterval(() => vpnNetworksSync('interval'), 5 * 60_000).unref();

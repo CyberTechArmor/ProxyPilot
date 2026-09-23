@@ -25,3 +25,20 @@ export async function syncPlatformVpnNetworks({ reason = 'interval', readStatus 
   }
   return out;
 }
+
+/**
+ * Push the VPN DNS names (the Full Platform hostnames + the operator's extra
+ * domains) to the host resolver: `proxypilot --json vpn dns set`. Called at
+ * boot, on the same interval, and after a plan save, a network change or an
+ * edit of the extra list. The outcome is recorded for the dashboard.
+ */
+export async function pushPlatformVpnDns({ call = (args) => callProxypilot(args) } = {}) {
+  const { vpnDnsManaged, vpnDnsExtra, recordVpnDnsPush } = await import('./setup-engine/platform-vpn-dns.js');
+  const db = getDb(), { managed } = vpnDnsManaged(db), extra = vpnDnsExtra(db);
+  let result;
+  try { result = await call(['vpn', 'dns', 'set', '--managed', managed.join(','), '--extra', extra.join(',')]); }
+  catch (e) { result = { ok: false, error: e?.message || String(e) }; }
+  const ok = result?.ok !== false;
+  recordVpnDnsPush(db, { ok, error: ok ? null : String(result?.error || 'unknown error').slice(0, 300), managed, extra });
+  return { ok, managed, extra, error: ok ? null : result?.error };
+}

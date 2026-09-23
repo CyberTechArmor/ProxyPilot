@@ -47,6 +47,7 @@ fullPlatformRouter.post('/reset', requireSudo, handle((req, res) => {
 fullPlatformRouter.put('/', requireSudo, handle((req, res) => {
   const r = saveFullPlatform(getDb(), req.body, req.user.id);
   logAudit(req.user.id, 'FULL_PLATFORM_PLAN_SAVED', 'setup_full_platform', '1', { revision: r.revision }, req.ip);
+  import('./platform-overview.js').then(({ pushVpnDnsSoon }) => pushVpnDnsSoon()).catch(() => {});
   res.json(fullPlatformState(getDb()));
 }));
 fullPlatformRouter.post('/apply', requireSudo, handle((req, res) => {

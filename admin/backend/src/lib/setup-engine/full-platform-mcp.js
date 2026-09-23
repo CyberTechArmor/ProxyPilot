@@ -14,6 +14,7 @@
 // engine's redact() on the way out.
 
 import { createHash } from 'node:crypto';
+import { vpnDnsView } from './platform-vpn-dns.js';
 import { SERVICES } from './platform-catalog.js';
 import { fullPlatformState, readFullPlatform, installedTargets, reviewFullPlatform, digest, fail, stageRefusal, STAGES } from './full-platform-store.js';
 import { lifecycleReview } from './full-platform-lifecycle.js';
@@ -164,6 +165,9 @@ export function platformSetupView(db) {
     // are the operator's list; restricted_networks is their union.
     vpn_networks: s.networks.vpn, additional_networks: s.networks.additional, restricted_networks: s.networks.effective,
     restricted_networks_applied: s.networks.applied,
+    // Names the VPN resolver (10.100.0.1) answers with the VPN address, so VPN
+    // peers reach them through the tunnel: managed (derived) + extra (operator).
+    vpn_dns: vpnDnsView(db),
     current_stage: s.stage, stages: s.stages,
     operation, operation_running: opRunning,
     services, failures,

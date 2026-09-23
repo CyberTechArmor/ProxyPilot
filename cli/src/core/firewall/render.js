@@ -235,6 +235,10 @@ table inet proxypilot {
     # bridge may reach (nftables drop is final across tables). The wildcard is
     # inert on a host with no Mock2 bridges — it matches no interface.
     iifname "m2br*" accept
+    # VPN DNS (proxypilot-vpn-dns.service on the VPN server address): peers
+    # resolve the platform hostnames to 10.100.0.1 so their requests go
+    # through the tunnel. VPN sources only; inert when nothing listens.
+    ip saddr ${VPN_CIDR} ip daddr 10.100.0.1 meta l4proto { tcp, udp } th dport 53 accept comment "vpn-dns"
     ct state established,related accept
     ct state invalid drop
     ip protocol icmp icmp type echo-request limit rate 5/second accept

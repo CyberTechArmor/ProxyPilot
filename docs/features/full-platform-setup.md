@@ -59,6 +59,24 @@ The allowlist for local recovery and every restricted service route is
   step-up (local password + TOTP or local passkey) and an audit record
   (`FULL_PLATFORM_NETWORKS_CHANGE`). The change is live when its Caddy step
   finishes. `/0` and an empty effective list are refused.
+- **Reaching them over the VPN.** VPN peers tunnel only `10.100.0.0/24`, so a
+  platform hostname resolved through public DNS is reached outside the tunnel
+  and Caddy sees the client's public address — being connected to the VPN
+  alone never satisfied the allowlist. The **VPN resolver**
+  (`proxypilot-vpn-dns.service`, `cli/src/core/vpn/dns.js`, bound to
+  `10.100.0.1:53` udp+tcp only) answers the Full Platform hostnames and the
+  operator's **extra domains** (exact or `*.suffix`) with `10.100.0.1`, returns
+  no AAAA for them, and forwards every other query to the host's resolvers.
+  Peer configs issued now carry `DNS = 10.100.0.1`; add that line under
+  `[Interface]` in configs issued earlier. The firewall admits port 53 to
+  `10.100.0.1` from the VPN subnet only. The names are pushed from the
+  backend with `proxypilot --json vpn dns set` (boot, every five minutes, after
+  a plan save, a network change or an edit) and shown in **Reached through the
+  VPN** (platform names locked, extra domains editable with sudo + audit
+  `PLATFORM_VPN_DNS_CHANGED`) and in `get_platform_setup.vpn_dns`. A platform
+  hostname whose route admits only non-VPN addresses is left out (sending it
+  through the tunnel would lock VPN users out) and listed with the reason.
+  Host: `proxypilot vpn dns status`.
 - The networks are not part of the SSO fingerprint: the change rewrites the
   SSO record's list and the recovery route together in place, and SSO
   verification and activation stand.

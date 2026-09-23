@@ -24,13 +24,18 @@ export async function autoBootstrap(db,r,api,{job,providerProbe,clientProbe}){
   let k;try{k=verifiedProvider(db,r.config.connectionId);await providerProbe({mode:'connect',url:k.origin,realm:k.realm});}catch{throw fail('The saved Keycloak provider could not be verified.');}job.fence();await clientProbe(db,r);job.fence();
   const result=await bootstrap(db,r,{bootstrapToken:kit.root},api,{job,verifyDatabase(){throw fail('The basic profile configures no database.');}});
   const current=custody(db,r,'kit');if(current)putCustody(db,r,'kit',{...current,root:null,rootRevoked:true});return result;}
+// The route admits only the restricted networks, so ProxyPilot's own requests to
+// the public name are refused. Go through this host's Caddy first (restricted
+// route + self-check header), then the public origin. Used by the sweep and the page.
+export async function reachableStatus(db,r,{send}={}){
+  let api=createClient(r.config.origin,{...(send?{send}:{}),edge:localEdge(db)}),health=await status(api);
+  if(health.state==='unavailable'){api=createClient(r.config.origin,send?{send}:{});health=await status(api);}
+  return {api,health};}
 // Periodic sweep (index.js): unseal a sealed automatic-custody instance after a
 // restart, but only once its recovery kit was acknowledged and no operation is pending.
 export async function sweepOpenBaoAutoUnseal({db,send}={}){const r=readOpenBao(db);
   if(!autoCustody(r)||!r.handoff_ack)return {skipped:'not_applicable'};
   if(r.last_job_id&&['queued','running'].includes(getJob(db,r.last_job_id)?.status))return {skipped:'operation_pending'};
-  // Through this host's Caddy first (restricted route + self-check header), then the public origin.
-  let api=createClient(r.config.origin,{...(send?{send}:{}),edge:localEdge(db)}),s=await status(api);
-  if(s.state==='unavailable'){api=createClient(r.config.origin,send?{send}:{});s=await status(api);}
+  const {api,health:s}=await reachableStatus(db,r,{send});
   if(s.state!=='sealed')return {skipped:s.state};
   const after=await autoUnseal(db,r,api);return {unsealed:after.state==='unsealed'};}

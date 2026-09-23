@@ -28,10 +28,22 @@ export function prepareFiles(r, credentials, { root = VAULTWARDEN_ROOT, resource
   // override it. Actual effective settings are still verified through the service.
   for (const [path, value] of [[config, expected], [handoff, { adminToken: credentials.admin }]]) {
     const content = JSON.stringify(value, null, 2) + '\n';
-    if (existsSync(path)) { if (readPrivate(path) !== content) throw fail('Vaultwarden protected configuration drifted. Resolve it with its owner; no overwrite or credential rotation was attempted.'); }
+    if (existsSync(path)) { const found = readPrivate(path); if (found === content) continue;
+      // An exact rendering from an earlier ProxyPilot version is ours to upgrade
+      // (e.g. before the rate-limit keys were added); any other difference is drift.
+      if (path === config && priorRenderings(value).includes(found)) { atomicPrivate(path, content); continue; }
+      throw fail('Vaultwarden protected configuration drifted. Resolve it with its owner; no overwrite or credential rotation was attempted.'); }
     else { if (identity.attempted.length || r.resources) throw fail('Vaultwarden protected configuration is missing. Restore the matching files before retry.'); atomicPrivate(path, content); }
   }
   return { root, data, config, marker, identity };
+}
+// Keys added to the owned config.json by later ProxyPilot versions, newest first.
+// Removing each group in turn reproduces what an earlier version wrote.
+export const CONFIG_ADDITIONS = [['admin_ratelimit_seconds', 'admin_ratelimit_max_burst']];
+export function priorRenderings(value) {
+  const out = []; let v = { ...value };
+  for (const keys of CONFIG_ADDITIONS) { v = Object.fromEntries(Object.entries(v).filter(([k]) => !keys.includes(k))); out.push(JSON.stringify(v, null, 2) + '\n'); }
+  return out;
 }
 export function keyEvidence(data, prior) {
   const names = readdirSync(data).filter(n => /^rsa_key(?:\.[a-z]+)+$/.test(n)).sort();

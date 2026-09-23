@@ -662,7 +662,11 @@ export default function Layout() {
       )}>
         <SnapshotExportBanner />
         <div className={cn(
-          "md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto",
+          // relative: the positioning context for absolutely positioned
+          // descendants (sr-only labels, popovers) — without it they are
+          // placed against the document, land below the fold and give the
+          // page a second, outer scrollbar.
+          "relative md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto",
           chromeless ? "p-0" : "p-4",
         )}>
           {/* Expose the assistant dock's state so routed pages (Lean BEAF Pro)

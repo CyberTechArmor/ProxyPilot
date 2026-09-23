@@ -97,6 +97,21 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
     throw new ApiError('Session expired', 401);
   }
 
+  // Fresh LOCAL proof gate: the session's sudo window may still be open, but
+  // actions like revealing the Keycloak bootstrap password, the administrator
+  // handoff, runtime actions, reset and restricted-network changes also need
+  // a local password + TOTP or local passkey within five minutes. The server
+  // answers 403 + sudo_required; prompt for local factors only (the modal's
+  // success stamps local_proof_at) and retry the call once.
+  if (response.status === 403 && data.sudo_required && _retryOnSudo) {
+    try {
+      await requestSudo({ localOnly: true });
+    } catch {
+      throw new ApiError(data.message || 'Local re-authentication cancelled', 403, data);
+    }
+    return request(endpoint, options, false);
+  }
+
   if (!response.ok) {
     throw new ApiError(data.error || 'Request failed', response.status, data);
   }

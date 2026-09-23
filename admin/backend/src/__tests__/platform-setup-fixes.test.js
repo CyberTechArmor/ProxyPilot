@@ -491,3 +491,17 @@ test('a refused recovery link opened in a browser renders a readable page, API c
   assert.match(page, /Use a &lt;different&gt; browser\./);
   assert.doesNotMatch(page, /<different>/);
 });
+
+test('Infisical refusals carry Infisical\'s own reason, with token-like runs masked', async () => {
+  const { requireOk } = await import('../lib/setup-engine/infisical-api.js');
+  assert.throws(() => requireOk({ status: 400, body: { message: 'hostPattern: not a valid host pattern' } }, 'Owned proxied destination'), /HTTP 400\)\. Infisical said: "hostPattern: not a valid host pattern"\./);
+  assert.throws(() => requireOk({ status: 400, body: { message: 'bad token ' + 'a'.repeat(40) } }, 'X'), (e) => /\[redacted\]/.test(e.message) && !e.message.includes('a'.repeat(40)));
+  assert.throws(() => requireOk({ status: 500, body: null }, 'X'), /X unavailable \(HTTP 500\)\. Complete/);
+});
+
+test('Vaultwarden admin rate limiting is named, not reported as a failed configuration', async () => {
+  const { verifyEffective } = await import('../lib/setup-engine/vaultwarden-api.js');
+  const { VAULTWARDEN_VERSION } = await import('../lib/setup-engine/vaultwarden-logic.js');
+  const api = async (path) => path === '/api/version' ? { status: 200, body: VAULTWARDEN_VERSION } : path === '/alive' ? { status: 200 } : { status: 429, body: null };
+  await assert.rejects(verifyEffective(api, { config: {} }, { admin: 'x', client: 'y' }), /rate-limited/);
+});

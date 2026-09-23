@@ -58,6 +58,7 @@ export function effectiveSettings(html, r, clientSecret) {
 export async function verifyEffective(api, r, credentials) {
   const h = await health(api); if (h.state !== 'healthy') throw fail(`Vaultwarden is ${h.state.replaceAll('_', ' ')}. No service verification was recorded.`);
   const result = await api('/admin/', { adminToken: credentials.admin });
-  if (result.status !== 200) throw fail('Vaultwarden read-only administrative configuration check failed. Keep existing login and ask its owner to complete the handoff.');
+  if (result.status === 429) throw fail('Vaultwarden rate-limited the administrative check (too many admin logins in a short time). Wait a few minutes and retry; nothing was changed.');
+  if (result.status !== 200) throw fail(`Vaultwarden read-only administrative configuration check failed (HTTP ${result.status}). Keep existing login and ask its owner to complete the handoff.`);
   return { ...effectiveSettings(result.body, r, credentials.client), version: VAULTWARDEN_VERSION };
 }

@@ -32,7 +32,12 @@ export async function infisicalRequest(origin,path,{method='GET',token,body,reso
 export function createInfisicalClient(origin,{send=infisicalRequest,job,edge=null}={}) {
   return async(path,options={})=>{job?.fence();const out=await send(origin,path,edge?{...options,edge}:options);job?.fence();return out;};
 }
-export function requireOk(result,label){if(result.status!==200||!result.body)throw fail(`${label} unavailable (HTTP ${result.status}). Complete the documented handoff; no capability is assumed.`);return result.body;}
+// Infisical's own validation text says exactly what it refused. It carries no
+// credential here (requests put secrets in bodies, not in errors), but any long
+// token-like run is still masked and the text is capped.
+export function upstreamReason(body){const m=typeof body?.message==='string'?body.message:typeof body?.error==='string'?body.error:null;if(!m)return '';
+  const clean=m.replace(/[A-Za-z0-9_\-.+/=]{32,}/g,'[redacted]').replace(/\s+/g,' ').trim().slice(0,300);return clean?` Infisical said: "${clean}".`:'';}
+export function requireOk(result,label){if(result.status!==200||!result.body)throw fail(`${label} unavailable (HTTP ${result.status}).${upstreamReason(result.body)} Complete the documented handoff; no capability is assumed.`);return result.body;}
 export const scopeQuery=projectId=>new URLSearchParams({projectId,environment:TEST_ENV,secretPath:TEST_PATH}).toString();
 export const secretPath=(projectId,key=TEST_KEY)=>`/api/v4/secrets/${key}?${scopeQuery(projectId)}&viewSecretValue=true&expandSecretReferences=false&includeImports=false`;
 

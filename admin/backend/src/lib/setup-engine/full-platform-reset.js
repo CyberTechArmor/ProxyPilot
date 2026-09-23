@@ -149,6 +149,8 @@ function recordPlan(db, { owned, sso, purgeData }) {
     else out.push({ table: `setup_${service}`, where: 'id=1', args: [], what: `${service} service record` });
     if (service === 'pomerium') out.push({ table: 'setup_route_protection', where: "state='removed'", args: [], what: 'retired Pomerium route policies' });
     if (purgeData && CREDENTIAL_TABLE[service]) out.push({ table: CREDENTIAL_TABLE[service], where: 'id=?', args: [row.credential_ref], what: `${service} protected credentials` });
+    // OpenBao automatic custody: the encrypted 2-share auto-unseal record and any unacknowledged recovery kit go with purge only (like the credentials above).
+    if (purgeData && service === 'openbao') out.push({ table: 'setup_openbao_credentials', where: 'id IN (?,?)', args: [`${row.credential_ref}:unseal`, `${row.credential_ref}:kit`], what: 'OpenBao automatic-unseal shares and one-time recovery kit (ciphertext)' });
   }
   if (sso?.owned) {
     out.push({ table: 'sso_config', where: 'id=1 AND active=0', args: [], what: 'inactive ProxyPilot SSO record naming the owned Keycloak (the observer reference)' });

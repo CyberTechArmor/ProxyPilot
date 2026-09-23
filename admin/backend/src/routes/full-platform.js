@@ -7,7 +7,8 @@ import { fullPlatformState, saveFullPlatform, applyFullPlatform, approvalDnsRefu
 import { protectedValue, storeProtected } from '../lib/setup-engine/full-platform-keycloak.js';
 import { personalSchema, personalRef } from '../lib/setup-engine/full-platform-infisical.js';
 import { readInfisical } from '../lib/setup-engine/infisical-store.js';
-import { readOpenBao, save as saveBao, idle as baoIdle } from '../lib/setup-engine/openbao-store.js';
+import { readOpenBao, save as saveBao, idle as baoIdle, custody as baoCustody } from '../lib/setup-engine/openbao-store.js';
+import { autoCustody, KIT_INSTRUCTIONS } from '../lib/setup-engine/openbao-logic.js';
 import { getJob } from '../lib/setup-engine/store.js';
 import { z } from 'zod';
 import { lifecycleReview, queueLifecycle } from '../lib/setup-engine/full-platform-lifecycle.js';
@@ -82,15 +83,31 @@ fullPlatformRouter.post('/infisical/administrator', requireSudo, handle((req, re
   res.status(202).json(result);
 }));
 fullPlatformRouter.post('/openbao/recovery', requireSudo, handle((req, res) => {
-  const p = z.object({ revision: z.number().int().positive(), pgpKeys: z.array(z.string()).length(3), rootPgpKey: z.string(), reviewed: z.literal(true) }).strict().parse(req.body);
+  // Default: automatic custody (no keys). The PGP custodian body is the Advanced option, unchanged.
+  const p = z.union([z.object({ revision: z.number().int().positive(), custody: z.literal('auto'), reviewed: z.literal(true) }).strict(), z.object({ revision: z.number().int().positive(), custody: z.literal('pgp').optional(), pgpKeys: z.array(z.string()).length(3), rootPgpKey: z.string(), reviewed: z.literal(true) }).strict()]).parse(req.body);
+  const auto = p.custody === 'auto';
   const db = getDb(), full = readFullPlatform(db), r = readOpenBao(db);
   if (!full || full.revision !== p.revision || full.approved_revision !== p.revision || !r?.config.basic || r.config.mode !== 'install' || r.init_attempted) throw fail('Recovery recipients can be enrolled only before this owned basic instance is initialized.');
   baoIdle(db, r);
   const { mode, origin, issuer, ...config } = r.config;
-  saveBao(db, { ...config, expectedPlanRevision: full.plan_revision, expectedRevision: r.revision, pgpKeys: p.pgpKeys, rootPgpKey: p.rootPgpKey, initialize: true, reviewed: true });
+  saveBao(db, { ...config, expectedPlanRevision: full.plan_revision, expectedRevision: r.revision, ...(auto ? { custody: 'auto' } : { pgpKeys: p.pgpKeys, rootPgpKey: p.rootPgpKey }), initialize: true, reviewed: true });
   const result = applyFullPlatform(db, { revision: full.revision, reviewToken: reviewFullPlatform(db).reviewToken, reviewed: true }, req.user.id);
-  logAudit(req.user.id, 'OPENBAO_RECIPIENTS_REVIEWED', 'setup_job', result.job.id, {}, req.ip);
+  logAudit(req.user.id, auto ? 'OPENBAO_AUTO_CUSTODY_CHOSEN' : 'OPENBAO_RECIPIENTS_REVIEWED', 'setup_job', result.job.id, {}, req.ip);
   res.status(202).json(result);
+}));
+// The one-time OpenBao recovery kit (automatic custody): fresh local proof like
+// the Keycloak reveal. Available until its receipt is acknowledged (PUT
+// /api/setup/platform/openbao/handoff), which deletes ProxyPilot's copy.
+fullPlatformRouter.get('/openbao/recovery-kit', requireSudo, handle((req, res) => {
+  const db = getDb();
+  { const refusal = localProofRefusal(db, req.session.id, requestOrigin(req), 'Downloading the OpenBao recovery kit'); if (refusal) return res.status(refusal.status).json(refusal.body); }
+  const r = readOpenBao(db);
+  if (!autoCustody(r)) throw fail('The recovery kit exists only for the automatically initialized managed OpenBao.');
+  const kit = !r.handoff_ack && baoCustody(db, r, 'kit');
+  if (!kit) throw Object.assign(fail('The one-time recovery kit was already acknowledged and deleted, or OpenBao is not initialized yet.'), { status: 410 });
+  logAudit(req.user.id, 'OPENBAO_RECOVERY_KIT_DOWNLOADED', 'setup_openbao', '1', {}, req.ip);
+  res.set({ 'Content-Disposition': `attachment; filename="openbao-recovery-kit-${new URL(r.config.origin).hostname}.json"`, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  res.json({ format: 'proxypilot-openbao-recovery-kit@1', origin: r.config.origin, clusterId: r.resources?.clusterId || null, generatedAt: new Date().toISOString(), threshold: 2, shares: kit.shares, rootToken: kit.root || null, ...(kit.root ? {} : { rootTokenNote: 'The initial root token was used to configure OpenBao and then revoked. To act as root later, generate a new root token with 2 shares (bao operator generate-root) and revoke it when finished.' }), receipt: kit.receipt, instructions: KIT_INSTRUCTIONS });
 }));
 fullPlatformRouter.post('/keycloak/reveal', requireSudo, handle((req, res) => {
   const db = getDb();

@@ -1,7 +1,8 @@
 import { localEdge } from './local-edge.js';
 import { assertUpstreamListening } from './owned-runtime.js';
 import { readOpenBao,secrets,currentPlan } from './openbao-store.js';
-import { OPENBAO_ROOT,OPENBAO_PORT,OPENBAO_APP,jobSchema,digest,fail } from './openbao-logic.js';
+import { OPENBAO_ROOT,OPENBAO_PORT,OPENBAO_APP,jobSchema,digest,fail,autoCustody } from './openbao-logic.js';
+import { autoUnseal,autoBootstrap } from './openbao-custody.js';
 import { ensureRuntime } from './openbao-runtime.js';
 import { initialize } from './openbao-handoff.js';
 import { createClient,status,requireReady } from './openbao-api.js';
@@ -20,18 +21,20 @@ export async function runOpenBaoOperation({db,params,exec,job,root=OPENBAO_ROOT,
     const local=createClient(`http://127.0.0.1:${OPENBAO_PORT}`,{send,job,local:true});let observed;
     for(let i=0;i<attempts;i++){observed=await status(local);if(observed.state!=='unavailable')break;await sleep(1000);}
     if(observed.state==='unavailable')throw fail('OpenBao is unavailable after start. Restore the owned runtime and retry; no initialization or verification was claimed.');
-    if(r.config.basic&&!r.config.initialize)return {verification:{state:'awaiting_user_action',label:'OpenBao runtime installed. Confirm separate recovery custodians before initialization.',complete:false}};
+    if(r.config.basic&&!r.config.initialize)return {verification:{state:'awaiting_user_action',label:'OpenBao runtime installed. Choose recovery custody: set it up automatically (recommended), or use your own PGP custodians (Advanced).',complete:false}};
     if(!r.handoff_ack){phase('protected_initialization_handoff');await initialize(db,r,local,{job,recoveryRoot});r=readOpenBao(db);}
     let child=r.edge_job_id?getJob(db,r.edge_job_id):null;
     if(!child){job.fence();db.exec('BEGIN IMMEDIATE');try{child=createJob(db,{app:OPENBAO_APP,kind:'configure_openbao_route',plan:{params},requestedBy:'openbao_apply',via:'system'});db.prepare('UPDATE setup_openbao SET edge_job_id=? WHERE id=1').run(child.id);db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}}
     phase('restricted_caddy_route');if(['queued','running'].includes(child.status))return {waiting:true,reason:'Waiting for the recorded OpenBao Caddy route step.'};if(child.status!=='succeeded')throw fail('OpenBao Caddy configuration failed. Resolve its conflict and retry.');await assertUpstreamListening({run:argv=>exec.host(argv,{timeoutMs:15000}),port:OPENBAO_PORT,fail,label:'OpenBao'});job.fence();
-    if(r.config.basic&&!r.handoff_ack)return {verification:{state:'awaiting_user_action',label:'Retrieve the encrypted OpenBao recovery package and acknowledge its receipt before manual unseal.',complete:false}};
-    if(!r.handoff_ack)throw fail('Recovery handoff acknowledgement is required. Retrieve and decrypt the protected package, keep shares separately, then acknowledge its receipt.');
+    // Automatic custody continues without the acknowledgement; the kit download stays a separate human step.
+    if(r.config.basic&&!r.handoff_ack&&!autoCustody(r))return {verification:{state:'awaiting_user_action',label:'Retrieve the encrypted OpenBao recovery package and acknowledge its receipt before manual unseal.',complete:false}};
+    if(!r.handoff_ack&&!autoCustody(r))throw fail('Recovery handoff acknowledgement is required. Retrieve and decrypt the protected package, keep shares separately, then acknowledge its receipt.');
   }
-  const api=createClient(r.config.origin,{send,job,edge:r.config.mode==='install'?localEdge(db):null});phase('seal_and_cluster_check');if(r.config.basic&&(await status(api)).state==='sealed')return {verification:{state:'awaiting_user_action',label:'OpenBao requires manual unseal with the separately retained recovery shares.',complete:false}};const ready=await requireReady(api,r);job.fence();
+  const api=createClient(r.config.origin,{send,job,edge:r.config.mode==='install'?localEdge(db):null});phase('seal_and_cluster_check');if(autoCustody(r)&&(await status(api)).state==='sealed'){phase('automatic_unseal');await autoUnseal(db,r,api);job.fence();}if(r.config.basic&&(await status(api)).state==='sealed')return {verification:{state:'awaiting_user_action',label:'OpenBao requires manual unseal with the separately retained recovery shares.',complete:false}};const ready=await requireReady(api,r);job.fence();
   // External seal parameters and cluster identity are observed, never configured.
   if(r.resources?.seal&&r.resources.seal!==ready.seal)throw fail('External seal configuration changed; review with its owner. No seal migration was attempted.');
   db.prepare('UPDATE setup_openbao SET resources_json=? WHERE id=1').run(JSON.stringify({...r.resources,clusterId:ready.clusterId,seal:ready.seal}));r=readOpenBao(db);
+  if(autoCustody(r)&&!r.bootstrap_complete){phase('automatic_bootstrap');if(await autoBootstrap(db,r,api,{job,providerProbe,clientProbe}))r=readOpenBao(db);else return {verification:{state:'awaiting_user_action',label:'ProxyPilot no longer holds the initial root token. Submit it from your recovery kit to configure owned scoped access; it will be revoked after verification.',complete:false}};}
   if(r.config.basic&&!r.bootstrap_complete)return {verification:{state:'awaiting_user_action',label:'Submit the transient initial root token to configure owned scoped access; it will be revoked after verification.',complete:false}};
   if(!r.bootstrap_complete)throw fail('Complete the reviewed transient bootstrap handoff, then apply again. No root token is retained as a runtime identity.');
   phase('keycloak_and_access_verification');let provider;try{provider=verifiedProvider(db,r.config.connectionId);await providerProbe({mode:'connect',url:provider.origin,realm:provider.realm});}catch{throw fail('The saved Keycloak provider is unavailable or unverified.');}job.fence();const client=await clientProbe(db,r);job.fence();

@@ -154,7 +154,7 @@ export function reviewFullPlatform(db, config = null) {
     stages: STAGES.map(({ id, name }) => ({ id, name })),
     dns: Object.entries({ proxypilot: wanted.publicOrigin, recovery: wanted.recoveryOrigin, ...Object.fromEntries(Object.entries(wanted.services).map(([id, s]) => [id, s.url])) }).map(([service, url]) => ({ service, url, action: 'Point this hostname directly at the Caddy host. DNS and valid HTTPS are verified by the service adapters; domain inventory alone is not proof.' })),
     managed: 'Callback URLs, private ports, resource names and protected client references are derived. Caddy retains public ports and TLS.',
-    humanSteps: ['B: reveal the bootstrap password, create the permanent administrator and enroll a passkey, link the ProxyPilot account, test SSO login, step-up and separate-browser recovery, retire the bootstrap account', 'D: the Infisical personal administrator, OpenBao recovery custody and manual unseal, Vaultwarden sign-in/unlock checks', 'E: activate SSO'],
+    humanSteps: ['B: reveal the bootstrap password, create the permanent administrator and enroll a passkey, link the ProxyPilot account, test SSO login, step-up and separate-browser recovery, retire the bootstrap account', 'D: the Infisical personal administrator, OpenBao recovery custody (automatic: download the one-time recovery kit; Advanced: PGP custodians with manual unseal), Vaultwarden sign-in/unlock checks', 'E: activate SSO'],
   };
 }
 // The ProxyPilot and recovery hostnames are fixed at the first apply (changing
@@ -245,9 +245,11 @@ export function fullPlatformState(db) {
     const observed = current?.verification;
     const ceremony = id === 'vaultwarden' && row?.ceremony_json ? JSON.parse(row.ceremony_json) : null;
     const needsCeremony = id === 'vaultwarden' && verification && ceremony?.configurationFingerprint !== verification.configurationFingerprint;
+    // OpenBao automatic custody: stage D is not done until the one-time recovery kit is downloaded and acknowledged.
+    const kitPending = id === 'openbao' && row?.config?.custody === 'auto' && !!row.handoff_digest && !row.handoff_ack;
     const removed = r?.state?.removed?.[id];
-    const state = removed ? 'runtime_removed' : !available ? 'dependency_required' : current && ['failed', 'recovery_required', 'refused'].includes(current.status) ? 'failed' : current && ['queued', 'running'].includes(current.status) ? current.status : needsCeremony || observed?.state === 'awaiting_user_action' ? 'awaiting_user_action' : verification ? 'verified' : row?.resources_json ? 'installed' : row ? 'awaiting_user_action' : 'planned';
-    return { id, name, stage: STAGE_OF[id], state, available, risk: id === 'infisical' && (t?.mode === 'install' || !t) ? AGENT_ROLE_RISK : null, ownership: t?.mode === 'install' ? 'managed' : t ? 'external' : null, url: config.services[id].url, job: current, verification, action: !available ? 'Waiting for G7 Vaultwarden adapter' : state === 'verified' ? verification.label : needsCeremony ? 'Complete the vault sign-in, unlock and denial checks directly in Vaultwarden.' : observed?.label || r?.state?.actions?.[id] || current?.reason || null };
+    const state = removed ? 'runtime_removed' : !available ? 'dependency_required' : current && ['failed', 'recovery_required', 'refused'].includes(current.status) ? 'failed' : current && ['queued', 'running'].includes(current.status) ? current.status : needsCeremony || kitPending || observed?.state === 'awaiting_user_action' ? 'awaiting_user_action' : verification ? 'verified' : row?.resources_json ? 'installed' : row ? 'awaiting_user_action' : 'planned';
+    return { id, name, stage: STAGE_OF[id], state, available, risk: id === 'infisical' && (t?.mode === 'install' || !t) ? AGENT_ROLE_RISK : null, ownership: t?.mode === 'install' ? 'managed' : t ? 'external' : null, url: config.services[id].url, job: current, verification, action: !available ? 'Waiting for G7 Vaultwarden adapter' : state === 'verified' ? verification.label : needsCeremony ? 'Complete the vault sign-in, unlock and denial checks directly in Vaultwarden.' : kitPending && state === 'awaiting_user_action' ? 'Download the one-time OpenBao recovery kit and store it offline (Platform Setup → OpenBao recovery custody).' : observed?.label || r?.state?.actions?.[id] || current?.reason || null };
   });
   // A successful coordinator job is not evidence of service or access completion.
   const sso = one(db, 'sso_config');

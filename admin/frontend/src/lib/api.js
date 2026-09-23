@@ -51,9 +51,9 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
   // 'Unexpected end of JSON input' which is unhelpful to the
   // operator.  Surface the actual HTTP status text + raw body
   // snippet instead so the toast says something actionable.
-  let data;
+  let data, text = '';
   try {
-    const text = await response.text();
+    text = await response.text();
     data = text.length === 0 ? {} : JSON.parse(text);
   } catch (parseErr) {
     if (response.ok) {
@@ -61,8 +61,12 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
       // health endpoint).  Treat as empty payload.
       data = {};
     } else {
+      // A refusal from the edge (e.g. Caddy's restricted-network 403) is plain
+      // text that says why; show it instead of a bare status.
+      let detail = '';
+      try { detail = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300); } catch { /* not text */ }
       throw new ApiError(
-        `${response.status} ${response.statusText || 'error'} (no JSON body)`,
+        detail ? `${response.status}: ${detail}` : `${response.status} ${response.statusText || 'error'} (no JSON body)`,
         response.status,
       );
     }

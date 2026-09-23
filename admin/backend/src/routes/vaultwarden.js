@@ -27,7 +27,7 @@ vaultwardenRouter.post('/apply', requireSudo, (req, res) => respond(res, async (
   const result = apply(getDb(), p.data, req.user.id); logAudit(req.user.id, 'VAULTWARDEN_PLAN_APPLIED', 'setup_job', result.job.id, { created: result.created }, req.ip); res.status(result.created ? 202 : 200).json(result);
 }));
 vaultwardenRouter.post('/ceremony', requireSudo, (req, res) => respond(res, async () => {
-  const p = ceremonySchema.safeParse(req.body); req.body = {}; if (!p.success) return res.status(400).json({ error: 'Record only the required disposable-account observations. Secrets, item contents and free text are refused.' });
+  const p = ceremonySchema.safeParse(req.body); req.body = {}; if (!p.success) return res.status(400).json({ error: 'Record only the required browser observations. Secrets, item contents and free text are refused.' });
   const db = getDb(), r = readVaultwarden(db); if (!r) return res.status(409).json({ error: 'Save and apply Vaultwarden first.' });
   const effective = await verifyEffective(createClient(r.config.origin), r, secrets(db, r)), client = await verifyClient(db, r);
   if (digest([effective.configurationFingerprint, client.fingerprint]) !== p.data.configurationFingerprint) return res.status(409).json({ error: 'Effective configuration changed. Reapply and repeat the browser checks.' });

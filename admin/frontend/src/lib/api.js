@@ -113,7 +113,10 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
   }
 
   if (!response.ok) {
-    throw new ApiError(data.error || 'Request failed', response.status, data);
+    // A refusal whose `error` is a machine code (e.g. local_session_required)
+    // carries the operator-facing explanation in `message`; show that.
+    const code = typeof data.error === 'string' && /^[a-z0-9_]+$/.test(data.error);
+    throw new ApiError((code && data.message) || data.error || data.message || 'Request failed', response.status, data);
   }
 
   return data;

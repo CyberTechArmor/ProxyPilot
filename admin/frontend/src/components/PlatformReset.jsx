@@ -19,7 +19,7 @@ export default function PlatformReset() {
     <p>Start Platform Setup over. Owned containers and their Caddy routes are removed and the saved plan, platform operations and owned service records are discarded, so stage A starts clean. External services are never touched. Reset is refused while SSO is active, while Pomerium application policies are active, or while an operation is running.</p>
     <label className="flex gap-2 items-start min-h-11"><input type="checkbox" className="mt-1" checked={purgeData} disabled={!!busy} onChange={e => { setPurgeData(e.target.checked); setReview(null); setConfirmed(false); }} /><span>Also delete owned data (directories, volumes, networks and protected credentials). A backup set is written to the exports directory and verified first.</span></label>
     <Button variant="outline" className="min-h-11 w-full sm:w-auto" disabled={!!busy} onClick={() => preview(purgeData)}>{busy === 'review' ? 'Reviewing…' : 'Review reset'}</Button>
-    {error && <p role="alert" className="text-destructive break-words">{error}</p>}
+    {error && !review && <p role="alert" className="text-destructive break-words">{error}</p>}
     {review && <section aria-label="Reset preview" className="rounded-lg border p-4 space-y-3 min-w-0">
       <h3 className="font-semibold">{review.purgeData ? 'Reset and delete owned data' : 'Reset (data kept)'}</h3>
       {review.blockers.map(b => <p role="alert" key={b} className="break-words">{b}</p>)}
@@ -39,6 +39,7 @@ export default function PlatformReset() {
         <Button variant="destructive" className="min-h-11" disabled={!!busy || !confirmed || review.blockers.length > 0} onClick={() => run('reset', async () => { const r = await api.fullPlatformReset({ revision: review.revision, reviewToken: review.reviewToken, purgeData: review.purgeData, reviewed: true }); setQueued(r.job); setReview(null); setConfirmed(false); })}>{busy === 'reset' ? 'Queuing reset…' : 'Reset Full Platform'}</Button>
         <Button variant="outline" className="min-h-11" disabled={!!busy} onClick={() => { setReview(null); setConfirmed(false); }}>Cancel</Button>
       </div>
+      {error && <p role="alert" className="text-destructive break-words">{error}</p>}
     </section>}
     {queued && <p role="status" className="break-words">Reset queued as operation {queued.id}. Follow it under Operation history; when it finishes, Platform Setup starts at step 1.</p>}
   </div>;

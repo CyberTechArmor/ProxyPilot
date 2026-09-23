@@ -72,9 +72,7 @@ export function createPlatformHandlers(kit) {
     // Off: refuse before ANY work — no platform read, no host command, and no
     // secret scrub (that would decrypt the credential tables).
     if (gate) { writeLedger({ ts: nowIso(), token_id: auth?.id ?? null, actor: auth?.created_by ?? null, tool: name, subject_type: 'platform', subject_id: 'platform', args: {}, outcome: 'refused', dry_run: false, confirmation_used: false, summary: `refused: ${PLATFORM_FLAG} is off`, detail: { requested_by: requestedBy(auth) }, duration_ms: Date.now() - t0 }); return err(gate); }
-    {
-      try { result = await fn(args || {}, auth, req); } catch (e) { result = err(e?.fullPlatformSafe || e?.name === 'ZodError' ? storeMessage(e) : `Tool failed: ${e?.message || 'unknown error'}`); }
-    }
+    try { result = await fn(args || {}, auth, req); } catch (e) { result = err(e?.fullPlatformSafe || e?.name === 'ZodError' ? storeMessage(e) : `Tool failed: ${e?.message || 'unknown error'}`); }
     writeLedger({ ts: nowIso(), token_id: auth?.id ?? null, actor: auth?.created_by ?? null, tool: name, subject_type: 'platform', subject_id: args?.service || args?.id || 'platform',
       args: { ...(args?.service ? { service: args.service } : {}), ...(args?.id ? { id: args.id } : {}) }, outcome: result?.isError ? 'refused' : 'ok', dry_run: false, confirmation_used: false,
       summary: 'read', detail: { requested_by: requestedBy(auth) }, duration_ms: Date.now() - t0 });

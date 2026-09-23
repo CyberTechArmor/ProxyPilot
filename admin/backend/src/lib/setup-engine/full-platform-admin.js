@@ -88,11 +88,14 @@ export async function runAdministrator(db, full, operation, job, { send } = {}) 
             let list = await authority.api(query), user = list?.find(u => u.username === profile.username);
             if (!user) {
               if (state.administrator[key]) throw fail('The recorded permanent user is missing. Restore that identity; retry will not replace it.');
-              await authority.api(`${base}/users`, { method: 'POST', body: { username: profile.username, email: profile.email, firstName: profile.firstName, lastName: profile.lastName, enabled: true, emailVerified: false,
+              await authority.api(`${base}/users`, { method: 'POST', body: { username: profile.username, email: profile.email, firstName: profile.firstName, lastName: profile.lastName, enabled: true, emailVerified: true,
                 attributes: { 'proxypilot.installation': [k.id], 'proxypilot.local-user': [String(profile.localUserId)] }, credentials: [{ type: 'password', value: input.password, temporary: false }], requiredActions: realm === 'master' ? [] : ['webauthn-register-passwordless'] } });
               list = await authority.api(query); user = list?.find(u => u.username === profile.username);
             }
             if (!user?.id || user.attributes?.['proxypilot.installation']?.[0] !== k.id || user.attributes?.['proxypilot.local-user']?.[0] !== String(profile.localUserId) || !user.enabled || state.administrator[key] && state.administrator[key] !== user.id) throw fail('An existing user cannot be linked by username or email alone. Prove the existing identities through the explicit linking flow; no account or credential was replaced.');
+            // The address was entered by the administrator who proved this installation;
+            // an unverified one blocks SSO sign-in and linking (Vaultwarden refuses it).
+            if (!user.emailVerified) { await authority.api(`${base}/users/${user.id}`, { method: 'PUT', body: { ...user, emailVerified: true } }); user = { ...user, emailVerified: true }; }
             state.administrator[key] = user.id; persist(); return { base, user };
           };
           const master = await ensureUser('master', 'masterId');

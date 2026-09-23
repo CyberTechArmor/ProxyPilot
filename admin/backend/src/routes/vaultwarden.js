@@ -5,12 +5,20 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { configSchema, applySchema, ceremonySchema, digest } from '../lib/setup-engine/vaultwarden-logic.js';
 import { state, readVaultwarden, review, save, apply, currentPlan, recordCeremony, secrets } from '../lib/setup-engine/vaultwarden-store.js';
 import { createClient, health, verifyEffective } from '../lib/setup-engine/vaultwarden-api.js';
+import { localEdge } from '../lib/setup-engine/local-edge.js';
 import { verifyClient } from '../lib/setup-engine/vaultwarden-identity.js';
 export const vaultwardenRouter = Router();
 vaultwardenRouter.use(requireAdmin, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+// The route admits only the restricted networks, so ProxyPilot's own request to
+// the public name is refused; go through this host's Caddy first (as OpenBao does).
+async function reachable(db, r) {
+  let api = createClient(r.config.origin, { edge: localEdge(db) }), h = await health(api);
+  if (h.state === 'unavailable') { api = createClient(r.config.origin); h = await health(api); }
+  return { api, h };
+}
 const respond = async (res, fn) => { try { await fn(); } catch (e) { res.status(e.vaultwardenSafe ? e.status : 500).json({ error: e.vaultwardenSafe ? e.message : 'Vaultwarden setup could not be completed. Credentials and upstream details withheld.' }); } };
 vaultwardenRouter.get('/', (_req, res) => respond(res, async () => {
-  const db = getDb(), r = readVaultwarden(db), s = state(db); let h = r ? await health(createClient(r.config.origin)) : { state: 'not_configured' }, matches = true;
+  const db = getDb(), r = readVaultwarden(db), s = state(db); let { h } = r ? await reachable(db, r) : { h: { state: 'not_configured' } }, matches = true;
   try { if (r) currentPlan(db, r); } catch { matches = false; }
   // Health alone never upgrades an old verification to a current configuration
   // proof. Full readback happens on explicit apply or the ceremony submission.
@@ -29,7 +37,7 @@ vaultwardenRouter.post('/apply', requireSudo, (req, res) => respond(res, async (
 vaultwardenRouter.post('/ceremony', requireSudo, (req, res) => respond(res, async () => {
   const p = ceremonySchema.safeParse(req.body); req.body = {}; if (!p.success) return res.status(400).json({ error: 'Record only the required browser observations. Secrets, item contents and free text are refused.' });
   const db = getDb(), r = readVaultwarden(db); if (!r) return res.status(409).json({ error: 'Save and apply Vaultwarden first.' });
-  const effective = await verifyEffective(createClient(r.config.origin), r, secrets(db, r)), client = await verifyClient(db, r);
+  const effective = await verifyEffective((await reachable(db, r)).api, r, secrets(db, r)), client = await verifyClient(db, r);
   if (digest([effective.configurationFingerprint, client.fingerprint]) !== p.data.configurationFingerprint) return res.status(409).json({ error: 'Effective configuration changed. Reapply and repeat the browser checks.' });
   const s = recordCeremony(db, p.data, req.user.id); logAudit(req.user.id, 'VAULTWARDEN_BROWSER_OBSERVED', 'setup_vaultwarden', '1', { source: 'operator_observed', revision: s.revision }, req.ip); res.json({ state: s });
 }));

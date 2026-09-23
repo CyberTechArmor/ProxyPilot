@@ -19,7 +19,11 @@ export function prepareFiles(r, credentials, { root = VAULTWARDEN_ROOT, resource
   privateDir(data);
   const config = join(root, 'config.json'), handoff = join(root, 'credentials.json');
   const expected = { ...expectedSettings(r), admin_token: credentials.admin, sso_client_secret: credentials.client, signups_allowed: false, sso_signups_allowed: true,
-    invitations_allowed: false, log_level: 'off' };
+    invitations_allowed: false, log_level: 'off',
+    // Every apply/verify logs in to /admin once. Vaultwarden's default (burst 3,
+    // then one per 300 s) refused a retry three minutes after a verified run.
+    // The token is a long random value, so a looser limit costs nothing real.
+    admin_ratelimit_seconds: 60, admin_ratelimit_max_burst: 20 };
   // CONFIG_FILE is this owned read-only file. A /data/config.json cannot silently
   // override it. Actual effective settings are still verified through the service.
   for (const [path, value] of [[config, expected], [handoff, { adminToken: credentials.admin }]]) {

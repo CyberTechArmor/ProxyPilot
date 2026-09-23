@@ -7,6 +7,7 @@ import { Card, CardHeader, CardTitle as BaseCardTitle, CardDescription, CardCont
 import OpenBaoSetup from '@/components/OpenBaoSetup';
 import VaultwardenSetup from '@/components/VaultwardenSetup';
 import SsoSetup from '@/components/SsoSetup';
+import PlatformOverview from '@/components/PlatformOverview';
 const CardTitle = props => <BaseCardTitle aria-level={2} {...props} />;
 
 const steps = [['domains', 'Domains and realm'], ['review', 'Review'], ['install', 'Install and connect'], ['administrator', 'Administrator and recovery'], ['verify', 'Verify and activate'], ['complete', 'Complete']];
@@ -70,6 +71,8 @@ export default function FullPlatformSetup({ onCustom }) {
       <div><h1 className="text-2xl md:text-3xl font-bold">Platform Setup</h1><p className="mt-2 text-muted-foreground">Full Platform · one saved setup for identity, access and secrets.</p></div>
       <Button variant="outline" className="min-h-11" onClick={onCustom}>Custom / Advanced</Button>
     </header>
+    {/* Top of the Platform section: the MCP access switch, then the overview. */}
+    <PlatformOverview />
     {error && <p role="alert" className="rounded-lg border border-destructive p-4 text-destructive break-words">{error}</p>}
     {notice && <p role="status" className="rounded-lg border p-4">{notice}</p>}
     {!config ? <p role="status">Loading saved setup…</p> : <>

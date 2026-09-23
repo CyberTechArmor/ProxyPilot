@@ -32,6 +32,7 @@ export default function PlatformReset() {
       {list('Networks deleted', review.remove.networks, n => n.name)}
       {list('External services left untouched', review.external, e => `${e.service} ${e.url || ''}`)}
       {review.backup && <p className="break-words">Backup set: {review.backup.directory}. {review.backup.verified}</p>}
+      {!review.purgeData && list('Data directories', review.retain?.directories, d => d.moved_to ? `${d.path} → moved aside to ${d.moved_to}` : `${d.path} (kept in place)`)}
       {review.retain?.note && <p className="break-words text-muted-foreground">{review.retain.note}</p>}
       {!review.blockers.length && <label className="flex gap-2 items-start min-h-11"><input type="checkbox" className="mt-1" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} /><span>I reviewed everything listed above{review.purgeData ? ', including the data that will be deleted after the backup set is verified' : ''}.</span></label>}
       <div className="flex flex-col sm:flex-row gap-2">

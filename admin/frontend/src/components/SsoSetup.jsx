@@ -250,6 +250,11 @@ export default function SsoSetup({ connections = [], managed = false, administra
             Save SSO configuration
           </Button>
         </fieldset>}
+        {managed && !config && (
+          <p className="text-sm text-muted-foreground" role="status">
+            {state ? "The SSO configuration is not saved yet; stage B saves it when Keycloak is ready. Refresh after the stage finishes." : "Loading SSO checks…"}
+          </p>
+        )}
         {config && (
           <>
             {showChecks && <>

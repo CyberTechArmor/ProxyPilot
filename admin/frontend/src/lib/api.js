@@ -203,6 +203,9 @@ export const api = {
   fullPlatformBaoRecoveryKit: () => request('/setup/platform/full/openbao/recovery-kit'),
   fullPlatformResetReview: (body) => request('/setup/platform/full/reset/review', { method: 'POST', body: JSON.stringify(body) }),
   fullPlatformReset: (body) => request('/setup/platform/full/reset', { method: 'POST', body: JSON.stringify(body) }),
+  getKeycloakLdap: () => request('/setup/platform/full/ldap'),
+  linkKeycloakLdap: (body) => request('/setup/platform/full/ldap', { method: 'POST', body: JSON.stringify(body) }),
+  removeKeycloakLdap: (body) => request('/setup/platform/full/ldap/remove', { method: 'POST', body: JSON.stringify(body) }),
   revealKeycloakBootstrap: () => request('/setup/platform/full/keycloak/reveal', { method: 'POST', body: '{}' }),
   // Platform overview (one endpoint for the whole overview; actions share the MCP tools' functions)
   getPlatformOverview: (refresh = false) => request(`/setup/platform/overview${refresh ? '?refresh=1' : ''}`),

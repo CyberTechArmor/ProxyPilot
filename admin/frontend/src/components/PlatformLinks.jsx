@@ -3,6 +3,7 @@ import { ExternalLink, Copy } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import PomeriumRouteProtection from '@/components/PomeriumRouteProtection';
+import KeycloakLdapLink from '@/components/KeycloakLdapLink';
 
 // "Use your platform": where each installed service is and what it is for,
 // kept visible after setup (the per-stage panels only show while a stage is current).
@@ -23,7 +24,7 @@ function Copyable({ value }) {
 export default function PlatformLinks({ services, realm }) {
   const [bao, setBao] = useState(null);
   const present = ORDER.map(id => services.find(s => s.id === id)).filter(s => s && ['verified', 'awaiting_user_action'].includes(s.state));
-  const hasBao = present.some(s => s.id === 'openbao'), pomeriumReady = present.some(s => s.id === 'pomerium' && s.state === 'verified');
+  const hasBao = present.some(s => s.id === 'openbao'), pomeriumReady = present.some(s => s.id === 'pomerium' && s.state === 'verified'), keycloakReady = present.some(s => s.id === 'keycloak' && s.state === 'verified');
   useEffect(() => { if (!hasBao) return; let active = true; api.getOpenBaoSetup().then(v => { if (active) setBao(v?.signIn || null); }).catch(() => {}); return () => { active = false; }; }, [hasBao]);
   if (!present.length) return null;
   const link = (href, text) => <a className="inline-flex items-center gap-1 min-h-11 underline break-all" href={href} target="_blank" rel="noreferrer">{text}<ExternalLink className="h-4 w-4 shrink-0" aria-hidden="true" /></a>;
@@ -39,6 +40,7 @@ export default function PlatformLinks({ services, realm }) {
       {['infisical', 'vaultwarden'].includes(s.id) && link(s.url, `Open ${s.name}`)}
       {s.state !== 'verified' && <p className="text-muted-foreground">Setup still has a step to finish for this service (see its stage above).</p>}
     </li>)}</ul>
+    {keycloakReady && <section aria-labelledby="pp-directory-link" className="space-y-2"><h3 id="pp-directory-link" className="font-semibold">Connect a directory (LDAP)</h3><KeycloakLdapLink /></section>}
     {pomeriumReady && <section aria-labelledby="pp-require-signin" className="space-y-2"><h3 id="pp-require-signin" className="font-semibold">Require sign-in on a site</h3><PomeriumRouteProtection /></section>}
   </div>;
 }

@@ -483,3 +483,11 @@ test('retire refusal names each missing readiness item in operator words', async
   assert.match(text, /separate-browser recovery check/);
   for (const k of ['administrator_link', 'client_and_passkey_settings', 'login', 'sudo', 'recovery', 'separate_recovery_session', 'recovery_route']) assert.ok(READINESS_STEPS[k], k);
 });
+
+test('a refused recovery link opened in a browser renders a readable page, API calls keep JSON', async () => {
+  const { ssoErrorPage } = await import('../routes/sso.js');
+  const page = ssoErrorPage('Use a <different> browser.');
+  assert.match(page, /<!doctype html>/);
+  assert.match(page, /Use a &lt;different&gt; browser\./);
+  assert.doesNotMatch(page, /<different>/);
+});

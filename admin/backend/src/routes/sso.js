@@ -61,13 +61,20 @@ const handle = (fn) => async (req, res) => {
     res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
     await fn(req, res);
   } catch (e) {
-    res.status(e.status || 400).json({
-      error: e.ssoSafe
-        ? e.message
-        : "SSO request failed. Check the saved configuration and retry; no provider credentials or response details are logged.",
-    });
+    const error = e.ssoSafe
+      ? e.message
+      : "SSO request failed. Check the saved configuration and retry; no provider credentials or response details are logged.";
+    // A link opened in the browser (recovery check, callback) gets a readable
+    // page, not raw JSON; API calls (fetch sends */*) keep the JSON body.
+    if (req.method === "GET" && req.accepts(["json", "html"]) === "html")
+      return res.status(e.status || 400).type("html").send(ssoErrorPage(error));
+    res.status(e.status || 400).json({ error });
   }
 };
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+export function ssoErrorPage(message) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ProxyPilot</title><style>body{font-family:system-ui,sans-serif;background:#020817;color:#e2e8f0;margin:0;padding:24px 16px}main{max-width:40rem;margin:10vh auto;border:1px solid #1e293b;border-radius:12px;padding:24px}h1{font-size:1.25rem;margin:0 0 12px}p{line-height:1.5}</style></head><body><main><h1>This step could not continue</h1><p>${esc(message)}</p><p><a href="/" style="color:#22c55e">Back to ProxyPilot</a></p></main></body></html>`;
+}
 function current(req) {
   const db = getDb(),
     r = readConfig(db);
@@ -457,7 +464,7 @@ ssoRouter.get(
     const b = browser(req, res);
     if (b === check.initiator_browser)
       throw fail(
-        "Open this check in a separate browser or private browser profile.",
+        "This recovery check was created in this browser, so it cannot prove recovery works independently. Copy the same link into a different browser (for example Chrome if you use Edge) that is not signed in to ProxyPilot. Private windows share one session with each other, so if you created the check in a private window, open it in a normal window of another browser instead. The link is still valid for 15 minutes from when it was created.",
       );
     const proof = random();
     db.prepare(

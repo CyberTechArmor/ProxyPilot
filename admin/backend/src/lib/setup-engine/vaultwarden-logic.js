@@ -24,7 +24,11 @@ export const applySchema = jobSchema.extend({ reviewToken: z.string().regex(/^[a
 // No free text, credentials, item contents, recovery codes or account names enter this endpoint.
 export const ceremonySchema = applySchema.extend({ configurationFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   browserSso: z.literal(true), vaultUnlock: z.literal(true), harmlessItem: z.literal(true),
-  deniedUser: z.literal(true), existingLogin: z.literal(true), accountPreserved: z.literal(true), disposable: z.literal(true),
+  existingLogin: z.literal(true), accountPreserved: z.literal(true),
+  // The check now uses the operator's OWN account. Denial of users without the
+  // access role is not an operator observation any more: it is the Keycloak deny
+  // condition the configuration check verifies. Older clients may still send these.
+  deniedUser: z.literal(true).optional(), disposable: z.literal(true).optional(),
 }).strict();
 export const namesFor = r => { const server = `pp-g7-${r.credential_ref.slice(-12)}`; return { server, network: `${server}-net` }; };
 export const callbackFor = r => `${r.config.origin}/identity/connect/oidc-signin`;

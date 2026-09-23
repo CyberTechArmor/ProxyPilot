@@ -63,6 +63,7 @@ export function apply(db, input, by) { return tx(db, () => { const r = assertRev
 export function recordCeremony(db, input, by) { return tx(db, () => { const r = assertReview(db, input), v = r.verified_json && JSON.parse(r.verified_json);
   if (!v || v.configurationFingerprint !== input.configurationFingerprint || v.fingerprint !== digest(r.config) || getJob(db, r.last_job_id)?.status !== 'succeeded') throw fail('Apply and verify the saved effective configuration before recording browser observations.');
   const result = { source: 'operator_observed', configurationFingerprint: v.configurationFingerprint, fingerprint: v.fingerprint, recordedAt: new Date().toISOString(), recordedBy: by,
-    browserSso: true, vaultUnlock: true, harmlessItem: true, deniedUser: true, existingLogin: true, accountPreserved: true, disposable: true };
+    browserSso: true, vaultUnlock: true, harmlessItem: true, existingLogin: true, accountPreserved: true, ownAccount: true,
+    deniedUser: 'keycloak_deny_condition_verified', deniedUserSource: v.client?.role ? `Keycloak refuses users without ${v.client.role} (verified configuration)` : 'verified configuration' };
   db.prepare('UPDATE setup_vaultwarden SET ceremony_json=? WHERE id=1').run(JSON.stringify(result)); return state(db);
 }); }

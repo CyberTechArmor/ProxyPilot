@@ -41,7 +41,7 @@ export async function runVaultwardenOperation({ db, params, exec, job, root = VA
   }
   phase('effective_configuration');
   const effective = await verifyEffective(createClient(r.config.origin, { send, job, edge: r.config.mode === 'install' ? localEdge(db) : null }), r, credentials); job.fence();
-  const verification = { state: 'configuration_verified', label: 'Vaultwarden configuration verified. Browser SSO, vault unlock and denied access require the separate disposable-account check.',
+  const verification = { state: 'configuration_verified', label: 'Vaultwarden configuration verified. Sign in to Vaultwarden with your own account, unlock the vault and record the browser checks. Users without the access role are refused by the verified Keycloak rule.',
     ...effective, configurationFingerprint: digest([effective.configurationFingerprint, client.fingerprint]), revision: r.revision, fingerprint: digest(r.config), client, verifiedAt: new Date().toISOString() };
   db.prepare('UPDATE setup_vaultwarden SET verified_json=? WHERE id=1').run(JSON.stringify(verification)); return { verification };
 }

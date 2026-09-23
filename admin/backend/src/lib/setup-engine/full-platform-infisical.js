@@ -78,8 +78,15 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
       // identity created on the first run, and creating it again fails with
       // "slug already exists". Find it organization-wide, then join it as the
       // organization admin, before the ownership checks below.
-      const all = requireOk(await request(`/api/v1/organization-admin/projects?${new URLSearchParams({ search: slug, limit: '100' })}`), 'Organization project inventory').projects;
-      const existing = all?.find(p => p.slug === slug);
+      // Prefer the project id recorded on the first run; otherwise page through
+      // the organization's projects unfiltered (its `search` matches names,
+      // not slugs) and match the slug exactly.
+      let existing = s.projectId ? { id: s.projectId } : null;
+      for (let offset = 0; !existing && offset < 1000; offset += 100) {
+        const page = requireOk(await request(`/api/v1/organization-admin/projects?${new URLSearchParams({ offset: String(offset), limit: '100' })}`), 'Organization project inventory').projects || [];
+        existing = page.find(p => p.slug === slug) || null;
+        if (page.length < 100) break;
+      }
       if (existing) {
         if (existing.orgId && existing.orgId !== s.organizationId || s.projectId && s.projectId !== existing.id) throw fail('The intended Infisical project is not this installation’s recorded resource.');
         requireOk(await request(`/api/v1/organization-admin/projects/${uuid(existing.id)}/grant-admin-access`, { method: 'POST', body: {} }), 'Administrator access to the owned project');

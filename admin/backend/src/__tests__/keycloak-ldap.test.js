@@ -155,3 +155,9 @@ test('LDAP-7 HTTP: fresh local proof required; response and audit never carry th
     secretFree(db, [ok.body, read.body, bad.body]);
   } finally { await f.close(); }
 }));
+
+test('runner validation accepts the reviewed Keycloak bootstrap recovery operation', async () => {
+  const { validateRunnerJob } = await import('../lib/setup-engine/logic.js');
+  const job = operation => ({ kind: 'full_platform_apply', app: 'pp-full-platform', plan_json: JSON.stringify({ params: { revision: 3, operation } }) });
+  assert.equal(validateRunnerJob(job('keycloak_recovery')).ok,true);assert.equal(validateRunnerJob(job('retire')).ok,true);assert.equal(validateRunnerJob(job('anything_else')).ok,false);
+});

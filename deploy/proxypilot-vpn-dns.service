@@ -1,0 +1,35 @@
+# proxypilot-vpn-dns — the resolver VPN peers use (DNS = 10.100.0.1).
+#
+# VPN peers route only 10.100.0.0/24 through the tunnel. A platform hostname
+# resolved through public DNS points at the host's public address, so the
+# browser reaches it OUTSIDE the tunnel and Caddy sees the client's public
+# address — the VPN never satisfies a restricted route. This resolver answers
+# the Full Platform hostnames and the operator's extra domains
+# (/var/lib/proxypilot/vpn-dns.json, `proxypilot vpn dns set`) with
+# 10.100.0.1 and forwards every other query to the host's resolvers.
+#
+# It binds 10.100.0.1:53 (udp+tcp) only, so it is unreachable from anywhere
+# but the tunnel; the firewall admits port 53 from 10.100.0.0/24 only. Until
+# wg0 is up the bind fails and systemd retries every 10 s.
+
+[Unit]
+Description=ProxyPilot VPN DNS (platform hostnames through the tunnel)
+After=network-online.target wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/proxypilot vpn dns serve
+Restart=always
+RestartSec=10
+Environment=HOME=/root
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

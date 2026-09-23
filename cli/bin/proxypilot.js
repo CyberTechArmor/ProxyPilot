@@ -531,6 +531,9 @@ import {
   peerShowCommand as vpnPeerShowCommand,
   statusCommand as vpnStatusCommand,
   serverSetListenPortCommand as vpnServerSetListenPortCommand,
+  dnsStatusCommand as vpnDnsStatusCommand,
+  dnsSetCommand as vpnDnsSetCommand,
+  dnsServeCommand as vpnDnsServeCommand,
 } from '../src/commands/vpn/index.js';
 
 const vpn = program
@@ -576,6 +579,29 @@ vpnServer
     const globalOpts = cmd.optsWithGlobals();
     await vpnServerSetListenPortCommand(opts, globalOpts);
   });
+
+const vpnDns = vpn
+  .command('dns')
+  .description('The resolver VPN peers use (10.100.0.1): platform hostnames and extra domains answer with the VPN address');
+
+vpnDns
+  .command('status')
+  .description('Show the managed and extra names and whether the resolver is running')
+  .action(async (opts, cmd) => { await vpnDnsStatusCommand(opts, cmd.optsWithGlobals()); });
+
+vpnDns
+  .command('set')
+  .description('Replace the managed (Full Platform) and/or extra name lists')
+  .option('--managed <list>', 'Comma-separated hostnames pushed by the dashboard (empty string clears)')
+  .option('--extra <list>', 'Comma-separated extra hostnames or *.suffix entries (empty string clears)')
+  .action(async (opts, cmd) => { await vpnDnsSetCommand(opts, cmd.optsWithGlobals()); });
+
+vpnDns
+  .command('serve')
+  .description('Run the resolver (proxypilot-vpn-dns.service)')
+  .option('--address <ip>', 'Bind address (default 10.100.0.1)')
+  .option('--port <p>', 'Port (default 53)')
+  .action(async (opts) => { await vpnDnsServeCommand(opts); });
 
 const vpnPeer = vpn
   .command('peer')

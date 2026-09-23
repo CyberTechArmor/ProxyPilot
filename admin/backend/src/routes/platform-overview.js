@@ -9,13 +9,17 @@
 import { Router } from 'express';
 import { getDb, logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
-import { requireLocalProof, requestOrigin } from '../lib/sso/sessions.js';
+import { localProofRefusal, requestOrigin } from '../lib/sso/sessions.js';
 import { runHostCapture } from '../lib/lxc-zip.js';
 import { platformOverview, serviceOverview, serviceLogs, servicePreflight, verifyService, retryService, containerControlReview, controlContainer, SERVICE_NAMES } from '../lib/setup-engine/platform-overview.js';
 import { networksReview, queueNetworksChange } from '../lib/setup-engine/full-platform-networks.js';
 import { resyncReview, resyncSharedPlan } from '../lib/setup-engine/full-platform-store.js';
 import { recoveryReview, queueRecovery } from '../lib/setup-engine/full-platform-kc-recovery.js';
 import { platformFlagState, setPlatformFlag } from '../lib/platform-mcp-flag.js';
+import { vpnDnsView, setVpnDnsExtra, vpnDnsExtra } from '../lib/setup-engine/platform-vpn-dns.js';
+
+// Push the VPN resolver's names to the host (best effort; the 5-minute sync retries).
+export const pushVpnDnsSoon = () => { import('../lib/platform-vpn-sync.js').then(({ pushPlatformVpnDns }) => pushPlatformVpnDns()).catch(() => {}); };
 
 export const platformOverviewRouter = Router();
 platformOverviewRouter.use(requireAdmin);
@@ -31,8 +35,9 @@ const handle = (fn) => async (req, res) => {
 };
 const service = (req) => { const s = String(req.params.service || ''); if (!SERVICES.includes(s)) throw Object.assign(new Error(`Unknown service ${s}.`), { status: 404 }); return s; };
 const localProof = (req, res, what) => {
-  try { requireLocalProof(getDb(), req.session.id, requestOrigin(req)); return true; }
-  catch { res.status(403).json({ error: 'sudo_required', sudo_required: true, message: `${what} requires fresh local administrator proof within five minutes.` }); return false; }
+  const refusal = localProofRefusal(getDb(), req.session.id, requestOrigin(req), what);
+  if (!refusal) return true;
+  res.status(refusal.status).json(refusal.body); return false;
 };
 
 /* ------------------------------ overview + flag --------------------------- */
@@ -92,8 +97,21 @@ platformOverviewRouter.post('/networks', requireSudo, handle(async (req, res) =>
   if (!localProof(req, res, 'Changing the restricted networks')) return;
   const out = queueNetworksChange(getDb(), req.body, req.user.id);
   logAudit(req.user.id, 'FULL_PLATFORM_NETWORKS_CHANGE', 'setup_job', out.job.id, { vpn: out.review.vpn_networks, additional_before: out.review.before_additional, additional_after: out.review.additional_networks, before: out.review.before, after: out.review.after, via: 'ui' }, req.ip);
-  import('../mock2/ops.js').then(({ drainBackendStepsNow }) => drainBackendStepsNow?.()).catch(() => {});
+  import('../mock2/ops.js').then(({ drainBackendStepsNow }) => drainBackendStepsNow?.()).then(pushVpnDnsSoon).catch(() => {});
   res.status(202).json({ job: out.job, created: out.created });
+}));
+
+// Names the VPN resolver answers with 10.100.0.1 (so VPN peers reach them
+// through the tunnel): the Full Platform hostnames (derived, read-only) and
+// the operator's extra domains (editable here; sudo + audit, pushed to the host).
+platformOverviewRouter.get('/vpn-dns', handle((_req, res) => res.json(vpnDnsView(getDb()))));
+platformOverviewRouter.put('/vpn-dns', requireSudo, handle(async (req, res) => {
+  const db = getDb(), before = vpnDnsExtra(db);
+  const extra = setVpnDnsExtra(db, req.body?.extra);
+  logAudit(req.user.id, 'PLATFORM_VPN_DNS_CHANGED', 'app_settings', 'platform.vpn_dns_extra', { before, after: extra, via: 'ui' }, req.ip);
+  const { pushPlatformVpnDns } = await import('../lib/platform-vpn-sync.js');
+  const pushed = await pushPlatformVpnDns().catch((e) => ({ ok: false, error: e?.message }));
+  res.json({ ...vpnDnsView(db), push: { ok: pushed.ok, error: pushed.error || null } });
 }));
 platformOverviewRouter.post('/resync/review', handle((_req, res) => res.json(resyncReview(getDb()))));
 platformOverviewRouter.post('/resync', requireSudo, handle((req, res) => {

@@ -2,7 +2,7 @@ import { queueAdministrator } from '../lib/setup-engine/full-platform-admin.js';
 import { Router } from 'express';
 import { getDb, logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
-import { requireLocalProof, requestOrigin } from '../lib/sso/sessions.js';
+import { localProofRefusal, requestOrigin } from '../lib/sso/sessions.js';
 import { fullPlatformState, saveFullPlatform, applyFullPlatform, reviewFullPlatform, configSchema, readFullPlatform, fail } from '../lib/setup-engine/full-platform-store.js';
 import { protectedValue, storeProtected } from '../lib/setup-engine/full-platform-keycloak.js';
 import { personalSchema, personalRef } from '../lib/setup-engine/full-platform-infisical.js';
@@ -26,8 +26,7 @@ fullPlatformRouter.post('/lifecycle/review', handle((req, res) => {
   res.json(lifecycleReview(getDb(), p.service, p.action));
 }));
 fullPlatformRouter.post('/lifecycle', requireSudo, handle((req, res) => {
-  try { requireLocalProof(getDb(), req.session.id, requestOrigin(req)); }
-  catch { return res.status(403).json({ error: 'sudo_required', sudo_required: true, message: 'Runtime actions require fresh local administrator proof.' }); }
+  { const refusal = localProofRefusal(getDb(), req.session.id, requestOrigin(req), 'Runtime actions'); if (refusal) return res.status(refusal.status).json(refusal.body); }
   const result = queueLifecycle(getDb(), req.body, req.user.id);
   logAudit(req.user.id, 'FULL_PLATFORM_RUNTIME_ACTION', 'setup_job', result.job.id, { service: req.body.service, action: req.body.action, retainData: true }, req.ip);
   res.status(202).json(result);
@@ -40,8 +39,7 @@ fullPlatformRouter.post('/reset/review', handle((req, res) => {
   res.json(resetReview(getDb(), p));
 }));
 fullPlatformRouter.post('/reset', requireSudo, handle((req, res) => {
-  try { requireLocalProof(getDb(), req.session.id, requestOrigin(req)); }
-  catch { return res.status(403).json({ error: 'sudo_required', sudo_required: true, message: 'Reset requires fresh local administrator proof within five minutes.' }); }
+  { const refusal = localProofRefusal(getDb(), req.session.id, requestOrigin(req), 'Reset'); if (refusal) return res.status(refusal.status).json(refusal.body); }
   const result = queueReset(getDb(), req.body, req.user.id);
   logAudit(req.user.id, 'FULL_PLATFORM_RESET_REQUESTED', 'setup_job', result.job.id, { purgeData: req.body.purgeData === true }, req.ip);
   res.status(202).json(result);
@@ -49,6 +47,7 @@ fullPlatformRouter.post('/reset', requireSudo, handle((req, res) => {
 fullPlatformRouter.put('/', requireSudo, handle((req, res) => {
   const r = saveFullPlatform(getDb(), req.body, req.user.id);
   logAudit(req.user.id, 'FULL_PLATFORM_PLAN_SAVED', 'setup_full_platform', '1', { revision: r.revision }, req.ip);
+  import('./platform-overview.js').then(({ pushVpnDnsSoon }) => pushVpnDnsSoon()).catch(() => {});
   res.json(fullPlatformState(getDb()));
 }));
 fullPlatformRouter.post('/apply', requireSudo, handle((req, res) => {
@@ -57,16 +56,14 @@ fullPlatformRouter.post('/apply', requireSudo, handle((req, res) => {
   res.status(result.created ? 202 : 200).json(result);
 }));
 fullPlatformRouter.post('/administrator', requireSudo, handle((req, res) => {
-  try { requireLocalProof(getDb(), req.session.id, requestOrigin(req)); }
-  catch { return res.status(403).json({ error: 'sudo_required', sudo_required: true, message: 'The administrator handoff requires fresh local proof within five minutes.' }); }
+  { const refusal = localProofRefusal(getDb(), req.session.id, requestOrigin(req), 'The administrator handoff'); if (refusal) return res.status(refusal.status).json(refusal.body); }
   const result = queueAdministrator(getDb(), req.body, req.user);
   logAudit(req.user.id, 'FULL_PLATFORM_ADMINISTRATOR_REQUEST', 'setup_job', result.job.id, { action: req.body.action }, req.ip);
   res.status(202).json(result);
 }));
 fullPlatformRouter.post('/infisical/administrator', requireSudo, handle((req, res) => {
   const db = getDb();
-  try { requireLocalProof(db, req.session.id, requestOrigin(req)); }
-  catch { return res.status(403).json({ error: 'sudo_required', sudo_required: true, message: 'Personal credentials require fresh local administrator proof.' }); }
+  { const refusal = localProofRefusal(db, req.session.id, requestOrigin(req), 'Entering a personal credential'); if (refusal) return res.status(refusal.status).json(refusal.body); }
   const p = personalSchema.parse(req.body), full = readFullPlatform(db), r = readInfisical(db);
   if (!full || full.revision !== p.revision || full.approved_revision !== p.revision || !r?.config.basic || r.config.mode !== 'install') throw fail('Apply the reviewed basic Infisical installation first.');
   if (full.last_job_id && ['queued', 'running'].includes(getJob(db, full.last_job_id)?.status)) throw fail('Wait for the current setup operation before entering the personal credential.');
@@ -90,8 +87,7 @@ fullPlatformRouter.post('/keycloak/reveal', requireSudo, handle((req, res) => {
   const db = getDb();
   // The existing four-hour sliding sudo window alone is insufficient here.
   // Reuse the actual proof timestamp, not sudo_until or the browser's clock.
-  try { requireLocalProof(db, req.session.id, requestOrigin(req)); }
-  catch { return res.status(403).json({ error: 'sudo_required', sudo_required: true, message: 'Reveal requires a fresh local password/TOTP or passkey proof within five minutes.' }); }
+  { const refusal = localProofRefusal(db, req.session.id, requestOrigin(req), 'Revealing the initial Keycloak password'); if (refusal) return res.status(refusal.status).json(refusal.body); }
   const full = readFullPlatform(db), ref = full?.state?.identity?.bootstrapRef;
   if (!ref) throw fail('Apply the reviewed managed Keycloak connection before revealing its initial password.');
   const value = protectedValue(db, ref);

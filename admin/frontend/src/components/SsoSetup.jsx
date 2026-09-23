@@ -393,8 +393,10 @@ export default function SsoSetup({ connections = [], managed = false, administra
               {recoveryUrl && (
                 <div className="space-y-2">
                   <Label htmlFor="recovery-check-url">
-                    Copy into a separate browser or private profile (valid for
-                    15 minutes)
+                    Open this link in a different browser from this one (valid
+                    for 15 minutes). Private windows share one session, so a
+                    private window of this same browser does not count if the
+                    check was created in one.
                   </Label>
                   <Input
                     id="recovery-check-url"

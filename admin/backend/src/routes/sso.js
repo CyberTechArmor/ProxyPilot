@@ -1,3 +1,4 @@
+import { readFullPlatform } from '../lib/setup-engine/full-platform-store.js';
 import { Router } from "express";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
@@ -169,6 +170,8 @@ ssoSetupRouter.post(
       throw fail(
         "The linked administrator is unavailable or disabled in Keycloak.",
       );
+    const full = readFullPlatform(db);
+    if (full?.approved_revision && (!full.state.administratorVerified || full.state.handoffFingerprint !== r.fingerprint)) throw fail('Complete the Full Platform permanent-administrator and bootstrap-retirement handoff before activation.');
     const latest = assertCurrent(db, r.fingerprint),
       readiness = activationReadiness(db, latest, req.user.id);
     if (!readiness.ready)

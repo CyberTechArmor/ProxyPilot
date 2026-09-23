@@ -787,3 +787,121 @@ with the existing containment exclusion and native database/full-boot limits.
 Acceptance does not turn scripted responses into real-service passes and does
 not authorize deployment, live DNS/database/identity changes, credential
 rotation, live restarts, infrastructure rebuild or G8–G10 work. Stop after G7.
+
+
+## Full Platform integrated follow-up — fixed contract (2026-09-22)
+
+Base: current main `24ba567eea4a5bd6f469b1f3fa30c0857201dfae`. G7 head
+`04820930cf7d467e40b756e398ed7382a10e6f38` on `feat/g7-guided-vaultwarden`
+is not merged. Preserve that branch; Vaultwarden remains an explicit adapter
+dependency, never implicitly skipped or marked installed. Accepted guided
+progress stays **60% (6/10)**; FP-1–FP-6 are a separate integration checklist.
+All criteria below start **pending**, recorded before implementation.
+
+FP-1 — One guided flow and domain selection
+- Add “Full Platform” as the normal choice, with Custom/Advanced available.
+- Present one sequence: Domains and realm → Review → Install and connect → Administrator and recovery → Verify and activate → Complete.
+- Full Platform selects Keycloak, Pomerium, Infisical with Agent Proxy, OpenBao and Vaultwarden where their adapters are available. Inspect G7 ancestry; do not recreate unmerged Vaultwarden work or label an unavailable adapter installed.
+- Do not silently skip an unavailable selected service and call Full Platform complete. Record the precise dependency and preserve completed installation work.
+- For each public service address, offer an existing linked-domain dropdown, optional subdomain and “Enter another hostname.” Reuse domain inventory; show the complete HTTPS address and prevent conflicting assignments.
+- Prefill from saved installations. Known operator examples are edge.fractionate.ai for ProxyPilot, iam.fractionate.ai for Keycloak and Fractionate for the realm; use discovered values, never hard-code these examples.
+- Derive suggested service/recovery addresses, callbacks, ports, resource names and policies. Advanced overrides are optional. Resolve addresses through existing DNS/TLS capabilities when authorized; otherwise show the precise DNS action required. A domain appearing in inventory is not proof of working DNS or TLS.
+- Save is inert. One reviewed apply starts the supported installation and connection work in dependency order.
+
+FP-2 — Automatically connect managed services
+- Managed Keycloak setup must create or reconcile the dedicated ProxyPilot OIDC client, observer client, service clients, required groups/claim mappings and passkey/step-up configuration through supported APIs. Automatically populate issuer, exact callbacks, client IDs and protected secret references in the consuming services.
+- Do not require copying client secrets, importing JSON, configuring authentication flows manually or repeatedly selecting the same identity provider. Keep secrets out of ordinary forms and job records; show “managed automatically” with optional advanced settings.
+- Limit changes to this installation’s owned resources. Reuse recorded credentials on retry and preserve unrelated clients, users and realm settings. External identity providers retain an explicitly authorized connection flow; never assume installation ownership grants control of a pre-existing realm.
+- Provision through the existing authorized host execution path. Bootstrap authority must not reach the browser or remain as an unrestricted automation credential. Retain only appropriately scoped automation access needed for later reviewed changes.
+- Apply supported identity integration to Pomerium, OpenBao and Vaultwarden. Detect edition limitations such as unavailable Infisical human SSO and report them explicitly; do not claim universal SSO where the selected edition cannot provide it.
+- Reuse the adapters to establish the required Infisical organization/projects and scoped machine identities, Agent Proxy connection and OpenBao scoped machine access with generated defaults and protected references. Surface only genuine operator handoffs that the selected product requires; internal connection values must flow between adapters automatically.
+- Remove developer acceptance-fixture requirements from basic installation: administrators must not supply a disposable VM, a specially named PostgreSQL database, test-table SQL or internal probe credentials to install the platform. Use existing automatic checks and owned disposable checks where feasible. Optional database/SSH/PKI engine configuration remains a later optional action; show untested advanced flows honestly.
+- Derive recovery network suggestions from existing approved administrator/VPN configuration, show them for confirmation and retain an independent recovery route. Never guess an unrestricted allowlist or silently create new VPN infrastructure.
+
+FP-3 — Initial credentials and administrator handoff
+- Add an authenticated “Reveal initial Keycloak password” action for a managed installation. Require current administrator authorization and fresh authentication. Reveal only the existing bootstrap password to that requester, audit the access without its value and hide it again when dismissed or expired. Never place it in URLs, logs, events, localStorage or general status responses.
+- Provide a Keycloak administrator form inside ProxyPilot. Default to “Use my current ProxyPilot administrator,” prefilling the current authorized account’s profile. Allow a different named administrator as an optional choice.
+- Use supported Keycloak APIs to create or safely link the appropriate permanent administration and application sign-in identities. Preserve the existing ProxyPilot user ID, roles, local credentials and sessions. Master-realm administration and application-realm sign-in are distinct; verify the required privileges.
+- Do not copy local password hashes or passkey records into Keycloak, or link an existing identity merely because its email matches. Guide the person through setting a credential/enrolling a passkey and proving both identities as applicable.
+- Test the permanent administrator’s fresh login and management permission, the ProxyPilot SSO login/step-up, and independent local recovery before removing the temporary bootstrap administrator. Keep the working access path if any check fails. This handoff must resume after interruption without duplicate users or new passwords.
+- Remove the temporary account only after verified handoff. After removal, label its credential retired rather than presenting it as a working login.
+- Configure passkey policy automatically; actual enrollment requires the person’s authenticator. Preserve required user verification and discoverability. OpenBao recovery acknowledgement/manual-unseal requirements and Vaultwarden vault-unlock secrets also remain explicit human steps.
+- Activate SSO only after the checks pass and the administrator confirms. Ordinary login must not grant elevated access.
+
+FP-4 — Finish an existing installation; removal/reinstall as fallback
+- Prefer discovering, reusing and completing existing ProxyPilot-managed services. The operator already installed Keycloak successfully; it must be usable as the starting point without reinstalling or deleting the realm.
+- Preview the proposed changes and reconcile only what is missing. Do not rotate credentials, replace volumes or discard working settings on repeated apply.
+- If an owned installation cannot be completed safely, explain the concrete incompatibility and offer supported Repair/Reinstall/Remove actions through the existing engine.
+- Distinguish removing service runtime from deleting its data. Default to retaining persistent data and protected credentials. Reinstall should reuse compatible retained data.
+- Any destructive reset must identify the affected services/data, require fresh authorization and explicit confirmation, and use existing compatible backup/recovery mechanisms. Never remove unrelated resources or silently drop an active identity/recovery dependency.
+- Connecting an external service does not authorize deleting or reinstalling it. Restrict removal to owned resources.
+- Implement these operator actions and test them in isolation; do not execute them on the live installation during development.
+
+FP-5 — Durable visual progress and later edits
+- Show one visual progress list with meaningful stages, per-service status, the current action and any required user action. Derive all progress from persistent server jobs/configuration, not browser memory.
+- Refreshing, closing/reopening the page, or restarting the API/runner must retain the same plan, completed steps, pending handoffs and retry targets. Retry resumes safely; it does not create duplicate resources.
+- Separate installed, connected, verified, awaiting user action, failed and complete. Retire stale “queued” banners after completion. Overall completion requires the applicable selected-service connections and access checks, with unsupported/skipped features stated.
+- Allow reopening and editing the saved setup with a reviewed diff and re-verification. Preserve credentials unless rotation is explicitly requested.
+- Hostname, issuer, realm and passkey RP-ID changes are migrations, not harmless field edits. Detect their consequences and preserve old working access until the replacement is verified. If a particular migration is unsupported, explain that and offer the applicable bounded replacement path; do not invent a general migration framework.
+
+FP-6 — Usable page and focused verification
+- Replace the long stack of independent setup forms with the guided sequence; keep advanced details collapsible.
+- Fix the double vertical scrolling: one main content scroll owner with reachable controls at desktop and 360px. Preserve the existing sidebar, dialogs and terminal layouts. Also correct [object Object] policy output, stale adapter wording and generic errors where these obstruct this flow.
+- Through the production adapters, verify fresh setup and continuation of an existing managed Keycloak installation; client/secret preservation on retry; reload/restart progress; administrator reveal authorization; verified bootstrap handoff; recovery before activation; and ownership/data protections on removal/reinstall.
+- Run affected tests, the frontend build and browser interaction checks, including scrolling and form navigation. Use disposable real services for integration ceremonies where available. Clearly distinguish real execution, scripted responses and unavailable host acceptance.
+- Add tests only for these criteria and concrete regressions. Do not expand into unrelated audits or infrastructure redesign.
+
+
+No merge, deployment, live service/DNS/database/identity changes, credential
+rotation, live resets/restarts, G8–G10, new runner or privilege-separation work.
+The installer/update host-dependency repair remains separate; preserve U1/U2
+and existing executor policy. Repository changes, isolated tests, commits,
+feature-branch publication and a PR are authorized.
+
+
+G7 ancestry update during implementation: PR #619 merged accepted head
+`04820930` plus acceptance record `17abcbb3` as `6c6f6ff8`. The feature branch
+was rebased onto that main; the G7 adapter is now available for reuse. Accepted
+guided progress is **70% (7/10)**. FP criteria remain separately pending.
+
+
+FP implementation checkpoint (2026-09-23; draft, not acceptance): the saved
+six-stage coordinator, managed Keycloak clients, fresh-auth bootstrap reveal,
+permanent administrator handoff, basic Infisical/OpenBao paths and retained-data
+runtime actions are implemented on the feature branch. Seven focused FP tests
+pass through production stores/adapters with scripted Keycloak wire responses;
+62 affected existing adapter tests and the frontend build pass. Infisical
+provisioning/reinstall integration and browser/real-service evidence remain in
+progress. No FP criterion is awarded complete at this checkpoint. No live
+resources were changed. PR #620 remains a draft.
+
+The user subsequently added the separate G8 application-connection prompt.
+Finish and publish this FP follow-up first; G8 will have its own branch from
+current main and its own six-criterion record before implementation. This does
+not change accepted guided progress: 70% (7/10).
+
+
+FP final implementation evidence (2026-09-23; review pending)
+
+Base: accepted G7 main `6c6f6ff83119c55d201e674b3962804baf4eb0df`.
+Recoverable implementation checkpoint: remote `a80ecfd0`, tree
+`e7d81370cccc5777c546a790b781c81b0bd7a56e`, draft PR #620.
+Follow-up corrections and evidence are included in the final feature head.
+
+| Criterion | Implementation and evidence | Remaining acceptance |
+| --- | --- | --- |
+| FP-1 | Six-stage default UI, linked/custom domains, exact HTTPS/conflict validation, inert CAS save and reviewed apply. Fresh HTTP caller dispatches one G2 job before dependencies; existing managed Keycloak is reused. | Public DNS/TLS and whole-stack install on a disposable Docker host. |
+| FP-2 | Owned clients/flows/groups and protected references; read-only reuse of recorded foreign-named clients; basic Infisical/Agent Proxy without a VM and OpenBao without a database fixture. Real Keycloak client/flow/policy readback and real OpenBao basic credential use passed. Infisical API ownership, scoped roles, credential uncertainty and authority retirement are covered with scripted upstreams. | Real Infisical/Agent Proxy edition capability; Pomerium/Vaultwarden runtime on host. Human Infisical SSO is explicitly not configured. |
+| FP-3 | Administrator/CSRF/sudo plus actual five-minute local proof for reveal. Distinct permanent master/application identities and administrator-only ownership profile attributes; real master login and identity reuse passed. Scripted SSO/recovery evidence gates retirement and activation; failed proof preserves bootstrap. | Real passkey enrollment, SSO/step-up, separate local recovery and vault unlock ceremonies. |
+| FP-4 | Ownership/data-mount checks before any removal; immutable container IDs; retained data/keys/credentials; active identity/access dependencies block removal. Scripted retained Vaultwarden removal/recreation preserves SQLite, keys and secrets, and ordinary retry refuses missing runtime afterward. | Real Docker retained-data lifecycle acceptance. No data deletion/reset added. |
+| FP-5 | Revision-bound persistent coordinator, child jobs, leases, fencing, protected handoff inputs and safe retry. API-process restart/browser reload preserves the same plan and queued operation. Completion requires current service/access/human evidence; unsupported migrations preserve existing access. | Host runner restart during a whole-stack deployment. |
+| FP-6 | 13 focused FP tests, 96 affected adapter tests and 66 engine/runner/installation-key/U1/U2 regressions passed; frontend build passed. Three real disposable tests passed (Keycloak, G6 OpenBao, basic OpenBao). Built UI: 24 layout audits at six widths, one main content scroll owner, zero axe violations and Lighthouse 100. | Whole-stack host acceptance remains separate; mocked responses are not reported as real service execution. |
+
+Guide: `docs/features/full-platform-setup.md`. Reproducible browser evidence:
+`docs/evidence/fp-browser.json`; scripts and opt-in live tests are committed.
+Real-service tests use verified release archives and isolated loopback ports,
+not operator services. No merge, deployment, live identity/DNS/database changes,
+credential rotation, installer/update changes, G9/G10 or privilege redesign.
+Accepted guided progress remains **70% (7/10)**. FP adds no milestone award;
+review acceptance and host acceptance remain distinct. G8 is separate work on a
+separate branch from main and is not included in this feature.

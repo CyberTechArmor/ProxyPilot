@@ -1,0 +1,229 @@
+{
+  "date": "2026-09-23T02:06:24.700Z",
+  "execution": "Built frontend and production HTTP/auth/CSRF/SQLite; no real platform service installation or human login ceremony.",
+  "audits": [
+    {
+      "state": "domains",
+      "scrollOwners": 1,
+      "width": 360,
+      "scrollWidth": 360,
+      "cardWidth": 328,
+      "cardScrollWidth": 328,
+      "shortButtons": []
+    },
+    {
+      "state": "domains",
+      "scrollOwners": 1,
+      "width": 375,
+      "scrollWidth": 375,
+      "cardWidth": 343,
+      "cardScrollWidth": 343,
+      "shortButtons": []
+    },
+    {
+      "state": "domains",
+      "scrollOwners": 1,
+      "width": 390,
+      "scrollWidth": 390,
+      "cardWidth": 358,
+      "cardScrollWidth": 358,
+      "shortButtons": []
+    },
+    {
+      "state": "domains",
+      "scrollOwners": 1,
+      "width": 768,
+      "scrollWidth": 768,
+      "cardWidth": 448,
+      "cardScrollWidth": 448,
+      "shortButtons": []
+    },
+    {
+      "state": "domains",
+      "scrollOwners": 1,
+      "width": 1280,
+      "scrollWidth": 1280,
+      "cardWidth": 960,
+      "cardScrollWidth": 960,
+      "shortButtons": []
+    },
+    {
+      "state": "domains",
+      "scrollOwners": 1,
+      "width": 1920,
+      "scrollWidth": 1920,
+      "cardWidth": 1152,
+      "cardScrollWidth": 1152,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "scrollOwners": 1,
+      "width": 360,
+      "scrollWidth": 360,
+      "cardWidth": 327,
+      "cardScrollWidth": 327,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "scrollOwners": 1,
+      "width": 375,
+      "scrollWidth": 375,
+      "cardWidth": 343,
+      "cardScrollWidth": 343,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "scrollOwners": 1,
+      "width": 390,
+      "scrollWidth": 390,
+      "cardWidth": 358,
+      "cardScrollWidth": 358,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "scrollOwners": 1,
+      "width": 768,
+      "scrollWidth": 768,
+      "cardWidth": 448,
+      "cardScrollWidth": 448,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "scrollOwners": 1,
+      "width": 1280,
+      "scrollWidth": 1280,
+      "cardWidth": 960,
+      "cardScrollWidth": 960,
+      "shortButtons": []
+    },
+    {
+      "state": "review",
+      "scrollOwners": 1,
+      "width": 1920,
+      "scrollWidth": 1920,
+      "cardWidth": 1152,
+      "cardScrollWidth": 1152,
+      "shortButtons": []
+    },
+    {
+      "state": "queued",
+      "scrollOwners": 1,
+      "width": 360,
+      "scrollWidth": 360,
+      "cardWidth": 327,
+      "cardScrollWidth": 327,
+      "shortButtons": []
+    },
+    {
+      "state": "queued",
+      "scrollOwners": 1,
+      "width": 375,
+      "scrollWidth": 375,
+      "cardWidth": 343,
+      "cardScrollWidth": 343,
+      "shortButtons": []
+    },
+    {
+      "state": "queued",
+      "scrollOwners": 1,
+      "width": 390,
+      "scrollWidth": 390,
+      "cardWidth": 358,
+      "cardScrollWidth": 358,
+      "shortButtons": []
+    },
+    {
+      "state": "queued",
+      "scrollOwners": 1,
+      "width": 768,
+      "scrollWidth": 768,
+      "cardWidth": 448,
+      "cardScrollWidth": 448,
+      "shortButtons": []
+    },
+    {
+      "state": "queued",
+      "scrollOwners": 1,
+      "width": 1280,
+      "scrollWidth": 1280,
+      "cardWidth": 960,
+      "cardScrollWidth": 960,
+      "shortButtons": []
+    },
+    {
+      "state": "queued",
+      "scrollOwners": 1,
+      "width": 1920,
+      "scrollWidth": 1920,
+      "cardWidth": 1152,
+      "cardScrollWidth": 1152,
+      "shortButtons": []
+    },
+    {
+      "state": "administrator",
+      "scrollOwners": 1,
+      "width": 360,
+      "scrollWidth": 360,
+      "cardWidth": 327,
+      "cardScrollWidth": 327,
+      "shortButtons": []
+    },
+    {
+      "state": "administrator",
+      "scrollOwners": 1,
+      "width": 375,
+      "scrollWidth": 375,
+      "cardWidth": 343,
+      "cardScrollWidth": 343,
+      "shortButtons": []
+    },
+    {
+      "state": "administrator",
+      "scrollOwners": 1,
+      "width": 390,
+      "scrollWidth": 390,
+      "cardWidth": 358,
+      "cardScrollWidth": 358,
+      "shortButtons": []
+    },
+    {
+      "state": "administrator",
+      "scrollOwners": 1,
+      "width": 768,
+      "scrollWidth": 768,
+      "cardWidth": 449,
+      "cardScrollWidth": 449,
+      "shortButtons": []
+    },
+    {
+      "state": "administrator",
+      "scrollOwners": 1,
+      "width": 1280,
+      "scrollWidth": 1280,
+      "cardWidth": 960,
+      "cardScrollWidth": 960,
+      "shortButtons": []
+    },
+    {
+      "state": "administrator",
+      "scrollOwners": 1,
+      "width": 1920,
+      "scrollWidth": 1920,
+      "cardWidth": 1152,
+      "cardScrollWidth": 1152,
+      "shortButtons": []
+    }
+  ],
+  "checks": [
+    "Browser save uses production API and is inert",
+    "API process restart and page reload preserve the same reviewed plan and queued operation"
+  ],
+  "errors": [],
+  "axeViolations": [],
+  "lighthouseScore": 100
+}

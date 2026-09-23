@@ -60,7 +60,7 @@ export function approvedFetch(
           });
           res.on("end", () =>
             resolveResponse(
-              new Response(Buffer.concat(chunks), {
+              new Response([204, 205, 304].includes(res.statusCode) ? null : Buffer.concat(chunks), {
                 status: res.statusCode,
                 headers: res.headers,
               }),

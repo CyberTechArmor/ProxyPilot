@@ -14,13 +14,8 @@ import { readSystemStats } from '../system-stats.js';
 
 export { PLATFORM_PLAN_SCHEMA } from './store.js';
 
-export const SERVICES = [
-  { id: 'keycloak', name: 'Keycloak', description: 'Identity provider for shared sign-in. Login activation requires the later identity and recovery adapters.' },
-  { id: 'pomerium', name: 'Pomerium', description: 'Access gateway: Caddy → Pomerium → application. Requires a verified identity provider; selecting Keycloak only records that intention.' },
-  { id: 'infisical', name: 'Infisical with Agent Proxy', description: 'Application secrets and a separate Agent Proxy for brokered credentials. Save choices first, then review the bounded guide.' },
-  { id: 'openbao', name: 'OpenBao', description: 'Secrets and policy service. Initialization, unseal and recovery material are handled by a later adapter.' },
-  { id: 'vaultwarden', name: 'Vaultwarden', description: 'Password vault. TLS, backup and recovery checks are required before a later installation can be activated.' },
-];
+import { SERVICES } from './platform-catalog.js';
+export { SERVICES } from './platform-catalog.js';
 
 const endpoint = z.string().trim().max(300).refine((value) => {
   if (!value) return true;

@@ -14,7 +14,7 @@ export async function infisicalRequest(origin,path,{method='GET',token,body,reso
   const data=body===undefined?null:JSON.stringify(body);
   return new Promise((done,reject)=>{
     let bytes=0;const chunks=[];
-    const req=request(u,{method,agent:false,timeout:7000,lookup:(_h,o,cb)=>o.all?cb(null,[addresses[0]]):cb(null,addresses[0].address,4),headers:{Accept:'application/json',...(token?{Authorization:`Bearer ${token}`} :{}),...(data?{'Content-Type':'application/json','Content-Length':Buffer.byteLength(data)}:{})}},res=>{
+    const req=request(u,{method,agent:false,timeout:7000,lookup:(_h,o,cb)=>o.all?cb(null,[addresses[0]]):cb(null,addresses[0].address,4),headers:{'User-Agent':'ProxyPilot-managed-setup',Accept:'application/json',...(token?{Authorization:`Bearer ${token}`} :{}),...(data?{'Content-Type':'application/json','Content-Length':Buffer.byteLength(data)}:{})}},res=>{
       res.on('data',b=>{bytes+=b.length;if(bytes>1024*1024)req.destroy();else chunks.push(b);});
       res.on('error',()=>reject(fail('Infisical response failed; details withheld.')));
       res.on('end',()=>{let value=null;try{value=JSON.parse(Buffer.concat(chunks));}catch{}

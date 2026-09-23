@@ -1,4 +1,5 @@
 import VaultwardenSetup from '@/components/VaultwardenSetup';
+import FullPlatformSetup from '@/components/FullPlatformSetup';
 import OpenBaoSetup from '@/components/OpenBaoSetup';
 import InfisicalSetup from '@/components/InfisicalSetup';
 import PomeriumSetup from '@/components/PomeriumSetup';
@@ -25,7 +26,7 @@ function CheckResult({ check }) {
     <div className="min-w-0 space-y-1 break-words">
       <p className="font-medium">{check.label} <span className="text-sm font-normal capitalize">— {statusLabel(check.status)}</span></p>
       <p className="text-sm text-muted-foreground">{check.reason}</p>
-      {check.facts && <dl className="text-xs grid grid-cols-1 sm:grid-cols-2 gap-x-5 gap-y-1">{Object.entries(check.facts).map(([key, value]) => <div key={key}><dt className="inline">{key.replace(/([A-Z])/g, ' $1')}: </dt><dd className="inline">{value === null ? 'Not checked' : typeof value === 'number' && key.endsWith('Bytes') ? `${(value / 1024 ** 3).toFixed(1)} GiB` : String(value)}</dd></div>)}</dl>}
+      {check.facts && <dl className="text-xs grid grid-cols-1 sm:grid-cols-2 gap-x-5 gap-y-1">{Object.entries(check.facts).map(([key, value]) => <div key={key}><dt className="inline">{key.replace(/([A-Z])/g, ' $1')}: </dt><dd className="inline">{value === null ? 'Not checked' : typeof value === 'number' && key.endsWith('Bytes') ? `${(value / 1024 ** 3).toFixed(1)} GiB` : typeof value === 'object' ? JSON.stringify(value) : String(value)}</dd></div>)}</dl>}
     </div>
   </li>;
 }
@@ -142,27 +143,28 @@ function PlatformSetupContent() {
         </CardContent></Card>;
       })}</div> : <Card><CardHeader><CardTitle>Review your plan</CardTitle><CardDescription>These are intended additions and connections. Unresolved checks can be saved for later.</CardDescription></CardHeader><CardContent className="space-y-4">
         <ul className="divide-y">{data.services.map((service) => <li key={service.id} className="py-3 min-w-0 break-words"><p className="font-medium">{service.name} · {modeLabel[choices[service.id].mode]}</p>{choices[service.id].mode !== 'skip' && <><p className="text-sm break-all">{choices[service.id].url || 'Endpoint required'}</p>{service.id === 'keycloak' && <p className="text-sm break-all">Realm: {choices.keycloak.realm || 'Realm required before applying'}</p>}{service.id === 'infisical' && <p className="text-sm break-all">Agent Proxy: {modeLabel[choices.infisical.agentProxyMode || choices.infisical.mode]}{(choices.infisical.agentProxyMode || choices.infisical.mode) !== 'skip' && ` · ${choices.infisical.agentProxyUrl || 'Endpoint required'}`}</p>}</>}<p className="text-xs text-muted-foreground">Installation / connection unverified</p></li>)}</ul>
-        <div className="rounded-lg border p-3 text-sm">Keycloak, Pomerium, Infisical and OpenBao have separate review and apply steps below. Other services remain saved intentions. ProxyPilot SSO has its own activation guide.</div>
+        <div className="rounded-lg border p-3 text-sm">Each available service has a separate advanced review and apply below. Full Platform connects the managed services in one sequence. ProxyPilot SSO has its own activation guide.</div>
         <div className="flex flex-col sm:flex-row flex-wrap gap-2"><Button className="min-h-11 bg-foreground text-background hover:bg-foreground/90" disabled={!!busy} onClick={save}>{busy === 'save' ? 'Saving plan…' : 'Save reviewed plan'}</Button></div>
         <p className="text-xs text-muted-foreground">Saving refreshes available checks and requires the existing administrator re-authentication when needed. It does not queue installation.</p>
       </CardContent></Card>}
-      <KeycloakSetup revision={data.plan.revision} dirty={dirty} mode={choices.keycloak.mode} />
+      <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">Keycloak installation</summary><div className="pt-3"><KeycloakSetup revision={data.plan.revision} dirty={dirty} mode={choices.keycloak.mode} /></div></details>
       <Card><CardHeader className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3"><div className="space-y-1.5"><CardTitle>Read-only checks</CardTitle><CardDescription>{checks ? `Snapshot from ${timestamp(checks.checkedAt)}. Run again to refresh.` : 'Not checked for these choices. Run available checks or save to collect a snapshot.'}</CardDescription></div><Button variant="outline" className="min-h-11 shrink-0" disabled={!!busy} onClick={runChecks}>{busy === 'checks' ? 'Checking…' : 'Run available checks'}</Button></CardHeader><CardContent className="space-y-3">
         {checks?.dependencies?.length > 0 && <div role="status" className="rounded-lg border border-destructive p-3"><p className="font-medium">Unresolved dependencies or conflicts</p><ul className="list-disc pl-5 text-sm space-y-1">{checks.dependencies.map((issue) => <li key={issue} className="break-words">{issue}</li>)}</ul></div>}
         {checks && <ul className="space-y-2">{checks.checks.map((check) => <CheckResult key={check.id} check={check} />)}</ul>}
       </CardContent></Card>
-      <SsoSetup connections={data.keycloak || []} />
-      <PomeriumSetup revision={data.plan.revision} dirty={dirty} mode={choices.pomerium.mode} origin={choices.pomerium.url} connections={data.keycloak || []} />
-      <VaultwardenSetup revision={data.plan.revision} dirty={dirty} choice={choices.vaultwarden} connections={data.keycloak} />
-      <OpenBaoSetup revision={data.plan.revision} dirty={dirty} choice={choices.openbao} connections={data.keycloak} />
-      <InfisicalSetup revision={data.plan.revision} dirty={dirty} choice={choices.infisical} />
-      <SetupJobs />
+      <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">Identity and recovery</summary><div className="pt-3"><SsoSetup connections={data.keycloak || []} /></div></details>
+      <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">Pomerium</summary><div className="pt-3"><PomeriumSetup revision={data.plan.revision} dirty={dirty} mode={choices.pomerium.mode} origin={choices.pomerium.url} connections={data.keycloak || []} /></div></details>
+      <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">Vaultwarden</summary><div className="pt-3"><VaultwardenSetup revision={data.plan.revision} dirty={dirty} choice={choices.vaultwarden} connections={data.keycloak} /></div></details>
+      <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">OpenBao</summary><div className="pt-3"><OpenBaoSetup revision={data.plan.revision} dirty={dirty} choice={choices.openbao} connections={data.keycloak} /></div></details>
+      <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">Infisical and Agent Proxy</summary><div className="pt-3"><InfisicalSetup revision={data.plan.revision} dirty={dirty} choice={choices.infisical} /></div></details>
+      <details className="rounded-lg border p-4"><summary className="min-h-11 cursor-pointer font-medium">Operation history</summary><div className="pt-3"><SetupJobs /></div></details>
     </>}
   </div>;
 }
 export default function PlatformSetup() {
   const { user, loading } = useAuth();
+  const [advanced, setAdvanced] = useState(false);
   if (loading) return <p role="status">Loading…</p>;
   if (user?.role !== 'admin') return <Navigate to="/" replace />;
-  return <PlatformSetupContent />;
+  return advanced ? <div className="space-y-5 shrink-0"><Button className="min-h-11" variant="outline" onClick={() => setAdvanced(false)}>Back to Full Platform</Button><PlatformSetupContent /></div> : <FullPlatformSetup onCustom={() => setAdvanced(true)} />;
 }

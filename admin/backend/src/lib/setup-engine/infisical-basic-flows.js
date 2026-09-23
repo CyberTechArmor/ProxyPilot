@@ -1,0 +1,33 @@
+import http from 'node:http';
+import { randomBytes } from 'node:crypto';
+import { testDestination } from './infisical-flows.js';
+import { secretPath } from './infisical-api.js';
+import { TEST_PORT, TEST_ENV, TEST_PATH, PLACEHOLDER, PROXY_KEY, infisicalError as fail } from './infisical-logic.js';
+
+const request = (url, { method = 'GET', path, headers = {} } = {}) => new Promise((resolve, reject) => {
+  const req = http.request(url, { method, path, headers, agent: false, timeout: 8000 }, res => { res.resume(); res.once('end', () => resolve(res.statusCode)); });
+  req.on('timeout', () => req.destroy()); req.on('error', () => reject(fail('The owned disposable connection check could not reach its destination.'))); req.end();
+});
+
+// A short-lived in-process destination checks the actual local service and
+// Agent Proxy. The basic installation requires no separately provisioned VM.
+// The agent receives a placeholder and its own limited token, never the value.
+export async function verifyBasicFlows(r, values, tokens, { api, job, destination = testDestination, send = request, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+  if (![401, 403].includes((await api(secretPath(r.identities.projectId))).status)) throw fail('Unauthenticated secret access was not explicitly denied.');
+  if (tokens.agent && (await api(secretPath(r.identities.projectId, PROXY_KEY), { token: tokens.agent })).status !== 403) throw fail('Agent identity can read secret values. The connection is not accepted.');
+  const nonce = randomBytes(20).toString('hex'), receipt = destination(values, nonce, { host: r.config.testHost });
+  await receipt.open();
+  try {
+    job.fence();
+    const origin = `http://${r.config.testHost}:${TEST_PORT}`;
+    const consumer = await send(origin, { method: 'POST', path: `/g5/consumer?nonce=${nonce}`, headers: { Authorization: `Bearer ${values.application}` } });
+    if (consumer !== 204 || receipt.received.consumer !== 1) throw fail('The owned consumer did not receive the scoped test credential.');
+    if (tokens.agent) {
+      const through = (suffix, token, secretPath = TEST_PATH) => send(r.config.proxyOrigin, { path: `${origin}/g5/${suffix}?nonce=${nonce}`, headers: { Authorization: `Bearer ${PLACEHOLDER}`, ...(token ? { 'Proxy-Authorization': `Basic ${Buffer.from(`${r.identities.projectId}:${TEST_ENV}${secretPath}:${token}`).toString('base64')}` } : {}) } });
+      let accepted = false;
+      for (let attempt = 0; attempt < 15; attempt++) { job.fence(); try { if (await through('allowed', tokens.agent) === 204) { accepted = true; break; } } catch {} await sleep(1000); }
+      if (!accepted || await through('allowed') !== 407 || await through('allowed', 'invalid-proxypilot-token') !== 502 || await through('denied', tokens.agent) !== 403 || await through('allowed', tokens.agent, '/ungranted-proxypilot') !== 502 || await through('allowed', tokens.agent) !== 204 || receipt.received.agent !== 2 || receipt.received.unauthorized) throw fail('Agent Proxy substitution or denial checks failed. No credential value is exposed.');
+    }
+    return { consumer: 'verified', unauthenticatedRead: 'denied', agentValueRead: tokens.agent ? 'denied' : 'not_selected', agentProxy: tokens.agent ? 'placeholder_substitution_and_denials_verified' : 'skipped', destinationReceipt: tokens.agent ? 'real_credential_received' : 'not_selected', execution: 'owned_disposable_local_destination', advancedVmFlows: 'not_tested' };
+  } finally { await receipt.close(); }
+}

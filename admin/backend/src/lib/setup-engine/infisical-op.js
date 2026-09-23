@@ -1,3 +1,5 @@
+import { provisionManagedInfisical } from './full-platform-infisical.js';
+import { verifyBasicFlows } from './infisical-basic-flows.js';
 import { readInfisical,infisicalSecrets } from './infisical-store.js';
 import { INFISICAL_APP,INFISICAL_ROOT,PROXY_KEY,infisicalJobSchema,infisicalError as fail,digest } from './infisical-logic.js';
 import { ensureInfisicalRuntime,ensureAgentProxyRuntime,prepareInfisicalFiles,assertLocalTestHost,assertIsolatedAgentVm } from './infisical-runtime.js';
@@ -6,11 +8,11 @@ import { verifyCredentialFlows } from './infisical-flows.js';
 import { assertInfisicalRouteAvailable } from './infisical-routes.js';
 import { createJob,getJob,acquireLock,renewLock,releaseLock,takeoverLock,readLock } from './store.js';
 
-export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_ROOT,send,runtime=ensureInfisicalRuntime,proxyRuntime=ensureAgentProxyRuntime,hostProbe=assertLocalTestHost,vmProbe=assertIsolatedAgentVm,flows=verifyCredentialFlows}) {
+export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_ROOT,send,runtime=ensureInfisicalRuntime,proxyRuntime=ensureAgentProxyRuntime,hostProbe=assertLocalTestHost,vmProbe=assertIsolatedAgentVm,flows=verifyCredentialFlows,basicFlows=verifyBasicFlows,provision=provisionManagedInfisical}) {
   infisicalJobSchema.parse(params);let r=readInfisical(db);
   if(!r||r.revision!==params.revision||r.last_job_id!==job.id)throw fail('The saved Infisical job was superseded.');
   const phase=name=>job.checkpoint(name,{resumable:true,infisical:true});
-  phase('private_target_checks');hostProbe(r.config);const vm=await vmProbe(r.config,{exec,job});
+  phase('private_target_checks');hostProbe(r.config);const vm=r.config.basic?{uuid:'owned-local-check'}:await vmProbe(r.config,{exec,job});
   if(r.resources?.vmRef&&r.resources.vmRef!==vm.uuid)throw fail('The test VM identity changed. No credential was delivered.');
   let resources=r.resources||{};
   if(r.config.mode==='install'){
@@ -25,7 +27,11 @@ export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_R
   const api=createInfisicalClient(r.config.origin,{send,job});
   requireOk(await api('/api/status'),'Infisical status');
   const initialized=requireOk(await api('/api/v1/admin/config'),'Infisical administrator initialization').config?.initialized;
-  if(initialized!==true)throw fail('Complete first-administrator setup through the restricted Infisical route, then perform the exact identity handoff and retry.');
+  if(r.config.basic&&r.config.mode==='install') {
+    const provisioned=await provision(db,r,api,{job});
+    if(!provisioned.ready)return {verification:{state:'awaiting_user_action',label:provisioned.action,complete:false}};
+    r=readInfisical(db);
+  } else if(initialized!==true)throw fail('Complete first-administrator setup through the restricted Infisical route, then perform the exact identity handoff and retry.');
   const values=infisicalSecrets(db,r),tokens=await verifyInfisicalIdentities(r,values,api);job.fence();
   // Connect also keeps its disposable test value locally; no external boot key
   // is copied, replaced or inferred. Retry compares values instead of updating.
@@ -41,12 +47,12 @@ export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_R
     phase('proxied_service_handoff');await verifyServiceHandoff(r,api,tokens.agent);
     phase('agent_proxy_runtime');proxyEvidence=await proxyRuntime(r,values,{exec,job,root});job.fence();
   }
-  phase('credential_flow_verification');const evidence=await withVmLease(db,r,job,async guarded=>flows(r,{application:value,proxy:files.keys.proxyTest},tokens,{exec,job:guarded,api,vmProbe:async(config,args)=>{const check=await vmProbe(config,args);if(check.uuid!==vm.uuid)throw fail('The test VM identity changed during verification.');return check;}}));job.fence();
+  phase('credential_flow_verification');const evidence=r.config.basic?await basicFlows(r,{application:value,proxy:files.keys.proxyTest},tokens,{api,job}):await withVmLease(db,r,job,async guarded=>flows(r,{application:value,proxy:files.keys.proxyTest},tokens,{exec,job:guarded,api,vmProbe:async(config,args)=>{const check=await vmProbe(config,args);if(check.uuid!==vm.uuid)throw fail('The test VM identity changed during verification.');return check;}}));job.fence();
   // Recheck effective grants after the flows; a saved success never certifies
   // a different plan or relies on a previous browser assertion.
   await verifyInfisicalIdentities(r,values,api);job.fence();r=readInfisical(db);
   if(r.revision!==params.revision||r.last_job_id!==job.id)throw fail('Infisical settings changed during verification.');
-  const verification={state:r.config.agentMode==='skip'?'application_secret_verified':'infisical_flows_verified',label:r.config.agentMode==='skip'?'Application secret verified; Agent Proxy deliberately skipped.':'Disposable application and Agent Proxy credential flows verified.',revision:r.revision,fingerprint:digest([r.config,r.identities]),...evidence,proxy:proxyEvidence,verifiedAt:new Date().toISOString(),humanSso:'optional_not_configured',scope:'one_disposable_test_secret'};
+  const verification={state:r.config.agentMode==='skip'?'application_secret_verified':'infisical_flows_verified',label:r.config.agentMode==='skip'?'Application secret verified; Agent Proxy deliberately skipped.':'Disposable application and Agent Proxy credential flows verified.',revision:r.revision,fingerprint:digest([r.config,r.identities]),...evidence,proxy:proxyEvidence,verifiedAt:new Date().toISOString(),humanSso:'not_configured_edition_oidcSSO_required',scope:'one_disposable_test_secret'};
   db.prepare('UPDATE setup_infisical SET verified_json=?,resources_json=? WHERE id=1').run(JSON.stringify(verification),JSON.stringify({...resources,vmRef:vm.uuid,protectedRef:files.bundle,directory:files.root,proxy:proxyEvidence}));
   return {verification};
 }

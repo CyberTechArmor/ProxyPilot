@@ -48,7 +48,7 @@ export async function ensureRuntime(r, credentials, { exec, job, root = VAULTWAR
   if (r.resources?.serverKeys) keyEvidence(files.data, r.resources.serverKeys);
   const createOnce = async (kind, present, args) => {
     if (present) return;
-    if (files.identity.attempted.includes(kind) || r.resources) throw fail('A previously attempted Vaultwarden resource is missing. Restore it; retry never reinstalls or resets the vault.');
+    if ((files.identity.attempted.includes(kind) || r.resources) && !(kind === 'server' && files.identity.reinstall && files.identity.reinstall === r.resources?.retainedReinstall)) throw fail('A previously attempted Vaultwarden resource is missing. Restore it; retry never reinstalls or resets the vault.');
     job.fence(); files.identity.attempted.push(kind); atomicPrivate(files.marker, JSON.stringify(files.identity)); await call(args);
   };
   const labels = ['--label', `${OWNER}=${owner}`];
@@ -70,6 +70,7 @@ export async function ensureRuntime(r, credentials, { exec, job, root = VAULTWAR
     !m.some(x => x.Type === 'bind' && x.Source === files.config && x.Destination === '/etc/vaultwarden/setup.json' && x.RW === false) ||
     Object.keys(a.NetworkSettings?.Networks || {}).some(x => x !== n.network)) throw fail('Vaultwarden runtime differs from the reviewed private persistent profile. No replacement was attempted.');
   if (!a.State?.Running) { job.fence(); files.identity.started = true; atomicPrivate(files.marker, JSON.stringify(files.identity)); await call(['start', n.server]); }
+  if (files.identity.reinstall) { delete files.identity.reinstall; job.fence(); atomicPrivate(files.marker, JSON.stringify(files.identity)); }
   job.generated({ kind: 'vaultwarden_data_configuration', name: owner, where: root });
   return { ...n, directory: root, data: files.data, config: files.config, image: VAULTWARDEN_IMAGE, ...(r.resources?.serverKeys ? { serverKeys: r.resources.serverKeys } : {}) };
 }

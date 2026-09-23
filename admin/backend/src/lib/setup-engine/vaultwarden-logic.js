@@ -1,3 +1,4 @@
+import { restrictedNetwork } from './platform-networks.js';
 import { z } from 'zod';
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
@@ -15,7 +16,7 @@ export const configSchema = z.object({
   expectedPlanRevision: z.number().int().positive(), expectedRevision: z.number().int().nonnegative(),
   connectionId: name, clientId: name, clientSecret: secret.optional(), adminToken: z.string().min(1).max(8192).regex(/^[^\r\n\0]+$/).optional(),
   accessRole: name, matchExistingEmail: z.boolean(),
-  allowedIps: z.array(z.string().refine(v => isIP(v) === 4)).max(16).default([]), reviewed: z.literal(true),
+  allowedIps: z.array(restrictedNetwork).max(16).default([]), reviewed: z.literal(true),
 }).strict();
 export const jobSchema = z.object({ revision: z.number().int().positive() }).strict();
 export const applySchema = jobSchema.extend({ reviewToken: z.string().regex(/^[a-f0-9]{64}$/), reviewed: z.literal(true) }).strict();

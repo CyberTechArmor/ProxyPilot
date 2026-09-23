@@ -39,7 +39,7 @@ const fields = [
     "Existing administrator / WireGuard IPs or CIDRs (comma separated)",
   ],
 ];
-export default function SsoSetup({ connections = [] }) {
+export default function SsoSetup({ connections = [], managed = false, administratorVerified = false }) {
   const [state, setState] = useState(null),
     [form, setForm] = useState(initial),
     [busy, setBusy] = useState(""),
@@ -122,12 +122,12 @@ export default function SsoSetup({ connections = [] }) {
             {notice}
           </p>
         )}
-        {!verified.length && (
+        {!managed && !verified.length && (
           <p>
             First verify a Keycloak connection above, then refresh this page.
           </p>
         )}
-        <fieldset
+        {!managed && <fieldset
           disabled={!!busy || state?.active}
           className="space-y-4 min-w-0"
         >
@@ -246,7 +246,7 @@ export default function SsoSetup({ connections = [] }) {
           >
             Save SSO configuration
           </Button>
-        </fieldset>
+        </fieldset>}
         {config && (
           <>
             <section className="space-y-3">
@@ -397,7 +397,7 @@ export default function SsoSetup({ connections = [] }) {
               )}
             </section>
             <section className="space-y-3">
-              <h3 className="font-semibold">5. Explicitly activate SSO</h3>
+              <h3 className="font-semibold">5. Explicitly activate SSO</h3>{managed && !administratorVerified && <p className="text-sm">After these checks pass, return to Administrator and recovery to verify permanent administration and retire the bootstrap account. Then activate here.</p>}
               <p className="text-sm">
                 Activation closes public local sign-in and its existing
                 sessions. Local credentials remain on the restricted recovery
@@ -415,7 +415,7 @@ export default function SsoSetup({ connections = [] }) {
               <div className="flex flex-col sm:flex-row gap-2">
                 <Button
                   className="min-h-11 bg-foreground text-background hover:bg-foreground/90"
-                  disabled={!!busy || !state.readiness?.ready || state.active}
+                  disabled={!!busy || !state.readiness?.ready || state.active || managed && !administratorVerified}
                   onClick={() =>
                     run("activate", () => api.ssoSetupAction("activate", fp))
                   }

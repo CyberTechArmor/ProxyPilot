@@ -1,3 +1,4 @@
+import { restrictedNetwork } from './platform-networks.js';
 // G5 release contract, checked against upstream tagged source (see operator guide).
 import { z } from 'zod';
 import { createHash } from 'node:crypto';
@@ -22,12 +23,12 @@ const id=z.string().uuid();
 const ip=z.string().refine(privateIp,'Use an RFC1918 IPv4 address on this host.');
 export const infisicalJobSchema=z.object({revision:z.number().int().positive()}).strict();
 export const infisicalConfigSchema=z.object({expectedPlanRevision:z.number().int().positive(),expectedRevision:z.number().int().nonnegative(),
-  agentMode:z.enum(['install','connect','skip']),testHost:ip,
-  agentVm:z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/),
+  basic:z.boolean().optional(),agentMode:z.enum(['install','connect','skip']),testHost:ip,
+  agentVm:z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/).optional(),
   // A new installation must not expose an unclaimed first-administrator screen.
-  allowedIps:z.array(z.string().refine(v=>isIP(v)===4)).min(1).max(8),
+  allowedIps:z.array(restrictedNetwork).min(1).max(8),
   externalProxyContainer:z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/).optional(),
-  reviewed:z.literal(true)}).strict();
+  reviewed:z.literal(true)}).strict().refine(v=>v.basic||!!v.agentVm,'Advanced credential tests require an isolated VM.');
 const credential=z.object({identityId:id,clientId:id,clientSecret:z.string().min(16).max(4096).regex(/^[^\r\n\0]+$/)}).strict();
 export const infisicalIdentitiesSchema=z.object({expectedRevision:z.number().int().positive(),organizationId:id,projectId:id,
   workload:credential,proxy:credential.optional(),agent:credential.optional(),reviewed:z.literal(true)}).strict();

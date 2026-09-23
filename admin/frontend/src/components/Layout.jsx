@@ -311,7 +311,7 @@ export default function Layout() {
 
   return (
     <SnapshotExportProvider>
-    <div className="min-h-viewport bg-background">
+    <div className="h-viewport overflow-hidden bg-background">
       {/* Mobile top bar (hidden on md+, and suppressed entirely by a
           chromeless page — the drawer is then opened from that page's own UI). */}
       <header className={cn(

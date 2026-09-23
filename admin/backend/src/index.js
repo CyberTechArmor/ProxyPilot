@@ -353,6 +353,17 @@ try {
   const sweepInputs = () => { try { const gone = sweepSetupInputs(setupInputsDir(databasePath())); if (gone.length) console.log(`[setup-engine] swept ${gone.length} unconsumed setup input(s)`); } catch (err) { console.error('[setup-engine] input sweep failed:', err?.message || err); } };
   setTimeout(sweepInputs, 5 * 60_000).unref();
   setInterval(sweepInputs, 60 * 60_000).unref();
+  // OpenBao automatic custody: unseal the owned instance with its 2 stored
+  // shares after a restart (only once the recovery kit was acknowledged).
+  const baoUnseal = async () => {
+    try {
+      const { sweepOpenBaoAutoUnseal } = await import('./lib/setup-engine/openbao-custody.js');
+      const r = await sweepOpenBaoAutoUnseal({ db: getDb() });
+      if (r.unsealed !== undefined) console.log(`[setup-engine] OpenBao automatic unseal: ${r.unsealed ? 'unsealed' : 'still sealed'}`);
+    } catch (err) { console.error('[setup-engine] OpenBao automatic unseal failed:', err?.openbaoSafe ? err.message : 'details withheld'); }
+  };
+  setTimeout(baoUnseal, 30_000).unref();
+  setInterval(baoUnseal, 2 * 60_000).unref();
 }
 
 // Sweep orphan in_progress backup rows.  The create-backup

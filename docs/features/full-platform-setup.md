@@ -29,8 +29,9 @@ verified; the next continue starts the next stage.
   working bootstrap path. Stage C unlocks only after the retirement.
 - **C. Pomerium.**
 - **D. Infisical, OpenBao, Vaultwarden**, each with its human steps (Infisical
-  personal administrator, OpenBao recovery custody and manual unseal,
-  Vaultwarden sign-in/unlock observations).
+  personal administrator, OpenBao recovery custody — by default the one-time
+  recovery kit download — Vaultwarden sign-in/unlock observations). Stage D is
+  not done while an automatic-custody recovery kit is still unacknowledged.
 - **E. Verify everything → Activate SSO → Complete.** The server requires every
   service's verification, permanent administration, recovery, current
   Vaultwarden observations and active SSO. A running process or a successful
@@ -112,11 +113,37 @@ retired. No permanent user's password is offered for reveal.
   checks a temporary owned local destination with allowed and denied requests.
   It does not request a disposable VM. If no private address is available, setup
   pauses for host configuration; it does not create a VPN or public listener.
-- **OpenBao:** supply three custodians' public PGP keys and an initial-root
-  recipient key, retain/decrypt the encrypted recovery package separately,
-  acknowledge custody and manually unseal with two shares. Submit the transient
-  initial root token to configure owned access; successful verification revokes
-  it. The basic profile verifies scoped KV reading and explicit denials, without
+- **OpenBao — recovery custody.** Two choices under *OpenBao recovery custody*:
+  - **Set up OpenBao automatically (default).** `POST /full/openbao/recovery`
+    with `{ revision, custody: 'auto', reviewed: true }` (no keys) saves
+    `custody: 'auto'` and continues the setup job. ProxyPilot initializes
+    OpenBao once (3 shares, threshold 2, no PGP) and in the same transaction
+    stores, encrypted with the installation key in `setup_openbao_credentials`,
+    an **auto-unseal record** (`<ref>:unseal`, 2 of the 3 shares, kept) and a
+    **one-time kit record** (`<ref>:kit`: receipt, all 3 shares, the initial
+    root token). Nothing secret reaches a plan, job, event, audit row or the
+    host recovery directory. The job then unseals with the 2 stored shares,
+    configures owned access with the root token (the same `bootstrap` as the
+    manual path), **revokes the root token and removes it from the kit
+    record**, and verifies. **Download recovery kit (one time)** —
+    `GET /full/openbao/recovery-kit`, fresh sudo + fresh local proof, audited
+    `OPENBAO_RECOVERY_KIT_DOWNLOADED` without contents, `no-store` attachment —
+    saves the kit as JSON and acknowledges its receipt automatically
+    (`PUT /openbao/handoff`); acknowledgement deletes the kit record, so a
+    second download returns 410. Store the file offline (print it, or keep it
+    in Vaultwarden). After a restart the job and a backend sweep (`index.js`,
+    30 s after boot then every 2 minutes, only once the kit is acknowledged
+    and no OpenBao operation is pending) unseal OpenBao with the stored shares.
+    Trade-off: someone with full control of this server (database + installation
+    key) can unlock OpenBao. Recovery without ProxyPilot: unseal with 2 kit
+    shares, then `bao operator generate-root` with 2 shares.
+  - **Advanced: use your own PGP custodians** (unchanged). Supply three
+    custodians' public PGP keys and an initial-root recipient key,
+    retain/decrypt the encrypted recovery package separately, acknowledge
+    custody and manually unseal with two shares. Submit the transient initial
+    root token to configure owned access; successful verification revokes it.
+
+  The basic profile verifies scoped KV reading and explicit denials, without
   a PostgreSQL fixture. Database, SSH and PKI engines remain optional and untested.
 - **Vaultwarden:** the dedicated client, restricted role/group and passkey flow
   are connected automatically. Verify the email in Keycloak, then perform the
@@ -178,7 +205,9 @@ External services are never touched: their records and runtime stay.
   `manifest.json` (size and sha256 of every file). Every file is re-hashed and
   every archive listed back with tar; any mismatch stops the reset with nothing
   deleted. Only then are the owned directories, volumes, networks and protected
-  credential rows removed. The OpenBao recovery-package directory is kept.
+  credential rows removed, including the OpenBao automatic-custody records
+  (`<ref>:unseal`, `<ref>:kit`); a data-kept reset keeps them with the other
+  protected credentials. The OpenBao recovery-package directory is kept.
 
 Credential rotation remains unsupported. Hostname, issuer, realm and passkey
 RP-ID changes still require a separately reviewed migration (or a reset). The
@@ -357,7 +386,7 @@ These stay on this page and have **no** MCP tool: **Reveal initial Keycloak
 password**, the administrator/recovery password, the fresh permanent master
 login that retires the bootstrap account, **Activate SSO**, and any secret
 (client secrets, admin tokens, the Infisical personal password, PGP keys, unseal
-shares, root token). They keep the fresh-local-proof requirement; an MCP key
+shares, root token), and the OpenBao recovery-kit download. They keep the fresh-local-proof requirement; an MCP key
 cannot reach them.
 
 **Observer.** Vaultwarden and OpenBao verify their dedicated client through the

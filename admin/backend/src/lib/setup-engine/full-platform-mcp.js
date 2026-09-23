@@ -51,7 +51,7 @@ export const HUMAN = Object.freeze({
   accessChecks: { ...PAGE, step: 'B. Keycloak, permanent administrator and recovery', section: '4. Link, SSO login, step-up and recovery checks', control: 'the account link, SSO login, step-up and separate-browser recovery tests' },
   retire: { ...PAGE, step: 'B. Keycloak, permanent administrator and recovery', section: '5. Retire the bootstrap account', control: 'Verify administration and retire bootstrap' },
   infisical: { ...PAGE, step: 'D. Infisical, OpenBao and Vaultwarden', section: 'Infisical administrator', control: 'Create or resume Infisical administration' },
-  openbao: { ...PAGE, step: 'D. Infisical, OpenBao and Vaultwarden', section: 'OpenBao recovery custody and manual unseal', control: 'the recipient keys, custody acknowledgement, unseal share and bootstrap token forms' },
+  openbao: { ...PAGE, step: 'D. Infisical, OpenBao and Vaultwarden', section: 'OpenBao recovery custody', control: 'Set up OpenBao automatically, then Download recovery kit (one time); the Advanced PGP custodian, unseal share and bootstrap token forms' },
   vaultwarden: { ...PAGE, step: 'D. Infisical, OpenBao and Vaultwarden', section: 'Vaultwarden sign-in and unlock checks', control: 'Record operator-observed checks' },
   activate: { ...PAGE, step: 'E. Verify everything and activate SSO', control: 'Activate SSO' },
   disableSso: { ...PAGE, step: 'E. Verify everything and activate SSO', control: 'Disable SSO (from local recovery)' },
@@ -187,6 +187,7 @@ export const HUMAN_ONLY = Object.freeze([
   { action: 'Fresh permanent master login to retire the bootstrap account', where: HUMAN.retire },
   { action: 'Activate SSO', where: HUMAN.activate },
   { action: 'Any secret input: client secrets, admin tokens, the Infisical personal password, OpenBao PGP keys, unseal shares, root/bootstrap token, vault master passwords', where: HUMAN.setup },
+  { action: 'Choose OpenBao recovery custody and download the one-time OpenBao recovery kit (its shares never leave the dashboard)', where: HUMAN.openbao },
 ]);
 
 function act(id, need, by, extra = {}) { return { id, need, by, mcp_can_do: by === 'mcp', ...extra }; }
@@ -240,7 +241,7 @@ function nextActions(db, v, s, full) {
     if (!v.failures.length && ids.some((id) => ['planned', 'installed'].includes(byId[id]?.state) || !byId[id]?.job)) out.push(cont(`Stage ${stage}: install and connect ${ids.join(', ')}.`));
     if (stage === 'D') {
       if (byId.infisical?.state === 'awaiting_user_action' && /personal|administrator|password/i.test(byId.infisical.action || '')) out.push(act('infisical_personal', byId.infisical.action, 'human', { where: HUMAN.infisical, stage }));
-      if (byId.openbao?.state === 'awaiting_user_action') out.push(act('openbao_custody', byId.openbao.action || 'Recovery custody, manual unseal and the bootstrap token are human steps.', 'human', { where: HUMAN.openbao, stage }));
+      if (byId.openbao?.state === 'awaiting_user_action') out.push(act('openbao_custody', byId.openbao.action || 'Choosing recovery custody (automatic, or Advanced PGP custodians with manual unseal and bootstrap token) is a human step.', 'human', { where: HUMAN.openbao, stage }));
       if (byId.vaultwarden?.state === 'awaiting_user_action' && /web vault|Vaultwarden/i.test(byId.vaultwarden.action || '')) out.push(act('vaultwarden_checks', byId.vaultwarden.action, 'human', { where: HUMAN.vaultwarden, stage }));
     }
   }
@@ -300,7 +301,7 @@ export function serviceRetryRefusal(db, service) {
       return { error: `Retrying ${service} would fail at dedicated_keycloak_handoff: the read-only Keycloak observer for its provider ${obs.present ? 'names a different provider' : 'does not exist'}. ${c.need}`, code: 'OBSERVER_REQUIRED', next_action: act('observer', c.need, c.by, { ...(c.tool ? { tool: c.tool } : {}), ...(c.where ? { where: c.where } : {}) }) };
     }
   }
-  if (service === 'openbao' && row.config.mode === 'install' && row.init_attempted && !row.handoff_ack) return { error: 'OpenBao is waiting for recovery custody acknowledgement and manual unseal — a human step.', code: 'HUMAN_STEP_REQUIRED', next_action: act('openbao_custody', 'Recovery custody and manual unseal.', 'human', { where: HUMAN.openbao }) };
+  if (service === 'openbao' && row.config.mode === 'install' && row.config.custody !== 'auto' && row.init_attempted && !row.handoff_ack) return { error: 'OpenBao is waiting for recovery custody acknowledgement and manual unseal — a human step.', code: 'HUMAN_STEP_REQUIRED', next_action: act('openbao_custody', 'Recovery custody and manual unseal.', 'human', { where: HUMAN.openbao }) };
   return null;
 }
 

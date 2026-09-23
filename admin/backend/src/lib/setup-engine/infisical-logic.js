@@ -33,6 +33,15 @@ const credential=z.object({identityId:id,clientId:id,clientSecret:z.string().min
 export const infisicalIdentitiesSchema=z.object({expectedRevision:z.number().int().positive(),organizationId:id,projectId:id,
   workload:credential,proxy:credential.optional(),agent:credential.optional(),reviewed:z.literal(true)}).strict();
 export const infisicalApplySchema=infisicalJobSchema.extend({reviewToken:z.string().regex(/^[a-f0-9]{64}$/),reviewed:z.literal(true)}).strict();
+// The owned basic installation runs the free self-hosted edition, whose
+// licence defaults have rbac:false — custom project roles are refused
+// ("plan RBAC restriction"). Its machine identities therefore get Infisical's
+// BUILT-IN project roles in the dedicated ProxyPilot project. Only the
+// built-in Admin role carries proxied-services:proxy, so the agent identity
+// is Admin there — AGENT_ROLE_RISK is shown wherever that applies.
+export const BUILTIN_ROLES = Object.freeze({ workload: 'member', proxy: 'viewer', agent: 'admin' });
+export const builtinRolesFor = agentMode => agentMode === 'skip' ? { workload: BUILTIN_ROLES.workload } : { ...BUILTIN_ROLES };
+export const AGENT_ROLE_RISK = 'Free edition: Infisical allows only its built-in Admin role to use the Agent Proxy, so agent identities are Admin of the dedicated ProxyPilot project. A compromised or manipulated agent could read the real credentials in that project directly instead of only through the proxy. Keep that project for brokered credentials only, limit each proxied service to the exact sites the agent needs, and broker agent-specific accounts (never a personal account) so a compromise stays contained and the account can be rotated. Infisical Enterprise custom roles remove this risk.';
 export function expectedPolicies(identities,agentMode) {
   const scope={environment:TEST_ENV,secretPath:TEST_PATH};
   const identityIds=['workload',...(agentMode==='skip'?[]:['proxy','agent'])].map(k=>identities[k].identityId).sort();

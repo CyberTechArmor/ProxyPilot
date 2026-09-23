@@ -93,12 +93,20 @@ retired. No permanent user's password is offered for reveal.
 - **Infisical:** choose its local human administrator credential once. This
   edition's Keycloak human SSO is not configured; `oidcSSO` entitlement is a
   separate capability. The owned basic flow creates a dedicated project,
-  environment, folder, exact scoped roles and machine identities. It replaces
+  environment, folder and machine identities. The self-hosted free edition
+  refuses custom project roles (licence `rbac: false`), so the identities hold
+  Infisical's BUILT-IN project roles in that dedicated project: broker →
+  Viewer, test workload → Member, agent → Admin (the only built-in role with
+  `proxied-services: proxy`). Consequence, shown as a banner on the service and
+  as `risk` over MCP: an agent identity can read the project's real credentials
+  directly, not only through the proxy. Keep the project for brokered
+  credentials only, limit each proxied service to the agent's sites, and broker
+  agent-specific accounts. Enterprise custom roles remove the trade-off
+  (`BUILTIN_ROLES` / `AGENT_ROLE_RISK` in `infisical-logic.js`). It replaces
   and revokes the unrestricted bootstrap grant, uses a 15-minute provisioning
   grant, and retires that authentication after verified machine login. Personal
   inputs expire after 15 minutes and are removed on execution; no refresh token
-  becomes a permanent automation credential. If the edition cannot supply
-  scoped roles or Agent Proxy, its precise capability check remains pending.
+  becomes a permanent automation credential.
   Interrupted secret issuance never silently creates another credential.
 - **Agent Proxy:** the basic flow derives an existing private runner address and
   checks a temporary owned local destination with allowed and denied requests.

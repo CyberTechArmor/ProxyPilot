@@ -3,8 +3,8 @@ import { z } from 'zod';
 import { protectedValue, storeProtected } from './full-platform-keycloak.js';
 import { infisicalSecrets } from './infisical-store.js';
 import { encryptSecret } from '../secrets.js';
-import { requireOk, verifyInfisicalIdentities, verifyPolicies, scopeQuery } from './infisical-api.js';
-import { expectedPolicies, desiredProxiedService, TEST_ENV, TEST_PATH, infisicalIdentitiesSchema, infisicalError as fail } from './infisical-logic.js';
+import { requireOk, verifyInfisicalIdentities, scopeQuery, sameBuiltinRole } from './infisical-api.js';
+import { BUILTIN_ROLES, desiredProxiedService, TEST_ENV, TEST_PATH, infisicalIdentitiesSchema, infisicalError as fail } from './infisical-logic.js';
 
 export const personalSchema = z.object({ revision: z.number().int().positive(), email: z.string().email().max(254), password: z.string().min(12).max(256), reviewed: z.literal(true) }).strict();
 export const personalRef = r => `full-infisical-personal-${r.credential_ref}`;
@@ -92,23 +92,15 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
       if (!detail?.metadata?.some(m => m.key === 'proxypilot' && m.value === r.credential_ref) || s.identities[kind]?.identityId && s.identities[kind].identityId !== identity.id) throw fail('A machine identity name collides with an unowned identity.');
       s.identities[kind] = { ...s.identities[kind], identityId: identity.id }; persist();
     }
-    const policies = expectedPolicies(s.identities, r.config.agentMode);
     for (const kind of kinds) {
-      const i = s.identities[kind], roleSlug = `pp-${kind}`;
-      const rolesPath = `/api/v1/projects/${s.projectId}/roles`;
-      const list = requireOk(await request(rolesPath), 'Scoped-role capability (requires edition support)').roles;
-      let role = list?.find(x => x.slug === roleSlug);
-      if (!role) role = requireOk(await request(rolesPath, { method: 'POST', body: { slug: roleSlug, name: `ProxyPilot ${kind}`, description: owned, permissions: policies[kind] } }), 'Scoped-role creation (requires edition support)').role;
-      if (role?.description !== owned) throw fail('A scoped role name collides with another policy.');
-      // Tagged response schemas return unpacked CASL rules, whereas the
-      // effective permission-audit endpoint returns packed rules.
-      const rules = typeof role.permissions === 'string' ? JSON.parse(role.permissions) : role.permissions;
-      const packed = rules?.map(rule => Array.isArray(rule) ? rule : [(Array.isArray(rule.action) ? rule.action : [rule.action]).join(','), rule.subject, rule.conditions, rule.inverted ? 1 : 0, rule.fields]);
-      verifyPolicies([{ permissions: packed }], policies[kind]);
+      // Built-in project role (free edition: custom roles are Enterprise-only).
+      const i = s.identities[kind], roleSlug = BUILTIN_ROLES[kind];
       const membershipPath = `/api/v1/projects/${s.projectId}/memberships/identities/${i.identityId}`;
+      const body = { roles: [{ role: roleSlug, isTemporary: false }] };
       const membership = await request(membershipPath);
-      if (membership.status === 404) requireOk(await request(membershipPath, { method: 'POST', body: { roles: [{ role: roleSlug, isTemporary: false }] } }), 'Scoped project membership');
-      else requireOk(membership, 'Project membership readback');
+      if (membership.status === 404) requireOk(await request(membershipPath, { method: 'POST', body }), 'Project membership (built-in role)');
+      else if (!sameBuiltinRole(requireOk(membership, 'Project membership readback'), roleSlug)) requireOk(await request(membershipPath, { method: 'PATCH', body }), 'Project membership role update');
+      if (!sameBuiltinRole(requireOk(await request(membershipPath), 'Project membership readback'), roleSlug)) throw fail(`The ${kind} identity must hold exactly the built-in ${roleSlug} project role and nothing else.`);
       const uaPath = `/api/v1/auth/universal-auth/identities/${i.identityId}`;
       let response = await request(uaPath);
       if (response.status === 404) response = await request(uaPath, { method: 'POST', body: { accessTokenTTL: 300, accessTokenMaxTTL: 300, accessTokenNumUsesLimit: 0, accessTokenPeriod: 0 } });

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { CheckCircle2, Lock, Loader2, XCircle, CircleDot } from 'lucide-react';
+import { CheckCircle2, Lock, Loader2, XCircle, CircleDot, AlertTriangle } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -80,6 +80,7 @@ function ServiceRows({ ids, services, locked, onLifecycle }) {
   return <ol className="space-y-3">{services.filter(s => ids.includes(s.id)).map(s => <li key={s.id} className="rounded-lg border p-4 space-y-2 min-w-0">
     <div className="flex flex-col sm:flex-row sm:justify-between gap-1"><h3 className="font-semibold">{s.name}</h3><span className="text-sm capitalize">{label(s.state)}</span></div>
     <p className="text-sm break-all">{s.url}</p>
+    {s.risk && <div role="note" className="flex gap-2 rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm break-words"><AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-amber-500" aria-hidden="true" /><p><strong>Security trade-off: </strong>{s.risk}</p></div>}
     {s.action && <p className="text-sm break-words">{s.action}</p>}
     {s.job?.phase && <p className="text-xs text-muted-foreground">Current action: {label(s.job.phase)}</p>}
     {s.ownership === 'managed' && onLifecycle && <details className="text-sm"><summary className="min-h-11 cursor-pointer flex items-center">Repair, reinstall or remove runtime</summary><div className="flex flex-col sm:flex-row gap-2">{['repair', 'reinstall', 'remove'].map(action => <Button key={action} variant="outline" className="min-h-11 capitalize" disabled={locked} onClick={() => onLifecycle(s.id, action)}>{action}</Button>)}</div></details>}

@@ -35,9 +35,10 @@ function fixture(){
   if(path.startsWith('/api/v1/identities?'))return ok({identities:Object.values(state.identities).map(identity=>({identity}))});
   if(path==='/api/v1/identities'&&method==='POST'){const k=body.name.split('-').at(-1),identity={...body,id:ids[k]};state.identities[k]=identity;return ok({identity});}
   if(path.startsWith('/api/v1/identities/')){const identity=Object.values(state.identities).find(i=>i.id===path.split('/').at(-1));return ok({identity:{identity,metadata:identity.metadata}});}
-  if(path.endsWith('/roles')){if(method==='POST'){state.roles.push(body);return ok({role:body});}return ok({roles:state.roles});}
+  // Free self-hosted edition (licence rbac:false): custom project roles are refused.
+  if(path.endsWith('/roles')){if(method==='POST'){state.roles.push(body);return {status:400,body:{message:'Failed to create custom role due to plan RBAC restriction. Upgrade to Infisical Enterprise plan to create custom roles.'}};}return ok({roles:[]});}
   if(path.includes('/permissions/audit')){const k=Object.keys(state.identities).find(k=>path.includes(state.identities[k].id)),identities=Object.fromEntries(Object.entries(state.identities).map(([k,i])=>[k,{identityId:i.id}]));return ok({sources:[{permissions:expectedPolicies(identities,'install')[k].map(p=>[p.action.join(','),p.subject,p.conditions])}]});}
-  if(path.includes('/memberships/identities/')){const i=Object.values(state.identities).find(i=>path.endsWith(i.id));if(method==='POST'){i.membership=body;return ok({});}return i.membership?ok(i.membership):missing();}
+  if(path.includes('/memberships/identities/')){const i=Object.values(state.identities).find(i=>path.endsWith(i.id));if(method==='POST'||method==='PATCH'){i.membership={identityMembership:{roles:body.roles.map(r=>({...r,customRoleId:null}))}};return ok({});}return i.membership?ok(i.membership):missing();}
   if(path==='/api/v1/auth/universal-auth/login'){const i=Object.values(state.identities).find(i=>i.id===body.clientId);return i?.secret===body.clientSecret?ok({accessToken:token({identityId:i.id}),expiresIn:300}):{status:403,body:null};}
   if(path.includes('/universal-auth/identities/')){const i=Object.values(state.identities).find(i=>path.includes(i.id));
    if(path.endsWith('/client-secrets')){if(method==='POST'){i.secret='machine-'+randomUUID();if(state.fault==='secret'){state.fault=null;throw Error('response lost after credential issuance');}return ok({clientSecret:i.secret});}return ok({clientSecretData:i.secret?[{id:'one-issued-secret'}]:[]});}
@@ -49,7 +50,7 @@ function fixture(){
  return {db,state,api,r,run:()=>provisionManagedInfisical(db,readInfisical(db),api,{job}),ref:`full-infisical-provision-${r.credential_ref}`};
 }
 test('FP-2 Infisical owned basic provisioning creates exact scoped identities, uses their credentials, retires bootstrap authority and reuses receipts',async()=>{
- const f=fixture();try{assert((await f.run()).ready);assert(f.state.originalRevoked&&f.state.detached);assert.equal(f.state.roles.length,3);assert.equal(Object.keys(f.state.identities).length,3);assert(!f.db.prepare('SELECT id FROM setup_full_credentials WHERE id=?').get(personalRef(f.r)));
+ const f=fixture();try{assert((await f.run()).ready);assert(f.state.originalRevoked&&f.state.detached);assert.equal(f.state.roles.length,0,'no custom role is attempted on the free edition');assert.deepEqual(Object.fromEntries(Object.entries(f.state.identities).map(([k,i])=>[k,i.membership.identityMembership.roles.map(r=>r.role)])),{workload:['member'],proxy:['viewer'],agent:['admin']});assert.equal(Object.keys(f.state.identities).length,3);assert(!f.db.prepare('SELECT id FROM setup_full_credentials WHERE id=?').get(personalRef(f.r)));
  const protectedState=protectedValue(f.db,f.ref);assert(protectedState.complete);assert(!protectedState.token&&!protectedState.originalToken);assert(Object.values(protectedState.identities).every(i=>!i.clientSecret));
  const secrets=infisicalSecrets(f.db,readInfisical(f.db)),before=f.state.writes.length;assert((await f.run()).ready);assert.equal(f.state.writes.length,before);assert.deepEqual(infisicalSecrets(f.db,readInfisical(f.db)),secrets);
  const visible=JSON.stringify([readInfisical(f.db),f.db.prepare('SELECT * FROM setup_jobs').all()]);for(const secret of Object.values(secrets))assert(!visible.includes(secret));
@@ -64,4 +65,16 @@ test('FP-2 Infisical unknown secret receipt refuses reissuance and preserves exi
 test('FP-2 Infisical lifetime reduction failure retires unrestricted token and clears personal input; existing unowned instance is never adopted',async()=>{
  const f=fixture();try{f.state.fault='lifetime';await assert.rejects(f.run(),/Bound bootstrap token/);assert(f.state.originalRevoked);assert(!protectedValue(f.db,f.ref).originalToken);assert(!f.db.prepare('SELECT id FROM setup_full_credentials WHERE id=?').get(personalRef(f.r)));}finally{f.db.close();}
  const g=fixture();try{g.state.initialized=true;await assert.rejects(g.run(),/without this installation/);assert.equal(g.state.writes.length,0);assert(!g.db.prepare('SELECT id FROM setup_full_credentials WHERE id=?').get(personalRef(g.r)));}finally{g.db.close();}
+});
+
+test('free edition: an identity holding a different or extra role is corrected to its built-in role, and the agent risk is reported',async()=>{
+ const f=fixture();try{
+  const { sameBuiltinRole } = await import('../lib/setup-engine/infisical-api.js');
+  assert(sameBuiltinRole({identityMembership:{roles:[{role:'viewer',isTemporary:false}]}},'viewer'));
+  assert(!sameBuiltinRole({identityMembership:{roles:[{role:'viewer'},{role:'admin'}]}},'viewer'));
+  assert(!sameBuiltinRole({identityMembership:{roles:[{role:'custom',customRoleId:'x'}]}},'custom'));
+  assert(!sameBuiltinRole({identityMembership:{roles:[{role:'admin',isTemporary:true}]}},'admin'));
+  const { reviewInfisical } = await import('../lib/setup-engine/infisical-store.js');
+  const review=reviewInfisical(f.db);assert.match(review.handoff.risk,/Admin of the dedicated ProxyPilot project/);assert.deepEqual(review.handoff.builtinRoles,{workload:'member',proxy:'viewer',agent:'admin'});
+ }finally{f.db.close();}
 });

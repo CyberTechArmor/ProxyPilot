@@ -1,7 +1,7 @@
 import https from 'node:https';
 import { lookup } from 'node:dns/promises';
 import { allowedAddress } from './keycloak-discovery.js';
-import { infisicalError as fail,expectedPolicies,TEST_ENV,TEST_PATH,TEST_KEY,desiredProxiedService,digest } from './infisical-logic.js';
+import { infisicalError as fail,expectedPolicies,builtinRolesFor,TEST_ENV,TEST_PATH,TEST_KEY,desiredProxiedService,digest } from './infisical-logic.js';
 
 // Fixed origin, pinned DNS, TLS validation, no redirects, bounded bodies/deadline.
 // Never attach raw upstream bodies/errors to jobs, audit records or the UI.
@@ -48,6 +48,9 @@ function unpackRules(sources) {
   return out;
 }
 function canonical(v){if(Array.isArray(v))return v.map(canonical).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));if(v&&typeof v==='object')return Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]));return v;}
+/** A membership readback holding exactly one permanent built-in role `slug`. */
+export function sameBuiltinRole(body,slug){const m=body?.identityMembership||body?.membership||body;const roles=m?.roles;
+  return Array.isArray(roles)&&roles.length===1&&(roles[0].role===slug)&&!roles[0].customRoleId&&!roles[0].isTemporary;}
 export function verifyPolicies(sources,wanted) {
   const actual=unpackRules(sources),expected=wanted.flatMap(r=>r.action.map(action=>({...r,action})));
   const normal=rules=>[...new Set(rules.map(r=>JSON.stringify(canonical(r))))].sort();
@@ -69,6 +72,13 @@ export async function verifyInfisicalIdentities(r,values,api) {
   }
   const project=requireOk(await api(`/api/v1/projects/${i.projectId}`,{token:tokens.workload}),'Test project').project;
   if(project?.id!==i.projectId||project.orgId!==i.organizationId||!project.environments?.some(e=>e.slug===TEST_ENV))throw fail('The reviewed project/environment handoff is incomplete or belongs to another organization.');
+  if(r.config.basic){
+    // Owned free edition: each identity holds exactly its built-in role (see BUILTIN_ROLES).
+    const roles=builtinRolesFor(r.config.agentMode);
+    for(const k of kinds){const m=requireOk(await api(`/api/v1/projects/${i.projectId}/memberships/identities/${i[k].identityId}`,{token:tokens.workload}),`${k} project membership`);
+      if(!sameBuiltinRole(m,roles[k]))throw fail(`The ${k} identity must hold exactly the built-in ${roles[k]} project role, not temporary, with no other roles.`);}
+    return tokens;
+  }
   const policies=expectedPolicies(i,r.config.agentMode);
   for(const k of kinds){const audit=requireOk(await api(`/api/v1/projects/${i.projectId}/memberships/identities/${i[k].identityId}/permissions/audit?includeFolderPermissions=true`,{token:tokens.workload}),`${k} effective permission audit`);verifyPolicies(audit.sources,policies[k]);}
   return tokens;

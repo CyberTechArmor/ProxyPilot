@@ -125,8 +125,15 @@ export async function runAdministrator(db, full, operation, job, { send } = {}) 
       try {
         const roles = await call(`/admin/realms/master/users/${profile.masterId}/role-mappings/realm/composite`);
         if (!roles.ok || !(await roles.json()).some(r => r.name === 'admin')) throw fail('Permanent master administration privileges were not proved.');
-        const subject = await call('/realms/master/protocol/openid-connect/userinfo');
-        if (!subject.ok || (await subject.json()).sub !== profile.masterId) throw fail('The fresh administrator login belongs to a different identity.');
+        // Whose login is this? Keycloak 26 issues admin-cli LIGHTWEIGHT access
+        // tokens and its userinfo endpoint refuses them, so the proof is
+        // server-side instead: the session this fresh login created
+        // (session_state, from our own token request) must be one of the
+        // permanent administrator's own sessions in the admin API.
+        const sid = typeof grant.session_state === 'string' ? grant.session_state : null;
+        const sessions = sid ? await call(`/admin/realms/master/users/${encodeURIComponent(profile.masterId)}/sessions`) : null;
+        if (!sessions?.ok) throw fail('The fresh administrator login could not be matched to the permanent administrator (Keycloak did not report its sessions). The temporary administrator was retained.');
+        if (!(await sessions.json()).some(x => x.id === sid)) throw fail('The fresh administrator login belongs to a different Keycloak user than the permanent administrator named in this handoff. The temporary administrator was retained.');
         // After a reviewed recovery (3h) there are two temporary accounts: the
         // original bootstrap-admin and the recovery account. Both are retired.
         const temporaries = [...new Set([bootstrap.username || 'bootstrap-admin', ...(bootstrap.recovered ? ['bootstrap-admin'] : [])])];

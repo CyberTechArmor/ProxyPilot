@@ -12,7 +12,7 @@ export function prepareFiles(r,{root=OPENBAO_ROOT,resourcesExist=false}={}){priv
   if(existsSync(config)){const s=lstatSync(config);if(!s.isFile()||s.isSymbolicLink()||s.uid!==process.getuid()||(s.mode&0o022)||readFileSync(config,'utf8')!==content)throw fail('OpenBao configuration drifted. Restore it without replacing Raft data.');}
   else {atomicPrivate(config,content);chmodSync(config,0o644);} // non-secret config, readable by the image's unprivileged user
   let ca;
-  if(r.config.database.caPem){ca=join(root,'postgres-ca.pem');if(existsSync(ca)){const s=lstatSync(ca);if(!s.isFile()||s.isSymbolicLink()||s.uid!==process.getuid()||(s.mode&0o022)||readFileSync(ca,'utf8')!==r.config.database.caPem)throw fail('Reviewed PostgreSQL public CA file drifted. Restore the saved certificate bundle.');}else{atomicPrivate(ca,r.config.database.caPem);chmodSync(ca,0o644);}}
+  if(r.config.database?.caPem){ca=join(root,'postgres-ca.pem');if(existsSync(ca)){const s=lstatSync(ca);if(!s.isFile()||s.isSymbolicLink()||s.uid!==process.getuid()||(s.mode&0o022)||readFileSync(ca,'utf8')!==r.config.database.caPem)throw fail('Reviewed PostgreSQL public CA file drifted. Restore the saved certificate bundle.');}else{atomicPrivate(ca,r.config.database.caPem);chmodSync(ca,0o644);}}
   return {root,config,ca};}
 export async function ensureRuntime(r,{exec,job,root=OPENBAO_ROOT}={}){const n=namesFor(r),owner=r.credential_ref;
   const call=async a=>{job.fence();const v=await exec.host(['docker',...a],{timeoutMs:120000});job.fence();if(v.code!==0)throw fail('OpenBao Docker operation failed. Inspect the named owned resource locally; runtime output is withheld.');return v.stdout;};

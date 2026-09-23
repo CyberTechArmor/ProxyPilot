@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 const buttonClass = 'min-h-11 w-full sm:w-auto whitespace-normal bg-green-700 hover:bg-green-800 text-white';
 const field = (id, label, props = {}) => <div className="space-y-2 min-w-0"><Label htmlFor={'vw-' + id}>{label}</Label><Input id={'vw-' + id} name={id} required autoComplete="off" {...props} /></div>;
-export default function VaultwardenSetup({ revision, dirty, choice, connections = [] }) {
+export default function VaultwardenSetup({ revision, dirty, choice, connections = [], managed = false }) {
   const [data, setData] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [message, setMessage] = useState(''), [reviewed, setReviewed] = useState(false);
   const state = data?.state, review = data?.review, pending = ['queued', 'running'].includes(state?.job?.status), skipped = choice.mode === 'skip';
   const matches = !state || state.config.mode === choice.mode && state.config.origin === choice.url;
@@ -30,7 +30,7 @@ export default function VaultwardenSetup({ revision, dirty, choice, connections 
     {error && <p role="alert" className="text-destructive break-words">{error}</p>}{message && <p role="status" className="border rounded-lg p-3 break-words">{message}</p>}
     {data && <div className="rounded-lg bg-muted p-4 space-y-2 text-sm"><p className="font-medium">Service: {data.health.state.replaceAll('_', ' ')}</p><p>{data.verification.label}</p></div>}
     <div className="text-sm space-y-2"><p>Keycloak verifies who you are. Vaultwarden decrypts your vault separately using your master password or another unlock method supported by your client. A Keycloak passkey does not automatically unlock the vault.</p><p>Keep existing email/password login available while testing. SSO-only stays off; this guide does not activate it. Never enter a master password, recovery code or vault item in ProxyPilot.</p></div>
-    {!state && allowed && <form onSubmit={save} className="space-y-4"><h3 className="font-medium">1. Review connection and access policy</h3><p className="text-sm break-all">{choice.mode === 'install' ? 'Install Vaultwarden 1.37.3 with persistent SQLite storage' : 'Connect to existing Vaultwarden 1.37.3 with read-only checks'} · {choice.url}</p>
+    {!managed && !state && allowed && <form onSubmit={save} className="space-y-4"><h3 className="font-medium">1. Review connection and access policy</h3><p className="text-sm break-all">{choice.mode === 'install' ? 'Install Vaultwarden 1.37.3 with persistent SQLite storage' : 'Connect to existing Vaultwarden 1.37.3 with read-only checks'} · {choice.url}</p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div className="space-y-2"><Label htmlFor="vw-connectionId">Verified Keycloak provider</Label><select id="vw-connectionId" name="connectionId" required defaultValue="" className="border bg-background rounded-md min-h-11 p-2 w-full"><option value="" disabled>Select provider</option>{connections.filter(c => c.verifiedAt).map(c => <option key={c.id} value={c.id}>{c.origin} · {c.realm}</option>)}</select></div>
         {field('clientId', 'Dedicated Keycloak client ID', { defaultValue: 'proxypilot-vaultwarden' })}{field('clientSecret', 'Dedicated client secret', { type: 'password' })}{field('accessRole', 'Allowed client role', { defaultValue: 'vault-user' })}
         {choice.mode === 'connect' && field('adminToken', 'Existing Vaultwarden admin token', { type: 'password' })}

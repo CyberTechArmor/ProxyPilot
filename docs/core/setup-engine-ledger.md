@@ -599,3 +599,36 @@ with the existing containment exclusion and native database/full-boot limits.
 Acceptance does not turn scripted responses into real-service passes and does
 not authorize deployment, live DNS/database/identity changes, credential
 rotation, live restarts, infrastructure rebuild or G8–G10 work. Stop after G7.
+
+
+### Full Platform integrated follow-up authorization (2026-09-22)
+
+The exact FP-1–FP-6 contract is recorded before implementation in the platform
+delivery ledger. Base main is `24ba567e` (G6 accepted, **60% / 6 of 10**).
+Unmerged G7 head `04820930` remains a dependency; do not recreate or merge it.
+Reuse the saved plans, production adapters, existing jobs/leases/runner,
+protected references, Caddy and recovery. Saving remains inert; reviewed apply
+is the execution boundary. No live actions, merge or deployment are authorized.
+This follow-up is tracked separately and earns no proposed milestone progress.
+
+
+G7 ancestry update during implementation: PR #619 merged accepted head
+`04820930` plus acceptance record `17abcbb3` as `6c6f6ff8`. The feature branch
+was rebased onto that main; the G7 adapter is now available for reuse. Accepted
+guided progress is **70% (7/10)**. FP criteria remain separately pending.
+
+
+FP implementation checkpoint (2026-09-23; draft, not acceptance): the saved
+six-stage coordinator, managed Keycloak clients, fresh-auth bootstrap reveal,
+permanent administrator handoff, basic Infisical/OpenBao paths and retained-data
+runtime actions are implemented on the feature branch. Seven focused FP tests
+pass through production stores/adapters with scripted Keycloak wire responses;
+62 affected existing adapter tests and the frontend build pass. Infisical
+provisioning/reinstall integration and browser/real-service evidence remain in
+progress. No FP criterion is awarded complete at this checkpoint. No live
+resources were changed. PR #620 remains a draft.
+
+The user subsequently added the separate G8 application-connection prompt.
+Finish and publish this FP follow-up first; G8 will have its own branch from
+current main and its own six-criterion record before implementation. This does
+not change accepted guided progress: 70% (7/10).

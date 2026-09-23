@@ -1,0 +1,135 @@
+import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
+import { approvedFetch } from '../sso/oidc.js';
+import { readConfig, activationReadiness } from '../sso/store.js';
+import { protectedValue, storeProtected, keycloakAdmin } from './full-platform-keycloak.js';
+import { readFullPlatform, fail } from './full-platform-store.js';
+import { createJob, getJob, jobView, acquireLock, releaseLock, renewLock, readLock, takeoverLock } from './store.js';
+
+export const administratorSchema = z.object({ revision: z.number().int().positive(), action: z.enum(['create', 'verify_and_retire']),
+  useCurrent: z.boolean().default(true), username: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._@-]{1,99}$/).optional(),
+  email: z.string().email().max(254), firstName: z.string().max(100).default(''), lastName: z.string().max(100).default(''),
+  password: z.string().min(12).max(256), otp: z.string().regex(/^\d{6,8}$/).optional(), reviewed: z.literal(true),
+}).strict();
+
+export function queueAdministrator(db, raw, user) {
+  const p = administratorSchema.parse(raw); db.exec('BEGIN IMMEDIATE');
+  try {
+    const full = readFullPlatform(db);
+    if (!full || full.revision !== p.revision || full.approved_revision !== p.revision || !full.state.identity?.bootstrapRef) throw fail('Apply and verify the managed Keycloak connection first.');
+    if (full.last_job_id && ['queued', 'running'].includes(getJob(db, full.last_job_id)?.status)) throw fail('The current setup operation must finish before the administrator handoff.');
+    if (String(full.created_by) !== String(user.id)) throw fail('Resume this handoff as the administrator who reviewed this installation.');
+    const username = p.useCurrent ? user.username : p.username;
+    if (!username || username === 'bootstrap-admin') throw fail('Choose a permanent named administrator distinct from the bootstrap account.');
+    if (full.state.administrator && (full.state.administrator.username !== username || full.state.administrator.email !== p.email)) throw fail('This handoff already names a permanent administrator. Reopen it; existing users will not be replaced.');
+    if (p.action === 'verify_and_retire') {
+      for (const kind of ['proxypilot','observer','pomerium','openbao','vaultwarden']) if ((['proxypilot','observer'].includes(kind) || full.config.services[kind].mode !== 'skip') && !full.state.identity.clients?.[kind]) throw fail('Connect all selected identity clients before retiring bootstrap administration.');
+      const sso = readConfig(db);
+      if (!full.state.administrator?.masterId || !sso || !activationReadiness(db, sso, user.id).ready) throw fail('Prove permanent administration, ProxyPilot SSO login/step-up and separate local recovery before retiring the bootstrap account.');
+      const link = db.prepare('SELECT subject FROM sso_links WHERE issuer=? AND user_id=?').get(sso.config.issuer, user.id);
+      if (link?.subject !== full.state.administrator.applicationId) throw fail('The proven application identity is not the permanent administrator named in this handoff.');
+    }
+    const ref = `full-administrator-${randomUUID()}`;
+    storeProtected(db, ref, { password: p.password, otp: p.otp, expiresAt: Date.now() + 15 * 60_000 });
+    const state = { ...full.state, administrator: { ...full.state.administrator, username, email: p.email, firstName: p.firstName, lastName: p.lastName, localUserId: user.id }, administratorRequest: ref };
+    const job = createJob(db, { app: 'pp-full-platform', kind: 'full_platform_apply', plan: { params: { revision: p.revision, operation: p.action === 'create' ? 'administrator' : 'retire' } }, requestedBy: user.id, via: 'ui', retryOf: full.last_job_id, reason: p.action === 'create' ? 'Create or resume the reviewed permanent administrator handoff.' : 'Freshly verify permanent administration and retire the temporary account only after all access checks.' });
+    db.prepare('UPDATE setup_full_platform SET state_json=?,last_job_id=? WHERE id=1').run(JSON.stringify(state), job.id);
+    db.exec('COMMIT'); return { job: jobView(job), created: true };
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+
+export async function withKeycloakLease(db, job, fn) {
+  const record = getJob(db, job.id), owner = record?.owner;
+  let lock = acquireLock(db, { app: 'pp-platform-keycloak', owner, operation: 'full_platform_identity', jobId: job.id, leaseMs: 30000 });
+  if (!lock.ok && lock.reason === 'stale' && readLock(db, 'pp-platform-keycloak')?.job_id === job.id) lock = takeoverLock(db, { app: 'pp-platform-keycloak', by: owner, operation: 'full_platform_identity', jobId: job.id, leaseMs: 30000, reason: 'Resume this interrupted managed identity handoff.' });
+  if (!lock.ok) throw fail('Keycloak has an active or unresolved operation. Reopen that operation before continuing the handoff.');
+  let lost = false;
+  const fence = () => { job.fence(); if (lost || !renewLock(db, { app: 'pp-platform-keycloak', owner, epoch: lock.lock.epoch, leaseMs: 30000 })) { lost = true; throw fail('The Keycloak identity lease was lost. The working access path was retained.'); } };
+  const timer = setInterval(() => { try { fence(); } catch { lost = true; } }, 10000); timer.unref();
+  try { return await fn({ ...job, fence }); }
+  finally { clearInterval(timer); releaseLock(db, { app: 'pp-platform-keycloak', owner, epoch: lock.lock.epoch }); }
+}
+
+export async function runAdministrator(db, full, operation, job, { send } = {}) {
+  const coordinatorJob = job;
+  const profile = full.state.administrator, inputRef = full.state.administratorRequest;
+  if (!profile || !inputRef) throw fail('Enter the permanent administrator credential again to resume this handoff.');
+  let input = protectedValue(db, inputRef);
+  if (input.expiresAt < Date.now()) { db.prepare('DELETE FROM setup_full_credentials WHERE id=?').run(inputRef); throw fail('The one-time administrator input expired. Enter it again; saved users and their credentials were retained.'); }
+  const bootstrap = protectedValue(db, full.state.identity.bootstrapRef);
+  const k = db.prepare('SELECT * FROM setup_keycloak WHERE id=?').get(bootstrap.installationId);
+  if (!k || k.ownership !== 'managed') throw fail('Only an owned Keycloak installation supports this handoff.');
+  const state = { ...full.state, administrator: { ...profile } };
+  const persist = () => { job.fence(); db.prepare('UPDATE setup_full_platform SET state_json=? WHERE id=1 AND revision=? AND last_job_id=?').run(JSON.stringify(state), full.revision, job.id); };
+  try {
+    return await withKeycloakLease(db, job, async guarded => {
+      job = guarded;
+      if (operation === 'administrator') {
+        if (bootstrap.retired) throw fail('The bootstrap account is already retired. Use permanent administration; it will not be recreated.');
+        const authority = await keycloakAdmin(k, bootstrap.password, { send, job });
+        try {
+          const ensureUser = async (realm, key) => {
+            const base = `/admin/realms/${encodeURIComponent(realm)}`, query = `${base}/users?username=${encodeURIComponent(profile.username)}&exact=true`;
+            let list = await authority.api(query), user = list?.find(u => u.username === profile.username);
+            if (!user) {
+              if (state.administrator[key]) throw fail('The recorded permanent user is missing. Restore that identity; retry will not replace it.');
+              await authority.api(`${base}/users`, { method: 'POST', body: { username: profile.username, email: profile.email, firstName: profile.firstName, lastName: profile.lastName, enabled: true, emailVerified: false,
+                attributes: { 'proxypilot.installation': [k.id], 'proxypilot.local-user': [String(profile.localUserId)] }, credentials: [{ type: 'password', value: input.password, temporary: false }], requiredActions: realm === 'master' ? [] : ['webauthn-register-passwordless'] } });
+              list = await authority.api(query); user = list?.find(u => u.username === profile.username);
+            }
+            if (!user?.id || user.attributes?.['proxypilot.installation']?.[0] !== k.id || user.attributes?.['proxypilot.local-user']?.[0] !== String(profile.localUserId) || !user.enabled || state.administrator[key] && state.administrator[key] !== user.id) throw fail('An existing user cannot be linked by username or email alone. Prove the existing identities through the explicit linking flow; no account or credential was replaced.');
+            state.administrator[key] = user.id; persist(); return { base, user };
+          };
+          const master = await ensureUser('master', 'masterId');
+          const role = await authority.api(`${master.base}/roles/admin`);
+          if (!role?.id) throw fail('The permanent master-realm administration role is unavailable.');
+          const rolesPath = `${master.base}/users/${master.user.id}/role-mappings/realm`;
+          const roles = await authority.api(rolesPath);
+          if (!roles?.some(r => r.id === role.id)) await authority.api(rolesPath, { method: 'POST', body: [role] });
+          if (!(await authority.api(rolesPath))?.some(r => r.id === role.id)) throw fail('Permanent master administration privileges were not verified.');
+          const appUser = await ensureUser(k.realm, 'applicationId');
+          for (const group of Object.values(full.state.identity.groups || {})) {
+            await authority.api(`${appUser.base}/users/${appUser.user.id}/groups/${group}`, { method: 'PUT' });
+          }
+          state.stage = 'administrator';
+          state.actions = { ...state.actions, administrator: 'Permanent master and application identities are prepared. Enroll a Keycloak passkey, prove the application link, test SSO and independent recovery, then verify and retire the temporary administrator.' };
+          persist();
+          return { verification: { state: 'awaiting_user_action', label: state.actions.administrator, complete: false } };
+        } finally { await authority.close(); }
+      }
+      const sso = readConfig(db);
+      if (!sso || !activationReadiness(db, sso, profile.localUserId).ready) throw fail('The current SSO/recovery evidence expired or changed. The bootstrap account was retained.');
+      const link = db.prepare('SELECT subject FROM sso_links WHERE issuer=? AND user_id=?').get(sso.config.issuer, profile.localUserId);
+      if (link?.subject !== profile.applicationId) throw fail('The linked application identity differs from this handoff.');
+      const fetcher = send || approvedFetch(k.origin);
+      job.fence();
+      const response = await fetcher(`${k.origin}/realms/master/protocol/openid-connect/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: 'admin-cli', grant_type: 'password', scope: 'openid', username: profile.username, password: input.password, ...(input.otp ? { totp: input.otp } : {}) }).toString() });
+      job.fence(); if (!response.ok) throw fail('Permanent administrator fresh login failed. The temporary administrator was retained.');
+      const grant = await response.json();
+      const call = async (path, method = 'GET') => { job.fence(); const r = await fetcher(k.origin + path, { method, headers: { Authorization: `Bearer ${grant.access_token}`, Accept: 'application/json' } }); job.fence(); return r; };
+      try {
+        const roles = await call(`/admin/realms/master/users/${profile.masterId}/role-mappings/realm/composite`);
+        if (!roles.ok || !(await roles.json()).some(r => r.name === 'admin')) throw fail('Permanent master administration privileges were not proved.');
+        const subject = await call('/realms/master/protocol/openid-connect/userinfo');
+        if (!subject.ok || (await subject.json()).sub !== profile.masterId) throw fail('The fresh administrator login belongs to a different identity.');
+        const users = await call('/admin/realms/master/users?username=bootstrap-admin&exact=true');
+        if (!users.ok) throw fail('Permanent administration could not inspect the temporary account.');
+        const temporary = (await users.json()).find(u => u.username === 'bootstrap-admin');
+        if (temporary) {
+          if (temporary.id === profile.masterId) throw fail('The permanent account cannot be the bootstrap account.');
+          state.bootstrapRetirementAttempted = true; persist();
+          const removed = await call(`/admin/realms/master/users/${temporary.id}`, 'DELETE');
+          if (removed.status !== 204 && removed.status !== 404) throw fail('Temporary account retirement failed. Reopen the current administrator state.');
+        } else if (!state.bootstrapRetirementAttempted && !bootstrap.retired) throw fail('The bootstrap account is unexpectedly absent. Review its ownership before accepting this handoff.');
+        const after = await call('/admin/realms/master/users?username=bootstrap-admin&exact=true');
+        if (!after.ok || (await after.json()).some(u => u.username === 'bootstrap-admin')) throw fail('Temporary administrator removal was not verified.');
+        storeProtected(db, full.state.identity.bootstrapRef, { installationId: k.id, retired: true });
+        state.handoffFingerprint = sso.fingerprint; state.administratorVerified = true; state.recoveryVerified = true; state.stage = 'verify';
+        state.actions = { ...state.actions, administrator: 'Permanent administration, linked SSO and independent recovery verified. The bootstrap credential is retired. Confirm SSO activation to continue.' }; persist();
+        return { verification: { state: 'administrator_handoff_verified', label: state.actions.administrator, complete: false } };
+      } finally {
+        if (grant.refresh_token) await fetcher(`${k.origin}/realms/master/protocol/openid-connect/logout`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: 'admin-cli', refresh_token: grant.refresh_token }).toString() }).catch(() => {});
+      }
+    });
+  } finally { coordinatorJob.fence(); db.prepare('DELETE FROM setup_full_credentials WHERE id=?').run(inputRef); input = null; }
+}

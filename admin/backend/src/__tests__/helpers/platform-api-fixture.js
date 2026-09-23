@@ -20,6 +20,7 @@ const { authenticateToken, blockPendingRole, generateToken } = await import('../
 const { csrfProtection } = await import('../../middleware/csrf.js');
 const { setupRouter } = await import('../../routes/setup.js');
 ensureSetupEngineSchema(db); db.exec(PLATFORM_PLAN_SCHEMA);
+const { FULL_PLATFORM_SCHEMA } = await import('../../lib/setup-engine/full-platform-store.js'); db.exec(FULL_PLATFORM_SCHEMA);
 const { SSO_SCHEMA } = await import('../../lib/sso/store.js'); db.exec(SSO_SCHEMA);
 const { KEYCLOAK_SCHEMA } = await import('../../lib/setup-engine/keycloak-store.js'); db.exec(KEYCLOAK_SCHEMA);
 db.exec(`CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, name TEXT);

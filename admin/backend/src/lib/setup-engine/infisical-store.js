@@ -28,7 +28,7 @@ export function saveInfisical(db,raw){const input=infisicalConfigSchema.parse(ra
     if(p.hostname!==input.testHost)throw fail('The supported local Agent Proxy must bind the reviewed private address on this host.');
     if(input.agentMode==='connect'&&!input.externalProxyContainer)throw fail('Connect requires an existing Agent Proxy Docker container on this host for read-only isolation/configuration verification.');
   }
-  const config={mode:plan.mode,origin:origin.origin,proxyOrigin,agentMode:input.agentMode,testHost:input.testHost,agentVm:input.agentVm,allowedIps:[...new Set(input.allowedIps)].sort(),externalProxyContainer:input.agentMode==='connect'?input.externalProxyContainer:null};
+  const config={mode:plan.mode,origin:origin.origin,proxyOrigin,agentMode:input.agentMode,testHost:input.testHost,...(input.basic?{basic:true}:{agentVm:input.agentVm}),allowedIps:[...new Set(input.allowedIps)].sort(),externalProxyContainer:input.agentMode==='connect'?input.externalProxyContainer:null};
   if(old){if(digest(config)!==digest(old.config))throw fail('Saved installation targets are immutable in G5. Restore the reviewed choices; migration is outside this slice.');return infisicalState(db);}
   const ref=`infisical-${randomBytes(12).toString('hex')}`;
   db.prepare('INSERT INTO setup_infisical_credentials VALUES (?,?)').run(ref,encryptSecret(JSON.stringify({})));

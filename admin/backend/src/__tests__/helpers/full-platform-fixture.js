@@ -80,6 +80,7 @@ export function keycloakWire(k) {
       if(p.length===1){if(method==='POST'){const {credentials,...user}=body;r.users.push({...user,id:uid()});passwords.set(parts[2]+':'+user.username,credentials[0].value);return yes({},201);}return yes(r.users.filter(x=>x.username===u.searchParams.get('username')));}
       if(p[2]==='role-mappings'){const key=p.slice(1).filter(x=>x!=='composite').join('/'),roles=r.roles.get(key)||[];if(method==='POST'){r.roles.set(key,[...roles,...body]);return yes({},204);}return yes(roles);}
       if(p[2]==='groups')return yes({},204);
+      if(p.length===2&&method==='PUT'){const i=r.users.findIndex(x=>x.id===p[1]);if(i<0)return yes({},404);r.users[i]={...r.users[i],...body,id:p[1]};return yes({},204);}
       if(method==='DELETE'){r.users=r.users.filter(u=>u.id!==p[1]);return yes({},204);}
     }
     throw Error('Unscripted Keycloak API: '+method+' '+path);

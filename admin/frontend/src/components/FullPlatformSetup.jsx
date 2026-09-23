@@ -3,10 +3,11 @@ import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
+import { Card, CardHeader, CardTitle as BaseCardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import OpenBaoSetup from '@/components/OpenBaoSetup';
 import VaultwardenSetup from '@/components/VaultwardenSetup';
 import SsoSetup from '@/components/SsoSetup';
+const CardTitle = props => <BaseCardTitle aria-level={2} {...props} />;
 
 const steps = [['domains', 'Domains and realm'], ['review', 'Review'], ['install', 'Install and connect'], ['administrator', 'Administrator and recovery'], ['verify', 'Verify and activate'], ['complete', 'Complete']];
 const names = { keycloak: 'Keycloak', pomerium: 'Pomerium', infisical: 'Infisical', openbao: 'OpenBao', vaultwarden: 'Vaultwarden' };
@@ -42,7 +43,7 @@ export default function FullPlatformSetup({ onCustom }) {
     const next = await api.getFullPlatform();
     if (!alive.current || id !== request.current) return;
     setData(next);
-    if (reset) { setConfig(next.config); setDirty(false); setReview(next.review); setStep(next.stage); setAdministrator(p => ({ ...p, username: next.state.administrator?.username || next.administrator?.username || '', email: next.state.administrator?.email || next.administrator?.email || '' })); }
+    if (reset) { setConfig(next.config); setDirty(false); setReview(next.review); setStep(next.stage); setAdministrator(p => ({ ...p, firstName: next.state.administrator?.firstName || '', lastName: next.state.administrator?.lastName || '', username: next.state.administrator?.username || next.administrator?.username || '', email: next.state.administrator?.email || next.administrator?.email || '' })); }
   }
   useEffect(() => {
     alive.current = true;
@@ -64,7 +65,7 @@ export default function FullPlatformSetup({ onCustom }) {
     try { await fn(); } catch (e) { setError(e.message); } finally { setBusy(''); }
   }
   const locked = !!busy || ['queued', 'running'].includes(data?.job?.status);
-  return <div className="space-y-6 min-w-0 max-w-6xl shrink-0 pb-6">
+  return <div id="full-platform-setup" className="space-y-6 min-w-0 max-w-6xl shrink-0 pb-6">
     <header className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
       <div><h1 className="text-2xl md:text-3xl font-bold">Platform Setup</h1><p className="mt-2 text-muted-foreground">Full Platform · one saved setup for identity, access and secrets.</p></div>
       <Button variant="outline" className="min-h-11" onClick={onCustom}>Custom / Advanced</Button>
@@ -104,6 +105,7 @@ export default function FullPlatformSetup({ onCustom }) {
         <p>Use my current ProxyPilot administrator: <strong>{data.administrator?.username || 'Current administrator'}</strong></p>
         <p className="text-sm">Your existing ProxyPilot account ID, local credentials and roles are preserved. Linking requires proof of both accounts.</p>
         <fieldset disabled={locked} className="space-y-3 rounded border p-4 min-w-0"><legend className="px-1 font-medium">Permanent Keycloak administrator</legend>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{[['firstName','First name'],['lastName','Last name']].map(([key,title])=><div className="space-y-2" key={key}><Label htmlFor={`full-admin-${key}`}>{title}</Label><Input id={`full-admin-${key}`} value={administrator[key]} autoComplete={key==='firstName'?'given-name':'family-name'} onChange={e=>setAdministrator(p=>({...p,[key]:e.target.value}))}/></div>)}</div>
           <label className="flex items-center gap-2 min-h-11"><input type="checkbox" checked={administrator.useCurrent} onChange={e => setAdministrator(p => ({ ...p, useCurrent: e.target.checked }))} />Use my current ProxyPilot administrator</label>
           {!administrator.useCurrent && <div className="space-y-2"><Label htmlFor="full-admin-name">Permanent administrator username</Label><Input id="full-admin-name" value={administrator.username} onChange={e => setAdministrator(p => ({ ...p, username: e.target.value }))} /></div>}
           <div className="space-y-2"><Label htmlFor="full-admin-email">Administrator email</Label><Input id="full-admin-email" type="email" value={administrator.email} autoComplete="email" onChange={e => setAdministrator(p => ({ ...p, email: e.target.value }))} /></div>

@@ -8,7 +8,7 @@ import { createJob, getJob, jobView, acquireLock, releaseLock, renewLock, readLo
 
 export const administratorSchema = z.object({ revision: z.number().int().positive(), action: z.enum(['create', 'verify_and_retire']),
   useCurrent: z.boolean().default(true), username: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._@-]{1,99}$/).optional(),
-  email: z.string().email().max(254), firstName: z.string().max(100).default(''), lastName: z.string().max(100).default(''),
+  email: z.string().email().max(254), firstName: z.string().trim().min(1, 'Enter the administrator’s first name.').max(100), lastName: z.string().trim().min(1, 'Enter the administrator’s last name.').max(100),
   password: z.string().min(12).max(256), otp: z.string().regex(/^\d{6,8}$/).optional(), reviewed: z.literal(true),
 }).strict();
 
@@ -19,9 +19,9 @@ export function queueAdministrator(db, raw, user) {
     if (!full || full.revision !== p.revision || full.approved_revision !== p.revision || !full.state.identity?.bootstrapRef) throw fail('Apply and verify the managed Keycloak connection first.');
     if (full.last_job_id && ['queued', 'running'].includes(getJob(db, full.last_job_id)?.status)) throw fail('The current setup operation must finish before the administrator handoff.');
     if (String(full.created_by) !== String(user.id)) throw fail('Resume this handoff as the administrator who reviewed this installation.');
-    const username = p.useCurrent ? user.username : p.username;
+    const username = (p.useCurrent ? user.username : p.username)?.toLowerCase();
     if (!username || username === 'bootstrap-admin') throw fail('Choose a permanent named administrator distinct from the bootstrap account.');
-    if (full.state.administrator && (full.state.administrator.username !== username || full.state.administrator.email !== p.email)) throw fail('This handoff already names a permanent administrator. Reopen it; existing users will not be replaced.');
+    if (full.state.administrator && (full.state.administrator.username.toLowerCase() !== username || full.state.administrator.email !== p.email)) throw fail('This handoff already names a permanent administrator. Reopen it; existing users will not be replaced.');
     if (p.action === 'verify_and_retire') {
       for (const kind of ['proxypilot','observer','pomerium','openbao','vaultwarden']) if ((['proxypilot','observer'].includes(kind) || full.config.services[kind].mode !== 'skip') && !full.state.identity.clients?.[kind]) throw fail('Connect all selected identity clients before retiring bootstrap administration.');
       const sso = readConfig(db);
@@ -30,6 +30,7 @@ export function queueAdministrator(db, raw, user) {
       if (link?.subject !== full.state.administrator.applicationId) throw fail('The proven application identity is not the permanent administrator named in this handoff.');
     }
     const ref = `full-administrator-${randomUUID()}`;
+    if (full.state.administratorRequest) db.prepare('DELETE FROM setup_full_credentials WHERE id=?').run(full.state.administratorRequest);
     storeProtected(db, ref, { password: p.password, otp: p.otp, expiresAt: Date.now() + 15 * 60_000 });
     const state = { ...full.state, administrator: { ...full.state.administrator, username, email: p.email, firstName: p.firstName, lastName: p.lastName, localUserId: user.id }, administratorRequest: ref };
     const job = createJob(db, { app: 'pp-full-platform', kind: 'full_platform_apply', plan: { params: { revision: p.revision, operation: p.action === 'create' ? 'administrator' : 'retire' } }, requestedBy: user.id, via: 'ui', retryOf: full.last_job_id, reason: p.action === 'create' ? 'Create or resume the reviewed permanent administrator handoff.' : 'Freshly verify permanent administration and retire the temporary account only after all access checks.' });
@@ -70,6 +71,18 @@ export async function runAdministrator(db, full, operation, job, { send } = {}) 
         try {
           const ensureUser = async (realm, key) => {
             const base = `/admin/realms/${encodeURIComponent(realm)}`, query = `${base}/users?username=${encodeURIComponent(profile.username)}&exact=true`;
+            // Declarative user profiles discard unknown attributes. Register
+            // only these administrator-controlled ownership fields, preserving
+            // every existing profile rule and leaving email linking disabled.
+            const profilePath = `${base}/users/profile`, schema = await authority.api(profilePath);
+            if (!Array.isArray(schema?.attributes)) throw fail('Keycloak user-profile ownership fields are unavailable.');
+            let changed = false;
+            for (const name of ['proxypilot.installation', 'proxypilot.local-user']) {
+              const existing = schema.attributes.find(a => a.name === name);
+              if (existing && (JSON.stringify(existing.permissions?.view) !== '["admin"]' || JSON.stringify(existing.permissions?.edit) !== '["admin"]')) throw fail('An ownership profile field has conflicting permissions. Existing profile rules were preserved.');
+              if (!existing) { schema.attributes.push({ name, displayName: name, permissions: { view: ['admin'], edit: ['admin'] }, multivalued: false }); changed = true; }
+            }
+            if (changed) await authority.api(profilePath, { method: 'PUT', body: schema });
             let list = await authority.api(query), user = list?.find(u => u.username === profile.username);
             if (!user) {
               if (state.administrator[key]) throw fail('The recorded permanent user is missing. Restore that identity; retry will not replace it.');

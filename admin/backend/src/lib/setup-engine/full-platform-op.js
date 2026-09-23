@@ -81,7 +81,7 @@ export async function runFullPlatformOperation({ db, params, exec, job, identity
     }
   }
   state.stage = 'administrator';
-  state.actions.administrator = 'Enroll a passkey, link and prove the permanent administrator, and verify independent recovery before activating SSO.';
+  if (!full.state.administratorVerified) state.actions.administrator = 'Enroll a passkey, link and prove the permanent administrator, and verify independent recovery before activating SSO.';
   let pending = false;
   for (const id of ['pomerium', 'infisical', 'openbao', 'vaultwarden']) {
     if (full.config.services[id].mode === 'skip') continue;

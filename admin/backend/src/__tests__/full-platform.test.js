@@ -17,6 +17,9 @@ import { readConfig, recordEvidence, activationReadiness } from '../lib/sso/stor
 import { createJob, getJob, startJob, acquireLock } from '../lib/setup-engine/store.js';
 import { runOnce, executeJob } from '../lib/setup-engine/executor.js';
 import { validateRunnerJob } from '../lib/setup-engine/logic.js';
+import { dockerFixture as vaultDocker } from './helpers/vaultwarden-fixture.js';
+import { ensureRuntime as vaultRuntime, keyEvidence } from '../lib/setup-engine/vaultwarden-runtime.js';
+import { namesFor as vaultNames } from '../lib/setup-engine/vaultwarden-logic.js';
 
 const terminal=(db,id,verification=null)=>db.prepare("UPDATE setup_jobs SET status='succeeded',owner=NULL,verification_json=? WHERE id=?").run(verification?JSON.stringify(verification):null,id);
 const withDb=async fn=>{const db=makeDb();try{await fn(db);}finally{db.close();}};
@@ -42,6 +45,7 @@ test('FP-1 inert CAS save, exact domains, restrictive networks and migration bou
   for(const origin of ['https://10.20.30.40','http://pilot.example.com','https://pilot.example.com:8443','https://pilot.example.com/path'])assert(!configSchema.safeParse({...config(),publicOrigin:origin}).success);
   assert(!configSchema.safeParse({...config(),recoveryOrigin:config().publicOrigin}).success);
   assert(!configSchema.safeParse({...config(),recoveryNetworks:['0.0.0.0/0']}).success);
+  assert(configSchema.safeParse({...config(),recoveryNetworks:[]}).success,'An inert review must allow entering the recovery network in the next step');
   const changed=config();changed.services.keycloak.url='https://different.example.com';assert.throws(()=>saveFullPlatform(db,{...input,expectedRevision:1,config:changed},'admin'),/migration/);
   assert(!fullPlatformState(db).complete);
 }));
@@ -92,9 +96,9 @@ function proof(db,applicationId){const sso=readConfig(db);db.prepare('INSERT OR 
   assert(activationReadiness(db,readConfig(db),'admin').ready);
 }
 test('FP-3 permanent master/application users resume without replacement; retirement requires fresh administration, linked SSO and separate recovery',()=>withDb(async db=>{
-  const {wire}=await connected(db),localBefore=db.prepare('SELECT * FROM users').all();const input={revision:1,action:'create',email:'alice@example.com',useCurrent:true,password:'personal-password-unchanged',reviewed:true},user={id:'admin',username:'Alice'};
+  const {wire}=await connected(db),localBefore=db.prepare('SELECT * FROM users').all();const input={revision:1,action:'create',email:'alice@example.com',firstName:'Alice',lastName:'Administrator',useCurrent:true,password:'personal-password-unchanged',reviewed:true},user={id:'admin',username:'Alice'};
   const create=async()=>{const queued=queueAdministrator(db,input,user);startJob(db,{id:queued.job.id,owner:'runner@full-admin#1:a'});const result=await runAdministrator(db,readFullPlatform(db),'administrator',handle(queued.job.id),{send:wire.send});terminal(db,queued.job.id,result.verification);};
-  await create();const profile=readFullPlatform(db).state.administrator;await create();assert.deepEqual(readFullPlatform(db).state.administrator,profile);assert.equal(wire.realms.get('master').users.length,2);assert.equal(wire.realms.get('proxypilot').users.length,1);assert.equal(wire.passwords.get('master:Alice'),input.password);
+  await create();const profile=readFullPlatform(db).state.administrator;await create();assert.deepEqual(readFullPlatform(db).state.administrator,profile);assert.equal(profile.username,'alice');assert.equal(wire.realms.get('master').users.length,2);assert.equal(wire.realms.get('proxypilot').users.length,1);assert.equal(wire.passwords.get('master:alice'),input.password);
   assert.deepEqual(db.prepare('SELECT * FROM users').all(),localBefore);assert.throws(()=>queueAdministrator(db,{...input,action:'verify_and_retire'},user),/SSO/);
   proof(db,profile.applicationId);
   const runRetire=async password=>{const q=queueAdministrator(db,{...input,action:'verify_and_retire',password},user);startJob(db,{id:q.job.id,owner:'runner@full-admin#1:a'});try{return await runAdministrator(db,readFullPlatform(db),'retire',handle(q.job.id),{send:wire.send});}finally{terminal(db,q.job.id);}};
@@ -115,4 +119,23 @@ test('FP-4 container-only removal requires ownership and retained mounts; blocks
 test('FP-5 production executor enforces runner policy and strict revision-only job envelope',()=>withDb(async db=>{
   const q=approved(db);assert(validateRunnerJob(q).ok);assert(!validateRunnerJob({...q,plan_json:JSON.stringify({params:{revision:1,password:'forbidden'}})}).ok);
   const claimed=startJob(db,{id:q.id,owner:'backend@fp#1:a'});const out=await executeJob(getJob(db,q.id),{db,owner:'backend@fp#1:a',exec:{host(){throw Error('No backend host fallback');}}});assert.equal(out.outcome,'runner_unavailable');
+}));
+test('FP-1 fresh HTTP plan/apply coordinates exactly one new Keycloak job before dependent services',()=>withDb(async db=>{
+  db.exec('DELETE FROM setup_keycloak');const f=await apiFixture(db);try{
+    assert.equal((await f.request('/full',{method:'PUT',body:{expectedRevision:0,config:config(),reviewed:true}})).status,200);
+    const review=reviewFullPlatform(db),result=await f.request('/full/apply',{method:'POST',body:{revision:1,reviewToken:review.reviewToken,reviewed:true}});assert.equal(result.status,202);
+    const deps={db,owner:'runner@fp-fresh#1:a',exec:{host(){throw Error('The coordinator must dispatch through the owned adapter');}},fullPlatformDeps:{interfaces:{test:[{address:'10.20.30.40',internal:false}]}}};
+    await runOnce(deps,{max:1,kinds:['full_platform_apply'],reconcileFirst:false});const children=db.prepare("SELECT * FROM setup_jobs WHERE kind='keycloak_setup' AND status='queued'").all();assert.equal(children.length,1);assert.equal(db.prepare('SELECT count(*) n FROM setup_keycloak').get().n,1);assert.equal(readInfisical(db),null);
+    await runOnce({...deps,nowMs:()=>Date.now()+35000},{max:1,kinds:['full_platform_apply'],reconcileFirst:false});assert.equal(db.prepare("SELECT count(*) n FROM setup_jobs WHERE kind='keycloak_setup' AND status='queued'").get().n,1);
+  }finally{await f.close();}
+}));
+test('FP-4 reviewed Vaultwarden runtime removal/reinstall retains SQLite, signing keys and credentials',()=>withDb(async db=>{
+  await connected(db);const dir=mkdtempSync(join(tmpdir(),'fp-vault-life-')),root=join(dir,'vault'),docker=vaultDocker();
+  try{let r=readVaultwarden(db);const original=vaultSecrets(db,r),resources=await vaultRuntime(r,original,{exec:docker,job:handle('setup'),root});resources.serverKeys=keyEvidence(resources.data);db.prepare('UPDATE setup_vaultwarden SET resources_json=?').run(JSON.stringify(resources));r=readVaultwarden(db);const name=vaultNames(r).server,obj=docker.objects.container.get(name);obj.Id='immutable-vault-id';
+    const data=readFileSync(join(resources.data,'db.sqlite3')),key=readFileSync(join(resources.data,'rsa_key.pem'));const host=docker.host;
+    docker.host=async args=>{if(args[1]==='stop'){obj.State.Running=false;return {code:0,stdout:''};}if(args[1]==='rm'){assert.equal(args[2],obj.Id);docker.objects.container.delete(name);return {code:0,stdout:''};}return host(args);};
+    const review=lifecycleReview(db,'vaultwarden','remove'),q=queueLifecycle(db,{revision:1,service:'vaultwarden',action:'remove',reviewToken:review.reviewToken,reviewed:true,retainData:true},'admin');startJob(db,{id:q.job.id,owner:'runner@fp-life#1:a'});await runLifecycle(db,readFullPlatform(db),handle(q.job.id),docker,{roots:{vaultwarden:root}});
+    await vaultRuntime(readVaultwarden(db),original,{exec:docker,job:handle(q.job.id),root});assert.deepEqual(readFileSync(join(resources.data,'db.sqlite3')),data);assert.deepEqual(readFileSync(join(resources.data,'rsa_key.pem')),key);assert.deepEqual(vaultSecrets(db,readVaultwarden(db)),original);assert(!JSON.parse(readFileSync(join(root,'owner.json'))).reinstall);
+    docker.objects.container.delete(name);await assert.rejects(vaultRuntime(readVaultwarden(db),original,{exec:docker,job:handle(q.job.id),root}),/never reinstalls/);
+  }finally{rmSync(dir,{recursive:true,force:true});}
 }));

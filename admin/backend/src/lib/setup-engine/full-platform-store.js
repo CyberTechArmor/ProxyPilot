@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS setup_full_platform (
 CREATE TABLE IF NOT EXISTS setup_full_credentials (id TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
 export const fail = (message, code = 'FULL_PLATFORM_REVIEW_REQUIRED') => Object.assign(new Error(message), { status: 409, code, fullPlatformSafe: true });
-export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const digest = value => createHash('sha256').update(JSON.stringify(value) ?? 'undefined').digest('hex');
 const origin = z.string().refine(url => { try { const u = new URL(url); return u.origin === url && u.protocol === 'https:' && !u.port && !u.username && !u.password && /^([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*$/.test(u.hostname); } catch { return false; } }, 'Use an HTTPS DNS hostname without credentials, port or path.');
 const service = z.object({ mode: z.enum(['install', 'connect', 'skip']), url: z.union([origin, z.literal('')]) }).strict();
 export const configSchema = z.object({
@@ -34,7 +34,7 @@ export const configSchema = z.object({
     hosts.add(s.url);
   }
   const network = validateRouteEdgeOptions({ ip_allowlist: c.recoveryNetworks });
-  if (network.error || c.recoveryNetworks.some(n => /\/0$/.test(n))) ctx.addIssue({ code: 'custom', message: 'Use restricted administrator/VPN networks; unrestricted access is refused.' });
+  if (c.recoveryNetworks.length && (network.error || c.recoveryNetworks.some(n => /\/0$/.test(n)))) ctx.addIssue({ code: 'custom', message: 'Use restricted administrator/VPN networks; unrestricted access is refused.' });
 });
 export const saveSchema = z.object({ expectedRevision: z.number().int().nonnegative(), config: configSchema, reviewed: z.literal(true) }).strict();
 export const jobSchema = z.object({ revision: z.number().int().positive(), operation: z.enum(['administrator', 'retire', 'lifecycle']).optional() }).strict();

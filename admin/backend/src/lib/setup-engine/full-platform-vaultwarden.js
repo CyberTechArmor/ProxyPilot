@@ -29,8 +29,10 @@ export async function ensureVaultwardenFlow(api, base, k, clientId, accessRole =
   let sub = executions.find(e => e.authenticationFlow && e.displayName === subAlias);
   if (!sub) { await api(`${ep}/flow`, { method: 'POST', body: { alias: subAlias, description, type: 'basic-flow', provider: 'basic-flow' } }); executions = await api(ep); sub = executions.find(e => e.authenticationFlow && e.displayName === subAlias); }
   if (!sub) throw fail('The Vaultwarden deny subflow was not read back.');
-  const allFlows = await api(flowsPath), child = allFlows?.find(f => f.alias === subAlias);
-  if (child?.description !== description) throw fail('The Vaultwarden deny subflow has different ownership.');
+  // The flows collection lists top-level flows only in Keycloak 26.7.4.
+  // Resolve the child through the ID on the owned parent's execution.
+  const child = sub.flowId && await api(`${flowsPath}/${sub.flowId}`);
+  if (child?.description !== description || child.alias !== subAlias || child.topLevel || child.builtIn) throw fail('The Vaultwarden deny subflow has different ownership.');
   const subPath = `${flowsPath}/${encodeURIComponent(subAlias)}/executions`;
   for (const provider of ['conditional-user-role', 'deny-access-authenticator']) {
     const current = await api(subPath);

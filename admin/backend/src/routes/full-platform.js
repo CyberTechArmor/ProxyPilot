@@ -8,7 +8,7 @@ import { protectedValue, storeProtected } from '../lib/setup-engine/full-platfor
 import { personalSchema, personalRef } from '../lib/setup-engine/full-platform-infisical.js';
 import { readInfisical } from '../lib/setup-engine/infisical-store.js';
 import { readOpenBao, save as saveBao, idle as baoIdle } from '../lib/setup-engine/openbao-store.js';
-import { configSchema as baoSchema } from '../lib/setup-engine/openbao-logic.js';
+import { getJob } from '../lib/setup-engine/store.js';
 import { z } from 'zod';
 import { lifecycleReview, queueLifecycle } from '../lib/setup-engine/full-platform-lifecycle.js';
 export const fullPlatformRouter = Router();
@@ -54,8 +54,9 @@ fullPlatformRouter.post('/infisical/administrator', requireSudo, handle((req, re
   catch { return res.status(403).json({ error: 'sudo_required', sudo_required: true, message: 'Personal credentials require fresh local administrator proof.' }); }
   const p = personalSchema.parse(req.body), full = readFullPlatform(db), r = readInfisical(db);
   if (!full || full.revision !== p.revision || full.approved_revision !== p.revision || !r?.config.basic || r.config.mode !== 'install') throw fail('Apply the reviewed basic Infisical installation first.');
-  storeProtected(db, personalRef(r), { email: p.email, password: p.password, expiresAt: Date.now() + 900_000 });
+  if (full.last_job_id && ['queued', 'running'].includes(getJob(db, full.last_job_id)?.status)) throw fail('Wait for the current setup operation before entering the personal credential.');
   const result = applyFullPlatform(db, { revision: full.revision, reviewToken: reviewFullPlatform(db).reviewToken, reviewed: true }, req.user.id);
+  storeProtected(db, personalRef(r), { email: p.email, password: p.password, expiresAt: Date.now() + 900_000 });
   logAudit(req.user.id, 'INFISICAL_PERSONAL_HANDOFF_REQUESTED', 'setup_job', result.job.id, {}, req.ip);
   res.status(202).json(result);
 }));

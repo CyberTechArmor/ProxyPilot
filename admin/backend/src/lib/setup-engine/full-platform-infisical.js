@@ -1,7 +1,7 @@
 // API contract: Infisical v0.165.15 tagged routes, documented in the FP guide.
 import { z } from 'zod';
 import { protectedValue, storeProtected } from './full-platform-keycloak.js';
-import { readInfisical, infisicalSecrets } from './infisical-store.js';
+import { infisicalSecrets } from './infisical-store.js';
 import { encryptSecret } from '../secrets.js';
 import { requireOk, verifyInfisicalIdentities, verifyPolicies, scopeQuery } from './infisical-api.js';
 import { expectedPolicies, desiredProxiedService, TEST_ENV, TEST_PATH, infisicalIdentitiesSchema, infisicalError as fail } from './infisical-logic.js';
@@ -17,10 +17,17 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
   const s = protectedValue(db, ref, () => ({ identities: {}, owner: r.credential_ref }));
   if (s.owner !== r.credential_ref) throw fail('Infisical provisioning ownership differs. No existing organization was adopted.');
   const persist = () => { job.fence(); storeProtected(db, ref, s); };
-  if (s.complete && r.identities) return { ready: true };
   let input;
   if (db.prepare('SELECT id FROM setup_full_credentials WHERE id=?').get(personalRef(r))) input = protectedValue(db, personalRef(r));
   if (input?.expiresAt < now) { db.prepare('DELETE FROM setup_full_credentials WHERE id=?').run(personalRef(r)); input = null; }
+  try {
+  if (s.complete && r.identities) return { ready: true };
+  if (s.retirementAttempted && r.identities && s.token && !s.personalAuthority && [401, 403].includes((await api('/api/v1/identities/details', { token: s.token })).status)) {
+    await verifyInfisicalIdentities(r, infisicalSecrets(db, r), api);
+    delete s.token; delete s.tokenExpiresAt;
+    for (const i of Object.values(s.identities)) delete i.clientSecret;
+    s.complete = true; persist(); return { ready: true };
+  }
   const initialized = requireOk(await api('/api/v1/admin/config'), 'Infisical initialization').config?.initialized;
   if (initialized !== true) {
     if (!input) return { ready: false, action: 'Choose the Infisical administrator’s personal password. This edition uses its local human login; Keycloak human SSO is not enabled.' };
@@ -36,6 +43,9 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
   const request = async (path, options = {}) => api(path, { ...options, token: options.token || s.token });
   // Upstream bootstrap creates an unrestricted token. Replace it immediately
   // with a 15-minute token, revoke the original, and retain no refresh token.
+  if (s.originalToken && s.token && [401, 403].includes((await api('/api/v1/identities/details', { token: s.originalToken })).status)) {
+    delete s.originalToken; persist();
+  }
   if (s.originalToken) {
     const authPath = `/api/v1/auth/token-auth/identities/${s.bootstrapIdentityId}`;
     requireOk(await api(authPath, { method: 'PATCH', token: s.originalToken, body: { accessTokenTTL: 900, accessTokenMaxTTL: 900, accessTokenNumUsesLimit: 0 } }), 'Bound bootstrap token lifetime');
@@ -59,7 +69,7 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
     s.token = selected.token; s.tokenExpiresAt = Math.min(jwt(selected.token).exp * 1000, now + 900_000); s.personalAuthority = true; persist();
   }
   const owned = `ProxyPilot ${r.credential_ref}`, slug = `proxypilot-${r.credential_ref.slice(-12)}`;
-  try {
+  {
     let projects = requireOk(await request('/api/v1/projects'), 'Owned project inventory').projects;
     let project = projects?.find(p => p.slug === slug);
     if (!project) project = requireOk(await request('/api/v1/projects', { method: 'POST', body: { projectName: 'ProxyPilot', slug, projectDescription: owned, type: 'secret-manager', shouldCreateDefaultEnvs: false } }), 'Dedicated project creation').project;
@@ -125,6 +135,7 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
     db.prepare('UPDATE setup_infisical_credentials SET value=? WHERE id=?').run(encryptSecret(JSON.stringify(values)), r.credential_ref);
     db.prepare('UPDATE setup_infisical SET identities_json=? WHERE id=1 AND revision=? AND last_job_id=?').run(JSON.stringify(identities), r.revision, job.id);
     if (!s.personalAuthority) {
+      s.retirementAttempted = true; persist();
       requireOk(await request(`/api/v1/auth/token-auth/identities/${s.bootstrapIdentityId}`, { method: 'DELETE' }), 'Bootstrap authentication retirement');
       if (![401, 403].includes((await api('/api/v1/identities/details', { token: s.token })).status)) throw fail('Infisical bootstrap authority retirement was not verified.');
     }
@@ -132,8 +143,18 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
     for (const i of Object.values(s.identities)) delete i.clientSecret;
     s.complete = true; persist();
     return { ready: true };
+  }
   } finally {
     job.fence(); db.prepare('DELETE FROM setup_full_credentials WHERE id=?').run(personalRef(r)); input = null;
+    if (s.originalToken) {
+      // A failed lifetime reduction must not silently leave the original
+      // unrestricted grant available. Keep an explicit recovery receipt when
+      // its revocation cannot be observed; the operation cannot pass.
+      try {
+        await api(`/api/v1/auth/token-auth/tokens/${uuid(jwt(s.originalToken).identityAccessTokenId)}/revoke`, { method: 'POST', token: s.token || s.originalToken });
+        if ([401, 403].includes((await api('/api/v1/identities/details', { token: s.originalToken })).status)) delete s.originalToken;
+      } finally { persist(); }
+    }
     // No personal password/refresh token becomes a lasting automation credential.
     if (s.personalAuthority) { delete s.token; delete s.tokenExpiresAt; delete s.personalAuthority; persist(); }
   }

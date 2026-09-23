@@ -60,6 +60,9 @@ export async function connectManagedKeycloak(db, k, full, { job, root = KEYCLOAK
   const prior = db.prepare('SELECT value FROM setup_full_credentials WHERE id=?').get(credentialRef);
   if (prior && protectedValue(db, credentialRef).password !== credentials.bootstrap) throw fail('Recorded bootstrap credentials differ from the host recovery set. No rotation was attempted.');
   if (!prior) storeProtected(db, credentialRef, { password: credentials.bootstrap, installationId: k.id, retired: false });
+  // Make the initial credential available even if a later service connection
+  // pauses. Persist only its protected reference under this operation's fence.
+  db.prepare('UPDATE setup_full_platform SET state_json=? WHERE id=1 AND revision=? AND last_job_id=?').run(JSON.stringify({ ...full.state, identity: { ...full.state.identity, bootstrapRef: credentialRef } }), full.revision, job.id);
   const admin = await keycloakAdmin(k, credentials.bootstrap, { job, send });
   try { return await reconcileOwnedIdentity(db, k, full, admin.api, job); }
   finally { await admin.close(); }
@@ -69,8 +72,12 @@ export async function reconcileOwnedIdentity(db, k, full, api, job) {
   const base = `/admin/realms/${encodeURIComponent(k.realm)}`, marker = `ProxyPilot ${k.id}`;
   const realm = await api(base);
   if (realm?.attributes?.['proxypilot.installation'] !== k.id) throw fail('This realm does not carry the managed installation ownership marker. Existing realm settings were preserved.');
-  const policy = { webAuthnPolicyPasswordlessRpId: new URL(k.origin).hostname, webAuthnPolicyPasswordlessUserVerificationRequirement: 'required', webAuthnPolicyPasswordlessResidentKey: 'required', webAuthnPolicyPasswordlessRequireResidentKey: 'Yes' };
-  if (Object.entries(policy).some(([key, value]) => realm[key] !== value)) await api(base, { method: 'PUT', body: policy });
+  // Keycloak updates this policy as a unit when its entity name is present.
+  // Preserve all unrelated passwordless policy fields in that same unit.
+  const policy = { ...Object.fromEntries(Object.entries(realm).filter(([key]) => key.startsWith('webAuthnPolicyPasswordless'))), webAuthnPolicyPasswordlessRpId: new URL(k.origin).hostname, webAuthnPolicyPasswordlessUserVerificationRequirement: 'required', webAuthnPolicyPasswordlessResidentKey: 'required' };
+  if (Object.entries(policy).some(([key, value]) => digest(realm[key]) !== digest(value))) await api(base, { method: 'PUT', body: policy });
+  const policyReadback = await api(base);
+  if (Object.entries(policy).some(([key, value]) => digest(policyReadback?.[key]) !== digest(value))) throw fail('Required discoverable-passkey policy was not accepted by Keycloak.');
   const actions = await api(`${base}/authentication/required-actions`);
   const action = actions?.find(a => a.alias === 'webauthn-register-passwordless');
   if (!action) throw fail('The pinned Keycloak release does not expose passwordless enrollment.');
@@ -144,7 +151,8 @@ export async function reconcileOwnedIdentity(db, k, full, api, job) {
   const unscoped = wantedRoles.filter(w => w?.id && !scoped.some(s => s.id === w.id));
   if (unscoped.length) await api(scopePath, { method: 'POST', body: unscoped });
   const readback = await api(rolePath);
-  if (wantedRoles.some(w => !w?.id || !readback?.some(a => a.id === w.id))) throw fail('The read-only observer grants could not be verified.');
+  const scopeReadback = await api(scopePath);
+  if (wantedRoles.some(w => !w?.id || !readback?.some(a => a.id === w.id) || !scopeReadback?.some(a => a.id === w.id))) throw fail('The read-only observer grants could not be verified.');
   }
   if (full.config.services.pomerium.mode !== 'skip') clients.pomerium = await ensureClient('pomerium', `${full.config.services.pomerium.url}/oauth2/callback`);
   const groups = {};
@@ -155,9 +163,13 @@ export async function reconcileOwnedIdentity(db, k, full, api, job) {
   }
   const vault = readVaultwarden(db);
   if (vault && full.config.services.vaultwarden.mode !== 'skip') {
+    if (vault.config.clientId !== `pp-${k.id}-vaultwarden`) {
+      clients.vaultwarden = await ensureClient('vaultwarden', vaultCallback(vault));
+    } else {
     const flowId = await ensureVaultwardenFlow(api, base, k, vault.config.clientId, vault.config.accessRole);
     clients.vaultwarden = await ensureClient('vaultwarden', vaultCallback(vault), false, false, { flow: flowId, tokenLifetime: '600' });
     groups.vaultwarden = (await ensureVaultwardenAccess(api, base, k, clients.vaultwarden, vault.config.accessRole)).group;
+    }
   }
   return { clients, groups, flow: alias, issuer: `${k.origin}/realms/${k.realm}`, policy: 'discoverable passkeys with required user verification', bootstrapRef: `keycloak-bootstrap-${k.id}` };
 }

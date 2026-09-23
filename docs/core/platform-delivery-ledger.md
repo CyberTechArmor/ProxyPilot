@@ -879,3 +879,29 @@ The user subsequently added the separate G8 application-connection prompt.
 Finish and publish this FP follow-up first; G8 will have its own branch from
 current main and its own six-criterion record before implementation. This does
 not change accepted guided progress: 70% (7/10).
+
+
+FP final implementation evidence (2026-09-23; review pending)
+
+Base: accepted G7 main `6c6f6ff83119c55d201e674b3962804baf4eb0df`.
+Recoverable implementation checkpoint: remote `a80ecfd0`, tree
+`e7d81370cccc5777c546a790b781c81b0bd7a56e`, draft PR #620.
+Follow-up corrections and evidence are included in the final feature head.
+
+| Criterion | Implementation and evidence | Remaining acceptance |
+| --- | --- | --- |
+| FP-1 | Six-stage default UI, linked/custom domains, exact HTTPS/conflict validation, inert CAS save and reviewed apply. Fresh HTTP caller dispatches one G2 job before dependencies; existing managed Keycloak is reused. | Public DNS/TLS and whole-stack install on a disposable Docker host. |
+| FP-2 | Owned clients/flows/groups and protected references; read-only reuse of recorded foreign-named clients; basic Infisical/Agent Proxy without a VM and OpenBao without a database fixture. Real Keycloak client/flow/policy readback and real OpenBao basic credential use passed. Infisical API ownership, scoped roles, credential uncertainty and authority retirement are covered with scripted upstreams. | Real Infisical/Agent Proxy edition capability; Pomerium/Vaultwarden runtime on host. Human Infisical SSO is explicitly not configured. |
+| FP-3 | Administrator/CSRF/sudo plus actual five-minute local proof for reveal. Distinct permanent master/application identities and administrator-only ownership profile attributes; real master login and identity reuse passed. Scripted SSO/recovery evidence gates retirement and activation; failed proof preserves bootstrap. | Real passkey enrollment, SSO/step-up, separate local recovery and vault unlock ceremonies. |
+| FP-4 | Ownership/data-mount checks before any removal; immutable container IDs; retained data/keys/credentials; active identity/access dependencies block removal. Scripted retained Vaultwarden removal/recreation preserves SQLite, keys and secrets, and ordinary retry refuses missing runtime afterward. | Real Docker retained-data lifecycle acceptance. No data deletion/reset added. |
+| FP-5 | Revision-bound persistent coordinator, child jobs, leases, fencing, protected handoff inputs and safe retry. API-process restart/browser reload preserves the same plan and queued operation. Completion requires current service/access/human evidence; unsupported migrations preserve existing access. | Host runner restart during a whole-stack deployment. |
+| FP-6 | 13 focused FP tests, 96 affected adapter tests and 66 engine/runner/installation-key/U1/U2 regressions passed; frontend build passed. Three real disposable tests passed (Keycloak, G6 OpenBao, basic OpenBao). Built UI: 24 layout audits at six widths, one main content scroll owner, zero axe violations and Lighthouse 100. | Whole-stack host acceptance remains separate; mocked responses are not reported as real service execution. |
+
+Guide: `docs/features/full-platform-setup.md`. Reproducible browser evidence:
+`docs/evidence/fp-browser.json`; scripts and opt-in live tests are committed.
+Real-service tests use verified release archives and isolated loopback ports,
+not operator services. No merge, deployment, live identity/DNS/database changes,
+credential rotation, installer/update changes, G9/G10 or privilege redesign.
+Accepted guided progress remains **70% (7/10)**. FP adds no milestone award;
+review acceptance and host acceptance remain distinct. G8 is separate work on a
+separate branch from main and is not included in this feature.

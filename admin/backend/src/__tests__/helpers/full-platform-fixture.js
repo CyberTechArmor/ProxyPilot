@@ -45,10 +45,11 @@ export function keycloakWire(k) {
       if(p[1]==='config')return yes(configs.get(p[2])||{},configs.has(p[2])?200:404);
       if(p[1]==='executions'&&p[3]==='config'){const e=r.flows.flatMap(f=>f.executions||[]).find(e=>e.id===p[2]);e.authenticationConfig=uid();configs.set(e.authenticationConfig,body);return yes({},201);}
       if(p[1]==='flows'){
-        if(p.length===2){if(method==='POST'){r.flows.push({...body,id:uid(),executions:[]});return yes({},201);}return yes(r.flows.map(({executions,...f})=>f));}
+        if(p.length===2){if(method==='POST'){r.flows.push({...body,id:uid(),executions:[]});return yes({},201);}return yes(r.flows.filter(f=>f.topLevel).map(({executions,...f})=>f));}
+        if(p.length===3&&method==='GET'){const flow=r.flows.find(f=>f.id===p[2]);return flow?yes(flow):yes({},404);}
         const f=r.flows.find(f=>f.alias===p[2]);if(!f)return yes({},404);
         if(p[4]==='execution'){f.executions.push({id:uid(),providerId:body.provider,requirement:'DISABLED',authenticationFlow:false});return yes({},201);}
-        if(p[4]==='flow'){r.flows.push({...body,id:uid(),executions:[]});f.executions.push({id:uid(),authenticationFlow:true,displayName:body.alias,child:body.alias,requirement:'DISABLED'});return yes({},201);}
+        if(p[4]==='flow'){const id=uid();r.flows.push({...body,id,topLevel:false,builtIn:false,executions:[]});f.executions.push({id:uid(),flowId:id,authenticationFlow:true,displayName:body.alias,child:body.alias,requirement:'DISABLED'});return yes({},201);}
         if(method==='PUT'){Object.assign(r.flows.flatMap(f=>f.executions).find(e=>e.id===body.id),body);return yes({},204);}
         return yes(flatten(r,f));
       }
@@ -71,6 +72,7 @@ export function keycloakWire(k) {
       if(p[2]==='role-mappings'){if(method==='POST'){g.roles.push(...body);return yes({},204);}return yes(g.roles);}return yes(g);
     }
     if(p[0]==='users'){
+      if(p[1]==='profile'){r.profile ||= {attributes:[]};if(method==='PUT'){r.profile=body;return yes(body);}return yes(r.profile);}
       if(p.length===1){if(method==='POST'){const {credentials,...user}=body;r.users.push({...user,id:uid()});passwords.set(parts[2]+':'+user.username,credentials[0].value);return yes({},201);}return yes(r.users.filter(x=>x.username===u.searchParams.get('username')));}
       if(p[2]==='role-mappings'){const key=p.slice(1).filter(x=>x!=='composite').join('/'),roles=r.roles.get(key)||[];if(method==='POST'){r.roles.set(key,[...roles,...body]);return yes({},204);}return yes(roles);}
       if(p[2]==='groups')return yes({},204);

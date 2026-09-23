@@ -9,7 +9,7 @@
 import { Router } from 'express';
 import { getDb, logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
-import { requireLocalProof, requestOrigin } from '../lib/sso/sessions.js';
+import { localProofRefusal, requestOrigin } from '../lib/sso/sessions.js';
 import { runHostCapture } from '../lib/lxc-zip.js';
 import { platformOverview, serviceOverview, serviceLogs, servicePreflight, verifyService, retryService, containerControlReview, controlContainer, SERVICE_NAMES } from '../lib/setup-engine/platform-overview.js';
 import { networksReview, queueNetworksChange } from '../lib/setup-engine/full-platform-networks.js';
@@ -31,8 +31,9 @@ const handle = (fn) => async (req, res) => {
 };
 const service = (req) => { const s = String(req.params.service || ''); if (!SERVICES.includes(s)) throw Object.assign(new Error(`Unknown service ${s}.`), { status: 404 }); return s; };
 const localProof = (req, res, what) => {
-  try { requireLocalProof(getDb(), req.session.id, requestOrigin(req)); return true; }
-  catch { res.status(403).json({ error: 'sudo_required', sudo_required: true, message: `${what} requires fresh local administrator proof within five minutes.` }); return false; }
+  const refusal = localProofRefusal(getDb(), req.session.id, requestOrigin(req), what);
+  if (!refusal) return true;
+  res.status(refusal.status).json(refusal.body); return false;
 };
 
 /* ------------------------------ overview + flag --------------------------- */

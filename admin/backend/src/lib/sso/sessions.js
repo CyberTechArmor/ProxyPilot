@@ -56,6 +56,25 @@ export function stampLocalProof(db, id, now = Date.now()) {
       "UPDATE sso_session_context SET local_proof_at=? WHERE session_id=? AND method IN ('local','link-only')",
     ).run(now, id);
 }
+/**
+ * Why a dashboard action that needs fresh LOCAL proof is refused, as the HTTP
+ * response to send — or null when the proof is there. A session that signed
+ * in through Keycloak (the SSO login test replaces the dashboard session) can
+ * never carry local proof, so it is told what to do instead of being offered
+ * a step-up prompt that cannot help; only a stale proof gets sudo_required
+ * (the client then opens the local step-up modal and retries).
+ */
+export function localProofRefusal(db, id, origin, what, now = Date.now()) {
+  try { requireLocalProof(db, id, origin, now); return null; } catch { /* explained below */ }
+  const ctx = sessionContext(db, id);
+  if (ctx && !["local", "link-only"].includes(ctx.method))
+    return { status: 403, body: { error: "local_session_required", code: "LOCAL_SESSION_REQUIRED", message: `${what} needs a local sign-in, and this browser is signed in through Keycloak (the SSO login test replaced the dashboard session). Keep this session open — its SSO test evidence counts only while it stays signed in — and do this step from a separate browser or private window signed in to ${origin} with your local password + TOTP or local passkey.` } };
+  if (ctx && ctx.origin !== origin)
+    return { status: 403, body: { error: "local_session_required", code: "LOCAL_SESSION_REQUIRED", message: `${what} must be done from a session signed in at ${origin}. Sign in there with your local password + TOTP or local passkey and retry.` } };
+  if (!ctx)
+    return { status: 403, body: { error: "local_session_required", code: "LOCAL_SESSION_REQUIRED", message: `${what} needs a local session this server can prove. Sign out, sign back in with your local password + TOTP or local passkey, and retry.` } };
+  return { status: 403, body: { error: "sudo_required", sudo_required: true, message: `${what} requires fresh local administrator proof within five minutes.` } };
+}
 export function requireLocalProof(db, id, origin, now = Date.now()) {
   const ctx = sessionContext(db, id);
   if (

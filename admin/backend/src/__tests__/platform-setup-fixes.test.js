@@ -352,10 +352,12 @@ test('4: the dashboard change needs fresh local step-up and writes an audit reco
     const review = await f.request('/overview/networks/review', { method: 'POST', body: { additionalNetworks: ['198.51.100.7'] } });
     assert.equal(review.status, 200); assert.deepEqual(review.body.vpn_networks, ['10.100.0.0/24']);
     const input = { revision: review.body.revision, reviewToken: review.body.reviewToken, additionalNetworks: ['198.51.100.7'], reviewed: true };
+    // A local session whose proof is older than five minutes (sudo alone is not proof).
+    { const sid = db.prepare("SELECT id FROM sessions WHERE user_id='admin' AND sudo_until IS NOT NULL").get().id; db.prepare("INSERT OR REPLACE INTO sso_session_context(session_id,user_id,origin,method,authenticated_at,local_proof_at) VALUES (?,'admin',?,'local',?,?)").run(sid, f.url.replace('http:', 'https:'), Date.now(), Date.now() - 301000); }
     const refused = await f.request('/overview/networks', { method: 'POST', body: input });
     assert.equal(refused.status, 403); assert.equal(refused.body.sudo_required, true);
     const session = db.prepare("SELECT id FROM sessions WHERE user_id='admin' AND sudo_until IS NOT NULL").get();
-    db.prepare("INSERT INTO sso_session_context(session_id,user_id,origin,method,authenticated_at,local_proof_at) VALUES (?,'admin',?,'local',?,?)").run(session.id, f.url.replace('http:', 'https:'), Date.now(), Date.now());
+    db.prepare("INSERT OR REPLACE INTO sso_session_context(session_id,user_id,origin,method,authenticated_at,local_proof_at) VALUES (?,'admin',?,'local',?,?)").run(session.id, f.url.replace('http:', 'https:'), Date.now(), Date.now());
     const ok = await f.request('/overview/networks', { method: 'POST', body: input });
     assert.equal(ok.status, 202, JSON.stringify(ok.body));
     const audit = db.prepare("SELECT * FROM audit WHERE action='FULL_PLATFORM_NETWORKS_CHANGE'").all();
@@ -449,4 +451,25 @@ test('5: stage E — every service verified: continue is refused (activation is 
   assert.deepEqual(v.next_actions.map((a) => a.id), ['activate_sso']);
   assert.equal(applyRefusal(db, { kind: 'continue', revision: v.revision, reviewToken: v.review_digest }).code, 'HUMAN_STEP_REQUIRED');
   assert.equal(completeStageB.length, 1);
+}));
+
+/* ------------------------- local proof refusals ------------------------- */
+
+test('local proof: a Keycloak (OIDC) session is told to use a local sign-in instead of being offered a step-up that cannot help', () => withDb(async (db) => {
+  const { localProofRefusal, stampLocalProof } = await import('../lib/sso/sessions.js');
+  for (const id of ['s-oidc', 's-local']) db.prepare("INSERT INTO sessions(id,user_id,expires_at) VALUES (?, 'admin', ?)").run(id, new Date(Date.now() + 3600000).toISOString());
+  const origin = 'https://pilot.example.com', ins = db.prepare('INSERT INTO sso_session_context(session_id,user_id,origin,method,authenticated_at) VALUES (?,?,?,?,?)');
+  ins.run('s-oidc', 'admin', origin, 'oidc', Date.now());
+  ins.run('s-local', 'admin', origin, 'local', Date.now());
+  const oidc = localProofRefusal(db, 's-oidc', origin, 'Retiring the bootstrap');
+  assert.equal(oidc.body.code, 'LOCAL_SESSION_REQUIRED'); assert.equal(oidc.body.sudo_required, undefined);
+  assert.match(oidc.body.message, /signed in through Keycloak.*separate browser or private window/);
+  stampLocalProof(db, 's-oidc');
+  assert.equal(localProofRefusal(db, 's-oidc', origin, 'x').body.code, 'LOCAL_SESSION_REQUIRED', 'a local step-up cannot stamp an OIDC session');
+  const stale = localProofRefusal(db, 's-local', origin, 'Retiring the bootstrap');
+  assert.equal(stale.body.sudo_required, true, 'a stale local proof gets the step-up prompt');
+  stampLocalProof(db, 's-local');
+  assert.equal(localProofRefusal(db, 's-local', origin, 'x'), null);
+  assert.equal(localProofRefusal(db, 's-local', 'https://recovery.example.com', 'x').body.code, 'LOCAL_SESSION_REQUIRED');
+  assert.equal(localProofRefusal(db, 's-none', origin, 'x').body.code, 'LOCAL_SESSION_REQUIRED');
 }));

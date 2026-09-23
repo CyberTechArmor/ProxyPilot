@@ -498,10 +498,12 @@ test('dashboard reset (Custom / Advanced): preview is inert; the reset needs adm
     const input = { revision: 1, reviewToken: preview.body.reviewToken, purgeData: true, reviewed: true };
     for (const who of [null, 'user']) assert.ok([401, 403].includes((await f.request('/full/reset', { method: 'POST', who, body: input })).status));
     assert.equal((await f.request('/full/reset', { method: 'POST', body: input, csrf: false })).status, 403);
+    // A local session whose proof is older than five minutes (sudo alone is not proof).
+    { const sid = db.prepare("SELECT id FROM sessions WHERE user_id='admin' AND sudo_until IS NOT NULL").get().id; db.prepare("INSERT OR REPLACE INTO sso_session_context(session_id,user_id,origin,method,authenticated_at,local_proof_at) VALUES (?,'admin',?,'local',?,?)").run(sid, f.url.replace('http:', 'https:'), Date.now(), Date.now() - 301000); }
     const stale = await f.request('/full/reset', { method: 'POST', body: input });
     assert.equal(stale.status, 403); assert.equal(stale.body.sudo_required, true, 'sudo alone is not fresh local proof');
     const session = db.prepare("SELECT id FROM sessions WHERE user_id='admin' AND sudo_until IS NOT NULL").get();
-    db.prepare("INSERT INTO sso_session_context(session_id,user_id,origin,method,authenticated_at,local_proof_at) VALUES (?,'admin',?,'local',?,?)").run(session.id, f.url.replace('http:', 'https:'), Date.now(), Date.now() - 301000);
+    db.prepare("INSERT OR REPLACE INTO sso_session_context(session_id,user_id,origin,method,authenticated_at,local_proof_at) VALUES (?,'admin',?,'local',?,?)").run(session.id, f.url.replace('http:', 'https:'), Date.now(), Date.now() - 301000);
     assert.equal((await f.request('/full/reset', { method: 'POST', body: input })).status, 403, 'proof older than five minutes');
     db.prepare('UPDATE sso_session_context SET local_proof_at=?').run(Date.now());
     const wrong = await f.request('/full/reset', { method: 'POST', body: { ...input, reviewToken: 'a'.repeat(64) } });

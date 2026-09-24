@@ -43,13 +43,16 @@ export async function verifyBasicFlows(r, values, tokens, { api, job, destinatio
         ['a request with no proxy credential', 407, () => through('allowed')],
         ['a request with an invalid token', 502, () => through('allowed', 'invalid-proxypilot-token')],
         ['the agent reaching a site outside the proxied service', 403, () => through('denied', tokens.agent)],
-        ['the agent asking for a secret path it was not given', 502, () => through('allowed', tokens.agent, '/ungranted-proxypilot')],
+        // Refused either way: 502 (no credential resolved) or 403 (no service on
+        // that path, Infisical CLI 0.43.133). The receipt below proves it never arrived.
+        ['the agent asking for a secret path it was not given', [403, 502], () => through('allowed', tokens.agent, '/ungranted-proxypilot')],
         ['the agent reaching the allowed site again', 204, () => through('allowed', tokens.agent)],
       ];
       for (const [label, want, run] of checks) {
         let got;
         try { got = await run(); } catch { got = 'no answer'; }
-        if (got !== want) throw fail(`Agent Proxy check failed: ${label} returned ${got === 'no answer' ? 'no answer' : `HTTP ${got}`} (expected ${want}). No credential value is exposed.`);
+        const allowed = [want].flat();
+        if (!allowed.includes(got)) throw fail(`Agent Proxy check failed: ${label} returned ${got === 'no answer' ? 'no answer' : `HTTP ${got}`} (expected ${allowed.join(' or ')}). No credential value is exposed.`);
       }
       if (receipt.received.agent !== 2 || receipt.received.unauthorized) throw fail(`Agent Proxy check failed: the test site received ${receipt.received.agent} substituted request(s) (expected 2)${receipt.received.unauthorized ? ' and an unauthorized one' : ''}. No credential value is exposed.`);
     }

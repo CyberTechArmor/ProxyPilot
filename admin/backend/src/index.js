@@ -366,6 +366,16 @@ try {
   };
   setTimeout(baoUnseal, 30_000).unref();
   setInterval(baoUnseal, 2 * 60_000).unref();
+  // Infisical agents that run in a container: drop the link (and its /32 on the
+  // Infisical route) when the container is gone or its address changed.
+  const agentContainers = async () => {
+    try {
+      const [{ sweepAgentContainers }, { renderInfisicalRoute }] = await Promise.all([import('./lib/setup-engine/agent-network.js'), import('./routes/infisical.js')]);
+      const r = await sweepAgentContainers(getDb(), { render: () => renderInfisicalRoute(getDb()) });
+      if (r.dropped?.length) console.log(`[setup-engine] Infisical agent container links dropped: ${r.dropped.join(', ')}`);
+    } catch (err) { console.error('[setup-engine] Infisical agent container sweep failed:', err?.infisicalSafe ? err.message : 'details withheld'); }
+  };
+  setInterval(agentContainers, 5 * 60_000).unref();
 }
 
 // Sweep orphan in_progress backup rows.  The create-backup

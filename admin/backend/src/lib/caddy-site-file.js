@@ -350,7 +350,9 @@ export function routeEdgeOptionLines(opts, indent = '        ', { routeId = 'r',
     // address, not the host's public address.
     lines.push(`${indent}@pp_denied {`);
     if (pathLine) lines.push(pathLine);
-    lines.push(`${i2}not remote_ip ${opts.ip_allowlist.join(' ')}`);
+    // extraAllow: linked Infisical agent containers (agent-network.js), this route only.
+    const extra = (selfCheck.extraAllow || []).filter((a) => /^\d{1,3}(?:\.\d{1,3}){3}\/32$/.test(a) && !opts.ip_allowlist.includes(a));
+    lines.push(`${i2}not remote_ip ${[...opts.ip_allowlist, ...extra].join(' ')}`);
     lines.push(`${i2}not {`);
     lines.push(`${i2}    remote_ip ${(selfCheck.sources || ['127.0.0.1/32', '::1/128']).join(' ')}`);
     lines.push(`${i2}    header ${selfCheck.header || 'X-ProxyPilot-Self-Check'} ${selfCheck.token}`);

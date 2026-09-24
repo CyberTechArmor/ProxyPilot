@@ -128,7 +128,40 @@ curl -x http://<private-ip>:17322 --proxy-user "<projectId>:agent/:$TOKEN" \
 ```
 
 - The agent must reach Infisical, which admits only the restricted networks,
-  and the Agent Proxy, which listens only on this host's private address.
+  and the Agent Proxy, which listens only on this host's private address. For
+  an agent in a container on this host, use "Runs in container" (below). An
+  agent elsewhere needs the VPN or an entry in Restricted networks. Don't put
+  a VPN config inside an agent: its key would open every restricted service.
+
+### Agents in containers on this host ("Runs in container")
+Choose the container when you register the agent, or link it later
+(`POST …/agents/:name/container`; unlink with `…/container/remove`). This is
+`lib/setup-engine/agent-network.js`:
+
+1. **Admitted on the Infisical route only.** The container's fixed eth0
+   address is added as a `/32` when the Infisical route is rendered
+   (`agentSourcesForRoute` → `extraAllow` in `routeEdgeOptionLines`). The
+   stored restricted networks and every other route (OpenBao, Recovery,
+   Keycloak admin, the dashboard) are unchanged. A container without a fixed
+   address is refused, so the admitted address cannot move to another
+   container.
+2. **The name points at this host inside the container.** One marked
+   `/etc/hosts` line (`# proxypilot-infisical-agent`) maps the Infisical
+   hostname to the bridge gateway. Requests then reach Caddy directly with the
+   container's own address, instead of looping through the router and arriving
+   as the router's address.
+3. **Checked from inside.** A TCP check to Infisical (443 on the gateway) and to
+   the Agent Proxy is reported, using nc, bash or python3, whichever the image
+   has.
+
+If the route update fails, nothing is admitted and the hosts line is removed.
+Unlinking, or removing the agent, re-renders the route without the address, and
+removes the hosts line once no other agent uses that container. A five-minute
+sweep (`sweepAgentContainers`, from `index.js`) drops a link whose container is
+gone, has a different address, or is a different container with the same name
+(`volatile.uuid`). An unreadable inventory changes nothing. Linking needs no
+Infisical authority, but it does need sudo and a fresh local sign-in, and it is
+audited (`INFISICAL_AGENT_CONTAINER_*`). Migration 1019 adds the columns.
 - For HTTPS sites the proxy inspects the request, so the agent must trust the
   Agent Proxy's CA certificate (see Infisical's Agent Proxy documentation).
 

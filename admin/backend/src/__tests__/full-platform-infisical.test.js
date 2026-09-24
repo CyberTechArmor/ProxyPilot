@@ -50,10 +50,11 @@ function fixture(){
    if(path.endsWith('/client-secrets')){if(method==='POST'){i.secret='machine-'+randomUUID();if(state.fault==='secret'){state.fault=null;throw Error('response lost after credential issuance');}return ok({clientSecret:i.secret});}return ok({clientSecretData:i.secret?[{id:'one-issued-secret'}]:[]});}
    if(method==='POST')i.ua={...body,clientId:i.id};return i.ua?ok({identityUniversalAuth:i.ua}):missing();
   }
-  if(path.startsWith('/api/v1/proxied-services')){if(method==='POST')state.services.push(body);return ok({services:state.services});}
+  // Like Infisical v0.165: a proxied service may only reference an existing secret.
+  if(path.startsWith('/api/v1/proxied-services')){if(method==='POST'){if(!state.proxySecret)return {status:400,body:null,error:'Referenced secret(s) not found in folder or its imports: PP_G5_PROXY_CREDENTIAL'};state.services.push(body);}return ok({services:state.services});}
   throw Error('Unscripted Infisical path '+method+' '+path);
  };
- return {db,state,api,r,run:()=>provisionManagedInfisical(db,readInfisical(db),api,{job}),ref:`full-infisical-provision-${r.credential_ref}`};
+ return {db,state,api,r,run:(opts={})=>provisionManagedInfisical(db,readInfisical(db),api,{job,ensureProxySecret:async(projectId)=>{state.proxySecret=projectId;},...opts}),ref:`full-infisical-provision-${r.credential_ref}`};
 }
 test('FP-2 Infisical owned basic provisioning creates exact scoped identities, uses their credentials, retires bootstrap authority and reuses receipts',async()=>{
  const f=fixture();try{assert((await f.run()).ready);assert(f.state.originalRevoked&&f.state.detached);assert.equal(f.state.roles.length,0,'no custom role is attempted on the free edition');assert.deepEqual(Object.fromEntries(Object.entries(f.state.identities).map(([k,i])=>[k,i.membership.identityMembership.roles.map(r=>r.role)])),{workload:['member'],proxy:['viewer'],agent:['admin']});assert.equal(Object.keys(f.state.identities).length,3);assert(!f.db.prepare('SELECT id FROM setup_full_credentials WHERE id=?').get(personalRef(f.r)));
@@ -104,4 +105,11 @@ test('resume with a recorded project id joins that project directly, without an 
   assert.equal(f.state.granted,1);
   assert.equal(f.state.writes.filter(w=>w.path==='/api/v1/projects'&&w.method==='POST').length,0);
  }finally{f.db.close();}
+});
+
+test('FP-2b the proxied service is created only after its referenced secret exists; Infisical\'s refusal text reaches the operator',async()=>{
+  const f=fixture();
+  await assert.rejects(f.run({ensureProxySecret:null}),/Owned proxied destination unavailable \(HTTP 400\)\. Infisical said: "Referenced secret\(s\) not found in folder or its imports: PP_G5_PROXY_CREDENTIAL"/);
+  assert.equal(f.state.services.length,0);
+  const out=await f.run();assert.equal(out.ready,true);assert.equal(f.state.proxySecret,f.state.services[0].projectId,'secret created in the same project first');
 });

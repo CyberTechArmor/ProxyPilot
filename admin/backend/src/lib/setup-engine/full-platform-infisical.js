@@ -11,7 +11,7 @@ export const personalRef = r => `full-infisical-personal-${r.credential_ref}`;
 const uuid = value => z.string().uuid().parse(value);
 const jwt = value => { try { return JSON.parse(Buffer.from(value.split('.')[1], 'base64url')); } catch { throw fail('Infisical issued an unsupported authority token.'); } };
 
-export async function provisionManagedInfisical(db, r, api, { job, now = Date.now() }) {
+export async function provisionManagedInfisical(db, r, api, { job, now = Date.now(), ensureProxySecret = null }) {
   if (!r.config.basic || r.config.mode !== 'install') throw fail('Automatic organization provisioning is limited to the owned basic installation.');
   const ref = `full-infisical-provision-${r.credential_ref}`;
   const s = protectedValue(db, ref, () => ({ identities: {}, owner: r.credential_ref }));
@@ -144,7 +144,7 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
     }
     if (r.config.agentMode !== 'skip') {
       const listed = requireOk(await request(`/api/v1/proxied-services?${scopeQuery(s.projectId)}`), 'Static Agent Proxy capability').services;
-      if (!listed?.length) requireOk(await request('/api/v1/proxied-services', { method: 'POST', body: desiredProxiedService(r.config, s.projectId) }), 'Owned proxied destination');
+      if (!listed?.length) { if (ensureProxySecret) await ensureProxySecret(s.projectId, s.token); requireOk(await request('/api/v1/proxied-services', { method: 'POST', body: desiredProxiedService(r.config, s.projectId) }), 'Owned proxied destination'); }
     }
     const inputIdentities = infisicalIdentitiesSchema.parse({ expectedRevision: r.revision, organizationId: s.organizationId, projectId: s.projectId, ...Object.fromEntries(kinds.map(k => [k, { identityId: s.identities[k].identityId, clientId: s.identities[k].clientId, clientSecret: s.identities[k].clientSecret }])), reviewed: true });
     const identities = { organizationId: s.organizationId, projectId: s.projectId, ...Object.fromEntries(kinds.map(k => [k, { identityId: inputIdentities[k].identityId, clientId: inputIdentities[k].clientId }])) };

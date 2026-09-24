@@ -2505,7 +2505,7 @@ test('mcpTokenExpired / mcpTokenRefusal: expiry is optional and checked first', 
   const now = Date.parse('2026-09-21T12:00:00Z');
   assert.equal(mcpTokenExpired(null, now), false);
   assert.equal(mcpTokenExpired('', now), false);
-  assert.equal(mcpTokenExpired('not a date', now), false, 'an unparseable expiry never expires (pre-914 rows)');
+  assert.equal(mcpTokenExpired('not a date', now), true, 'an unparseable expiry fails closed');
   assert.equal(mcpTokenExpired('2026-09-21T12:00:01Z', now), false);
   assert.equal(mcpTokenExpired('2026-09-21T12:00:00Z', now), true);
   assert.equal(mcpTokenExpired('2026-09-20T00:00:00Z', now), true);

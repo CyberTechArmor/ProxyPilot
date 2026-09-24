@@ -21,6 +21,7 @@
 //                             patches, secrets, credentials or upload bytes.
 //   * small validators      — shared by more than one family.
 
+import {redactMcpSecrets} from '../mcp-redaction.js';
 import { createHash, randomBytes } from 'node:crypto';
 
 /* ------------------------- confirmation tokens ------------------------- */
@@ -81,54 +82,44 @@ export const SELF_EDIT_TOOLS = Object.freeze([
 
 // Tools a container-scoped or project-scoped key may always call: they carry
 // no target, or their target is checked by the tool itself.
-const SCOPE_NEUTRAL_TOOLS = Object.freeze([
-  'list_lxc_containers', 'list_projects', 'create_upload_ticket', 'append_upload_chunk', 'finish_upload',
-]);
-
-/** Parse mcp_tokens.scope_json. null / '' / malformed → the unscoped default. */
 export function parseTokenScope(raw) {
-  const base = { tools: null, lxc_containers: null, project_ids: null, self_edit: false };
-  if (raw == null || raw === '') return base;
-  let j;
-  try { j = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { return base; }
-  if (!j || typeof j !== 'object') return base;
-  const list = (v) => (Array.isArray(v) && v.length ? v.map((x) => String(x)) : null);
-  return {
-    tools: list(j.tools),
-    lxc_containers: list(j.lxc_containers),
-    project_ids: Array.isArray(j.project_ids) && j.project_ids.length ? j.project_ids.map((x) => Number(x)).filter(Number.isInteger) : null,
-    self_edit: j.self_edit === true,
-  };
+  const base = { tools:null, lxc_containers:null, project_ids:null, self_edit:false };
+  if (raw === null || raw === undefined) return base;
+  let input;
+  try { input = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { return {...base,tools:[],invalid:true}; }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {...base,tools:[],invalid:true};
+  const checked=validateTokenScope(input);
+  return checked.error ? {...base,tools:[],invalid:true} : {...base,...checked.scope};
 }
 
-/** Validate a scope object a caller wants to mint. Returns { scope } or { error }. */
-export function validateTokenScope(input, { knownTools = [] } = {}) {
-  if (input == null) return { scope: null };
-  if (typeof input !== 'object' || Array.isArray(input)) return { error: 'scope must be an object' };
-  const out = {};
-  if (input.tools != null) {
-    if (!Array.isArray(input.tools) || !input.tools.every((t) => typeof t === 'string')) return { error: 'scope.tools must be an array of tool names' };
-    const unknown = input.tools.filter((t) => knownTools.length && !knownTools.includes(t));
-    if (unknown.length) return { error: `scope.tools names unknown tools: ${unknown.join(', ')}` };
-    out.tools = [...new Set(input.tools)];
+export function validateTokenScope(input, {knownTools=[]} = {}) {
+  if (input === null) return {scope:null};
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {error:'scope must be an explicit object or null'};
+  if (Object.keys(input).some(k=>!['tools','lxc_containers','project_ids','self_edit'].includes(k))) return {error:'Unknown scope field'};
+  const out={};
+  for (const key of ['tools','lxc_containers','project_ids']) {
+    if (!Object.hasOwn(input,key)) continue;
+    const values=input[key];
+    if (!Array.isArray(values) || values.length>1000) return {error:`scope.${key} must be an array`};
+    if (key==='tools' && !values.every(v=>typeof v==='string' && /^[a-z][a-z0-9_]*$/.test(v) && (!knownTools.length || knownTools.includes(v)))) return {error:'scope.tools contains unknown tools'};
+    if (key==='lxc_containers' && !values.every(v=>typeof v==='string' && /^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(v))) return {error:'scope.lxc_containers must contain container names'};
+    if (key==='project_ids' && !values.every(v=>Number.isSafeInteger(v) && v>0)) return {error:'scope.project_ids must contain positive integers'};
+    out[key]=[...new Set(values)]; // Empty is deliberately deny-all, never unrestricted.
   }
-  if (input.lxc_containers != null) {
-    if (!Array.isArray(input.lxc_containers) || !input.lxc_containers.every((c) => /^[a-zA-Z0-9][a-zA-Z0-9-]*$/.test(String(c)))) {
-      return { error: 'scope.lxc_containers must be an array of container names (without the pp- prefix)' };
-    }
-    out.lxc_containers = [...new Set(input.lxc_containers.map(String))];
+  if (Object.hasOwn(input,'self_edit')) {
+    if (typeof input.self_edit!=='boolean') return {error:'scope.self_edit must be a boolean'};
+    out.self_edit=input.self_edit;
   }
-  if (input.project_ids != null) {
-    if (!Array.isArray(input.project_ids) || !input.project_ids.every((p) => Number.isInteger(Number(p)) && Number(p) > 0)) {
-      return { error: 'scope.project_ids must be an array of positive integers' };
-    }
-    out.project_ids = [...new Set(input.project_ids.map(Number))];
+  return {scope:out};
+}
+
+export function scopeSubsetRefusal(child,parent) {
+  if (child?.invalid || parent?.invalid) return 'Malformed key scope';
+  for(const key of ['tools','lxc_containers','project_ids']) {
+    if (parent[key] !== null && (child[key] === null || child[key].some(v=>!parent[key].includes(v)))) return `Child ${key} exceeds parent scope`;
   }
-  if (input.self_edit != null) {
-    if (typeof input.self_edit !== 'boolean') return { error: 'scope.self_edit must be a boolean' };
-    out.self_edit = input.self_edit;
-  }
-  return { scope: Object.keys(out).length ? out : null };
+  if(child.self_edit && !parent.self_edit) return 'Child self_edit exceeds parent scope';
+  return null;
 }
 
 function toolTakes(tool, prop) {
@@ -140,44 +131,43 @@ function toolTakes(tool, prop) {
  * entry (for its schema), `scope` a parsed scope. Returns null when allowed,
  * else the refusal string.
  */
-export function scopeRefusal(scope, toolName, args = {}, tool = null) {
-  const s = scope || parseTokenScope(null);
-  if (SELF_EDIT_TOOLS.includes(toolName) && !s.self_edit) {
-    return `${toolName} is on the self-editing scope, which this MCP key does not carry. Mint a key with create_scoped_key({ scope: { self_edit: true } }) — self-editing is never granted implicitly.`;
-  }
-  if (s.tools && !s.tools.includes(toolName)) {
-    return `This MCP key is limited to: ${s.tools.join(', ')}. ${toolName} is not on its allowlist.`;
-  }
-  if (s.lxc_containers) {
-    const neutral = SCOPE_NEUTRAL_TOOLS.includes(toolName);
-    const takesContainer = tool ? toolTakes(tool, 'container') : args.container != null;
-    if (!neutral && !takesContainer && !(s.tools && s.tools.includes(toolName))) {
-      return `This MCP key is limited to LXC guest(s) ${s.lxc_containers.join(', ')} and may only call container tools.`;
-    }
-    if (takesContainer && args.container != null && !s.lxc_containers.includes(String(args.container))) {
-      return `This MCP key is limited to LXC guest(s) ${s.lxc_containers.join(', ')}; ${args.container} is outside its scope.`;
-    }
-    if (args.new_name != null && !s.lxc_containers.includes(String(args.new_name))) {
-      return `This MCP key may not create or name a guest outside its scope (${s.lxc_containers.join(', ')}).`;
+export function scopeRefusal(scope, toolName, args = {}, tool = null, {catalog=false} = {}) {
+  const s=scope || parseTokenScope(null);
+  if(s.invalid) return 'Malformed key scope; administrator review required';
+  if(SELF_EDIT_TOOLS.includes(toolName) && !s.self_edit) return 'This key does not carry the self-editing scope';
+  if(s.tools !== null && !s.tools.includes(toolName)) return `${toolName} is not on its allowlist`;
+  const common=['create_scoped_key','create_upload_ticket','append_upload_chunk','finish_upload'];
+  const kindTarget=toolTakes(tool,'kind') && toolTakes(tool,'target');
+  if(s.lxc_containers !== null) {
+    const neutral=common.includes(toolName) || toolName==='list_lxc_containers';
+    const keys=['container','source_container','target_container','destination_container','new_name'];
+    const takes=keys.filter(k=>k!=='new_name').some(k=>tool ? toolTakes(tool,k) : Object.hasOwn(args,k)) || kindTarget;
+    if(!neutral && !takes) return 'This key may only call container tools';
+    if(!catalog && !neutral) {
+      if(kindTarget && args.kind!=='lxc') return 'Target kind is outside its scope';
+      const targets=keys.filter(k=>args[k]!=null).map(k=>args[k]);
+      if(kindTarget) targets.push(args.target);
+      if(!targets.length || targets.some(v=>typeof v!=='string' || !s.lxc_containers.includes(v))) return 'Container target is outside its scope';
     }
   }
-  if (s.project_ids) {
-    const neutral = SCOPE_NEUTRAL_TOOLS.includes(toolName);
-    const takesProject = tool ? toolTakes(tool, 'project_id') : args.project_id != null;
-    if (!neutral && !takesProject && !(s.tools && s.tools.includes(toolName))) {
-      return `This MCP key is limited to project(s) ${s.project_ids.join(', ')} and may only call project tools.`;
-    }
-    if (takesProject && args.project_id != null && !s.project_ids.includes(Number(args.project_id))) {
-      return `This MCP key is limited to project(s) ${s.project_ids.join(', ')}; project ${args.project_id} is outside its scope.`;
+  if(s.project_ids !== null) {
+    const neutral=common.includes(toolName) || toolName==='list_projects';
+    const keys=['project_id','source_project_id','target_project_id','destination_project_id'];
+    const takes=keys.some(k=>tool ? toolTakes(tool,k) : Object.hasOwn(args,k)) || kindTarget;
+    if(toolName==='clone_project') return 'A project-scoped key cannot create an unscoped destination project';
+    if(!neutral && !takes) return 'This key may only call project tools';
+    if(!catalog && !neutral) {
+      if(kindTarget && args.kind!=='project') return 'Target kind is outside its scope';
+      const targets=keys.filter(k=>args[k]!=null).map(k=>args[k]);
+      if(kindTarget) targets.push(args.target);
+      if(!targets.length || targets.some(v=>!((typeof v==='number' && Number.isSafeInteger(v)) || (typeof v==='string' && /^[1-9][0-9]*$/.test(v))) || !s.project_ids.includes(Number(v)))) return 'Project target is outside its scope';
     }
   }
   return null;
 }
 
-/** The catalog a scoped key is shown by tools/list. */
-export function filterCatalogForScope(tools, scope) {
-  const s = scope || parseTokenScope(null);
-  return tools.filter((t) => scopeRefusal(s, t.name, {}, t) === null);
+export function filterCatalogForScope(tools,scope) {
+  return tools.filter(t=>scopeRefusal(scope,t.name,{},t,{catalog:true})===null);
 }
 
 /* ---------------------------- arg redaction ---------------------------- */
@@ -193,14 +183,15 @@ export function redactArgs(args, { keep = [] } = {}) {
   if (!args || typeof args !== 'object') return {};
   const out = {};
   for (const [k, v] of Object.entries(args)) {
-    if (keep.includes(k)) { out[k] = v; continue; }
+    if (keep.includes(k)) { out[k] = JSON.parse(redactMcpSecrets(JSON.stringify(v ?? null))); continue; }
     if (k === 'confirmation_token') { out[k] = '[used]'; continue; }
     if (REDACT_KEYS.has(k)) {
       out[k] = typeof v === 'string' ? `[redacted ${Buffer.byteLength(v, 'utf8')} bytes]` : '[redacted]';
       continue;
     }
     if (v && typeof v === 'object' && !Array.isArray(v)) { out[k] = redactArgs(v); continue; }
-    out[k] = typeof v === 'string' && v.length > 200 ? `${v.slice(0, 200)}…` : v;
+    const safe=JSON.parse(redactMcpSecrets(JSON.stringify(v ?? null)));
+    out[k] = typeof safe === 'string' && safe.length > 200 ? `${safe.slice(0, 200)}…` : safe;
   }
   return out;
 }

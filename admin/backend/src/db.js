@@ -2400,6 +2400,12 @@ export function initDatabase() {
     d.exec("UPDATE mcp_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE created_by IN (SELECT id FROM users WHERE totp_enabled=0) AND revoked_at IS NULL");
   });
 
+  runMigration(db, 1014, 'mcp_delegation_lineage', (d) => {
+    d.exec('ALTER TABLE mcp_tokens ADD COLUMN parent_id INTEGER REFERENCES mcp_tokens(id)');
+    d.exec('ALTER TABLE mcp_tokens ADD COLUMN review_required INTEGER NOT NULL DEFAULT 1');
+    d.exec('CREATE INDEX IF NOT EXISTS idx_mcp_parent ON mcp_tokens(parent_id)');
+  });
+
   runMigration(db, 1011, 'route_ip_allowlist_paths', (d) => {
     const cols = d.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);
     if (cols.length && !cols.includes('ip_allowlist_paths_json')) d.exec('ALTER TABLE service_http_routes ADD COLUMN ip_allowlist_paths_json TEXT');

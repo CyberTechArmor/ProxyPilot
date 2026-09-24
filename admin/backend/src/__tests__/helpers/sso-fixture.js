@@ -154,13 +154,14 @@ registerHooks({
   resolve(specifier, context, next) {
     if (
       specifier.endsWith("/db.js") &&
+      new URL(specifier, context.parentURL).pathname.endsWith("/admin/backend/src/db.js") &&
       context.parentURL?.includes("/admin/backend/src/")
     )
       return {
         url:
           "data:text/javascript," +
           encodeURIComponent(
-            `export const getDb=()=>globalThis.__ssoFixture.getDb(); export const setSetting=(k,v)=>getDb().prepare("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)").run(k,v); export const getAdminDomain=()=>getSetting('admin_domain'); export const AUDIT_TERMINAL_SESSION_START='TERMINAL_SESSION_START'; export const AUDIT_TERMINAL_SESSION_END='TERMINAL_SESSION_END'; export const getSetting=k=>getDb().prepare('SELECT value FROM app_settings WHERE key=?').get(k)?.value; export function logAudit(user,action,type,id,data){getDb().prepare('INSERT INTO audit VALUES (?,?)').run(action,JSON.stringify(data));}`,
+            `export const getDb=()=>globalThis.__ssoFixture.getDb(); export const runMigration=()=>{throw new Error('Unexpected secondary database migration in fixture')}; export const databasePath=()=>'/tmp/unused-mcp-fixture.db'; export const setSetting=(k,v)=>getDb().prepare("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)").run(k,v); export const getAdminDomain=()=>getSetting('admin_domain'); export const AUDIT_TERMINAL_SESSION_START='TERMINAL_SESSION_START'; export const AUDIT_TERMINAL_SESSION_END='TERMINAL_SESSION_END'; export const getSetting=k=>getDb().prepare('SELECT value FROM app_settings WHERE key=?').get(k)?.value; export function logAudit(user,action,type,id,data){getDb().prepare('INSERT INTO audit VALUES (?,?)').run(action,JSON.stringify(data));}`,
           ),
         shortCircuit: true,
       };
@@ -297,6 +298,7 @@ export async function setup() {
       method = body === undefined ? "GET" : "POST",
       form = false,
       csrf = true,
+      headers: extraHeaders = {},
     } = {},
   ) {
     const headers = {
@@ -316,6 +318,7 @@ export async function setup() {
           }
         : {}),
     };
+    Object.assign(headers, extraHeaders);
     const payload =
       body === undefined
         ? undefined

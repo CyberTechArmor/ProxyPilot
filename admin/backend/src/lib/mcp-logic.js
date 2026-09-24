@@ -157,11 +157,11 @@ export function mcpTokenOwnerRefusal({ ownerId, owner } = {}) {
 }
 
 // mcpTokenExpired(expiresAt, now) — true once a token's optional expiry has
-// passed. An unset or unparseable expiry never expires (the pre-914 rows).
+// passed. Null means explicitly non-expiring; malformed expiry fails closed.
 export function mcpTokenExpired(expiresAt, now = Date.now()) {
   if (!expiresAt) return false;
   const t = Date.parse(expiresAt);
-  return Number.isFinite(t) && t <= now;
+  return !Number.isFinite(t) || t <= now;
 }
 
 // mcpTokenRefusal — the whole per-call validity rule: unexpired, then a

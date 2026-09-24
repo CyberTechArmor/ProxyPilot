@@ -1,3 +1,5 @@
+import { mcpKeyRefusal, redactMcpSecrets } from '../lib/mcp-key-authority.js';
+import { localProofRefusal, requestOrigin } from '../lib/sso/sessions.js';
 // ProxyPilot remote MCP server (Streamable HTTP) + its token administration.
 //
 // Two routers:
@@ -82,7 +84,7 @@ import { migrationService } from '../lib/migration/index.js';
 import { createExtendedHandlers } from './mcp-tools/index.js';
 import { platformRouteRefusal } from '../lib/setup-engine/platform-hostnames.js';
 import { instanceIdentity } from '../lib/setup-engine/lifecycle-logic.js';
-import { createConfirmationStore, parseTokenScope, scopeRefusal, filterCatalogForScope } from '../lib/mcp-ext/logic.js';
+import { createConfirmationStore, parseTokenScope, validateTokenScope, scopeRefusal, filterCatalogForScope } from '../lib/mcp-ext/logic.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
   collectCandidatePaths, extractToStaging, applyStagingToTarget, ZIP_LIMITS, ZipError,
@@ -183,11 +185,8 @@ function findToken(rawToken) {
       .prepare(`SELECT * FROM mcp_tokens WHERE token_hash = ? AND revoked_at IS NULL`)
       .get(hashMcpToken(rawToken));
     if (!row) return null;
-    const owner = row.created_by
-      ? db.prepare(`SELECT id, role FROM users WHERE id = ?`).get(String(row.created_by))
-      : null;
-    const refusal = mcpTokenRefusal({ expiresAt: row.expires_at, ownerId: row.created_by, owner });
-    if (refusal) { noteOwnerRefusal(row, refusal); return null; }
+    const refusal=mcpKeyRefusal(db,row);
+    if(refusal) {noteOwnerRefusal(row,refusal);return null;}
     db.prepare(`UPDATE mcp_tokens SET last_used_at = ? WHERE id = ?`)
       .run(new Date().toISOString(), row.id);
     return row;
@@ -536,7 +535,7 @@ async function lxcExistsKind(incusName, targetDir, variantEntries) {
   return (p) => kind.get(p) || null;
 }
 
-async function toolListLxcContainers() {
+async function toolListLxcContainers(args,auth) {
   // This tool used to swallow every failure mode — non-zero exit, and JSON
   // made unparseable by the host-capture cap — and answer `{"containers":[]}`,
   // which reads as "the host is empty" while name-addressed tools were happily
@@ -564,7 +563,7 @@ async function toolListLxcContainers() {
   if (parsed.error) {
     return toolResult(`Could not list containers — incus list returned ${lxcListFailureDetail(out, parsed.error)}. This is a listing failure, not proof the host is empty.`, { isError: true });
   }
-  return toolResult({ containers: lxcContainerSummaries(parsed.list, LXC_PREFIX) });
+  return toolResult({ containers: lxcContainerSummaries(parsed.list, LXC_PREFIX).filter(c=>{const allowed=parseTokenScope(auth?.scope_json).lxc_containers;return allowed===null || allowed.includes(c.name);}) });
 }
 
 async function toolInspectLxcZip(args, auth) {
@@ -2461,12 +2460,13 @@ async function toolSetRoute(args, auth) {
   });
 }
 
-async function toolListProjects(args = {}) {
+async function toolListProjects(args = {},auth) {
   const filters = normalizeProjectFilters(args || {});
   if (filters.error) return toolResult(filters.error, { isError: true });
   const m = await mock2Modules();
   const pins = m.projects.pinnedProjectIdSet();
-  const rows = m.projects.listProjects().filter((p) => p.lifecycle !== 'failed_provisioning');
+  const allowed=parseTokenScope(auth?.scope_json).project_ids;
+  const rows = m.projects.listProjects().filter((p) => p.lifecycle !== 'failed_provisioning' && (allowed===null || allowed.includes(p.id)));
   const summaries = filterProjectSummaries(rows.map((p) => projectSummary(p, m, pins)), filters);
   return toolResult({
     projects: summaries,
@@ -4662,6 +4662,9 @@ async function handleRpc(message, auth, req) {
     return rpcError(message?.id, RPC_INVALID_REQUEST, 'Invalid JSON-RPC request');
   }
   const { id, method, params } = message;
+  auth=getDb().prepare('SELECT * FROM mcp_tokens WHERE id=?').get(auth.id);
+  const authorityError=mcpKeyRefusal(getDb(),auth);
+  if(authorityError) return rpcError(id,RPC_INVALID_REQUEST,'MCP authority no longer valid');
   const isNotification = id === undefined || id === null;
 
   switch (method) {
@@ -4696,9 +4699,9 @@ async function handleRpc(message, auth, req) {
         const result = await handler(params?.arguments || {}, auth, req);
         return rpcResult(id, result);
       } catch (err) {
-        console.error(`[mcp] tool ${name} failed:`, err?.message || err);
+        console.error(`[mcp] tool ${name} failed:`, redactMcpSecrets(err?.message));
         // Tool-level failure — surfaced as tool output so the model can react.
-        return rpcResult(id, toolResult(`Tool failed: ${err?.message || 'unknown error'}`, { isError: true }));
+        return rpcResult(id, toolResult(`Tool failed: ${redactMcpSecrets(err?.message || 'unknown error')}`, { isError: true }));
       }
     }
     default:
@@ -4760,7 +4763,7 @@ export function createMcpRouter() {
       if (response == null) return res.status(202).end();
       return res.json(response);
     } catch (err) {
-      console.error('[mcp] request failed:', err?.message || err);
+      console.error('[mcp] request failed:', redactMcpSecrets(err?.message));
       return res.status(500).json(rpcError(body?.id ?? null, RPC_INTERNAL_ERROR, 'Internal error'));
     }
   };
@@ -4781,40 +4784,54 @@ export function createMcpAdminRouter() {
       const users = new Map(db.prepare(`SELECT id, username, role FROM users`).all().map((u) => [String(u.id), u]));
       const cols = db.prepare(`PRAGMA table_info(mcp_tokens)`).all().map((c) => c.name);
       const expiresCol = cols.includes('expires_at') ? ', expires_at' : '';
-      rows = db.prepare(`SELECT id, name, created_by, created_at, last_used_at, revoked_at${expiresCol} FROM mcp_tokens ORDER BY id DESC`).all()
+      rows = db.prepare(`SELECT id, name, created_by, created_at, last_used_at, revoked_at, scope_json, parent_id, review_required${expiresCol} FROM mcp_tokens ORDER BY id DESC`).all()
         .map((r) => {
           const owner = users.get(String(r.created_by || '')) || null;
           // owner_status: 'active' | 'disabled' | 'deleted' | 'demoted' |
           // 'expired' | 'none'. Anything but 'active' means the token no
           // longer authenticates (findToken).
-          return { ...r, expires_at: r.expires_at || null, owner_username: owner?.username || null, owner_status: mcpTokenOwnerStatus({ expiresAt: r.expires_at, ownerId: r.created_by, owner }) };
+          return { ...r, scope:parseTokenScope(r.scope_json), authority_status:mcpKeyRefusal(db,r) || 'active', expires_at: r.expires_at || null, owner_username: owner?.username || null, owner_status: mcpTokenOwnerStatus({ expiresAt: r.expires_at, ownerId: r.created_by, owner }) };
         });
     } catch { /* pre-migration */ }
     res.json({ tokens: rows });
   });
 
-  // Mint: the raw token (and the ready-to-paste connector URL) is returned
-  // ONCE; only its hash is stored.
-  router.post('/', requireAdmin, (req, res) => {
-    const name = String(req.body?.name || '').trim().slice(0, 100) || 'MCP client';
-    // Lifetime (migration 914): absent = MCP_TOKEN_DEFAULT_DAYS (365), 0 = never (explicit).
-    const expiry = mcpTokenExpiry(req.body?.expires_in_days, Date.now(), { defaultDays: mcpTokenDefaultDays() });
-    if (expiry.error) return res.status(400).json({ error: expiry.error });
-    const token = mintMcpToken();
-    getDb().prepare(`
-      INSERT INTO mcp_tokens (name, token_hash, created_by, created_at, token_prefix, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(name, hashMcpToken(token), String(req.user.id), new Date().toISOString(), token.slice(0, 13), expiry.expiresAt);
-    logAudit(req.user.id, 'MCP_TOKEN_CREATED', 'mcp_token', name, { expires_at: expiry.expiresAt, never_expires: !!expiry.never }, req.ip);
-    const base = publicBaseUrl(req);
-    res.status(201).json({
-      token,
-      name,
-      expires_at: expiry.expiresAt,
-      endpoint: `${base}/api/mcp`,
-      connector_url: `${base}/api/mcp/t/${token}`,
-      note: 'Store this token now — it is shown only once.',
-    });
+  const freshProof=(req,res,next)=>{
+    const refusal=localProofRefusal(getDb(),req.user.jti,requestOrigin(req),'MCP authority changes');
+    if(refusal) return res.status(refusal.status).json(refusal.body);
+    next();
+  };
+  function reviewedPolicy(req) {
+    if (!Object.hasOwn(req.body || {},'scope') || !Object.hasOwn(req.body || {},'expires_in_days')) throw new Error('Explicit scope and expiry are required');
+    const checked=validateTokenScope(req.body.scope,{knownTools:MCP_TOOLS.map(t=>t.name)});
+    if(checked.error) throw new Error(checked.error);
+    const parsed=parseTokenScope(checked.scope);
+    if(parsed.tools===null && parsed.lxc_containers===null && parsed.project_ids===null && req.body.full_access!==true) throw new Error('Full access requires explicit administrator approval');
+    const expiry=mcpTokenExpiry(req.body.expires_in_days,Date.now(),{defaultDays:30});
+    if(expiry.error) throw new Error(expiry.error);
+    return {scope:checked.scope,expiry};
+  }
+  router.post('/',requireAdmin,freshProof,(req,res)=>{
+    let policy;try{policy=reviewedPolicy(req);}catch(e){return res.status(400).json({error:e.message});}
+    const name=String(req.body.name || 'MCP client').trim().slice(0,100);
+    const token=mintMcpToken(), {scope,expiry}=policy;
+    const info=getDb().prepare(`INSERT INTO mcp_tokens(name,token_hash,created_by,created_at,token_prefix,expires_at,scope_json,review_required)
+      VALUES(?,?,?,?,?,?,?,0)`).run(name,hashMcpToken(token),String(req.user.id),new Date().toISOString(),token.slice(0,13),expiry.expiresAt,scope===null?null:JSON.stringify(scope));
+    logAudit(req.user.id,'MCP_TOKEN_CREATED','mcp_token',String(info.lastInsertRowid),{scope,expires_at:expiry.expiresAt},req.ip);
+    res.set('Cache-Control','no-store');
+    const base=publicBaseUrl(req);
+    res.status(201).json({id:Number(info.lastInsertRowid),token,name,scope,expires_at:expiry.expiresAt,endpoint:`${base}/api/mcp`,connector_url:`${base}/api/mcp/t/${token}`,note:'Shown once. Prefer Authorization: Bearer. URL credentials must be excluded from proxy logs.'});
+  });
+  router.post('/:id/review',requireAdmin,freshProof,(req,res)=>{
+    if(req.body.review!==true) return res.status(400).json({error:'Explicit review confirmation required'});
+    let policy;try{policy=reviewedPolicy(req);}catch(e){return res.status(400).json({error:e.message});}
+    const db=getDb(), row=db.prepare('SELECT * FROM mcp_tokens WHERE id=? AND revoked_at IS NULL').get(Number(req.params.id));
+    if(!row) return res.status(404).json({error:'Key not found'});
+    // A dashboard review is an explicit new root grant. Never infer old lineage.
+    const {scope,expiry}=policy;
+    db.prepare('UPDATE mcp_tokens SET scope_json=?,expires_at=?,created_by=?,parent_id=NULL,review_required=0 WHERE id=?').run(scope===null?null:JSON.stringify(scope),expiry.expiresAt,String(req.user.id),row.id);
+    logAudit(req.user.id,'MCP_TOKEN_REVIEWED','mcp_token',String(row.id),{scope,expires_at:expiry.expiresAt,previous_owner:row.created_by,previous_parent:row.parent_id},req.ip);
+    res.json({reviewed:true,id:row.id,scope,expires_at:expiry.expiresAt});
   });
 
   router.delete('/:id', requireAdmin, (req, res) => {

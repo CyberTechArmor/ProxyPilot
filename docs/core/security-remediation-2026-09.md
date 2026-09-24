@@ -9,7 +9,7 @@ as its own tested commit and pull request. A merge is not a deployment.
 | S2 | Terminal WebSocket authorization | Fixed; tests and limits below |
 | S3 | Predictable trusted-device MFA bypass | Fixed; migration 1012 |
 | S4 | TOTP replacement and enrollment proof | Fixed; migration 1013 |
-| S5 | MCP scope and child-key escalation | Open |
+| S5 | MCP scope and child-key escalation | Fixed; migration 1014 and log upgrade below |
 | S6 | Web backend holds host-root authority | Open; requires architectural migration |
 | S7 | Vulnerable production dependencies | Open |
 | S8 | Public first-account claim | Open |
@@ -126,3 +126,43 @@ expiry, attempt budget, missing CSRF, concurrent completion, replay, limited
 session boundaries, session invalidation and durable notification. Both upgrade
 migration tests pass with the test-only Node SQLite adapter. Frontend build
 passes; browser visual QA remains unexecuted (S2 environment limitation).
+
+
+## S5: MCP delegation and review
+
+Scopes fail closed on malformed JSON, unknown fields/types and invalid resource
+IDs. Empty allowlists deny all. Explicit tools do not override resource bounds;
+source/destination and kind/target aliases are checked. Filtered inventory and
+catalogs follow the same restrictions, with dispatch authoritative. Child keys
+inherit omitted scopes/finite expiry and cannot broaden tools, resources,
+self-edit or expiry. Every request checks current owners and the complete stored
+parent chain; revocation, restriction, expiry and role loss disable descendants.
+Cycles/depth abuse fail closed. Confirmation flags/tokens remain machine workflow
+controls, not proof of a separate human decision. Administrator account creation,
+promotion and reactivation now require the dashboard, preventing a restricted
+automation key from manufacturing a new administrator grant.
+
+**Upgrade notice:** migration 1014 marks every existing key for explicit review,
+because historical lineage is unknown. Hashes/inventory are retained. An admin
+with local proof from the last five minutes reviews the scope and expiry in MCP
+Access, granting a new root authority without rotating the secret. Root creation
+also requires explicit scope/expiry and an additional full-access choice when
+unrestricted. New UI defaults to inventory tools and 30 days. Secrets are shown
+once, stored hashed, and excluded from inventory responses.
+
+Application errors and ledger serialization redact MCP credentials. Installer
+and updater harden standard Caddy access and runtime log formats, including URL,
+Referer, cookie and Authorization fields. The updater stops for custom formats
+that require local review, or failed Caddy validation/reload, restoring config
+on failure. Manually deployed backends must apply equivalent log filters before
+using URL credentials. Prefer Bearer transport. Review upstream/CDN logs too;
+these are outside the repository's control. Existing historical logs are not
+rewritten: revoke/reissue keys if they were recorded there.
+
+Validation: 186 MCP tests pass, including actual Express/CSRF/authentication,
+SQLite, child minting and dashboard review. A recorded host boundary proves
+out-of-scope calls have no effects and container inventory remains filtered.
+The actual migration/idempotence test passes using the Node SQLite adapter.
+Two Python Caddy transform tests, shell syntax checks and frontend build pass.
+Caddy validate/reload and 360px browser QA remain unexecuted here (no binaries).
+The upgrade performs Caddy checks on the operator's host before continuing.

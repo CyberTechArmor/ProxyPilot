@@ -926,6 +926,9 @@ ${domain} {${admin_tls_line}
 }
 EOF
 
+    # Credential URLs must not reach access/runtime logs before serving MCP.
+    python3 "${SCRIPT_DIR}/scripts/secure-mcp-caddy-logs.py" --no-reload || return 1
+
     # Ensure Caddy directories have correct ownership (caddy runs as 'caddy' user)
     mkdir -p /var/lib/caddy /var/log/caddy
     chown -R caddy:caddy /var/lib/caddy /var/log/caddy 2>/dev/null || true

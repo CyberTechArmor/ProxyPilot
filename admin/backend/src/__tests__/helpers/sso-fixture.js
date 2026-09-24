@@ -234,6 +234,8 @@ export async function setup() {
   ensureSetupEngineSchema(db);
   db.exec(KEYCLOAK_SCHEMA);
   db.exec(store.SSO_SCHEMA);
+  db.exec((await import('../../lib/admin-bootstrap.js')).ADMIN_BOOTSTRAP_SCHEMA);
+  db.prepare("INSERT INTO app_settings VALUES('installation_bootstrap_id','fixture-installation')").run();
   db.exec((await import('../../lib/totp-enrollment.js')).TOTP_ENROLLMENT_SCHEMA);
   const passwordHash = await bcrypt.hash("local-password-fixture", 4),
     secret = new OTPAuth.Secret({ size: 20 }).base32;

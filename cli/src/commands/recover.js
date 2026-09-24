@@ -238,7 +238,7 @@ export async function recoverStatusCommand(opts = {}, globalOpts = {}, depsIn = 
       ['USERNAME', 'ROLE', 'SOURCE', 'PASSWORD', 'TOTP', 'LOCKED', 'SESSIONS', 'PASSKEYS', 'MCP KEYS'],
       inv.accounts.map((a) => [a.username, a.role, a.authSource, a.hasPassword ? 'set' : 'NONE', a.hasTotp ? 'enrolled' : 'none', a.locked ? 'yes' : 'no', a.activeSessions ?? '-', a.passkeys ?? '-', a.mcpKeys ?? '-'])
     );
-    if (inv.setupExposed.length) output.warn(`administrator(s) with no password — claimable through the public initial-setup endpoint: ${inv.setupExposed.join(', ')}. Run: proxypilot recover admin <name> --password`);
+    if (inv.setupExposed.length) output.warn(`administrator(s) with no password — initial-setup requires a root-issued installation credential: ${inv.setupExposed.join(', ')}. Run: proxypilot recover admin <name> --password`);
     if (!inv.localAdmins.length) output.warn('no local administrator exists; with the directory down, nobody can sign in. Run: proxypilot recover admin <name> --create --password');
     return EXIT.OK;
   } catch (e) {
@@ -256,3 +256,20 @@ export async function recoverStatusCommand(opts = {}, globalOpts = {}, depsIn = 
 }
 
 export const RECOVERY_ACTIONS = ACTIONS;
+
+// Safe unattended installer entrypoint: only issues installation proof for an
+// unclaimed account. Existing-account recovery retains its separate ceremony.
+export async function recoverBootstrapCommand(username,opts={},depsIn={}) {
+  const deps={...defaultDeps(),...depsIn};let db;
+  try{
+    requireRoot(deps);
+    const install=resolveInstall({installDir:opts.installDir,envPath:opts.env,dbPath:opts.db},deps.fs);
+    if(!install.ok)throw new Error(install.message);
+    db=await deps.openDb(install.dbPath);
+    const {issueBootstrap}=await import('../recovery/bootstrap.js');
+    const issued=issueBootstrap(db,username,{directory:deps.bootstrapDirectory||'/run/proxypilot-bootstrap'});
+    deps.stdout(`Installation credential file: ${issued.credentialFile}`);
+    deps.stdout(`Valid until ${issued.expiresAt}. Read it locally as root, enter it in setup, then remove the file. Issuing again retires the previous credential.`);
+    return EXIT.OK;
+  }catch(e){deps.stdout(e.message);return e.exitCode || EXIT.REFUSED;}finally{db?.close();}
+}

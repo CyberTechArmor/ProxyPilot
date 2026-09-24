@@ -1,3 +1,4 @@
+import {bootstrapUser,claimBootstrap} from '../lib/admin-bootstrap.js';
 import jwt from 'jsonwebtoken';
 import { beginTotpEnrollment, completeTotpEnrollment } from '../lib/totp-enrollment.js';
 import { recordLocalSession, stampLocalProof } from '../lib/sso/sessions.js';
@@ -206,48 +207,37 @@ authRouter.get('/setup-status', (req, res) => {
   // Local accounts only: a directory-backed (LDAP) administrator has an
   // intentionally empty password_hash and must never look claimable here.
   const needsSetup = db.prepare(
-    "SELECT id, username FROM users WHERE role = 'admin' AND (password_hash = '' OR password_hash IS NULL) AND (auth_source IS NULL OR auth_source = 'local') LIMIT 1"
+    "SELECT id FROM users WHERE role = 'admin' AND (password_hash = '' OR password_hash IS NULL) AND (auth_source IS NULL OR auth_source = 'local') AND totp_enabled=0 AND NOT EXISTS(SELECT 1 FROM sso_links WHERE user_id=users.id) AND NOT EXISTS(SELECT 1 FROM webauthn_credentials WHERE user_id=users.id) LIMIT 1"
   ).get();
 
   res.json({
     needsSetup: !!needsSetup,
-    username: needsSetup?.username || null,
   });
 });
 
 // Initial setup endpoint - set password for first-time admin (public, no auth required)
 const initialSetupSchema = z.object({
   username: z.string().min(1, 'Username is required'),
+  bootstrapCredential: z.string().min(1, 'Installation credential is required').max(100),
   newPassword: z.string().min(12, 'Password must be at least 12 characters'),
   confirmPassword: z.string().min(1, 'Password confirmation is required'),
 });
 
 authRouter.post('/initial-setup', async (req, res) => {
   try {
-    const { username, newPassword, confirmPassword } = initialSetupSchema.parse(req.body);
+    const { username, bootstrapCredential, newPassword, confirmPassword } = initialSetupSchema.parse(req.body);
     const db = getDb();
 
     if (newPassword !== confirmPassword) {
       return res.status(400).json({ error: 'Passwords do not match' });
     }
 
-    // Only allow setup for LOCAL admin users with no password set. An LDAP
-    // administrator's empty hash is by design (routes/auth.js login), not an
-    // invitation: without this filter anyone who knew the name could set a
-    // password and be issued a session as that administrator.
-    const user = db.prepare(
-      "SELECT * FROM users WHERE username = ? AND role = 'admin' AND (password_hash = '' OR password_hash IS NULL) AND (auth_source IS NULL OR auth_source = 'local')"
-    ).get(username);
-
-    if (!user) {
-      return res.status(400).json({ error: 'Initial setup is not available for this user' });
-    }
-
-    // Hash and save the new password
+    // Check before expensive hashing, then atomically recheck/consume afterward.
+    // All missing/wrong/expired/account-mismatch proofs get the same response.
+    if (!bootstrapUser(db,username,bootstrapCredential)) return res.status(403).json({error:'Initial setup credential is invalid or unavailable'});
     const passwordHash = await bcrypt.hash(newPassword, 12);
-    db.prepare(
-      'UPDATE users SET password_hash = ?, password_change_required = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-    ).run(passwordHash, user.id);
+    const user=claimBootstrap(db,{username,token:bootstrapCredential,passwordHash});
+    if(!user) return res.status(403).json({error:'Initial setup credential is invalid or unavailable'});
 
     logAudit(user.id, 'INITIAL_PASSWORD_SET', 'user', user.id, {}, req.ip);
 
@@ -408,8 +398,7 @@ authRouter.post('/login', async (req, res) => {
       // Check if user needs initial setup (empty password)
       if (!user.password_hash) {
         return res.status(401).json({
-          error: 'Initial setup required. Please set your password.',
-          setupRequired: true,
+          error: 'Invalid credentials',
         });
       }
 

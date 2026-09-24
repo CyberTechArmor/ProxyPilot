@@ -1379,7 +1379,7 @@ main() {
     # Password will be set via the web UI on first login
     ADMIN_PASS=""
     echo ""
-    log_info "You will create your password from the web dashboard on first login"
+    log_info "Root will issue a one-use installation credential for web setup"
 
     # TOTP will also be set up via the web UI
     TOTP_SECRET=""
@@ -1768,6 +1768,12 @@ EOF
     log_info "Waiting for ProxyPilot to start..."
     sleep 10
 
+    # The public first-run form stays locked without this installation proof.
+    # Only the file path is printed; never put the credential in installer logs.
+    if ! /usr/local/bin/proxypilot recover bootstrap "$ADMIN_USER" --install-dir "$INSTALL_DIR"; then
+        log_warn "Bootstrap credential not issued. Once the backend is healthy, run: sudo proxypilot recover bootstrap $ADMIN_USER"
+    fi
+
     # Copy reset script
     cp "${SCRIPT_DIR}/reset.sh" "$INSTALL_DIR/"
     chmod +x "$INSTALL_DIR/reset.sh"
@@ -1790,7 +1796,7 @@ EOF
     echo -e "${YELLOW}║${NC}  Username: ${GREEN}${ADMIN_USER}${NC}"
     echo -e "${YELLOW}║${NC}                                                                ${YELLOW}║${NC}"
     echo -e "${YELLOW}║${NC}  ${CYAN}Open the dashboard URL above to:${NC}                              ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║${NC}    1. Create your admin password                               ${YELLOW}║${NC}"
+    echo -e "${YELLOW}║${NC}    1. Enter setup credential; create your password             ${YELLOW}║${NC}"
     echo -e "${YELLOW}║${NC}    2. Set up two-factor authentication (TOTP)                  ${YELLOW}║${NC}"
     echo -e "${YELLOW}║${NC}                                                                ${YELLOW}║${NC}"
     echo -e "${YELLOW}╚════════════════════════════════════════════════════════════════╝${NC}"

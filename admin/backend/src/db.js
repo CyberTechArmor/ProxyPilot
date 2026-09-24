@@ -5,6 +5,7 @@ import { VAULTWARDEN_SCHEMA } from './lib/setup-engine/vaultwarden-store.js';
 import { FULL_PLATFORM_SCHEMA } from './lib/setup-engine/full-platform-store.js';
 import { KEYCLOAK_LDAP_SCHEMA } from './lib/setup-engine/keycloak-ldap-schema.js';
 import { OPENBAO_SCHEMA } from './lib/setup-engine/openbao-store.js';
+import { AGENTS_SCHEMA as OPENBAO_AGENTS_SCHEMA } from './lib/setup-engine/openbao-agents.js';
 import { INFISICAL_SCHEMA } from './lib/setup-engine/infisical-store.js';
 import { POMERIUM_SCHEMA } from './lib/setup-engine/pomerium-store.js';
 import { SSO_SCHEMA } from './lib/sso/store.js';
@@ -2416,6 +2417,10 @@ export function initDatabase() {
   runMigration(db, 1016, 'resume_audited_mcp_dashboard_roots', (d) => {
     resumeAuditedMcpRoots(d);
   });
+
+  // Connect an agent (lib/setup-engine/openbao-agents.js): agent names and
+  // credential names only; values live in OpenBao.
+  runMigration(db, 1017, 'openbao_agents', (d) => d.exec(OPENBAO_AGENTS_SCHEMA));
 
   runMigration(db, 1011, 'route_ip_allowlist_paths', (d) => {
     const cols = d.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);

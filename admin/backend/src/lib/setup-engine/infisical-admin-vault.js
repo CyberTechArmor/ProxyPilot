@@ -31,7 +31,7 @@ export const vaultReady = db => !!adminPasswordLocation(db);
 
 // fresh: generate a new password and store it as the next version (bootstrap of
 // a new Infisical). Otherwise read the stored one back for a resume sign-in.
-export async function infisicalAdminVault(db, { email, origin, fresh }, { read = readOpenBao, reach = reachableStatus, ready = requireReady, root = withTransientRoot, generate = generatePassword } = {}) {
+export async function infisicalAdminVault(db, { email, origin, fresh, password: chosen = null }, { read = readOpenBao, reach = reachableStatus, ready = requireReady, root = withTransientRoot, generate = generatePassword } = {}) {
   const b = read(db);
   if (!locationOf(b)) throw fail('The generated Infisical password is kept in OpenBao, which is not installed here with automatic custody yet. Finish OpenBao first, or enter a password yourself.');
   const kv = `${namesFor(b).prefix}-kv`, data = `/v1/${kv}/data/${ADMIN_SECRET_PATH}`;
@@ -51,7 +51,8 @@ export async function infisicalAdminVault(db, { email, origin, fresh }, { read =
       // write instead of being overwritten. A deleted latest version still counts.
       let version = current.body?.data?.metadata?.version || 0;
       if (current.status === 404) { const meta = await api(`/v1/${kv}/metadata/${ADMIN_SECRET_PATH}`, { token }); version = meta.status === 200 ? meta.body?.data?.current_version || 0 : 0; }
-      const password = generate();
+      // A password the person chose is stored as given; otherwise one is generated.
+      const password = chosen ?? generate();
       const write = await api(data, { method: 'POST', token, body: { options: { cas: version }, data: { email, password, url: origin, note: NOTE } } });
       if (![200, 204].includes(write.status)) throw fail(`OpenBao did not accept the generated Infisical password (HTTP ${write.status}). Infisical was not initialized.`);
       const back = await api(data, { token });

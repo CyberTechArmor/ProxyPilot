@@ -68,6 +68,8 @@ test('resolver: name rules, upstreams and the config file', () => {
 test('firewall: port 53 on the VPN server address is admitted from the VPN subnet only', () => {
   const rules = render({ base: [], discovered: [], container_egress: [], network: {} });
   assert.match(rules, /ip saddr 10\.100\.0\.0\/24 ip daddr 10\.100\.0\.1 meta l4proto \{ tcp, udp \} th dport 53 accept comment "vpn-dns"/);
+  // The Infisical Agent Proxy self-test: Docker bridges to the test port only.
+  assert.match(rules, /iifname "br-\*" tcp dport 18086 accept comment "infisical-agent-proxy-selftest"/);
 });
 
 test('backend: the Full Platform hostnames go to the resolver unless their route refuses VPN sources; extra names are validated', () => { const db = makeDb(); return (async () => {

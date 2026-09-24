@@ -239,6 +239,11 @@ table inet proxypilot {
     # resolve the platform hostnames to 10.100.0.1 so their requests go
     # through the tunnel. VPN sources only; inert when nothing listens.
     ip saddr ${VPN_CIDR} ip daddr 10.100.0.1 meta l4proto { tcp, udp } th dport 53 accept comment "vpn-dns"
+    # Infisical Agent Proxy self-test (lib/setup-engine/infisical-basic-flows.js):
+    # the managed proxy runs on a Docker bridge (br-*) and must reach the
+    # short-lived test site ProxyPilot opens on this host's private address,
+    # TCP 18086, only while the credential check runs. Nothing listens otherwise.
+    iifname "br-*" tcp dport 18086 accept comment "infisical-agent-proxy-selftest"
     ct state established,related accept
     ct state invalid drop
     ip protocol icmp icmp type echo-request limit rate 5/second accept

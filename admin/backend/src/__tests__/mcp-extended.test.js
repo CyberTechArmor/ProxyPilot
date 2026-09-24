@@ -227,7 +227,7 @@ test('scoped keys: refusals are decided before the handler runs and the catalog 
   const lxc = parseTokenScope({ lxc_containers: ['web1'] });
   assert.equal(scopeRefusal(lxc, 'read_lxc_file', { container: 'web1' }, byName.get('read_lxc_file')), null);
   assert.match(scopeRefusal(lxc, 'read_lxc_file', { container: 'web2' }, byName.get('read_lxc_file')), /outside its scope/);
-  assert.match(scopeRefusal(lxc, 'list_projects', {}, byName.get('list_projects')) || '', /^$/);
+  assert.match(scopeRefusal(lxc, 'list_projects', {}, byName.get('list_projects')), /only call container tools/);
   assert.match(scopeRefusal(lxc, 'delete_route', {}, byName.get('delete_route')), /only call container tools/);
   const proj = parseTokenScope({ project_ids: [3], tools: ['read_project_file', 'get_rules'] });
   assert.equal(scopeRefusal(proj, 'get_rules', { project_id: 3 }, byName.get('get_rules')), null);

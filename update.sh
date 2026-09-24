@@ -1105,6 +1105,8 @@ retrofit_smoke_browser
 # managed snippet so pasted/seeded certs can serve the admin origin (Cloudflare
 # Full-strict). No-op on ACME installs and on already-migrated sites.
 retrofit_admin_tls_snippet
+# Stop before rebuilding if existing custom logs need an operator review.
+python3 "${SCRIPT_DIR}/scripts/secure-mcp-caddy-logs.py"
 # Caddy Cloudflare DNS plugin (domain provisioning, DNS-01 method): a caddy
 # package upgrade replaces the binary and silently DROPS add-on packages, so
 # re-install it whenever this host wants it — the marker file is written when

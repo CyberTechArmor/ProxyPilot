@@ -1,3 +1,4 @@
+import { mcpKeyRefusal } from '../../lib/mcp-key-authority.js';
 // ProxyPilot's own administration over MCP: users, scoped MCP keys, settings
 // and feature flags, the audit log and the MCP ledger, security scans and GRC
 // evidence, the dashboard database's own backup/restore, host snapshots, host
@@ -17,7 +18,7 @@ import { encryptSecret, decryptSecret } from '../../lib/secrets.js';
 import { hasHostBinary } from '../../lib/host-exec.js';
 import { mcpTokenOwnerStatus, mcpTokenExpiry, mcpTokenDefaultDays } from '../../lib/mcp-logic.js';
 import {
-  validateTokenScope, parseTokenScope, intIn, stamp, sha256Hex, UNIT_NAME_RE, parseSystemctlUnits, parseDpkgList, parseAptUpgradable, pathUnder,
+  validateTokenScope, parseTokenScope, scopeSubsetRefusal, intIn, stamp, sha256Hex, UNIT_NAME_RE, parseSystemctlUnits, parseDpkgList, parseAptUpgradable, pathUnder,
 } from '../../lib/mcp-ext/logic.js';
 import {
   COMPRESSION_SETTING, COMPRESSIONS, DEFAULT_COMPRESSION, normalizeCompression,
@@ -54,7 +55,8 @@ export function createAdminHandlers(kit) {
   const create_user = mutation('create_user', { subjectType: 'user' }, async (args, auth, req, note) => {
     const username = String(args.username || '').trim().toLowerCase();
     if (!/^[a-z0-9][a-z0-9._-]{1,63}$/.test(username)) return err('username: 2–64 chars, lowercase letters, digits, . _ -');
-    const role = args.role === 'admin' ? 'admin' : 'user';
+    if(args.role==='admin') return err('Administrator creation requires the authenticated dashboard');
+    const role = 'user';
     const display = args.display_name != null ? String(args.display_name).slice(0, 100) : null;
     const db = getDb();
     if (db.prepare('SELECT id FROM users WHERE username = ?').get(username)) return err('Username already exists');
@@ -78,6 +80,7 @@ export function createAdminHandlers(kit) {
     note.subject_id = user.id;
     const role = String(args.role || '');
     if (!['admin', 'user', 'pending'].includes(role)) return err('role must be admin, user or pending');
+    if (role==='admin' && user.role!=='admin') return err('Administrator promotion requires the authenticated dashboard');
     if (user.role === role) return ok({ applied: false, user: userShape(user), note: 'Already that role.' });
     const demotion = user.role === 'admin';
     if (demotion) {
@@ -118,6 +121,7 @@ export function createAdminHandlers(kit) {
       if (!guard.allowed) { note.refused = true; return err(guard.error); }
       if (db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'").get().c <= 1) { note.refused = true; return err('Cannot disable the last admin'); }
     }
+    if (!disable && (args.role==='admin' || getSetting(`user_disabled_role:${user.id}`)==='admin')) return err('Administrator reactivation requires the authenticated dashboard');
     const restoreRole = disable ? null : (['admin', 'user'].includes(args.role) ? args.role : (getSetting(`user_disabled_role:${user.id}`) || 'user'));
     const d = dry(args, { user: user.username, action: disable ? 'disable (role → pending, sessions revoked, MCP keys revoked)' : `enable (role → ${restoreRole}; revoked MCP keys stay revoked)` }); if (d) return d;
     const gate = confirmFlag(args, note, `${disable ? 'Disable' : 'Enable'} ${user.username}.`); if (gate) return gate;
@@ -167,7 +171,7 @@ export function createAdminHandlers(kit) {
 
   /* ------------------------------ MCP keys ------------------------------- */
 
-  const keyShape = (r) => ({ id: r.id, name: r.name, prefix: r.token_prefix || null, created_by: r.created_by, created_at: r.created_at, last_used_at: r.last_used_at, revoked_at: r.revoked_at, expires_at: r.expires_at || null, scope: parseTokenScope(r.scope_json), scoped: !!r.scope_json });
+  const keyShape = (r) => ({ id: r.id, name: r.name, prefix: r.token_prefix || null, created_by: r.created_by, created_at: r.created_at, last_used_at: r.last_used_at, revoked_at: r.revoked_at, expires_at: r.expires_at || null, scope: parseTokenScope(r.scope_json), scoped: !!r.scope_json, parent_id:r.parent_id, review_required:r.review_required, authority_status:mcpKeyRefusal(getDb(),r) || 'active' });
 
   const list_mcp_keys = reader('list_mcp_keys', async (args, auth) => {
     const db = getDb();
@@ -187,16 +191,16 @@ export function createAdminHandlers(kit) {
   const create_scoped_key = mutation('create_scoped_key', { subjectType: 'mcp_token' }, async (args, auth, req, note) => {
     const name = String(args.name || '').trim().slice(0, 100);
     if (!name) return err('name is required');
-    const v = validateTokenScope(args.scope ?? null, { knownTools: MCP_TOOL_NAMES() });
-    if (v.error) return err(v.error);
-    const scope = v.scope;
-    const mine = parseTokenScope(auth.scope_json);
-    if (scope?.self_edit && !mine.self_edit && !actorIsSuperadmin(auth)) {
-      // A key can only hand out what its owner could grant from the dashboard;
-      // self-edit is the exception that needs an explicit human grant.
-      const owner = getDb().prepare('SELECT role FROM users WHERE id = ?').get(String(auth.created_by));
-      if (owner?.role !== 'admin') { note.refused = true; return err('Only an admin-owned key can mint a self_edit key'); }
-    }
+    const db=getDb();
+    const parent=db.prepare('SELECT * FROM mcp_tokens WHERE id=?').get(auth.id);
+    const parentError=mcpKeyRefusal(db,parent);
+    if(parentError) return err(parentError);
+    const requested=args.scope === undefined ? (parent.scope_json === null ? null : JSON.parse(parent.scope_json)) : args.scope;
+    const v=validateTokenScope(requested,{knownTools:MCP_TOOL_NAMES()});
+    if(v.error) return err(v.error);
+    const scope=v.scope;
+    const escalation=scopeSubsetRefusal(parseTokenScope(scope),parseTokenScope(parent.scope_json));
+    if(escalation) {note.refused=true;return err(escalation);}
     const plan = { name, scope: scope || 'unscoped (full admin surface, no self-editing)' };
     const d = dry(args, plan); if (d) return d;
     // A key inherits its owner from the key that mints it, and an ownerless
@@ -204,18 +208,21 @@ export function createAdminHandlers(kit) {
     // one at all rather than mint a dead key.
     const ownerId = String(auth.created_by || '').trim();
     if (!ownerId) { note.refused = true; return err('This key has no recorded owner, so it cannot mint another; mint from a key owned by a live admin (MCP Access page)'); }
-    const expiry = mcpTokenExpiry(args.expires_in_days, Date.now(), { defaultDays: mcpTokenDefaultDays() });
-    if (expiry.error) return err(expiry.error);
+    const expiry = args.expires_in_days === undefined && parent.expires_at
+      ? {expiresAt:parent.expires_at}
+      : mcpTokenExpiry(args.expires_in_days,Date.now(),{defaultDays:30});
+    if(expiry.error) return err(expiry.error);
+    if(parent.expires_at && (!expiry.expiresAt || Date.parse(expiry.expiresAt)>Date.parse(parent.expires_at))) return err('Child expiry exceeds parent expiry');
     const gate = confirmFlag(args, note, `Mint MCP key "${name}" with scope ${JSON.stringify(scope || 'unscoped')}${expiry.expiresAt ? ` expiring ${expiry.expiresAt}` : ' that never expires (explicit)'}.`); if (gate) return gate;
     const token = mintMcpToken();
     const prefix = token.slice(0, 13);
-    const info = getDb().prepare('INSERT INTO mcp_tokens (name, token_hash, created_by, created_at, scope_json, token_prefix, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(name, hashMcpToken(token), ownerId, new Date().toISOString(), scope ? JSON.stringify(scope) : null, prefix, expiry.expiresAt);
+    const info = getDb().prepare('INSERT INTO mcp_tokens (name, token_hash, created_by, created_at, scope_json, token_prefix, expires_at, parent_id, review_required) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)')
+      .run(name, hashMcpToken(token), ownerId, new Date().toISOString(), scope ? JSON.stringify(scope) : null, prefix, expiry.expiresAt, parent.id);
     note.subject_id = String(info.lastInsertRowid);
     note.summary = `minted MCP key ${name}`;
     note.detail = { scope: scope || null, prefix, expires_at: expiry.expiresAt, never_expires: !!expiry.never };
     const base = req ? ctx.publicBaseUrl(req) : '';
-    return ok({ created: true, id: Number(info.lastInsertRowid), name, prefix, scope: scope || null, expires_at: expiry.expiresAt, token, ...(base ? { endpoint: `${base}/api/mcp`, connector_url: `${base}/api/mcp/t/${token}` } : {}), note: 'Store the token now — it is shown once. A scoped key sees only the tools its scope allows in tools/list.' });
+    return ok({ created: true, id: Number(info.lastInsertRowid), name, prefix, scope: scope || null, expires_at: expiry.expiresAt, token, ...(base ? { endpoint: `${base}/api/mcp`, connector_url: `${base}/api/mcp/t/${token}` } : {}), parent_id:parent.id, note: 'Store the token now. Authority and expiry are bounded by the entire parent chain; parent revocation also disables this key.' });
   });
 
   const revoke_mcp_key = mutation('revoke_mcp_key', { subjectType: 'mcp_token' }, async (args, auth, req, note) => {

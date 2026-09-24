@@ -31,8 +31,11 @@ export default function McpAccess() {
   const { toast } = useToast();
   const [tokens, setTokens] = useState([]);
   const [name, setName] = useState('');
-  // Lifetime in days; blank = the server default (365), 0 = never (explicit).
-  const [expiresDays, setExpiresDays] = useState('');
+  // Explicit lifetime; 0 is the administrator's non-expiring choice.
+  const [expiresDays, setExpiresDays] = useState('30');
+  const [scopeText,setScopeText]=useState('{"tools":["list_lxc_containers","list_projects"]}');
+  const [fullAccess,setFullAccess]=useState(false);
+  const [reviewId,setReviewId]=useState(null);
   const [busy, setBusy] = useState(false);
   const [minted, setMinted] = useState(null); // { token, connector_url, endpoint } — shown once
 
@@ -51,8 +54,11 @@ export default function McpAccess() {
   const mint = async () => {
     setBusy(true);
     try {
-      const r = await api.mcpCreateToken(name.trim() || 'MCP client', expiresDays === '' ? undefined : Number(expiresDays));
-      setMinted(r);
+      const scope=JSON.parse(scopeText);
+      if(expiresDays==='') throw new Error('Choose an expiry in days');
+      const r = reviewId ? await api.mcpReviewToken(reviewId,Number(expiresDays),scope,fullAccess) : await api.mcpCreateToken(name.trim() || 'MCP client',Number(expiresDays),scope,fullAccess);
+      setMinted(reviewId ? null : r);
+      setReviewId(null);
       setName('');
       load();
     } catch (err) {
@@ -133,6 +139,17 @@ export default function McpAccess() {
             </div>
           ) : null}
 
+          {reviewId && <p className="text-sm font-medium">Review key #{reviewId}. Approving creates a new root grant with the scope and expiry below; its secret is preserved.</p>}
+          <div className="space-y-2">
+            <label htmlFor="mcp-scope" className="text-sm font-medium">Allowed tools and resources (JSON)</label>
+            <textarea id="mcp-scope" className="w-full min-h-28 rounded-md border bg-background p-3 font-mono text-xs"
+              value={scopeText} onChange={e=>setScopeText(e.target.value)} />
+            <p className="text-xs text-muted-foreground">Fields: tools, lxc_containers, project_ids, self_edit. Empty arrays deny access. Omitted resource lists allow all resources for the selected tools.</p>
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-1 h-5 w-5 shrink-0" checked={fullAccess} onChange={e=>setFullAccess(e.target.checked)} />
+              I explicitly authorize full administrator tool access when the scope is null or has no allowlists.
+            </label>
+          </div>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
               value={name}
@@ -145,19 +162,18 @@ export default function McpAccess() {
               type="number" inputMode="numeric" min="0" max="3650"
               value={expiresDays}
               onChange={(e) => setExpiresDays(e.target.value)}
-              placeholder="Expires in days (365)"
+              placeholder="Expires in days (30)"
               aria-label="Expires in days; 0 means never"
-              title="Days until this token expires. Blank = 365. 0 = never (explicit)."
+              title="Choose 1–3650 days, or 0 for an explicitly non-expiring token."
               className="h-11 sm:h-10 sm:w-48"
             />
             <Button onClick={mint} disabled={busy} className="h-11 sm:h-10 shrink-0">
               {busy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-              Create token
+              {reviewId ? `Approve key #${reviewId}` : 'Create token'}
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            New tokens expire after 365 days unless you set a lifetime; 0 means never. A token whose
-            owner is disabled, demoted or deleted stops working at once.
+            Choose a scope and expiry, then prove your local administrator identity. Keys awaiting review cannot authenticate. Child keys remain limited by their parents; revoking a parent disables descendants. 0 explicitly means no expiry.
           </p>
 
           {active.length === 0 ? (
@@ -165,9 +181,11 @@ export default function McpAccess() {
           ) : (
             <div className="divide-y rounded-lg border">
               {active.map((t) => (
-                <div key={t.id} className="flex items-center justify-between gap-2 p-3">
+                <div key={t.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-medium">{t.name}</div>
+                    <p className="text-xs break-all">Scope: {t.scope_json || 'full surface; no self-edit'}</p>
+                    <p className="text-xs">{t.authority_status}{t.parent_id ? ` · parent #${t.parent_id}` : ' · root key'}</p>
                     <div className="text-xs text-muted-foreground">
                       Created {t.created_at ? new Date(t.created_at).toLocaleDateString() : '—'}
                       {t.last_used_at ? ` · last used ${new Date(t.last_used_at).toLocaleString()}` : ' · never used'}
@@ -175,6 +193,8 @@ export default function McpAccess() {
                       {t.owner_status && t.owner_status !== 'active' ? ` · owner ${t.owner_status}` : ''}
                     </div>
                   </div>
+                  <div className="flex gap-2 shrink-0">
+                  <Button variant="outline" className="h-11 sm:h-9" onClick={()=>{setReviewId(t.id);setName(t.name);setScopeText(t.scope_json || 'null');setFullAccess(false);setExpiresDays('30');}}>Review</Button>
                   <Button
                     variant="outline" size="sm"
                     className="h-11 w-11 sm:h-9 sm:w-auto sm:px-3 shrink-0 text-destructive"
@@ -184,6 +204,7 @@ export default function McpAccess() {
                     <Trash2 className="h-3.5 w-3.5 sm:mr-1.5" />
                     <span className="hidden sm:inline">Revoke</span>
                   </Button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -200,7 +221,7 @@ export default function McpAccess() {
           <p><strong className="text-foreground">Claude Code:</strong> <code className="break-all">claude mcp add --transport http proxypilot &lt;endpoint&gt; --header "Authorization: Bearer &lt;token&gt;"</code></p>
           <p>
             Zip deploys are two-phase: Claude inspects and shows you which files would be replaced,
-            and only applies after you approve — replaced files are kept as <code>.old</code>. Full
+            and uses a machine confirmation before applying — replaced files are kept as <code>.old</code>. These checks prevent mistakes; they are not independent human approval. Token scope controls authority. Full
             reference: <code>docs/features/mcp.md</code> in the repo.
           </p>
         </CardContent>

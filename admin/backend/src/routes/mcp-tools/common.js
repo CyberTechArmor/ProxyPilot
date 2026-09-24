@@ -1,3 +1,4 @@
+import { redactMcpSecrets } from '../../lib/mcp-key-authority.js';
 // The toolkit every extended MCP tool family is built on.
 //
 // routes/mcp.js hands in a `ctx` (its own private helpers — takeLxcSnapshot,
@@ -65,11 +66,11 @@ export function createToolkit(ctx) {
       `).run(
         row.ts, row.token_id ?? null, row.actor ?? null, row.tool, row.subject_type ?? null,
         row.subject_id == null ? null : String(row.subject_id), row.project_id ?? null,
-        JSON.stringify(row.args ?? {}), row.outcome, row.dry_run ? 1 : 0, row.confirmation_used ? 1 : 0,
-        row.snapshot ?? null, row.summary ?? null, JSON.stringify(row.detail ?? {}), row.duration_ms ?? null,
+        redactMcpSecrets(JSON.stringify(row.args ?? {})), row.outcome, row.dry_run ? 1 : 0, row.confirmation_used ? 1 : 0,
+        row.snapshot ?? null, row.summary == null ? null : redactMcpSecrets(row.summary), redactMcpSecrets(JSON.stringify(row.detail ?? {})), row.duration_ms ?? null,
       );
     } catch (e) {
-      console.warn('[mcp] ledger write failed:', e?.message || e);
+      console.warn('[mcp] ledger write failed:', redactMcpSecrets(e?.message));
     }
   }
 
@@ -114,8 +115,8 @@ export function createToolkit(ctx) {
         try {
           result = await fn(args || {}, auth, req, note);
         } catch (e) {
-          console.error(`[mcp] ${name} failed:`, e?.message || e);
-          result = err(`Tool failed: ${e?.message || 'unknown error'}`);
+          console.error(`[mcp] ${name} failed:`, redactMcpSecrets(e?.message));
+          result = err(`Tool failed: ${redactMcpSecrets(e?.message || 'unknown error')}`);
         }
       }
       if (note.ledger === false && !result?.isError) return result;   // a read-only branch of a writing tool
@@ -135,12 +136,12 @@ export function createToolkit(ctx) {
         try {
           logAudit(auth?.created_by ?? null, opts.audit || `MCP_${name.toUpperCase()}`, subjectType || 'mcp', note.subject_id ?? name,
             { via: 'mcp', token_id: auth?.id ?? null, ...(note.snapshot ? { snapshot: note.snapshot } : {}), ...note.detail }, null);
-        } catch (e) { console.warn('[mcp] audit write failed:', e?.message || e); }
+        } catch (e) { console.warn('[mcp] audit write failed:', redactMcpSecrets(e?.message)); }
         if (note.project && note.summary && ctx.appendProjectChangeRecord) {
           try {
             const rec = await ctx.appendProjectChangeRecord(note.project, auth, `mcp ${name}: ${note.summary}`);
             if (rec && !result.isError) result = attach(result, { change_record: rec });
-          } catch (e) { console.warn('[mcp] change record failed:', e?.message || e); }
+          } catch (e) { console.warn('[mcp] change record failed:', redactMcpSecrets(e?.message)); }
         }
       }
       return result;
@@ -150,8 +151,8 @@ export function createToolkit(ctx) {
   function reader(name, fn) {
     return async (args, auth, req) => {
       try { return await fn(args || {}, auth, req); } catch (e) {
-        console.error(`[mcp] ${name} failed:`, e?.message || e);
-        return err(`Tool failed: ${e?.message || 'unknown error'}`);
+        console.error(`[mcp] ${name} failed:`, redactMcpSecrets(e?.message));
+        return err(`Tool failed: ${redactMcpSecrets(e?.message || 'unknown error')}`);
       }
     };
   }
@@ -197,7 +198,7 @@ export function createToolkit(ctx) {
     });
   }
 
-  /** The lighter gate: `confirm: true` after the user agreed in conversation. */
+  /** Machine workflow safeguard only; this is not independently verified human approval. */
   function confirmFlag(args, note, message) {
     if (args.confirm === true) return null;
     note.refused = true;

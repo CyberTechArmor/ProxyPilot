@@ -36,7 +36,22 @@ export async function verifyBasicFlows(r, values, tokens, { api, job, destinatio
       const through = (suffix, token, secretPath = TEST_PATH) => send(r.config.proxyOrigin, { path: `${origin}/g5/${suffix}?nonce=${nonce}`, headers: { Authorization: `Bearer ${PLACEHOLDER}`, ...(token ? { 'Proxy-Authorization': `Basic ${Buffer.from(`${r.identities.projectId}:${TEST_ENV}${secretPath}:${token}`).toString('base64')}` } : {}) } });
       let accepted = false;
       for (let attempt = 0; attempt < 15; attempt++) { job.fence(); try { if (await through('allowed', tokens.agent) === 204) { accepted = true; break; } } catch {} await sleep(1000); }
-      if (!accepted || await through('allowed') !== 407 || await through('allowed', 'invalid-proxypilot-token') !== 502 || await through('denied', tokens.agent) !== 403 || await through('allowed', tokens.agent, '/ungranted-proxypilot') !== 502 || await through('allowed', tokens.agent) !== 204 || receipt.received.agent !== 2 || receipt.received.unauthorized) throw fail('Agent Proxy substitution or denial checks failed. No credential value is exposed.');
+      // Each check names itself and the status it got, so a failure says which
+      // step Infisical or the proxy answered differently (no values involved).
+      const checks = [
+        ['the agent reaching the allowed site', 204, () => accepted ? 204 : through('allowed', tokens.agent)],
+        ['a request with no proxy credential', 407, () => through('allowed')],
+        ['a request with an invalid token', 502, () => through('allowed', 'invalid-proxypilot-token')],
+        ['the agent reaching a site outside the proxied service', 403, () => through('denied', tokens.agent)],
+        ['the agent asking for a secret path it was not given', 502, () => through('allowed', tokens.agent, '/ungranted-proxypilot')],
+        ['the agent reaching the allowed site again', 204, () => through('allowed', tokens.agent)],
+      ];
+      for (const [label, want, run] of checks) {
+        let got;
+        try { got = await run(); } catch { got = 'no answer'; }
+        if (got !== want) throw fail(`Agent Proxy check failed: ${label} returned ${got === 'no answer' ? 'no answer' : `HTTP ${got}`} (expected ${want}). No credential value is exposed.`);
+      }
+      if (receipt.received.agent !== 2 || receipt.received.unauthorized) throw fail(`Agent Proxy check failed: the test site received ${receipt.received.agent} substituted request(s) (expected 2)${receipt.received.unauthorized ? ' and an unauthorized one' : ''}. No credential value is exposed.`);
     }
     return { consumer: 'verified', unauthenticatedRead: 'denied', agentValueRead, agentProxy: tokens.agent ? 'placeholder_substitution_and_denials_verified' : 'skipped', destinationReceipt: tokens.agent ? 'real_credential_received' : 'not_selected', execution: 'owned_disposable_local_destination', advancedVmFlows: 'not_tested' };
   } finally { await receipt.close(); }

@@ -38,3 +38,10 @@ test('an unexpected answer to the agent read check fails with its status', async
   const { r, deps } = harness(500);
   await assert.rejects(verifyBasicFlows(r, { application: 'a' }, { agent: 'agent-token' }, deps), /HTTP 500/);
 });
+
+test('a failed Agent Proxy check names the step and the status it got', async () => {
+  const { r, deps } = harness(200);
+  const send = deps.send;
+  deps.send = async (origin, options) => options.path.includes('/g5/denied') ? 204 : send(origin, options);
+  await assert.rejects(verifyBasicFlows(r, { application: 'a' }, { agent: 'agent-token' }, deps), /site outside the proxied service returned HTTP 204 \(expected 403\)/);
+});

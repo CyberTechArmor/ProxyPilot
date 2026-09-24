@@ -26,7 +26,15 @@ jobs:
         working-directory: cli
       - name: Authentication, authorization, upgrade and dependency regressions
         working-directory: admin/backend
-        run: node --test src/__tests__/security-*.test.js src/__tests__/sso-transport.test.js src/__tests__/webauthn.test.js src/__tests__/mcp-*.test.js src/__tests__/ldap.test.js src/__tests__/notification-logic.test.js src/__tests__/root-recovery.test.js
+        run: |
+          tests=()
+          for test_file in src/__tests__/security-*.test.js; do
+            case "$test_file" in *security-bootstrap*) ;; *) tests+=("$test_file");; esac
+          done
+          node --test "${tests[@]}" src/__tests__/sso-transport.test.js src/__tests__/webauthn.test.js src/__tests__/mcp-*.test.js src/__tests__/ldap.test.js src/__tests__/notification-logic.test.js src/__tests__/root-recovery.test.js
+      - name: Root-only bootstrap integration (disposable runner and temporary databases)
+        working-directory: admin/backend
+        run: sudo "$(command -v node)" --test src/__tests__/security-bootstrap*.test.js
       - run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - run: bash -n install.sh update.sh
   audit:

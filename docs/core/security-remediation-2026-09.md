@@ -257,3 +257,9 @@ storage, LDAP/SSO refusal, limited-session denial, real TOTP completion, passwor
 retry and an actual second-process database restart. Frontend production build
 passes. Browser visual QA and installer execution on a representative host
 remain unexecuted. See `docs/features/root-recovery.md` for operator commands.
+
+CI runs the bootstrap integration subset as root on its disposable runner, using
+temporary databases/directories, to exercise the real root-only CLI and file
+ownership checks. All other backend tests retain the ordinary runner identity.
+The initial CI run correctly refused the positive issuance cases as non-root;
+the production ownership checks remain intact.

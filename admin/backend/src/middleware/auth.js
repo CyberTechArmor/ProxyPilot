@@ -1,3 +1,4 @@
+import { utcTimestamp } from '../lib/utc-time.js';
 import { checkSessionContext, refreshCentralCheck, requestOrigin, sessionContext } from '../lib/sso/sessions.js';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
@@ -91,13 +92,13 @@ export function validateSession(jti, origin = null) {
   session.enrollmentOnly = session.auth_level === 'enrollment';
   session.linkOnly = sessionContext(db, session.id)?.method === 'link-only';
   const nowMs = Date.now();
-  const expiresAtMs = Date.parse(session.expires_at);
+  const expiresAtMs = utcTimestamp(session.expires_at);
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
     return { ok: false, status: 401, error: 'Session expired' };
   }
-  const lastUsedMs = Date.parse(session.last_used_at);
+  const lastUsedMs = utcTimestamp(session.last_used_at);
   const idleMs = SESSION_IDLE_HOURS * 60 * 60 * 1000;
-  if (Number.isFinite(lastUsedMs) && nowMs - lastUsedMs > idleMs) {
+  if (!Number.isFinite(lastUsedMs) || nowMs - lastUsedMs > idleMs) {
     db.prepare(`UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?`).run(jti);
     return { ok: false, status: 401, error: 'Session idle timeout' };
   }
@@ -216,7 +217,7 @@ export function requireSudo(req, res, next) {
     return res.status(401).json({ error: 'Authentication required' });
   }
   const nowMs = Date.now();
-  const sudoUntilMs = req.session.sudo_until ? Date.parse(req.session.sudo_until) : 0;
+  const sudoUntilMs = req.session.sudo_until ? utcTimestamp(req.session.sudo_until) : 0;
   if (!Number.isFinite(sudoUntilMs) || sudoUntilMs <= nowMs) {
     return res.status(401).json({
       error: 'sudo_required',

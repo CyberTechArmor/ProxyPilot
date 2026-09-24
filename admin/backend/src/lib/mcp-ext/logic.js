@@ -234,6 +234,7 @@ export function readOnlySqlError(sql) {
   const s = String(sql || '').trim();
   if (!s) return 'sql is required';
   if (s.length > 20000) return 'sql is too long (max 20000 chars)';
+  if (s.includes('\\') || s.includes('\0')) return 'psql meta-commands and backslash escapes are not supported';
   const body = s.replace(/;\s*$/, '');
   if (/;/.test(body)) return 'one statement per call — no semicolons';
   if (!/^(select|with|explain|show|table|values)\b/i.test(body)) return 'run_project_sql is read-only: the statement must start with SELECT, WITH, EXPLAIN, SHOW, TABLE or VALUES';

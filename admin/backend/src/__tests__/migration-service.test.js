@@ -92,7 +92,9 @@ function setup({ script = () => ({ status: 0, stdout: '', stderr: '' }) } = {}) 
   const audit = [];
   const runHostCapture = async (bin, args) => {
     calls.push({ bin, argv: [bin, ...args] });
+    if (bin === 'incus' && args[0] === 'profile') return { status: 0, stdout: JSON.stringify({ config: {}, devices: { root: { type: 'disk', path: '/', pool: 'default' } } }) };
     const r = script(bin, args, calls.length) || {};
+    if (bin === 'incus' && args[0] === 'list' && args.includes('json') && !r.stdout) return { status: r.status ?? 0, stdout: '[]' };
     return { status: r.status ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
   };
   // An uploaded rootfs tarball must land somewhere writable by whoever runs
@@ -131,7 +133,7 @@ test('create: validates, mints one token, prints one command, and refuses a seco
   assert.equal(r.command, `curl -fsSL http://localhost:3001/api/migrations/agent/${r.token}/install.sh | sudo sh`);
   assert.equal(r.tls_pin, null, 'an http base URL has no certificate to pin');
   assert.equal(r.migration.token.tls_pin, null);
-  assert.ok(!JSON.stringify(r.migration).includes(r.token.split('_')[2]), 'the view never carries the secret');
+  assert.ok(!JSON.stringify(r.migration).includes(r.token.split('_').slice(2).join('_')), 'the view never carries the secret');
   assert.ok(argvOf(calls).some((c) => c === 'incus config show pp-web'), 'the guest name is checked before the token is minted');
 
   const dup = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web' } });
@@ -976,7 +978,7 @@ test('MCP: cleanup is confirm-gated and dry-runnable, and the token tools carry 
   const { svc, handlers } = setup({ script: (bin, args) => {
     seen.push([bin, ...args].join(' '));
     if (bin === 'incus' && args[0] === 'config' && args[1] === 'show') return guestExists ? { status: 0, stdout: 'config: {}' } : { status: 1 };
-    if (bin === 'incus' && args[0] === 'list') return { status: 0, stdout: 'STOPPED\n' };
+    if (bin === 'incus' && args[0] === 'list' && args.includes('json')) return { status: 0, stdout: 'STOPPED\n' };
     return { status: 0 };
   } });
   const r = await svc.createMigration({ input: { mode: 'whole-machine', name: 'web', source_kind: 'proxmox-lxc' } });
@@ -1181,4 +1183,18 @@ test('the watchdog fails a running transfer whose agent has gone silent, and not
   assert.equal(svc.rowById(alive).status, 'running', 'two quiet minutes is a slow file, not a dead source');
   assert.equal(svc.rowById(waiting).status, 'awaiting_review');
   assert.deepEqual(svc.sweepStalled(), { failed: [] }, 'a failed row is terminal and not failed twice');
+});
+
+
+test('application migration provisions an actual VM and never container nesting flags', async () => {
+  const { svc, calls } = setup({ script: (bin,args) => bin === 'incus' && args[0] === 'config' && args[1] === 'show' ? { status: 1 } : { status: 0 } });
+  const created = await svc.createMigration({ input: { mode:'application', name:'vm-destination', type:'virtual-machine', source_kind:'lxc', cpu:2, memory_gb:2, disk_gb:100, nested:true, app_dirs:['/srv/myapp'] } });
+  assert.ok(created.migration, JSON.stringify(created));
+  await svc.recordManifest(svc.rowById(created.migration.id), MANIFEST);
+  const approved = await svc.approveTransfer(created.migration.id, { actor:'admin-1' });
+  assert.equal(approved.error, undefined, JSON.stringify(approved));
+  const launch = calls.find(c => c.argv[1] === 'launch').argv;
+  assert.ok(launch.includes('--vm'));
+  assert.ok(launch.includes('root,size=100GB'));
+  assert.equal(launch.some(v => v.startsWith('security.')), false);
 });

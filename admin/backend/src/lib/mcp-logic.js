@@ -791,13 +791,10 @@ export function defaultSnapshotName(date, prefix = 'pp-mcp') {
  * Validate a set_lxc_config request against the config policy.
  * Returns { key, value, restartRequired, warning|null } or { error }.
  *
- * security.privileged=true additionally requires acknowledgeRisk — and the
- * policy's warning text rides back on SUCCESS too, because the tool's job is
- * to present the trade-off, not just apply the flip (a real operator chose
- * this path in the field after being steered away; the warning exists for
- * the next one).
+ * Container privilege changes are refused; migrate into a VM instead.
  */
 export function validateLxcConfigChange(key, value, { acknowledgeRisk = false } = {}, policy) {
+  if (String(key).trim() === 'security.privileged') return { error: 'Container privilege cannot be changed in place. Provision a VM and migrate the application.' };
   const keys = policy?.keys || {};
   const k = String(key ?? '').trim();
   const rule = keys[k];
@@ -814,16 +811,11 @@ export function validateLxcConfigChange(key, value, { acknowledgeRisk = false } 
   } else if (k === 'limits.memory') {
     if (!/^[1-9][0-9]*(\.[0-9]+)?(GB|GiB|MB|MiB)$/i.test(v)) return { error: 'limits.memory must be a size string, e.g. "4GB" or "512MiB"' };
   }
-  if (k === 'security.privileged' && v === 'true' && acknowledgeRisk !== true) {
-    return {
-      error: `Setting security.privileged=true requires acknowledge_risk: true. ${rule.warning || ''}`.trim(),
-    };
-  }
   return {
     key: k,
     value: v,
     restartRequired: !!rule.restart_required,
-    warning: (k === 'security.privileged' && v === 'true') ? (rule.warning || null) : null,
+    warning: null,
   };
 }
 
@@ -1243,10 +1235,11 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'create_lxc_container',
-    description: 'Create a new LXC/Incus guest as a setup-engine job (the runner launches it from a validated plan and reads it back as Running; a failed launch removes the half-created guest). Creation-only, so inherently non-destructive: fails if the name already exists, never replaces. docker_ready (default true) sets security.nesting plus the syscall intercepts Docker needs at birth, so the keyring/nesting failures do not occur on new guests — privileged mode is NOT included and stays behind set_lxc_config\'s risk gate. Waits briefly for a DHCP lease and returns the same detail as get_lxc_container. Requires confirm: true.',
+    description: 'Create a new LXC/Incus guest as a setup-engine job (the runner launches it from a validated plan and reads it back as Running; a failed launch removes the half-created guest). Creation-only, so inherently non-destructive: fails if the name already exists, never replaces. docker_ready (default true) sets security.nesting plus the syscall intercepts Docker needs at birth, so the keyring/nesting failures do not occur on new guests — privileged containers are refused; use type=virtual-machine for a separate guest kernel. Waits briefly for a DHCP lease and returns the same detail as get_lxc_container. Requires confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {
+        type: { type: 'string', enum: ['container','virtual-machine'], description: 'Defaults to unprivileged container. Use virtual-machine for full Docker compatibility or stronger isolation.' },
         name: { type: 'string', description: 'Guest name (ProxyPilot adds its pp- prefix). Fails if taken.' },
         image: { type: 'string', description: 'Incus image alias, default images:debian/12.' },
         cpu: { type: 'number', description: 'vCPU limit, default 2.' },
@@ -1276,15 +1269,15 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'set_lxc_config',
-    description: 'Set one allowlisted Incus config key on a guest: security.nesting, security.privileged, limits.cpu, limits.memory, boot.autostart (the allowlist in lib/mcp-policy/lxc-config-allowlist.json is the source of truth — anything else, notably raw.lxc and device passthrough, is rejected). Runs as a setup-engine job under the guest\'s lease: takes an automatic snapshot before the write (the job reads it back first), sets the key and reads it back, and reports whether a restart is needed (job_id on the result). security.privileged=true additionally requires acknowledge_risk: true and returns the warning that container root becomes host root — prefer raising kernel.keys.* sysctls on the host for Docker keyring failures. Requires confirm: true.',
+    description: 'Set one allowlisted Incus config key on a guest: security.nesting, limits.cpu, limits.memory, boot.autostart (the allowlist in lib/mcp-policy/lxc-config-allowlist.json is the source of truth — anything else, notably raw.lxc and device passthrough, is rejected). Runs as a setup-engine job under the guest\'s lease: takes an automatic snapshot before the write (the job reads it back first), sets the key and reads it back, and reports whether a restart is needed (job_id on the result). In-place container privilege changes are refused; use a VM for workloads needing stronger isolation or full Docker compatibility. Requires confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {
         container: { type: 'string' },
-        key: { type: 'string', enum: ['security.nesting', 'security.privileged', 'limits.cpu', 'limits.memory', 'boot.autostart'] },
+        key: { type: 'string', enum: ['security.nesting', 'limits.cpu', 'limits.memory', 'boot.autostart'] },
         value: { type: 'string', description: 'New value, e.g. "true", "4", "8GB".' },
         confirm: { type: 'boolean', description: 'Must be true.' },
-        acknowledge_risk: { type: 'boolean', description: 'Required (true) only when setting security.privileged=true.' },
+        acknowledge_risk: { type: 'boolean', description: 'Legacy compatibility field; never authorizes privileged containers.' },
       },
       required: ['container', 'key', 'value', 'confirm'],
       additionalProperties: false,

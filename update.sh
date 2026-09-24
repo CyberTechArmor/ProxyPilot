@@ -1207,6 +1207,14 @@ REPOEOF
 fi
 log ""
 
+# Inventory is non-disruptive. An updater cannot infer application consistency,
+# secret transfer, or the downtime window needed for a privileged-LXC cutover.
+if command -v incus >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    if ! $SUDO_CMD node "$SCRIPT_DIR/scripts/guest-isolation-inventory.mjs" /var/lib/proxypilot/security/guest-isolation.json 2>&1 | tee -a "$LOG_FILE"; then
+        log "Guest isolation inventory failed; review guest isolation before migration. No guest was changed."
+    fi
+fi
+
 # Phase A host-side agent — in-place migration on existing deploys.
 #
 # install.sh installs the agent on fresh boxes; update.sh's job is to

@@ -1,3 +1,4 @@
+import { profileIsolationError } from '../guest-isolation.js';
 // The migration service: rows, tokens, the agent's job document, the event
 // stream, and the Incus-side work (trust token, rootfs-tar import, guest
 // creation, the fence). routes/migrations.js and the MCP `migration` family
@@ -131,7 +132,7 @@ export function createMigrationService({
     const clash = db().prepare(`SELECT id, status FROM migrations WHERE target_name = ? AND status NOT IN ('completed','failed','cancelled')`).get(incusName);
     if (clash) return { error: `migration ${clash.id} is already running against ${incusName} (${clash.status}) — cancel it first` };
     const exists = await exec('incus', ['config', 'show', incusName], { timeoutMs: 30000 });
-    if (exists.status === 0 && spec.mode === 'whole-machine') return { error: `the guest ${incusName} already exists — a migration never overwrites a guest; pick another name` };
+    if (exists.status === 0) return { error: `the guest ${incusName} already exists — a migration never overwrites a guest; pick another name` };
 
     const minted = mintMigrationToken({ ttlSeconds, now: now() });
     const pin = await tlsPin();
@@ -644,14 +645,18 @@ export function createMigrationService({
 
   /** Create the empty guest an application-mode migration copies into. */
   async function ensureApplicationGuest(row, spec) {
-    const existing = await exec('incus', ['config', 'show', row.target_name], { timeoutMs: 30000 });
-    if (existing.status === 0) {
-      event(row.id, { kind: 'log', message: `guest ${row.target_name} already exists — reusing it` });
-      db().prepare('UPDATE migrations SET guest_created = 0 WHERE id = ?').run(row.id);
-      return { existed: true };
-    }
+    const existing = await exec('incus', ['list', row.target_name, '--format', 'json'], { timeoutMs: 30000 });
+    let instances; try { instances = JSON.parse(existing.stdout); } catch { /* refused below */ }
+    if (existing.status !== 0 || !Array.isArray(instances)) return { error: 'Cannot verify the migration target is absent' };
+    if (instances.some(i => i.name === row.target_name)) return { error: 'Target already exists; review the interrupted migration before retrying. No existing guest was reused or overwritten.' };
+    const profile = await exec('incus', ['profile', 'show', 'default', '--format', 'json'], { timeoutMs: 15000 });
+    let parsedProfile; try { parsedProfile = JSON.parse(profile.stdout); } catch { /* refused below */ }
+    const isolationError = profile.status === 0 ? profileIsolationError(parsedProfile) : 'Cannot read launch profile';
+    if (isolationError) return { error: isolationError };
     const cfg = guestConfig(spec, { prefix: '' });
     const argv = ['launch', spec.app?.image || 'images:debian/13', row.target_name];
+    if (spec.type === 'virtual-machine') argv.push('--vm');
+    else argv.push('--config', 'security.privileged=false');
     if (spec.pool) argv.push('--storage', spec.pool);
     if (spec.network) argv.push('--network', spec.network);
     for (const [k, v] of Object.entries(cfg.config)) argv.push('--config', `${k}=${v}`);
@@ -660,7 +665,8 @@ export function createMigrationService({
     if (r.status !== 0) return { error: `could not create ${row.target_name}: ${tail(r.stderr) || `exit ${r.status}`}` };
     event(row.id, { kind: 'log', message: `created guest ${row.target_name} (${spec.app?.image})` });
     db().prepare('UPDATE migrations SET guest_created = 1 WHERE id = ?').run(row.id);
-    await fenceGuest(row);
+    const fenced = await fenceGuest(row);
+    if (fenced?.error) return { error: fenced.error };
     return { created: true };
   }
 
@@ -996,6 +1002,10 @@ export function createMigrationService({
     }
     if (imp.status !== 0) return { error: `incus image import failed: ${tail(imp.stderr) || `exit ${imp.status}`}` };
 
+    const profile = await exec('incus', ['profile', 'show', 'default', '--format', 'json'], { timeoutMs: 15000 });
+    let parsedProfile; try { parsedProfile = JSON.parse(profile.stdout); } catch { /* refused below */ }
+    const isolationError = profile.status === 0 ? profileIsolationError(parsedProfile) : 'Cannot read launch profile';
+    if (isolationError) return { error: isolationError };
     const cfg = guestConfig(spec, { prefix: '' });
     const argv = ['init', alias, row.target_name];
     if (spec.pool) argv.push('--storage', spec.pool);

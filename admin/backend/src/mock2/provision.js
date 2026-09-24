@@ -1,3 +1,4 @@
+import { profileIsolationError } from '../lib/guest-isolation.js';
 // Mock2 project provisioning + lifecycle host jobs (Phase M2 + M3).
 //
 // Mirrors the LXC create pattern (routes/lxc.js: 202 + in-memory progress map +
@@ -281,6 +282,11 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   const failLifecycle = rehydrate ? 'archived' : 'failed_provisioning';
   const bail = (reason) => fail(project, reason, { lifecycle: failLifecycle });
 
+  const profileRead = await sh('incus profile show default --format json', { timeoutMs: 15000 });
+  let profile; try { profile = JSON.parse(profileRead.stdout); } catch { /* refuse below */ }
+  const isolationError = profileRead.code === 0 ? profileIsolationError(profile) : 'Cannot verify default profile';
+  if (isolationError) return bail(isolationError);
+
   // Idempotency: clear any stale container of this name (a prior failed
   // attempt, or a leftover) so the sequence can always start clean. No-op if
   // absent. On rehydrate the container was destroyed at archive, so this is a
@@ -308,7 +314,7 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
 
   // ---- Launch the container, NIC pinned to the project bridge ----
   setStatus(projectId, { phase: 'launch', message: `${rehydrate ? 'Rehydrating' : 'Provisioning'}: launching container…` });
-  const launch = await sh(`incus launch ${image} ${containerName} --network ${bridgeName}`, { timeoutMs: 300000 });
+  const launch = await sh(`incus launch ${image} ${containerName} --network ${bridgeName} --config security.privileged=false`, { timeoutMs: 300000 });
   if (launch.code !== 0) return bail(`container launch failed: ${(launch.stderr || '').trim().slice(-500)}`);
 
   // ---- Wait for a bridge IP ----

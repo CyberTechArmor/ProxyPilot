@@ -1,3 +1,4 @@
+import { profileIsolationError, guestIsolation } from '../guest-isolation.js';
 // Setup engine — the Incus lifecycle and snapshot verbs as ONE operation
 // (A-17.2 … A-17.5), over the HOST executor: argv arrays to `incus`, rendered
 // by lifecycle-logic.js from a validated plan, never a shell string and never
@@ -76,6 +77,12 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
   const what = prof.target === 'snapshot' ? `snapshot ${snap} of ${name}` : name;
   const resumed = !!(prior && prior.lifecycle === true);
   const issuedBefore = resumed && prior.issued === true;
+
+  if (kind === 'instance_create' && !issuedBefore) {
+    const profile = await host(['incus', 'profile', 'show', p.profile || 'default', '--format', 'json'], { timeoutMs: 15000 });
+    const bad = profile.code === 0 ? profileIsolationError(safeJson(profile.stdout)) : 'Cannot read the launch profile';
+    if (bad) return fail('isolation', bad, { refused: true });
+  }
 
   // 1) query and bind before anything.
   job.fence({ safe: true });
@@ -183,12 +190,15 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
   }
   if (!verdict.ok) return fail('verify', `incus ${kind.replace('_', ' ')} exited ${issue.code} but ${what} reads ${verdict.observed}, not ${verdict.expected}; not claiming success`, { issued: true, instanceState: verdict.observed, identity, verification: lifecycleVerification(kind, verdict, { container: name, snapshot: snap }) });
 
+  if (kind === 'instance_create') {
+    const isolation = guestIsolation(after.instance);
+    if (isolation.migration_required || isolation.review_required || (p.vm === true && isolation.type !== 'virtual-machine')) {
+      return fail('isolation', 'Created guest failed isolation read-back; do not publish it', { issued: true, isolation });
+    }
+  }
+
   // 5) the best-effort extras a create / snapshot carries, never a failure.
   const warnings = [];
-  if (kind === 'instance_create' && p.rootSize) {
-    const d = await host(rootSizeArgv(name, p.rootSize), { timeoutMs: 30_000 });
-    if (d.code !== 0) warnings.push(`root disk size could not be set (${tailOf(d, 200)}) — the profile default applies`);
-  }
   if (kind === 'snapshot_create' && p.note) {
     const n = await host(snapshotNoteArgv(name, snap, p.note), { timeoutMs: 10_000 });
     if (n.code !== 0) warnings.push(`the note could not be recorded on the snapshot (${tailOf(n, 200)})`);

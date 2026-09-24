@@ -1,3 +1,5 @@
+import { sizeBytes } from '../guest-isolation.js';
+import { vmDiskArgv, filesystemGrown } from './vm-disk-growth.js';
 // Setup engine — the guest configuration verbs as ONE operation (A-17.8),
 // over the host executor's argv channel: `incus config …` and the firewall
 // CLI, rendered by config-logic.js from a validated plan, never a shell
@@ -160,6 +162,27 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
       if (!m2.ok) return fail('target', `${name} changed since this job's interrupted attempt bound it (${m2.why}); refusing to continue — nothing further was issued`, { refused: true, instanceState: inst.status || null, identity });
     }
   }
+  if (kind === 'config_set' && p.rootSize != null) {
+    const desired = sizeBytes(p.rootSize);
+    let current = sizeBytes(priorRootSize(inst));
+    if (inst.type === 'virtual-machine') {
+      if (inst.status !== 'Running') return fail('preflight', 'Start the VM before growing its disk so the guest filesystem can be verified', { refused: true });
+      const probe = await run(vmDiskArgv(name), { timeoutMs: 15000 });
+      let facts; try { facts = JSON.parse(probe.stdout); } catch { /* refuse below */ }
+      if (probe.code !== 0 || !Number.isSafeInteger(facts?.disk_bytes)) return fail('preflight', `Cannot verify the VM root layout: ${tailOf(probe, 300)}`, { refused: true });
+      current ??= facts.disk_bytes;
+    }
+    if (!current || desired < current) return fail('preflight', 'Disk shrinking or an unknown current size requires reprovisioning onto a new disk; no disk was changed', { refused: true });
+    if (desired > current) {
+      const root = (inst.expanded_devices || inst.devices || {}).root;
+      if (!root?.pool) return fail('preflight', 'Cannot verify the storage pool before growth', { refused: true });
+      const capacity = await run(['incus','query',`/1.0/storage-pools/${encodeURIComponent(root.pool)}/resources`], { timeoutMs: 15000 });
+      let space; try { space = JSON.parse(capacity.stdout).space; } catch { /* refuse below */ }
+      const reserve = Math.max(2 * 1024**3, Number(space?.total) * 0.1);
+      if (capacity.code !== 0 || !Number.isFinite(space?.used) || !Number.isFinite(space?.total) || space.total - space.used < desired - current + reserve)
+        return fail('preflight', 'Insufficient verified pool space: growth must leave at least 10% or 2 GiB free', { refused: true });
+    }
+  }
   const previous = resumed && prior.previous ? prior.previous : priorState(kind, p, inst);
   const cp = (extra = {}) => ({ config: true, resumable: true, disruptive: false, kind, container: name, target: identity, previous, writeBegun: writeBegun || issuedAny, ...extra });
   try {
@@ -172,7 +195,7 @@ export async function runConfigOperation({ kind, params, exec, job = noopJob(), 
   // whole state already holds ends here with nothing issued and no
   // snapshot — there is nothing to protect.
   const instance = async () => { const r = await list(); if (r.error) throw new ReadBackError(r.error); return r.instance; };
-  const steps = buildSteps(kind, p, { name, run, instance, reservedPath, store: deps.forwardStore || null });
+  const steps = buildSteps(kind, p, { name, run, instance, vm: inst?.type === 'virtual-machine', reservedPath, store: deps.forwardStore || null });
   const applied = resumed && prior.applied && typeof prior.applied === 'object' ? { ...prior.applied } : {};
   let stopped = null;
   let allHold = true;
@@ -412,7 +435,7 @@ function rowVerdict(row, f, serviceId) {
 }
 
 // buildSteps(kind, p, io) → [{ key, label, required?, check() → { ok, observed, extra?, … }, issue(before) → result, refuse?(before), refuseAlready?(before) }]
-function buildSteps(kind, p, { name, run, instance, reservedPath, store }) {
+function buildSteps(kind, p, { name, run, instance, vm, reservedPath, store }) {
   const incus = (argv) => run(argv, { timeoutMs: TIMEOUTS.incus });
   const fw = (argv) => run(argv, { timeoutMs: TIMEOUTS.firewall });
   // The applied-policy step every firewall kind ends with: the recorded
@@ -443,6 +466,15 @@ function buildSteps(kind, p, { name, run, instance, reservedPath, store }) {
         key: 'root.size', label: `set the root disk size to ${p.rootSize}`,
         check: async () => { const v = rootSizeVerdict(await instance(), p.rootSize); return { ok: v.ok, observed: v.observed == null ? '(unset)' : `size=${v.observed}` }; },
         issue: async () => { const r = await incus(rootSizeOverrideArgv(name, p.rootSize)); if (r.code !== 0 && /already exists|already has|instance-level|already overrid/i.test(r.stderr || '')) return incus(rootSizeSetArgv(name, p.rootSize)); return r; },
+      });
+      if (p.rootSize != null && vm) steps.push({
+        key: 'root.filesystem', label: 'grow and verify the VM root partition and filesystem',
+        check: async () => {
+          const r = await run(vmDiskArgv(name), { timeoutMs: 15000 });
+          let facts; try { facts = JSON.parse(r.stdout); } catch { /* mismatch */ }
+          return { ok: r.code === 0 && filesystemGrown(facts, p.rootSize), observed: facts ? JSON.stringify(facts) : 'guest filesystem unreadable' };
+        },
+        issue: () => run(vmDiskArgv(name, 'grow'), { timeoutMs: 120000 }),
       });
       return steps;
     }

@@ -831,20 +831,10 @@ test('validateLxcConfigChange: allowlisted keys pass with their gates', () => {
   assert.ok(validateLxcConfigChange('security.nesting', 'yes', {}, CFG_POLICY).error);
 });
 
-test('validateLxcConfigChange: privileged=true needs acknowledge_risk and carries the warning', () => {
-  const refused = validateLxcConfigChange('security.privileged', 'true', {}, CFG_POLICY);
-  assert.match(refused.error, /acknowledge_risk/);
-  assert.match(refused.error, /host root/);
-
-  const ok = validateLxcConfigChange('security.privileged', 'true', { acknowledgeRisk: true }, CFG_POLICY);
-  assert.equal(ok.error, undefined);
-  // The warning rides on SUCCESS too — the tool presents the trade-off, it
-  // does not just apply the flip.
-  assert.match(ok.warning, /host root/);
-  // Turning privileged OFF needs no acknowledgement.
-  const off = validateLxcConfigChange('security.privileged', 'false', {}, CFG_POLICY);
-  assert.equal(off.error, undefined);
-  assert.equal(off.warning, null);
+test('validateLxcConfigChange refuses in-place privilege changes even with risk acknowledgement', () => {
+  for (const value of ['true', 'false']) {
+    assert.match(validateLxcConfigChange('security.privileged', value, { acknowledgeRisk: true }, CFG_POLICY).error, /cannot be changed in place/);
+  }
 });
 
 test('validateLxcConfigChange: non-allowlisted keys are rejected, dangerous ones with their rationale', () => {

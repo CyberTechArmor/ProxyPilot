@@ -76,7 +76,7 @@ const inst = (over = {}) => ({
   name: 'pp-x', status: 'Running', created_at: '2026-09-01T10:00:00Z',
   config: { 'volatile.uuid': UUID_A, 'limits.cpu': '2', 'limits.memory': '2048MB', 'user.api_token': TOKEN },
   devices: { data: { type: 'disk', source: '/srv/shares/data', path: '/data', 'raw.mount.options': TOKEN } },
-  expanded_devices: { root: { type: 'disk', path: '/', pool: 'default' }, eth0: { type: 'nic', network: 'incusbr0' }, data: { type: 'disk', source: '/srv/shares/data', path: '/data' } },
+  expanded_devices: { root: { type: 'disk', path: '/', pool: 'default', size: '20GiB' }, eth0: { type: 'nic', network: 'incusbr0' }, data: { type: 'disk', source: '/srv/shares/data', path: '/data' } },
   snapshots: [], state: { network: { eth0: { addresses: [{ family: 'inet', address: '10.10.10.5', scope: 'global' }] } } },
   ...over,
 });
@@ -85,7 +85,7 @@ const exec = (h, g = scriptedGuest({})) => ({ guest: g.guest, host: h.host });
 function clock(start = T0) { const c = { t: start }; c.nowMs = () => c.t; c.sleep = async (ms) => { c.t += ms; }; c.tick = (ms) => { c.t += ms; }; return c; }
 // heartbeat: false — a runner heartbeat stamped with the fake clock would read as a live runner to a caller on the real clock.
 const runAll = (d, ex, c, opts = {}) => runOnce({ db: d, owner: opts.owner || RUNNER, exec: ex, reviewLogin: async () => LOGIN, nowMs: c.nowMs, sleep: c.sleep, keepAliveMs: opts.keepAliveMs || 60_000, reservedPortsPath: opts.reservedPortsPath || null, heartbeat: false, log: () => {} }, { reconcileFirst: false, ...opts });
-const READS = (a) => (a[0] === 'incus' && a[1] === 'list') || (a[0] === PROXYPILOT_BIN && (a[3] === 'list' || a[3] === 'status' || (a[3] === 'reconcile' && a[4] === '--dry-run') || (a[3] === 'egress' && a[4] === 'list'))) || a[0] === 'cat' || (a[0] === 'sysctl' && a[1] === '-n');
+const READS = (a) => (a[0] === 'incus' && ['list','query'].includes(a[1])) || (a[0] === PROXYPILOT_BIN && (a[3] === 'list' || a[3] === 'status' || (a[3] === 'reconcile' && a[4] === '--dry-run') || (a[3] === 'egress' && a[4] === 'list'))) || a[0] === 'cat' || (a[0] === 'sysctl' && a[1] === '-n');
 const mutations = (h) => h.calls.filter((a) => !READS(a));
 const submit = (d, kind, params, extra = {}) => submitRunnerJob(d, { kind, app: params.container, params, nowMs: T0, ...extra });
 const cps = (d, id) => listEvents(d, id).filter((e) => e.kind === 'checkpoint').map((e) => e.phase);
@@ -105,7 +105,7 @@ test('registry: the seven configuration kinds are runner jobs, mutating and excl
   for (const k of KINDS_FROM_CONFIG) { assert.ok(RUNNER_JOB_KINDS.includes(k)); assert.ok(MUTATING_JOB_KINDS.includes(k)); assert.ok(EXCLUSIVE_JOB_KINDS.includes(k), `${k} is refused, never queued behind`); }
   assert.deepEqual([...FIREWALL_KINDS], ['forward_apply', 'forward_remove', 'egress_set']); assert.equal(HOST_FIREWALL_LOCK, '@host/firewall');
   assert.deepEqual([...SNAPSHOT_KINDS], ['config_set', 'device_add', 'device_remove', 'network_pin']);
-  assert.deepEqual(Object.keys(CONFIG_KEY_ALLOWLIST).sort(), ['boot.autostart', 'limits.cpu', 'limits.memory', 'security.nesting', 'security.privileged']);
+  assert.deepEqual(Object.keys(CONFIG_KEY_ALLOWLIST).sort(), ['boot.autostart', 'limits.cpu', 'limits.memory', 'security.nesting']);
   const mcpPolicy = JSON.parse(readFileSync(new URL('../lib/mcp-policy/lxc-config-allowlist.json', import.meta.url), 'utf8'));
   assert.deepEqual(Object.keys(mcpPolicy.keys).sort(), Object.keys(CONFIG_KEY_ALLOWLIST).sort(), 'the runner allowlist names exactly the MCP policy\'s keys');
   const pol = loadDevicePolicy();
@@ -116,7 +116,7 @@ test('validation is strict: allowlisted keys and shapes, the risk acknowledgemen
   const ok = (k, p) => assert.deepEqual(validateConfigParams(k, p), { ok: true }, `${k} ${JSON.stringify(p)}`);
   const bad = (k, p, re) => assert.match(validateConfigParams(k, p).reason, re, `${k} ${JSON.stringify(p)}`);
   ok('config_set', { container: 'pp-x', changes: [{ key: 'limits.cpu', value: '4' }, { key: 'limits.memory', value: '4096MB' }], rootSize: '20GiB', snapshot: { name: 'pp-mcp-pre-resources-x' }, expect: IDENTITY, retryOf: 'job-1' });
-  ok('config_set', { container: 'pp-x', changes: [{ key: 'security.privileged', value: 'true' }], acknowledgeRisk: true });
+  bad('config_set', { container: 'pp-x', changes: [{ key: 'security.privileged', value: 'true' }], acknowledgeRisk: true }, /privilege in place is disabled/);
   ok('config_set', { container: 'pp-x', changes: [{ key: 'limits.memory', value: '1.5gb' }] });
   ok('device_add', { container: 'pp-x', device: 'shared', deviceType: 'disk', props: { source: '/srv/shares/media', path: '/mnt/media', readonly: 'true' }, snapshot: { name: 's' } });
   ok('device_add', { container: 'pp-x', device: 'web', deviceType: 'proxy', props: { listen: 'tcp:0.0.0.0:8080', connect: 'tcp:127.0.0.1:80' } });
@@ -131,7 +131,7 @@ test('validation is strict: allowlisted keys and shapes, the risk acknowledgemen
   bad('config_set', { container: 'pp-x', changes: [{ key: 'raw.lxc', value: 'lxc.mount.entry=/ host none bind' }] }, /not on the configuration allowlist/);
   bad('config_set', { container: 'pp-x', changes: [{ key: 'limits.memory', value: '4 GB; rm -rf /' }] }, /not an accepted value/);
   bad('config_set', { container: 'pp-x', changes: [{ key: 'limits.cpu', value: '4' }, { key: 'limits.cpu', value: '8' }] }, /given twice/);
-  bad('config_set', { container: 'pp-x', changes: [{ key: 'security.privileged', value: 'true' }] }, /requires acknowledgeRisk: true/);
+  bad('config_set', { container: 'pp-x', changes: [{ key: 'security.privileged', value: 'true' }] }, /privilege in place is disabled/);
   bad('config_set', { container: 'pp-x', changes: [{ key: 'limits.cpu', value: '4' }], rootSize: '20' }, /rootSize/);
   bad('config_set', { container: 'pp-x', changes: [{ key: 'limits.cpu', value: '4' }], snapshot: { name: 'bad name' } }, /snapshot name/);
   bad('config_set', { container: 'pp-x', changes: [{ key: 'limits.cpu', value: '4' }], snapshot: { name: 's', created_at: 'x' } }, /not a plan field/);
@@ -268,7 +268,7 @@ test('config_set: the keys and the root size are set one by one, each read back;
   assert.equal(row.outcome, 'configured'); assert.match(row.reason, /config:limits\.cpu done, config:limits\.memory done, root\.size done/);
   const r = resultFromJob(row);
   assert.equal(r.ok, true); assert.equal(r.step, 'configured'); assert.equal(r.instanceState, 'Running');
-  assert.deepEqual(r.previous, { config: { 'limits.cpu': '2', 'limits.memory': '2048MB' }, rootSize: null });
+  assert.deepEqual(r.previous, { config: { 'limits.cpu': '2', 'limits.memory': '2048MB' }, rootSize: '20GiB' });
   assert.deepEqual(Object.fromEntries(Object.entries(r.applied).map(([k, a]) => [k, a.state])), { 'config:limits.cpu': 'done', 'config:limits.memory': 'done', 'root.size': 'done' });
   assert.equal(r.snapshot, null, 'no snapshot was asked for (the dashboard contract)');
   assert.equal(readLock(d, 'pp-x'), null, 'lease released');
@@ -286,7 +286,7 @@ test('config_set: the keys and the root size are set one by one, each read back;
 
 test('config_set with the snapshot: taken and read back BEFORE the first write (recorded as generated, the coverage naming the custom volume); a snapshot that fails changes nothing; a snapshot already there that this request did not take is refused', async () => {
   const d = db(); const c = clock();
-  const st = { instances: [inst({ expanded_devices: { root: { type: 'disk', path: '/', pool: 'default' }, vol: { type: 'disk', pool: 'default', source: 'vol1', path: '/var/lib/data' } } })] }; const h = scriptedHost(st);
+  const st = { instances: [inst({ expanded_devices: { root: { type: 'disk', path: '/', pool: 'default', size: '20GiB' }, vol: { type: 'disk', pool: 'default', source: 'vol1', path: '/var/lib/data' } } })] }; const h = scriptedHost(st);
   const sub = submit(d, 'config_set', { container: 'pp-x', changes: [{ key: 'security.nesting', value: 'true' }], snapshot: { name: 'pp-mcp-pre-security_nesting-20260926-120000' }, expect: IDENTITY });
   await runAll(d, exec(h), c);
   const row = getJob(d, sub.job.id); assert.equal(row.status, 'succeeded', row.reason);
@@ -735,7 +735,7 @@ test('MCP set_lxc_resources / add_lxc_device / remove_lxc_device: dry_run and th
   const done = parse(await tools.set_lxc_resources({ container: 'x', cpu: 4, memory_mb: 4096, disk_gb: 40, confirm: true }, AUTH));
   assert.deepEqual(done.applied, ['limits.cpu=4', 'limits.memory=4096MiB', 'root.size=40GiB'], JSON.stringify(done));
   assert.equal(done.snapshot, 'pp-mcp-pre-resources-20260926-120000'); assert.match(done.snapshot_covers, /root disk and configuration only/); assert.equal(done.verified, true); assert.ok(done.job_id);
-  assert.deepEqual(done.previous, { config: { 'limits.cpu': '2', 'limits.memory': '2048MB' }, rootSize: null });
+  assert.deepEqual(done.previous, { config: { 'limits.cpu': '2', 'limits.memory': '2048MB' }, rootSize: '20GiB' });
   assert.deepEqual(mutations(h), [['incus', 'snapshot', 'create', 'pp-x', 'pp-mcp-pre-resources-20260926-120000'], ['incus', 'config', 'set', 'pp-x', 'limits.cpu', '4'], ['incus', 'config', 'set', 'pp-x', 'limits.memory', '4096MiB'], ['incus', 'config', 'device', 'override', 'pp-x', 'root', 'size=40GiB']]);
   assert.deepEqual(hostCalls, [], 'the tool itself issues nothing on the host');
   const job = getJob(d, done.job_id); assert.equal(job.kind, 'config_set'); assert.equal(job.via, 'mcp'); assert.deepEqual(parseJson(job.plan_json).params.expect, IDENTITY);

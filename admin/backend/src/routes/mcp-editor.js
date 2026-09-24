@@ -35,7 +35,9 @@
 //      very next call rather than when something expires.
 
 import express from 'express';
-import { logAudit } from '../db.js';
+import { getDb, logAudit } from '../db.js';
+import { editorAuthorityError, EDITOR_KEY_DAYS, EDITOR_KEY_MAX_DAYS } from '../lib/editor-key-lifecycle.js';
+import { localProofRefusal, requestOrigin } from '../lib/sso/sessions.js';
 import { requireAdmin } from '../middleware/auth.js';
 import {
   rpcResult, rpcError, toolResult,
@@ -111,6 +113,10 @@ function authenticate(req, pathToken) {
   if (key.revoked_at) {
     return { status: 403, key, error: authRejection('revoked', key.container_name) };
   }
+  let owner;
+  try { owner = getDb().prepare('SELECT role FROM users WHERE id=?').get(key.created_by); } catch { /* fail closed */ }
+  const authorityError = editorAuthorityError(key, owner);
+  if (authorityError) return { status: 403, key, error: authorityError };
   const activation = getActivation(key.container_name);
   if (!activation || !activation.active) {
     return { status: 403, key, error: authRejection('suspended', key.container_name) };
@@ -485,8 +491,15 @@ function shapeKey(row, { activationActive, containerExists }) {
     created_at: row.created_at,
     last_used_at: row.last_used_at,
     revoked_at: row.revoked_at,
-    status: keyStatus(row, { activationActive, containerExists }),
+    expires_at: row.expires_at,
+    status: keyStatus(row, { activationActive, containerExists }) === 'active' && editorAuthorityError(row, getDb().prepare('SELECT role FROM users WHERE id=?').get(row.created_by)) ? 'owner_disabled' : keyStatus(row, { activationActive, containerExists }),
   };
+}
+
+function requireEditorProof(req, res, next) {
+  const refusal = localProofRefusal(getDb(), req.user.jti, requestOrigin(req), 'Delegated editor authority changes');
+  if (refusal) return res.status(refusal.status).json(refusal.body);
+  next();
 }
 
 export function createEditorAdminRouter() {
@@ -533,7 +546,7 @@ export function createEditorAdminRouter() {
   // Activate / deactivate, and set the editable root. Activation cannot
   // complete without a docroot (setActivation enforces it); deactivating
   // suspends every key for this container at once and is reversible.
-  router.put('/:container/activation', requireAdmin, async (req, res) => {
+  router.put('/:container/activation', requireAdmin, requireEditorProof, async (req, res) => {
     const name = String(req.params.container);
     if (!LXC_NAME_REGEX.test(name)) return res.status(400).json({ error: 'Invalid container name' });
     const exists = await lxcContainerExists(name);
@@ -554,7 +567,7 @@ export function createEditorAdminRouter() {
 
   // Mint a key. The plaintext token — and the ready-to-paste connector URL —
   // is in this response and nowhere else, ever again.
-  router.post('/:container/keys', requireAdmin, async (req, res) => {
+  router.post('/:container/keys', requireAdmin, requireEditorProof, async (req, res) => {
     const name = String(req.params.container);
     if (!LXC_NAME_REGEX.test(name)) return res.status(400).json({ error: 'Invalid container name' });
     // A key may only ever be created for a container that exists RIGHT NOW.
@@ -569,7 +582,9 @@ export function createEditorAdminRouter() {
     const label = String(req.body?.label || '').trim().slice(0, 120);
     if (!label) return res.status(400).json({ error: 'A label is required — it is how you will recognise this key later.' });
 
-    const { token, row } = createEditorKey({ containerName: name, label, createdBy: req.user.id });
+    const expiresDays = req.body?.expires_days ?? EDITOR_KEY_DAYS;
+    if (!Number.isInteger(expiresDays) || expiresDays < 1 || expiresDays > EDITOR_KEY_MAX_DAYS) return res.status(400).json({ error: `Expiry must be 1–${EDITOR_KEY_MAX_DAYS} days` });
+    const { token, row } = createEditorKey({ containerName: name, label, createdBy: req.user.id, expiresDays });
     logAudit(req.user.id, 'LXC_EDITOR_KEY_CREATED', 'lxc', name, {
       key_id: row.id, label, token_prefix: row.token_prefix, docroot: activation.docroot,
     }, req.ip);

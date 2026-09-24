@@ -1,3 +1,4 @@
+import { utcTimestamp } from '../lib/utc-time.js';
 import { getDb } from '../db.js';
 import { getUserPermissions } from './auth.js';
 import { requireLocalProof } from '../lib/sso/sessions.js';
@@ -28,7 +29,7 @@ export function terminalDecision({ user, session, target, origin, opening = fals
         session.linkOnly || session.enrollmentOnly || user.linkOnly || user.enrollmentOnly) return false;
     const identity = { ...user, role: current.role };
     if (target.kind === 'host') {
-      if (current.role !== 'admin' || !(Date.parse(session.sudo_until) > Date.now())) return false;
+      if (current.role !== 'admin' || !(utcTimestamp(session.sudo_until) > Date.now())) return false;
       if (opening) requireLocalProof(getDb(), user.jti, origin);
       return true;
     }

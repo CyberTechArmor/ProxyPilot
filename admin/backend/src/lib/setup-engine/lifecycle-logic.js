@@ -1,3 +1,4 @@
+import { unsafeGuestConfig } from '../guest-isolation.js';
 // Setup engine — the PURE layer of the Incus lifecycle and snapshot jobs
 // (platform ledger A-17.2 … A-17.5): which kinds exist, what parameters each
 // accepts, the FIXED host command each renders, what state each expects
@@ -42,12 +43,11 @@ export const NOTE_MAX = 500;
 // after birth through the config verbs and their own allowlist.
 export const LAUNCH_CONFIG_ALLOWLIST = Object.freeze({
   'security.nesting': /^(true|false)$/,
-  'security.privileged': /^(true|false)$/,
+  'security.privileged': /^false$/,
   'security.syscalls.intercept.mknod': /^(true|false)$/,
   'security.syscalls.intercept.setxattr': /^(true|false)$/,
   'security.syscalls.intercept.bpf': /^(true|false)$/,
   'security.syscalls.intercept.bpf.devices': /^(true|false)$/,
-  'raw.lxc': /^lxc\.apparmor\.profile=unconfined$/,
   'limits.cpu': /^[1-9][0-9]{0,2}$/,
   'limits.memory': SIZE_RE,
   'boot.autostart': /^(true|false)$/,
@@ -122,6 +122,9 @@ export function validateLifecycleParams(kind, p = {}) {
     if (p.network != null && !NETWORK_NAME_RE.test(String(p.network))) return { ok: false, reason: 'network must be a bridge name' };
     if (!isBool(p.vm)) return { ok: false, reason: 'vm must be a boolean' };
     if (p.rootSize != null && !SIZE_RE.test(String(p.rootSize))) return { ok: false, reason: 'rootSize must be a size like 20GiB' };
+    const isolationError = unsafeGuestConfig(p.config);
+    if (isolationError) return { ok: false, reason: isolationError };
+    if (p.vm && Object.keys(p.config || {}).some(k => k.startsWith('security.'))) return { ok: false, reason: 'Container security flags do not apply to a VM' };
     if (p.config != null) {
       if (!isPlainObject(p.config)) return { ok: false, reason: 'config must be a map of allowlisted launch keys' };
       for (const [k, v] of Object.entries(p.config)) {
@@ -154,6 +157,8 @@ export function lifecycleArgv(kind, p, { snapshotForm = 'subcommand' } = {}) {
     case 'instance_create': {
       const argv = ['incus', 'launch', String(p.image), name, '--profile', String(p.profile || 'default')];
       for (const k of Object.keys(LAUNCH_CONFIG_ALLOWLIST)) if (p.config && p.config[k] != null) argv.push('--config', `${k}=${p.config[k]}`);
+      if (!p.vm && p.config?.['security.privileged'] == null) argv.push('--config', 'security.privileged=false');
+      if (p.rootSize) argv.push('--device', `root,size=${p.rootSize}`);
       if (p.network) argv.push('--network', String(p.network));
       if (p.vm === true) argv.push('--vm');
       return argv;

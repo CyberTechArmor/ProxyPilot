@@ -73,6 +73,7 @@ export function validateTarget(input = {}) {
   if (!transport) return { error: `transport must be one of ${TRANSPORTS.join(', ')} (or omitted, and it is derived from the mode)` };
   if (mode === 'application' && transport !== 'file-sync') return { error: 'application mode always transports with file-sync (tarballs through ProxyPilot into the guest)' };
   if (mode === 'whole-machine' && transport === 'file-sync') return { error: 'whole-machine mode transports with incus-migrate, or rootfs-tar for a Proxmox LXC' };
+  if (type === 'virtual-machine' && ['lxc', 'proxmox-lxc', 'container'].includes(sourceKind) && mode !== 'application') return { error: 'A container has no bootable VM disk; use application mode with a fresh VM image' };
   if (transport === 'rootfs-tar' && type !== 'container') return { error: 'rootfs-tar imports a container; a VM disk goes through incus-migrate' };
 
   const cpu = input.cpu == null ? 2 : intIn(input.cpu, 1, 128);
@@ -152,7 +153,8 @@ export function guestConfig(spec, { prefix = 'pp-' } = {}) {
     'limits.memory': `${spec.memory_gb}GB`,
     'boot.autostart': 'false',
   };
-  if (spec.nested) {
+  if (spec.type !== 'virtual-machine') cfg['security.privileged'] = 'false';
+  if (spec.nested && spec.type !== 'virtual-machine') {
     cfg['security.nesting'] = 'true';
     cfg['security.syscalls.intercept.mknod'] = 'true';
     cfg['security.syscalls.intercept.setxattr'] = 'true';

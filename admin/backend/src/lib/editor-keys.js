@@ -1,3 +1,4 @@
+import { EDITOR_KEY_DAYS, EDITOR_KEY_MAX_DAYS } from './editor-key-lifecycle.js';
 // Delegated editing — the store.
 //
 // Everything here touches the SQLite database (better-sqlite3), which is why
@@ -85,13 +86,14 @@ export function setActivation({ containerName, docroot, active, createdBy }) {
  * (this module cannot run incus), which is why containerName arrives already
  * verified.
  */
-export function createEditorKey({ containerName, label, createdBy }) {
+export function createEditorKey({ containerName, label, createdBy, expiresDays = EDITOR_KEY_DAYS }) {
+  if (!Number.isInteger(expiresDays) || expiresDays < 1 || expiresDays > EDITOR_KEY_MAX_DAYS) throw new Error(`Expiry must be 1–${EDITOR_KEY_MAX_DAYS} days`);
   const token = mintEditorToken();
   const t = nowIso();
   const r = getDb().prepare(`
     INSERT INTO lxc_editor_keys
-      (scope_type, container_name, label, token_hash, token_prefix, created_by, created_at)
-    VALUES ('lxc', ?, ?, ?, ?, ?, ?)
+      (scope_type, container_name, label, token_hash, token_prefix, created_by, created_at, expires_at)
+    VALUES ('lxc', ?, ?, ?, ?, ?, ?, ?)
   `).run(
     String(containerName),
     String(label || '').trim().slice(0, 120) || 'Delegated editor',
@@ -99,6 +101,7 @@ export function createEditorKey({ containerName, label, createdBy }) {
     editorTokenDisplayPrefix(token),
     createdBy ? String(createdBy) : null,
     t,
+    new Date(Date.now() + expiresDays * 86400000).toISOString(),
   );
   return { token, row: getEditorKey(Number(r.lastInsertRowid)) };
 }

@@ -385,7 +385,7 @@ export default function LxcContainers() {
   const [createForm, setCreateForm] = useState({
     name: '', image: '', type: 'container',
     cpu: '', memory: '', initScript: '',
-    dockerSupport: true, dockerPrivileged: true,
+    dockerSupport: false, dockerPrivileged: false,
     services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }],
   });
   // Optional git remote for a NEW container (mock2 target remotes): the app
@@ -606,7 +606,7 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', type: 'container', cpu: '', memory: '', initScript: '', dockerSupport: true, dockerPrivileged: true, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
+            setCreateForm({ name: '', image: '', type: 'container', cpu: '', memory: '', initScript: '', dockerSupport: false, dockerPrivileged: false, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
             setImageSelection('');
             setTemplateSelection('');
             if (status.initScriptWarning) {
@@ -772,6 +772,7 @@ export default function LxcContainers() {
       const limits = {};
       if (resizeForm.cpu) limits.cpu = parseInt(resizeForm.cpu, 10);
       if (resizeForm.memory) limits.memory = parseInt(resizeForm.memory, 10);
+      if (resizeForm.rootSize) limits.rootSize = resizeForm.rootSize;
       await api.resizeLxcContainer(selectedContainer.name, limits);
       toast({ title: 'Container resized', description: `Resource limits updated for ${selectedContainer.name}.` });
       setResizeOpen(false);
@@ -2355,10 +2356,10 @@ export default function LxcContainers() {
                             type="checkbox"
                             className="mt-0.5 cursor-pointer"
                             checked={createForm.dockerPrivileged}
-                            onChange={(e) => setCreateForm((f) => ({ ...f, dockerPrivileged: e.target.checked }))}
+                            onChange={(e) => setCreateForm((f) => ({ ...f, type: e.target.checked ? 'virtual-machine' : 'container', image: '', dockerSupport: false, dockerPrivileged: false }))}
                           />
                           <span className="text-xs text-muted-foreground">
-                            <span className="text-yellow-500">Privileged Docker (advanced)</span> — sets <code className="font-mono">security.privileged=true</code> <span className="text-foreground">and</span> <code className="font-mono">raw.lxc=lxc.apparmor.profile=unconfined</code>. Required for Docker images that touch sysctls during init (n8n, most node:N-alpine bases — the "open sysctl … reopen fd N: permission denied" runc error) and BuildKit syscalls like <code className="font-mono">spawn sh</code> with bcrypt-style native postinstalls. The container runs at host-root capability with no AppArmor profile — only enable on hosts where you trust everything inside this LXC.
+                            <span className="text-foreground">Use a VM for full Docker compatibility</span> — gives the workload its own kernel. Choose a VM image after switching. Privileged LXC and unconfined AppArmor are no longer offered.
                           </span>
                         </label>
                       )}
@@ -2428,8 +2429,11 @@ export default function LxcContainers() {
               )}
             </DialogTitle>
             <DialogDescription>
-              Container details and management
+              Guest details and management
             </DialogDescription>
+            {selectedContainer?.isolation?.migration_required && (
+              <p className="text-sm text-amber-600 break-words">This legacy container needs VM migration. Keep it running while you stage an application migration to a new VM from Migrations. The update does not convert or stop it automatically.</p>
+            )}
           </DialogHeader>
           {selectedContainer && (
             <Tabs
@@ -3868,7 +3872,7 @@ export default function LxcContainers() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Cpu className="h-5 w-5 text-blue-500" />
-              Resize Container
+              Resize Guest
             </DialogTitle>
             <DialogDescription>
               Update resource limits for {selectedContainer?.name}.
@@ -3896,10 +3900,16 @@ export default function LxcContainers() {
               />
               {selectedContainer?.type === 'virtual-machine' && (
                 <p className="text-xs text-muted-foreground">
-                  VM memory changes apply on next boot. Use Reboot to apply now.
+                  CPU and memory changes may require a full VM restart when the guest cannot hotplug them.
                 </p>
               )}
             </div>
+          </div>
+          <div className="space-y-2 pb-2">
+            <Label htmlFor="resize-root">Root disk size (optional)</Label>
+            <Input id="resize-root" placeholder="100GiB" value={resizeForm.rootSize || ''}
+              onChange={(e) => setResizeForm(f => ({ ...f, rootSize: e.target.value }))} />
+            <p className="text-xs text-muted-foreground">Growth only. Supported VM partitions and filesystems expand automatically. Shrinking requires a new VM and data transfer.</p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setResizeOpen(false)} disabled={resizing}>

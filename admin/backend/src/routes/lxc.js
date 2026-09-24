@@ -1,3 +1,4 @@
+import { guestIsolation, sizeBytes } from '../lib/guest-isolation.js';
 import { multipartLimits } from '../lib/multipart-limits.js';
 import { Router } from 'express';
 import { exec, spawn } from 'child_process';
@@ -9,7 +10,9 @@ import { join } from 'path';
 import http from 'http';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
-import { requireGuestAccess } from '../middleware/terminal-access.js';
+import { lxcAccess } from '../middleware/lxc-access.js';
+import { networkConfigArgv } from '../lib/incus-network-policy.js';
+import { requireGuestAccess, canManageGuest } from '../middleware/terminal-access.js';
 import { requireSudo, requireAdminOrPermission } from '../middleware/auth.js';
 
 // Containers/routing surface: full admins always pass; regular users
@@ -45,7 +48,7 @@ import {
   findConflicts, collectCandidatePaths,
 } from '../lib/zip-extract.js';
 import {
-  writeTarFromZip, checkContainerConflicts, readContainerStartup,
+  runHostCapture, writeTarFromZip, checkContainerConflicts, readContainerStartup,
   applyTarToContainer, setupStartupScript,
 } from '../lib/lxc-zip.js';
 import {
@@ -234,10 +237,10 @@ function sleep(ms) {
 
 // Apply the containers/routing gate to all routes in this router
 lxcRouter.use(requireProxyAccess);
-lxcRouter.use('/containers/:name', requireGuestAccess);
+lxcRouter.use('/containers/:name/workspace', requireGuestAccess);
 
 // GET /status - Check if Incus is available on the host
-lxcRouter.get('/status', async (req, res) => {
+lxcRouter.get('/status', lxcAccess('GET', '/status'), async (req, res) => {
   try {
     const { stdout } = await execOnHost('incus version 2>/dev/null');
     const version = stdout.trim();
@@ -264,17 +267,18 @@ lxcRouter.get('/status', async (req, res) => {
 });
 
 // GET /containers - List all pp-* containers with their state
-lxcRouter.get('/containers', async (req, res) => {
+lxcRouter.get('/containers', lxcAccess('GET', '/containers'), async (req, res) => {
   try {
     const result = await execOnHost('incus list --format json');
     const all = JSON.parse(result.stdout || '[]');
     const containers = all
-      .filter(c => c.name.startsWith(INSTANCE_PREFIX))
+      .filter(c => c.name.startsWith(INSTANCE_PREFIX) && canManageGuest(req.user,c.name.slice(INSTANCE_PREFIX.length)))
       .map(c => ({
         name: c.name.replace(new RegExp(`^${INSTANCE_PREFIX}`), ''),
         incusName: c.name,
         status: c.status.toLowerCase(),
         type: c.type,
+        isolation: guestIsolation(c),
         architecture: c.architecture,
         created_at: c.created_at,
         image: c.config?.['image.description'] || c.config?.['image.os'] || '',
@@ -302,7 +306,7 @@ lxcRouter.get('/containers', async (req, res) => {
 // containers in the regular /containers endpoint would be a behaviour
 // change for the LXC management page; cleaner to expose a separate
 // listing here.
-lxcRouter.get('/all-containers', async (req, res) => {
+lxcRouter.get('/all-containers', lxcAccess('GET', '/all-containers'), async (req, res) => {
   try {
     const result = await execOnHost('incus list --format json');
     const all = JSON.parse(result.stdout || '[]');
@@ -332,7 +336,7 @@ lxcRouter.get('/all-containers', async (req, res) => {
 //
 // `name` is accepted both with and without the `pp-` prefix so the
 // UI can pass whatever it has on hand.
-lxcRouter.get('/containers/:name/cert-mounts', requireProxyAccess, async (req, res) => {
+lxcRouter.get('/containers/:name/cert-mounts', lxcAccess('GET', '/containers/:name/cert-mounts'), requireProxyAccess, async (req, res) => {
   try {
     const db = getDb();
     const incusName = req.params.name.startsWith(INSTANCE_PREFIX)
@@ -454,12 +458,12 @@ lxcRouter.get('/containers/:name/cert-mounts', requireProxyAccess, async (req, r
 // (docker-privileged, etc.) when the operator picks a VM target.
 // Reuses the same `incus list --format json` call + extract helpers
 // as GET /containers.
-lxcRouter.get('/containers/with-ip', async (req, res) => {
+lxcRouter.get('/containers/with-ip', lxcAccess('GET', '/containers/with-ip'), async (req, res) => {
   try {
     const result = await execOnHost('incus list --format json');
     const all = JSON.parse(result.stdout || '[]');
     const containers = all
-      .filter((c) => c.name.startsWith(INSTANCE_PREFIX))
+      .filter((c) => c.name.startsWith(INSTANCE_PREFIX) && canManageGuest(req.user,c.name.slice(INSTANCE_PREFIX.length)))
       .map((c) => ({
         name: c.name.replace(new RegExp(`^${INSTANCE_PREFIX}`), ''),
         status: c.status.toLowerCase(),
@@ -492,7 +496,7 @@ lxcRouter.get('/containers/with-ip', async (req, res) => {
 // instead. If neither field is set we conservatively report
 // container — that matches the historical behaviour where
 // everything was a CT.
-lxcRouter.get('/images', async (req, res) => {
+lxcRouter.get('/images', lxcAccess('GET', '/images'), async (req, res) => {
   try {
     const result = await execOnHost('incus image list --format json 2>/dev/null');
     const raw = JSON.parse(result.stdout);
@@ -544,25 +548,25 @@ export function deriveImageSupports(img) {
 // container name (the ordering bug an operator hit with
 // snapshot-export-queue).
 
-lxcRouter.get('/exports', async (req, res) => {
+lxcRouter.get('/exports', lxcAccess('GET', '/exports'), async (req, res) => {
   try {
     res.json({
       success: true,
-      exports: exportStore().list({ container: req.query.container ? String(req.query.container) : null }),
-      queue: exportStore().queueStatus(),
+      exports: exportStore().list({ container: req.query.container ? String(req.query.container) : null }).filter(row=>canManageGuest(req.user,row.container)),
+      queue: req.user.role==='admin' ? exportStore().queueStatus() : null,
     });
   } catch (e) {
     res.status(500).json({ success: false, error: e?.message || 'could not list prepared downloads' });
   }
 });
 
-lxcRouter.get('/exports/:id', (req, res) => {
+lxcRouter.get('/exports/:id', lxcAccess('GET', '/exports/:id'), (req, res) => {
   const row = exportStore().get(req.params.id);
   if (!row) return res.status(404).json({ success: false, error: 'no such prepared download' });
   res.json({ success: true, export: row });
 });
 
-lxcRouter.post('/exports', requireSudo, async (req, res) => {
+lxcRouter.post('/exports', lxcAccess('POST', '/exports'), requireSudo, async (req, res) => {
   try {
     const r = await exportStore().prepare({
       container: req.body?.container,
@@ -579,7 +583,7 @@ lxcRouter.post('/exports', requireSudo, async (req, res) => {
   }
 });
 
-lxcRouter.delete('/exports/:id', requireSudo, async (req, res) => {
+lxcRouter.delete('/exports/:id', lxcAccess('DELETE', '/exports/:id'), requireSudo, async (req, res) => {
   try {
     const r = await exportStore().remove(req.params.id, { actor: req.user?.id || null, ip: req.ip });
     if (r.error) return res.status(422).json({ success: false, error: r.error });
@@ -599,7 +603,7 @@ lxcRouter.delete('/exports/:id', requireSudo, async (req, res) => {
  * browser its own progress bar and let an interrupted download resume
  * instead of starting over.
  */
-lxcRouter.get('/exports/:id/download', async (req, res) => {
+lxcRouter.get('/exports/:id/download', lxcAccess('GET', '/exports/:id/download'), async (req, res) => {
   const store = exportStore();
   const open = await store.openForDownload(req.params.id);
   if (open.error) return res.status(open.error.includes('no such') ? 404 : 422).json({ success: false, error: open.error });
@@ -669,7 +673,7 @@ lxcRouter.get('/exports/:id/download', async (req, res) => {
  *     guest after a restore is the operator's call, not ours — and the guest
  *     is left STOPPED so nothing races before they make it.
  */
-lxcRouter.post('/exports/:id/restore', requireSudo, async (req, res) => {
+lxcRouter.post('/exports/:id/restore', lxcAccess('POST', '/exports/:id/restore'), requireSudo, async (req, res) => {
   const store = exportStore();
   const name = String(req.body?.name || '').trim();
   if (!validateName(name)) {
@@ -753,7 +757,7 @@ lxcRouter.post('/exports/:id/restore', requireSudo, async (req, res) => {
 // doesn't route 'snapshot-export-queue' into the per-container
 // info handler (which would 404 on incus info — the bug an
 // operator reported in the May 2026 review pass).
-lxcRouter.get('/containers/snapshot-export-queue', (req, res) => {
+lxcRouter.get('/containers/snapshot-export-queue', lxcAccess('GET', '/containers/snapshot-export-queue'), (req, res) => {
   try {
     res.json({ success: true, ...getSnapshotExportQueueStatus() });
   } catch (err) {
@@ -762,7 +766,7 @@ lxcRouter.get('/containers/snapshot-export-queue', (req, res) => {
 });
 
 // GET /containers/:name - Get detailed info for a container
-lxcRouter.get('/containers/:name', async (req, res) => {
+lxcRouter.get('/containers/:name', lxcAccess('GET', '/containers/:name'), async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {
@@ -787,7 +791,7 @@ lxcRouter.get('/containers/:name', async (req, res) => {
 });
 
 // GET /containers/:name/state - Get live resource state
-lxcRouter.get('/containers/:name/state', async (req, res) => {
+lxcRouter.get('/containers/:name/state', lxcAccess('GET', '/containers/:name/state'), async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {
@@ -837,7 +841,7 @@ lxcRouter.get('/containers/:name/state', async (req, res) => {
 // carries `has_local` (true when incus reports it on the pool)
 // plus an `s3_locations` array listing every destination the
 // snapshot is currently stored on.
-lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
+lxcRouter.get('/containers/:name/snapshots', lxcAccess('GET', '/containers/:name/snapshots'), async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {
@@ -955,7 +959,7 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
 // "shell quoting"). Don't retrofit existing JSON.stringify call
 // sites — it's out of scope for the VM session and the brief
 // explicitly says so.
-lxcRouter.post('/containers', async (req, res) => {
+lxcRouter.post('/containers', lxcAccess('POST', '/containers'), async (req, res) => {
   const { name, image, profile, domain, port, cpu, memory, initScript, dockerSupport, dockerPrivileged, services: rawServices } = req.body;
   // Instance kind. Defaults to 'container' to keep existing callers
   // (older frontend builds, scripted creates) working without a
@@ -963,7 +967,7 @@ lxcRouter.post('/containers', async (req, res) => {
   // never reach the launchCmd assembly as anything other than one of
   // these two literals.
   const rawType = req.body?.type;
-  const type = rawType === undefined || rawType === null ? 'container' : rawType;
+  const type = dockerPrivileged === true ? 'virtual-machine' : (rawType === undefined || rawType === null ? 'container' : rawType);
   if (type !== 'container' && type !== 'virtual-machine') {
     return res.status(400).json({
       success: false,
@@ -972,17 +976,8 @@ lxcRouter.post('/containers', async (req, res) => {
   }
   const isVm = type === 'virtual-machine';
 
-  // Docker-in-LXC syscall intercepts apply to LXCs only. Letting an
-  // operator submit dockerSupport=true with type=virtual-machine would
-  // either crash incus (--config security.syscalls.intercept.* on a VM
-  // is rejected by the daemon) or, worse, silently get ignored. Refuse
-  // up front so the operator gets a clear error.
-  if (isVm && (dockerSupport === true || dockerPrivileged === true)) {
-    return res.status(400).json({
-      success: false,
-      error: 'Docker-in-LXC syscall intercepts cannot be applied to a virtual machine.',
-    });
-  }
+  // Full Docker compatibility selects a VM. No container privilege flag is
+  // ever applied, including requests from older dashboard clients.
 
   // Normalize services: support both new multi-service array and legacy single domain/port.
   // healthPath is optional; bad input is dropped silently here (the create
@@ -1085,38 +1080,9 @@ lxcRouter.post('/containers', async (req, res) => {
   //   syscalls.intercept.bpf=true
   //   syscalls.intercept.bpf.devices=true
   //
-  // dockerPrivileged is the "I need full Docker compatibility" escape
-  // hatch: bundles three host-trust-loosening knobs that operators
-  // hit one after another otherwise.
-  //
-  //   security.privileged=true
-  //     Drops the LXC user-namespace map so containers run with host
-  //     root capabilities. Required for some BuildKit syscalls
-  //     (e.g. `spawn sh` with bcrypt-style native postinstalls).
-  //
-  //   raw.lxc='lxc.apparmor.profile=unconfined'
-  //     Removes the AppArmor profile from the LXC. Without this,
-  //     runc inside the LXC can't write /proc/sys/* values during
-  //     container init — Docker images that touch sysctls (e.g. n8n
-  //     setting net.ipv4.ip_unprivileged_port_start) fail with
-  //     `open sysctl ... reopen fd N: permission denied`. Syscall
-  //     intercepts and security.privileged are orthogonal to
-  //     AppArmor and don't fix this on their own.
-  //
-  // We always pair these because operators who reach for "Privileged
-  // Docker" universally also need the AppArmor knob — splitting them
-  // into two checkboxes was a footgun that made every Docker image
-  // touching sysctls fail until the operator manually edited the
-  // LXC's raw.lxc.
-  // The launch plan: image, profile, the allowlisted --config keys (Docker
-  // readiness, the resource limits the operator picked, the VM memory
-  // floor) and the VM flag. Everything is validated by name in the plan
-  // (lib/setup-engine/lifecycle-logic.js); nothing is interpolated into a
-  // shell. The job renders `incus launch …` on the host and reads the guest
-  // back as Running before it reports created; a failed launch removes the
-  // half-created guest and says so.
+  // The durable launch plan keeps VM and container settings distinct.
   const launchConfig = {};
-  if (dockerSupport === true) {
+  if (!isVm && dockerSupport === true) {
     Object.assign(launchConfig, {
       'security.nesting': 'true',
       'security.syscalls.intercept.mknod': 'true',
@@ -1124,17 +1090,13 @@ lxcRouter.post('/containers', async (req, res) => {
       'security.syscalls.intercept.bpf': 'true',
       'security.syscalls.intercept.bpf.devices': 'true',
     });
-    if (dockerPrivileged === true) {
-      launchConfig['security.privileged'] = 'true';
-      launchConfig['raw.lxc'] = 'lxc.apparmor.profile=unconfined';
-    }
   }
   // Resource limits ride on the launch. VMs need a memory floor — Incus
   // rejects booting a VM without a limits.memory value on most stock
   // profiles — so default to 2GiB if the operator didn't pick one.
   // Containers keep the legacy "no implicit memory cap" behaviour. A VM's
-  // root disk defaults to 20GiB (best effort: some profiles carry no
-  // `root` device by name; the job then reports a warning, never a failure).
+  // root disk defaults to 20GiB, applied at launch before the first boot.
+  // A profile without the required root device causes launch to fail.
   if (cpu) launchConfig['limits.cpu'] = String(cpu);
   if (memory) launchConfig['limits.memory'] = `${memory}MB`;
   else if (isVm) launchConfig['limits.memory'] = '2GiB';
@@ -1185,7 +1147,7 @@ lxcRouter.post('/containers', async (req, res) => {
 });
 
 // GET /containers/:name/create-status - Poll creation progress
-lxcRouter.get('/containers/:name/create-status', async (req, res) => {
+lxcRouter.get('/containers/:name/create-status', lxcAccess('GET', '/containers/:name/create-status'), async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {
@@ -1525,7 +1487,7 @@ async function listListeningPorts(incusName) {
 // dialog open since /proc/net is a few KB and there's no
 // docker-compose health gate at this layer (this endpoint is
 // container-scoped, not service-scoped).
-lxcRouter.get('/containers/:name/listening-ports', async (req, res) => {
+lxcRouter.get('/containers/:name/listening-ports', lxcAccess('GET', '/containers/:name/listening-ports'), async (req, res) => {
   const { name } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -1564,7 +1526,7 @@ lxcRouter.get('/containers/:name/listening-ports', async (req, res) => {
 });
 
 // GET /containers/:name/services - List Caddy services for this container (by IP)
-lxcRouter.get('/containers/:name/services', async (req, res) => {
+lxcRouter.get('/containers/:name/services', lxcAccess('GET', '/containers/:name/services'), async (req, res) => {
   const { name } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -1882,7 +1844,7 @@ const MEET_PRESET = {
 // Refuses to overwrite — if any of the (domain, path) tuples already
 // exist or any L4 listen port is taken, the whole call rolls back so
 // the operator doesn't end up half-configured.
-lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
+lxcRouter.post('/containers/:name/quick-add/meet', lxcAccess('POST', '/containers/:name/quick-add/meet'), async (req, res) => {
   const { name } = req.params;
   const { domain } = req.body || {};
 
@@ -2192,7 +2154,7 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
 // last resort that doesn't require a host shell — equivalent to
 // the host-side `caddy reload --config /etc/caddy/Caddyfile`
 // pattern but driven from the routes-table state we already own.
-lxcRouter.post('/containers/:name/services/regenerate', async (req, res) => {
+lxcRouter.post('/containers/:name/services/regenerate', lxcAccess('POST', '/containers/:name/services/regenerate'), async (req, res) => {
   const { name } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -2235,7 +2197,7 @@ lxcRouter.post('/containers/:name/services/regenerate', async (req, res) => {
   }
 });
 
-lxcRouter.post('/containers/:name/services', async (req, res) => {
+lxcRouter.post('/containers/:name/services', lxcAccess('POST', '/containers/:name/services'), async (req, res) => {
   const { name } = req.params;
   const {
     domain,
@@ -2491,7 +2453,7 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
 // Request body now also carries pathPrefix / stripPrefix / websocketEnabled
 // so the inline edit form can change the new per-route knobs without
 // having to delete and re-add the row.
-lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
+lxcRouter.put('/containers/:name/services/:domain', lxcAccess('PUT', '/containers/:name/services/:domain'), async (req, res) => {
   const { name, domain: oldDomain } = req.params;
   const { routeId } = req.query;
   const {
@@ -2755,7 +2717,7 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
 //     matches this container exactly.
 //
 // See docs/incidents/2026-09-04-route-config-drift.md.
-lxcRouter.delete('/containers/:name/services/:domain', async (req, res) => {
+lxcRouter.delete('/containers/:name/services/:domain', lxcAccess('DELETE', '/containers/:name/services/:domain'), async (req, res) => {
   const { name, domain } = req.params;
   const { routeId } = req.query;
 
@@ -2890,7 +2852,7 @@ lxcRouter.delete('/containers/:name/services/:domain', async (req, res) => {
 });
 
 // POST /containers/:name/exec - Execute a command and return JSON result
-lxcRouter.post('/containers/:name/exec', async (req, res) => {
+lxcRouter.post('/containers/:name/exec', lxcAccess('POST', '/containers/:name/exec'), async (req, res) => {
   const { name } = req.params;
   const { command, cwd } = req.body;
 
@@ -2926,7 +2888,7 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
 });
 
 // POST /containers/:name/tab-complete - Tab completion for paths
-lxcRouter.post('/containers/:name/tab-complete', async (req, res) => {
+lxcRouter.post('/containers/:name/tab-complete', lxcAccess('POST', '/containers/:name/tab-complete'), async (req, res) => {
   const { name } = req.params;
   const { partial, cwd } = req.body;
 
@@ -2953,7 +2915,7 @@ lxcRouter.post('/containers/:name/tab-complete', async (req, res) => {
 // previously buffered the whole file in RAM, which OOMed the backend on
 // realistic backups). We then stream the temp file into `incus import -`
 // stdin and unlink it in a finally regardless of success/failure.
-lxcRouter.post('/import', upload.single('backup'), async (req, res) => {
+lxcRouter.post('/import', lxcAccess('POST', '/import'), upload.single('backup'), async (req, res) => {
   const { name } = req.body;
 
   // Helper to clean up the temp upload regardless of outcome.
@@ -3019,7 +2981,7 @@ lxcRouter.post('/import', upload.single('backup'), async (req, res) => {
 });
 
 // GET /containers/:name/files - List files in a directory
-lxcRouter.get('/containers/:name/files', async (req, res) => {
+lxcRouter.get('/containers/:name/files', lxcAccess('GET', '/containers/:name/files'), async (req, res) => {
   const { name } = req.params;
   const dirPath = req.query.path || '/root';
 
@@ -3068,7 +3030,7 @@ lxcRouter.get('/containers/:name/files', async (req, res) => {
 });
 
 // GET /containers/:name/files/download - Download a file from the container
-lxcRouter.get('/containers/:name/files/download', async (req, res) => {
+lxcRouter.get('/containers/:name/files/download', lxcAccess('GET', '/containers/:name/files/download'), async (req, res) => {
   const { name } = req.params;
   const filePath = req.query.path;
 
@@ -3114,7 +3076,7 @@ lxcRouter.get('/containers/:name/files/download', async (req, res) => {
 });
 
 // POST /containers/:name/files/upload - Upload a file to the container
-lxcRouter.post('/containers/:name/files/upload', upload.single('file'), async (req, res) => {
+lxcRouter.post('/containers/:name/files/upload', lxcAccess('POST', '/containers/:name/files/upload'), upload.single('file'), async (req, res) => {
   const { name } = req.params;
   const destPath = req.query.path || '/root/';
 
@@ -3238,7 +3200,7 @@ async function containerExistsKind(incusName, targetDir, variantEntries) {
 // reports contents, conflicts inside the container's target dir,
 // startup-script candidates, and any previously registered startup
 // script. Nothing is written to the container here.
-lxcRouter.post('/containers/:name/zip-upload', lxcZipUploadSingle, async (req, res) => {
+lxcRouter.post('/containers/:name/zip-upload', lxcAccess('POST', '/containers/:name/zip-upload'), lxcZipUploadSingle, async (req, res) => {
   const { name } = req.params;
   if (!validateName(name)) {
     if (req.file) await rm(req.file.path, { force: true }).catch(() => {});
@@ -3340,7 +3302,7 @@ lxcRouter.post('/containers/:name/zip-upload', lxcZipUploadSingle, async (req, r
 // the container after the UI confirmed conflicts (each original is
 // kept as `<name>.old`), then optionally register + run the startup
 // script.
-lxcRouter.post('/containers/:name/zip-upload/:uploadId/apply', async (req, res) => {
+lxcRouter.post('/containers/:name/zip-upload/:uploadId/apply', lxcAccess('POST', '/containers/:name/zip-upload/:uploadId/apply'), async (req, res) => {
   const { name } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -3458,7 +3420,7 @@ lxcRouter.post('/containers/:name/zip-upload/:uploadId/apply', async (req, res) 
 
 // DELETE /containers/:name/zip-upload/:uploadId — cancel. Nothing
 // was written to the container.
-lxcRouter.delete('/containers/:name/zip-upload/:uploadId', async (req, res) => {
+lxcRouter.delete('/containers/:name/zip-upload/:uploadId', lxcAccess('DELETE', '/containers/:name/zip-upload/:uploadId'), async (req, res) => {
   const { name } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -3469,7 +3431,7 @@ lxcRouter.delete('/containers/:name/zip-upload/:uploadId', async (req, res) => {
 });
 
 // POST /containers/:name/start - Start a container
-lxcRouter.post('/containers/:name/start', async (req, res) => {
+lxcRouter.post('/containers/:name/start', lxcAccess('POST', '/containers/:name/start'), async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {
@@ -3496,7 +3458,7 @@ lxcRouter.post('/containers/:name/start', async (req, res) => {
 });
 
 // POST /containers/:name/stop - Stop a container
-lxcRouter.post('/containers/:name/stop', async (req, res) => {
+lxcRouter.post('/containers/:name/stop', lxcAccess('POST', '/containers/:name/stop'), async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {
@@ -3530,7 +3492,7 @@ lxcRouter.post('/containers/:name/stop', async (req, res) => {
 // Side effect: any `services.lxc_container_name` rows pointing at
 // the old name are updated to the new one so route configs +
 // container-services discovery stay consistent.
-lxcRouter.post('/containers/:name/rename', async (req, res) => {
+lxcRouter.post('/containers/:name/rename', lxcAccess('POST', '/containers/:name/rename'), async (req, res) => {
   const { name } = req.params;
   const newName = (req.body?.newName || '').trim();
 
@@ -3611,7 +3573,7 @@ lxcRouter.post('/containers/:name/rename', async (req, res) => {
 // not regenerated by this route — the frontend triggers
 // /services/caddy/regenerate-all afterward so a stale rule
 // doesn't keep the old container reachable.
-lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
+lxcRouter.post('/containers/:name/transfer-routes', lxcAccess('POST', '/containers/:name/transfer-routes'), async (req, res) => {
   // Top-level guard: a synchronous throw inside the body (db
   // contention, weird name, audit log issue) would otherwise
   // leave the response hanging until Caddy's upstream timeout
@@ -3836,7 +3798,7 @@ lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
   }
 });
 
-lxcRouter.post('/containers/:name/restart', async (req, res) => {
+lxcRouter.post('/containers/:name/restart', lxcAccess('POST', '/containers/:name/restart'), async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {
@@ -3870,7 +3832,7 @@ lxcRouter.post('/containers/:name/restart', async (req, res) => {
 //   - Containers: SIGPWR/SIGTERM into the init process; functionally
 //     equivalent to the existing /restart endpoint without --force, but
 //     containers stay on the existing button for now.
-lxcRouter.post('/containers/:name/reboot', async (req, res) => {
+lxcRouter.post('/containers/:name/reboot', lxcAccess('POST', '/containers/:name/reboot'), async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {
@@ -3902,9 +3864,9 @@ lxcRouter.post('/containers/:name/reboot', async (req, res) => {
 // prior values are recorded on the job (a live limit, reversible — no
 // snapshot, as this route never took one). The inputs are validated here
 // and again by the runner; nothing is interpolated into a shell any more.
-lxcRouter.post('/containers/:name/resize', async (req, res) => {
+lxcRouter.post('/containers/:name/resize', lxcAccess('POST', '/containers/:name/resize'), async (req, res) => {
   const { name } = req.params;
-  const { cpu, memory } = req.body || {};
+  const { cpu, memory, rootSize } = req.body || {};
 
   if (!validateName(name)) {
     return res.status(400).json({
@@ -3913,10 +3875,10 @@ lxcRouter.post('/containers/:name/resize', async (req, res) => {
     });
   }
 
-  if (cpu == null && memory == null) {
+  if (cpu == null && memory == null && rootSize == null) {
     return res.status(400).json({
       success: false,
-      error: 'At least one of cpu or memory must be provided.',
+      error: 'At least one of cpu, memory or rootSize must be provided.',
     });
   }
   const changes = [];
@@ -3934,12 +3896,12 @@ lxcRouter.post('/containers/:name/resize', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     const { runGuestConfig } = await import('../mock2/ops.js');
-    const out = await runGuestConfig({ kind: 'config_set', containerName: incusName, changes, requestedBy: req.user?.username || null, via: 'ui' });
+    const out = await runGuestConfig({ kind: 'config_set', containerName: incusName, changes, ...(rootSize != null ? { rootSize } : {}), requestedBy: req.user?.username || null, via: 'ui' });
     if (!out.ok) return lifecycleFailure(res, out, `Failed to resize container '${name}'`);
 
     res.json({
       success: true,
-      message: `Container '${name}' resource limits updated.`,
+      message: `Guest '${name}' resource configuration updated. CPU or memory changes may require a restart if the guest cannot hotplug them.`,
       config: {
         cpu: cpu != null ? String(Number(cpu)) : 'unchanged',
         memory: memory != null ? `${Number(memory)}MB` : 'unchanged',
@@ -3959,7 +3921,7 @@ lxcRouter.post('/containers/:name/resize', async (req, res) => {
 });
 
 // DELETE /containers/:name - Delete a container
-lxcRouter.delete('/containers/:name', requireSudo, async (req, res) => {
+lxcRouter.delete('/containers/:name', lxcAccess('DELETE', '/containers/:name'), requireSudo, async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {
@@ -4093,7 +4055,7 @@ lxcRouter.delete('/containers/:name', requireSudo, async (req, res) => {
 // (gzip) but same order of magnitude. When the backend can't report
 // usage (e.g. dir storage), bytes is null and the UI falls back to an
 // indeterminate spinner.
-lxcRouter.get('/containers/:name/export-info', async (req, res) => {
+lxcRouter.get('/containers/:name/export-info', lxcAccess('GET', '/containers/:name/export-info'), async (req, res) => {
   const { name } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -4122,7 +4084,7 @@ lxcRouter.get('/containers/:name/export-info', async (req, res) => {
 });
 
 // GET /containers/:name/export - Export container as tarball backup
-lxcRouter.get('/containers/:name/export', async (req, res) => {
+lxcRouter.get('/containers/:name/export', lxcAccess('GET', '/containers/:name/export'), async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {
@@ -4193,7 +4155,7 @@ lxcRouter.get('/containers/:name/export', async (req, res) => {
 // Pre-flight size estimate for downloading an existing snapshot.
 // Mirrors /containers/:name/export-info but reads from the snapshot's
 // storage volume instead of the live container's root volume.
-lxcRouter.get('/containers/:name/snapshot/:snapshotName/export-info', async (req, res) => {
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/export-info', lxcAccess('GET', '/containers/:name/snapshot/:snapshotName/export-info'), async (req, res) => {
   const { name, snapshotName } = req.params;
   if (!validateName(name) || !validateName(snapshotName)) {
     return res.status(400).json({ success: false, error: 'Invalid name.' });
@@ -4221,7 +4183,7 @@ lxcRouter.get('/containers/:name/snapshot/:snapshotName/export-info', async (req
 // We always delete the temp instance on every termination path —
 // successful close, error, and client disconnect — so a cancelled
 // download doesn't leak a stopped container.
-lxcRouter.get('/containers/:name/snapshot/:snapshotName/export', async (req, res) => {
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/export', lxcAccess('GET', '/containers/:name/snapshot/:snapshotName/export'), async (req, res) => {
   const { name, snapshotName } = req.params;
   if (!validateName(name) || !validateName(snapshotName)) {
     return res.status(400).json({ success: false, error: 'Invalid name.' });
@@ -4373,7 +4335,7 @@ function pruneSnapshotJobs() {
 // The previous synchronous version SIGTERMed at 5 min, which is too
 // short for snapshots of large or busy containers (Postgres LXC
 // reproduced the failure shown in the bug report).
-lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
+lxcRouter.post('/containers/:name/snapshot', lxcAccess('POST', '/containers/:name/snapshot'), async (req, res) => {
   const { name } = req.params;
   const { snapshotName, note } = req.body;
 
@@ -4483,7 +4445,7 @@ async function refreshSnapshotJob(job) {
 // GET /containers/:name/snapshot-exports — list every S3 export
 // row for this container.  Used by the snapshots panel to render
 // 'on-site ✓ · off-site ✗' chips next to each snapshot row.
-lxcRouter.get('/containers/:name/snapshot-exports', (req, res) => {
+lxcRouter.get('/containers/:name/snapshot-exports', lxcAccess('GET', '/containers/:name/snapshot-exports'), (req, res) => {
   const { name } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -4521,7 +4483,7 @@ lxcRouter.get('/containers/:name/snapshot-exports', (req, res) => {
 // without S3 fan-out (or push it to additional destinations
 // after the fact).  Returns immediately; per-destination state
 // lands in the exports table.
-lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export', async (req, res) => {
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export', lxcAccess('POST', '/containers/:name/snapshot/:snapshotName/s3-export'), async (req, res) => {
   const { name, snapshotName } = req.params;
   if (!validateName(name) || !validateName(snapshotName)) {
     return res.status(400).json({ success: false, error: 'Invalid container or snapshot name.' });
@@ -4564,7 +4526,7 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export', async (req,
 // every-30-minute cron in lib/backup-scheduler; exposed here so
 // an operator who just cancelled a stuck push doesn't have to
 // wait the full interval to clear the dangling pp-snapxp-* temp.
-lxcRouter.post('/containers/snapshot-exports/sweep', async (req, res) => {
+lxcRouter.post('/containers/snapshot-exports/sweep', lxcAccess('POST', '/containers/snapshot-exports/sweep'), async (req, res) => {
   const r = sweepOrphanTempInstances();
   if (!r.ok) {
     return res.status(502).json({ success: false, error: r.error });
@@ -4577,7 +4539,7 @@ lxcRouter.post('/containers/snapshot-exports/sweep', async (req, res) => {
 // so the delete-confirm dialog can display 'retained until ...' /
 // 'legal hold' before the operator clicks confirm.  Implemented as
 // a HEAD round-trip to the bucket; cheap, no body transfer.
-lxcRouter.get('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/info', async (req, res) => {
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/info', lxcAccess('GET', '/containers/:name/snapshot/:snapshotName/s3-export/:exportId/info'), async (req, res) => {
   const { exportId } = req.params;
   const out = await inspectSnapshotS3Object({ exportId });
   if (!out.ok) {
@@ -4594,7 +4556,7 @@ lxcRouter.get('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/info
 // `incus snapshot delete` flow handles that.  Returns 423 (Locked)
 // when the object has active retention or legal hold so the
 // caller can render the lock state instead of a generic 502.
-lxcRouter.delete('/containers/:name/snapshot/:snapshotName/s3-export/:exportId', async (req, res) => {
+lxcRouter.delete('/containers/:name/snapshot/:snapshotName/s3-export/:exportId', lxcAccess('DELETE', '/containers/:name/snapshot/:snapshotName/s3-export/:exportId'), async (req, res) => {
   const { exportId } = req.params;
   const out = await deleteSnapshotExport({
     exportId,
@@ -4624,7 +4586,7 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName/s3-export/:exportId',
 // The export row's status flips to 'failed' with
 // error='canceled by operator' once the upload's done()
 // promise rejects on the next event-loop tick.
-lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/cancel', async (req, res) => {
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/cancel', lxcAccess('POST', '/containers/:name/snapshot/:snapshotName/s3-export/:exportId/cancel'), async (req, res) => {
   const { exportId } = req.params;
   const out = await cancelSnapshotExport({
     exportId,
@@ -4646,7 +4608,7 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/can
 // Returns elapsedMs (always) and estimateMs (when an estimate exists).
 // Once status is 'done' or 'error' the job stays around for a while so
 // the UI can render a final state on the next poll.
-lxcRouter.get('/containers/:name/snapshot-jobs/:jobId', async (req, res) => {
+lxcRouter.get('/containers/:name/snapshot-jobs/:jobId', lxcAccess('GET', '/containers/:name/snapshot-jobs/:jobId'), async (req, res) => {
   const { name, jobId } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -4670,7 +4632,7 @@ lxcRouter.get('/containers/:name/snapshot-jobs/:jobId', async (req, res) => {
 });
 
 // POST /containers/:name/snapshot/:snapshotName/restore - Restore a snapshot
-lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', requireSudo, async (req, res) => {
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', lxcAccess('POST', '/containers/:name/snapshot/:snapshotName/restore'), requireSudo, async (req, res) => {
   const { name, snapshotName } = req.params;
 
   if (!validateName(name)) {
@@ -4712,7 +4674,7 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', requireSudo, 
 // DELETE /containers/:name/snapshot/:snapshotName/local - Drop the
 // local copy only; any S3-stored copies stay.  Used when an
 // operator wants to reclaim pool space but keep the S3 backups.
-lxcRouter.delete('/containers/:name/snapshot/:snapshotName/local', requireSudo, async (req, res) => {
+lxcRouter.delete('/containers/:name/snapshot/:snapshotName/local', lxcAccess('DELETE', '/containers/:name/snapshot/:snapshotName/local'), requireSudo, async (req, res) => {
   const { name, snapshotName } = req.params;
 
   if (!validateName(name) || !validateName(snapshotName)) {
@@ -4744,7 +4706,7 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName/local', requireSudo, 
 // S3 destination it was exported to.  The frontend's whole-snapshot
 // trash button drives this; per-location deletes use the
 // scoped /local and /s3-export/:exportId endpoints.
-lxcRouter.delete('/containers/:name/snapshot/:snapshotName', requireSudo, async (req, res) => {
+lxcRouter.delete('/containers/:name/snapshot/:snapshotName', lxcAccess('DELETE', '/containers/:name/snapshot/:snapshotName'), requireSudo, async (req, res) => {
   const { name, snapshotName } = req.params;
 
   if (!validateName(name)) {
@@ -4851,7 +4813,7 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', requireSudo, async 
 //
 // Fails fast with 409 if a local snapshot of the same name
 // already exists — the caller is expected to drop it first.
-lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/restore', async (req, res) => {
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/restore', lxcAccess('POST', '/containers/:name/snapshot/:snapshotName/s3-export/:exportId/restore'), async (req, res) => {
   const { name, snapshotName, exportId } = req.params;
   if (!validateName(name) || !validateName(snapshotName)) {
     return res.status(400).json({ success: false, error: 'Invalid name.' });
@@ -4907,7 +4869,7 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/res
 // download/import dance runs.  Returns the current phase + bytes
 // counters so the UI can render a meaningful progress bar instead
 // of a bare spinner.  Cleared 30s after the import finishes.
-lxcRouter.get('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/import-progress', (req, res) => {
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/import-progress', lxcAccess('GET', '/containers/:name/snapshot/:snapshotName/s3-export/:exportId/import-progress'), (req, res) => {
   const { exportId } = req.params;
   const p = getImportProgress({ exportId });
   if (!p) {
@@ -4917,7 +4879,7 @@ lxcRouter.get('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/impo
 });
 
 // GET /containers/:name/snapshot/:snapshotName/notes - Get notes for a snapshot
-lxcRouter.get('/containers/:name/snapshot/:snapshotName/notes', (req, res) => {
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/notes', lxcAccess('GET', '/containers/:name/snapshot/:snapshotName/notes'), (req, res) => {
   const { name, snapshotName } = req.params;
 
   if (!validateName(name) || !validateName(snapshotName)) {
@@ -4936,7 +4898,7 @@ lxcRouter.get('/containers/:name/snapshot/:snapshotName/notes', (req, res) => {
 });
 
 // POST /containers/:name/snapshot/:snapshotName/notes - Add a note to a snapshot
-lxcRouter.post('/containers/:name/snapshot/:snapshotName/notes', (req, res) => {
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/notes', lxcAccess('POST', '/containers/:name/snapshot/:snapshotName/notes'), (req, res) => {
   const { name, snapshotName } = req.params;
   const { note } = req.body;
 
@@ -4961,7 +4923,7 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/notes', (req, res) => {
 });
 
 // DELETE /containers/:name/snapshot/:snapshotName/notes/:noteId - Delete a note
-lxcRouter.delete('/containers/:name/snapshot/:snapshotName/notes/:noteId', (req, res) => {
+lxcRouter.delete('/containers/:name/snapshot/:snapshotName/notes/:noteId', lxcAccess('DELETE', '/containers/:name/snapshot/:snapshotName/notes/:noteId'), (req, res) => {
   const { name, snapshotName, noteId } = req.params;
 
   if (!validateName(name) || !validateName(snapshotName)) {
@@ -4980,7 +4942,7 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName/notes/:noteId', (req,
 // ─── Incus Infrastructure Management ─────────────────────────────────────────
 
 // GET /networks - List all Incus networks
-lxcRouter.get('/networks', async (req, res) => {
+lxcRouter.get('/networks', lxcAccess('GET', '/networks'), async (req, res) => {
   try {
     const result = await execOnHost('incus network list --format json', { timeout: 10000 });
     const networks = JSON.parse(result.stdout || '[]');
@@ -4991,7 +4953,7 @@ lxcRouter.get('/networks', async (req, res) => {
 });
 
 // GET /networks/:name - Get network details
-lxcRouter.get('/networks/:name', async (req, res) => {
+lxcRouter.get('/networks/:name', lxcAccess('GET', '/networks/:name'), async (req, res) => {
   const { name } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid network name.' });
@@ -5006,48 +4968,72 @@ lxcRouter.get('/networks/:name', async (req, res) => {
 });
 
 // PUT /networks/:name - Update network config
-lxcRouter.put('/networks/:name', async (req, res) => {
-  const { name } = req.params;
-  const { config } = req.body;
-  if (!validateName(name)) {
-    return res.status(400).json({ success: false, error: 'Invalid network name.' });
-  }
-  if (!config || typeof config !== 'object') {
-    return res.status(400).json({ success: false, error: 'Config object required.' });
-  }
+lxcRouter.put('/networks/:name', lxcAccess('PUT', '/networks/:name'), async (req, res) => {
+  let commands;
+  try { commands=networkConfigArgv(req.params.name,req.body?.config); }
+  catch(e) { return res.status(400).json({success:false,error:e.message}); }
   try {
-    for (const [key, value] of Object.entries(config)) {
-      // Validate key format (only alphanumeric, dots, dashes)
-      if (!/^[a-zA-Z0-9._-]+$/.test(key)) continue;
-      const safeValue = String(value).replace(/['"\\]/g, '');
-      await execOnHost(`incus network set ${name} ${key} ${safeValue}`, { timeout: 10000 });
+    for(const args of commands) {
+      const r=await runHostCapture('incus',args,{timeoutMs:10000});
+      if(r.status!==0) throw new Error('Network update failed');
     }
-    res.json({ success: true, message: `Network '${name}' updated.` });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.stderr || error.message });
-  }
+    logAudit(req.user.id,'INCUS_NETWORK_UPDATED','network',req.params.name,{keys:Object.keys(req.body.config)},req.ip);
+    res.json({success:true});
+  } catch(e) { res.status(500).json({success:false,error:e.message}); }
 });
-
-// POST /networks/:name/unset - Unset a network config key
-lxcRouter.post('/networks/:name/unset', async (req, res) => {
-  const { name } = req.params;
-  const { key } = req.body;
-  if (!validateName(name)) {
-    return res.status(400).json({ success: false, error: 'Invalid network name.' });
-  }
-  if (!key || !/^[a-zA-Z0-9._-]+$/.test(key)) {
-    return res.status(400).json({ success: false, error: 'Invalid config key.' });
-  }
-  try {
-    await execOnHost(`incus network unset ${name} ${key}`, { timeout: 10000 });
-    res.json({ success: true, message: `Key '${key}' unset on network '${name}'.` });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.stderr || error.message });
-  }
+lxcRouter.post('/networks/:name/unset', lxcAccess('POST', '/networks/:name/unset'), async (req,res)=>{
+  let commands;
+  try { commands=networkConfigArgv(req.params.name,{[req.body?.key]:null},{unset:true}); }
+  catch(e) { return res.status(400).json({success:false,error:e.message}); }
+  let r;
+  try { r=await runHostCapture('incus',commands[0],{timeoutMs:10000}); }
+  catch { return res.status(500).json({success:false,error:'Network update failed'}); }
+  if(r.status!==0) return res.status(500).json({success:false,error:'Network update failed'});
+  logAudit(req.user.id,'INCUS_NETWORK_UPDATED','network',req.params.name,{unset:req.body.key},req.ip);
+  res.json({success:true});
 });
 
 // GET /storage-pools - List storage pools
-lxcRouter.get('/storage-pools', async (req, res) => {
+// Current isolation and the update's non-disruptive migration path.
+lxcRouter.get('/isolation', lxcAccess('GET', '/isolation'), async (req, res) => {
+  try {
+    const r = await runHostCapture('incus', ['list','--format','json'], { timeoutMs: 15000 });
+    if (r.status !== 0) throw new Error('Guest inventory unavailable');
+    const guests = JSON.parse(r.stdout).filter(i => i.name.startsWith(INSTANCE_PREFIX));
+    res.json({ guests: guests.map(i => ({ name: i.name.slice(INSTANCE_PREFIX.length), ...guestIsolation(i) })), automatic_cutover: false });
+  } catch { res.status(503).json({ error: 'Guest isolation inventory unavailable' }); }
+});
+lxcRouter.post('/containers/:name/vm-migration', lxcAccess('POST', '/containers/:name/vm-migration'), async (req, res) => {
+  if (!validateName(req.params.name)) return res.status(400).json({ error: 'Invalid source guest' });
+  try {
+    const source = INSTANCE_PREFIX + req.params.name;
+    const r = await runHostCapture('incus', ['list',source,'--format','json'], { timeoutMs: 15000 });
+    if (r.status !== 0) return res.status(503).json({ error: 'Cannot inspect source' });
+    const instance = JSON.parse(r.stdout).find(i => i.name === source);
+    if (!instance) return res.status(404).json({ error: 'Source guest not found' });
+    if (instance.type === 'virtual-machine') return res.status(409).json({ error: 'Source is already a VM' });
+    const body = req.body || {};
+    if (!Array.isArray(body.app_dirs) || !body.app_dirs.length || !body.name || body.name === req.params.name)
+      return res.status(400).json({ error: 'Choose a new target name and explicit application directories; the source guest is retained' });
+    const config = instance.expanded_config || instance.config || {};
+    const root = (instance.expanded_devices || instance.devices || {}).root;
+    const { migrationService } = await import('../lib/migration/index.js');
+    const result = await migrationService().createMigration({ actor: req.user.id, ip: req.ip, ttlSeconds: 3600, input: {
+      name: body.name, app_dirs: body.app_dirs, database: body.database,
+      service_name: body.service_name, image: body.image, pool: body.pool || root?.pool,
+      network: body.network, cpu: body.cpu ?? Number(config['limits.cpu'] || 2),
+      memory_gb: body.memory_gb ?? ((sizeBytes(config['limits.memory']) || 2e9) / 1e9),
+      disk_gb: body.disk_gb ?? Math.ceil((sizeBytes(root?.size) || 100e9) / 1e9),
+      mode: 'application', type: 'virtual-machine', source_kind: 'lxc',
+      source_label: source, auto_transfer: false,
+    } });
+    if (result.error) return res.status(409).json({ error: result.error });
+    res.status(201).json({ ...result, source: { name: source, ...guestIsolation(instance) },
+      cutover: 'Source remains live. Run the source agent, review inventory and capacity, provision the VM runtime and secrets, test privately, freeze all writers, final sync, then switch routes. Retain the stopped source for rollback.' });
+  } catch { res.status(503).json({ error: 'Could not prepare the VM migration; no cutover was attempted' }); }
+});
+
+lxcRouter.get('/storage-pools', lxcAccess('GET', '/storage-pools'), async (req, res) => {
   try {
     const result = await execOnHost('incus storage list --format json', { timeout: 10000 });
     const pools = JSON.parse(result.stdout || '[]');
@@ -5069,7 +5055,7 @@ lxcRouter.get('/storage-pools', async (req, res) => {
 });
 
 // GET /profiles - List profiles
-lxcRouter.get('/profiles', async (req, res) => {
+lxcRouter.get('/profiles', lxcAccess('GET', '/profiles'), async (req, res) => {
   try {
     const result = await execOnHost('incus profile list --format json', { timeout: 10000 });
     const profiles = JSON.parse(result.stdout || '[]');
@@ -5080,7 +5066,7 @@ lxcRouter.get('/profiles', async (req, res) => {
 });
 
 // GET /profiles/:name - Get profile details
-lxcRouter.get('/profiles/:name', async (req, res) => {
+lxcRouter.get('/profiles/:name', lxcAccess('GET', '/profiles/:name'), async (req, res) => {
   const { name } = req.params;
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid profile name.' });
@@ -5095,7 +5081,7 @@ lxcRouter.get('/profiles/:name', async (req, res) => {
 });
 
 // GET /cached-images - List locally cached images
-lxcRouter.get('/cached-images', async (req, res) => {
+lxcRouter.get('/cached-images', lxcAccess('GET', '/cached-images'), async (req, res) => {
   try {
     const result = await execOnHost('incus image list --format json', { timeout: 15000 });
     const images = JSON.parse(result.stdout || '[]');
@@ -5106,7 +5092,7 @@ lxcRouter.get('/cached-images', async (req, res) => {
 });
 
 // DELETE /cached-images/:fingerprint - Delete a cached image
-lxcRouter.delete('/cached-images/:fingerprint', async (req, res) => {
+lxcRouter.delete('/cached-images/:fingerprint', lxcAccess('DELETE', '/cached-images/:fingerprint'), async (req, res) => {
   const { fingerprint } = req.params;
   if (!fingerprint || !/^[a-f0-9]+$/.test(fingerprint)) {
     return res.status(400).json({ success: false, error: 'Invalid image fingerprint.' });
@@ -5147,7 +5133,7 @@ const PP_SNAP_EXPORT_PREFIX = 'pp-snap-export-';
 const IMPORT_TEMP_STALE_MS = 24 * 60 * 60 * 1000;
 
 // GET /cleanup/preview - Enumerate cleanable artifacts.
-lxcRouter.get('/cleanup/preview', async (req, res) => {
+lxcRouter.get('/cleanup/preview', lxcAccess('GET', '/cleanup/preview'), async (req, res) => {
   const categories = [];
 
   // 1. Unused Incus images. `used_by` is empty when no instance is
@@ -5243,7 +5229,7 @@ lxcRouter.get('/cleanup/preview', async (req, res) => {
 // delete something that just transitioned out of "orphaned" state.
 // Each category is best-effort: a per-item failure is logged and
 // reported but doesn't abort the rest of the run.
-lxcRouter.post('/cleanup/execute', requireSudo, async (req, res) => {
+lxcRouter.post('/cleanup/execute', lxcAccess('POST', '/cleanup/execute'), requireSudo, async (req, res) => {
   const { categories } = req.body || {};
   const allowed = new Set(['images', 'exportTemps', 'importTemps']);
   if (!Array.isArray(categories) || categories.length === 0 || categories.some((c) => !allowed.has(c))) {

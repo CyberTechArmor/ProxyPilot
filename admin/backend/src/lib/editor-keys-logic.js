@@ -1,3 +1,4 @@
+import { utcTimestamp } from './utc-time.js';
 // Delegated editing — the pure layer.
 //
 // ProxyPilot's main MCP server (routes/mcp.js) hands a Claude client the whole
@@ -207,6 +208,7 @@ export const CANON_ERRORS = {
 // and reversible; orphaned means the container the key was pinned to is gone.
 export function keyStatus(row, { activationActive = false, containerExists = true } = {}) {
   if (row?.revoked_at) return 'revoked';
+  if (!(utcTimestamp(row?.expires_at) > Date.now())) return 'expired';
   if (!containerExists) return 'orphaned';
   if (!activationActive) return 'suspended';
   return 'active';

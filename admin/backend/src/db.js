@@ -1,3 +1,4 @@
+import { migrateEditorKeyLifecycle } from './lib/editor-key-lifecycle.js';
 import {resumeAuditedMcpRoots} from './lib/mcp-legacy-recovery.js';
 import {ADMIN_BOOTSTRAP_SCHEMA} from './lib/admin-bootstrap.js';
 import { TOTP_ENROLLMENT_SCHEMA } from './lib/totp-enrollment.js';
@@ -2421,6 +2422,7 @@ export function initDatabase() {
   // Connect an agent (lib/setup-engine/openbao-agents.js): agent names and
   // credential names only; values live in OpenBao.
   runMigration(db, 1017, 'openbao_agents', (d) => d.exec(OPENBAO_AGENTS_SCHEMA));
+  runMigration(db, 1018, 'editor_key_lifecycle', migrateEditorKeyLifecycle);
 
   runMigration(db, 1011, 'route_ip_allowlist_paths', (d) => {
     const cols = d.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);

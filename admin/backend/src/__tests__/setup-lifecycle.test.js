@@ -73,6 +73,7 @@ function scriptedHost(state) {
       assert.ok(Array.isArray(argv) && argv.every((a) => typeof a === 'string'), 'argv arrays only');
       if (argv[0] !== 'incus') return { code: 127, stdout: '', stderr: 'not incus' };
       const verb = argv[1];
+      if (verb === 'profile') return { code: 0, stdout: JSON.stringify(state.profile || { config: {}, devices: { root: { type: 'disk', path: '/', pool: 'default' } } }) };
       if (verb === 'list') { const i = byName(argv[2]); return { code: 0, stdout: JSON.stringify(i ? [i] : []), stderr: '' }; }
       if (verb === 'start') { const i = byName(argv[2]); if (!i) return { code: 1, stdout: '', stderr: 'Error: Instance not found' }; if (state.startFails) return { code: 1, stdout: '', stderr: 'Error: Failed to run: /sbin/init: no such file' }; if (!state.startNoop) i.status = 'Running'; return { code: 0, stdout: '', stderr: '' }; }
       if (verb === 'stop') { const i = byName(argv[2]); if (!i) return { code: 1, stdout: '', stderr: 'Error: Instance not found' }; if (state.stopFails && !argv.includes('--force')) return { code: 1, stdout: '', stderr: 'Error: The instance is busy' }; i.status = 'Stopped'; return { code: 0, stdout: '', stderr: '' }; }
@@ -83,7 +84,7 @@ function scriptedHost(state) {
         if (byName(name)) return { code: 1, stdout: '', stderr: `Error: Instance "${name}" already exists` };
         if (state.launchFails) { if (state.launchLeavesHalf) state.instances.push({ name, status: 'Stopped', created_at: '2026-09-22T12:00:05Z', config: {}, snapshots: [] }); return { code: 1, stdout: '', stderr: 'Error: Failed instance creation: image not found' }; }
         state.launched = argv;
-        state.instances.push({ name, status: 'Running', created_at: '2026-09-22T12:00:05Z', config: { 'volatile.uuid': UUID_B, ...Object.fromEntries(argv.filter((a, i) => argv[i - 1] === '--config').map((kv) => kv.split('='))) }, snapshots: [] });
+        state.instances.push({ name, type: argv.includes('--vm') ? 'virtual-machine' : 'container', status: 'Running', created_at: '2026-09-22T12:00:05Z', config: { 'volatile.uuid': UUID_B, ...Object.fromEntries(argv.filter((a, i) => argv[i - 1] === '--config').map((kv) => kv.split('='))) }, snapshots: [] });
         return { code: 0, stdout: '', stderr: '' };
       }
       if (verb === 'config' && argv[2] === 'device' && argv[3] === 'override') { state.rootSize = argv[6]; return state.rootFails ? { code: 1, stdout: '', stderr: "Error: device 'root' doesn't exist" } : { code: 0, stdout: '', stderr: '' }; }
@@ -102,7 +103,7 @@ function scriptedHost(state) {
 }
 const exec = (h, g = scriptedGuest({})) => ({ guest: g.guest, host: h.host });
 const runAll = (d, ex, nowMs, opts = {}) => runOnce({ db: d, owner: RUNNER, exec: ex, reviewLogin: async () => LOGIN, nowMs: () => nowMs }, { reconcileFirst: false, ...opts });
-const mutations = (h) => h.calls.filter((a) => a[1] !== 'list');
+const mutations = (h) => h.calls.filter((a) => !['list','profile'].includes(a[1]));
 const submit = (d, kind, params, extra = {}) => submitRunnerJob(d, { kind, app: params.container, params, nowMs: T0, ...extra });
 
 // A job whose owner died at a given checkpoint: created, claimed by DEAD,
@@ -133,7 +134,7 @@ test('validation is strict: names, flags and an allowlisted launch config; never
   ok('instance_delete', { container: 'pp-x', force: true, expect: { uuid: UUID_A, created_at: '2026-09-01T10:00:00Z' } });
   ok('snapshot_create', { container: 'pp-x', snapshot: 'before-upgrade.1', note: 'before the 2.0 upgrade' });
   ok('snapshot_delete', { container: 'pp-x', snapshot: 'snap-1', expect: { created_at: '2026-09-20T10:00:00Z' } });
-  ok('instance_create', { container: 'pp-new', image: 'images:debian/12', profile: 'default', vm: true, rootSize: '20GiB', network: 'm2br7', config: { 'limits.cpu': '2', 'limits.memory': '4096MiB', 'security.nesting': 'true', 'raw.lxc': 'lxc.apparmor.profile=unconfined' } });
+  ok('instance_create', { container: 'pp-new', image: 'images:debian/12', profile: 'default', vm: true, rootSize: '20GiB', network: 'm2br7', config: { 'limits.cpu': '2', 'limits.memory': '4096MiB' } });
   bad('instance_start', { container: '../x' }, /guest name/);
   bad('instance_start', { container: 'pp-x', argv: ['incus', 'start', 'pp-x'] }, /never carries a command/);
   bad('instance_start', { container: 'pp-x', command: 'incus start pp-x' }, /never carries a command/);
@@ -151,11 +152,11 @@ test('validation is strict: names, flags and an allowlisted launch config; never
   bad('instance_create', { container: 'pp-new', image: 'images:debian/12', profile: 'a b' }, /profile name/);
   bad('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'user.script': 'curl x | sh' } }, /not on the launch allowlist/);
   bad('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'limits.memory': '4 GB; rm -rf /' } }, /not an accepted value/);
-  bad('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'raw.lxc': 'lxc.mount.entry=/ host none bind' } }, /not an accepted value/);
+  bad('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'raw.lxc': 'lxc.mount.entry=/ host none bind' } }, /Raw.*not supported/);
   bad('instance_create', { container: 'pp-new', image: 'images:debian/12', rootSize: '20' }, /rootSize/);
   bad('instance_start', { container: 'pp-x', image: 'images:debian/12' }, /carries no image/);
   bad('snapshot_create', { container: 'pp-x', snapshot: 's', note: 'AUTH_MASTER_SECRET=abcdefghijklmnop' }, /looks like a secret/);
-  assert.deepEqual(Object.keys(LAUNCH_CONFIG_ALLOWLIST).sort(), ['boot.autostart', 'limits.cpu', 'limits.memory', 'raw.lxc', 'security.nesting', 'security.privileged', 'security.syscalls.intercept.bpf', 'security.syscalls.intercept.bpf.devices', 'security.syscalls.intercept.mknod', 'security.syscalls.intercept.setxattr']);
+  assert.deepEqual(Object.keys(LAUNCH_CONFIG_ALLOWLIST).sort(), ['boot.autostart', 'limits.cpu', 'limits.memory', 'security.nesting', 'security.privileged', 'security.syscalls.intercept.bpf', 'security.syscalls.intercept.bpf.devices', 'security.syscalls.intercept.mknod', 'security.syscalls.intercept.setxattr']);
   // validateRunnerJob delegates: a lifecycle job with argv never becomes a queued job.
   assert.match(validateRunnerJob({ kind: 'instance_start', app: 'pp-x', plan: { params: { container: 'pp-x', argv: ['x'] } } }).reason, /never carries a command/);
   assert.equal(validateRunnerJob({ kind: 'snapshot_create', app: 'pp-x', plan: { params: { container: 'pp-x', snapshot: 's' } } }).ok, true);
@@ -168,8 +169,8 @@ test('the fixed commands: one argv per kind, rendered from the plan alone; an in
   assert.deepEqual(lifecycleArgv('instance_stop', { container: 'pp-x', force: true }), ['incus', 'stop', 'pp-x', '--force']);
   assert.deepEqual(lifecycleArgv('instance_restart', { container: 'pp-x', force: true }), ['incus', 'restart', 'pp-x', '--force']);
   assert.deepEqual(lifecycleArgv('instance_delete', { container: 'pp-x', force: true }), ['incus', 'delete', 'pp-x'], 'force applies to the stop that precedes the delete, never to the delete itself');
-  assert.deepEqual(lifecycleArgv('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'limits.memory': '2GiB', 'security.nesting': 'true' }, vm: true, network: 'm2br7' }),
-    ['incus', 'launch', 'images:debian/12', 'pp-new', '--profile', 'default', '--config', 'security.nesting=true', '--config', 'limits.memory=2GiB', '--network', 'm2br7', '--vm'], 'config flags in allowlist order');
+  assert.deepEqual(lifecycleArgv('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'limits.memory': '2GiB' }, vm: true, network: 'm2br7' }),
+    ['incus', 'launch', 'images:debian/12', 'pp-new', '--profile', 'default', '--config', 'limits.memory=2GiB', '--network', 'm2br7', '--vm'], 'config flags in allowlist order');
   assert.deepEqual(lifecycleArgv('snapshot_create', { container: 'pp-x', snapshot: 's1' }), ['incus', 'snapshot', 'create', 'pp-x', 's1']);
   assert.deepEqual(lifecycleArgv('snapshot_create', { container: 'pp-x', snapshot: 's1' }, { snapshotForm: 'legacy' }), ['incus', 'snapshot', 'pp-x', 's1']);
   assert.deepEqual(lifecycleArgv('snapshot_delete', { container: 'pp-x', snapshot: 's1' }), ['incus', 'snapshot', 'delete', 'pp-x', 's1']);
@@ -293,14 +294,15 @@ test('instance_delete: bound to the confirmed identity; a running guest is stopp
   assert.deepEqual(mutations(h), [['incus', 'stop', 'pp-x']]); assert.equal(st.instances.length, 1);
 });
 
-test('instance_create: launch with the allowlisted config and the VM flag, verified Running, the root size a best-effort follow-up; an existing name is refused before launch; a failed launch removes the half-created guest', async () => {
+test('instance_create: launch with the allowlisted config and the VM flag, verified Running, the root size applied before boot; an existing name is refused before launch; a failed launch removes the half-created guest', async () => {
   const d = db();
   const st = { instances: [] }; const h = scriptedHost(st);
-  const c = submit(d, 'instance_create', { container: 'pp-new', image: 'images:debian/12', profile: 'default', vm: true, rootSize: '20GiB', config: { 'limits.cpu': '2', 'limits.memory': '2GiB', 'security.nesting': 'true' } });
+  const c = submit(d, 'instance_create', { container: 'pp-new', image: 'images:debian/12', profile: 'default', vm: true, rootSize: '20GiB', config: { 'limits.cpu': '2', 'limits.memory': '2GiB' } });
   const out = await runAll(d, exec(h), T0 + 1);
   assert.equal(out.ran[0].status, 'succeeded', getJob(d, c.job.id).reason);
-  assert.deepEqual(st.launched, ['incus', 'launch', 'images:debian/12', 'pp-new', '--profile', 'default', '--config', 'security.nesting=true', '--config', 'limits.cpu=2', '--config', 'limits.memory=2GiB', '--vm']);
-  assert.equal(st.rootSize, 'size=20GiB');
+  assert.deepEqual(st.launched, ['incus', 'launch', 'images:debian/12', 'pp-new', '--profile', 'default', '--config', 'limits.cpu=2', '--config', 'limits.memory=2GiB', '--device', 'root,size=20GiB', '--vm']);
+  assert.ok(st.launched.includes('root,size=20GiB'));
+  assert.equal(h.calls.some(a => a[1] === 'config' && a[2] === 'device'), false, 'disk sized before boot');
   const row = getJob(d, c.job.id);
   assert.equal(row.outcome, 'created'); assert.equal(resultFromJob(row).instanceState, 'Running');
   assert.deepEqual(parseJson(row.progress_json).generated.map((g) => ({ kind: g.kind, name: g.name })), [{ kind: 'instance', name: 'pp-new' }]);
@@ -310,11 +312,11 @@ test('instance_create: launch with the allowlisted config and the VM flag, verif
   const dup = submit(d, 'instance_create', { container: 'pp-new', image: 'images:debian/12' }, { nowMs: T0 + 2 });
   const o2 = await runAll(d, exec(h), T0 + 3);
   assert.equal(o2.ran[0].status, 'refused'); assert.match(getJob(d, dup.job.id).reason, /pp-new already exists \(status Running\); a create never replaces/); assert.deepEqual(mutations(h), []);
-  // Root size refused by the profile: a warning, not a failure.
+  // No post-boot root override remains; sizing is part of launch.
   st.rootFails = true; h.calls.length = 0;
   const w = submit(d, 'instance_create', { container: 'pp-vm2', image: 'images:debian/12', vm: true, rootSize: '20GiB' }, { nowMs: T0 + 4 });
   await runAll(d, exec(h), T0 + 5);
-  assert.equal(getJob(d, w.job.id).status, 'succeeded'); assert.match(resultFromJob(getJob(d, w.job.id)).warnings[0], /root disk size could not be set/);
+  assert.equal(getJob(d, w.job.id).status, 'succeeded'); assert.equal(resultFromJob(getJob(d, w.job.id)).warnings, undefined);
   // A failed launch that left a half-created guest: cleaned up, reported failed at issue.
   st.launchFails = true; st.launchLeavesHalf = true; h.calls.length = 0;
   const f = submit(d, 'instance_create', { container: 'pp-half', image: 'images:nope' }, { nowMs: T0 + 6 });

@@ -36,6 +36,7 @@ import {
 
 const STATUS_STYLES = {
   active: 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/30',
+  expired: 'bg-amber-500/10 text-amber-600 border-amber-500/30',
   revoked: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30',
   suspended: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30',
   orphaned: 'bg-muted text-muted-foreground border-border',
@@ -44,6 +45,8 @@ const STATUS_STYLES = {
 const STATUS_HELP = {
   active: 'Working now',
   revoked: 'Permanently revoked',
+  owner_disabled: 'The issuing administrator is no longer active — create a replacement key',
+  expired: 'Expired — create a replacement key with fresh local proof',
   suspended: 'Delegated editing is switched off for this container',
   orphaned: 'The container no longer exists',
 };
@@ -263,7 +266,7 @@ export default function DelegatedEditing({ containerName }) {
               onClick={createKey}
             >
               {busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <KeyRound className="h-4 w-4 mr-1.5" />}
-              Create key
+              Create 30-day key
             </Button>
           </div>
           {!state?.activation && (
@@ -290,6 +293,7 @@ export default function DelegatedEditing({ containerName }) {
                       <span className="font-mono">{k.token_prefix}…</span>
                       <span>created {formatWhen(k.created_at)}</span>
                       <span>last used {formatWhen(k.last_used_at)}</span>
+                      <span>expires {formatWhen(k.expires_at)}</span>
                     </div>
                     <div className="text-xs text-muted-foreground mt-0.5">{STATUS_HELP[k.status]}</div>
                   </div>

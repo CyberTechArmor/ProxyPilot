@@ -1,3 +1,4 @@
+import { READER_PROVISION_SCRIPT } from '../lib/project-sql-reader.js';
 // Mock2 project template (Phase M2) — the seed a new project's bare repo and
 // container are built from.
 //
@@ -573,6 +574,10 @@ if command -v psql >/dev/null 2>&1; then
   su - postgres -c "psql -tAc \\"SELECT 1 FROM pg_roles WHERE rolname='app'\\" | grep -q 1 || psql -c \\"CREATE ROLE app LOGIN PASSWORD 'app'\\"" 2>/dev/null || echo "[mock2] app role create skipped/failed (non-fatal)"
   su - postgres -c "psql -tAc \\"SELECT 1 FROM pg_database WHERE datname='app'\\" | grep -q 1 || psql -c \\"CREATE DATABASE app OWNER app\\"" 2>/dev/null || echo "[mock2] app database create skipped/failed (non-fatal)"
 fi
+
+(
+${READER_PROVISION_SCRIPT}
+) || echo "[mock2] read-only SQL unavailable until an administrator provisions it"
 
 # No egress proxy: the bridge NATs straight out (Incus ipv4.nat). Once the fence
 # is applied (provision.js, right after this script) egress is still NAT'd — the

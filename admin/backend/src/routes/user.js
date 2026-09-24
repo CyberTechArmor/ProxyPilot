@@ -727,7 +727,9 @@ function revokeUserAccess(db, userId, { sessions: revokeSessions = true } = {}) 
     try { sessions = db.prepare(`UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).run(now, userId).changes; } catch { /* pre-migration */ }
   }
   try { mcpTokens = db.prepare(`UPDATE mcp_tokens SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL`).run(now, String(userId)).changes; } catch { /* pre-migration */ }
-  return { sessions, mcpTokens };
+  let editorKeys = 0;
+  try { editorKeys = db.prepare('UPDATE lxc_editor_keys SET revoked_at=? WHERE created_by=? AND revoked_at IS NULL').run(now, String(userId)).changes; } catch { /* pre-migration */ }
+  return { sessions, mcpTokens, editorKeys };
 }
 
 // Update user

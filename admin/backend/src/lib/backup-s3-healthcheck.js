@@ -92,7 +92,7 @@ export function register() {
     task = cron.schedule(expr, () => {
       runOnce().catch((err) => logger('runOnce threw', { error: err?.message }));
     }, {
-      scheduled: true,
+
       timezone: process.env.TZ || 'UTC',
     });
     logger(`registered (cron=${expr})`);
@@ -103,7 +103,7 @@ export function register() {
 
 export function unregister() {
   if (task) {
-    try { task.stop(); } catch { /* ignore */ }
+    try { task.destroy(); } catch { /* ignore */ }
     task = null;
   }
 }

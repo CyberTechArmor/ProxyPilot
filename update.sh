@@ -928,6 +928,10 @@ if [ -z "$NODE_CMD" ]; then
     exit 1
 fi
 log_verbose "Found node: $NODE_CMD"
+if ! "$NODE_CMD" -e 'const [m,n]=process.versions.node.split(".").map(Number);process.exit((m===24||(m===22&&n>=15))?0:1)'; then
+    log "${RED}Node.js 22.15+ or 24 LTS is required. Upgrade Node locally and rerun; no rebuild has started.${NC}"
+    exit 1
+fi
 
 # Change to project directory
 cd "$SCRIPT_DIR"
@@ -1211,7 +1215,7 @@ log ""
 # feature flags without touching the deploy mechanics.
 log "${BLUE}[3.5/7] Installing host-side agent (Phase A scaffold)...${NC}"
 
-AGENT_GO_VERSION="1.21.13"
+AGENT_GO_VERSION="1.27.1"
 
 # Detect installed Go version (system PATH first, then /usr/local/go).
 # Returns empty string if absent.
@@ -1263,6 +1267,10 @@ else
     if ! curl -fsSL -o "${GO_TMPDIR}/${GO_TARBALL}" "https://go.dev/dl/${GO_TARBALL}" 2>&1 | tee -a "$LOG_FILE"; then
         log "${RED}Failed to download Go tarball${NC}"
         rm -rf "$GO_TMPDIR"
+        exit 1
+    fi
+    if ! (cd "${GO_TMPDIR}" && sha256sum --ignore-missing -c "${SCRIPT_DIR}/deploy/go-toolchain.sha256"); then
+        echo "Go download checksum failed; existing toolchain retained" >&2
         exit 1
     fi
     rm -rf /usr/local/go

@@ -395,12 +395,8 @@ test('applyRecovery --totp alone clears exactly what the login handler keys its 
   assert.equal(alice.totp_enabled, 0);
   assert.equal(alice.totp_secret, '');
   assert.equal(alice.password_hash, OLD_HASH, 'the password is not touched');
-  // routes/auth.js: `if (user.totp_enabled && user.totp_secret)` is the gate
-  // between "verify TOTP" and "TOTP setup required" — pin that the column
-  // pair the recovery clears is the pair the handler reads.
-  const auth = readFileSync(join(REPO, 'admin/backend/src/routes/auth.js'), 'utf8');
-  assert.ok(auth.includes('if (user.totp_enabled && user.totp_secret)'));
-  assert.ok(auth.includes("error: 'TOTP setup required'"));
+  // security-enrollment.test.js exercises the actual login and limited
+  // enrollment route from this cleared-factor state.
   // Nobody else's second factor moved.
   assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM users WHERE totp_enabled = 1`).get().n, 3);
 });

@@ -3,10 +3,10 @@ import { readSystemStats } from '../lib/system-stats.js';
 import { Router } from 'express';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { writeFile, unlink, readdir, readFile, mkdir, rm, stat } from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, lstatSync } from 'fs';
 import { join, basename, resolve, dirname } from 'path';
 import os from 'os';
 import multer from 'multer';
@@ -22,7 +22,9 @@ import {
 import { getDb, logAudit, getAdminDomain } from '../db.js';
 import { emitContentChanged } from '../lib/change-events.js';
 import { decryptSecret } from '../lib/secrets.js';
-import { requireAdmin, requireSudo } from '../middleware/auth.js';
+import { requireAdmin, requireSudo, canViewService } from '../middleware/auth.js';
+import { serviceAccess } from '../middleware/service-access.js';
+import { composeOperation } from '../lib/docker-compose-operation.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { checkRouteDrift } from '../lib/route-drift.js';
@@ -46,6 +48,7 @@ import {
 } from '../lib/cert-mount-reconciler.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Owned platform routes let the adapter's own loopback self-check through
 // their restricted matcher (lib/setup-engine/local-edge.js); any other route,
@@ -81,7 +84,7 @@ async function execOnHost(command, options = {}) {
   if (isInDocker) {
     // Use nsenter to execute on the host's namespace
     // This requires the container to have appropriate privileges
-    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(command)}`;
+    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`;
     return execAsync(hostCommand, { timeout });
   } else {
     // Not in Docker, execute directly
@@ -232,9 +235,16 @@ function toSafeDirectoryName(name) {
 
 // Safely resolve a file path within a base directory (prevents path traversal)
 function safePath(baseDir, userPath) {
+  if (typeof baseDir !== 'string' || !baseDir || typeof userPath !== 'string' || /[\x00]/.test(userPath)) return null;
   const resolved = resolve(baseDir, userPath);
   if (!resolved.startsWith(resolve(baseDir) + '/') && resolved !== resolve(baseDir)) {
     return null;
+  }
+  // Refuse symlinks at every existing component (including the base).
+  let current = resolved;
+  while (current !== dirname(current)) {
+    try { if (lstatSync(current).isSymbolicLink()) return null; } catch (e) { if (e.code !== 'ENOENT') return null; }
+    current = dirname(current);
   }
   return resolved;
 }
@@ -475,7 +485,7 @@ async function isCaddyInstalled() {
 // target stance. On any downstream failure (config gen / adapt / reload),
 // both tables AND every affected merged file are rolled back to the
 // pre-POST state.
-servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
+servicesRouter.post('/:id/obtain-certificate', serviceAccess('POST', '/:id/obtain-certificate'), async (req, res) => {
   try {
     const db = getDb();
     const serviceId = req.params.id;
@@ -642,7 +652,7 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
 // regenerates the merged Caddy config for every affected domain, and
 // rolls back both tables + every affected merged file on any downstream
 // failure. TOTP check remains as the destructive-action guard.
-servicesRouter.delete('/:id/certificate', async (req, res) => {
+servicesRouter.delete('/:id/certificate', serviceAccess('DELETE', '/:id/certificate'), async (req, res) => {
   try {
     const { totpCode, passkeyAssertion } = deleteServiceSchema.parse(req.body);
     const db = getDb();
@@ -807,7 +817,7 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
 // and `services.ssl_enabled` are gone after the legacy column drop. Any
 // route on the domain is considered authoritative — if one exists with
 // ssl_enabled=1, the domain is SSL-enabled.
-servicesRouter.get('/ssl-status/:domain', async (req, res) => {
+servicesRouter.get('/ssl-status/:domain', serviceAccess('GET', '/ssl-status/:domain'), async (req, res) => {
   try {
     const domain = req.params.domain;
     const db = getDb();
@@ -833,7 +843,7 @@ servicesRouter.get('/ssl-status/:domain', async (req, res) => {
 });
 
 // Check system requirements (Caddy, etc.)
-servicesRouter.get('/system-check', async (req, res) => {
+servicesRouter.get('/system-check', serviceAccess('GET', '/system-check'), async (req, res) => {
   try {
     const caddyInstalled = await isCaddyInstalled();
 
@@ -862,7 +872,7 @@ servicesRouter.get('/system-check', async (req, res) => {
 // (transitional dual-source state) and calls `regenerateDomainCaddyConfig`
 // once per distinct domain. Caddy is reloaded exactly once at the end so
 // N domain rewrites share a single reload.
-servicesRouter.post('/:id/regenerate-config', async (req, res) => {
+servicesRouter.post('/:id/regenerate-config', serviceAccess('POST', '/:id/regenerate-config'), async (req, res) => {
   try {
     const db = getDb();
     const serviceId = req.params.id;
@@ -1114,7 +1124,7 @@ export async function upgradeSiteRenderContract() {
   return { upgraded: true, skipped: false, from: have, to: want, results: r.results };
 }
 
-servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
+servicesRouter.post('/caddy/regenerate-all', serviceAccess('POST', '/caddy/regenerate-all'), async (req, res) => {
   try {
     const r = await regenerateAllSiteConfigs();
     if (!r.ok) {
@@ -1142,7 +1152,7 @@ servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
 });
 
 // Caddy reload endpoint
-servicesRouter.post('/caddy/reload', async (req, res) => {
+servicesRouter.post('/caddy/reload', serviceAccess('POST', '/caddy/reload'), async (req, res) => {
   try {
     const result = await reloadCaddy();
     if (result.success) {
@@ -1172,7 +1182,7 @@ servicesRouter.post('/caddy/reload', async (req, res) => {
 // are synthesized from the primary route (earliest-created). Using
 // `SELECT *` + optional-chaining lets a single code path handle both
 // states without additional branching.
-servicesRouter.get('/', (req, res) => {
+servicesRouter.get('/', serviceAccess('GET', '/'), (req, res) => {
   try {
     const db = getDb();
 
@@ -1216,7 +1226,7 @@ servicesRouter.get('/', (req, res) => {
       });
     }
 
-    const formattedServices = servicesRows.map((s) => {
+    const formattedServices = servicesRows.filter(s => canViewService(req.user.id, s.id)).map((s) => {
       const routes = routesByService.get(s.id) || [];
       const primary = routes[0];
 
@@ -1285,7 +1295,7 @@ servicesRouter.get('/', (req, res) => {
 // object carries a nested `routes` array in primary-first order, exposes
 // Phase 2b service-level fields, and retains legacy top-level route-owned
 // fields for backward compatibility with the pre-Section-H frontend.
-servicesRouter.get('/:id', (req, res) => {
+servicesRouter.get('/:id', serviceAccess('GET', '/:id'), (req, res) => {
   try {
     const db = getDb();
     const s = db
@@ -1395,7 +1405,7 @@ servicesRouter.get('/:id', (req, res) => {
 });
 
 // Toggle favorite status
-servicesRouter.post('/:id/favorite', (req, res) => {
+servicesRouter.post('/:id/favorite', serviceAccess('POST', '/:id/favorite'), (req, res) => {
   try {
     const db = getDb();
     const service = db.prepare('SELECT id, is_favorite FROM services WHERE id = ?').get(req.params.id);
@@ -1415,7 +1425,7 @@ servicesRouter.post('/:id/favorite', (req, res) => {
 });
 
 // Create new service
-servicesRouter.post('/', async (req, res) => {
+servicesRouter.post('/', serviceAccess('POST', '/'), async (req, res) => {
   try {
     const data = createServiceSchema.parse(req.body);
     // Owned platform hostnames/routes are created by their service adapter (read-only here).
@@ -1780,7 +1790,7 @@ services:
 });
 
 // Update service
-servicesRouter.put('/:id', async (req, res) => {
+servicesRouter.put('/:id', serviceAccess('PUT', '/:id'), async (req, res) => {
   try {
     const data = createServiceSchema.partial().parse(req.body);
     // Owned platform hostnames/routes are created by their service adapter (read-only here).
@@ -2134,7 +2144,7 @@ servicesRouter.put('/:id', async (req, res) => {
 });
 
 // Get service config versions (for version control)
-servicesRouter.get('/:id/config-versions', async (req, res) => {
+servicesRouter.get('/:id/config-versions', serviceAccess('GET', '/:id/config-versions'), async (req, res) => {
   try {
     const db = getDb();
 
@@ -2175,7 +2185,7 @@ servicesRouter.get('/:id/config-versions', async (req, res) => {
 // and the handler returns 400. If the domain changed, both the old and
 // new domain's merged files are regenerated so the stale domain shrinks
 // or unlinks and the reverted domain is rewritten.
-servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
+servicesRouter.post('/:id/revert-config/:versionId', serviceAccess('POST', '/:id/revert-config/:versionId'), async (req, res) => {
   try {
     const db = getDb();
     const serviceId = req.params.id;
@@ -2324,7 +2334,7 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
 });
 
 // Get Caddy config for advanced editing
-servicesRouter.get('/:id/caddy-config', async (req, res) => {
+servicesRouter.get('/:id/caddy-config', serviceAccess('GET', '/:id/caddy-config'), async (req, res) => {
   try {
     const db = getDb();
     // Phase 2b D.14: fetch the service's primary route domain.
@@ -2355,7 +2365,7 @@ servicesRouter.get('/:id/caddy-config', async (req, res) => {
 });
 
 // Save Caddy config with failsafe revert on reload failure
-servicesRouter.put('/:id/caddy-config', async (req, res) => {
+servicesRouter.put('/:id/caddy-config', serviceAccess('PUT', '/:id/caddy-config'), async (req, res) => {
   try {
     const { config } = req.body;
     const db = getDb();
@@ -2451,7 +2461,7 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
 // routes touch, and reloads Caddy. Audit-logged as `LXC_IP_REFRESHED`.
 // No-op (returns 200 with `old_ip === new_ip`) when the IP is unchanged.
 // On any downstream failure, reverts the DB + restores merged files.
-servicesRouter.post('/:id/refresh-ip', async (req, res) => {
+servicesRouter.post('/:id/refresh-ip', serviceAccess('POST', '/:id/refresh-ip'), async (req, res) => {
   try {
     const db = getDb();
     const serviceId = req.params.id;
@@ -2830,7 +2840,7 @@ const createRouteSchema = z.object({
 // Returns `{routes: [...]}` ordered by length(path_prefix) DESC so the
 // more-specific prefixes appear first (matching Caddy's source-order
 // matching behavior). 404 when the parent service does not exist.
-servicesRouter.get('/:id/routes', (req, res) => {
+servicesRouter.get('/:id/routes', serviceAccess('GET', '/:id/routes'), (req, res) => {
   try {
     const db = getDb();
     const service = db
@@ -2889,7 +2899,7 @@ servicesRouter.get('/:id/routes', (req, res) => {
 // domain, INSERTs the route, regenerates the merged config, runs caddy adapt,
 // and reloads. On any downstream failure, rolls back both the DB row and
 // the merged file to pre-POST state.
-servicesRouter.post('/:id/routes', async (req, res) => {
+servicesRouter.post('/:id/routes', serviceAccess('POST', '/:id/routes'), async (req, res) => {
   try {
     const db = getDb();
     const service = db
@@ -3126,7 +3136,7 @@ servicesRouter.post('/:id/routes', async (req, res) => {
 //     file picks up the moved route
 //   - uniqueness + SSL consistency re-validation against the new tuple
 //   - dual-layer rollback (DB row + both merged files) on any failure
-servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
+servicesRouter.put('/:id/routes/:routeId', serviceAccess('PUT', '/:id/routes/:routeId'), async (req, res) => {
   try {
     const db = getDb();
     const service = db
@@ -3507,7 +3517,7 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
 // restores both the row and the file. Parent service is NOT touched —
 // a service with zero routes is legal in Phase 2b; the operator can add
 // routes back without recreating the service.
-servicesRouter.delete('/:id/routes/:routeId', async (req, res) => {
+servicesRouter.delete('/:id/routes/:routeId', serviceAccess('DELETE', '/:id/routes/:routeId'), async (req, res) => {
   { const pr = platformRouteRefusal(getDb(), { routeId: req.params.routeId, serviceId: req.params.id }); if (pr) return res.status(409).json(pr); }
   try {
     const db = getDb();
@@ -3643,7 +3653,7 @@ servicesRouter.delete('/:id/routes/:routeId', async (req, res) => {
 });
 
 // Delete service (requires TOTP or passkey)
-servicesRouter.delete('/:id', requireSudo, async (req, res) => {
+servicesRouter.delete('/:id', serviceAccess('DELETE', '/:id'), requireSudo, async (req, res) => {
   try {
     const { totpCode, passkeyAssertion } = deleteServiceSchema.parse(req.body);
     const db = getDb();
@@ -3754,7 +3764,7 @@ servicesRouter.delete('/:id', requireSudo, async (req, res) => {
 // ==================== FILE MANAGEMENT ====================
 
 // List files for a service
-servicesRouter.get('/:id/files', async (req, res) => {
+servicesRouter.get('/:id/files', serviceAccess('GET', '/:id/files'), async (req, res) => {
   try {
     const db = getDb();
     const service = db.prepare('SELECT data_dir FROM services WHERE id = ?').get(req.params.id);
@@ -3786,6 +3796,7 @@ async function listFilesRecursive(dir, baseDir, maxDepth = 3, currentDepth = 0) 
     const fullPath = join(dir, entry.name);
     const relativePath = fullPath.replace(baseDir + '/', '');
 
+    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
       const subFiles = await listFilesRecursive(fullPath, baseDir, maxDepth, currentDepth + 1);
       files.push({
@@ -3813,7 +3824,7 @@ async function listFilesRecursive(dir, baseDir, maxDepth = 3, currentDepth = 0) 
 }
 
 // Read a file
-servicesRouter.get('/:id/files/*', async (req, res) => {
+servicesRouter.get('/:id/files/*', serviceAccess('GET', '/:id/files/*'), async (req, res) => {
   try {
     const db = getDb();
     const service = db.prepare('SELECT data_dir FROM services WHERE id = ?').get(req.params.id);
@@ -3853,7 +3864,7 @@ servicesRouter.get('/:id/files/*', async (req, res) => {
 });
 
 // Create or update a file (with version control)
-servicesRouter.put('/:id/files/*', async (req, res) => {
+servicesRouter.put('/:id/files/*', serviceAccess('PUT', '/:id/files/*'), async (req, res) => {
   try {
     const { content, notes } = req.body;
     if (typeof content !== 'string') {
@@ -3934,7 +3945,7 @@ servicesRouter.put('/:id/files/*', async (req, res) => {
 });
 
 // Delete a file
-servicesRouter.delete('/:id/files/*', async (req, res) => {
+servicesRouter.delete('/:id/files/*', serviceAccess('DELETE', '/:id/files/*'), async (req, res) => {
   try {
     const db = getDb();
     const service = db.prepare('SELECT data_dir FROM services WHERE id = ?').get(req.params.id);
@@ -3979,7 +3990,7 @@ servicesRouter.delete('/:id/files/*', async (req, res) => {
 // ==================== FILE VERSION CONTROL ====================
 
 // Get file versions
-servicesRouter.get('/:id/versions/*', (req, res) => {
+servicesRouter.get('/:id/versions/*', serviceAccess('GET', '/:id/versions/*'), (req, res) => {
   try {
     const db = getDb();
     const service = db.prepare('SELECT id FROM services WHERE id = ?').get(req.params.id);
@@ -4005,7 +4016,7 @@ servicesRouter.get('/:id/versions/*', (req, res) => {
 });
 
 // Get specific version content
-servicesRouter.get('/:id/version/:versionId', (req, res) => {
+servicesRouter.get('/:id/version/:versionId', serviceAccess('GET', '/:id/version/:versionId'), (req, res) => {
   try {
     const db = getDb();
     const version = db.prepare(`
@@ -4032,7 +4043,7 @@ servicesRouter.get('/:id/version/:versionId', (req, res) => {
 });
 
 // Revert to a specific version
-servicesRouter.post('/:id/revert/:versionId', async (req, res) => {
+servicesRouter.post('/:id/revert/:versionId', serviceAccess('POST', '/:id/revert/:versionId'), async (req, res) => {
   try {
     const db = getDb();
     const version = db.prepare(`
@@ -4046,7 +4057,8 @@ servicesRouter.post('/:id/revert/:versionId', async (req, res) => {
       return res.status(404).json({ error: 'Version not found' });
     }
 
-    const fullPath = join(version.data_dir, version.file_path);
+    const fullPath = safePath(version.data_dir, version.file_path);
+    if (!fullPath) return res.status(403).json({ error: 'Access denied' });
 
     // Save current as new version before reverting
     if (existsSync(fullPath)) {
@@ -4091,7 +4103,7 @@ servicesRouter.post('/:id/revert/:versionId', async (req, res) => {
 });
 
 // Update version notes
-servicesRouter.put('/:id/version/:versionId/notes', (req, res) => {
+servicesRouter.put('/:id/version/:versionId/notes', serviceAccess('PUT', '/:id/version/:versionId/notes'), (req, res) => {
   try {
     const { notes } = req.body;
     const db = getDb();
@@ -4123,7 +4135,7 @@ servicesRouter.put('/:id/version/:versionId/notes', (req, res) => {
 // ==================== FILE UPLOAD/DOWNLOAD ====================
 
 // Upload file (for binary or large files)
-servicesRouter.post('/:id/upload/*', async (req, res) => {
+servicesRouter.post('/:id/upload/*', serviceAccess('POST', '/:id/upload/*'), async (req, res) => {
   try {
     const { content, encoding } = req.body; // content can be base64 encoded
 
@@ -4163,7 +4175,7 @@ servicesRouter.post('/:id/upload/*', async (req, res) => {
 });
 
 // Download file as base64
-servicesRouter.get('/:id/download/*', async (req, res) => {
+servicesRouter.get('/:id/download/*', serviceAccess('GET', '/:id/download/*'), async (req, res) => {
   try {
     const db = getDb();
     const service = db.prepare('SELECT data_dir FROM services WHERE id = ?').get(req.params.id);
@@ -4264,7 +4276,7 @@ function serviceZipVariant(entries, dataDir) {
 
 // Inspect: park the zip, report contents + conflicts. Nothing is
 // written to the site directory here.
-servicesRouter.post('/:id/zip-upload', zipUploadSingle, async (req, res) => {
+servicesRouter.post('/:id/zip-upload', serviceAccess('POST', '/:id/zip-upload'), zipUploadSingle, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No zip file provided' });
@@ -4335,7 +4347,7 @@ const zipApplySchema = z.object({
 // with the rename-and-move step. Conflicts (recomputed here — the
 // site may have changed since inspect) hard-stop with 409 unless the
 // user confirmed; on confirm each original is kept as `<name>.old`.
-servicesRouter.post('/:id/zip-upload/:uploadId/apply', async (req, res) => {
+servicesRouter.post('/:id/zip-upload/:uploadId/apply', serviceAccess('POST', '/:id/zip-upload/:uploadId/apply'), async (req, res) => {
   try {
     const parsedBody = zipApplySchema.safeParse(req.body || {});
     if (!parsedBody.success) {
@@ -4410,7 +4422,7 @@ servicesRouter.post('/:id/zip-upload/:uploadId/apply', async (req, res) => {
 });
 
 // Cancel: discard the parked archive. Nothing was written.
-servicesRouter.delete('/:id/zip-upload/:uploadId', async (req, res) => {
+servicesRouter.delete('/:id/zip-upload/:uploadId', serviceAccess('DELETE', '/:id/zip-upload/:uploadId'), async (req, res) => {
   try {
     const rec = getZipUpload(req.params.uploadId, 'service', req.params.id);
     if (rec) await discardZipUpload(rec.id);
@@ -4422,7 +4434,7 @@ servicesRouter.delete('/:id/zip-upload/:uploadId', async (req, res) => {
 });
 
 // Export service files as JSON
-servicesRouter.get('/:id/export-files', async (req, res) => {
+servicesRouter.get('/:id/export-files', serviceAccess('GET', '/:id/export-files'), async (req, res) => {
   try {
     const db = getDb();
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
@@ -4449,7 +4461,7 @@ servicesRouter.get('/:id/export-files', async (req, res) => {
 });
 
 // Import files to service
-servicesRouter.post('/:id/import-files', async (req, res) => {
+servicesRouter.post('/:id/import-files', serviceAccess('POST', '/:id/import-files'), async (req, res) => {
   try {
     const { files } = req.body;
 
@@ -4512,7 +4524,7 @@ servicesRouter.post('/:id/import-files', async (req, res) => {
 // compatibility with Phase 2 importers, but new-shape importers should
 // use the nested `routes` array as the source of truth. D.10 accepts
 // both shapes.
-servicesRouter.post('/export', async (req, res) => {
+servicesRouter.post('/export', serviceAccess('POST', '/export'), async (req, res) => {
   try {
     const { serviceIds, includeFiles } = req.body;
     const db = getDb();
@@ -4527,6 +4539,7 @@ servicesRouter.post('/export', async (req, res) => {
       services = db.prepare('SELECT * FROM services WHERE is_admin = 0').all();
     }
 
+    services = services.filter(service => canViewService(req.user.id, service.id));
     const exportData = {
       version: '2.0',
       exportedAt: new Date().toISOString(),
@@ -4612,6 +4625,7 @@ servicesRouter.post('/export', async (req, res) => {
 
 // Helper to export files recursively
 async function exportFilesRecursive(dir, baseDir) {
+  if (!safePath(baseDir, dir)) throw new Error('Unsafe export directory');
   const entries = await readdir(dir, { withFileTypes: true });
   const files = [];
 
@@ -4619,6 +4633,7 @@ async function exportFilesRecursive(dir, baseDir) {
     const fullPath = join(dir, entry.name);
     const relativePath = fullPath.replace(baseDir + '/', '');
 
+    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
       const subFiles = await exportFilesRecursive(fullPath, baseDir);
       files.push(...subFiles);
@@ -4663,7 +4678,7 @@ async function exportFilesRecursive(dir, baseDir) {
 //      `service_http_routes`, then INSERT each secondary route directly.
 //   6. After the loop, regenerate every touched domain's merged file
 //      once and reload Caddy.
-servicesRouter.post('/import', async (req, res) => {
+servicesRouter.post('/import', serviceAccess('POST', '/import'), async (req, res) => {
   try {
     const { services: importServices, overwrite } = req.body;
 
@@ -4922,7 +4937,7 @@ function isCommandBlocked(command) {
 }
 
 // Execute command on host (Admin only)
-servicesRouter.post('/terminal/execute', requireAdmin, async (req, res) => {
+servicesRouter.post('/terminal/execute', serviceAccess('POST', '/terminal/execute'), requireAdmin, async (req, res) => {
   try {
     let { command, workingDir, timeout } = terminalSchema.parse(req.body);
 
@@ -5003,7 +5018,7 @@ const fileWriteSchema = z.object({
   createDirs: z.boolean().optional().default(true),
 });
 
-servicesRouter.post('/terminal/write-file', requireAdmin, async (req, res) => {
+servicesRouter.post('/terminal/write-file', serviceAccess('POST', '/terminal/write-file'), requireAdmin, async (req, res) => {
   try {
     const { filePath, content, createDirs } = fileWriteSchema.parse(req.body);
 
@@ -5069,7 +5084,7 @@ const terminalUploadSchema = z.object({
   encoding: z.enum(['base64', 'text']).default('base64'),
 });
 
-servicesRouter.post('/terminal/upload-file', requireAdmin, async (req, res) => {
+servicesRouter.post('/terminal/upload-file', serviceAccess('POST', '/terminal/upload-file'), requireAdmin, async (req, res) => {
   try {
     const { directory, filename, content, encoding } = terminalUploadSchema.parse(req.body);
 
@@ -5129,7 +5144,7 @@ servicesRouter.post('/terminal/upload-file', requireAdmin, async (req, res) => {
 });
 
 // Get system info
-servicesRouter.get('/terminal/system-info', requireAdmin, async (req, res) => {
+servicesRouter.get('/terminal/system-info', serviceAccess('GET', '/terminal/system-info'), requireAdmin, async (req, res) => {
   try {
     const [hostname, uptime, memory, disk] = await Promise.all([
       execOnHost('hostname').then(r => r.stdout.trim()).catch(() => 'unknown'),
@@ -5151,7 +5166,7 @@ servicesRouter.get('/terminal/system-info', requireAdmin, async (req, res) => {
 });
 
 // Docker management endpoints
-servicesRouter.get('/docker/containers', async (req, res) => {
+servicesRouter.get('/docker/containers', serviceAccess('GET', '/docker/containers'), async (req, res) => {
   try {
     const result = await execOnHost('docker ps -a --format "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"');
     const containers = result.stdout.trim().split('\n').filter(Boolean).map(line => {
@@ -5164,7 +5179,7 @@ servicesRouter.get('/docker/containers', async (req, res) => {
   }
 });
 
-servicesRouter.post('/docker/container/:action', async (req, res) => {
+servicesRouter.post('/docker/container/:action', serviceAccess('POST', '/docker/container/:action'), async (req, res) => {
   try {
     const { action } = req.params;
     const { containerId, containerName } = req.body;
@@ -5201,156 +5216,65 @@ servicesRouter.post('/docker/container/:action', async (req, res) => {
   }
 });
 
-// Docker Compose operations
-servicesRouter.post('/docker/compose', async (req, res) => {
+// Docker/Compose arguments remain argv through the host namespace boundary.
+async function execHostFile(bin, args, options = {}) {
+  const executable = isInDocker ? 'nsenter' : bin;
+  const argv = isInDocker ? ['-t', '1', '-m', '-u', '-n', '-i', bin, ...args] : args;
+  return execFileAsync(executable, argv, { timeout: 120000, maxBuffer: 8 * 1024 * 1024, ...options, shell: false });
+}
+
+async function executeCompose(body, allowDestroy = false) {
+  const args = composeOperation(body, { allowDestroy });
+  // Do not guess a project or delete unrelated resources if its manifest is gone.
+  // Reject symlinks and caller-writable manifests at the host, then let Compose
+  // use the exact reviewed path. Only freshly authenticated admins reach here.
+  const check = await execHostFile('python3', ['-c',
+    `import os,stat,sys
+p=sys.argv[1]
+assert os.path.realpath(p)==p
+assert stat.S_ISREG(os.stat(p).st_mode)
+q=p
+while True:
+ s=os.stat(q)
+ assert s.st_uid==0 and not s.st_mode & 0o022
+ if q=='/': break
+ q=os.path.dirname(q)
+print(p)`, body.path]);
+  if (check.stdout.trim() !== body.path) throw new Error('Untrusted Compose path');
+  const command = await getDockerComposeCmd();
+  return execHostFile(command === 'docker-compose' ? 'docker-compose' : 'docker', command === 'docker-compose' ? args : ['compose', ...args]);
+}
+
+servicesRouter.post('/docker/compose', serviceAccess('POST', '/docker/compose'), async (req, res) => {
   try {
-    const { action, path, serviceName, options } = req.body;
-    const validActions = ['up', 'down', 'restart', 'pull', 'logs', 'ps', 'stop', 'start', 'destroy'];
-
-    if (!validActions.includes(action)) {
-      return res.status(400).json({ error: 'Invalid action' });
-    }
-
-    if (!path) {
-      return res.status(400).json({ error: 'Compose file path required' });
-    }
-
-    const composeCmd = await getDockerComposeCmd();
-    let cmd = `${composeCmd} -f ${JSON.stringify(path)}`;
-
-    switch (action) {
-      case 'up':
-      case 'start':
-        cmd += ' up -d';
-        break;
-      case 'down':
-        cmd += ' down';
-        break;
-      case 'stop':
-        cmd += ' stop';
-        break;
-      case 'restart':
-        cmd += ' restart';
-        break;
-      case 'pull':
-        cmd += ' pull';
-        break;
-      case 'logs':
-        cmd += ' logs --tail=100';
-        break;
-      case 'ps':
-        cmd += ' ps';
-        break;
-      case 'destroy':
-        // Destroy with optional volume/image/orphan removal
-        cmd += ' down';
-        if (options?.removeVolumes) cmd += ' -v';
-        if (options?.removeImages) cmd += ' --rmi all';
-        if (options?.removeOrphans) cmd += ' --remove-orphans';
-        break;
-    }
-
-    if (serviceName && ['up', 'start', 'stop', 'restart', 'logs'].includes(action)) {
-      cmd += ` ${serviceName}`;
-    }
-
-    cmd += ' 2>&1';
-
-    const result = await execOnHost(cmd, { timeout: 120000 });
-
-    logAudit(req.user.id, 'DOCKER_COMPOSE', 'compose', path, { action, serviceName, options }, req.ip);
-
-    res.json({
-      success: true,
-      output: result.stdout + (result.stderr || ''),
-    });
+    const result = await executeCompose(req.body);
+    logAudit(req.user.id, 'DOCKER_COMPOSE', 'compose', req.body.path, { action: req.body.action, serviceName: req.body.serviceName }, req.ip);
+    res.json({ success: true, output: result.stdout + (result.stderr || '') });
   } catch (error) {
-    res.json({
-      success: false,
-      output: error.stdout + '\n' + (error.stderr || error.message),
-    });
+    res.status(400).json({ success: false, error: error.message });
   }
 });
 
-// Docker Compose destroy with TOTP verification (for dangerous operations)
-servicesRouter.post('/docker/compose/destroy', async (req, res) => {
+servicesRouter.post('/docker/compose/destroy', serviceAccess('POST', '/docker/compose/destroy'), async (req, res) => {
   try {
-    const { path, totpCode, passkeyAssertion, options } = req.body;
-
-    if (!path) {
-      return res.status(400).json({ error: 'Compose file path required' });
-    }
-
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-    const verified = await verifyConfirmationFactor({ req, user, totpCode, passkeyAssertion });
+    // The same sudo gate protects both entry points. This endpoint additionally
+    // consumes the existing one-action factor before a destructive Compose plan.
+    composeOperation({ ...req.body, action: 'destroy' }, { allowDestroy: true });
+    const user = getDb().prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const verified = await verifyConfirmationFactor({ req, user, totpCode: req.body.totpCode, passkeyAssertion: req.body.passkeyAssertion });
     if (!verified.ok) return res.status(401).json({ error: verified.error });
-
-    // Check if compose file exists first
-    try {
-      await execOnHost(`test -f ${JSON.stringify(path)}`);
-    } catch (e) {
-      // File doesn't exist - try to stop containers by project name instead
-      const projectName = path.split('/').slice(-2, -1)[0] || 'unknown';
-      try {
-        // Try to stop any containers with this project label
-        const stopCmd = `docker ps -q --filter "label=com.docker.compose.project=${projectName}" | xargs -r docker stop 2>/dev/null || true`;
-        await execOnHost(stopCmd);
-        const rmCmd = `docker ps -aq --filter "label=com.docker.compose.project=${projectName}" | xargs -r docker rm -f 2>/dev/null || true`;
-        await execOnHost(rmCmd);
-
-        logAudit(req.user.id, 'DOCKER_COMPOSE_DESTROY', 'compose', path, { options, fallback: true }, req.ip);
-
-        return res.json({
-          success: true,
-          output: `Compose file not found at ${path}. Stopped and removed containers with project "${projectName}" directly.`,
-        });
-      } catch (fallbackErr) {
-        return res.json({
-          success: false,
-          output: `Compose file not found at ${path} and fallback cleanup failed: ${fallbackErr.message}`,
-        });
-      }
-    }
-
-    const composeCmd = await getDockerComposeCmd();
-    let cmd = `${composeCmd} -f ${JSON.stringify(path)} down`;
-    if (options?.removeVolumes) cmd += ' -v';
-    if (options?.removeImages) cmd += ' --rmi all';
-    if (options?.removeOrphans) cmd += ' --remove-orphans';
-    cmd += ' 2>&1';
-
-    const result = await execOnHost(cmd, { timeout: 120000 });
-
-    // If prune requested, run docker system prune for this project
-    let pruneOutput = '';
-    if (options?.prune) {
-      try {
-        const pruneResult = await execOnHost('docker system prune -f 2>&1', { timeout: 60000 });
-        pruneOutput = '\n--- Prune Output ---\n' + pruneResult.stdout;
-      } catch (e) {
-        pruneOutput = '\n--- Prune Failed ---\n' + e.message;
-      }
-    }
-
-    logAudit(req.user.id, 'DOCKER_COMPOSE_DESTROY', 'compose', path, { options }, req.ip);
-
-    res.json({
-      success: true,
-      output: result.stdout + (result.stderr || '') + pruneOutput,
-    });
+    const result = await executeCompose({ ...req.body, action: 'destroy' }, true);
+    logAudit(req.user.id, 'DOCKER_COMPOSE_DESTROY', 'compose', req.body.path, { options: req.body.options }, req.ip);
+    res.json({ success: true, output: result.stdout + (result.stderr || '') });
   } catch (error) {
-    res.json({
-      success: false,
-      output: error.stdout + '\n' + (error.stderr || error.message),
-    });
+    res.status(400).json({ success: false, error: error.message });
   }
 });
 
 // ==================== VOLUME MANAGEMENT ====================
 
 // List Docker volumes
-servicesRouter.get('/docker/volumes', async (req, res) => {
+servicesRouter.get('/docker/volumes', serviceAccess('GET', '/docker/volumes'), async (req, res) => {
   try {
     const result = await execOnHost('docker volume ls --format "{{.Name}}\\t{{.Driver}}\\t{{.Mountpoint}}" 2>/dev/null');
     const volumes = result.stdout.trim().split('\n').filter(Boolean).map(line => {
@@ -5375,7 +5299,7 @@ servicesRouter.get('/docker/volumes', async (req, res) => {
 });
 
 // Export a Docker volume to a tar.gz file
-servicesRouter.post('/docker/volumes/export', async (req, res) => {
+servicesRouter.post('/docker/volumes/export', serviceAccess('POST', '/docker/volumes/export'), async (req, res) => {
   try {
     const { volumeName } = req.body;
 
@@ -5409,7 +5333,7 @@ servicesRouter.post('/docker/volumes/export', async (req, res) => {
 });
 
 // Import a Docker volume from a tar.gz file
-servicesRouter.post('/docker/volumes/import', async (req, res) => {
+servicesRouter.post('/docker/volumes/import', serviceAccess('POST', '/docker/volumes/import'), async (req, res) => {
   try {
     const { volumeName, backupFile } = req.body;
 
@@ -5417,7 +5341,7 @@ servicesRouter.post('/docker/volumes/import', async (req, res) => {
       return res.status(400).json({ error: 'Invalid volume name' });
     }
 
-    if (!backupFile || !backupFile.endsWith('.tar.gz')) {
+    if (typeof backupFile !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.tar\.gz$/.test(backupFile)) {
       return res.status(400).json({ error: 'Invalid backup file' });
     }
 
@@ -5450,7 +5374,7 @@ servicesRouter.post('/docker/volumes/import', async (req, res) => {
 });
 
 // List available volume backups
-servicesRouter.get('/docker/volumes/backups', async (req, res) => {
+servicesRouter.get('/docker/volumes/backups', serviceAccess('GET', '/docker/volumes/backups'), async (req, res) => {
   try {
     const backupDir = '/data/volume-backups';
     await execOnHost(`mkdir -p ${backupDir}`);
@@ -5473,7 +5397,7 @@ servicesRouter.get('/docker/volumes/backups', async (req, res) => {
 });
 
 // Get real-time system stats using Node.js os module - reliable inside containers
-servicesRouter.get('/system/stats', async (req, res) => {
+servicesRouter.get('/system/stats', serviceAccess('GET', '/system/stats'), async (req, res) => {
   try {
     const stats = await readSystemStats();
     res.json(stats);
@@ -5484,7 +5408,7 @@ servicesRouter.get('/system/stats', async (req, res) => {
 });
 
 // Kill switch - secure the ProxyPilot dashboard (requires TOTP)
-servicesRouter.post('/system/secure', async (req, res) => {
+servicesRouter.post('/system/secure', serviceAccess('POST', '/system/secure'), async (req, res) => {
   try {
     const { totpCode, passkeyAssertion } = deleteServiceSchema.parse(req.body);
     const db = getDb();
@@ -5566,7 +5490,7 @@ export async function listManagedGuests() {
   }
 }
 
-servicesRouter.get('/route-drift', async (req, res) => {
+servicesRouter.get('/route-drift', serviceAccess('GET', '/route-drift'), async (req, res) => {
   try {
     const report = await checkRouteDrift({
       db: getDb(),
@@ -5582,7 +5506,7 @@ servicesRouter.get('/route-drift', async (req, res) => {
 // ==================== DISCOVER EXISTING SITES ====================
 
 // Discover existing Caddy sites from sites directory
-servicesRouter.get('/discover/caddy-sites', async (req, res) => {
+servicesRouter.get('/discover/caddy-sites', serviceAccess('GET', '/discover/caddy-sites'), async (req, res) => {
   try {
     const db = getDb();
     // Phase 2b D.14: source existing domains from service_http_routes
@@ -5710,7 +5634,7 @@ servicesRouter.get('/discover/caddy-sites', async (req, res) => {
 // discovered `type` and (b) calls `syncPrimaryRouteFromLegacy` right
 // after the INSERT so a matching `service_http_routes` row exists.
 // Mirrors the D.2 POST /api/services dual-write strategy.
-servicesRouter.post('/discover/import', async (req, res) => {
+servicesRouter.post('/discover/import', serviceAccess('POST', '/discover/import'), async (req, res) => {
   try {
     const { domain, name, type, rootDir, target, port, sslEnabled, websocketEnabled } = req.body;
 
@@ -5840,7 +5764,7 @@ servicesRouter.post('/discover/import', async (req, res) => {
 // ==================== DOCKER COMPOSE SERVICES ====================
 
 // Discover docker compose projects and their services
-servicesRouter.get('/discover/docker-compose', async (req, res) => {
+servicesRouter.get('/discover/docker-compose', serviceAccess('GET', '/discover/docker-compose'), async (req, res) => {
   try {
     // Get all running containers with their compose project info
     const result = await execOnHost(`docker ps -a --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}\\t{{.Labels}}' 2>/dev/null || echo ""`);
@@ -5912,7 +5836,7 @@ servicesRouter.get('/discover/docker-compose', async (req, res) => {
 });
 
 // Get all docker compose services (for display in services list)
-servicesRouter.get('/docker-compose/services', async (req, res) => {
+servicesRouter.get('/docker-compose/services', serviceAccess('GET', '/docker-compose/services'), async (req, res) => {
   try {
     // Get all containers (not just compose-labelled ones, in case labels are missing)
     const result = await execOnHost(`docker ps -a --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}\\t{{.Labels}}' 2>/dev/null || echo ""`);
@@ -6995,7 +6919,7 @@ const l4ForwardSchema = z.object({
 );
 
 // GET /services/:id/l4-forwards — list rows for a service.
-servicesRouter.get('/:id/l4-forwards', (req, res) => {
+servicesRouter.get('/:id/l4-forwards', serviceAccess('GET', '/:id/l4-forwards'), (req, res) => {
   try {
     const db = getDb();
     const svc = db.prepare(`SELECT id FROM services WHERE id = ?`).get(req.params.id);
@@ -7030,7 +6954,7 @@ servicesRouter.get('/:id/l4-forwards', (req, res) => {
 });
 
 // POST /services/:id/l4-forwards — create + reconcile.
-servicesRouter.post('/:id/l4-forwards', async (req, res) => {
+servicesRouter.post('/:id/l4-forwards', serviceAccess('POST', '/:id/l4-forwards'), async (req, res) => {
   let data;
   try {
     data = l4ForwardSchema.parse(req.body || {});
@@ -7129,7 +7053,7 @@ servicesRouter.post('/:id/l4-forwards', async (req, res) => {
 
 // DELETE /services/:id/l4-forwards/:forwardId — DB delete + reconcile
 // removes the device + firewall row.
-servicesRouter.delete('/:id/l4-forwards/:forwardId', async (req, res) => {
+servicesRouter.delete('/:id/l4-forwards/:forwardId', serviceAccess('DELETE', '/:id/l4-forwards/:forwardId'), async (req, res) => {
   try {
     const db = getDb();
     const ctx = await loadServiceForL4(db, req.params.id);
@@ -7191,7 +7115,7 @@ servicesRouter.delete('/:id/l4-forwards/:forwardId', async (req, res) => {
 // reconciler is otherwise only invoked off create/delete; this endpoint
 // makes the heal action a one-click affordance instead of asking the
 // operator to delete + re-add.
-servicesRouter.post('/:id/l4-forwards/reconcile', async (req, res) => {
+servicesRouter.post('/:id/l4-forwards/reconcile', serviceAccess('POST', '/:id/l4-forwards/reconcile'), async (req, res) => {
   try {
     const db = getDb();
     const ctx = await loadServiceForL4(db, req.params.id);
@@ -7228,7 +7152,7 @@ servicesRouter.post('/:id/l4-forwards/reconcile', async (req, res) => {
 // exactly what to fix next — and, when host-side is verified clean,
 // names the cloud-provider security group as the only remaining
 // candidate (which is outside ProxyPilot's reach).
-servicesRouter.post('/:id/l4-forwards/diagnose', async (req, res) => {
+servicesRouter.post('/:id/l4-forwards/diagnose', serviceAccess('POST', '/:id/l4-forwards/diagnose'), async (req, res) => {
   try {
     const db = getDb();
     const ctx = await loadServiceForL4(db, req.params.id);
@@ -7253,7 +7177,7 @@ servicesRouter.post('/:id/l4-forwards/diagnose', async (req, res) => {
 // persist the result. Returns the raw detector envelope so the UI
 // can render the chip row + the docker-compose ps table without a
 // second round trip.
-servicesRouter.post('/:id/detected-ports/rescan', async (req, res) => {
+servicesRouter.post('/:id/detected-ports/rescan', serviceAccess('POST', '/:id/detected-ports/rescan'), async (req, res) => {
   try {
     const db = getDb();
     const svc = db.prepare(`SELECT * FROM services WHERE id = ?`).get(req.params.id);
@@ -7278,7 +7202,7 @@ servicesRouter.post('/:id/detected-ports/rescan', async (req, res) => {
 // GET /services/:id/detected-ports — read the cache without rescanning.
 // The UI hits this on every panel load; rescan is opt-in via the
 // button, which keeps page load cheap.
-servicesRouter.get('/:id/detected-ports', (req, res) => {
+servicesRouter.get('/:id/detected-ports', serviceAccess('GET', '/:id/detected-ports'), (req, res) => {
   try {
     const db = getDb();
     const svc = db.prepare(`SELECT id FROM services WHERE id = ?`).get(req.params.id);
@@ -7342,7 +7266,7 @@ function loadCertMountRow(db, mountId, serviceId) {
 // GET /:id/cert-mounts — list rows for a service plus per-row Incus
 // state. The state-check fans out via Promise.all so a service with
 // half a dozen mounts still settles in one round-trip-ish.
-servicesRouter.get('/:id/cert-mounts', requireAdmin, async (req, res) => {
+servicesRouter.get('/:id/cert-mounts', serviceAccess('GET', '/:id/cert-mounts'), requireAdmin, async (req, res) => {
   try {
     const db = getDb();
     const svc = db
@@ -7402,7 +7326,7 @@ servicesRouter.get('/:id/cert-mounts', requireAdmin, async (req, res) => {
 
 // POST /:id/cert-mounts — create + reconcile (which actually attaches
 // the device on the target LXC).
-servicesRouter.post('/:id/cert-mounts', requireSudo, async (req, res) => {
+servicesRouter.post('/:id/cert-mounts', serviceAccess('POST', '/:id/cert-mounts'), requireSudo, async (req, res) => {
   let data;
   try {
     data = certMountCreateSchema.parse(req.body || {});
@@ -7586,7 +7510,7 @@ servicesRouter.post('/:id/cert-mounts', requireSudo, async (req, res) => {
 // DELETE /:id/cert-mounts/:mountId — remove the Incus device first,
 // then drop the DB row. Tolerates "device not found" (drift case)
 // so the DB row removal still proceeds.
-servicesRouter.delete('/:id/cert-mounts/:mountId', requireSudo, async (req, res) => {
+servicesRouter.delete('/:id/cert-mounts/:mountId', serviceAccess('DELETE', '/:id/cert-mounts/:mountId'), requireSudo, async (req, res) => {
   try {
     const db = getDb();
     const row = loadCertMountRow(db, req.params.mountId, req.params.id);
@@ -7618,7 +7542,7 @@ servicesRouter.delete('/:id/cert-mounts/:mountId', requireSudo, async (req, res)
 // UI hook for the drift badge's Reconcile button. Re-runs the
 // inspect→attach decision for one row only so a wide sweep isn't
 // required just because one device went missing.
-servicesRouter.post('/:id/cert-mounts/:mountId/reconcile', requireSudo, async (req, res) => {
+servicesRouter.post('/:id/cert-mounts/:mountId/reconcile', serviceAccess('POST', '/:id/cert-mounts/:mountId/reconcile'), requireSudo, async (req, res) => {
   try {
     const db = getDb();
     const row = loadCertMountRow(db, req.params.mountId, req.params.id);

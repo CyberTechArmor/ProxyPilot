@@ -124,7 +124,9 @@ test('2: after the Infisical runtime step 127.0.0.1:18085 accepts a connection; 
     assert.ok(!edgeNetworkCurrent({ ...edge, Internal: true }, n)); assert.ok(!edgeNetworkCurrent({ ...edge, Containers: { x: { Name: n.database } } }, n));
     const server = docker.objects.container.get(n.server);
     assert.equal(server.HostConfig.NetworkMode, n.edgeNetwork);
-    assert.deepEqual(Object.keys(server.NetworkSettings.Networks).sort(), [n.edgeNetwork, n.network].sort());
+    // The Agent Proxy's private network joins too (only when the proxy is selected).
+    assert.deepEqual(Object.keys(server.NetworkSettings.Networks).sort(), [n.edgeNetwork, n.network, ...(r.config.agentMode === 'skip' ? [] : [n.agentNetwork])].sort());
+    if (r.config.agentMode !== 'skip') assert.equal(docker.objects.network.get(n.agentNetwork).Internal, true);
     for (const key of ['database', 'redis']) assert.deepEqual(Object.keys(docker.objects.container.get(n[key]).NetworkSettings.Networks), [n.network]);
     assert.equal(await portListening(docker.host, INFISICAL_PORT), true);
     await new Promise((ok, no) => { const s = net.connect(INFISICAL_PORT, '127.0.0.1', () => { s.destroy(); ok(); }); s.once('error', no); });

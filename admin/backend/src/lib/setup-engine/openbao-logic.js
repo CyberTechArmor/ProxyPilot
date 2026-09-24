@@ -42,14 +42,18 @@ const humanRoleWith=(r,ttl)=>({role_type:'oidc',user_claim:'sub',bound_audiences
 // (8 h) on the shared team area; the advanced profile keeps its 2-minute proof.
 export const HUMAN_TTL=28800;
 export const humanRoleFor=r=>humanRoleWith(r,r.config.basic?HUMAN_TTL:120);
-// The team workspace: read/write under <kv>/team/, plus what the web UI needs to
-// list the engine. Nothing else in the vault; the machine policy is unchanged.
-export const humanPolicyFor=r=>{if(!r.config.basic)return policyFor(r);const kv=`${namesFor(r).prefix}-kv`;return [
+// Basic profile: members of the mapped Keycloak group are OpenBao administrators
+// (they sign in with their passkey; sessions last 8 h). The machine policy is unchanged.
+export const ADMIN_POLICY='path "*" { capabilities = ["create", "read", "update", "patch", "delete", "list", "sudo"] }\n';
+export const humanPolicyFor=r=>r.config.basic?ADMIN_POLICY:policyFor(r);
+// The earlier team-workspace rendering: read/write under <kv>/team/ only. Kept so
+// an install that carries it is recognised and upgraded (priorHumanFor).
+export const teamPolicyFor=r=>{const kv=`${namesFor(r).prefix}-kv`;return [
   [`${kv}/data/team/*`,'"create", "read", "update", "delete", "list"'],[`${kv}/metadata/team/*`,'"read", "list", "delete"'],[`${kv}/delete/team/*`,'"update"'],[`${kv}/undelete/team/*`,'"update"'],
   [`${kv}/metadata/`,'"list"'],[`${kv}/config`,'"read"'],[`${kv}/data/health`,'"read"'],['sys/internal/ui/mounts','"read"'],[`sys/internal/ui/mounts/${kv}`,'"read"'],
   ['sys/capabilities-self','"update"'],['auth/token/lookup-self','"read"'],['auth/token/renew-self','"update"'],['auth/token/revoke-self','"update"'],
 ].map(([p,c])=>`path "${p}" { capabilities = [${c}] }\n`).join('');};
-// What ProxyPilot wrote for the human side before the workspace existed. An
-// exact match is upgraded in place (openbao-custody.js upgradeHumanAccess);
-// any other difference is drift.
-export const priorHumanFor=r=>({policy:policyFor(r),role:humanRoleWith(r,120)});
+// What ProxyPilot wrote for the human side before: the 2-minute proof policy and
+// then the team workspace. An exact match of either is upgraded in place
+// (openbao-custody.js upgradeHumanAccess); any other difference is drift.
+export const priorHumanFor=r=>({policy:policyFor(r),policies:r.config.basic?[policyFor(r),teamPolicyFor(r)]:[],role:humanRoleWith(r,120)});

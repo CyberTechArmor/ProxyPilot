@@ -174,6 +174,15 @@ and Docker logging is disabled. Command:
 secrets agent-proxy start --unmatched-host=block --poll-interval=30 --telemetry=false
 ```
 
+The managed proxy reaches the Infisical server by name over an owned internal
+network, `pp-if-<ref>-agent-net` (joined only by the server and the proxy), with
+`INFISICAL_DOMAIN=http://pp-if-<ref>-server:8080`. It never uses the public origin:
+from a Docker bridge that name loops back through the firewall and reaches the
+restricted Caddy route as the firewall's LAN address, so the route refuses it.
+An install whose env file still carries the public origin is upgraded by
+recreating the stateless proxy container (its state volume is kept). An
+external (connected) proxy keeps the origin.
+
 The protected `/var/lib/proxypilot/infisical/agent-proxy.env` contains only the
 proxy Universal Auth client ID/secret, Infisical origin and disabled update check.
 The agent never mounts or receives this file, the host protected directory or

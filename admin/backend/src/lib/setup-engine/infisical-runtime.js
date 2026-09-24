@@ -15,7 +15,7 @@ const OWNER='io.proxypilot.infisical';
 export const EDGE_NETWORK_OPTIONS=Object.freeze({'com.docker.network.bridge.enable_ip_masquerade':'false'});
 // Options a daemon may report on its own for a plain bridge; nothing else is tolerated.
 const DAEMON_DEFAULT_OPTIONS={'com.docker.network.enable_ipv4':'true','com.docker.network.enable_ipv6':'false'};
-export const namesFor=r=>{const prefix=`pp-if-${r.credential_ref.slice(-12)}`;return {network:`${prefix}-data-net`,edgeNetwork:`${prefix}-edge-net`,proxyNetwork:`${prefix}-proxy-net`,database:`${prefix}-db`,redis:`${prefix}-redis`,server:`${prefix}-server`,proxy:`${prefix}-proxy`,databaseVolume:`${prefix}-pg`,redisVolume:`${prefix}-redis-data`,proxyVolume:`${prefix}-proxy-state`};};
+export const namesFor=r=>{const prefix=`pp-if-${r.credential_ref.slice(-12)}`;return {network:`${prefix}-data-net`,edgeNetwork:`${prefix}-edge-net`,proxyNetwork:`${prefix}-proxy-net`,agentNetwork:`${prefix}-agent-net`,database:`${prefix}-db`,redis:`${prefix}-redis`,server:`${prefix}-server`,proxy:`${prefix}-proxy`,databaseVolume:`${prefix}-pg`,redisVolume:`${prefix}-redis-data`,proxyVolume:`${prefix}-proxy-state`};};
 function privateDir(path){mkdirSync(path,{recursive:true,mode:0o700});const s=lstatSync(path);if(!s.isDirectory()||s.isSymbolicLink()||s.uid!==process.getuid()||(s.mode&0o077))throw fail('Infisical protected directory has unsafe ownership or permissions.');}
 function immutableFile(path,content){if(existsSync(path)){if(readPrivate(path)!==content)throw fail('Protected Infisical configuration drifted; restore its matching backup set.');}else atomicPrivate(path,content);}
 export function prepareInfisicalFiles(r,{root=INFISICAL_ROOT,resourcesExist=false}={}) {
@@ -73,6 +73,13 @@ export async function ensureInfisicalRuntime(r,{exec,job,root=INFISICAL_ROOT,att
   for(const key of ['databaseVolume','redisVolume'])if(inventory[key]&&(inventory[key].Driver!=='local'||Object.keys(inventory[key].Options||{}).length))throw fail('Owned Infisical volume driver/options changed. No data was replaced.');
   if(inventory.edgeNetwork&&!edgeNetworkCurrent(inventory.edgeNetwork,names))throw fail('Owned Infisical edge network drifted (it must be a non-internal bridge with masquerade off, joined only by the server). Nothing was changed.');
   if(!inventory.network)await d.must(['network','create','--internal',...labels,names.network],'private network create');
+  // The Agent Proxy reaches this server over its own internal network, never
+  // through the public restricted route: from a container that route hairpins
+  // through the firewall and is refused as the firewall's LAN address.
+  const withProxy=r.config.agentMode!=='skip';
+  if(withProxy){inventory.agentNetwork=await d.inspect('network',names.agentNetwork);const a=inventory.agentNetwork;
+    if(a&&(a.Labels?.[OWNER]!==owner||!a.Internal||a.Driver!=='bridge'||Object.values(a.Containers||{}).some(c=>![names.server,names.proxy].includes(c.Name))))throw fail('Owned Infisical agent network drifted (it must be an internal bridge joined only by the server and the Agent Proxy). Nothing was changed.');
+    if(!a)await d.must(['network','create','--internal',...labels,names.agentNetwork],'agent network create');}
   if(!inventory.edgeNetwork)await d.must(['network','create','--driver','bridge',...Object.entries(EDGE_NETWORK_OPTIONS).flatMap(([k,v])=>['--opt',`${k}=${v}`]),...labels,names.edgeNetwork],'edge network create');
   // A server created by the internal-only profile never binds its published
   // port. It holds no data (no mounts; its state is in db/redis and the
@@ -92,7 +99,7 @@ export async function ensureInfisicalRuntime(r,{exec,job,root=INFISICAL_ROOT,att
   for(const spec of specs){spec.owner=owner;
     // The server's primary network is the edge bridge (its published port);
     // it joins data-net second to reach db and redis by name.
-    spec.network=spec.key==='server'?names.edgeNetwork:names.network;spec.networks=spec.key==='server'?[names.edgeNetwork,names.network]:[names.network];
+    spec.network=spec.key==='server'?names.edgeNetwork:names.network;spec.networks=spec.key==='server'?[names.edgeNetwork,names.network,...(withProxy?[names.agentNetwork]:[])]:[names.network];
     if(!inventory[spec.key]){const args=['create','--name',names[spec.key],...labels,'--restart','unless-stopped','--network',spec.network,...LOG_ARGS];if(spec.envFile)args.push('--env-file',spec.envFile);for(const m of spec.mounts)args.push('--mount',`type=volume,source=${m.Name},target=${m.Destination}`);if(spec.ports)args.push('--publish',`127.0.0.1:${INFISICAL_PORT}:8080`);args.push(spec.image,...(spec.command||[]));await d.must(args,`${spec.key} create`);}
     let actual=await d.inspect('container',names[spec.key]);
     for(const extra of spec.networks.filter(n=>n!==spec.network&&!Object.hasOwn(actual.NetworkSettings?.Networks||{},n))){await d.must(['network','connect',extra,actual.Id||names[spec.key]],`${spec.key} network connect`);actual=await d.inspect('container',names[spec.key]);}
@@ -118,7 +125,10 @@ export async function ensureAgentProxyRuntime(r,values,{exec,job,root=INFISICAL_
   if(r.config.agentMode==='skip')return {state:'skipped'};
   const d=dockerAdapter(exec,job),n=namesFor(r),external=r.config.agentMode==='connect';
   const name=external?r.config.externalProxyContainer:n.proxy,actual=await d.inspect('container',name);
-  const env={INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:r.identities.proxy.clientId,INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:values.proxy,INFISICAL_DOMAIN:r.config.origin,INFISICAL_DISABLE_UPDATE_CHECK:'true'};
+  // A managed proxy talks to the server by name on the owned internal agent
+  // network (see ensureInfisicalRuntime); an existing external proxy keeps the origin.
+  const domain=external?r.config.origin:`http://${n.server}:8080`;
+  const env={INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:r.identities.proxy.clientId,INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:values.proxy,INFISICAL_DOMAIN:domain,INFISICAL_DISABLE_UPDATE_CHECK:'true'};
   const command=['secrets','agent-proxy','start','--unmatched-host=block','--poll-interval=30','--telemetry=false'];
   // Connect inspects the selected instance's existing dedicated resources. It
   // never requires renaming/recreating them under a newly generated owner ref.
@@ -129,18 +139,35 @@ export async function ensureAgentProxyRuntime(r,values,{exec,job,root=INFISICAL_
     if(r.resources?.proxy?.network&&(r.resources.proxy.network!==network||r.resources.proxy.volume!==volume))throw fail('Existing Agent Proxy resources changed since verification. No adoption was attempted.');
     spec.network=network;spec.mounts[0].Name=volume;
   }
-  privateDir(root);const envFile=join(root,'agent-proxy.env');immutableFile(envFile,Object.entries(env).map(([k,v])=>`${k}=${v}`).join('\n')+'\n');
-  if(!actual&&external)throw fail('The selected existing Agent Proxy container was not found. Its protected environment handoff is prepared; complete the exact guide and retry.');
+  if(!external)spec.networks=[n.proxyNetwork,n.agentNetwork];
+  privateDir(root);const envFile=join(root,'agent-proxy.env'),render=e=>Object.entries(e).map(([k,v])=>`${k}=${v}`).join('\n')+'\n';
+  // Upgrade from the earlier rendering, which pointed the proxy at the public
+  // origin: only an exact match of that file (and an owned container carrying
+  // it) is replaced. The container holds no state; its volume is kept.
+  let current=actual;
+  if(!external&&existsSync(envFile)&&readPrivate(envFile)===render({...env,INFISICAL_DOMAIN:r.config.origin})){
+    if(current){if(current.Config?.Labels?.[OWNER]!==r.credential_ref)throw fail('The Agent Proxy container is not owned by this installation. Nothing was changed.');
+      job.event?.('runtime_migration','Infisical Agent Proxy: recreating it to reach the server over the private agent network instead of the public restricted route (no state is kept in this container).',{container:name});
+      if(current.State?.Running)await d.must(['stop','--time','10',current.Id||name],'Agent Proxy stop');await d.must(['rm',current.Id||name],'Agent Proxy remove');current=null;}
+    atomicPrivate(envFile,render(env));
+  }
+  immutableFile(envFile,render(env));
+  if(!current&&external)throw fail('The selected existing Agent Proxy container was not found. Its protected environment handoff is prepared; complete the exact guide and retry.');
   for(const [kind,resourceName] of [['network',spec.network],['volume',spec.mounts[0].Name]]) {
     const resource=await d.inspect(kind,resourceName);
     if(resource&&((!external&&resource.Labels?.[OWNER]!==r.credential_ref)||(kind==='network'&&(resource.Driver!=='bridge'||resource.Internal||Object.keys(resource.Options||{}).length))||(kind==='volume'&&(resource.Driver!=='local'||Object.keys(resource.Options||{}).length))))throw fail('Agent Proxy network/volume isolation changed or ownership conflicts. Nothing was overwritten.');
-    if(!resource){if(external||actual)throw fail('Agent Proxy network/volume identity unavailable.');await d.must([kind,'create','--label',`${OWNER}=${r.credential_ref}`,resourceName],'Agent Proxy resource create');}
+    if(!resource){if(external||current)throw fail('Agent Proxy network/volume identity unavailable.');await d.must([kind,'create','--label',`${OWNER}=${r.credential_ref}`,resourceName],'Agent Proxy resource create');}
     if(kind==='network'&&Object.values(resource?.Containers||{}).some(c=>c.Name!==name))throw fail('Agent Proxy bridge is shared with another container. Nothing was changed.');
   }
-  if(!actual){
+  if(!current){
     await d.must(['create','--name',name,'--label',`${OWNER}=${r.credential_ref}`,'--restart','unless-stopped','--network',spec.network,...LOG_ARGS,'--env-file',envFile,'--publish',`${new URL(r.config.proxyOrigin).hostname}:17322:17322`,'--mount',`type=volume,source=${n.proxyVolume},target=/root/.infisical`,AGENT_PROXY_IMAGE,...command],'Agent Proxy create');
   }
-  const verified=await d.inspect('container',name);await verifyImageDefaults(d,verified,spec);assertContainer(verified,spec,{external});
+  let verified=await d.inspect('container',name);
+  if(!external){let agentNet=await d.inspect('network',n.agentNetwork);
+    if(!agentNet){await d.must(['network','create','--internal','--label',`${OWNER}=${r.credential_ref}`,n.agentNetwork],'agent network create');agentNet=await d.inspect('network',n.agentNetwork);}
+    if(agentNet?.Labels?.[OWNER]!==r.credential_ref||!agentNet.Internal)throw fail('The private Infisical agent network is not this installation\'s internal network. Nothing was changed.');
+    if(!Object.hasOwn(verified.NetworkSettings?.Networks||{},n.agentNetwork)){await d.must(['network','connect',n.agentNetwork,verified.Id||name],'Agent Proxy agent network connect');verified=await d.inspect('container',name);}}
+  await verifyImageDefaults(d,verified,spec);assertContainer(verified,spec,{external});
   if(external&&!verified.State?.Running)throw fail('Existing Agent Proxy is stopped. The operator must start it; Connect does not restart services.');
   if(!external)await startOwnedContainer({run:argv=>exec.host(argv,{timeoutMs:120000}),name,fail,job,label:'Infisical Agent Proxy',requireHealth:false,sleep});
   return {container:name,network:spec.network,volume:spec.mounts[0].Name,image:AGENT_PROXY_IMAGE,ownership:external?'external':'managed',endpoint:r.config.proxyOrigin,credentialRef:r.credential_ref};

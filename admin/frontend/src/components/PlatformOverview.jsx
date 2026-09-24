@@ -143,7 +143,7 @@ function ServicePanel({ id, onClose, onChanged, openJob }) {
   const reviewLifecycle = (verb) => run(verb, async () => setReview({ kind: 'lifecycle', ...(await api.fullPlatformLifecycleReview({ service: id, action: verb })) }));
   const confirm = () => run('confirm', async () => {
     if (review.kind === 'container') { const r = await api.platformContainerControl(id, { container: review.container, action: review.action, reviewToken: review.reviewToken, reviewed: true }); setNotice(`${review.action} ${review.container}: ${r.stopped ? 'stopped' : `running (${r.health})`}`); }
-    if (review.kind === 'lifecycle') { const r = await api.fullPlatformLifecycle({ revision: review.revision, service: review.service, action: review.action, reviewToken: review.reviewToken, reviewed: true, retainData: true }); setNotice(`${review.action} queued as ${r.job.id}.`); }
+    if (review.kind === 'lifecycle') { const r = await api.fullPlatformLifecycle({ revision: review.revision, service: review.service, action: review.action, reviewToken: review.reviewToken, reviewed: true, retainData: review.retainData !== false }); setNotice(`${review.action} queued as ${r.job.id}.`); }
     if (review.kind === 'recover') { const r = await api.keycloakRecover({ revision: review.revision, reviewToken: review.reviewToken, reviewed: true }); setNotice(`Recovery queued as ${r.job.id}; the saved setup continues after it.`); }
     setReview(null); await load(true); onChanged();
   });
@@ -176,12 +176,13 @@ function ServicePanel({ id, onClose, onChanged, openJob }) {
               <ActionButton aid="preflight" onClick={() => run('preflight', async () => setPreflight(await api.platformServicePreflight(id)))} />
               <ActionButton aid="logs" onClick={() => run('logs', async () => setLogs(await api.getPlatformServiceLogs(id, 50)))} />
               {['repair', 'reinstall', 'remove'].map((verb) => <ActionButton key={verb} aid={verb} variant={verb === 'remove' ? 'destructive' : 'outline'} onClick={() => reviewLifecycle(verb)} />)}
+              <ActionButton aid="reset_data" variant="destructive" onClick={() => reviewLifecycle('reset_data')} />
               <ActionButton aid="recover_bootstrap" onClick={() => run('recover_bootstrap', async () => setReview({ kind: 'recover', ...(await api.keycloakRecoveryReview()) }))} />
             </div>
           </section>
-          {review && <Confirm review={review} busy={busy === 'confirm'} destructive={['stop', 'remove'].includes(review.action)}
-            title={review.kind === 'container' ? `${review.action} ${review.container}` : review.kind === 'recover' ? 'Recover the Keycloak bootstrap administrator' : `${review.action} ${s.name}`}
-            confirmText={review.kind === 'recover' ? 'I reviewed this recovery. ProxyPilot generates and stores the new credential; I will retire the bootstrap in stage B.' : 'I reviewed the affected runtime and the downtime. Keep all persistent data and credentials.'}
+          {review && <Confirm review={review} busy={busy === 'confirm'} destructive={['stop', 'remove', 'reset_data'].includes(review.action)}
+            title={review.action === 'reset_data' ? `Reset ${s.name} data` : review.kind === 'container' ? `${review.action} ${review.container}` : review.kind === 'recover' ? 'Recover the Keycloak bootstrap administrator' : `${review.action} ${s.name}`}
+            confirmText={review.action === 'reset_data' ? 'I understand every Infisical account, organization, project, machine identity and secret is deleted (after a verified backup), and that I will create a new administrator with Reinstall.' : review.kind === 'recover' ? 'I reviewed this recovery. ProxyPilot generates and stores the new credential; I will retire the bootstrap in stage B.' : 'I reviewed the affected runtime and the downtime. Keep all persistent data and credentials.'}
             onCancel={() => setReview(null)} onConfirm={confirm} />}
           {verify && <section className="rounded-lg border p-4 space-y-2 text-sm min-w-0"><h4 className="font-semibold">Verification {verify.ok ? 'passed' : 'failed'} · {when(verify.at)}</h4><ul className="space-y-1">{verify.checks.map((c) => <li key={c.id} className={`break-words ${c.ok ? '' : 'text-destructive'}`}>{c.ok ? '✓' : '✗'} {label(c.id)}: {c.detail}</li>)}</ul></section>}
           {preflight && <section className="rounded-lg border p-4 space-y-2 text-sm min-w-0"><h4 className="font-semibold">Preflight {preflight.ready ? 'ready' : 'not ready'}</h4><ul className="space-y-1">{preflight.checks.map((c) => <li key={c.id} className={`break-words ${c.ok ? '' : 'text-destructive'}`}>{c.ok ? '✓' : '✗'} {c.id}: {c.detail}</li>)}</ul></section>}

@@ -167,3 +167,42 @@ test('FP-removed: a personal credential is refused (not silently stored) while a
   const both = removedRefusal({ state: { removed: { vaultwarden: true, infisical: true } } });
   assert.match(both, /Vaultwarden and Infisical were removed/); assert.match(both, /asks for this password again/);
 });
+
+test('FP-reset-data: Infisical data reset backs up and reads back its volumes before deleting them, clears the connection state, keeps keys and route, and is dashboard-only', () => withDb(async db => {
+  await connected(db);
+  const { namesFor: infNames } = await import('../lib/setup-engine/infisical-runtime.js');
+  const r = readInfisical(db), n = infNames(r), dir = mkdtempSync(join(tmpdir(), 'fp-infisical-reset-'));
+  writeFileSync(join(dir, 'protected.json'), JSON.stringify({ identity: { ref: r.credential_ref, origin: r.config.origin } }), { mode: 0o600 });
+  writeFileSync(join(dir, 'server.env'), 'ENCRYPTION_KEY=keep-me\n'); writeFileSync(join(dir, 'agent-proxy.env'), 'INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=old\n');
+  storeProtected(db, `full-infisical-provision-${r.credential_ref}`, { identities: {}, owner: r.credential_ref, organizationId: 'old-org' });
+  db.prepare("UPDATE setup_infisical SET identities_json='{\"organizationId\":\"old-org\"}' WHERE id=1").run();
+  try {
+    assert.ok(lifecycleReview(db, 'openbao', 'reset_data').blockers.some(b => /Infisical only/.test(b)));
+    const review = lifecycleReview(db, 'infisical', 'reset_data');
+    assert.deepEqual(review.volumes, [n.databaseVolume, n.redisVolume, n.proxyVolume]); assert.equal(review.retainData, false); assert.deepEqual(review.blockers, []);
+    const input = { revision: 1, service: 'infisical', action: 'reset_data', reviewToken: review.reviewToken, reviewed: true, retainData: false };
+    assert.throws(() => queueLifecycle(db, { ...input, retainData: true }, 'admin'), /retainData/);
+    assert.throws(() => queueLifecycle(db, input, 'admin', { via: 'mcp' }), /dashboard-only/);
+    const q = queueLifecycle(db, input, 'admin'); startJob(db, { id: q.job.id, owner: 'runner@fp-reset#1:a' });
+    const calls = [], volumes = new Set([n.databaseVolume, n.redisVolume, n.proxyVolume]);
+    const mounts = { [n.database]: [{ Type: 'volume', Name: n.databaseVolume, Destination: '/var/lib/postgresql/data', RW: true }], [n.redis]: [{ Type: 'volume', Name: n.redisVolume, Destination: '/data', RW: true }], [n.proxy]: [{ Type: 'volume', Name: n.proxyVolume, Destination: '/root/.infisical', RW: true }], [n.server]: [] };
+    const exec = { host: async (args) => { calls.push(args.join(' ')); const [bin, a1, a2, a3] = args;
+      if (bin === 'docker' && a1 === 'container' && a2 === 'ls') return { code: 0, stdout: Object.keys(mounts).join('\n') };
+      if (bin === 'docker' && a1 === 'container' && a2 === 'inspect') return { code: 0, stdout: JSON.stringify([{ Id: `id-${a3}`, Config: { Labels: { 'io.proxypilot.infisical': r.credential_ref } }, State: { Running: true }, Mounts: mounts[a3] }]) };
+      if (bin === 'docker' && a1 === 'volume' && a2 === 'ls') return { code: 0, stdout: [...volumes].join('\n') };
+      if (bin === 'docker' && a1 === 'volume' && a2 === 'inspect') return { code: 0, stdout: JSON.stringify([{ Name: a3, Mountpoint: `/var/lib/docker/volumes/${a3}/_data`, Labels: { 'io.proxypilot.infisical': r.credential_ref } }]) };
+      if (bin === 'docker' && a1 === 'volume' && a2 === 'rm') { volumes.delete(a3); return { code: 0, stdout: '' }; }
+      return { code: 0, stdout: '' }; } };
+    const out = await runLifecycle(db, readFullPlatform(db), handle(q.job.id), exec, { roots: { infisical: dir } });
+    assert.match(out.verification.label, /Reinstall/);
+    const firstRm = calls.findIndex(c => c.startsWith('docker volume rm')), lastVerify = calls.map((c, i) => c.startsWith('tar -tzf') ? i : -1).filter(i => i >= 0).pop();
+    assert.ok(lastVerify >= 0 && firstRm > lastVerify, 'every volume is archived and read back before the first deletion');
+    assert.equal(calls.filter(c => c.startsWith('tar -C')).length, 3); assert.equal(volumes.size, 0);
+    assert.ok(!calls.some(c => c.includes('--volumes')));
+    assert.equal(readFileSync(join(dir, 'server.env'), 'utf8'), 'ENCRYPTION_KEY=keep-me\n', 'the encryption keys stay');
+    assert.throws(() => readFileSync(join(dir, 'agent-proxy.env')), /ENOENT/, 'the old Agent Proxy credentials are gone');
+    assert.equal(db.prepare('SELECT 1 FROM setup_full_credentials WHERE id=?').get(`full-infisical-provision-${r.credential_ref}`), undefined);
+    const after = readInfisical(db); assert.equal(after.identities, null); assert.equal(after.credential_ref, r.credential_ref, 'same record, keys and route');
+    assert.equal(fullPlatformState(db).services.find(s => s.id === 'infisical').state, 'runtime_removed');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}));

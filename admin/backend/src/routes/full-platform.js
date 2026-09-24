@@ -33,13 +33,13 @@ fullPlatformRouter.get('/', handle((req, res) => {
 }));
 fullPlatformRouter.post('/review', handle((req, res) => res.json(reviewFullPlatform(getDb(), configSchema.parse(req.body)))));
 fullPlatformRouter.post('/lifecycle/review', handle((req, res) => {
-  const p = z.object({ service: z.enum(['keycloak','pomerium','infisical','openbao','vaultwarden']), action: z.enum(['repair','reinstall','remove']) }).strict().parse(req.body);
+  const p = z.object({ service: z.enum(['keycloak','pomerium','infisical','openbao','vaultwarden']), action: z.enum(['repair','reinstall','remove','reset_data']) }).strict().parse(req.body);
   res.json(lifecycleReview(getDb(), p.service, p.action));
 }));
 fullPlatformRouter.post('/lifecycle', requireSudo, handle((req, res) => {
   { const refusal = localProofRefusal(getDb(), req.session.id, requestOrigin(req), 'Runtime actions'); if (refusal) return res.status(refusal.status).json(refusal.body); }
   const result = queueLifecycle(getDb(), req.body, req.user.id);
-  logAudit(req.user.id, 'FULL_PLATFORM_RUNTIME_ACTION', 'setup_job', result.job.id, { service: req.body.service, action: req.body.action, retainData: true }, req.ip);
+  logAudit(req.user.id, 'FULL_PLATFORM_RUNTIME_ACTION', 'setup_job', result.job.id, { service: req.body.service, action: req.body.action, retainData: req.body.action !== 'reset_data' }, req.ip);
   res.status(202).json(result);
 }));
 // Reset (Platform Setup → Reset Full Platform): the preview is inert; the reset itself needs the

@@ -231,6 +231,16 @@ function allowedIpsFor(_scope) {
   return '10.100.0.0/24';
 }
 
+// An install enabled before the VPN resolver existed kept its old DNS value
+// (outside the VPN subnet, so renderClientConfig drops it) and its peers got
+// no DNS line at all: the platform hostnames then resolved to the public
+// address and the restricted routes answered 403. When the resolver is running
+// here, peers use it.
+export function withVpnResolver(cfg, { active = () => spawnSync('systemctl', ['is-active', '--quiet', 'proxypilot-vpn-dns.service']).status === 0 } = {}) {
+  if (!cfg || /^10\.100\.0\.\d{1,3}$/.test(String(cfg.dns || '').trim())) return cfg;
+  return active() ? { ...cfg, dns: '10.100.0.1' } : cfg;
+}
+
 export function renderClientConfig({ peerPrivateKey, peerIp, scope, cfg, mtu }) {
   // DNS = the VPN resolver (proxypilot-vpn-dns.service on 10.100.0.1,
   // inside AllowedIPs, so it is reachable through the tunnel). It answers
@@ -337,7 +347,7 @@ export async function addPeer({ name, scope = 'admin', services = null, actor } 
     peerPrivateKey: kp.private,
     peerIp: ip,
     scope,
-    cfg,
+    cfg: withVpnResolver(cfg),
   });
   if (!fs.existsSync(VPN_PEERS_DIR)) {
     fs.mkdirSync(VPN_PEERS_DIR, { recursive: true, mode: 0o700 });
@@ -404,7 +414,7 @@ export async function rotatePeer({ name, actor } = {}) {
     peerPrivateKey: kp.private,
     peerIp: peer.allowed_ip,
     scope: peer.scope,
-    cfg,
+    cfg: withVpnResolver(cfg),
   });
   if (!fs.existsSync(VPN_PEERS_DIR)) {
     fs.mkdirSync(VPN_PEERS_DIR, { recursive: true, mode: 0o700 });

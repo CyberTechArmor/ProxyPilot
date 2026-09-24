@@ -1,0 +1,23 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {spawnSync} from 'node:child_process';
+import {recoverBootstrapCommand} from '../../../../cli/src/commands/recover.js';
+const dir=mkdtempSync(join(tmpdir(),'pp-bootstrap-upgrade-'));
+process.env.DATABASE_PATH=join(dir,'test.db');process.env.TOTP_ENCRYPTION_KEY='a'.repeat(64);process.env.NODE_ENV='test';
+const {initDatabase,getDb}=await import('../db.js');
+test('upgrade keeps unclaimed accounts locked, preserves initialized data, and restart preserves one-use proof',async()=>{
+ initDatabase();const db=getDb();db.exec(`DROP TABLE admin_bootstrap;DELETE FROM schema_migrations WHERE version=1015;DELETE FROM app_settings WHERE key='installation_bootstrap_id';
+ INSERT INTO users(id,username,password_hash,totp_secret,totp_enabled,role) VALUES('new','new','','',0,'admin'),('done','done','existing-password','existing-factor',1,'admin');`);
+ initDatabase();const installation=db.prepare("SELECT value FROM app_settings WHERE key='installation_bootstrap_id'").get().value;assert(installation);
+ assert.equal(db.prepare('SELECT COUNT(*) n FROM admin_bootstrap').get().n,0);
+ assert.equal(db.prepare("SELECT password_hash FROM users WHERE id='done'").get().password_hash,'existing-password');
+ const output=[];const status=await recoverBootstrapCommand('new',{db:process.env.DATABASE_PATH},{bootstrapDirectory:dir,stdout:s=>output.push(s)});assert.equal(status,0,output.join('\n'));const file=output[0].slice('Installation credential file: '.length);const raw=readFileSync(file,'utf8').trim();assert(!output.join('\n').includes(raw));assert(!JSON.stringify(db.prepare('SELECT * FROM admin_bootstrap').all()).includes(raw));
+ initDatabase();assert.equal(db.prepare("SELECT value FROM app_settings WHERE key='installation_bootstrap_id'").get().value,installation);
+ db.close();
+ const script=`const {initDatabase,getDb}=await import(${JSON.stringify(new URL('../db.js',import.meta.url).href)});initDatabase();const db=getDb();if(db.prepare('SELECT COUNT(*) n FROM admin_bootstrap WHERE consumed_at IS NULL AND expires_at>?').get(Date.now()).n!==1)throw Error('proof not retained');if(db.prepare("SELECT password_hash FROM users WHERE id='done'").get().password_hash!=='existing-password')throw Error('identity changed');db.close();`;
+ const child=spawnSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',timeout:10000});assert.equal(child.status,0,child.stderr);
+ rmSync(dir,{recursive:true,force:true});
+});

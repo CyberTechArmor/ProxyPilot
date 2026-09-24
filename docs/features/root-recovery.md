@@ -92,21 +92,45 @@ matter:
 
 - **No local administrator exists.** With the directory down nobody can sign
   in; `--create` one.
-- **An administrator has no password.** A *local* administrator whose
-  `password_hash` is empty is claimable through the public initial-setup
-  endpoint by anyone who reaches the login page. Run `--password` for it.
+- **An administrator has no password.** First-run web setup requires a
+  root-issued installation credential. For an unclaimed local administrator:
 
-## A defect this work found and closed
+  ```sh
+  sudo proxypilot recover bootstrap <username>
+  ```
 
-Building the inventory showed that `POST /api/auth/initial-setup` and
-`GET /api/auth/setup-status` selected *any* administrator with an empty
-`password_hash`. A directory-provisioned account has an empty hash **by
-design** (its password lives in LDAP), so once an operator promoted such an
-account to administrator, anyone who knew its username could set a password
-on it and be issued a session as that administrator. Both queries now
-require `auth_source` to be local. The suite executes the handler's own SQL
-against a fixture holding an LDAP administrator and a passwordless local one
-(`root-recovery.test.js`).
+  The command writes a 256-bit, one-use credential to a new mode-0600 file under
+  `/run/proxypilot-bootstrap` (directory mode 0700) and prints only its path and
+  15-minute deadline. Read it locally as root, enter it with the username and
+  new password in the setup form, then remove the file. It is never placed in a
+  URL, command argument or routine log; the database stores only its hash and
+  lifecycle state. The runtime delivery file disappears on host reboot.
+
+  Issuing again retires any prior credential. It never resets an initialized
+  account, LDAP account, SSO-linked identity or existing passkey. For those
+  local account recovery needs, use the existing `recover admin` ceremony.
+
+## Initial setup and interrupted enrollment
+
+Migration 1015 adds installation-bound, one-use bootstrap state. Upgrading an
+unclaimed account leaves it locked until root issues a credential. It does not
+change any initialized user's password, factor or link. Public status reports
+only whether setup is needed; it does not expose a username. The server checks
+proof both before password hashing and atomically with the password write.
+Concurrent claimants cannot both succeed.
+
+After a valid claim, the session allows only MFA completion and logout. If the
+browser closes or the backend restarts during enrollment, sign in with the
+chosen password to restart MFA enrollment. If the bootstrap credential expired
+before claiming, issue another locally. A host reboot removes the delivery
+file; root can reissue without reopening anonymous setup. If the chosen password
+is lost, use `recover admin --password` (and the existing factor recovery options
+only when needed). No data, encryption key or unrelated account is reset.
+
+Tests in `security-bootstrap.test.js` exercise actual HTTP dispatch with the
+same credential issuer as the CLI, including LDAP/SSO refusal, replay, expiry,
+concurrent claims and completion. The native database migration test also starts
+a second process to verify restart behavior.
 
 ## Where it runs from
 

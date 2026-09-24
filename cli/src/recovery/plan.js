@@ -114,7 +114,7 @@ export function accountFootprint(db, userId, optional) {
 // accountInventory(db) → every account's non-secret standing, for `recover
 // status`: who could be recovered, who is directory-backed, who is locked,
 // and — the one dangerous state — an administrator with no password, whom
-// the public initial-setup endpoint would let anyone claim.
+// initial-setup now requires installation possession proof.
 export function accountInventory(db) {
   const schema = inspectSchema(db);
   if (!schema.ok) return { ok: false, schema, accounts: [] };
@@ -136,8 +136,8 @@ export function accountInventory(db) {
     lockedUntil: r.locked_until || null,
     superadmin: !!r.is_superadmin,
     recoverable: (r.auth_source || 'local') === 'local',
-    // A LOCAL administrator with no password is claimable through the public
-    // initial-setup endpoint (routes/auth.js filters directory accounts out).
+    // A LOCAL administrator with no password needs root-issued proof for the
+    // initial-setup endpoint (directory accounts remain ineligible).
     setupExposed: r.role === 'admin' && !r.has_password && (r.auth_source || 'local') === 'local',
     ...accountFootprint(db, r.id, schema.optional),
   }));
@@ -214,7 +214,7 @@ export function planRecovery(db, { username, actions } = {}) {
   if (wanted.has('password')) {
     steps.push({ step: 'set-password', details: account.has_password ? 'replaces the current password; a change is required at next login; the lockout is cleared' : 'sets a password on an account that has none; a change is required at next login' });
   } else if (!account.has_password) {
-    warnings.push(`'${name}' has NO password: the public initial-setup endpoint lets anyone who reaches the login page claim it. Add --password.`);
+    warnings.push(`'${name}' has NO password: initial-setup requires a root-issued credential. Use recover bootstrap for a new installation, or add --password to recover locally.`);
   }
   if (wanted.has('totp')) {
     steps.push({ step: 'clear-totp', details: account.has_totp ? 'the next password login enrols a new authenticator' : 'no second factor is enrolled; the next password login enrols one' });

@@ -671,26 +671,8 @@ test('recover status: read-only inventory over the file, with the passwordless w
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-// ── the public initial-setup endpoint cannot claim a directory account ───
-
-test('initial-setup and setup-status select LOCAL passwordless administrators only (the query from routes/auth.js, executed)', () => {
-  // Found while building the inventory: an LDAP-provisioned account that an
-  // admin promoted has an empty password_hash by design, and the public
-  // initial-setup handler used to accept any admin with an empty hash — set
-  // a password, receive a session. Pin the filter by running the handler's
-  // own SQL against the fixture.
-  const auth = readFileSync(join(REPO, 'admin/backend/src/routes/auth.js'), 'utf8');
-  const claim = /"(SELECT \* FROM users WHERE username = \? AND role = 'admin' AND \(password_hash = '' OR password_hash IS NULL\)[^"]*)"/.exec(auth);
-  const status = /"(SELECT id, username FROM users WHERE role = 'admin' AND \(password_hash = '' OR password_hash IS NULL\)[^"]*)"/.exec(auth);
-  assert.ok(claim && status, 'the two initial-setup queries are where the suite expects them');
-  const db = memDb();
-  assert.equal(db.prepare(claim[1]).get('carol'), undefined, 'the LDAP administrator is not claimable');
-  assert.equal(db.prepare(status[1]).get(), undefined, 'no setup is pending while only the LDAP admin lacks a hash');
-  db.prepare(`UPDATE users SET password_hash = '' WHERE username = 'bob'`).run();
-  assert.equal(db.prepare(claim[1]).get('bob').id, 'u-bob', 'a local administrator without a password still can');
-  assert.equal(db.prepare(status[1]).get().username, 'bob');
-  assert.equal(db.prepare(claim[1]).get('carol'), undefined);
-});
+// security-bootstrap.test.js exercises actual public setup dispatch, including
+// directory/SSO refusal, installation proof, concurrent claims and MFA.
 
 // ── reset.sh no longer deletes anything ──────────────────────────────────
 

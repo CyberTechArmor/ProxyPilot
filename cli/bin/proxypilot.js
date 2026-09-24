@@ -801,7 +801,7 @@ sshPasswordAuth
 // ── recover command group ───────────────────────────────────────────────────
 // Non-destructive root recovery (docs/features/root-recovery.md): restore one
 // local administrator's access in the live database; nothing else changes.
-import { recoverAdminCommand, recoverStatusCommand } from '../src/commands/recover.js';
+import { recoverAdminCommand, recoverStatusCommand, recoverBootstrapCommand } from '../src/commands/recover.js';
 
 const recover = program
   .command('recover')
@@ -817,6 +817,14 @@ recover
     const globalOpts = cmd.optsWithGlobals();
     process.exitCode = await recoverStatusCommand(opts, globalOpts);
   });
+
+recover
+  .command('bootstrap <username>')
+  .description('Issue a 15-minute installation credential to a root-only file for an unclaimed local admin')
+  .option('--install-dir <dir>', 'ProxyPilot install root (default /opt/proxypilot)')
+  .option('--env <file>', 'Installation .env path')
+  .option('--db <file>', 'Backend database path')
+  .action(async (username,opts) => { process.exitCode=await recoverBootstrapCommand(username,opts); });
 
 recover
   .command('admin <username>')

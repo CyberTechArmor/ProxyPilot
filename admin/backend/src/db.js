@@ -1,3 +1,4 @@
+import {ADMIN_BOOTSTRAP_SCHEMA} from './lib/admin-bootstrap.js';
 import { TOTP_ENROLLMENT_SCHEMA } from './lib/totp-enrollment.js';
 import { VAULTWARDEN_SCHEMA } from './lib/setup-engine/vaultwarden-store.js';
 import { FULL_PLATFORM_SCHEMA } from './lib/setup-engine/full-platform-store.js';
@@ -1953,12 +1954,12 @@ export function initDatabase() {
       `).run(userId, process.env.ADMIN_USERNAME, passwordHash, process.env.ADMIN_TOTP_SECRET || '');
       console.log('Admin user created with provided password');
     } else {
-      // New mode: no password - user sets it from the web UI on first login
+      // Unclaimed local administrator. Root must issue a bootstrap credential.
       db.prepare(`
         INSERT INTO users (id, username, password_hash, totp_secret, totp_enabled, role, password_change_required)
         VALUES (?, ?, '', '', 0, 'admin', 1)
       `).run(userId, process.env.ADMIN_USERNAME);
-      console.log('Admin user created - initial setup required via web UI');
+      console.log('Admin user created - root bootstrap credential required for setup');
     }
 
     console.log('Admin user created');
@@ -2398,6 +2399,11 @@ export function initDatabase() {
     d.exec(TOTP_ENROLLMENT_SCHEMA);
     d.exec("UPDATE sessions SET revoked_at=CURRENT_TIMESTAMP,sudo_until=NULL WHERE user_id IN (SELECT id FROM users WHERE totp_enabled=0) AND revoked_at IS NULL");
     d.exec("UPDATE mcp_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE created_by IN (SELECT id FROM users WHERE totp_enabled=0) AND revoked_at IS NULL");
+  });
+
+  runMigration(db, 1015, 'installation_admin_bootstrap', (d) => {
+    d.exec(ADMIN_BOOTSTRAP_SCHEMA);
+    d.prepare("INSERT OR IGNORE INTO app_settings(key,value) VALUES('installation_bootstrap_id',?)").run(uuidv4());
   });
 
   runMigration(db, 1014, 'mcp_delegation_lineage', (d) => {

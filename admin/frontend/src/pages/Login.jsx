@@ -57,6 +57,7 @@ export default function Login() {
 
   // Initial setup state
   const [setupMode, setSetupMode] = useState(false);
+  const [bootstrapCredential,setBootstrapCredential]=useState('');
   const [setupLoading, setSetupLoading] = useState(true);
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -134,7 +135,6 @@ export default function Login() {
       const status = await api.getSetupStatus();
       if (status.needsSetup) {
         setSetupMode(true);
-        setUsername(status.username || '');
       }
     } catch (e) {
       // Server may not be ready, ignore
@@ -186,13 +186,14 @@ export default function Login() {
 
     setLoading(true);
     try {
-      const result = await api.initialSetup({ username, newPassword, confirmPassword });
+      const result = await api.initialSetup({ username, bootstrapCredential, newPassword, confirmPassword });
 
       // Backend has set the pp_token httpOnly cookie. We keep the
       // token in component state only so the next-step API call (TOTP
       // setup) can pass it explicitly if the cookie isn't yet
       // cross-route-visible during the transition click.
       setSetupToken(result.token);
+      setBootstrapCredential('');
 
       // Move to TOTP setup step
       if (result.totpSetupRequired && result.totpSecret) {
@@ -458,8 +459,14 @@ export default function Login() {
                   placeholder="Admin username"
                   required
                   autoComplete="username"
-                  disabled={!!username}
                 />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="bootstrap-credential">Installation credential</Label>
+                <Input id="bootstrap-credential" type="password" autoComplete="off" spellCheck={false}
+                  value={bootstrapCredential} onChange={e=>setBootstrapCredential(e.target.value.trim())} required />
+                <p className="text-sm text-muted-foreground">Use the 15-minute credential issued on the host by the installer or root recovery command.</p>
               </div>
 
               <div className="space-y-2">

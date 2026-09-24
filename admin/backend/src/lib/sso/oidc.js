@@ -42,7 +42,10 @@ export function approvedFetch(
         t.unref();
       }),
     ]);
-    if (!addresses.length || addresses.some((a) => !allowedAddress(a.address)))
+    // The edge address is this host's own Caddy (loopback for the host runner,
+    // the Docker gateway in the container), never a DNS answer; only DNS
+    // answers are screened, as in the OpenBao, Infisical and Vaultwarden clients.
+    if (!addresses.length || (!edge && addresses.some((a) => !allowedAddress(a.address))))
       throw fail("SSO DNS resolves to a blocked address.");
     return new Promise((resolveResponse, reject) => {
       let size = 0;

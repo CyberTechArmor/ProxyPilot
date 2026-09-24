@@ -22,8 +22,10 @@ export async function infisicalRequest(origin,path,{method='GET',token,body,reso
       res.on('data',b=>{bytes+=b.length;if(bytes>1024*1024)req.destroy();else chunks.push(b);});
       res.on('error',()=>reject(fail('Infisical response failed; details withheld.')));
       res.on('end',()=>{let value=null;try{value=JSON.parse(Buffer.concat(chunks));}catch{}
-        // Bodies for denial/error never leave the transport layer.
-        done({status:res.statusCode,body:res.statusCode>=200&&res.statusCode<300?value:null});});
+        // Bodies for denial/error never leave the transport layer; only Infisical's
+        // short message does (redacted again by upstreamReason) so a refusal says why.
+        const ok=res.statusCode>=200&&res.statusCode<300,msg=!ok&&value&&typeof value==='object'?(typeof value.message==='string'?value.message:typeof value.error==='string'?value.error:null):null;
+        done({status:res.statusCode,body:ok?value:null,...(msg?{error:msg.slice(0,500)}:{})});});
     });
     const timer=setTimeout(()=>req.destroy(),10000);timer.unref();req.on('close',()=>clearTimeout(timer));req.on('timeout',()=>req.destroy());
     req.on('error',()=>reject(fail('Infisical HTTPS failed (DNS, TLS, timeout or reachability); details withheld.')));req.end(data);
@@ -37,7 +39,7 @@ export function createInfisicalClient(origin,{send=infisicalRequest,job,edge=nul
 // token-like run is still masked and the text is capped.
 export function upstreamReason(body){const m=typeof body?.message==='string'?body.message:typeof body?.error==='string'?body.error:null;if(!m)return '';
   const clean=m.replace(/[A-Za-z0-9_\-.+/=]{32,}/g,'[redacted]').replace(/\s+/g,' ').trim().slice(0,300);return clean?` Infisical said: "${clean}".`:'';}
-export function requireOk(result,label){if(result.status!==200||!result.body)throw fail(`${label} unavailable (HTTP ${result.status}).${upstreamReason(result.body)} Complete the documented handoff; no capability is assumed.`);return result.body;}
+export function requireOk(result,label){if(result.status!==200||!result.body)throw fail(`${label} unavailable (HTTP ${result.status}).${upstreamReason(result.body||(result.error?{message:result.error}:null))} Complete the documented handoff; no capability is assumed.`);return result.body;}
 export const scopeQuery=projectId=>new URLSearchParams({projectId,environment:TEST_ENV,secretPath:TEST_PATH}).toString();
 export const secretPath=(projectId,key=TEST_KEY)=>`/api/v4/secrets/${key}?${scopeQuery(projectId)}&viewSecretValue=true&expandSecretReferences=false&includeImports=false`;
 

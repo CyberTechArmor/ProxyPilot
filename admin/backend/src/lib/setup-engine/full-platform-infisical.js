@@ -62,7 +62,11 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
   if (!s.token || s.tokenExpiresAt <= now) {
     if (!input) return { ready: false, action: 'Fresh Infisical administration is required to resume the saved connection. Re-enter the same personal credential; users and machine credentials are retained.' };
     if (input.email !== s.email) throw fail('Resume as the recorded Infisical administrator. No account is selected by an unverified matching email.');
-    const login = requireOk(await api('/api/v3/auth/login', { method: 'POST', body: { email: input.email, password: input.password } }), 'Fresh Infisical administrator login');
+    const attempt = await api('/api/v3/auth/login', { method: 'POST', body: { email: input.email, password: input.password } });
+    // Infisical answers 400 "Invalid credentials" for a password that differs
+    // from the one the account was created with (the email matched above).
+    if (attempt.status === 400) throw fail(`Infisical refused the sign-in for ${input.email}${attempt.error ? ` ("${String(attempt.error).slice(0, 120)}")` : ''}: the password does not match the one this Infisical account was created with. Enter that original password, or start Infisical over with Platform overview → Manage Infisical → Reset Infisical data (a verified backup is kept) and choose a new one.`);
+    const login = requireOk(attempt, 'Fresh Infisical administrator login');
     const selected = requireOk(await api('/api/v3/auth/select-organization', { method: 'POST', token: login.accessToken, body: { organizationId: s.organizationId } }), 'Recorded organization administration');
     if (selected.isMfaEnabled || !selected.token) throw fail('Infisical requires its interactive MFA ceremony. Complete the owner-authorized handoff in Infisical; no MFA bypass is attempted.');
     if (jwt(selected.token).userId !== s.userId) throw fail('The fresh Infisical administrator differs from the recorded bootstrap identity.');

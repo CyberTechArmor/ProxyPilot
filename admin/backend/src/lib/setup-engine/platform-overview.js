@@ -128,6 +128,11 @@ function serviceActions(db, service, { ownership, containers, dns, op, selected 
     if (!why) { try { const r = lifecycleReview(db, service, verb); if (r.blockers.length) why = r.blockers.join(' '); } catch (e) { why = e.fullPlatformSafe ? e.message : 'No saved installation is available for this action.'; } }
     out.push(action(verb, `${verb[0].toUpperCase()}${verb.slice(1)}`, !why, why, { kind: 'lifecycle', preview: true }));
   }
+  if (service === 'infisical') {
+    let why = !managed ? notManaged : busy;
+    if (!why) { try { const r = lifecycleReview(db, service, 'reset_data'); if (r.blockers.length) why = r.blockers.join(' '); } catch (e) { why = e.fullPlatformSafe ? e.message : 'No saved installation is available for this action.'; } }
+    out.push(action('reset_data', 'Reset Infisical data (new administrator)', !why, why, { kind: 'lifecycle', preview: true }));
+  }
   out.push(action('logs', 'View logs', managed && containers.some((c) => c.present), !managed ? notManaged : 'No owned container is present.', { kind: 'read' }));
   out.push(action('preflight', 'Re-run preflight', selected, 'Not selected in the saved plan.', { kind: 'read' }));
   if (service === 'keycloak') {

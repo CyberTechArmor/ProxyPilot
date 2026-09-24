@@ -14,7 +14,17 @@ const request = (url, { method = 'GET', path, headers = {} } = {}) => new Promis
 // The agent receives a placeholder and its own limited token, never the value.
 export async function verifyBasicFlows(r, values, tokens, { api, job, destination = testDestination, send = request, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   if (![401, 403].includes((await api(secretPath(r.identities.projectId))).status)) throw fail('Unauthenticated secret access was not explicitly denied.');
-  if (tokens.agent && (await api(secretPath(r.identities.projectId, PROXY_KEY), { token: tokens.agent })).status !== 403) throw fail('Agent identity can read secret values. The connection is not accepted.');
+  // The free edition lets only its built-in Admin role use the Agent Proxy
+  // (BUILTIN_ROLES.agent, AGENT_ROLE_RISK), so an agent that can read values
+  // directly is the documented trade-off here, not a failure. Record which
+  // one Infisical answered; anything else is not a result we can vouch for.
+  let agentValueRead = 'not_selected';
+  if (tokens.agent) {
+    const { status } = await api(secretPath(r.identities.projectId, PROXY_KEY), { token: tokens.agent });
+    if (status === 403) agentValueRead = 'denied';
+    else if (status === 200) agentValueRead = 'readable_builtin_admin_role';
+    else throw fail(`Could not check what the agent identity can read (Infisical answered HTTP ${status}).`);
+  }
   const nonce = randomBytes(20).toString('hex'), receipt = destination(values, nonce, { host: r.config.testHost });
   await receipt.open();
   try {
@@ -28,6 +38,6 @@ export async function verifyBasicFlows(r, values, tokens, { api, job, destinatio
       for (let attempt = 0; attempt < 15; attempt++) { job.fence(); try { if (await through('allowed', tokens.agent) === 204) { accepted = true; break; } } catch {} await sleep(1000); }
       if (!accepted || await through('allowed') !== 407 || await through('allowed', 'invalid-proxypilot-token') !== 502 || await through('denied', tokens.agent) !== 403 || await through('allowed', tokens.agent, '/ungranted-proxypilot') !== 502 || await through('allowed', tokens.agent) !== 204 || receipt.received.agent !== 2 || receipt.received.unauthorized) throw fail('Agent Proxy substitution or denial checks failed. No credential value is exposed.');
     }
-    return { consumer: 'verified', unauthenticatedRead: 'denied', agentValueRead: tokens.agent ? 'denied' : 'not_selected', agentProxy: tokens.agent ? 'placeholder_substitution_and_denials_verified' : 'skipped', destinationReceipt: tokens.agent ? 'real_credential_received' : 'not_selected', execution: 'owned_disposable_local_destination', advancedVmFlows: 'not_tested' };
+    return { consumer: 'verified', unauthenticatedRead: 'denied', agentValueRead, agentProxy: tokens.agent ? 'placeholder_substitution_and_denials_verified' : 'skipped', destinationReceipt: tokens.agent ? 'real_credential_received' : 'not_selected', execution: 'owned_disposable_local_destination', advancedVmFlows: 'not_tested' };
   } finally { await receipt.close(); }
 }

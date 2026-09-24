@@ -284,3 +284,53 @@ in a sandbox without a host; `docs/known-issues.md` tracks it):
 | U.V4 | `touch /root/ProxyPilot/x.txt` on the host | Update block shows "Local changes on the host" with `?? x.txt`, button disabled; MCP run refused with the same reason |
 | U.V5 | As root: write `/run/proxypilot-update/request.json` by hand (no nonce file) | `state.<id>.json` → `refused`, `reason: "not_written_by_agent: …"` (or `nonce_mismatch` when written as the agent user) |
 | U.V6 | Bump `version` in the site's `manifest.json` (or lower `standards-version.json` locally) and force a check | standards line flips to "site X available, update ProxyPilot to pick it up" |
+
+## Host Node runtime upgrades (September 2026 correction)
+
+The updater must be able to fetch/re-exec new shell code even when the installed
+Node is older than the new application requires. After the privilege/checkout
+checks and self-reexec, **Preparing Node.js runtime** selects a compatible
+Node/npm pair (22.15+ in the 22 series, or 24). It checks the current PATH and
+system installations, puts the chosen binary first in PATH, and pins the host
+CLI wrapper to that interpreter.
+
+If none is usable, root updates on Debian/Ubuntu with apt-get and curl provision
+Node 24 from the same NodeSource repository used by `install.sh`. The setup
+script is fully downloaded over HTTPS before execution; download, repository,
+package-manager and final runtime verification failures stop before environment
+changes, application dependency replacement or service shutdown. Other hosts
+get a specific local runtime-installation instruction. This changes the host's
+Node package; the container image already uses its own Node 24 runtime.
+
+Backend (native installs), frontend and host CLI use `npm ci` so a Node-major
+change cannot retain a native addon built for the previous ABI. Failure through
+`tee` is propagated; a failed CLI dependency install is fatal instead of a
+warning followed by starting an incompatible runner.
+
+### Recovering a host already stopped at the old Node-version gate
+
+The affected updater checks Node **before fetching**, so its Update button
+cannot fetch this correction. On the host, pull the recorded checkout once and
+run the supported updater (no flags are removed and no local changes discarded):
+
+```sh
+sudo bash <<'SH'
+set -e
+cd -- "$(cat /var/lib/proxypilot/update/source-dir)"
+git pull --ff-only origin main
+bash ./update.sh --yes --rebuild
+SH
+```
+
+If the recorded checkout is missing, locate the original git clone before
+proceeding; `/opt/proxypilot` may be a deployed copy rather than the clone.
+Afterward the dashboard update path can prepare the runtime itself. A source
+merge alone does not run this repair on an installed host.
+
+Validation: executable shell bootstrap tests replace only downloads/package
+installation with disposable fixtures; they cover old/missing runtimes, missing
+npm, PATH shadowing, supported-version reuse, failed/truncated downloads,
+repository/apt failure, false installation success and npm failure through tee.
+The real updater still refuses restricted Compose before runtime mutation.
+Runner/progress and database-maintenance/recovery regression tests pass. A live
+Debian/Ubuntu package upgrade and production deployment were not performed.

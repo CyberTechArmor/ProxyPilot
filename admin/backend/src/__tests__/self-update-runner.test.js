@@ -22,6 +22,8 @@ echo "args: $*"
 echo -e "\\033[0;34m[0/7] Backing up database...\\033[0m"
 echo "[1/7] Fetching latest changes..."
 echo "[2/7] Pulling latest code..."
+echo "[2.5/7] Preparing Node.js runtime..."
+if [ "\${FAKE_NODE_FAIL:-}" = 1 ]; then echo "Node.js runtime download failed; no application rebuild has started."; exit 1; fi
 echo "[3.5/7] Installing host-side agent (Phase A scaffold)..."
 echo "[7/7] Restarting ProxyPilot..."
 if [ "\${FAKE_UPTODATE:-}" = 1 ]; then echo "Code is already up to date!"; fi
@@ -222,6 +224,20 @@ test('phases are tracked from the [n/7] markers (3.5 included) and a failure kee
   assert.ok(existsSync(join(s.state, `done.${id}`)));
   // The phase tracker wrote intermediate states; the 3.5 marker parsed as a number.
   assert.ok(readFileSync(join(s.state, `${id}.log`), 'utf8').includes('[3.5/7]'));
+});
+
+test('runtime provisioning failure is recorded before dependencies or service restart', (t) => {
+  const s = setup(); t.after(s.cleanup);
+  s.runner(['record-source', s.src]);
+  const id = s.request({});
+  assert.equal(s.runner([], { FAKE_NODE_FAIL: '1' }).status, 1);
+  const st = s.readJson('state.json');
+  assert.equal(st.status, 'failed');
+  assert.equal(st.phase_index, 2.5);
+  assert.equal(st.phase, 'Preparing Node.js runtime');
+  assert.match(st.reason, /Node.js runtime download failed/);
+  assert.ok(existsSync(join(s.state, `done.${id}`)));
+  assert.ok(!readFileSync(join(s.state, `${id}.log`), 'utf8').includes('[7/7]'));
 });
 
 test('an up-to-date checkout without --rebuild is a success flagged up_to_date', (t) => {

@@ -141,7 +141,10 @@ test('parseState: statuses, terminal/live/stale, defaults', () => {
 
 test('phaseList follows the [n/7] index: done before, active at, pending after; failed marks the phase', () => {
   const running = phaseList(parseState({ status: 'running', phase_index: 3.5 }));
-  assert.deepEqual(running.map((p) => p.state), ['done', 'done', 'done', 'done', 'active', 'pending', 'pending', 'pending', 'pending']);
+  assert.deepEqual(running.map((p) => p.state), ['done', 'done', 'done', 'done', 'done', 'active', 'pending', 'pending', 'pending', 'pending']);
+  const runtimeFailure = phaseList(parseState({ status: 'failed', phase_index: 2.5 }));
+  assert.equal(runtimeFailure.find(p => p.index === 2.5).state, 'failed');
+  assert.equal(runtimeFailure.find(p => p.index === 3).state, 'pending');
   assert.ok(phaseList(parseState({ status: 'success', phase_index: 7 })).every((p) => p.state === 'done'));
   const failed = phaseList(parseState({ status: 'failed', phase_index: 6 }));
   assert.equal(failed.find((p) => p.index === 6).state, 'failed');

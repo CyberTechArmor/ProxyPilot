@@ -23,7 +23,11 @@ ordinary reverse proxy or successful login as host isolation.
   and custom logging before update. The updater refuses custom Caddy formats it
   cannot safely redact. Use standard supported logging or have the configuration
   reviewed; do not bypass the guard or resume credential-bearing URL logs.
-- Host Node must be 22.15+ or 24 LTS; shipped container uses Node 24. Agent builds
+- Host Node must be 22.15+ or 24 LTS; shipped container uses Node 24. The updater
+  now verifies/reuses a compatible pair or installs Node 24 on supported root
+  Debian/Ubuntu updates before application changes. Hosts already stopped by
+  the earlier pre-fetch Node gate need the one-time checkout recovery in
+  [the update guide](../features/self-update.md#recovering-a-host-already-stopped-at-the-old-node-version-gate). Agent builds
   use Go 1.27.1 with pinned download checksums. The dependency scan record is
   `security-dependency-scan-2026-09.json`. Images/OS packages were not scanned in
   this environment and need the deployment's image/host scan.

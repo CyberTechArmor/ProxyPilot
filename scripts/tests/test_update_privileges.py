@@ -44,6 +44,11 @@ class Privileges(unittest.TestCase):
                 stub = root / 'bin' / name
                 stub.write_text('#!/usr/bin/env python3\nfrom pathlib import Path\nPath(' + repr(str(marker)) + ').touch()\nraise SystemExit(99)\n')
                 stub.chmod(0o755)
+            # Reproduce an old host Node without ever invoking it: privilege
+            # preflight must still refuse before runtime download/package work.
+            node = root / 'bin/node'
+            node.write_text('#!/bin/sh\nexit 1\n')
+            node.chmod(0o755)
             env = dict(os.environ, PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'])
             result = subprocess.run(['bash', str(root / 'update.sh'), '--yes', '--rebuild'], env=env, capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)

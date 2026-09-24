@@ -28,6 +28,8 @@ import { readFullPlatform, installedTargets, fail } from './full-platform-store.
 import { serviceReaders } from './full-platform-services.js';
 import { ownedRoute } from './full-platform-mcp.js';
 import { DENIED_BODY } from '../caddy-site-file.js';
+import { spawnHostSync } from '../host-exec.js';
+import { inDocker } from './local-edge.js';
 
 export const ACCESS_KEYS = ['vaultwarden', 'keycloakAdmin', 'proxypilot'];
 export const ACCESS_DEFAULTS = Object.freeze({ vaultwarden: 'restricted', keycloakAdmin: 'restricted', proxypilot: 'open' });
@@ -41,6 +43,19 @@ export const ADMIN_ACCESS_SNIPPET = process.env.CADDY_ADMIN_ACCESS_SNIPPET || '/
 const SITES_DIR = () => process.env.CADDY_SITES_DIR || '/etc/caddy/sites';
 // Token-authenticated machine endpoints that must keep working from anywhere.
 export const DASHBOARD_MACHINE_PATHS = Object.freeze(['/api/health', '/api/mcp', '/api/mcp/*', '/api/mcp-editor/*', '/api/migrations/agent/*', '/api/mock2/git/*']);
+// The snippet lives in /etc/caddy, which the backend container does not mount
+// (only sites/, custom/ and the Caddyfile are): written through the host, like
+// the admin TLS snippet (lib/tls-cert-store.js). A write into the container's
+// own /etc/caddy left the host's import pointing at a missing file, and caddy
+// adapt refused the whole change (2026-09-24).
+const SAFE_PATH = /^\/[A-Za-z0-9._/-]+$/;
+const fsIo = { read: (f) => (existsSync(f) ? readFileSync(f, 'utf8') : null), write: (f, text) => { const tmp = join(dirname(f), `.${Date.now()}.pp-tmp`); writeFileSync(tmp, text, { mode: 0o644 }); renameSync(tmp, f); } };
+const hostIo = {
+  read: (f) => { if (!SAFE_PATH.test(f)) return null; const r = spawnHostSync('sh', ['-c', `cat '${f}' 2>/dev/null`], { encoding: 'utf8', timeout: 5000 }); return r.status === 0 ? r.stdout : null; },
+  write: (f, text) => { if (!SAFE_PATH.test(f)) throw fail('Unsafe snippet path.'); const r = spawnHostSync('sh', ['-c', `cat > '${f}.pp-tmp' && chmod 644 '${f}.pp-tmp' && (chown root:caddy '${f}.pp-tmp' 2>/dev/null || true) && mv '${f}.pp-tmp' '${f}'`], { input: text, encoding: 'utf8', timeout: 8000 }); if (r.error || r.status !== 0) throw new Error(`could not write ${f} on the host`); },
+};
+/** Snippet file I/O: through the host inside the Docker backend, else the local filesystem. */
+export const snippetIo = () => (inDocker() ? hostIo : fsIo);
 const choice = z.enum(['restricted', 'open']);
 export const accessSchema = z.object({ vaultwarden: choice, keycloakAdmin: choice, proxypilot: choice, reviewed: z.literal(true) }).strict();
 
@@ -104,11 +119,11 @@ export function withAdminImport(text, adminDomain, snippet = ADMIN_ACCESS_SNIPPE
 }
 
 /** What each switch is set to and what is actually applied. */
-export function accessState(db, { adminDomain = null, snippet = ADMIN_ACCESS_SNIPPET, sitesDir } = {}) {
+export function accessState(db, { adminDomain = null, snippet = ADMIN_ACCESS_SNIPPET, sitesDir, io = snippetIo() } = {}) {
   const choices = accessChoices(db), routes = accessRoutes(db), networks = accessNetworks(db);
   const vwPaths = parse(routes.vaultwarden?.ip_allowlist_paths_json);
   const kcAllow = parse(routes.keycloakAdmin?.ip_allowlist_json);
-  let snippetText = null; try { snippetText = existsSync(snippet) ? readFileSync(snippet, 'utf8') : null; } catch { snippetText = null; }
+  let snippetText = null; try { snippetText = io.read(snippet); } catch { snippetText = null; }
   const site = adminSite(adminDomain, { sitesDir, snippet });
   const applied = {
     vaultwarden: routes.vaultwarden ? (same(vwPaths, ['/admin']) ? 'open' : 'restricted') : null,
@@ -145,7 +160,7 @@ export function inNetworks(ip, networks) {
  * one Caddy regenerate/validate/reload, everything restored if any step fails.
  * deps: { regenerate(domain), adapt(), reload() } from routes/services.js.
  */
-export async function applyAccess(db, raw, { client, adminDomain, deps, snippet = ADMIN_ACCESS_SNIPPET, sitesDir } = {}) {
+export async function applyAccess(db, raw, { client, adminDomain, deps, snippet = ADMIN_ACCESS_SNIPPET, sitesDir, io = snippetIo() } = {}) {
   const p = accessSchema.parse(raw), routes = accessRoutes(db), networks = accessNetworks(db);
   if ((p.proxypilot === 'restricted' || p.keycloakAdmin === 'restricted') && !networks.length) throw fail('No restricted networks are applied yet. Finish stage A (domains, realm and networks) first.');
   const site = adminSite(adminDomain, { sitesDir, snippet });
@@ -156,13 +171,13 @@ export async function applyAccess(db, raw, { client, adminDomain, deps, snippet 
   const updates = [];
   if (routes.vaultwarden) updates.push({ row: routes.vaultwarden, set: { ip_allowlist_paths_json: p.vaultwarden === 'open' ? JSON.stringify(['/admin']) : null } });
   if (routes.keycloakAdmin) updates.push({ row: routes.keycloakAdmin, set: p.keycloakAdmin === 'restricted' ? { ip_allowlist_json: JSON.stringify(networks), ip_allowlist_paths_json: JSON.stringify(['/admin']) } : { ip_allowlist_json: null, ip_allowlist_paths_json: null } });
-  const snippetBefore = existsSync(snippet) ? readFileSync(snippet, 'utf8') : null, siteBefore = site.file ? site.text : null;
+  const snippetBefore = io.read(snippet), siteBefore = site.file ? site.text : null;
   const write = (file, text) => { const tmp = join(dirname(file), `.${Date.now()}.pp-tmp`); writeFileSync(tmp, text, { mode: 0o644 }); renameSync(tmp, file); };
   const restore = async () => {
     for (const u of updates) { const cols = Object.keys(u.set); db.prepare(`UPDATE service_http_routes SET ${cols.map((c) => `${c}=?`).join(',')} WHERE id=?`).run(...cols.map((c) => u.row[c] ?? null), u.row.id); }
     // With no earlier snippet an open one is left behind: harmless, and the
     // restored site file may still import it.
-    try { write(snippet, snippetBefore ?? adminAccessSnippet(false, [])); } catch { /* best effort */ }
+    try { io.write(snippet, snippetBefore ?? adminAccessSnippet(false, [])); } catch { /* best effort */ }
     try { if (site.file && siteBefore !== null) write(site.file, siteBefore); } catch { /* best effort */ }
     for (const d of new Set(updates.map((u) => u.row.domain))) { try { await deps.regenerate(d); } catch { /* best effort */ } }
     try { await deps.reload(); } catch { /* best effort */ }
@@ -170,7 +185,7 @@ export async function applyAccess(db, raw, { client, adminDomain, deps, snippet 
   try {
     for (const u of updates) { const cols = Object.keys(u.set); db.prepare(`UPDATE service_http_routes SET ${cols.map((c) => `${c}=?`).join(',')} WHERE id=?`).run(...cols.map((c) => u.set[c]), u.row.id); }
     if (site.canImport) {
-      write(snippet, adminAccessSnippet(p.proxypilot === 'restricted', networks));
+      io.write(snippet, adminAccessSnippet(p.proxypilot === 'restricted', networks));
       if (!site.imports) write(site.file, withAdminImport(site.text, adminDomain, snippet));
     }
     for (const d of new Set(updates.map((u) => u.row.domain))) await deps.regenerate(d);
@@ -182,14 +197,14 @@ export async function applyAccess(db, raw, { client, adminDomain, deps, snippet 
   }
   const put = db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
   for (const k of ACCESS_KEYS) put.run(SETTING(k), p[k]);
-  return accessState(db, { adminDomain, snippet, sitesDir });
+  return accessState(db, { adminDomain, snippet, sitesDir, io });
 }
 
 /** After a restricted-network change: rewrite a restricted dashboard snippet with the new list (no-op otherwise). → true when rewritten */
-export function refreshAdminSnippet(db, networks, { snippet = ADMIN_ACCESS_SNIPPET } = {}) {
+export function refreshAdminSnippet(db, networks, { snippet = ADMIN_ACCESS_SNIPPET, io = snippetIo() } = {}) {
   try {
-    if (!existsSync(snippet) || !/# access: restricted/.test(readFileSync(snippet, 'utf8')) || !networks.length) return false;
-    const tmp = join(dirname(snippet), `.${Date.now()}.pp-tmp`); writeFileSync(tmp, adminAccessSnippet(true, networks), { mode: 0o644 }); renameSync(tmp, snippet);
+    if (!/# access: restricted/.test(io.read(snippet) || '') || !networks.length) return false;
+    io.write(snippet, adminAccessSnippet(true, networks));
     return true;
   } catch { return false; }
 }

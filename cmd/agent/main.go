@@ -2,12 +2,8 @@
 // RPC bridge that replaces nsenter as the dashboard container's path
 // to host operations.
 //
-// Phase A scope: scaffold + agent.ping only. The Node backend is NOT
-// using this binary in any production path yet — every existing
-// nsenter call site stays untouched. Phases B-E migrate Caddy /
-// Incus / Docker / misc methods onto the agent behind feature flags;
-// Phase F drops `privileged: true` on the container once those flags
-// have flipped and burned in.
+// The migration is incomplete: see docs/core/security-host-boundary.md.
+// Authentication of a local process is not independent operator authorization.
 //
 // Wire protocol — JSON-over-newline, one request/response per
 // connection (pooling is a later concern):
@@ -54,12 +50,17 @@ func main() {
 	}
 
 	socketPath := flag.String("socket", defaultSocket, "Unix socket path to listen on")
+	clientUIDs := flag.String("client-uids", "0", "Allowed host-observed Unix peer UIDs (comma separated, root-managed)")
 	flag.Parse()
+	allowed, err := parseUIDs(*clientUIDs)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Methods register themselves with the global registry on import.
-	// agent.ping is the only one wired in Phase A; the rest of the
-	// dispatcher matrix lights up in Phases B-E.
+	// The registry is a fixed allowlist, not an arbitrary command bridge.
 	registry := methods.DefaultRegistry()
+	rpc := newServer(registry, allowed)
 
 	// Best-effort cleanup of a stale socket from a prior run that
 	// crashed without unlinking. systemd RuntimeDirectory would handle
@@ -101,7 +102,7 @@ func main() {
 			log.Printf("accept: %v", err)
 			continue
 		}
-		go handleConn(conn, registry)
+		rpc.accept(conn)
 	}
 }
 

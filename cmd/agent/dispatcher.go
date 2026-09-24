@@ -2,109 +2,158 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"github.com/cybertecharmor/proxypilot/cmd/agent/methods"
 	"io"
 	"log"
 	"net"
+	"sync"
 	"time"
-
-	"github.com/cybertecharmor/proxypilot/cmd/agent/methods"
 )
 
 const (
-	// One request line, one response line, then close. 64 KiB is a
-	// generous ceiling for params payloads — larger inputs (e.g.
-	// arbitrary file uploads) will land on a streaming method in a
-	// later phase, not on this JSON-line wire.
-	maxLineBytes = 64 * 1024
-	// Read deadline. A client that connects but never writes a request
-	// is probably hung — kill the conn so we don't leak a goroutine
-	// per stuck client.
-	readDeadline = 30 * time.Second
+	maxLineBytes     = 64 * 1024
+	maxResponseBytes = 4 * 1024 * 1024
+	readDeadline     = 30 * time.Second
+	writeDeadline    = 5 * time.Second
+	maxConnections   = 32
+	maxMethodCalls   = 4
 )
 
-// handleConn reads exactly one request line, dispatches to the
-// registered method handler, writes exactly one response line, and
-// closes. Errors during read/dispatch produce an error envelope on
-// the wire when the request was syntactically valid enough that we
-// could echo back its id; otherwise the connection is closed without
-// a response (the client will see EOF).
-func handleConn(conn net.Conn, registry *methods.Registry) {
+type peerIdentity struct {
+	UID uint32
+	PID int32
+}
+type server struct {
+	registry    *methods.Registry
+	allowedUIDs map[uint32]bool
+	connections chan struct{}
+	mu          sync.Mutex
+	methods     map[string]chan struct{}
+	audit       func(peerIdentity, string, string, time.Duration)
+}
+
+func newServer(registry *methods.Registry, allowed map[uint32]bool) *server {
+	return &server{registry: registry, allowedUIDs: allowed, connections: make(chan struct{}, maxConnections), methods: make(map[string]chan struct{}), audit: func(peer peerIdentity, method, outcome string, elapsed time.Duration) {
+		// Only registered names and fixed outcomes. Never log request bodies, caller-
+		// supplied method names, results, errors, credentials or terminal contents.
+		log.Printf("rpc uid=%d pid=%d method=%s outcome=%s duration_ms=%d", peer.UID, peer.PID, method, outcome, elapsed.Milliseconds())
+	}}
+}
+
+func (s *server) accept(conn net.Conn) {
+	peer, err := socketPeer(conn)
+	if err != nil || !s.allowedUIDs[peer.UID] {
+		conn.Close()
+		return
+	}
+	select {
+	case s.connections <- struct{}{}:
+		go func() { defer func() { <-s.connections }(); s.handle(conn, peer) }()
+	default:
+		conn.Close()
+	}
+}
+
+func (s *server) methodSlot(method string) chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// These methods share a root-runner request file; serialize across aliases.
+	if method == "update.request" || method == "update.check" || method == "storage.install_request" {
+		method = "update-writer"
+	}
+	slot := s.methods[method]
+	if slot == nil {
+		limit := maxMethodCalls
+		if method == "update-writer" || method == "security.cve_2026_31431.patch" {
+			limit = 1
+		}
+		slot = make(chan struct{}, limit)
+		s.methods[method] = slot
+	}
+	return slot
+}
+
+func (s *server) handle(conn net.Conn, peer peerIdentity) {
 	defer conn.Close()
+	started := time.Now()
+	method, outcome := "unparsed", "invalid_request"
+	defer func() {
+		if recover() != nil {
+			outcome = "internal"
+			writeErr(conn, 0, "internal", "method failed")
+		}
+		s.audit(peer, method, outcome, time.Since(started))
+	}()
 	if err := conn.SetReadDeadline(time.Now().Add(readDeadline)); err != nil {
 		return
 	}
-
-	br := bufio.NewReaderSize(conn, maxLineBytes)
-	line, err := br.ReadBytes('\n')
+	// ReadSlice returns ErrBufferFull without allocating an unbounded line.
+	line, err := bufio.NewReaderSize(conn, maxLineBytes).ReadSlice('\n')
+	if err == bufio.ErrBufferFull {
+		outcome = "request_too_large"
+		writeErr(conn, 0, outcome, "request exceeds 64 KiB line limit")
+		return
+	}
 	if err != nil && err != io.EOF {
-		log.Printf("read: %v", err)
 		return
 	}
 	if len(line) == 0 {
 		return
 	}
-	// ReadBytes returns a slice that includes the trailing newline; we
-	// also defensively cap on length so a malicious client can't drive
-	// the agent into reading beyond the buffer (bufio will return
-	// bufio.ErrBufferFull before that, but be explicit).
-	if len(line) > maxLineBytes {
-		writeErr(conn, 0, "request_too_large", "request exceeds 64 KiB line limit")
-		return
-	}
-
 	var req methods.Request
-	if err := json.Unmarshal(line, &req); err != nil {
-		writeErr(conn, 0, "parse_error", "invalid JSON request: "+err.Error())
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&req) != nil {
+		writeErr(conn, 0, "parse_error", "invalid JSON request")
 		return
 	}
-	if req.Method == "" {
-		writeErr(conn, req.ID, "invalid_request", "method is required")
+	if decoder.Decode(new(any)) != io.EOF {
+		writeErr(conn, 0, "parse_error", "one request is required")
 		return
 	}
-
-	handler, ok := registry.Lookup(req.Method)
+	handler, ok := s.registry.Lookup(req.Method)
 	if !ok {
-		writeErr(conn, req.ID, "method_not_found", "unknown method: "+req.Method)
+		outcome = "method_not_found"
+		writeErr(conn, req.ID, outcome, "method is not available")
 		return
 	}
-
+	method = req.Method
+	slot := s.methodSlot(method)
+	select {
+	case slot <- struct{}{}:
+		defer func() { <-slot }()
+	default:
+		outcome = "busy"
+		writeErr(conn, req.ID, outcome, "method concurrency limit reached")
+		return
+	}
 	result, methodErr := handler(req.Params)
 	if methodErr != nil {
+		outcome = "method_error"
 		writeErr(conn, req.ID, methodErr.Code, methodErr.Message)
 		return
 	}
+	outcome = "ok"
 	writeOK(conn, req.ID, result)
 }
 
 func writeOK(w io.Writer, id int64, result any) {
-	resp := methods.Response{ID: id, Result: result}
-	encodeAndWrite(w, resp)
+	encodeAndWrite(w, methods.Response{ID: id, Result: result})
 }
-
 func writeErr(w io.Writer, id int64, code, message string) {
-	resp := methods.Response{
-		ID: id,
-		Error: &methods.Error{
-			Code:    code,
-			Message: message,
-		},
-	}
-	encodeAndWrite(w, resp)
+	encodeAndWrite(w, methods.Response{ID: id, Error: &methods.Error{Code: code, Message: message}})
 }
-
 func encodeAndWrite(w io.Writer, resp methods.Response) {
+	if conn, ok := w.(net.Conn); ok {
+		if conn.SetWriteDeadline(time.Now().Add(writeDeadline)) != nil {
+			return
+		}
+	}
 	buf, err := json.Marshal(resp)
-	if err != nil {
-		// Fallback: a hand-rolled minimal error envelope. This path
-		// only fires if the result struct is non-encodable, which is a
-		// programming bug in a method, not an operator-input issue.
-		log.Printf("encode response: %v", err)
-		_, _ = w.Write([]byte(`{"id":0,"error":{"code":"internal","message":"response encoding failed"}}` + "\n"))
-		return
+	if err != nil || len(buf) > maxResponseBytes {
+		buf, _ = json.Marshal(methods.Response{ID: resp.ID, Error: &methods.Error{Code: "response_limit", Message: "response cannot be delivered within limits"}})
 	}
-	buf = append(buf, '\n')
-	if _, err := w.Write(buf); err != nil {
-		log.Printf("write: %v", err)
-	}
+	_, _ = w.Write(append(buf, '\n'))
 }

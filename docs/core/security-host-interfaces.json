@@ -1,0 +1,700 @@
+{
+  "status": "S6 partially implemented/open; candidates are not all executable paths",
+  "contracts": "docs/core/security-host-boundary.md",
+  "files": {
+    "admin/backend/src/index.js": {
+      "host_files: // by /var/lib/proxypilot not being bind-mounted into the admin": 1,
+      "host_files: // runs in a container without /var/lib/proxypilot bind-mounted": 1,
+      "host_files: `Likely cause: /var/lib/proxypilot not bind-mounted into the admin container, ` +": 1,
+      "host_files: error = 'local file missing \u2014 wiped on container rebuild (check that /var/lib/proxypilot is bind-mounted)'": 1
+    },
+    "admin/backend/src/lib/agent.js": {
+      "host_files: const DEFAULT_SOCKET = '/run/proxypilot-agent/proxypilot-agent.sock';": 1
+    },
+    "admin/backend/src/lib/backup-local-store.js": {
+      "host_files: //     /var/lib/proxypilot/backups/<id>.ppbackup with mode 0600.": 1,
+      "host_files: // dashboard's `/var/lib/proxypilot` convention.": 1,
+      "host_files: return process.env.PROXYPILOT_BACKUP_DIR || '/var/lib/proxypilot/backups';": 1
+    },
+    "admin/backend/src/lib/backup-pack.js": {
+      "host_command: // All shell-outs go through spawnHostSync so the dashboard": 1,
+      "host_command: const cat = spawnHostSync('cat', [hostOut], {": 1,
+      "host_command: const r = spawnHostSync('docker', [": 1,
+      "host_command: const r = spawnHostSync('docker', ['volume', 'ls', '--format', '{{.Name}}'], {": 1,
+      "host_command: const r = spawnHostSync('incus', ['export', instanceName, hostOut, '--compression', 'gzip'], {": 1,
+      "host_command: const r = spawnHostSync('incus', ['list', '-f', 'csv', '-c', 'n'], {": 1,
+      "host_command: import { spawnHostSync, hasHostBinary } from './host-exec.js';": 1,
+      "host_command: spawnHostSync('rm', ['-f', hostOut], { encoding: 'utf-8' });": 3,
+      "host_files: ...collectDirAsEntries(caddyDir || '/etc/caddy', 'caddy'),": 1,
+      "host_files: ...collectDirAsEntries(wireguardDir || '/etc/wireguard', 'wireguard'),": 1,
+      "host_files: //   caddy/                          \u2190 /etc/caddy": 1,
+      "host_files: //   wireguard/                      \u2190 /etc/wireguard": 1,
+      "host_files: // a follow-up that walks /etc/caddy/sites/<name> the same": 1,
+      "host_files: caddyDir = '/etc/caddy',": 1,
+      "host_files: wireguardDir = '/etc/wireguard',": 1,
+      "host_namespace: // HOST (because it runs there via nsenter).  We then `cat` the": 1,
+      "host_namespace: // nsenter.  Pre-this-fix the bare spawnSync('docker', ...) call": 1,
+      "process_api: import { spawnSync } from 'node:child_process';": 1
+    },
+    "admin/backend/src/lib/backup-scheduler.js": {
+      "host_files: cveInboxDir: process.env.PROXYPILOT_CVE_INBOX_DIR || '/var/lib/proxypilot/cve-inbox',": 3
+    },
+    "admin/backend/src/lib/caddy-cert.js": {
+      "host_command: // into spawnHostSync so the rest of the module is unaware of the": 1,
+      "host_command: const r = spawnHostSync(": 2,
+      "host_command: import { spawnHostSync } from './host-exec.js';": 1,
+      "host_files: // install.sh only exposes /etc/caddy/sites, /etc/caddy/custom and": 1,
+      "host_namespace: // nsenter pivot. Returning structured data here rather than parsing": 1,
+      "host_namespace: // stat the host filesystem via nsenter, just like the L4 reconciler": 1,
+      "process_api: // child_process.": 1
+    },
+    "admin/backend/src/lib/caddy-driver.js": {
+      "host_command host_namespace: //   anything else     \u2192 existing nsenter-based execOnHost path,": 1,
+      "host_command: // Local execOnHost \u2014 same shape as the copies in routes/services.js": 1,
+      "host_command: // every existing `try { await execOnHost('caddy \u2026') } catch (e)": 1,
+      "host_command: async function execOnHost(command, { timeout = 30000 } = {}) {": 1,
+      "host_command: return execOnHost(`caddy adapt --config ${configPath} > /dev/null 2>&1`, { timeout: timeoutMs });": 1,
+      "host_command: return execOnHost(`caddy reload --config ${configPath}${flag} 2>&1`, { timeout: timeoutMs });": 1,
+      "host_files: * the existing /etc/caddy bind-mount) and forwards its body as": 1,
+      "host_files: const CADDY_CONFIG_FILE = process.env.CADDY_CONFIG_FILE || '/etc/caddy/Caddyfile';": 1,
+      "host_namespace: * @param {boolean} [opts.force]       Pass --force on the nsenter path (default true).": 1,
+      "host_namespace: const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(command)}`;": 1,
+      "process_api: import { exec } from 'child_process';": 1
+    },
+    "admin/backend/src/lib/cert-mount-reconciler.js": {
+      "host_namespace: // nsenter pivot inside the admin container is centralised \u2014 see": 1,
+      "host_namespace: `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`,": 1,
+      "process_api: import { exec } from 'child_process';": 1
+    },
+    "admin/backend/src/lib/cve-research.js": {
+      "host_namespace: // access (no nsenter / not in Docker at all) this can fail \u2014 that's": 1
+    },
+    "admin/backend/src/lib/domain-provision-logic.js": {
+      "host_files: // next to the Services-managed files in /etc/caddy/sites.": 1,
+      "host_files: // which would parse a token file as config). /etc/caddy/pp-secrets is": 1,
+      "host_files: export const PP_SECRETS_DIR = '/etc/caddy/pp-secrets';": 1
+    },
+    "admin/backend/src/lib/engine-cli.js": {
+      "host_files: export function getInboxDir() { return process.env.PROXYPILOT_INBOX_DIR || '/var/lib/proxypilot/cve-inbox'; }": 1,
+      "host_files: export function getInventoryPath() { return process.env.PROXYPILOT_INVENTORY_PATH || '/var/lib/proxypilot/inventory.json'; }": 1,
+      "host_namespace: 'engine spawn failed: nsenter not found in container. ' +": 1,
+      "host_namespace: //   the running kernel etc., so they pivot through `nsenter -t 1` into": 1,
+      "host_namespace: // Build the argv. In Docker we wrap with nsenter so the spawn pivots": 1,
+      "host_namespace: // engine subprocess logic (nsenter host-pivot decision, PYTHONPATH": 1,
+      "host_namespace: bin = 'nsenter';": 1,
+      "process_api: import { spawn } from 'node:child_process';": 1
+    },
+    "admin/backend/src/lib/health-checks.js": {
+      "process_api: import { spawnSync } from 'node:child_process';": 1
+    },
+    "admin/backend/src/lib/host-exec.js": {
+      "host_command: // routes/lxc.js has had its own `execOnHost` + `spawnOnHost`": 1,
+      "host_command: // spawnHost(bin, args, opts) \u2014 async equivalent for streaming": 1,
+      "host_command: // spawnHostSync(bin, args, opts) \u2014 synchronous spawn that runs": 1,
+      "host_command: const r = spawnHostSync('sh', ['-c', `command -v ${JSON.stringify(bin)}`], {": 1,
+      "host_command: export function spawnHost(bin, args = [], opts = {}) {": 1,
+      "host_command: export function spawnHostSync(bin, args = [], opts = {}) {": 1,
+      "host_namespace: 'nsenter',": 2,
+      "host_namespace: // binaries (curl, python3, util-linux for nsenter, git).  It": 1,
+      "host_namespace: // pivot into the host's mount + network namespaces via nsenter.": 1,
+      "process_api: import { spawnSync, spawn } from 'node:child_process';": 1
+    },
+    "admin/backend/src/lib/l4-diagnose.js": {
+      "host_namespace: `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`,": 1,
+      "process_api: import { exec } from 'child_process';": 1
+    },
+    "admin/backend/src/lib/l4-reconciler.js": {
+      "host_namespace: // Default execHost: nsenter into pid 1 when running inside the": 1,
+      "host_namespace: `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`,": 1,
+      "process_api: import { exec } from 'child_process';": 1
+    },
+    "admin/backend/src/lib/l4-reserved-ports.js": {
+      "host_namespace: // the wrong tree and `sysctl -p` (which runs on the host via nsenter)": 1,
+      "host_namespace: `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`,": 1,
+      "process_api: import { exec } from 'child_process';": 1
+    },
+    "admin/backend/src/lib/lxc-exports-instance.js": {
+      "host_command: import { runHostCapture } from './lxc-zip.js';": 1,
+      "host_command: runHost: (bin, args, opts) => runHostCapture(bin, args, opts),": 1,
+      "host_command: runHostCapture('sh', ['-c', script, 'sh', ...argv], { timeoutMs: 60000, ...opts });": 1,
+      "host_files: const DEFAULT_EXPORTS_DIR = '/var/lib/proxypilot/mcp-exports';": 1
+    },
+    "admin/backend/src/lib/lxc-zip.js": {
+      "host_command: //     spawnHost (argv-based; per shell-quote.js guidance all": 1,
+      "host_command: // Promise wrapper over spawnHost for the zip flow's incus calls:": 1,
+      "host_command: // impure export is runHostCapture.": 1,
+      "host_command: const child = spawnHost(bin, args, {": 1,
+      "host_command: export function runHostCapture(bin, args, {": 1,
+      "host_command: import { spawnHost } from './host-exec.js';": 1,
+      "host_command: return runHostCapture('incus', ['exec', incusName, '--', 'sh', '-c', script], opts);": 1,
+      "host_files: 'mkdir -p /etc/systemd/system',": 1,
+      "host_files: export const STARTUP_UNIT_PATH = `/etc/systemd/system/${STARTUP_UNIT_NAME}`;": 1
+    },
+    "admin/backend/src/lib/mcp-ext/catalog/edge.js": {
+      "host_files: tool('create_static_release', 'Capture the current docroot as a release (a full copy under /var/lib/proxypilot/static-releases) with an optional label.', { site_id: P.site_id, label: { type: 'string' }, dry_run: P.dry_run }, ['site_id']),": 1
+    },
+    "admin/backend/src/lib/mcp-logic.js": {
+      "host_command: /** Parse `incus list --format json`. Pass the runHostCapture result as the": 1,
+      "host_namespace: // test_route probes run as host `curl` (through the same nsenter seam every": 1
+    },
+    "admin/backend/src/lib/migration/index.js": {
+      "host_command: getDb, runHostCapture, publicBaseUrl, logAudit,": 1,
+      "host_command: import { runHostCapture } from '../lxc-zip.js';": 1
+    },
+    "admin/backend/src/lib/migration/manifest.js": {
+      "host_files: *            rootfs-tar and file-sync stream THROUGH `/var/lib/proxypilot`,": 1
+    },
+    "admin/backend/src/lib/migration/service.js": {
+      "host_command: // runHostCapture.": 1,
+      "host_command: const exec = (bin, args, opts = {}) => runHostCapture(bin, args, { timeoutMs: 60000, ...opts });": 1,
+      "host_command: getDb, runHostCapture, publicBaseUrl, logAudit = () => {}, now = () => Date.now(), lxcPrefix = 'pp-',": 1,
+      "host_command: if (typeof runHostCapture !== 'function') throw new Error('createMigrationService needs runHostCapture');": 1,
+      "host_files: export const AGENT_DIR = process.env.PROXYPILOT_MIGRATION_AGENT_DIR || '/var/lib/proxypilot/agent';": 1,
+      "host_files: export const WORK_DIR = process.env.PROXYPILOT_MIGRATION_WORK_DIR || '/var/lib/proxypilot/migration';": 1
+    },
+    "admin/backend/src/lib/platform-vpn-sync.js": {
+      "host_namespace: // (vpn-startup.js callProxypilot, nsenter-aware). refreshVpnNetworks records": 1
+    },
+    "admin/backend/src/lib/port-detector.js": {
+      "host_command: * pass its own execOnHost (Docker-in-pod or bare-metal both work);": 1
+    },
+    "admin/backend/src/lib/project-lifecycle.js": {
+      "host_namespace: // unit-testable against a fake Incus (no better-sqlite3, no nsenter):": 1
+    },
+    "admin/backend/src/lib/pty.js": {
+      "host_namespace: //                hardening B1 is what makes the nsenter step legal": 1,
+      "host_namespace: //                host's path so nsenter'd bash actually finds the dir.": 1,
+      "host_namespace: //                nsenter pivot when in Docker; falls through to a plain": 1,
+      "host_namespace: //                via nsenter (host holds the incus binary + socket).": 1,
+      "host_namespace: // `target` flows straight into argv for nsenter/incus exec, so this is": 1,
+      "host_namespace: // we translate to its host equivalent so nsenter'd bash finds it.": 1,
+      "host_namespace: cmd = 'nsenter';": 3
+    },
+    "admin/backend/src/lib/restore.js": {
+      "host_command: // 3a: .env (written via spawnHost so we hit the host's mount": 1,
+      "host_command: // namespace via spawnHost('cat') in case the bind mount": 1,
+      "host_command: // spawnHost('cat') fallback so an install whose bind mount went": 1,
+      "host_command: const r = spawnHostSync('cat', [backup.local_path], {": 1,
+      "host_command: const r = spawnHostSync('mkdir', ['-p', dir], { encoding: 'utf-8' });": 1,
+      "host_command: const r = spawnHostSync('sh', ['-c', cmd], {": 1,
+      "host_command: import { spawnHostSync } from './host-exec.js';": 1,
+      "host_command: spawnHostSync('chmod', [mode.toString(8), dest], { encoding: 'utf-8' });": 1,
+      "host_command: spawnHostSync('sh', ['-c',": 2,
+      "host_files: // (e.g. /opt/proxypilot/.env, /etc/caddy/...).  The admin": 1,
+      "host_files: // /etc/caddy/Caddyfile as separate mount points; rm-ing them on": 1,
+      "host_files: // /var/lib/proxypilot/backups is bind-mounted), then a": 1,
+      "host_files: // bind-mounts /etc/caddy/sites, /etc/caddy/custom, and": 1,
+      "host_files: `  This usually means /var/lib/proxypilot is not bind-mounted into the admin container ` +": 1,
+      "host_files: caddyDir = process.env.CADDY_DIR || '/etc/caddy',": 1,
+      "host_files: const safetyDir = process.env.PROXYPILOT_BACKUPS_LOCAL_DIR || '/var/lib/proxypilot/backups';": 1,
+      "host_files: wireguardDir = process.env.PROXYPILOT_WG_DIR || '/etc/wireguard',": 1,
+      "host_namespace: // Routing the writes through nsenter via lib/host-exec makes": 1,
+      "process_api: import { spawnSync } from 'node:child_process';": 1
+    },
+    "admin/backend/src/lib/route-drift.js": {
+      "host_files: // never removed: the operator's own /etc/caddy/custom files are legitimate,": 1,
+      "host_files: const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';": 1
+    },
+    "admin/backend/src/lib/security-cve-driver.js": {
+      "host_files: * the inbox YAML at /var/lib/proxypilot/cve-inbox/. Routes mounting": 1,
+      "host_namespace: // driver, this driver has no nsenter fallback \u2014 there is no shell": 1
+    },
+    "admin/backend/src/lib/self-update.js": {
+      "host_files: //                      straight from /var/lib/proxypilot/update (bind-mounted": 1,
+      "host_files: export const STATE_DIR = process.env.PROXYPILOT_UPDATE_STATE_DIR || '/var/lib/proxypilot/update';": 1,
+      "host_files: try { await stat(join('/run/proxypilot-update', 'request.json')); out.pending = true; } catch { out.pending = false; }": 1
+    },
+    "admin/backend/src/lib/setup-engine/config-logic.js": {
+      "host_files: disk_source_roots: Array.isArray(devicePolicy.disk_source_roots) && devicePolicy.disk_source_roots.length ? devicePolicy.disk_source_roots : ['/var/lib/proxypilot/shares'],": 1
+    },
+    "admin/backend/src/lib/setup-engine/deploy-op.js": {
+      "host_files: export const UNIT_PATH = `/etc/systemd/system/${UNIT_NAME}`;": 1,
+      "host_namespace: // backend's in-process fallback (the nsenter pivot) when no runner is live.": 1
+    },
+    "admin/backend/src/lib/setup-engine/full-platform-lifecycle.js": {
+      "host_files: export const RESET_BACKUP_DIR = '/var/lib/proxypilot/mcp-exports';": 1
+    },
+    "admin/backend/src/lib/setup-engine/full-platform-reset.js": {
+      "host_files: export const RESET_EXPORTS_DIR = '/var/lib/proxypilot/mcp-exports';": 1
+    },
+    "admin/backend/src/lib/setup-engine/guest-probes.js": {
+      "host_files: export function protectedCopiesScript(jobId, { appDir = '/srv/app', unitPath = '/etc/systemd/system/mock2-dev.service', environmentFile = '/etc/environment', dumpsDir = DB_DUMPS_DIR, withDatabase = true } = {}) {": 1
+    },
+    "admin/backend/src/lib/setup-engine/infisical-logic.js": {
+      "host_files: export const INFISICAL_ROOT = '/var/lib/proxypilot/infisical';": 1
+    },
+    "admin/backend/src/lib/setup-engine/keycloak-logic.js": {
+      "host_files: export const KEYCLOAK_ROOT = '/var/lib/proxypilot/keycloak';": 1
+    },
+    "admin/backend/src/lib/setup-engine/openbao-logic.js": {
+      "host_files: export const OPENBAO_ROOT='/var/lib/proxypilot/openbao';": 1,
+      "host_files: export const RECOVERY_ROOT='/var/lib/proxypilot-openbao-recovery';": 1
+    },
+    "admin/backend/src/lib/setup-engine/owned-runtime.js": {
+      "host_command: // (the host runner's exec.host); `runHostCapture` results ({ status }) are": 1
+    },
+    "admin/backend/src/lib/setup-engine/platform-access.js": {
+      "host_command: import { spawnHostSync } from '../host-exec.js';": 1,
+      "host_command: read: (f) => { if (!SAFE_PATH.test(f)) return null; const r = spawnHostSync('sh', ['-c', `cat '${f}' 2>/dev/null`], { encoding: 'utf8', timeout: 5000 }); return r.status === 0 ? r.stdout : null; },": 1,
+      "host_command: write: (f, text) => { if (!SAFE_PATH.test(f)) throw fail('Unsafe snippet path.'); const r = spawnHostSync('sh', ['-c', `cat > '${f}.pp-tmp' && chmod 644 '${f}.pp-tmp' && (chown root:caddy '${f}.pp-tmp' 2>/dev/null || true) && mv '${f}.pp-tmp' '${f}'`], { input: text, encoding: 'utf8', timeout: 8000 }); if (r.error || r.status !== 0) throw new Error(`could not write ${f} on the host`); },": 1,
+      "host_files: // The snippet lives in /etc/caddy, which the backend container does not mount": 1,
+      "host_files: // own /etc/caddy left the host's import pointing at a missing file, and caddy": 1,
+      "host_files: const SITES_DIR = () => process.env.CADDY_SITES_DIR || '/etc/caddy/sites';": 1,
+      "host_files: export const ADMIN_ACCESS_SNIPPET = process.env.CADDY_ADMIN_ACCESS_SNIPPET || '/etc/caddy/pp-admin-access.caddy';": 1
+    },
+    "admin/backend/src/lib/setup-engine/platform-overview.js": {
+      "host_command host_namespace: // (the backend passes runHostCapture through nsenter; tests pass a fake).": 1
+    },
+    "admin/backend/src/lib/setup-engine/pomerium-logic.js": {
+      "host_files: export const POMERIUM_ROOT = '/var/lib/proxypilot/pomerium';": 1
+    },
+    "admin/backend/src/lib/setup-engine/vaultwarden-logic.js": {
+      "host_files: export const VAULTWARDEN_ROOT = '/var/lib/proxypilot/vaultwarden';": 1
+    },
+    "admin/backend/src/lib/snapshot-s3-export.js": {
+      "host_command: //   2. spawnHost('cat') pipes the buffer into a host /tmp file.": 1,
+      "host_command: // Async wrapper around spawnHost.  Drop-in replacement for": 1,
+      "host_command: // spawnHostSync that does NOT block the Node event loop \u2014 using": 1,
+      "host_command: const child = spawnHost(bin, args, {": 1,
+      "host_command: const del = spawnHostSync('incus', ['delete', '--force', name], {": 1,
+      "host_command: const list = spawnHostSync('incus', ['list', '-c', 'n', '-f', 'csv'], {": 1,
+      "host_command: import { spawnHostSync, spawnHost, hasHostBinary } from './host-exec.js';": 1,
+      "host_command: spawnHostSync('incus', ['stop', '--force', name], {": 1
+    },
+    "admin/backend/src/lib/storage/host.js": {
+      "host_command host_namespace: // runHostCapture (nsenter into the host namespaces from the dashboard": 1,
+      "host_command: // scanning). Mutations always run through runHostCapture: the agent unit is": 1,
+      "host_command: const r = await runHostCapture(bin, args, { timeoutMs, input, maxCapture });": 1,
+      "host_command: export function createStorageHost({ runHostCapture, agentCall = null, useAgent = true, agentTimeoutMs = 60000, logger = console } = {}) {": 1,
+      "host_command: if (typeof runHostCapture !== 'function') throw new Error('createStorageHost needs runHostCapture');": 1,
+      "host_files: const r = await sh('test -f \"/etc/systemd/system/$1\" || test -f \"/lib/systemd/system/$1\" || test -f \"/usr/lib/systemd/system/$1\"', [unit], { timeoutMs: 5000 });": 1,
+      "host_files: const sourceDir = (await readFile('/var/lib/proxypilot/update/source-dir', { maxBytes: 4096 }) || '').trim() || null;": 1,
+      "host_files: export const REPLICATION_STATE_DIR = process.env.PROXYPILOT_STORAGE_STATE_DIR || '/var/lib/proxypilot/storage';": 1,
+      "host_namespace: * has called the agent, and the preflight's other reads go through nsenter.": 1,
+      "host_namespace: /** Whole-disk inventory. Agent first; smartctl / import scan filled in through nsenter where the agent could not. */": 1,
+      "host_namespace: return { datasets: d.datasets, snapshots: s.snapshots, error: d.error || s.error || null, source: 'nsenter' };": 1,
+      "host_namespace: return { devices, importable, warnings, source: 'nsenter' };": 1,
+      "host_namespace: return { list: l.pools, status: s, error: l.error || null, source: 'nsenter' };": 1
+    },
+    "admin/backend/src/lib/storage/index.js": {
+      "host_command: const host = createStorageHost({ runHostCapture, agentCall, useAgent: process.env.PROXYPILOT_STORAGE_USE_AGENT !== '0' });": 1,
+      "host_command: import { runHostCapture } from '../lxc-zip.js';": 1
+    },
+    "admin/backend/src/lib/storage/parse.js": {
+      "host_namespace: // through the existing nsenter path. Native-free, no host exec: every": 1
+    },
+    "admin/backend/src/lib/storage/planner.js": {
+      "host_files: const backupsDir = inv.backupsDir || '/var/lib/proxypilot/storage';": 1
+    },
+    "admin/backend/src/lib/storage/service.js": {
+      "host_files: plan.steps.push({ id: 's2', argv: ['sh', '-c', 'umask 022 && mkdir -p \"$1\" && cat > \"$1/schedule.conf\"', 'sh', `/etc/systemd/system/${unit}.d`], description: `Write the schedule drop-in for ${unit}`, stdin: 'content', content: renderTimerDropIn(cfg.schedule), timeout_ms: 30000, ignore_failure: false, kind: 'exec' });": 1,
+      "host_files: try { pending = (await host.readFile('/run/proxypilot-update/request.json', { maxBytes: 4096 })) != null; } catch { pending = false; }": 1,
+      "host_files: { id: 's2', argv: ['rm', '-f', `${REPLICATION_CONF_DIR}/replication-${name}.conf`, `/etc/systemd/system/${unit}.d/schedule.conf`], description: 'Remove its configuration', stdin: null, timeout_ms: 30000, ignore_failure: false, kind: 'exec' },": 1
+    },
+    "admin/backend/src/lib/system-stats.js": {
+      "process_api: import { exec } from 'node:child_process';": 1
+    },
+    "admin/backend/src/lib/tls-cert-store.js": {
+      "host_command: const cur = spawnHostSync('sh', ['-c', `cat '${ADMIN_TLS_SNIPPET}' 2>/dev/null || true`], { encoding: 'utf8', timeout: 5000 });": 1,
+      "host_command: const cw = spawnHostSync('sh', ['-c', `cat > '${certFile}'; chmod 644 '${certFile}'; chown root:caddy '${certFile}' 2>/dev/null || true`], { input: servedChainPem, encoding: 'utf8', timeout: 10000 });": 1,
+      "host_command: const exists = spawnHostSync('sh', ['-c', `test -f '${ADMIN_TLS_SNIPPET}'`], { encoding: 'utf8', timeout: 5000 });": 1,
+      "host_command: const kw = spawnHostSync('sh', ['-c', `cat > '${keyFile}'; chmod 600 '${keyFile}'; chown caddy:caddy '${keyFile}' 2>/dev/null || true`], { input: keyPem, encoding: 'utf8', timeout: 10000 });": 1,
+      "host_command: const p = spawnHostSync('sh', ['-c', prep], { encoding: 'utf8', timeout: 10000 });": 1,
+      "host_command: const w = spawnHostSync('sh', ['-c', `cat > '${ADMIN_TLS_SNIPPET}'; chmod 644 '${ADMIN_TLS_SNIPPET}'; chown root:caddy '${ADMIN_TLS_SNIPPET}' 2>/dev/null || true`], { input: directive, encoding: 'utf8', timeout: 8000 });": 1,
+      "host_command: import { spawnHostSync } from './host-exec.js';": 1,
+      "host_command: spawnHostSync('sh', ['-c', `rm -f '${certFile}' '${keyFile}'`], { encoding: 'utf8', timeout: 10000 });": 1,
+      "host_files: //     /etc/caddy/pp-manual-certs) with 0600 perms owned by the caddy user, over": 1,
+      "host_files: export const ADMIN_TLS_SNIPPET = process.env.CADDY_ADMIN_TLS_SNIPPET || '/etc/caddy/pp-admin-tls.caddy';": 1,
+      "host_files: export const MANUAL_CERT_DIR = process.env.CADDY_MANUAL_CERT_DIR || '/etc/caddy/pp-manual-certs';": 1
+    },
+    "admin/backend/src/lib/vpn-startup.js": {
+      "host_namespace: // inside the host namespace via nsenter.": 1,
+      "host_namespace: `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`,": 1,
+      "process_api: import { exec } from 'child_process';": 1
+    },
+    "admin/backend/src/mock2/caddy.js": {
+      "host_files: // /etc/caddy/sites/*) nor the operator's /etc/caddy/custom/*. It writes its": 1,
+      "host_files: // Write (or overwrite) the site file for one parent domain. The /etc/caddy": 1,
+      "host_files: // own site files under a dedicated directory (default /etc/caddy/mock2) and": 1,
+      "host_files: const CADDY_CONFIG_FILE = process.env.CADDY_CONFIG_FILE || '/etc/caddy/Caddyfile';": 1,
+      "host_files: export const MOCK2_CADDY_DIR = process.env.MOCK2_CADDY_DIR || '/etc/caddy/mock2';": 1,
+      "host_namespace: // caddy binary itself needs the nsenter pivot, which happens inside reload.": 1
+    },
+    "admin/backend/src/mock2/chat-images.js": {
+      "host_files: const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';": 1
+    },
+    "admin/backend/src/mock2/connect.js": {
+      "process_api: import { spawn } from 'node:child_process';": 1
+    },
+    "admin/backend/src/mock2/container-lock.js": {
+      "host_command: // in-process executor (mock2/deploy.js) optional overrides env, guestExec,": 1,
+      "host_command: return store ? { getDb: store.getDb, owner: store.owner, env: store.env || null, guestExec: store.guestExec || null, hostExec: store.hostExec || null, reviewLogin: store.reviewLogin || null, inputsDir: store.inputsDir || null, configureRoutes: store.configureRoutes || null, renderDeps: store.renderDeps || null, reservedPortsPath: store.reservedPortsPath || null } : null;": 1
+    },
+    "admin/backend/src/mock2/deploy.js": {
+      "host_command: exec: store?.guestExec || {": 1,
+      "host_command: host: store?.hostExec || (async (argv, { timeoutMs } = {}) => runHost(argv[0], argv.slice(1), { timeoutMs })),": 1,
+      "host_namespace: // executor: the nsenter guest pivot and the registry's review login (the": 1
+    },
+    "admin/backend/src/mock2/domains.js": {
+      "host_files: const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';": 1
+    },
+    "admin/backend/src/mock2/firewall.js": {
+      "host_files: // /var/lib/proxypilot/firewall.json and we never touch it). Reconciled at boot.": 1,
+      "host_files: export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';": 1,
+      "host_namespace: // functions shell to the host through the shared nsenter-aware runner": 1
+    },
+    "admin/backend/src/mock2/host.js": {
+      "host_command: // Every Mock2 host mutation pivots through lib/host-exec.js spawnHost (risk R3:": 1,
+      "host_command: child = spawnHost(bin, args, { stdio: [stdinMode, 'pipe', 'pipe'] });": 1,
+      "host_command: import { spawnHost } from '../lib/host-exec.js';": 1,
+      "host_namespace: // Run a shell one-liner on the host (nsenter-pivoted inside Docker).": 1,
+      "host_namespace: // nsenter when the backend runs inside Docker). provision.js grew its own": 1
+    },
+    "admin/backend/src/mock2/network.js": {
+      "host_namespace: // `getent ahostsv4` on the host (through the nsenter-aware runner), so the IP the": 1,
+      "host_namespace: // hence a bash `/dev/tcp` connect run through the nsenter-aware runner (not a": 1,
+      "host_namespace: // nsenter-aware runner (mock2/host.js, risk R3).": 1
+    },
+    "admin/backend/src/mock2/provision.js": {
+      "host_command: // EVERY host mutation pivots through lib/host-exec.js spawnHost (risk R3:": 1,
+      "host_files: `incus exec ${containerName} -- sh -c 'code=$(curl -sS -o /dev/null -w \"%{http_code}\" --max-time 3 \"http://127.0.0.1:${webPort}/\" 2>/dev/null); exec_line=$(grep -h \"^ExecStart\" /etc/systemd/system/mock2-dev.service 2>/dev/null); echo \"$code|$exec_line\"'`,": 2,
+      "host_files: export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';": 1,
+      "host_namespace: // nsenter when the backend runs inside Docker). New host artifacts \u2014 the bare": 1,
+      "host_namespace: // nsenter-aware runner (risk R3).": 1
+    },
+    "admin/backend/src/mock2/reconcile.js": {
+      "host_files: // Rewriting the file at boot re-asserts the `import /etc/caddy/mock2/*.caddy`": 1
+    },
+    "admin/backend/src/mock2/routes.js": {
+      "host_files: `code=$(curl -sS -o /dev/null -w \"%{http_code}\" --max-time 3 \"http://127.0.0.1:${port}/\" 2>/dev/null); exec_line=$(grep -h \"^ExecStart\" /etc/systemd/system/mock2-dev.service 2>/dev/null); echo \"$code|$exec_line\"`,": 1
+    },
+    "admin/backend/src/mock2/runner-sdk.js": {
+      "host_namespace: // bytes piped through `incus exec <c> -- <cmd reading stdin>` (the nsenter pivot is": 1,
+      "process_api: // Node process's namespace via child_process `tar` \u2014 the same namespace the SDK's": 1,
+      "process_api: import { execFile } from 'node:child_process';": 1
+    },
+    "admin/backend/src/mock2/scaffold-e2e.js": {
+      "process_api: // Uses only the pg driver + child_process, mirroring scripts/migrate.mjs, so it": 1,
+      "process_api: import { spawn, spawnSync } from 'node:child_process';": 1
+    },
+    "admin/backend/src/mock2/scaffold.js": {
+      "process_api: import { execFileSync } from 'node:child_process';": 1
+    },
+    "admin/backend/src/mock2/template.js": {
+      "host_files: cat > /etc/systemd/system/mock2-dev.service <<UNIT": 1
+    },
+    "admin/backend/src/routes/backups.js": {
+      "host_files: const CVE_INBOX_DIR = process.env.PROXYPILOT_CVE_INBOX_DIR || '/var/lib/proxypilot/cve-inbox';": 1
+    },
+    "admin/backend/src/routes/cves.js": {
+      "host_files: // The actual inbox lives at /var/lib/proxypilot/cve-inbox/<cve>.yaml.": 1
+    },
+    "admin/backend/src/routes/domains.js": {
+      "host_command host_files: try { spawnHostSync('sh', ['-c', `mkdir -p /var/lib/proxypilot && touch ${PLUGIN_MARKER}`], { timeout: 10000 }); } catch { /* marker is a nicety */ }": 1,
+      "host_command host_files: try { spawnHostSync('sh', ['-c', `mkdir -p /var/lib/proxypilot && touch ${PLUGIN_MARKER}`], { timeout: 10000 }); } catch { /* update.sh also detects via site files */ }": 1,
+      "host_command: const add = spawnHostSync('caddy', ['add-package', 'github.com/caddy-dns/cloudflare'], { encoding: 'utf8', timeout: 180000 });": 1,
+      "host_command: const r = spawnHostSync('caddy', ['list-modules'], { encoding: 'utf8', timeout: 15000 });": 1,
+      "host_command: const r = spawnHostSync('sh', ['-c',": 1,
+      "host_command: const r = spawnHostSync('sh', ['-c', script], { input: token, encoding: 'utf8', timeout: 10000 });": 1,
+      "host_command: const restart = spawnHostSync('systemctl', ['restart', 'caddy'], { encoding: 'utf8', timeout: 60000 });": 1,
+      "host_command: import { spawnHostSync } from '../lib/host-exec.js';": 1,
+      "host_command: try { spawnHostSync('sh', ['-c', `rm -f '${path}'`], { encoding: 'utf8', timeout: 10000 }); } catch { /* best effort */ }": 1,
+      "host_files: // in /etc/caddy/sites (validated with `caddy adapt`, applied with the": 1,
+      "host_files: // token is materialized to /etc/caddy/pp-secrets/<domain>.token on the": 1,
+      "host_files: const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';": 1,
+      "host_files: const PLUGIN_MARKER = '/var/lib/proxypilot/caddy-cloudflare-plugin.enabled';": 1
+    },
+    "admin/backend/src/routes/firewall.js": {
+      "host_command: async function execOnHost(command, { timeout = 20000 } = {}) {": 1,
+      "host_command: result = await execOnHost(cmd, { timeout });": 1,
+      "host_namespace: // via nsenter so the action lands on the host's CLI database, audit": 1,
+      "host_namespace: const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`;": 1,
+      "process_api: import { exec } from 'child_process';": 1
+    },
+    "admin/backend/src/routes/full-platform.js": {
+      "host_command host_files: const why = spawnHostSync('sh', ['-c', 'caddy adapt --config /etc/caddy/Caddyfile 2>&1 >/dev/null | tail -c 400'], { encoding: 'utf8', timeout: 30000 });": 1,
+      "host_command: const { spawnHostSync } = await import('../lib/host-exec.js');": 1
+    },
+    "admin/backend/src/routes/housekeeping.js": {
+      "host_namespace: // Same shape as l4-reconciler / caddy-driver: nsenter to the host": 1,
+      "host_namespace: `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`,": 1,
+      "process_api: import { exec } from 'node:child_process';": 1
+    },
+    "admin/backend/src/routes/lxc-workspace.js": {
+      "host_command: const probe = await runHostCapture('incus', ['exec', incusName, '--', 'sh', '-c', buildRootProbeScript()], { timeoutMs: 15000 });": 1,
+      "host_command: import { runHostCapture, readContainerStartup } from '../lib/lxc-zip.js';": 1,
+      "host_command: return runHostCapture('incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', ...params], { timeoutMs: 30000, ...opts });": 1
+    },
+    "admin/backend/src/routes/lxc.js": {
+      "host_command host_files: await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');": 5,
+      "host_command: // Verify the target exists.  execOnHost throws on non-zero": 1,
+      "host_command: async function execOnHost(command, options = {}) {": 1,
+      "host_command: await execOnHost(": 2,
+      "host_command: await execOnHost(`incus config device unset ${shellSingleQuote(incusName)} eth0 ipv4.address`, { timeout: 30000 });": 1,
+      "host_command: await execOnHost(`incus copy ${incusName}/${snapshotName} ${tempName}`, { timeout: 30 * 60 * 1000 });": 1,
+      "host_command: await execOnHost(`incus delete ${tempName} --force`, { timeout: 60000 });": 1,
+      "host_command: await execOnHost(`incus image delete ${fingerprint}`, { timeout: 15000 });": 1,
+      "host_command: await execOnHost(`incus image delete ${img.fingerprint}`, { timeout: 30000 });": 1,
+      "host_command: await execOnHost(`incus info ${incusName} 2>/dev/null`);": 3,
+      "host_command: await execOnHost(`incus info ${incusName} 2>/dev/null`, { timeout: 5000 });": 1,
+      "host_command: await execOnHost(`incus network set ${name} ${key} ${safeValue}`, { timeout: 10000 });": 1,
+      "host_command: await execOnHost(`incus network unset ${name} ${key}`, { timeout: 10000 });": 1,
+      "host_command: await execOnHost(`incus rename ${oldIncusName} ${newIncusName}`, { timeout: 60_000 });": 1,
+      "host_command: await execOnHost(`incus start ${incusName}`, { timeout: 30000 });": 1,
+      "host_command: child = spawnOnHost(`incus export ${tempName} - ${incusCompressionArgs(picked.compression).join(' ')}`);": 1,
+      "host_command: const child = spawnOnHost(": 1,
+      "host_command: const child = spawnOnHost(exportCmd);": 1,
+      "host_command: const child = spawnOnHost(importCmd);": 1,
+      "host_command: const child = spawnOnHost(pullCmd);": 1,
+      "host_command: const child = spawnOnHost(pushCmd);": 1,
+      "host_command: const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });": 1,
+      "host_command: const infoResult = await execOnHost(`incus storage info ${pool.name} --format json`, { timeout: 10000 });": 1,
+      "host_command: const listResult = await execOnHost(": 1,
+      "host_command: const listResult = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`);": 1,
+      "host_command: const opsResult = await execOnHost('incus operation list --format json 2>/dev/null', { timeout: 5000 });": 1,
+      "host_command: const probe = await execOnHost(": 1,
+      "host_command: const q = await execOnHost(`incus query ${shellSingleQuote(`/1.0/instances/${incusName}`)} 2>/dev/null`, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });": 1,
+      "host_command: const r = await execOnHost(": 2,
+      "host_command: const r = await execOnHost('incus image list --format json 2>/dev/null', { timeout: 15000 });": 2,
+      "host_command: const r = await execOnHost('incus list --format json 2>/dev/null', { timeout: 15000 });": 2,
+      "host_command: const r = await execOnHost(`incus info ${newIncusName} 2>/dev/null`, { timeout: 5000 });": 1,
+      "host_command: const r = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });": 2,
+      "host_command: const r = await execOnHost(`incus query /1.0/instances/${job.incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });": 1,
+      "host_command: const r = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });": 1,
+      "host_command: const r = await execOnHost(cmd, { timeout: 5000 });": 1,
+      "host_command: const r = await execOnHost(cmd, { timeout: timeoutMs + 1000 });": 1,
+      "host_command: const result = await execOnHost('incus image list --format json 2>/dev/null');": 1,
+      "host_command: const result = await execOnHost('incus image list --format json', { timeout: 15000 });": 1,
+      "host_command: const result = await execOnHost('incus list --format json');": 3,
+      "host_command: const result = await execOnHost('incus network list --format json', { timeout: 10000 });": 1,
+      "host_command: const result = await execOnHost('incus profile list --format json', { timeout: 10000 });": 1,
+      "host_command: const result = await execOnHost('incus storage list --format json', { timeout: 10000 });": 1,
+      "host_command: const result = await execOnHost(`incus exec ${incusName} -- bash -c ${shellSingleQuote(lsCmd)}`, { timeout: 5000 });": 1,
+      "host_command: const result = await execOnHost(`incus info ${incusName} --format json 2>/dev/null`);": 1,
+      "host_command: const result = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`);": 1,
+      "host_command: const result = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });": 5,
+      "host_command: const result = await execOnHost(`incus network show ${name} --format json`, { timeout: 10000 });": 1,
+      "host_command: const result = await execOnHost(`incus query /1.0/profiles/${name}`, { timeout: 10000 });": 1,
+      "host_command: const result = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`);": 1,
+      "host_command: const result = await execOnHost(cmd, { timeout: 10000 });": 1,
+      "host_command: const result = await execOnHost(execCmd, { timeout: 60000 });": 1,
+      "host_command: const srcDevices = await execOnHost(": 1,
+      "host_command: const stateResult = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });": 1,
+      "host_command: const { stdout } = await execOnHost('incus version 2>/dev/null');": 1,
+      "host_command: const { stdout: poolsJson } = await execOnHost('incus storage list --format json 2>/dev/null');": 1,
+      "host_command: execHost: execOnHost,": 1,
+      "host_command: function spawnOnHost(command) {": 1,
+      "host_command: try { await execOnHost(`incus delete ${incusName} --force 2>/dev/null || true`); } catch {}": 1,
+      "host_command: try { await execOnHost(`incus start ${shellSingleQuote(incusName)}`, { timeout: 60000 }); started = true; }": 1,
+      "host_files: // the host-side `caddy reload --config /etc/caddy/Caddyfile`": 1,
+      "host_files: const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';": 1,
+      "host_namespace: // Execute command on host (uses nsenter when in Docker, direct exec otherwise)": 1,
+      "host_namespace: // nsenter ...\" string with no actionable signal. Detect timeout": 1,
+      "host_namespace: const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`;": 1,
+      "host_namespace: return spawn('nsenter', ['-t', '1', '-m', '-u', '-n', '-i', 'sh', '-c', command], {": 1,
+      "process_api: import { exec, spawn } from 'child_process';": 1
+    },
+    "admin/backend/src/routes/mcp-editor.js": {
+      "host_command: const r = await runHostCapture(": 1,
+      "host_command: import { runHostCapture } from '../lib/lxc-zip.js';": 1
+    },
+    "admin/backend/src/routes/mcp-tools/admin.js": {
+      "host_command: ? await runHostCapture('zfs', ['snapshot', ...(plan.recursive ? ['-r'] : []), `${plan.dataset}@${name}`], { timeoutMs: 60000 })": 1,
+      "host_command: const probe = await runHostCapture('sh', ['-c', 'command -v trivy'], { timeoutMs: 5000 });": 1,
+      "host_command: const r = await runHostCapture('apt', ['list', '--upgradable'], { timeoutMs: 60000, maxCapture: 4 * 1024 * 1024 });": 1,
+      "host_command: const r = await runHostCapture('dpkg-query', ['-W', '-f', '${binary:Package}\\\\t${Version}\\\\t${Status}\\\\n'], { timeoutMs: 60000, maxCapture: 8 * 1024 * 1024 });": 1,
+      "host_command: const r = await runHostCapture('lynis', ['audit', 'system', '--quick', '--no-colors', '--nolog'], { timeoutMs: 20 * 60 * 1000, maxCapture: 8 * 1024 * 1024 });": 1,
+      "host_command: const r = await runHostCapture('shutdown', ['-r', `+${delay}`, 'ProxyPilot MCP reboot'], { timeoutMs: 15000 });": 1,
+      "host_command: const r = await runHostCapture('systemctl', ['--no-pager', '--full', action, unit], { timeoutMs: 120000 });": 1,
+      "host_command: const r = await runHostCapture('systemctl', ['list-units', '--type=service,timer', '--all', '--no-pager', '--plain', '--output=json'], { timeoutMs: 30000, maxCapture: 4 * 1024 * 1024 });": 1,
+      "host_command: const r = await runHostCapture('trivy', [target, '--format', 'json', '--severity', severity, '--quiet', subject], { timeoutMs: 30 * 60 * 1000, maxCapture: 32 * 1024 * 1024 });": 1,
+      "host_command: const r2 = await runHostCapture('systemctl', ['list-units', '--type=service,timer', '--all', '--no-pager', '--plain', '--no-legend'], { timeoutMs: 30000, maxCapture: 4 * 1024 * 1024 });": 1,
+      "host_command: const st = await runHostCapture('systemctl', ['is-active', unit], { timeoutMs: 15000 });": 1,
+      "host_command: getDb, getSetting, setSetting, runHostCapture, uuidv4, mintMcpToken, hashMcpToken, MCP_TOOL_NAMES, dbPath,": 1,
+      "host_command: if (!hasHostBinary('lynis')) { const probe = await runHostCapture('sh', ['-c', 'command -v lynis'], { timeoutMs: 5000 }); if (probe.status !== 0) return err('lynis is not installed on the host (apt-get install lynis). Nothing was run.'); }": 1,
+      "host_files: const GRC_DIR = process.env.PROXYPILOT_GRC_DIR || '/var/lib/proxypilot/grc';": 1,
+      "host_files: const REPORTS_DIR = process.env.PROXYPILOT_SECURITY_REPORTS_DIR || '/var/lib/proxypilot/security-reports';": 1,
+      "host_files: const r = await hostSh('findmnt -no FSTYPE,SOURCE / ; findmnt -no FSTYPE,SOURCE /var/lib/proxypilot 2>/dev/null || true', [], { timeoutMs: 10000 });": 1,
+      "host_files: const subvol = fs.data.fs === 'btrfs' ? '/var/lib/proxypilot' : '/';": 1
+    },
+    "admin/backend/src/routes/mcp-tools/common.js": {
+      "host_command: return runHostCapture('incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', ...argv], { timeoutMs: 60000, ...opts });": 2,
+      "host_command: return runHostCapture('sh', ['-c', script, 'sh', ...argv], { timeoutMs: 60000, ...opts });": 1,
+      "host_command: runHostCapture, LXC_PREFIX,": 1
+    },
+    "admin/backend/src/routes/mcp-tools/edge.js": {
+      "host_command: const r = await runHostCapture('caddy', ['list-modules'], { timeoutMs: 15000 }).catch(() => null);": 2,
+      "host_command: const r = await runHostCapture('tail', ['-c', String(tailBytes), logPath], { timeoutMs: 20000, maxCapture: tailBytes + 65536 });": 1,
+      "host_command: getDb, getSetting, setSetting, runHostCapture, LXC_PREFIX, LXC_NAME_REGEX, fetchLxcInstance, lxcReachableAddress,": 1
+    },
+    "admin/backend/src/routes/mcp-tools/lxc-admin.js": {
+      "host_command: const q = await runHostCapture('incus', ['query', `/1.0/instances/${incus(newName)}`], { timeoutMs: 30000 });": 1,
+      "host_command: const r = await runHostCapture('incus', ['copy', snap ? `${incus(name)}/${snap}` : incus(name), incus(newName)], { timeoutMs: 30 * 60 * 1000 });": 1,
+      "host_command: const r = await runHostCapture('incus', ['import', file, incus(newName)], { timeoutMs: 45 * 60 * 1000 });": 1,
+      "host_command: const r = await runHostCapture('incus', argv, { timeoutMs: 45 * 60 * 1000 });": 1,
+      "host_command: const r = await runHostCapture(PROXYPILOT_BIN, ['--json', 'firewall', ...argv], { timeoutMs: 60000 });": 1,
+      "host_command: const s = await runHostCapture('incus', ['start', incus(newName)], { timeoutMs: 120000 });": 1,
+      "host_command: const st = await runHostCapture('incus', ['start', incus(newName)], { timeoutMs: 120000 });": 1,
+      "host_command: const u = await runHostCapture('incus', ['config', 'device', 'unset', incus(newName), 'eth0', 'ipv4.address'], { timeoutMs: 30000 });": 1,
+      "host_command: getDb, runHostCapture, LXC_PREFIX, LXC_NAME_REGEX, validLxcFilePath, validTargetDir,": 1,
+      "host_command: hasBinary: async (b) => (await runHostCapture('sh', ['-c', `command -v ${JSON.stringify(b)}`], { timeoutMs: 10000 })).status === 0,": 1
+    },
+    "admin/backend/src/routes/mcp-tools/platform.js": {
+      "host_command: const r = await ctx.runHostCapture('ss', ['-ltnH'], { timeoutMs: 15000 });": 1,
+      "host_command: const run = (argv, timeoutMs = 30000) => ctx.runHostCapture(argv[0], argv.slice(1), { timeoutMs });": 1,
+      "host_command: try { const r = await ctx.runHostCapture('docker', ['version', '--format', '{{.Server.Version}}'], { timeoutMs: 15000 }); docker = r.status === 0 ? { ok: true, version: /^[\\w.+-]{1,40}$/.test(r.stdout.trim()) ? r.stdout.trim() : 'unknown' } : { ok: false, error: 'docker version failed' }; }": 1,
+      "host_namespace: // One host-command seam for every platform tool (the backend's nsenter-aware runner).": 1
+    },
+    "admin/backend/src/routes/mcp-tools/project-config.js": {
+      "host_command: const r = await runHostCapture('incus', ['config', 'set', p.incusName, k, v], { timeoutMs: 60000 });": 1,
+      "host_command: const r = await runHostCapture('incus', ['export', p.incusName, file, ...incusCompressionArgs(picked.compression)], { timeoutMs: 45 * 60 * 1000 });": 1,
+      "host_command: getSetting, setSetting, runHostCapture, mock2Modules, projectContainerName, requireActiveProject, liveBuildGuard,": 1,
+      "host_command: if (r.status !== 0) r = await runHostCapture('incus', ['config', 'device', 'set', p.incusName, 'root', 'size', `${disk}GiB`], { timeoutMs: 60000 });": 1,
+      "host_command: let r = await runHostCapture('incus', ['config', 'device', 'override', p.incusName, 'root', `size=${disk}GiB`], { timeoutMs: 60000 });": 1
+    },
+    "admin/backend/src/routes/mcp-tools/self-edit.js": {
+      "host_command: const { runHostCapture, takeUploadTicket, selfUpdateInstalled, selfUpdateStart, selfUpdateStatus, SELF_UPDATE_POLICY } = ctx;": 1,
+      "host_command: return runHostCapture('git', ['-c', `safe.directory=${dir}`, '-c', 'user.email=mcp-self@proxypilot', '-c', 'user.name=ProxyPilot MCP (self-edit)', '-C', dir, ...argv], { timeoutMs: 120000, ...opts });": 1,
+      "host_files: //                   live checkout. It lives under /var/lib/proxypilot because": 1,
+      "host_files: //   candidate slot  /var/lib/proxypilot/self/candidate \u2014 a clone of the live": 1,
+      "host_files: try { await access(CAND); } catch { return err(`${CAND} is not visible inside the dashboard container \u2014 the /var/lib/proxypilot bind mount is missing, so checks cannot run here.`); }": 1,
+      "process_api: import { spawn } from 'node:child_process';": 1
+    },
+    "admin/backend/src/routes/mcp-tools/static-admin.js": {
+      "host_files: // /var/lib/proxypilot/static-releases) with rollback, and aliases (extra": 1,
+      "host_files: const RELEASES_ROOT = process.env.STATIC_RELEASES_DIR || '/var/lib/proxypilot/static-releases';": 1
+    },
+    "admin/backend/src/routes/mcp.js": {
+      "host_command: // OUTPUT IS THE TAIL, NOT THE HEAD. runHostCapture keeps the FIRST 256 KB it": 1,
+      "host_command: // files: runHostCapture defaulted to 256 KB while these tools advertised": 1,
+      "host_command: const c = await runHostCapture(": 1,
+      "host_command: const d = await runHostCapture('df', ['-kP', picked.source], { timeoutMs: 30000 });": 1,
+      "host_command: const g = await runHostCapture('getent', ['hosts', domain], { timeoutMs: 10000 });": 1,
+      "host_command: const headR = await runHostCapture(": 1,
+      "host_command: const info = await runHostCapture('incus', ['storage', 'info', picked.name, '--bytes'], { timeoutMs: 30000 });": 1,
+      "host_command: const pem = await runHostCapture('cat', [dir.certFile], { timeoutMs: 10000 });": 1,
+      "host_command: const poolList = await runHostCapture('incus', ['storage', 'list', '--format', 'json'], { timeoutMs: 30000 });": 1,
+      "host_command: const probe = await runHostCapture(": 2,
+      "host_command: const profile = await runHostCapture('incus', ['profile', 'show', 'default'], { timeoutMs: 30000 });": 1,
+      "host_command: const q = await runHostCapture('incus', ['query', `/1.0/storage-pools/${picked.name}/resources`], { timeoutMs: 30000 });": 1,
+      "host_command: const r = await runHostCapture(": 13,
+      "host_command: const r = await runHostCapture('curl', argv, { timeoutMs: (maxTimeSeconds + 5) * 1000 });": 1,
+      "host_command: const r = await runHostCapture('incus', ['exec', `${LXC_PREFIX}${name}`, '--', 'sh', '-c', script, 'sh', path], { timeoutMs: 60000 });": 1,
+      "host_command: const r = await runHostCapture('incus', ['exec', incusName, '--', 'sh', '-c', script, 'sh', abs, String(LXC_FILE_READ_CAP)], { timeoutMs: 30000, maxCapture: FILE_READ_CAPTURE });": 1,
+      "host_command: const r = await runHostCapture('incus', ['list', target, '--format', 'json'], { timeoutMs: 20000, maxCapture: LXC_LIST_CAPTURE_CAP });": 1,
+      "host_command: const r = await runHostCapture('incus', argv, {": 1,
+      "host_command: const r = await runHostCapture('incus', argv, { timeoutMs: (timeout + 10) * 1000 });": 1,
+      "host_command: const r = await runHostCapture('incus', argv, { timeoutMs: 120000, maxCapture: 4 * 1024 * 1024 });": 1,
+      "host_command: const r = await runHostCapture('incus', argv, { timeoutMs: 30000 });": 2,
+      "host_command: const r = await runHostCapture('incus', argv, { timeoutMs: 45000 });": 2,
+      "host_command: const r = await runHostCapture('incus', argv, { timeoutMs: 60000 });": 1,
+      "host_command: const r = await runHostCapture('tail', ['-c', '524288', logPath], { timeoutMs: 15000 });": 1,
+      "host_command: const r = await runHostCapture(bin, argv, { timeoutMs: 30000, ...opts });": 1,
+      "host_command: const read = await runHostCapture(": 1,
+      "host_command: const retry = await runHostCapture('incus', snapshotArgv('create', incusName, snapName, other), { timeoutMs: 120000 });": 1,
+      "host_command: const routeProbe = await runHostCapture('ip', ['route', 'get', ip], { timeoutMs: 10000 }).catch(() => null);": 1,
+      "host_command: const s = await runHostCapture(": 1,
+      "host_command: const unitR = await runHostCapture(": 1,
+      "host_command: const w = await runHostCapture(": 3,
+      "host_command: incus: (argv, opts) => runHostCapture('incus', argv, opts),": 1,
+      "host_command: let list = await runHostCapture('incus', ['list', '--all-projects', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });": 1,
+      "host_command: let out = await runHostCapture('incus', ['list', '--all-projects', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });": 1,
+      "host_command: let out = await runHostCapture('incus', ['list', incusName, '--all-projects', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });": 1,
+      "host_command: let r = await runHostCapture('incus', snapshotArgv('create', incusName, snapName, form), { timeoutMs: 120000 });": 1,
+      "host_command: list = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });": 1,
+      "host_command: out = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });": 1,
+      "host_command: out = await runHostCapture('incus', ['list', incusName, '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });": 1,
+      "host_command: runHostCapture, runInContainer, readContainerStartup, agentCall, publicBaseUrl,": 1,
+      "host_command: setupStartupScript, writeTarFromZip, runHostCapture, runInContainer, CAPTURE_CAP,": 1,
+      "host_command: snapshotCliProbe = runHostCapture('incus', ['snapshot', 'create', '--help'], { timeoutMs: 15000 })": 1,
+      "host_namespace: // Every number from the HOST (nsenter-aware runner), never from inside a guest.": 1
+    },
+    "admin/backend/src/routes/platform-overview.js": {
+      "host_command: export const hostRun = (argv, timeoutMs = 30000) => runHostCapture(argv[0], argv.slice(1), { timeoutMs });": 1,
+      "host_command: import { runHostCapture } from '../lib/lxc-zip.js';": 1
+    },
+    "admin/backend/src/routes/services.js": {
+      "host_command: // Tiny local copy of the existing execOnHost pattern from this file's": 1,
+      "host_command: // regular writeFile works. Only shell commands (caddy reload, etc.) need execOnHost.": 1,
+      "host_command: async function execOnHost(command, options = {}) {": 1,
+      "host_command: async function execOnHostLocal(cmd, { timeout = 15_000 } = {}) {": 1,
+      "host_command: await execOnHost('docker compose version 2>/dev/null');": 1,
+      "host_command: await execOnHost('docker stop proxypilot-admin 2>&1 || true');": 1,
+      "host_command: await execOnHost('docker-compose version 2>/dev/null');": 1,
+      "host_command: await execOnHost('systemctl is-active --quiet caddy 2>/dev/null');": 1,
+      "host_command: await execOnHost('systemctl restart caddy 2>&1');": 1,
+      "host_command: await execOnHost('systemctl start caddy 2>&1');": 1,
+      "host_command: await execOnHost('which caddy 2>/dev/null || command -v caddy 2>/dev/null');": 1,
+      "host_command: await execOnHost(`caddy start --config ${CADDY_CONFIG_FILE} 2>&1`);": 1,
+      "host_command: await execOnHost(`docker volume create ${volumeName} 2>/dev/null || true`);": 1,
+      "host_command: await execOnHost(`echo ${JSON.stringify(base64Content)} | base64 -d > ${JSON.stringify(filePath)}`, { timeout: 60000 });": 2,
+      "host_command: await execOnHost(`mkdir -p ${JSON.stringify(dirPath)}`);": 1,
+      "host_command: await execOnHost(`mkdir -p ${JSON.stringify(directory)}`);": 1,
+      "host_command: await execOnHost(`mkdir -p ${backupDir}`);": 2,
+      "host_command: await execOnHost(`test -f ${backupPath}`);": 1,
+      "host_command: await execOnHostLocal(": 1,
+      "host_command: const indexResult = await execOnHost(`test -f ${JSON.stringify(join(rootDir, 'index.html'))} && echo \"exists\" || echo \"\"`);": 1,
+      "host_command: const pgrepResult = await execOnHost('pgrep -o caddy 2>/dev/null');": 1,
+      "host_command: const r = await execOnHost('incus list --format json 2>/dev/null', { timeout: 5000 });": 2,
+      "host_command: const r = await execOnHostLocal(": 1,
+      "host_command: const result = await execOnHost(": 1,
+      "host_command: const result = await execOnHost('docker ps -a --format \"{{.ID}}\\\\t{{.Names}}\\\\t{{.Image}}\\\\t{{.Status}}\\\\t{{.Ports}}\"');": 1,
+      "host_command: const result = await execOnHost('docker volume ls --format \"{{.Name}}\\\\t{{.Driver}}\\\\t{{.Mountpoint}}\" 2>/dev/null');": 1,
+      "host_command: const result = await execOnHost(`cat ${JSON.stringify(join(sitesDir, file))} 2>/dev/null || echo \"\"`);": 1,
+      "host_command: const result = await execOnHost(`docker ${action} ${JSON.stringify(target)} 2>&1`);": 1,
+      "host_command: const result = await execOnHost(`docker ps -a --format '{{.ID}}\\\\t{{.Names}}\\\\t{{.Image}}\\\\t{{.Status}}\\\\t{{.Ports}}\\\\t{{.Labels}}' 2>/dev/null || echo \"\"`);": 2,
+      "host_command: const result = await execOnHost(`ls -1 ${JSON.stringify(sitesDir)} 2>/dev/null || echo \"\"`);": 1,
+      "host_command: const result = await execOnHost(`ls -la ${backupDir}/*.tar.gz 2>/dev/null || echo \"\"`);": 1,
+      "host_command: const result = await execOnHost(exportCmd, { timeout: 300000 }); // 5 min timeout": 1,
+      "host_command: const result = await execOnHost(fullCommand, { timeout });": 1,
+      "host_command: const result = await execOnHost(importCmd, { timeout: 300000 }); // 5 min timeout": 1,
+      "host_command: const sizeResult = await execOnHost(`docker run --rm -v ${vol.name}:/data alpine du -sh /data 2>/dev/null | cut -f1`);": 1,
+      "host_command: execHost: execOnHostLocal,": 1,
+      "host_command: execOnHost('df -h / 2>/dev/null | tail -1').then(r => r.stdout.trim()).catch(() => 'unknown'),": 1,
+      "host_command: execOnHost('free -h 2>/dev/null | head -2').then(r => r.stdout.trim()).catch(() => 'unknown'),": 1,
+      "host_command: execOnHost('hostname').then(r => r.stdout.trim()).catch(() => 'unknown'),": 1,
+      "host_command: execOnHost('uptime -p 2>/dev/null || uptime').then(r => r.stdout.trim()).catch(() => 'unknown'),": 1,
+      "host_files: // Note: Since /etc/caddy/sites is a mounted volume in Docker,": 1,
+      "host_files: const CADDY_CONFIG_FILE = process.env.CADDY_CONFIG_FILE || '/etc/caddy/Caddyfile';": 1,
+      "host_files: const CADDY_CUSTOM_DIR = process.env.CADDY_CUSTOM_DIR || '/etc/caddy/custom';": 1,
+      "host_files: const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';": 1,
+      "host_namespace: // Execute command on host (uses nsenter when in Docker, direct exec otherwise)": 1,
+      "host_namespace: // Use base64 to safely transfer content through nsenter": 1,
+      "host_namespace: // Use nsenter to execute on the host's namespace": 1,
+      "host_namespace: const executable = isInDocker ? 'nsenter' : bin;": 1,
+      "host_namespace: const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`;": 1,
+      "host_namespace: return execAsync(`nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(cmd)}`, { timeout });": 1,
+      "process_api: import { exec, execFile } from 'child_process';": 1
+    },
+    "admin/backend/src/routes/ssh-access.js": {
+      "host_command: // Reuse the shellSingleQuote + execOnHost helpers but route through": 1,
+      "host_command: // the shellSingleQuote+execOnHost path. Keep in sync with": 1,
+      "host_command: async function execOnHost(command, { timeout = 15000 } = {}) {": 1,
+      "host_command: const { stdout } = await execOnHost(script, { timeout: 10000 });": 1,
+      "host_command: result = await execOnHost(cmd, { timeout: opts.timeout ?? 20000 });": 1,
+      "host_command: result = await execOnHost(wrapped, { timeout });": 1,
+      "host_files: 'for f in /etc/ssh/ssh_host_*_key.pub; do',": 1,
+      "host_files: // /etc/ssh/ssh_host_*_key.pub and runs `ssh-keygen -lf` on each file; it": 1,
+      "host_namespace: // nsenter so the action lands on the host's CLI database, audit": 1,
+      "host_namespace: const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`;": 1,
+      "process_api: import { exec } from 'child_process';": 1
+    },
+    "admin/backend/src/routes/terminal-ws.js": {
+      "host_namespace: ? `nsenter -t 1 -m -u -n -i incus info ${name} --format json`": 1,
+      "process_api: import { exec } from 'child_process';": 1
+    },
+    "admin/backend/src/routes/tls-certs.js": {
+      "host_files: const CONFIG_FILE = process.env.CADDY_CONFIG_FILE || '/etc/caddy/Caddyfile';": 1
+    },
+    "admin/backend/src/routes/user.js": {
+      "process_api: import { execSync, spawn } from 'child_process';": 1
+    },
+    "admin/backend/src/routes/vpn.js": {
+      "host_command: async function execOnHost(command, { timeout = 25000 } = {}) {": 1,
+      "host_command: result = await execOnHost(cmd, { timeout });": 1,
+      "host_namespace: // /usr/local/bin/proxypilot via nsenter so the action lands on the": 1,
+      "host_namespace: const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`;": 1,
+      "process_api: import { exec } from 'child_process';": 1
+    }
+  }
+}

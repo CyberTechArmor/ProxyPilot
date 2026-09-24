@@ -164,12 +164,21 @@ func writeUpdateRequest(action, requestedBy, flags string) (string, time.Time, e
 
 // readJSONObject returns nil, nil when the file does not exist.
 func readJSONObject(path string) (map[string]any, error) {
-	buf, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	defer f.Close()
+	const maxStateBytes = 1024 * 1024
+	buf, err := io.ReadAll(io.LimitReader(f, maxStateBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(buf) > maxStateBytes {
+		return nil, fmt.Errorf("update state exceeds size limit")
 	}
 	var m map[string]any
 	if err := json.Unmarshal(buf, &m); err != nil {
@@ -338,7 +347,7 @@ type storageInstallRequestParams struct {
 func StorageInstallRequest(params json.RawMessage) (any, *Error) {
 	var p storageInstallRequestParams
 	if len(params) > 0 {
-		if err := json.Unmarshal(params, &p); err != nil {
+		if err := decodeParams(params, &p); err != nil {
 			return nil, &Error{Code: "invalid_params", Message: "storage.install_request params must be {requested_by:string}: " + err.Error()}
 		}
 	}
@@ -379,7 +388,7 @@ func StorageInstallRequest(params json.RawMessage) (any, *Error) {
 func UpdateRequest(params json.RawMessage) (any, *Error) {
 	var p updateRequestParams
 	if len(params) > 0 {
-		if err := json.Unmarshal(params, &p); err != nil {
+		if err := decodeParams(params, &p); err != nil {
 			return nil, &Error{Code: "invalid_params", Message: "update.request params must be {requested_by:string, flags?:string[]}: " + err.Error()}
 		}
 	}
@@ -456,7 +465,7 @@ func tailFile(path string, n int) (string, int64, bool, error) {
 		}
 		truncated = true
 	}
-	buf, err := io.ReadAll(f)
+	buf, err := io.ReadAll(io.LimitReader(f, int64(n)))
 	if err != nil {
 		return "", size, truncated, err
 	}
@@ -498,7 +507,7 @@ func fitWireBudget(s string, budget int) (string, bool) {
 func UpdateStatus(params json.RawMessage) (any, *Error) {
 	var p updateStatusParams
 	if len(params) > 0 {
-		if err := json.Unmarshal(params, &p); err != nil {
+		if err := decodeParams(params, &p); err != nil {
 			return nil, &Error{Code: "invalid_params", Message: "update.status params must be {id?:string, log_tail_bytes?:int}: " + err.Error()}
 		}
 	}

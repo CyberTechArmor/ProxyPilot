@@ -933,6 +933,15 @@ if ! "$NODE_CMD" -e 'const [m,n]=process.versions.node.split(".").map(Number);pr
     exit 1
 fi
 
+# Refuse privilege expansion before checkout, environment, package or service
+# mutations. Compose resolves overrides; its output stays private to the checker.
+for privilege_dir in "/opt/proxypilot" "$SCRIPT_DIR" "$(dirname "$SCRIPT_DIR")"; do
+    if [[ -f "${privilege_dir}/docker-compose.yml" ]] && grep -q proxypilot "${privilege_dir}/docker-compose.yml"; then
+        python3 "${SCRIPT_DIR}/scripts/check-update-privileges.py" "$privilege_dir"
+        break
+    fi
+done
+
 # Change to project directory
 cd "$SCRIPT_DIR"
 log_verbose "Working directory: $SCRIPT_DIR"
@@ -1692,15 +1701,8 @@ else
             fi
         fi
 
-        # In-place migration of the deployed docker-compose.yml: the
-        # B1 cap-drop refactor (cap_drop:ALL + cap_add:[SYS_ADMIN,
-        # SYS_PTRACE] + security_opt) didn't actually reduce the
-        # attack surface (pid:host + docker.sock = privileged-
-        # equivalent regardless) and surfaced a long tail of
-        # AppArmor/seccomp edge cases that broke nsenter on real
-        # deploys. Restore `privileged: true` for installs that have
-        # the buggy block. Idempotent: skips if `privileged: true` is
-        # already present.
+        # Preserve operator restrictions. S6 preflight already checked the
+        # effective Compose configuration before deployment mutations.
         COMPOSE_FILE="${INSTALL_DIR}/docker-compose.yml"
 
         # Strip the obsolete `version: '3.x'` key — it's been
@@ -1768,42 +1770,6 @@ else
       - PROXYPILOT_HOSTNAME=${HOST_HN}" \
                 "$COMPOSE_FILE"
             log "${GREEN}docker-compose.yml: engine env vars added${NC}"
-        fi
-
-        if [ -f "$COMPOSE_FILE" ] && ! grep -q "^[[:space:]]*privileged: true" "$COMPOSE_FILE"; then
-            if grep -qE "cap_drop:|cap_add:|security_opt:" "$COMPOSE_FILE"; then
-                log "${YELLOW}Patching docker-compose.yml: replacing cap-drop block with privileged: true${NC}"
-                # Strip the cap_drop / cap_add / security_opt blocks
-                # added by B1, replace with a single `privileged: true`
-                # line right after `restart: always`.
-                python3 - "$COMPOSE_FILE" <<'PYEOF' || true
-import sys, re
-path = sys.argv[1]
-with open(path) as f:
-    text = f.read()
-# Drop the three blocks B1 added (each is a key followed by indented
-# list items). Match the key line plus all immediately-following lines
-# whose indent is deeper than the key's.
-def strip_block(text, key):
-    pat = re.compile(
-        rf"(?m)^([ \t]+){re.escape(key)}:[ \t]*\n((?:\1[ \t]+- .*\n)+)"
-    )
-    return pat.sub("", text)
-for k in ("cap_drop", "cap_add", "security_opt"):
-    text = strip_block(text, k)
-# Ensure `privileged: true` appears once, right after `restart:` line.
-if "privileged: true" not in text:
-    text = re.sub(
-        r"(?m)^([ \t]+)(restart:\s*\S+)\s*\n",
-        lambda m: f"{m.group(0)}{m.group(1)}privileged: true\n",
-        text,
-        count=1,
-    )
-with open(path, "w") as f:
-    f.write(text)
-PYEOF
-                log "${GREEN}docker-compose.yml patched. Container will pick up on rebuild.${NC}"
-            fi
         fi
 
         # CVE engine — host-side requirements for the AUTO_PATCH /

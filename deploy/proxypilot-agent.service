@@ -3,9 +3,11 @@
 # /run/proxypilot-agent/proxypilot-agent.sock; this service binary
 # listens there and dispatches incoming JSON-line RPC requests.
 #
-# Phase A — service ships installed and enabled, but the dashboard's
-# production code paths still use nsenter. The agent is dual-tracked
-# until Phases B-E migrate methods onto it behind feature flags.
+# The agent serves a partial set of typed operations. The web backend still
+# has host-root authority: docs/core/security-host-boundary.md tracks S6.
+# Kernel peer credentials allow only host UID 0 by default. A reviewed native
+# or user-namespace deployment needs a root-owned unit override listing its
+# host-observed backend UID; socket group membership alone is insufficient.
 #
 # IMPORTANT — boot-time race fix.
 # The socket lives INSIDE a systemd-managed RuntimeDirectory rather
@@ -25,12 +27,6 @@
 # the mount. Before=docker.service makes systemd-managed Docker
 # wait for us on boot.
 #
-# Hardening directives below are Phase A baseline. The
-# ReadWritePaths list intentionally covers every host path a future
-# Phase B-E method will need to drive (caddy reload, incus calls,
-# docker socket); it's harmless now since agent.ping is the only
-# method wired and it touches nothing.
-
 [Unit]
 Description=ProxyPilot host-side agent
 After=network.target
@@ -45,9 +41,13 @@ Before=docker.service
 Type=simple
 User=proxypilot-agent
 Group=proxypilot-agent
-ExecStart=/usr/local/bin/proxypilot-agent --socket=/run/proxypilot-agent/proxypilot-agent.sock
+ExecStart=/usr/local/bin/proxypilot-agent --socket=/run/proxypilot-agent/proxypilot-agent.sock --client-uids=0
 Restart=on-failure
 RestartSec=2
+# Transport/resource limits, not an independent human-authorization boundary.
+LimitNOFILE=512
+TasksMax=128
+MemoryMax=512M
 
 # RuntimeDirectory is created by systemd at unit-start with the
 # right ownership and mode, before ExecStart runs. The path is

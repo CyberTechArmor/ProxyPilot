@@ -8,10 +8,8 @@
 //   Response: {"id":<int>,"result":<any>}\n
 //             {"id":<int>,"error":{"code":"<code>","message":"<msg>"}}\n
 //
-// Phase A: NO production code path calls this module. agent.ping is
-// the only working method, and it exists so we can prove the socket
-// bind-mount + group_add are wired correctly before Phase B starts
-// migrating Caddy operations onto the agent.
+// This client is used by the partial host-agent migration. The web backend
+// still has direct host access; see docs/core/security-host-boundary.md.
 //
 // The default socket path comes from PROXYPILOT_AGENT_SOCKET (set in
 // docker-compose.yml). Override per-call via opts.socketPath for
@@ -22,6 +20,7 @@ import net from 'node:net';
 const DEFAULT_SOCKET = '/run/proxypilot-agent/proxypilot-agent.sock';
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 64 * 1024;
+const MAX_REQUEST_BYTES = 64 * 1024;
 
 let nextId = 1;
 
@@ -48,6 +47,13 @@ export function agentCall(method, params = {}, opts = {}) {
   const id = nextId++;
 
   return new Promise((resolve, reject) => {
+    if (typeof method !== 'string' || method.length > 128 || !/^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$/.test(method)) {
+      throw new Error('Invalid agent method');
+    }
+    // Serialize inside the Promise, before connecting: cyclic/oversized input
+    // rejects the call instead of throwing from a later socket event callback.
+    const line = JSON.stringify({ id, method, params }) + '\n';
+    if (Buffer.byteLength(line) > MAX_REQUEST_BYTES) throw new Error('Agent request exceeds 64 KiB line limit');
     const socket = net.createConnection(socketPath);
     const buffers = [];
     let totalBytes = 0;
@@ -70,7 +76,6 @@ export function agentCall(method, params = {}, opts = {}) {
     socket.on('error', (err) => finish(err));
 
     socket.on('connect', () => {
-      const line = JSON.stringify({ id, method, params }) + '\n';
       socket.write(line);
     });
 
@@ -79,11 +84,13 @@ export function agentCall(method, params = {}, opts = {}) {
       // until we see the newline (or hit the byte ceiling) and parse
       // the first line. Trailing bytes after \n would be a protocol
       // bug on the agent side — we ignore them.
-      buffers.push(chunk);
+      if (done) return;
       totalBytes += chunk.length;
       if (totalBytes > maxResponseBytes) {
         finish(new Error(`agent response exceeds ${maxResponseBytes} bytes`));
+        return;
       }
+      buffers.push(chunk);
     });
 
     socket.on('end', () => parseAndResolve(method, id, buffers, finish));
@@ -103,15 +110,11 @@ function parseAndResolve(method, expectedId, buffers, finish) {
   try {
     resp = JSON.parse(lineBuf.toString('utf8'));
   } catch (err) {
-    finish(new Error(`agent returned invalid JSON: ${err.message}`));
+    finish(new Error('agent returned invalid JSON'));
     return;
   }
   if (resp == null || typeof resp !== 'object') {
     finish(new Error('agent response was not a JSON object'));
-    return;
-  }
-  if (resp.error) {
-    finish(new AgentError(resp.error.code || 'unknown', resp.error.message || ''));
     return;
   }
   if (resp.id !== expectedId) {
@@ -119,6 +122,10 @@ function parseAndResolve(method, expectedId, buffers, finish) {
     // agent broke protocol. Treat as fatal so misbehaving builds
     // surface immediately rather than silently corrupting callers.
     finish(new Error(`agent response id ${resp.id} did not match request id ${expectedId}`));
+    return;
+  }
+  if (resp.error) {
+    finish(new AgentError(resp.error.code || 'unknown', resp.error.message || ''));
     return;
   }
   finish(null, resp.result);

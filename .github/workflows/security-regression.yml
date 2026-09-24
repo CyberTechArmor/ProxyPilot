@@ -36,6 +36,13 @@ jobs:
         working-directory: admin/backend
         run: sudo "$(command -v node)" --test src/__tests__/security-bootstrap*.test.js
       - run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      - run: python3 scripts/host-boundary-inventory.py
+      - name: Agent client and selected-agent outage behavior
+        working-directory: admin/backend
+        run: node --test src/__tests__/agent.test.js src/__tests__/caddy-driver.test.js
+      - name: Update recovery and runner policy regressions
+        working-directory: admin/backend
+        run: node --test src/__tests__/update-runner-maintenance.test.js src/__tests__/update-runner-policy.test.js src/__tests__/self-update-logic.test.js src/__tests__/self-update-runner.test.js
       - run: bash -n install.sh update.sh
   audit:
     runs-on: ubuntu-latest
@@ -70,7 +77,7 @@ jobs:
         with:
           go-version: '1.27.1'
           cache: false
-      - run: go vet ./... && go test ./...
+      - run: go vet ./... && go test -race ./...
         working-directory: cmd/agent
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
         working-directory: cmd/agent

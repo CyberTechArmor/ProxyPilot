@@ -45,7 +45,7 @@ type caddyReloadResult struct {
 func CaddyReload(params json.RawMessage) (any, *Error) {
 	var p caddyReloadParams
 	if len(params) > 0 && string(params) != "null" {
-		if err := json.Unmarshal(params, &p); err != nil {
+		if err := decodeParams(params, &p); err != nil {
 			return nil, &Error{Code: "invalid_params", Message: "caddy.reload params must be {config_path?:string}: " + err.Error()}
 		}
 	}

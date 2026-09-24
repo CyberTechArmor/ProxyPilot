@@ -31,7 +31,7 @@ type caddyAdaptResult struct {
 // CaddyAdapt is the caddy.adapt RPC handler.
 func CaddyAdapt(params json.RawMessage) (any, *Error) {
 	var p caddyAdaptParams
-	if err := json.Unmarshal(params, &p); err != nil {
+	if err := decodeParams(params, &p); err != nil {
 		return nil, &Error{Code: "invalid_params", Message: "caddy.adapt params must be {config_text:string}: " + err.Error()}
 	}
 	if p.ConfigText == "" {

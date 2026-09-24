@@ -1,8 +1,7 @@
 package methods
 
 import (
-	"bytes"
-	"os/exec"
+	"time"
 )
 
 // caddyBinary is the absolute path to the caddy executable. It's a
@@ -26,10 +25,5 @@ const maxCaddyConfigBytes = 5 * 1024 * 1024
 // at all" (envelope-level error). Tests substitute caddyBinary to
 // drive each branch.
 func runCaddy(args ...string) (stdout, stderr []byte, err error) {
-	cmd := exec.Command(caddyBinary, args...)
-	var outBuf, errBuf bytes.Buffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
-	err = cmd.Run()
-	return outBuf.Bytes(), errBuf.Bytes(), err
+	return runBounded(30*time.Second, caddyBinary, args...)
 }

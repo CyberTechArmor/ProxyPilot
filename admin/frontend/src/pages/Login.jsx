@@ -6,10 +6,9 @@ import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
-import { Rocket, Loader2, ShieldCheck, QrCode, Copy, Check, Smartphone, KeyRound, Eye, EyeOff, Fingerprint } from 'lucide-react';
+import { Rocket, Loader2, ShieldCheck, QrCode, Copy, Check, KeyRound, Eye, EyeOff, Fingerprint } from 'lucide-react';
 import QRCode from 'qrcode';
 import { authenticateWithPasskey, isPasskeySupported } from '@/lib/passkey';
 
@@ -23,8 +22,6 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [qrCodeUrl, setQrCodeUrl] = useState('');
   const [copied, setCopied] = useState(false);
-  const [rememberDevice, setRememberDevice] = useState(false);
-  const [deviceFingerprint, setDeviceFingerprint] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   // Passkey fast-path button is only shown if the user has registered
   // a passkey on this device (signaled by Profile after a successful
@@ -227,7 +224,6 @@ export default function Login() {
       const result = await api.completeTotpSetup({
         totpCode,
         totpSecret: secret,
-        registerDevice: rememberDevice,
       });
 
       // Login complete — backend has set the pp_token + pp_csrf
@@ -252,8 +248,6 @@ export default function Login() {
         username,
         password,
         totpCode: (totpRequired || totpSetup) ? totpCode : '',
-        deviceFingerprint: deviceFingerprint || undefined,
-        registerDevice: rememberDevice,
       };
 
       // Include setup secret if this is a new TOTP setup
@@ -264,11 +258,6 @@ export default function Login() {
       await login(loginData);
       navigate(sessionStorage.getItem('pp_recovery') ? '/local-recovery' : '/');
     } catch (error) {
-      // Capture device fingerprint from response
-      if (error.deviceFingerprint) {
-        setDeviceFingerprint(error.deviceFingerprint);
-      }
-
       // Check if initial setup is required
       if (error.setupRequired) {
         setSetupMode(true);
@@ -326,7 +315,6 @@ export default function Login() {
     try {
       const result = await authenticateWithPasskey({
         username: username || undefined,
-        registerDevice: rememberDevice,
       });
       if (!result.ok) {
         if (result.code !== 'CANCELLED') {
@@ -616,16 +604,7 @@ export default function Login() {
                 </p>
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-muted rounded-lg">
-                <div className="flex items-center gap-2">
-                  <Smartphone className="h-4 w-4 text-muted-foreground" />
-                  <div>
-                    <span className="text-sm font-medium">Remember this device</span>
-                    <p className="text-xs text-muted-foreground">Skip TOTP on future logins</p>
-                  </div>
-                </div>
-                <Switch checked={rememberDevice} onCheckedChange={setRememberDevice} />
-              </div>
+              <p className="text-xs text-muted-foreground">Each password sign-in requires an authenticator code. You can also sign in with a passkey.</p>
 
               <Button type="submit" className="w-full min-h-11" disabled={loading || totpCode.length !== 6}>
                 {loading ? (
@@ -819,16 +798,7 @@ export default function Login() {
                     Enter the code from your authenticator app
                   </p>
                 </div>
-                <div className="flex items-center justify-between p-3 bg-muted rounded-lg">
-                  <div className="flex items-center gap-2">
-                    <Smartphone className="h-4 w-4 text-muted-foreground" />
-                    <div>
-                      <span className="text-sm font-medium">Remember this device</span>
-                      <p className="text-xs text-muted-foreground">Skip TOTP on future logins</p>
-                    </div>
-                  </div>
-                  <Switch checked={rememberDevice} onCheckedChange={setRememberDevice} />
-                </div>
+                <p className="text-xs text-muted-foreground">Each password sign-in requires an authenticator code. You can also sign in with a passkey.</p>
               </div>
             )}
 

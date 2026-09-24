@@ -909,29 +909,10 @@ if [ -z "$GIT_CMD" ]; then
 fi
 log_verbose "Found git: $GIT_CMD"
 
-# Find npm
-log_verbose "Looking for npm..."
-NPM_CMD=$(find_command npm) || true
-if [ -z "$NPM_CMD" ]; then
-    log "${RED}Error: npm is not installed${NC}"
-    log "Please install Node.js and npm first"
-    exit 1
-fi
-log_verbose "Found npm: $NPM_CMD"
-
-# Find node
-log_verbose "Looking for node..."
+# Version display below tolerates a missing/old Node. Runtime provisioning is
+# after checkout/re-exec, so the latest bootstrap can repair an older host.
 NODE_CMD=$(find_command node) || true
-if [ -z "$NODE_CMD" ]; then
-    log "${RED}Error: node is not installed${NC}"
-    log "Please install Node.js first"
-    exit 1
-fi
-log_verbose "Found node: $NODE_CMD"
-if ! "$NODE_CMD" -e 'const [m,n]=process.versions.node.split(".").map(Number);process.exit((m===24||(m===22&&n>=15))?0:1)'; then
-    log "${RED}Node.js 22.15+ or 24 LTS is required. Upgrade Node locally and rerun; no rebuild has started.${NC}"
-    exit 1
-fi
+NPM_CMD=""
 
 # Refuse privilege expansion before checkout, environment, package or service
 # mutations. Compose resolves overrides; its output stays private to the checker.
@@ -947,7 +928,7 @@ cd "$SCRIPT_DIR"
 log_verbose "Working directory: $SCRIPT_DIR"
 
 # Get current version
-CURRENT_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")
+CURRENT_VERSION=$("$NODE_CMD" -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")
 log "Current version: ${YELLOW}v${CURRENT_VERSION}${NC}"
 # The version number only moves on releases; the COMMIT is what proves which
 # build this checkout actually is (operator report: "up to date" read as a
@@ -1095,6 +1076,15 @@ else
         exec 200>&- 2>/dev/null || true
         exec bash "$SCRIPT_DIR/update.sh" --rebuild "$@"
     fi
+fi
+
+# A new dependency floor must not strand the dashboard updater on the old
+# host runtime. Preflight and checkout checks have passed; provision/verify the
+# runtime before environment changes, native npm installs or service downtime.
+log "${BLUE}[2.5/7] Preparing Node.js runtime...${NC}"
+source "${SCRIPT_DIR}/scripts/ensure-node-runtime.sh"
+if ! pp_ensure_node_runtime; then
+    exit 1
 fi
 
 # After pulling, sync .env against the new version's .env.example. Any
@@ -1512,8 +1502,8 @@ if [ "$IS_DOCKER_DEPLOY" = "true" ]; then
     log "Docker deployment detected — skipping host-side backend npm install (Dockerfile installs deps in alpine builder)"
 else
     cd "$BACKEND_DIR"
-    log_verbose "Running: $NPM_CMD install in $BACKEND_DIR"
-    if ! $NPM_CMD install 2>&1 | tee -a "$LOG_FILE"; then
+    log_verbose "Installing locked backend dependencies with $NODE_CMD"
+    if ! pp_install_locked_dependencies "$BACKEND_DIR"; then
         log "${RED}Error: Failed to install backend dependencies${NC}"
         exit 1
     fi
@@ -1522,15 +1512,9 @@ fi
 # Install frontend dependencies
 log "${BLUE}[5/7] Installing frontend dependencies...${NC}"
 cd "$FRONTEND_DIR"
-log_verbose "Running: $NPM_CMD install in $FRONTEND_DIR"
-# Same PIPESTATUS-vs-tee gotcha as the build step below: `if ! cmd | tee`
-# checks tee's exit code, not npm's, so a failed install would silently
-# proceed to a build that's missing dependencies.  Use PIPESTATUS to
-# read the real npm exit code.
-$NPM_CMD install 2>&1 | tee -a "$LOG_FILE"
-install_status=${PIPESTATUS[0]}
-if [[ "$install_status" -ne 0 ]]; then
-    log "${RED}Error: Failed to install frontend dependencies (npm exit ${install_status})${NC}"
+log_verbose "Installing locked frontend dependencies with $NODE_CMD"
+if ! pp_install_locked_dependencies "$FRONTEND_DIR"; then
+    log "${RED}Error: Failed to install frontend dependencies${NC}"
     exit 1
 fi
 
@@ -1572,12 +1556,14 @@ cd "$SCRIPT_DIR"
 if [[ -d "$SCRIPT_DIR/cli" ]]; then
     log "${BLUE}Refreshing ProxyPilot CLI...${NC}"
     cd "$SCRIPT_DIR/cli"
-    if ! $NPM_CMD install --omit=dev --silent 2>&1 | tee -a "$LOG_FILE"; then
-        log "${YELLOW}Warning: CLI dep install reported issues — see $LOG_FILE${NC}"
+    if ! pp_install_locked_dependencies "$SCRIPT_DIR/cli" --omit=dev; then
+        log "${RED}Error: Failed to install CLI dependencies for the selected Node runtime; refusing to start an incompatible runner. See $LOG_FILE${NC}"
+        exit 1
     fi
     cat > /usr/local/bin/proxypilot <<EOF
 #!/bin/sh
-exec /usr/bin/env node "${SCRIPT_DIR}/cli/bin/proxypilot.js" "\$@"
+export PATH="$(dirname "$NODE_CMD"):\$PATH"
+exec "${NODE_CMD}" "${SCRIPT_DIR}/cli/bin/proxypilot.js" "\$@"
 EOF
     chmod 0755 /usr/local/bin/proxypilot
     cd "$SCRIPT_DIR"
@@ -1957,7 +1943,10 @@ PYEOF
         # Rebuild frontend at the install location
         log "Rebuilding frontend..."
         cd "${INSTALL_DIR}/admin/frontend"
-        $NPM_CMD ci 2>&1 | tee -a "$LOG_FILE"
+        if ! pp_install_locked_dependencies "$PWD"; then
+            log "${RED}Error: Failed to install deployed frontend dependencies${NC}"
+            exit 1
+        fi
         NODE_ENV=production $NPM_CMD run build 2>&1 | tee -a "$LOG_FILE"
 
         # Rebuild and restart Docker container

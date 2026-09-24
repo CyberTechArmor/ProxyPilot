@@ -18,6 +18,7 @@ export const UPDATE_PHASES = Object.freeze([
   { index: 0, label: 'Backing up database' },
   { index: 1, label: 'Fetching latest changes' },
   { index: 2, label: 'Pulling latest code' },
+  { index: 2.5, label: 'Preparing Node.js runtime' },
   { index: 3, label: 'Checking Incus' },
   { index: 3.5, label: 'Building host agent' },
   { index: 4, label: 'Installing backend dependencies' },

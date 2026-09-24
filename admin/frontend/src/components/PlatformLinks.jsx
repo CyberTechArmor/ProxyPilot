@@ -22,7 +22,7 @@ function Copyable({ value }) {
   return <span className="inline-flex items-center gap-1 min-w-0"><code className="break-all">{value}</code><Button type="button" variant="ghost" size="icon" className="h-11 w-11 shrink-0" aria-label={`Copy ${value}`} onClick={async () => { try { await navigator.clipboard.writeText(value); setDone(true); setTimeout(() => setDone(false), 1500); } catch { /* clipboard unavailable: the value is shown */ } }}><Copy className="h-4 w-4" aria-hidden="true" /></Button>{done && <span role="status" className="text-xs">Copied</span>}</span>;
 }
 
-export default function PlatformLinks({ services, realm }) {
+export default function PlatformLinks({ services, realm, infisicalPassword }) {
   const [bao, setBao] = useState(null);
   const present = ORDER.map(id => services.find(s => s.id === id)).filter(s => s && ['verified', 'awaiting_user_action'].includes(s.state));
   const hasBao = present.some(s => s.id === 'openbao'), pomeriumReady = present.some(s => s.id === 'pomerium' && s.state === 'verified'), keycloakReady = present.some(s => s.id === 'keycloak' && s.state === 'verified');
@@ -39,6 +39,15 @@ export default function PlatformLinks({ services, realm }) {
         {bao && <ol className="list-decimal pl-5 space-y-1"><li>Method <b>OIDC</b> → <b>More options</b> → Mount path: <Copyable value={bao.mountPath} /></li><li>Role: <code>{bao.role}</code> (or blank) → Sign in with Keycloak.</li>{bao.workspace && <li>To add a secret: Secrets engines → <code className="break-all">{bao.workspace.engine}</code> → Create secret → path <code>{bao.workspace.path}your-name</code>.</li>}</ol>}
         {bao?.scope && <p className="text-muted-foreground">{bao.scope}</p>}</>}
       {['infisical', 'vaultwarden'].includes(s.id) && link(s.url, `Open ${s.name}`)}
+      {s.id === 'infisical' && infisicalPassword?.generated && infisicalPassword.location && <>
+        <p className="font-medium">Your Infisical sign-in is kept in OpenBao</p>
+        <ol className="list-decimal pl-5 space-y-1">
+          <li>{hasBao ? link(bao?.url || present.find(x => x.id === 'openbao').url + '/ui/', 'Open OpenBao') : 'Open OpenBao'} and sign in with Keycloak (see OpenBao below).</li>
+          <li>Secrets engines → <code className="break-all">{infisicalPassword.location.engine}</code> → <Copyable value={infisicalPassword.location.path} /> → copy <b>password</b> (the <b>email</b> is in the same entry).</li>
+          <li>Open Infisical → enter the email and password → <b>Continue with Email</b>. Once setup is verified, turn on two-factor authentication (authenticator app) in Infisical → Personal settings, and keep its recovery codes in OpenBao too.</li>
+        </ol>
+        <p className="text-muted-foreground">If you change the password in Infisical, save the new one in the same OpenBao entry; ProxyPilot reads it from there when it has to sign in again.</p>
+      </>}
       {s.state !== 'verified' && <p className="text-muted-foreground">Setup still has a step to finish for this service (see its stage above).</p>}
     </li>)}</ul>
     <section aria-labelledby="pp-access" className="space-y-2"><h3 id="pp-access" className="font-semibold">Who can reach each service</h3><PlatformAccess /></section>

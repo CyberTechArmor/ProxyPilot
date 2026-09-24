@@ -113,3 +113,52 @@ test('FP-2b the proxied service is created only after its referenced secret exis
   assert.equal(f.state.services.length,0);
   const out=await f.run();assert.equal(out.ready,true);assert.equal(f.state.proxySecret,f.state.services[0].projectId,'secret created in the same project first');
 });
+
+test('generated password: bootstrap uses the password generated into OpenBao; ProxyPilot keeps no copy and a later sign-in reads it back by itself',async()=>{
+ const f=fixture();try{
+  storeProtected(f.db,personalRef(f.r),{email:'alice@example.com',generate:true,expiresAt:Date.now()+900000});
+  const vault={calls:[],password:'Gen3ra-tedPwd-inOpen-Bao123'};
+  const adminVault=async args=>{vault.calls.push(args);return vault.password;};
+  let bootstrapBody;
+  const api=async(path,opts={})=>{if(path==='/api/v1/admin/bootstrap')bootstrapBody=opts.body;return f.api(path,opts);};
+  // Stop before completion (lost machine-credential response) so a resume is needed.
+  f.state.fault='secret';
+  await assert.rejects(provisionManagedInfisical(f.db,readInfisical(f.db),api,{job:{id:readInfisical(f.db).last_job_id,fence(){}},ensureProxySecret:async p=>{f.state.proxySecret=p;},adminVault}),/response lost/);
+  assert.deepEqual(vault.calls,[{email:'alice@example.com',origin:f.r.config.origin,fresh:true}]);
+  assert.equal(bootstrapBody.password,vault.password);assert.equal(bootstrapBody.email,'alice@example.com');
+  assert(!f.db.prepare('SELECT id FROM setup_full_credentials WHERE id=?').get(personalRef(f.r)),'the handoff is deleted');
+  const kept=protectedValue(f.db,f.ref);assert.equal(kept.passwordInOpenBao,true);
+  assert(!JSON.stringify([kept,f.db.prepare('SELECT * FROM setup_jobs').all()]).includes(vault.password),'the password is not stored by ProxyPilot');
+  // Later: the 15-minute authority has expired and nobody re-entered anything.
+  const later=Date.now()+3600_000,logins=[];
+  const resumeApi=async(path,opts={})=>{
+   if(path==='/api/v3/auth/login'){logins.push(opts.body);return opts.body.password===vault.password?{status:200,body:{accessToken:'login-token'}}:{status:400,body:null,error:'Invalid credentials'};}
+   if(path==='/api/v3/auth/select-organization')return {status:200,body:{token:token({userId:ids.workload,exp:Math.floor(later/1000)+900}),isMfaEnabled:false}};
+   return f.api(path,opts);
+  };
+  const run=()=>provisionManagedInfisical(f.db,readInfisical(f.db),resumeApi,{job:{id:readInfisical(f.db).last_job_id,fence(){}},now:later,ensureProxySecret:async p=>{f.state.proxySecret=p;},adminVault});
+  await assert.rejects(run(),/interrupted/,'resumes up to the recorded unknown-secret refusal');
+  assert.deepEqual(vault.calls.at(-1),{email:'alice@example.com',origin:f.r.config.origin,fresh:false});
+  assert.deepEqual(logins.at(-1),{email:'alice@example.com',password:vault.password});
+  // A password changed in Infisical but not in OpenBao is named as such.
+  vault.password='changed-elsewhere-not-in-openbao';logins.length=0;
+  const mismatch=async(path,opts={})=>path==='/api/v3/auth/login'?{status:400,body:null,error:'Invalid credentials'}:resumeApi(path,opts);
+  await assert.rejects(provisionManagedInfisical(f.db,readInfisical(f.db),mismatch,{job:{id:readInfisical(f.db).last_job_id,fence(){}},now:later,adminVault}),/password stored in OpenBao \(team\/infisical-administrator\) does not match/);
+ }finally{f.db.close();}
+});
+
+test('generated password: without OpenBao the job refuses before bootstrapping anything',async()=>{
+ const f=fixture();try{
+  storeProtected(f.db,personalRef(f.r),{email:'alice@example.com',generate:true,expiresAt:Date.now()+900000});
+  await assert.rejects(f.run(),/kept in OpenBao, which this operation cannot reach/);
+  assert.equal(f.state.initialized,false);assert.equal(f.state.writes.length,0);
+ }finally{f.db.close();}
+});
+
+test('administrator handoff input: a chosen password or generate, never both, and nothing else',async()=>{
+ const { personalSchema } = await import('../lib/setup-engine/full-platform-infisical.js');
+ const base={revision:1,email:'alice@example.com',reviewed:true};
+ assert(personalSchema.safeParse({...base,password:'a-long-chosen-password'}).success);
+ assert(personalSchema.safeParse({...base,generate:true}).success);
+ for(const bad of [{...base,generate:true,password:'a-long-chosen-password'},{...base},{...base,generate:false},{...base,password:'short'}])assert(!personalSchema.safeParse(bad).success,JSON.stringify(bad));
+});

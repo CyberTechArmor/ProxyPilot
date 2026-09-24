@@ -6,7 +6,8 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { localProofRefusal, requestOrigin, sessionContext } from '../lib/sso/sessions.js';
 import { fullPlatformState, saveFullPlatform, applyFullPlatform, approvalDnsRefusal, reviewFullPlatform, configSchema, readFullPlatform, removedRefusal, fail } from '../lib/setup-engine/full-platform-store.js';
 import { protectedValue, storeProtected } from '../lib/setup-engine/full-platform-keycloak.js';
-import { personalSchema, personalRef } from '../lib/setup-engine/full-platform-infisical.js';
+import { personalSchema, personalRef, administratorPassword } from '../lib/setup-engine/full-platform-infisical.js';
+import { vaultReady } from '../lib/setup-engine/infisical-admin-vault.js';
 import { readInfisical } from '../lib/setup-engine/infisical-store.js';
 import { readOpenBao, save as saveBao, idle as baoIdle, custody as baoCustody } from '../lib/setup-engine/openbao-store.js';
 import { autoCustody, KIT_INSTRUCTIONS } from '../lib/setup-engine/openbao-logic.js';
@@ -29,7 +30,9 @@ const handle = fn => async (req, res) => {
 fullPlatformRouter.get('/', handle((req, res) => {
   const db = getDb(), ctx = sessionContext(db, req.session?.id), origin = requestOrigin(req);
   const localActions = !!ctx && ['local', 'link-only'].includes(ctx.method) && ctx.origin === origin;
-  res.json({ ...fullPlatformState(db), administrator: { id: req.user.id, username: req.user.username, email: req.user.email || '' }, session: { localActions, method: ctx?.method || null, origin } });
+  let infisicalPassword = null;
+  try { infisicalPassword = administratorPassword(db, readInfisical(db)); } catch { /* not configured */ }
+  res.json({ ...fullPlatformState(db), administrator: { id: req.user.id, username: req.user.username, email: req.user.email || '' }, infisicalPassword, session: { localActions, method: ctx?.method || null, origin } });
 }));
 fullPlatformRouter.post('/review', handle((req, res) => res.json(reviewFullPlatform(getDb(), configSchema.parse(req.body)))));
 fullPlatformRouter.post('/lifecycle/review', handle((req, res) => {
@@ -81,9 +84,10 @@ fullPlatformRouter.post('/infisical/administrator', requireSudo, handle((req, re
   if (!full || full.revision !== p.revision || full.approved_revision !== p.revision || !r?.config.basic || r.config.mode !== 'install') throw fail('Apply the reviewed basic Infisical installation first.');
   if (full.last_job_id && ['queued', 'running'].includes(getJob(db, full.last_job_id)?.status)) throw fail('Wait for the current setup operation before entering the personal credential.');
   { const why = removedRefusal(full); if (why) throw fail(why); }
+  if (p.generate && !vaultReady(db)) throw fail('The generated password is kept in OpenBao. Finish OpenBao (automatic custody) first, or choose a password yourself.');
   const result = applyFullPlatform(db, { revision: full.revision, reviewToken: reviewFullPlatform(db).reviewToken, reviewed: true }, req.user.id);
-  storeProtected(db, personalRef(r), { email: p.email, password: p.password, expiresAt: Date.now() + 900_000 });
-  logAudit(req.user.id, 'INFISICAL_PERSONAL_HANDOFF_REQUESTED', 'setup_job', result.job.id, {}, req.ip);
+  storeProtected(db, personalRef(r), p.generate ? { email: p.email, generate: true, expiresAt: Date.now() + 900_000 } : { email: p.email, password: p.password, expiresAt: Date.now() + 900_000 });
+  logAudit(req.user.id, 'INFISICAL_PERSONAL_HANDOFF_REQUESTED', 'setup_job', result.job.id, { generated: !!p.generate }, req.ip);
   res.status(202).json(result);
 }));
 // Quick LDAP Link (docs/features/keycloak-ldap.md): the Keycloak administrator

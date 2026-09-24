@@ -2,16 +2,28 @@
 import { z } from 'zod';
 import { protectedValue, storeProtected } from './full-platform-keycloak.js';
 import { infisicalSecrets } from './infisical-store.js';
+import { adminPasswordLocation } from './infisical-admin-vault.js';
 import { encryptSecret } from '../secrets.js';
 import { requireOk, verifyInfisicalIdentities, scopeQuery, sameBuiltinRole } from './infisical-api.js';
 import { BUILTIN_ROLES, desiredProxiedService, TEST_ENV, TEST_PATH, infisicalIdentitiesSchema, infisicalError as fail } from './infisical-logic.js';
 
-export const personalSchema = z.object({ revision: z.number().int().positive(), email: z.string().email().max(254), password: z.string().min(12).max(256), reviewed: z.literal(true) }).strict();
+// Either a password the person chooses, or generate: ProxyPilot generates it
+// into OpenBao (infisical-admin-vault.js) and the handoff carries only the email.
+const personalBase = { revision: z.number().int().positive(), email: z.string().email().max(254), reviewed: z.literal(true) };
+export const personalSchema = z.union([z.object({ ...personalBase, password: z.string().min(12).max(256) }).strict(), z.object({ ...personalBase, generate: z.literal(true) }).strict()]);
 export const personalRef = r => `full-infisical-personal-${r.credential_ref}`;
 const uuid = value => z.string().uuid().parse(value);
+// For the dashboard: whether this installation's administrator password was
+// generated into OpenBao, and where OpenBao keeps it. No value is read.
+export function administratorPassword(db, r) {
+  const location = adminPasswordLocation(db);
+  let generated = false;
+  try { if (r?.credential_ref && db.prepare('SELECT id FROM setup_full_credentials WHERE id=?').get(`full-infisical-provision-${r.credential_ref}`)) generated = !!protectedValue(db, `full-infisical-provision-${r.credential_ref}`).passwordInOpenBao; } catch { /* unreadable record: shown as not generated */ }
+  return { generated, location, canGenerate: !!location };
+}
 const jwt = value => { try { return JSON.parse(Buffer.from(value.split('.')[1], 'base64url')); } catch { throw fail('Infisical issued an unsupported authority token.'); } };
 
-export async function provisionManagedInfisical(db, r, api, { job, now = Date.now(), ensureProxySecret = null }) {
+export async function provisionManagedInfisical(db, r, api, { job, now = Date.now(), ensureProxySecret = null, adminVault = null }) {
   if (!r.config.basic || r.config.mode !== 'install') throw fail('Automatic organization provisioning is limited to the owned basic installation.');
   const ref = `full-infisical-provision-${r.credential_ref}`;
   const s = protectedValue(db, ref, () => ({ identities: {}, owner: r.credential_ref }));
@@ -20,6 +32,13 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
   let input;
   if (db.prepare('SELECT id FROM setup_full_credentials WHERE id=?').get(personalRef(r))) input = protectedValue(db, personalRef(r));
   if (input?.expiresAt < now) { db.prepare('DELETE FROM setup_full_credentials WHERE id=?').run(personalRef(r)); input = null; }
+  // The password itself: the chosen one, or the generated one from OpenBao
+  // (fresh: a new one for a new account; otherwise the stored one, to sign in).
+  const credential = async fresh => {
+    if (!input.generate) return input;
+    if (!adminVault) throw fail('The generated Infisical password is kept in OpenBao, which this operation cannot reach. Enter a password yourself instead.');
+    return { email: input.email, password: await adminVault({ email: input.email, origin: r.config.origin, fresh }) };
+  };
   try {
   if (s.complete && r.identities) return { ready: true };
   if (s.retirementAttempted && r.identities && s.token && !s.personalAuthority && [401, 403].includes((await api('/api/v1/identities/details', { token: s.token })).status)) {
@@ -30,10 +49,11 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
   }
   const initialized = requireOk(await api('/api/v1/admin/config'), 'Infisical initialization').config?.initialized;
   if (initialized !== true) {
-    if (!input) return { ready: false, action: 'Choose the Infisical administrator’s personal password. This edition uses its local human login; Keycloak human SSO is not enabled.' };
+    if (!input) return { ready: false, action: 'Create the Infisical administrator: generate its password into OpenBao (recommended), or choose one. This edition has no Keycloak sign-in.' };
     if (s.organizationId) throw fail('A previously initialized Infisical instance is now empty. Restore its matching data and protected keys; no second organization was created.');
-    s.bootstrapAttempted = true; persist();
-    const result = requireOk(await api('/api/v1/admin/bootstrap', { method: 'POST', body: { email: input.email, password: input.password, organization: `ProxyPilot ${r.credential_ref.slice(-12)}` } }), 'Owned Infisical bootstrap');
+    const chosen = await credential(true);
+    s.passwordInOpenBao = !!input.generate; s.bootstrapAttempted = true; persist();
+    const result = requireOk(await api('/api/v1/admin/bootstrap', { method: 'POST', body: { email: chosen.email, password: chosen.password, organization: `ProxyPilot ${r.credential_ref.slice(-12)}` } }), 'Owned Infisical bootstrap');
     s.organizationId = uuid(result.organization?.id); s.bootstrapIdentityId = uuid(result.identity?.id); s.userId = uuid(result.user?.id); s.email = input.email;
     s.originalToken = result.identity?.credentials?.token;
     if (!s.originalToken) throw fail('Infisical bootstrap did not return its one-time authority. Recover administration without resetting the service.');
@@ -60,12 +80,16 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
     delete s.originalToken; persist();
   }
   if (!s.token || s.tokenExpiresAt <= now) {
+    // An account created with a generated password resumes by itself: the
+    // password is read back from OpenBao for this sign-in only.
+    if (!input && s.passwordInOpenBao) input = { email: s.email, generate: true };
     if (!input) return { ready: false, action: 'Fresh Infisical administration is required to resume the saved connection. Re-enter the same personal credential; users and machine credentials are retained.' };
     if (input.email !== s.email) throw fail('Resume as the recorded Infisical administrator. No account is selected by an unverified matching email.');
-    const attempt = await api('/api/v3/auth/login', { method: 'POST', body: { email: input.email, password: input.password } });
+    const chosen = await credential(false);
+    const attempt = await api('/api/v3/auth/login', { method: 'POST', body: { email: chosen.email, password: chosen.password } });
     // Infisical answers 400 "Invalid credentials" for a password that differs
     // from the one the account was created with (the email matched above).
-    if (attempt.status === 400) throw fail(`Infisical refused the sign-in for ${input.email}${attempt.error ? ` ("${String(attempt.error).slice(0, 120)}")` : ''}: the password does not match the one this Infisical account was created with. Enter that original password, or start Infisical over with Platform overview → Manage Infisical → Reset Infisical data (a verified backup is kept) and choose a new one.`);
+    if (attempt.status === 400) throw fail(`Infisical refused the sign-in for ${input.email}${attempt.error ? ` ("${String(attempt.error).slice(0, 120)}")` : ''}: ${input.generate ? 'the password stored in OpenBao (team/infisical-administrator) does not match this Infisical account. If you changed it in Infisical, save the new one in OpenBao too, then retry' : 'the password does not match the one this Infisical account was created with. Enter that original password'}, or start Infisical over with Platform overview → Manage Infisical → Reset Infisical data (a verified backup is kept).`);
     const login = requireOk(attempt, 'Fresh Infisical administrator login');
     const selected = requireOk(await api('/api/v3/auth/select-organization', { method: 'POST', token: login.accessToken, body: { organizationId: s.organizationId } }), 'Recorded organization administration');
     if (selected.isMfaEnabled || !selected.token) throw fail('Infisical requires its interactive MFA ceremony. Complete the owner-authorized handoff in Infisical; no MFA bypass is attempted.');

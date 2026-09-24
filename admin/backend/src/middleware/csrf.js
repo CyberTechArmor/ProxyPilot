@@ -19,7 +19,6 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const CSRF_EXEMPT_PREFIXES = [
   '/api/auth/login',
   '/api/auth/initial-setup',
-  '/api/auth/complete-totp-setup',
   '/api/auth/setup-status',
   // Passkey login is the WebAuthn equivalent of /login: callers don't
   // yet have a session and therefore can't have a pp_csrf cookie.
@@ -68,7 +67,7 @@ export function csrfProtection(req, res, next) {
   // original URL. (req.originalUrl includes query strings; startsWith
   // on a path prefix is unaffected by them.)
   for (const prefix of CSRF_EXEMPT_PREFIXES) {
-    if (req.originalUrl.startsWith(prefix)) return next();
+    if (prefix.endsWith('/') ? req.originalUrl.startsWith(prefix) : req.originalUrl.split('?')[0] === prefix) return next();
   }
 
   // The MCP endpoint itself (POST /api/mcp with a Bearer token, no trailing

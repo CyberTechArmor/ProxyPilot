@@ -81,7 +81,7 @@ export function verifyWsUpgrade(req) {
     throw err;
   }
   if (decoded.id !== result.session.user_id) reject('Session identity mismatch', 401);
-  if (!['admin', 'user'].includes(result.session.currentRole) || decoded.enrollmentOnly) reject('Terminal access denied');
+  if (!['admin', 'user'].includes(result.session.currentRole) || decoded.enrollmentOnly || result.session.enrollmentOnly) reject('Terminal access denied');
   if (result.session.linkOnly) { const err = new Error('Complete Keycloak linking before opening a terminal.'); err.statusCode = 403; throw err; }
   return { user: { ...decoded, role: result.session.currentRole }, session: result.session };
 }

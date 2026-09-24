@@ -1,3 +1,4 @@
+import { beginTotpEnrollment, completeTotpEnrollment } from '../lib/totp-enrollment.js';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import * as OTPAuth from 'otpauth';
@@ -359,8 +360,10 @@ userRouter.post('/change-password', async (req, res) => {
 // Generate new TOTP secret (for setup/reset)
 userRouter.post('/totp/generate', async (req, res) => {
   try {
-    const { currentPassword } = z.object({
+    const { currentPassword, totpCode, passkeyAssertion } = z.object({
       currentPassword: z.string().min(1, 'Password is required'),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
+      passkeyAssertion: z.any().optional(),
     }).parse(req.body);
 
     const db = getDb();
@@ -379,30 +382,17 @@ userRouter.post('/totp/generate', async (req, res) => {
       return res.status(401).json({ error: 'Password is incorrect' });
     }
 
-    // Generate new TOTP secret
-    const secret = new OTPAuth.Secret({ size: 20 });
-
-    const totp = new OTPAuth.TOTP({
-      issuer: 'ProxyPilot',
-      label: user.username,
-      algorithm: 'SHA1',
-      digits: 6,
-      period: 30,
-      secret: secret,
-    });
-
-    const uri = totp.toString();
-
-    res.json({
-      secret: secret.base32,
-      uri,
-      qrData: uri,
-    });
+    const proof = await verifyConfirmationFactor({req,user,totpCode,passkeyAssertion});
+    if (!proof.ok) return res.status(401).json({error:proof.error});
+    const pending = beginTotpEnrollment(user,req.user.jti,'replace');
+    res.set('Cache-Control','no-store');
+    res.json({...pending,qrData:pending.uri});
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: error.errors[0].message });
     }
-    console.error('Error generating TOTP:', error);
+    if (error.status) return res.status(error.status).json({error:error.message});
+    console.error('TOTP generation failed');
     res.status(500).json({ error: 'Failed to generate TOTP secret' });
   }
 });
@@ -422,35 +412,14 @@ userRouter.post('/totp/verify', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Verify the TOTP code with the new secret
-    const totp = new OTPAuth.TOTP({
-      issuer: 'ProxyPilot',
-      label: user.username,
-      algorithm: 'SHA1',
-      digits: 6,
-      period: 30,
-      secret: OTPAuth.Secret.fromBase32(secret),
-    });
-
-    const delta = totp.validate({ token: totpCode, window: 1 });
-    if (delta === null) {
-      return res.status(401).json({ error: 'Invalid TOTP code' });
-    }
-
-    // Save the new secret (encrypted at rest)
-    db.prepare(`
-      UPDATE users SET totp_secret = ?, totp_enabled = 1, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(encryptSecret(secret), req.user.id);
-
-    logAudit(req.user.id, 'TOTP_UPDATED', 'user', req.user.id, {}, req.ip);
-
-    res.json({ success: true, message: 'TOTP updated successfully' });
+    completeTotpEnrollment({userId:req.user.id,sessionId:req.user.jti,purpose:'replace',code:totpCode,submittedSecret:secret,ip:req.ip});
+    res.json({success:true,reauthenticationRequired:true,message:'TOTP updated. Sign in again with your new code.'});
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: error.errors[0].message });
     }
-    console.error('Error verifying TOTP:', error);
+    if (error.status) return res.status(error.status).json({error:error.message});
+    console.error('TOTP verification failed');
     res.status(500).json({ error: 'Failed to verify TOTP' });
   }
 });

@@ -25,7 +25,7 @@ export function terminalDecision({ user, session, target, origin, opening = fals
   try {
     const current = getDb().prepare('SELECT role FROM users WHERE id=?').get(user?.id);
     if (!current || !['admin', 'user'].includes(current.role) || session?.user_id !== user.id ||
-        session.linkOnly || user.linkOnly || user.enrollmentOnly) return false;
+        session.linkOnly || session.enrollmentOnly || user.linkOnly || user.enrollmentOnly) return false;
     const identity = { ...user, role: current.role };
     if (target.kind === 'host') {
       if (current.role !== 'admin' || !(Date.parse(session.sudo_until) > Date.now())) return false;

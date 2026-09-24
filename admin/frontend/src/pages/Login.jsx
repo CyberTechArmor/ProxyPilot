@@ -241,6 +241,7 @@ export default function Login() {
   // Handle normal login
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (totpSetup?.totpSecret) return handleSetupTotpVerify(e);
     setLoading(true);
 
     try {
@@ -249,11 +250,6 @@ export default function Login() {
         password,
         totpCode: (totpRequired || totpSetup) ? totpCode : '',
       };
-
-      // Include setup secret if this is a new TOTP setup
-      if (totpSetup?.totpSecret) {
-        loginData.totpSetupSecret = totpSetup.totpSecret;
-      }
 
       await login(loginData);
       navigate(sessionStorage.getItem('pp_recovery') ? '/local-recovery' : '/');

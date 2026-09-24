@@ -605,9 +605,9 @@ export const api = {
     body: JSON.stringify(data),
   }),
 
-  generateTotp: (password) => request('/user/totp/generate', {
+  generateTotp: (password, totpCode) => request('/user/totp/generate', {
     method: 'POST',
-    body: JSON.stringify({ currentPassword: password }),
+    body: JSON.stringify({ currentPassword: password, totpCode }),
   }),
 
   verifyTotp: (data) => request('/user/totp/verify', {

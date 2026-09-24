@@ -160,7 +160,7 @@ registerHooks({
         url:
           "data:text/javascript," +
           encodeURIComponent(
-            `export const getDb=()=>globalThis.__ssoFixture.getDb(); export const getAdminDomain=()=>getSetting('admin_domain'); export const AUDIT_TERMINAL_SESSION_START='TERMINAL_SESSION_START'; export const AUDIT_TERMINAL_SESSION_END='TERMINAL_SESSION_END'; export const getSetting=k=>getDb().prepare('SELECT value FROM app_settings WHERE key=?').get(k)?.value; export function logAudit(user,action,type,id,data){getDb().prepare('INSERT INTO audit VALUES (?,?)').run(action,JSON.stringify(data));}`,
+            `export const getDb=()=>globalThis.__ssoFixture.getDb(); export const setSetting=(k,v)=>getDb().prepare("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)").run(k,v); export const getAdminDomain=()=>getSetting('admin_domain'); export const AUDIT_TERMINAL_SESSION_START='TERMINAL_SESSION_START'; export const AUDIT_TERMINAL_SESSION_END='TERMINAL_SESSION_END'; export const getSetting=k=>getDb().prepare('SELECT value FROM app_settings WHERE key=?').get(k)?.value; export function logAudit(user,action,type,id,data){getDb().prepare('INSERT INTO audit VALUES (?,?)').run(action,JSON.stringify(data));}`,
           ),
         shortCircuit: true,
       };
@@ -220,7 +220,7 @@ export async function setup() {
   const db = (currentDb = new DatabaseSync(":memory:"));
   db.exec("PRAGMA foreign_keys=ON");
   db.exec(`CREATE TABLE users(id TEXT PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,password_hash TEXT,totp_secret TEXT,totp_enabled INTEGER DEFAULT 1,role TEXT,auth_source TEXT DEFAULT 'local',password_change_required INTEGER DEFAULT 0,failed_attempts INTEGER DEFAULT 0,last_failed_at TEXT,locked_until TEXT,webauthn_user_handle BLOB,updated_at TEXT);
- CREATE TABLE sessions(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id) ON DELETE CASCADE,expires_at TEXT,last_used_at TEXT DEFAULT CURRENT_TIMESTAMP,revoked_at TEXT,sudo_until TEXT,ip TEXT,user_agent TEXT);
+ CREATE TABLE sessions(auth_level TEXT NOT NULL DEFAULT 'full',id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id) ON DELETE CASCADE,expires_at TEXT,last_used_at TEXT DEFAULT CURRENT_TIMESTAMP,revoked_at TEXT,sudo_until TEXT,ip TEXT,user_agent TEXT);
  CREATE TABLE app_settings(key TEXT PRIMARY KEY,value TEXT);CREATE TABLE audit(action TEXT,data TEXT);
  CREATE TABLE user_permissions(user_id TEXT,permission TEXT);CREATE TABLE ldap_connections(id TEXT,enabled INTEGER,created_at TEXT,name TEXT);
  CREATE TABLE authenticated_devices(id TEXT,user_id TEXT,device_fingerprint TEXT,expires_at TEXT,last_used_at TEXT,ip_address TEXT);
@@ -233,6 +233,7 @@ export async function setup() {
   ensureSetupEngineSchema(db);
   db.exec(KEYCLOAK_SCHEMA);
   db.exec(store.SSO_SCHEMA);
+  db.exec((await import('../../lib/totp-enrollment.js')).TOTP_ENROLLMENT_SCHEMA);
   const passwordHash = await bcrypt.hash("local-password-fixture", 4),
     secret = new OTPAuth.Secret({ size: 20 }).base32;
   for (const role of ["admin", "user", "pending"])

@@ -28,6 +28,7 @@ import {
   ShieldAlert,
   Trash2,
   Sliders,
+  Download,
 } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 
@@ -965,6 +966,13 @@ export default function Vpn() {
  * - Closing the dialog is the ONLY way out: there is no auto-dismiss,
  *   no "save for later". The operator must click "I've saved it".
  */
+// WireGuard tunnel names (taken from the file name on import) allow at most 15
+// characters from [A-Za-z0-9_=+.-].
+function peerFileName(name) {
+  const base = String(name || 'proxypilot').replace(/[^A-Za-z0-9_=+.-]/g, '-').slice(0, 15) || 'proxypilot';
+  return `${base}.conf`;
+}
+
 function PeerRevealDialog({ reveal, onClose }) {
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [copied, setCopied] = useState(false);
@@ -981,6 +989,16 @@ function PeerRevealDialog({ reveal, onClose }) {
       });
     return () => { cancelled = true; };
   }, [reveal]);
+
+  // A phone cannot scan a QR code shown on its own screen: save the file and
+  // import it in the WireGuard app. Nothing is sent anywhere; the file is made
+  // in the browser from the config already shown here.
+  function downloadConfig() {
+    const url = URL.createObjectURL(new Blob([reveal.config ?? ''], { type: 'application/octet-stream' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = peerFileName(reveal.name); document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 
   async function copyConfig() {
     if (!reveal?.config) return;
@@ -1021,13 +1039,20 @@ function PeerRevealDialog({ reveal, onClose }) {
 
             <div className="grid gap-4 sm:grid-cols-[1fr_auto]">
               <div className="space-y-2">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <Label>WireGuard config</Label>
-                  <Button size="sm" variant="outline" onClick={copyConfig}>
-                    {copied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}
-                    {copied ? 'Copied' : 'Copy'}
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" className="min-h-11" onClick={downloadConfig}>
+                      <Download className="h-4 w-4 mr-2" />
+                      Download .conf
+                    </Button>
+                    <Button variant="outline" className="min-h-11" onClick={copyConfig}>
+                      {copied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}
+                      {copied ? 'Copied' : 'Copy'}
+                    </Button>
+                  </div>
                 </div>
+                <p className="text-xs text-muted-foreground">On a phone: Download, then in the WireGuard app tap + → Import from file (or archive) and pick {peerFileName(reveal.name)}.</p>
                 <textarea
                   readOnly
                   value={reveal.config ?? ''}

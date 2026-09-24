@@ -28,6 +28,7 @@ class Privileges(unittest.TestCase):
             (root / 'scripts').mkdir()
             (root / 'bin').mkdir()
             shutil.copyfile(SCRIPT, root / 'scripts' / SCRIPT.name)
+            shutil.copyfile(SCRIPT.parent / 'update-terminal-handoff.sh', root / 'scripts/update-terminal-handoff.sh')
             shutil.copyfile(SCRIPT.parents[1] / 'update.sh', root / 'update.sh')
             compose = root / 'docker-compose.yml'
             compose.write_text('services:\n  proxypilot:\n    privileged: false\n')
@@ -49,7 +50,7 @@ class Privileges(unittest.TestCase):
             node = root / 'bin/node'
             node.write_text('#!/bin/sh\nexit 1\n')
             node.chmod(0o755)
-            env = dict(os.environ, PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'])
+            env = dict(os.environ, PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'], PROXYPILOT_UPDATE_RUNNER='1')
             result = subprocess.run(['bash', str(root / 'update.sh'), '--yes', '--rebuild'], env=env, capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
             self.assertIn('Privilege preflight refused', result.stderr)

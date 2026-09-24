@@ -24,43 +24,6 @@ DB_LAYOUT_ENV_PATH=""
 # compose up -d on the existing image after a failed rebuild.
 INSTALL_DIR=""
 
-# Concurrent-run guard. Two update.sh invocations will race on the DB
-# backup, the git pull, and the docker rebuild. flock is in util-linux
-# on every Debian/Ubuntu we support; if it's missing we just warn and
-# continue.
-LOCK_FILE="/var/lock/proxypilot-update.lock"
-# The writability probe runs in a SUBSHELL so its 2>/dev/null cannot stick.
-# Never put a redirection like 2>/dev/null on the bare `exec` below:
-# redirections on exec are permanent for the whole script, and doing so
-# pointed stderr at /dev/null from here on — every interactive `read -p`
-# prompt (which writes to stderr) became invisible, so updates looked hung
-# at the uncommitted-changes question, and all error output was swallowed
-# (operator report, 2026-07-31).
-if command -v flock &>/dev/null && ( : >"$LOCK_FILE" ) 2>/dev/null; then
-    exec 200>"$LOCK_FILE"
-    if ! flock -n 200 2>/dev/null; then
-        # A held lock during the self-update re-exec is our own
-        # lineage, not a second operator. Children spawned while the
-        # pre-pull process held fd 200 (git's post-pull background
-        # maintenance is the usual one) inherit the locked file
-        # description and keep the flock alive past the exec, which
-        # used to abort the update right after "[2/7] Pulling latest
-        # code". The re-exec'd run already owns this update — warn
-        # and carry on; the stray child exits on its own shortly.
-        if [ -n "${PROXYPILOT_UPDATE_REEXEC:-}" ]; then
-            echo -e "\033[1;33m[WARN]\033[0m Update lock still held by a child of the pre-update process; continuing (self-update re-exec)."
-            # Best-effort re-acquire so the rest of this run is still
-            # guarded once the straggler exits (git gc is quick).
-            flock -w 30 200 2>/dev/null || true
-        else
-            echo -e "\033[0;31m[ERROR]\033[0m Another update.sh is already running (lock: $LOCK_FILE)."
-            echo "If you're sure no other process is running:"
-            echo "  rm $LOCK_FILE && retry"
-            exit 1
-        fi
-    fi
-fi
-
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -884,6 +847,56 @@ on_error() {
     exit "$exit_code"
 }
 
+# Hand off BEFORE taking the lock or doing any update work. A dashboard
+# terminal is killed when its container stops; sudo can clear its environment,
+# so the helper also recognizes the marked ancestor shell. The root update
+# runner/transient service already has an independent lifetime.
+source "$SCRIPT_DIR/scripts/update-terminal-handoff.sh"
+if [[ "$SKIP_RESTART" != true && "${PROXYPILOT_UPDATE_RUNNER:-}" != 1 ]] && pp_dashboard_terminal_ancestor; then
+    if pp_handoff_terminal_update "$SCRIPT_DIR" "$@"; then exit 0; else exit 1; fi
+fi
+
+# Concurrent-run guard. Two update.sh invocations will race on the DB
+# backup, the git pull, and the docker rebuild. flock is in util-linux
+# on every Debian/Ubuntu we support; if it's missing we just warn and
+# continue.
+LOCK_FILE="/var/lock/proxypilot-update.lock"
+# The writability probe runs in a SUBSHELL so its 2>/dev/null cannot stick.
+# Never put a redirection like 2>/dev/null on the bare `exec` below:
+# redirections on exec are permanent for the whole script, and doing so
+# pointed stderr at /dev/null from here on — every interactive `read -p`
+# prompt (which writes to stderr) became invisible, so updates looked hung
+# at the uncommitted-changes question, and all error output was swallowed
+# (operator report, 2026-07-31).
+if command -v flock &>/dev/null && ( : >"$LOCK_FILE" ) 2>/dev/null; then
+    exec 200>"$LOCK_FILE"
+    LOCK_OPTIONS=(-n)
+    # Let inherited pre-pull children release the old updater's lock during a
+    # terminal handoff. A timeout still refuses; it never bypasses another run.
+    if [[ "${PROXYPILOT_TERMINAL_HANDOFF:-}" = 1 ]]; then LOCK_OPTIONS=(-w 30); fi
+    if ! flock "${LOCK_OPTIONS[@]}" 200 2>/dev/null; then
+        # A held lock during the self-update re-exec is our own
+        # lineage, not a second operator. Children spawned while the
+        # pre-pull process held fd 200 (git's post-pull background
+        # maintenance is the usual one) inherit the locked file
+        # description and keep the flock alive past the exec, which
+        # used to abort the update right after "[2/7] Pulling latest
+        # code". The re-exec'd run already owns this update — warn
+        # and carry on; the stray child exits on its own shortly.
+        if [ -n "${PROXYPILOT_UPDATE_REEXEC:-}" ]; then
+            echo -e "\033[1;33m[WARN]\033[0m Update lock still held by a child of the pre-update process; continuing (self-update re-exec)."
+            # Best-effort re-acquire so the rest of this run is still
+            # guarded once the straggler exits (git gc is quick).
+            flock -w 30 200 2>/dev/null || true
+        else
+            echo -e "\033[0;31m[ERROR]\033[0m Another update.sh is already running (lock: $LOCK_FILE)."
+            echo "If you're sure no other process is running:"
+            echo "  rm $LOCK_FILE && retry"
+            exit 1
+        fi
+    fi
+fi
+
 echo ""
 log "${BLUE}========================================${NC}"
 log "${BLUE}       ProxyPilot Update Script        ${NC}"
@@ -1625,18 +1638,6 @@ KMODS
     fi
 fi
 
-log ""
-log "${GREEN}========================================${NC}"
-log "${GREEN}       Update completed successfully!   ${NC}"
-log "${GREEN}========================================${NC}"
-log ""
-if [ "$LOCAL" != "$REMOTE" ]; then
-    log "Updated from ${YELLOW}v${CURRENT_VERSION}${NC} to ${GREEN}v${NEW_VERSION}${NC}"
-else
-    log "Rebuilt version ${GREEN}v${NEW_VERSION}${NC}"
-fi
-log ""
-
 # Restart
 if [ "$SKIP_RESTART" = true ]; then
     log "${YELLOW}Skipping restart (--no-restart specified)${NC}"
@@ -1948,6 +1949,11 @@ PYEOF
             exit 1
         fi
         NODE_ENV=production $NPM_CMD run build 2>&1 | tee -a "$LOG_FILE"
+        deployed_build_status=${PIPESTATUS[0]}
+        if [[ "$deployed_build_status" -ne 0 || ! -f dist/index.html ]]; then
+            log "${RED}Deployed frontend build failed; refusing to stop the running dashboard.${NC}"
+            exit 1
+        fi
 
         # Rebuild and restart Docker container
         log "Rebuilding Docker container..."
@@ -2085,6 +2091,7 @@ PYEOF
         log "${GREEN}       Restart completed!               ${NC}"
         log "${GREEN}========================================${NC}"
         log ""
+        pp_report_update_completion
         # Disarm the trap before the early exit (the trap-disarm at
         # the bottom of the script is unreachable on the Docker path).
         trap - EXIT ERR INT TERM
@@ -2227,6 +2234,10 @@ fi
 
 # Non-Docker / --no-restart updates perform no database relocation here.
 if [[ -d "$SCRIPT_DIR/cli" ]]; then install_setup_runner; fi
+
+# Never announce success before restart/readiness: the operator may see only
+# this log's last lines if their browser terminal disconnects.
+pp_report_update_completion
 
 # Update succeeded — disarm the restore trap. The backup is kept on disk
 # (subject to rotation) so the operator can roll back manually if a

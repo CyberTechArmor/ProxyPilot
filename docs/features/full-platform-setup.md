@@ -102,8 +102,9 @@ retired. No permanent user's password is offered for reveal.
   as `risk` over MCP: an agent identity can read the project's real credentials
   directly, not only through the proxy. Keep the project for brokered
   credentials only, limit each proxied service to the agent's sites, and broker
-  agent-specific accounts. Enterprise custom roles remove the trade-off
-  (`BUILTIN_ROLES` / `AGENT_ROLE_RISK` in `infisical-logic.js`). It replaces
+  agent-specific accounts. For real agents, give each one its own project
+  (`docs/features/agents.md`), so a compromise stays inside that agent's
+  credentials (`BUILTIN_ROLES` / `AGENT_ROLE_RISK` in `infisical-logic.js`). It replaces
   and revokes the unrestricted bootstrap grant, uses a 15-minute provisioning
   grant, and retires that authentication after verified machine login. Personal
   inputs expire after 15 minutes and are removed on execution; no refresh token

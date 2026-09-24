@@ -1,4 +1,4 @@
-// Connect an agent (docs/features/openbao-agents.md): each agent or machine
+// Connect an agent (docs/features/agents.md): each agent or machine
 // gets its own OpenBao AppRole whose policy reads ONLY <kv>/agents/<name>/*.
 // It is never an administrator. Credentials are values the person enters
 // in the dashboard; each one is written under that agent's path, which is what

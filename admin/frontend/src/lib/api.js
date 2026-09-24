@@ -187,6 +187,13 @@ export const api = {
   removeOpenBaoAgentCredential: (name, key) => request(`/setup/platform/openbao/agents/${encodeURIComponent(name)}/credentials/${encodeURIComponent(key)}`, { method: 'DELETE' }),
   rotateOpenBaoAgent: (name) => request(`/setup/platform/openbao/agents/${encodeURIComponent(name)}/rotate`, { method: 'POST', body: '{}' }),
   removeOpenBaoAgent: (name) => request(`/setup/platform/openbao/agents/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  // Per-agent Infisical projects. A client secret comes back once, in the create/rotate response only.
+  getInfisicalAgents: () => request('/setup/platform/infisical/agents'),
+  createInfisicalAgent: (body) => request('/setup/platform/infisical/agents', { method: 'POST', body: JSON.stringify(body) }),
+  setInfisicalAgentCredential: (name, key, body) => request(`/setup/platform/infisical/agents/${encodeURIComponent(name)}/credentials/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  removeInfisicalAgentCredential: (name, key, body) => request(`/setup/platform/infisical/agents/${encodeURIComponent(name)}/credentials/${encodeURIComponent(key)}/remove`, { method: 'POST', body: JSON.stringify(body || {}) }),
+  rotateInfisicalAgent: (name, body) => request(`/setup/platform/infisical/agents/${encodeURIComponent(name)}/rotate`, { method: 'POST', body: JSON.stringify(body || {}) }),
+  removeInfisicalAgent: (name, body) => request(`/setup/platform/infisical/agents/${encodeURIComponent(name)}/remove`, { method: 'POST', body: JSON.stringify(body || {}) }),
   getInfisicalSetup: () => request('/setup/platform/infisical'),
   saveInfisicalSetup: (body) => request('/setup/platform/infisical', { method: 'PUT', body: JSON.stringify(body) }),
   saveInfisicalIdentities: (body) => request('/setup/platform/infisical/identities', { method: 'PUT', body: JSON.stringify(body) }),

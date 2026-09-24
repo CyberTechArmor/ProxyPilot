@@ -519,7 +519,7 @@ export default function Login() {
 
               <Button
                 type="submit"
-                className="w-full"
+                className="w-full min-h-11"
                 disabled={loading || newPassword.length < 12 || newPassword !== confirmPassword}
               >
                 {loading ? (
@@ -642,7 +642,9 @@ export default function Login() {
               ? 'Set up Two-Factor Authentication'
               : totpRequired
                 ? 'Enter your authenticator code'
-                : 'Sign in to manage your proxy services'}
+                : !branding.isCustom && !ssoStatus?.recovery && !new URLSearchParams(window.location.search).has('recovery')
+                  ? 'Your applications, knowledge, and agents. Under your control.'
+                  : 'Sign in to manage your proxy services'}
           </CardDescription>
         </CardHeader>
         <CardContent>

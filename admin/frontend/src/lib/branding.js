@@ -5,13 +5,12 @@
 // Loaded once at boot, applied to the document (title + favicon link), and
 // readable from any component via useBranding() — a tiny external store, no
 // context provider needed. Unset fields are null and every consumer falls
-// back to the built-in ProxyPilot branding, so a fresh install looks exactly
-// as before.
+// back to the built-in Fractionate branding.
 
 import { useSyncExternalStore } from 'react';
 import { api } from './api';
 
-export const DEFAULT_BRANDING = Object.freeze({ name: 'ProxyPilot', logo: null, favicon: null });
+export const DEFAULT_BRANDING = Object.freeze({ name: 'Fractionate', logo: null, favicon: null, isCustom: false });
 // The custom mark as a real URL (the backend decodes the stored data URI):
 // apple-touch-icon and manifest icons need a fetchable file, not inline data.
 export const BRANDING_ICON_URL = '/api/branding/icon';
@@ -26,13 +25,16 @@ export function useBranding() {
 }
 
 export function applyBranding(b = {}) {
+  const savedName = String(b.name || '').trim();
   current = {
-    name: String(b.name || '').trim() || DEFAULT_BRANDING.name,
+    name: savedName || DEFAULT_BRANDING.name,
     logo: b.logo || null,
     favicon: b.favicon || null,
+    // Keep saved overrides distinct from the normalized display name.
+    isCustom: Boolean(savedName || b.logo || b.favicon),
   };
-  // The tab title: the custom platform name plain, or the stock title.
-  document.title = current.name === DEFAULT_BRANDING.name ? 'ProxyPilot Admin' : current.name;
+  // Preserve the legacy title convention for an explicitly saved ProxyPilot.
+  document.title = savedName === 'ProxyPilot' ? 'ProxyPilot Admin' : current.name;
   if (current.favicon) {
     // Every <link rel="icon"> (the SVG and the PNG fallback) points at the
     // custom mark, and so does apple-touch-icon: iOS reads that from the DOM

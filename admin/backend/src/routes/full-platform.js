@@ -103,7 +103,13 @@ fullPlatformRouter.post('/access', requireSudo, async (req, res) => {
     const before = accessState(db, { adminDomain: getAdminDomain() }).applied;
     const state = await applyAccess(db, req.body, { client, adminDomain: getAdminDomain(), deps: {
       regenerate: async (d) => { try { await ensureCaddyStructure(); } catch { /* regenerate re-checks */ } await regenerateDomainCaddyConfig(db, d); },
-      adapt: () => caddyAdapt({}), reload: () => caddyReload({}) } });
+      // caddy adapt's own output is discarded by the driver; on failure read it
+      // once more so the refusal says why (e.g. an import that is missing).
+      adapt: async () => { try { return await caddyAdapt({}); } catch (e) {
+        const { spawnHostSync } = await import('../lib/host-exec.js');
+        const why = spawnHostSync('sh', ['-c', 'caddy adapt --config /etc/caddy/Caddyfile 2>&1 >/dev/null | tail -c 400'], { encoding: 'utf8', timeout: 30000 });
+        throw Object.assign(new Error(`Caddy refused the configuration: ${String(why.stdout || '').trim() || e.message}`), { stderr: undefined }); } },
+      reload: () => caddyReload({}) } });
     logAudit(req.user.id, 'PLATFORM_ACCESS_APPLIED', 'platform_access', '1', { before, after: state.applied, client }, req.ip);
     res.json({ ...state, client });
   } catch (e) { res.status(e.status || 400).json({ code: e.code || 'PLATFORM_ACCESS', error: e.fullPlatformSafe ? e.message : e.name === 'ZodError' ? 'Choose restricted or open for each switch.' : 'The access change could not be applied.' }); }

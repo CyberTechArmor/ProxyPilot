@@ -23,7 +23,7 @@ export const fieldsMatch=(actual,wanted)=>!!actual&&Object.entries(wanted).every
 // anything else is someone else's change and is refused. → {upgraded}
 export async function applyHumanAccess(r,api,token){const n=namesFor(r),prior=priorHumanFor(r),policy=humanPolicyFor(r),role=humanRoleFor(r);let upgraded=false;
   const pp=`/v1/sys/policies/acl/${n.human}`,pr=await api(pp,{token});const text=pr.status===200?pr.body?.data?.policy:null;
-  if(pr.status===404||pr.status===200&&text!==policy&&text===prior.policy){ok(await api(pp,{method:'PUT',token,body:{policy}}),'Human policy');upgraded||=pr.status===200;}
+  if(pr.status===404||pr.status===200&&text!==policy&&prior.policies.includes(text)){ok(await api(pp,{method:'PUT',token,body:{policy}}),'Human policy');upgraded||=pr.status===200;}
   else if(pr.status!==200||text!==policy)throw fail('The OpenBao human policy differs from what ProxyPilot wrote. Nothing was overwritten.');
   const rp=`/v1/auth/${n.oidc}/role/mapped`,rr=await api(rp,{token}),live=rr.status===200?rr.body?.data:null;
   if(rr.status===404||rr.status===200&&!live||!fieldsMatch(live,role)&&fieldsMatch(live,prior.role)){ok(await api(rp,{method:'POST',token,body:role}),'Human policy mapping');upgraded||=!!live;}
@@ -37,7 +37,7 @@ export async function bootstrap(db,r,input,api,{job,verifyDatabase}){const curre
   const mounts=ok(await api('/v1/sys/mounts',{token})).data,auth=ok(await api('/v1/sys/auth',{token})).data;
   const owned=[{map:mounts,name:r.config.basic?n.prefix+'-kv':n.database,type:r.config.basic?'kv':'database',path:'sys/mounts'},{map:auth,name:n.oidc,type:'oidc',path:'sys/auth'},{map:auth,name:n.approle,type:'approle',path:'sys/auth'}];
   for(const x of owned){const a=x.map?.[x.name+'/'];if(a&&(a.type!==x.type||a.description!==r.credential_ref))throw fail('An intended mount belongs to another configuration. External resources were preserved.');}
-  {const prior=priorHumanFor(r).policy;for(const [p,text] of ownedPolicies(r)){const res=await api(`/v1/sys/policies/acl/${p}`,{token});if(res.status!==404&&(res.status!==200||res.body?.data?.policy!==text&&!(p===n.human&&res.body?.data?.policy===prior)))throw fail('A policy name collides with different existing rules. Nothing was overwritten.');}}
+  {const prior=priorHumanFor(r).policies;for(const [p,text] of ownedPolicies(r)){const res=await api(`/v1/sys/policies/acl/${p}`,{token});if(res.status!==404&&(res.status!==200||res.body?.data?.policy!==text&&!(p===n.human&&prior.includes(res.body?.data?.policy))))throw fail('A policy name collides with different existing rules. Nothing was overwritten.');}}
   if(!r.config.basic){if(!input.databasePassword)throw fail('The advanced database flow requires its transient database credential.');await verifyDatabase(r,input.databasePassword);}job.fence();
   for(const x of owned)if(!x.map?.[x.name+'/'])ok(await api(`/v1/${x.path}/${x.name}`,{method:'POST',token,body:{type:x.type,description:r.credential_ref,...(x.type==='kv'?{options:{version:'2'}}:{})}}),'Owned mount creation');
   {const path=`/v1/sys/policies/acl/${n.machine}`,res=await api(path,{token});if(res.status===404)ok(await api(path,{method:'PUT',token,body:{policy:policyFor(r)}}));else if(res.body?.data?.policy!==policyFor(r))throw fail('Owned policy drifted.');}

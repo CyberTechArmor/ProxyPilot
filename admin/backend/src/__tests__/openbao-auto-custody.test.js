@@ -10,7 +10,7 @@ import { runOnce } from '../lib/setup-engine/executor.js';
 import { runBackendSteps } from '../lib/setup-engine/backend-steps.js';
 import { backendStepDeps } from '../mock2/ops.js';
 import { sweepOpenBaoAutoUnseal,decodeRoot,withTransientRoot } from '../lib/setup-engine/openbao-custody.js';
-import { digest,namesFor,policyFor,humanPolicyFor,priorHumanFor,HUMAN_TTL } from '../lib/setup-engine/openbao-logic.js';
+import { digest,namesFor,policyFor,humanPolicyFor,priorHumanFor,teamPolicyFor,HUMAN_TTL } from '../lib/setup-engine/openbao-logic.js';
 import { getJob } from '../lib/setup-engine/store.js';
 import { makeDb as fullDb,apiFixture,driveStages } from './helpers/full-platform-fixture.js';
 import { readFullPlatform } from '../lib/setup-engine/full-platform-store.js';
@@ -135,11 +135,11 @@ test('Full Platform: recovery route accepts custody auto without keys; kit route
   }finally{await f.close();}
 }finally{db.close();}});
 
-test('team workspace: a fresh install writes the workspace policy and the 8 h role with no root generation',()=>withDb(async(db,dir)=>{
+test('human access: a fresh install writes the administrator policy and the 8 h role with no root generation',()=>withDb(async(db,dir)=>{
   const h=harness(db,dir);apply(db,approval(db),'admin');const j=await h.finish();assert.equal(j.status,'succeeded',j.reason);
   const r=readOpenBao(db),n=namesFor(r);
   assert.equal(h.api.policies.get(n.human),humanPolicyFor(r));assert.equal(h.api.policies.get(n.machine),policyFor(r),'machine scope unchanged');
-  assert.match(h.api.policies.get(n.human),/-kv\/data\/team\/\*" \{ capabilities = \["create", "read", "update", "delete", "list"\]/);
+  assert.equal(h.api.policies.get(n.human),'path "*" { capabilities = ["create", "read", "update", "patch", "delete", "list", "sudo"] }\n','the signed-in group is administrator');
   assert.equal(h.api.resources.get(`/v1/auth/${n.oidc}/role/mapped`).token_ttl,HUMAN_TTL);assert.equal(h.api.genStarts,0);
 }));
 
@@ -157,6 +157,17 @@ test('team workspace: an install carrying the earlier rendering is upgraded with
   h.api.policies.set(n.human,'path "secret/*" { capabilities = ["read"] }\n');
   apply(db,approval(db),'admin');const drift=await h.finish();assert.match(drift.reason,/differs from what ProxyPilot wrote/);assert.equal(h.api.genStarts,1);
   assert.equal(h.api.policies.get(n.human),'path "secret/*" { capabilities = ["read"] }\n');
+}));
+
+test('human access: an install carrying the team-workspace policy is upgraded to administrator; the machine scope is unchanged',()=>withDb(async(db,dir)=>{
+  const h=harness(db,dir);apply(db,approval(db),'admin');assert.equal((await h.finish()).status,'succeeded');
+  const r=readOpenBao(db),n=namesFor(r),team=teamPolicyFor(r);
+  assert(priorHumanFor(r).policies.includes(team));
+  h.api.policies.set(n.human,team);const starts=h.api.genStarts;
+  apply(db,approval(db),'admin');const up=await h.finish();assert.equal(up.status,'succeeded',up.reason);
+  assert.equal(h.api.policies.get(n.human),humanPolicyFor(r));assert.match(humanPolicyFor(r),/^path "\*"/);
+  assert.equal(h.api.policies.get(n.machine),policyFor(r));
+  assert.equal(h.api.genStarts,starts+1);assert.equal(h.api.genRoots.size,0,'the transient root is revoked');
 }));
 
 test('transient root: refuses an in-progress generation, cancels its own failed attempt, decodes the one-time pad',async()=>{

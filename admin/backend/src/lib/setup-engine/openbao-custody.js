@@ -66,7 +66,7 @@ export async function withTransientRoot(db,r,api,fn){if(!autoCustody(r))throw fa
 export async function humanAccessState(db,r,api){const n=namesFor(r),machine=await verifyMachine(r,secrets(db,r),api);let live;
   try{const pr=await api(`/v1/sys/policies/acl/${n.human}`,{token:machine}),rr=await api(`/v1/auth/${n.oidc}/role/mapped`,{token:machine});live={policy:pr.body?.data?.policy,role:rr.body?.data};}
   finally{await api('/v1/auth/token/revoke-self',{method:'POST',token:machine}).catch(()=>{});}
-  const prior=priorHumanFor(r),policy=live.policy===humanPolicyFor(r)?'current':live.policy===prior.policy?'prior':'drift',role=fieldsMatch(live.role,humanRoleFor(r))?'current':fieldsMatch(live.role,prior.role)?'prior':'drift';
+  const prior=priorHumanFor(r),policy=live.policy===humanPolicyFor(r)?'current':prior.policies.includes(live.policy)?'prior':'drift',role=fieldsMatch(live.role,humanRoleFor(r))?'current':fieldsMatch(live.role,prior.role)?'prior':'drift';
   return policy==='drift'||role==='drift'?'drift':policy==='current'&&role==='current'?'current':'prior';}
 // Bring the human side (team workspace policy + 8 h role) up to the current
 // rendering. Nothing privileged is generated unless the live values are exactly

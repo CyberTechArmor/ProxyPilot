@@ -68,7 +68,13 @@ test('G5.2 incomplete handoff fails truthfully and retry preserves services and 
 }));
 test('G5.3 conflicting existing disposable secret is never overwritten',()=>withDb(async(db,dir)=>{setup(db);const h=harness(db,dir);h.api.secrets.set(TEST_KEY,{secretValue:'unrelated-preserve-me',secretComment:'foreign'});apply(db);const job=await h.finish();assert.equal(job.status,'failed');assert.match(job.reason,/Nothing was overwritten/);assert.equal(h.api.secrets.get(TEST_KEY).secretValue,'unrelated-preserve-me');assert.deepEqual(h.api.writes,[]);}));
 test('G5.1 connect Infisical leaves its runtime/Caddy untouched; Agent Proxy skipped reports application only',()=>withDb(async(db,dir)=>{setup(db,{agentMode:'skip'});const h=harness(db,dir,{flows:async()=>({consumer:'verified',agentProxy:'skipped'})});apply(db);const job=await h.finish();assert.equal(job.status,'succeeded',job.reason);assert.equal(JSON.parse(job.verification_json).state,'application_secret_verified');assert(!h.docker.calls.some(a=>a[0]==='docker'));assert.equal(db.prepare('SELECT count(*) AS n FROM service_http_routes').get().n,1);assert.deepEqual(h.api.writes,[TEST_KEY]);},{mode:'connect',agentMode:'skip'}));
-test('G5.1 existing Agent Proxy verification is read-only and refuses changed command/environment/listeners',()=>withDb(async(db,dir)=>{setup(db);const r=readInfisical(db),d=dockerFixture(),root=join(dir,'protected'),values=infisicalSecrets(db,r);prepareInfisicalFiles(r,{root});await ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root});const name=namesFor(r).proxy;r.config.agentMode='connect';r.config.externalProxyContainer=name;const before=d.calls.length;await ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root});assert(!d.calls.slice(before).some(a=>['create','start','restart'].includes(a[1])));
+// An operator's own (external) Agent Proxy talks to the public origin; the
+// managed one reaches the server over the private agent network.
+function asExternalProxy(d,r,root){const n=namesFor(r),c=d.objects.container.get(n.proxy),file=join(root,'agent-proxy.env');
+  c.Config.Env=c.Config.Env.map(e=>e.startsWith('INFISICAL_DOMAIN=')?`INFISICAL_DOMAIN=${r.config.origin}`:e);
+  writeFileSync(file,readFileSync(file,'utf8').replace(/^INFISICAL_DOMAIN=.*$/m,`INFISICAL_DOMAIN=${r.config.origin}`));
+  delete c.NetworkSettings.Networks[n.agentNetwork];}
+test('G5.1 existing Agent Proxy verification is read-only and refuses changed command/environment/listeners',()=>withDb(async(db,dir)=>{setup(db);const r=readInfisical(db),d=dockerFixture(),root=join(dir,'protected'),values=infisicalSecrets(db,r);prepareInfisicalFiles(r,{root});await ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root});asExternalProxy(d,r,root);const name=namesFor(r).proxy;r.config.agentMode='connect';r.config.externalProxyContainer=name;const before=d.calls.length;await ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root});assert(!d.calls.slice(before).some(a=>['create','start','restart'].includes(a[1])));
   const actual=d.objects.container.get(name);actual.Config.Cmd.push('--unmatched-host=allow');await assert.rejects(ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root}),/command/);actual.Config.Cmd.pop();actual.Config.Env.push('HTTPS_PROXY=http://foreign');await assert.rejects(ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root}),/environment/);actual.Config.Env.pop();actual.HostConfig.PortBindings['17322/tcp'][0].HostIp='0.0.0.0';await assert.rejects(ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root}),/isolation/);
 }));
 test('G5.5 foreign Docker collision and missing protected keys fail without replacement',()=>withDb(async(db,dir)=>{setup(db);const r=readInfisical(db),d=dockerFixture(),root=join(dir,'protected'),n=namesFor(r);d.objects.volume.set(n.databaseVolume,{Labels:{}});await assert.rejects(ensureInfisicalRuntime(r,{exec:d,job:handle,root}),/collision/);assert(!d.calls.some(a=>a[1]==='create'));d.objects.volume.clear();await ensureInfisicalRuntime(r,{exec:d,job:handle,root,attempts:1});rmSync(join(root,'protected.json'));await assert.rejects(ensureInfisicalRuntime(r,{exec:d,job:handle,root}),/Restore/);
@@ -112,7 +118,7 @@ test('G5.4 retry rejects volume driver and private network drift before proxy st
 }));
 test('G5.1 Connect accepts an existing dedicated bridge/volume without renaming or writing external resources',()=>withDb(async(db,dir)=>{
   setup(db);const r=readInfisical(db),d=dockerFixture(),root=join(dir,'protected'),values=infisicalSecrets(db,r),n=namesFor(r);
-  prepareInfisicalFiles(r,{root});await ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root});
+  prepareInfisicalFiles(r,{root});await ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root});asExternalProxy(d,r,root);
   const actual=d.objects.container.get(n.proxy);actual.HostConfig.NetworkMode='operator-proxy-bridge';actual.NetworkSettings.Networks={'operator-proxy-bridge':{}};actual.Mounts[0].Name='operator-proxy-state';actual.Config.Labels={};
   d.objects.network.set('operator-proxy-bridge',{Driver:'bridge',Internal:false,Options:{},Containers:{proxy:{Name:n.proxy}}});
   d.objects.volume.set('operator-proxy-state',{Driver:'local',Options:{}});
@@ -121,4 +127,26 @@ test('G5.1 Connect accepts an existing dedicated bridge/volume without renaming 
   assert(!d.calls.slice(before).some(a=>['create','start','restart','rm'].includes(a[1])));
   d.objects.network.get('operator-proxy-bridge').Containers.other={Name:'unrelated-container'};
   await assert.rejects(ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root}),/shared/);
+}));
+
+test('Agent Proxy reaches the server over the private agent network; an install pointing it at the public origin is upgraded in place',()=>withDb(async(db,dir)=>{
+  setup(db);const r=readInfisical(db),d=dockerFixture(),root=join(dir,'protected'),values=infisicalSecrets(db,r),n=namesFor(r);
+  await ensureInfisicalRuntime(r,{exec:d,job:handle,root,attempts:1});
+  const agentNet=d.objects.network.get(n.agentNetwork);assert(agentNet&&agentNet.Internal,'owned internal agent network');
+  assert(Object.hasOwn(d.objects.container.get(n.server).NetworkSettings.Networks,n.agentNetwork),'the server joins it');
+  await ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root});
+  const proxy=()=>d.objects.container.get(n.proxy),domain=()=>proxy().Config.Env.find(e=>e.startsWith('INFISICAL_DOMAIN='));
+  assert.equal(domain(),`INFISICAL_DOMAIN=http://${n.server}:8080`);
+  assert.deepEqual(Object.keys(proxy().NetworkSettings.Networks).sort(),[n.agentNetwork,n.proxyNetwork].sort());
+  // The earlier rendering: the proxy logged in through the public restricted route.
+  asExternalProxy(d,r,root);const volume=proxy().Mounts[0].Name;
+  await ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root});
+  assert.equal(domain(),`INFISICAL_DOMAIN=http://${n.server}:8080`,'recreated on the private domain');
+  assert.equal(proxy().Mounts[0].Name,volume,'state volume kept');
+  assert(readFileSync(join(root,'agent-proxy.env'),'utf8').includes(`INFISICAL_DOMAIN=http://${n.server}:8080`));
+  // Anything else in the file is drift and is not rewritten.
+  writeFileSync(join(root,'agent-proxy.env'),readFileSync(join(root,'agent-proxy.env'),'utf8').replace(/^INFISICAL_DOMAIN=.*$/m,'INFISICAL_DOMAIN=https://elsewhere.example'));
+  await assert.rejects(ensureAgentProxyRuntime(r,values,{exec:d,job:handle,root}),/drifted/);
+  // Re-running the server runtime keeps the server on exactly its three networks.
+  await ensureInfisicalRuntime(r,{exec:d,job:handle,root,attempts:1});
 }));

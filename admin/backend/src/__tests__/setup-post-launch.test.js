@@ -125,6 +125,7 @@ function scriptedHost(state) {
         if (a[0] === '-C' || a[2] === '-C') return state.rules.has(key) ? { code: 0, stdout: '', stderr: '' } : { code: 1, stdout: '', stderr: 'iptables: Bad rule (does a matching rule exist in that chain?).' };
         state.rules.add(key); return { code: 0, stdout: '', stderr: '' };
       }
+      if (bin === 'incus' && a[0] === 'profile') return { code: 0, stdout: JSON.stringify({ config: {}, devices: { root: { type: 'disk', path: '/', pool: 'default' } } }) };
       if (bin !== 'incus') return { code: 127, stdout: '', stderr: `not found: ${bin}` };
       if (a[0] === 'network' && a[1] === 'list') return { code: 0, stdout: JSON.stringify(state.bridges ?? [{ name: 'incusbr0', type: 'bridge', managed: true }, { name: 'eth0', type: 'physical', managed: false }]), stderr: '' };
       if (a[0] === 'network' && a[1] === 'set') { state.natSet = [...(state.natSet || []), a[2]]; return state.natFails ? { code: 1, stdout: '', stderr: 'Error: Network not found' } : { code: 0, stdout: '', stderr: '' }; }
@@ -242,7 +243,7 @@ async function dashboardCreate(d, h, g, { inputsDir, script = SCRIPT, services =
 test('registry: guest_setup is a runner, mutating and exclusive kind (the two modules agree); configure_routes is the backend\'s; the phases are fixed and ordered', () => {
   assert.deepEqual([...SETUP_JOB_KINDS], ['guest_setup']); assert.deepEqual([...SETUP_KINDS_FROM_LOGIC], [...SETUP_JOB_KINDS], 'logic.js spells the list out (import cycle); it must match');
   assert.ok(RUNNER_JOB_KINDS.includes('guest_setup')); assert.ok(MUTATING_JOB_KINDS.includes('guest_setup')); assert.ok(EXCLUSIVE_JOB_KINDS.includes('guest_setup'));
-  assert.deepEqual([...BACKEND_STEP_KINDS], ['configure_infisical_route', 'configure_pomerium_routes', 'configure_routes', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route']); assert.ok(BACKEND_JOB_KINDS.includes('configure_routes')); assert.ok(!RUNNER_JOB_KINDS.includes('configure_routes'), 'the runner never claims a backend step');
+  assert.deepEqual([...BACKEND_STEP_KINDS], ['configure_vaultwarden_route', 'remove_platform_routes', 'update_platform_networks', 'configure_openbao_route', 'configure_infisical_route', 'configure_pomerium_routes', 'configure_routes', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route']); assert.ok(BACKEND_JOB_KINDS.includes('configure_routes')); assert.ok(!RUNNER_JOB_KINDS.includes('configure_routes'), 'the runner never claims a backend step');
   assert.ok(MUTATING_JOB_KINDS.includes('configure_routes'), 'a lifecycle verb is refused while the routes are being configured');
   assert.deepEqual([...SETUP_PHASES], ['network_nat', 'await_address', 'dns', 'init_script', 'routes']); assert.deepEqual([...FIXUP_PHASES], ['network_nat', 'dns']);
   assert.equal(HOST_NETWORK_LOCK, '@host/network'); assert.equal(HOST_ROUTES_LOCK, '@host/routes');

@@ -1507,8 +1507,11 @@ async function toolSetLxcConfig(args, auth) {
 // flags (routes/lxc.js POST /containers) so Docker-readiness is set correctly
 // at birth and the keyring/nesting failures seen in the field cannot occur on
 // new guests. Deliberately does NOT accept security.privileged — that flip
-// stays behind set_lxc_config's acknowledge_risk gate.
+// is refused; a VM is the supported path for workloads needing it.
 async function toolCreateLxcContainer(args, auth) {
+  const type = args.type || 'container';
+  if (!['container','virtual-machine'].includes(type)) return toolResult('type must be container or virtual-machine', { isError: true });
+  const vm = type === 'virtual-machine';
   const name = String(args.name || '');
   if (!LXC_NAME_REGEX.test(name)) return toolResult('Invalid container name (letters, digits, hyphens; must start alphanumeric)', { isError: true });
   if (args.confirm !== true) {
@@ -1520,7 +1523,7 @@ async function toolCreateLxcContainer(args, auth) {
   if (!Number.isInteger(cpu) || cpu < 1 || cpu > 64) return toolResult('cpu must be a whole number of vCPUs (1–64)', { isError: true });
   const memoryGb = args.memory_gb == null ? 4 : Number(args.memory_gb);
   if (!Number.isFinite(memoryGb) || memoryGb < 0.5 || memoryGb > 512) return toolResult('memory_gb must be between 0.5 and 512', { isError: true });
-  const diskGb = args.disk_gb == null ? null : Number(args.disk_gb);
+  const diskGb = args.disk_gb == null ? (vm ? 20 : null) : Number(args.disk_gb);
   if (diskGb !== null && (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 2048)) return toolResult('disk_gb must be a whole number of GB (1–2048)', { isError: true });
   const dockerReady = args.docker_ready !== false;
   const autostart = args.autostart !== false;
@@ -1543,7 +1546,7 @@ async function toolCreateLxcContainer(args, auth) {
     'limits.memory': `${Math.round(memoryGb * 1024)}MiB`,
     'boot.autostart': String(autostart),
   };
-  if (dockerReady) {
+  if (dockerReady && !vm) {
     // Same flag set the UI creation route uses for Docker-in-LXC guests:
     // nesting plus the syscall intercepts BuildKit and sysctl-touching
     // images need. Privileged mode is NOT part of docker-ready.
@@ -1561,7 +1564,7 @@ async function toolCreateLxcContainer(args, auth) {
   // on that record for the host-reachable address instead of polling the
   // host itself.
   const { runLifecycle, waitForSetup } = await import('../mock2/ops.js');
-  const launch = await runLifecycle({ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, rootSize: diskGb !== null ? `${diskGb}GiB` : null, setup: { phases: ['network_nat', 'await_address'], addressTimeoutMs: 15_000 }, requestedBy: auth.created_by ?? null, via: 'mcp' });
+  const launch = await runLifecycle({ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, vm, rootSize: diskGb !== null ? `${diskGb}GiB` : null, setup: { phases: ['network_nat', 'await_address'], addressTimeoutMs: 15_000 }, requestedBy: auth.created_by ?? null, via: 'mcp' });
   if (!launch.ok) return toolResult(`Launch failed: ${launch.error}${launch.jobId ? ` (job ${launch.jobId})` : ''}`, { isError: true });
 
   const warnings = [...(Array.isArray(launch.warnings) ? launch.warnings : [])];

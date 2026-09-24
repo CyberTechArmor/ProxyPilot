@@ -1,3 +1,4 @@
+import { READER_QUERY_SCRIPT } from '../../lib/project-sql-reader.js';
 // Components, standards, and project lifecycle / configuration over MCP.
 //
 //   components   list / get / import / install / uninstall / versions
@@ -664,21 +665,14 @@ export function createProjectConfigHandlers(kit) {
     if (bad) return err(bad);
     const limit = intIn(args.limit, 1, 5000) || 200;
     const sql = String(args.sql).trim().replace(/;\s*$/, '');
-    // A READ ONLY transaction plus a statement timeout: the keyword check above
-    // is the reader's guard, the transaction is the database's.
-    // The statement rides in a temp file the postgres user can read: nesting
-    // it through su's quoting would be fragile.
-    const safeScript = 'n="$1"; command -v psql >/dev/null 2>&1 || { echo NOPSQL >&2; exit 66; }; '
-      + 'f=$(mktemp /tmp/pp-sql.XXXXXX) || exit 98; cat > "$f"; chmod 644 "$f"; '
-      + 'out=$(su - postgres -c "psql -X -v ON_ERROR_STOP=1 -d app -A -F \'|\' --pset footer=off -c \'SET statement_timeout = 30000\' -c \'BEGIN READ ONLY\' -f $f -c ROLLBACK" 2>&1); ec=$?; rm -f "$f"; '
-      + 'printf "%s\\n" "$out" | head -n "$((n + 8))"; exit $ec';
-    const r = await projectSh(p.incusName, safeScript, [String(limit)], { input: `${sql};\n`, timeoutMs: 60000, maxCapture: 2 * 1024 * 1024 });
-    if (r.status === 66) return err('psql is not available in this project container');
-    if (r.status !== 0) return err(`Query failed: ${tail(r.stdout || r.stderr, 1200)}`);
-    const lines = (r.stdout || '').split('\n').filter((l) => l !== '' && !/^(SET|BEGIN|ROLLBACK)$/.test(l));
-    const header = lines.length ? lines[0].split('|') : [];
-    const rows = lines.slice(1, 1 + limit).map((l) => l.split('|'));
-    return ok({ project_id: p.project.id, columns: header, row_count: rows.length, truncated: lines.length - 1 > limit, rows, note: 'Ran inside BEGIN READ ONLY … ROLLBACK with a 30 s statement timeout, as the postgres superuser on database "app".' });
+    const r = await projectSh(p.incusName, READER_QUERY_SCRIPT, [], {
+      input: JSON.stringify({ sql, limit }), timeoutMs: 40000, maxCapture: 2 * 1024 * 1024,
+    });
+    if (r.status === 66) return err('Read-only SQL is not provisioned. An administrator must run the project SQL reader provisioning step. No superuser fallback is permitted.');
+    if (r.status !== 0) return err(`Query failed: ${tail(r.stderr || r.stdout, 1200)}`);
+    let result;
+    try { result = JSON.parse(r.stdout); } catch { return err('The SQL reader returned an invalid response'); }
+    return ok({ project_id: p.project.id, ...result, note: 'Database app, dedicated pp_mcp_reader login, READ ONLY transaction, 30 s timeout. Access is limited to granted curated views in api_read; no psql meta-commands.' });
   });
 
   const dump_project_db = mutation('dump_project_db', { subjectType: 'mock2_project' }, async (args, auth, req, note) => {

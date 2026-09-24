@@ -105,6 +105,7 @@ export function scriptedConfigHost(state) {
       }
       if (argv[0] !== 'incus') return { code: 127, stdout: '', stderr: 'not incus' };
       const verb = argv[1];
+      if (verb === 'query' && argv[2].endsWith('/resources')) return { code: 0, stdout: JSON.stringify({ space: { total: 1e12, used: 1e11 } }) };
       if (verb === 'list') { const i = byName(argv[2]); return { code: 0, stdout: JSON.stringify(i ? [i] : []), stderr: '' }; }
       if (verb === 'snapshot' && argv[2] === 'create') {
         const i = byName(argv[3]); if (!i) return { code: 1, stdout: '', stderr: 'Error: Instance not found' };

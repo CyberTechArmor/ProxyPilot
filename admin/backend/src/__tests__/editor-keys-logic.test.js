@@ -211,7 +211,8 @@ test('canonicalization distinguishes a missing docroot, a missing parent, and an
 // ---- key status ----
 
 test('key status: revocation outranks everything, suspension is the container toggle', () => {
-  const live = { revoked_at: null };
+  const live = { revoked_at: null, expires_at: '2099-01-01T00:00:00Z' };
+  assert.equal(keyStatus({ expires_at: '2000-01-01T00:00:00Z' }), 'expired');
   const dead = { revoked_at: '2026-01-01T00:00:00.000Z' };
   assert.equal(keyStatus(live, { activationActive: true, containerExists: true }), 'active');
   assert.equal(keyStatus(live, { activationActive: false, containerExists: true }), 'suspended');

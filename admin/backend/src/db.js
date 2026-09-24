@@ -1,3 +1,4 @@
+import { migrateEditorKeyLifecycle } from './lib/editor-key-lifecycle.js';
 import {resumeAuditedMcpRoots} from './lib/mcp-legacy-recovery.js';
 import {ADMIN_BOOTSTRAP_SCHEMA} from './lib/admin-bootstrap.js';
 import { TOTP_ENROLLMENT_SCHEMA } from './lib/totp-enrollment.js';
@@ -2424,6 +2425,8 @@ export function initDatabase() {
   runMigration(db, 1017, 'openbao_agents', (d) => d.exec(OPENBAO_AGENTS_SCHEMA));
   // Per-agent Infisical projects (lib/setup-engine/infisical-agents.js): names and IDs only.
   runMigration(db, 1018, 'infisical_agents', (d) => d.exec(INFISICAL_AGENTS_SCHEMA));
+  runMigration(db, 1019, 'editor_key_lifecycle', migrateEditorKeyLifecycle);
+
 
   runMigration(db, 1011, 'route_ip_allowlist_paths', (d) => {
     const cols = d.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);

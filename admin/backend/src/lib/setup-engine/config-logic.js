@@ -48,17 +48,16 @@ export const SNAPSHOT_KINDS = Object.freeze(['config_set', 'device_add', 'device
 export const PROXYPILOT_BIN = process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot';
 
 // The config keys a job may set, each with its value shape. The MCP allowlist
-// (lib/mcp-policy/lxc-config-allowlist.json) names the same five keys; this
+// (lib/mcp-policy/lxc-config-allowlist.json) names the same four keys; this
 // is the runner's own copy so a row that arrived any other way is held to
 // the same rule. Memory accepts the shapes the MCP validator always did.
 export const CONFIG_KEY_ALLOWLIST = Object.freeze({
   'security.nesting': /^(true|false)$/,
-  'security.privileged': /^(true|false)$/,
   'limits.cpu': /^[1-9][0-9]{0,2}$/,
   'limits.memory': /^[1-9][0-9]{0,6}(\.[0-9]{1,3})?(MB|MiB|GB|GiB)$/i,
   'boot.autostart': /^(true|false)$/,
 });
-export const RISK_ACKNOWLEDGED_KEYS = Object.freeze({ 'security.privileged': 'true' });
+export const RISK_ACKNOWLEDGED_KEYS = Object.freeze({});
 
 export const DEVICE_NAME_RE = /^[a-z][a-z0-9-]{0,30}$/;
 export const DEVICE_REF_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,40}$/;
@@ -149,6 +148,7 @@ export function validateConfigParams(kind, p = {}) {
         const seen = new Set();
         for (const c of changes) {
           if (!isPlainObject(c) || typeof c.key !== 'string' || typeof c.value !== 'string') return { ok: false, reason: 'every change is { key, value } of strings' };
+          if (c.key === 'security.privileged') return { ok: false, reason: 'Changing container privilege in place is disabled; provision a VM and migrate data with correct ownership' };
           const re = CONFIG_KEY_ALLOWLIST[c.key];
           if (!re) return { ok: false, reason: `config key '${c.key}' is not on the configuration allowlist (${Object.keys(CONFIG_KEY_ALLOWLIST).join(', ')})` };
           if (!re.test(c.value)) return { ok: false, reason: `config ${c.key}=${c.value.slice(0, 40)} is not an accepted value` };

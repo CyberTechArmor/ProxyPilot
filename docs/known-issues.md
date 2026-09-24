@@ -352,16 +352,13 @@ policy decision for the operator, not a repair; when it is made, change both
 the grant and the slide (they read the same variable) and consider a hard
 cap measured from the original grant so re-arming cannot extend it forever.
 
-## Delegated-editing keys are not owner-checked per call
+## Delegated editor lifecycle migration
 
-`lib/editor-keys.js` (the `/api/mcp-editor` restricted sibling) stores
-`created_by` on each key like `mcp_tokens` does, but its lookup checks only
-the hash, the revocation timestamp and the container's activation switch.
-The 2026-09 owner-validity rule (refuse a token whose minting admin is gone
-or disabled; revoke on disable/delete) was applied to the MCP surface only.
-Those keys are pinned to one container's docroot and the activation toggle
-suspends all of them at once, so the exposure is small; apply the same rule
-there in a change of its own.
+The follow-up security change adds live owner checks, offboarding revocation,
+30-day default expiry (90-day maximum), and fresh local proof for new grants.
+Migration 1019 preserves existing token hashes and gives legacy keys a 30-day
+rotation window. Keys whose issuing administrator cannot be verified fail
+closed. Replace them from Sharing; revocation is permanent.
 
 ## Existing generated apps cannot receive updated component code
 

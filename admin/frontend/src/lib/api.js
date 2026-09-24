@@ -180,6 +180,13 @@ export const api = {
   saveOpenBaoSetup: (body) => request('/setup/platform/openbao', {method:'PUT',body:JSON.stringify(body)}),
   applyOpenBaoSetup: (body) => request('/setup/platform/openbao/apply', {method:'POST',body:JSON.stringify(body)}),
   openBaoOperator: (action,body) => request('/setup/platform/openbao/'+action, {method:action==='handoff'?'PUT':'POST',body:JSON.stringify(body)}),
+  // Connect an agent (OpenBao AppRole per agent). A secret ID comes back once, in the create/rotate response only.
+  getOpenBaoAgents: () => request('/setup/platform/openbao/agents'),
+  createOpenBaoAgent: (body) => request('/setup/platform/openbao/agents', { method: 'POST', body: JSON.stringify(body) }),
+  setOpenBaoAgentCredential: (name, key, body) => request(`/setup/platform/openbao/agents/${encodeURIComponent(name)}/credentials/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  removeOpenBaoAgentCredential: (name, key) => request(`/setup/platform/openbao/agents/${encodeURIComponent(name)}/credentials/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+  rotateOpenBaoAgent: (name) => request(`/setup/platform/openbao/agents/${encodeURIComponent(name)}/rotate`, { method: 'POST', body: '{}' }),
+  removeOpenBaoAgent: (name) => request(`/setup/platform/openbao/agents/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   getInfisicalSetup: () => request('/setup/platform/infisical'),
   saveInfisicalSetup: (body) => request('/setup/platform/infisical', { method: 'PUT', body: JSON.stringify(body) }),
   saveInfisicalIdentities: (body) => request('/setup/platform/infisical/identities', { method: 'PUT', body: JSON.stringify(body) }),

@@ -10,7 +10,7 @@ import { BUILTIN_ROLES, desiredProxiedService, TEST_ENV, TEST_PATH, infisicalIde
 // Either a password the person chooses, or generate: ProxyPilot generates it
 // into OpenBao (infisical-admin-vault.js) and the handoff carries only the email.
 const personalBase = { revision: z.number().int().positive(), email: z.string().email().max(254), reviewed: z.literal(true) };
-export const personalSchema = z.union([z.object({ ...personalBase, password: z.string().min(12).max(256) }).strict(), z.object({ ...personalBase, generate: z.literal(true) }).strict()]);
+export const personalSchema = z.union([z.object({ ...personalBase, password: z.string().min(12).max(256), keepInOpenBao: z.boolean().optional() }).strict(), z.object({ ...personalBase, generate: z.literal(true) }).strict()]);
 export const personalRef = r => `full-infisical-personal-${r.credential_ref}`;
 const uuid = value => z.string().uuid().parse(value);
 // For the dashboard: whether this installation's administrator password was
@@ -35,9 +35,17 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
   // The password itself: the chosen one, or the generated one from OpenBao
   // (fresh: a new one for a new account; otherwise the stored one, to sign in).
   const credential = async fresh => {
-    if (!input.generate) return input;
+    if (!input.generate) {
+      // A chosen password kept in OpenBao is written before the account uses it.
+      if (fresh && input.keepInOpenBao) await keepChosen();
+      return input;
+    }
     if (!adminVault) throw fail('The generated Infisical password is kept in OpenBao, which this operation cannot reach. Enter a password yourself instead.');
     return { email: input.email, password: await adminVault({ email: input.email, origin: r.config.origin, fresh }) };
+  };
+  const keepChosen = async () => {
+    if (!adminVault) throw fail('Keeping the password in OpenBao needs OpenBao, which this operation cannot reach. Nothing was stored.');
+    await adminVault({ email: input.email, origin: r.config.origin, fresh: true, password: input.password });
   };
   try {
   if (s.complete && r.identities) return { ready: true };
@@ -52,7 +60,7 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
     if (!input) return { ready: false, action: 'Create the Infisical administrator: generate its password into OpenBao (recommended), or choose one. This edition has no Keycloak sign-in.' };
     if (s.organizationId) throw fail('A previously initialized Infisical instance is now empty. Restore its matching data and protected keys; no second organization was created.');
     const chosen = await credential(true);
-    s.passwordInOpenBao = !!input.generate; s.bootstrapAttempted = true; persist();
+    s.passwordInOpenBao = !!(input.generate || input.keepInOpenBao); s.bootstrapAttempted = true; persist();
     const result = requireOk(await api('/api/v1/admin/bootstrap', { method: 'POST', body: { email: chosen.email, password: chosen.password, organization: `ProxyPilot ${r.credential_ref.slice(-12)}` } }), 'Owned Infisical bootstrap');
     s.organizationId = uuid(result.organization?.id); s.bootstrapIdentityId = uuid(result.identity?.id); s.userId = uuid(result.user?.id); s.email = input.email;
     s.originalToken = result.identity?.credentials?.token;
@@ -95,6 +103,8 @@ export async function provisionManagedInfisical(db, r, api, { job, now = Date.no
     if (selected.isMfaEnabled || !selected.token) throw fail('Infisical requires its interactive MFA ceremony. Complete the owner-authorized handoff in Infisical; no MFA bypass is attempted.');
     if (jwt(selected.token).userId !== s.userId) throw fail('The fresh Infisical administrator differs from the recorded bootstrap identity.');
     s.token = selected.token; s.tokenExpiresAt = Math.min(jwt(selected.token).exp * 1000, now + 900_000); s.personalAuthority = true; persist();
+    // A chosen password is kept only once Infisical has accepted it.
+    if (!input.generate && input.keepInOpenBao) { await keepChosen(); s.passwordInOpenBao = true; persist(); }
   }
   const owned = `ProxyPilot ${r.credential_ref}`, slug = `proxypilot-${r.credential_ref.slice(-12)}`;
   {

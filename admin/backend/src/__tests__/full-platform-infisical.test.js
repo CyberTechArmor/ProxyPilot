@@ -162,3 +162,29 @@ test('administrator handoff input: a chosen password or generate, never both, an
  assert(personalSchema.safeParse({...base,generate:true}).success);
  for(const bad of [{...base,generate:true,password:'a-long-chosen-password'},{...base},{...base,generate:false},{...base,password:'short'}])assert(!personalSchema.safeParse(bad).success,JSON.stringify(bad));
 });
+
+test('chosen password kept in OpenBao: written before bootstrap as chosen, and on a resume only after Infisical accepts it',async()=>{
+ const f=fixture();try{
+  const chosen='alices-own-chosen-password';
+  storeProtected(f.db,personalRef(f.r),{email:'alice@example.com',password:chosen,keepInOpenBao:true,expiresAt:Date.now()+900000});
+  const calls=[];const adminVault=async a=>{calls.push(a);return a.password;};
+  const job={id:readInfisical(f.db).last_job_id,fence(){}};
+  f.state.fault='secret';
+  await assert.rejects(provisionManagedInfisical(f.db,readInfisical(f.db),f.api,{job,ensureProxySecret:async p=>{f.state.proxySecret=p;},adminVault}),/response lost/);
+  assert.deepEqual(calls,[{email:'alice@example.com',origin:f.r.config.origin,fresh:true,password:chosen}]);
+  assert.equal(protectedValue(f.db,f.ref).passwordInOpenBao,true);
+  const schema=(await import('../lib/setup-engine/full-platform-infisical.js')).personalSchema;
+  assert(schema.safeParse({revision:1,email:'a@example.com',password:'a-long-chosen-password',keepInOpenBao:true,reviewed:true}).success);
+  assert(!schema.safeParse({revision:1,email:'a@example.com',generate:true,keepInOpenBao:true,reviewed:true}).success);
+ }finally{f.db.close();}
+ // Resume with a chosen password: nothing is stored when Infisical refuses it.
+ const g=fixture();try{
+  const calls=[];const adminVault=async a=>{calls.push(a);return a.password;};
+  storeProtected(g.db,g.ref,{identities:{},owner:g.r.credential_ref,organizationId:ids.org,userId:ids.workload,email:'alice@example.com'});
+  g.state.initialized=true;
+  storeProtected(g.db,personalRef(g.r),{email:'alice@example.com',password:'wrong-chosen-password',keepInOpenBao:true,expiresAt:Date.now()+900000});
+  const api=async(path,o={})=>path==='/api/v3/auth/login'?{status:400,body:null,error:'Invalid credentials'}:g.api(path,o);
+  await assert.rejects(provisionManagedInfisical(g.db,readInfisical(g.db),api,{job:{id:readInfisical(g.db).last_job_id,fence(){}},adminVault}),/does not match/);
+  assert.deepEqual(calls,[],'a refused password is never stored');
+ }finally{g.db.close();}
+});

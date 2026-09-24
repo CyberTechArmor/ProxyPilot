@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import PomeriumRouteProtection from '@/components/PomeriumRouteProtection';
 import KeycloakLdapLink from '@/components/KeycloakLdapLink';
 import PlatformAccess from '@/components/PlatformAccess';
+import OpenBaoAgents from '@/components/OpenBaoAgents';
 
 // "Use your platform": where each installed service is and what it is for,
 // kept visible after setup (the per-stage panels only show while a stage is current).
@@ -36,7 +37,7 @@ export default function PlatformLinks({ services, realm, infisicalPassword }) {
       <p>{PURPOSE[s.id]}</p>
       {s.id === 'keycloak' && <>{link(`${s.url}/admin/master/console/`, 'Administration console')}<br />{realm && link(`${s.url}/realms/${encodeURIComponent(realm)}/account/`, `Your account in ${realm} (passkeys, sessions)`)}</>}
       {s.id === 'openbao' && <>{link(bao?.url || `${s.url}/ui/`, 'Open OpenBao')}
-        {bao && <ol className="list-decimal pl-5 space-y-1"><li>Method <b>OIDC</b> → <b>More options</b> → Mount path: <Copyable value={bao.mountPath} /></li><li>Role: <code>{bao.role}</code> (or blank) → Sign in with Keycloak.</li>{bao.workspace && <li>To add a secret: Secrets engines → <code className="break-all">{bao.workspace.engine}</code> → Create secret → path <code>{bao.workspace.path}your-name</code>.</li>}</ol>}
+        {bao && <ol className="list-decimal pl-5 space-y-1"><li>Method <b>OIDC</b> → <b>More options</b> → Mount path: <Copyable value={bao.mountPath} /></li><li>Role: <code>{bao.role}</code> (or blank) → Sign in with Keycloak.</li>{bao.workspace && <li>You are an OpenBao administrator. Shared secrets: Secrets engines → <code className="break-all">{bao.workspace.engine}</code> → Create secret → path <code>{bao.workspace.path}your-name</code>.</li>}</ol>}
         {bao?.scope && <p className="text-muted-foreground">{bao.scope}</p>}</>}
       {['infisical', 'vaultwarden'].includes(s.id) && link(s.url, `Open ${s.name}`)}
       {s.id === 'infisical' && infisicalPassword?.generated && infisicalPassword.location && <>
@@ -51,6 +52,7 @@ export default function PlatformLinks({ services, realm, infisicalPassword }) {
       {s.state !== 'verified' && <p className="text-muted-foreground">Setup still has a step to finish for this service (see its stage above).</p>}
     </li>)}</ul>
     <section aria-labelledby="pp-access" className="space-y-2"><h3 id="pp-access" className="font-semibold">Who can reach each service</h3><PlatformAccess /></section>
+    {hasBao && present.some(s => s.id === 'openbao' && s.state === 'verified') && <section aria-labelledby="pp-agents" className="space-y-2"><h3 id="pp-agents" className="font-semibold">Agents and machines (OpenBao)</h3><OpenBaoAgents /></section>}
     {keycloakReady && <section aria-labelledby="pp-directory-link" className="space-y-2"><h3 id="pp-directory-link" className="font-semibold">Connect a directory (LDAP)</h3><KeycloakLdapLink /></section>}
     {pomeriumReady && <section aria-labelledby="pp-require-signin" className="space-y-2"><h3 id="pp-require-signin" className="font-semibold">Require sign-in on a site</h3><PomeriumRouteProtection /></section>}
   </div>;

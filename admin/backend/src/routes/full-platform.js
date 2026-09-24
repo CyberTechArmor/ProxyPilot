@@ -84,10 +84,10 @@ fullPlatformRouter.post('/infisical/administrator', requireSudo, handle((req, re
   if (!full || full.revision !== p.revision || full.approved_revision !== p.revision || !r?.config.basic || r.config.mode !== 'install') throw fail('Apply the reviewed basic Infisical installation first.');
   if (full.last_job_id && ['queued', 'running'].includes(getJob(db, full.last_job_id)?.status)) throw fail('Wait for the current setup operation before entering the personal credential.');
   { const why = removedRefusal(full); if (why) throw fail(why); }
-  if (p.generate && !vaultReady(db)) throw fail('The generated password is kept in OpenBao. Finish OpenBao (automatic custody) first, or choose a password yourself.');
+  if ((p.generate || p.keepInOpenBao) && !vaultReady(db)) throw fail('The password is kept in OpenBao. Finish OpenBao (automatic custody) first, or choose a password without keeping it there.');
   const result = applyFullPlatform(db, { revision: full.revision, reviewToken: reviewFullPlatform(db).reviewToken, reviewed: true }, req.user.id);
-  storeProtected(db, personalRef(r), p.generate ? { email: p.email, generate: true, expiresAt: Date.now() + 900_000 } : { email: p.email, password: p.password, expiresAt: Date.now() + 900_000 });
-  logAudit(req.user.id, 'INFISICAL_PERSONAL_HANDOFF_REQUESTED', 'setup_job', result.job.id, { generated: !!p.generate }, req.ip);
+  storeProtected(db, personalRef(r), p.generate ? { email: p.email, generate: true, expiresAt: Date.now() + 900_000 } : { email: p.email, password: p.password, keepInOpenBao: !!p.keepInOpenBao, expiresAt: Date.now() + 900_000 });
+  logAudit(req.user.id, 'INFISICAL_PERSONAL_HANDOFF_REQUESTED', 'setup_job', result.job.id, { generated: !!p.generate, keptInOpenBao: !!(p.generate || p.keepInOpenBao) }, req.ip);
   res.status(202).json(result);
 }));
 // Quick LDAP Link (docs/features/keycloak-ldap.md): the Keycloak administrator

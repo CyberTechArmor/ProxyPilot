@@ -22,9 +22,11 @@ jobs:
           cache-dependency-path: admin/backend/package-lock.json
       - run: npm ci --no-audit --no-fund
         working-directory: admin/backend
+      - run: npm ci --no-audit --no-fund
+        working-directory: cli
       - name: Authentication, authorization, upgrade and dependency regressions
         working-directory: admin/backend
-        run: node --test src/__tests__/security-*.test.js src/__tests__/sso-transport.test.js src/__tests__/webauthn.test.js src/__tests__/mcp-*.test.js src/__tests__/ldap.test.js src/__tests__/notification-logic.test.js
+        run: node --test src/__tests__/security-*.test.js src/__tests__/sso-transport.test.js src/__tests__/webauthn.test.js src/__tests__/mcp-*.test.js src/__tests__/ldap.test.js src/__tests__/notification-logic.test.js src/__tests__/root-recovery.test.js
       - run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - run: bash -n install.sh update.sh
   audit:

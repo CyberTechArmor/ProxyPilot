@@ -193,7 +193,7 @@ through authorized upload routes. Several Nodemailer advisories concern options
 not accepted by the notification wrapper; the package is updated regardless.
 
 The image moves from EOL Node 20 to Node 24 LTS and installs the lockfile with
-npm ci. Native SQLite moves to 12.11.1 for supported runtime compatibility.
+npm ci. Backend and recovery CLI native SQLite move to 12.11.1 for supported runtime compatibility.
 Native installs/build hosts require Node 22.15+ or 24; update preflight refuses
 older versions before rebuild, and installation selects 24. The agent builder
 moves from Go 1.21.13 to verified Go 1.27.1 tarballs with pinned SHA-256 checks.
@@ -222,3 +222,8 @@ Primary references: [Multer array-index advisory](https://github.com/expressjs/m
 [cron migration](https://nodecron.com/migrating-from-v3.html),
 [Node release support](https://nodejs.org/en/about/previous-releases), and
 [Go release checksums](https://go.dev/dl/?mode=json).
+
+S7 CI follow-up: all 13 checks on the first PR revision passed, including the
+Unix-socket CVE-driver tests and both storage integration jobs. The recovery
+CLI SQLite dependency is also upgraded for Node 24, and its recovery tests are
+included in the security workflow.

@@ -1,3 +1,4 @@
+import { multipartLimits } from '../lib/multipart-limits.js';
 import { protectionForRoute, pomeriumHandlerLines } from '../lib/setup-engine/pomerium-routes.js';
 import { readSystemStats } from '../lib/system-stats.js';
 import { Router } from 'express';
@@ -4239,7 +4240,7 @@ const zipStorage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, ZIP_UPLOAD_TMP_DIR),
   filename: (_req, _file, cb) => cb(null, `${randomBytes(16).toString('hex')}.zip`),
 });
-const zipUpload = multer({ storage: zipStorage, limits: { fileSize: ZIP_LIMITS.maxZipBytes } });
+const zipUpload = multer({ storage: zipStorage, limits: multipartLimits(ZIP_LIMITS.maxZipBytes) });
 
 // Multer surfaces LIMIT_FILE_SIZE through the error middleware,
 // which would render as an opaque 500 — translate it to a clear 413.

@@ -528,7 +528,7 @@ install_dependencies() {
 # Required Go toolchain version for building the host-side agent.
 # Bumping this is a deliberate decision — anything older predates
 # language features the agent relies on.
-AGENT_GO_VERSION="1.21.13"
+AGENT_GO_VERSION="1.27.1"
 
 # Print the installed Go version (e.g. "1.22.4") on stdout, or empty
 # string if Go isn't available. Used by the version comparison below
@@ -585,6 +585,10 @@ ensure_go_toolchain() {
     if ! curl -fsSL -o "${tmpdir}/${tarball}" "$url"; then
         log_error "Failed to download Go from $url"
         rm -rf "$tmpdir"
+        exit 1
+    fi
+    if ! (cd "${tmpdir}" && sha256sum --ignore-missing -c "${SCRIPT_DIR}/deploy/go-toolchain.sha256"); then
+        echo "Go download checksum failed; existing toolchain retained" >&2
         exit 1
     fi
     rm -rf /usr/local/go
@@ -1649,9 +1653,9 @@ main() {
     # Build frontend on host (faster than building in Docker)
     log_info "Building frontend..."
     cd "${INSTALL_DIR}/admin/frontend"
-    if ! command -v node &> /dev/null; then
-        log_info "Installing Node.js..."
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    if ! command -v node &> /dev/null || ! node -e 'const [m,n]=process.versions.node.split(".").map(Number);process.exit((m===24||(m===22&&n>=15))?0:1)'; then
+        log_info "Installing supported Node.js 24 LTS..."
+        curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
         apt-get install -y nodejs
     fi
     npm ci

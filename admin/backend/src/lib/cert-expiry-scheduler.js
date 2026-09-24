@@ -69,7 +69,7 @@ export function register() {
   try {
     task = cron.schedule(expr, () => {
       try { runOnce(); } catch (err) { logger('runOnce threw', { error: err?.message }); }
-    }, { scheduled: true, timezone: process.env.TZ || 'UTC' });
+    }, {  timezone: process.env.TZ || 'UTC' });
     logger(`registered (cron=${expr})`);
   } catch (err) {
     logger('register failed', { error: err?.message });
@@ -77,7 +77,7 @@ export function register() {
 }
 
 export function unregister() {
-  if (task) { try { task.stop(); } catch { /* ignore */ } task = null; }
+  if (task) { try { task.destroy(); } catch { /* ignore */ } task = null; }
 }
 
 export function hydrate() {

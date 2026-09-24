@@ -133,11 +133,19 @@ export function spawnTerminalPty({ kind, target, mode = 'exec', cols = 80, rows 
     if (translated) startCwd = translated;
   }
 
+  // A native backend can inherit its update service's environment. A fresh
+  // terminal is not that runner and must not skip its own update handoff.
+  const env = { ...process.env, TERM: 'xterm-256color' };
+  for (const key of ['PROXYPILOT_UPDATE_RUNNER', 'PROXYPILOT_UPDATE_REEXEC', 'PROXYPILOT_TERMINAL_HANDOFF', 'PROXYPILOT_TERMINAL']) {
+    delete env[key];
+  }
+  if (kind === 'host') env.PROXYPILOT_TERMINAL = 'host';
+
   return pty.spawn(cmd, args, {
     name: 'xterm-256color',
     cols,
     rows,
     cwd: startCwd,
-    env: { ...process.env, TERM: 'xterm-256color' },
+    env,
   });
 }

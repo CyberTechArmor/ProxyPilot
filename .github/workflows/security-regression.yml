@@ -36,6 +36,8 @@ jobs:
         working-directory: admin/backend
         run: sudo "$(command -v node)" --test src/__tests__/security-bootstrap*.test.js
       - run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Terminal update handoff (disposable command boundaries, root entry)
+        run: sudo python3 -m unittest discover -s scripts/tests -p 'test_update_terminal.py'
       - run: python3 scripts/host-boundary-inventory.py
       - name: Agent client and selected-agent outage behavior
         working-directory: admin/backend

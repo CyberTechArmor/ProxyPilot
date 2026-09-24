@@ -310,8 +310,11 @@ warning followed by starting an incompatible runner.
 ### Recovering a host already stopped at the old Node-version gate
 
 The affected updater checks Node **before fetching**, so its Update button
-cannot fetch this correction. On the host, pull the recorded checkout once and
-run the supported updater (no flags are removed and no local changes discarded):
+cannot fetch this correction. From **SSH or the server console**, pull the
+recorded checkout once and run the supported updater (no flags are removed and
+no local changes discarded). Keep that SSH session open until the final health
+check succeeds. Earlier updater versions must not run inside ProxyPilot's own
+terminal: stopping the dashboard also kills its terminal's processes.
 
 ```sh
 sudo bash <<'SH'
@@ -334,3 +337,63 @@ repository/apt failure, false installation success and npm failure through tee.
 The real updater still refuses restricted Compose before runtime mutation.
 Runner/progress and database-maintenance/recovery regression tests pass. A live
 Debian/Ubuntu package upgrade and production deployment were not performed.
+
+### Updates started inside the dashboard terminal
+
+The host terminal now marks its shell with `PROXYPILOT_TERMINAL=host`. Before
+taking the update lock or changing the application, `update.sh` recognizes that
+marker (or the old Docker marker) in its environment or an ancestor shell,
+including when `sudo` has cleared the child environment. A restarting update
+is handed to an independent root systemd service named
+`proxypilot-terminal-update-<time>-<pid>`. The service owns its process lifetime
+and journal output; it has no browser PTY. If handoff is unavailable or refused,
+the updater stops before making changes and asks for SSH/console execution.
+`nohup` alone would still leave an updater in the dashboard container's cgroup.
+
+The detached service uses safe noninteractive defaults and preserves explicitly
+selected Compose overrides. It never adds `--discard-local`. The existing
+dashboard Update button and MCP update runner already use an independent host
+service. A manual terminal handoff is logged in its journal and
+`/tmp/proxypilot-update.log`; it does not create a dashboard update-history job.
+`--no-restart` remains in the foreground and reports only build completion.
+
+Handoff is **not completion**. The script prints “Update completed successfully”
+only after restart, a successful `/api/health` response, and runner installation.
+Use the exact `journalctl` command printed by the handoff to inspect progress
+and the result after the browser disconnects. Host API readiness does not prove
+that an external reverse-proxy route is reachable.
+
+If an older terminal-launched update left the Docker dashboard unavailable,
+inspect it from **SSH/console**:
+
+```sh
+sudo docker ps -a --filter name=proxypilot-admin
+sudo tail -n 80 /tmp/proxypilot-update.log
+```
+
+For the standard `/opt/proxypilot` Docker install, the following attempts to
+start the existing image, refusing while an updater still owns its lock. Use
+the same Compose overrides as the installation if you configured any. It
+neither rebuilds an image nor restores a database:
+
+```sh
+sudo flock -n -E 75 /var/lock/proxypilot-update.lock bash -c '
+  set -e
+  cd /opt/proxypilot
+  docker compose up -d --no-build --pull never
+  docker compose ps
+'
+```
+
+Exit 75 means an update is still active; inspect its journal before intervening.
+If the container exits or remains unhealthy, inspect
+`sudo docker logs --tail 100 proxypilot-admin` before attempting a rebuild or
+database recovery. A native installation needs its own service/process-manager
+recovery, not this Docker command. Starting the old image does not install the
+source correction; pull and run the updater from SSH/console afterward.
+
+Validation: tests execute the actual updater entry with only host commands
+stubbed, verify sudo-style ancestor detection, lock release during handoff,
+failure refusal and honest completion, and exercise the real PTY factory and
+the deployed frontend build gate. Stopping a real dashboard container under
+systemd still requires disposable-host acceptance; these tests do not claim it.

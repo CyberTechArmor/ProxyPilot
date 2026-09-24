@@ -2383,6 +2383,12 @@ export function initDatabase() {
   runMigration(db, 1009, 'setup_full_platform', (d) => d.exec(FULL_PLATFORM_SCHEMA));
   // 1010: Quick LDAP Link — the one Keycloak directory link (non-secret config, recorded component id, sync counts).
   runMigration(db, 1010, 'setup_keycloak_ldap', (d) => d.exec(KEYCLOAK_LDAP_SCHEMA));
+  // 1011: an allowlist may guard named paths only (Vaultwarden open with /admin
+  // restricted; Keycloak's /admin restricted) — lib/setup-engine/platform-access.js.
+  runMigration(db, 1011, 'route_ip_allowlist_paths', (d) => {
+    const cols = d.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);
+    if (cols.length && !cols.includes('ip_allowlist_paths_json')) d.exec('ALTER TABLE service_http_routes ADD COLUMN ip_allowlist_paths_json TEXT');
+  });
 
   runMigration(db, 1002, 'setup_platform_plan', (d) => {
     d.exec(PLATFORM_PLAN_SCHEMA);

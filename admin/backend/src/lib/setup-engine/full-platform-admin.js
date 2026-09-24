@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import { approvedFetch } from '../sso/oidc.js';
+import { keycloakFetch } from '../sso/oidc.js';
 import { readConfig, activationReadiness, readinessText } from '../sso/store.js';
 import { protectedValue, storeProtected, keycloakAdmin } from './full-platform-keycloak.js';
 import { readFullPlatform, fail } from './full-platform-store.js';
@@ -69,7 +69,7 @@ export async function runAdministrator(db, full, operation, job, { send } = {}) 
       job = guarded;
       if (operation === 'administrator') {
         if (bootstrap.retired) throw fail('The bootstrap account is already retired. Use permanent administration; it will not be recreated.');
-        const authority = await keycloakAdmin(k, bootstrap.password, { send, job, ...(bootstrap.username ? { username: bootstrap.username } : {}) });
+        const authority = await keycloakAdmin(k, bootstrap.password, { send: send || keycloakFetch(db, k.origin), job, ...(bootstrap.username ? { username: bootstrap.username } : {}) });
         try {
           const ensureUser = async (realm, key) => {
             const base = `/admin/realms/${encodeURIComponent(realm)}`, query = `${base}/users?username=${encodeURIComponent(profile.username)}&exact=true`;
@@ -119,7 +119,7 @@ export async function runAdministrator(db, full, operation, job, { send } = {}) 
       if (!sso || !activationReadiness(db, sso, profile.localUserId).ready) throw fail('The current SSO/recovery evidence expired or changed. The bootstrap account was retained.');
       const link = db.prepare('SELECT subject FROM sso_links WHERE issuer=? AND user_id=?').get(sso.config.issuer, profile.localUserId);
       if (link?.subject !== profile.applicationId) throw fail('The linked application identity differs from this handoff.');
-      const fetcher = send || approvedFetch(k.origin);
+      const fetcher = send || keycloakFetch(db, k.origin);
       job.fence();
       const response = await fetcher(`${k.origin}/realms/master/protocol/openid-connect/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: 'admin-cli', grant_type: 'password', scope: 'openid', username: profile.username, password: input.password, ...(input.otp ? { totp: input.otp } : {}) }).toString() });
       job.fence(); if (!response.ok) throw fail('Permanent administrator fresh login failed. The temporary administrator was retained.');

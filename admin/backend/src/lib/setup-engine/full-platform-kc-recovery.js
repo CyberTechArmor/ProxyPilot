@@ -23,6 +23,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { readFullPlatform, installedTargets, digest, fail } from './full-platform-store.js';
 import { createJob, getJob, jobView } from './store.js';
 import { protectedValue, storeProtected, keycloakAdmin } from './full-platform-keycloak.js';
+import { keycloakFetch } from '../sso/oidc.js';
 import { resourceNames, KEYCLOAK_ROOT } from './keycloak-logic.js';
 import { atomicPrivate } from './pomerium-runtime.js';
 import { withKeycloakLease } from './full-platform-admin.js';
@@ -78,6 +79,7 @@ export function queueRecovery(db, { revision, reviewToken, reviewed }, by, { via
 export async function runKeycloakRecovery(db, full, job, exec, { root = KEYCLOAK_ROOT, send, admin = keycloakAdmin } = {}) {
   const k = installedTargets(db).keycloak?.row;
   if (!k || k.ownership !== 'managed') throw fail('Only an owned Keycloak installation can be recovered.');
+  send ||= keycloakFetch(db, k.origin);
   const bootstrapRef = full.state?.identity?.bootstrapRef || `keycloak-bootstrap-${k.id}`;
   return withKeycloakLease(db, job, async (guarded) => {
     job.checkpoint('keycloak_bootstrap_recovery', { resumable: true });

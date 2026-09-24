@@ -1,6 +1,7 @@
 import { queueAdministrator } from '../lib/setup-engine/full-platform-admin.js';
 import { Router } from 'express';
 import { getDb, logAudit } from '../db.js';
+import * as dbModule from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { localProofRefusal, requestOrigin, sessionContext } from '../lib/sso/sessions.js';
 import { fullPlatformState, saveFullPlatform, applyFullPlatform, approvalDnsRefusal, reviewFullPlatform, configSchema, readFullPlatform, removedRefusal, fail } from '../lib/setup-engine/full-platform-store.js';
@@ -14,6 +15,7 @@ import { z } from 'zod';
 import { lifecycleReview, queueLifecycle } from '../lib/setup-engine/full-platform-lifecycle.js';
 import { resetReview, queueReset } from '../lib/setup-engine/full-platform-reset.js';
 import { ldapState, queueLdap } from '../lib/setup-engine/keycloak-ldap.js';
+import { accessState, applyAccess, clientAddress } from '../lib/setup-engine/platform-access.js';
 export const fullPlatformRouter = Router();
 fullPlatformRouter.use(requireAdmin);
 fullPlatformRouter.use((_req, res, next) => { res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' }); next(); });
@@ -88,6 +90,24 @@ fullPlatformRouter.post('/infisical/administrator', requireSudo, handle((req, re
 // and bind passwords are a personal credential entry — fresh local proof, no
 // MCP tool, audited without values; the job deletes ProxyPilot's copies.
 fullPlatformRouter.get('/ldap', handle((_req, res) => res.json(ldapState(getDb()))));
+// Who can reach each service: three switches, applied at once (platform-access.js).
+// Through the namespace: test fixtures stub db.js without getAdminDomain.
+const getAdminDomain = () => { try { return dbModule.getAdminDomain?.() || null; } catch { return null; } };
+fullPlatformRouter.get('/access', handle((req, res) => res.json({ ...accessState(getDb(), { adminDomain: getAdminDomain() }), client: clientAddress(req) })));
+fullPlatformRouter.post('/access', requireSudo, async (req, res) => {
+  try {
+    const db = getDb();
+    { const refusal = localProofRefusal(db, req.session.id, requestOrigin(req), 'Changing who can reach the services'); if (refusal) return res.status(refusal.status).json(refusal.body); }
+    const [{ regenerateDomainCaddyConfig, ensureCaddyStructure }, { caddyAdapt, caddyReload }] = await Promise.all([import('./services.js'), import('../lib/caddy-driver.js')]);
+    const client = clientAddress(req);
+    const before = accessState(db, { adminDomain: getAdminDomain() }).applied;
+    const state = await applyAccess(db, req.body, { client, adminDomain: getAdminDomain(), deps: {
+      regenerate: async (d) => { try { await ensureCaddyStructure(); } catch { /* regenerate re-checks */ } await regenerateDomainCaddyConfig(db, d); },
+      adapt: () => caddyAdapt({}), reload: () => caddyReload({}) } });
+    logAudit(req.user.id, 'PLATFORM_ACCESS_APPLIED', 'platform_access', '1', { before, after: state.applied, client }, req.ip);
+    res.json({ ...state, client });
+  } catch (e) { res.status(e.status || 400).json({ code: e.code || 'PLATFORM_ACCESS', error: e.fullPlatformSafe ? e.message : e.name === 'ZodError' ? 'Choose restricted or open for each switch.' : 'The access change could not be applied.' }); }
+});
 for (const [path, operation] of [['/ldap', 'link'], ['/ldap/remove', 'remove']]) fullPlatformRouter.post(path, requireSudo, handle((req, res) => {
   const db = getDb();
   { const refusal = localProofRefusal(db, req.session.id, requestOrigin(req), 'Entering a personal credential'); if (refusal) return res.status(refusal.status).json(refusal.body); }

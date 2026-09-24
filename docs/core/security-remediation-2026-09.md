@@ -7,7 +7,7 @@ as its own tested commit and pull request. A merge is not a deployment.
 | --- | --- | --- |
 | S1 | Service authorization and Compose command injection | Fixed; focused tests below |
 | S2 | Terminal WebSocket authorization | Fixed; tests and limits below |
-| S3 | Predictable trusted-device MFA bypass | Open |
+| S3 | Predictable trusted-device MFA bypass | Fixed; migration 1012 |
 | S4 | TOTP replacement and enrollment proof | Open |
 | S5 | MCP scope and child-key escalation | Open |
 | S6 | Web backend holds host-root authority | Open; requires architectural migration |
@@ -75,3 +75,24 @@ passes. The terminal layout and modal markup are unchanged. Mobile visual QA
 and a real sibling-origin browser check remain unexecuted: this environment
 has no installed browser, and the browser download failed. HTTP upgrade tests
 exercise hostile sibling and absent Origin headers directly.
+
+## S3: retire fingerprint device trust
+
+Password sign-in always requires TOTP. Request headers, `deviceFingerprint`
+and `registerDevice` can no longer create or exercise MFA exemptions. Passkey
+sign-in retains its existing verification. The login page removes the old
+remember-device switch and explains the new behavior.
+
+**Upgrade notice:** migration 1012 deletes legacy trusted-device records and
+revokes pre-upgrade sessions/sudo grants. Users must sign in again with their
+existing factors. Password hashes, TOTP seeds and passkeys are preserved. The
+versioned migration runs once; subsequent starts preserve newly authenticated
+sessions. No replacement device-trust credential is introduced.
+
+Validation: the actual login-route regression and all eleven guided SSO tests
+pass, including copied fingerprints and matching headers. Ten passkey guard
+checks and an actual initDatabase upgrade/idempotence test pass using Node's
+SQLite engine through a test-only adapter because native better-sqlite3
+bindings are unavailable in this environment. The unadapted passkey suite
+could not start; it was not counted as a native pass. Frontend build passes.
+Browser visual QA remains unavailable as described under S2.

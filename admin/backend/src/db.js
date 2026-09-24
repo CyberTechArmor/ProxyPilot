@@ -1830,7 +1830,7 @@ export function initDatabase() {
     )
   `);
 
-  // Create authenticated devices table for TOTP-free login on trusted devices
+  // Legacy device inventory retained for API compatibility; never authentication proof.
   db.exec(`
     CREATE TABLE IF NOT EXISTS authenticated_devices (
       id TEXT PRIMARY KEY,
@@ -1851,6 +1851,13 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_devices_user_fingerprint
     ON authenticated_devices(user_id, device_fingerprint)
   `);
+
+  // Retire predictable device trust and any sessions minted through the old
+  // bypass. Passwords, TOTP seeds and passkeys are deliberately preserved.
+  runMigration(db, 1012, 'retire_fingerprint_device_trust', (d) => {
+    d.exec('DELETE FROM authenticated_devices');
+    d.exec('UPDATE sessions SET revoked_at=CURRENT_TIMESTAMP, sudo_until=NULL WHERE revoked_at IS NULL');
+  });
 
   // Create service config versions table for version control on settings
   db.exec(`

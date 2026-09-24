@@ -48,7 +48,7 @@ ordinary reverse proxy or successful login as host isolation.
 | S2 terminals | Host terminals require local administrator proof within five minutes and sudo; SSO operators use the configured local recovery origin. Guest users need proxy feature permission and a write grant on the exact guest service. Add only deliberate exact development origins |
 | S3 migration 1012 | Existing sessions/sudo and fingerprint-only trusted devices are invalidated once. Announce sign-in with existing MFA/passkeys. Passwords, TOTP seeds and passkeys are preserved |
 | S4 migration 1013 | Unfinished-enrollment sessions and MCP authority are retired. Password login resumes limited enrollment; finish MFA before normal access. Factor replacement needs the current factor/password (or supported passkey proof), then signs out existing sessions |
-| S5 migration 1014 | All historical MCP keys pause for explicit review because ancestry is unknown. Use MCP Access under a freshly proven local admin session to approve a specific scope and expiry or revoke/reissue. Reviewing preserves the secret hash and establishes an explicit new root grant. New children cannot exceed parent authority or survive its revocation |
+| S5 migrations 1014/1016 | Dashboard roots with unique matching creation audits resume with their original scope, expiry and secret. Unverified historical keys remain paused: use **Restore connection**, choose scope/expiry and save with fresh local admin proof. **Allow all tools** is the new-connection default and really grants the full catalog, including self-edit. Saving existing access preserves the secret/URL and establishes a new root grant. Child containment and revocation remain enforced |
 | S5 logging | Prefer bearer headers. Verify MCP URL credentials, Authorization, Cookie and Referer are removed from both Caddy access/runtime output and application errors; inspect with a disposable sentinel, never a live token |
 | S8 migration 1015 | Initialized accounts keep their identity and factors. Public setup exposes no username. Unclaimed local admins require a root-issued bootstrap credential and then limited MFA enrollment |
 
@@ -74,7 +74,7 @@ acceptance and backup. Existing update failure/maintenance recovery and job
 fencing remain in place. Record the actual installed SHA; an up-to-date version
 label alone does not prove which fixes are running.
 
-Verify application health, schema migration records 1012–1015 and a successful
+Verify application health, schema migration records 1012–1016 and a successful
 local MFA/passkey login. Check Keycloak/Pomerium sign-in and local recovery from
 their configured origins. Use test identities for denied service access,
 pending/enrollment-only API and WebSocket denial, delegated guest success,
@@ -82,7 +82,8 @@ host-terminal fresh proof, and already-open terminal revocation. Quiet terminal
 checks run every five seconds; SSO's existing status cache may add up to sixty
 seconds.
 
-Review/reissue the intended MCP keys before reconnecting automation. Test one
+Refresh the MCP client tool list after upgrade; review any keys still awaiting
+review in MCP Access before reconnecting automation. Test one
 allowed operation and one denied cross-resource/child-escalation operation.
 Check real job runner heartbeat, a non-destructive setup/lifecycle job, and
 backup/restore verification on disposable resources. Confirm agent ping and
@@ -91,8 +92,9 @@ outage test must not activate any newly migrated privileged fallback; legacy
 storage/backend paths remain an S6 blocker, explicitly not a passing result.
 
 Inspect login, factor replacement, MCP review and host-terminal entry at desktop
-and 360px widths, including keyboard navigation and visible errors. These browser
-checks were not executed in the coding environment. Also run a real sibling-
+and 360px widths, including keyboard navigation and visible errors. The MCP correction was browser-tested at 360/375/390/768/1280/1920px with
+Lighthouse mobile accessibility 98; the other security-flow browser checks
+were not executed in the coding environment. Also run a real sibling-
 origin WebSocket rejection test; source tests used actual upgrades with explicit
 Origin headers and a fake PTY.
 

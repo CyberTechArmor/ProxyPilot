@@ -4777,6 +4777,10 @@ export function createMcpRouter() {
 export function createMcpAdminRouter() {
   const router = express.Router();
 
+  router.get('/tools', requireAdmin, (req, res) => {
+    res.json({ tools: MCP_TOOLS.map(({name,description})=>({name,description})) });
+  });
+
   router.get('/', requireAdmin, (req, res) => {
     let rows = [];
     try {

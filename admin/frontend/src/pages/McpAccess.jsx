@@ -1,22 +1,9 @@
-// MCP Access — connect a Claude subscription (or any MCP client) to ProxyPilot.
-//
-// ProxyPilot exposes a remote MCP server (routes/mcp.js): static-site & LXC
-// zip deploys with the same ask-before-replace flow as the UI, and Projects
-// (list, create, clone, file editing, reference upload). No tool on that
-// surface queues a build, so a connected chat never spends the project's
-// configured API budget — the harness lane stays in the UI. This page mints and
-// revokes the access tokens. The raw token — and the ready-to-paste claude.ai
-// connector URL — is shown exactly once at mint time; only a hash is stored.
-//
-// Originally shipped as a card on /security, which has redirected to /cves
-// since the CVE inbox superseded it — i.e. the card was unreachable (operator
-// report). It now has its own page and sidebar entry.
-//
-// MOBILE_FIRST: single column, 44px targets, copy rows truncate not overflow.
+// MCP connection administration: full tool access by default, explicit custom scopes.
+// Token secrets are shown once; existing connections retain their token on update.
 
 import { useEffect, useState, useCallback } from 'react';
 import { Navigate } from 'react-router-dom';
-import { api, ApiError } from '@/lib/api';
+import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -33,18 +20,23 @@ export default function McpAccess() {
   const [name, setName] = useState('');
   // Explicit lifetime; 0 is the administrator's non-expiring choice.
   const [expiresDays, setExpiresDays] = useState('30');
-  const [scopeText,setScopeText]=useState('{"tools":["list_lxc_containers","list_projects"]}');
-  const [fullAccess,setFullAccess]=useState(false);
+  const [scopeText, setScopeText] = useState('{"tools":[]}');
+  const [fullAccess, setFullAccess] = useState(true);
+  const [tools, setTools] = useState([]);
+  const [toolSearch, setToolSearch] = useState('');
+  const [loadError, setLoadError] = useState('');
   const [reviewId,setReviewId]=useState(null);
   const [busy, setBusy] = useState(false);
   const [minted, setMinted] = useState(null); // { token, connector_url, endpoint } — shown once
 
   const load = useCallback(async () => {
     try {
-      const r = await api.mcpListTokens();
+      const [r, catalog] = await Promise.all([api.mcpListTokens(), api.mcpListTools()]);
       setTokens(r.tokens || []);
+      setTools(catalog.tools || []);
+      setLoadError('');
     } catch (err) {
-      if (!(err instanceof ApiError)) console.error('load mcp tokens failed:', err);
+      setLoadError(err.message || 'Could not load MCP access');
     }
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -54,15 +46,20 @@ export default function McpAccess() {
   const mint = async () => {
     setBusy(true);
     try {
-      const scope=JSON.parse(scopeText);
+      // All tools is the actual policy, not an acknowledgment beside a
+      // still-restricted JSON value. Includes self-edit; feature gates remain.
+      const scope = fullAccess ? { self_edit: true } : JSON.parse(scopeText);
       if(expiresDays==='') throw new Error('Choose an expiry in days');
       const r = reviewId ? await api.mcpReviewToken(reviewId,Number(expiresDays),scope,fullAccess) : await api.mcpCreateToken(name.trim() || 'MCP client',Number(expiresDays),scope,fullAccess);
       setMinted(reviewId ? null : r);
+      if (reviewId) toast({ title: 'Connection updated', description: 'Your existing token and connector URL still work. Refresh the tools in your MCP client.' });
       setReviewId(null);
       setName('');
-      load();
+      setFullAccess(true);
+      setScopeText('{"tools":[]}');
+      await load();
     } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not create token', description: err.message });
+      toast({ variant: 'destructive', title: reviewId ? 'Could not update connection' : 'Could not create token', description: err.message });
     } finally {
       setBusy(false);
     }
@@ -87,6 +84,16 @@ export default function McpAccess() {
   };
 
   const active = tokens.filter((t) => !t.revoked_at);
+  const visibleTools = tools.filter(t => `${t.name} ${t.description}`.toLowerCase().includes(toolSearch.toLowerCase()));
+  const editToken = (token) => {
+    setReviewId(token.id);
+    setName(token.name);
+    setScopeText(token.scope_json || 'null');
+    const scope = token.scope;
+    setFullAccess(!scope?.invalid && scope?.tools == null && scope?.lxc_containers == null && scope?.project_ids == null && (scope?.self_edit === true || token.scope_json == null));
+    setExpiresDays(token.expires_at ? String(Math.max(1, Math.ceil((Date.parse(token.expires_at) - Date.now()) / 86400000))) : '0');
+  };
+  const cancelEdit = () => { setReviewId(null); setName(''); setFullAccess(true); setScopeText('{"tools":[]}'); setExpiresDays('30'); };
 
   return (
     <div className="space-y-4">
@@ -95,12 +102,12 @@ export default function McpAccess() {
         <h1 className="text-lg font-semibold">MCP Access</h1>
       </div>
       <p className="text-xs text-muted-foreground max-w-2xl">
-        Connect a Claude subscription (or any MCP client) to ProxyPilot. The tools cover
-        static-site &amp; LXC zip deploys — with the same ask-before-replace confirmation the UI
-        uses — and Projects: create, clone, status, file editing and reference uploads. Connected
-        chats cannot queue builds, so they never spend a project&apos;s API budget.
+        Connect your MCP client to manage services, guests, projects, builds, storage and the
+        platform. New connections allow all tools by default. Custom scopes are optional;
+        feature switches and each operation's confirmation checks still apply.
       </p>
 
+      {loadError && <p role="alert" className="text-sm text-destructive">{loadError}</p>}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Access tokens</CardTitle>
@@ -119,44 +126,61 @@ export default function McpAccess() {
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="shrink-0 text-muted-foreground w-28">Connector URL</span>
                   <code className="min-w-0 flex-1 truncate">{minted.connector_url}</code>
-                  <Button variant="outline" size="sm" className="h-9 shrink-0" onClick={() => copyText(minted.connector_url, 'Connector URL')}>
+                  <Button variant="outline" size="sm" aria-label="Copy connector URL" className="h-11 w-11 sm:h-9 sm:w-auto shrink-0" onClick={() => copyText(minted.connector_url, 'Connector URL')}>
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
                 </div>
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="shrink-0 text-muted-foreground w-28">Bearer token</span>
                   <code className="min-w-0 flex-1 truncate">{minted.token}</code>
-                  <Button variant="outline" size="sm" className="h-9 shrink-0" onClick={() => copyText(minted.token, 'Token')}>
+                  <Button variant="outline" size="sm" aria-label="Copy bearer token" className="h-11 w-11 sm:h-9 sm:w-auto shrink-0" onClick={() => copyText(minted.token, 'Token')}>
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
                 </div>
-                <p className="text-muted-foreground">Endpoint for header-auth clients: <code>{minted.endpoint}</code></p>
+                <p className="text-muted-foreground break-all">Endpoint for header-auth clients: <code>{minted.endpoint}</code></p>
                 <p className="text-muted-foreground">
                   The connector URL contains the token — treat the whole URL as a secret.
                 </p>
               </div>
-              <Button variant="outline" size="sm" className="h-9" onClick={() => setMinted(null)}>Done — I stored it</Button>
+              <Button variant="outline" size="sm" className="h-11 sm:h-9" onClick={() => setMinted(null)}>Done — I stored it</Button>
             </div>
           ) : null}
 
-          {reviewId && <p className="text-sm font-medium">Review key #{reviewId}. Approving creates a new root grant with the scope and expiry below; its secret is preserved.</p>}
+          {reviewId && <p role="status" className="text-sm font-medium">Editing {name}. Saving updates this connection without replacing its token or URL.</p>}
           <div className="space-y-2">
-            <label htmlFor="mcp-scope" className="text-sm font-medium">Allowed tools and resources (JSON)</label>
-            <textarea id="mcp-scope" className="w-full min-h-28 rounded-md border bg-background p-3 font-mono text-xs"
-              value={scopeText} onChange={e=>setScopeText(e.target.value)} />
-            <p className="text-xs text-muted-foreground">Fields: tools, lxc_containers, project_ids, self_edit. Empty arrays deny access. Omitted resource lists allow all resources for the selected tools.</p>
-            <label className="flex items-start gap-2 text-sm">
-              <input type="checkbox" className="mt-1 h-5 w-5 shrink-0" checked={fullAccess} onChange={e=>setFullAccess(e.target.checked)} />
-              I explicitly authorize full administrator tool access when the scope is null or has no allowlists.
+            <label className="flex min-h-11 cursor-pointer items-center gap-3 rounded-md border p-3 text-sm font-medium">
+              <input type="checkbox" className="h-5 w-5 shrink-0" checked={fullAccess} onChange={e => setFullAccess(e.target.checked)} />
+              Allow all tools
             </label>
+            <p className="text-xs text-muted-foreground">All tools includes administration and ProxyPilot self-editing across all resources. Saving requires your local administrator verification.</p>
+            {!fullAccess && <div className="space-y-2">
+              <label htmlFor="mcp-scope" className="text-sm font-medium">Custom tools and resources (JSON)</label>
+              <textarea id="mcp-scope" className="w-full min-h-28 rounded-md border bg-background p-3 font-mono text-xs"
+                value={scopeText} onChange={e => setScopeText(e.target.value)} />
+              <p className="text-xs text-muted-foreground">Fields: tools, lxc_containers, project_ids, self_edit. Empty arrays allow none. Omitted lists allow all in that dimension; use Allow all tools for unrestricted access.</p>
+            </div>}
+            <details open className="rounded-md border p-3">
+              <summary className="min-h-11 cursor-pointer text-sm font-medium">Available tools ({tools.length})</summary>
+              <label htmlFor="mcp-tool-search" className="sr-only">Search available tools</label>
+              <Input id="mcp-tool-search" placeholder="Search tools" value={toolSearch} onChange={e => setToolSearch(e.target.value)} className="mb-2" />
+              <ul aria-label="Available MCP tools" className="max-h-64 overflow-y-auto space-y-1">
+                {visibleTools.map(tool => <li key={tool.name} className="rounded border p-2 text-xs">
+                  <span className="font-mono font-medium break-all">{tool.name}</span>
+                  <p className="text-muted-foreground break-words">{tool.description}</p>
+                </li>)}
+              </ul>
+              {!visibleTools.length && <p className="text-xs text-muted-foreground">{tools.length ? 'No matching tools.' : 'Loading tool catalog…'}</p>}
+              <p className="mt-2 text-xs text-muted-foreground">This shows the full catalog. A custom-scoped connection only receives its permitted tools.</p>
+            </details>
           </div>
-          <div className="flex flex-col gap-2 sm:flex-row">
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
             <Input
               value={name}
+              disabled={!!reviewId}
               onChange={(e) => setName(e.target.value)}
               placeholder="Token name (e.g. Claude on my phone)"
               aria-label="Token name"
-              className="h-11 sm:h-10 flex-1"
+              className="h-11 sm:h-10 min-w-0 flex-1 sm:basis-48"
             />
             <Input
               type="number" inputMode="numeric" min="0" max="3650"
@@ -169,23 +193,24 @@ export default function McpAccess() {
             />
             <Button onClick={mint} disabled={busy} className="h-11 sm:h-10 shrink-0">
               {busy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-              {reviewId ? `Approve key #${reviewId}` : 'Create token'}
+              {reviewId ? 'Save connection' : 'Create token'}
             </Button>
+            {reviewId && <Button variant="outline" className="h-11 sm:h-10" onClick={cancelEdit} disabled={busy}>Cancel edit</Button>}
           </div>
           <p className="text-xs text-muted-foreground">
-            Choose a scope and expiry, then prove your local administrator identity. Keys awaiting review cannot authenticate. Child keys remain limited by their parents; revoking a parent disables descendants. 0 explicitly means no expiry.
+            Choose an expiry, then save. If a connection is awaiting review, edit it and save to restore access using the same URL. Child keys remain limited by their parents; revoking a parent disables descendants. 0 explicitly means no expiry.
           </p>
 
           {active.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No active tokens. The MCP endpoint refuses every request until one exists.</p>
+            <p className="text-xs text-muted-foreground">No connections yet. Create a token to connect your MCP client.</p>
           ) : (
             <div className="divide-y rounded-lg border">
               {active.map((t) => (
                 <div key={t.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-medium">{t.name}</div>
-                    <p className="text-xs break-all">Scope: {t.scope_json || 'full surface; no self-edit'}</p>
-                    <p className="text-xs">{t.authority_status}{t.parent_id ? ` · parent #${t.parent_id}` : ' · root key'}</p>
+                    <p className="text-xs break-all">Scope: {t.scope_json || 'All standard tools'}</p>
+                    <p className="text-xs break-words">{t.authority_status}{t.parent_id ? ` · parent #${t.parent_id}` : ' · root key'}</p>
                     <div className="text-xs text-muted-foreground">
                       Created {t.created_at ? new Date(t.created_at).toLocaleDateString() : '—'}
                       {t.last_used_at ? ` · last used ${new Date(t.last_used_at).toLocaleString()}` : ' · never used'}
@@ -193,8 +218,8 @@ export default function McpAccess() {
                       {t.owner_status && t.owner_status !== 'active' ? ` · owner ${t.owner_status}` : ''}
                     </div>
                   </div>
-                  <div className="flex gap-2 shrink-0">
-                  <Button variant="outline" className="h-11 sm:h-9" onClick={()=>{setReviewId(t.id);setName(t.name);setScopeText(t.scope_json || 'null');setFullAccess(false);setExpiresDays('30');}}>Review</Button>
+                  <div className="flex flex-wrap gap-2 shrink-0">
+                  <Button variant="outline" className="h-11 sm:h-9" onClick={() => editToken(t)}>{t.review_required ? 'Restore connection' : 'Edit access'}</Button>
                   <Button
                     variant="outline" size="sm"
                     className="h-11 w-11 sm:h-9 sm:w-auto sm:px-3 shrink-0 text-destructive"

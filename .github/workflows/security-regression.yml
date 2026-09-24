@@ -68,6 +68,11 @@ jobs:
           node-version: 24
       - run: npm ci --no-audit --no-fund && npm run build
         working-directory: admin/frontend
+      - name: MCP access browser regression
+        run: |
+          npm ci --prefix admin/backend --ignore-scripts --no-audit --no-fund
+          node admin/backend/node_modules/playwright-core/cli.js install --with-deps chromium
+          node admin/frontend/tests/mcp-access.browser.mjs
   agent:
     runs-on: ubuntu-latest
     timeout-minutes: 15

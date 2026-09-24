@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
 import { approvedFetch } from "../lib/sso/oidc.js";
 
 test("G3 credential transport uses real TLS, pinned DNS, exact origin, redirect refusal and bounded responses", async () => {
@@ -138,4 +139,23 @@ test("G3 credential transport uses real TLS, pinned DNS, exact origin, redirect 
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the local edge may be loopback (host runner); DNS answers are still screened", async () => {
+  const seen = [];
+  // A request double: records the pinned address the lookup hands out, answers 200.
+  const request = (url, options, onResponse) => {
+    const req = new EventEmitter();
+    req.write = () => {}; req.destroy = () => {};
+    req.end = () => { options.lookup(url.hostname, {}, (_e, address) => seen.push(address));
+      const res = new EventEmitter(); res.statusCode = 200; res.headers = {}; res.resume = () => {};
+      onResponse(res); res.emit("end"); req.emit("close"); };
+    return req;
+  };
+  const edge = { address: "127.0.0.1", headers: { "X-ProxyPilot-Self-Check": "a".repeat(48) } };
+  const viaEdge = approvedFetch("https://iam.example.com", { request, edge });
+  assert.equal((await viaEdge("https://iam.example.com/admin/realms/r/clients")).status, 200);
+  assert.deepEqual(seen, ["127.0.0.1"]);
+  const direct = approvedFetch("https://iam.example.com", { request, resolve: async () => [{ address: "127.0.0.1", family: 4 }] });
+  await assert.rejects(direct("https://iam.example.com/realms/r"), /blocked address/);
 });

@@ -1,7 +1,7 @@
 {
-  "name": "ProxyPilot Admin",
-  "short_name": "ProxyPilot",
-  "description": "Reverse-proxy and project management for ProxyPilot.",
+  "name": "Fractionate",
+  "short_name": "Fractionate",
+  "description": "Application, knowledge, and agent management.",
   "id": "/",
   "start_url": "/",
   "scope": "/",

@@ -293,7 +293,7 @@ test('route edge options render inside the handle block, wrapped in route {} onl
   const lines = routeEdgeOptionLines(opts, '    ', { routeId: 'r1' });
   assert.deepEqual(lines, [
     '    @pp_denied not remote_ip 10.0.0.0/8',
-    '    header @pp_denied Content-Type "text/plain; charset=utf-8"',
+    '    header @pp_denied Content-Type "text/html; charset=utf-8"',
     `    respond @pp_denied "${DENIED_BODY}" 403`,
     '    basic_auth {', '        ops $2b$x', '    }',
     '    header {', '        X-A "b c"', '        -X-Gone', '        Content-Security-Policy "default-src \'self\'"', '    }',

@@ -223,7 +223,7 @@ export function siteSecurityHeaderLines({ allowFramingRoute = null, frameAncesto
 // Bump when the rendered site-file shape changes in a way every existing file
 // must pick up. The backend compares it with app_settings.caddy_site_render_contract
 // at boot and regenerates all site files once (index.js).
-export const CADDY_SITE_RENDER_CONTRACT = '4'; // 3: allowlist refusals carry DENIED_BODY; 4: allowlist may apply to named paths only
+export const CADDY_SITE_RENDER_CONTRACT = '5'; // 3: allowlist refusals carry DENIED_BODY; 4: allowlist may apply to named paths only; 5: the refusal is an HTML page
 
 
 // ---- per-route edge options (migration 907; set_route_options over MCP) ----
@@ -334,7 +334,7 @@ export function validateRouteEdgeOptions(input = {}, { bcryptHash = null, rateLi
 // "access denied" page and says nothing; this names the source address Caddy
 // saw, which is what tells a VPN user their device resolved the hostname to
 // the public address (fix: the tunnel's DNS setting, see cli/src/core/vpn/dns.js).
-export const DENIED_BODY = 'Access denied (403). This hostname admits only its restricted networks, and this request came from {remote_host}. If you are connected to the VPN, your device resolved this name to the public address instead of through the tunnel: add DNS = 10.100.0.1 under [Interface] in the WireGuard config, reconnect, and retry.';
+export const DENIED_BODY = '<!doctype html><html lang=\'en\'><head><meta charset=\'utf-8\'><meta name=\'viewport\' content=\'width=device-width,initial-scale=1\'><meta name=\'robots\' content=\'noindex\'><title>Private address · VPN only</title><style>:root{color-scheme:light dark;--bg:#f4f6f8;--card:#fff;--fg:#0f172a;--muted:#5b6474;--line:#e2e8f0;--accent:#16a34a;--code:#eef2f6}@media (prefers-color-scheme:dark){:root{--bg:#0b1020;--card:#121a2e;--fg:#e6ebf5;--muted:#9aa6bd;--line:#223055;--accent:#22c55e;--code:#0e1528}}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px 16px;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}main{width:100%;max-width:560px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px 24px;box-shadow:0 10px 30px rgba(0,0,0,.08)}.badge{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);border-radius:999px;padding:4px 12px}h1{font-size:24px;line-height:1.25;margin:14px 0 8px}p{margin:0 0 12px;color:var(--muted)}strong{color:var(--fg)}code{font:14px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);border-radius:6px;padding:2px 6px;word-break:break-all}ol{margin:16px 0 0;padding-left:22px}li{margin:0 0 10px}.meta{margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-size:13px}</style></head><body><main><span class=\'badge\'>&#128274; VPN only</span><h1>This address is private</h1><p><strong>{http.request.host}</strong> only answers devices on the VPN or an approved network. This request came from <code>{remote_host}</code>.</p><ol><li><strong>Connect the VPN</strong> in the WireGuard app, then reload this page.</li><li><strong>Already connected?</strong> Your device looked this name up outside the tunnel. Add <code>DNS = 10.100.0.1</code> under <code>[Interface]</code> in the WireGuard config (or download a fresh config from ProxyPilot &rarr; VPN), reconnect and reload.</li></ol><p class=\'meta\'>Access denied (403) &middot; managed by ProxyPilot</p></main></body></html>';
 
 /** Caddyfile lines for a route's edge options, to go INSIDE the handle block before the proxy/file_server body. */
 export function routeEdgeOptionLines(opts, indent = '        ', { routeId = 'r', selfCheck = null } = {}) {
@@ -355,15 +355,15 @@ export function routeEdgeOptionLines(opts, indent = '        ', { routeId = 'r',
     lines.push(`${i2}    header ${selfCheck.header || 'X-ProxyPilot-Self-Check'} ${selfCheck.token}`);
     lines.push(`${i2}}`);
     lines.push(`${indent}}`);
-    lines.push(`${indent}header @pp_denied Content-Type "text/plain; charset=utf-8"`);
+    lines.push(`${indent}header @pp_denied Content-Type "text/html; charset=utf-8"`);
     lines.push(`${indent}respond @pp_denied ${q(DENIED_BODY)} 403`);
   } else if (opts.ip_allowlist && pathLine) {
     lines.push(`${indent}@pp_denied {`, pathLine, `${i2}not remote_ip ${opts.ip_allowlist.join(' ')}`, `${indent}}`);
-    lines.push(`${indent}header @pp_denied Content-Type "text/plain; charset=utf-8"`);
+    lines.push(`${indent}header @pp_denied Content-Type "text/html; charset=utf-8"`);
     lines.push(`${indent}respond @pp_denied ${q(DENIED_BODY)} 403`);
   } else if (opts.ip_allowlist) {
     lines.push(`${indent}@pp_denied not remote_ip ${opts.ip_allowlist.join(' ')}`);
-    lines.push(`${indent}header @pp_denied Content-Type "text/plain; charset=utf-8"`);
+    lines.push(`${indent}header @pp_denied Content-Type "text/html; charset=utf-8"`);
     lines.push(`${indent}respond @pp_denied ${q(DENIED_BODY)} 403`);
   }
   if (opts.basic_auth) {

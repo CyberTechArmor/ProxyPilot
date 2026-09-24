@@ -95,7 +95,7 @@ export function adminAccessSnippet(restricted, networks) {
   if (!restricted) return `${head}# access: open\n`;
   if (!networks.length) throw fail('No restricted networks are applied yet, so the dashboard cannot be made VPN-only.');
   const q = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-  return `${head}# access: restricted\n@pp_admin_denied {\n    not remote_ip ${networks.join(' ')}\n    not path ${DASHBOARD_MACHINE_PATHS.join(' ')}\n}\nheader @pp_admin_denied Content-Type "text/plain; charset=utf-8"\nrespond @pp_admin_denied ${q(DENIED_BODY)} 403\n`;
+  return `${head}# access: restricted\n@pp_admin_denied {\n    not remote_ip ${networks.join(' ')}\n    not path ${DASHBOARD_MACHINE_PATHS.join(' ')}\n}\nheader @pp_admin_denied Content-Type "text/html; charset=utf-8"\nrespond @pp_admin_denied ${q(DENIED_BODY)} 403\n`;
 }
 
 /** The dashboard's site file and whether it imports the snippet (or can be made to). */

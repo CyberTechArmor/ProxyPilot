@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { ServiceAccess } from '@/components/PlatformAccess';
 
 // Platform overview (top of the Platform section): the mcp.platform switch,
 // then one row per service. Everything shown comes from ONE backend call
@@ -167,6 +168,7 @@ function ServicePanel({ id, onClose, onChanged, openJob }) {
             <div className="min-w-0 text-sm"><p className="font-medium break-all">{c.name}</p><p className="text-xs text-muted-foreground break-all">{c.pending ? label(c.status) : c.present === false ? 'Expected but missing' : c.present === null ? 'Not inspected' : `${c.id || ''} · ${label(c.status)} · ${c.health}${c.exit_code != null ? ` · exit ${c.exit_code}` : ''}${c.log_driver ? ` · logs: ${c.log_driver}` : ''}`}</p>{c.error && <p className="text-xs text-destructive break-words">{c.error}</p>}</div>
             <div className="flex flex-col sm:flex-row gap-2 shrink-0">{['start', 'stop', 'restart'].map((verb) => { const a = act(`${verb}:${c.name}`); return a ? <Button key={verb} variant="outline" className="min-h-11 capitalize" disabled={!a.enabled || !!busy} title={a.reason || undefined} onClick={() => reviewContainer(c.name, verb)}>{verb}</Button> : null; })}</div>
           </li>)}</ul>{s.actions.some((a) => a.kind === 'container' && !a.enabled && a.reason?.includes('dependents')) && <p className="text-xs text-muted-foreground break-words">{s.actions.find((a) => a.kind === 'container' && a.reason?.includes('dependents')).reason}</p>}</section>}
+          <ServiceAccess service={id} />
           <section className="space-y-3"><h4 className="font-semibold">Actions</h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <ActionButton aid="retry" onClick={() => run('retry', async () => { const r = await api.platformServiceRetry(id); setNotice(`Adapter job queued: ${r.job.id}.`); await load(true); onChanged(); })} />

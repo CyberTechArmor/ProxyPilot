@@ -37,7 +37,11 @@ export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_R
   requireOk(await api('/api/status'),'Infisical status');
   const initialized=requireOk(await api('/api/v1/admin/config'),'Infisical administrator initialization').config?.initialized;
   if(r.config.basic&&r.config.mode==='install') {
-    const provisioned=await provision(db,r,api,{job});
+    // The proxied service references PROXY_KEY and Infisical v0.165 refuses a
+    // reference to a missing secret, so provisioning creates it first, with the
+    // same value and marker the later check (ensureTestSecret below) expects.
+    const ensureProxySecret=async(projectId,token)=>{const keys=prepareInfisicalFiles({...r,resources:r.config.mode==='install'?resources:r.resources},{root}).keys;await ensureTestSecret({...r,identities:{...(r.identities||{}),projectId}},keys.proxyTest,api,token,PROXY_KEY);};
+    const provisioned=await provision(db,r,api,{job,ensureProxySecret});
     if(!provisioned.ready)return {verification:{state:'awaiting_user_action',label:provisioned.action,complete:false}};
     r=readInfisical(db);
   } else if(initialized!==true)throw fail('Complete first-administrator setup through the restricted Infisical route, then perform the exact identity handoff and retry.');

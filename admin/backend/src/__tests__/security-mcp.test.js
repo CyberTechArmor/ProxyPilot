@@ -69,3 +69,24 @@ test('dashboard grants require CSRF, fresh local proof and explicit policy; revi
  const inventory=await f.request('/api/mcp-tokens',{cookie:session.cookie});assert(!JSON.stringify(inventory.data).includes(before));assert(!JSON.stringify(inventory.data).includes(minted.data.token));
  }finally{await f.close();}
 });
+test('dashboard all-tools grants expose the full catalog; restoring an empty connection keeps its secret',async()=>{
+ const f=await fixture();try{
+ const session=f.local();
+ assert.equal((await f.request('/api/mcp-tokens/tools')).status,401);
+ assert.equal((await f.request('/api/mcp-tokens/tools',{cookie:f.local('user').cookie})).status,403);
+ const catalog=await f.request('/api/mcp-tokens/tools',{cookie:session.cookie});assert.equal(catalog.status,200);
+ const names=catalog.data.tools.map(t=>t.name).sort();assert(names.length>50);assert(names.includes('apply_self_patch'));
+ const body={name:'all tools',scope:{self_edit:true},full_access:true,expires_in_days:30};
+ const created=await f.request('/api/mcp-tokens',{cookie:session.cookie,body});assert.equal(created.status,201,JSON.stringify(created.data));
+ const root={token:created.data.token};
+ assert.deepEqual((await f.rpc(root,'tools/list')).data.result.tools.map(t=>t.name).sort(),names);
+ assert.equal((await f.rpc(root,'get_settings')).data.result.isError,false);
+ const paused=f.key({tools:[]},{review:1});const hash=f.db.prepare('SELECT token_hash FROM mcp_tokens WHERE id=?').get(paused.id).token_hash;
+ assert.equal((await f.rpc(paused,'tools/list')).status,401);
+ assert.equal((await f.request(`/api/mcp-tokens/${paused.id}/review`,{cookie:session.cookie,body:{...body,review:true}})).status,200);
+ assert.equal(f.db.prepare('SELECT token_hash FROM mcp_tokens WHERE id=?').get(paused.id).token_hash,hash);
+ assert.deepEqual((await f.rpc(paused,'tools/list')).data.result.tools.map(t=>t.name).sort(),names);
+ const urlAuth=await f.request(`/api/mcp/t/${paused.token}`,{body:{jsonrpc:'2.0',id:1,method:'tools/list'}});
+ assert.equal(urlAuth.status,200);assert.deepEqual(urlAuth.data.result.tools.map(t=>t.name).sort(),names);
+ }finally{await f.close();}
+});

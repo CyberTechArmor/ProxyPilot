@@ -1,3 +1,4 @@
+import {resumeAuditedMcpRoots} from './lib/mcp-legacy-recovery.js';
 import {ADMIN_BOOTSTRAP_SCHEMA} from './lib/admin-bootstrap.js';
 import { TOTP_ENROLLMENT_SCHEMA } from './lib/totp-enrollment.js';
 import { VAULTWARDEN_SCHEMA } from './lib/setup-engine/vaultwarden-store.js';
@@ -2410,6 +2411,10 @@ export function initDatabase() {
     d.exec('ALTER TABLE mcp_tokens ADD COLUMN parent_id INTEGER REFERENCES mcp_tokens(id)');
     d.exec('ALTER TABLE mcp_tokens ADD COLUMN review_required INTEGER NOT NULL DEFAULT 1');
     d.exec('CREATE INDEX IF NOT EXISTS idx_mcp_parent ON mcp_tokens(parent_id)');
+  });
+
+  runMigration(db, 1016, 'resume_audited_mcp_dashboard_roots', (d) => {
+    resumeAuditedMcpRoots(d);
   });
 
   runMigration(db, 1011, 'route_ip_allowlist_paths', (d) => {

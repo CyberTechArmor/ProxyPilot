@@ -114,6 +114,22 @@ contract is the same on every tool rather than remembered per tool. Code:
   `mcp.builds`, `mcp.destructive`, `mcp.host_control`, `mcp.self_edit`,
   `mcp.security_scans`, `mcp.dns`, `mcp.webhooks`.
 
+### Dashboard connections
+
+MCP Access starts with **Allow all tools** selected and the full searchable
+catalog expanded. Creating/saving with this selected grants all tools and
+resources, including self-editing; feature switches and operation checks still
+apply. Uncheck it to set a custom scope. The default expiry is 30 days; 0 is an
+explicit non-expiring choice. Saving requires fresh local administrator proof.
+
+Use **Edit access** or **Restore connection** on an existing key and save to
+change permissions without replacing its token or connector URL. Refresh the
+MCP client's tools afterward. Migration 1016 automatically resumes valid old
+dashboard roots whose creation audit uniquely matches; unverified history still
+requires review. Recovery never restores revoked/expired keys or broadens their
+previous scope. Reviewing a child in the dashboard creates a new root grant;
+normal MCP delegation still cannot exceed its parent.
+
 ### Scoped keys
 
 `mcp_tokens.scope_json` (migration 903) limits a key to a tool allowlist,

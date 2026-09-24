@@ -1400,6 +1400,7 @@ export const api = {
     }),
   // ---- MCP access tokens (Claude connector) ----
   mcpListTokens: () => request('/mcp-tokens'),
+  mcpListTools: () => request('/mcp-tokens/tools'),
   mcpCreateToken: (name, expiresInDays, scope, fullAccess) => request('/mcp-tokens', { method: 'POST', body: JSON.stringify({ name, expires_in_days:expiresInDays, scope, full_access:fullAccess }) }),
   mcpReviewToken: (id, expiresInDays, scope, fullAccess) => request(`/mcp-tokens/${id}/review`, {method:'POST',body:JSON.stringify({review:true,expires_in_days:expiresInDays,scope,full_access:fullAccess})}),
   mcpRevokeToken: (id) => request(`/mcp-tokens/${id}`, { method: 'DELETE' }),

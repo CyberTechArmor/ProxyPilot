@@ -9,7 +9,7 @@ as its own tested commit and pull request. A merge is not a deployment.
 | S2 | Terminal WebSocket authorization | Fixed; tests and limits below |
 | S3 | Predictable trusted-device MFA bypass | Fixed; migration 1012 |
 | S4 | TOTP replacement and enrollment proof | Fixed; migration 1013 |
-| S5 | MCP scope and child-key escalation | Fixed; migration 1014 and log upgrade below |
+| S5 | MCP scope and child-key escalation | Fixed; migrations 1014/1016 and log upgrade below |
 | S6 | Web backend holds host-root authority | Partially implemented/open; boundary hardening delivered, architectural migration remains |
 | S7 | Vulnerable production dependencies | Package findings fixed; scan limits below |
 | S8 | Public first-account claim | Fixed; migration 1015 and local bootstrap |
@@ -142,13 +142,26 @@ controls, not proof of a separate human decision. Administrator account creation
 promotion and reactivation now require the dashboard, preventing a restricted
 automation key from manufacturing a new administrator grant.
 
-**Upgrade notice:** migration 1014 marks every existing key for explicit review,
-because historical lineage is unknown. Hashes/inventory are retained. An admin
-with local proof from the last five minutes reviews the scope and expiry in MCP
-Access, granting a new root authority without rotating the secret. Root creation
-also requires explicit scope/expiry and an additional full-access choice when
-unrestricted. New UI defaults to inventory tools and 30 days. Secrets are shown
-once, stored hashed, and excluded from inventory responses.
+**Upgrade compatibility correction:** migration 1014 initially paused all historical
+keys. Migration 1016 resumes only active dashboard root keys with a unique,
+matching creation audit, preserving their exact hash, scope and expiry. Unknown
+or ambiguous provenance, MCP-created keys, revoked/expired keys and inactive
+owners remain refused. A freshly proven local administrator can use **Restore
+connection** to save a new root grant using the same token and URL.
+
+MCP Access now defaults to **Allow all tools** and shows the complete searchable
+catalog. The checkbox submits `{self_edit:true}` with `full_access:true` (all
+tools/resources, including self-edit); unchecking enables custom JSON scopes.
+Saving still needs fresh local proof and an explicit expiry (30 days by default,
+0 for no expiry). It never enables feature flags or bypasses operation checks.
+Secrets are shown once, stored hashed, and excluded from inventory responses.
+
+Regression verification: 211 MCP tests pass, including actual HTTP catalog/grant
+checks and the native SQLite recovery migration. The real dashboard/browser
+flow tests default selection, custom/all checkbox transitions, restoration with
+the same connection, error feedback, CSRF and six widths (360/375/390/768/1280/
+1920px), with the overflow guard disabled. Lighthouse mobile accessibility: 98.
+Production frontend build passes. Browser regression runs in security CI.
 
 Application errors and ledger serialization redact MCP credentials. Installer
 and updater harden standard Caddy access and runtime log formats, including URL,

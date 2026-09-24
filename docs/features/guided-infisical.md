@@ -65,6 +65,38 @@ is a truthful incomplete state, not installation success or an automatic retry.
 Connect verifies the external Infisical server without changing its runtime,
 public route, boot keys or unrelated identity settings.
 
+## Generated administrator password (managed basic install)
+
+Infisical's free edition has no Keycloak sign-in (`oidcSSO`, `samlSSO` and
+`ldap` are paid entitlements), so the administrator signs in with a local email
+and password. On the managed basic install the recommended choice is
+**Platform Setup → stage D → Infisical administrator → Generate password and
+create administrator** (`POST /api/setup/platform/full/infisical/administrator`
+with `generate: true`; fresh local proof and sudo, audited as
+`INFISICAL_PERSONAL_HANDOFF_REQUESTED` with `generated: true`, no MCP tool):
+
+- `lib/setup-engine/infisical-admin-vault.js` generates a password (4×6
+  characters, about 140 bits) and writes it with check-and-set to the OpenBao
+  team area, `<prefix>-kv` → `team/infisical-administrator`, together with the
+  email and the Infisical URL. It reads it back before Infisical is
+  bootstrapped with it.
+- ProxyPilot keeps no copy. Each read or write uses a transient root token
+  generated from the automatic-custody shares, then revoked and proved revoked
+  (`withTransientRoot`). This requires OpenBao with automatic custody and a
+  completed bootstrap; otherwise the route refuses and the page offers only
+  the chosen-password form.
+- The provisioning record keeps only `passwordInOpenBao: true`. When the
+  15-minute provisioning authority expires before provisioning finishes, the
+  resume signs in by itself with the password read back from OpenBao. A
+  chosen-password account still needs the password entered again.
+- To sign in to Infisical, a member of the OpenBao group opens OpenBao (OIDC with
+  the Keycloak passkey), goes to Secrets engines → `<prefix>-kv` →
+  `team/infisical-administrator`, and copies the password. The "Use your
+  platform" card lists these steps. After setup is verified, turn on Infisical's
+  own two-factor authentication. A password changed in Infisical must be saved
+  in the same OpenBao entry, or a later resume sign-in is refused with that
+  explanation.
+
 ## Exact organization, project and identity handoff
 
 Use the Infisical administrator UI at the selected origin. Preserve unrelated

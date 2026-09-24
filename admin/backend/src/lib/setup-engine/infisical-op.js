@@ -1,5 +1,6 @@
 import { provisionManagedInfisical } from './full-platform-infisical.js';
 import { verifyBasicFlows } from './infisical-basic-flows.js';
+import { infisicalAdminVault } from './infisical-admin-vault.js';
 import { readInfisical,infisicalSecrets } from './infisical-store.js';
 import { INFISICAL_PORT,INFISICAL_APP,INFISICAL_ROOT,PROXY_KEY,infisicalJobSchema,infisicalError as fail,digest } from './infisical-logic.js';
 import { ensureInfisicalRuntime,ensureAgentProxyRuntime,prepareInfisicalFiles,assertLocalTestHost,assertIsolatedAgentVm } from './infisical-runtime.js';
@@ -10,7 +11,7 @@ import { localEdge } from './local-edge.js';
 import { assertUpstreamListening } from './owned-runtime.js';
 import { createJob,getJob,acquireLock,renewLock,releaseLock,takeoverLock,readLock } from './store.js';
 
-export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_ROOT,send,runtime=ensureInfisicalRuntime,proxyRuntime=ensureAgentProxyRuntime,hostProbe=assertLocalTestHost,vmProbe=assertIsolatedAgentVm,flows=verifyCredentialFlows,basicFlows=verifyBasicFlows,provision=provisionManagedInfisical}) {
+export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_ROOT,send,runtime=ensureInfisicalRuntime,proxyRuntime=ensureAgentProxyRuntime,hostProbe=assertLocalTestHost,vmProbe=assertIsolatedAgentVm,flows=verifyCredentialFlows,basicFlows=verifyBasicFlows,provision=provisionManagedInfisical,adminVault=infisicalAdminVault}) {
   infisicalJobSchema.parse(params);let r=readInfisical(db);
   if(!r||r.revision!==params.revision||r.last_job_id!==job.id)throw fail('The saved Infisical job was superseded.');
   const phase=name=>job.checkpoint(name,{resumable:true,infisical:true});
@@ -41,7 +42,7 @@ export async function runInfisicalOperation({db,params,exec,job,root=INFISICAL_R
     // reference to a missing secret, so provisioning creates it first, with the
     // same value and marker the later check (ensureTestSecret below) expects.
     const ensureProxySecret=async(projectId,token)=>{const keys=prepareInfisicalFiles({...r,resources:r.config.mode==='install'?resources:r.resources},{root}).keys;await ensureTestSecret({...r,identities:{...(r.identities||{}),projectId}},keys.proxyTest,api,token,PROXY_KEY);};
-    const provisioned=await provision(db,r,api,{job,ensureProxySecret});
+    const provisioned=await provision(db,r,api,{job,ensureProxySecret,adminVault:args=>adminVault(db,args)});
     if(!provisioned.ready)return {verification:{state:'awaiting_user_action',label:provisioned.action,complete:false}};
     r=readInfisical(db);
   } else if(initialized!==true)throw fail('Complete first-administrator setup through the restricted Infisical route, then perform the exact identity handoff and retry.');

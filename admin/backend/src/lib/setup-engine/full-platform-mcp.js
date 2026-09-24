@@ -50,7 +50,7 @@ export const HUMAN = Object.freeze({
   passkey: { ...PAGE, step: 'B. Keycloak, permanent administrator and recovery', section: '3. Passkey', control: 'Open Keycloak passkey enrollment' },
   accessChecks: { ...PAGE, step: 'B. Keycloak, permanent administrator and recovery', section: '4. Link, SSO login, step-up and recovery checks', control: 'the account link, SSO login, step-up and separate-browser recovery tests' },
   retire: { ...PAGE, step: 'B. Keycloak, permanent administrator and recovery', section: '5. Retire the bootstrap account', control: 'Verify administration and retire bootstrap' },
-  infisical: { ...PAGE, step: 'D. Infisical, OpenBao and Vaultwarden', section: 'Infisical administrator', control: 'Create or resume Infisical administration' },
+  infisical: { ...PAGE, step: 'D. Infisical, OpenBao and Vaultwarden', section: 'Infisical administrator', control: 'Generate password and create administrator (or: Choose a password yourself)' },
   openbao: { ...PAGE, step: 'D. Infisical, OpenBao and Vaultwarden', section: 'OpenBao recovery custody', control: 'Set up OpenBao automatically, then Download recovery kit (one time); the Advanced PGP custodian, unseal share and bootstrap token forms' },
   vaultwarden: { ...PAGE, step: 'D. Infisical, OpenBao and Vaultwarden', section: 'Vaultwarden sign-in and unlock checks', control: 'Record operator-observed checks' },
   activate: { ...PAGE, step: 'E. Verify everything and activate SSO', control: 'Activate SSO' },

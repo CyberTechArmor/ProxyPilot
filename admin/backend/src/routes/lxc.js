@@ -8,6 +8,7 @@ import { join } from 'path';
 import http from 'http';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
+import { requireGuestAccess } from '../middleware/terminal-access.js';
 import { requireSudo, requireAdminOrPermission } from '../middleware/auth.js';
 
 // Containers/routing surface: full admins always pass; regular users
@@ -121,7 +122,7 @@ async function execOnHost(command, options = {}) {
   const timeout = options.timeout || 30000;
 
   if (isInDocker) {
-    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(command)}`;
+    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`;
     return execAsync(hostCommand, { timeout });
   } else {
     return execAsync(command, { timeout });
@@ -232,6 +233,7 @@ function sleep(ms) {
 
 // Apply the containers/routing gate to all routes in this router
 lxcRouter.use(requireProxyAccess);
+lxcRouter.use('/containers/:name', requireGuestAccess);
 
 // GET /status - Check if Incus is available on the host
 lxcRouter.get('/status', async (req, res) => {
@@ -1439,7 +1441,7 @@ function probeHttp(ip, port, host, path, timeoutMs = 2000) {
 // hex is big-endian. State 0A = TCP_LISTEN.
 async function listListeningPorts(incusName) {
   const inner = 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null';
-  const cmd = `incus exec ${incusName} -- sh -c ${JSON.stringify(inner)}`;
+  const cmd = `incus exec ${incusName} -- sh -c ${shellSingleQuote(inner)}`;
   let stdout = '';
   let stderr = '';
   try {
@@ -2901,8 +2903,8 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
 
   const incusName = `${INSTANCE_PREFIX}${name}`;
   const envSetup = 'export TERM=xterm DEBIAN_FRONTEND=noninteractive;';
-  const fullCmd = cwd ? `${envSetup} cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : `${envSetup} ${command}`;
-  const execCmd = `incus exec ${incusName} -- sh -c ${JSON.stringify(fullCmd)}`;
+  const fullCmd = cwd ? `${envSetup} cd ${shellSingleQuote(cwd)} 2>/dev/null; ${command}` : `${envSetup} ${command}`;
+  const execCmd = `incus exec ${incusName} -- sh -c ${shellSingleQuote(fullCmd)}`;
 
   // Timeout is required: incus exec hangs after command finishes.
   // 60s is enough for quick commands; use BG mode for longer operations.
@@ -2935,8 +2937,8 @@ lxcRouter.post('/containers/:name/tab-complete', async (req, res) => {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     const dir = partial.includes('/') ? partial.substring(0, partial.lastIndexOf('/') + 1) : (cwd || '.');
     const prefix = partial.includes('/') ? partial.substring(partial.lastIndexOf('/') + 1) : partial;
-    const lsCmd = `cd ${JSON.stringify(cwd || '/root')} 2>/dev/null; ls -1a ${JSON.stringify(dir)} 2>/dev/null`;
-    const result = await execOnHost(`incus exec ${incusName} -- bash -c ${JSON.stringify(lsCmd)}`, { timeout: 5000 });
+    const lsCmd = `cd ${shellSingleQuote(cwd || '/root')} 2>/dev/null; ls -1a ${shellSingleQuote(dir)} 2>/dev/null`;
+    const result = await execOnHost(`incus exec ${incusName} -- bash -c ${shellSingleQuote(lsCmd)}`, { timeout: 5000 });
     const entries = (result.stdout || '').split('\n').filter(e => e && e !== '.' && e !== '..' && e.startsWith(prefix));
     res.json({ success: true, completions: entries });
   } catch {
@@ -3027,7 +3029,7 @@ lxcRouter.get('/containers/:name/files', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     // Use ls with machine-parseable output
-    const cmd = `incus exec ${incusName} -- ls -la --time-style=long-iso ${JSON.stringify(dirPath)}`;
+    const cmd = `incus exec ${incusName} -- ls -la --time-style=long-iso ${shellSingleQuote(dirPath)}`;
     const result = await execOnHost(cmd, { timeout: 10000 });
     const lines = result.stdout.split('\n').filter(l => l.trim() && !l.startsWith('total'));
     const files = lines.map(line => {

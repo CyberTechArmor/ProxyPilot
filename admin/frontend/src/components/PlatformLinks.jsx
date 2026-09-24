@@ -6,6 +6,7 @@ import PomeriumRouteProtection from '@/components/PomeriumRouteProtection';
 import KeycloakLdapLink from '@/components/KeycloakLdapLink';
 import PlatformAccess from '@/components/PlatformAccess';
 import OpenBaoAgents from '@/components/OpenBaoAgents';
+import InfisicalAgents from '@/components/InfisicalAgents';
 
 // "Use your platform": where each installed service is and what it is for,
 // kept visible after setup (the per-stage panels only show while a stage is current).
@@ -53,6 +54,7 @@ export default function PlatformLinks({ services, realm, infisicalPassword }) {
     </li>)}</ul>
     <section aria-labelledby="pp-access" className="space-y-2"><h3 id="pp-access" className="font-semibold">Who can reach each service</h3><PlatformAccess /></section>
     {hasBao && present.some(s => s.id === 'openbao' && s.state === 'verified') && <section aria-labelledby="pp-agents" className="space-y-2"><h3 id="pp-agents" className="font-semibold">Agents and machines (OpenBao)</h3><OpenBaoAgents /></section>}
+    {present.some(s => s.id === 'infisical' && s.state === 'verified') && <section aria-labelledby="pp-if-agents" className="space-y-2"><h3 id="pp-if-agents" className="font-semibold">Agents through the Infisical Agent Proxy</h3><InfisicalAgents /></section>}
     {keycloakReady && <section aria-labelledby="pp-directory-link" className="space-y-2"><h3 id="pp-directory-link" className="font-semibold">Connect a directory (LDAP)</h3><KeycloakLdapLink /></section>}
     {pomeriumReady && <section aria-labelledby="pp-require-signin" className="space-y-2"><h3 id="pp-require-signin" className="font-semibold">Require sign-in on a site</h3><PomeriumRouteProtection /></section>}
   </div>;

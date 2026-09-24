@@ -7,6 +7,7 @@ import { FULL_PLATFORM_SCHEMA } from './lib/setup-engine/full-platform-store.js'
 import { KEYCLOAK_LDAP_SCHEMA } from './lib/setup-engine/keycloak-ldap-schema.js';
 import { OPENBAO_SCHEMA } from './lib/setup-engine/openbao-store.js';
 import { AGENTS_SCHEMA as OPENBAO_AGENTS_SCHEMA } from './lib/setup-engine/openbao-agents.js';
+import { INFISICAL_AGENTS_SCHEMA } from './lib/setup-engine/infisical-agents.js';
 import { INFISICAL_SCHEMA } from './lib/setup-engine/infisical-store.js';
 import { POMERIUM_SCHEMA } from './lib/setup-engine/pomerium-store.js';
 import { SSO_SCHEMA } from './lib/sso/store.js';
@@ -2422,7 +2423,10 @@ export function initDatabase() {
   // Connect an agent (lib/setup-engine/openbao-agents.js): agent names and
   // credential names only; values live in OpenBao.
   runMigration(db, 1017, 'openbao_agents', (d) => d.exec(OPENBAO_AGENTS_SCHEMA));
-  runMigration(db, 1018, 'editor_key_lifecycle', migrateEditorKeyLifecycle);
+  // Per-agent Infisical projects (lib/setup-engine/infisical-agents.js): names and IDs only.
+  runMigration(db, 1018, 'infisical_agents', (d) => d.exec(INFISICAL_AGENTS_SCHEMA));
+  runMigration(db, 1019, 'editor_key_lifecycle', migrateEditorKeyLifecycle);
+
 
   runMigration(db, 1011, 'route_ip_allowlist_paths', (d) => {
     const cols = d.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);

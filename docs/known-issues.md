@@ -356,7 +356,7 @@ cap measured from the original grant so re-arming cannot extend it forever.
 
 The follow-up security change adds live owner checks, offboarding revocation,
 30-day default expiry (90-day maximum), and fresh local proof for new grants.
-Migration 1018 preserves existing token hashes and gives legacy keys a 30-day
+Migration 1019 preserves existing token hashes and gives legacy keys a 30-day
 rotation window. Keys whose issuing administrator cannot be verified fail
 closed. Replace them from Sharing; revocation is permanent.
 

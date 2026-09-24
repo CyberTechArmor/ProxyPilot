@@ -10,7 +10,7 @@ import { existsSync } from 'fs';
 import { join, basename, resolve, dirname } from 'path';
 import os from 'os';
 import multer from 'multer';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import * as OTPAuth from 'otpauth';
 import {
   ZIP_LIMITS, ZipError, parseZip, detectWrapperDir, effectiveEntries,
@@ -27,7 +27,7 @@ import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { checkRouteDrift } from '../lib/route-drift.js';
 import { parseCaddySiteFile, siteSecurityHeaderLines, dashboardFrameAncestor, CADDY_SITE_RENDER_CONTRACT, parseRouteEdgeOptions, routeEdgeOptionLines, wrapRouteBody } from '../lib/caddy-site-file.js';
-import { selfCheckForRoute, SELF_CHECK_HEADER, LOOPBACK_SOURCES } from '../lib/setup-engine/local-edge.js';
+import { selfCheckForRoute, SELF_CHECK_HEADER, selfCheckSources } from '../lib/setup-engine/local-edge.js';
 import { platformRouteRefusal, platformOwnerOfRoute, platformHostnames, platformPanelLink } from '../lib/setup-engine/platform-hostnames.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
@@ -53,7 +53,7 @@ const execAsync = promisify(exec);
 function platformSelfCheck(routeId) {
   let db = null; try { db = getDb(); } catch { return null; }
   const token = selfCheckForRoute(db, routeId);
-  return token ? { token, header: SELF_CHECK_HEADER, sources: LOOPBACK_SOURCES } : null;
+  return token ? { token, header: SELF_CHECK_HEADER, sources: selfCheckSources(db) } : null;
 }
 
 export const servicesRouter = Router();
@@ -1102,12 +1102,16 @@ export async function regenerateAllSiteConfigs() {
 // tries again and the log says why.
 export async function upgradeSiteRenderContract() {
   const { getSetting, setSetting } = await import('../db.js');
+  // The admitted self-check sources are part of the rendered shape: a new
+  // container address must reach every owned restricted route.
+  let sources = []; try { sources = selfCheckSources(getDb()); } catch { /* no database: loopback only */ }
+  const want = `${CADDY_SITE_RENDER_CONTRACT}+${createHash('sha256').update(JSON.stringify(sources)).digest('hex').slice(0, 12)}`;
   const have = getSetting('caddy_site_render_contract');
-  if (have === CADDY_SITE_RENDER_CONTRACT) return { upgraded: false, skipped: true, contract: have };
+  if (have === want) return { upgraded: false, skipped: true, contract: have };
   const r = await regenerateAllSiteConfigs();
-  if (!r.ok) return { upgraded: false, skipped: false, from: have, to: CADDY_SITE_RENDER_CONTRACT, error: r.error, details: r.details, results: r.results };
-  setSetting('caddy_site_render_contract', CADDY_SITE_RENDER_CONTRACT);
-  return { upgraded: true, skipped: false, from: have, to: CADDY_SITE_RENDER_CONTRACT, results: r.results };
+  if (!r.ok) return { upgraded: false, skipped: false, from: have, to: want, error: r.error, details: r.details, results: r.results };
+  setSetting('caddy_site_render_contract', want);
+  return { upgraded: true, skipped: false, from: have, to: want, results: r.results };
 }
 
 servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
@@ -6559,7 +6563,7 @@ function routeEdgeOptionColumns(db) {
   try {
     const cols = db.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);
     routeEdgeColumnsCache = cols.includes('rate_limit_json')
-      ? 'r.extra_headers_json, r.csp, r.basic_auth_json, r.ip_allowlist_json, r.rate_limit_json,'
+      ? `r.extra_headers_json, r.csp, r.basic_auth_json, r.ip_allowlist_json, r.rate_limit_json,${cols.includes('ip_allowlist_paths_json') ? ' r.ip_allowlist_paths_json,' : ''}`
       : '';
   } catch {
     routeEdgeColumnsCache = '';

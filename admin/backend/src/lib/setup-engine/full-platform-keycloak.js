@@ -5,7 +5,7 @@ import { readVaultwarden } from './vaultwarden-store.js';
 import { callbackFor as vaultCallback } from './vaultwarden-logic.js';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { approvedFetch } from '../sso/oidc.js';
+import { approvedFetch, keycloakFetch } from '../sso/oidc.js';
 import { encryptSecret, decryptSecret } from '../secrets.js';
 import { readPrivate } from './pomerium-runtime.js';
 import { KEYCLOAK_ROOT } from './keycloak-logic.js';
@@ -66,6 +66,7 @@ export async function connectManagedKeycloak(db, k, full, { job, root = KEYCLOAK
   // Make the initial credential available even if a later service connection
   // pauses. Persist only its protected reference under this operation's fence.
   db.prepare('UPDATE setup_full_platform SET state_json=? WHERE id=1 AND revision=? AND last_job_id=?').run(JSON.stringify({ ...full.state, identity: { ...full.state.identity, bootstrapRef: credentialRef } }), full.revision, job.id);
+  send ||= keycloakFetch(db, k.origin);
   const admin = recorded?.recovered ? await keycloakAdmin(k, recorded.password, { job, send, username: recorded.username }) : await keycloakAdmin(k, credentials.bootstrap, { job, send });
   try { return await reconcileOwnedIdentity(db, k, full, admin.api, job); }
   finally { await admin.close(); }

@@ -1030,6 +1030,14 @@ server.listen(PORT, '0.0.0.0', () => {
     // existing site file must pick it up. Runs once per contract bump; the
     // files come back if validation or reload fails (see
     // regenerateAllSiteConfigs), and the setting is only written on success.
+    // Inside Docker the backend reaches the host's Caddy through the bridge;
+    // record its own address first so the render below admits its self-checks.
+    try {
+      const { recordSelfCheckSources } = await import('./lib/setup-engine/local-edge.js');
+      const { getDb: dbNow } = await import('./db.js');
+      const rec = recordSelfCheckSources(dbNow());
+      if (rec.changed) console.log(`[local-edge] self-check sources now ${rec.sources.join(', ') || 'loopback only'}`);
+    } catch (err) { console.error('[local-edge] could not record self-check sources:', err?.message || err); }
     try {
       const { upgradeSiteRenderContract } = await import('./routes/services.js');
       const r = await upgradeSiteRenderContract();

@@ -206,6 +206,8 @@ export const api = {
   getKeycloakLdap: () => request('/setup/platform/full/ldap'),
   linkKeycloakLdap: (body) => request('/setup/platform/full/ldap', { method: 'POST', body: JSON.stringify(body) }),
   removeKeycloakLdap: (body) => request('/setup/platform/full/ldap/remove', { method: 'POST', body: JSON.stringify(body) }),
+  getPlatformAccess: () => request('/setup/platform/full/access'),
+  applyPlatformAccess: (body) => request('/setup/platform/full/access', { method: 'POST', body: JSON.stringify(body) }),
   revealKeycloakBootstrap: () => request('/setup/platform/full/keycloak/reveal', { method: 'POST', body: '{}' }),
   // Platform overview (one endpoint for the whole overview; actions share the MCP tools' functions)
   getPlatformOverview: (refresh = false) => request(`/setup/platform/overview${refresh ? '?refresh=1' : ''}`),

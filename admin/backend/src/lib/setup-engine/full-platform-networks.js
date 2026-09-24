@@ -27,6 +27,7 @@ import { createJob, getJob, jobView } from './store.js';
 import { validateRouteEdgeOptions } from '../caddy-site-file.js';
 import { renderDomains } from '../route-render.js';
 import { vpnNetworks, vpnFromStatus, recordVpnNetworks, additionalOf, effectiveNetworks } from './platform-networks.js';
+import { refreshAdminSnippet } from './platform-access.js';
 
 export const NETWORKS_APP = 'pp-platform-networks';
 export const NETWORKS_KIND = 'update_platform_networks';
@@ -74,6 +75,9 @@ export function networksReview(db, additional, { ignoreJob = null, vpn = vpnNetw
     const last = row.last_job_id && getJob(db, row.last_job_id);
     if (last && OPEN.includes(last.status) && last.id !== ignoreJob) blockers.push(`${id} job ${last.id} is ${last.status}. Wait for it.`);
   }
+  // Keycloak's /admin, when restricted (platform-access.js), carries the same list.
+  const kc = targets.keycloak?.row;
+  if (kc?.ownership === 'managed' && has(db, 'service_http_routes') && db.prepare('SELECT ip_allowlist_json FROM service_http_routes WHERE id=?').get(`keycloak-route-${kc.id}`)?.ip_allowlist_json) routeIds.push(`keycloak-route-${kc.id}`);
   const sso = ssoRow(db);
   if (sso) { records.push({ record: 'sso_config', what: `ProxyPilot SSO record (recoveryNetworks), rewritten in place — ${sso.active ? 'SSO stays active and verified' : 'its verification stands'}; the networks are not part of the SSO fingerprint` }); routeIds.push(RECOVERY_ROUTE); }
   const routes = has(db, 'service_http_routes') ? routeIds.map((id) => db.prepare('SELECT id, domain, ip_allowlist_json FROM service_http_routes WHERE id=?').get(id)).filter(Boolean).map((r) => ({ route_id: r.id, hostname: r.domain, before: r.ip_allowlist_json ? JSON.parse(r.ip_allowlist_json) : null, after })) : [];
@@ -166,6 +170,8 @@ export async function applyNetworksChange(db, { jobId, fence, render }) {
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   fence();
+  // A VPN-only dashboard follows the same list (its snippet is reloaded with the domains below).
+  refreshAdminSnippet(db, review.after);
   const domains = [...new Set(review.routes.map((r) => r.hostname))];
   if (domains.length) await renderDomains({ db, domains, ...render, fence });
   return { created: [], existing: domains, conflicts: [], rendered: domains };

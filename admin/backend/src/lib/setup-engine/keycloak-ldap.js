@@ -10,7 +10,7 @@
 // or removed. Doc: docs/features/keycloak-ldap.md.
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import { approvedFetch } from '../sso/oidc.js';
+import { keycloakFetch } from '../sso/oidc.js';
 import { protectedValue, storeProtected } from './full-platform-keycloak.js';
 import { withKeycloakLease } from './full-platform-admin.js';
 import { readFullPlatform, fail } from './full-platform-store.js';
@@ -142,7 +142,7 @@ export async function runKeycloakLdap({ db, params, job, send }) {
     if (!row.admin_ref || (p.operation === 'link' && !row.bind_ref)) throw fail('The one-time passwords for this request are gone. Enter them again.');
     const input = protectedValue(db, row.admin_ref), bind = p.operation === 'link' ? protectedValue(db, row.bind_ref) : null;
     if (input.expiresAt < Date.now() || (bind && bind.expiresAt < Date.now())) throw fail('The one-time passwords for this request expired. Enter them again; nothing was changed.');
-    const c = row.config, fetcher = send || approvedFetch(k.origin);
+    const c = row.config, fetcher = send || keycloakFetch(db, k.origin);
     const status = { ...row.status };
     const persist = (fields = {}) => { job.fence(); const sets = Object.keys(fields).map(key => `${key}=?`); db.prepare(`UPDATE setup_keycloak_ldap SET ${[...sets, 'status_json=?'].join(',')} WHERE id=1 AND last_job_id=?`).run(...Object.values(fields), JSON.stringify(status), coordinatorJob.id); };
     return await withKeycloakLease(db, job, async guarded => {

@@ -223,7 +223,7 @@ export function siteSecurityHeaderLines({ allowFramingRoute = null, frameAncesto
 // Bump when the rendered site-file shape changes in a way every existing file
 // must pick up. The backend compares it with app_settings.caddy_site_render_contract
 // at boot and regenerates all site files once (index.js).
-export const CADDY_SITE_RENDER_CONTRACT = '3'; // 3: allowlist refusals carry DENIED_BODY
+export const CADDY_SITE_RENDER_CONTRACT = '4'; // 3: allowlist refusals carry DENIED_BODY; 4: allowlist may apply to named paths only
 
 
 // ---- per-route edge options (migration 907; set_route_options over MCP) ----
@@ -239,6 +239,7 @@ export function parseRouteEdgeOptions(row = {}) {
   const headers = j(row.extra_headers_json ?? row.extraHeadersJson);
   const basicAuth = j(row.basic_auth_json ?? row.basicAuthJson);
   const ipAllow = j(row.ip_allowlist_json ?? row.ipAllowlistJson);
+  const ipPaths = j(row.ip_allowlist_paths_json ?? row.ipAllowlistPathsJson);
   const rateLimit = j(row.rate_limit_json ?? row.rateLimitJson);
   const csp = row.csp != null && String(row.csp).trim() !== '' ? String(row.csp).trim() : null;
   const out = {
@@ -246,6 +247,9 @@ export function parseRouteEdgeOptions(row = {}) {
     csp,
     basic_auth: Array.isArray(basicAuth) && basicAuth.length ? basicAuth : null,
     ip_allowlist: Array.isArray(ipAllow) && ipAllow.length ? ipAllow : null,
+    // Only with an allowlist: the allowlist then guards these paths (and what
+    // is under them) and the rest of the route is open.
+    ip_allowlist_paths: Array.isArray(ipAllow) && ipAllow.length && Array.isArray(ipPaths) && ipPaths.length && ipPaths.every(isAllowlistPath) ? ipPaths : null,
     rate_limit: rateLimit && typeof rateLimit === 'object' && rateLimit.events ? rateLimit : null,
   };
   return Object.values(out).some((v) => v != null) ? out : null;
@@ -253,6 +257,8 @@ export function parseRouteEdgeOptions(row = {}) {
 
 const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,80}$/;
 const CIDR_RE = /^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$|^[0-9a-fA-F:]+(\/\d{1,3})?$/;
+/** A path the allowlist can be limited to: absolute, plain characters, no wildcard (the renderer adds `/*`). */
+export const isAllowlistPath = (p) => typeof p === 'string' && /^\/[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*$/.test(p) && p.length <= 100;
 const q = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
 /**
@@ -335,18 +341,24 @@ export function routeEdgeOptionLines(opts, indent = '        ', { routeId = 'r',
   if (!opts) return [];
   const lines = [];
   const i2 = `${indent}    `;
+  const pathLine = opts.ip_allowlist && opts.ip_allowlist_paths ? `${i2}path ${opts.ip_allowlist_paths.flatMap((p) => [p, `${p}/*`]).join(' ')}` : null;
   if (opts.ip_allowlist && selfCheck && /^[a-f0-9]{48}$/.test(selfCheck.token || '')) {
     // A platform adapter's own self-check (lib/setup-engine/local-edge.js):
     // loopback source AND the installation's self-check header. Nothing else
     // is let through — not other loopback traffic, not the firewall's LAN
     // address, not the host's public address.
     lines.push(`${indent}@pp_denied {`);
+    if (pathLine) lines.push(pathLine);
     lines.push(`${i2}not remote_ip ${opts.ip_allowlist.join(' ')}`);
     lines.push(`${i2}not {`);
     lines.push(`${i2}    remote_ip ${(selfCheck.sources || ['127.0.0.1/32', '::1/128']).join(' ')}`);
     lines.push(`${i2}    header ${selfCheck.header || 'X-ProxyPilot-Self-Check'} ${selfCheck.token}`);
     lines.push(`${i2}}`);
     lines.push(`${indent}}`);
+    lines.push(`${indent}header @pp_denied Content-Type "text/plain; charset=utf-8"`);
+    lines.push(`${indent}respond @pp_denied ${q(DENIED_BODY)} 403`);
+  } else if (opts.ip_allowlist && pathLine) {
+    lines.push(`${indent}@pp_denied {`, pathLine, `${i2}not remote_ip ${opts.ip_allowlist.join(' ')}`, `${indent}}`);
     lines.push(`${indent}header @pp_denied Content-Type "text/plain; charset=utf-8"`);
     lines.push(`${indent}respond @pp_denied ${q(DENIED_BODY)} 403`);
   } else if (opts.ip_allowlist) {

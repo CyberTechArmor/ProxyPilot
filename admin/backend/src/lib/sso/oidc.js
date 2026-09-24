@@ -3,13 +3,25 @@ import https from "node:https";
 import { lookup } from "node:dns/promises";
 import { allowedAddress } from "../setup-engine/keycloak-discovery.js";
 import { readCredential, fail, assertCurrent } from "./store.js";
+import { localEdge } from "../setup-engine/local-edge.js";
+
+/** approvedFetch for a Keycloak served by THIS host's Caddy (the managed install): through the local edge. Any other origin: as before. */
+export function keycloakFetch(db, origin, opts = {}) {
+  let managed = false;
+  try { managed = !!db?.prepare("SELECT id FROM setup_keycloak WHERE origin=? AND ownership='managed'").get(origin); } catch { managed = false; }
+  if (!managed) return approvedFetch(origin, opts);
+  const viaEdge = approvedFetch(origin, { ...opts, edge: localEdge(db) }), direct = approvedFetch(origin, opts);
+  // A host whose Caddy the edge address cannot reach falls back to the public
+  // route (unrestricted paths still work there); an answered request never retries.
+  return async (input, options) => { try { return await viaEdge(input, options); } catch (e) { if (e?.edgeUnreachable) return direct(input, options); throw e; } };
+}
 
 // All server traffic stays at the reviewed G2 origin. DNS is pinned for each
 // request; TLS, body/time limits and redirect refusal apply to credential POSTs
 // as well as discovery/keys. Errors deliberately contain no URLs or bodies.
 export function approvedFetch(
   origin,
-  { resolve = lookup, request = https.request } = {},
+  { resolve = lookup, request = https.request, edge = null } = {},
 ) {
   return async (input, options = {}) => {
     const url = new URL(String(input));
@@ -21,7 +33,9 @@ export function approvedFetch(
       url.hash
     )
       throw fail("SSO endpoint is outside the verified Keycloak origin.");
-    const addresses = await Promise.race([
+    // edge: pinned to this host's Caddy with the self-check header, so a
+    // restricted Keycloak path (/admin) still answers ProxyPilot's own calls.
+    const addresses = edge ? [{ address: edge.address, family: 4 }] : await Promise.race([
       resolve(url.hostname, { all: true, family: 4 }),
       new Promise((_, reject) => {
         const t = setTimeout(() => reject(fail("SSO DNS timeout.")), 5000);
@@ -38,7 +52,7 @@ export function approvedFetch(
         url,
         {
           method: options.method || "GET",
-          headers: Object.fromEntries(new Headers(options.headers)),
+          headers: { ...Object.fromEntries(new Headers(options.headers)), ...(edge?.headers || {}) },
           agent: false,
           lookup: (_host, opts, cb) =>
             opts.all
@@ -75,7 +89,12 @@ export function approvedFetch(
       );
       timer.unref();
       req.on("close", () => clearTimeout(timer));
-      req.on("error", () => reject(fail("SSO HTTPS request failed.")));
+      req.on("error", (e) => {
+        const f = fail("SSO HTTPS request failed.");
+        // Nothing was sent: the local edge itself could not be reached.
+        if (edge && ["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"].includes(e?.code)) f.edgeUnreachable = true;
+        reject(f);
+      });
       if (body) req.write(body);
       req.end();
     });
@@ -170,7 +189,7 @@ export async function exchange(db, r, flow, url, deps = {}) {
 export async function reader(db, r, deps = {}) {
   const config = oidcConfiguration(db, r, { ...deps, reader: true });
   const result = await oidc.clientCredentialsGrant(config);
-  const fetchImpl = deps.fetchImpl || approvedFetch(r.config.keycloakOrigin);
+  const fetchImpl = deps.fetchImpl || keycloakFetch(db, r.config.keycloakOrigin);
   return async (path) => {
     const response = await fetchImpl(
       `${r.config.keycloakOrigin}/admin/realms/${encodeURIComponent(r.config.realm)}${path}`,

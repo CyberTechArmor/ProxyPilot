@@ -113,6 +113,28 @@ retired. No permanent user's password is offered for reveal.
   checks a temporary owned local destination with allowed and denied requests.
   It does not request a disposable VM. If no private address is available, setup
   pauses for host configuration; it does not create a VPN or public listener.
+- **Who can reach each service (Use your platform card).** Recovery, OpenBao
+  and Infisical are always restricted to the platform networks (VPN ∪
+  additional). Three switches, applied together by `POST /full/access` (fresh
+  sudo + local proof, audited `PLATFORM_ACCESS_APPLIED`; one regenerate →
+  `caddy adapt` → reload, everything restored on failure;
+  `lib/setup-engine/platform-access.js`):
+  - **Vaultwarden** — restricted (default) or open; open keeps `/admin`
+    restricted (`ip_allowlist_paths_json = ["/admin"]`, migration 1011).
+  - **Keycloak admin** — restricted (default: `/admin`, console + admin API,
+    on the Keycloak route) or open; sign-in and account pages are always
+    public. ProxyPilot's own admin calls go through the local edge with the
+    self-check header (`keycloakFetch`), so the observer, the LDAP link and
+    the administrator handoff keep working. The restricted list follows later
+    network changes.
+  - **ProxyPilot dashboard** — open (default) or restricted, through the
+    backend-owned snippet `/etc/caddy/pp-admin-access.caddy` that the
+    install.sh-written dashboard site imports (the import is added once, only
+    to ProxyPilot's own site file). MCP, migration agents, git and health stay
+    reachable. Restricting it is refused from a browser outside the networks.
+  The backend runs in Docker: its local-edge requests dial the bridge gateway,
+  and it records its own address at boot (`recordSelfCheckSources`), which
+  the renderer admits together with the self-check header.
 - **OpenBao — team workspace (basic profile).** People in the OpenBao group sign
   in through Keycloak (OIDC, mount `pp-g6-<ref12>-oidc`, role `mapped`; the
   dashboard's *Use your platform* card shows the steps) and get an 8-hour

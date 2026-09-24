@@ -18,6 +18,24 @@ import { join } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { agentCall, AgentError } from '../lib/agent.js';
 
+test('invalid and oversized requests reject before connecting, including cyclic input', async () => {
+  const opts = { socketPath: '/nonexistent/not-a-real-agent.sock' };
+  await assert.rejects(agentCall('agent.ping', { body: 'x'.repeat(65536) }, opts), /exceeds 64 KiB/);
+  await assert.rejects(agentCall('not a method', {}, opts), /Invalid agent method/);
+  const cycle = {}; cycle.self = cycle;
+  await assert.rejects(agentCall('agent.ping', cycle, opts), /circular/i);
+});
+
+test('error responses must match the request identity', async () => {
+  await withStub(req => ({ id: req.id + 1, error: { code: 'wrong', message: 'SECRET' } }), {}, async socketPath => {
+    await assert.rejects(agentCall('agent.ping', {}, { socketPath }), error => {
+      assert.match(error.message, /did not match/);
+      assert(!error.message.includes('SECRET'));
+      return true;
+    });
+  });
+});
+
 // Tiny one-shot agent stub: accepts a connection, reads one JSON
 // line, calls handler({id, method, params}), writes back the
 // returned envelope, closes. If `hang` is true, accepts but never

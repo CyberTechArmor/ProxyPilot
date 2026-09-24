@@ -29,7 +29,6 @@ package methods
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -336,19 +335,10 @@ func runStorage(bin string, timeout time.Duration, args ...string) (storageRun, 
 	if err != nil {
 		return storageRun{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, path, args...)
-	var out, errb bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errb
-	runErr := cmd.Run()
-	r := storageRun{stdout: out.String(), stderr: errb.String()}
+	out, errb, runErr := runBounded(timeout, path, args...)
+	r := storageRun{stdout: string(out), stderr: string(errb)}
 	if runErr == nil {
 		return r, nil
-	}
-	if ctx.Err() != nil {
-		return r, fmt.Errorf("%s timed out after %s", bin, timeout)
 	}
 	var ee *exec.ExitError
 	if errors.As(runErr, &ee) {
@@ -1684,7 +1674,7 @@ type storageListDisksParams struct {
 func StorageListDisks(params json.RawMessage) (any, *Error) {
 	p := storageListDisksParams{}
 	if len(bytes.TrimSpace(params)) > 0 && !bytes.Equal(bytes.TrimSpace(params), []byte("null")) {
-		if err := json.Unmarshal(params, &p); err != nil {
+		if err := decodeParams(params, &p); err != nil {
 			return nil, &Error{Code: "invalid_params", Message: "storage.list_disks params must be {smart?:bool, include_loop?:bool}: " + err.Error()}
 		}
 	}

@@ -29,7 +29,7 @@ type caddyFmtResult struct {
 // envelope-level errors.
 func CaddyFmt(params json.RawMessage) (any, *Error) {
 	var p caddyFmtParams
-	if err := json.Unmarshal(params, &p); err != nil {
+	if err := decodeParams(params, &p); err != nil {
 		return nil, &Error{Code: "invalid_params", Message: "caddy.fmt params must be {config_text:string}: " + err.Error()}
 	}
 	if p.ConfigText == "" {

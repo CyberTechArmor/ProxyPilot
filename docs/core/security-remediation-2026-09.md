@@ -10,7 +10,7 @@ as its own tested commit and pull request. A merge is not a deployment.
 | S3 | Predictable trusted-device MFA bypass | Fixed; migration 1012 |
 | S4 | TOTP replacement and enrollment proof | Fixed; migration 1013 |
 | S5 | MCP scope and child-key escalation | Fixed; migration 1014 and log upgrade below |
-| S6 | Web backend holds host-root authority | Open; requires architectural migration |
+| S6 | Web backend holds host-root authority | Partially implemented/open; boundary hardening delivered, architectural migration remains |
 | S7 | Vulnerable production dependencies | Package findings fixed; scan limits below |
 | S8 | Public first-account claim | Fixed; migration 1015 and local bootstrap |
 
@@ -263,3 +263,51 @@ temporary databases/directories, to exercise the real root-only CLI and file
 ownership checks. All other backend tests retain the ordinary runner identity.
 The initial CI run correctly refused the positive issuance cases as non-root;
 the production ownership checks remain intact.
+
+
+## S6: partial host-boundary hardening; architectural finding remains open
+
+The existing agent now checks kernel Unix peer UIDs, rejects undeclared fields,
+limits connections/method concurrency and bounds request reads, responses,
+subprocess output, child lifetime and update-state reads. Audit metadata excludes
+request/result/error content. The Node client refuses oversized requests before
+connecting. Agent unit resource limits are explicit. The updater no longer
+restores privileged mode; a read-only effective-Compose preflight refuses a
+restricted/custom deployment before mutation. A real invocation of update.sh in
+a disposable fixture proves refusal before checkout, package or service effects.
+
+The standard backend still retains privileged mode, host PID access, daemon
+socket and host mounts because replacements remain incomplete. The 94-file
+candidate inventory, operation/owner/contract matrix and exact missing host
+acceptance checks are in [security-host-boundary.md](security-host-boundary.md).
+This is not closure by configuration flag or a generic agent exec method.
+Independent host-side authority for broad operators, remaining typed operations,
+and a representative installation are still required.
+
+Local validation: Go vet, method/migration tests and dispatcher/UID-policy tests
+pass with the race detector. The real Unix peer test cannot bind in this sandbox
+and is required in hosted CI. Five Python tests cover logging and effective
+Compose preflight, including the actual updater invocation. All 57 affected
+update/recovery/policy tests pass. The selected-agent Caddy outage reaches no
+recorded host-command effect. Two locally runnable Node client tests pass; hosted
+CI runs the complete Unix client/driver suite. No host deployment occurred.
+
+## Publication and combined rollout
+
+Stage A was committed and merged per finding: S1 [#649](https://github.com/CyberTechArmor/ProxyPilot/pull/649),
+S2 [#650](https://github.com/CyberTechArmor/ProxyPilot/pull/650),
+S3 [#651](https://github.com/CyberTechArmor/ProxyPilot/pull/651),
+S4 [#652](https://github.com/CyberTechArmor/ProxyPilot/pull/652),
+S5 [#654](https://github.com/CyberTechArmor/ProxyPilot/pull/654),
+S7 [#655](https://github.com/CyberTechArmor/ProxyPilot/pull/655),
+S8 [#657](https://github.com/CyberTechArmor/ProxyPilot/pull/657).
+S7/S8 hosted security CI passed, including native SQLite and the Unix-socket
+checks that were unavailable earlier locally. Those later native results
+supersede the initial S3/S4 adapter-only limitation above. All seven S8 checks
+passed after its root-only integration step was corrected; eight combined S8 /
+newer Infisical compatibility tests also passed before merge.
+
+Use [security-remediation-runbook.md](security-remediation-runbook.md) for backups,
+management-network containment, credential/key transitions, preflight, verification,
+root recovery and rollback limits. The unexecuted browser, image/OS and representative
+host checks remain explicit. Seven findings are fixed; S6 remains open.

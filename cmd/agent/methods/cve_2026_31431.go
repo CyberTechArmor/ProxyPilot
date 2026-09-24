@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -161,7 +160,7 @@ func SecurityCVE202631431Check(_ json.RawMessage) (any, *Error) {
 func SecurityCVE202631431Patch(params json.RawMessage) (any, *Error) {
 	var p cvePatchParams
 	if len(params) > 0 && string(params) != "null" {
-		if err := json.Unmarshal(params, &p); err != nil {
+		if err := decodeParams(params, &p); err != nil {
 			return nil, &Error{Code: "invalid_params", Message: "params must be {force?,mitigate_only?,patch_only?:bool}: " + err.Error()}
 		}
 	}
@@ -358,12 +357,10 @@ func readInstalledKernelVersion() string {
 // string compare which is good enough for sort stability when dpkg
 // is missing (we don't make security decisions on the fallback).
 func dpkgVersionCompare(a, b string) int {
-	cmd := exec.Command(dpkgBin, "--compare-versions", a, "lt", b)
-	if err := cmd.Run(); err == nil {
+	if _, _, err := runBounded(10*time.Second, dpkgBin, "--compare-versions", a, "lt", b); err == nil {
 		return -1
 	}
-	cmd = exec.Command(dpkgBin, "--compare-versions", a, "gt", b)
-	if err := cmd.Run(); err == nil {
+	if _, _, err := runBounded(10*time.Second, dpkgBin, "--compare-versions", a, "gt", b); err == nil {
 		return 1
 	}
 	if a < b {
@@ -712,17 +709,12 @@ func yamlScalar(s string) string {
 // =============================================================
 
 func runCVECmd(bin string, args ...string) (stdout, stderr []byte, err error) {
-	cmd := exec.Command(bin, args...)
-	var outBuf, errBuf strings.Builder
-	cmd.Stdout = &writerFromBuilder{b: &outBuf}
-	cmd.Stderr = &writerFromBuilder{b: &errBuf}
-	err = cmd.Run()
-	return []byte(outBuf.String()), []byte(errBuf.String()), err
+	timeout := 30 * time.Second
+	if bin == aptGetBin || bin == updateGrubBin || bin == grubbyBin {
+		timeout = 30 * time.Minute
+	}
+	return runBounded(timeout, bin, args...)
 }
-
-type writerFromBuilder struct{ b *strings.Builder }
-
-func (w *writerFromBuilder) Write(p []byte) (int, error) { return w.b.Write(p) }
 
 func writeFileAtomic(path string, body []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)

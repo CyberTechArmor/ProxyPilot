@@ -32,10 +32,11 @@ function Issued({ issued, state, onClose }) {
 }
 
 export default function InfisicalAgents() {
-  const [state, setState] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [issued, setIssued] = useState(null), [message, setMessage] = useState(''), [password, setPassword] = useState('');
-  useEffect(() => { let on = true; api.getInfisicalAgents().then(v => on && setState(v)).catch(e => on && setError(e.message)); return () => { on = false; }; }, []);
+  const [state, setState] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [issued, setIssued] = useState(null), [message, setMessage] = useState(''), [password, setPassword] = useState(''), [containers, setContainers] = useState([]), [network, setNetwork] = useState(null);
+  useEffect(() => { let on = true; api.getInfisicalAgents().then(v => on && setState(v)).catch(e => on && setError(e.message)); api.getLxcContainers().then(v => on && setContainers(v?.containers || [])).catch(() => {}); return () => { on = false; }; }, []);
   const authority = () => (password ? { password } : {});
-  async function run(fn, done) { setBusy(true); setError(''); setMessage(''); try { const out = await fn(); if (out?.state) setState(out.state); if (out?.clientSecret) setIssued(out); if (done) setMessage(done); } catch (e) { setError(e.message); } finally { setBusy(false); } }
+  async function run(fn, done) { setBusy(true); setError(''); setMessage(''); try { const out = await fn(); if (out?.state) setState(out.state); if (out?.clientSecret) setIssued(out); setNetwork(out?.network || null); if (done) setMessage(done); } catch (e) { setError(e.message); } finally { setBusy(false); } }
+  const containerOptions = <>{containers.map(c => <option key={c.incusName} value={c.incusName}>{c.name}{c.status !== 'running' ? ` (${c.status})` : ''}</option>)}</>;
   if (!state) return error ? <p role="alert" className="text-destructive text-sm">{error}</p> : <p role="status" className="text-sm">Loading agents…</p>;
   if (!state.ready) return <p className="text-sm">{state.reason}</p>;
   return <div className="space-y-4 min-w-0">
@@ -45,17 +46,27 @@ export default function InfisicalAgents() {
     {error && <p role="alert" className="text-destructive text-sm break-words">{error}</p>}
     {message && <p role="status" className="text-sm rounded-lg border p-3">{message}</p>}
     {issued && <Issued issued={issued} state={state} onClose={() => setIssued(null)} />}
-    <form className="rounded-lg border p-4 space-y-3" onSubmit={e => { e.preventDefault(); const f = new FormData(e.currentTarget), form = e.currentTarget; run(async () => { const out = await api.createInfisicalAgent({ name: f.get('name'), description: f.get('description') || '', ...authority(), reviewed: true }); form.reset(); return out; }); }}>
+    {network && <section aria-label="Container link" role="status" className="rounded-lg border p-3 text-sm space-y-1 min-w-0">
+      {network.error ? <p className="text-destructive break-words">{network.error}</p> : <>
+        <p className="break-words">Linked <b>{network.container}</b> ({network.ip}): Infisical admits it, and inside it {network.hostname} now points at this host ({network.gateway}).</p>
+        <ul className="space-y-1">{network.checks.map(c => <li key={c.label} className="break-all">{c.reachable === true ? '✓' : c.reachable === false ? '✗' : '?'} {c.label} {c.host}:{c.port}{c.reachable === false ? ' — not reachable from the container' : c.reachable === null ? ' — the container has no tool to test with (nc, bash or python3)' : ''}</li>)}</ul></>}
+    </section>}
+    <form className="rounded-lg border p-4 space-y-3" onSubmit={e => { e.preventDefault(); const f = new FormData(e.currentTarget), form = e.currentTarget; run(async () => { const out = await api.createInfisicalAgent({ name: f.get('name'), description: f.get('description') || '', ...(f.get('container') ? { container: f.get('container') } : {}), ...authority(), reviewed: true }); form.reset(); return out; }); }}>
       <h4 className="font-semibold">Register an agent</h4>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="space-y-1"><Label htmlFor="ia-name">Name</Label><Input id="ia-name" name="name" className="min-h-11" required pattern="[a-z][a-z0-9\-]{1,29}" placeholder="crawler" /></div>
         <div className="space-y-1"><Label htmlFor="ia-desc">Description (optional)</Label><Input id="ia-desc" name="description" className="min-h-11" maxLength={200} /></div>
+        <div className="space-y-1"><Label htmlFor="ia-ct">Runs in container (optional)</Label><select id="ia-ct" name="container" className="w-full min-h-11 rounded-md border bg-background px-3"><option value="">Not on this host</option>{containerOptions}</select></div>
       </div>
+      <p className="text-xs text-muted-foreground">A container on this host needs no VPN: only that container is admitted to Infisical (nothing else behind the restriction), and Infisical’s name points at this host inside it.</p>
       <Button type="submit" className="min-h-11 w-full sm:w-auto" disabled={busy}>Create its project and show its credentials</Button>
     </form>
     {state.agents.length === 0 && <p className="text-sm text-muted-foreground">No agents registered yet.</p>}
     <ul className="space-y-3">{state.agents.map(a => <li key={a.name} className="rounded-lg border p-4 space-y-3 text-sm min-w-0">
       <div><p className="font-semibold break-all">{a.name}</p>{a.description && <p className="text-muted-foreground break-words">{a.description}</p>}<p className="text-muted-foreground break-all">Project <code>{a.projectId}</code></p></div>
+      {a.container
+        ? <div className="flex flex-col sm:flex-row sm:items-center gap-2"><span className="flex-1 break-all">Runs in <b>{a.container}</b> ({a.containerIp}), admitted to Infisical</span><Button type="button" variant="outline" className="min-h-11 w-full sm:w-auto" disabled={busy} onClick={() => { if (window.confirm(`Stop admitting ${a.container} to Infisical?`)) run(() => api.unlinkInfisicalAgentContainer(a.name), `${a.container} is no longer admitted.`); }}>Unlink container</Button></div>
+        : <form className="flex flex-col sm:flex-row sm:items-end gap-2" onSubmit={e => { e.preventDefault(); const c = new FormData(e.currentTarget).get('container'); if (c) run(() => api.linkInfisicalAgentContainer(a.name, c)); }}><div className="flex-1 space-y-1 min-w-0"><Label htmlFor={`ia-ct-${a.name}`}>Runs in container</Label><select id={`ia-ct-${a.name}`} name="container" className="w-full min-h-11 rounded-md border bg-background px-3" required><option value="">Choose a container</option>{containerOptions}</select></div><Button type="submit" className="min-h-11 w-full sm:w-auto" disabled={busy}>Link container</Button></form>}
       <div className="space-y-2"><p className="font-medium">Assigned credentials</p>
         {a.credentials.length === 0 && <p className="text-muted-foreground">None yet.</p>}
         <ul className="space-y-2">{a.credentials.map(c => <li key={c.key} className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0"><span className="flex-1 min-w-0 break-all"><code>{c.key}</code> → {c.hostPattern} · placeholder <code>{c.placeholder}</code></span><Button type="button" variant="outline" className="min-h-11 w-full sm:w-auto" disabled={busy} onClick={() => { if (window.confirm(`Remove ${c.key} from ${a.name}? The secret and its proxied site are deleted.`)) run(() => api.removeInfisicalAgentCredential(a.name, c.key, authority()), `${c.key} removed.`); }}>Remove</Button></li>)}</ul>

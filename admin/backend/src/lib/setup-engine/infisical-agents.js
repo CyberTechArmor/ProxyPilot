@@ -14,11 +14,18 @@ import { infisicalError as fail } from './infisical-logic.js';
 import { protectedValue } from './full-platform-keycloak.js';
 import { infisicalAdminVault } from './infisical-admin-vault.js';
 import { localEdge } from './local-edge.js';
+import { containerAddress, writeHosts, probe, hostRunner } from './agent-network.js';
 
 export const INFISICAL_AGENTS_SCHEMA = `CREATE TABLE IF NOT EXISTS infisical_agents(
   name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL, identity_id TEXT NOT NULL,
   client_id TEXT NOT NULL, client_secret_id TEXT, credentials_json TEXT NOT NULL DEFAULT '[]',
-  created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`;
+  created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  container TEXT, container_ip TEXT, container_uuid TEXT)`;
+// Migration 1019: the "runs in container" columns on an existing table.
+export function addContainerColumns(db) {
+  const cols = db.prepare('PRAGMA table_info(infisical_agents)').all().map(c => c.name);
+  for (const c of ['container', 'container_ip', 'container_uuid']) if (cols.length && !cols.includes(c)) db.exec(`ALTER TABLE infisical_agents ADD COLUMN ${c} TEXT`);
+}
 export const AGENT_ENV = 'agent', AGENT_PATH = '/';
 
 const agentName = z.string().regex(/^[a-z][a-z0-9-]{1,29}$/, 'Agent names are 2–30 lower-case letters, digits or dashes, starting with a letter.');
@@ -27,7 +34,9 @@ const keyName = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/, 'Credential names are
 // separated, no scheme (Infisical's own grammar; it re-validates).
 const hostPattern = z.string().trim().min(1).max(255).regex(/^[A-Za-z0-9*.:\-/,\[\] ]+$/, 'Sites are host[:port][/path] entries without https://, comma separated.').refine(v => !v.includes('://'), 'Leave out https:// in the site.');
 const password = z.string().min(12).max(256).optional();
-export const createSchema = z.object({ name: agentName, description: z.string().max(200).default(''), password, reviewed: z.literal(true) }).strict();
+const containerName = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$/, 'Choose a container by its name.');
+export const createSchema = z.object({ name: agentName, description: z.string().max(200).default(''), container: containerName.optional(), password, reviewed: z.literal(true) }).strict();
+export const containerSchema = z.object({ container: containerName }).strict();
 export const credentialSchema = z.object({ value: z.string().min(1).max(16384), hostPattern, surfaces: z.array(z.enum(['header', 'query', 'path', 'body'])).min(1).max(4).default(['header']), password, reviewed: z.literal(true) }).strict();
 export const authoritySchema = z.object({ password }).strict();
 export const parseName = v => agentName.parse(v);
@@ -40,7 +49,7 @@ export const serviceName = key => `pp-${key.toLowerCase().replace(/_/g, '-')}`;
 const table = db => !!db.prepare("SELECT name FROM sqlite_master WHERE name='infisical_agents'").get();
 const rowOf = (db, name) => table(db) ? db.prepare('SELECT * FROM infisical_agents WHERE name=?').get(name) : null;
 const mustRow = (db, name) => { const row = rowOf(db, name); if (!row) throw fail(`No Infisical agent named ${name} is registered.`); return row; };
-const view = row => row && { name: row.name, description: row.description, projectId: row.project_id, clientId: row.client_id, credentials: JSON.parse(row.credentials_json), createdAt: row.created_at, updatedAt: row.updated_at };
+const view = row => row && { name: row.name, description: row.description, projectId: row.project_id, clientId: row.client_id, container: row.container || null, containerIp: row.container_ip || null, credentials: JSON.parse(row.credentials_json), createdAt: row.created_at, updatedAt: row.updated_at };
 const provisionOf = (db, r) => { try { return protectedValue(db, `full-infisical-provision-${r.credential_ref}`); } catch { return null; } };
 
 const contextOf = db => { const r = readInfisical(db); return { r, s: r ? provisionOf(db, r) : null }; };
@@ -95,7 +104,12 @@ export async function createAgent(db, raw, user, deps = {}) {
     const now = new Date().toISOString();
     db.prepare('INSERT INTO infisical_agents(name,description,project_id,identity_id,client_id,client_secret_id,credentials_json,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
       .run(input.name, input.description, project.id, identity.id, ua.clientId, secret.clientSecretData?.id || null, '[]', user?.id || null, now, now);
-    return { agent: view(rowOf(db, input.name)), clientId: ua.clientId, clientSecret: secret.clientSecret };
+    let network = null;
+    if (input.container) {
+      // The agent exists either way; a link that fails is reported, and can be retried.
+      try { network = await linkContainer(db, input.name, { container: input.container }, deps); } catch (e) { network = { error: e.infisicalSafe ? e.message : 'The container could not be linked.' }; }
+    }
+    return { agent: view(rowOf(db, input.name)), clientId: ua.clientId, clientSecret: secret.clientSecret, network };
   } catch (e) {
     // A half-made agent leaves nothing behind: its project (and memberships) goes.
     await call(`/api/v1/projects/${project.id}`, { method: 'DELETE' }).catch(() => {});
@@ -154,6 +168,43 @@ export async function removeAgent(db, name, raw = {}, deps = {}) {
   for (const [path, label] of [[`/api/v1/projects/${row.project_id}`, 'Removing the agent project'], [`/api/v1/identities/${row.identity_id}`, 'Removing the agent identity']]) {
     const res = await call(path, { method: 'DELETE' }); if (res.status !== 404) accepted(res, label);
   }
+  if (row.container) await unlinkContainer(db, name, deps).catch(() => {});
   db.prepare('DELETE FROM infisical_agents WHERE name=?').run(name);
   return { removed: name };
+}
+
+// Runs in container (agent-network.js): admit the container's /32 on the
+// Infisical route (at render), point the Infisical name at the host inside it,
+// then probe Infisical and the Agent Proxy from inside. No Infisical authority
+// is needed: nothing in Infisical changes.
+export async function linkContainer(db, name, raw, { run = hostRunner, render, context = contextOf } = {}) {
+  parseName(name); const { container } = containerSchema.parse(raw); mustRow(db, name);
+  const { r } = context(db);
+  if (!r?.config?.origin) throw fail('Finish Infisical first.');
+  const address = containerAddress(container, { run });
+  if (!address.running) throw fail(`Start ${container} first; its name for Infisical is set inside it.`);
+  const hostname = new URL(r.config.origin).hostname, before = rowOf(db, name);
+  writeHosts(container, hostname, address.gateway, { run });
+  db.prepare('UPDATE infisical_agents SET container=?, container_ip=?, container_uuid=?, updated_at=? WHERE name=?').run(container, address.ip, address.uuid, new Date().toISOString(), name);
+  try { if (render) await render(); }
+  catch (e) {
+    db.prepare('UPDATE infisical_agents SET container=?, container_ip=?, container_uuid=? WHERE name=?').run(before.container, before.container_ip, before.container_uuid, name);
+    if (!before.container) try { writeHosts(container, hostname, null, { run }); } catch { /* reported below */ }
+    throw fail(`The Infisical route could not be updated for ${container}; nothing was admitted. ${e.infisicalSafe || e.fullPlatformSafe ? e.message : ''}`.trim());
+  }
+  const proxy = r.config.proxyOrigin ? new URL(r.config.proxyOrigin) : null;
+  const checks = probe(container, [['Infisical', address.gateway, 443], ...(proxy ? [['Agent Proxy', proxy.hostname, Number(proxy.port || 80)]] : [])], { run });
+  return { container, ip: address.ip, gateway: address.gateway, hostname, checks };
+}
+
+export async function unlinkContainer(db, name, { run = hostRunner, render, context = contextOf } = {}) {
+  parseName(name); const row = mustRow(db, name);
+  if (!row.container) return { container: null };
+  db.prepare('UPDATE infisical_agents SET container=NULL, container_ip=NULL, container_uuid=NULL, updated_at=? WHERE name=?').run(new Date().toISOString(), name);
+  if (render) await render();
+  // The name inside the container is removed once no other agent uses that container.
+  const others = db.prepare('SELECT count(*) AS n FROM infisical_agents WHERE container=?').get(row.container).n;
+  const { r } = context(db);
+  if (!others && r?.config?.origin) try { writeHosts(row.container, new URL(r.config.origin).hostname, null, { run }); } catch { /* the container may be stopped or gone; the route no longer admits it */ }
+  return { container: row.container, removed: true };
 }

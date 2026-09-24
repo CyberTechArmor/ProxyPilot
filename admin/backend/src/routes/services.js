@@ -31,6 +31,7 @@ import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { checkRouteDrift } from '../lib/route-drift.js';
 import { parseCaddySiteFile, siteSecurityHeaderLines, dashboardFrameAncestor, CADDY_SITE_RENDER_CONTRACT, parseRouteEdgeOptions, routeEdgeOptionLines, wrapRouteBody } from '../lib/caddy-site-file.js';
 import { selfCheckForRoute, SELF_CHECK_HEADER, selfCheckSources } from '../lib/setup-engine/local-edge.js';
+import { agentSourcesForRoute } from '../lib/setup-engine/agent-network.js';
 import { platformRouteRefusal, platformOwnerOfRoute, platformHostnames, platformPanelLink } from '../lib/setup-engine/platform-hostnames.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
@@ -57,7 +58,8 @@ const execFileAsync = promisify(execFile);
 function platformSelfCheck(routeId) {
   let db = null; try { db = getDb(); } catch { return null; }
   const token = selfCheckForRoute(db, routeId);
-  return token ? { token, header: SELF_CHECK_HEADER, sources: selfCheckSources(db) } : null;
+  // Linked Infisical agent containers are admitted on the Infisical route only.
+  return token ? { token, header: SELF_CHECK_HEADER, sources: selfCheckSources(db), extraAllow: agentSourcesForRoute(db, routeId) } : null;
 }
 
 export const servicesRouter = Router();

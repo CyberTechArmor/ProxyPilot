@@ -1,5 +1,7 @@
 import jwt from 'jsonwebtoken';
 import { requestOrigin } from '../lib/sso/sessions.js';
+import { getAdminDomain, getDb } from '../db.js';
+import { readConfig } from '../lib/sso/store.js';
 import { validateSession } from './auth.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'development-secret-change-in-production';
@@ -26,10 +28,9 @@ function parseCookieHeader(header) {
 // auth flow, B4); falls back to the `Authorization: Bearer ...` header for
 // non-browser clients to mirror authenticateToken.
 //
-// CSRF intentionally NOT enforced here: SameSite=Strict on pp_token blocks
-// cross-site WebSocket upgrades at the browser level, and the upgrade
-// request body is empty (no double-submit token to verify against). The
-// per-frame messages are authenticated by the surviving connection.
+// Cookie-authenticated browsers must present an exact configured Origin. A
+// non-browser client may omit Origin only when using a Bearer header without
+// an authentication cookie. Neither Host nor SameSite establishes that proof.
 //
 // Returns `{ user }` on success. Throws on missing / invalid / expired token.
 export function verifyWsUpgrade(req) {
@@ -38,6 +39,20 @@ export function verifyWsUpgrade(req) {
   const authHeader = req.headers?.authorization;
   const headerToken = authHeader && authHeader.split(' ')[1];
   const token = cookieToken || headerToken;
+  const origin = req.headers?.origin;
+  const reject = (message, statusCode = 403) => { const e = new Error(message); e.statusCode = statusCode; throw e; };
+  if (origin) {
+    const configured = readConfig(getDb());
+    const origins = new Set([getAdminDomain() && `https://${getAdminDomain()}`,
+      configured?.config?.publicOrigin, configured?.config?.recoveryOrigin,
+      ...(process.env.TERMINAL_ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)]);
+    let parsed; try { parsed = new URL(origin); } catch { reject('Invalid terminal origin'); }
+    if (!origins.has(origin) || parsed.origin !== origin || parsed.host !== req.headers.host ||
+        !['https:', 'http:'].includes(parsed.protocol)) reject('Terminal origin denied');
+  } else if (cookieToken || !/^Bearer \S+$/i.test(authHeader || '')) {
+    reject('Terminal Origin required');
+  }
+
 
   if (!token) {
     const err = new Error('Authentication required');
@@ -65,6 +80,8 @@ export function verifyWsUpgrade(req) {
     err.statusCode = result.status;
     throw err;
   }
+  if (decoded.id !== result.session.user_id) reject('Session identity mismatch', 401);
+  if (!['admin', 'user'].includes(result.session.currentRole) || decoded.enrollmentOnly) reject('Terminal access denied');
   if (result.session.linkOnly) { const err = new Error('Complete Keycloak linking before opening a terminal.'); err.statusCode = 403; throw err; }
   return { user: { ...decoded, role: result.session.currentRole }, session: result.session };
 }

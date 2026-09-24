@@ -1,4 +1,4 @@
-import { validateSession } from '../middleware/auth.js';
+import { terminalDecision } from '../middleware/terminal-access.js';
 import { refreshCentralCheck, requestOrigin } from '../lib/sso/sessions.js';
 import { WebSocketServer } from 'ws';
 import { exec } from 'child_process';
@@ -134,7 +134,7 @@ function parseTarget(rawUrl) {
   // authorizer resolves + authorizes it into a container name (m2-<id>). No
   // cwd/type hints — the shell starts in the container's /srv/app (pty.js).
   const mm = url.match(/^\/api\/terminal\/mock2\/(\d{1,18})$/);
-  if (mm) return { kind: 'mock2', target: mm[1], cwd: null, typeHint: null };
+  if (mm) return { kind: 'mock2', projectId: mm[1], target: null, cwd: null, typeHint: null };
   return null;
 }
 
@@ -159,28 +159,8 @@ export function attachTerminalServer(httpServer) {
       return rejectUpgrade(socket, 404, 'Unknown terminal target');
     }
 
-    if (target.kind === 'host' && user.role !== 'admin') {
-      return rejectUpgrade(socket, 403, 'Admin role required for host shell');
-    }
-
-    // Mock2 project terminal: resolve + authorize via the injected authorizer
-    // (editor-or-admin on an online project, ADR-007). Replace the project id in
-    // target.target with the resolved container name for the PTY. When the mock2
-    // module is off, mock2TerminalAuthorizer is null → unknown target.
-    if (target.kind === 'mock2') {
-      if (!mock2TerminalAuthorizer) {
-        return rejectUpgrade(socket, 404, 'Unknown terminal target');
-      }
-      let decision;
-      try {
-        decision = mock2TerminalAuthorizer({ user, projectId: target.target });
-      } catch {
-        return rejectUpgrade(socket, 500, 'Terminal authorization failed');
-      }
-      if (!decision || !decision.ok) {
-        return rejectUpgrade(socket, decision?.status || 403, decision?.reason || 'Forbidden');
-      }
-      target.target = decision.containerName;
+    if (!authorized(req, target, true)) {
+      return rejectUpgrade(socket, 403, 'Terminal access denied; host shells require fresh local sudo proof');
     }
 
     if (currentSessions(user.id) >= MAX_SESSIONS_PER_USER) {
@@ -196,6 +176,13 @@ export function attachTerminalServer(httpServer) {
   });
 
   return wss;
+}
+
+function authorized(req, target, opening = false) {
+  try {
+    const { user, session } = verifyWsUpgrade(req);
+    return terminalDecision({ user, session, target, origin: requestOrigin(req), opening, mock2Authorizer: mock2TerminalAuthorizer });
+  } catch { return false; }
 }
 
 async function handleSession(ws, req, user, target) {
@@ -221,6 +208,11 @@ async function handleSession(ws, req, user, target) {
       mode = 'console';
       banner = '\r\n\x1b[33m[VM console — agent shortcuts disabled]\x1b[0m\r\n';
     }
+  }
+
+  if (!authorized(req, target, true) || ws.readyState !== ws.OPEN) {
+    try { ws.close(1008, 'Terminal access denied'); } catch {}
+    return;
   }
 
   let term;
@@ -253,7 +245,7 @@ async function handleSession(ws, req, user, target) {
   );
 
   const authTimer = setInterval(() => {
-    refreshCentralCheck(getDb(), user.jti).then(() => { if (!validateSession(user.jti, requestOrigin(req)).ok) cleanup('session-revoked'); }).catch(() => cleanup('session-unavailable'));
+    refreshCentralCheck(getDb(), user.jti).then(() => { if (!authorized(req, target)) cleanup('session-revoked'); }).catch(() => cleanup('session-unavailable'));
   }, 5000);
   const idleTimer = setInterval(() => {
     if (closed) return;
@@ -299,7 +291,7 @@ async function handleSession(ws, req, user, target) {
 
   const onPtyData = (data) => {
     lastActivity = Date.now();
-    if (!validateSession(user.jti, requestOrigin(req)).ok) { cleanup('session-revoked'); return; }
+    if (!authorized(req, target)) { cleanup('session-revoked'); return; }
     const buf = Buffer.from(data, 'utf8');
     bytesOut += buf.length;
     if (ws.readyState !== ws.OPEN) return;
@@ -329,7 +321,7 @@ async function handleSession(ws, req, user, target) {
   });
 
   ws.on('message', (raw, isBinary) => {
-    if (!validateSession(user.jti, requestOrigin(req)).ok) { cleanup('session-revoked'); return; }
+    if (!authorized(req, target)) { cleanup('session-revoked'); return; }
     lastActivity = Date.now();
     bytesIn += raw.length;
 

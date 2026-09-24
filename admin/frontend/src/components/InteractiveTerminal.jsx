@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
+import { requestSudo } from '../lib/sudo.js';
 
 // InteractiveTerminal — xterm.js + WebSocket front-end for the
 // streaming-terminal route. Mounts a Terminal into a sized container,
@@ -88,6 +89,11 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
     setStatus('connecting');
     setErrorText('');
 
+    let disposed = false;
+    let disposeTerminal = () => {};
+    const connect = async () => {
+    if (wsPath.split('?')[0] === '/api/terminal/host') await requestSudo({ localOnly: true });
+    if (disposed) return;
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 14,
@@ -207,7 +213,7 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
     });
     ro.observe(containerRef.current);
 
-    return () => {
+    disposeTerminal = () => {
       try { ro.disconnect(); } catch { /* ignore */ }
       cancelAnimationFrame(resizeRaf);
       cancelAnimationFrame(refitRaf1);
@@ -220,6 +226,11 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
       fitRef.current = null;
       wsRef.current = null;
     };
+    };
+    connect().catch((error) => {
+      if (!disposed) { setStatus('error'); setErrorText(error.message || 'Terminal authorization failed'); }
+    });
+    return () => { disposed = true; disposeTerminal(); };
   }, [wsPath, initialCwd, reconnectNonce]);
 
   const isDisconnected = status === 'closed' || status === 'idle-closed' || status === 'error';

@@ -709,7 +709,7 @@ test("G3 activation closes public local-login bypass while retaining independent
     assert.throws(
       () =>
         verifyWsUpgrade({
-          headers: { cookie: restrictedCookie, host: "pilot.example.com" },
+          headers: { cookie: restrictedCookie, host: "pilot.example.com", origin: "https://pilot.example.com" },
         }),
       /linking/,
     );

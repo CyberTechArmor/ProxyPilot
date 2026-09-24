@@ -160,7 +160,7 @@ registerHooks({
         url:
           "data:text/javascript," +
           encodeURIComponent(
-            `export const getDb=()=>globalThis.__ssoFixture.getDb(); export const getSetting=k=>getDb().prepare('SELECT value FROM app_settings WHERE key=?').get(k)?.value; export function logAudit(user,action,type,id,data){getDb().prepare('INSERT INTO audit VALUES (?,?)').run(action,JSON.stringify(data));}`,
+            `export const getDb=()=>globalThis.__ssoFixture.getDb(); export const getAdminDomain=()=>getSetting('admin_domain'); export const AUDIT_TERMINAL_SESSION_START='TERMINAL_SESSION_START'; export const AUDIT_TERMINAL_SESSION_END='TERMINAL_SESSION_END'; export const getSetting=k=>getDb().prepare('SELECT value FROM app_settings WHERE key=?').get(k)?.value; export function logAudit(user,action,type,id,data){getDb().prepare('INSERT INTO audit VALUES (?,?)').run(action,JSON.stringify(data));}`,
           ),
         shortCircuit: true,
       };
@@ -370,6 +370,7 @@ export async function setup() {
     });
   }
   return {
+    server,
     db,
     app,
     url,

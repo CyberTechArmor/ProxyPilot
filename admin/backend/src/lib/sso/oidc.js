@@ -89,10 +89,13 @@ export function approvedFetch(
       );
       timer.unref();
       req.on("close", () => clearTimeout(timer));
+      let connected = false;
+      req.on("socket", (sock) => { if (!sock.connecting) connected = true; else sock.once("connect", () => { connected = true; }); });
       req.on("error", (e) => {
         const f = fail("SSO HTTPS request failed.");
-        // Nothing was sent: the local edge itself could not be reached.
-        if (edge && ["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"].includes(e?.code)) f.edgeUnreachable = true;
+        // Nothing was sent: the local edge itself could not be reached
+        // (refused, unreachable, or no connection before the timeout).
+        if (edge && (!connected || ["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"].includes(e?.code))) f.edgeUnreachable = true;
         reject(f);
       });
       if (body) req.write(body);

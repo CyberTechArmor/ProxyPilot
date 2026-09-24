@@ -45,3 +45,12 @@ test('a failed Agent Proxy check names the step and the status it got', async ()
   deps.send = async (origin, options) => options.path.includes('/g5/denied') ? 204 : send(origin, options);
   await assert.rejects(verifyBasicFlows(r, { application: 'a' }, { agent: 'agent-token' }, deps), /site outside the proxied service returned HTTP 204 \(expected 403\)/);
 });
+
+test('an ungranted secret path may be refused as 403 or 502; anything else fails', async () => {
+  for (const [status, ok] of [[403, true], [502, true], [204, false]]) {
+    const { r, deps } = harness(200), send = deps.send;
+    deps.send = async (origin, options) => { const auth = options.headers['Proxy-Authorization']; if (auth && Buffer.from(auth.split(' ')[1], 'base64').toString().includes('/ungranted-proxypilot')) return status; return send(origin, options); };
+    const run = verifyBasicFlows(r, { application: 'a' }, { agent: 'agent-token' }, deps);
+    if (ok) await run; else await assert.rejects(run, /secret path it was not given returned HTTP 204 \(expected 403 or 502\)/);
+  }
+});

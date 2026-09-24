@@ -1,0 +1,27 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+const dir=mkdtempSync(join(tmpdir(),'pp-enrollment-upgrade-'));
+process.env.DATABASE_PATH=join(dir,'test.db');
+process.env.TOTP_ENCRYPTION_KEY='a'.repeat(64);
+process.env.NODE_ENV='test';
+const {initDatabase,getDb}=await import('../db.js');
+test('upgrade removes pre-enrollment authority and preserves completed accounts',()=>{
+  initDatabase();const db=getDb();
+  db.exec(`DROP TABLE totp_enrollments;
+    ALTER TABLE sessions DROP COLUMN auth_level;
+    DELETE FROM schema_migrations WHERE version=1013;
+    INSERT INTO users(id,username,password_hash,totp_secret,totp_enabled,role) VALUES('new','new','hash','',0,'admin'),('complete','complete','hash','existing-factor',1,'admin');
+    INSERT INTO sessions(id,user_id,expires_at) VALUES('new-session','new','2099-01-01'),('complete-session','complete','2099-01-01');
+    INSERT INTO mcp_tokens(name,token_hash,created_by,created_at) VALUES('new','hash-new','new','2026-01-01'),('complete','hash-complete','complete','2026-01-01');`);
+  initDatabase();
+  assert(db.prepare("SELECT revoked_at FROM sessions WHERE id='new-session'").get().revoked_at);
+  assert(db.prepare("SELECT revoked_at FROM mcp_tokens WHERE name='new'").get().revoked_at);
+  assert.equal(db.prepare("SELECT revoked_at FROM sessions WHERE id='complete-session'").get().revoked_at,null);
+  assert.equal(db.prepare("SELECT revoked_at FROM mcp_tokens WHERE name='complete'").get().revoked_at,null);
+  assert.equal(db.prepare("SELECT auth_level FROM sessions WHERE id='complete-session'").get().auth_level,'full');
+  initDatabase();assert.equal(db.prepare('SELECT COUNT(*) n FROM totp_enrollments').get().n,0);
+  db.close();rmSync(dir,{recursive:true,force:true});
+});

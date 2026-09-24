@@ -77,7 +77,7 @@ export function validateSession(jti, origin = null) {
   }
   const db = getDb();
   const session = db.prepare(
-    `SELECT id, user_id, expires_at, last_used_at, revoked_at, sudo_until
+    `SELECT *
        FROM sessions WHERE id = ?`
   ).get(jti);
   if (!session || session.revoked_at) {
@@ -88,6 +88,7 @@ export function validateSession(jti, origin = null) {
   const currentUser = db.prepare('SELECT id, role FROM users WHERE id = ?').get(session.user_id);
   if (!currentUser) return { ok: false, status: 401, error: 'Account no longer exists' };
   session.currentRole = currentUser.role;
+  session.enrollmentOnly = session.auth_level === 'enrollment';
   session.linkOnly = sessionContext(db, session.id)?.method === 'link-only';
   const nowMs = Date.now();
   const expiresAtMs = Date.parse(session.expires_at);
@@ -139,6 +140,9 @@ export async function authenticateToken(req, res, next) {
   }
 
   if (decoded.id !== result.session.user_id) return res.status(401).json({ error: 'Session identity mismatch' });
+  const enrollmentOnly = result.session.enrollmentOnly || decoded.enrollmentOnly === true;
+  if (enrollmentOnly && !(req.method === 'POST' && ['/api/auth/complete-totp-setup','/api/auth/logout'].includes(req.originalUrl.split('?')[0])))
+    return res.status(403).json({ error:'Complete MFA enrollment first', enrollment_required:true });
   const context = sessionContext(getDb(), decoded.jti);
   const linkOnly = context?.method === 'link-only';
   if (linkOnly) {
@@ -148,7 +152,7 @@ export async function authenticateToken(req, res, next) {
     if (!(req.method==='GET' && reads.includes(path)) && !(req.method==='POST' && writes.includes(path))) return res.status(403).json({ error: 'This local proof session can only link your account to Keycloak.', link_only: true });
     if (path==='/api/auth/sso/begin' && req.body?.action!=='link') return res.status(403).json({error:'Complete account linking, then sign in through Keycloak.',link_only:true});
   }
-  req.user = { ...decoded, role: result.session.currentRole, linkOnly };
+  req.user = { ...decoded, role: result.session.currentRole, linkOnly, enrollmentOnly };
   if (req.localRecovery && req.user.role !== 'admin') return res.status(403).json({ error: 'Recovery requires a local administrator' });
   req.session = result.session;
   next();
@@ -161,10 +165,11 @@ export async function authenticateToken(req, res, next) {
 //
 // The caller MUST pass req.ip + req.headers['user-agent'] so the
 // session row carries an audit trail of where the token was minted.
-export function generateToken(user, { ip, userAgent } = {}) {
+export function generateToken(user, { ip, userAgent, enrollmentOnly = false } = {}) {
   const db = getDb();
   const jti = uuidv4();
-  const expiresAtMs = Date.now() + SESSION_TTL_HOURS * 60 * 60 * 1000;
+  const ttlMs = enrollmentOnly ? 5 * 60_000 : SESSION_TTL_HOURS * 60 * 60 * 1000;
+  const expiresAtMs = Date.now() + ttlMs;
   const expiresAtISO = new Date(expiresAtMs).toISOString();
 
   db.prepare(
@@ -178,15 +183,18 @@ export function generateToken(user, { ip, userAgent } = {}) {
     userAgent ? String(userAgent).slice(0, 200) : null,
   );
 
+  if (enrollmentOnly) db.prepare("UPDATE sessions SET auth_level='enrollment' WHERE id=?").run(jti);
+
   return jwt.sign(
     {
       id: user.id,
       username: user.username,
       role: user.role || 'admin',
       jti,
+      ...(enrollmentOnly ? { enrollmentOnly:true } : {}),
     },
     JWT_SECRET,
-    { expiresIn: `${SESSION_TTL_HOURS}h` }
+    { expiresIn: Math.floor(ttlMs / 1000) }
   );
 }
 

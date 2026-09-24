@@ -1,3 +1,5 @@
+import jwt from 'jsonwebtoken';
+import { beginTotpEnrollment, completeTotpEnrollment } from '../lib/totp-enrollment.js';
 import { recordLocalSession, stampLocalProof } from '../lib/sso/sessions.js';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
@@ -249,10 +251,10 @@ authRouter.post('/initial-setup', async (req, res) => {
 
     logAudit(user.id, 'INITIAL_PASSWORD_SET', 'user', user.id, {}, req.ip);
 
-    // Generate token so user is logged in immediately (still needs TOTP setup)
-    const token = generateToken(user, { ip: req.ip, userAgent: req.headers["user-agent"] });
-    recordLocalSession(db, token, req, user);
+    const token = generateToken(user, { ip:req.ip, userAgent:req.headers['user-agent'], enrollmentOnly:true });
+    const pending = beginTotpEnrollment(user, jwt.decode(token).jti);
     setAuthCookies(res, token);
+    res.set('Cache-Control','no-store');
 
     res.json({
       success: true,
@@ -272,18 +274,7 @@ authRouter.post('/initial-setup', async (req, res) => {
       },
       // Include TOTP setup info so user can set it up right away
       totpSetupRequired: true,
-      totpSecret: (() => {
-        const secret = new OTPAuth.Secret({ size: 20 });
-        const totp = new OTPAuth.TOTP({
-          issuer: 'ProxyPilot',
-          label: username,
-          algorithm: 'SHA1',
-          digits: 6,
-          period: 30,
-          secret: secret,
-        });
-        return { secret: secret.base32, uri: totp.toString() };
-      })(),
+      totpSecret: pending,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -309,26 +300,8 @@ authRouter.post('/complete-totp-setup', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Verify the TOTP code
-    const totp = new OTPAuth.TOTP({
-      issuer: 'ProxyPilot',
-      label: user.username,
-      algorithm: 'SHA1',
-      digits: 6,
-      period: 30,
-      secret: OTPAuth.Secret.fromBase32(totpSecret),
-    });
-
-    const delta = totp.validate({ token: totpCode, window: 1 });
-    if (delta === null) {
-      return res.status(401).json({ error: 'Invalid TOTP code. Please try again.' });
-    }
-
-    // Save TOTP secret (encrypted at rest)
-    db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-      .run(encryptSecret(totpSecret), user.id);
-
-    logAudit(user.id, 'TOTP_SETUP', 'user', user.id, {}, req.ip);
+    if (!req.user.enrollmentOnly || user.totp_enabled) return res.status(409).json({error:'Initial enrollment is not available'});
+    completeTotpEnrollment({userId:user.id,sessionId:req.user.jti,purpose:'enroll',code:totpCode,submittedSecret:totpSecret,ip:req.ip});
 
     // Generate fresh token with updated user info
     const freshUser = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
@@ -354,7 +327,8 @@ authRouter.post('/complete-totp-setup', authenticateToken, async (req, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: error.errors[0].message });
     }
-    console.error('TOTP setup error:', error);
+    if (error.status) return res.status(error.status).json({error:error.message});
+    console.error('TOTP setup failed');
     res.status(500).json({ error: 'TOTP setup failed' });
   }
 });
@@ -364,13 +338,12 @@ const loginSchema = z.object({
   username: z.string().min(1, 'Username is required'),
   password: z.string().min(1, 'Password is required'),
   totpCode: z.string().length(6, 'TOTP code must be 6 digits').optional().or(z.literal('')),
-  totpSetupSecret: z.string().optional(), // For users setting up TOTP for the first time
 });
 
 // Password login always requires TOTP. Passkey authentication remains separate.
 authRouter.post('/login', async (req, res) => {
   try {
-    const { username, password, totpCode, totpSetupSecret } = loginSchema.parse(req.body);
+    const { username, password, totpCode } = loginSchema.parse(req.body);
     const db = getDb();
 
     // Find user
@@ -479,55 +452,11 @@ authRouter.post('/login', async (req, res) => {
       }
 
     } else {
-      // User needs to set up TOTP - mandatory for all users
-      if (!totpCode || !totpSetupSecret) {
-        // Generate new TOTP secret and return QR code
-        const secret = new OTPAuth.Secret({ size: 20 });
-        const totp = new OTPAuth.TOTP({
-          issuer: 'ProxyPilot',
-          label: username,
-          algorithm: 'SHA1',
-          digits: 6,
-          period: 30,
-          secret: secret,
-        });
-
-        return res.status(401).json({
-          error: 'TOTP setup required',
-          totpSetupRequired: true,
-          totpSecret: secret.base32,
-          totpUri: totp.toString(),
-        });
-      }
-
-      // Verify the setup code
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(totpSetupSecret),
-      });
-
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        recordLoginFailure(db, user, req);
-        logAudit(null, 'LOGIN_FAILED', 'user', user.id, { reason: 'Invalid TOTP setup code' }, req.ip);
-        return res.status(401).json({
-          error: 'Invalid TOTP code. Please scan the QR code and try again.',
-          totpSetupRequired: true,
-          totpSecret: totpSetupSecret,
-          totpUri: totp.toString(),
-        });
-      }
-
-      // Save the TOTP secret to the user (encrypted at rest)
-      db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 1 WHERE id = ?')
-        .run(encryptSecret(totpSetupSecret), user.id);
-
-      logAudit(user.id, 'TOTP_SETUP', 'user', user.id, {}, req.ip);
-
+      const token = generateToken(user,{ip:req.ip,userAgent:req.headers['user-agent'],enrollmentOnly:true});
+      const pending = beginTotpEnrollment(user,jwt.decode(token).jti);
+      setAuthCookies(res,token);
+      res.set('Cache-Control','no-store');
+      return res.status(401).json({error:'TOTP setup required',totpSetupRequired:true,enrollmentOnly:true,token,totpSecret:pending.secret,totpUri:pending.uri});
     }
 
     // Generate token + set cookies (canonical browser path)

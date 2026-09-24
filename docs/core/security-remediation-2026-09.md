@@ -8,7 +8,7 @@ as its own tested commit and pull request. A merge is not a deployment.
 | S1 | Service authorization and Compose command injection | Fixed; focused tests below |
 | S2 | Terminal WebSocket authorization | Fixed; tests and limits below |
 | S3 | Predictable trusted-device MFA bypass | Fixed; migration 1012 |
-| S4 | TOTP replacement and enrollment proof | Open |
+| S4 | TOTP replacement and enrollment proof | Fixed; migration 1013 |
 | S5 | MCP scope and child-key escalation | Open |
 | S6 | Web backend holds host-root authority | Open; requires architectural migration |
 | S7 | Vulnerable production dependencies | Open |
@@ -96,3 +96,33 @@ SQLite engine through a test-only adapter because native better-sqlite3
 bindings are unavailable in this environment. The unadapted passkey suite
 could not start; it was not counted as a native pass. Frontend build passes.
 Browser visual QA remains unavailable as described under S2.
+
+## S4: bound MFA enrollment and factor replacement
+
+Initial setup and password login for an unenrolled account now issue a
+five-minute enrollment session. The database and JWT both record its limited
+purpose. Only completion and logout are allowed; ordinary APIs, setup, key
+minting and WebSockets refuse it. The pending server-generated seed is encrypted
+at rest and bound to that user/session, purpose, prior factor and deadline.
+Completion consumes it atomically; wrong proofs have a five-attempt budget.
+Cookie completion requires CSRF, and pre-auth CSRF exemptions match exact routes.
+
+An already-enrolled account cannot use the setup endpoint to reset its factor.
+The profile replacement flow verifies the password and current TOTP (the API
+also supports the existing current-passkey confirmation ceremony), then creates
+a session-bound pending seed. The profile form asks for the current code before
+showing a replacement QR. Finishing replacement atomically updates the factor,
+consumes pending state, revokes all sessions/device trust, and writes the audit
+and notification. The user signs in again with the new factor.
+
+Migration 1013 retires sessions and MCP keys belonging to accounts that had not
+completed TOTP enrollment under the previous flow. Completed accounts retain
+their existing authority. The migration and repeated startup are tested.
+
+Validation: 28 integration/regression tests pass across enrollment, service,
+terminal, device-trust and guided SSO suites. Tests cover arbitrary factor
+replacement, real old/new OTP proof, session binding, encrypted storage,
+expiry, attempt budget, missing CSRF, concurrent completion, replay, limited
+session boundaries, session invalidation and durable notification. Both upgrade
+migration tests pass with the test-only Node SQLite adapter. Frontend build
+passes; browser visual QA remains unexecuted (S2 environment limitation).

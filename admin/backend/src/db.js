@@ -1,3 +1,4 @@
+import { TOTP_ENROLLMENT_SCHEMA } from './lib/totp-enrollment.js';
 import { VAULTWARDEN_SCHEMA } from './lib/setup-engine/vaultwarden-store.js';
 import { FULL_PLATFORM_SCHEMA } from './lib/setup-engine/full-platform-store.js';
 import { KEYCLOAK_LDAP_SCHEMA } from './lib/setup-engine/keycloak-ldap-schema.js';
@@ -2392,6 +2393,13 @@ export function initDatabase() {
   runMigration(db, 1010, 'setup_keycloak_ldap', (d) => d.exec(KEYCLOAK_LDAP_SCHEMA));
   // 1011: an allowlist may guard named paths only (Vaultwarden open with /admin
   // restricted; Keycloak's /admin restricted) — lib/setup-engine/platform-access.js.
+  runMigration(db, 1013, 'bound_totp_enrollment', (d) => {
+    d.exec("ALTER TABLE sessions ADD COLUMN auth_level TEXT NOT NULL DEFAULT 'full'");
+    d.exec(TOTP_ENROLLMENT_SCHEMA);
+    d.exec("UPDATE sessions SET revoked_at=CURRENT_TIMESTAMP,sudo_until=NULL WHERE user_id IN (SELECT id FROM users WHERE totp_enabled=0) AND revoked_at IS NULL");
+    d.exec("UPDATE mcp_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE created_by IN (SELECT id FROM users WHERE totp_enabled=0) AND revoked_at IS NULL");
+  });
+
   runMigration(db, 1011, 'route_ip_allowlist_paths', (d) => {
     const cols = d.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);
     if (cols.length && !cols.includes('ip_allowlist_paths_json')) d.exec('ALTER TABLE service_http_routes ADD COLUMN ip_allowlist_paths_json TEXT');

@@ -185,6 +185,7 @@ export default function Profile() {
   const [totpForm, setTotpForm] = useState({
     password: '',
     verificationCode: '',
+    currentCode: '',
   });
 
   // Passkey management state
@@ -403,7 +404,7 @@ export default function Profile() {
     setSettingUpTotp(true);
 
     try {
-      const data = await api.generateTotp(totpForm.password);
+      const data = await api.generateTotp(totpForm.password, totpForm.currentCode);
       setTotpSetupData(data);
 
       // Generate QR code
@@ -445,8 +446,9 @@ export default function Profile() {
 
       setTotpSetupData(null);
       setQrCodeUrl('');
-      setTotpForm({ password: '', verificationCode: '' });
-      fetchProfile();
+      setTotpForm({ password: '', verificationCode: '', currentCode: '' });
+      localStorage.removeItem('user');
+      window.location.href = '/login';
     } catch (error) {
       toast({
         variant: 'destructive',
@@ -461,7 +463,7 @@ export default function Profile() {
   const cancelTotpSetup = () => {
     setTotpSetupData(null);
     setQrCodeUrl('');
-    setTotpForm({ password: '', verificationCode: '' });
+    setTotpForm({ password: '', verificationCode: '', currentCode: '' });
   };
 
   // Device management functions
@@ -944,7 +946,14 @@ export default function Profile() {
                 />
               </div>
 
-              <Button onClick={handleGenerateTotp} disabled={settingUpTotp || !totpForm.password}>
+              <div className="space-y-2">
+                <Label htmlFor="totpCurrentCode">Current authenticator code</Label>
+                <Input id="totpCurrentCode" inputMode="numeric" autoComplete="one-time-code"
+                  className="h-12 text-center tracking-[0.5em] text-lg" maxLength={6}
+                  value={totpForm.currentCode}
+                  onChange={(e) => setTotpForm({ ...totpForm, currentCode: e.target.value.replace(/\D/g, '').slice(0, 6) })} />
+              </div>
+              <Button onClick={handleGenerateTotp} disabled={settingUpTotp || !totpForm.password || totpForm.currentCode.length !== 6}>
                 {settingUpTotp ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -1024,7 +1033,7 @@ export default function Profile() {
                 Authenticated Devices
               </CardTitle>
               <CardDescription>
-                Devices that can log in without TOTP verification
+                Legacy device trust has been retired. Password sign-in always requires TOTP.
               </CardDescription>
             </div>
             <div className="flex gap-2">

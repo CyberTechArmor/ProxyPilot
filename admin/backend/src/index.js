@@ -203,6 +203,8 @@ const setupLimiter = rateLimit({
 });
 app.use('/api/auth/initial-setup', setupLimiter);
 app.use('/api/auth/complete-totp-setup', setupLimiter);
+app.use('/api/user/totp/generate', setupLimiter);
+app.use('/api/user/totp/verify', setupLimiter);
 
 // setup-status is polled by the frontend on every page load to decide
 // whether to show the setup wizard, so it needs a higher ceiling than

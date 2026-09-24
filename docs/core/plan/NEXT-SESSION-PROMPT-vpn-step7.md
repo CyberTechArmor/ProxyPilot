@@ -6,11 +6,38 @@ Three things are already shipped — do **not** re-implement any of them:
 * Firewall manager (steps 1–4) — see
   `docs/core/plan/phase-08b-firewall-manager.md`.
 * VPN server (step 5) — see `docs/core/plan/phase-12a-vpn-server.md`.
-* VPN peer lifecycle (step 6) — six commits, head `c5bef94` on
+* VPN peer lifecycle (step 6) — six commits ending at `c5bef94` on
   `claude/setup-vpn-step6-prompt-OqCEZ`. The shipped record is
   `docs/core/plan/phase-12b-vpn-peers.md` if it exists; if it does
   not, read the step-6 commit log + `cli/src/core/vpn/peer.js` end
   to end before starting.
+
+### Post-step-6 fixes also on the same branch (head `b4ca5e0`)
+
+These shipped after step 6 in response to operator-reported issues.
+Read each commit message; the changes alter the firewall renderer's
+input shape and a few CLI surfaces step 7 will touch:
+
+* `6a807dd` — `container_egress` chain's drop tail is now scoped to
+  `daddr <bridge_gw>` (was unconditional drop of every saddr in the
+  bridge CIDR; broke all LXC outbound traffic, including DNS and
+  any backend the LXC's apps reached).
+* `1b35486` / `5444369` — `input_hook` trusts the LXC bridge
+  interface so containers can DHCP / DNS to the host's dnsmasq.
+  Uses `iifname` (lazy string match), not `iif` (eager numeric
+  index that nft rejects when the bridge isn't up at apply time).
+* `84ecb73` — `state.network = { bridge_iface, bridge_cidr,
+  bridge_gw }` parameterizes the renderer for hosts whose bridge
+  isn't ProxyPilot's `pp-br0` default. Validated up-front via tight
+  regexes in `bridgeFromState()`. Defaults preserved.
+* `b4ca5e0` — `proxypilot firewall detect-bridge [--apply] [--force]`
+  CLI auto-detects the host's managed Incus bridge from
+  `incus network list --format json` and writes `state.network`.
+  Wired into `scripts/install-firewall.sh` so install + update
+  populate the field automatically; idempotent on re-runs.
+* `196dc64` — service-card domain in the dashboard is now an
+  `<a target="_blank">` link. Out of scope for step 7's L7 work but
+  worth knowing the surface exists.
 
 ## Spec
 
@@ -31,8 +58,12 @@ writing code, especially:
 
 ## Branch
 
-The harness will assign a branch. Stay on it. Do **not** push to
-main, the firewall branch, or the step 5 / 6 branches.
+The harness will assign a branch. Stay on it. Branch off
+`claude/setup-vpn-step6-prompt-OqCEZ` (head `b4ca5e0`) so the
+post-step-6 fixes above are present — step 7's work depends on
+the parameterized `state.network` and on `bridgeFromState()`. Do
+**not** push to main, the firewall branch, or the step 5 / 6
+branches.
 
 ## Scope of this session — step 7 only
 
@@ -189,6 +220,17 @@ the split early if 7a alone produces ≥ 5 commits.
    call `reconcile({ actor })`. Do not bypass.
 8. **Audit completeness.** One audit row per mutation. The only new
    action is `peer.set-scope`; everything else reuses step-6 actions.
+9. **`iifname` not `iif` for any iface-based input rule.** Eager
+   `iif` resolution fails when the bridge isn't up at apply time
+   (boot order, stopped containers). The post-step-6 fix
+   established this; don't regress it.
+10. **Network values come from `state.network` via `bridgeFromState()`,
+    not hardcoded constants.** The post-step-6 fix removed
+    `LXC_BRIDGE_CIDR` / `LXC_BRIDGE_GW` / `LXC_BRIDGE_IFACE` as
+    consumer-facing constants. If step 7 needs the bridge GW (e.g.
+    to compute "from VPN /32 → bridge service" rules), call
+    `bridgeFromState(state)` so a host whose bridge isn't `pp-br0`
+    still gets correct rules.
 
 ### Composition with what's already shipped
 
@@ -197,19 +239,40 @@ contracts:
 
 * `cli/src/core/firewall/reconcile.js` — extend with
   `resolveVpnSources(state)` pre-render hook. Keep `reconcile()`
-  signature stable.
+  signature stable. The post-step-6 fix already establishes the
+  pattern: reconcile reads `state`, calls a pre-render resolver,
+  hands richer state to `render()`. Mirror that.
 * `cli/src/core/firewall/render.js` — already honors
-  `source_cidrs`. Do **not** edit; only feed richer state.
+  `source_cidrs`. **Do not edit the renderer.** Read the existing
+  `bridgeFromState(state)` helper as a model — short, total, throws
+  on invalid input — and add `resolveVpnSources(state)` next to it
+  with the same shape.
 * `cli/src/core/firewall/state.js` — extend rule schema (new optional
   `service` field). Schema migration in `cli/src/db/schema.js` adds
   the column under a `PRAGMA table_info` guard — append, don't
   introduce a migration framework.
+* `cli/src/core/firewall/detect.js` — exists from the post-step-6
+  fix; out of scope for step 7. Don't extend it for service
+  detection.
 * `cli/src/core/vpn/peer.js` — every mutation calls `fwReconcile`.
   Imports already exist for the base-toggle path; reuse them.
 * `cli/src/caddy/` — extend to support per-route vpn-only matchers.
   Add `render.js` (pure render of route → site block) if the
   existing `client.js` is too tightly coupled to the imperative
   path.
+
+### Known inconsistency you may want to fix in passing
+
+`cli/src/core/firewall/render.js` still hardcodes
+`NAMED_SERVICES.pgbouncer.dst = '10.0.100.1'`. After the post-
+step-6 parameterization, this is wrong on hosts where the bridge
+GW differs (e.g. the operator-reported `incusbr0` / `10.64.250.1`).
+Step 7 touches the renderer's input shape; if you're adding a
+service-tag pre-resolver anyway, plumbing the bridge GW through
+`bridgeFromState()` so `NAMED_SERVICES` rewrites `dst` to the
+actual gateway is a small additive fix. **Optional** — call it out
+in the audit pass and ship as a separate commit if you have time;
+skip if scope is already heavy.
 
 ### File layout
 
@@ -288,7 +351,13 @@ the fix obvious. Skip nice-to-have refactors.
 * Do not modify the firewall renderer's contract
   (`render(state) → ruleset string`). Only feed it richer state.
 * Do not modify step 5 / 6 contracts (`enable`, `disable`,
-  `addPeer`, `rotatePeer`, etc.). Add new exports additively.
+  `addPeer`, `rotatePeer`, etc.) or the post-step-6 fix's
+  contracts (`bridgeFromState()`, `detectBridge()`,
+  `firewall detect-bridge` CLI). Add new exports additively.
+* Do not re-introduce hardcoded `LXC_BRIDGE_*` constants. The
+  post-step-6 fix removed them on purpose; new code reads from
+  `state.network` via `bridgeFromState()`.
+* Do not regress `iifname` to `iif` for any iface-based rule.
 * Do not introduce a new `audit_log` table or migration framework.
 * Do not commit `node_modules/`. The `.gitignore` already excludes it.
 * Do not push to main, the firewall branch, or the step 5 / 6

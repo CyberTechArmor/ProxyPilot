@@ -68,12 +68,12 @@ export function register() {
   unregister();
   const expr = process.env.PROXYPILOT_STORAGE_MONITOR_CRON || DEFAULT_CRON;
   try {
-    task = cron.schedule(expr, () => { runOnce().catch(() => {}); }, { scheduled: true, timezone: process.env.TZ || 'UTC' });
+    task = cron.schedule(expr, () => { runOnce().catch(() => {}); }, {  timezone: process.env.TZ || 'UTC' });
     logger(`registered (cron=${expr})`);
   } catch (err) { logger('register failed', { error: err?.message }); }
 }
 
-export function unregister() { if (task) { try { task.stop(); } catch { /* ignore */ } task = null; } }
+export function unregister() { if (task) { try { task.destroy(); } catch { /* ignore */ } task = null; } }
 
 export function hydrate() {
   if (process.env.PROXYPILOT_DISABLE_CRONS === '1') return;

@@ -73,7 +73,7 @@ export function register(row) {
   }
 
   const task = cron.schedule(row.cron_expr, () => enqueue(row.id), {
-    scheduled: true,
+
     timezone: process.env.TZ || 'UTC',
   });
   tasks.set(row.id, task);
@@ -92,7 +92,7 @@ export function register(row) {
 export function unregister(id) {
   const t = tasks.get(id);
   if (!t) return;
-  try { t.stop(); } catch { /* ignore */ }
+  try { t.destroy(); } catch { /* ignore */ }
   tasks.delete(id);
 }
 
@@ -121,7 +121,7 @@ function registerOrphanSweeper() {
     } catch (err) {
       errLogger('temp-instance sweep threw', { error: err?.message });
     }
-  }, { scheduled: true, timezone: process.env.TZ || 'UTC' });
+  }, {  timezone: process.env.TZ || 'UTC' });
 }
 
 export function hydrate() {

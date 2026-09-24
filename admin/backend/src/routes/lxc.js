@@ -1,3 +1,4 @@
+import { multipartLimits } from '../lib/multipart-limits.js';
 import { Router } from 'express';
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -75,7 +76,7 @@ const importStorage = multer.diskStorage({
   // decoration.
   filename: (_req, _file, cb) => cb(null, `import-${Date.now()}-${randomUUID()}.tarball`),
 });
-const upload = multer({ storage: importStorage, limits: { fileSize: LXC_IMPORT_LIMIT_BYTES } });
+const upload = multer({ storage: importStorage, limits: multipartLimits(LXC_IMPORT_LIMIT_BYTES) });
 
 export const lxcRouter = Router();
 
@@ -3176,7 +3177,7 @@ const lxcZipStorage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, LXC_ZIP_TMP_DIR),
   filename: (_req, _file, cb) => cb(null, `lxc-${randomUUID()}.zip`),
 });
-const lxcZipUpload = multer({ storage: lxcZipStorage, limits: { fileSize: ZIP_LIMITS.maxZipBytes } });
+const lxcZipUpload = multer({ storage: lxcZipStorage, limits: multipartLimits(ZIP_LIMITS.maxZipBytes) });
 
 function lxcZipUploadSingle(req, res, next) {
   lxcZipUpload.single('file')(req, res, (err) => {

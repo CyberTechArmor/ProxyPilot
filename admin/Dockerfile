@@ -3,7 +3,7 @@
 # Frontend is pre-built before docker build (admin/frontend/dist).
 
 # Stage 1: Build backend dependencies
-FROM node:20-alpine AS backend-builder
+FROM node:24-alpine AS backend-builder
 WORKDIR /app/backend
 
 # Install build dependencies for better-sqlite3.
@@ -37,14 +37,14 @@ COPY admin/backend/package*.json admin/backend/.npmrc ./
 # (which always uses --no-cache). Wrap in the same five-attempt
 # exponential-backoff loop the apk add steps use.
 RUN for i in 1 2 3 4 5; do \
-        npm install --omit=dev && break || { \
+        npm ci --omit=dev && break || { \
             echo "npm install attempt $i/5 failed, sleeping $((i*i*2))s"; \
             sleep $((i*i*2)); \
         }; \
     done && test -d node_modules
 
 # Stage 2: Production image
-FROM node:20-alpine
+FROM node:24-alpine
 WORKDIR /app
 
 # Runtime dependencies. Same retry pattern as the builder. Now also

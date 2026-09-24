@@ -1,3 +1,4 @@
+import { multipartLimits } from '../lib/multipart-limits.js';
 // Lean BEAF Pro — /api/lbp. Team-shared innovation project management.
 //
 // Access model (R01): every authenticated, non-pending user is a workspace
@@ -56,7 +57,7 @@ const uploadStorage = multer.diskStorage({
 });
 const upload = multer({
   storage: uploadStorage,
-  limits: { fileSize: Number(process.env.LBP_MAX_UPLOAD_BYTES || 50 * 1024 * 1024) },
+  limits: multipartLimits(Number(process.env.LBP_MAX_UPLOAD_BYTES || 50 * 1024 * 1024)),
 });
 
 // Mime types the inline viewer may render directly (everything else is

@@ -11,7 +11,7 @@ as its own tested commit and pull request. A merge is not a deployment.
 | S4 | TOTP replacement and enrollment proof | Fixed; migration 1013 |
 | S5 | MCP scope and child-key escalation | Fixed; migration 1014 and log upgrade below |
 | S6 | Web backend holds host-root authority | Open; requires architectural migration |
-| S7 | Vulnerable production dependencies | Open |
+| S7 | Vulnerable production dependencies | Package findings fixed; scan limits below |
 | S8 | Public first-account claim | Open |
 
 ## S1: service authorization
@@ -166,3 +166,64 @@ The actual migration/idempotence test passes using the Node SQLite adapter.
 Two Python Caddy transform tests, shell syntax checks and frontend build pass.
 Caddy validate/reload and 360px browser QA remain unexecuted here (no binaries).
 The upgrade performs Caddy checks on the operator's host before continuing.
+
+
+## S7: dependencies and continuous regression checks
+
+Fresh npm audits on 2026-09-24: backend **9 → 0** package entries (2 high,
+6 moderate, 1 low before); frontend **7 → 0** (3 high, 3 moderate, 1 low).
+CLI and shipped application template both report zero. Full before/after
+advisory data is in `security-dependency-scan-2026-09.json`.
+
+Runtime fixes: Multer 2.4.0, Nodemailer 9.1.1, SimpleWebAuthn 13.3.3,
+Express 4.22.3/body-parser 1.20.8/qs 6.16.0, ldapts 8.2.0 and node-cron
+4.6.0. The latter two remove vulnerable nested uuid versions. Multer's new
+safeguards require explicit opt-in: every upload route now bounds multipart
+field depth, array indices, field count/size and parts as well as file bytes.
+Cron scheduling still starts immediately; discarded tasks use v4 destroy to
+release their registry entries. LDAP's used Client/bind/search/unbind interface
+is unchanged. Nodemailer keeps the SMTP-only, explicit field interface.
+
+Frontend uses React Router 7.18.4 (React 18 compatible), with PostCSS 8.5.28,
+Nano ID 3.3.19 and updated browser/selector tooling. Router is a runtime browser
+dependency; PostCSS and browser-target discovery are build-time dependencies.
+The app does not use Router server rendering, so its SSR-specific advisory did
+not represent an observed deployed SSR path. Multipart issues are reachable
+through authorized upload routes. Several Nodemailer advisories concern options
+not accepted by the notification wrapper; the package is updated regardless.
+
+The image moves from EOL Node 20 to Node 24 LTS and installs the lockfile with
+npm ci. Backend and recovery CLI native SQLite move to 12.11.1 for supported runtime compatibility.
+Native installs/build hosts require Node 22.15+ or 24; update preflight refuses
+older versions before rebuild, and installation selects 24. The agent builder
+moves from Go 1.21.13 to verified Go 1.27.1 tarballs with pinned SHA-256 checks.
+Existing configuration, data and encryption keys are untouched.
+
+Validation: **267 tests passed**, including all S1–S5 HTTP/WebSocket/MCP and
+migration tests, real native SQLite/passkey checks, LDAP/notification tests,
+real SMTP delivery/header-injection checks, bounded multipart size/index,
+malformed/aborted upload cleanup and scheduler lifetime. Frontend build, Go vet,
+Go tests, and govulncheck passed (no Go vulnerabilities found). Caddy transform
+and shell syntax checks pass. Four pre-existing Unix-socket CVE-driver tests
+are blocked locally by EPERM on socket bind; they remain enabled in CI.
+Browser visual/navigation QA and Docker image/OS vulnerability scanning remain
+unexecuted because the necessary runtime tools are unavailable.
+
+`security-regression.yml` runs on every PR and main push: native backend
+security/upgrade tests, all four npm audits (all severities), frontend build,
+Python/shell checks, Go vet/tests and govulncheck. No path filter can omit a
+middleware/schema/policy change. No advisory suppression was introduced.
+
+Primary references: [Multer array-index advisory](https://github.com/expressjs/multer/security/advisories/GHSA-535w-7cp7-47q4),
+[Multer aborted-upload advisory](https://github.com/expressjs/multer/security/advisories/GHSA-qfvm-cv95-jqjf),
+[Nodemailer advisory](https://github.com/nodemailer/nodemailer/security/advisories/GHSA-8m3c-c648-2xjj),
+[Router advisory](https://github.com/remix-run/react-router/security/advisories/GHSA-wrjc-x8rr-h8h6),
+[PostCSS advisory](https://github.com/postcss/postcss/security/advisories/GHSA-fxqj-rqcc-2cmp),
+[cron migration](https://nodecron.com/migrating-from-v3.html),
+[Node release support](https://nodejs.org/en/about/previous-releases), and
+[Go release checksums](https://go.dev/dl/?mode=json).
+
+S7 CI follow-up: all 13 checks on the first PR revision passed, including the
+Unix-socket CVE-driver tests and both storage integration jobs. The recovery
+CLI SQLite dependency is also upgraded for Node 24, and its recovery tests are
+included in the security workflow.

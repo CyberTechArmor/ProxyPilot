@@ -718,6 +718,38 @@ export function lxcCommandTimeoutMs(seconds, policy = {}) {
 
 // ---- get_lxc_container: instance detail mapping ----
 
+// The MCP creation path can request a VM, but never carries Docker-in-LXC
+// privileges into it. This is a generic guest plan, not an A3 worker policy.
+export function mcpGuestCreateOptions(args = {}) {
+  const cpu = args.cpu == null ? 2 : Number(args.cpu);
+  if (!Number.isInteger(cpu) || cpu < 1 || cpu > 64) return { error: 'cpu must be a whole number of vCPUs (1–64)' };
+  const memoryGb = args.memory_gb == null ? 4 : Number(args.memory_gb);
+  if (!Number.isFinite(memoryGb) || memoryGb < 0.5 || memoryGb > 512) return { error: 'memory_gb must be between 0.5 and 512' };
+  const diskGb = args.disk_gb == null ? null : Number(args.disk_gb);
+  if (diskGb !== null && (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 2048)) return { error: 'disk_gb must be a whole number of GB (1–2048)' };
+  const isVm = args.vm === true;
+  if (isVm && args.docker_ready === true) return { error: 'docker_ready is for containers and cannot be enabled on a VM' };
+  const dockerReady = !isVm && args.docker_ready !== false;
+  const autostart = args.autostart !== false;
+  const config = {
+    'limits.cpu': String(cpu),
+    'limits.memory': `${Math.round(memoryGb * 1024)}MiB`,
+    'boot.autostart': String(autostart),
+  };
+  if (isVm) {
+    config['security.nesting'] = 'false';
+    config['security.guestapi'] = 'false';
+  }
+  if (dockerReady) Object.assign(config, {
+    'security.nesting': 'true',
+    'security.syscalls.intercept.mknod': 'true',
+    'security.syscalls.intercept.setxattr': 'true',
+    'security.syscalls.intercept.bpf': 'true',
+    'security.syscalls.intercept.bpf.devices': 'true',
+  });
+  return { cpu, memoryGb, diskGb, isVm, dockerReady, autostart, config };
+}
+
 /** Map one incus instance (list --format json shape) to the tool's detail
  *  view: addresses on every non-lo NIC, the security/limits/boot config
  *  subset, and snapshots. Pure so the shape is testable. */
@@ -735,6 +767,7 @@ export function lxcContainerDetail(instance) {
   const addresses = lxcContainerAddresses(instance);
   const primary = addresses.find((a) => !a.internal && a.family === 'inet') || null;
   return {
+    type: instance?.type || null,
     status: instance?.status || null,
     created_at: instance?.created_at || null,
     ephemeral: !!instance?.ephemeral,
@@ -1243,16 +1276,17 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'create_lxc_container',
-    description: 'Create a new LXC/Incus guest as a setup-engine job (the runner launches it from a validated plan and reads it back as Running; a failed launch removes the half-created guest). Creation-only, so inherently non-destructive: fails if the name already exists, never replaces. docker_ready (default true) sets security.nesting plus the syscall intercepts Docker needs at birth, so the keyring/nesting failures do not occur on new guests — privileged mode is NOT included and stays behind set_lxc_config\'s risk gate. Waits briefly for a DHCP lease and returns the same detail as get_lxc_container. Requires confirm: true.',
+    description: 'Create a new Incus container or VM as a setup-engine job. vm:true creates a VM with nesting and guest API disabled; Docker-ready flags are refused for VMs. Creation fails if the name exists and never replaces it. The root disk override is best effort, and the default profile/network do not constitute an isolated worker boundary. Waits briefly for a DHCP lease and returns the Incus instance type and detail. Requires confirm:true.',
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Guest name (ProxyPilot adds its pp- prefix). Fails if taken.' },
         image: { type: 'string', description: 'Incus image alias, default images:debian/12.' },
+        vm: { type: 'boolean', description: 'Create a virtual machine instead of a container. Default false.' },
         cpu: { type: 'number', description: 'vCPU limit, default 2.' },
         memory_gb: { type: 'number', description: 'RAM limit in GB, default 4. Browser workloads need >= 4 — Chrome OOMs at 2.' },
         disk_gb: { type: 'number', description: 'Root disk in GB (best-effort override of the profile default).' },
-        docker_ready: { type: 'boolean', description: 'Set nesting + syscall intercepts for running Docker inside. Default true.' },
+        docker_ready: { type: 'boolean', description: 'Containers: set nesting + Docker syscall intercepts (default true). VMs: must be false or omitted.' },
         autostart: { type: 'boolean', description: 'boot.autostart, default true.' },
         confirm: { type: 'boolean', description: 'Must be true.' },
       },

@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { agentSourcesForRoute, containerAddress, hostsScript, sweepAgentContainers, HOSTS_MARKER } from '../lib/setup-engine/agent-network.js';
+import { agentSourcesForRoute, containerAddress, hostsScript, writeHosts, probe, probeScript, sweepAgentContainers, HOSTS_MARKER } from '../lib/setup-engine/agent-network.js';
 import { INFISICAL_AGENTS_SCHEMA, addContainerColumns, linkContainer, unlinkContainer } from '../lib/setup-engine/infisical-agents.js';
 import { routeEdgeOptionLines } from '../lib/caddy-site-file.js';
 
@@ -60,7 +60,7 @@ test('link: pinned address required; name set inside; route re-rendered; Infisic
 
 test('a failed route update admits nothing and takes the name back out', async () => {
   const db = database(), h = host();
-  await assert.rejects(linkContainer(db, 'crawler', { container: 'crawler' }, { run: h.run, render: async () => { throw Error('caddy adapt failed'); }, context }), /nothing was admitted/);
+  await assert.rejects(linkContainer(db, 'crawler', { container: 'crawler' }, { run: h.run, render: async () => { throw Error('caddy adapt failed'); }, context }), /registry was restored/);
   assert.deepEqual(agentSourcesForRoute(db, 'infisical-route-x'), []);
   assert.doesNotMatch(h.calls.filter(c => c[1] === 'exec').at(-1).at(-1), /printf/);
 });
@@ -73,7 +73,9 @@ test('sweep: a deleted, re-addressed or replaced container loses its link; an un
   assert.deepEqual((await sweepAgentContainers(db, { run: host({ containers: {} }).run, render })).dropped, ['crawler']);
   link(); assert.deepEqual((await sweepAgentContainers(db, { run: host({ containers: { crawler: { ip: '10.0.3.99', uuid: 'u-1', status: 'Running' } } }).run, render })).dropped, ['crawler']);
   link(); assert.deepEqual((await sweepAgentContainers(db, { run: host({ containers: { crawler: { ip: '10.0.3.20', uuid: 'u-2', status: 'Running' } } }).run, render })).dropped, ['crawler'], 'same name, different container');
-  assert.equal(renders, 3);
+  link(); db.prepare("UPDATE infisical_agents SET container_uuid=NULL WHERE name='crawler'").run();
+  assert.deepEqual((await sweepAgentContainers(db, { run: host().run, render })).dropped, ['crawler'], 'unidentified legacy link is removed');
+  assert.equal(renders, 4);
 });
 
 test('the /etc/hosts edit keeps other lines and is idempotent (run in a real shell)', () => {
@@ -95,4 +97,39 @@ test('migration 1019 adds the container columns to an existing table', () => {
   addContainerColumns(db); addContainerColumns(db);
   assert.deepEqual(db.prepare('PRAGMA table_info(infisical_agents)').all().map(c => c.name).slice(-3), ['container', 'container_ip', 'container_uuid']);
   assert.throws(() => containerAddress('bad name!'), /by its name/);
+});
+
+test('relink removes a stale guest marker and failed unlink restores the stored admission', async () => {
+  const db = database(), h = host({ containers: { crawler: { ip: '10.0.3.20', uuid: 'u-1', status: 'Running' }, next: { ip: '10.0.3.21', uuid: 'u-2', status: 'Running' } } });
+  await linkContainer(db, 'crawler', { container: 'crawler' }, { run: h.run, render: async () => {}, context });
+  await linkContainer(db, 'crawler', { container: 'next' }, { run: h.run, render: async () => {}, context });
+  assert.deepEqual(agentSourcesForRoute(db, 'infisical-route-x'), ['10.0.3.21/32']);
+  assert.ok(h.calls.some(c => c[1] === 'exec' && c[2] === 'crawler' && !c.at(-1).includes('printf')));
+  await assert.rejects(unlinkContainer(db, 'crawler', { run: h.run, render: async () => { throw Error('reload failed'); }, context }), /registry was restored/);
+  assert.deepEqual(agentSourcesForRoute(db, 'infisical-route-x'), ['10.0.3.21/32']);
+});
+
+test('invalid stored probe configuration is refused before hosts and route changes', async () => {
+  const db = database(), h = host(); let renders = 0;
+  const badContext = () => ({ r: { config: { origin: 'https://secure.example.com', proxyOrigin: 'http://bad.example.com:0' } }, s: null });
+  await assert.rejects(linkContainer(db, 'crawler', { container: 'crawler' }, { run: h.run, render: async () => { renders++; }, context: badContext }), /Invalid probe/);
+  assert.equal(renders, 0);
+  assert.equal(h.calls.filter(c => c[1] === 'exec').length, 0);
+  assert.deepEqual(agentSourcesForRoute(db, 'infisical-route-x'), []);
+});
+
+test('privileged network helpers refuse hostile stored names and probe targets before execution', () => {
+  const h = host();
+  const badNetwork = (bin, args) => {
+    if (args[0] === 'list') return { code: 0, stdout: JSON.stringify([{ name: 'crawler', status: 'Running', expanded_devices: { eth0: { network: '-bad', 'ipv4.address': '10.0.3.20' } } }]) };
+    throw Error('network command must not run');
+  };
+  assert.throws(() => containerAddress('crawler', { run: badNetwork }), /no fixed address/);
+  assert.throws(() => writeHosts('-bad', 'secure.example.com', '10.0.3.1', { run: h.run }), /by its name/);
+  assert.throws(() => writeHosts('crawler', 'a'.repeat(64) + '.example.com', '10.0.3.1', { run: h.run }), /Invalid host/);
+  assert.throws(() => probeScript("x'; touch /tmp/injected; '", 443), /Invalid probe/);
+  assert.throws(() => probeScript('secure.example.com', 0), /Invalid probe/);
+  assert.throws(() => probeScript('secure.example.com', 65536), /Invalid probe/);
+  assert.throws(() => probe('crawler', [['bad', 'secure.example.com', '443']], { run: h.run }), /Invalid probe/);
+  assert.deepEqual(h.calls, [], 'refused helpers never execute incus');
 });

@@ -152,6 +152,9 @@
       "host_files: export const AGENT_DIR = process.env.PROXYPILOT_MIGRATION_AGENT_DIR || '/var/lib/proxypilot/agent';": 1,
       "host_files: export const WORK_DIR = process.env.PROXYPILOT_MIGRATION_WORK_DIR || '/var/lib/proxypilot/migration';": 1
     },
+    "admin/backend/src/lib/operational-evidence-decoder.js": {
+      "process_api: import { spawn } from 'node:child_process';": 1
+    },
     "admin/backend/src/lib/platform-vpn-sync.js": {
       "host_namespace: // (vpn-startup.js callProxypilot, nsenter-aware). refreshVpnNetworks records": 1
     },
@@ -203,6 +206,10 @@
       "host_files: //                      straight from /var/lib/proxypilot/update (bind-mounted": 1,
       "host_files: export const STATE_DIR = process.env.PROXYPILOT_UPDATE_STATE_DIR || '/var/lib/proxypilot/update';": 1,
       "host_files: try { await stat(join('/run/proxypilot-update', 'request.json')); out.pending = true; } catch { out.pending = false; }": 1
+    },
+    "admin/backend/src/lib/setup-engine/agent-network.js": {
+      "host_command: const r = spawnHostSync('incus', args, { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL' });": 1,
+      "host_command: import { spawnHostSync } from '../host-exec.js';": 1
     },
     "admin/backend/src/lib/setup-engine/config-logic.js": {
       "host_files: disk_source_roots: Array.isArray(devicePolicy.disk_source_roots) && devicePolicy.disk_source_roots.length ? devicePolicy.disk_source_roots : ['/var/lib/proxypilot/shares'],": 1

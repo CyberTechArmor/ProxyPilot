@@ -44,7 +44,7 @@ them. Preserve original IDs and evidence. Close only with fresh relevant proof.
 | Existing item | Placement in this plan |
 |---|---|
 | SEC-01 host isolation / privileged backend boundary | A1 dependency design; A3 execution boundary; A8 target verification. |
-| SEC-02 required security CI / host inventory | Every merge and A8; no suppression or bypass. Both agent-network and evidence-decoder findings remain visible. |
+| SEC-02 required security CI / host inventory | Every merge and A8; no suppression or bypass. PR #674 records reviewed source contracts for agent-network and evidence-decoder in the static inventory; S6 and deployment acceptance remain open. |
 | SEC-03 real-host, migration/rollback and disk growth | A3 resource/storage design; A8 deployment acceptance. |
 | SEC-04 privileged LXC-to-VM cutover | A1 determines whether the chosen pilot requires it. If required, A3/A8 prerequisite; broader estate migration is follow-on F7. |
 | SEC-05 draft PR compatibility, restricted readers and key rotation | A1 inspects dependencies, A2/A4 address relevant identity/authority, A8 requires compatible integration. Do not merge an unrelated historical PR implicitly. |

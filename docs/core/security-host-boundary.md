@@ -40,7 +40,7 @@ verification pending.” Do not describe all eight audit findings as closed.
   legacy root-equivalent baseline secure.
 - CI records new/changed direct-host candidates through
   `scripts/host-boundary-inventory.py`. The checked-in
-  [candidate inventory](security-host-interfaces.json) covers 94 backend files
+  [candidate inventory](security-host-interfaces.json) covers 96 backend files
   matched by namespace, command, process-import and host-path patterns. It
   deliberately includes comments/imports. It is review evidence, not a claim
   that all matches execute or that nonmatching indirect access is safe.
@@ -68,6 +68,16 @@ The agent service's `disk` group can access raw devices. Its broad writable path
 allowances and Caddy permissions also need a method-by-method review. The
 current service is not a minimal final privilege boundary. Do not widen these
 permissions merely to make a failed method work.
+
+## Reviewed merge candidates for PR #674
+
+This is acceptance of two *static inventory entries*, not closure of S6 or
+deployment approval. The backend still has root-equivalent host access.
+
+| Operation / owner | Caller and authority | Implemented contract and evidence | Remaining requirement |
+| --- | --- | --- | --- |
+| Infisical guest networking / setup engine (`lib/setup-engine/agent-network.js`, `infisical-agents.js`) | `routes/infisical.js` agent create/link/unlink requires administrator, sudo and fresh local proof, with audit after success; no MCP mutation. `index.js` invokes a periodic stale-link sweep. | The helper uses fixed `incus list`, `network get` and guest `exec` operations through `host-exec.js`; requested container and inventory network names, fixed IPv4 and nonempty instance identity are checked before further privileged calls. Hostname, gateway and probe host/port are checked before guest shell interpolation; stored proxy origin is validated before hosts/route changes. The host command has a 30-second timeout and 1 MiB output bound. Hosts edits use a fresh guest temporary file, retain unrelated lines and only change the marked entry. The stored `/32` is added by `services.js`/`caddy-site-file.js` only to the Infisical route. Tests cover rejection before effects, link/unlink, failed render rollback, and deleted/readdressed/replaced/unreadable inventory. | Root-equivalent backend authority, guest-root hosts writes and a time-of-check/time-of-use race between Incus identity reads, route render and actual traffic remain. A failed external Caddy reload may need operator reconciliation; the static review cannot prove host network isolation. S6/SEC-01–03 and applicable INF findings stay open. |
+| Private image decoding / Operations (`lib/operational-evidence-decoder.js`, `operational-evidence-decoder-worker.cjs`) | Authenticated, authorized evidence intake calls `operational-evidence-service.js`; `operational-evidence-runtime.js` requires both false-default feature gates, finite quota, an absolute reviewed runner path and a separate boundary-review assertion. Neither HTTP nor evidence metadata selects the executable. | Fixed Node executable/worker argv, shell-disabled spawn, empty environment and piped byte protocol. At most one child per backend process. Input/output each stop at 8 MiB, output framing and fields are checked, dimensions stop at 8192 per edge/16 MP, timeout is at most 10 seconds, and malformed/error/early-exit results fail closed. Timeout/output failure sends SIGKILL to the direct child; the slot is held until `close`. Real PNG/JPEG HTTP fixtures and new failure/slot tests cover the source contract. The approved pins remain pngjs 7.0.0 and jpeg-js 0.4.4. | The wrapper must independently enforce low privilege, no network, hard CPU/RSS/process limits, trusted executable ownership, no database/evidence-root/credential access and whole-job descendant teardown. An absolute path, V8 heap cap, kill or review flag does not establish these guarantees. A child or descendant retaining pipes can keep the local slot occupied until closure; deployment-wide concurrency budgets and host acceptance remain open. S6/SEC-01–03 stay open. |
 
 ## Why container privilege removal is blocked
 

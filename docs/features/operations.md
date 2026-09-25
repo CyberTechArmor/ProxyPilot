@@ -247,9 +247,10 @@ restriction/deletion receipts before serving; restoring a blob cannot revive its
 terminal DB receipt. Backup copies have their separately approved expiration.
 Filesystem permissions, wrapper isolation, deployed session/SSO behavior, backup
 restore and physical-deletion SLA remain release prerequisites. SEC-01–05 and
-INF-01–04 remain unchanged. The pre-existing agent-network host-boundary finding
-remains a release gate; the new decoder process boundary also requires its host
-contract/inventory review. No release-readiness claim is made.
+INF-01–04 remain unchanged. The agent-network and decoder process contracts have
+source review and accepted static inventory entries in `docs/core/security-host-boundary.md`;
+the broader S6 host-isolation finding and deployed decoder-wrapper acceptance
+remain open. No release-readiness claim is made.
 
 ## Exact evidence in guide review (D3 backend)
 

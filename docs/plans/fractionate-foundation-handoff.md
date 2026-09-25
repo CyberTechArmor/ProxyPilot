@@ -6,6 +6,26 @@ supervised agent. [F1–F7](fractionate-follow-on-plan.md) retain the remaining 
 for after A8. [A1](fractionate-agents-a1-prompt.md) is the next section; it has not
 been executed. A request to merge is not evidence that merge/checks succeeded.
 
+## PR #674 host-inventory repair (2026-09-25)
+
+The two direct-host candidates were reviewed and narrowly accepted in
+`docs/core/security-host-interfaces.json`, with operation contracts and remaining
+requirements in `docs/core/security-host-boundary.md`. Infisical guest networking
+now validates inventory identity/network and every interpolated host/probe input,
+bounds the Incus result, uses a fresh guest hosts temporary file, and restores the
+registry on render failure. External Caddy state may still need reconciliation.
+The evidence decoder keeps its one-process slot until child close after failure,
+enforces its deadline, and rejects unexpected output fields. Direct-child SIGKILL
+does not certify descendant teardown or OS isolation.
+
+The false-default gates, approved media package versions, migrations, Operations
+B1–B4, D1–D4, retirement and branding remain unchanged. The saved 127-test
+foundation command, new regressions, inventory guard and frontend build were
+rerun; exact results and hashes are in adjacent `merge-readiness-evidence/`.
+Linux CI now has a dedicated step for both contracts. This source review does not
+close S6, SEC-01–05 or INF-01–04 and does not approve feature activation,
+wrapper provisioning, deployment or A1.
+
 ## Completed source included
 
 - Batch 03 charcoal/mobile navigation polish, Operations/Dev Studio naming,
@@ -37,21 +57,21 @@ at 360/375/390/768/1280/1920 and 375px form completion. Mobile Lighthouse scored
 100 on four tested Guide role states. This browser audit is prior D4 evidence,
 not a newly performed roadmap-session audit or a spoken screen-reader audit.
 
-The fresh unchanged host inventory reports contract-review failures for:
+Before this repair, the unchanged host inventory reported failures for:
 
 - `admin/backend/src/lib/setup-engine/agent-network.js`
 - `admin/backend/src/lib/operational-evidence-decoder.js`
 
-These remain unresolved; no accepted inventory or check was weakened. Required
-GitHub CI must be assessed on the actual submitted revision. This document makes
-no all-green CI, merge-ready or release-ready claim.
+This revision records only those two reviewed candidates; the guard still detects
+new or changed sites. Required GitHub CI must be assessed on the submitted revision.
+This document makes no release-ready claim.
 
 The first PR CI run passed 304 of 305 backend regression tests; one stale MCP
 assertion still required creating a retired Lean BEAF board card. The follow-up
 changes that assertion to require absence of the retired integration, retaining
 the parent-domain, slug, membership, preset and provisioning checks. It does not
 restore retired behavior or weaken authorization. The inventory contract reviews
-remain separate unresolved merge gates; their accepted manifest is unchanged.
+were separate merge gates at that historical revision; see the repair above.
 
 ## Evidence location and limits
 

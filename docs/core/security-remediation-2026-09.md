@@ -290,9 +290,12 @@ restricted/custom deployment before mutation. A real invocation of update.sh in
 a disposable fixture proves refusal before checkout, package or service effects.
 
 The standard backend still retains privileged mode, host PID access, daemon
-socket and host mounts because replacements remain incomplete. The 94-file
+socket and host mounts because replacements remain incomplete. The 96-file
 candidate inventory, operation/owner/contract matrix and exact missing host
 acceptance checks are in [security-host-boundary.md](security-host-boundary.md).
+PR #674 adds reviewed Infisical guest-network and evidence-decoder candidate
+contracts with narrow validation and cleanup fixes. Inventory acceptance records
+source review only; S6 and SEC/INF deployment findings remain open.
 This is not closure by configuration flag or a generic agent exec method.
 Independent host-side authority for broad operators, remaining typed operations,
 and a representative installation are still required.

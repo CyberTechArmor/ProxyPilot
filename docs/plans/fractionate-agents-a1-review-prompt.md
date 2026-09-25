@@ -2,11 +2,13 @@
 
 > Historical handoff executed on 2026-09-25. The live website review and
 > [pilot contract](fractionate-agents-a1-pilot-contract.md) are recorded; the
-> user will create the first Operations project and specify its final site.
-> A1 remains in review pending its guide and authority decisions. The later
-> user request separately authorized committing/merging the reviewed work;
+> user later directed that the first project/site be entered through the
+> interface, without gating A1. A1 scope/architecture is complete; guide,
+> credential, named actor and limit checks remain run/release gates. The later
+> user requests separately authorized committing/merging the reviewed work;
 > [A2's next-section prompt](fractionate-agents-a2-prompt.md) remains the
-> implementation handoff, not an instruction to start A2 here.
+> implementation handoff, not an instruction to start A2 here. The original
+> gate language below is preserved as historical instruction.
 
 Workspace: `C:/Users/thoma/Fractionate/OpenAI/Fractionate/ProxyPilot-batch-03`.
 

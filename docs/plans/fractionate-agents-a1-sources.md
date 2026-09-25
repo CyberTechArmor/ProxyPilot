@@ -45,12 +45,15 @@ minimum placement; revisit after selection and at each release gate.
 
 ## Delivery dependencies and preserved deferral
 
-1. **A1 → A2:** review the selected and live-verified synthetic demo sign-in target,
-   [pilot contract](fractionate-agents-a1-pilot-contract.md), exact Operations
-   project/final site and approved guide, run/credential-use authority, limits
-   and takeover boundary. Review [owner project modes](fractionate-project-credentials-backlog.md)
-   before A2 implements them.
-   A2 remains profile metadata and guide assignment. Optional posting of a
+1. **A1 → A2:** use the selected and live-verified synthetic demo sign-in target,
+   [pilot contract](fractionate-agents-a1-pilot-contract.md) and
+   [owner project modes](fractionate-project-credentials-backlog.md) as design
+   inputs. A2 adds optional owner-managed site entry and disabled profile
+   metadata; it does not require the user's first project or site. Exact
+   project/site, guide, run/credential authority, limits and takeover actors
+   are checked at assignment/run/release boundaries.
+   A2 remains project access, site and profile metadata with optional approved
+   guide assignment. Optional posting of a
    downloaded file to Operations needs a separate explicit pilot-scope decision
    and destination policy.
 2. **A2 → A3:** stable IDs, project-scoped access and immutable assignment

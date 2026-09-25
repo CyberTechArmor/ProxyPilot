@@ -332,6 +332,21 @@ The fail-closed A3 groundwork was submitted as draft PR
 successfully at that head. This submission is for review and does not mark
 A3 accepted; the selected VM tests and all S6/SEC-01/SEC-04 proof remain open.
 
+The user then asked for Debian in the Incus VM image picker. PR
+[#679](https://github.com/CyberTechArmor/ProxyPilot/pull/679) made
+`images:debian/12` selectable even when only container images are cached,
+corrected the VM image preflight and passed Security regression run
+`36193694335`. Its merge `87b35f221ca3523ea1abe651061a4cdb1e843dea`
+was deployed by self-update `cb3d985f-09f7-4806-a8eb-b36bad3fed3b`,
+exit 0 with a healthy application. The MCP catalog in this task still has
+no `vm` input for `create_lxc_container`; passing the property previously
+created an ordinary container. The user directed MCP-only verification, so
+there is still no authorized MCP path to create the selected disposable VM
+from this task. A fresh MCP schema must expose and transmit the deployed
+`vm` property. Both test guests were rechecked after deployment: each is
+`type: container`, `status: Stopped`, `boot.autostart: false`. No VM proof
+or A3 activation followed.
+
 ## Verification and rollback
 
 From `admin/backend`:

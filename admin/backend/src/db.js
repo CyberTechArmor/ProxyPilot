@@ -30,6 +30,7 @@ import { operationalEvidenceMigration1103 } from './lib/operational-evidence-sch
 import { operationalEvidenceMigration1104 } from './lib/operational-evidence-storage-schema.js';
 import { operationalEvidenceMigration1105 } from './lib/operational-evidence-guide-schema.js';
 import { operationalAgentsMigration1106 } from './lib/operational-agents-schema.js';
+import { operationalWorkerMigration1107 } from './lib/operational-worker-schema.js';
 
 const __dbFilename = fileURLToPath(import.meta.url);
 const __dbDirname = dirname(__dbFilename);
@@ -150,6 +151,7 @@ export function getDb() {
 //   1104 Operations — private upload leases, capacity and validation receipts.
 //   1105 Operations — exact guide evidence references and sealed submission manifests.
 //   1106 Operations — project discovery, optional site origin and disabled agent profiles.
+//   1107 Operations — closed A3 run/worker identity and fence records.
 //   800 Manual (pasted) TLS certificates — tls_certificates (admin-supplied
 //               PEM cert + encrypted key for ACME-blocked networks; the private
 //               key is encrypted at rest, covered names/fingerprint/validity are
@@ -2030,6 +2032,7 @@ export function initDatabase() {
   runMigration(db, 1104, 'operational_evidence_storage', operationalEvidenceMigration1104);
   runMigration(db, 1105, 'operational_evidence_guide', operationalEvidenceMigration1105);
   runMigration(db, 1106, 'operational_agents_metadata', operationalAgentsMigration1106);
+  runMigration(db, 1107, 'operational_worker_fences', operationalWorkerMigration1107);
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

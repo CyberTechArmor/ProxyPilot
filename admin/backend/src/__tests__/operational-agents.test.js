@@ -120,7 +120,8 @@ test('profile IDs, roles, exact guide assignment, stale revisions and account lo
     error(()=>f.store.profile(viewer,p.id,created.id),401);
     f.store.archive(owner,p.id,f.store.get(owner,p.id).revision,{reason:'Done'});
     error(()=>f.store.deleteProfile(owner,p.id,created.id,3),409);
-    assert.equal(f.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name IN ('ops_agent_runs','ops_agent_workers','ops_credential_bindings')").get().n,0);
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM ops_agent_runs').get().n,0);
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='ops_credential_bindings'").get().n,0);
   } finally {f.close();}
 });
 

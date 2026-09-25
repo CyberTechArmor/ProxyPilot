@@ -17,7 +17,6 @@ let child,browser,db,fixture;const out={date:new Date().toISOString(),execution:
 const start=async()=>{child=fork(new URL('../src/__tests__/helpers/openbao-api-process.js',import.meta.url),[dbPath],{stdio:['ignore','ignore','inherit','ipc']});fixture=(await once(child,'message'))[0];};
 const stop=async()=>{if(child){const end=once(child,'exit');child.send('close');await end;child=null;}};
 try{await start();db=makeDb(dbPath);browser=await puppeteer.launch({executablePath:process.env.G6_CHROMIUM,headless:true,args:['--no-sandbox','--disable-dev-shm-usage','--use-gl=angle','--use-angle=swiftshader','--disable-gpu']});const page=await browser.newPage();page.on('pageerror',e=>out.errors.push(e.message));
-  await page.evaluateOnNewDocument(()=>localStorage.setItem('lbp-assistant-open','0'));
   const open=async()=>{await page.setCookie({name:'pp_token',value:fixture.tokens.admin,url:fixture.url,httpOnly:true},{name:'pp_csrf',value:'fixture-csrf',url:fixture.url});await page.goto(fixture.url+'/platform-setup',{waitUntil:'networkidle0'});await page.waitForSelector('#openbao-setup');};
   const click=async text=>{await page.waitForFunction(t=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===t&&!b.disabled),{},text);await page.evaluate(t=>[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===t&&!b.disabled).click(),text);};
   const fill=async(id,text)=>{await page.$eval('#bao-'+id,e=>{e.focus();e.select();});await page.keyboard.type(text);};

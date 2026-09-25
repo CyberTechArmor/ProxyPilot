@@ -2089,9 +2089,9 @@ test('create_project mirrors the UI create: same gate, same slug, same membershi
   assert.match(fn, /resolveParentDomain/);
   // The slug is derived from the name, so a duplicate is refused not renamed.
   assert.match(fn, /deriveProjectSlug/);
-  // Born with an owner, and on the board, exactly like the UI's create.
+  // Born with an editor, exactly like the UI's create; Lean BEAF is retired.
   assert.match(fn, /upsertMember/);
-  assert.match(fn, /createCardForMock2Project/);
+  assert.doesNotMatch(fn, /createCardForMock2Project|lean-beaf/);
   // Deterministic look: the 'ai' preset would be a model call.
   assert.match(fn, /DEFAULT_DESIGN_PRESET/);
   assert.equal(fn.includes('DESIGN_PRESET_AI'), false,

@@ -40,7 +40,7 @@ function containerFor(project) {
 // terminal authorizer's lifecycle gate. Returns a 409 response, or null when ok.
 function requireOnline(project, res) {
   if (project.lifecycle !== 'active') {
-    res.status(409).json({ error: 'The project container is not running. Start the project to use Flightdeck.' });
+    res.status(409).json({ error: 'The project container is not running. Start the project to use Dev Studio.' });
     return true;
   }
   return false;

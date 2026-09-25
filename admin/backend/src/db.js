@@ -24,6 +24,11 @@ import {
   lbpMigration700, lbpMigration701Blockers, lbpMigration702BoardOrder, lbpMigration703Schedules,
   lbpMigration704BriefRuns, lbpMigration705BriefRunText,
 } from './lib/lean-beaf-schema.js';
+import { retireLeanBeaf } from './lib/lean-beaf-retirement.js';
+import { operationalProjectsMigration1100, operationalProjectsMigration1101, operationalProjectsMigration1102 } from './lib/operational-projects-schema.js';
+import { operationalEvidenceMigration1103 } from './lib/operational-evidence-schema.js';
+import { operationalEvidenceMigration1104 } from './lib/operational-evidence-storage-schema.js';
+import { operationalEvidenceMigration1105 } from './lib/operational-evidence-guide-schema.js';
 
 const __dbFilename = fileURLToPath(import.meta.url);
 const __dbDirname = dirname(__dbFilename);
@@ -136,6 +141,13 @@ export function getDb() {
 //   704 Lean BEAF Pro — lbp_brief_runs (AI brief generation audit: who ran
 //               it, mode, model, token usage, computed cost).
 //   705 Lean BEAF Pro — lbp_brief_runs.brief_text (persist the generated brief).
+//   706 Lean BEAF retirement — permanently remove its tables and settings.
+//   1100 Operations — private human-only records, drafts, grants and audit.
+//   1101 Operations — immutable review snapshots, versions and withdrawal.
+//   1102 Operations — version-pinned manual work and append-only corrections.
+//   1103 Operations — private demonstration and immutable evidence metadata.
+//   1104 Operations — private upload leases, capacity and validation receipts.
+//   1105 Operations — exact guide evidence references and sealed submission manifests.
 //   800 Manual (pasted) TLS certificates — tls_certificates (admin-supplied
 //               PEM cert + encrypted key for ACME-blocked networks; the private
 //               key is encrypted at rest, covered names/fingerprint/validity are
@@ -2008,6 +2020,13 @@ export function initDatabase() {
   runMigration(db, 703, 'lean_beaf_pro_schedules', lbpMigration703Schedules);
   runMigration(db, 704, 'lean_beaf_pro_brief_runs', lbpMigration704BriefRuns);
   runMigration(db, 705, 'lean_beaf_pro_brief_run_text', lbpMigration705BriefRunText);
+  runMigration(db, 706, 'lean_beaf_retirement', retireLeanBeaf);
+  runMigration(db, 1100, 'operational_projects_foundation', operationalProjectsMigration1100);
+  runMigration(db, 1101, 'operational_projects_review', operationalProjectsMigration1101);
+  runMigration(db, 1102, 'operational_projects_manual_runs', operationalProjectsMigration1102);
+  runMigration(db, 1103, 'operational_evidence_metadata', operationalEvidenceMigration1103);
+  runMigration(db, 1104, 'operational_evidence_storage', operationalEvidenceMigration1104);
+  runMigration(db, 1105, 'operational_evidence_guide', operationalEvidenceMigration1105);
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

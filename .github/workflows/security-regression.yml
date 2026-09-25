@@ -39,6 +39,9 @@ jobs:
       - name: Terminal update handoff (disposable command boundaries, root entry)
         run: sudo python3 -m unittest discover -s scripts/tests -p 'test_update_terminal.py'
       - run: python3 scripts/host-boundary-inventory.py
+      - name: Reviewed Infisical and evidence decoder host contracts
+        working-directory: admin/backend
+        run: node --test src/__tests__/agent-network.test.js src/__tests__/agent-network-boundary.test.js src/__tests__/operational-evidence-decoder.test.js
       - name: Agent client and selected-agent outage behavior
         working-directory: admin/backend
         run: node --test src/__tests__/agent.test.js src/__tests__/caddy-driver.test.js

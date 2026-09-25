@@ -27,32 +27,35 @@
     --destructive-foreground: 0 0% 100%;
     --border: 214.3 31.8% 88%;
     --input: 214.3 31.8% 88%;
+    --sidebar: var(--card);
+    --navigation-backdrop: 0 0% 0% / 0.6;
     --ring: 142.1 76.2% 36.3%;
     --radius: 0.5rem;
   }
 
-  /* Dark theme — the original ProxyPilot palette, now class-gated. Applied
-     to <html> by default (see index.html pre-paint script + ThemeContext)
-     so existing installs look identical until a user toggles to light. */
+  /* Theme editing guide: see THEME.md. Values are HSL channels.
+     Dark theme — neutral charcoal surfaces with raised dark-grey cards.
+     Keep the stock green accents and the light palette independent. */
   .dark {
-    --background: 222.2 84% 4.9%;
+    --background: 0 0% 10%;
     --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
+    --card: 0 0% 16%;
     --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
+    --popover: 0 0% 16%;
     --popover-foreground: 210 40% 98%;
     --primary: 142.1 76.2% 36.3%;
     --primary-foreground: 355.7 100% 97.3%;
-    --secondary: 217.2 32.6% 17.5%;
+    --secondary: 0 0% 22%;
     --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
+    --muted: 0 0% 22%;
+    --muted-foreground: 0 0% 76%;
+    --accent: 0 0% 22%;
     --accent-foreground: 210 40% 98%;
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
+    --border: 0 0% 24%;
+    --input: 0 0% 28%;
+    --sidebar: 0 0% 13%;
     --ring: 142.1 76.2% 36.3%;
     --radius: 0.5rem;
   }

@@ -42,7 +42,7 @@ const artifacts=process.env.BROWSER_ARTIFACTS;
 if(artifacts)mkdirSync(artifacts,{recursive:true});
 try{
  const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.addInitScript(({user})=>{localStorage.setItem('user',JSON.stringify(user));localStorage.setItem('lbp-assistant-open','0');localStorage.setItem('mock2HintDismissed','1');},{user});
+ await page.addInitScript(({user})=>{localStorage.setItem('user',JSON.stringify(user));localStorage.setItem('mock2HintDismissed','1');},{user});
  await page.goto(origin+'/mcp-access');await page.getByRole('heading',{name:'MCP Access',exact:true}).waitFor();
  const all=page.getByRole('checkbox',{name:'Allow all tools'});
  assert(await all.isChecked());assert(await page.locator('details').getAttribute('open')!==null);

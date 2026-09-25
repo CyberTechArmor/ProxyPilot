@@ -1,9 +1,9 @@
-// Flightdeck — the build-phase IDE workspace. ONE place for the workspace name
+// Dev Studio — the build-phase IDE workspace. ONE place for the workspace name
 // (spec: a single WORKSPACE_NAME constant, no "VS"/"VSCode" strings anywhere)
 // and the per-project persistence keys.
 //
-// Named "Flightdeck" — on-brand with ProxyPilot: the deck where every instrument
-// lives (chat, files, editor, terminal, preview).
+// Display label: Dev Studio. Legacy Flightdeck module names, API routes and
+// persistence keys stay stable for compatibility.
 //
 // IMPORTANT: this module is imported by the eagerly-loaded ProjectDetail page,
 // so it must stay LIGHT — no CodeMirror/editor imports. The CodeMirror language
@@ -13,7 +13,7 @@
 
 import { api } from '@/lib/api';
 
-export const WORKSPACE_NAME = 'Flightdeck';
+export const WORKSPACE_NAME = 'Dev Studio';
 
 // ---- File-system adapters -------------------------------------------------
 // The explorer (FlightdeckFileTree) and editor (FlightdeckEditor) talk to the

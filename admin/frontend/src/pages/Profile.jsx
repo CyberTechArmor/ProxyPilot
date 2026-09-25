@@ -106,7 +106,7 @@ function PlatformBrandingCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
+        <CardTitle aria-level={2} className="flex items-center gap-2">
           <Palette className="h-5 w-5" />
           Platform branding
         </CardTitle>
@@ -770,7 +770,7 @@ export default function Profile() {
   }
 
   return (
-    <div className="space-y-6 max-w-2xl">
+    <div className="space-y-6 lg:space-y-8 max-w-3xl">
       <div>
         <h1 className="text-3xl font-bold">Profile</h1>
         <p className="text-muted-foreground">
@@ -795,7 +795,7 @@ export default function Profile() {
       {/* Account Info */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
+          <CardTitle aria-level={2} className="flex items-center gap-2">
             <Shield className="h-5 w-5" />
             Account Information
           </CardTitle>
@@ -829,7 +829,7 @@ export default function Profile() {
       {profile?.authSource === 'ldap' ? (
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
+            <CardTitle aria-level={2} className="flex items-center gap-2">
               <Key className="h-5 w-5" />
               Password
             </CardTitle>
@@ -842,7 +842,7 @@ export default function Profile() {
       ) : (
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
+          <CardTitle aria-level={2} className="flex items-center gap-2">
             <Key className="h-5 w-5" />
             Change Password
           </CardTitle>
@@ -851,7 +851,7 @@ export default function Profile() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleChangePassword} className="space-y-4">
+          <form onSubmit={handleChangePassword} className="space-y-4 lg:space-y-6">
             <div className="space-y-2">
               <Label htmlFor="currentPassword">Current Password</Label>
               <Input
@@ -904,7 +904,7 @@ export default function Profile() {
               />
             </div>
 
-            <Button type="submit" disabled={changingPassword}>
+            <Button type="submit" className="min-h-11" disabled={changingPassword}>
               {changingPassword ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -922,7 +922,7 @@ export default function Profile() {
       {/* TOTP Setup */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
+          <CardTitle aria-level={2} className="flex items-center gap-2">
             <QrCode className="h-5 w-5" />
             Two-Factor Authentication
           </CardTitle>
@@ -953,7 +953,7 @@ export default function Profile() {
                   value={totpForm.currentCode}
                   onChange={(e) => setTotpForm({ ...totpForm, currentCode: e.target.value.replace(/\D/g, '').slice(0, 6) })} />
               </div>
-              <Button onClick={handleGenerateTotp} disabled={settingUpTotp || !totpForm.password || totpForm.currentCode.length !== 6}>
+              <Button className="min-h-11" onClick={handleGenerateTotp} disabled={settingUpTotp || !totpForm.password || totpForm.currentCode.length !== 6}>
                 {settingUpTotp ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -1001,11 +1001,11 @@ export default function Profile() {
               </div>
 
               <div className="flex gap-2">
-                <Button variant="outline" onClick={cancelTotpSetup}>
+                <Button variant="outline" className="min-h-11" onClick={cancelTotpSetup}>
                   Cancel
                 </Button>
                 <Button
-                  onClick={handleVerifyTotp}
+                  className="min-h-11" onClick={handleVerifyTotp}
                   disabled={settingUpTotp || totpForm.verificationCode.length !== 6}
                 >
                   {settingUpTotp ? (
@@ -1026,9 +1026,9 @@ export default function Profile() {
       {/* Authenticated Devices */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <CardTitle className="flex items-center gap-2">
+              <CardTitle aria-level={2} className="flex items-center gap-2">
                 <Smartphone className="h-5 w-5" />
                 Authenticated Devices
               </CardTitle>
@@ -1037,7 +1037,7 @@ export default function Profile() {
               </CardDescription>
             </div>
             <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={fetchDevices} disabled={loadingDevices}>
+              <Button variant="outline" size="sm" className="h-11 w-11 shrink-0" aria-label="Refresh authenticated devices" onClick={fetchDevices} disabled={loadingDevices}>
                 <RefreshCw className={`h-4 w-4 ${loadingDevices ? 'animate-spin' : ''}`} />
               </Button>
               {devices.length > 1 && (
@@ -1104,9 +1104,9 @@ export default function Profile() {
       {/* Passkeys */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <CardTitle className="flex items-center gap-2">
+              <CardTitle aria-level={2} className="flex items-center gap-2">
                 <Fingerprint className="h-5 w-5" />
                 Passkeys
               </CardTitle>
@@ -1117,13 +1117,13 @@ export default function Profile() {
               </CardDescription>
             </div>
             <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={fetchPasskeys} disabled={loadingPasskeys}>
+              <Button variant="outline" size="sm" className="h-11 w-11 shrink-0" aria-label="Refresh passkeys" onClick={fetchPasskeys} disabled={loadingPasskeys}>
                 <RefreshCw className={`h-4 w-4 ${loadingPasskeys ? 'animate-spin' : ''}`} />
               </Button>
               <Button
                 variant="outline"
                 size="sm"
-                onClick={openRegisterPasskey}
+                className="min-h-11 whitespace-normal" onClick={openRegisterPasskey}
                 disabled={!isPasskeySupported()}
                 title={!isPasskeySupported() ? 'Passkeys are not supported on this browser' : ''}
               >
@@ -1367,7 +1367,7 @@ export default function Profile() {
       {isAdmin && (
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
+            <CardTitle aria-level={2} className="flex items-center gap-2">
               <Settings className="h-5 w-5" />
               Application Settings
             </CardTitle>
@@ -1439,6 +1439,8 @@ export default function Profile() {
                       setNewGithubRepo(githubRepo);
                       setEditingRepo(true);
                     }}
+                    aria-label="Edit update repository"
+                    className="h-11 w-11 shrink-0"
                   >
                     <Edit3 className="h-4 w-4" />
                   </Button>

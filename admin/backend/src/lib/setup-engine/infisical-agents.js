@@ -14,7 +14,7 @@ import { infisicalError as fail } from './infisical-logic.js';
 import { protectedValue } from './full-platform-keycloak.js';
 import { infisicalAdminVault } from './infisical-admin-vault.js';
 import { localEdge } from './local-edge.js';
-import { containerAddress, writeHosts, probe, hostRunner } from './agent-network.js';
+import { containerAddress, hostsScript, probeScript, writeHosts, probe, hostRunner } from './agent-network.js';
 
 export const INFISICAL_AGENTS_SCHEMA = `CREATE TABLE IF NOT EXISTS infisical_agents(
   name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL, identity_id TEXT NOT NULL,
@@ -184,16 +184,24 @@ export async function linkContainer(db, name, raw, { run = hostRunner, render, c
   const address = containerAddress(container, { run });
   if (!address.running) throw fail(`Start ${container} first; its name for Infisical is set inside it.`);
   const hostname = new URL(r.config.origin).hostname, before = rowOf(db, name);
+  hostsScript(hostname, address.gateway);
+  const proxy = r.config.proxyOrigin ? new URL(r.config.proxyOrigin) : null;
+  if (proxy && !['http:', 'https:'].includes(proxy.protocol)) throw fail('Invalid Agent Proxy address.');
+  const targets = [['Infisical', address.gateway, 443], ...(proxy ? [['Agent Proxy', proxy.hostname, Number(proxy.port || (proxy.protocol === 'https:' ? 443 : 80))]] : [])];
+  for (const [, host, port] of targets) probeScript(host, port);
   writeHosts(container, hostname, address.gateway, { run });
   db.prepare('UPDATE infisical_agents SET container=?, container_ip=?, container_uuid=?, updated_at=? WHERE name=?').run(container, address.ip, address.uuid, new Date().toISOString(), name);
   try { if (render) await render(); }
   catch (e) {
     db.prepare('UPDATE infisical_agents SET container=?, container_ip=?, container_uuid=? WHERE name=?').run(before.container, before.container_ip, before.container_uuid, name);
-    if (!before.container) try { writeHosts(container, hostname, null, { run }); } catch { /* reported below */ }
-    throw fail(`The Infisical route could not be updated for ${container}; nothing was admitted. ${e.infisicalSafe || e.fullPlatformSafe ? e.message : ''}`.trim());
+    if (before.container !== container && !db.prepare('SELECT count(*) AS n FROM infisical_agents WHERE container=?').get(container).n)
+      try { writeHosts(container, hostname, null, { run }); } catch { /* guest may already be unavailable */ }
+    try { if (render) await render(); } catch { /* external Caddy state may need operator reconciliation */ }
+    throw fail(`The Infisical route could not be updated for ${container}; the registry was restored. Verify the Caddy route before retrying. ${e.infisicalSafe || e.fullPlatformSafe ? e.message : ''}`.trim());
   }
-  const proxy = r.config.proxyOrigin ? new URL(r.config.proxyOrigin) : null;
-  const checks = probe(container, [['Infisical', address.gateway, 443], ...(proxy ? [['Agent Proxy', proxy.hostname, Number(proxy.port || 80)]] : [])], { run });
+  if (before.container && before.container !== container && !db.prepare('SELECT count(*) AS n FROM infisical_agents WHERE container=?').get(before.container).n)
+    try { writeHosts(before.container, hostname, null, { run }); } catch { /* stale guest may be stopped or gone */ }
+  const checks = probe(container, targets, { run });
   return { container, ip: address.ip, gateway: address.gateway, hostname, checks };
 }
 
@@ -201,7 +209,12 @@ export async function unlinkContainer(db, name, { run = hostRunner, render, cont
   parseName(name); const row = mustRow(db, name);
   if (!row.container) return { container: null };
   db.prepare('UPDATE infisical_agents SET container=NULL, container_ip=NULL, container_uuid=NULL, updated_at=? WHERE name=?').run(new Date().toISOString(), name);
-  if (render) await render();
+  try { if (render) await render(); }
+  catch (e) {
+    db.prepare('UPDATE infisical_agents SET container=?, container_ip=?, container_uuid=? WHERE name=?').run(row.container, row.container_ip, row.container_uuid, name);
+    try { if (render) await render(); } catch { /* external Caddy state may need operator reconciliation */ }
+    throw fail(`The Infisical route could not be updated for ${row.container}; the registry was restored. Verify the Caddy route before retrying. ${e.infisicalSafe || e.fullPlatformSafe ? e.message : ''}`.trim());
+  }
   // The name inside the container is removed once no other agent uses that container.
   const others = db.prepare('SELECT count(*) AS n FROM infisical_agents WHERE container=?').get(row.container).n;
   const { r } = context(db);

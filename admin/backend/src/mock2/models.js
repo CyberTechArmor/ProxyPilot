@@ -2,8 +2,7 @@
 //
 // Before this file, the same ids were duplicated as string literals across
 // ~10 modules (concept, runner, runner-logic, connector-logic,
-// routing-logic, prepass-logic, settings, consult-logic, concept-logic,
-// lean-beaf), so a model migration was a repo-wide hunt where one missed
+// routing-logic, prepass-logic, settings, consult-logic, concept-logic), so a model migration was a repo-wide hunt where one missed
 // call site silently kept paying old-model prices — or 404'd. Now a
 // migration edits these constants and, where behavior genuinely shifts,
 // the per-lane tuning that references them.

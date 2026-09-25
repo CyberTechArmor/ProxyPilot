@@ -4232,7 +4232,7 @@ servicesRouter.get('/:id/download/*', serviceAccess('GET', '/:id/download/*'), a
 //                                             confirmed any conflicts)
 //   DELETE /:id/zip-upload/:uploadId          cancel — nothing written
 //
-// Disk-backed multer (lean-beaf pattern: random stored name, never
+// Disk-backed multer (random stored name, never
 // the client filename); the archive is parked by lib/zip-staging so
 // confirming doesn't re-upload the bytes.
 

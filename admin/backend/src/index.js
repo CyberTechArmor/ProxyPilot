@@ -1,6 +1,11 @@
 import { ssoRouter } from './routes/sso.js';
 import { recoveryBoundary } from './lib/sso/sessions.js';
 import express from 'express';
+import { createOperationsRouter } from './routes/operational-projects.js';
+import { createOperationsStore } from './lib/operational-projects-store.js';
+import { operationsEnabled } from './lib/operational-projects-logic.js';
+import { evidenceConfiguration, createEvidenceRuntime } from './lib/operational-evidence-runtime.js';
+import { createEvidenceRouter, evidenceHeaders } from './routes/operational-evidence.js';
 import http from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -35,7 +40,6 @@ import { createMcpRouter, createMcpAdminRouter } from './routes/mcp.js';
 import { createEditorMcpRouter, createEditorAdminRouter } from './routes/mcp-editor.js';
 import { tlsCertsRouter } from './routes/tls-certs.js';
 import { brandingRouter } from './routes/branding.js';
-import { createLeanBeafRouter } from './routes/lean-beaf.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { cacheControlFor, NO_CACHE } from './lib/static-cache-logic.js';
@@ -173,6 +177,10 @@ app.use(cors({
 }));
 
 // Rate limiting - increased for dashboard usage
+// Evidence failures (including auth, CSRF and parser refusal) are never cached.
+// Cover authentication, CSRF and parser refusals as well as guide/evidence reads.
+app.use('/api/operational-projects', (_req,res,next) => { res.set('Cache-Control','no-store'); next(); });
+app.use('/api/operational-projects/:id/demonstrations', evidenceHeaders);
 const limiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute window
   max: 300, // 300 requests per minute (5 per second)
@@ -592,6 +600,19 @@ app.use('/api/auth/sso', ssoRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/services', authenticateToken, blockPendingRole, servicesRouter);
 app.use('/api/user', authenticateToken, userRouter);
+const evidenceConfig = evidenceConfiguration();
+const evidenceRuntime = createEvidenceRuntime(evidenceConfig);
+const operationsStore = operationsEnabled() ? createOperationsStore(getDb(), { evidenceFactory: evidenceRuntime?.factory }) : null;
+app.use('/api/operational-projects', authenticateToken, blockPendingRole, createOperationsRouter({
+  Router: express.Router,
+  enabled: operationsEnabled(),
+  store: operationsStore,
+  evidenceEnabled: evidenceConfig.enabled,
+  evidenceRouter: createEvidenceRouter({ Router: express.Router, enabled: evidenceConfig.enabled,
+    store: operationsStore?.evidence, service: evidenceRuntime?.service(operationsStore.evidence), csrf: csrfProtection }),
+  lookupLimiter: rateLimit({ windowMs: 60_000, max: 30, keyGenerator: req => req.user.id,
+    standardHeaders: true, legacyHeaders: false }),
+}));
 app.use('/api/lxc', authenticateToken, blockPendingRole, lxcRouter);
 app.use('/api/ssh-access', authenticateToken, blockPendingRole, sshAccessRouter);
 app.use('/api/firewall', authenticateToken, blockPendingRole, firewallRouter);
@@ -623,9 +644,6 @@ app.use('/api/migrations', authenticateToken, blockPendingRole, migrationRouter)
   setInterval(sweepMigrations, 60_000).unref();
 }
 app.use('/api/notifications', authenticateToken, blockPendingRole, notificationsRouter);
-// Lean BEAF Pro — team-shared innovation project management. Deliberately
-// NOT admin-gated: every non-pending user is a workspace member (R01).
-app.use('/api/lbp', authenticateToken, blockPendingRole, createLeanBeafRouter());
 app.use('/api/ldap', authenticateToken, ldapRouter);
 // Domain provisioning: NOT behind authenticateToken — the /provision/*
 // endpoints authenticate with the X-API-Key provisioning key (validated

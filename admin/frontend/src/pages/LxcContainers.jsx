@@ -413,8 +413,9 @@ export default function LxcContainers() {
   // Live image catalog for the Create dialog dropdown. Populated on
   // dialog open from GET /lxc/images (already-pulled local images),
   // each row annotated with `supports: ['container'|'virtual-machine']`
-  // by the backend so we can filter by createForm.type. PRESET_IMAGES
-  // below is the fallback when the live fetch fails (incus daemon
+  // by the backend so we can filter by createForm.type. Debian 12 stays
+  // available as a remote VM image even when only container images are cached.
+  // PRESET_IMAGES is the fallback when the live fetch fails (incus daemon
   // down, network glitch on the proxy hop, etc.) — without it the
   // operator gets locked out of creating an instance during a
   // degraded-but-not-down condition.
@@ -2059,9 +2060,9 @@ export default function LxcContainers() {
                     // Build the dropdown options. When the live catalog
                     // loaded, filter by createForm.type using the
                     // backend-annotated supports[] array and sort by
-                    // os/release. When the fetch failed, fall back to
-                    // PRESET_IMAGES — the operator stays unblocked
-                    // during a degraded incus-list condition. Flat
+                    // os/release. Debian 12 is always selectable for VMs;
+                    // Incus downloads its VM variant on create. When the
+                    // fetch failed, fall back to PRESET_IMAGES. Flat
                     // sorted list (not grouped sections) by design;
                     // grouping was deemed out-of-scope for this pass.
                     const liveAvailable = Array.isArray(imageCatalog) && imageCatalog.length > 0;
@@ -2088,6 +2089,10 @@ export default function LxcContainers() {
                         });
                     }
                     const showFallback = !imageCatalogLoading && (imageCatalogError || !liveAvailable);
+                    // A cached container image does not make its VM image available.
+                    // Incus pulls the VM variant of this alias on launch with --vm.
+                    const showRemoteDebianVm = createForm.type === 'virtual-machine' &&
+                      !liveOptions.some((option) => option.value === 'images:debian/12');
                     return (
                       <>
                         <Select
@@ -2121,12 +2126,17 @@ export default function LxcContainers() {
                                 </div>
                               </SelectItem>
                             ))}
-                            {!imageCatalogLoading && liveAvailable && liveOptions.length === 0 && (
+                            {!imageCatalogLoading && liveAvailable && liveOptions.length === 0 && createForm.type !== 'virtual-machine' && (
                               <div className="px-2 py-3 text-xs text-muted-foreground">
                                 No cached {createForm.type === 'virtual-machine' ? 'VM' : 'container'} images. Use Custom image below to pull one.
                               </div>
                             )}
-                            {showFallback && PRESET_IMAGES.map((img) => (
+                            {!imageCatalogLoading && showRemoteDebianVm && (
+                              <SelectItem value="images:debian/12">Debian 12 (Bookworm)</SelectItem>
+                            )}
+                            {showFallback && PRESET_IMAGES.filter((img) =>
+                              createForm.type !== 'virtual-machine' || img.value !== 'images:debian/12'
+                            ).map((img) => (
                               <SelectItem key={img.value} value={img.value}>
                                 {img.label}
                               </SelectItem>
@@ -2142,6 +2152,9 @@ export default function LxcContainers() {
                       </>
                     );
                   })()}
+                  {createForm.type === 'virtual-machine' && createForm.image === 'images:debian/12' && (
+                    <p className="text-xs text-muted-foreground">Incus downloads the Debian VM image when you create it.</p>
+                  )}
                   {imageSelection === '__custom__' && (
                     <Input
                       placeholder="images:ubuntu/24.04 or ubuntu:24.04"

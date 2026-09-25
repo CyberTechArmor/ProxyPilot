@@ -46,6 +46,13 @@ These remain unresolved; no accepted inventory or check was weakened. Required
 GitHub CI must be assessed on the actual submitted revision. This document makes
 no all-green CI, merge-ready or release-ready claim.
 
+The first PR CI run passed 304 of 305 backend regression tests; one stale MCP
+assertion still required creating a retired Lean BEAF board card. The follow-up
+changes that assertion to require absence of the retired integration, retaining
+the parent-domain, slug, membership, preset and provisioning checks. It does not
+restore retired behavior or weaken authorization. The inventory contract reviews
+remain separate unresolved merge gates; their accepted manifest is unchanged.
+
 ## Evidence location and limits
 
 Detailed fixtures, exact incremental patches, screenshots, hashes, commands and

@@ -2132,7 +2132,7 @@ export default function LxcContainers() {
                               </div>
                             )}
                             {!imageCatalogLoading && showRemoteDebianVm && (
-                              <SelectItem value="images:debian/12">Debian 12 (Bookworm) — download on create</SelectItem>
+                              <SelectItem value="images:debian/12">Debian 12 (Bookworm)</SelectItem>
                             )}
                             {showFallback && PRESET_IMAGES.filter((img) =>
                               createForm.type !== 'virtual-machine' || img.value !== 'images:debian/12'
@@ -2152,6 +2152,9 @@ export default function LxcContainers() {
                       </>
                     );
                   })()}
+                  {createForm.type === 'virtual-machine' && createForm.image === 'images:debian/12' && (
+                    <p className="text-xs text-muted-foreground">Incus downloads the Debian VM image when you create it.</p>
+                  )}
                   {imageSelection === '__custom__' && (
                     <Input
                       placeholder="images:ubuntu/24.04 or ubuntu:24.04"

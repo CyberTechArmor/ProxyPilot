@@ -1,31 +1,37 @@
-# A1 pilot contract — demo sign-in (review draft)
+# A1 pilot contract — demo sign-in design
 
-Status: **proposed, not approved** (2026-09-25). This contract fixes the
-implementation boundary for review; it grants no authority to launch an agent.
+Status: **A1 design complete; operational authorization pending** (2026-09-25).
+This contract fixes implementation defaults for the synthetic sign-in workflow;
+it grants no authority to launch an agent or use a real account. The user will
+create the first Operations project and enter its site through the interface.
+Neither action is required to close A1.
 The public fixture website is already deployed. It is an application target,
 not an agent worker or evidence that A8 deployment is accepted.
 
 ## Project, guide and people
 
-| Field | Proposed contract | Approval needed |
+| Field | A1 design default | Required before an authorized run |
 |---|---|---|
-| Operations project | One active `ops_projects.id`; no Dev Studio or demo-site project ID substitution. The user will create the first project. | **Record its exact UUID and owner after creation.** No project was identified in the A1 source/evidence. |
-| Guide | The project's exact current, independently approved, nonwithdrawn `ops_guide_versions.id`, version number and `content_hash`, read through Operations at profile assignment and pinned at run start. No fallback to an older version. | **Choose or create the guide, supply its version ID/number/hash and independent approver.** No approved pilot guide was identified. |
-| Profile configuration | Current eligible project owner or editor may create/edit the proposed profile and assign the approved guide; an archive, grant loss, stale revision or guide withdrawal refuses the change. Profile creation launches nothing. | Confirm this role choice and name the initial configurator. |
-| Run start | A current eligible owner or operator may explicitly start one run after the guide, binding and limits are pinned. An editor or reviewer needs a separate operator grant to start. | Confirm this narrower proposed role choice and name the initial starter. |
-| Stop and takeover | The starter and project owner may stop or take over; a separately named supervisor may do so only with an explicit project-scoped grant. Stop fences broker calls before worker teardown. Takeover fences the worker before exposing the browser session. | Name the supervisor/takeover actor, or choose owner plus starter only. |
-| Sensitive-action approval | Only a separately designated current eligible human approver for this project may approve one exact action digest; the starter/model cannot self-approve. Existing guide reviewer status alone grants no run-action approval. | Name approver(s) and whether the starter may ever be an approver. Proposed default: independent human for any new consent, account change or artifact write. |
+| Operations project and site | One active `ops_projects.id`; no Dev Studio or demo-site project ID substitution. Owner enters an optional site origin in Operations UI; absence does not block project or profile creation. | Current project UUID, owner and explicit site origin must be present and checked at run start. A changed origin requires a new scoped allowlist and target proof. |
+| Guide | The project's exact current, independently approved, nonwithdrawn `ops_guide_versions.id`, version number and `content_hash`, read through Operations at assignment and pinned at run start. A profile may remain unassigned and disabled. No fallback to an older version. | Exact approved guide ID/version/hash and independent approver must exist before assignment or run. |
+| Profile configuration | Current eligible project owner or editor may create/edit a profile; archive, grant loss or stale revision refuses the change. Only an independently approved current guide may be assigned. Profile creation launches nothing. | Current account and project grant are checked for each edit. A named configurator can be selected through the UI. |
+| Run start | A current eligible owner or operator may explicitly start one run after the guide, binding and limits are pinned. An editor or reviewer needs a separate operator grant. | A named starter, current grant and exact action scope are checked at run start; this A1 document grants no run permission. |
+| Stop and takeover | The starter and project owner may stop or take over; a separately named supervisor needs an explicit project-scoped grant. Stop fences broker calls before worker teardown. Takeover fences the worker before exposing the browser session. | Assign any additional supervisor in the product before use; the current eligible owner/starter are still rechecked. |
+| Sensitive-action approval | Only a separately designated current eligible human approver may approve one exact action digest; the starter/model cannot self-approve. Existing guide reviewer status alone grants no run-action approval. | Designate an independent approver before a sensitive action; otherwise block it. New consent, account changes and artifact writes remain outside the initial sign-in scope. |
 
 The existing Operations roles and independent guide-approval rule are grounded
 in `docs/features/operations.md` and `operational-projects-logic.js`. Run and
-approval roles above are **new policy proposals**, not existing product grants.
+approval roles above are **design defaults**, not existing product grants.
 The owner cannot waive guide review; a platform admin without project
 membership gets no implicit access.
 
-The user will also specify the first project's site. `demo.fractionate.ai` is
-the currently verified synthetic target, not a substitute for that final
-choice. A changed origin requires a new allowlist, credential/account review
-and target acceptance evidence before a run. The requested project
+`demo.fractionate.ai` is the verified synthetic target used to design and test
+the first workflow. The owner may enter another site through the Operations
+project interface later; its origin is not inferred from this fixture. The
+project currently has only name/description fields, so A2 must add a dedicated
+owner-managed site origin field and accessible input. Missing or changed origin
+blocks a run until allowlist, credential/account and target acceptance checks
+are current. The requested project
 hidden/read-only/collaborative modes and contributor-specific credential
 backlog are in [project access and credential phases](fractionate-project-credentials-backlog.md).
 Project discovery, project membership, credential sharing and agent run
@@ -55,8 +61,9 @@ account or provider key is authorized by this fixture choice.
 
 Every ceiling is enforced before each action and at its broker/worker boundary.
 Missing authority, scope, price, quota or current guide fails closed. These
-numeric values and provider/model choice require user approval before the A1
-gate can close; they are not deployed controls.
+numbers are A1 implementation defaults, not deployed controls or authority to
+spend. A4 must select and verify provider/model metering; A8 must obtain the
+actual run and deployment authorization before any real-key pilot.
 
 ## Success, failure and human handoff
 
@@ -92,21 +99,20 @@ Operations PNG/JPEG evidence store nor Dev Studio assets nor backup S3
 credentials grant this action. The separate design and A3–A8 proof in the
 [acceptance matrix](fractionate-agents-a1-acceptance.md) apply if selected.
 
-## Decisions required to close A1
+## Deferred configuration and release gates
 
-1. Exact Operations project UUID/owner, final site origin and exact independently
-   approved current guide version ID, number, content hash and approver.
-2. Accept or edit the proposed configurator, starter, stop/takeover and
-   sensitive-action approver roles; name the first human actors.
-3. Accept or edit the fixture binding and revocation behavior, allowed actions,
-   two-attempt rule and numeric time/tool/cost/resource ceilings; choose the
-   provider/model for the spending rule.
-4. Keep project PDF/CSV delivery excluded (proposed), or separately select its
-   source, destination, grant, limits and approver.
-5. Choose the initial project discovery mode and whether credential
-   replication destinations are selected per credential or always required;
-   confirm any named recipients before sharing a value.
+The owner creates the first project and enters its site in the A2 interface.
+A2 may create access policy and disabled, unassigned profile metadata before
+that happens. The A1 design defaults are hidden project discovery, owner-approved
+membership requests for read-only/collaborative discovery, and explicit
+per-credential destination selection. No secret is shared by project membership
+alone. Those defaults can be changed through reviewed policy work, not inferred
+from a site's text or a credential name.
 
-A1 remains **in review** until these choices and required authority are
-recorded and its acceptance gate is met. A2 implementation is a separate next
-section and has not begun.
+Before any run, record the exact project/site, independently approved current
+guide and human starter/supervisor/approver grants, fixture or other credential
+binding, allowlist and enforced ceilings. A4 chooses a provider/model and proves
+metering. A8 obtains separate deployment and live-run authorization and target
+proof. Optional PDF/CSV project delivery remains excluded until selected with
+its own source, destination, grant, limits and approver. These are **run/release
+gates**, not A1 design completion requirements. A2 implementation has not begun.

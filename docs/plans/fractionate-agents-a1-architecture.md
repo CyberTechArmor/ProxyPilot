@@ -1,6 +1,6 @@
 # A1 — first supervised agent architecture and pilot contract
 
-Status: **design and pilot contract in review; live demo verified, guide/authority approval open**
+Status: **A1 scope and architecture complete; live demo verified; run authority pending**
 (2026-09-25).
 This is a review contract for A2–A8, not an implemented runtime or permission to
 use an account. The official section list is [A1–A8](fractionate-agents-a1-a8.md).
@@ -22,21 +22,24 @@ A8 acceptance. The fixture account is `demo@fractionate.ai` with public sample
 password `welcome-demo` unless changed by environment configuration. The
 proposed terminal output is a **verified signed-in demo session** for that
 account, or an explicit blocked/failed result. The user will create the first
-Operations project and specify its final site; a different origin reopens
-site-specific allowlist, account and acceptance proof. The deployed server, CSV and
+Operations project and enter its site through the interface when ready; A2
+adds that field. Neither project creation nor site entry gates A1 design.
+A different origin requires site-specific allowlist, account and acceptance
+proof before any run. The deployed server, CSV and
 build files match local hashes, but the source/build were uncommitted at
 deployment time, so no commit can be claimed as their deployment identity.
-Do not mark A1 complete
-until the exact Operations guide, human authority and [pilot contract](fractionate-agents-a1-pilot-contract.md)
-are approved.
+The exact Operations guide, human authority and
+[pilot contract](fractionate-agents-a1-pilot-contract.md) are run/release gates.
+They can be bound through later project/profile interfaces; A1 design closure
+does not authorize a run.
 
-| Decision | Current value | Required before A1 completion |
+| Decision | A1 design value | Required before an authorized run |
 |---|---|---|
 | Workflow and application | **Navigate to `https://demo.fractionate.ai` and sign in** | Demo website route, service, TLS, browser sign-in and CSV verified 2026-09-25; agent deployment remains A8 |
-| Inputs and account | **Demo password form; public fixture account above** | Choose Operations project/guide version/hash and approve proposed binding; no real account credentials |
+| Inputs and account | **Demo password form; public fixture account above** | Bind an exact Operations project/site, approved guide version/hash and credential; no real account credentials from A1 |
 | Desired output and success | **`/workspace` plus `/api/session` returns the intended account and `/api/files` lists sample CSV** | Pin exact guide, time/action budget and failure evidence; never emit password/session token |
 | Permitted changes | **One demo sign-in session, read-only file access and sign-out** | No account setting change, upload, project mutation or broad navigation; bound login attempts |
-| Human approvals | **Human authorizes run start; no in-demo approval ceremony** | Approve proposed roles and named actors for configuration, start/stop/takeover and sensitive actions; unexpected challenge/consent still pauses |
+| Human approvals | **Human authorizes run start; no in-demo approval ceremony** | Current named starter/supervisor/approver grants must be selected and checked; unexpected challenge/consent still pauses |
 | Optional document delivery | **Feasible design, outside initial sign-in acceptance until selected** | Source document, allowed PDF/CSV, project owner, local/S3 destination and authorization for one artifact write |
 
 The first delivery remains **one supported workflow, one profile and at most one
@@ -90,7 +93,7 @@ quota, ACL/prefix isolation, retention, backup/restore and deletion policy befor
 activation. PDF/CSV bytes remain untrusted data; storing them does not imply
 parsing, summarizing, sharing or guide approval.
 
-### Run acceptance envelope to fill after pilot selection
+### Run acceptance envelope to fill at authorization
 
 At start, the human must supply the selected workflow's typed inputs and the
 exact current approved Operations guide version. The server records project ID,
@@ -102,9 +105,9 @@ archive, grant loss and account ineligibility are checked again at each boundary
 A newly approved version never silently replaces a running pin. If policy calls
 for stopping on withdrawal, the run stops; it never falls back to an older guide.
 
-The [pilot contract](fractionate-agents-a1-pilot-contract.md) proposes exact
-login-attempt, time, tool, cost and worker ceilings for review; these are not
-approved or implemented. The A2–A8 implementation must persist
+The [pilot contract](fractionate-agents-a1-pilot-contract.md) records initial
+login-attempt, time, tool, cost and worker design ceilings; these are not
+implemented or authorization to spend. The A2–A8 implementation must persist
 hard ceilings for elapsed time, provider cost/tokens, tool calls, external writes,
 bytes and worker resources. A limit is enforced server side before an action and
 at the worker/broker boundary; UI estimates are informational. Default-deny is

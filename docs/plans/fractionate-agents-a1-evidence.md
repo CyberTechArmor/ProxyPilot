@@ -52,8 +52,11 @@ hashes above; `git diff --check` passed; the A1 documentation verifier checked
 local links, preserved source hashes and migration status. The verifier's
 exact count and patch hash remain in the adjacent evidence directory.
 
-The user will create the first Operations project and specify its final site.
-The exact project ID, current independently approved guide version/hash,
-human authority and pilot limits are not yet approved. A1 therefore remains
-**in review**; A2 has not started. S6, SEC-01–05, INF-01–04 and A8 target
-proof remain open.
+The user will create the first Operations project and enter its site through
+the interface when ready. The current Operations project schema has no site
+field; [A2](fractionate-agents-a2-prompt.md) adds an optional owner-managed
+origin. No project/site ID is needed for A1 design completion. The exact
+project/site, independently approved guide version/hash, human authority,
+credential binding and enforced limits must be checked before an authorized
+run. A1 scope/architecture is **complete**; A2 has not started. S6,
+SEC-01–05, INF-01–04 and A8 target proof remain open.

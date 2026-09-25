@@ -27,8 +27,8 @@ new blocking dependency and place it under the affected section for review.
 
 | Section | Bounded work | Completion evidence | Status |
 |---|---|---|---|
-| A1 — Scope and architecture | Select one useful workflow/application; define success, permitted actions, human approvals, trust boundaries, identity/state model, reuse and dependencies. Refine A2–A8 contracts without implementing runtime. | Source-grounded architecture, acceptance matrix, security dependency map, pilot choice or clearly blocked choice, and executable A2 prompt. | In review: live demo website verified; pilot contract proposed; exact project/approved guide, authority and limits await approval |
-| A2 — Project access and agent profiles | Owner-selected hidden/read-only/collaborative project discovery with explicit member roles; stable project/profile/run/worker/binding identities; profile CRUD and scoped guide assignment; current-user authority, no privilege inheritance from names or broad management roles. | Hidden-project non-disclosure, native authorization, cross-project, stale grant/account and audit tests; accessible access/profile UI; no compute from profile creation. | Pending A1 |
+| A1 — Scope and architecture | Select one useful workflow/application; define success, permitted actions, human approvals, trust boundaries, identity/state model, reuse and dependencies. Refine A2–A8 contracts without implementing runtime. | Source-grounded architecture, acceptance matrix, security dependency map, selected synthetic pilot, and executable A2 prompt. | **Design complete:** live demo verified; site/project/guide/human bindings and live authority remain later gates |
+| A2 — Project access and agent profiles | Optional owner-managed project site origin, hidden/read-only/collaborative discovery with explicit member roles; stable project/profile/run/worker/binding identities; profile CRUD and optional scoped guide assignment; current-user authority, no privilege inheritance from names or broad management roles. | Hidden-project non-disclosure, site validation/change, native authorization, cross-project, stale grant/account and audit tests; accessible access/profile UI; no compute from profile creation. | Ready for separate implementation request |
 | A3 — Isolated execution environment | One selected worker/browser environment; typed launch/stop contracts, private run workspace, egress/tool limits, hard resource budgets and cleanup. Resolve relevant host-boundary blockers. | Escape/unauthorized-operation refusals, cancellation/cleanup and target isolation checks; no host-root execution available to the model. | Pending A2 |
 | A4 — Credentials and provider connection | One initial provider; contributor-specific project credential intake into OpenBao, separately granted Infisical/Vaultwarden destination feasibility, scoped agent binding, brokered access, rotation/revocation and bounded provider spending. Retain administrator re-authentication/MFA boundaries. | Positive/negative credential access, destination consistency and real cancellation/revocation tests in the authorized environment; no secrets in model context, logs or browser output where non-disclosure is claimed. | Pending A3; vault cascade requires reviewed feasibility |
 | A5 — Core execution loop | Explicit run start, pin approved guide version, bounded tool/action loop, durable state/progress/results, approval checkpoints and refusal outside permitted actions. | One synthetic workflow completes; tool errors, stale authority, prompt injection/untrusted page content, budgets and stop requests fail safely; no implicit authority from guide/evidence content. | Pending A4 |
@@ -86,11 +86,13 @@ Current A1 artifacts: [architecture and pilot decision](fractionate-agents-a1-ar
 [project access and credential backlog](fractionate-project-credentials-backlog.md) and
 [A2 prompt](fractionate-agents-a2-prompt.md). The first workflow is sign-in at
 `demo.fractionate.ai` as a synthetic target; the user will create the first
-Operations project and specify its final site. The standalone demo website is
+Operations project and enter its site through the A2 interface when ready.
+No site or project ID is required to close A1 design. The standalone demo website is
 live with a public demo account and protected sample CSV. The deployed source/build matched files
 uncommitted at deployment time, so no commit is claimed for the archive. The exact Operations project,
-approved guide, human authority and limits remain open. The website deployment
+site, approved guide, human authority and enforced limits remain run/release
+gates. The website deployment
 does not satisfy A8 agent deployment. Optional PDF/CSV delivery to an
 Operations project is a separate explicit action grant; it is not implemented.
-A1 remains in review and A2 has not started. Original
+A1 design is complete; A2 has not started. Original
 [A1 executable prompt](fractionate-agents-a1-prompt.md).

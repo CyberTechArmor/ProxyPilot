@@ -1,10 +1,13 @@
 # Operations projects, credentials and sharing — phased backlog
 
-Status: **requirements/design backlog, not implemented or approved** (2026-09-25).
-The user will create the first project and specify its site. Keep its exact
-`ops_projects.id`, selected origin and approved guide version/hash as A1 review
-inputs. The deployed `demo.fractionate.ai` remains an available synthetic target;
-do not silently treat it as the user's final site.
+Status: **A1 design backlog; implementation pending** (2026-09-25).
+The user will create the first Operations project and enter its site through
+the project interface when ready. A2 adds the dedicated optional site origin
+field because current Operations projects have only name/description. Project
+and disabled profile creation do not require a site. The exact
+`ops_projects.id`, selected origin and approved guide version/hash are checked
+before an authorized run. The deployed `demo.fractionate.ai` remains an
+available synthetic target; never silently use it as the user's project site.
 
 This backlog refers to **Operations** projects (`/operational-projects`). Dev
 Studio (`/projects`) has different IDs and grants. A current eligible ProxyPilot
@@ -103,8 +106,8 @@ alone never creates a credential share.
 
 | Phase / tag | Bounded result | Exit evidence | Planned place |
 |---|---|---|---|
-| **P0 `A1/decision`** | User creates/selects first Operations project and exact site; records approved guide version/hash and pilot roles/limits; confirms project preset and whether vault destinations are mandatory or selected per credential. | Exact IDs, origin, guide approval, human actors and reviewed A1 contract. | A1 closure; no agent implementation. |
-| **P1 `A2/project-access`** | Add owner-controlled discoverability preset, membership requests/approvals, redacted directory, and project-scoped profile configuration. Keep create-project available to eligible accounts. | Cross-project, hidden-name, stale-grant, archive, admin-bypass, accessibility and migration tests; no vault/worker side effects. | A2; keep profile-only changes bounded if project modes need a separate reviewed slice. |
+| **P0 `A1/design`** | Fix the synthetic sign-in scope and safe defaults: hidden project, owner-approved membership for discoverable presets, per-credential destination selection and no implicit secret sharing. | A1 architecture, pilot contract, acceptance matrix and executable A2 prompt. Project/site/guide/human IDs are deferred to configuration and run authorization. | A1 design complete; no agent implementation. |
+| **P1 `A2/project-access`** | Add optional owner-managed site origin input, owner-controlled discoverability preset, membership requests/approvals, redacted directory, and project-scoped disabled profile configuration. Keep create-project available to eligible accounts. | Cross-project, hidden-name, invalid/changed site, stale-grant, archive, admin-bypass, accessibility and migration tests; no vault/worker side effects. | A2; no first-project or site prerequisite. |
 | **P2 `A4/openbao-intake`** | Contributor-specific credential record and fresh-proof input; OpenBao scoped write/readback/version, no plaintext persistence, rotation and revoke contract. Agent binding is a separate least-authority grant. | Disposable OpenBao positive/negative ACL, CAS race, failed write, leak scan, backup/restore and revocation evidence. | A4 after A3 isolation proof. |
 | **P3 `A4/infisical-sync`** | Explicit per-credential Infisical destination, scoped identity, site allowlist and durable sync receipts. | Free-edition authority check, partial failure/retry, version drift, recipient and revocation tests. | A4 integration slice; no automatic broad copy. |
 | **P4 `A4/vaultwarden-handoff`** | Prove contributor-side personal import or exact organization collection sharing; show per-destination status and recipient/ownership transition. | Disposable Vaultwarden client/version proof, no master-key custody, wrong-recipient and offline/revocation tests. | A4 integration slice; block claim if infeasible. |

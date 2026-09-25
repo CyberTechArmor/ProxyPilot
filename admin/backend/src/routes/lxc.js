@@ -1039,7 +1039,7 @@ lxcRouter.post('/containers', async (req, res) => {
   if (isVm) {
     try {
       const probe = await execOnHost(
-        `incus image info ${image} --format json 2>/dev/null`,
+        `incus image info ${image} --vm --format json 2>/dev/null`,
         { timeout: 5000 }
       );
       const meta = JSON.parse(probe.stdout || '{}');

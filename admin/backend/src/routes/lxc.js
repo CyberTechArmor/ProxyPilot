@@ -1039,12 +1039,12 @@ lxcRouter.post('/containers', async (req, res) => {
   if (isVm) {
     try {
       const probe = await execOnHost(
-        `incus image info ${image} --vm --format json 2>/dev/null`,
+        `incus image list ${image} --format json 2>/dev/null`,
         { timeout: 5000 }
       );
-      const meta = JSON.parse(probe.stdout || '{}');
-      const supports = deriveImageSupports(meta);
-      if (!supports.includes('virtual-machine')) {
+      const matches = JSON.parse(probe.stdout || '[]');
+      if (Array.isArray(matches) && matches.length > 0 &&
+          !matches.some((candidate) => deriveImageSupports(candidate).includes('virtual-machine'))) {
         return res.status(400).json({
           success: false,
           error: `Image '${image}' is not bootable as a virtual machine.`,

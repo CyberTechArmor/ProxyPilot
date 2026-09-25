@@ -46,7 +46,7 @@ import {
   snapshotArgv, snapshotCliFormFromProbe, isSnapshotCliShapeError,
   SNAPSHOT_CLI_SUBCOMMAND, SNAPSHOT_CLI_LEGACY,
   startupRunTimeoutMs, parseMarkedStreams,
-  parseLxcCommand, lxcCommandTimeoutMs, lxcContainerDetail,
+  parseLxcCommand, lxcCommandTimeoutMs, lxcContainerDetail, mcpGuestCreateOptions,
   validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
   validIpv4, validImageAlias,
   validDomainName, normalizePort, parseCurlProbeOutput, classifyCurlExit,
@@ -1516,14 +1516,9 @@ async function toolCreateLxcContainer(args, auth) {
   }
   const image = validImageAlias(args.image || 'images:debian/12');
   if (!image) return toolResult('image must be an Incus image alias, e.g. "images:debian/12"', { isError: true });
-  const cpu = args.cpu == null ? 2 : Number(args.cpu);
-  if (!Number.isInteger(cpu) || cpu < 1 || cpu > 64) return toolResult('cpu must be a whole number of vCPUs (1–64)', { isError: true });
-  const memoryGb = args.memory_gb == null ? 4 : Number(args.memory_gb);
-  if (!Number.isFinite(memoryGb) || memoryGb < 0.5 || memoryGb > 512) return toolResult('memory_gb must be between 0.5 and 512', { isError: true });
-  const diskGb = args.disk_gb == null ? null : Number(args.disk_gb);
-  if (diskGb !== null && (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 2048)) return toolResult('disk_gb must be a whole number of GB (1–2048)', { isError: true });
-  const dockerReady = args.docker_ready !== false;
-  const autostart = args.autostart !== false;
+  const options = mcpGuestCreateOptions(args);
+  if (options.error) return toolResult(options.error, { isError: true });
+  const { cpu, memoryGb, diskGb, isVm, dockerReady, autostart, config } = options;
   const incusName = `${LXC_PREFIX}${name}`;
 
   const existing = await fetchLxcInstance(incusName);
@@ -1538,30 +1533,15 @@ async function toolCreateLxcContainer(args, auth) {
   // reports created, and removes a half-created guest when the launch failed
   // (never one that already existed: a create never replaces). Memory is
   // passed in MiB so a fractional GB stays exact.
-  const config = {
-    'limits.cpu': String(cpu),
-    'limits.memory': `${Math.round(memoryGb * 1024)}MiB`,
-    'boot.autostart': String(autostart),
-  };
-  if (dockerReady) {
-    // Same flag set the UI creation route uses for Docker-in-LXC guests:
-    // nesting plus the syscall intercepts BuildKit and sysctl-touching
-    // images need. Privileged mode is NOT part of docker-ready.
-    Object.assign(config, {
-      'security.nesting': 'true',
-      'security.syscalls.intercept.mknod': 'true',
-      'security.syscalls.intercept.setxattr': 'true',
-      'security.syscalls.intercept.bpf': 'true',
-      'security.syscalls.intercept.bpf.devices': 'true',
-    });
-  }
+  // Generic guest config is built in the pure policy helper. No caller can
+  // pass Incus flags, device mounts or Docker intercepts into a VM.
   // The NAT fix-up and the DHCP wait after the launch are the setup engine's
   // (A-17.7): the launch job carries the plan, its executor queues a
   // `guest_setup` follow-up bound to the launched guest, and this tool waits
   // on that record for the host-reachable address instead of polling the
   // host itself.
   const { runLifecycle, waitForSetup } = await import('../mock2/ops.js');
-  const launch = await runLifecycle({ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, rootSize: diskGb !== null ? `${diskGb}GiB` : null, setup: { phases: ['network_nat', 'await_address'], addressTimeoutMs: 15_000 }, requestedBy: auth.created_by ?? null, via: 'mcp' });
+  const launch = await runLifecycle({ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, vm: isVm, rootSize: diskGb !== null ? `${diskGb}GiB` : null, setup: { phases: ['network_nat', 'await_address'], addressTimeoutMs: 15_000 }, requestedBy: auth.created_by ?? null, via: 'mcp' });
   if (!launch.ok) return toolResult(`Launch failed: ${launch.error}${launch.jobId ? ` (job ${launch.jobId})` : ''}`, { isError: true });
 
   const warnings = [...(Array.isArray(launch.warnings) ? launch.warnings : [])];
@@ -1575,12 +1555,13 @@ async function toolCreateLxcContainer(args, auth) {
   const probe = await fetchLxcInstance(incusName);
   const detail = probe.instance ? lxcContainerDetail(probe.instance) : null;
   logAudit(auth.created_by, 'LXC_CREATED', 'lxc', name, {
-    via: 'mcp', image, cpu, memory_gb: memoryGb, disk_gb: diskGb, docker_ready: dockerReady, autostart, setup_job: launch.setupJobId || null,
+    via: 'mcp', image, vm: isVm, cpu, memory_gb: memoryGb, disk_gb: diskGb, docker_ready: dockerReady, autostart, setup_job: launch.setupJobId || null,
   }, null);
   return toolResult({
     created: true,
     container: name,
     image,
+    vm: isVm,
     job_id: launch.jobId,
     setup_job_id: launch.setupJobId || null,
     ...(setup?.progress?.address?.ip && !detail?.primary_address ? { primary_address: setup.progress.address.ip } : {}),

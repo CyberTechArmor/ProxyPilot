@@ -765,6 +765,7 @@ test('policy file shape: read_only, scoped, deny lists all present and argv-shap
 
 test('lxcContainerDetail maps addresses, config subset, and snapshots', () => {
   const d = lxcContainerDetail({
+    type: 'virtual-machine',
     status: 'Running',
     created_at: '2026-08-01T00:00:00Z',
     profiles: ['default'],
@@ -787,6 +788,7 @@ test('lxcContainerDetail maps addresses, config subset, and snapshots', () => {
     snapshots: [{ name: 'pre-privilege-flip', created_at: '2026-08-10T00:00:00Z' }],
   });
   assert.equal(d.status, 'Running');
+  assert.equal(d.type, 'virtual-machine');
   // Each address now carries WHERE it lives: `bridge` (on the guest's
   // host-attached NIC) and `internal` (on an interface the guest's own
   // runtime created, which the host cannot route to). This instance reports
@@ -808,8 +810,25 @@ test('lxcContainerDetail maps addresses, config subset, and snapshots', () => {
 
 import {
   validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
-  validIpv4, validImageAlias,
+  validIpv4, validImageAlias, mcpGuestCreateOptions,
 } from '../lib/mcp-logic.js';
+
+test('MCP VM creation keeps Docker privileges out and disables guest API at birth', () => {
+  const vm = mcpGuestCreateOptions({ vm: true, cpu: 1, memory_gb: 0.5, disk_gb: 4, autostart: false });
+  assert.equal(vm.error, undefined);
+  assert.equal(vm.isVm, true);
+  assert.equal(vm.dockerReady, false);
+  assert.deepEqual(vm.config, {
+    'limits.cpu': '1', 'limits.memory': '512MiB', 'boot.autostart': 'false',
+    'security.nesting': 'false', 'security.guestapi': 'false',
+  });
+  assert.match(mcpGuestCreateOptions({ vm: true, docker_ready: true }).error, /cannot be enabled/);
+  assert.equal(mcpGuestCreateOptions({ vm: true, memory_gb: 0.25 }).error !== undefined, true);
+  const container = mcpGuestCreateOptions({});
+  assert.equal(container.isVm, false);
+  assert.equal(container.dockerReady, true);
+  assert.equal(container.config['security.guestapi'], undefined);
+});
 
 const CFG_POLICY = JSON.parse(
   readFileSync(new URL('../lib/mcp-policy/lxc-config-allowlist.json', import.meta.url), 'utf8'),
@@ -1007,6 +1026,7 @@ test('normalizeServiceId keeps uuid AND legacy integer ids (the Number() NaN tra
 
 test('tool catalog covers the full 25-tool upgrade surface', () => {
   const names = new Set(MCP_TOOLS.map((t) => t.name));
+  assert.equal(MCP_TOOLS.find((t) => t.name === 'create_lxc_container').inputSchema.properties.vm.type, 'boolean');
   for (const required of [
     // cycle 2
     'get_lxc_container', 'run_lxc_command',

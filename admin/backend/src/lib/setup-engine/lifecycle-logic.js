@@ -42,6 +42,7 @@ export const NOTE_MAX = 500;
 // after birth through the config verbs and their own allowlist.
 export const LAUNCH_CONFIG_ALLOWLIST = Object.freeze({
   'security.nesting': /^(true|false)$/,
+  'security.guestapi': /^false$/,
   'security.privileged': /^(true|false)$/,
   'security.syscalls.intercept.mknod': /^(true|false)$/,
   'security.syscalls.intercept.setxattr': /^(true|false)$/,

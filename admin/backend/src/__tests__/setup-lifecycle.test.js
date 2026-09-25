@@ -152,6 +152,8 @@ test('validation is strict: names, flags and an allowlisted launch config; never
   bad('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'user.script': 'curl x | sh' } }, /not on the launch allowlist/);
   bad('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'limits.memory': '4 GB; rm -rf /' } }, /not an accepted value/);
   bad('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'raw.lxc': 'lxc.mount.entry=/ host none bind' } }, /not an accepted value/);
+  ok('instance_create', { container: 'pp-vm-safe', image: 'images:debian/12', vm: true, config: { 'security.guestapi': 'false', 'security.nesting': 'false', 'limits.memory': '512MiB' } });
+  bad('instance_create', { container: 'pp-vm-unsafe', image: 'images:debian/12', vm: true, config: { 'security.guestapi': 'true' } }, /not an accepted value/);
   bad('instance_create', { container: 'pp-new', image: 'images:debian/12', rootSize: '20' }, /rootSize/);
   bad('instance_start', { container: 'pp-x', image: 'images:debian/12' }, /carries no image/);
   bad('snapshot_create', { container: 'pp-x', snapshot: 's', note: 'AUTH_MASTER_SECRET=abcdefghijklmnop' }, /looks like a secret/);
@@ -170,6 +172,8 @@ test('the fixed commands: one argv per kind, rendered from the plan alone; an in
   assert.deepEqual(lifecycleArgv('instance_delete', { container: 'pp-x', force: true }), ['incus', 'delete', 'pp-x'], 'force applies to the stop that precedes the delete, never to the delete itself');
   assert.deepEqual(lifecycleArgv('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'limits.memory': '2GiB', 'security.nesting': 'true' }, vm: true, network: 'm2br7' }),
     ['incus', 'launch', 'images:debian/12', 'pp-new', '--profile', 'default', '--config', 'security.nesting=true', '--config', 'limits.memory=2GiB', '--network', 'm2br7', '--vm'], 'config flags in allowlist order');
+  assert.deepEqual(lifecycleArgv('instance_create', { container: 'pp-vm-safe', image: 'images:debian/12', vm: true, config: { 'security.guestapi': 'false', 'limits.memory': '512MiB' } }),
+    ['incus', 'launch', 'images:debian/12', 'pp-vm-safe', '--profile', 'default', '--config', 'security.guestapi=false', '--config', 'limits.memory=512MiB', '--vm']);
   assert.deepEqual(lifecycleArgv('snapshot_create', { container: 'pp-x', snapshot: 's1' }), ['incus', 'snapshot', 'create', 'pp-x', 's1']);
   assert.deepEqual(lifecycleArgv('snapshot_create', { container: 'pp-x', snapshot: 's1' }, { snapshotForm: 'legacy' }), ['incus', 'snapshot', 'pp-x', 's1']);
   assert.deepEqual(lifecycleArgv('snapshot_delete', { container: 'pp-x', snapshot: 's1' }), ['incus', 'snapshot', 'delete', 'pp-x', 's1']);

@@ -5,6 +5,8 @@ import { operationsApi as api } from '@/lib/api';
 import { Action, Panel, Field, Choice, GuideText, roleNames } from '@/components/operational-projects/shared';
 
 import { Demonstrations, EvidenceSet, evidenceDisclaimer } from '@/components/operational-projects/Evidence';
+import { AgentConfiguration } from '@/components/operational-projects/Agents';
+import { AccessPolicy } from '@/components/operational-projects/AccessPolicy';
 
 const blankRun={started_at:'',ended_at:'',outcome:'completed',notes:'',reason:''};
 const localTime=iso=>{const d=new Date(iso);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);};
@@ -15,12 +17,13 @@ export default function OperationalProjectDetail() {
 }
 function Operation({id}) {
   const {user}=useAuth(),navigate=useNavigate(),base=`/${id}`;
-  const [data,setData]=useState(null),[section,setSection]=useState(()=>{const value=new URLSearchParams(window.location.search).get('section');return ['Overview','Guide','Versions','Runs','Access'].includes(value)?value:'Overview';}),[busy,setBusy]=useState(false);
+  const [data,setData]=useState(null),[section,setSection]=useState(()=>{const value=new URLSearchParams(window.location.search).get('section');return ['Overview','Guide','Versions','Runs','Access','Agents'].includes(value)?value:'Overview';}),[busy,setBusy]=useState(false);
   const [error,setError]=useState(''),[message,setMessage]=useState(''),[draft,setDraft]=useState(null),[meta,setMeta]=useState(null);
   const [reason,setReason]=useState(''),[identifier,setIdentifier]=useState(''),[candidate,setCandidate]=useState(null),[grantRole,setGrantRole]=useState('viewer');
   const [transfer,setTransfer]=useState(''),[discard,setDiscard]=useState(false),[selectedVersion,setSelectedVersion]=useState(null);
   const [runForm,setRunForm]=useState(blankRun),[runVersion,setRunVersion]=useState(null),[correcting,setCorrecting]=useState(null),[relatedRun,setRelatedRun]=useState(null);
   const [capability,setCapability]=useState(false),[evidenceTick,setEvidenceTick]=useState(0),[selectionDirty,setSelectionDirty]=useState(false);
+  const [agentCapability,setAgentCapability]=useState(false);
   const requests=useRef(null),generation=useRef(0);
   const retry=useRef(null),alive=useRef(true),errorRef=useRef(null);
   const clearPrivate=()=>{setData(null);setDraft(null);setMeta(null);setRunForm(blankRun);setRunVersion(null);setCorrecting(null);setRelatedRun(null);setSelectedVersion(null);setCandidate(null);setReason('');setIdentifier('');retry.current=null;};
@@ -30,7 +33,7 @@ function Operation({id}) {
     const {project}=await api.get(base,signal);
     const [d,v,r,e,a]=await Promise.all([api.get(`${base}/draft`,signal),api.get(`${base}/versions`,signal),api.get(`${base}/runs`,signal),api.get(`${base}/events`,signal),project.own_role==='owner'?api.get(`${base}/access`,signal):null]);
     if(!alive.current||gen!==generation.current)return;
-    setCapability(caps.enabled&&caps.evidence_enabled);setEvidenceTick(t=>t+1);
+    setCapability(caps.enabled&&caps.evidence_enabled);setAgentCapability(caps.enabled&&caps.agents_metadata_enabled);setEvidenceTick(t=>t+1);
     setData({p:project,d:d.draft,v,r,e,a});
     if(replace===true||replace==='draft')setDraft({title:d.draft.title,instructions:d.draft.instructions,revision:d.draft.revision});
     if(replace===true||replace==='meta')setMeta({name:project.name,description:project.description,revision:project.revision});
@@ -73,10 +76,10 @@ function Operation({id}) {
     <header className="space-y-2"><Link className="underline inline-flex min-h-11 items-center" to="/operational-projects">Back to Operations</Link><h1 className="text-2xl font-bold break-words [overflow-wrap:anywhere]">{p.name}</h1><p className="text-sm text-muted-foreground">Your role: {p.own_role} · {p.archived_at?'Archived':'Active'} · {p.current_version?`Current guide v${p.current_version.version_number}`:'No current approved guide'}</p></header>
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
     <p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>
-    <nav aria-label="Operation sections" className="grid grid-cols-2 sm:grid-cols-5 gap-2">{['Overview','Guide','Versions','Runs','Access'].map(tab=><Action key={tab} aria-pressed={section===tab} variant={section===tab?'default':'outline'} onClick={()=>{setSection(tab);setError('');}}>{tab}</Action>)}</nav>
+    <nav aria-label="Operation sections" className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">{['Overview','Guide','Versions','Runs','Access',...(agentCapability?['Agents']:[])].map(tab=><Action key={tab} aria-pressed={section===tab} variant={section===tab?'default':'outline'} onClick={()=>{setSection(tab);setError('');}}>{tab}</Action>)}</nav>
     <Action variant="outline" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh server state</Action>
     {section==='Overview'&&<>
-      <Panel title="Overview"><p className="whitespace-pre-wrap break-words">{p.description||'No description yet.'}</p><p className="text-sm break-words">Owner: {p.owner_name}</p>{p.archived_at&&<p>Archived: {p.archive_reason}</p>}
+      <Panel title="Overview"><p className="whitespace-pre-wrap break-words">{p.description||'No description yet.'}</p><p className="text-sm break-words">Owner: {p.owner_name}</p>{agentCapability&&<p className="text-sm break-words">Project site: {p.site_origin||'Not set'} · Visibility: {p.visibility}</p>}{p.archived_at&&<p>Archived: {p.archive_reason}</p>}
         {editable&&active&&meta&&<form className="space-y-4" onSubmit={ev=>{ev.preventDefault();perform(()=>write('',{name:meta.name,description:meta.description},meta.revision,'PATCH'),'Details saved.','meta');}}>
           <Field label="Name" required maxLength={200} value={meta.name} onChange={ev=>setMeta({...meta,name:ev.target.value})}/><Field label="Description" textarea rows={3} maxLength={20000} value={meta.description} onChange={ev=>setMeta({...meta,description:ev.target.value})}/>
           <div className="flex flex-wrap gap-2"><Action disabled={busy} type="submit">Save details</Action><Action type="button" variant="outline" disabled={busy} onClick={()=>setMeta({name:p.name,description:p.description,revision:p.revision})}>Discard local detail edits</Action></div>
@@ -131,6 +134,7 @@ function Operation({id}) {
     </Panel>}
     {section==='Access'&&<Panel title="Access">
       <p>Your role: {p.own_role}. Platform administration grants no automatic access.</p>{capability&&<p className="text-sm">Evidence archive, restriction, deletion requests and owner retention holds are in Guide → Demonstrations. A hold grants no private access. {evidenceDisclaimer}</p>}
+      {agentCapability&&owner&&<AccessPolicy base={base} project={p} onChanged={()=>refresh(false)}/>}
       {owner&&a?<>
         <p className="text-sm break-words">Owner: {a.owner.username}</p>
         <ul className="space-y-3">{a.members.map(member=><Member key={member.user_id} member={member} busy={busy} active={active} save={role=>perform(()=>write(`/members/${member.user_id}`,{role},p.revision,'PUT'),'Member role updated.')} remove={()=>perform(()=>write(`/members/${member.user_id}`,{},p.revision,'DELETE'),'Access revoked.')}/>)}</ul>
@@ -141,6 +145,7 @@ function Operation({id}) {
       </>:<Action variant="outline" disabled={busy} onClick={()=>perform(async()=>{await write(`/members/${user.id}`,{},p.revision,'DELETE');navigate('/operational-projects');},'You left the operation.')}>Leave operation</Action>}
       {p.ownership_offer&&active&&<div className="space-y-3 border rounded-md p-3"><p>Ownership offer expires {p.ownership_offer.expires_at}.</p><div className="flex flex-wrap gap-2">{(owner?['cancel']:['accept','decline']).map(decision=><Action key={decision} disabled={busy} variant={decision==='accept'?'default':'outline'} onClick={()=>perform(()=>write(`/ownership-offers/${p.ownership_offer.id}/decision`,{decision},p.revision),`Ownership offer ${decision} completed.`)}>{decision==='accept'?'Accept ownership':decision==='decline'?'Decline ownership':'Cancel ownership offer'}</Action>)}</div></div>}
     </Panel>}
+    {section==='Agents'&&agentCapability&&<AgentConfiguration base={base} project={p} onChanged={()=>refresh(false)}/>}
   </div>;
 }
 

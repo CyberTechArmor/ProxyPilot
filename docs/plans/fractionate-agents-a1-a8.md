@@ -1,5 +1,11 @@
 # Official bounded plan: first usable supervised agent
 
+> **A2 source status (2026-09-25):** Project discovery, optional owner-managed
+> site origin and disabled agent profile metadata are implemented in the A2
+> revision. Migration 1106 is additive and its gate defaults off. A3 worker
+> isolation and every run/release gate remain open. The bounded next prompt is
+> [A3 isolated worker](fractionate-agents-a3-prompt.md).
+
 Approved sequence by user direction, 2026-09-25. This plan supersedes the earlier
 suggested next step of D5 and the unbounded future-agent sequence. It establishes
 scope and order; individual implementation sections are selected separately.

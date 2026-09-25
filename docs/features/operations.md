@@ -19,6 +19,36 @@ grants, drafts, contributors and audit; 1101 adds review snapshots, approved
 versions, draft iteration state and withdrawals; 1102 adds manual records.
 Historical migrations are unchanged. Historical account IDs survive user deletion.
 
+## A2 project discovery and disabled agent profiles
+
+Migration 1106 adds an optional `site_origin`, monotonic `site_revision`, a
+visibility preset, membership requests and project-scoped profile metadata.
+It is additive and applies even while the feature is off. The separate
+`OPERATIONS_AGENTS_METADATA_ENABLED=true` gate requires Operations and is false
+by default. A site and profile are optional when a project is created. Saving
+the site changes no route, DNS, worker or credential. Only the current owner may
+set or clear a canonical HTTPS origin. Changing it advances `site_revision` and
+invalidates the profile's site assignment pin.
+
+The default `hidden` preset is member-only. `read-only` and `collaborative`
+show eligible signed-in nonmembers only a redacted name card and a request
+button. The owner must explicitly review the expansion from hidden and approve
+each request. Read-only requests may receive viewer access; collaborative
+requests may receive an existing named role. Discovery itself exposes no site,
+draft, events, roster, credentials or execution authority. Archive removes a
+project from discovery and blocks new approvals. A downgrade to hidden cancels
+pending requests. Account and membership state is rechecked on each read or
+write.
+
+Profiles use opaque UUIDs and a project foreign key. Owners and editors can
+create, update, soft-delete and assign the current independently approved guide
+by exact version ID and SHA-256 hash. Profile and project writes use quoted
+numeric `If-Match` revisions and transactional project audit. A guide that is
+withdrawn or superseded makes its assignment stale. Profiles stay disabled for
+execution in A2 even when site and guide are present. No profile mutation
+creates an agent run, worker, credential binding, provider call or live target
+change. Run authority and effective policy enforcement belong to later sections.
+
 ## Permissions
 
 Existing active `user` and `admin` accounts may create an operation and become

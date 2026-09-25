@@ -232,10 +232,11 @@ test('composition preserves authoritative auth/CSRF and new modules have no runt
   const csrf=readFileSync(new URL('../middleware/csrf.js',import.meta.url),'utf8');
   assert.equal(csrf.includes('operational-projects'),false);
   for(const name of ['operational-projects-store.js','operational-projects-logic.js','operational-projects-schema.js','operational-projects-workflow.js',
-    'operational-evidence-guide.js','operational-evidence-guide-schema.js','operational-evidence-logic.js']) {
+    'operational-evidence-guide.js','operational-evidence-guide-schema.js','operational-evidence-logic.js',
+    'operational-agents-store.js','operational-agents-schema.js']) {
     const content=readFileSync(new URL('../lib/'+name,import.meta.url),'utf8');
     const imports=[...content.matchAll(/(?:from\s+|import\s*\()(['"])([^'"]+)\1/g)].map(m=>m[2]);
     assert.ok(imports.every(i=>['node:crypto','zod','./operational-projects-logic.js','./operational-projects-workflow.js',
-      './operational-evidence-guide.js','./operational-evidence-logic.js'].includes(i)),imports.join(','));
+      './operational-evidence-guide.js','./operational-evidence-logic.js','./operational-agents-store.js'].includes(i)),imports.join(','));
   }
 });

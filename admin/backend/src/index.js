@@ -606,6 +606,7 @@ const operationsStore = operationsEnabled() ? createOperationsStore(getDb(), { e
 app.use('/api/operational-projects', authenticateToken, blockPendingRole, createOperationsRouter({
   Router: express.Router,
   enabled: operationsEnabled(),
+  agentsEnabled: process.env.OPERATIONS_AGENTS_METADATA_ENABLED === 'true',
   store: operationsStore,
   evidenceEnabled: evidenceConfig.enabled,
   evidenceRouter: createEvidenceRouter({ Router: express.Router, enabled: evidenceConfig.enabled,

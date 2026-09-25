@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 dist/
+admin/frontend/dist-demo/
 
 # Environment variables
 .env

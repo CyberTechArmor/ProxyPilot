@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createOperationsWorkflow } from './operational-projects-workflow.js';
+import { createOperationalAgentsStore } from './operational-agents-store.js';
 import {
   assertEligible, assertOperation, assertRevision, fail, parse, resolveOperationsRole, schemas, validId,
 } from './operational-projects-logic.js';
@@ -58,9 +59,11 @@ export function createOperationsStore(db, { now = () => new Date().toISOString()
   }
   const evidence = evidenceFactory?.({one,all,run,tx,access,event,bump,now,uuid});
   const workflow = createOperationsWorkflow({one,all,run,tx,access,event,bump,now,uuid,evidence});
+  const agents = createOperationalAgentsStore({one,all,run,tx,access,eligible,event,bump,now,uuid,user,workflow});
   return {
     ...(evidence ? { evidence } : {}),
     ...workflow.methods,
+    ...agents,
     assertActor: eligible,
     create(actor, input) {
       const v = parse(schemas.create, input);
@@ -138,6 +141,7 @@ export function createOperationsStore(db, { now = () => new Date().toISOString()
         if (target === p.owner_user_id) fail(409, 'Owner access cannot be changed through membership');
         run(`INSERT INTO ops_project_grants(project_id,user_id,role,granted_by,granted_at) VALUES (?,?,?,?,?)
           ON CONFLICT(project_id,user_id) DO UPDATE SET role=excluded.role,granted_by=excluded.granted_by,granted_at=excluded.granted_at`, id, target, v.role, actor.id, now());
+        run("UPDATE ops_access_requests SET state='approved',revision=revision+1,decided_at=?,decided_by=? WHERE project_id=? AND user_id=? AND state='pending'",now(),actor.id,id,target);
         event(actor, id, 'member_set', target, { role: v.role });
         return { ok: true };
       });

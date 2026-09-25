@@ -1,5 +1,10 @@
 # A1 acceptance matrix and A2–A8 refinements
 
+> **A2 source status (2026-09-25):** Access policy, optional site origin and
+> disabled profile metadata are implemented under a false-default gate.
+> A3 worker isolation and run/release authorization remain open. Earlier
+> A1-only status statements below describe the design handoff.
+
 Date 2026-09-25. A1 scope/design is complete; run and release gates remain open.
 Read with the [architecture](fractionate-agents-a1-architecture.md),
 [source register](fractionate-agents-a1-sources.md) and official

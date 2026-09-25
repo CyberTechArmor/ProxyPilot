@@ -51,6 +51,7 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
   // 'Unexpected end of JSON input' which is unhelpful to the
   // operator.  Surface the actual HTTP status text + raw body
   // snippet instead so the toast says something actionable.
+  if (response.ok && options.responseType === 'blob') return response.blob();
   let data, text = '';
   try {
     text = await response.text();
@@ -1399,10 +1400,10 @@ export const api = {
   // use_base_domain: serve the project on the parent domain itself
   // (example.com) as well as its minted subdomain. The backend refuses it when
   // another service already answers on that hostname.
-  mock2CreateProject: ({ name, description, parent_domain_id, use_base_domain, design_preset, lbp_project_id, remote }) =>
+  mock2CreateProject: ({ name, description, parent_domain_id, use_base_domain, design_preset, remote }) =>
     request('/mock2/projects', {
       method: 'POST',
-      body: JSON.stringify({ name, description, parent_domain_id, use_base_domain, design_preset, lbp_project_id, remote }),
+      body: JSON.stringify({ name, description, parent_domain_id, use_base_domain, design_preset, remote }),
     }),
   mock2ProjectProvisionStatus: (id) => request(`/mock2/projects/${id}/provision-status`),
   // Clone a project under a new name/domain. mode 'fresh' = app + git history
@@ -2457,120 +2458,6 @@ export const api = {
   tlsModeSet: (mode) =>
     request('/tls-certs/tls-mode', { method: 'PUT', body: JSON.stringify({ mode }) }),
 
-  // ---- Lean BEAF Pro (/api/lbp) — team-shared innovation projects ----
-
-  lbpUsers: () => request('/lbp/users'),
-  lbpLocations: (all = false) => request(`/lbp/locations${all ? '?all=1' : ''}`),
-  lbpCreateLocation: (data) =>
-    request('/lbp/locations', { method: 'POST', body: JSON.stringify(data) }),
-  lbpUpdateLocation: (id, data) =>
-    request(`/lbp/locations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  lbpMeetings: () => request('/lbp/meetings'),
-  lbpMarkMeeting: (at) =>
-    request('/lbp/meetings', { method: 'POST', body: JSON.stringify(at ? { at } : {}) }),
-  lbpSchedules: () => request('/lbp/schedules'),
-  lbpCreateSchedule: (data) =>
-    request('/lbp/schedules', { method: 'POST', body: JSON.stringify(data) }),
-  lbpUpdateSchedule: (sid, data) =>
-    request(`/lbp/schedules/${sid}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  lbpDeleteSchedule: (sid) =>
-    request(`/lbp/schedules/${sid}`, { method: 'DELETE' }),
-  lbpBriefsFeed: () => request('/lbp/briefs'),
-  lbpOverview: () => request('/lbp/overview'),
-  lbpBrief: (mode) => request(`/lbp/brief?mode=${encodeURIComponent(mode)}`),
-  lbpBriefAi: (mode) =>
-    request('/lbp/brief/ai', { method: 'POST', body: JSON.stringify({ mode }) }),
-  lbpBriefAsk: (question) =>
-    request('/lbp/brief/ask', { method: 'POST', body: JSON.stringify({ question }) }),
-  lbpDashboardMetrics: () => request('/lbp/dashboard-metrics'),
-  lbpConnections: () => request('/lbp/connections'),
-  lbpSaveConnection: (key, data) =>
-    request(`/lbp/connections/${key}`, { method: 'PUT', body: JSON.stringify(data) }),
-  lbpBriefRuns: () => request('/lbp/brief-runs'),
-  lbpBriefSettings: () => request('/lbp/brief-settings'),
-  lbpSaveBriefSettings: (data) =>
-    request('/lbp/brief-settings', { method: 'PUT', body: JSON.stringify(data) }),
-  lbpArchive: () => request('/lbp/archive'),
-  lbpProjects: ({ filter, includeArchived } = {}) => {
-    const params = new URLSearchParams();
-    if (filter) params.set('filter', filter);
-    if (includeArchived) params.set('include', 'archived');
-    const qs = params.toString();
-    return request(`/lbp/projects${qs ? `?${qs}` : ''}`);
-  },
-  lbpIdeaCheck: (q) => request(`/lbp/idea-check?q=${encodeURIComponent(q)}`),
-  lbpCreateProject: (data) =>
-    request('/lbp/projects', { method: 'POST', body: JSON.stringify(data) }),
-  lbpProject: (id) => request(`/lbp/projects/${id}`),
-  lbpUpdateProject: (id, data) =>
-    request(`/lbp/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  lbpSetStage: (id, stage) =>
-    request(`/lbp/projects/${id}/stage`, { method: 'POST', body: JSON.stringify({ stage }) }),
-  lbpReorder: (stage, orderedIds) =>
-    request('/lbp/projects/reorder', { method: 'POST', body: JSON.stringify({ stage, ordered_ids: orderedIds }) }),
-  lbpSetScope: (id, scope) =>
-    request(`/lbp/projects/${id}/scope`, { method: 'PUT', body: JSON.stringify(scope) }),
-  lbpSetAssignees: (id, user_ids) =>
-    request(`/lbp/projects/${id}/assignees`, { method: 'POST', body: JSON.stringify({ user_ids }) }),
-  lbpCloseProject: (id, data) =>
-    request(`/lbp/projects/${id}/close`, { method: 'POST', body: JSON.stringify(data) }),
-  lbpBlockers: (id) => request(`/lbp/projects/${id}/blockers`),
-  lbpBlock: (id, { reason, date }) =>
-    request(`/lbp/projects/${id}/block`, { method: 'POST', body: JSON.stringify({ reason, date }) }),
-  lbpUnblock: (id, { date, note } = {}) =>
-    request(`/lbp/projects/${id}/unblock`, { method: 'POST', body: JSON.stringify({ date, note }) }),
-  lbpActivity: (id) => request(`/lbp/projects/${id}/activity`),
-  lbpAddComment: (id, body) =>
-    request(`/lbp/projects/${id}/comments`, { method: 'POST', body: JSON.stringify({ body }) }),
-  lbpTasks: (id) => request(`/lbp/projects/${id}/tasks`),
-  lbpAddTask: (id, data) =>
-    request(`/lbp/projects/${id}/tasks`, { method: 'POST', body: JSON.stringify(data) }),
-  lbpUpdateTask: (taskId, data) =>
-    request(`/lbp/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  lbpDeleteTask: (taskId) => request(`/lbp/tasks/${taskId}`, { method: 'DELETE' }),
-  lbpMetrics: () => request('/lbp/metrics'),
-  lbpProposeMetric: (data) =>
-    request('/lbp/metrics', { method: 'POST', body: JSON.stringify(data) }),
-  lbpApproveMetric: (id) => request(`/lbp/metrics/${id}/approve`, { method: 'POST' }),
-  lbpRetireMetric: (id) => request(`/lbp/metrics/${id}/retire`, { method: 'POST' }),
-  lbpMetricReports: (id) => request(`/lbp/projects/${id}/metric-reports`),
-  lbpAddMetricReport: (id, data) =>
-    request(`/lbp/projects/${id}/metric-reports`, { method: 'POST', body: JSON.stringify(data) }),
-  lbpTimeEvents: (id) => request(`/lbp/projects/${id}/time-events`),
-  lbpAddTimeEvent: (id, data) =>
-    request(`/lbp/projects/${id}/time-events`, { method: 'POST', body: JSON.stringify(data) }),
-  lbpFeedback: (id) => request(`/lbp/projects/${id}/feedback`),
-  lbpAddFeedback: (id, data) =>
-    request(`/lbp/projects/${id}/feedback`, { method: 'POST', body: JSON.stringify(data) }),
-  lbpUpdateFeedback: (feedbackId, data) =>
-    request(`/lbp/feedback/${feedbackId}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  lbpLearnings: (id) => request(`/lbp/projects/${id}/learnings`),
-  lbpAddLearning: (id, body) =>
-    request(`/lbp/projects/${id}/learnings`, { method: 'POST', body: JSON.stringify({ body }) }),
-  lbpFiles: (id) => request(`/lbp/projects/${id}/files`),
-  lbpFileUrl: (fileId, download = false) =>
-    `${API_BASE}/lbp/files/${fileId}${download ? '?download=1' : ''}`,
-  lbpUploadFile: async (id, file) => {
-    const csrf = readCookie('pp_csrf');
-    const formData = new FormData();
-    formData.append('file', file);
-    const response = await fetch(`${API_BASE}/lbp/projects/${id}/files`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: csrf ? { 'X-CSRF-Token': csrf } : {},
-      body: formData,
-    });
-    const data = await response.json();
-    if (!response.ok) throw new ApiError(data.error || 'Upload failed', response.status, data);
-    return data;
-  },
-  lbpAddLink: (id, other_id, note) =>
-    request(`/lbp/projects/${id}/links`, { method: 'POST', body: JSON.stringify({ other_id, note }) }),
-  lbpDeleteLink: (linkId) => request(`/lbp/links/${linkId}`, { method: 'DELETE' }),
-  lbpLinkLxc: (id, mock2_project_id) =>
-    request(`/lbp/projects/${id}/link-lxc`, { method: 'POST', body: JSON.stringify({ mock2_project_id }) }),
-  lbpSeedDemo: () => request('/lbp/seed-demo', { method: 'POST' }),
-
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();
@@ -2588,3 +2475,45 @@ export const api = {
 };
 
 export { ApiError };
+
+// Uses the shared cookie/CSRF/error handling; Operations never stores private
+// drafts in localStorage and never calls a provisioning API.
+export const operationsApi = {
+  get: (path = '', signal) => request(`/operational-projects${path}`, { cache: 'no-store', signal }),
+  download: (path, signal) => request(`/operational-projects${path}`, { cache: 'no-store', signal, responseType: 'blob' }),
+  upload: (path, file, signal, onProgress) => evidenceUpload(`/operational-projects${path}`, file, signal, onProgress),
+  write: (path, body, revision, method = 'POST', signal) => request(`/operational-projects${path}`, {
+    signal, cache: 'no-store', method, body: JSON.stringify(body), ...(revision == null ? {} : { headers: { 'If-Match': `"${revision}"` } }),
+  }),
+};
+
+// Small still images restart as one bounded body. Never automatically retry bytes.
+function evidenceUpload(endpoint, file, signal, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    const finish = (fn, value) => { signal?.removeEventListener('abort', abort); fn(value); };
+    xhr.open('PUT', `${API_BASE}${endpoint}`);
+    xhr.withCredentials = true;
+    xhr.timeout = 35000;
+    xhr.setRequestHeader('Content-Type', file.type);
+    const csrf = readCookie('pp_csrf');
+    if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
+    xhr.upload.onprogress = e => onProgress?.(Math.min(file.size, e.loaded), file.size);
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* Edge refusal. */ }
+      if (xhr.status === 401) {
+        localStorage.removeItem('user'); window.location.href = '/login';
+      }
+      if (xhr.status >= 200 && xhr.status < 300) finish(resolve, data);
+      else finish(reject, new ApiError(data.message || data.error || `Upload refused (${xhr.status})`, xhr.status, data));
+    };
+    xhr.onerror = () => finish(reject, new ApiError('Transfer interrupted. Check the server receipt before retrying.', 0));
+    xhr.ontimeout = xhr.onerror;
+    xhr.onabort = () => finish(reject, new DOMException('Transfer interrupted; server receipt retained.', 'AbortError'));
+    if (signal?.aborted) return finish(reject, new DOMException('Aborted', 'AbortError'));
+    signal?.addEventListener('abort', abort, { once: true });
+    xhr.send(file);
+  });
+}

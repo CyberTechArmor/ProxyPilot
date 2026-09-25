@@ -20,7 +20,6 @@ const out={date:new Date().toISOString().slice(0,10),execution:'Built frontend +
 try {
   let fixture=await start();browser=await puppeteer.launch({executablePath:process.env.G4_CHROMIUM,headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
   const page=await browser.newPage();page.on('pageerror',e=>out.errors.push(e.message));
-  await page.evaluateOnNewDocument(()=>{localStorage.setItem('lbp-assistant-open','0');});
   const open=async()=>{await page.setCookie({name:'pp_token',value:fixture.tokens.admin,url:fixture.url,httpOnly:true},{name:'pp_csrf',value:'fixture-csrf',url:fixture.url});await page.goto(fixture.url+'/platform-setup',{waitUntil:'networkidle0'});await page.waitForSelector('#pomerium-setup');};
   await open();
   const click=async text=>{await page.waitForFunction(t=>[...document.querySelectorAll('#pomerium-setup button')].some(b=>b.textContent===t&&!b.disabled),{},text);await page.evaluate(t=>[...document.querySelectorAll('#pomerium-setup button')].find(b=>b.textContent===t).click(),text);};

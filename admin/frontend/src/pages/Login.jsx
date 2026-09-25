@@ -356,13 +356,13 @@ export default function Login() {
   // One-time sign-in link: choose a password, then the normal flow signs in.
   if (linkMode) {
     return (
-      <div className="min-h-viewport flex items-center justify-center bg-background p-4">
+      <main className="min-h-viewport flex items-center justify-center bg-background p-4">
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
             <div className="flex justify-center mb-4">
               <Rocket className="h-12 w-12 text-primary" />
             </div>
-            <CardTitle className="text-2xl">Welcome{linkGreeting ? `, ${linkGreeting}` : ''}</CardTitle>
+            <CardTitle aria-level={1} className="text-2xl">Welcome{linkGreeting ? `, ${linkGreeting}` : ''}</CardTitle>
             <CardDescription>
               Choose your password to finish setting up your account
             </CardDescription>
@@ -393,6 +393,7 @@ export default function Login() {
                     variant="ghost"
                     size="sm"
                     className="absolute right-0 top-0 h-full px-3"
+                    aria-label={showPassword ? "Hide password" : "Show password"}
                     onClick={() => setShowPassword(!showPassword)}
                   >
                     {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -428,13 +429,13 @@ export default function Login() {
             </form>
           </CardContent>
         </Card>
-      </div>
+      </main>
     );
   }
 
   if (setupMode && !setupTotpStep) {
     return (
-      <div className="min-h-viewport flex items-center justify-center bg-background p-4">
+      <main className="min-h-viewport flex items-center justify-center bg-background p-4">
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
             <div className="flex justify-center mb-4">
@@ -442,7 +443,7 @@ export default function Login() {
                 ? <img src={branding.logo} alt="" className="h-12 w-12 rounded object-contain" />
                 : <Rocket className="h-12 w-12 text-primary" />}
             </div>
-            <CardTitle className="text-2xl">Welcome to {branding.name}</CardTitle>
+            <CardTitle aria-level={1} className="text-2xl">Welcome to {branding.name}</CardTitle>
             <CardDescription>
               Create your admin password to get started
             </CardDescription>
@@ -493,6 +494,7 @@ export default function Login() {
                     variant="ghost"
                     size="sm"
                     className="absolute right-0 top-0 h-full px-3"
+                    aria-label={showPassword ? "Hide password" : "Show password"}
                     onClick={() => setShowPassword(!showPassword)}
                   >
                     {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -534,7 +536,7 @@ export default function Login() {
             </form>
           </CardContent>
         </Card>
-      </div>
+      </main>
     );
   }
 
@@ -542,13 +544,13 @@ export default function Login() {
   if (setupTotpStep && totpSetup) {
     const secret = totpSetup.secret || totpSetup.totpSecret;
     return (
-      <div className="min-h-viewport flex items-center justify-center bg-background p-4">
+      <main className="min-h-viewport flex items-center justify-center bg-background p-4">
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
             <div className="flex justify-center mb-4">
               <ShieldCheck className="h-12 w-12 text-primary" />
             </div>
-            <CardTitle className="text-2xl">Set Up Two-Factor Auth</CardTitle>
+            <CardTitle aria-level={1} className="text-2xl">Set Up Two-Factor Auth</CardTitle>
             <CardDescription>
               Scan the QR code with your authenticator app to secure your account
             </CardDescription>
@@ -577,7 +579,7 @@ export default function Login() {
                   <code className="bg-muted px-3 py-1.5 rounded text-sm font-mono">
                     {secret}
                   </code>
-                  <Button type="button" variant="ghost" size="sm" onClick={copySecret} className="h-8 w-8 p-0">
+                  <Button type="button" variant="ghost" size="sm" onClick={copySecret} aria-label="Copy setup secret" className="h-11 w-11 p-0">
                     {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
                   </Button>
                 </div>
@@ -622,7 +624,7 @@ export default function Login() {
             </form>
           </CardContent>
         </Card>
-      </div>
+      </main>
     );
   }
 
@@ -636,7 +638,7 @@ export default function Login() {
               ? <img src={branding.logo} alt="" className="h-12 w-12 rounded object-contain" />
               : <Rocket className="h-12 w-12 text-primary" />}
           </div>
-          <CardTitle className="text-2xl">{branding.name === 'ProxyPilot' ? 'ProxyPilot Admin' : branding.name}</CardTitle>
+          <CardTitle aria-level={1} className="text-2xl">{branding.name === 'ProxyPilot' ? 'ProxyPilot Admin' : branding.name}</CardTitle>
           <CardDescription>
             {totpSetup
               ? 'Set up Two-Factor Authentication'
@@ -745,7 +747,7 @@ export default function Login() {
                     <code className="bg-muted px-3 py-1.5 rounded text-sm font-mono">
                       {totpSetup.totpSecret}
                     </code>
-                    <Button type="button" variant="ghost" size="sm" onClick={copySecret} className="h-8 w-8 p-0">
+                    <Button type="button" variant="ghost" size="sm" onClick={copySecret} aria-label="Copy setup secret" className="h-11 w-11 p-0">
                       {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
                     </Button>
                   </div>
@@ -827,9 +829,22 @@ export default function Login() {
             )}
 
             {!totpRequired && !totpSetup && (
-              <p className="text-center text-xs text-muted-foreground mt-4">
-                Can't log in? Run <code className="bg-muted px-1.5 py-0.5 rounded font-mono">sudo /opt/proxypilot/reset.sh</code> on your server to reset credentials.
-              </p>
+              <details className="mt-4 text-sm text-muted-foreground">
+                <summary className="min-h-11 cursor-pointer rounded-md py-3 text-center underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+                  Having trouble signing in?
+                </summary>
+                <div className="space-y-3 pt-2">
+                  <p>Contact your administrator for help accessing your account.</p>
+                  <details>
+                    <summary className="min-h-11 cursor-pointer rounded-md py-3 font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+                      Administrator recovery instructions
+                    </summary>
+                    <p className="pt-2 leading-relaxed">
+                      If you administer this server, run <code className="break-all rounded bg-muted px-1.5 py-0.5 font-mono">sudo /opt/proxypilot/reset.sh</code> on the server to reset credentials.
+                    </p>
+                  </details>
+                </div>
+              </details>
             )}
           </form>
         </CardContent>

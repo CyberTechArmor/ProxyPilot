@@ -2950,17 +2950,6 @@ async function toolCreateProject(args, auth) {
     base_domain: useBaseDomain ? parent.domain : null,
   }, null);
 
-  // Every LXC AI-dev project gets a card on the innovation board, as in the
-  // UI. Best-effort: a failure here must never break provisioning.
-  try {
-    const lbp = await import('../lib/lean-beaf-store.js');
-    lbp.createCardForMock2Project({
-      mock2ProjectId: project.id, name, description: description ?? null, createdBy: auth.created_by,
-    });
-  } catch (err) {
-    console.warn('[mcp] LBP card create failed (non-fatal):', err?.message);
-  }
-
   m.provision.startProvision(project);
   return toolResult({
     created: true,

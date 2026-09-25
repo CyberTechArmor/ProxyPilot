@@ -453,7 +453,7 @@ export default function ProjectDetail() {
           </div>
         </div>
         <Button asChild variant="ghost" size="sm" className="shrink-0">
-          <Link to="/projects"><ArrowLeft className="h-4 w-4 mr-1" />Flightdeck</Link>
+          <Link to="/projects"><ArrowLeft className="h-4 w-4 mr-1" />Dev Studio</Link>
         </Button>
       </div>
 
@@ -544,7 +544,7 @@ export default function ProjectDetail() {
                   <div className="flex min-h-0 flex-1 flex-col gap-2">
                     <div className="flex justify-end shrink-0">
                       <Button variant="outline" size="sm" className="min-h-[36px]" onClick={() => setBuildView('flightdeck')}>
-                        Open Flightdeck
+                        Open Dev Studio
                       </Button>
                     </div>
                     <BuildMode
@@ -701,7 +701,7 @@ export default function ProjectDetail() {
           {/* Classic view is a desktop choice — a phone only ever gets the
               clean Flightdeck, so the switch would be a dead end there. */}
           <Button variant="outline" size="sm" className="hidden md:inline-flex h-8" onClick={() => setBuildView('classic')}>Classic view</Button>
-          <Button size="sm" className="h-11 md:h-8" onClick={() => setTab('chat')}><LayoutPanelLeft className="h-3.5 w-3.5 mr-1" />Flightdeck</Button>
+          <Button size="sm" className="h-11 md:h-8" onClick={() => setTab('chat')}><LayoutPanelLeft className="h-3.5 w-3.5 mr-1" />Dev Studio</Button>
         </div>
       ) : null}
       {/* The card list outgrew one scroll — grouped into categories, spend

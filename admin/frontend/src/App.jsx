@@ -19,11 +19,9 @@ import Housekeeping from '@/pages/Housekeeping';
 import Storage from '@/pages/Storage';
 import Migrations from '@/pages/Migrations';
 import Projects from '@/pages/Projects';
+import OperationalProjects from '@/pages/OperationalProjects';
+import OperationalProjectDetail from '@/pages/OperationalProjectDetail';
 import ProjectSettings from '@/pages/ProjectSettings';
-import LeanBeafPro from '@/pages/LeanBeafPro';
-import LbpProjectDetail from '@/pages/LbpProjectDetail';
-import LbpBriefs from '@/pages/LbpBriefs';
-import LbpConnections from '@/pages/LbpConnections';
 import ProjectDetail from '@/pages/ProjectDetail';
 import ParentDomains from '@/pages/ParentDomains';
 import ModelConnectors from '@/pages/ModelConnectors';
@@ -117,12 +115,6 @@ function App() {
         <Route path="storage" element={<Storage />} />
         <Route path="migrations" element={<Migrations />} />
         <Route path="notifications" element={<Notifications />} />
-        {/* Lean BEAF Pro — team-shared innovation projects. Open to every
-            authenticated non-pending user (R01); backend enforces the same. */}
-        <Route path="lean-beaf" element={<LeanBeafPro />} />
-        <Route path="lean-beaf/briefs" element={<LbpBriefs />} />
-        <Route path="lean-beaf/connections" element={<LbpConnections />} />
-        <Route path="lean-beaf/:id" element={<LbpProjectDetail />} />
         <Route path="domains" element={<DomainProvisioning />} />
         <Route path="tls-certificates" element={<TlsCertificates />} />
         {/* Admin-gated: the page renders inside the dashboard shell and the
@@ -133,6 +125,8 @@ function App() {
             production-pinned host GET /api/mock2/status 404s and it bounces
             home, so the route staying registered leaks nothing. */}
         <Route path="projects" element={<Projects />} />
+        <Route path="operational-projects" element={<OperationalProjects />} />
+        <Route path="operational-projects/:id" element={<OperationalProjectDetail />} />
         {/* Everything that is not a project lives under Settings (the gear in
             the Projects header); the list itself stays the default view. */}
         <Route path="projects/settings" element={<ProjectSettings />} />

@@ -272,3 +272,30 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — Every change in Sections A–J was written as a `sm:`/`md:`/`lg:` override on top of the existing desktop classes, so desktop layouts are preserved by construction (e.g., `max-w-full h-full rounded-none sm:max-w-4xl sm:h-[90vh] sm:rounded-lg` keeps the original `max-w-4xl h-[90vh]` at `sm+`; `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3` keeps the original `lg:grid-cols-3`). The Layout sidebar also stays identical at `md+` via `md:translate-x-0`, and the mobile top bar is `md:hidden`. *Interactive desktop audit at 1280/1920 should still be performed by the operator via `npm run dev` before declaring the phase verified.*
 - [x] Lighthouse mobile accessibility pass on Dashboard (≥90)
       — Accessibility-impacting changes made in Phase 1: (1) hamburger button carries `aria-label="Open navigation menu"`, (2) mobile sidebar backdrop is `aria-hidden="true"`, (3) file-tree close button carries `aria-label="Close file tree"`, (4) folder-sidebar disclosure uses `aria-expanded`, (5) TOTP Input fields get `inputMode="numeric"` + `autoComplete="one-time-code"`, (6) every `Button size="icon"` continues to carry its `title` which shadcn exposes as an accessible name. *Interactive Lighthouse run against `/` at mobile emulation should still be performed by the operator via `npm run dev` + Lighthouse/PageSpeed Insights before declaring the phase verified. Record the score here when available.*
+# Lean BEAF retirement verification (2026-09-25)
+
+The remaining flat sidebar/Profile shell was checked in an isolated synthetic
+preview at 360, 375, 390, 768, 1280 and 1920px, in both themes with the horizontal
+overflow guard disabled. No horizontal scroll; removed navigation and assistant
+gutter absent; Flightdeck retained. Mobile drawer open/Escape and screenshots
+checked. Mobile Lighthouse Profile accessibility: 92. No new dialogs or controls.
+Existing Profile/setup accessibility follow-ups remain separate; these checks
+do not certify backend authorization or deployed behavior.
+# Dev Studio label verification (2026-09-25)
+
+The renamed sidebar and development-list heading/description were checked at
+360/375/390/768/1280/1920px in both themes, with the horizontal overflow guard
+disabled: no horizontal scroll. Synthetic local preview mobile Lighthouse
+accessibility: Dev Studio list 98, Profile/shell 92. No new controls or dialogs.
+# Operations and conversation accessibility verification — 2026-09-25
+
+Operations list and Overview/Guide/Versions/Runs/Access passed horizontal-scroll
+checks at 360/375/390/768/1280/1920px in both themes, with the global overflow guard
+disabled. The 375px multi-user workflow completed creation, review, manual records,
+correction, withdrawal, conflict recovery, archive/restore and ownership acceptance.
+No new dialogs; inline form actions measured at least 44px. Mobile Lighthouse:
+Operations list 100 and detail 100. Profile/setup/enrollment also passed those
+widths after the bounded accessibility fixes; Profile and setup Lighthouse each 100.
+Evidence is in the external `operations-completion-evidence` directory. Operations
+uses a real isolated API/native SQLite fixture; Profile/setup use synthetic APIs.
+These checks do not establish deployed auth, remote SSO or host isolation.

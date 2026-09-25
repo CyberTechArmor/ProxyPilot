@@ -26,7 +26,6 @@ try {
   const page = await browser.newPage();
   page.on('pageerror', e => out.errors.push(e.message));
   await page.setViewport({ width: 360, height: 740 });
-  await page.evaluateOnNewDocument(() => localStorage.setItem('lbp-assistant-open', '0'));
   await page.setCookie({ name: 'pp_token', value: fixture.tokens.admin, url: fixture.url, httpOnly: true }, { name: 'pp_csrf', value: 'fixture-csrf', url: fixture.url });
   const open = async () => { await page.goto(fixture.url + '/platform-setup', { waitUntil: 'networkidle0' }); await page.waitForSelector('#infisical-setup'); };
   const click = async text => {

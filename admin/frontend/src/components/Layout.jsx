@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
-import { api } from '@/lib/api';
+import { api, operationsApi } from '@/lib/api';
 import { useToast, getNotificationHistory } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import {
@@ -25,6 +25,7 @@ import {
   Database,
   MoveRight,
   FolderGit2,
+  ClipboardList,
   Globe,
   Lock,
   Plug,
@@ -37,7 +38,6 @@ import { cn } from '@/lib/utils';
 import { useBranding } from '@/lib/branding';
 import { SnapshotExportProvider } from '@/context/SnapshotExportContext';
 import SnapshotExportBanner from '@/components/SnapshotExportBanner';
-import AiAssistant from '@/components/lbp/AiAssistant';
 
 export default function Layout() {
   const { user, logout } = useAuth();
@@ -49,9 +49,25 @@ export default function Layout() {
 
   // Mobile sidebar drawer state
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const navTriggerRef = useRef(null);
+  const navCloseRef = useRef(null);
   const openNav = useCallback(() => setSidebarOpen(true), []);
+  const closeNav = useCallback(() => {
+    setSidebarOpen(false);
+    navTriggerRef.current?.focus();
+  }, []);
 
-  // Chromeless mode — a routed page (currently the project studio's Flightdeck)
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    navCloseRef.current?.focus();
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') closeNav();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [sidebarOpen, closeNav]);
+
+  // Chromeless mode — a routed page (currently the project studio's Dev Studio)
   // asking for the PHONE viewport with no dashboard chrome: no mobile top bar,
   // no content padding, so the workspace gets the full screen. It affects only
   // the <md styles; md+ keeps its sidebar and padding exactly as before. A page
@@ -61,17 +77,6 @@ export default function Layout() {
   // child-before-parent, so a reset in this component would fire AFTER the
   // incoming page asked for chromeless and silently undo it.
   const [chromeless, setChromeless] = useState(false);
-
-  // Global Lean BEAF Pro AI assistant dock (right side, every page). Docked by
-  // default ("always there"); the operator can collapse it and the choice
-  // persists across reloads/navigation.
-  const [assistantOpen, setAssistantOpen] = useState(
-    () => localStorage.getItem('lbp-assistant-open') !== '0'
-  );
-  const setAssistant = useCallback((v) => {
-    setAssistantOpen(v);
-    localStorage.setItem('lbp-assistant-open', v ? '1' : '0');
-  }, []);
 
   // Desktop sidebar collapse (md+). Auto-collapses on the project studio page
   // (a /projects/<id> detail route) to give the preview + chat room; the
@@ -271,11 +276,20 @@ export default function Layout() {
     return () => { cancelled = true; };
   }, [canDevelop]);
 
+  const [operationsEnabled, setOperationsEnabled] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setOperationsEnabled(false);
+    if (user && !user.linkOnly && user.role !== 'pending') {
+      operationsApi.get('/capabilities').then(data => {
+        if (!cancelled) setOperationsEnabled(data.enabled && data.ui_available);
+      }).catch(() => { if (!cancelled) setOperationsEnabled(false); });
+    }
+    return () => { cancelled = true; };
+  }, [user?.id, user?.role, user?.linkOnly]);
+
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
-    // Projects (Lean BEAF Pro) — team-shared innovation projects. No adminOnly flag:
-    // every non-pending user is a workspace member (R01).
-    { name: 'Projects', href: '/lean-beaf', icon: Rocket },
     { name: 'Incus', href: '/incus', icon: Server, adminOnly: true, permission: 'proxy' },
     { name: 'Host Shell', href: '/admin/shell', icon: TerminalSquare, adminOnly: true },
     { name: 'SSH Access', href: '/ssh-access', icon: KeyRound, adminOnly: true },
@@ -294,14 +308,15 @@ export default function Layout() {
     { name: 'MCP Access', href: '/mcp-access', icon: Plug, adminOnly: true },
     // Mock2 dev/build module — only present when the backend reports it
     // enabled (ADR-001). Hidden entirely on disabled/pinned hosts.
-    ...(mock2Enabled ? [{ name: 'Flightdeck', href: '/projects', icon: FolderGit2, adminOnly: true, permission: 'developer' }] : []),
+    ...(mock2Enabled ? [{ name: 'Dev Studio', href: '/projects', icon: FolderGit2, adminOnly: true, permission: 'developer' }] : []),
+    ...(operationsEnabled ? [{ name: 'Operations', href: '/operational-projects', icon: ClipboardList }] : []),
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];
 
   // Accounts still waiting for a role (LDAP sign-ins) only see Profile.
   // Admin-only entries also open up to users holding the entry's
-  // feature permission (Incus → 'proxy', Flightdeck → 'developer').
+  // feature permission (Incus → 'proxy', Dev Studio → 'developer').
   const isPending = (user?.role ?? storedUser?.role) === 'pending';
   const filteredNavigation = navigation.filter(item =>
     isPending
@@ -322,7 +337,10 @@ export default function Layout() {
           variant="ghost"
           size="icon"
           onClick={() => setSidebarOpen(true)}
+          ref={navTriggerRef}
           aria-label="Open navigation menu"
+          aria-expanded={sidebarOpen}
+          aria-controls="main-navigation"
           className="h-11 w-11"
         >
           <Menu className="h-5 w-5" />
@@ -348,8 +366,8 @@ export default function Layout() {
       {/* Mobile sidebar backdrop (click to close) */}
       {sidebarOpen && (
         <div
-          className="fixed inset-0 z-40 bg-black/50 md:hidden"
-          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 z-40 bg-navigation-backdrop md:hidden"
+          onClick={closeNav}
           aria-hidden="true"
         />
       )}
@@ -370,19 +388,20 @@ export default function Layout() {
 
       {/* Sidebar */}
       <aside
+        id="main-navigation"
         className={cn(
           // h-viewport (100dvh), not inset-y-0: for a FIXED element inset-y-0
           // resolves against the initial containing block, which on mobile is
           // the LARGE viewport — the drawer then extends under the browser's
           // URL bar and its footer is unreachable.
-          "fixed top-0 left-0 z-50 w-64 h-viewport bg-card border-r transform transition-transform duration-200 ease-out",
+          "fixed top-0 left-0 z-50 w-64 h-viewport bg-sidebar border-r shadow-xl md:shadow-none transform transition-transform duration-200 ease-out",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
           collapsed ? "md:-translate-x-full" : "md:translate-x-0"
         )}
       >
         <div className="flex flex-col h-full">
           {/* Logo and Version */}
-          <div className="flex items-start justify-between gap-2 px-6 py-4 border-b">
+          <div className="flex items-start justify-between gap-2 px-4 md:px-6 py-4 border-b">
             <div className="flex flex-col min-w-0">
               <div className="flex items-center gap-2 min-w-0">
                 {branding.logo
@@ -415,7 +434,18 @@ export default function Layout() {
                 )}
               </div>
             </div>
-            {/* Collapse (md+ only — mobile closes via the backdrop/route change). */}
+            <Button
+              ref={navCloseRef}
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={closeNav}
+              aria-label="Close navigation menu"
+              className="h-11 w-11 shrink-0 md:hidden"
+            >
+              <X className="h-5 w-5" />
+            </Button>
+            {/* Desktop collapse; mobile also closes via the backdrop/route change. */}
             <button
               type="button"
               onClick={() => setCollapsed(true)}
@@ -469,7 +499,7 @@ export default function Layout() {
                 <FolderGit2 className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-medium text-foreground">
-                    Flightdeck / AI dev flow available
+                    Dev Studio / AI dev flow available
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
                     The Mock2 dev/build module ships with this version but is
@@ -496,7 +526,7 @@ export default function Layout() {
 
           {/* User section */}
           <div className="px-4 py-4 border-t">
-            <div className="flex items-center gap-3 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2 px-3 py-2">
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium truncate">{user?.username}</p>
                 <p className="text-xs text-muted-foreground">{isAdmin ? 'Administrator' : 'User'}</p>
@@ -507,7 +537,7 @@ export default function Layout() {
                 onClick={toggleTheme}
                 aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
                 title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-                className="h-11 w-11 md:h-10 md:w-10"
+                className="h-11 w-11 shrink-0"
               >
                 <ThemeIcon className="h-5 w-5" />
               </Button>
@@ -517,7 +547,7 @@ export default function Layout() {
                   size="icon"
                   onClick={openNotifications}
                   title="Notifications"
-                  className="relative h-11 w-11 md:h-10 md:w-10"
+                  className="relative h-11 w-11 shrink-0"
                 >
                   <Bell className="h-5 w-5" />
                   {unreadCount > 0 && (
@@ -655,10 +685,6 @@ export default function Layout() {
         // Collapsed: leave a thin rail (md:pl-14) so the floating expand button
         // doesn't overlap page content; expanded: clear the full sidebar.
         collapsed ? "md:pl-14" : "md:pl-64",
-        // When the AI assistant is docked (lg+), reflow content to its left so
-        // both stay usable; below lg the assistant is a full-screen overlay and
-        // content isn't padded.
-        assistantOpen && "lg:pr-[360px]"
       )}>
         <SnapshotExportBanner />
         <div className={cn(
@@ -669,21 +695,10 @@ export default function Layout() {
           "relative md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto",
           chromeless ? "p-0" : "p-4",
         )}>
-          {/* Expose the assistant dock's state so routed pages (Lean BEAF Pro)
-              can surface it as a tab on narrow screens, plus the nav drawer +
-              chromeless switch a full-bleed page (the project studio) drives. */}
-          <Outlet context={{
-            assistantOpen, setAssistant, assistantAvailable: !isPending, openNav, setChromeless,
-          }} />
+          <Outlet context={{ openNav, setChromeless }} />
         </div>
       </main>
 
-      {/* Lean BEAF Pro AI assistant — shown ONLY on the Lean BEAF Pro pages
-          (its scope), and hidden for pending accounts (Profile-only). Mounted
-          here so it persists across the LBP sub-routes. */}
-      {!isPending && location.pathname.startsWith('/lean-beaf') && (
-        <AiAssistant open={assistantOpen} onOpen={() => setAssistant(true)} onClose={() => setAssistant(false)} />
-      )}
     </div>
     </SnapshotExportProvider>
   );

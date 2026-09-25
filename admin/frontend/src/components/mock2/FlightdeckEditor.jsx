@@ -45,7 +45,7 @@ function codemirrorLanguage(language) {
 // identity changes (another root) every tab closes, since the paths mean
 // something else now.
 
-export default function FlightdeckEditor({ projectId, fs: fsProp = null, openRequest, canEdit, externalNonce = 0, onDirtyChange, onActivePathChange, onSaved, placeholder = 'Flightdeck editor' }) {
+export default function FlightdeckEditor({ projectId, fs: fsProp = null, openRequest, canEdit, externalNonce = 0, onDirtyChange, onActivePathChange, onSaved, placeholder = 'Dev Studio editor' }) {
   const { toast } = useToast();
   const fs = useMemo(() => fsProp || mock2FlightdeckFs(projectId), [fsProp, projectId]);
   const [tabs, setTabs] = useState([]); // { path, language, content, saved, dirty, conflict }

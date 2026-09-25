@@ -325,6 +325,13 @@ delete operation; both non-ephemeral guests remain allocated for host-side
 cleanup. A refreshed connector schema or a reviewed VM-capable host surface
 is required before a disposable VM can be provisioned and observed.
 
+The fail-closed A3 groundwork was submitted as draft PR
+[#680](https://github.com/CyberTechArmor/ProxyPilot/pull/680) at commit
+`528e889569f849ac1ca87193e3cfc8e42093cddc`, based on the deployed
+`e2c40acc` main tree. Security regression run `36193254890` completed
+successfully at that head. This submission is for review and does not mark
+A3 accepted; the selected VM tests and all S6/SEC-01/SEC-04 proof remain open.
+
 ## Verification and rollback
 
 From `admin/backend`:

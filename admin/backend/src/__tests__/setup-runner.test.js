@@ -19,7 +19,7 @@ import {
 import { reconcile, executeJob, runOnce, serve, FencedError } from '../../../../cli/src/setup-runner/runner.js';
 import { setupRunnerCommand, hostGuestExec, EXIT } from '../../../../cli/src/commands/setup-runner.js';
 import {
-  ensureSetupEngineSchema, createJob, startJob, acquireLock, readLock, checkpoint, getJob, listEvents, claimNextJob, takeoverLock,
+  ensureSetupEngineSchema, createJob, startJob, acquireLock, readLock, checkpoint, getJob, listEvents, claimNextJob, takeoverLock, liveRunners,
 } from '../lib/setup-engine/store.js';
 import { ownerIdentity } from '../lib/setup-engine/logic.js';
 import { sweepSetupEngineOnBoot } from '../lib/setup-engine/backend.js';
@@ -371,6 +371,36 @@ test('serve: reconciles on start, drains the queue each tick, stops when asked',
   assert.ok(out.some((l) => /stopping/.test(l)));
 });
 
+test('serve keeps a fresh runner heartbeat while a tick is awaiting work', async () => {
+  const d = db();
+  let now = T0;
+  let stop = false;
+  let releaseSleep;
+  let enteredSleep;
+  const sleeping = new Promise((resolve) => { enteredSleep = resolve; });
+  const running = serve({ db: d, owner: RUNNER, exec: scriptedGuest({ loaded: true, active: true }), nowMs: () => now }, {
+    heartbeatEveryMs: 5,
+    shouldStop: () => stop,
+    sleep: () => {
+      now = T0 + 31_000;
+      enteredSleep();
+      return new Promise((resolve) => { releaseSleep = resolve; });
+    },
+  });
+  try {
+    await sleeping;
+    for (let i = 0; i < 20 && !liveRunners(d, { nowMs: now }).length; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(liveRunners(d, { nowMs: now }).length, 1, 'the runner stays live beyond the 30-second deadline while awaiting work');
+  } finally {
+    stop = true;
+    releaseSleep?.();
+    await running;
+    d.close();
+  }
+});
+
 // ── the command ─────────────────────────────────────────────────────────
 
 test('setup-runner command: root only; once/reconcile/status over the file-backed database', async () => {
@@ -446,7 +476,7 @@ test('the unit runs the installed CLI as root with Restart=always, and install.s
   const install = readFileSync(`${REPO}install.sh`, 'utf8');
   assert.match(install, /deploy\/proxypilot-setup-runner\.service" \/etc\/systemd\/system\/proxypilot-setup-runner\.service/);
   assert.match(install, /systemctl enable proxypilot-setup-runner\.service/);
-  const update = readFileSync(`${REPO}update.sh`, 'utf8');
+  const update = readFileSync(`${REPO}update.sh`, 'utf8').replace(/\r\n/g, '\n');
   assert.match(update, /install_setup_runner\(\) \{/);
   const readiness = update.indexOf('\n        install_setup_runner\n', update.indexOf('# Restart\n'));
   assert.ok(readiness > update.indexOf('install_setup_runner() {'), 'defined before the update reaches readiness (recovery also calls it)');

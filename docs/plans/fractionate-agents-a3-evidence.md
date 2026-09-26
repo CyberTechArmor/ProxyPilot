@@ -624,4 +624,4 @@ Follow-up source SHA-256 before submission:
 | `admin/backend/src/lib/operational-worker-boundary.js` | `4b7a4b620f246ae2b1650fa96f1505afbf53105ce081f4e4885fe7d595e15fe9` |
 | `admin/backend/src/__tests__/operational-worker-boundary.test.js` | `978dc7ccaded3dd6814cdfc2cc311c33e0eb5e315e2de499740eff6306785683` |
 | `admin/frontend/src/components/operational-projects/AccessPolicy.jsx` | `af2e9ee54748b224ad9749e90bfa8a0d3ff00e74184d3ac2192f3f9a4d2f7c38` |
-| `docs/plans/fractionate-agents-a3-continuation-prompt.md` | `a2b3f957102491c5e5b82a7e0321c6443195840c7794c8cf2da16bbed9a9552d` |
+| `docs/plans/fractionate-agents-a3-continuation-prompt.md` | `a028ebbaeadf52f5c0e4f81257f2a9ef9e82c0460b8f64a3014266462c49367c` |

@@ -2,10 +2,11 @@
 
 Do not execute merely by reading this file. A2 is merged as PR #677 at
 `ade9a783d1b80058f8bbcd255872d229bfdd17bc`; its metadata gate remains
-off. A3 is **not accepted**. Draft PR #680 is open at
-`1d57f9ce0cc483950886a23438809113d1a90554`; Security regression run
-`36251836583` passed at that head, but the disposable Debian VM failed the
-required boundary checks. Recheck these revisions and the current `main`
+off. A3 is **not accepted**. Draft PR #680 remains open; fetch its exact
+current head and Security CI before work. The earlier project-limits head
+`1d57f9ce0cc483950886a23438809113d1a90554` passed run `36251836583`;
+the disposable Debian VM still failed the required boundary checks. Recheck
+the current PR head and `main`
 before working. No Operations project UUID or live site is needed for A3.
 
 Workspace: `C:/Users/thoma/Fractionate/OpenAI/Fractionate/ProxyPilot-batch-03`.
@@ -77,8 +78,8 @@ fail closed and document the observed blocker.
 The latest reviewed A3 head adds migration 1108 and project-owned optional
 limits, replacing the illustrative 1-vCPU, 512-MiB, 128-MiB, 300-second and
 20-action constants. Review its exact diff and test results before continuing.
-An absent project limit is unbounded by
-project policy. Pin the project policy revision, and enforce configured totals
+An absent project limit is unbounded by project policy. Pin the project
+policy revision, and enforce configured totals
 across restarts and attempts. Lease renewal and checkpointing must not reset a
 configured total. A worker or model cannot extend its own limits; a project
 owner must change the policy, which fences the old worker. Use explicit
@@ -99,8 +100,8 @@ delivery remains outside this sign-in pilot.
 ## Acceptance and handoff
 
 On the disposable VM, prove approved-origin browser access and a usable
-human view/control handoff, plus negative
-host-file, socket, management-network, public-egress, redirect and broker
+human view/control handoff, plus negative host-file, socket,
+management-network, public-egress, redirect and broker
 escape cases. Set disposable test limits and force CPU, memory, process,
 time, disk and action overruns against those settings.
 Prove cancellation and crashes remove descendants and private workspace;

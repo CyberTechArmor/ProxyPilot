@@ -701,3 +701,12 @@ Rollback of this continuation is the small broker/test/document diff; retain
 migrations 1100–1108 and immutable history. Older writers still require
 `OPERATIONS_ENABLED=false` and the agent gate off before rollback. Do not
 start A4 until a Debian 13 target and its host-enforced boundary pass.
+
+The correction was submitted as draft PR
+[#686](https://github.com/CyberTechArmor/ProxyPilot/pull/686), initially at
+`5cacdefbc5d38f6d463249089cdb664557ff9639`. Its exact-head
+[Security regression run](https://github.com/CyberTechArmor/ProxyPilot/actions/runs/36254343922)
+completed successfully: frontend, backend, agent and all four audit jobs
+passed. The backend job included the unsuppressed host-boundary inventory.
+This CI pass validates that source revision; it does not close the VM target
+failures or authorize merging the draft.

@@ -120,7 +120,7 @@ export default function SelfUpdatePanel({ updateInfo, checking, onRefresh }) {
   }, [run?.log_tail]);
 
   const openConfirm = () => {
-    setRebuild(!updateInfo?.updateAvailable);
+    setRebuild(false);
     setConfirmOpen(true);
   };
 
@@ -346,15 +346,15 @@ export default function SelfUpdatePanel({ updateInfo, checking, onRefresh }) {
             <DialogDescription>
               {info?.updateAvailable
                 ? `v${info.currentVersion} → v${info.latestVersion}${info.latest_sha_short ? ` (${info.latest_sha_short})` : ''}`
-                : 'The checkout is already up to date; enable the rebuild switch to rebuild anyway.'}
+                : 'The ProxyPilot checkout is current. Update now still checks and upgrades host Incus and verifies image auto-update settings.'}
             </DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto space-y-3 text-sm">
             <ul className="list-disc pl-5 space-y-1">
-              <li>The database is backed up first and restored automatically if the update fails.</li>
-              <li>Pulls the latest code from GitHub{info?.github?.repo ? ` (${info.github.repo})` : ''}{installed?.branch ? ` on ${installed.branch}` : ''}, rebuilds the host agent, installs dependencies and builds the dashboard.</li>
-              <li>Rebuilds and restarts the container: the dashboard and API are unavailable for about 1–2 minutes. This page keeps polling and reconnects.</li>
-              <li>Project containers and anything running in them are not touched.</li>
+                {(info?.updateAvailable || rebuild) && <li>The ProxyPilot database is backed up first and restored automatically if the application update fails.</li>}
+                {(info?.updateAvailable || rebuild) && <li>Pulls the latest code from GitHub{info?.github?.repo ? ` (${info.github.repo})` : ''}{installed?.branch ? ` on ${installed.branch}` : ''}, rebuilds the host agent, installs dependencies and builds the dashboard.</li>}
+              <li>Checks and upgrades the host Incus package to the current stable release, after saving its database and storage checkpoint. Incus management and guests may be interrupted during the upgrade; recovery from a failed Incus schema change may need operator work.</li>
+                {(info?.updateAvailable || rebuild) && <li>Rebuilds and restarts the dashboard. The API is unavailable during its restart. This page keeps polling and reconnects.</li>}
             </ul>
             <div className="flex items-center justify-between gap-3 rounded-md border p-3">
               <Label htmlFor="pp-update-rebuild" className="text-sm">Force rebuild even if already up to date</Label>

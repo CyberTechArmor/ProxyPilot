@@ -1034,8 +1034,25 @@ if [ "$LOCAL" = "$REMOTE" ]; then
         log "Local and origin/main are both at: $($GIT_CMD log -1 --format='%h (%ad) %s' --date=short origin/main 2>/dev/null || echo "$REMOTE")"
         log ""
         if [ "$ASSUME_YES" = true ]; then
-            # Non-interactive: the prompt's safe default is "no".
-            log "${BLUE}No changes made (--yes). Use --rebuild to force rebuild.${NC}"
+            # The application is current, but the host Incus stable channel
+            # may have advanced. Run the same guarded package/image step
+            # without rebuilding an unchanged dashboard.
+            log "${BLUE}[3/7] Checking Incus stable release and image updates...${NC}"
+            SUDO_CMD=""
+            if [ "$EUID" -ne 0 ]; then SUDO_CMD="sudo"; fi
+            if ! command -v incus &>/dev/null; then
+                if ! (set -o pipefail; $SUDO_CMD bash "$SCRIPT_DIR/scripts/install-incus-stable.sh" 2>&1 | tee -a "$LOG_FILE"); then
+                    exit 1
+                fi
+                $SUDO_CMD systemctl enable --now incus.service || exit 1
+                if ! incus storage list --format json 2>/dev/null | grep -q '"name"'; then
+                    $SUDO_CMD incus admin init --minimal || exit 1
+                fi
+            fi
+            if ! (set -o pipefail; $SUDO_CMD bash "$SCRIPT_DIR/scripts/upgrade-incus-stable.sh" 2>&1 | tee -a "$LOG_FILE"); then
+                exit 1
+            fi
+            log "${BLUE}ProxyPilot code is unchanged; Incus stable and image settings checked.${NC}"
             exit 0
         fi
         read -p "Do you want to rebuild anyway? (y/N) " -n 1 -r
@@ -1140,14 +1157,15 @@ log ""
 
 # Check and install Incus if not present
 log "${BLUE}[3/7] Checking Incus installation...${NC}"
+SUDO_CMD=""
+if [ "$EUID" -ne 0 ]; then SUDO_CMD="sudo"; fi
 if command -v incus &> /dev/null; then
-    log "${GREEN}Incus is already installed ($(incus version 2>/dev/null || echo 'unknown'))${NC}"
+    log "Incus before update: $(incus version 2>/dev/null || echo 'unavailable')"
 else
     log "${YELLOW}Incus is not installed. Installing the current stable channel...${NC}"
-    SUDO_CMD=""
-    if [ "$EUID" -ne 0 ]; then SUDO_CMD="sudo"; fi
     if ! (set -o pipefail; $SUDO_CMD bash "$SCRIPT_DIR/scripts/install-incus-stable.sh" 2>&1 | tee -a "$LOG_FILE"); then
-        log "${RED}Failed to install Incus. LXC container features will not be available.${NC}"
+        log "${RED}Failed to install Incus; refusing to claim the update succeeded.${NC}"
+        exit 1
     fi
 
     # Enable and start Incus if installed
@@ -1163,6 +1181,10 @@ else
 
         log "${GREEN}Incus is ready ($(incus version 2>/dev/null))${NC}"
     fi
+fi
+if ! (set -o pipefail; $SUDO_CMD bash "$SCRIPT_DIR/scripts/upgrade-incus-stable.sh" 2>&1 | tee -a "$LOG_FILE"); then
+    log "${RED}Incus upgrade or image-refresh verification failed; see the checkpoint path in the log.${NC}"
+    exit 1
 fi
 log ""
 

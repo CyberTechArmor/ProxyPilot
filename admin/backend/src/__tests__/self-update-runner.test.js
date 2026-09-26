@@ -357,8 +357,8 @@ test('the systemd units and the agent unit agree on the request directory', () =
   assert.match(path, /^Unit=proxypilot-update\.service$/m);
   assert.match(service, /^Type=oneshot$/m);
   assert.match(service, /^ExecStart=\/usr\/local\/sbin\/proxypilot-update-runner$/m);
-  assert.match(service, /^KillMode=process$/m);
-  assert.match(service, /^TimeoutStartSec=3600$/m);
+  assert.match(service, /^KillMode=control-group$/m);
+  assert.match(service, /^TimeoutStartSec=21600$/m);
   assert.doesNotMatch(service, /^User=/m, 'the runner is root: that is the point');
   assert.doesNotMatch(service, /^\[Install\]/m, 'only the path unit starts it');
   assert.match(agent, /^RuntimeDirectory=proxypilot-agent proxypilot-update$/m);

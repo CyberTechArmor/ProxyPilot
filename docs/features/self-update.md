@@ -4,8 +4,26 @@ ProxyPilot can update itself from the dashboard (Profile → Application
 Settings → **Update now**) and over MCP (`run_proxypilot_update`). Both do
 exactly one thing: ask the host to run `update.sh --yes`, the same script an
 operator runs by hand — DB backup, `git pull`, self re-exec, dependency
-install, frontend build, host-agent rebuild, `docker compose down/build/up`,
-health check. Nothing is re-implemented over RPC.
+install, Incus stable-channel check and guarded upgrade, frontend build,
+host-agent rebuild, `docker compose down/build/up`, health check. Nothing is
+re-implemented over RPC. Even when application code is already current,
+`--yes` checks Incus; it does not rebuild the dashboard merely for that check.
+
+The Incus step uses `scripts/upgrade-incus-stable.sh`. It refuses a clustered
+host, a kernel below the current Incus minimum, unsupported storage pools,
+insufficient local backup capacity, failed SQL dumps or archive verification,
+and unrelated apt package removals. For an upgrade it saves the local and
+global SQL dumps and a full `/var/lib/incus` archive, plus recursive ZFS
+snapshots for external ZFS pool sources, before installing the pinned Zabbly
+stable package. The service is stopped during the checkpoint, so running
+guest management may be interrupted. A ZFS snapshot on the same pool is a
+rollback checkpoint, not an off-host disaster recovery backup. A failed or
+partial package upgrade needs operator recovery from the logged checkpoint;
+the script never attempts an automatic Incus downgrade after a possible DB
+schema change. Successful runs set and read back
+`images.auto_update_cached=true` and `images.auto_update_interval=6`.
+Existing image records keep their individual auto-update flag; fingerprint
+images and remote copies made without `--auto-update` are not changed.
 
 ## Why this shape
 
@@ -46,7 +64,7 @@ proxypilot-update.path (PathExists=…/request.json)  →  proxypilot-update.ser
 | Path | Role |
 |---|---|
 | `deploy/proxypilot-update.path` | `PathExists=/run/proxypilot-update/request.json` → starts the service. `PathExists` (not `PathChanged`) so a request that lands while the runner is busy is picked up when it is free. |
-| `deploy/proxypilot-update.service` | `Type=oneshot`, root, `ExecStart=/usr/local/sbin/proxypilot-update-runner`, `TimeoutStartSec=3600`, `KillMode=process`, `StartLimitIntervalSec=60`/`StartLimitBurst=10`. No `[Install]`: only the path unit starts it. |
+| `deploy/proxypilot-update.service` | `Type=oneshot`, root, `ExecStart=/usr/local/sbin/proxypilot-update-runner`, `TimeoutStartSec=21600`, `KillMode=control-group`, `StartLimitIntervalSec=60`/`StartLimitBurst=10`. No `[Install]`: only the path unit starts it. |
 | `scripts/update-runner.sh` | The runner. Installed atomically to `/usr/local/sbin/proxypilot-update-runner` by `install.sh` and re-installed by `update.sh` when changed (same pattern as the agent unit). All functions, `main "$@"` on the last line — bash has parsed the whole file before running, so the copy `update.sh` installs mid-run cannot corrupt the running one. |
 | `deploy/proxypilot-agent.service` | `RuntimeDirectory=proxypilot-agent proxypilot-update` — the agent's *only* writable drop box under `ProtectSystem=strict` besides `/etc/caddy`. `0750`, group `proxypilot-agent`: nothing else on the host can author a request. |
 | `cmd/agent/methods/update.go` | `update.check`, `update.request`, `update.status` (tests: `update_test.go`). |

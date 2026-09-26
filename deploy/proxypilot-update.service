@@ -15,9 +15,10 @@
 # State + logs for the dashboard land in /var/lib/proxypilot/update
 # (world-readable, root-written), which the agent reads back for the UI.
 #
-# KillMode=process: update.sh re-execs itself in place after the pull and
-# leaves short-lived children (git's background maintenance) behind; only
-# the main process is ours to reap, the rest exit on their own.
+# Kill the whole update process group on cancellation or timeout, including
+# an in-progress backup or apt process. The Incus helper's EXIT trap restarts
+# the daemon after ordinary failures; after a forced kill the operator must
+# inspect the checkpoint and service status.
 #
 # Start limit: a "check" request is also a start, and the dashboard makes
 # one every ten minutes at most (the backend caches the result), so the
@@ -33,8 +34,8 @@ StartLimitBurst=10
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/proxypilot-update-runner
-TimeoutStartSec=3600
-KillMode=process
+TimeoutStartSec=21600
+KillMode=control-group
 Environment=HOME=/root
 Environment=TERM=dumb
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/go/bin:/snap/bin

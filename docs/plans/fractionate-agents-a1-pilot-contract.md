@@ -1,6 +1,12 @@
 # A1 pilot contract — demo sign-in design
 
 Status: **A1 design complete; operational authorization pending** (2026-09-25).
+Policy amendment (2026-09-26): the user replaced the illustrative numeric
+ceilings below with owner-defined, per-project limits. An unset field is
+unbounded by project policy. One browser process tree, the action and origin
+allowlists, fencing, teardown and the requirement to prove the worker's OS
+boundary remain mandatory. The values in the historical table are no longer
+defaults or prerequisites for a run.
 This contract fixes implementation defaults for the synthetic sign-in workflow;
 it grants no authority to launch an agent or use a real account. The user will
 create the first Operations project and enter its site through the interface.

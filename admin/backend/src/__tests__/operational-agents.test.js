@@ -5,12 +5,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { operationsFixture, fixtureRouter } from './helpers/operations-fixture.js';
 import { createOperationsRouter } from '../routes/operational-projects.js';
 import { operationalAgentsMigration1106 } from '../lib/operational-agents-schema.js';
+import { operationalWorkerMigration1107 } from '../lib/operational-worker-schema.js';
+import { operationalAgentLimitsMigration1108 } from '../lib/operational-agent-limits-schema.js';
 import { operationalProjectsMigration1100, operationalProjectsMigration1101, operationalProjectsMigration1102 } from '../lib/operational-projects-schema.js';
 
 const actor = u => ({...u,requestId:randomUUID()});
 const profile = {display_name:'Sign in',workflow_type:'synthetic_sign_in',
-  proposed_actions:['navigate','click','type','read','logout'],proposed_origins:['https://example.test'],
-  budgets:{max_seconds:300,max_actions:20,max_tokens:10000,max_usd:0.25}};
+  proposed_actions:['navigate','click','type','read','logout'],proposed_origins:['https://example.test']};
 const error = (fn,status) => assert.throws(fn,e=>e.status===status);
 
 test('hidden projects remain private; discoverable cards are redacted and requests require owner approval',()=>{
@@ -120,7 +121,8 @@ test('profile IDs, roles, exact guide assignment, stale revisions and account lo
     error(()=>f.store.profile(viewer,p.id,created.id),401);
     f.store.archive(owner,p.id,f.store.get(owner,p.id).revision,{reason:'Done'});
     error(()=>f.store.deleteProfile(owner,p.id,created.id,3),409);
-    assert.equal(f.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name IN ('ops_agent_runs','ops_agent_workers','ops_credential_bindings')").get().n,0);
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM ops_agent_runs').get().n,0);
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='ops_credential_bindings'").get().n,0);
   } finally {f.close();}
 });
 
@@ -139,6 +141,41 @@ test('native route gate, If-Match and project-scoped endpoints',async()=>{
     assert.equal((await request('GET','/directory')).statusCode,200);
     const off=createOperationsRouter({Router:fixtureRouter,store:f.store,enabled:true,agentsEnabled:false,lookupLimiter:(_r,_s,n)=>n()});
     assert.equal((await off.dispatch({method:'GET',path:'/directory',user:owner})).statusCode,404);
+  } finally {f.close();}
+});
+
+test('project run limits default unbounded, are owner controlled, revisioned and audited',async()=>{
+  const f=operationsFixture();
+  try {
+    const owner=actor(f.addUser()),editor=actor(f.addUser());
+    const p=f.store.create(owner,{name:'Limits'});
+    f.store.grant(owner,p.id,editor.id,p.revision,{role:'editor'});
+    let current=f.store.get(owner,p.id);
+    assert.deepEqual(current.agent_limits,{});
+    assert.equal(current.agent_limits_revision,1);
+    const limits={cpu:2,memory_mib:4096,temporary_disk_mib:8192,
+      max_seconds:3600,max_actions:200,max_tokens:200000,max_usd:25};
+    error(()=>f.store.agentLimits(editor,p.id,current.revision,{limits}),403);
+    error(()=>f.store.agentLimits(owner,p.id,current.revision,{limits:{max_actions:0}}),400);
+    error(()=>f.store.agentLimits(owner,p.id,current.revision,{limits:{unknown:1}}),400);
+    const saved=f.store.agentLimits(owner,p.id,current.revision,{limits});
+    assert.equal(saved.limits_revision,2);
+    assert.deepEqual(f.store.get(editor,p.id).agent_limits,limits);
+    error(()=>f.store.agentLimits(owner,p.id,current.revision,{limits:{}}),412);
+    current=f.store.get(owner,p.id);
+    f.db.exec("CREATE TRIGGER deny_agent_limit_audit BEFORE INSERT ON ops_project_events WHEN NEW.action='agent_limits_changed' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;");
+    assert.throws(()=>f.store.agentLimits(owner,p.id,current.revision,{limits:{}}));
+    assert.deepEqual(f.store.get(owner,p.id).agent_limits,limits);
+    f.db.exec('DROP TRIGGER deny_agent_limit_audit');
+    const router=createOperationsRouter({Router:fixtureRouter,store:f.store,enabled:true,agentsEnabled:true,lookupLimiter:(_r,_s,n)=>n()});
+    const request=(user,body,rev)=>router.dispatch({method:'PUT',path:`/${p.id}/agent-limits`,body,user,headers:rev?{'if-match':`"${rev}"`}:{}});
+    assert.equal((await request(owner,{limits:{}},null)).statusCode,428);
+    assert.equal((await request(editor,{limits:{}},current.revision)).statusCode,403);
+    assert.equal((await request(owner,{limits:{}},current.revision)).statusCode,200);
+    current=f.store.get(owner,p.id);
+    assert.deepEqual(current.agent_limits,{});
+    assert.equal(current.agent_limits_revision,3);
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM ops_project_events WHERE project_id=? AND action='agent_limits_changed'").get(p.id).n,2);
   } finally {f.close();}
 });
 
@@ -170,6 +207,42 @@ test('1106 upgrades populated legacy tables and older writer cannot erase A2 col
     db.prepare('UPDATE ops_projects SET name=?,description=? WHERE id=?').run('Older writer','Legacy edit',id);
     row=db.prepare('SELECT * FROM ops_projects WHERE id=?').get(id);
     assert.equal(row.site_origin,'https://example.test');assert.equal(row.site_revision,2);
+  } finally {db.close();}
+});
+
+test('1108 migrates populated run history and child references without restoring mock caps',()=>{
+  const db=new DatabaseSync(':memory:');
+  try {
+    db.exec(`PRAGMA foreign_keys=ON;
+      CREATE TABLE ops_projects(id TEXT PRIMARY KEY);
+      CREATE TABLE ops_agent_profiles(project_id TEXT,id TEXT,PRIMARY KEY(project_id,id));
+      CREATE TABLE ops_guide_versions(project_id TEXT,id TEXT,PRIMARY KEY(project_id,id));`);
+    operationalWorkerMigration1107(db);
+    const project=randomUUID(),profileId=randomUUID(),guide=randomUUID(),run=randomUUID(),attempt=randomUUID();
+    db.prepare('INSERT INTO ops_projects(id) VALUES(?)').run(project);
+    db.prepare('INSERT INTO ops_agent_profiles(project_id,id) VALUES(?,?)').run(project,profileId);
+    db.prepare('INSERT INTO ops_guide_versions(project_id,id) VALUES(?,?)').run(project,guide);
+    db.prepare(`INSERT INTO ops_agent_runs(id,project_id,profile_id,profile_revision,site_origin,site_revision,
+      guide_version_id,guide_hash,policy_digest,max_seconds,max_actions,state,started_at,deadline_at,updated_at)
+      VALUES(?,?,?,1,'https://demo.fractionate.ai',1,?,?,?,300,20,'blocked',?,?,?)`)
+      .run(run,project,profileId,guide,'a'.repeat(64),'b'.repeat(64),
+        '2026-09-25T00:00:00Z','2026-09-25T00:05:00Z','2026-09-25T00:05:00Z');
+    db.prepare(`INSERT INTO ops_agent_worker_attempts(id,run_id,attempt_no,fence,state,lease_expires_at,workspace_id,created_at)
+      VALUES(?,?,1,1,'lost',?,?,?)`).run(attempt,run,'2026-09-25T00:01:00Z',randomUUID(),'2026-09-25T00:00:00Z');
+    db.prepare('INSERT INTO ops_agent_worker_events(run_id,attempt_id,kind,created_at) VALUES(?,?,?,?)')
+      .run(run,attempt,'recovery_fenced','2026-09-25T00:05:00Z');
+    db.exec('PRAGMA foreign_keys=OFF');
+    operationalAgentLimitsMigration1108(db);
+    db.exec('PRAGMA foreign_keys=ON');
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+    // Legacy runs had profile-local caps, so they cannot be reinterpreted as
+    // the new project's initially unbounded policy.
+    assert.equal(db.prepare('SELECT project_limits_revision AS n FROM ops_agent_runs WHERE id=?').get(run).n,0);
+    assert.equal(db.prepare('SELECT run_id FROM ops_agent_worker_attempts WHERE id=?').get(attempt).run_id,run);
+    assert.equal(db.prepare('SELECT run_id FROM ops_agent_worker_events WHERE attempt_id=?').get(attempt).run_id,run);
+    assert.deepEqual(JSON.parse(db.prepare('SELECT agent_limits_json AS json FROM ops_projects WHERE id=?').get(project).json),{});
+    assert.throws(()=>db.prepare('UPDATE ops_agent_runs SET max_actions=200 WHERE id=?').run(run));
+    assert.throws(()=>db.prepare('DELETE FROM ops_agent_runs WHERE id=?').run(run));
   } finally {db.close();}
 });
 

@@ -2,6 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { operationalProjectsMigration1100, operationalProjectsMigration1101, operationalProjectsMigration1102 } from '../../lib/operational-projects-schema.js';
 import { operationalAgentsMigration1106 } from '../../lib/operational-agents-schema.js';
+import { operationalWorkerMigration1107 } from '../../lib/operational-worker-schema.js';
+import { operationalAgentLimitsMigration1108 } from '../../lib/operational-agent-limits-schema.js';
 import { createOperationsStore } from '../../lib/operational-projects-store.js';
 
 export function operationsFixture() {
@@ -34,6 +36,10 @@ export function operationsFixture() {
   operationalProjectsMigration1101(adapter);
   operationalProjectsMigration1102(adapter);
   operationalAgentsMigration1106(adapter);
+  operationalWorkerMigration1107(adapter);
+  db.exec('PRAGMA foreign_keys=OFF');
+  operationalAgentLimitsMigration1108(adapter);
+  db.exec('PRAGMA foreign_keys=ON');
   let time = Date.now();
   const store = createOperationsStore(adapter, { now: () => new Date(time).toISOString() });
   const addUser = (role = 'user') => {

@@ -2,11 +2,16 @@ import { useEffect, useState } from 'react';
 import { operationsApi as api } from '@/lib/api';
 import { Action, Choice, Field, roleNames } from './shared';
 
+const limitFields=[['cpu','CPU cores'],['memory_mib','Worker memory (MiB)'],['temporary_disk_mib','Temporary disk (MiB)'],['max_seconds','Run seconds'],['max_actions','Browser actions'],['max_tokens','Provider tokens'],['max_usd','Provider spending (USD)']];
+const editLimits = values => Object.fromEntries(limitFields.map(([key])=>[key,values?.[key] == null?'':String(values[key])]));
+
 export function AccessPolicy({base,project,onChanged}) {
   const [site,setSite]=useState(project.site_origin||''),[visibility,setVisibility]=useState(project.visibility||'hidden');
+  const [limits,setLimits]=useState(()=>editLimits(project.agent_limits));
   const [reviewed,setReviewed]=useState(false),[requests,setRequests]=useState([]),[roles,setRoles]=useState({});
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState('');
   useEffect(()=>{setSite(project.site_origin||'');setVisibility(project.visibility||'hidden');setReviewed(false);},[project.site_origin,project.visibility]);
+  useEffect(()=>setLimits(editLimits(project.agent_limits)),[project.agent_limits_revision]);
   useEffect(()=>{let live=true;api.get(`${base}/access-requests`).then(r=>{if(live)setRequests(r.requests);}).catch(e=>{if(live)setError(e.message);});return()=>{live=false;};},[base,project.revision]);
   async function save(fn,success) {
     if(busy)return;setBusy(true);setError('');setMessage('');
@@ -28,6 +33,12 @@ export function AccessPolicy({base,project,onChanged}) {
       <Field label="Project site HTTPS origin (optional)" type="url" placeholder="https://example.com" value={site} disabled={busy||!!project.archived_at} onChange={e=>setSite(e.target.value)}/>
       <p className="text-sm break-words">Current site: {project.site_origin||'None'} · Site revision {project.site_revision}. Saving this value changes metadata only.</p>
       <Action type="submit" disabled={busy||!!project.archived_at||site.trim()===(project.site_origin||'')}>Save site</Action>
+    </form>
+    <form className="space-y-3" onSubmit={e=>{e.preventDefault();const configured=Object.fromEntries(limitFields.filter(([key])=>limits[key]!==''&&limits[key]!=null).map(([key])=>[key,Number(limits[key])]));save(()=>api.write(`${base}/agent-limits`,{limits:configured},project.revision,'PUT'),'Project run limits saved.');}}>
+      <h3 className="font-semibold">Agent run limits</h3>
+      <p className="text-sm">Leave a field blank for no project limit. The proposed A3 browser VM starts at 2 vCPU, 4 GiB RAM and 12 GiB root disk; a CPU or memory limit below that prevents its launch. This starting size still needs VM proof. Changes are audited and invalidate a prepared run using an older policy. Agent execution remains disabled.</p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{limitFields.map(([key,label])=><Field key={key} label={label} type="number" min={key==='max_usd'?'0.01':'1'} step={key==='max_usd'?'0.01':'1'} value={limits[key]} disabled={busy||!!project.archived_at} onChange={e=>setLimits({...limits,[key]:e.target.value})}/>)}</div>
+      <Action type="submit" disabled={busy||!!project.archived_at}>Save project limits</Action>
     </form>
     <div className="space-y-3"><h3 className="font-semibold">Pending membership requests</h3>
       {!requests.length&&<p>No pending requests.</p>}

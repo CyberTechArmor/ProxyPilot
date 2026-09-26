@@ -19,17 +19,26 @@ export function siteOrigin(value) {
   return url.origin;
 }
 const origin = z.string().max(2048).nullable();
-const budgets = z.object({ max_seconds: z.number().int().min(1).max(300), max_actions: z.number().int().min(1).max(20),
-  max_tokens: z.number().int().min(1).max(10000), max_usd: z.number().finite().positive().max(0.25) }).strict();
+// An absent key means that the project owner has not set that limit.
+export const agentLimits = z.object({
+  cpu: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  memory_mib: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  temporary_disk_mib: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  max_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  max_actions: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  max_tokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  max_usd: z.number().finite().positive().optional(),
+}).strict();
 const profileFields = { display_name: name, workflow_type: z.literal('synthetic_sign_in'),
   proposed_actions: z.array(z.enum(['navigate','click','type','read','download','logout'])).max(6).refine(v => new Set(v).size === v.length),
-  proposed_origins: z.array(z.string().max(2048)).max(5), budgets };
+  proposed_origins: z.array(z.string().max(2048)).max(5) };
 export const schemas = {
   create: z.object({ name, description: text(20000).default('') }).strict(),
   project: z.object({ name: name.optional(), description: text(20000).optional() }).strict().refine(v => Object.keys(v).length > 0),
   visibility: z.object({ visibility: z.enum(['hidden','read-only','collaborative']),
     reviewed_visibility: z.literal('Expose redacted project card').optional() }).strict(),
   site: z.object({ site_origin: origin }).strict(),
+  agentLimits: z.object({ limits: agentLimits }).strict(),
   profileCreate: z.object(profileFields).strict(),
   profileUpdate: z.object(Object.fromEntries(Object.entries(profileFields).map(([key, value]) => [key, value.optional()])))
     .strict().refine(v => Object.keys(v).length > 0),

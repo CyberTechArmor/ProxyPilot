@@ -41,6 +41,7 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   router.patch('/:id', handle((r, a) => store.update(a, r.params.id, expected(r), r.body)));
   router.put('/:id/visibility', agentsOnly, handle((r,a)=>store.visibility(a,r.params.id,expected(r),r.body),200,'visibility_write'));
   router.put('/:id/site', agentsOnly, handle((r,a)=>store.site(a,r.params.id,expected(r),r.body),200,'site_write'));
+  router.put('/:id/agent-limits', agentsOnly, handle((r,a)=>store.agentLimits(a,r.params.id,expected(r),r.body),200,'agent_limits_write'));
   router.post('/:id/access-requests', agentsOnly, handle((r,a)=>{empty(r);return store.request(a,r.params.id);},201,'membership_request'));
   router.get('/:id/access-requests', agentsOnly, handle((r,a)=>store.requests(a,r.params.id),200,'membership_requests_read'));
   router.post('/:id/access-requests/:requestId/decision', agentsOnly,

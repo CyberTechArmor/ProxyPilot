@@ -87,7 +87,7 @@ const AUTH = { id: 7, created_by: 'admin-1', name: 'test key', scope_json: null 
 /* -------------------------------- catalog ------------------------------ */
 
 test('the extended catalog is well-formed, unique, and every family is represented', () => {
-  assert.equal(MCP_EXT_TOOLS.length, 193);
+  assert.equal(MCP_EXT_TOOLS.length, 195);
   assert.equal(new Set(MCP_EXT_TOOL_NAMES).size, MCP_EXT_TOOL_NAMES.length);
   for (const t of MCP_EXT_TOOLS) {
     assert.match(t.name, /^[a-z][a-z0-9_]+$/);
@@ -97,14 +97,14 @@ test('the extended catalog is well-formed, unique, and every family is represent
     for (const r of t.inputSchema.required || []) assert.ok(t.inputSchema.properties[r], `${t.name}: required ${r} is not a property`);
   }
   assert.deepEqual(Object.keys(MCP_EXT_TOOL_GROUPS), ['builds', 'project_config', 'lxc_admin', 'edge', 'static_admin', 'admin', 'self_edit', 'storage', 'migration', 'platform']);
-  assert.equal(MCP_TOOLS.length, 72 + 193);
+  assert.equal(MCP_TOOLS.length, 72 + 195);
   assert.ok(Object.isFrozen(MCP_TOOLS));
   assert.match(MCP_SERVER_INSTRUCTIONS, /confirmation_token/);
   assert.match(MCP_SERVER_INSTRUCTIONS, /scope\.self_edit/);
 });
 
 test('every destructive verb takes a one-time confirmation token, never a bare confirm', () => {
-  const expected = ['delete_lxc_container', 'restore_snapshot', 'delete_route', 'delete_static_site', 'rollback_static_site', 'reset_passkey',
+  const expected = ['delete_lxc_container', 'restore_snapshot', 'acknowledge_lxc_setup_job', 'delete_route', 'delete_static_site', 'rollback_static_site', 'reset_passkey',
     'restore_proxypilot_db', 'reboot_host', 'delete_project', 'restore_project_db', 'rollback_release', 'promote_self', 'rollback_self'];
   for (const n of expected) assert.ok(MCP_EXT_TOKEN_GATED.includes(n), `${n} must be confirmation-token gated`);
   for (const n of MCP_EXT_TOKEN_GATED) {

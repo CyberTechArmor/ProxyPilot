@@ -47,7 +47,7 @@ import {
 import { scriptedConfigHost as scriptedHost, forwardsSchema, forwardRows, mcpCtx, parse, AUTH } from './helpers/scripted-config-host.js';
 import { runConfigOperation } from '../lib/setup-engine/config-op.js';
 import { ownerIdentity, parseJson, validateRunnerJob, reconcileDecision, RUNNER_JOB_KINDS, MUTATING_JOB_KINDS, EXCLUSIVE_JOB_KINDS, CONFIG_JOB_KINDS } from '../lib/setup-engine/logic.js';
-import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, createJob, claimNextJob, checkpoint, runnerHeartbeat, listJobs, releaseLock, requeueJob, takeoverLock, recordGenerated } from '../lib/setup-engine/store.js';
+import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, markLockStale, createJob, claimNextJob, checkpoint, runnerHeartbeat, listJobs, releaseLock, requeueJob, takeoverLock, recordGenerated, recordJobOutcome } from '../lib/setup-engine/store.js';
 import { runOnce, reconcile, fencedForwardStore, originChain, ownedFrom } from '../lib/setup-engine/executor.js';
 import { submitRunnerJob, runSubmittedJob, resultFromJob } from '../lib/setup-engine/orchestrator.js';
 import { sweepSetupEngineOnBoot } from '../lib/setup-engine/backend.js';
@@ -739,6 +739,10 @@ test('MCP set_lxc_resources / add_lxc_device / remove_lxc_device: dry_run and th
   assert.deepEqual(mutations(h), [['incus', 'snapshot', 'create', 'pp-x', 'pp-mcp-pre-resources-20260926-120000'], ['incus', 'config', 'set', 'pp-x', 'limits.cpu', '4'], ['incus', 'config', 'set', 'pp-x', 'limits.memory', '4096MiB'], ['incus', 'config', 'device', 'override', 'pp-x', 'root', 'size=40GiB']]);
   assert.deepEqual(hostCalls, [], 'the tool itself issues nothing on the host');
   const job = getJob(d, done.job_id); assert.equal(job.kind, 'config_set'); assert.equal(job.via, 'mcp'); assert.deepEqual(parseJson(job.plan_json).params.expect, IDENTITY);
+  const visible = parse(await tools.get_lxc_setup_jobs({ container: 'x' }, AUTH));
+  assert.equal(visible.jobs[0].job_id, done.job_id);
+  assert.equal(visible.jobs[0].status, 'succeeded');
+  assert.equal(JSON.stringify(visible).includes(TOKEN), false, 'the MCP job view excludes plans and progress');
   const row = ledger().find((r) => r.tool === 'set_lxc_resources' && r.outcome === 'ok'); assert.ok(row); assert.equal(row.snapshot, done.snapshot); assert.equal(JSON.parse(row.detail_json).job_id, done.job_id);
   noSecretIn(d, [done.job_id]);
   // Devices.
@@ -761,6 +765,49 @@ test('MCP set_lxc_resources / add_lxc_device / remove_lxc_device: dry_run and th
   acquireLock(d, { app: 'pp-x', owner: RUNNER, operation: 'deploy', jobId: 'dep', nowMs: Date.now() });
   const busy = parse(await tools.set_lxc_resources({ container: 'x', cpu: 8, confirm: true }, AUTH));
   assert.match(busy.error, /deploy .* is in progress for pp-x — the config set was refused before any change/); assert.deepEqual(mutations(h), []);
+});
+
+test('MCP VM resource change returns a durable job id before a slow snapshot completes', async (t) => {
+  const d = db(); const st = { instances: [inst({ type: 'virtual-machine', status: 'Stopped' })] };
+  const h = scriptedHost(st);
+  mcpStore(d, h); t.after(() => configureContainerLockStore(null));
+  const tools = createExtendedHandlers(mcpCtx(d, st).ctx).handlers;
+  const submitted = parse(await tools.set_lxc_resources({ container: 'x', cpu: 4,
+    memory_mb: 4096, disk_gb: 12, confirm: true }, AUTH));
+  assert.equal(submitted.submitted, true);
+  assert.equal(submitted.verified, false);
+  assert.ok(submitted.job_id);
+  const observed = parse(await tools.get_lxc_setup_jobs({ container: 'x' }, AUTH));
+  assert.equal(observed.jobs[0].job_id, submitted.job_id);
+  assert.equal(observed.jobs[0].kind, 'config_set');
+});
+
+test('MCP interrupted setup acknowledgement is bound to the job, guest and stale lease', async () => {
+  const d = db(); const st = { instances: [inst({ type: 'virtual-machine', status: 'Stopped' })] };
+  const tools = createExtendedHandlers(mcpCtx(d, st).ctx).handlers;
+  createJob(d, { id: 'interrupted-1', kind: 'instance_create', app: 'pp-x', plan: { steps: [], params: { container: 'pp-x' } } });
+  claimNextJob(d, { owner: RUNNER, kinds: ['instance_create'] });
+  recordJobOutcome(d, { id: 'interrupted-1', status: 'recovery_required', outcome: 'interrupted_uncertain', reason: 'launch outcome uncertain', by: RUNNER });
+  acquireLock(d, { app: 'pp-x', owner: RUNNER, operation: 'instance_create', jobId: 'interrupted-1' });
+  markLockStale(d, { app: 'pp-x', recoveryJobId: 'interrupted-1' });
+  const status = parse(await tools.get_lxc_setup_jobs({ container: 'x' }, AUTH));
+  assert.equal(status.lease.recovery_job_id, 'interrupted-1');
+  assert.equal(status.jobs[0].outcome, 'interrupted_uncertain');
+  assert.match(parse(await tools.acknowledge_lxc_setup_job({ container: 'y', job_id: 'interrupted-1' }, AUTH)).error, /belongs to y/);
+  const preview = parse(await tools.acknowledge_lxc_setup_job({ container: 'x', job_id: 'interrupted-1' }, AUTH));
+  assert.equal(preview.needs_confirmation, true);
+  assert.equal(getJob(d, 'interrupted-1').outcome, 'interrupted_uncertain');
+  assert.ok(readLock(d, 'pp-x'));
+  st.instances[0] = inst({ type: 'virtual-machine', status: 'Stopped', config: { 'volatile.uuid': UUID_B } });
+  assert.equal((await tools.acknowledge_lxc_setup_job({ container: 'x', job_id: 'interrupted-1', confirmation_token: preview.confirmation_token }, AUTH)).isError, true,
+    'a replacement guest invalidates the token');
+  assert.ok(readLock(d, 'pp-x'));
+  st.instances[0] = inst({ type: 'virtual-machine', status: 'Stopped' });
+  const retry = parse(await tools.acknowledge_lxc_setup_job({ container: 'x', job_id: 'interrupted-1' }, AUTH));
+  const done = parse(await tools.acknowledge_lxc_setup_job({ container: 'x', job_id: 'interrupted-1', confirmation_token: retry.confirmation_token }, AUTH));
+  assert.equal(done.released, true);
+  assert.equal(getJob(d, 'interrupted-1').outcome, 'interrupted_uncertain_acknowledged');
+  assert.equal(readLock(d, 'pp-x'), null);
 });
 
 test('MCP set_port_forward add / remove: the row is the tool\'s (a backend step), the device, rule and drop-in the job\'s (REAL sh for the drop-in); the response keeps its shape with the job id; a definite host failure rolls the row back and names what the host holds; the remove clears the host side and recomputes the reservation', async (t) => {

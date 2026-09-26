@@ -17,6 +17,8 @@ import { restoreHazards, restoreNotes } from '../../lib/lxc-exports.js';
 import { restoreSnapshot, resolveRestoreSnapshotPlan, runLifecycle, runGuestConfig, planDigest } from '../../mock2/ops.js';
 import { instanceIdentity } from '../../lib/setup-engine/lifecycle-logic.js';
 import { containerLockStore } from '../../mock2/container-lock.js';
+import { getJob, listJobs, readLock } from '../../lib/setup-engine/store.js';
+import { acknowledgeUncertainJob } from '../../lib/setup-engine/backend.js';
 import { snapshotCoverage } from '../../lib/setup-engine/restore-logic.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../../lib/export-compression.js';
 
@@ -331,6 +333,55 @@ export function createLxcAdminHandlers(kit) {
 
   /* -------------------------- resources / devices ------------------------- */
 
+  const get_lxc_setup_jobs = reader('get_lxc_setup_jobs', async (args) => {
+    const name = nameOf(args);
+    if (!name) return err('Invalid container name');
+    const rows = listJobs(getDb(), { app: incus(name), limit: intIn(args.limit, 1, 50) || 10 });
+    const lease = readLock(getDb(), incus(name));
+    return ok({ container: name, lease: lease ? {
+      operation: lease.operation, job_id: lease.job_id,
+      stale_since: lease.stale_since, recovery_job_id: lease.recovery_job_id,
+    } : null, jobs: rows.map((row) => ({
+      job_id: row.id, kind: row.kind, status: row.status, phase: row.phase,
+      outcome: row.outcome, reason: row.reason, created_at: row.created_at,
+      updated_at: row.updated_at,
+    })) });
+  });
+
+  const acknowledge_lxc_setup_job = mutation('acknowledge_lxc_setup_job', { subjectType: 'lxc', flag: 'mcp.destructive' }, async (args, auth, _req, note) => {
+    const name = nameOf(args);
+    if (!name) return err('Invalid container name');
+    const id = String(args.job_id || '');
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(id)) return err('Invalid job id');
+    note.subject_id = name;
+    const job = getJob(getDb(), id);
+    if (!job || job.app !== incus(name)) return err(`No setup job ${id} belongs to ${name}`);
+    if (job.status !== 'recovery_required' || !['interrupted_uncertain', 'init_uncertain'].includes(job.outcome))
+      return err(`Job ${id} is ${job.status} (${job.outcome || 'no outcome'}); acknowledgement cannot release its lease`);
+    if (job.outcome === 'init_uncertain' && args.writer_stopped !== true)
+      return err(`Job ${id} has an uncertain init writer; establish that it stopped before passing writer_stopped:true`);
+    const probe = await fetchLxcInstance(incus(name));
+    if (probe.error) return err(`Could not inspect ${name}: ${probe.error}`);
+    const guest = probe.instance ? { status: probe.instance.status, identity: instanceIdentity(probe.instance) } : { status: 'absent', identity: null };
+    const lock = readLock(getDb(), incus(name));
+    if (!lock?.stale_since || lock.recovery_job_id !== id) return err(`No stale lease for job ${id} is held on ${name}`);
+    const plan = { container: name, job_id: id, kind: job.kind, outcome: job.outcome, reason: job.reason,
+      guest, lease: { operation: lock.operation, recovery_job_id: lock.recovery_job_id },
+      effect: 'Record that the guest was inspected and release only this job\'s stale lease; the operation is not replayed.' };
+    const d = dry(args, plan); if (d) return d;
+    const digest = planDigest(plan);
+    const gate = confirmToken(args, auth, note, { tool: 'acknowledge_lxc_setup_job', subject: `${name}/${id}/${digest}`,
+      action: `acknowledge interrupted setup job ${id} on ${name} and release its stale lease`, preview: plan });
+    if (gate) return gate;
+    const result = acknowledgeUncertainJob(getDb(), { id, by: auth?.name || null, via: 'mcp',
+      writerStopped: args.writer_stopped === true });
+    if (!result.ok) return err(result.error);
+    note.summary = `acknowledged interrupted job ${id} on ${name}`;
+    note.detail = { job_id: id, released: !!result.released, guest };
+    return ok({ acknowledged: true, container: name, job_id: id, released: !!result.released,
+      guest, next: 'Read back the guest and setup jobs before submitting another operation.' });
+  });
+
   const set_lxc_resources = mutation('set_lxc_resources', { subjectType: 'lxc' }, async (args, auth, req, note) => {
     const name = nameOf(args);
     if (!name) return err('Invalid container name');
@@ -356,9 +407,16 @@ export function createLxcAdminHandlers(kit) {
     const out = await runGuestConfig({
       kind: 'config_set', containerName: incus(name), changes, rootSize: disk ? `${disk}GiB` : null,
       snapshot: { name: defaultSnapshotName(new Date(), 'pp-mcp-pre-resources') }, expect: instanceIdentity(inst.instance), requestedBy: auth?.name || null, via: 'mcp',
+      detach: inst.detail.type === 'virtual-machine',
     });
     note.snapshot = out.snapshot?.name || null;
     if (!out.ok) return err(`${out.error}${out.jobId ? ` (job ${out.jobId})` : ''}`, out.jobId ? { job_id: out.jobId, step: out.step, refused: !!out.refused, partial: !!out.partial, applied: out.applied || null, snapshot: out.snapshot?.name || null } : null);
+    if (out.submitted) {
+      note.summary = `submitted resources on ${name} (job ${out.jobId})`;
+      note.detail = { ...plan, job_id: out.jobId, submitted: true };
+      return ok({ submitted: true, verified: false, container: name,
+        job_id: out.jobId, next: `Poll get_lxc_setup_jobs({ container: "${name}" }) and read back CPU, memory and root disk after success.` });
+    }
     const applied = [...changes.map((c) => `${c.key}=${c.value}`), ...(disk ? [`root.size=${disk}GiB`] : [])];
     note.summary = `resources on ${name}: ${applied.join(', ')} (job ${out.jobId})`;
     note.detail = { applied, job_id: out.jobId, previous: out.previous || null };
@@ -922,7 +980,7 @@ export function createLxcAdminHandlers(kit) {
     list_lxc_exports, delete_lxc_export,
     delete_lxc_container, clone_lxc_container, export_lxc, import_lxc,
     list_snapshots, restore_snapshot, delete_snapshot,
-    set_lxc_resources, add_lxc_device, remove_lxc_device, get_lxc_usage,
+    set_lxc_resources, get_lxc_setup_jobs, acknowledge_lxc_setup_job, add_lxc_device, remove_lxc_device, get_lxc_usage,
     delete_lxc_file, move_lxc_file, mkdir_lxc, chmod_lxc_file, push_lxc_file_from_ticket,
     service_control, list_processes, install_package,
     get_command_allowlist, set_command_allowlist,

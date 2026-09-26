@@ -1541,8 +1541,22 @@ async function toolCreateLxcContainer(args, auth) {
   // on that record for the host-reachable address instead of polling the
   // host itself.
   const { runLifecycle, waitForSetup } = await import('../mock2/ops.js');
-  const launch = await runLifecycle({ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, vm: isVm, rootSize: diskGb !== null ? `${diskGb}GiB` : null, setup: { phases: ['network_nat', 'await_address'], addressTimeoutMs: 15_000 }, requestedBy: auth.created_by ?? null, via: 'mcp' });
+  // VM launch and its post-launch setup can outlive an MCP HTTP request.
+  // Return the durable job id instead of waiting until the connector times out
+  // and leaves the caller unsure whether a guest was created.
+  const launch = await runLifecycle({ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, vm: isVm, rootSize: diskGb !== null ? `${diskGb}GiB` : null, setup: { phases: ['network_nat', 'await_address'], addressTimeoutMs: 15_000 }, requestedBy: auth.created_by ?? null, via: 'mcp', detach: isVm });
   if (!launch.ok) return toolResult(`Launch failed: ${launch.error}${launch.jobId ? ` (job ${launch.jobId})` : ''}`, { isError: true });
+
+  if (launch.submitted) {
+    logAudit(auth.created_by, 'LXC_CREATE_SUBMITTED', 'lxc', name, {
+      via: 'mcp', image, vm: isVm, cpu, memory_gb: memoryGb, disk_gb: diskGb,
+      docker_ready: dockerReady, autostart, job_id: launch.jobId,
+    }, null);
+    return toolResult({ submitted: true, creation_verified: false, container: name, image,
+      vm: isVm, job_id: launch.jobId,
+      next: `Poll get_lxc_setup_jobs({ container: "${name}" }) and read back the instance after the job succeeds.`,
+    });
+  }
 
   const warnings = [...(Array.isArray(launch.warnings) ? launch.warnings : [])];
   let setup = null;

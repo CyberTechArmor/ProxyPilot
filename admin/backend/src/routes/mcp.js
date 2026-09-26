@@ -1024,6 +1024,27 @@ async function toolGetLxcContainer(args) {
   const db = getDb();
   const lease = readSetupLock(db, incusName);
   const setupJobs = listSetupJobs(db, { app: incusName, limit: 10 });
+  // Incus operations can outlive the runner command that started them. A
+  // failed setup job with no lease is therefore not proof that the instance
+  // is free for another create/delete. Surface the daemon's own operation
+  // state alongside the durable job record before an operator intervenes.
+  let incusOperations = { error: null, active: [] };
+  try {
+    const ops = await runHostCapture('incus', ['operation', 'list', '--format', 'json'],
+      { timeoutMs: 10000, maxCapture: 1024 * 1024 });
+    if (ops.status !== 0) throw new Error((ops.stderr || ops.error || 'incus operation list failed').slice(-300));
+    const rows = JSON.parse(ops.stdout || '[]');
+    if (!Array.isArray(rows)) throw new Error('incus operation list returned a non-array');
+    incusOperations.active = rows.filter((op) => {
+      const resources = Object.values(op.resources || {}).flat();
+      return resources.some((resource) => String(resource).split('/').pop() === incusName)
+        || String(op.description || '').includes(incusName);
+    }).map((op) => ({ id: op.id, class: op.class, description: op.description,
+      status: op.status, created_at: op.created_at, updated_at: op.updated_at,
+      may_cancel: op.may_cancel, resources: op.resources }));
+  } catch (error) {
+    incusOperations = { error: String(error?.message || error).slice(0, 300), active: [] };
+  }
   return toolResult({
     name,
     ...lxcContainerDetail(r.instance),
@@ -1034,6 +1055,7 @@ async function toolGetLxcContainer(args) {
         status: job.status, phase: job.phase, outcome: job.outcome,
         reason: job.reason, created_at: job.created_at, updated_at: job.updated_at })),
     },
+    incus_operations: incusOperations,
     registered_startup: startup?.scriptPath
       ? { script_path: startup.scriptPath, working_dir: startup.workingDir || null }
       : null,

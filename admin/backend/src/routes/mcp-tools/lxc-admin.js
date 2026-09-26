@@ -108,16 +108,40 @@ export function createLxcAdminHandlers(kit) {
     const snapshots = inst.detail.snapshots;
     const wantExport = args.export !== false;
     await exportsDir();
+    let incompleteVmRecovery = null;
     if (!snapshots.length) {
-      note.refused = true;
-      return err(`Refusing to delete ${name}: it has no snapshot. Take one with snapshot_lxc_container first — the snapshot is what the export tarball is cut from, and deleting a guest that was never snapshotted leaves nothing to come back to.`);
+      // A failed Incus VM create can leave an instance record and tiny config
+      // filesystem after its root block volume has gone. Such a VM cannot be
+      // snapshotted or exported. Require deliberate no-export + force flags,
+      // a stopped VM, and a fresh read proving that exact block is absent.
+      if (inst.detail.type === 'virtual-machine' && inst.detail.status === 'Stopped'
+          && args.export === false && args.force === true) {
+        const svc = typeof ctx.storage === 'function' ? ctx.storage() : ctx.storage;
+        const base = svc?.managed()?.datasets?.incus;
+        if (base) {
+          const dir = `${base}/virtual-machines`;
+          const fs = `${dir}/${incus(name)}`;
+          const block = `${fs}.block`;
+          const volumes = await runHostCapture('zfs', ['list', '-H', '-o', 'name', '-r', dir],
+            { timeoutMs: 15000, maxCapture: 1024 * 1024 });
+          if (volumes.status === 0 && !volumes.timedOut && !volumes.stdoutTruncated
+              && volumes.stdoutComplete !== false) {
+            const names = new Set(String(volumes.stdout || '').split('\n').map((s) => s.trim()));
+            if (names.has(fs) && !names.has(block)) incompleteVmRecovery = { missing_root_block: block };
+          }
+        }
+      }
+      if (!incompleteVmRecovery) {
+        note.refused = true;
+        return err(`Refusing to delete ${name}: it has no snapshot. Take one with snapshot_lxc_container first. A stopped VM with a missing root block volume can instead use the guarded recovery path with export:false and force:true.`);
+      }
     }
     const bound = getDb().prepare(`SELECT DISTINCT r.domain FROM service_http_routes r JOIN services s ON s.id = r.service_id WHERE s.lxc_container_name = ?`).all(name).map((r) => r.domain);
     // The identity the confirmation binds and the job revalidates before the
     // delete: a guest recreated under the same name is a different guest.
     const identity = { uuid: inst.instance?.config?.['volatile.uuid'] || null, created_at: inst.detail.created_at || null };
-    const digest = planDigest({ container: name, identity, export: wantExport, force: args.force === true });
-    const plan = { container: name, status: inst.detail.status, identity, snapshots: snapshots.map((s) => s.name), routes_removed: bound, export: wantExport ? `${EXPORTS}/lxc-${name}-<timestamp>.tar.zst (the exports.compression setting picks the compressor)` : 'SKIPPED (export: false)', then: 'a setup-engine job stops the guest (force: true stops it hard) and deletes it under its lease, verifying it is gone; refused while a deploy or restore holds it' };
+    const digest = planDigest({ container: name, identity, export: wantExport, force: args.force === true, incompleteVmRecovery });
+    const plan = { container: name, status: inst.detail.status, identity, snapshots: snapshots.map((s) => s.name), routes_removed: bound, export: wantExport ? `${EXPORTS}/lxc-${name}-<timestamp>.tar.zst (the exports.compression setting picks the compressor)` : 'SKIPPED (export: false)', incomplete_vm_recovery: incompleteVmRecovery, then: 'a setup-engine job stops the guest (force: true stops it hard) and deletes it under its lease, verifying it is gone; refused while a deploy or restore holds it' };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmToken(args, auth, note, { tool: 'delete_lxc_container', subject: `${name}/${digest}`, action: `delete container ${name} (${bound.length} route(s) removed, ${snapshots.length} snapshot(s) lost with it)`, preview: plan });
     if (gate) return gate;

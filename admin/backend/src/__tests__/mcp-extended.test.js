@@ -217,6 +217,44 @@ test('destructive preconditions: delete_lxc_container refuses a guest with no sn
   assert.equal(ledger[0][8], 'refused');
 });
 
+test('incomplete VM deletion requires stopped state, explicit no-export force, and a freshly missing root block', async () => {
+  const dir = 'tank/incus/virtual-machines';
+  const fs = `${dir}/pp-broken`;
+  let listing = `${dir}\n${fs}\n`;
+  let state = 'Stopped';
+  let complete = true;
+  const { ctx, confirmations } = makeCtx({
+    storage: () => ({ managed: () => ({ datasets: { incus: 'tank/incus' } }) }),
+    fetchLxcInstance: async () => ({ instance: { status: state, snapshots: [], config: { 'volatile.uuid': 'vm-1' } } }),
+    lxcContainerDetail: () => ({ type: 'virtual-machine', snapshots: [], status: state, created_at: '2026-09-26T18:20:24Z' }),
+    runHostCapture: async (bin, argv) => {
+      assert.equal(bin, 'zfs');
+      assert.deepEqual(argv, ['list', '-H', '-o', 'name', '-r', dir]);
+      return { status: 0, stdout: listing, stdoutComplete: complete };
+    },
+  });
+  const tools = createExtendedHandlers(ctx).handlers;
+  for (const args of [{}, { export: false }, { force: true }]) {
+    const refused = await tools.delete_lxc_container({ container: 'broken', ...args }, AUTH);
+    assert.equal(refused.isError, true);
+  }
+  listing += `${fs}.block\n`;
+  assert.equal((await tools.delete_lxc_container({ container: 'broken', export: false, force: true }, AUTH)).isError, true);
+  listing = `${dir}\n${fs}\n`;
+  complete = false;
+  assert.equal((await tools.delete_lxc_container({ container: 'broken', export: false, force: true }, AUTH)).isError, true);
+  complete = true;
+  state = 'Running';
+  assert.equal((await tools.delete_lxc_container({ container: 'broken', export: false, force: true }, AUTH)).isError, true);
+  state = 'Stopped';
+  const preview = parse(await tools.delete_lxc_container({ container: 'broken', export: false, force: true, dry_run: true }, AUTH));
+  assert.deepEqual(preview.would.incomplete_vm_recovery, { missing_root_block: `${fs}.block` });
+  assert.equal(confirmations.size(), 0, 'dry run does not issue a token');
+  const first = parse(await tools.delete_lxc_container({ container: 'broken', export: false, force: true }, AUTH));
+  assert.equal(first.needs_confirmation, true);
+  assert.ok(first.confirmation_token);
+});
+
 test('scoped keys: refusals are decided before the handler runs and the catalog is filtered', () => {
   const unscoped = parseTokenScope(null);
   assert.equal(scopeRefusal(unscoped, 'delete_route', {}, byName.get('delete_route')), null);

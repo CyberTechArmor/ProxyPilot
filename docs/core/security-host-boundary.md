@@ -52,6 +52,15 @@ names the requested instance. This is diagnostic readback for interrupted
 create/delete jobs; it does not cancel daemon operations or grant a guest host
 control. The backend remains root-equivalent, so S6 remains open.
 
+The MCP delete recovery path reads fixed ZFS dataset names from the managed
+Incus pool with a 15-second, 1 MiB bound. It may skip the normal snapshot and
+export requirement only for a stopped VM whose configuration filesystem still
+exists but root block volume is absent, with both `export:false` and
+`force:true` and a target-bound one-time confirmation. The runner still issues
+and verifies the Incus delete under the guest lease; the backend does not
+destroy an Incus-owned ZFS dataset directly. This is an operator recovery
+exception for a VM that cannot be snapshotted, not a host isolation boundary.
+
 ## Remaining operation contracts and owners
 
 “Owner” below identifies the code subsystem responsible for the migration, not

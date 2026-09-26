@@ -543,6 +543,7 @@
       "host_command: const s = await runHostCapture('incus', ['start', incus(newName)], { timeoutMs: 120000 });": 1,
       "host_command: const st = await runHostCapture('incus', ['start', incus(newName)], { timeoutMs: 120000 });": 1,
       "host_command: const u = await runHostCapture('incus', ['config', 'device', 'unset', incus(newName), 'eth0', 'ipv4.address'], { timeoutMs: 30000 });": 1,
+      "host_command: const volumes = await runHostCapture('zfs', ['list', '-H', '-o', 'name', '-r', dir],": 1,
       "host_command: getDb, runHostCapture, LXC_PREFIX, LXC_NAME_REGEX, validLxcFilePath, validTargetDir,": 1,
       "host_command: hasBinary: async (b) => (await runHostCapture('sh', ['-c', `command -v ${JSON.stringify(b)}`], { timeoutMs: 10000 })).status === 0,": 1
     },

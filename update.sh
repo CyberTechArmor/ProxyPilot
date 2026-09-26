@@ -1024,6 +1024,19 @@ REMOTE=$($GIT_CMD rev-parse origin/main 2>/dev/null)
 log_verbose "Local commit: $LOCAL"
 log_verbose "Remote commit: $REMOTE"
 
+# The self-update service can still be running under the previous unit's
+# timeout after a pull. Install its new unit now and end this request so the
+# next request starts with the new lifetime and kill behavior. Continuing a
+# long Incus checkpoint under the old unit would make it time out mid-backup.
+if [ "$EUID" -eq 0 ] && [ -f /etc/systemd/system/proxypilot-update.service ] \
+    && ! cmp -s "$SCRIPT_DIR/deploy/proxypilot-update.service" /etc/systemd/system/proxypilot-update.service \
+    && [ "$(systemctl show -p ActiveState --value proxypilot-update.service 2>/dev/null)" = activating ]; then
+    install -m 0644 "$SCRIPT_DIR/deploy/proxypilot-update.service" /etc/systemd/system/proxypilot-update.service
+    systemctl daemon-reload
+    log "${YELLOW}Self-update service lifetime changed; rerun the update to start under the new unit.${NC}"
+    exit 75
+fi
+
 if [ "$LOCAL" = "$REMOTE" ]; then
     if [ "$FORCE_REBUILD" = true ]; then
         log "${YELLOW}Code is up to date, but rebuilding as requested...${NC}"

@@ -84,6 +84,7 @@ import { migrationService } from '../lib/migration/index.js';
 import { createExtendedHandlers } from './mcp-tools/index.js';
 import { platformRouteRefusal } from '../lib/setup-engine/platform-hostnames.js';
 import { instanceIdentity } from '../lib/setup-engine/lifecycle-logic.js';
+import { listJobs as listSetupJobs, readLock as readSetupLock } from '../lib/setup-engine/store.js';
 import { createConfirmationStore, parseTokenScope, validateTokenScope, scopeRefusal, filterCatalogForScope } from '../lib/mcp-ext/logic.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
@@ -1017,9 +1018,22 @@ async function toolGetLxcContainer(args) {
   if (r.error) return toolResult(`Could not inspect ${name}: ${r.error}`, { isError: true });
   if (r.notFound) return toolResult(`Container ${name} not found — use list_lxc_containers for valid names`, { isError: true });
   const startup = await readContainerStartup(incusName).catch(() => null);
+  // Include the durable setup state here as well as in get_lxc_setup_jobs:
+  // older connected MCP clients may not have refreshed that newer tool's
+  // catalog, yet a stale lease is exactly what blocks safe recovery.
+  const db = getDb();
+  const lease = readSetupLock(db, incusName);
+  const setupJobs = listSetupJobs(db, { app: incusName, limit: 10 });
   return toolResult({
     name,
     ...lxcContainerDetail(r.instance),
+    setup: {
+      lease: lease ? { operation: lease.operation, job_id: lease.job_id,
+        stale_since: lease.stale_since, recovery_job_id: lease.recovery_job_id } : null,
+      jobs: setupJobs.map((job) => ({ job_id: job.id, kind: job.kind,
+        status: job.status, phase: job.phase, outcome: job.outcome,
+        reason: job.reason, created_at: job.created_at, updated_at: job.updated_at })),
+    },
     registered_startup: startup?.scriptPath
       ? { script_path: startup.scriptPath, working_dir: startup.workingDir || null }
       : null,
@@ -2499,6 +2513,7 @@ async function toolGetProject(args) {
     ...(containerStatus === null ? { container_status_note: 'incus could not be queried — unknown, not absent' } : {}),
     archived_at: project.archived_at || null,
     description: project.description || null,
+    provision_error: project.provision_error || null,
     provisioning: provisionStatus ? { phase: provisionStatus.phase, message: provisionStatus.message, error: provisionStatus.error || null } : null,
     queued_builds: queueRows.map((r) => ({ id: r.id, instruction: String(r.instruction || '').slice(0, 200) })),
     pending_verification: pending,

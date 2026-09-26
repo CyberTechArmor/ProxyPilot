@@ -2,12 +2,12 @@
 
 Do not execute merely by reading this file. A2 is merged as PR #677 at
 `ade9a783d1b80058f8bbcd255872d229bfdd17bc`; its metadata gate remains
-off. A3 is **not accepted**. Draft PR #680 remains open; fetch its exact
-current head and Security CI before work. The earlier project-limits head
-`1d57f9ce0cc483950886a23438809113d1a90554` passed run `36251836583`;
-the disposable Debian VM still failed the required boundary checks. Recheck
-the current PR head and `main`
-before working. No Operations project UUID or live site is needed for A3.
+off. A3 is **not accepted**. PR #680 was merged as fail-closed groundwork at
+`5946de10c7048979949fd84c1cdc3bd25a7cf605` despite the open isolation
+gate. Its exact head `4c4a3ce22086f25727302f58b1e4b61c82fcc061`
+passed Security regression run `36252438415`. Recheck the current `main`
+and any continuation PR head before working. No Operations project UUID or
+live site is needed for A3.
 
 Workspace: `C:/Users/thoma/Fractionate/OpenAI/Fractionate/ProxyPilot-batch-03`.
 
@@ -15,7 +15,7 @@ Workspace: `C:/Users/thoma/Fractionate/OpenAI/Fractionate/ProxyPilot-batch-03`.
 
 Read the official A1–A8 plan, A1 architecture, pilot contract, acceptance
 matrix and source register; the A2 evidence and exact submitted diff; the
-entire [A3 evidence](fractionate-agents-a3-evidence.md), draft PR #680 and
+entire [A3 evidence](fractionate-agents-a3-evidence.md), merged PR #680 and
 its exact diff; the host-boundary inventory; `CLAUDE.md`, adjacent `FINISH.md`
 and both trackers. Read `MOBILE_FIRST.md` if changing UI. Capture branch,
 HEAD, complete Git status, current `main`, PR head and pre-edit hashes.
@@ -31,6 +31,16 @@ currently runs Incus 7.5.1; verify that again before using version-specific
 controls. Use ProxyPilot MCP for host and guest operations, consistent with
 the user's MCP-only direction. The generic VM created for earlier A3 probes
 is stopped with autostart off and is **not** an isolated worker.
+The later `agents-a3-browser-proof` Debian 13 VM was created despite an MCP
+HTTP 504; it has 2 vCPU, 4096 MiB RAM and an explicit 12 GiB root device,
+but remains stopped behind an interrupted setup lease. Inspect its durable
+job through `get_lxc_setup_jobs` after the MCP fix is deployed, resolve the
+lease only after guest readback, and reuse this VM rather than launching
+another. The MCP repair merged in PR #687 and is deployed at `3401bead` with
+the update copy repair from PR #688; both passed exact-head Security CI.
+This chat's connector has a cached older tool list, so the new setup-job MCP
+reads and acknowledgement still need a refreshed connector before the lease
+can be handled. The final A3 evidence-head CI remains to be verified.
 
 Build a minimal Debian 13 browser-worker image. Provision **2 vCPU, 4 GiB
 guest RAM and 12 GiB root disk** as a provisional starting size, with no
@@ -112,9 +122,9 @@ explicitly leave S6/SEC-01/SEC-04 open for any control that cannot be proved.
 Run affected native SQLite/HTTP and worker tests, frontend build if touched,
 host-boundary inventory without suppression, and required Security CI for
 every submitted head. Update adjacent A3 evidence with commands, results,
-hashes, exact diff, target proof, rollback and older-writer limits. Reconcile
-draft PR #680 with current `main` only through a reviewable integration and
-fresh exact-head CI. Keep it draft and unmerged while any A3 gate remains
-open. When A3 is accepted, use the existing bounded
+hashes, exact diff, target proof, rollback and older-writer limits. Base any
+continuation on current `main` through a reviewable integration and fresh
+exact-head CI. Keep a continuation PR draft and unmerged while any A3 gate
+remains open. When A3 is accepted, use the existing bounded
 [A4 prompt](fractionate-agents-a4-prompt.md) as the next section and stop
 for review before A4 implementation.

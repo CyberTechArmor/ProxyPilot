@@ -625,3 +625,170 @@ Follow-up source SHA-256 before submission:
 | `admin/backend/src/__tests__/operational-worker-boundary.test.js` | `978dc7ccaded3dd6814cdfc2cc311c33e0eb5e315e2de499740eff6306785683` |
 | `admin/frontend/src/components/operational-projects/AccessPolicy.jsx` | `af2e9ee54748b224ad9749e90bfa8a0d3ff00e74184d3ac2192f3f9a4d2f7c38` |
 | `docs/plans/fractionate-agents-a3-continuation-prompt.md` | `a028ebbaeadf52f5c0e4f81257f2a9ef9e82c0460b8f64a3014266462c49367c` |
+
+## 2026-09-26 continuation after the groundwork merge
+
+GitHub reported PR #680 **merged**, with exact head
+`4c4a3ce22086f25727302f58b1e4b61c82fcc061`, base
+`e2c40accf1689d31454350165391f9d8b15a1990`, and merge commit
+`5946de10c7048979949fd84c1cdc3bd25a7cf605`. Security regression
+run `36252438415` succeeded on that head. The current `main` branch API and a
+fresh `git fetch origin main` both reported the merge commit. The prior
+instruction to keep PR #680 draft cannot be applied after its merge. The
+continuation was moved to `agents-a3-isolation-continuation` based on that
+exact `origin/main`, carrying only this turn's uncommitted edits. No earlier
+commit was reset, rewritten or silently integrated. The pre-edit branch was
+`agents-a3-isolated-worker` at `4c4a3ce22086f25727302f58b1e4b61c82fcc061`;
+complete pre-edit status was only
+`?? scripts/tests/a3-vm-probe.zip`. That preexisting ZIP remains untracked,
+unmodified and excluded from the intended diff (SHA-256
+`4cae3e4a36c0b9809270aef126c6c47c0b3ddb67fb144f387854c299616ad9fb`).
+
+The host package readback reported Incus
+`1:7.5.1-debian13-202609250203`. Before the attempted resize, the stopped
+`agents-a3-vm-probe-01` was a Debian 12 virtual machine with one vCPU,
+512 MiB configured RAM, autostart off and guest API/nesting off. A
+`set_lxc_resources` dry run planned two vCPUs, 4096 MiB and an explicit
+12 GiB root disk, with a snapshot first. The apply call timed out at the
+connector (HTTP 504). Readback showed the new pre-resources snapshot but
+still reported one vCPU and 512 MiB; no successful disk readback was
+available. The call was not treated as a successful resize, was not retried
+blindly, and the VM remained stopped. A separate `create_lxc_container`
+request for a Debian 13 VM with `vm:true`, two vCPUs, four GiB RAM, 12 GiB
+disk and autostart off returned `INVALID_ARGUMENT` twice, including a call
+that omitted `docker_ready`. A fresh guest inventory showed no new guest;
+no Debian 13 VM, browser or human transport was installed by these calls.
+
+The source correction removes the browser broker's old 20-action and
+300-second local caps. Fixed JSON reads retain a 10-second request timeout.
+The project-owned durable reservation already checks
+the pinned policy revision, cumulative action count and optional run
+deadline on every operation. A separate broker-local counter would incorrectly
+stop an unbounded project at 20 and reset on a broker restart. The updated
+browser proof uses an explicit disposable 25-action reservation policy;
+the new native test performs 25 actions and observes that the 26th is refused
+by the reservation. Credential submission remains unavailable, and the OS
+launcher still returns `BOUNDARY_UNVERIFIED`. This correction is source-level
+only; it does not establish target broker enforcement.
+
+Verification from `admin/backend`:
+`node --import ../../../agents-a2-evidence/dependency-loader.mjs --test src/__tests__/operational-*.test.js`
+passed **68/68** native SQLite/HTTP/worker tests. From repository root,
+`PYTHONUTF8=1` with the bundled Python running
+`scripts/host-boundary-inventory.py` inventoried **96** backend candidates and
+left S6 open without suppression. `git diff --check` found no whitespace
+errors (Windows line-ending warnings only). No frontend file changed, so no
+frontend build was required for this diff. The exact review diff is
+`git diff origin/main` on this continuation branch; it changes the broker,
+worker test, browser proof and this evidence/prompt only. Pre-edit broker
+SHA-256 was `4d5aea71db85487434c5b2f29e56e905231507e8bb02c6343ee8cb68d6ba12c6`.
+Post-edit source SHA-256 values before evidence edits are:
+
+| File | SHA-256 |
+|---|---|
+| `admin/backend/src/lib/operational-browser-broker.js` | `dc39701c8a091d07875c03204b3092c448be8dde29be780586c4fd2f4a6ee493` |
+| `admin/backend/src/__tests__/operational-worker-boundary.test.js` | `a0a94677b5a824f3d7fe050697c3f869e013437ee661efae3d0d5ba2bdd61c13` |
+| `scripts/tests/operational-browser-proof.mjs` | `a9555f31eea294d9027e793291aa63206505ea98629d531db2fd0b9b2b859637` |
+| `docs/plans/fractionate-agents-a3-continuation-prompt.md` | `7e36036fd1b7490561e768ff586c8afe582abe7489efb240fb4f03d976f7d9f9` |
+
+**A3 is still blocked.** The Debian 13 VM capacity, host QEMU RSS, root
+disk, restricted network, browser viability, approved-origin sign-in, human
+takeover, process/temporary-disk/time limits and independent teardown remain
+unproved. The existing Debian 12 VM's observed public egress and Incus
+management reachability remain failures. S6/SEC-01/SEC-04 stay open; no
+feature activation, provider, credential, vault or live identity was used.
+Rollback of this continuation is the small broker/test/document diff; retain
+migrations 1100–1108 and immutable history. Older writers still require
+`OPERATIONS_ENABLED=false` and the agent gate off before rollback. Do not
+start A4 until a Debian 13 target and its host-enforced boundary pass.
+
+The correction was submitted as draft PR
+[#686](https://github.com/CyberTechArmor/ProxyPilot/pull/686), initially at
+`5cacdefbc5d38f6d463249089cdb664557ff9639`. Its exact-head
+[Security regression run](https://github.com/CyberTechArmor/ProxyPilot/actions/runs/36254343922)
+completed successfully: frontend, backend, agent and all four audit jobs
+passed. The backend job included the unsuppressed host-boundary inventory.
+This CI pass validates that source revision; it does not close the VM target
+failures or authorize merging the draft.
+
+## 2026-09-26 correction: VM creation timed out after Incus created it
+
+The earlier `INVALID_ARGUMENT` and "no Debian 13 VM" interpretation above was
+incorrect. The connector's structured error code is generic; its text block
+contains the server's actual response. A repeated creation request for
+`agents-a3-browser-proof` took longer than the MCP gateway deadline and
+returned HTTP 504. ProxyPilot MCP readback then found a **stopped Debian 13
+virtual machine** created at `2026-09-26T18:20:24.655225835Z` with
+`limits.cpu=2`, `limits.memory=4096MiB`, `boot.autostart=false`,
+`security.nesting=false`, `security.guestapi=false`, and an instance root disk
+device of exactly `12GiB`. It had no address, browser, or human transport.
+No second guest should be launched. A subsequent start was refused because
+the previous `instance_create` setup job still held a stale lease; its exact
+job status was not available through the deployed MCP catalog. The guest
+remains stopped and is **not** an isolated worker.
+
+The underlying API issue is synchronous waiting for durable setup jobs:
+`create_lxc_container` waited through VM launch and post-launch setup, and
+`set_lxc_resources` waited through a VM snapshot and resize. Both can exceed
+the gateway deadline while the job continues or enters recovery. The local
+correction submits those VM operations and returns a job id without claiming
+completion, exposes compact per-guest setup job and lease status through MCP,
+and adds a token-gated acknowledgement for only an inspected
+`interrupted_uncertain` or `init_uncertain` job. The existing setup engine
+still binds the acknowledgement to the exact stale lease and never replays
+the uncertain operation. It does not acknowledge the live job by itself.
+
+Focused Windows validation used the dependency set installed in the sibling
+checkout: the three resource/job/acknowledgement tests and all 19 extended
+MCP catalog tests passed; the pure VM Incus argv test passed. The full
+setup-guest-config suite cannot pass on this Windows host because its
+reserved-port tests invoke Unix `sh` and `sysctl`. The MCP-only repair was
+cherry-picked from commit `f37208dbb404888bfc84ebc3caf7bd55af6d871b`
+onto current `main` as `b591171ec7e97e16ee77311f4f2b809e5a1f4914` in
+[PR #687](https://github.com/CyberTechArmor/ProxyPilot/pull/687).
+Its exact-head [Security regression run](https://github.com/CyberTechArmor/ProxyPilot/actions/runs/36263182848)
+passed all seven jobs. The A3 continuation head before this evidence update,
+`c82834ef7dde4219280f1d5978e074b2536331f2`, also passed all seven jobs
+in [run 36263094910](https://github.com/CyberTechArmor/ProxyPilot/actions/runs/36263094910).
+The live host still runs an older checkout;
+the new MCP status and acknowledgement tools are not deployed. The job must
+be inspected and its stale lease resolved before any start or browser proof.
+S6/SEC-01/SEC-04 remain open, A3 stays inactive, and PR #686 remains draft.
+
+## 2026-09-26 live MCP repair deployment
+
+PR #687 merged at `869c5bcd38ae7bc56b8bce255350f399af6c7da0` after
+its seven-job Security CI pass. ProxyPilot's managed update run
+`79e33237-6dc6-4c9e-bf3e-e7cf9a2ac89f` succeeded from
+`10fdc9bbe848420a9c98180087b850c0760dcfa7` to that merge commit;
+the rebuilt Docker backend reported healthy. The live checkout read back
+clean at the merged SHA. `agents-a3-browser-proof` still read back as a
+stopped VM with its original 2-vCPU, 4096-MiB and 12-GiB configuration.
+A resource dry run confirmed the same values and changed nothing.
+
+The first update spent a prolonged period copying the entire `admin`
+directory into the Docker build context, including host-installed
+`node_modules`. PR #688 replaced that copy with a tar stream that keeps
+source and the built frontend while excluding host dependencies and
+preserving install-local data. Its focused copy test, Bash syntax check and
+seven-job Security CI passed; it merged at
+`3401bead4dafb6bf790fcfb431e9e50882778c77`. A second managed update
+was submitted as `5f02caef-41fa-4afe-b88d-f243b7f4e611` to deploy it.
+That run succeeded from `869c5bcd38ae7bc56b8bce255350f399af6c7da0`
+to `3401bead4dafb6bf790fcfb431e9e50882778c77`, reporting a healthy
+Docker restart. The live checkout read back clean at the final merged SHA.
+Systemd showed the new tar helper excluding both host `node_modules`
+directories. The second copy phase completed and the update succeeded; this
+does not quantify the copy's exact duration because the dashboard was
+temporarily unavailable during Docker rebuild.
+The original update completed without interruption, so the attempted
+managed service restart was not performed; automatic approval review had
+rejected interrupting the active copy due to partial-install risk.
+
+This chat's ProxyPilot connector still advertises its pre-deployment tool
+catalog, so `get_lxc_setup_jobs` and `acknowledge_lxc_setup_job` cannot yet
+be called through this MCP connection even after the second deployment.
+No uncertain job was acknowledged,
+no stale lease was released, and the VM was not started. The actual setup
+job outcome, target network fence, browser and human takeover proofs remain
+unverified. A3 stays inactive and PR #686 stays draft.

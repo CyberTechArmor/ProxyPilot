@@ -20,7 +20,8 @@ export function permitsSyntheticRequest(rawUrl, method) {
 
 async function fixedJson(page, path) {
   return page.evaluate(async fixedPath => {
-    const response = await fetch(fixedPath, {method:'GET',credentials:'same-origin',redirect:'manual',cache:'no-store'});
+    const response = await fetch(fixedPath, {method:'GET',credentials:'same-origin',
+      redirect:'manual',cache:'no-store',signal:AbortSignal.timeout(10_000)});
     if (!response.ok || response.type === 'opaqueredirect' ||
         !response.headers.get('content-type')?.toLowerCase().startsWith('application/json'))
       throw new Error('BROWSER_READBACK_FAILED');
@@ -32,14 +33,11 @@ export async function createSyntheticSignInBrowserBroker({browser, reserveAction
   if (typeof browser?.newContext !== 'function' || typeof reserveAction !== 'function')
     fail('BROWSER_BOUNDARY_UNAVAILABLE');
   const context = await browser.newContext({acceptDownloads:false,serviceWorkers:'block'});
-  let page, busy = false, closed = false, actions = 0, closePromise;
-  const deadline = Date.now() + 300_000;
+  let page, busy = false, closed = false, closePromise;
   const shutdown = () => {
-    clearTimeout(timer);
     if (!closePromise) { closed = true; closePromise = context.close(); }
     return closePromise;
   };
-  const timer = setTimeout(() => { void shutdown().catch(() => {}); }, 300_000);
   try {
     if (typeof context.route !== 'function' || typeof context.routeWebSocket !== 'function' ||
         typeof context.newPage !== 'function') fail('BROWSER_BOUNDARY_UNAVAILABLE');
@@ -59,14 +57,13 @@ export async function createSyntheticSignInBrowserBroker({browser, reserveAction
       validateBrowserAction(request);
       if (closed) fail('BROWSER_CLOSED');
       if (busy) fail('BROWSER_BUSY');
-      if (Date.now() >= deadline) fail('BROWSER_DEADLINE');
-      if (actions >= 20) fail('ACTION_LIMIT');
       if (request.action === 'submit_bound_fixture') fail('CREDENTIAL_BROKER_UNAVAILABLE');
       busy = true;
       try {
+        // The durable store reserves the action against the pinned project
+        // policy. Its deadline and total survive broker or worker restarts.
         await reserveAction(request);
-        if (closed || Date.now() >= deadline) fail('BROWSER_DEADLINE');
-        actions++;
+        if (closed) fail('BROWSER_CLOSED');
         switch (request.action) {
           case 'open_landing': {
             const response = await page.goto(`${SYNTHETIC_ORIGIN}/`, {waitUntil:'domcontentloaded'});

@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const RUNNER = fileURLToPath(new URL('../../../../scripts/update-runner.sh', import.meta.url));
 const UPDATE_SH = fileURLToPath(new URL('../../../../update.sh', import.meta.url));
+const COPY_ADMIN = fileURLToPath(new URL('../../../../scripts/copy-admin-to-install.sh', import.meta.url));
 
 const FAKE_UPDATE_SH = `#!/bin/bash
 echo "args: $*"
@@ -368,4 +369,33 @@ test('the systemd units and the agent unit agree on the request directory', () =
   for (const f of [path, service, runner]) {
     assert.doesNotMatch(f, /claude|anthropic|openai|gpt/i, 'no model or vendor names in the runner or units');
   }
+});
+
+test('Docker context copy includes source and built frontend while preserving install data and omitting host dependencies', (t) => {
+  assert.match(readFileSync(UPDATE_SH, 'utf8'), /bash "\$\{SCRIPT_DIR\}\/scripts\/copy-admin-to-install\.sh" "\$SCRIPT_DIR" "\$INSTALL_DIR"/);
+  const root = mkdtempSync(join(tmpdir(), 'pp-update-copy-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const src = join(root, 'source'); const install = join(root, 'install');
+  for (const path of [
+    join(src, 'admin', 'backend', 'src'), join(src, 'admin', 'backend', 'node_modules'),
+    join(src, 'admin', 'frontend', 'dist'), join(src, 'admin', 'frontend', 'node_modules'),
+    join(install, 'admin', 'backend', 'data'),
+  ]) mkdirSync(path, { recursive: true });
+  writeFileSync(join(src, 'admin', 'backend', 'src', 'index.js'), 'new source');
+  writeFileSync(join(src, 'admin', 'frontend', 'dist', 'index.html'), 'new build');
+  writeFileSync(join(src, 'admin', 'backend', 'node_modules', 'skip'), 'large dependency');
+  writeFileSync(join(src, 'admin', 'frontend', 'node_modules', 'skip'), 'large dependency');
+  writeFileSync(join(src, 'admin', 'backend', '.env'), 'source secret');
+  writeFileSync(join(install, 'admin', 'backend', '.env'), 'install secret');
+  writeFileSync(join(install, 'admin', 'backend', 'data', 'keep'), 'local data');
+  const shellPath = (path) => process.platform === 'win32'
+    ? `/${path[0].toLowerCase()}${path.slice(2).replace(/\\/g, '/')}` : path;
+  const copied = spawnSync('bash', [COPY_ADMIN, shellPath(src), shellPath(install)], { encoding: 'utf8' });
+  assert.equal(copied.status, 0, copied.stderr);
+  assert.equal(readFileSync(join(install, 'admin', 'backend', 'src', 'index.js'), 'utf8'), 'new source');
+  assert.equal(readFileSync(join(install, 'admin', 'frontend', 'dist', 'index.html'), 'utf8'), 'new build');
+  assert.equal(readFileSync(join(install, 'admin', 'backend', '.env'), 'utf8'), 'install secret');
+  assert.equal(readFileSync(join(install, 'admin', 'backend', 'data', 'keep'), 'utf8'), 'local data');
+  assert.equal(existsSync(join(install, 'admin', 'backend', 'node_modules')), false);
+  assert.equal(existsSync(join(install, 'admin', 'frontend', 'node_modules')), false);
 });

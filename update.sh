@@ -1661,7 +1661,11 @@ else
         # Copy updated admin files to install directory (if running from a different dir)
         if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then
             log "Copying updated files from ${SCRIPT_DIR} to ${INSTALL_DIR}..."
-            cp -r "${SCRIPT_DIR}/admin" "${INSTALL_DIR}/"
+            # Backend/frontend node_modules were just installed in the source
+            # checkout. Copying them into the Docker build context can take
+            # tens of minutes and the image installs its own dependencies.
+            # Keep the pre-built frontend dist and preserve install-local data.
+            bash "${SCRIPT_DIR}/scripts/copy-admin-to-install.sh" "$SCRIPT_DIR" "$INSTALL_DIR"
             # CVE engine package — the new admin/Dockerfile COPYs
             # proxypilot/ from the build context, so it must live
             # alongside admin/ in the install dir. install.sh already

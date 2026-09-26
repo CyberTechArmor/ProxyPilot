@@ -1,10 +1,12 @@
-# A3 isolated worker boundary — local review stop
+# A3 isolated worker boundary — target review stop
 
-Date: 2026-09-25. **A3 is blocked, not accepted.** The source adds a closed
+Original review: 2026-09-25; disposable VM continuation: 2026-09-26.
+**A3 is blocked, not accepted.** The source adds a closed
 internal contract and durable fencing records. It does not launch a worker,
 browser, provider or credential broker. This A3 work made no route, feature
 activation or live account action. User-authorized MCP tests created and
-stopped two disposable LXC guests. Neither guest is the selected VM boundary.
+stopped two disposable LXC guests and one Debian VM. The VM observations below
+show that the generic VM does not enforce the selected A3 worker boundary.
 
 ## Exact A2 baseline and preservation
 
@@ -347,7 +349,104 @@ from this task. A fresh MCP schema must expose and transmit the deployed
 `type: container`, `status: Stopped`, `boot.autostart: false`. No VM proof
 or A3 activation followed.
 
+## 2026-09-26 disposable Debian VM observation (supersedes the MCP availability statements above)
+
+The refreshed ProxyPilot MCP schema exposed `vm: boolean`. The user authorized
+MCP-only creation and all disposable testing. Before this continuation the A3
+branch was `agents-a3-isolated-worker` at
+`937c639d0b51b7cf1683b74bf6a09b490bbe6770`; `git status --short
+--branch` showed one untracked probe zip and the new browser probe script,
+with no tracked modifications. The A3 launch implementation remained the
+fail-closed draft in PR #680. No feature flag was activated.
+
+`create_lxc_container` was called with `vm: true`, `docker_ready: false`,
+`autostart: false`, `cpu: 1`, `memory_gb: 0.5`, `disk_gb: 4`, and
+`image: images:debian/12` for `agents-a3-vm-probe-01`. MCP returned
+`created: true`, `vm: true`, `type: virtual-machine`. The guest was created
+at `2026-09-26T11:56:57.595066535Z` on the default profile and bridge,
+with `limits.cpu=1`, `limits.memory=512MiB`, `security.guestapi=false`,
+`security.nesting=false`, `boot.autostart=false`, and initial address
+`10.185.17.144`. The requested 4 GiB root override failed with **“Block
+volumes cannot be shrunk”**; the inherited root volume remained about 9.6
+GiB. This is a generic VM, not an A3 worker VM. Its caller-selected default
+profile and network are not an attested worker policy.
+
+The following operations used only ProxyPilot MCP guest tools. `free -m`
+reported 430 MiB guest-visible memory and no swap; it does not measure host
+QEMU RSS. `df -h` showed 9.6 GiB root, 216 MiB `/dev/shm`, 44 MiB `/run`
+and 50 MiB `/run/incus_agent`. `/dev/kvm` was present. `stat` returned
+ENOENT for `/dev/incus/sock`, `/run/incus/unix.socket`,
+`/var/run/docker.sock`, `/root/ProxyPilot`, `/opt/proxypilot`,
+`/data/services`, `/workspace` and `/evidence`. These sampled paths are
+not an exhaustive mount or device audit. The Incus agent mount remained
+present despite the guest API socket being absent.
+
+| Actual VM probe | Observation | A3 result |
+|---|---|---|
+| `ip route` | Default route via `10.185.17.1` on `enp5s0` | No dedicated deny-by-default worker network |
+| `curl -I --max-time 10 https://demo.fractionate.ai` | HTTP/2 200 | Approved synthetic origin reachable by curl, not a browser proof |
+| `curl -I --max-time 10 https://example.com` | HTTP/2 200 | **Forbidden public egress reachable** |
+| `curl -I --max-time 5 https://10.185.17.1:8443` | TLS handshake reached the Incus management port; curl exited 60 on its self-signed certificate | **Management network reachable**, although authenticated API use was not attempted |
+| Registered bounded probe `scripts/tests/operational-lxc-probe.sh` | 167,772,160-byte `/tmp` write and 32 children succeeded, then were reaped; startup exit 0 | **128 MiB writable-space and process restraint absent** |
+| `get_lxc_container` more than 300 seconds after creation | Still `Running` | **No host-enforced five-minute worker deadline** on generic VM |
+| Guest cgroup root read and `sysctl -n kernel.pid_max` | No root `memory.max`, `cpu.max` or `pids.max` files; global pid max 4,194,304 | No observed guest process cap; `limits.cpu=1` is one configured vCPU, not an observed CPU overrun termination |
+
+The bounded probe's first upload had Windows CRLF and failed with exit 127
+because of its `#!/bin/sh\r` line. MCP `read_lxc_file` and
+`write_lxc_file` with the observed SHA precondition replaced it with LF
+content (`dda661bc1b7d6f76c05a85c902eb605cac2e49f2422a7be87497f0f943b9915e`);
+the next `rerun_startup` exited 0 in 3.355 seconds. It removed its
+160 MiB temporary file and reaped the children before exit. This cleanup
+belongs to the test script, not a host teardown guarantee.
+
+The separate disposable browser viability source
+`scripts/tests/operational-vm-browser-probe.sh` has SHA-256
+`297c7b9af1560e2cd35ec9866496c15fbbf1a8b343925fa577d7e0c077743564`.
+It installed Debian Chromium 154.0.8037.57 and launched it as a nonroot
+`a3browser` user through the registered startup mechanism. An initial
+45-second approved-origin `--dump-dom` attempt exited 124 with zero DOM
+bytes. A second bounded run tested a local `data:` page for 15 seconds
+and the approved origin for 25 seconds with a ten-second virtual-time
+budget; both also exited 124 with zero DOM bytes. Thus **browser viability
+and positive approved-origin browser access are unproved**. The console
+showed D-Bus/GCM errors, but these logs do not identify a proven root
+cause. The browser probe used `--disable-dev-shm-usage`, which directs
+temporary browser data to the unrestricted root filesystem; it is a
+diagnostic and cannot serve as an A3 launch configuration. No agent loop,
+credential or provider was run.
+
+The VM was stopped with `control_lxc_container`, job
+`8498c894-3ed6-4a63-8541-630693dde892`; a fresh `get_lxc_container`
+read showed `type: virtual-machine`, `status: Stopped`, no address,
+`boot.autostart=false`, and no snapshots. The non-ephemeral guest remains
+allocated for review. A newly exposed MCP deletion tool refuses guests
+without a snapshot; no deletion was attempted. The two interim LXC guests
+also remain stopped.
+
+This VM **fails** the required network, management reachability, writable
+disk, process and deadline checks. The configured memory and CPU values do
+not establish total host RSS, CPU overrun termination or one browser tree.
+The approved-origin browser test, redirect/subresource policy, 20-action
+host broker, cancellation, crash cleanup, per-attempt workspace removal,
+host-side fence and no-replay restart proof remain unobserved on the VM.
+No A3 worker was launched, so S6/SEC-01/SEC-04 remain open. Draft PR #680
+must stay unmerged and the A2/A3 feature gates off until an enforceable
+supervisor, isolated network and resource limits have independent target
+proof. These results supersede the earlier dated statement that MCP could
+not provision a VM; they do not change the earlier LXC observations.
+
 ## Verification and rollback
+
+For the 2026-09-26 VM-evidence continuation, the affected native command
+`node --import ../../../agents-a2-evidence/dependency-loader.mjs --test
+src/__tests__/operational-*.test.js` passed **65/65** in `admin/backend`.
+`git diff --check` exited 0 with only Windows LF/CRLF conversion notices.
+This continuation changed only this evidence, the A4 gate wording and the
+disposable VM browser probe; it changed no frontend or runtime source, so
+the existing frontend build and browser fixture results below remain the
+relevant local checks. Required Security CI for any newly submitted head
+must be recorded against that exact commit in PR #680; a previous head's
+green result cannot validate a later evidence commit.
 
 From `admin/backend`:
 
@@ -382,14 +481,15 @@ invocation needed `PYTHONUTF8=1` to avoid a Windows cp1252 decode error.
 Code rollback must set `OPERATIONS_ENABLED=false` for older writers and retain
 additive migration 1107, run/attempt/event rows and migrations 1100–1106.
 Never delete rows to make an older binary writable. No A3 OS worker exists to
-stop in this checkout. The interim LXC is stopped with autostart disabled;
-MCP has no delete verb, so its storage remains allocated. A later runner must
+stop in this checkout. The two interim LXC guests and the disposable VM are
+stopped with autostart disabled and remain allocated. The refreshed MCP
+deletion verb refuses guests without snapshots. A later runner must
 prove teardown before terminal
 disposition and must reconcile any uncertain browser effect without replay.
 The next bounded prompt is [A4](fractionate-agents-a4-prompt.md), contingent
 on completing the A3 target proof first.
 
-Final A3 worktree diff against the concurrent `7bec67f` HEAD has three
+Initial A3 worktree diff against the concurrent `7bec67f` HEAD had three
 tracked modifications (`db.js`, Operations fixture and A2 test), plus ten
 new files: worker schema, worker boundary, browser broker, worker test,
 synthetic browser proof, three LXC probe scripts, this evidence and the A4

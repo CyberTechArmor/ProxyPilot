@@ -2,7 +2,7 @@
 
 Do not execute merely by reading this file. **A3 remains blocked** at the
 [A3 evidence](fractionate-agents-a3-evidence.md). Before A4 implementation,
-obtain a separately reviewed disposable Incus VM target and finish A3: implement
+use the observed disposable Incus VM findings and finish A3: implement
 the Incus VM supervisor and browser/egress broker; prove
 the actual filesystem, socket, network, redirect, CPU, RSS, process, time,
 disk, cancellation, crash and descendant/workspace limits. Resolve the pilot's

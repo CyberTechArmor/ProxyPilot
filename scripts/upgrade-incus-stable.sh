@@ -111,7 +111,10 @@ else
     for file in /etc/subuid /etc/subgid; do
         [ ! -f "$file" ] || cp -a "$file" "$backup_dir/"
     done
-    (cd "$backup_dir" && sha256sum incus.tar local.sql global.sql > SHA256SUMS && sha256sum -c SHA256SUMS) || die 'backup checksum verification failed'
+    # tar -tf has already read the entire archive. Record a checksum for later
+    # recovery checks; hashing the same local file a second time here does not
+    # make this checkpoint more consistent and can exceed the update deadline.
+    (cd "$backup_dir" && sha256sum incus.tar local.sql global.sql > SHA256SUMS) || die 'backup checksum creation failed'
     say "rollback checkpoint: $backup_dir"
 
     # Debian-to-Zabbly transitions may replace the old Incus split packages.

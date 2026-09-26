@@ -16,8 +16,12 @@ and unrelated apt package removals. For an upgrade it saves the local and
 global SQL dumps and a full `/var/lib/incus` archive, plus recursive ZFS
 snapshots for external ZFS pool sources, before installing the pinned Zabbly
 stable package. The service is stopped during the checkpoint, so running
-guest management may be interrupted. A ZFS snapshot on the same pool is a
-rollback checkpoint, not an off-host disaster recovery backup. A failed or
+guest management may be interrupted. The archive is listed back and a SHA-256
+manifest is saved for recovery verification. Directory-pool guests may keep
+writing while the Incus daemon is stopped, so this archive is a recovery
+checkpoint rather than a transactionally consistent backup of running guest
+data. A ZFS snapshot on the same pool is also a rollback checkpoint, not an
+off-host disaster recovery backup. A failed or
 partial package upgrade needs operator recovery from the logged checkpoint;
 the script never attempts an automatic Incus downgrade after a possible DB
 schema change. Successful runs set and read back

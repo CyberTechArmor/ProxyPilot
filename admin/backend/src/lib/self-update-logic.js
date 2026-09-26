@@ -37,8 +37,9 @@ export const STANDARDS_SITE_URL = 'https://mock2.fractionate.ai';
 
 export const MCP_RUN_CONFIRM_MESSAGE =
   'Confirm with the user first: run_proxypilot_update runs update.sh on the ProxyPilot host — ' +
-  'database backup, git pull, dependency install, frontend build and a docker compose rebuild — ' +
-  'and the dashboard and this API are unreachable for about 1–2 minutes while the container restarts. ' +
+  'database and Incus checkpoint, Incus stable package upgrade, git pull, dependency install, frontend build and a docker compose rebuild. ' +
+  'Incus management and guests may be interrupted; a failed schema upgrade may need operator recovery. ' +
+  'The dashboard and this API are unreachable for about 1–2 minutes while the container restarts, and the full update may take longer. ' +
   'Re-call with confirm: true to proceed (add rebuild: true to force a rebuild when the checkout is already up to date).';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

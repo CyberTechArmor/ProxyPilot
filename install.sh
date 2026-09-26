@@ -230,6 +230,14 @@ install_incus() {
     # Verify Incus is running
     if incus version &> /dev/null; then
         log_success "Incus is running ($(incus version))"
+        incus config set images.auto_update_cached=true
+        incus config set images.auto_update_interval=6
+        if [ "$(incus config get images.auto_update_cached)" != true ] ||
+           [ "$(incus config get images.auto_update_interval)" != 6 ]; then
+            log_error 'Incus cached-image auto-update could not be verified'
+            return 1
+        fi
+        log_success 'Cached remote images will auto-update every six hours'
     else
         log_error "Incus installation succeeded but daemon is not responding"
         log_error "Try: systemctl status incus"

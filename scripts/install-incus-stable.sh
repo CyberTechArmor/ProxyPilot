@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # Install Incus from Zabbly's stable channel on a fresh Debian/Ubuntu host.
-# Existing Incus installations are deliberately left to a separate upgrade
-# with a full Incus data backup: newer daemons may migrate the database.
+# --repository-only prepares the signed source for upgrade-incus-stable.sh.
+# Only that script performs an existing-daemon upgrade, after its backup gate.
 set -euo pipefail
+
+mode=${1:-install}
+if [ "$mode" != install ] && [ "$mode" != --repository-only ]; then
+    echo 'Usage: install-incus-stable.sh [--repository-only]' >&2
+    exit 2
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
     echo 'install-incus-stable.sh must run as root' >&2
     exit 1
 fi
-if command -v incus >/dev/null 2>&1; then
+if [ "$mode" = install ] && command -v incus >/dev/null 2>&1; then
     echo 'Incus is already installed; back up its data before a separate upgrade' >&2
     exit 1
 fi
@@ -20,8 +26,17 @@ case "${ID:-}:${VERSION_CODENAME:-}" in
 esac
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y --no-install-recommends ca-certificates curl gnupg
+if [ "$mode" = --repository-only ]; then
+    for dependency in curl gpg dpkg apt-cache; do
+        command -v "$dependency" >/dev/null 2>&1 || {
+            echo "Missing $dependency; refusing package changes before the Incus checkpoint" >&2
+            exit 1
+        }
+    done
+else
+    apt-get update -y
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg
+fi
 key_file=$(mktemp)
 trap 'rm -f "$key_file"' EXIT
 curl --fail --show-error --silent --location https://pkgs.zabbly.com/key.asc -o "$key_file"
@@ -43,10 +58,14 @@ Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/zabbly.gpg
 EOF
 apt-get update -y
-candidate=$(apt-cache policy incus | awk '/Candidate:/ { print $2; exit }')
-if [ -z "$candidate" ] || [ "$candidate" = '(none)' ]; then
+candidate=$(apt-cache madison incus | awk '$3 ~ /^https:\/\/pkgs\.zabbly\.com\/incus\/stable/ { print $2; exit }')
+if [ -z "$candidate" ]; then
     echo 'No Incus candidate in the Zabbly stable channel' >&2
     exit 1
 fi
-apt-get install -y --no-install-recommends incus
+if [ "$mode" = --repository-only ]; then
+    echo "Incus stable candidate: $candidate"
+    exit 0
+fi
+apt-get install -y --no-install-recommends "incus=$candidate"
 echo "Installed Incus stable candidate $candidate"

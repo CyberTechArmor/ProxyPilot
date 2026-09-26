@@ -16,19 +16,29 @@ VM image when `--vm` is requested, even if the container variant is cached.
 
 ## Existing hosts
 
-`install.sh` and `update.sh` intentionally **do not upgrade an existing Incus
-daemon** as part of an application deploy. Incus may migrate its database on
-upgrade, and downgrading packages alone may then be impossible. Before a
-separate host upgrade, inventory the host version, kernel, storage drivers,
-instances and available space; take and verify a full backup of
-`/var/lib/incus` and any external storage pool; confirm an outage window and
-a restore procedure. The current ProxyPilot MCP exposes the host package
-inventory but no host Incus package upgrade action. A UI/MCP application
-update does not change the installed daemon.
+`update.sh` now checks the signed Zabbly stable channel even when the
+ProxyPilot checkout is current. If a newer Incus package is available, its
+single-host upgrade step requires Linux 6.12 or later, an apt simulation with
+no non-Incus package removals, a readable instance and storage inventory,
+adequate backup space, a verified archive of `/var/lib/incus`, SQL dumps and
+recursive ZFS snapshots of external Incus storage. Unknown storage drivers,
+external directory pools and clustered servers fail closed. The updater
+records the checkpoint path and verifies daemon response and instance count
+after the package change. It does not automatically downgrade a daemon whose
+database may have migrated; the checkpoint is retained for operator recovery.
+The Incus package step can interrupt Incus management and guests during the
+service/package restart. A full update can take longer than a dashboard-only
+rebuild.
 
-On the observed pilot host, ProxyPilot MCP reported Incus
+The installer and updater explicitly set `images.auto_update_cached=true`
+and `images.auto_update_interval=6` and read them back. These settings apply
+to future alias downloads. Incus does not auto-update fingerprint-pinned
+images or previously copied images that were not marked `--auto-update`, and
+image refresh does not update an already-created guest's OS packages.
+
+Before this updater revision, the observed pilot host reported Incus
 `6.0.4-2+deb13u6`, with only `6.0.4-2+deb13u10` available from its configured
-Debian repositories. That host has not been upgraded to 7.5.1. Its A3 worker
+Debian repositories. Its A3 worker
 isolation acceptance remains blocked until a disposable target proves the
 specified network and resource controls; a newer version alone is not proof.
 
@@ -36,4 +46,6 @@ Sources: [Incus 7.5 release](https://linuxcontainers.org/incus/news/),
 [launch reference](https://linuxcontainers.org/incus/docs/main/reference/manpages/incus/launch/),
 [REST API](https://linuxcontainers.org/incus/docs/main/rest-api/),
 [Zabbly packages](https://github.com/zabbly/incus),
-[Incus backup](https://linuxcontainers.org/incus/docs/main/backup/).
+[Incus backup](https://linuxcontainers.org/incus/docs/main/backup/),
+[image handling](https://linuxcontainers.org/incus/docs/main/image-handling/),
+[current requirements](https://linuxcontainers.org/incus/docs/main/requirements/).

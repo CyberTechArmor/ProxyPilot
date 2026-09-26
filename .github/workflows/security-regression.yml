@@ -48,7 +48,8 @@ jobs:
       - name: Update recovery and runner policy regressions
         working-directory: admin/backend
         run: node --test src/__tests__/update-runner-maintenance.test.js src/__tests__/update-runner-policy.test.js src/__tests__/self-update-logic.test.js src/__tests__/self-update-runner.test.js
-      - run: bash -n install.sh update.sh
+      - run: bash -n install.sh update.sh scripts/install-incus-stable.sh scripts/upgrade-incus-stable.sh
+      - run: bash scripts/tests/incus-upgrade-preflight.sh
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10

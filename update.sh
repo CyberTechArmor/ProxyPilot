@@ -1143,52 +1143,11 @@ log "${BLUE}[3/7] Checking Incus installation...${NC}"
 if command -v incus &> /dev/null; then
     log "${GREEN}Incus is already installed ($(incus version 2>/dev/null || echo 'unknown'))${NC}"
 else
-    log "${YELLOW}Incus is not installed. Installing...${NC}"
-
-    if [ "$EUID" -ne 0 ]; then
-        log "${YELLOW}Note: Installing Incus requires root privileges. Attempting with sudo...${NC}"
-    fi
-
-    # Try installing from default repos first (Ubuntu 24.04+, Debian Trixie+)
-    INSTALL_CMD="apt-get"
-    if [ "$EUID" -ne 0 ]; then
-        INSTALL_CMD="sudo apt-get"
-    fi
-
-    $INSTALL_CMD update -y 2>&1 | tee -a "$LOG_FILE"
-    if $INSTALL_CMD install -y incus 2>/dev/null; then
-        log "${GREEN}Incus installed from default repositories${NC}"
-    else
-        # Fall back to Zabbly repository
-        log "Adding Zabbly repository for Incus..."
-
-        SUDO_CMD=""
-        if [ "$EUID" -ne 0 ]; then
-            SUDO_CMD="sudo"
-        fi
-
-        $SUDO_CMD mkdir -p /etc/apt/keyrings/
-        curl -fsSL https://pkgs.zabbly.com/key.asc | $SUDO_CMD gpg --dearmor -o /etc/apt/keyrings/zabbly.gpg
-
-        CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME}")
-
-        $SUDO_CMD tee /etc/apt/sources.list.d/zabbly-incus-stable.sources > /dev/null <<REPOEOF
-Enabled: yes
-Types: deb
-URIs: https://pkgs.zabbly.com/incus/stable
-Suites: ${CODENAME}
-Components: main
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/zabbly.gpg
-REPOEOF
-
-        $INSTALL_CMD update -y 2>&1 | tee -a "$LOG_FILE"
-        if ! $INSTALL_CMD install -y incus 2>&1 | tee -a "$LOG_FILE"; then
-            log "${RED}Failed to install Incus. LXC container features will not be available.${NC}"
-            log "${YELLOW}You can install manually: sudo apt install incus${NC}"
-        else
-            log "${GREEN}Incus installed from Zabbly repository${NC}"
-        fi
+    log "${YELLOW}Incus is not installed. Installing the current stable channel...${NC}"
+    SUDO_CMD=""
+    if [ "$EUID" -ne 0 ]; then SUDO_CMD="sudo"; fi
+    if ! (set -o pipefail; $SUDO_CMD bash "$SCRIPT_DIR/scripts/install-incus-stable.sh" 2>&1 | tee -a "$LOG_FILE"); then
+        log "${RED}Failed to install Incus. LXC container features will not be available.${NC}"
     fi
 
     # Enable and start Incus if installed

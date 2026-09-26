@@ -381,9 +381,9 @@ export default function LxcContainers() {
   // node:N-alpine line, etc.) fails OCI init unless AppArmor is
   // unconfined — which is what the Privileged toggle now bundles.
   // Operators who want stricter isolation untick before creating.
-  const [imageSelection, setImageSelection] = useState('');
+  const [imageSelection, setImageSelection] = useState('images:debian/13');
   const [createForm, setCreateForm] = useState({
-    name: '', image: '', type: 'container',
+    name: '', image: 'images:debian/13', type: 'container',
     cpu: '', memory: '', initScript: '',
     dockerSupport: true, dockerPrivileged: true,
     services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }],
@@ -607,8 +607,8 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', type: 'container', cpu: '', memory: '', initScript: '', dockerSupport: true, dockerPrivileged: true, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
-            setImageSelection('');
+            setCreateForm({ name: '', image: 'images:debian/13', type: 'container', cpu: '', memory: '', initScript: '', dockerSupport: true, dockerPrivileged: true, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
+            setImageSelection('images:debian/13');
             setTemplateSelection('');
             if (status.initScriptWarning) {
               toast({
@@ -2089,10 +2089,13 @@ export default function LxcContainers() {
                         });
                     }
                     const showFallback = !imageCatalogLoading && (imageCatalogError || !liveAvailable);
-                    // A cached container image does not make its VM image available.
-                    // Incus pulls the VM variant of this alias on launch with --vm.
-                    const showRemoteDebianVm = createForm.type === 'virtual-machine' &&
-                      !liveOptions.some((option) => option.value === 'images:debian/12');
+                    // A cached container image does not make its VM variant
+                    // available. Keep the current Debian remote alias visible
+                    // for both types, plus Debian 12 for older VM workloads.
+                    const remoteDebian = PRESET_IMAGES.filter((img) =>
+                      img.value === 'images:debian/13' ||
+                      (createForm.type === 'virtual-machine' && img.value === 'images:debian/12')
+                    ).filter((img) => !liveOptions.some((option) => option.value === img.value));
                     return (
                       <>
                         <Select
@@ -2131,11 +2134,11 @@ export default function LxcContainers() {
                                 No cached {createForm.type === 'virtual-machine' ? 'VM' : 'container'} images. Use Custom image below to pull one.
                               </div>
                             )}
-                            {!imageCatalogLoading && showRemoteDebianVm && (
-                              <SelectItem value="images:debian/12">Debian 12 (Bookworm)</SelectItem>
-                            )}
+                            {!imageCatalogLoading && remoteDebian.map((img) => (
+                              <SelectItem key={img.value} value={img.value}>{img.label}</SelectItem>
+                            ))}
                             {showFallback && PRESET_IMAGES.filter((img) =>
-                              createForm.type !== 'virtual-machine' || img.value !== 'images:debian/12'
+                              !remoteDebian.some((remote) => remote.value === img.value)
                             ).map((img) => (
                               <SelectItem key={img.value} value={img.value}>
                                 {img.label}
@@ -2152,7 +2155,7 @@ export default function LxcContainers() {
                       </>
                     );
                   })()}
-                  {createForm.type === 'virtual-machine' && createForm.image === 'images:debian/12' && (
+                  {createForm.type === 'virtual-machine' && /^images:debian\/(13|12)$/.test(createForm.image) && (
                     <p className="text-xs text-muted-foreground">Incus downloads the Debian VM image when you create it.</p>
                   )}
                   {imageSelection === '__custom__' && (

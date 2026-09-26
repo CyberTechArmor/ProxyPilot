@@ -81,6 +81,10 @@ function scriptedHost(state) {
       if (verb === 'launch') {
         const name = argv[3];
         if (byName(name)) return { code: 1, stdout: '', stderr: `Error: Instance "${name}" already exists` };
+        if (state.rootFails && argv.includes('--device')) {
+          if (state.launchLeavesHalf) state.instances.push({ name, status: 'Stopped', created_at: '2026-09-22T12:00:05Z', config: {}, snapshots: [] });
+          return { code: 1, stdout: '', stderr: 'Error: Block volumes cannot be shrunk' };
+        }
         if (state.launchFails) { if (state.launchLeavesHalf) state.instances.push({ name, status: 'Stopped', created_at: '2026-09-22T12:00:05Z', config: {}, snapshots: [] }); return { code: 1, stdout: '', stderr: 'Error: Failed instance creation: image not found' }; }
         state.launched = argv;
         state.instances.push({ name, status: 'Running', created_at: '2026-09-22T12:00:05Z', config: { 'volatile.uuid': UUID_B, ...Object.fromEntries(argv.filter((a, i) => argv[i - 1] === '--config').map((kv) => kv.split('='))) }, snapshots: [] });
@@ -157,7 +161,7 @@ test('validation is strict: names, flags and an allowlisted launch config; never
   bad('instance_create', { container: 'pp-new', image: 'images:debian/12', rootSize: '20' }, /rootSize/);
   bad('instance_start', { container: 'pp-x', image: 'images:debian/12' }, /carries no image/);
   bad('snapshot_create', { container: 'pp-x', snapshot: 's', note: 'AUTH_MASTER_SECRET=abcdefghijklmnop' }, /looks like a secret/);
-  assert.deepEqual(Object.keys(LAUNCH_CONFIG_ALLOWLIST).sort(), ['boot.autostart', 'limits.cpu', 'limits.memory', 'raw.lxc', 'security.nesting', 'security.privileged', 'security.syscalls.intercept.bpf', 'security.syscalls.intercept.bpf.devices', 'security.syscalls.intercept.mknod', 'security.syscalls.intercept.setxattr']);
+  assert.deepEqual(Object.keys(LAUNCH_CONFIG_ALLOWLIST).sort(), ['boot.autostart', 'limits.cpu', 'limits.memory', 'raw.lxc', 'security.guestapi', 'security.nesting', 'security.privileged', 'security.syscalls.intercept.bpf', 'security.syscalls.intercept.bpf.devices', 'security.syscalls.intercept.mknod', 'security.syscalls.intercept.setxattr']);
   // validateRunnerJob delegates: a lifecycle job with argv never becomes a queued job.
   assert.match(validateRunnerJob({ kind: 'instance_start', app: 'pp-x', plan: { params: { container: 'pp-x', argv: ['x'] } } }).reason, /never carries a command/);
   assert.equal(validateRunnerJob({ kind: 'snapshot_create', app: 'pp-x', plan: { params: { container: 'pp-x', snapshot: 's' } } }).ok, true);
@@ -297,14 +301,13 @@ test('instance_delete: bound to the confirmed identity; a running guest is stopp
   assert.deepEqual(mutations(h), [['incus', 'stop', 'pp-x']]); assert.equal(st.instances.length, 1);
 });
 
-test('instance_create: launch with the allowlisted config and the VM flag, verified Running, the root size a best-effort follow-up; an existing name is refused before launch; a failed launch removes the half-created guest', async () => {
+test('instance_create: explicit root size is applied at launch or fails closed; an existing name is refused and a failed launch removes a half-created guest', async () => {
   const d = db();
   const st = { instances: [] }; const h = scriptedHost(st);
   const c = submit(d, 'instance_create', { container: 'pp-new', image: 'images:debian/12', profile: 'default', vm: true, rootSize: '20GiB', config: { 'limits.cpu': '2', 'limits.memory': '2GiB', 'security.nesting': 'true' } });
   const out = await runAll(d, exec(h), T0 + 1);
   assert.equal(out.ran[0].status, 'succeeded', getJob(d, c.job.id).reason);
-  assert.deepEqual(st.launched, ['incus', 'launch', 'images:debian/12', 'pp-new', '--profile', 'default', '--config', 'security.nesting=true', '--config', 'limits.cpu=2', '--config', 'limits.memory=2GiB', '--vm']);
-  assert.equal(st.rootSize, 'size=20GiB');
+  assert.deepEqual(st.launched, ['incus', 'launch', 'images:debian/12', 'pp-new', '--profile', 'default', '--config', 'security.nesting=true', '--config', 'limits.cpu=2', '--config', 'limits.memory=2GiB', '--device', 'root,size=20GiB', '--vm']);
   const row = getJob(d, c.job.id);
   assert.equal(row.outcome, 'created'); assert.equal(resultFromJob(row).instanceState, 'Running');
   assert.deepEqual(parseJson(row.progress_json).generated.map((g) => ({ kind: g.kind, name: g.name })), [{ kind: 'instance', name: 'pp-new' }]);
@@ -314,11 +317,17 @@ test('instance_create: launch with the allowlisted config and the VM flag, verif
   const dup = submit(d, 'instance_create', { container: 'pp-new', image: 'images:debian/12' }, { nowMs: T0 + 2 });
   const o2 = await runAll(d, exec(h), T0 + 3);
   assert.equal(o2.ran[0].status, 'refused'); assert.match(getJob(d, dup.job.id).reason, /pp-new already exists \(status Running\); a create never replaces/); assert.deepEqual(mutations(h), []);
-  // Root size refused by the profile: a warning, not a failure.
+  // Root size refused by Incus: no larger profile-default guest is reported
+  // as a successful create. The launch's half-created guest is removed.
   st.rootFails = true; h.calls.length = 0;
+  st.launchLeavesHalf = true;
   const w = submit(d, 'instance_create', { container: 'pp-vm2', image: 'images:debian/12', vm: true, rootSize: '20GiB' }, { nowMs: T0 + 4 });
   await runAll(d, exec(h), T0 + 5);
-  assert.equal(getJob(d, w.job.id).status, 'succeeded'); assert.match(resultFromJob(getJob(d, w.job.id)).warnings[0], /root disk size could not be set/);
+  assert.equal(getJob(d, w.job.id).status, 'failed');
+  assert.match(getJob(d, w.job.id).reason, /Block volumes cannot be shrunk/);
+  assert.equal(st.instances.some((instance) => instance.name === 'pp-vm2'), false);
+  st.rootFails = false;
+  st.launchLeavesHalf = false;
   // A failed launch that left a half-created guest: cleaned up, reported failed at issue.
   st.launchFails = true; st.launchLeavesHalf = true; h.calls.length = 0;
   const f = submit(d, 'instance_create', { container: 'pp-half', image: 'images:nope' }, { nowMs: T0 + 6 });
@@ -797,7 +806,7 @@ test('the runner\'s host channel receives the rendered argv as one spawn — no 
   const spawned = [];
   const spawnImpl = (bin, args, opts) => {
     spawned.push([bin, ...args]);
-    return spawn('true', [], opts);
+    return spawn(process.execPath, ['-e', 'process.exit(0)'], opts);
   };
   const ex = hostGuestExec({ spawnImpl });
   for (const [kind, p] of [['instance_stop', { container: 'pp-x', force: true }], ['snapshot_delete', { container: 'pp-x', snapshot: 'a.b' }], ['instance_create', { container: 'pp-n', image: 'images:debian/12', config: { 'security.nesting': 'true' } }]]) {

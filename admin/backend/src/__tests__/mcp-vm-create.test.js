@@ -13,7 +13,8 @@ test('MCP VM plan reaches Incus as a VM without container privileges or guest AP
   assert.deepEqual(argv, ['incus', 'launch', 'images:debian/12', 'pp-a3-test',
     '--profile', 'default', '--config', 'security.nesting=false',
     '--config', 'security.guestapi=false', '--config', 'limits.cpu=1',
-    '--config', 'limits.memory=512MiB', '--config', 'boot.autostart=false', '--vm']);
+    '--config', 'limits.memory=512MiB', '--config', 'boot.autostart=false',
+    '--device', 'root,size=4GiB', '--vm']);
   assert.equal(options.dockerReady, false);
   assert.match(mcpGuestCreateOptions({ vm: true, docker_ready: true }).error, /cannot be enabled/);
 });

@@ -3,8 +3,8 @@
 Do not execute merely by reading this file. A2 is merged as PR #677 at
 `ade9a783d1b80058f8bbcd255872d229bfdd17bc`; its metadata gate remains
 off. A3 is **not accepted**. Draft PR #680 is open at
-`031883ba6d3105d4c4788bf2125c0dae3ce64e75`; Security regression run
-`36241086515` passed at that head, but the disposable Debian VM failed the
+`1d57f9ce0cc483950886a23438809113d1a90554`; Security regression run
+`36251836583` passed at that head, but the disposable Debian VM failed the
 required boundary checks. Recheck these revisions and the current `main`
 before working. No Operations project UUID or live site is needed for A3.
 
@@ -31,6 +31,31 @@ controls. Use ProxyPilot MCP for host and guest operations, consistent with
 the user's MCP-only direction. The generic VM created for earlier A3 probes
 is stopped with autostart off and is **not** an isolated worker.
 
+Build a minimal Debian 13 browser-worker image. Provision **2 vCPU, 4 GiB
+guest RAM and 12 GiB root disk** as a provisional starting size, with no
+swap. This is installed VM capacity, not a project run quota or a claim that
+host QEMU RSS is capped at 4 GiB. Install only the OS, Chromium, required
+fonts/libraries, the narrow broker client and the smallest human-view/control
+transport that can be proved. Keep the model/provider and management services
+outside the guest; do not install Docker or a general desktop stack. Use the
+current Incus instance CPU/memory options and root disk device size, then
+read back the actual guest and host values. A best-effort disk override is
+insufficient. The prior 4 GiB root request could not shrink the image and
+left a 9.6 GiB filesystem. If 12 GiB cannot be applied, record the smallest
+supported size and why before proceeding.
+
+Run repeated cold browser starts, the approved synthetic sign-in and a
+human takeover/view session while measuring host QEMU+descendant RSS, guest
+memory, CPU pressure, free disk and action latency. Retain enough headroom
+for a browser restart, log growth and a security update. If this starting
+size fails, increase only the failing dimension and record the smallest
+passing measured size. If a smaller size passes the same proof with headroom,
+reduce it. An unset project resource limit remains unbounded by project
+policy, but the VM still starts with finite capacity and may need a fenced,
+measured resize for a larger task. A configured project CPU or memory limit
+below the proven minimum must fail before launch; it must not be silently
+raised. Keep the private temporary-workspace budget separate from root size.
+
 Complete an enforceable A3 launch/stop supervisor and typed browser broker.
 Bind stable run/attempt IDs and a durable fence to the actual VM identity
 and boot generation. Create a private per-attempt workspace, one active
@@ -49,10 +74,10 @@ guest-visible `free` result or configured `limits.cpu` alone is not proof.
 If the target cannot enforce a configured limit or run a browser within it,
 fail closed and document the observed blocker.
 
-The current reviewed A3 head still contains illustrative 1-vCPU, 512-MiB,
-128-MiB, 300-second and 20-action constants. The 2026-09-26 local follow-up
-adds migration 1108 and project-owned optional limits; review its exact diff
-and test results before continuing. An absent project limit is unbounded by
+The latest reviewed A3 head adds migration 1108 and project-owned optional
+limits, replacing the illustrative 1-vCPU, 512-MiB, 128-MiB, 300-second and
+20-action constants. Review its exact diff and test results before continuing.
+An absent project limit is unbounded by
 project policy. Pin the project policy revision, and enforce configured totals
 across restarts and attempts. Lease renewal and checkpointing must not reset a
 configured total. A worker or model cannot extend its own limits; a project
@@ -73,7 +98,8 @@ delivery remains outside this sign-in pilot.
 
 ## Acceptance and handoff
 
-On the disposable VM, prove approved-origin browser access and negative
+On the disposable VM, prove approved-origin browser access and a usable
+human view/control handoff, plus negative
 host-file, socket, management-network, public-egress, redirect and broker
 escape cases. Set disposable test limits and force CPU, memory, process,
 time, disk and action overruns against those settings.

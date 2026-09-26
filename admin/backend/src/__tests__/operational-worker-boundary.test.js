@@ -2,20 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { operationsFixture } from './helpers/operations-fixture.js';
-import { BROWSER_ACTIONS, WORKER_TARGET, createOperationalWorkerStore,
-  createWorkerLauncher, validateBrowserAction, validateWorkerLaunch } from '../lib/operational-worker-boundary.js';
+import { BROWSER_ACTIONS, WORKER_INSTALL_BASELINE, WORKER_TARGET, createOperationalWorkerStore,
+  createWorkerLauncher, validateBrowserAction, validateWorkerLaunch, workerInstallResources } from '../lib/operational-worker-boundary.js';
 import { createSyntheticSignInBrowserBroker, permitsSyntheticRequest } from '../lib/operational-browser-broker.js';
 
 const hash = 'a'.repeat(64);
 const launch = () => ({run_id:randomUUID(),attempt_id:randomUUID(),fence:1,
-  policy_digest:hash,origin:'https://demo.fractionate.ai',target:WORKER_TARGET,limits:{}});
+  policy_digest:hash,origin:'https://demo.fractionate.ai',target:WORKER_TARGET,limits:{},
+  install:{...WORKER_INSTALL_BASELINE}});
 
 test('typed launch and browser broker refuse caller-selected capabilities; absent OS runner fails closed', async () => {
   const spec=launch();
   assert.equal(validateWorkerLaunch(spec).target,WORKER_TARGET);
+  assert.deepEqual(validateWorkerLaunch(spec).install,WORKER_INSTALL_BASELINE);
   assert.equal(validateWorkerLaunch({...spec,limits:{cpu:2,memory_mib:4096,max_seconds:3600}}).limits.max_seconds,3600);
+  assert.deepEqual(workerInstallResources({cpu:4,memory_mib:8192}),
+    {cpu:4,memory_mib:8192,root_disk_gib:12});
   for (const patch of [{argv:['sh']},{origin:'https://other.test'},{limits:{memory_mib:-1}},
-    {limits:{shell:true}},
+    {limits:{shell:true}},{limits:{cpu:1}},{limits:{memory_mib:2048}},
+    {install:{cpu:1,memory_mib:4096,root_disk_gib:12}},
     {target:'host-root'},{policy_digest:'bad'}])
     assert.throws(()=>validateWorkerLaunch({...spec,...patch}));
   const action={run_id:spec.run_id,attempt_id:spec.attempt_id,fence:1,action:'open_landing'};
@@ -70,7 +75,7 @@ test('durable single profile run, attempt fence, action quota, launch failure an
     f.store.grant(owner,p.id,reviewer.id,p.revision,{role:'reviewer'});
     f.store.site(owner,p.id,f.store.get(owner,p.id).revision,{site_origin:'https://demo.fractionate.ai'});
     f.store.agentLimits(owner,p.id,f.store.get(owner,p.id).revision,
-      {limits:{cpu:2,memory_mib:1024,temporary_disk_mib:256,max_seconds:300,max_actions:20}});
+      {limits:{cpu:2,memory_mib:4096,temporary_disk_mib:256,max_seconds:300,max_actions:20}});
     const created=f.store.createProfile(owner,p.id,f.store.get(owner,p.id).revision,
       {display_name:'Synthetic',workflow_type:'synthetic_sign_in',proposed_actions:['navigate','read'],
         proposed_origins:['https://demo.fractionate.ai']}).profile;
@@ -91,7 +96,8 @@ test('durable single profile run, attempt fence, action quota, launch failure an
     assert.throws(()=>workers.prepare(config),/UNIQUE/);
     const a=workers.reserveAttempt(r.run_id);
     assert.deepEqual(workers.launchSpec(a).limits,
-      {cpu:2,memory_mib:1024,temporary_disk_mib:256,max_seconds:300,max_actions:20});
+      {cpu:2,memory_mib:4096,temporary_disk_mib:256,max_seconds:300,max_actions:20});
+    assert.deepEqual(workers.launchSpec(a).install,WORKER_INSTALL_BASELINE);
     const actionRef={run_id:a.run_id,attempt_id:a.attempt_id,fence:a.fence};
     assert.throws(()=>workers.reserveAttempt(r.run_id),{code:'RUN_NOT_PREPARED'});
     workers.markRunning(a);
@@ -159,6 +165,9 @@ test('durable single profile run, attempt fence, action quota, launch failure an
     assert.throws(()=>workers.authorizeAction(unboundedAction),{code:'STALE_CONFIGURATION'});
     assert.deepEqual(workers.recover(),[unbounded.run_id]);
     workers.finishStop(unbounded.run_id,'blocked',teardown(unbounded.run_id,unboundedAttempt));
+    f.store.agentLimits(owner,p.id,f.store.get(owner,p.id).revision,{limits:{cpu:1}});
+    assert.throws(()=>workers.prepare(config),{code:'PROJECT_LIMIT_BELOW_WORKER_MINIMUM'});
+    f.store.agentLimits(owner,p.id,f.store.get(owner,p.id).revision,{limits:{max_actions:1}});
     const siteChange=workers.prepare(config), siteAttempt=workers.reserveAttempt(siteChange.run_id);
     workers.markRunning(siteAttempt);
     f.store.site(owner,p.id,f.store.get(owner,p.id).revision,{site_origin:null});

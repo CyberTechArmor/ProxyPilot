@@ -580,3 +580,48 @@ ship together when this gated feature is later activated. An older A3 writer
 cannot safely create a run after the project policy changes because it does
 not pin `agent_limits_revision`; do not use it for execution. No OS runner
 exists at either revision.
+
+## 2026-09-26 provisional browser VM install size
+
+The user requested the smallest practical installed CPU/RAM/disk for the A3
+browser, agent broker and human interaction. The typed launch contract now
+derives a provisional **2-vCPU, 4096-MiB guest RAM, 12-GiB root disk** install
+shape when project resource fields are unset. If project CPU or memory is
+configured above that floor, the install shape uses the configured value; a
+value below the floor fails before run preparation. This is VM capacity, not
+a run quota. `temporary_disk_mib` remains a separate optional project limit.
+The OS launcher still returns `BOUNDARY_UNVERIFIED`, so no VM was installed
+or resized and this size has **not** passed browser or host-resource proof.
+
+The choice uses the earlier 512-MiB VM's timed-out Chromium probes and failed
+4-GiB root shrink as negative observations. ProxyPilot's generic MCP guest
+creation already defaults to 2 vCPU/4 GiB RAM and describes 2 GiB browser
+OOM experience; that description is a sizing clue, not A3 proof. Debian's
+[Chromium package](https://packages.debian.org/trixie/chromium) is roughly
+320 MB installed before dependencies and cache. Current
+[Incus instance options](https://linuxcontainers.org/incus/docs/main/reference/instance_options/)
+support VM `limits.cpu` and `limits.memory`; the
+[root disk device](https://linuxcontainers.org/incus/docs/main/reference/devices_disk/)
+supports a size value. The 12-GiB root proposal is above the prior image's
+9.6-GiB inherited filesystem and below ProxyPilot's generic 20-GiB VM
+default. A3 must measure host QEMU/descendant RSS separately from guest RAM,
+read back the actual root size, and resize only from representative browser
+and human takeover results. Incus container-only process/CPU allowance
+controls cannot prove equivalent VM limits.
+
+Local validation for this follow-up: the affected native Operations suite
+passed **67/67**; the frontend production build passed; the host-boundary
+inventory returned **96 candidate files, S6 open**, without suppression;
+`git diff --check` found no whitespace errors (only Windows line-ending
+warnings). No new target proof, feature activation, deployment or merge is
+claimed. The updated bounded work prompt is
+[A3 continuation](fractionate-agents-a3-continuation-prompt.md).
+
+Follow-up source SHA-256 before submission:
+
+| File | SHA-256 |
+|---|---|
+| `admin/backend/src/lib/operational-worker-boundary.js` | `4b7a4b620f246ae2b1650fa96f1505afbf53105ce081f4e4885fe7d595e15fe9` |
+| `admin/backend/src/__tests__/operational-worker-boundary.test.js` | `978dc7ccaded3dd6814cdfc2cc311c33e0eb5e315e2de499740eff6306785683` |
+| `admin/frontend/src/components/operational-projects/AccessPolicy.jsx` | `af2e9ee54748b224ad9749e90bfa8a0d3ff00e74184d3ac2192f3f9a4d2f7c38` |
+| `docs/plans/fractionate-agents-a3-continuation-prompt.md` | `a2b3f957102491c5e5b82a7e0321c6443195840c7794c8cf2da16bbed9a9552d` |

@@ -7,6 +7,9 @@ import { agentLimits } from './operational-projects-logic.js';
 export const WORKER_TARGET = 'incus-disposable-vm-browser-v1';
 // Resource and run caps are project policy. An empty object means that the
 // owner has not configured a cap; it never authorizes an unverified runner.
+// A VM still needs finite installed capacity. This is a provisional boot
+// floor, not a project quota; A3 must measure it on the disposable target.
+export const WORKER_INSTALL_BASELINE = Object.freeze({cpu:2,memory_mib:4096,root_disk_gib:12});
 export const BROWSER_ACTIONS = Object.freeze([
   'open_landing', 'open_login', 'submit_bound_fixture', 'read_workspace',
   'read_session', 'read_files', 'sign_out',
@@ -21,13 +24,26 @@ const fields = (value, names) => value && typeof value === 'object' &&
   !Array.isArray(value) && Object.keys(value).sort().join(',') === [...names].sort().join(',');
 const validUuid = value => typeof value === 'string' && UUID.test(value);
 
+export function workerInstallResources(limits) {
+  const parsed=agentLimits.safeParse(limits);
+  if (!parsed.success) fail('INVALID_PROJECT_LIMITS');
+  const cpu=parsed.data.cpu??WORKER_INSTALL_BASELINE.cpu;
+  const memory_mib=parsed.data.memory_mib??WORKER_INSTALL_BASELINE.memory_mib;
+  if (cpu<WORKER_INSTALL_BASELINE.cpu || memory_mib<WORKER_INSTALL_BASELINE.memory_mib)
+    fail('PROJECT_LIMIT_BELOW_WORKER_MINIMUM');
+  return Object.freeze({cpu,memory_mib,root_disk_gib:WORKER_INSTALL_BASELINE.root_disk_gib});
+}
+
 export function validateWorkerLaunch(value) {
-  if (!fields(value, ['run_id','attempt_id','fence','policy_digest','origin','target','limits'])) fail('INVALID_LAUNCH');
+  if (!fields(value, ['run_id','attempt_id','fence','policy_digest','origin','target','limits','install'])) fail('INVALID_LAUNCH');
   if (!validUuid(value.run_id) || !validUuid(value.attempt_id) ||
       !Number.isSafeInteger(value.fence) || value.fence < 1 || !HASH.test(value.policy_digest || '') ||
       value.origin !== 'https://demo.fractionate.ai' || value.target !== WORKER_TARGET ||
       !agentLimits.safeParse(value.limits).success) fail('INVALID_LAUNCH');
-  return Object.freeze({...value, limits: Object.freeze({...value.limits})});
+  const install=workerInstallResources(value.limits);
+  if (!fields(value.install,Object.keys(WORKER_INSTALL_BASELINE)) ||
+      Object.keys(install).some(key=>value.install[key]!==install[key])) fail('INVALID_LAUNCH');
+  return Object.freeze({...value, limits: Object.freeze({...value.limits}),install});
 }
 
 export function validateBrowserAction(value) {
@@ -130,6 +146,7 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
           fail('STALE_CONFIGURATION');
         profilePolicy(p,input.site_origin);
         const limits=projectLimits(project);
+        workerInstallResources(limits);
         const id = uuid(), now = clock();
         const deadlineMs=limits.max_seconds == null ? null : now.getTime() + limits.max_seconds*1000;
         if (deadlineMs != null && (!Number.isFinite(deadlineMs) || deadlineMs > 8.64e15)) fail('INVALID_PROJECT_LIMITS');
@@ -187,9 +204,10 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
           r.fence!==ref.fence || a.fence!==ref.fence || stamp()>=a.lease_expires_at ||
           (r.deadline_at && stamp()>=r.deadline_at)) fail('STALE_WORKER');
       const {project}=assertPinnedConfiguration(r);
+      const limits=projectLimits(project);
       return validateWorkerLaunch({run_id:r.id,attempt_id:a.id,fence:a.fence,
         policy_digest:r.policy_digest,origin:r.site_origin,target:WORKER_TARGET,
-        limits:projectLimits(project)});
+        limits,install:workerInstallResources(limits)});
     },
     authorizeAction(request) {
       validateBrowserAction(request);

@@ -36,7 +36,7 @@ export function AccessPolicy({base,project,onChanged}) {
     </form>
     <form className="space-y-3" onSubmit={e=>{e.preventDefault();const configured=Object.fromEntries(limitFields.filter(([key])=>limits[key]!==''&&limits[key]!=null).map(([key])=>[key,Number(limits[key])]));save(()=>api.write(`${base}/agent-limits`,{limits:configured},project.revision,'PUT'),'Project run limits saved.');}}>
       <h3 className="font-semibold">Agent run limits</h3>
-      <p className="text-sm">Leave a field blank for no project limit. Changes are audited and invalidate a prepared run using an older policy. Agent execution remains disabled.</p>
+      <p className="text-sm">Leave a field blank for no project limit. The proposed A3 browser VM starts at 2 vCPU, 4 GiB RAM and 12 GiB root disk; a CPU or memory limit below that prevents its launch. This starting size still needs VM proof. Changes are audited and invalidate a prepared run using an older policy. Agent execution remains disabled.</p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{limitFields.map(([key,label])=><Field key={key} label={label} type="number" min={key==='max_usd'?'0.01':'1'} step={key==='max_usd'?'0.01':'1'} value={limits[key]} disabled={busy||!!project.archived_at} onChange={e=>setLimits({...limits,[key]:e.target.value})}/>)}</div>
       <Action type="submit" disabled={busy||!!project.archived_at}>Save project limits</Action>
     </form>

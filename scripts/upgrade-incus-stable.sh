@@ -15,7 +15,7 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 before_version=$(incus version) || die 'the installed Incus daemon is not responding'
 before_instances=$(incus list --all-projects --format json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') || die 'cannot list instances across all projects'
 server_json=$(incus query /1.0) || die 'cannot inspect the Incus server'
-if ! printf '%s' "$server_json" | python3 -c 'import json,sys; e=json.load(sys.stdin)["metadata"]["environment"]; sys.exit(0 if e.get("server_clustered") is False else 1)'; then
+if ! printf '%s' "$server_json" | python3 -c 'import json,sys; o=json.load(sys.stdin); e=o.get("metadata",o)["environment"]; sys.exit(0 if e.get("server_clustered") is False else 1)'; then
     die 'cluster status is unknown or clustered; a coordinated Incus upgrade is required'
 fi
 # Incus 7.x requires Linux >= 6.12. Check before touching apt sources.

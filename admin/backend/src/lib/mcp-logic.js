@@ -1276,12 +1276,12 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'create_lxc_container',
-    description: 'Create a new Incus container or VM as a setup-engine job. vm:true creates a VM with nesting and guest API disabled; Docker-ready flags are refused for VMs. Creation fails if the name exists and never replaces it. The root disk override is best effort, and the default profile/network do not constitute an isolated worker boundary. Waits briefly for a DHCP lease and returns the Incus instance type and detail. Requires confirm:true.',
+    description: 'Create a new Incus container or VM as a setup-engine job. vm:true creates a VM with nesting and guest API disabled; Docker-ready flags are refused for VMs. Creation fails if the name exists and never replaces it. An explicit root disk size is applied at launch or creation fails; the default profile/network do not constitute an isolated worker boundary. Waits briefly for a DHCP lease and returns the Incus instance type and detail. Requires confirm:true.',
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Guest name (ProxyPilot adds its pp- prefix). Fails if taken.' },
-        image: { type: 'string', description: 'Incus image alias, default images:debian/12.' },
+        image: { type: 'string', description: 'Incus image alias, default images:debian/13.' },
         vm: { type: 'boolean', description: 'Create a virtual machine instead of a container. Default false.' },
         cpu: { type: 'number', description: 'vCPU limit, default 2.' },
         memory_gb: { type: 'number', description: 'RAM limit in GB, default 4. Browser workloads need >= 4 — Chrome OOMs at 2.' },

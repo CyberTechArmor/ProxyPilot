@@ -20,7 +20,7 @@
 // a guest or a snapshot keeps its evidence after the resource is gone.
 
 import {
-  LIFECYCLE_PROFILE, validateLifecycleParams, lifecycleArgv, instanceListArgv, rootSizeArgv, snapshotNoteArgv, cleanupArgv,
+  LIFECYCLE_PROFILE, validateLifecycleParams, lifecycleArgv, instanceListArgv, snapshotNoteArgv, cleanupArgv,
   instanceIdentity, snapshotIdentity, identityMatches, stateVerdict, alreadyDone, lifecycleOutcomeStep, lifecycleVerification, setupFollowUpFor,
 } from './lifecycle-logic.js';
 import { parseInstanceList } from './restore-logic.js';
@@ -183,12 +183,8 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
   }
   if (!verdict.ok) return fail('verify', `incus ${kind.replace('_', ' ')} exited ${issue.code} but ${what} reads ${verdict.observed}, not ${verdict.expected}; not claiming success`, { issued: true, instanceState: verdict.observed, identity, verification: lifecycleVerification(kind, verdict, { container: name, snapshot: snap }) });
 
-  // 5) the best-effort extras a create / snapshot carries, never a failure.
+  // 5) a snapshot's best-effort note, never a failure.
   const warnings = [];
-  if (kind === 'instance_create' && p.rootSize) {
-    const d = await host(rootSizeArgv(name, p.rootSize), { timeoutMs: 30_000 });
-    if (d.code !== 0) warnings.push(`root disk size could not be set (${tailOf(d, 200)}) — the profile default applies`);
-  }
   if (kind === 'snapshot_create' && p.note) {
     const n = await host(snapshotNoteArgv(name, snap, p.note), { timeoutMs: 10_000 });
     if (n.code !== 0) warnings.push(`the note could not be recorded on the snapshot (${tailOf(n, 200)})`);

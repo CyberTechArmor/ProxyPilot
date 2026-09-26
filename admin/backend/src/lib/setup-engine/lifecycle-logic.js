@@ -14,7 +14,7 @@
 //   instance_stop      incus stop <name> [--force]               → Stopped
 //   instance_restart   incus restart <name> [--force]            → Running
 //   instance_delete    (incus stop <name> [--force];) incus delete <name> → absent
-//   instance_create    incus launch <image> <name> --profile <p> [--config k=v]… [--vm] [--network <bridge>] → present, Running
+//   instance_create    incus launch <image> <name> --profile <p> [--config k=v]… [--device root,size=<size>] [--vm] [--network <bridge>] → present, Running
 //   snapshot_create    incus snapshot create <name> <snap> (legacy form discovered) [+ user.note] → snapshot present
 //   snapshot_delete    incus snapshot delete <name> <snap>       → snapshot absent
 //
@@ -118,7 +118,7 @@ export function validateLifecycleParams(kind, p = {}) {
     return { ok: false, reason: `a ${kind} job carries no note` };
   }
   if (kind === 'instance_create') {
-    if (!IMAGE_ALIAS_RE.test(String(p.image || '')) || String(p.image).startsWith('-')) return { ok: false, reason: 'image must be an Incus image alias (e.g. images:debian/12)' };
+    if (!IMAGE_ALIAS_RE.test(String(p.image || '')) || String(p.image).startsWith('-')) return { ok: false, reason: 'image must be an Incus image alias (e.g. images:debian/13)' };
     if (p.profile != null && !PROFILE_NAME_RE.test(String(p.profile))) return { ok: false, reason: 'profile must be a profile name' };
     if (p.network != null && !NETWORK_NAME_RE.test(String(p.network))) return { ok: false, reason: 'network must be a bridge name' };
     if (!isBool(p.vm)) return { ok: false, reason: 'vm must be a boolean' };
@@ -155,6 +155,9 @@ export function lifecycleArgv(kind, p, { snapshotForm = 'subcommand' } = {}) {
     case 'instance_create': {
       const argv = ['incus', 'launch', String(p.image), name, '--profile', String(p.profile || 'default')];
       for (const k of Object.keys(LAUNCH_CONFIG_ALLOWLIST)) if (p.config && p.config[k] != null) argv.push('--config', `${k}=${p.config[k]}`);
+      // An Incus VM block volume cannot be shrunk after launch. Apply an
+      // explicit root size atomically at creation, or fail the launch.
+      if (p.rootSize) argv.push('--device', `root,size=${p.rootSize}`);
       if (p.network) argv.push('--network', String(p.network));
       if (p.vm === true) argv.push('--vm');
       return argv;
@@ -167,8 +170,7 @@ export function lifecycleArgv(kind, p, { snapshotForm = 'subcommand' } = {}) {
 
 // The read every lifecycle job does before and after its command.
 export function instanceListArgv(name) { return ['incus', 'list', String(name), '--format', 'json']; }
-// The two best-effort follow-ups a create / snapshot may carry.
-export function rootSizeArgv(name, size) { return ['incus', 'config', 'device', 'override', String(name), 'root', `size=${size}`]; }
+// A snapshot may carry a best-effort note after creation.
 export function snapshotNoteArgv(name, snap, note) { return ['incus', 'config', 'set', `${name}/snapshots/${snap}`, `user.note=${note}`]; }
 // A half-created guest left by a failed launch (validated absent first).
 export function cleanupArgv(name) { return ['incus', 'delete', String(name), '--force']; }

@@ -1010,7 +1010,7 @@ lxcRouter.post('/containers', async (req, res) => {
   if (!image) {
     return res.status(400).json({
       success: false,
-      error: 'Image is required (e.g., "ubuntu:24.04", "images:debian/12").',
+      error: 'Image is required (e.g., "ubuntu:24.04", "images:debian/13").',
     });
   }
 
@@ -1133,8 +1133,8 @@ lxcRouter.post('/containers', async (req, res) => {
   // rejects booting a VM without a limits.memory value on most stock
   // profiles — so default to 2GiB if the operator didn't pick one.
   // Containers keep the legacy "no implicit memory cap" behaviour. A VM's
-  // root disk defaults to 20GiB (best effort: some profiles carry no
-  // `root` device by name; the job then reports a warning, never a failure).
+  // root disk defaults to 20GiB and is specified in the launch command;
+  // Incus refuses creation if that size cannot be applied.
   if (cpu) launchConfig['limits.cpu'] = String(cpu);
   if (memory) launchConfig['limits.memory'] = `${memory}MB`;
   else if (isVm) launchConfig['limits.memory'] = '2GiB';

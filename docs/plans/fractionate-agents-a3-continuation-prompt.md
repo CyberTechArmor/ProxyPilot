@@ -2,12 +2,12 @@
 
 Do not execute merely by reading this file. A2 is merged as PR #677 at
 `ade9a783d1b80058f8bbcd255872d229bfdd17bc`; its metadata gate remains
-off. A3 is **not accepted**. Draft PR #680 remains open; fetch its exact
-current head and Security CI before work. The earlier project-limits head
-`1d57f9ce0cc483950886a23438809113d1a90554` passed run `36251836583`;
-the disposable Debian VM still failed the required boundary checks. Recheck
-the current PR head and `main`
-before working. No Operations project UUID or live site is needed for A3.
+off. A3 is **not accepted**. PR #680 was merged as fail-closed groundwork at
+`5946de10c7048979949fd84c1cdc3bd25a7cf605` despite the open isolation
+gate. Its exact head `4c4a3ce22086f25727302f58b1e4b61c82fcc061`
+passed Security regression run `36252438415`. Recheck the current `main`
+and any continuation PR head before working. No Operations project UUID or
+live site is needed for A3.
 
 Workspace: `C:/Users/thoma/Fractionate/OpenAI/Fractionate/ProxyPilot-batch-03`.
 
@@ -15,7 +15,7 @@ Workspace: `C:/Users/thoma/Fractionate/OpenAI/Fractionate/ProxyPilot-batch-03`.
 
 Read the official A1–A8 plan, A1 architecture, pilot contract, acceptance
 matrix and source register; the A2 evidence and exact submitted diff; the
-entire [A3 evidence](fractionate-agents-a3-evidence.md), draft PR #680 and
+entire [A3 evidence](fractionate-agents-a3-evidence.md), merged PR #680 and
 its exact diff; the host-boundary inventory; `CLAUDE.md`, adjacent `FINISH.md`
 and both trackers. Read `MOBILE_FIRST.md` if changing UI. Capture branch,
 HEAD, complete Git status, current `main`, PR head and pre-edit hashes.
@@ -112,9 +112,9 @@ explicitly leave S6/SEC-01/SEC-04 open for any control that cannot be proved.
 Run affected native SQLite/HTTP and worker tests, frontend build if touched,
 host-boundary inventory without suppression, and required Security CI for
 every submitted head. Update adjacent A3 evidence with commands, results,
-hashes, exact diff, target proof, rollback and older-writer limits. Reconcile
-draft PR #680 with current `main` only through a reviewable integration and
-fresh exact-head CI. Keep it draft and unmerged while any A3 gate remains
-open. When A3 is accepted, use the existing bounded
+hashes, exact diff, target proof, rollback and older-writer limits. Base any
+continuation on current `main` through a reviewable integration and fresh
+exact-head CI. Keep a continuation PR draft and unmerged while any A3 gate
+remains open. When A3 is accepted, use the existing bounded
 [A4 prompt](fractionate-agents-a4-prompt.md) as the next section and stop
 for review before A4 implementation.

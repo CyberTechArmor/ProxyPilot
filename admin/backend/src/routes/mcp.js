@@ -4038,6 +4038,21 @@ async function toolMoveProjectFile(args, auth) {
 
 async function toolRedeployProject(args, auth) {
   const m = await mock2Modules();
+  const current = m.projects.getProject(Number(args.project_id));
+  if (!current) return toolResult('Project not found', { isError: true });
+  if (current.lifecycle === 'failed_provisioning') {
+    const retry = await m.provision.retryFailedProvision(current);
+    logAudit(auth.created_by, 'MOCK2_PROJECT_PROVISION_RETRY', 'mock2_project', current.id,
+      { via: 'mcp', ok: retry.ok, error: retry.error || null }, null);
+    if (!retry.ok) return toolResult(retry.error, { isError: true });
+    return toolResult({
+      retry_started: true,
+      project_id: current.id,
+      container: retry.project.container_name,
+      url: projectUrl(retry.project, m.domains),
+      next: 'Provisioning is running in the background. Poll get_project until lifecycle is active or failed_provisioning.',
+    });
+  }
   const { project, error } = requireActiveProject(m, args);
   if (error) return toolResult(error, { isError: true });
   const guard = liveBuildGuard(m, project);

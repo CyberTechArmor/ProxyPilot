@@ -58,7 +58,7 @@ Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/zabbly.gpg
 EOF
 apt-get update -y
-candidate=$(apt-cache madison incus | awk '$3 ~ /^https:\/\/pkgs\.zabbly\.com\/incus\/stable/ { print $2; exit }')
+candidate=$(bash "$(dirname "${BASH_SOURCE[0]}")/incus-stable-candidate.sh")
 if [ -z "$candidate" ]; then
     echo 'No Incus candidate in the Zabbly stable channel' >&2
     exit 1

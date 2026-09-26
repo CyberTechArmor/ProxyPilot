@@ -54,7 +54,7 @@ done
 
 say "installed: $before_version; instances: $before_instances; kernel: $kernel"
 bash "$script_dir/install-incus-stable.sh" --repository-only
-stable_version=$(apt-cache madison incus | awk '$3 ~ /^https:\/\/pkgs\.zabbly\.com\/incus\/stable/ { print $2; exit }')
+stable_version=$(bash "$script_dir/incus-stable-candidate.sh")
 [ -n "$stable_version" ] || die 'no signed Zabbly stable Incus package is available'
 installed_version=$(dpkg-query -W -f='${Version}' incus) || die 'cannot read installed Incus package version'
 

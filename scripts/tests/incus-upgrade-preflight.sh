@@ -48,4 +48,14 @@ case_refuses() {
 case_refuses true 6.12.0 'cluster status is unknown or clustered' wrapped
 case_refuses null 6.12.0 'cluster status is unknown or clustered'
 case_refuses false 6.8.0 'below the Incus 7.x minimum'
-echo 'Incus upgrade preflight refusals: PASS (3 cases)'
+cat > "$fixture/apt-cache" <<'EOF'
+#!/bin/sh
+cat <<'PACKAGES'
+     incus | 6.0.4-2+deb13u10 | http://deb.debian.org/debian trixie/main amd64 Packages
+     incus | 1:7.5.1-20260925 | https://pkgs.zabbly.com/incus/stable trixie/main amd64 Packages
+PACKAGES
+EOF
+chmod +x "$fixture/apt-cache"
+candidate=$(PATH="$fixture:$PATH" bash "$root/scripts/incus-stable-candidate.sh")
+[ "$candidate" = '1:7.5.1-20260925' ] || { echo "wrong stable candidate: $candidate" >&2; exit 1; }
+echo 'Incus upgrade preflight and candidate parsing: PASS (4 cases)'

@@ -1276,7 +1276,7 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'create_lxc_container',
-    description: 'Create a new Incus container or VM as a setup-engine job. vm:true creates a VM with nesting and guest API disabled; Docker-ready flags are refused for VMs. Creation fails if the name exists and never replaces it. An explicit root disk size is applied at launch or creation fails; the default profile/network do not constitute an isolated worker boundary. Waits briefly for a DHCP lease and returns the Incus instance type and detail. Requires confirm:true.',
+    description: 'Create a new Incus container or VM as a setup-engine job. vm:true creates a VM with nesting and guest API disabled; Docker-ready flags are refused for VMs. Creation fails if the name exists and never replaces it. An explicit root disk size is applied at launch or creation fails. VM requests return a durable job id immediately; poll get_lxc_setup_jobs and read back the instance and root device before treating creation as complete. The default profile/network do not constitute an isolated worker boundary. Requires confirm:true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1285,7 +1285,7 @@ const MCP_BASE_TOOLS = [
         vm: { type: 'boolean', description: 'Create a virtual machine instead of a container. Default false.' },
         cpu: { type: 'number', description: 'vCPU limit, default 2.' },
         memory_gb: { type: 'number', description: 'RAM limit in GB, default 4. Browser workloads need >= 4 — Chrome OOMs at 2.' },
-        disk_gb: { type: 'number', description: 'Root disk in GB (best-effort override of the profile default).' },
+        disk_gb: { type: 'number', description: 'Root disk in GB, applied atomically at launch and verified after the job.' },
         docker_ready: { type: 'boolean', description: 'Containers: set nesting + Docker syscall intercepts (default true). VMs: must be false or omitted.' },
         autostart: { type: 'boolean', description: 'boot.autostart, default true.' },
         confirm: { type: 'boolean', description: 'Must be true.' },

@@ -710,3 +710,40 @@ completed successfully: frontend, backend, agent and all four audit jobs
 passed. The backend job included the unsuppressed host-boundary inventory.
 This CI pass validates that source revision; it does not close the VM target
 failures or authorize merging the draft.
+
+## 2026-09-26 correction: VM creation timed out after Incus created it
+
+The earlier `INVALID_ARGUMENT` and "no Debian 13 VM" interpretation above was
+incorrect. The connector's structured error code is generic; its text block
+contains the server's actual response. A repeated creation request for
+`agents-a3-browser-proof` took longer than the MCP gateway deadline and
+returned HTTP 504. ProxyPilot MCP readback then found a **stopped Debian 13
+virtual machine** created at `2026-09-26T18:20:24.655225835Z` with
+`limits.cpu=2`, `limits.memory=4096MiB`, `boot.autostart=false`,
+`security.nesting=false`, `security.guestapi=false`, and an instance root disk
+device of exactly `12GiB`. It had no address, browser, or human transport.
+No second guest should be launched. A subsequent start was refused because
+the previous `instance_create` setup job still held a stale lease; its exact
+job status was not available through the deployed MCP catalog. The guest
+remains stopped and is **not** an isolated worker.
+
+The underlying API issue is synchronous waiting for durable setup jobs:
+`create_lxc_container` waited through VM launch and post-launch setup, and
+`set_lxc_resources` waited through a VM snapshot and resize. Both can exceed
+the gateway deadline while the job continues or enters recovery. The local
+correction submits those VM operations and returns a job id without claiming
+completion, exposes compact per-guest setup job and lease status through MCP,
+and adds a token-gated acknowledgement for only an inspected
+`interrupted_uncertain` or `init_uncertain` job. The existing setup engine
+still binds the acknowledgement to the exact stale lease and never replays
+the uncertain operation. It does not acknowledge the live job by itself.
+
+Focused Windows validation used the dependency set installed in the sibling
+checkout: the three resource/job/acknowledgement tests and all 19 extended
+MCP catalog tests passed; the pure VM Incus argv test passed. The full
+setup-guest-config suite cannot pass on this Windows host because its
+reserved-port tests invoke Unix `sh` and `sysctl`. Security CI on the final
+submitted head is still required. The live host still runs an older checkout;
+the new MCP status and acknowledgement tools are not deployed. The job must
+be inspected and its stale lease resolved before any start or browser proof.
+S6/SEC-01/SEC-04 remain open, A3 stays inactive, and PR #686 remains draft.

@@ -31,6 +31,13 @@ currently runs Incus 7.5.1; verify that again before using version-specific
 controls. Use ProxyPilot MCP for host and guest operations, consistent with
 the user's MCP-only direction. The generic VM created for earlier A3 probes
 is stopped with autostart off and is **not** an isolated worker.
+The later `agents-a3-browser-proof` Debian 13 VM was created despite an MCP
+HTTP 504; it has 2 vCPU, 4096 MiB RAM and an explicit 12 GiB root device,
+but remains stopped behind an interrupted setup lease. Inspect its durable
+job through `get_lxc_setup_jobs` after the MCP fix is deployed, resolve the
+lease only after guest readback, and reuse this VM rather than launching
+another. The local correction is in draft PR #686; its final-head Security
+CI and live deployment remain to be verified.
 
 Build a minimal Debian 13 browser-worker image. Provision **2 vCPU, 4 GiB
 guest RAM and 12 GiB root disk** as a provisional starting size, with no

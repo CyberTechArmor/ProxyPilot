@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { agentLimits } from './operational-projects-logic.js';
 
 // Internal A3 contract. No caller-controlled argv, path, URL, selector or bytes.
-// An OS runner is deliberately absent until its limits are measured on target.
+// An OS runner is deliberately absent until isolation and configured limits
+// are measured on the selected target.
 export const WORKER_TARGET = 'incus-disposable-vm-browser-v1';
-export const WORKER_LIMITS = Object.freeze({ cpu: 1, memory_mib: 512,
-  temporary_disk_mib: 128, browser_trees: 1, wall_seconds: 300, actions: 20 });
+// Resource and run caps are project policy. An empty object means that the
+// owner has not configured a cap; it never authorizes an unverified runner.
 export const BROWSER_ACTIONS = Object.freeze([
   'open_landing', 'open_login', 'submit_bound_fixture', 'read_workspace',
   'read_session', 'read_files', 'sign_out',
@@ -24,9 +26,8 @@ export function validateWorkerLaunch(value) {
   if (!validUuid(value.run_id) || !validUuid(value.attempt_id) ||
       !Number.isSafeInteger(value.fence) || value.fence < 1 || !HASH.test(value.policy_digest || '') ||
       value.origin !== 'https://demo.fractionate.ai' || value.target !== WORKER_TARGET ||
-      !fields(value.limits, Object.keys(WORKER_LIMITS)) ||
-      Object.entries(WORKER_LIMITS).some(([key, n]) => value.limits[key] !== n)) fail('INVALID_LAUNCH');
-  return Object.freeze({...value, limits: WORKER_LIMITS});
+      !agentLimits.safeParse(value.limits).success) fail('INVALID_LAUNCH');
+  return Object.freeze({...value, limits: Object.freeze({...value.limits})});
 }
 
 export function validateBrowserAction(value) {
@@ -72,33 +73,38 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
     const guide=one('SELECT id,content_hash FROM ops_guide_versions WHERE project_id=? ORDER BY version_number DESC LIMIT 1',r.project_id);
     const withdrawn=guide && one('SELECT 1 FROM ops_version_withdrawals WHERE project_id=? AND version_id=?',r.project_id,guide.id);
     if (!p || p.archived_at || p.site_origin!==r.site_origin || p.site_revision!==r.site_revision ||
+        p.agent_limits_revision!==r.project_limits_revision ||
         !profile || profile.revision!==r.profile_revision || profile.guide_version_id!==r.guide_version_id ||
         profile.guide_hash!==r.guide_hash || profile.assigned_site_revision!==r.site_revision ||
         !guide || withdrawn || guide.id!==r.guide_version_id || guide.content_hash!==r.guide_hash)
       fail('STALE_CONFIGURATION');
-    return profile;
+    return {profile,project:p};
   }
   function profilePolicy(profile, origin) {
-    let origins, actions, budgets;
+    let origins, actions;
     try {
       origins=JSON.parse(profile.proposed_origins_json);
       actions=JSON.parse(profile.proposed_actions_json);
-      budgets=JSON.parse(profile.budgets_json);
     } catch { fail('INVALID_PROFILE_POLICY'); }
     if (profile.workflow_type!=='synthetic_sign_in' || !Array.isArray(origins) ||
-        !origins.includes(origin) || !Array.isArray(actions) ||
-        !Number.isSafeInteger(budgets?.max_seconds) || budgets.max_seconds<1 || budgets.max_seconds>300 ||
-        !Number.isSafeInteger(budgets?.max_actions) || budgets.max_actions<1 || budgets.max_actions>20)
+        !origins.includes(origin) || !Array.isArray(actions))
       fail('INVALID_PROFILE_POLICY');
-    return {actions,budgets};
+    return {actions};
+  }
+  function projectLimits(project) {
+    let parsed;
+    try { parsed=JSON.parse(project.agent_limits_json); } catch { fail('INVALID_PROJECT_LIMITS'); }
+    const result=agentLimits.safeParse(parsed);
+    if (!result.success) fail('INVALID_PROJECT_LIMITS');
+    return result.data;
   }
   function current(runId, attemptId, fence) {
     const r = one('SELECT * FROM ops_agent_runs WHERE id=?', runId);
     const a = one('SELECT * FROM ops_agent_worker_attempts WHERE id=? AND run_id=?', attemptId, runId);
     if (!r || !a || r.fence !== fence || a.fence !== fence ||
         r.state !== 'running' || a.state !== 'running' ||
-        stamp() >= r.deadline_at || stamp() >= a.lease_expires_at) fail('STALE_WORKER');
-    const profile=assertPinnedConfiguration(r);
+        (r.deadline_at && stamp() >= r.deadline_at) || stamp() >= a.lease_expires_at) fail('STALE_WORKER');
+    const {profile}=assertPinnedConfiguration(r);
     return {r,a,profile};
   }
   return {
@@ -122,13 +128,17 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
             p.assigned_site_revision !== input.site_revision ||
             project.site_origin !== input.site_origin || project.site_revision !== input.site_revision)
           fail('STALE_CONFIGURATION');
-        const {budgets}=profilePolicy(p,input.site_origin);
-        const id = uuid(), now = clock(), deadline = new Date(now.getTime() + budgets.max_seconds*1000).toISOString();
+        profilePolicy(p,input.site_origin);
+        const limits=projectLimits(project);
+        const id = uuid(), now = clock();
+        const deadlineMs=limits.max_seconds == null ? null : now.getTime() + limits.max_seconds*1000;
+        if (deadlineMs != null && (!Number.isFinite(deadlineMs) || deadlineMs > 8.64e15)) fail('INVALID_PROJECT_LIMITS');
+        const deadline=deadlineMs == null ? null : new Date(deadlineMs).toISOString();
         run(`INSERT INTO ops_agent_runs(id,project_id,profile_id,profile_revision,site_origin,site_revision,
-          guide_version_id,guide_hash,policy_digest,max_seconds,max_actions,state,started_at,deadline_at,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,'prepared',?,?,?)`, id,input.project_id,input.profile_id,input.profile_revision,
+          guide_version_id,guide_hash,policy_digest,project_limits_revision,max_seconds,max_actions,state,started_at,deadline_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'prepared',?,?,?)`, id,input.project_id,input.profile_id,input.profile_revision,
           input.site_origin,input.site_revision,input.guide_version_id,input.guide_hash,input.policy_digest,
-          budgets.max_seconds,budgets.max_actions,
+          project.agent_limits_revision,limits.max_seconds??null,limits.max_actions??null,
           now.toISOString(),deadline,now.toISOString());
         event(id,null,'prepared');
         return {run_id:id,deadline_at:deadline};
@@ -138,12 +148,13 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
       if (!validUuid(runId)) fail('INVALID_RUN');
       return tx(() => {
         const r=one('SELECT * FROM ops_agent_runs WHERE id=?',runId);
-        if (!r || r.state !== 'prepared' || stamp() >= r.deadline_at) fail('RUN_NOT_PREPARED');
+        if (!r || r.state !== 'prepared' || (r.deadline_at && stamp() >= r.deadline_at)) fail('RUN_NOT_PREPARED');
         assertPinnedConfiguration(r);
         const id=uuid(), workspaceId=uuid(), fence=r.fence+1;
+        const lease=new Date(Math.min(clock().getTime()+30_000,r.deadline_at?Date.parse(r.deadline_at):Infinity)).toISOString();
         run("UPDATE ops_agent_runs SET state='starting',fence=?,revision=revision+1,updated_at=? WHERE id=?",fence,stamp(),runId);
         run(`INSERT INTO ops_agent_worker_attempts(id,run_id,attempt_no,fence,state,lease_expires_at,workspace_id,created_at)
-          VALUES(?,?,1,?,'starting',?,?,?)`,id,runId,fence,r.deadline_at,workspaceId,stamp());
+          VALUES(?,?,1,?,'starting',?,?,?)`,id,runId,fence,lease,workspaceId,stamp());
         event(runId,id,'attempt_reserved');
         return {run_id:runId,attempt_id:id,fence,workspace_id:workspaceId};
       });
@@ -153,12 +164,32 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
         const r=one('SELECT * FROM ops_agent_runs WHERE id=?',ref.run_id);
         const a=one('SELECT * FROM ops_agent_worker_attempts WHERE id=? AND run_id=?',ref.attempt_id,ref.run_id);
         if (!r || !a || r.state!=='starting' || a.state!=='starting' ||
-            r.fence!==ref.fence || a.fence!==ref.fence || stamp()>=r.deadline_at) fail('STALE_WORKER');
+            r.fence!==ref.fence || a.fence!==ref.fence ||
+            (r.deadline_at && stamp()>=r.deadline_at) || stamp()>=a.lease_expires_at) fail('STALE_WORKER');
         assertPinnedConfiguration(r);
         run("UPDATE ops_agent_runs SET state='running',revision=revision+1,updated_at=? WHERE id=?",stamp(),ref.run_id);
         run("UPDATE ops_agent_worker_attempts SET state='running' WHERE id=?",ref.attempt_id);
         event(ref.run_id,ref.attempt_id,'running');
       });
+    },
+    renewLease(ref) {
+      return tx(() => {
+        const {r,a}=current(ref.run_id,ref.attempt_id,ref.fence);
+        const next=new Date(Math.min(clock().getTime()+30_000,r.deadline_at?Date.parse(r.deadline_at):Infinity)).toISOString();
+        run('UPDATE ops_agent_worker_attempts SET lease_expires_at=? WHERE id=?',next,a.id);
+        return {lease_expires_at:next};
+      });
+    },
+    launchSpec(ref) {
+      const r=one('SELECT * FROM ops_agent_runs WHERE id=?',ref.run_id);
+      const a=one('SELECT * FROM ops_agent_worker_attempts WHERE id=? AND run_id=?',ref.attempt_id,ref.run_id);
+      if (!r || !a || r.state!=='starting' || a.state!=='starting' ||
+          r.fence!==ref.fence || a.fence!==ref.fence || stamp()>=a.lease_expires_at ||
+          (r.deadline_at && stamp()>=r.deadline_at)) fail('STALE_WORKER');
+      const {project}=assertPinnedConfiguration(r);
+      return validateWorkerLaunch({run_id:r.id,attempt_id:a.id,fence:a.fence,
+        policy_digest:r.policy_digest,origin:r.site_origin,target:WORKER_TARGET,
+        limits:projectLimits(project)});
     },
     authorizeAction(request) {
       validateBrowserAction(request);
@@ -167,7 +198,7 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
         if (request.action==='submit_bound_fixture') fail('CREDENTIAL_BROKER_UNAVAILABLE');
         const {actions}=profilePolicy(profile,r.site_origin);
         if (!actions.includes(REQUIRED_ACTION[request.action])) fail('ACTION_NOT_CONFIGURED');
-        if (r.action_count >= r.max_actions) fail('ACTION_LIMIT');
+        if (r.max_actions != null && r.action_count >= r.max_actions) fail('ACTION_LIMIT');
         run('UPDATE ops_agent_runs SET action_count=action_count+1,revision=revision+1,updated_at=? WHERE id=?',stamp(),r.id);
         event(r.id,request.attempt_id,`action:${request.action}`);
         return {ordinal:r.action_count+1};

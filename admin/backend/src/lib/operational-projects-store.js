@@ -45,7 +45,9 @@ export function createOperationsStore(db, { now = () => new Date().toISOString()
   }
   function summary(p, role, actorId) {
     const offer = pendingOffer(p);
-    return { ...p, own_role: role, current_version: workflow.current(p.id), owner_name: user(p.owner_user_id)?.username ?? 'Deleted account',
+    const { agent_limits_json, ...projectFields } = p;
+    return { ...projectFields, agent_limits: JSON.parse(agent_limits_json), own_role: role,
+      current_version: workflow.current(p.id), owner_name: user(p.owner_user_id)?.username ?? 'Deleted account',
       ownership_offer: offer && (role === 'owner' || offer.target_user_id === actorId) ? offer : null };
   }
   function mutation(actor, id, action, expected, fn) {

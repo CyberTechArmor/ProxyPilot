@@ -13,7 +13,7 @@ Then read the official A1–A8 plan, A1 architecture, pilot contract, acceptance
 matrix and source register, A2 and A3 evidence and exact diff, current
 Operations schema/store/routes, host-boundary inventory, `CLAUDE.md`, adjacent
 `FINISH.md` and both trackers. Capture branch, HEAD, full status and pre-edit
-hashes. Preserve B1–B4, D1–D4, migrations 1100–1107 and immutable history.
+hashes. Preserve B1–B4, D1–D4, migrations 1100–1108 and immutable history.
 
 Scope A4 to one synthetic sign-in credential binding and one allowlisted
 provider/model route. Use an operator-authorized project/profile/binding UUID
@@ -25,9 +25,11 @@ cookie-jar disposal. Prove actual secret and management-network separation on
 the A3 target. An Infisical project Admin or OpenBao AppRole can read assigned
 values; do not claim those mechanisms hide a secret from that identity.
 
-Enforce the pilot's US$0.25/10,000-token ceilings with reservation and actual
-provider usage accounting. Unknown model price, usage, authority, scope or
-network limit fails closed. Record provider response IDs and redacted
+Read the current project-owned token and spending policy, which defaults to
+unset/unbounded, and pin its revision to the run. Enforce any configured
+limit with reservation and actual provider usage accounting. Unknown model
+price, usage, authority, scope or network boundary fails closed even when
+project spending is unbounded. Record provider response IDs and redacted
 outcomes. Do not build the A5 loop, approvals, A6 UI, A7 recovery practice,
 A8 release, optional Operations document delivery, D5 or shared Knowledge.
 Use only disposable synthetic account and provider fixtures until separate

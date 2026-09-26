@@ -510,3 +510,73 @@ file was edited by A3. Final source/test SHA-256:
 | `scripts/tests/operational-lxc-memory-probe.sh` | `f52b8e5705f9ad672c1e938a8b42c4d2a6d50df4d9d6d6333ff5307630ff59c0` |
 | `scripts/tests/operational-lxc-crash-probe.sh` | `30460be1695a10ef6e664b27ca37a626d0b06636521fd47ce18e48e535f02a42` |
 | `docs/plans/fractionate-agents-a4-prompt.md` | `2d239ac28000ba473fbcde8cf2b9aaa77302749b1d1b34c3087060f95249ce1f` |
+
+## 2026-09-26 project-limits follow-up
+
+The user superseded the illustrative A1/A3 numeric limits: each Operations
+project now owns optional CPU, worker memory, temporary disk, run seconds,
+browser actions, provider tokens and spending limits. An empty policy means
+those fields are unbounded by project policy. One browser process tree,
+origin/action allowlists, run fencing, a renewable 30-second attempt lease,
+and verified descendant/workspace teardown remain security boundaries.
+This does **not** authorize an OS runner: `createWorkerLauncher` still returns
+`BOUNDARY_UNVERIFIED`. Those one-browser-tree and teardown controls remain
+requirements for the future OS runner, not current enforcement. S6/SEC-01/SEC-04 remain open; no target proof was
+claimed or host/guest changed in this follow-up.
+
+Base branch/head: `agents-a3-isolated-worker` at
+`031883ba6d3105d4c4788bf2125c0dae3ce64e75` (draft PR #680). The
+reviewed A2 merge remains `ade9a783d1b80058f8bbcd255872d229bfdd17bc`
+(PR #677). Before editing, the tracked tree was clean; the preexisting
+untracked `scripts/tests/a3-vm-probe.zip` was preserved. The untracked
+`fractionate-agents-a3-continuation-prompt.md` was prepared in the prior
+turn and updated for this policy. No merge, flag activation or deployment
+was made in this follow-up.
+
+Migration 1108 adds `ops_projects.agent_limits_json` (default `{}`) and
+`agent_limits_revision`, rebuilds `ops_agent_runs` with nullable run caps,
+copies existing rows with policy revision 0 so legacy runs cannot resume
+under an unbounded new policy, and restores the active-run unique index and immutable
+history triggers. It runs with foreign keys disabled only during the table
+rebuild and checks them afterward. Existing profile `budgets_json` remains in
+the database for older history, but new profile requests reject that field
+and the worker ignores it. Project owners write limits through a gated,
+audited, If-Match `PUT /:id/agent-limits`; a policy change invalidates a
+prepared/running worker through its pinned revision. The internal launch
+spec derives the current policy from the pinned project, while the actual
+launcher still refuses execution.
+
+Verification:
+
+| Command | Result |
+|---|---|
+| `node --import ../../../agents-a2-evidence/dependency-loader.mjs --test src/__tests__/operational-*.test.js` from `admin/backend` | 67 passed, 0 failed/skipped; includes owner-only limits, unbounded action/time behavior, stale policy fence and populated 1108 migration/history preservation. |
+| `node node_modules/vite/bin/vite.js build --configLoader runner --config vite.codex-temp.config.mjs` from `admin/frontend`, with a temporary config defining `__dirname` | Built 1,972 modules successfully; existing dynamic-import/chunk warnings. Temporary config removed. A direct default config build was blocked by the local esbuild/junction sandbox path; bundled pnpm attempted an unavailable network reinstall, so the preexisting junction packages were restored before the successful direct Vite build. |
+| `PYTHONUTF8=1` with bundled Python, `scripts/host-boundary-inventory.py` | 96 candidate backend files inventoried; S6 remains open. No suppression. |
+| `git diff --check` | No whitespace errors; Windows LF/CRLF warnings only. |
+
+Source SHA-256 after this follow-up:
+
+| File | SHA-256 |
+|---|---|
+| `admin/backend/src/db.js` | `230febf661393f97467068a54bf91f1bf4abd19f175ce47217932c9cd7c90ebd` |
+| `admin/backend/src/lib/operational-projects-logic.js` | `61029941776f1ac8ebdf356ec3ed14e6fbb46ba543fcdde47ff0822188f29a20` |
+| `admin/backend/src/lib/operational-agents-store.js` | `53a23a51646c115f2ac2579f689eae9a1772943cdb0f5e300a5682d9f9d8e675` |
+| `admin/backend/src/lib/operational-projects-store.js` | `cd387f22f6296784be8af78d8cbd7555cdf52f2a7a678a26888401460cac1135` |
+| `admin/backend/src/lib/operational-worker-boundary.js` | `3b5b9a772b5be7b68deeb206b0d6d7b835e03687bc3f34241db2fa0578ea7c2b` |
+| `admin/backend/src/lib/operational-agent-limits-schema.js` | `b82d91e209b6b81d2074f658f714073e37fa2f81a49a0ed327d19428679d7d90` |
+| `admin/backend/src/routes/operational-projects.js` | `f04d834493dd1317c524a583e0956ce2d2833475a82deeb7ec8982625ccb85af` |
+| `admin/backend/src/__tests__/helpers/operations-fixture.js` | `9d0224ef92c8c5b25353b1ba917e46e9f97a3fdbf60b69c85d661549dc6bd02b` |
+| `admin/backend/src/__tests__/operational-agents.test.js` | `3cd3717533a087beac8ccf3203365e937c3fe22544f8e2fcbebb4e7a74829a60` |
+| `admin/backend/src/__tests__/operational-worker-boundary.test.js` | `0450d7f8a6d9350cce39cf0843d73d36d7b071c1d55e205d5d3f877b21dd2c69` |
+| `admin/frontend/src/components/operational-projects/AccessPolicy.jsx` | `9c0050a144394192f65cc34a8d50b148983b8a17d29e5d9807a58042d2d204e5` |
+| `admin/frontend/src/components/operational-projects/Agents.jsx` | `2787eb6b56047bd422f2354159d626f544980e1c5cdbfb7fdcb8e27c1079b298` |
+
+Rollback/older-writer limit: keep migration 1108 and all run, attempt and
+event rows; disable `OPERATIONS_ENABLED` (and the A2/A3 agent gate) before
+using an older backend. An A2 frontend sending profile `budgets` receives
+HTTP 400 against the new strict request schema, so backend and frontend must
+ship together when this gated feature is later activated. An older A3 writer
+cannot safely create a run after the project policy changes because it does
+not pin `agent_limits_revision`; do not use it for execution. No OS runner
+exists at either revision.

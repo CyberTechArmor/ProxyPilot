@@ -3,6 +3,8 @@ import { assertRevision, fail, parse, schemas, siteOrigin, validId } from './ope
 // Metadata and membership only. The only dependencies are the Operations DB
 // primitives, so a profile write has no path to a worker, vault or provider.
 export function createOperationalAgentsStore({ one, all, run, tx, access, eligible, event, bump, now, uuid, user, workflow }) {
+  const limitKeys = ['cpu','memory_mib','temporary_disk_mib','max_seconds','max_actions','max_tokens','max_usd'];
+  const canonicalLimits = limits => JSON.stringify(Object.fromEntries(limitKeys.filter(key => key in limits).map(key => [key,limits[key]])));
   const project = id => one('SELECT * FROM ops_projects WHERE id=?', id);
   const profileRow = (id, profileId) => validId(profileId) && one(
     'SELECT * FROM ops_agent_profiles WHERE project_id=? AND id=? AND deleted_at IS NULL', id, profileId);
@@ -19,7 +21,7 @@ export function createOperationalAgentsStore({ one, all, run, tx, access, eligib
       disabled_reasons.push('Assigned guide is no longer current');
     return { id: row.id, project_id: id, display_name: row.display_name, workflow_type: row.workflow_type,
       proposed_actions: JSON.parse(row.proposed_actions_json), proposed_origins,
-      budgets: JSON.parse(row.budgets_json), guide_version_id: row.guide_version_id,
+      guide_version_id: row.guide_version_id,
       guide_hash: row.guide_hash, guide_version_number: current?.id === row.guide_version_id ? current.version_number : null,
       revision: row.revision, site_revision: p.site_revision, assigned_site_revision: row.assigned_site_revision,
       disabled: true, disabled_reasons,
@@ -35,6 +37,20 @@ export function createOperationalAgentsStore({ one, all, run, tx, access, eligib
     return v;
   }
   return {
+    agentLimits(actor,id,expected,input) {
+      const {limits}=parse(schemas.agentLimits,input);
+      const encoded=canonicalLimits(limits);
+      return tx(()=>{
+        const {p}=access(actor,id,'access');assertRevision(expected,p.revision);
+        if(p.archived_at) fail(409,'Operational record is archived');
+        const changed=encoded!==canonicalLimits(JSON.parse(p.agent_limits_json));
+        if(changed) {
+          run('UPDATE ops_projects SET agent_limits_json=?,agent_limits_revision=agent_limits_revision+1 WHERE id=?',encoded,id);
+          event(actor,id,'agent_limits_changed',null,{fields:Object.keys(limits)});bump(id);
+        }
+        return {limits,limits_revision:p.agent_limits_revision+(changed?1:0),revision:p.revision+(changed?1:0)};
+      });
+    },
     auditDenied(actor,requestedProjectId,action,status) {
       if (!actor?.id) return;
       run('INSERT INTO ops_agent_denials(actor_id,requested_project_id,action,status,created_at) VALUES(?,?,?,?,?)',
@@ -132,7 +148,7 @@ export function createOperationalAgentsStore({ one, all, run, tx, access, eligib
         const {p}=access(actor,id,'edit');assertRevision(expected,p.revision);
         const timestamp=now(),profileId=uuid();
         run(`INSERT INTO ops_agent_profiles(id,project_id,display_name,workflow_type,proposed_actions_json,proposed_origins_json,budgets_json,created_by,created_at,updated_by,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?)`,profileId,id,v.display_name,v.workflow_type,JSON.stringify(v.proposed_actions),JSON.stringify(v.proposed_origins),JSON.stringify(v.budgets),actor.id,timestamp,actor.id,timestamp);
+          VALUES(?,?,?,?,?,?,?,?,?,?,?)`,profileId,id,v.display_name,v.workflow_type,JSON.stringify(v.proposed_actions),JSON.stringify(v.proposed_origins),'{}',actor.id,timestamp,actor.id,timestamp);
         event(actor,id,'profile_created',profileId);bump(id);
         return {profile:profile(id,profileRow(id,profileId))};
       });
@@ -141,10 +157,10 @@ export function createOperationalAgentsStore({ one, all, run, tx, access, eligib
       const v=fields(input,schemas.profileUpdate);
       return tx(()=>{
         access(actor,id,'edit');const r=profileRow(id,profileId);if(!r) fail(404,'Profile not found');assertRevision(expected,r.revision);
-        run(`UPDATE ops_agent_profiles SET display_name=?,workflow_type=?,proposed_actions_json=?,proposed_origins_json=?,budgets_json=?,
+        run(`UPDATE ops_agent_profiles SET display_name=?,workflow_type=?,proposed_actions_json=?,proposed_origins_json=?,
           revision=revision+1,updated_by=?,updated_at=? WHERE id=?`,v.display_name??r.display_name,v.workflow_type??r.workflow_type,
           JSON.stringify(v.proposed_actions??JSON.parse(r.proposed_actions_json)),JSON.stringify(v.proposed_origins??JSON.parse(r.proposed_origins_json)),
-          JSON.stringify(v.budgets??JSON.parse(r.budgets_json)),actor.id,now(),profileId);
+          actor.id,now(),profileId);
         event(actor,id,'profile_updated',profileId,{fields:Object.keys(v)});bump(id);
         return {profile:profile(id,profileRow(id,profileId))};
       });

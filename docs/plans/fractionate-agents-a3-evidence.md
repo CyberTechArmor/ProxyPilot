@@ -754,3 +754,41 @@ The live host still runs an older checkout;
 the new MCP status and acknowledgement tools are not deployed. The job must
 be inspected and its stale lease resolved before any start or browser proof.
 S6/SEC-01/SEC-04 remain open, A3 stays inactive, and PR #686 remains draft.
+
+## 2026-09-26 live MCP repair deployment
+
+PR #687 merged at `869c5bcd38ae7bc56b8bce255350f399af6c7da0` after
+its seven-job Security CI pass. ProxyPilot's managed update run
+`79e33237-6dc6-4c9e-bf3e-e7cf9a2ac89f` succeeded from
+`10fdc9bbe848420a9c98180087b850c0760dcfa7` to that merge commit;
+the rebuilt Docker backend reported healthy. The live checkout read back
+clean at the merged SHA. `agents-a3-browser-proof` still read back as a
+stopped VM with its original 2-vCPU, 4096-MiB and 12-GiB configuration.
+A resource dry run confirmed the same values and changed nothing.
+
+The first update spent a prolonged period copying the entire `admin`
+directory into the Docker build context, including host-installed
+`node_modules`. PR #688 replaced that copy with a tar stream that keeps
+source and the built frontend while excluding host dependencies and
+preserving install-local data. Its focused copy test, Bash syntax check and
+seven-job Security CI passed; it merged at
+`3401bead4dafb6bf790fcfb431e9e50882778c77`. A second managed update
+was submitted as `5f02caef-41fa-4afe-b88d-f243b7f4e611` to deploy it.
+That run succeeded from `869c5bcd38ae7bc56b8bce255350f399af6c7da0`
+to `3401bead4dafb6bf790fcfb431e9e50882778c77`, reporting a healthy
+Docker restart. The live checkout read back clean at the final merged SHA.
+Systemd showed the new tar helper excluding both host `node_modules`
+directories. The second copy phase completed and the update succeeded; this
+does not quantify the copy's exact duration because the dashboard was
+temporarily unavailable during Docker rebuild.
+The original update completed without interruption, so the attempted
+managed service restart was not performed; automatic approval review had
+rejected interrupting the active copy due to partial-install risk.
+
+This chat's ProxyPilot connector still advertises its pre-deployment tool
+catalog, so `get_lxc_setup_jobs` and `acknowledge_lxc_setup_job` cannot yet
+be called through this MCP connection even after the second deployment.
+No uncertain job was acknowledged,
+no stale lease was released, and the VM was not started. The actual setup
+job outcome, target network fence, browser and human takeover proofs remain
+unverified. A3 stays inactive and PR #686 stays draft.

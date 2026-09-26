@@ -36,9 +36,11 @@ HTTP 504; it has 2 vCPU, 4096 MiB RAM and an explicit 12 GiB root device,
 but remains stopped behind an interrupted setup lease. Inspect its durable
 job through `get_lxc_setup_jobs` after the MCP fix is deployed, resolve the
 lease only after guest readback, and reuse this VM rather than launching
-another. The local correction is in draft PR #686 and independently in
-reviewable PR #687, whose exact-head Security CI passed. Live deployment and
-the final A3 evidence-head CI remain to be verified.
+another. The MCP repair merged in PR #687 and is deployed at `3401bead` with
+the update copy repair from PR #688; both passed exact-head Security CI.
+This chat's connector has a cached older tool list, so the new setup-job MCP
+reads and acknowledgement still need a refreshed connector before the lease
+can be handled. The final A3 evidence-head CI remains to be verified.
 
 Build a minimal Debian 13 browser-worker image. Provision **2 vCPU, 4 GiB
 guest RAM and 12 GiB root disk** as a provisional starting size, with no

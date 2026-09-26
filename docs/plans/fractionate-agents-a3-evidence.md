@@ -742,8 +742,15 @@ Focused Windows validation used the dependency set installed in the sibling
 checkout: the three resource/job/acknowledgement tests and all 19 extended
 MCP catalog tests passed; the pure VM Incus argv test passed. The full
 setup-guest-config suite cannot pass on this Windows host because its
-reserved-port tests invoke Unix `sh` and `sysctl`. Security CI on the final
-submitted head is still required. The live host still runs an older checkout;
+reserved-port tests invoke Unix `sh` and `sysctl`. The MCP-only repair was
+cherry-picked from commit `f37208dbb404888bfc84ebc3caf7bd55af6d871b`
+onto current `main` as `b591171ec7e97e16ee77311f4f2b809e5a1f4914` in
+[PR #687](https://github.com/CyberTechArmor/ProxyPilot/pull/687).
+Its exact-head [Security regression run](https://github.com/CyberTechArmor/ProxyPilot/actions/runs/36263182848)
+passed all seven jobs. The A3 continuation head before this evidence update,
+`c82834ef7dde4219280f1d5978e074b2536331f2`, also passed all seven jobs
+in [run 36263094910](https://github.com/CyberTechArmor/ProxyPilot/actions/runs/36263094910).
+The live host still runs an older checkout;
 the new MCP status and acknowledgement tools are not deployed. The job must
 be inspected and its stale lease resolved before any start or browser proof.
 S6/SEC-01/SEC-04 remain open, A3 stays inactive, and PR #686 remains draft.

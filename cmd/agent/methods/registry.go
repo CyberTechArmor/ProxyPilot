@@ -91,5 +91,7 @@ func DefaultRegistry() *Registry {
 	r.Register("update.request", UpdateRequest)
 	r.Register("storage.install_request", StorageInstallRequest)
 	r.Register("update.status", UpdateStatus)
+	r.Register("incus.upgrade_backups_list", IncusUpgradeBackupsList)
+	r.Register("incus.upgrade_backup_remove", IncusUpgradeBackupRemove)
 	return r
 }

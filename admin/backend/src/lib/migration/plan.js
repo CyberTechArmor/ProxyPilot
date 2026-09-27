@@ -27,6 +27,7 @@
 // structures into API responses and lib/migration/service.js persists them.
 
 import { DEFAULT_RSYNC_EXCLUDES } from './manifest.js';
+import { NEW_GUEST_IMAGE } from '../debian13-guest.js';
 
 export const MODES = Object.freeze(['whole-machine', 'application']);
 export const TRANSPORTS = Object.freeze(['incus-migrate', 'rootfs-tar', 'file-sync']);
@@ -109,8 +110,8 @@ export function validateTarget(input = {}) {
       if (!/^[A-Za-z0-9@._-]{1,128}$/.test(s)) return { error: 'service_name: the systemd unit that runs the app on the source' };
       app.service_name = s;
     }
-    const image = String(input.image || 'images:debian/13');
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:+/-]{2,120}$/.test(image)) return { error: 'image: an Incus image alias, e.g. images:debian/13' };
+    const image = String(input.image || NEW_GUEST_IMAGE);
+    if (image !== NEW_GUEST_IMAGE) return { error: `new migration guests require ${NEW_GUEST_IMAGE}; image overrides are refused` };
     app.image = image;
   }
 

@@ -67,6 +67,27 @@ test('browser broker refuses an unverified routing capability and closes its con
   assert.equal(closed,1);
 });
 
+test('browser broker delegates project action totals to the durable reservation', async () => {
+  let reserved=0, closed=0;
+  const page={setDefaultTimeout(){},setDefaultNavigationTimeout(){},
+    evaluate:async()=>({authenticated:false})};
+  const context={route:async()=>{},routeWebSocket:async()=>{},on(){},
+    newPage:async()=>page,close:async()=>{closed++;}};
+  const broker=await createSyntheticSignInBrowserBroker({browser:{newContext:async()=>context},
+    reserveAction:async()=>{if (++reserved>25) {
+      const error=new Error('ACTION_LIMIT'); error.code='ACTION_LIMIT'; throw error;
+    }}});
+  const request={...launch(),action:'read_session'};
+  const action={run_id:request.run_id,attempt_id:request.attempt_id,fence:request.fence,
+    action:request.action};
+  for(let i=0;i<25;i++)
+    assert.deepEqual(await broker.perform(action),{untrusted_page_claim_authenticated:false});
+  await assert.rejects(broker.perform(action),{code:'ACTION_LIMIT'});
+  assert.equal(reserved,26);
+  await broker.close();
+  assert.equal(closed,1);
+});
+
 test('durable single profile run, attempt fence, action quota, launch failure and restart block', async () => {
   const f=operationsFixture();
   try {

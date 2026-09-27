@@ -28,6 +28,7 @@
 
 import { CONTAINER_NAME_RE, redact } from './logic.js';
 import { validateSetupParams, FIXUP_PHASES, SETUP_PHASES } from './setup-logic.js';
+import { NEW_GUEST_IMAGE } from '../debian13-guest.js';
 
 export const LIFECYCLE_JOB_KINDS = Object.freeze(['instance_create', 'instance_start', 'instance_stop', 'instance_restart', 'instance_delete', 'snapshot_create', 'snapshot_delete']);
 export const SNAPSHOT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
@@ -119,6 +120,7 @@ export function validateLifecycleParams(kind, p = {}) {
   }
   if (kind === 'instance_create') {
     if (!IMAGE_ALIAS_RE.test(String(p.image || '')) || String(p.image).startsWith('-')) return { ok: false, reason: 'image must be an Incus image alias (e.g. images:debian/13)' };
+    if (p.image !== NEW_GUEST_IMAGE) return { ok: false, reason: `new instances require ${NEW_GUEST_IMAGE}; image overrides are refused` };
     if (p.profile != null && !PROFILE_NAME_RE.test(String(p.profile))) return { ok: false, reason: 'profile must be a profile name' };
     if (p.network != null && !NETWORK_NAME_RE.test(String(p.network))) return { ok: false, reason: 'network must be a bridge name' };
     if (!isBool(p.vm)) return { ok: false, reason: 'vm must be a boolean' };

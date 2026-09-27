@@ -25,7 +25,7 @@ export default function NewMigrationDialog({ open, onClose, onCreated }) {
   const [form, setForm] = useState({
     mode: 'whole-machine', name: '', type: 'container', source_kind: '', source_label: '',
     cpu: 2, memory_gb: 4, disk_gb: '', pool: '', network: '', nested: false,
-    image: 'images:debian/13', app_dirs: '', database: 'none', service_name: '', freeze: 'stop',
+    app_dirs: '', database: 'none', service_name: '', freeze: 'stop',
     auto_transfer: false, keep_agent: false,
   });
   const [busy, setBusy] = useState(false);
@@ -61,7 +61,7 @@ export default function NewMigrationDialog({ open, onClose, onCreated }) {
       if (form.source_kind) body.source_kind = form.source_kind;
       if (form.source_label.trim()) body.source_label = form.source_label.trim();
       if (form.mode === 'application') {
-        body.image = form.image.trim() || 'images:debian/13';
+        body.image = 'images:debian/13';
         body.database = form.database;
         if (form.service_name.trim()) body.service_name = form.service_name.trim();
         const dirs = form.app_dirs.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -201,8 +201,8 @@ export default function NewMigrationDialog({ open, onClose, onCreated }) {
                 <p className="text-sm font-medium">Application mode</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1.5">
-                    <Label htmlFor="mig-image">Base image</Label>
-                    <Input id="mig-image" className="h-11 sm:h-9" value={form.image} onChange={(e) => set('image')(e.target.value)} />
+                    <Label>Base image</Label>
+                    <p className="flex h-11 items-center rounded border px-3 font-mono text-sm sm:h-9">images:debian/13</p>
                   </div>
                   <div className="space-y-1.5">
                     <Label>Database</Label>

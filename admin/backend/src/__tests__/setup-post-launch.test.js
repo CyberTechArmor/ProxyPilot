@@ -129,6 +129,7 @@ function scriptedHost(state) {
       if (a[0] === 'network' && a[1] === 'list') return { code: 0, stdout: JSON.stringify(state.bridges ?? [{ name: 'incusbr0', type: 'bridge', managed: true }, { name: 'eth0', type: 'physical', managed: false }]), stderr: '' };
       if (a[0] === 'network' && a[1] === 'set') { state.natSet = [...(state.natSet || []), a[2]]; return state.natFails ? { code: 1, stdout: '', stderr: 'Error: Network not found' } : { code: 0, stdout: '', stderr: '' }; }
       if (a[0] === 'list') { state.lists += 1; const i = byName(a[1]); return { code: 0, stdout: JSON.stringify(i ? [withAddress(i)] : []), stderr: '' }; }
+      if (a[0] === 'exec' && a.at(-1) === '/etc/os-release') return { code: 0, stdout: 'ID=debian\nVERSION_ID="13"\n', stderr: '' };
       if (a[0] === 'start') { const i = byName(a[1]); if (!i) return { code: 1, stdout: '', stderr: 'Error: Instance not found' }; i.status = 'Running'; return { code: 0, stdout: '', stderr: '' }; }
       if (a[0] === 'restart') { const i = byName(a[1]); if (!i) return { code: 1, stdout: '', stderr: 'Error: Instance not found' }; i.status = 'Running'; state.restarts = (state.restarts || 0) + 1; return { code: 0, stdout: '', stderr: '' }; }
       if (a[0] === 'stop') { const i = byName(a[1]); if (i) i.status = 'Stopped'; return { code: 0, stdout: '', stderr: '' }; }
@@ -233,7 +234,7 @@ async function dashboardCreate(d, h, g, { inputsDir, script = SCRIPT, services =
   const setup = { phases: ['network_nat', 'await_address', 'dns'], addressTimeoutMs: 30_000 };
   if (script) { setup.initScript = writeInitScriptInput(inputsDir, script); setup.phases.push('init_script'); }
   if (services) { setup.phases.push('routes'); setup.services = services; setup.serviceName = name.replace(/^pp-/, ''); }
-  const out = await runLifecycle({ kind: 'instance_create', containerName: name, image: 'images:debian/12', profile: 'default', config: { 'limits.cpu': '2' }, setup, via: 'ui', requestedBy: 'thomas', detach: true, awaitKick: true });
+  const out = await runLifecycle({ kind: 'instance_create', containerName: name, image: 'images:debian/13', profile: 'default', config: { 'limits.cpu': '2' }, setup, via: 'ui', requestedBy: 'thomas', detach: true, awaitKick: true });
   return { out, setup };
 }
 
@@ -280,8 +281,8 @@ test('validation is strict: a script REFERENCE (ref, sha256, bytes) and never it
   assert.deepEqual(validateRunnerJob({ kind: 'guest_setup', app: 'pp-x', plan: { steps: [], params: { container: 'pp-x', phases: ['dns'] } } }), { ok: true });
   assert.match(validateRunnerJob({ kind: 'guest_setup', app: 'pp-x', plan: { steps: [], params: { container: 'pp-x', phases: ['dns'], argv: ['sh'] } } }).reason, /never carries a command/);
   // A create carries the plan without an identity; a start carries the fix-up flag; nothing else does.
-  assert.deepEqual(validateLifecycleParams('instance_create', { container: 'pp-n', image: 'images:debian/12', setup: { phases: ['network_nat', 'dns'] } }), { ok: true });
-  assert.match(validateLifecycleParams('instance_create', { container: 'pp-n', image: 'images:debian/12', setup: { phases: ['dns'], expect: { uuid: UUID_A } } }).reason, /binds its identity from the launched guest/);
+  assert.deepEqual(validateLifecycleParams('instance_create', { container: 'pp-n', image: 'images:debian/13', setup: { phases: ['network_nat', 'dns'] } }), { ok: true });
+  assert.match(validateLifecycleParams('instance_create', { container: 'pp-n', image: 'images:debian/13', setup: { phases: ['dns'], expect: { uuid: UUID_A } } }).reason, /binds its identity from the launched guest/);
   assert.match(validateLifecycleParams('instance_start', { container: 'pp-x', setup: { phases: ['dns'] } }).reason, /carries no setup plan/);
   assert.deepEqual(validateLifecycleParams('instance_start', { container: 'pp-x', fixup: true }), { ok: true });
   assert.match(validateLifecycleParams('instance_stop', { container: 'pp-x', fixup: true }).reason, /fixup applies to start and restart/);
@@ -618,7 +619,9 @@ test('dashboard create: the launch job carries the plan; its executor queues the
   assert.ok(m.includes('iptables -I DOCKER-USER -i incusbr0 -j ACCEPT') && m.includes('iptables -I DOCKER-USER -o incusbr0 -j ACCEPT'));
   assert.ok(m.some((x) => x.startsWith('iptables -t nat -A POSTROUTING')));
   assert.ok(!h.calls.some((a) => a.includes('sh') || a.includes('-c')), 'no shell on the host channel');
-  assert.equal(h.calls.some((a) => a[1] === 'exec'), false, 'the guest scripts go through the contained guest executor, not incus exec on the host channel');
+  assert.deepEqual(h.calls.filter((a) => a[1] === 'exec'),
+    [['incus', 'exec', 'pp-new', '--', 'cat', '/etc/os-release']],
+    'the host channel reads only guest OS proof; scripts use the contained guest executor');
   const routesJob = getJob(d, ph.routes.job);
   assert.equal(routesJob.kind, 'configure_routes'); assert.equal(routesJob.status, 'queued', 'queued for the backend; nothing ran it yet');
   assert.deepEqual(parseJson(routesJob.plan_json).params.services, SERVICES); assert.equal(parseJson(routesJob.plan_json).params.ip, '10.10.10.7'); assert.equal(parseJson(routesJob.plan_json).params.serviceName, 'new');
@@ -640,7 +643,7 @@ test('dashboard create: the launch job carries the plan; its executor queues the
   assert.equal(view.phase, 'ready'); assert.equal(view.completion, 'complete'); assert.equal(view.initScriptWarning, null); assert.equal(view.caddyWarning, null); assert.equal(view.routesJobId, routesJob.id);
   assert.equal(readLock(d, 'pp-new'), null); assert.equal(readLock(d, HOST_NETWORK_LOCK), null); assert.equal(readLock(d, HOST_ROUTES_LOCK), null, 'every lease released');
   // A second create of the same name while nothing is open is a launch refusal (exists); nothing here reads a map.
-  const again = await runLifecycle({ kind: 'instance_create', containerName: 'pp-new', image: 'images:debian/12', via: 'ui' });
+  const again = await runLifecycle({ kind: 'instance_create', containerName: 'pp-new', image: 'images:debian/13', via: 'ui' });
   assert.equal(again.ok, false); assert.equal(lifecycleHttpStatus(again), 409); assert.equal(st.launches, 1);
 });
 
@@ -670,7 +673,7 @@ test('MCP create: the launch carries the NAT + address plan (no script, no route
   const d = db(); const st = { instances: [], addressAfter: 3 }; const h = scriptedHost(st); const g = scriptedGuest({});
   opsStore(d, h, g);
   t.after(() => configureContainerLockStore(null));
-  const launch = await runLifecycle({ kind: 'instance_create', containerName: 'pp-m', image: 'images:debian/12', profile: 'default', config: { 'limits.cpu': '2', 'limits.memory': '4096MiB', 'boot.autostart': 'true' }, setup: { phases: ['network_nat', 'await_address'], addressTimeoutMs: 15_000 }, requestedBy: 'key-1', via: 'mcp' });
+  const launch = await runLifecycle({ kind: 'instance_create', containerName: 'pp-m', image: 'images:debian/13', profile: 'default', config: { 'limits.cpu': '2', 'limits.memory': '4096MiB', 'boot.autostart': 'true' }, setup: { phases: ['network_nat', 'await_address'], addressTimeoutMs: 15_000 }, requestedBy: 'key-1', via: 'mcp' });
   assert.equal(launch.ok, true, JSON.stringify(launch)); assert.ok(launch.setupJobId, 'the create answers with the setup job');
   const setup = await waitForSetup(d, launch.setupJobId, { timeoutMs: 5000 });
   assert.equal(setup.status, 'succeeded'); assert.equal(setup.progress.address.ip, '10.10.10.7'); assert.deepEqual(Object.keys(setup.progress.phases), ['network_nat', 'await_address']);
@@ -900,7 +903,7 @@ test('interruption AFTER the script was issued: the resumed job READS the exit c
   //     acknowledgement that establishes the writer stopped releases it — atomically.
   {
     const c = clock(); const { d, h, g, st } = mk({ guestRc: null, guestRunning: 4242 });
-    createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/12' } }, status: 'succeeded', nowMs: T0 - 200_000 });
+    createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/13' } }, status: 'succeeded', nowMs: T0 - 200_000 });
     deadSetup(d, { params: { container: 'pp-n', phases: ['init_script'], expect: { uuid: UUID_B }, initScript: script, origin: { jobId: 'create-1', kind: 'instance_create' } }, cp });
     reconcile({ db: d, owner: RUNNER, nowMs: T0 });
     const out = await runAll(d, exec(h, g), c, { inputsDir });
@@ -1000,7 +1003,7 @@ test('interruption AFTER the script was issued: the resumed job READS the exit c
 
 test('a dead backend mid-routes: the boot sweep records the routes job interrupted, marks the setup\'s routes phase failed and settles the setup PARTIAL (its lifecycle parent too); a retry of the routes job re-renders, never duplicates a row, and settles it COMPLETE (real schema, fake render)', async (t) => {
   const d = db(); ensureRoutesSchema(d);
-  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/12' } }, status: 'succeeded', nowMs: T0 - 11_000 });
+  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/13' } }, status: 'succeeded', nowMs: T0 - 11_000 });
   createJob(d, { id: 'setup-1', kind: 'guest_setup', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', phases: ['routes'], services: SERVICES, serviceName: 'n', origin: { jobId: 'create-1', kind: 'instance_create' } } }, status: 'succeeded', nowMs: T0 - 10_000 });
   d.prepare(`UPDATE setup_jobs SET outcome = 'setup_pending', progress_json = ? WHERE id = 'setup-1'`).run(JSON.stringify({ phases: { network_nat: { state: 'done' }, routes: { state: 'pending' } }, completion: 'pending', address: { ip: '10.10.10.7' } }));
   createJob(d, { id: 'routes-1', kind: 'configure_routes', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', serviceName: 'n', ip: '10.10.10.7', services: SERVICES, origin: { jobId: 'setup-1', kind: 'guest_setup', createJobId: 'create-1' } } }, nowMs: T0 - 9_000 });
@@ -1031,7 +1034,7 @@ test('a dead backend mid-routes: the boot sweep records the routes job interrupt
 
 test('a failed route render keeps the setup PARTIAL on every record; a render that succeeds later settles it complete; a routes job that loses a lease mid-way writes nothing further (fenced)', async (t) => {
   const d = db();
-  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/12' } }, status: 'succeeded', nowMs: T0 - 11_000 });
+  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/13' } }, status: 'succeeded', nowMs: T0 - 11_000 });
   createJob(d, { id: 'setup-1', kind: 'guest_setup', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', phases: ['dns', 'routes'], services: SERVICES, serviceName: 'n', origin: { jobId: 'create-1', kind: 'instance_create' } } }, status: 'succeeded', nowMs: T0 - 10_000 });
   d.prepare(`UPDATE setup_jobs SET outcome = 'setup_pending', progress_json = ? WHERE id = 'setup-1'`).run(JSON.stringify({ phases: { dns: { state: 'done' }, routes: { state: 'pending' } }, completion: 'pending' }));
   const mk = (id, retryOf = null) => createJob(d, { id, kind: 'configure_routes', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', serviceName: 'n', ip: '10.10.10.7', services: SERVICES, origin: { jobId: 'setup-1', kind: 'guest_setup', createJobId: 'create-1' } } }, retryOf, nowMs: T0 });
@@ -1085,7 +1088,7 @@ function caddyDir(dir, hooks = {}) {
 // route tables, ready for the backend's drain.
 function seedRoutesChain(d, { ip = '10.10.10.7', services = SERVICES, id = 'routes-1' } = {}) {
   ensureRoutesSchema(d);
-  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/12' } }, status: 'succeeded', nowMs: T0 - 11_000 });
+  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/13' } }, status: 'succeeded', nowMs: T0 - 11_000 });
   createJob(d, { id: 'setup-1', kind: 'guest_setup', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', phases: ['routes'], services, serviceName: 'n', origin: { jobId: 'create-1', kind: 'instance_create' } } }, status: 'succeeded', nowMs: T0 - 10_000 });
   d.prepare(`UPDATE setup_jobs SET outcome = 'setup_pending', progress_json = ? WHERE id = 'setup-1'`).run(JSON.stringify({ phases: { network_nat: { state: 'done' }, routes: { state: 'pending', job: id } }, completion: 'pending', address: { ip } }));
   createJob(d, { id, kind: 'configure_routes', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', serviceName: 'n', ip, services, origin: { jobId: 'setup-1', kind: 'guest_setup', createJobId: 'create-1' } } }, nowMs: T0 - 9_000 });
@@ -1294,7 +1297,7 @@ test('the shared network lease is RENEWED through a slow live sequence (each com
 test('a credential the init script echoes never enters a job row, an event, a verification or the create-status answer — through the real wrapper under a real sh with the guest\'s umask at 022 — and the guest\'s artifacts are owner-only', async (t) => {
   const d = db(); const inputsDir = join(tmp(), 'setup-inputs'); const guestDir = tmp(); const c = clock();
   const st = { instances: [inst({ name: 'pp-n', config: { 'volatile.uuid': UUID_B } })] }; const h = scriptedHost(st); const gs = { realShell: guestDir }; const g = scriptedGuest(gs);
-  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/12' } }, status: 'succeeded', nowMs: T0 - 1000 });
+  createJob(d, { id: 'create-1', kind: 'instance_create', app: 'pp-n', plan: { steps: [], params: { container: 'pp-n', image: 'images:debian/13' } }, status: 'succeeded', nowMs: T0 - 1000 });
   const script = writeInitScriptInput(inputsDir, ECHO_SCRIPT);
   const sub = submitRunnerJob(d, { kind: 'guest_setup', app: 'pp-n', params: { container: 'pp-n', phases: ['dns', 'init_script'], expect: { uuid: UUID_B }, initScript: script, origin: { jobId: 'create-1', kind: 'instance_create' } }, nowMs: T0 });
   const out = await runAll(d, exec(h, g), c, { inputsDir });
@@ -1375,10 +1378,10 @@ test('runner-required with no runner: a direct setup is refused (cancelled / run
   const refused = await runGuestSetup({ containerName: 'pp-n', phases: ['network_nat', 'dns'], via: 'ui' });
   assert.equal(refused.ok, false); assert.equal(refused.step, 'runner_unavailable'); assert.equal(getJob(d, refused.jobId).status, 'cancelled'); assert.equal(lifecycleHttpStatus(refused), 503);
   assert.deepEqual(h.calls, []);
-  const create = await runLifecycle({ kind: 'instance_create', containerName: 'pp-q', image: 'images:debian/12', setup: { phases: ['network_nat', 'await_address', 'dns'] }, via: 'ui' });
+  const create = await runLifecycle({ kind: 'instance_create', containerName: 'pp-q', image: 'images:debian/13', setup: { phases: ['network_nat', 'await_address', 'dns'] }, via: 'ui' });
   assert.equal(create.ok, false); assert.equal(create.step, 'runner_unavailable'); assert.equal(st.launches, undefined);
   runnerHeartbeat(d, { owner: RUNNER, host: 'pp', pid: 300, nowMs: Date.now() });
-  const handed = await runLifecycle({ kind: 'instance_create', containerName: 'pp-q', image: 'images:debian/12', setup: { phases: ['network_nat', 'await_address', 'dns'] }, via: 'ui', detach: true });
+  const handed = await runLifecycle({ kind: 'instance_create', containerName: 'pp-q', image: 'images:debian/13', setup: { phases: ['network_nat', 'await_address', 'dns'] }, via: 'ui', detach: true });
   assert.equal(handed.ok, true); assert.equal(handed.executor, 'runner'); assert.equal(getJob(d, handed.jobId).status, 'queued'); assert.deepEqual(h.calls, [], 'the backend ran nothing');
   assert.equal(createStatus(d, 'pp-q', { nowMs: Date.now() }).phase, 'downloading');
   const out = await runAll(d, exec(h, g), clock(Date.now()), { inputsDir });

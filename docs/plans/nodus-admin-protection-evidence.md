@@ -26,6 +26,11 @@ container used ProxyPilot MCP `run_lxc_command` with
 `curl -I --max-time 8 http://10.185.17.240:3001/`. It returned HTTP 200 in
 189 ms on 2026-09-27 at 10:23 UTC. This is a concrete same-bridge direct-IP
 bypass of the planned gateway. The probe did not change either guest.
+`get_lxc_container(nodus)` also reported a bridge IPv6 address,
+`fd42:53c1:d5e6:16b0:1266:6aff:fe92:72ae`; a fence limited to IPv4 would
+be incomplete. An attempted IPv6 peer `curl` was refused by the current MCP
+argument validator (`INVALID_ARGUMENT`), so IPv6 reachability remains
+unmeasured rather than assumed denied.
 
 Focused SQLite/MCP tests covered verified subjects, stale revisions,
 single-use confirmation, MCP job provenance, managed LXC/WebSocket review,

@@ -8,9 +8,9 @@ test('MCP VM plan reaches Incus as a VM without container privileges or guest AP
     disk_gb: 4, autostart: false });
   assert.equal(options.error, undefined);
   const argv = lifecycleArgv('instance_create', { container: 'pp-a3-test',
-    image: 'images:debian/12', profile: 'default', vm: options.isVm,
+    image: 'images:debian/13', profile: 'default', vm: options.isVm,
     config: options.config, rootSize: `${options.diskGb}GiB` });
-  assert.deepEqual(argv, ['incus', 'launch', 'images:debian/12', 'pp-a3-test',
+  assert.deepEqual(argv, ['incus', 'launch', 'images:debian/13', 'pp-a3-test',
     '--profile', 'default', '--config', 'security.nesting=false',
     '--config', 'security.guestapi=false', '--config', 'limits.cpu=1',
     '--config', 'limits.memory=512MiB', '--config', 'boot.autostart=false',

@@ -61,6 +61,16 @@ an assigned person. The existing A-17.9–A-17.14 and A-18 ledger remains open.
 | --- | --- | --- |
 | Docker/Compose / service control | `routes/services.js`, `lib/docker-compose-operation.js`; host namespace, daemon socket, root-owned manifests | Fixed lifecycle methods; root-owned approved manifests and allowed mounts; resource identity, fresh independent grant for broad deployment authority; no caller Compose blob |
 | Incus identity, import/export / instance management (A-17.9) | `routes/lxc.js`, `routes/mcp-tools/lxc-admin.js`, `lib/lxc-zip.js`, `lib/lxc-exports-instance.js`, `lib/snapshot-s3-export.js`; host exec/files | Reference-only rename/copy/import/export jobs, identity checks, destination allowlists, leases/fencing, staged artifact ownership and bounded streaming |
+
+New guest creation now constrains the image to `images:debian/13` and reads
+`/etc/os-release` through a fixed `incus exec <new-guest> -- cat` command
+before reporting success. The dashboard and MCP clone/import paths may start
+the newly created guest for this readback, then stop it if a stopped result
+was requested. A failed readback refuses the operation and attempts to stop
+that new guest. These host commands never target a pre-existing guest for
+Debian 13 conversion. The existing host command and filesystem boundary
+remains privileged; this check is an OS version gate, not an A3 worker
+isolation boundary. S6 remains open.
 | Project provisioning and component install / setup engine (A-17.10–11) | `mock2/provision.js`, `mock2/component-install.js`, `lib/project-lifecycle.js`, `mock2/{host,deploy,runner-sdk}.js`; launch, guest scripts, idle sweep | Existing runner job kinds with project lease, immutable approved inputs, guest-only execution and durable recovery; remove backend-allowed execution only after replacements pass |
 | Caddy, domains, TLS / edge controller (A-17.12) | `lib/{caddy-driver,caddy-cert,cert-mount-reconciler,tls-cert-store}.js`, `mock2/caddy.js`, `routes/{services,domains}.js`; writable `/etc/caddy`, adapt/reload | Constrained route/certificate methods and host-owned writes; canonical path/symlink policy, no arbitrary Caddy imports/config authority from a compromised backend. Current optional RPCs still accept broad config and are not isolation |
 | Firewall, L4, VPN, SSH / network controller | `lib/l4-*`, `lib/{platform-vpn-sync,vpn-startup}.js`, `mock2/{firewall,network}.js`, `routes/{firewall,vpn,ssh-access}.js`; host exec, sysctl, network/credential files | Typed validated rules and peer operations, host-owned ranges/ports/path policy, shared firewall lease; root-controlled grants for broader changes |

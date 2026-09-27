@@ -161,6 +161,15 @@ test('launch handler rejects dockerSupport for VMs', async () => {
   }
 });
 
+test('new instance HTTP path rejects Debian 12 before any host operation', async () => {
+  const handler = findHandler(lxc.lxcRouter, 'post', '/containers');
+  const { req, res } = makeReqRes({ method: 'POST', path: '/containers',
+    body: { name: 'new-bookworm', image: 'images:debian/12', type: 'container' } });
+  await handler(req, res);
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.error, /require images:debian\/13/);
+});
+
 test('shellSingleQuote escapes single quotes (defense against argv break-out)', async () => {
   // shellSingleQuote is non-exported in lxc.js (file-local), but the
   // pattern is well-known: wrap in single quotes, replace each ' with

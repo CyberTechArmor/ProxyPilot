@@ -73,6 +73,9 @@ function scriptedHost(state) {
       assert.ok(Array.isArray(argv) && argv.every((a) => typeof a === 'string'), 'argv arrays only');
       if (argv[0] !== 'incus') return { code: 127, stdout: '', stderr: 'not incus' };
       const verb = argv[1];
+      if (verb === 'exec') return { code: state.releaseFails ? 1 : 0,
+        stdout: state.releaseContent ?? 'ID=debian\nVERSION_ID="13"\n',
+        stderr: state.releaseFails ? 'guest agent unavailable' : '' };
       if (verb === 'list') { const i = byName(argv[2]); return { code: 0, stdout: JSON.stringify(i ? [i] : []), stderr: '' }; }
       if (verb === 'start') { const i = byName(argv[2]); if (!i) return { code: 1, stdout: '', stderr: 'Error: Instance not found' }; if (state.startFails) return { code: 1, stdout: '', stderr: 'Error: Failed to run: /sbin/init: no such file' }; if (!state.startNoop) i.status = 'Running'; return { code: 0, stdout: '', stderr: '' }; }
       if (verb === 'stop') { const i = byName(argv[2]); if (!i) return { code: 1, stdout: '', stderr: 'Error: Instance not found' }; if (state.stopFails && !argv.includes('--force')) return { code: 1, stdout: '', stderr: 'Error: The instance is busy' }; i.status = 'Stopped'; return { code: 0, stdout: '', stderr: '' }; }
@@ -137,7 +140,7 @@ test('validation is strict: names, flags and an allowlisted launch config; never
   ok('instance_delete', { container: 'pp-x', force: true, expect: { uuid: UUID_A, created_at: '2026-09-01T10:00:00Z' } });
   ok('snapshot_create', { container: 'pp-x', snapshot: 'before-upgrade.1', note: 'before the 2.0 upgrade' });
   ok('snapshot_delete', { container: 'pp-x', snapshot: 'snap-1', expect: { created_at: '2026-09-20T10:00:00Z' } });
-  ok('instance_create', { container: 'pp-new', image: 'images:debian/12', profile: 'default', vm: true, rootSize: '20GiB', network: 'm2br7', config: { 'limits.cpu': '2', 'limits.memory': '4096MiB', 'security.nesting': 'true', 'raw.lxc': 'lxc.apparmor.profile=unconfined' } });
+  ok('instance_create', { container: 'pp-new', image: 'images:debian/13', profile: 'default', vm: true, rootSize: '20GiB', network: 'm2br7', config: { 'limits.cpu': '2', 'limits.memory': '4096MiB', 'security.nesting': 'true', 'raw.lxc': 'lxc.apparmor.profile=unconfined' } });
   bad('instance_start', { container: '../x' }, /guest name/);
   bad('instance_start', { container: 'pp-x', argv: ['incus', 'start', 'pp-x'] }, /never carries a command/);
   bad('instance_start', { container: 'pp-x', command: 'incus start pp-x' }, /never carries a command/);
@@ -152,14 +155,14 @@ test('validation is strict: names, flags and an allowlisted launch config; never
   bad('instance_delete', { container: 'pp-x', expect: { name: 'pp-x' } }, /not an identity field/);
   bad('instance_delete', { container: 'pp-x', expect: { created_at: 'yesterday' } }, /timestamp/);
   bad('instance_create', { container: 'pp-new', image: '-rf' }, /image alias/);
-  bad('instance_create', { container: 'pp-new', image: 'images:debian/12', profile: 'a b' }, /profile name/);
-  bad('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'user.script': 'curl x | sh' } }, /not on the launch allowlist/);
-  bad('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'limits.memory': '4 GB; rm -rf /' } }, /not an accepted value/);
-  bad('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'raw.lxc': 'lxc.mount.entry=/ host none bind' } }, /not an accepted value/);
-  ok('instance_create', { container: 'pp-vm-safe', image: 'images:debian/12', vm: true, config: { 'security.guestapi': 'false', 'security.nesting': 'false', 'limits.memory': '512MiB' } });
-  bad('instance_create', { container: 'pp-vm-unsafe', image: 'images:debian/12', vm: true, config: { 'security.guestapi': 'true' } }, /not an accepted value/);
-  bad('instance_create', { container: 'pp-new', image: 'images:debian/12', rootSize: '20' }, /rootSize/);
-  bad('instance_start', { container: 'pp-x', image: 'images:debian/12' }, /carries no image/);
+  bad('instance_create', { container: 'pp-new', image: 'images:debian/13', profile: 'a b' }, /profile name/);
+  bad('instance_create', { container: 'pp-new', image: 'images:debian/13', config: { 'user.script': 'curl x | sh' } }, /not on the launch allowlist/);
+  bad('instance_create', { container: 'pp-new', image: 'images:debian/13', config: { 'limits.memory': '4 GB; rm -rf /' } }, /not an accepted value/);
+  bad('instance_create', { container: 'pp-new', image: 'images:debian/13', config: { 'raw.lxc': 'lxc.mount.entry=/ host none bind' } }, /not an accepted value/);
+  ok('instance_create', { container: 'pp-vm-safe', image: 'images:debian/13', vm: true, config: { 'security.guestapi': 'false', 'security.nesting': 'false', 'limits.memory': '512MiB' } });
+  bad('instance_create', { container: 'pp-vm-unsafe', image: 'images:debian/13', vm: true, config: { 'security.guestapi': 'true' } }, /not an accepted value/);
+  bad('instance_create', { container: 'pp-new', image: 'images:debian/13', rootSize: '20' }, /rootSize/);
+  bad('instance_start', { container: 'pp-x', image: 'images:debian/13' }, /carries no image/);
   bad('snapshot_create', { container: 'pp-x', snapshot: 's', note: 'AUTH_MASTER_SECRET=abcdefghijklmnop' }, /looks like a secret/);
   assert.deepEqual(Object.keys(LAUNCH_CONFIG_ALLOWLIST).sort(), ['boot.autostart', 'limits.cpu', 'limits.memory', 'raw.lxc', 'security.guestapi', 'security.nesting', 'security.privileged', 'security.syscalls.intercept.bpf', 'security.syscalls.intercept.bpf.devices', 'security.syscalls.intercept.mknod', 'security.syscalls.intercept.setxattr']);
   // validateRunnerJob delegates: a lifecycle job with argv never becomes a queued job.
@@ -174,16 +177,16 @@ test('the fixed commands: one argv per kind, rendered from the plan alone; an in
   assert.deepEqual(lifecycleArgv('instance_stop', { container: 'pp-x', force: true }), ['incus', 'stop', 'pp-x', '--force']);
   assert.deepEqual(lifecycleArgv('instance_restart', { container: 'pp-x', force: true }), ['incus', 'restart', 'pp-x', '--force']);
   assert.deepEqual(lifecycleArgv('instance_delete', { container: 'pp-x', force: true }), ['incus', 'delete', 'pp-x'], 'force applies to the stop that precedes the delete, never to the delete itself');
-  assert.deepEqual(lifecycleArgv('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'limits.memory': '2GiB', 'security.nesting': 'true' }, vm: true, network: 'm2br7' }),
-    ['incus', 'launch', 'images:debian/12', 'pp-new', '--profile', 'default', '--config', 'security.nesting=true', '--config', 'limits.memory=2GiB', '--network', 'm2br7', '--vm'], 'config flags in allowlist order');
-  assert.deepEqual(lifecycleArgv('instance_create', { container: 'pp-vm-safe', image: 'images:debian/12', vm: true, config: { 'security.guestapi': 'false', 'limits.memory': '512MiB' } }),
-    ['incus', 'launch', 'images:debian/12', 'pp-vm-safe', '--profile', 'default', '--config', 'security.guestapi=false', '--config', 'limits.memory=512MiB', '--vm']);
+  assert.deepEqual(lifecycleArgv('instance_create', { container: 'pp-new', image: 'images:debian/13', config: { 'limits.memory': '2GiB', 'security.nesting': 'true' }, vm: true, network: 'm2br7' }),
+    ['incus', 'launch', 'images:debian/13', 'pp-new', '--profile', 'default', '--config', 'security.nesting=true', '--config', 'limits.memory=2GiB', '--network', 'm2br7', '--vm'], 'config flags in allowlist order');
+  assert.deepEqual(lifecycleArgv('instance_create', { container: 'pp-vm-safe', image: 'images:debian/13', vm: true, config: { 'security.guestapi': 'false', 'limits.memory': '512MiB' } }),
+    ['incus', 'launch', 'images:debian/13', 'pp-vm-safe', '--profile', 'default', '--config', 'security.guestapi=false', '--config', 'limits.memory=512MiB', '--vm']);
   assert.deepEqual(lifecycleArgv('snapshot_create', { container: 'pp-x', snapshot: 's1' }), ['incus', 'snapshot', 'create', 'pp-x', 's1']);
   assert.deepEqual(lifecycleArgv('snapshot_create', { container: 'pp-x', snapshot: 's1' }, { snapshotForm: 'legacy' }), ['incus', 'snapshot', 'pp-x', 's1']);
   assert.deepEqual(lifecycleArgv('snapshot_delete', { container: 'pp-x', snapshot: 's1' }), ['incus', 'snapshot', 'delete', 'pp-x', 's1']);
   assert.deepEqual(instanceListArgv('pp-x'), ['incus', 'list', 'pp-x', '--format', 'json']);
   assert.throws(() => lifecycleArgv('instance_start', { container: 'pp-x; rm -rf /' }), /refusing to render/);
-  assert.throws(() => lifecycleArgv('instance_create', { container: 'pp-new', image: 'images:debian/12', config: { 'user.x': 'y' } }), /allowlist/);
+  assert.throws(() => lifecycleArgv('instance_create', { container: 'pp-new', image: 'images:debian/13', config: { 'user.x': 'y' } }), /allowlist/);
 });
 
 test('identity, state verdicts and the idempotent short-circuit', () => {
@@ -304,24 +307,24 @@ test('instance_delete: bound to the confirmed identity; a running guest is stopp
 test('instance_create: explicit root size is applied at launch or fails closed; an existing name is refused and a failed launch removes a half-created guest', async () => {
   const d = db();
   const st = { instances: [] }; const h = scriptedHost(st);
-  const c = submit(d, 'instance_create', { container: 'pp-new', image: 'images:debian/12', profile: 'default', vm: true, rootSize: '20GiB', config: { 'limits.cpu': '2', 'limits.memory': '2GiB', 'security.nesting': 'true' } });
+  const c = submit(d, 'instance_create', { container: 'pp-new', image: 'images:debian/13', profile: 'default', vm: true, rootSize: '20GiB', config: { 'limits.cpu': '2', 'limits.memory': '2GiB', 'security.nesting': 'true' } });
   const out = await runAll(d, exec(h), T0 + 1);
   assert.equal(out.ran[0].status, 'succeeded', getJob(d, c.job.id).reason);
-  assert.deepEqual(st.launched, ['incus', 'launch', 'images:debian/12', 'pp-new', '--profile', 'default', '--config', 'security.nesting=true', '--config', 'limits.cpu=2', '--config', 'limits.memory=2GiB', '--device', 'root,size=20GiB', '--vm']);
+  assert.deepEqual(st.launched, ['incus', 'launch', 'images:debian/13', 'pp-new', '--profile', 'default', '--config', 'security.nesting=true', '--config', 'limits.cpu=2', '--config', 'limits.memory=2GiB', '--device', 'root,size=20GiB', '--vm']);
   const row = getJob(d, c.job.id);
   assert.equal(row.outcome, 'created'); assert.equal(resultFromJob(row).instanceState, 'Running');
   assert.deepEqual(parseJson(row.progress_json).generated.map((g) => ({ kind: g.kind, name: g.name })), [{ kind: 'instance', name: 'pp-new' }]);
   assert.equal(readLock(d, 'pp-new'), null, 'a lock on a guest that did not exist before the job is released after it');
   // Existing name: refused at query, no launch.
   h.calls.length = 0; st.launched = null;
-  const dup = submit(d, 'instance_create', { container: 'pp-new', image: 'images:debian/12' }, { nowMs: T0 + 2 });
+  const dup = submit(d, 'instance_create', { container: 'pp-new', image: 'images:debian/13' }, { nowMs: T0 + 2 });
   const o2 = await runAll(d, exec(h), T0 + 3);
   assert.equal(o2.ran[0].status, 'refused'); assert.match(getJob(d, dup.job.id).reason, /pp-new already exists \(status Running\); a create never replaces/); assert.deepEqual(mutations(h), []);
   // Root size refused by Incus: no larger profile-default guest is reported
   // as a successful create. The launch's half-created guest is removed.
   st.rootFails = true; h.calls.length = 0;
   st.launchLeavesHalf = true;
-  const w = submit(d, 'instance_create', { container: 'pp-vm2', image: 'images:debian/12', vm: true, rootSize: '20GiB' }, { nowMs: T0 + 4 });
+  const w = submit(d, 'instance_create', { container: 'pp-vm2', image: 'images:debian/13', vm: true, rootSize: '20GiB' }, { nowMs: T0 + 4 });
   await runAll(d, exec(h), T0 + 5);
   assert.equal(getJob(d, w.job.id).status, 'failed');
   assert.match(getJob(d, w.job.id).reason, /Block volumes cannot be shrunk/);
@@ -330,7 +333,7 @@ test('instance_create: explicit root size is applied at launch or fails closed; 
   st.launchLeavesHalf = false;
   // A failed launch that left a half-created guest: cleaned up, reported failed at issue.
   st.launchFails = true; st.launchLeavesHalf = true; h.calls.length = 0;
-  const f = submit(d, 'instance_create', { container: 'pp-half', image: 'images:nope' }, { nowMs: T0 + 6 });
+  const f = submit(d, 'instance_create', { container: 'pp-half', image: 'images:debian/13' }, { nowMs: T0 + 6 });
   const o3 = await runAll(d, exec(h), T0 + 7);
   assert.equal(o3.ran[0].status, 'failed');
   assert.deepEqual(mutations(h).map((a) => a.slice(0, 2)), [['incus', 'launch'], ['incus', 'delete']]);
@@ -338,6 +341,19 @@ test('instance_create: explicit root size is applied at launch or fails closed; 
   assert.ok(!st.instances.some((i) => i.name === 'pp-half'));
   const fr = resultFromJob(getJob(d, f.job.id));
   assert.equal(fr.step, 'issue'); assert.deepEqual(fr.cleanup, { attempted: true, removed: true, detail: null }); assert.match(fr.error, /image not found/);
+});
+
+test('instance_create rejects Debian 12 and stops a newly launched guest whose os-release is not Debian 13', async () => {
+  assert.match(validateLifecycleParams('instance_create', { container: 'pp-old', image: 'images:debian/12' }).reason, /require images:debian\/13/);
+  const d = db();
+  const st = { instances: [], releaseContent: 'ID=debian\nVERSION_ID="12"\n' };
+  const h = scriptedHost(st);
+  const created = submit(d, 'instance_create', { container: 'pp-new', image: 'images:debian/13' });
+  await runAll(d, exec(h), T0 + 1);
+  assert.equal(getJob(d, created.job.id).status, 'failed');
+  assert.match(getJob(d, created.job.id).reason, /os-release does not prove/);
+  assert.equal(st.instances[0].status, 'Stopped');
+  assert.deepEqual(mutations(h).map(c => c[1]), ['launch', 'exec', 'stop']);
 });
 
 test('snapshot_create and snapshot_delete: the argv, the note recorded on the snapshot, the legacy CLI form discovered, an existing snapshot refused, the delete bound to the snapshot\'s timestamp', async () => {
@@ -481,7 +497,7 @@ test('interruption, idempotent kinds: a dead owner\'s start / delete is resumed 
 });
 
 test('interruption, never-replayed kinds (R-023): a restart or create whose command was issued ends recovery_required naming the check; nothing is re-issued, no recovery job is queued, the lease is KEPT stale so every operation on the guest is refused — at submission and at the executor, however the row got there — until an operator acknowledges; the boot sweep records the same', async () => {
-  for (const [kind, params] of [['instance_restart', { container: 'pp-x' }], ['instance_create', { container: 'pp-x', image: 'images:debian/12' }]]) {
+  for (const [kind, params] of [['instance_restart', { container: 'pp-x' }], ['instance_create', { container: 'pp-x', image: 'images:debian/13' }]]) {
     const d = db(); const st = { instances: [inst()] }; const h = scriptedHost(st);
     const job = deadJob(d, { kind, params, cp: { phase: 'issuing', lifecycle: true, replay: 'never', resumable: false, disruptive: true, issued: true, target: null, container: 'pp-x' } });
     acquireLock(d, { app: 'pp-x', owner: DEAD, operation: kind, jobId: job.id, nowMs: T0 - 99_000 });
@@ -544,7 +560,7 @@ test('interruption, never-replayed kinds (R-023): a restart or create whose comm
   assert.deepEqual(sw.interrupted, ['dead-1']); assert.deepEqual(sw.recoveryQueued, []);
   assert.equal(getJob(d, 'dead-1').outcome, 'interrupted_uncertain'); assert.equal(readLock(d, 'pp-x')?.recovery_job_id, 'dead-1');
   // No lease row left at all (it had been removed): the condition still excludes — a stale row is written in the dead owner's name.
-  const d2 = db(); deadJob(d2, { kind: 'instance_create', params: { container: 'pp-n', image: 'images:debian/12' }, cp: { phase: 'issuing', lifecycle: true, replay: 'never', resumable: false, disruptive: true, issued: true, container: 'pp-n' } });
+  const d2 = db(); deadJob(d2, { kind: 'instance_create', params: { container: 'pp-n', image: 'images:debian/13' }, cp: { phase: 'issuing', lifecycle: true, replay: 'never', resumable: false, disruptive: true, issued: true, container: 'pp-n' } });
   assert.equal(readLock(d2, 'pp-n'), null);
   reconcile({ db: d2, owner: RUNNER, nowMs: T0 });
   const held = readLock(d2, 'pp-n');
@@ -695,7 +711,7 @@ test('the ops layer: the plan and its digest (a different force flag or identity
   assert.equal(p1.digest, planDigest(p1.plan));
   assert.equal(resolveLifecyclePlan(null, { kind: 'instance_start', containerName: 'pp-x', force: true }).plan.force, false, 'force is a stop/restart/delete flag; a start never carries it');
   assert.match(resolveLifecyclePlan(null, { kind: 'reboot', containerName: 'pp-x' }).error, /unknown lifecycle operation/);
-  assert.equal(resolveLifecyclePlan(null, { kind: 'instance_create', containerName: 'pp-n', image: 'images:debian/12', config: { 'limits.cpu': 2, 'limits.memory': null } }).params.config['limits.cpu'], '2');
+  assert.equal(resolveLifecyclePlan(null, { kind: 'instance_create', containerName: 'pp-n', image: 'images:debian/13', config: { 'limits.cpu': 2, 'limits.memory': null } }).params.config['limits.cpu'], '2');
   assert.equal(lifecycleHttpStatus({ ok: false, code: 'CONTAINER_BUSY' }), 409);
   assert.equal(lifecycleHttpStatus({ ok: false, code: 'CONTAINER_LOCK_STALE' }), 409);
   assert.equal(lifecycleHttpStatus({ ok: false, code: 'INVALID' }), 400);
@@ -707,7 +723,7 @@ test('the ops layer: the plan and its digest (a different force flag or identity
   const d = db();
   configureContainerLockStore({ getDb: () => d, owner: BACKEND, env: { SETUP_EXECUTOR_POLICY: 'backend-allowed' }, guestExec: { guest: async () => ({ code: 0, stdout: '' }) }, hostExec: async () => ({ code: 0, stdout: '[]', stderr: '' }) });
   t.after(() => configureContainerLockStore(null));
-  const bad = await runLifecycle({ kind: 'instance_create', containerName: 'pp-n', image: 'images:debian/12', config: { 'user.x': 'y' } });
+  const bad = await runLifecycle({ kind: 'instance_create', containerName: 'pp-n', image: 'images:debian/13', config: { 'user.x': 'y' } });
   assert.equal(bad.code, 'INVALID'); assert.match(bad.error, /allowlist/); assert.equal(listJobs(d).length, 0, 'no job row for an invalid plan');
 });
 
@@ -809,7 +825,7 @@ test('the runner\'s host channel receives the rendered argv as one spawn — no 
     return spawn(process.execPath, ['-e', 'process.exit(0)'], opts);
   };
   const ex = hostGuestExec({ spawnImpl });
-  for (const [kind, p] of [['instance_stop', { container: 'pp-x', force: true }], ['snapshot_delete', { container: 'pp-x', snapshot: 'a.b' }], ['instance_create', { container: 'pp-n', image: 'images:debian/12', config: { 'security.nesting': 'true' } }]]) {
+  for (const [kind, p] of [['instance_stop', { container: 'pp-x', force: true }], ['snapshot_delete', { container: 'pp-x', snapshot: 'a.b' }], ['instance_create', { container: 'pp-n', image: 'images:debian/13', config: { 'security.nesting': 'true' } }]]) {
     const argv = lifecycleArgv(kind, p);
     const r = await ex.host(argv, { timeoutMs: 5000 });
     assert.equal(r.code, 0);

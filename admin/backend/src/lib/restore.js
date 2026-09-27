@@ -319,6 +319,12 @@ export async function runModeA({
   runId, backup, destination, passphrase, importIncus = false,
   privateBridge = process.env.PROXYPILOT_RESTORE_BRIDGE || 'pp-restore-br0',
 }) {
+  if (importIncus) {
+    const error = 'Incus archive import cannot verify the resulting guest /etc/os-release as Debian 13; no guest was created';
+    appendStep(runId, { stage: 'incus-import', status: 'failed', error });
+    finalize(runId, 'failed', error);
+    return { ok: false, error };
+  }
   // Re-use the Mode C pipeline up through manifest verification —
   // a corrupt artifact should fail before we touch disk.
   const inner = await runModeCInner({ runId, backup, destination, passphrase });

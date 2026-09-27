@@ -23,6 +23,7 @@ import {
 } from './plan.js';
 import { mintMigrationToken, verifyToken, parseToken, formatPin, tokenState, DEFAULT_TTL_SECONDS } from './token.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs, extensionFor } from '../export-compression.js';
+import { parseDebian13Release } from '../debian13-guest.js';
 
 export const ARCHES = Object.freeze(['amd64', 'arm64']);
 /** Where install.sh / update.sh drop the cross-built agents (scripts/build-migration-agent.sh). */
@@ -615,6 +616,11 @@ export function createMigrationService({
     if (!row.manifest_at) return { error: 'the inventory has not arrived yet — there is nothing to review' };
     if (row.approved_at) return { error: 'this transfer is already approved' };
     const spec = parse(row.spec_json, {});
+    if (row.mode === 'whole-machine') {
+      const os = parse(row.manifest_json, {})?.os;
+      if (os?.id !== 'debian' || String(os.version_id) !== '13')
+        return { error: 'source inventory does not report Debian 13; whole-machine import refused before transfer' };
+    }
 
     const capacity = await measureCapacity(row).catch(() => null);
     const blocking = manifestConcerns(parse(row.manifest_json, null) || {}, { mode: row.mode, capacity, transport: row.transport, target_type: spec.type, install_tools: spec.install_tools !== false }).filter((c) => c.level === 'block');
@@ -644,8 +650,14 @@ export function createMigrationService({
 
   /** Create the empty guest an application-mode migration copies into. */
   async function ensureApplicationGuest(row, spec) {
+    if (spec.app?.image !== 'images:debian/13') return { error: 'new migration guests require images:debian/13; stored image overrides are refused' };
+    const verifyRelease = async () => {
+      const release = await exec('incus', ['exec', row.target_name, '--', 'cat', '/etc/os-release'], { timeoutMs: 30000 }).catch(() => ({ status: 1 }));
+      return release.status === 0 && parseDebian13Release(release.stdout);
+    };
     const existing = await exec('incus', ['config', 'show', row.target_name], { timeoutMs: 30000 });
     if (existing.status === 0) {
+      if (!(await verifyRelease())) return { error: `existing guest ${row.target_name} does not prove Debian 13 in /etc/os-release` };
       event(row.id, { kind: 'log', message: `guest ${row.target_name} already exists — reusing it` });
       db().prepare('UPDATE migrations SET guest_created = 0 WHERE id = ?').run(row.id);
       return { existed: true };
@@ -658,9 +670,14 @@ export function createMigrationService({
     if (spec.disk_gb) argv.push('--device', `root,size=${spec.disk_gb}GB`);
     const r = await exec('incus', argv, { timeoutMs: 600000 });
     if (r.status !== 0) return { error: `could not create ${row.target_name}: ${tail(r.stderr) || `exit ${r.status}`}` };
+    if (!(await verifyRelease())) {
+      const stop = await exec('incus', ['stop', row.target_name, '--force'], { timeoutMs: 120000 }).catch(() => ({ status: 1 }));
+      return { error: `new migration guest ${row.target_name} did not prove Debian 13 in /etc/os-release; ${stop.status === 0 ? 'stopped' : 'could not be stopped'}` };
+    }
     event(row.id, { kind: 'log', message: `created guest ${row.target_name} (${spec.app?.image})` });
     db().prepare('UPDATE migrations SET guest_created = 1 WHERE id = ?').run(row.id);
-    await fenceGuest(row);
+    const fenced = await fenceGuest(row);
+    if (fenced?.error) return { error: fenced.error };
     return { created: true };
   }
 
@@ -702,6 +719,27 @@ export function createMigrationService({
         : 'guest fenced: default-deny on bridge → host services (the firewall baseline — this guest has no allow entries), and no route',
     });
     return { fenced: true, removed };
+  }
+
+  async function verifyImportedGuest(name) {
+    const read = () => exec('incus', ['exec', name, '--', 'cat', '/etc/os-release'], { timeoutMs: 30000 });
+    let release = await read();
+    let startedForProof = false;
+    if (release.status !== 0) {
+      const start = await exec('incus', ['start', name], { timeoutMs: 120000 });
+      if (start.status !== 0) return { error: `${name} could not start for Debian 13 /etc/os-release verification` };
+      startedForProof = true;
+      release = await read();
+    }
+    if (release.status !== 0 || !parseDebian13Release(release.stdout)) {
+      await exec('incus', ['stop', name, '--force'], { timeoutMs: 120000 });
+      return { error: `${name}:/etc/os-release did not prove Debian 13; guest stopped` };
+    }
+    if (startedForProof) {
+      const stop = await exec('incus', ['stop', name], { timeoutMs: 120000 });
+      if (stop.status !== 0) return { error: `${name} proved Debian 13 but could not be stopped after verification` };
+    }
+    return { ok: true };
   }
 
   /* --------------------------- transport switch -------------------------- */
@@ -952,6 +990,9 @@ export function createMigrationService({
    */
   async function importRootfsTar(row) {
     const spec = parse(row.spec_json, {});
+    const os = parse(row.manifest_json, {})?.os;
+    if (os?.id !== 'debian' || String(os.version_id) !== '13')
+      return { error: 'source inventory does not report Debian 13; rootfs import refused' };
     const { dir, path } = await artifactPath(row);
     try { await stat(path); } catch { return { error: 'no rootfs tarball has been uploaded for this migration' }; }
     const man = parse(row.manifest_json, {}) || {};
@@ -1009,7 +1050,10 @@ export function createMigrationService({
     if (init.status !== 0) return { error: `incus init failed: ${tail(init.stderr) || `exit ${init.status}`}` };
     await rm(dir, { recursive: true, force: true });
 
-    await fenceGuest(row);
+    const fenced = await fenceGuest(row);
+    if (fenced?.error) return { error: fenced.error };
+    const proof = await verifyImportedGuest(row.target_name);
+    if (proof.error) return { error: proof.error };
     const ts = nowIso(now());
     db().prepare('UPDATE migrations SET phase = ?, status = ?, updated_at = ?, guest_created = 1 WHERE id = ?').run('post-import', 'ready', ts, row.id);
     event(row.id, { kind: 'state', phase: 'post-import', message: `guest ${row.target_name} created from the imported rootfs, stopped and fenced` });
@@ -1035,7 +1079,10 @@ export function createMigrationService({
     // unpacked into it; verify it is really there, then fence.
     const chk = await exec('incus', ['config', 'show', row.target_name], { timeoutMs: 30000 });
     if (chk.status !== 0) return fail(row.id, `the transfer reported success but ${row.target_name} does not exist on this host`);
-    await fenceGuest(rowById(row.id));
+    const fenced = await fenceGuest(rowById(row.id));
+    if (fenced?.error) return fail(row.id, fenced.error);
+    const proof = await verifyImportedGuest(row.target_name);
+    if (proof.error) return fail(row.id, proof.error);
     const ts = nowIso(now());
     // A whole-machine transport lands the guest itself; file-sync unpacked
     // into a guest whose origin ensureApplicationGuest already recorded.

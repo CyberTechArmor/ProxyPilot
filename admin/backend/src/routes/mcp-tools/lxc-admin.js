@@ -21,6 +21,7 @@ import { getJob, listJobs, readLock } from '../../lib/setup-engine/store.js';
 import { acknowledgeUncertainJob } from '../../lib/setup-engine/backend.js';
 import { snapshotCoverage } from '../../lib/setup-engine/restore-logic.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../../lib/export-compression.js';
+import { parseDebian13Release } from '../../lib/debian13-guest.js';
 
 export function createLxcAdminHandlers(kit) {
   const { ctx, ok, err, mutation, reader, confirmToken, confirmFlag, dry, guestSh, hostSh, tail, policy } = kit;
@@ -54,6 +55,21 @@ export function createLxcAdminHandlers(kit) {
     return LXC_NAME_REGEX.test(name) ? name : null;
   };
   const incus = (name) => `${LXC_PREFIX}${name}`;
+  async function proveNewGuest(name, leaveRunning) {
+    const guest = incus(name);
+    const started = await runHostCapture('incus', ['start', guest], { timeoutMs: 120000 }).catch(error => ({ status: 1, stderr: error?.message }));
+    if (started.status !== 0) return { error: `Could not start ${name} to read /etc/os-release; new guest remains unverified` };
+    const release = await runHostCapture('incus', ['exec', guest, '--', 'cat', '/etc/os-release'], { timeoutMs: 30000 }).catch(error => ({ status: 1, stderr: error?.message }));
+    if (release.status !== 0 || !parseDebian13Release(release.stdout)) {
+      const stop = await runHostCapture('incus', ['stop', guest, '--force'], { timeoutMs: 120000 }).catch(error => ({ status: 1, stderr: error?.message }));
+      return { error: `${name}:/etc/os-release did not prove Debian 13; new guest ${stop.status === 0 ? 'stopped' : 'could not be stopped'}` };
+    }
+    if (!leaveRunning) {
+      const stopped = await runHostCapture('incus', ['stop', guest], { timeoutMs: 120000 });
+      if (stopped.status !== 0) return { error: `Debian 13 verified but ${name} could not be stopped as requested` };
+    }
+    return { verified: true, started: leaveRunning };
+  }
 
   async function instanceOrError(name) {
     const r = await fetchLxcInstance(incus(name));
@@ -166,16 +182,17 @@ export function createLxcAdminHandlers(kit) {
     let snap = args.snapshot ? validSnapshotName(args.snapshot) : null;
     if (args.snapshot && !snap) return err('snapshot name is invalid');
     if (snap && !src.detail.snapshots.some((s) => s.name === snap)) return err(`Snapshot ${snap} does not exist on ${name}`);
+    const inherited = restoreHazards(src.instance.devices || {}, {});
+    if (inherited.pinnedIp || inherited.proxyDevices.length)
+      return err('Clone would inherit a pinned IP or proxy device, so it cannot be started safely for Debian 13 guest verification; remove the conflicting devices first');
     const plan = { from: snap ? `${name}/${snap}` : name, to: newName, start: args.start === true };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmFlag(args, note, `This copies ${plan.from} to a new container ${newName}.`); if (gate) return gate;
     const r = await runHostCapture('incus', ['copy', snap ? `${incus(name)}/${snap}` : incus(name), incus(newName)], { timeoutMs: 30 * 60 * 1000 });
     if (r.status !== 0) return err(`incus copy failed: ${tail(r.stderr) || (r.timedOut ? 'timed out' : 'unknown error')}`);
-    let started = false;
-    if (args.start === true) {
-      const s = await runHostCapture('incus', ['start', incus(newName)], { timeoutMs: 120000 });
-      started = s.status === 0;
-    }
+    const proof = await proveNewGuest(newName, args.start === true);
+    if (proof.error) return err(proof.error);
+    const started = proof.started;
     note.summary = `cloned ${plan.from} → ${newName}`;
     note.detail = plan;
     return ok({ cloned: true, from: plan.from, container: newName, started, note: 'The clone keeps the source\'s config and devices, including any static IP pin — set_lxc_network before routing to it.' });
@@ -235,14 +252,12 @@ export function createLxcAdminHandlers(kit) {
     // Published ports have one owner. Starting a second claimant on a guess
     // is how a restore takes production down, so that needs saying out loud
     // (start: true) rather than defaulting.
-    let started = false;
     const portClash = hazards.proxyDevices.length > 0 && args.start !== true;
-    if (args.start !== false && !portClash) {
-      const st = await runHostCapture('incus', ['start', incus(newName)], { timeoutMs: 120000 });
-      started = st.status === 0;
-    } else if (portClash) {
-      notes.push(`Left stopped because of those port forwards. Re-call with start: true once you have decided which guest keeps them, or remove them here with remove_lxc_device.`);
-    }
+    if (hazards.proxyDevices.length > 0 || (hazards.pinnedIp && !pinRemoved))
+      return err(`${newName} was imported but remains stopped: inherited network devices prevent safe Debian 13 guest readback; remove the conflicts, then verify /etc/os-release before use`);
+    const proof = await proveNewGuest(newName, args.start !== false && !portClash);
+    if (proof.error) return err(proof.error);
+    const started = proof.started;
     note.summary = `imported ${newName} from ${file}`;
     note.detail = { ...plan, ip_pin_removed: pinRemoved ? hazards.pinnedIp : null, proxy_devices: hazards.proxyDevices, started };
     return ok({

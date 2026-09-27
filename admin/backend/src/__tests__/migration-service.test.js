@@ -72,7 +72,7 @@ const MANIFEST = {
   schema: MANIFEST_SCHEMA,
   collected_at: '2026-09-19T09:59:00Z',
   source: { hostname: 'old-web01', kind: 'proxmox-lxc', arch: 'amd64', cpus: 2, memory_bytes: 4 * 1024 ** 3, addresses: ['10.0.0.5'] },
-  os: { id: 'debian', version_id: '12', pretty_name: 'Debian 12', init: 'systemd' },
+  os: { id: 'debian', version_id: '13', pretty_name: 'Debian 13', init: 'systemd' },
   units: [{ name: 'myapp.service', state: 'running', working_directory: '/srv/myapp', ports: [{ proto: 'tcp', port: 3000 }] }],
   listening: [{ proto: 'tcp', address: '127.0.0.1', port: 3000, process: 'node' }],
   vhosts: [{ server: 'nginx', file: '/etc/nginx/sites-enabled/app', tls: true, server_names: ['app.example.com'], upstreams: ['http://127.0.0.1:3000'] }],
@@ -93,6 +93,8 @@ function setup({ script = () => ({ status: 0, stdout: '', stderr: '' }) } = {}) 
   const runHostCapture = async (bin, args) => {
     calls.push({ bin, argv: [bin, ...args] });
     const r = script(bin, args, calls.length) || {};
+    if (bin === 'incus' && args[0] === 'exec' && (r.status == null || r.status === 0) && !r.stdout)
+      return { status: 0, stdout: 'ID=debian\nVERSION_ID="13"\n', stderr: '' };
     return { status: r.status ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
   };
   // An uploaded rootfs tarball must land somewhere writable by whoever runs

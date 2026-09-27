@@ -10,9 +10,14 @@ and the lifecycle runner removes any half-created instance.
 New ProxyPilot installs use Zabbly's `stable` APT channel on its supported
 Debian 12/13 and Ubuntu 22.04/24.04/26.04 releases. The installer verifies
 the repository key fingerprint before installing the current channel package.
-The Create dialog and `create_lxc_container` MCP tool default to
-`images:debian/13`; Debian 12 remains selectable. Incus downloads a separate
-VM image when `--vm` is requested, even if the container variant is cached.
+The Create dialog, `create_lxc_container` MCP tool, Mock2 provisioner and
+application migration use `images:debian/13` for new guests. Image overrides
+to Debian 12 or another alias are refused. Creation reads the running guest's
+`/etc/os-release` and requires `ID=debian` and `VERSION_ID=13`; an image alias
+by itself is insufficient. Clone and import paths also require guest readback,
+and paths that cannot safely obtain it fail closed. Existing guests are not
+upgraded or restarted by this rule. Incus downloads a separate VM image when
+`--vm` is requested, even if the container variant is cached.
 
 ## Existing hosts
 

@@ -37,6 +37,7 @@ import { resyncReview, resyncSharedPlan } from '../../lib/setup-engine/full-plat
 import { recoveryReview, queueRecovery } from '../../lib/setup-engine/full-platform-kc-recovery.js';
 import { isEncrypted, decryptSecret } from '../../lib/secrets.js';
 import { nowIso } from '../../lib/mcp-ext/logic.js';
+import { readPomerium, pomeriumIntents, routeSnapshot, subjectChoices, reviewPomeriumRoute, savePomeriumRoute } from '../../lib/setup-engine/pomerium-store.js';
 
 export const PLATFORM_FLAG = 'mcp.platform';
 export const PURGE_FLAG = 'mcp.platform.purge';
@@ -142,6 +143,49 @@ export function createPlatformHandlers(kit) {
     const evaluated = evaluatePreflight(d, { resolve, caddyAddresses, docker, listening, key: { configured, decrypts } });
     const checks = evaluated.checks.map((c) => { const h = c.id.startsWith('dns:') ? dns.results[c.id.slice(4)] : null; return h ? { ...c, ok: h.ok, detail: h.ok ? 'resolves to the Caddy host from this host and from 1.1.1.1' : h.reason, remedy: h.zone?.managed ? 'set_dns_record (the zone is on the stored Cloudflare token)' : `Set at the external DNS host: ${h.record || 'an A record for the Caddy host'}` } : c; });
     return ok({ ...evaluated, checks, ready: checks.every((c) => c.ok), dns: Object.values(dns.results), caddy_host: dns.expected, ports_expected: SERVICE_PORTS });
+  });
+
+  const get_route_protection = read('get_route_protection', async () => {
+    const d = db(), state = readPomerium(d);
+    if (!state) return ok({ configured: false, routes: [], identities: [], intents: [] });
+    const routes = d.prepare('SELECT id,domain FROM service_http_routes ORDER BY domain').all().map(route => {
+      try {
+        const accepted = routeSnapshot(d, route.id, state.config);
+        return { id: route.id, domain: route.domain, upstream: `http://${accepted.target_ip}:${accepted.target_port}`,
+          supported: true, apply_ready: accepted.runtime !== 'lxc',
+          ...(accepted.runtime === 'lxc' ? { reason: 'Managed LXC host ingress fence and direct-IP bypass proof are not installed.' } : {}) };
+      } catch (error) {
+        return { id: route.id, domain: route.domain, supported: false, reason: error?.pomeriumSafe ? error.message : 'Route configuration cannot be verified.' };
+      }
+    });
+    const job = state.last_job_id ? getJob(d, state.last_job_id) : null;
+    return ok({ configured: true, revision: state.revision, routes, identities: subjectChoices(d, state.config.issuer),
+      intents: pomeriumIntents(d), job: job ? jobSummary(job) : null });
+  });
+
+  const set_route_protection = write('set_route_protection', { audit: 'POMERIUM_ROUTE_REVIEWED' }, async (args, auth, _req, note) => {
+    const d = db();
+    const input = { expectedRevision: args.expected_revision, routeId: args.route_id,
+      action: args.action, subjects: args.allowed_identities };
+    note.subject_id = String(input.routeId || '');
+    const review = reviewPomeriumRoute(d, input);
+    const preview = { route_id: review.routeId, domain: review.domain, upstream: review.upstream,
+      action: review.action, allowed_identities: review.subjects, restrictions: review.restrictions,
+      warning: review.warning, revision: input.expectedRevision };
+    if (args.dry_run === true) return ok({ dry_run: true, preview, note: 'Nothing was queued and no confirmation token was issued.' });
+    if (review.action === 'protect' && review.lxcContainer) {
+      note.refused = true;
+      return err('Managed LXC protection requires a persistent host ingress fence and direct-IP bypass proof. No Pomerium job was queued or Caddy route changed.');
+    }
+    const gate = confirmToken(args, auth, note, { tool: 'set_route_protection', subject: review.reviewToken,
+      action: `${input.action} ${review.domain}`, preview: { preview } });
+    if (gate) return gate;
+    const result = savePomeriumRoute(d, { ...input, reviewToken: review.reviewToken, reviewed: true }, requestedBy(auth), { via: 'mcp' });
+    note.summary = `${input.action} ${review.domain} queued (${result.job.id})`;
+    note.detail = { ...note.detail, route_id: input.routeId, action: input.action, revision: input.expectedRevision,
+      next_revision: input.expectedRevision + 1, job_id: result.job.id };
+    return ok({ queued: true, job: jobSummary(result.job), preview,
+      next: `get_platform_job({ id: "${result.job.id}" }); then get_route_protection to verify the final state.` });
   });
 
   /* -------------------------------- writes ------------------------------- */
@@ -319,6 +363,7 @@ export function createPlatformHandlers(kit) {
   return {
     verify_platform_service, get_platform_service_logs, control_platform_container, set_platform_restricted_networks, resync_platform_plan, recover_keycloak_bootstrap,
     get_platform_setup, get_platform_service, list_platform_jobs, get_platform_job, platform_preflight,
+    get_route_protection, set_route_protection,
     save_platform_setup, apply_platform_setup: queueApply('apply'), continue_platform_setup: queueApply('continue'),
     manage_platform_service, reset_platform_setup,
   };

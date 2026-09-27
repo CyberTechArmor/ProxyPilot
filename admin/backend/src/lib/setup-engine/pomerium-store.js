@@ -1,10 +1,17 @@
 import { randomBytes, generateKeyPairSync, createPrivateKey } from 'node:crypto';
+import { isIP } from 'node:net';
 import { encryptSecret, decryptSecret, isEncrypted } from '../secrets.js';
 import { readKeycloak } from './keycloak-store.js';
+import { platformRouteRefusal } from './platform-hostnames.js';
 import { issuerFor } from './keycloak-logic.js';
 import { createJob, getJob, jobView } from './store.js';
 import { digest, pomeriumError as fail, POMERIUM_APP, POMERIUM_PORT, pomeriumConfigSchema, pomeriumRouteSchema } from './pomerium-logic.js';
 
+export const POMERIUM_LXC_IDENTITY_TRIGGER = `
+CREATE TRIGGER IF NOT EXISTS pomerium_service_lxc_identity BEFORE UPDATE OF lxc_container_name ON services
+ WHEN EXISTS(SELECT 1 FROM setup_route_protection p JOIN service_http_routes r ON r.id=p.route_id WHERE r.service_id=OLD.id AND p.state!='removed')
+ BEGIN SELECT RAISE(ABORT, 'Pomerium protection requires a stable managed LXC identity.'); END;
+`;
 export const POMERIUM_SCHEMA = `
 CREATE TABLE IF NOT EXISTS setup_pomerium (
  id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, config_json TEXT NOT NULL,
@@ -23,9 +30,10 @@ CREATE TRIGGER IF NOT EXISTS pomerium_route_update BEFORE UPDATE ON service_http
 CREATE TRIGGER IF NOT EXISTS pomerium_route_delete BEFORE DELETE ON service_http_routes
  WHEN EXISTS(SELECT 1 FROM setup_route_protection WHERE route_id=OLD.id AND state!='removed')
  BEGIN SELECT RAISE(ABORT, 'Pomerium protection requires explicit removal before deleting a route.'); END;
-CREATE TRIGGER IF NOT EXISTS pomerium_service_update BEFORE UPDATE OF target_ip,kind,is_admin,runtime ON services
+CREATE TRIGGER IF NOT EXISTS pomerium_service_update BEFORE UPDATE OF target_ip,kind,is_admin,runtime,lxc_container_name ON services
  WHEN EXISTS(SELECT 1 FROM setup_route_protection p JOIN service_http_routes r ON r.id=p.route_id WHERE r.service_id=OLD.id AND p.state!='removed')
  BEGIN SELECT RAISE(ABORT, 'Pomerium protection requires a stable private upstream.'); END;
+${POMERIUM_LXC_IDENTITY_TRIGGER}
 CREATE TRIGGER IF NOT EXISTS pomerium_service_alias BEFORE UPDATE OF target_ip ON services
  WHEN EXISTS(SELECT 1 FROM setup_route_protection p JOIN service_http_routes r ON r.id=p.route_id JOIN services s ON s.id=r.service_id JOIN service_http_routes a ON a.service_id=NEW.id
  WHERE p.state!='removed' AND s.id!=NEW.id AND NEW.target_ip IN (s.target_ip,'localhost') AND a.target_port=r.target_port)
@@ -112,18 +120,23 @@ export function subjectChoices(db, issuer) {
   return db.prepare('SELECT l.subject,u.username FROM sso_links l JOIN users u ON u.id=l.user_id WHERE l.issuer=? ORDER BY u.username').all(issuer);
 }
 export function routeSnapshot(db, id, config) {
-  const r = db.prepare('SELECT r.*,s.target_ip,s.kind,s.is_admin,s.name,s.runtime FROM service_http_routes r JOIN services s ON s.id=r.service_id WHERE r.id=?').get(id);
+  const r = db.prepare('SELECT r.*,s.target_ip,s.kind,s.is_admin,s.name,s.runtime,s.lxc_container_name FROM service_http_routes r JOIN services s ON s.id=r.service_id WHERE r.id=?').get(id);
   if (!r) throw fail('The selected route no longer exists.');
   const sso = db.prepare('SELECT config_json FROM sso_config WHERE id=1').get();
   const g3 = sso ? JSON.parse(sso.config_json) : {};
   const admin = db.prepare("SELECT value FROM app_settings WHERE key='admin_domain'").get()?.value;
   const excluded = [admin, new URL(config.origin).hostname, new URL(config.issuer).hostname, ...[g3.publicOrigin,g3.recoveryOrigin].filter(Boolean).map(x=>new URL(x).hostname)];
-  if (r.is_admin || excluded.includes(r.domain) || r.target_port === 3001 || r.service_id.startsWith('keycloak-') || r.service_id.startsWith('sso-')) throw fail('ProxyPilot, recovery, machine APIs and identity endpoints must remain independent.');
+  if (r.is_admin || excluded.includes(r.domain) || platformRouteRefusal(db,{ hostname:r.domain,routeId:r.id,serviceId:r.service_id }) ||
+    ['sso-','proxypilot-'].some(p=>r.service_id.startsWith(p)) || (r.target_ip==='127.0.0.1' && r.target_port===3001))
+    throw fail('ProxyPilot, recovery, machine APIs and identity endpoints must remain independent.');
   if (r.kind !== 'container_service' || r.path_prefix !== '/' || r.strip_prefix || !r.ssl_enabled || !r.force_https || !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(r.domain)) throw fail('G4 supports a single HTTPS application route at / with no prefix rewrite.');
-  if (r.target_ip !== '127.0.0.1' || !Number.isInteger(r.target_port) || r.target_port < 1024 || [POMERIUM_PORT,18082,18083,18084,18080].includes(r.target_port)) throw fail(`Direct-upstream bypass is not contained: ${r.target_ip}:${r.target_port}. G4 supports verified host-loopback application listeners only.`);
-  for (const field of ['websocket_enabled','read_timeout_seconds','write_timeout_seconds','host_header_override','basic_auth_json','rate_limit_json']) if (r[field]) throw fail(`Unsupported existing route behavior: ${field}. It will not be removed or weakened.`);
+  const managedLxc = r.runtime === 'lxc' && /^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(r.lxc_container_name || '') &&
+    isIP(r.target_ip) === 4 && (/^10\./.test(r.target_ip) || /^192\.168\./.test(r.target_ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(r.target_ip));
+  if ((!managedLxc && r.target_ip !== '127.0.0.1') || !Number.isInteger(r.target_port) || r.target_port < 1024 || [POMERIUM_PORT,18082,18083,18084,18080].includes(r.target_port)) throw fail(`Direct-upstream bypass is not contained: ${r.target_ip}:${r.target_port}. Use a verified host-loopback listener or a managed private LXC upstream with a host ingress fence.`);
+  for (const field of ['read_timeout_seconds','write_timeout_seconds','host_header_override','basic_auth_json','rate_limit_json']) if (r[field]) throw fail(`Unsupported existing route behavior: ${field}. It will not be removed or weakened.`);
   const aliases = db.prepare('SELECT r.id,r.domain,r.target_port,s.target_ip FROM service_http_routes r JOIN services s ON s.id=r.service_id WHERE r.id!=?').all(id);
-  if (aliases.some(a=>a.domain===r.domain || (['127.0.0.1','localhost'].includes(a.target_ip) && a.target_port===r.target_port))) throw fail('Another recorded route shares this hostname or upstream; it would bypass the selected gateway.');
+  if (aliases.some(a=>a.domain===r.domain || (a.target_port===r.target_port &&
+    (a.target_ip===r.target_ip || (['127.0.0.1','localhost'].includes(a.target_ip) && ['127.0.0.1','localhost'].includes(r.target_ip)))))) throw fail('Another recorded route shares this hostname or upstream; it would bypass the selected gateway.');
   return r;
 }
 export function reviewPomeriumRoute(db, raw) {
@@ -138,11 +151,12 @@ export function reviewPomeriumRoute(db, raw) {
     const known = new Set(subjectChoices(db,r.config.issuer).map(x=>x.subject));
     if (subjects.some(s=>!known.has(s))) throw fail('Select identities already verified through G3 for this exact Keycloak issuer.');
   } else if (!old || old.state === 'removed' || subjects.length) throw fail('Removal needs an existing protected/pending route and an empty allow list.');
-  const intent = { routeId: route.id, domain: route.domain, upstream: `http://127.0.0.1:${route.target_port}`, action: input.action, subjects,
+  const intent = { routeId: route.id, domain: route.domain, upstream: `http://${route.target_ip}:${route.target_port}`, action: input.action, subjects,
+    lxcContainer: route.runtime==='lxc' ? route.lxc_container_name : null, websocket: !!route.websocket_enabled,
     snapshot: digest(route), restrictions: { ipAllowlist: route.ip_allowlist_json, headers: route.extra_headers_json, csp: route.csp, maxBodyBytes: route.max_body_bytes, maxUploadSize: route.max_upload_size } };
   return { ...intent, reviewToken: digest([r.revision,r.config,intent]), warning: input.action === 'remove' ? 'This explicitly restores direct Caddy → app access. Existing application authentication and route restrictions remain.' : 'Access will be denied during apply. Host listener, configuration and gateway checks must pass before this route is labelled protected.' };
 }
-export function savePomeriumRoute(db, input, by) {
+export function savePomeriumRoute(db, input, by, { via = 'ui' } = {}) {
   return transaction(db, () => {
     const r = readPomerium(db); idle(db,r);
     const review = reviewPomeriumRoute(db, Object.fromEntries(['expectedRevision','routeId','action','subjects'].map(k=>[k,input[k]])));
@@ -151,10 +165,10 @@ export function savePomeriumRoute(db, input, by) {
     const revision = r.revision+1;
     db.prepare("INSERT INTO setup_route_protection(route_id,intent_json,state,revision) VALUES (?,?,?,?) ON CONFLICT(route_id) DO UPDATE SET intent_json=excluded.intent_json,state=excluded.state,revision=excluded.revision,verified_json=NULL").run(input.routeId,JSON.stringify(intent),input.action==='remove'?'removing':'pending',revision);
     db.prepare('UPDATE setup_pomerium SET revision=?,verified_json=NULL WHERE id=1').run(revision);
-    return queuePomerium(db,revision,by);
+    return queuePomerium(db,revision,by,{ via });
   });
 }
-function queuePomerium(db, revision, by) {
+function queuePomerium(db, revision, by, { via = 'ui' } = {}) {
   const r = readPomerium(db);
   if (!r || r.revision !== revision) throw fail('Pomerium revision changed; reopen the saved guide.');
   const plan=db.prepare('SELECT choices_json FROM setup_platform_plan WHERE id=1').get();
@@ -162,7 +176,7 @@ function queuePomerium(db, revision, by) {
   if(!choice || choice.mode==='skip' || choice.mode!==r.config.mode || choice.url!==r.config.origin) throw fail('Pomerium is skipped or the platform target changed; restore its reviewed choices before applying.');
   const last = r.last_job_id ? getJob(db,r.last_job_id) : null;
   if (last && JSON.parse(last.plan_json).params.revision === revision && ['queued','running','succeeded'].includes(last.status)) return { job: jobView(last), created: false };
-  const job = createJob(db,{ app:POMERIUM_APP,kind:'pomerium_apply',plan:{params:{revision}},configRefs:{connection:r.config.connectionId,credentials:r.credential_ref},requestedBy:by,via:'ui',retryOf:r.last_job_id,
+  const job = createJob(db,{ app:POMERIUM_APP,kind:'pomerium_apply',plan:{params:{revision}},configRefs:{connection:r.config.connectionId,credentials:r.credential_ref},requestedBy:by,via,retryOf:r.last_job_id,
     reason:'Reviewed Pomerium intent queued for the independent runner; the browser may close. No backend host fallback.' });
   db.prepare('UPDATE setup_pomerium SET last_job_id=?,edge_job_id=NULL,verified_json=NULL WHERE id=1').run(job.id);
   return { job:jobView(job),created:true };

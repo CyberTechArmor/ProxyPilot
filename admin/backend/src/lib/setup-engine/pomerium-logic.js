@@ -43,6 +43,7 @@ export function renderPomeriumConfig(config, intents, secrets) {
     routes: intents.filter(i => i.action !== 'remove').map(i => ({
       name: `proxypilot-${i.routeId}`, from: `https://${i.domain}`, to: i.upstream,
       preserve_host_header: true, pass_identity_headers: true,
+      ...(i.websocket ? { allow_websockets: true } : {}),
       policy: [{ allow: { or: i.subjects.map(subject => ({ 'claim/sub': subject })) } }],
     })),
   };

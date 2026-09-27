@@ -34,12 +34,14 @@ export async function runPomeriumOperation({db,params,exec,job,runtime=ensurePom
   }
   await providerProbe({mode:'connect',url:k.origin,realm:k.realm});job.fence();
   clientEvidence=await clientProbe(db,r);job.fence();
+  // Inspect the private upstream before replacing a live Caddy route with
+  // denial; a missing LXC host fence must not take an application offline.
+  const privateEvidence=await privateProbe(intents,{exec,job});job.fence();
   if(!current().denialApplied) {
     job.checkpoint('deny_routes',{resumable:true,pomerium:true});
     if(!await edge('deny')) return {waiting:true,reason:'Waiting for the recorded Caddy deny/authentication route step.'};
     job.progress({denialApplied:true});
   }
-  const privateEvidence=await privateProbe(intents,{exec,job});job.fence();
   if(!current().runtimeVerified) {
     job.checkpoint('gateway_runtime',{resumable:true,pomerium:true});
     const resources=await runtime(db,r,intents,{exec,job});job.fence();

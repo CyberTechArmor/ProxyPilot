@@ -15,6 +15,8 @@ export function verifyLoopbackSockets(output,intents) {
 }
 export async function verifyPrivateApplications(intents,{exec,job,sysRoot='/proc/sys/net/ipv4/conf'}={}) {
   if(!intents.some(i=>i.action!=='remove')) return {state:'not_applicable'};
+  if (intents.some(i=>i.action!=='remove' && i.lxcContainer))
+    throw fail('Managed LXC upstream is not yet protected by a verified persistent host ingress fence; the Pomerium job refuses before changing Caddy.');
   job.fence();
   const sockets=await exec.host(['ss','-H','-ltnp'],{timeoutMs:10000});
   if(sockets.code!==0) throw fail('Cannot inspect host listeners; direct-upstream bypass prevention is not established.');

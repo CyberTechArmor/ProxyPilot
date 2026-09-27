@@ -45,6 +45,13 @@ verification pending.” Do not describe all eight audit findings as closed.
   deliberately includes comments/imports. It is review evidence, not a claim
   that all matches execute or that nonmatching indirect access is safe.
 
+The `get_lxc_container` MCP read now invokes fixed `incus operation list
+--format json` through the existing host adapter with a 10-second timeout and
+1 MiB capture limit. It returns only operations whose resource or description
+names the requested instance. This is diagnostic readback for interrupted
+create/delete jobs; it does not cancel daemon operations or grant a guest host
+control. The backend remains root-equivalent, so S6 remains open.
+
 ## Remaining operation contracts and owners
 
 “Owner” below identifies the code subsystem responsible for the migration, not

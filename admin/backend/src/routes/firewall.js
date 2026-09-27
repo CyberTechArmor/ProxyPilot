@@ -28,9 +28,9 @@ async function execOnHost(command, { timeout = 20000 } = {}) {
     // re-introduce the same `$()`-in-double-quotes injection class
     // we deliberately avoid below.
     const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`;
-    return execAsync(hostCommand, { timeout, maxBuffer: 4 * 1024 * 1024 });
+    return execAsync(hostCommand, { timeout, maxBuffer: 64 * 1024 * 1024 });
   }
-  return execAsync(command, { timeout, maxBuffer: 4 * 1024 * 1024 });
+  return execAsync(command, { timeout, maxBuffer: 64 * 1024 * 1024 });
 }
 
 /**
@@ -62,9 +62,14 @@ async function callProxypilot(args, { timeout } = {}) {
         // fall through
       }
     }
+    // A large rule list can exceed the capture limit. Never put its partial
+    // JSON into an API error: the dashboard would render megabytes in a toast.
+    if (e?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      throw new Error('Firewall output exceeded the server capture limit');
+    }
     const stderr = (e?.stderr || '').toString().trim();
     const stdout = (e?.stdout || '').toString().trim();
-    throw new Error(stderr || stdout || e.message || 'proxypilot firewall failed');
+    throw new Error((stderr || stdout || e.message || 'proxypilot firewall failed').slice(0, 500));
   }
   const out = (result.stdout || '').toString();
   try {

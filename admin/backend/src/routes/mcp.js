@@ -84,6 +84,7 @@ import { migrationService } from '../lib/migration/index.js';
 import { createExtendedHandlers } from './mcp-tools/index.js';
 import { platformRouteRefusal } from '../lib/setup-engine/platform-hostnames.js';
 import { instanceIdentity } from '../lib/setup-engine/lifecycle-logic.js';
+import { listJobs as listSetupJobs, readLock as readSetupLock } from '../lib/setup-engine/store.js';
 import { createConfirmationStore, parseTokenScope, validateTokenScope, scopeRefusal, filterCatalogForScope } from '../lib/mcp-ext/logic.js';
 import {
   parseZip, detectWrapperDir, effectiveEntries, findConflicts, fsExistsKind,
@@ -1017,9 +1018,44 @@ async function toolGetLxcContainer(args) {
   if (r.error) return toolResult(`Could not inspect ${name}: ${r.error}`, { isError: true });
   if (r.notFound) return toolResult(`Container ${name} not found — use list_lxc_containers for valid names`, { isError: true });
   const startup = await readContainerStartup(incusName).catch(() => null);
+  // Include the durable setup state here as well as in get_lxc_setup_jobs:
+  // older connected MCP clients may not have refreshed that newer tool's
+  // catalog, yet a stale lease is exactly what blocks safe recovery.
+  const db = getDb();
+  const lease = readSetupLock(db, incusName);
+  const setupJobs = listSetupJobs(db, { app: incusName, limit: 10 });
+  // Incus operations can outlive the runner command that started them. A
+  // failed setup job with no lease is therefore not proof that the instance
+  // is free for another create/delete. Surface the daemon's own operation
+  // state alongside the durable job record before an operator intervenes.
+  let incusOperations = { error: null, active: [] };
+  try {
+    const ops = await runHostCapture('incus', ['operation', 'list', '--format', 'json'],
+      { timeoutMs: 10000, maxCapture: 1024 * 1024 });
+    if (ops.status !== 0) throw new Error((ops.stderr || ops.error || 'incus operation list failed').slice(-300));
+    const rows = JSON.parse(ops.stdout || '[]');
+    if (!Array.isArray(rows)) throw new Error('incus operation list returned a non-array');
+    incusOperations.active = rows.filter((op) => {
+      const resources = Object.values(op.resources || {}).flat();
+      return resources.some((resource) => String(resource).split('/').pop() === incusName)
+        || String(op.description || '').includes(incusName);
+    }).map((op) => ({ id: op.id, class: op.class, description: op.description,
+      status: op.status, created_at: op.created_at, updated_at: op.updated_at,
+      may_cancel: op.may_cancel, resources: op.resources }));
+  } catch (error) {
+    incusOperations = { error: String(error?.message || error).slice(0, 300), active: [] };
+  }
   return toolResult({
     name,
     ...lxcContainerDetail(r.instance),
+    setup: {
+      lease: lease ? { operation: lease.operation, job_id: lease.job_id,
+        stale_since: lease.stale_since, recovery_job_id: lease.recovery_job_id } : null,
+      jobs: setupJobs.map((job) => ({ job_id: job.id, kind: job.kind,
+        status: job.status, phase: job.phase, outcome: job.outcome,
+        reason: job.reason, created_at: job.created_at, updated_at: job.updated_at })),
+    },
+    incus_operations: incusOperations,
     registered_startup: startup?.scriptPath
       ? { script_path: startup.scriptPath, working_dir: startup.workingDir || null }
       : null,
@@ -2499,6 +2535,7 @@ async function toolGetProject(args) {
     ...(containerStatus === null ? { container_status_note: 'incus could not be queried — unknown, not absent' } : {}),
     archived_at: project.archived_at || null,
     description: project.description || null,
+    provision_error: project.provision_error || null,
     provisioning: provisionStatus ? { phase: provisionStatus.phase, message: provisionStatus.message, error: provisionStatus.error || null } : null,
     queued_builds: queueRows.map((r) => ({ id: r.id, instruction: String(r.instruction || '').slice(0, 200) })),
     pending_verification: pending,
@@ -4001,6 +4038,21 @@ async function toolMoveProjectFile(args, auth) {
 
 async function toolRedeployProject(args, auth) {
   const m = await mock2Modules();
+  const current = m.projects.getProject(Number(args.project_id));
+  if (!current) return toolResult('Project not found', { isError: true });
+  if (current.lifecycle === 'failed_provisioning') {
+    const retry = await m.provision.retryFailedProvision(current);
+    logAudit(auth.created_by, 'MOCK2_PROJECT_PROVISION_RETRY', 'mock2_project', current.id,
+      { via: 'mcp', ok: retry.ok, error: retry.error || null }, null);
+    if (!retry.ok) return toolResult(retry.error, { isError: true });
+    return toolResult({
+      retry_started: true,
+      project_id: current.id,
+      container: retry.project.container_name,
+      url: projectUrl(retry.project, m.domains),
+      next: 'Provisioning is running in the background. Poll get_project until lifecycle is active or failed_provisioning.',
+    });
+  }
   const { project, error } = requireActiveProject(m, args);
   if (error) return toolResult(error, { isError: true });
   const guard = liveBuildGuard(m, project);

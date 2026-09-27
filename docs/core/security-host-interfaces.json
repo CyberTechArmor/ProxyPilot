@@ -579,6 +579,7 @@
       "host_command: const g = await runHostCapture('getent', ['hosts', domain], { timeoutMs: 10000 });": 1,
       "host_command: const headR = await runHostCapture(": 1,
       "host_command: const info = await runHostCapture('incus', ['storage', 'info', picked.name, '--bytes'], { timeoutMs: 30000 });": 1,
+      "host_command: const ops = await runHostCapture('incus', ['operation', 'list', '--format', 'json'],": 1,
       "host_command: const pem = await runHostCapture('cat', [dir.certFile], { timeoutMs: 10000 });": 1,
       "host_command: const poolList = await runHostCapture('incus', ['storage', 'list', '--format', 'json'], { timeoutMs: 30000 });": 1,
       "host_command: const probe = await runHostCapture(": 2,

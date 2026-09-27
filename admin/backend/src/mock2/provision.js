@@ -145,6 +145,48 @@ export function startProvision(project) {
   return true;
 }
 
+// Retry a failed first provision from its existing seed repository. Never run
+// the create seed again: that path deletes the repository before rebuilding it.
+// Refuse a retry if an Incus guest already owns the name, because the shared
+// bring-up routine removes a stale guest before launch.
+export async function retryFailedProvision(project) {
+  const projectId = Number(project.id);
+  if (project.lifecycle !== 'failed_provisioning') {
+    return { ok: false, error: `Project is ${project.lifecycle}, not failed_provisioning` };
+  }
+  const repoPath = project.repo_path || repoPathForProject(projectId);
+  const containerName = project.container_name || containerNameForProject(projectId);
+  const repo = await runHost('git', ['--git-dir', repoPath, 'rev-parse', '--verify', 'refs/heads/main'], { timeoutMs: 30000 });
+  if (repo.code !== 0) {
+    return { ok: false, error: `Seed repository is missing or invalid at ${repoPath}; retry refused to protect project history` };
+  }
+  const listed = await runHost('incus', ['list', '--format', 'json'], { timeoutMs: 30000 });
+  if (listed.code !== 0) {
+    return { ok: false, error: `Incus inventory unavailable: ${(listed.stderr || '').trim().slice(0, 250)}` };
+  }
+  let guests;
+  try { guests = JSON.parse(listed.stdout); }
+  catch { return { ok: false, error: 'Incus inventory was not valid JSON' }; }
+  if (!Array.isArray(guests)) return { ok: false, error: 'Incus inventory had an unexpected shape' };
+  if (guests.some((guest) => guest.name === containerName)) {
+    return { ok: false, error: `${containerName} already exists in Incus; retry refused to avoid deleting it` };
+  }
+  // Recheck after asynchronous host probes so a concurrent request cannot
+  // restart the same project. The row change happens before the job starts.
+  if (getProject(projectId)?.lifecycle !== 'failed_provisioning') {
+    return { ok: false, error: 'Project lifecycle changed while checking retry prerequisites' };
+  }
+  const retryProject = updateProject(projectId, {
+    lifecycle: 'provisioning', container_name: containerName, provision_error: null,
+  });
+  setStatus(projectId, { phase: 'starting', message: 'Retrying provisioning from the existing repository…', startedAt: Date.now(), error: null });
+  bringUpFromRepo(retryProject, { repoPath, containerName, mode: 'provision', dataOrigin: 'new' }).catch((err) => {
+    console.error(`[mock2] retry crashed for project ${projectId}:`, err?.message || err);
+    fail(retryProject, `retry crashed: ${err?.message || err}`);
+  });
+  return { ok: true, project: retryProject };
+}
+
 // ---- Clone provisioning (create a sibling project from a source project) ----
 //
 // The new project's bare repo starts as a byte-for-byte clone of the SOURCE

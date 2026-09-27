@@ -139,7 +139,7 @@ export function routeSnapshot(db, id, config) {
     (a.target_ip===r.target_ip || (['127.0.0.1','localhost'].includes(a.target_ip) && ['127.0.0.1','localhost'].includes(r.target_ip)))))) throw fail('Another recorded route shares this hostname or upstream; it would bypass the selected gateway.');
   return r;
 }
-export function reviewPomeriumRoute(db, raw) {
+export function reviewPomeriumRoute(db, raw, { verifiedSubjects = [] } = {}) {
   const input = pomeriumRouteSchema.parse(raw), r = readPomerium(db);
   if (!r || r.revision !== input.expectedRevision) throw fail('Pomerium revision changed; reopen and review again.');
   verifiedProvider(db,r.config.connectionId);
@@ -148,7 +148,7 @@ export function reviewPomeriumRoute(db, raw) {
   const subjects = [...new Set(input.subjects)].sort();
   if (input.action === 'protect') {
     if (!subjects.length) throw fail('Select at least one verified identity; everyone else will be denied.');
-    const known = new Set(subjectChoices(db,r.config.issuer).map(x=>x.subject));
+    const known = new Set([...subjectChoices(db,r.config.issuer).map(x=>x.subject), ...verifiedSubjects]);
     if (subjects.some(s=>!known.has(s))) throw fail('Select identities already verified through G3 for this exact Keycloak issuer.');
   } else if (!old || old.state === 'removed' || subjects.length) throw fail('Removal needs an existing protected/pending route and an empty allow list.');
   const intent = { routeId: route.id, domain: route.domain, upstream: `http://${route.target_ip}:${route.target_port}`, action: input.action, subjects,
@@ -156,10 +156,10 @@ export function reviewPomeriumRoute(db, raw) {
     snapshot: digest(route), restrictions: { ipAllowlist: route.ip_allowlist_json, headers: route.extra_headers_json, csp: route.csp, maxBodyBytes: route.max_body_bytes, maxUploadSize: route.max_upload_size } };
   return { ...intent, reviewToken: digest([r.revision,r.config,intent]), warning: input.action === 'remove' ? 'This explicitly restores direct Caddy → app access. Existing application authentication and route restrictions remain.' : 'Access will be denied during apply. Host listener, configuration and gateway checks must pass before this route is labelled protected.' };
 }
-export function savePomeriumRoute(db, input, by, { via = 'ui' } = {}) {
+export function savePomeriumRoute(db, input, by, { via = 'ui', verifiedSubjects = [] } = {}) {
   return transaction(db, () => {
     const r = readPomerium(db); idle(db,r);
-    const review = reviewPomeriumRoute(db, Object.fromEntries(['expectedRevision','routeId','action','subjects'].map(k=>[k,input[k]])));
+    const review = reviewPomeriumRoute(db, Object.fromEntries(['expectedRevision','routeId','action','subjects'].map(k=>[k,input[k]])), { verifiedSubjects });
     if (!input.reviewed || review.reviewToken !== input.reviewToken) throw fail('Route or policy changed after review. Review the exact route again.');
     const { reviewToken,warning,...intent } = review;
     const revision = r.revision+1;

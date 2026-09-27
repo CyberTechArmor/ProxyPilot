@@ -33,11 +33,11 @@ export const PLATFORM_TOOLS = Object.freeze([
     {}),
 
   tool('get_route_protection',
-    'Read the saved Pomerium revision, protection intents and job, eligible application routes with refusal reasons, and verified Keycloak identities for this issuer. No credentials or tokens are returned.',
-    {}),
+    'Read the saved Pomerium revision, protection intents and job, and eligible routes. Optionally resolve one exact Keycloak email through the existing read-only observer, then read back its enabled user and subject ID for this issuer. Ambiguous or missing matches refuse. No credentials or tokens are returned.',
+    { identity_email: { type: 'string', description: 'Optional exact email to resolve in the verified Keycloak realm; never derive a subject ID from its spelling.' } }),
 
   tool('set_route_protection',
-    'Review or apply sign-in protection for one existing application route. Supply the route id, protect/remove action, verified Keycloak subject IDs, and expected Pomerium revision. A supported first call returns the exact review and a one-time confirmation_token; repeat the same arguments with that token to queue the existing Pomerium runner. Managed LXC protection refuses before queuing until a persistent host ingress fence and direct-IP proof are available. A changed route or policy refuses the token. dry_run returns only the review.',
+    'Review or apply sign-in protection for one existing application route. Supply the route id, protect/remove action, exact Keycloak subject IDs, and expected Pomerium revision. Subjects without a verified ProxyPilot SSO link are read back as enabled users through the verified read-only Keycloak observer on every call. A supported first call returns the exact review and a one-time confirmation_token; repeat the same arguments with that token to queue the existing Pomerium runner. Managed LXC protection refuses before queuing until a persistent host ingress fence and direct-IP proof are available. A changed route or policy refuses the token. dry_run returns only the review.',
     { route_id: { type: 'string', description: 'Existing service_http_routes id from get_route_protection.' }, action: { type: 'string', enum: ['protect', 'remove'] }, allowed_identities: { type: 'array', items: { type: 'string' }, description: 'Verified Keycloak subject IDs; empty when removing protection.' }, expected_revision: { type: 'number', description: 'Pomerium revision from get_route_protection.' }, dry_run: P.dry_run, confirmation_token: P.confirmation_token },
     ['route_id', 'action', 'allowed_identities', 'expected_revision']),
 

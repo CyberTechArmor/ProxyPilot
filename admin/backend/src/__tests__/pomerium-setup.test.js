@@ -100,6 +100,33 @@ test('MCP route protection binds exact review, verified subject, revision and jo
   assert.equal((await call('set_route_protection',args)).error,true,'stale revision is refused');
 }));
 
+test('MCP route review accepts an unlinked subject only after exact enabled Keycloak readback',()=>withDb(async db=>{
+  savePomerium(db,configInput);
+  const sso=JSON.parse(db.prepare('SELECT config_json FROM sso_config WHERE id=1').get().config_json);
+  sso.keycloakOrigin='https://identity.example.com';
+  db.prepare('UPDATE sso_config SET config_json=?,verified_at=? WHERE id=1').run(JSON.stringify(sso),new Date().toISOString());
+  db.exec(`CREATE TABLE mcp_ledger (id INTEGER PRIMARY KEY,ts TEXT,token_id INTEGER,actor TEXT,tool TEXT,subject_type TEXT,subject_id TEXT,project_id INTEGER,args_json TEXT,outcome TEXT,dry_run INTEGER,confirmation_used INTEGER,snapshot TEXT,summary TEXT,detail_json TEXT,duration_ms INTEGER)`);
+  const id='1255cb3b-0b31-4957-8155-494ba93b8620';
+  let enabled=true, reads=0;
+  const ctx={getDb:()=>db,getSetting:()=>null,policy:{feature_flags:{'mcp.platform':{default:true}}},confirmations:createConfirmationStore(),
+    keycloakReader:async()=>async path=>{reads++;return path===`/users/${id}`?{id,email:'thomas@fractinate.ai',username:'thomas',enabled}:null;},
+    toolResult:(data,{isError=false}={})=>({content:[{type:'text',text:JSON.stringify(data)}],isError}),logAudit:()=>{}};
+  const tools=createPlatformHandlers(createToolkit(ctx)),auth={id:7,created_by:'admin'};
+  const args={route_id:'test-route',action:'protect',allowed_identities:[id],expected_revision:1};
+  const preview=await tools.set_route_protection(args,auth);
+  assert.equal(preview.isError,false,preview.content[0].text);
+  const token=JSON.parse(preview.content[0].text).confirmation_token;
+  assert.equal(reads,1);
+  enabled=false;
+  const refused=await tools.set_route_protection({...args,confirmation_token:token},auth);
+  assert.equal(refused.isError,true);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM setup_route_protection').get().n,0);
+  enabled=true;
+  const applied=await tools.set_route_protection({...args,confirmation_token:token},auth);
+  assert.equal(applied.isError,false);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM setup_route_protection').get().n,1);
+}));
+
 test('G4 API enforces admin, CSRF, sudo, strict inputs and secret-free inert save; skip is inert',()=>withDb(async db=>{
   const a=await apiFixture(db);try {
     assert.equal((await a.request('/pomerium',{who:null})).status,401);

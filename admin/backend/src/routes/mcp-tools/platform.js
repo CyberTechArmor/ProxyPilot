@@ -38,6 +38,7 @@ import { recoveryReview, queueRecovery } from '../../lib/setup-engine/full-platf
 import { isEncrypted, decryptSecret } from '../../lib/secrets.js';
 import { nowIso } from '../../lib/mcp-ext/logic.js';
 import { readPomerium, pomeriumIntents, routeSnapshot, subjectChoices, reviewPomeriumRoute, savePomeriumRoute } from '../../lib/setup-engine/pomerium-store.js';
+import { resolveKeycloakEmail, verifyKeycloakSubjects } from '../../lib/setup-engine/pomerium-subjects.js';
 
 export const PLATFORM_FLAG = 'mcp.platform';
 export const PURGE_FLAG = 'mcp.platform.purge';
@@ -145,7 +146,7 @@ export function createPlatformHandlers(kit) {
     return ok({ ...evaluated, checks, ready: checks.every((c) => c.ok), dns: Object.values(dns.results), caddy_host: dns.expected, ports_expected: SERVICE_PORTS });
   });
 
-  const get_route_protection = read('get_route_protection', async () => {
+  const get_route_protection = read('get_route_protection', async (args) => {
     const d = db(), state = readPomerium(d);
     if (!state) return ok({ configured: false, routes: [], identities: [], intents: [] });
     const routes = d.prepare('SELECT id,domain FROM service_http_routes ORDER BY domain').all().map(route => {
@@ -159,7 +160,10 @@ export function createPlatformHandlers(kit) {
       }
     });
     const job = state.last_job_id ? getJob(d, state.last_job_id) : null;
+    const exactIdentity = args?.identity_email == null ? null :
+      await resolveKeycloakEmail(d, args.identity_email, { createReader: ctx.keycloakReader });
     return ok({ configured: true, revision: state.revision, routes, identities: subjectChoices(d, state.config.issuer),
+      ...(exactIdentity ? { exact_identity: exactIdentity } : {}),
       intents: pomeriumIntents(d), job: job ? jobSummary(job) : null });
   });
 
@@ -168,7 +172,12 @@ export function createPlatformHandlers(kit) {
     const input = { expectedRevision: args.expected_revision, routeId: args.route_id,
       action: args.action, subjects: args.allowed_identities };
     note.subject_id = String(input.routeId || '');
-    const review = reviewPomeriumRoute(d, input);
+    const linked = new Set(subjectChoices(d, readPomerium(d)?.config?.issuer).map(choice => choice.subject));
+    const unresolved = input.action === 'protect' && Array.isArray(input.subjects) ?
+      input.subjects.filter(subject => !linked.has(subject)) : [];
+    const verifiedSubjects = unresolved.length ?
+      await verifyKeycloakSubjects(d, unresolved, { createReader: ctx.keycloakReader }) : [];
+    const review = reviewPomeriumRoute(d, input, { verifiedSubjects });
     const preview = { route_id: review.routeId, domain: review.domain, upstream: review.upstream,
       action: review.action, allowed_identities: review.subjects, restrictions: review.restrictions,
       warning: review.warning, revision: input.expectedRevision };
@@ -180,7 +189,7 @@ export function createPlatformHandlers(kit) {
     const gate = confirmToken(args, auth, note, { tool: 'set_route_protection', subject: review.reviewToken,
       action: `${input.action} ${review.domain}`, preview: { preview } });
     if (gate) return gate;
-    const result = savePomeriumRoute(d, { ...input, reviewToken: review.reviewToken, reviewed: true }, requestedBy(auth), { via: 'mcp' });
+    const result = savePomeriumRoute(d, { ...input, reviewToken: review.reviewToken, reviewed: true }, requestedBy(auth), { via: 'mcp', verifiedSubjects });
     note.summary = `${input.action} ${review.domain} queued (${result.job.id})`;
     note.detail = { ...note.detail, route_id: input.routeId, action: input.action, revision: input.expectedRevision,
       next_revision: input.expectedRevision + 1, job_id: result.job.id };

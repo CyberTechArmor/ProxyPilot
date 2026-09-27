@@ -52,3 +52,44 @@ the admin app needs it. No guest, including running `pp-nodus`, was started,
 stopped, restarted, upgraded or deleted for this work. Rollback is a source
 revert while the route remains unprotected; a future live apply needs a
 separate verified fence removal order that never exposes the upstream.
+
+## 2026-09-27 exact-subject continuation
+
+Current deployed main was read back as `aba43253b18bc068418b2ee129bfcb83afa070a8`
+(PR #696), clean. PRs #694 and #695 are merged and deployed. The live MCP
+connection still advertises an older tool catalog: `get_route_protection`,
+`set_route_protection`, and `inspect_a3_vm` are not callable in this session.
+No protection policy was applied.
+
+Read-only MCP `get_lxc_container(nodus)` showed `pp-nodus` Running at
+`10.185.17.240` and `fd42:53c1:d5e6:16b0:1266:6aff:fe92:72ae`.
+`run_lxc_command(fractionate-demo, "curl -I --max-time 8
+http://10.185.17.240:3001/")` returned HTTP 200 in 33 ms, confirming the
+same-bridge bypass remains open. An IPv6 `curl` and `probe_lxc_port` were
+refused by the MCP argument validators, so IPv6 denial is not proved.
+`test_route(nodus-admin.fractionate.ai, test_websocket=true)` showed edge
+HTTP 302 to `/admin/`, direct upstream HTTP 200 and no WebSocket upgrade.
+An unauthenticated browser loaded the Nodus admin landing page without a
+Pomerium redirect. The public `nodus.fractionate.ai` route remains separate.
+
+Source in the continuation branch adds optional exact-email lookup to
+`get_route_protection`, using the already configured Keycloak `view-users`
+observer. It requires one exact match, reads that user back by ID, and
+refuses disabled, missing, ambiguous, changed or wrong-issuer results.
+`set_route_protection` checks any subject without an existing verified SSO
+link against the same observer on both review and apply; the existing
+revision and single-use confirmation checks remain. The supplied
+`thomas@fractinate.ai` is test input, not a guessed ID. No live subject ID
+has been read back. The managed LXC ingress-fence refusal remains active.
+
+Local affected tests: seven focused Pomerium/MCP/identity tests passed;
+22 MCP catalog, Debian 13 and VM creation tests passed. The full Pomerium
+and Full Platform tests were attempted on Windows and failed on their
+Unix-specific ownership/path assumptions; their exact pre-change PR heads
+passed Linux Security regression runs 101 and 103. The unsuppressed host
+boundary inventory returned 96 candidate backend files with S6 open.
+Rollback for this source-only identity extension is a code revert; no
+Keycloak user, credential, Pomerium policy, firewall or guest was changed.
+Live acceptance still requires the persistent host bridge ingress fence,
+independent IPv4/IPv6 bypass denial, resolved Keycloak ID, MCP policy apply
+and readback, and authorized plus unauthenticated browser checks.

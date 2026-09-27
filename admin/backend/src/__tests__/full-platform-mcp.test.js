@@ -41,7 +41,7 @@ const body = (r) => { try { return JSON.parse(r.content[0].text); } catch { retu
 const text = (r) => r.content[0].text;
 const terminal = (db, id, status = 'succeeded', verification = null) => db.prepare('UPDATE setup_jobs SET status=?,owner=NULL,verification_json=? WHERE id=?').run(status, verification ? JSON.stringify(verification) : null, id);
 
-function tools(db, { now = () => Date.now(), flags = {}, host = null, resolvers = null } = {}) {
+function tools(db, { now = () => Date.now(), flags = {}, host = null, resolvers = null, keycloakReader = null } = {}) {
   // mcp.platform is off on a new install; these tests model an install where an
   // administrator turned it on (or migration 915 kept it on).
   const settings = new Map(Object.entries({ 'mcp.platform': true, ...flags }).map(([k, v]) => [`feature_flag:${k}`, v ? '1' : '0']));
@@ -52,6 +52,7 @@ function tools(db, { now = () => Date.now(), flags = {}, host = null, resolvers 
     getDb: () => db, logAudit: (...a) => audit.push(a), getSetting: (k) => settings.get(k) ?? null, setSetting: (k, v) => settings.set(k, v),
     toolResult, policy: POLICY, confirmations: createConfirmationStore({ now }),
     runHostCapture: host || (async () => ({ status: 1, stdout: '', stderr: 'no host in this test' })),
+    ...(keycloakReader ? { keycloakReader } : {}),
     resolveHost: async (h) => (h.endsWith('example.com') ? ['203.0.113.10'] : []),
     // Host resolver and 1.1.1.1 both answer the Caddy host for example.com (3e).
     platformResolvers: resolvers || { host: async (h) => (h.endsWith('example.com') ? ['203.0.113.10'] : []), public: async (h) => (h.endsWith('example.com') ? ['203.0.113.10'] : []) },
@@ -66,6 +67,28 @@ function tools(db, { now = () => Date.now(), flags = {}, host = null, resolvers 
 // The coordinator driven through stage D (B's human part scripted), every child scripted.
 async function connected(db, through = 'D') { return driveStages(db, { owner: 'runner@fp-mcp#1:a', through }); }
 const withDb = async (fn) => { const db = makeDb(); try { await fn(db); } finally { db.close(); } };
+
+test('route identity lookup requires an exact enabled Keycloak user read back from the verified issuer', () => withDb(async db => {
+  await connected(db);
+  const id = '1255cb3b-0b31-4957-8155-494ba93b8620';
+  const email = 'thomas@fractinate.ai';
+  const reads = [];
+  let users = [{ id, email, username: 'thomas', enabled: true }];
+  const keycloakReader = async () => async path => {
+    reads.push(path);
+    return path.startsWith('/users?') ? users : users.find(user => path === `/users/${user.id}`) || null;
+  };
+  const { call } = tools(db, { keycloakReader });
+  const found = body(await call('get_route_protection', { identity_email: email }));
+  assert.deepEqual(found.exact_identity, { issuer: readPomerium(db).config.issuer, id, email, username: 'thomas', enabled: true });
+  assert.deepEqual(reads, [`/users?email=${encodeURIComponent(email)}&exact=true`, `/users/${id}`]);
+  users = [];
+  assert.match(text(await call('get_route_protection', { identity_email: email })), /does not identify exactly one/);
+  users = [{ id, email, username: 'thomas', enabled: false }];
+  assert.match(text(await call('get_route_protection', { identity_email: email })), /disabled/);
+  users = [{ id, email, username: 'thomas', enabled: true }, { id: '8c2c8dbf-9399-4484-a0d3-2f27f0ba71dd', email, username: 'other', enabled: true }];
+  assert.match(text(await call('get_route_protection', { identity_email: email })), /does not identify exactly one/);
+}));
 
 /* ------------------------------ the observer ---------------------------- */
 

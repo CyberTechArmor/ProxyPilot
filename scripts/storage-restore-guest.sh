@@ -15,6 +15,8 @@
 # guest/snap new` instead; this helper is only reached for the others.
 # Called by restore_guest_from_snapshot after the plan/confirm flow.
 set -euo pipefail
+echo 'Refusing new guest: this helper cannot boot and verify /etc/os-release as Debian 13 before reporting success.' >&2
+exit 78
 SNAP="${1:-}"; NEW="${2:-}"; POOL="${3:-}"
 WORK="${PROXYPILOT_STORAGE_STATE_DIR:-/var/lib/proxypilot/storage}/restore"
 

@@ -328,15 +328,7 @@ export default function LxcContainers() {
 
   // Preset images for the dropdown
   const PRESET_IMAGES = [
-    { value: 'images:ubuntu/24.04', label: 'Ubuntu 24.04 LTS' },
-    { value: 'images:ubuntu/22.04', label: 'Ubuntu 22.04 LTS' },
     { value: 'images:debian/13', label: 'Debian 13 (Trixie)' },
-    { value: 'images:debian/12', label: 'Debian 12 (Bookworm)' },
-    { value: 'images:debian/11', label: 'Debian 11 (Bullseye)' },
-    { value: 'images:alpine/3.20', label: 'Alpine 3.20' },
-    { value: 'images:centos/9-Stream', label: 'CentOS 9 Stream' },
-    { value: 'images:fedora/40', label: 'Fedora 40' },
-    { value: 'images:rockylinux/9', label: 'Rocky Linux 9' },
   ];
 
   // Init scripts run inside the freshly-launched container as soon as
@@ -413,8 +405,8 @@ export default function LxcContainers() {
   // Live image catalog for the Create dialog dropdown. Populated on
   // dialog open from GET /lxc/images (already-pulled local images),
   // each row annotated with `supports: ['container'|'virtual-machine']`
-  // by the backend so we can filter by createForm.type. Debian 12 stays
-  // available as a remote VM image even when only container images are cached.
+  // by the backend so we can filter by createForm.type. The Debian 13 remote
+  // alias remains available even when only container images are cached.
   // PRESET_IMAGES is the fallback when the live fetch fails (incus daemon
   // down, network glitch on the proxy hop, etc.) — without it the
   // operator gets locked out of creating an instance during a
@@ -2058,10 +2050,8 @@ export default function LxcContainers() {
                   <Label>Image *</Label>
                   {(() => {
                     // Build the dropdown options. When the live catalog
-                    // loaded, filter by createForm.type using the
-                    // backend-annotated supports[] array and sort by
-                    // os/release. Debian 12 is always selectable for VMs;
-                    // Incus downloads its VM variant on create. When the
+                    // loaded, filter by createForm.type and the one approved
+                    // Debian 13 alias. When the
                     // fetch failed, fall back to PRESET_IMAGES. Flat
                     // sorted list (not grouped sections) by design;
                     // grouping was deemed out-of-scope for this pass.
@@ -2080,7 +2070,7 @@ export default function LxcContainers() {
                           const label = desc || alias || fp;
                           return { value, label, os, release, alias, fp };
                         })
-                        .filter((o) => o.value)
+                        .filter((o) => o.value === 'images:debian/13')
                         .sort((a, b) => {
                           const oa = (a.os || '~').toLowerCase();
                           const ob = (b.os || '~').toLowerCase();
@@ -2090,11 +2080,10 @@ export default function LxcContainers() {
                     }
                     const showFallback = !imageCatalogLoading && (imageCatalogError || !liveAvailable);
                     // A cached container image does not make its VM variant
-                    // available. Keep the current Debian remote alias visible
-                    // for both types, plus Debian 12 for older VM workloads.
+                    // available. Keep the Debian 13 remote alias visible
+                    // for both types.
                     const remoteDebian = PRESET_IMAGES.filter((img) =>
-                      img.value === 'images:debian/13' ||
-                      (createForm.type === 'virtual-machine' && img.value === 'images:debian/12')
+                      img.value === 'images:debian/13'
                     ).filter((img) => !liveOptions.some((option) => option.value === img.value));
                     return (
                       <>
@@ -2102,11 +2091,7 @@ export default function LxcContainers() {
                           value={imageSelection}
                           onValueChange={(val) => {
                             setImageSelection(val);
-                            if (val !== '__custom__') {
-                              setCreateForm((f) => ({ ...f, image: val }));
-                            } else {
-                              setCreateForm((f) => ({ ...f, image: '' }));
-                            }
+                            setCreateForm((f) => ({ ...f, image: val }));
                           }}
                         >
                           <SelectTrigger>
@@ -2131,7 +2116,7 @@ export default function LxcContainers() {
                             ))}
                             {!imageCatalogLoading && liveAvailable && liveOptions.length === 0 && createForm.type !== 'virtual-machine' && (
                               <div className="px-2 py-3 text-xs text-muted-foreground">
-                                No cached {createForm.type === 'virtual-machine' ? 'VM' : 'container'} images. Use Custom image below to pull one.
+                                No cached Debian 13 {createForm.type === 'virtual-machine' ? 'VM' : 'container'} image. Incus will fetch it at creation.
                               </div>
                             )}
                             {!imageCatalogLoading && remoteDebian.map((img) => (
@@ -2144,7 +2129,6 @@ export default function LxcContainers() {
                                 {img.label}
                               </SelectItem>
                             ))}
-                            <SelectItem value="__custom__">Custom image...</SelectItem>
                           </SelectContent>
                         </Select>
                         {imageCatalogError && (
@@ -2155,23 +2139,11 @@ export default function LxcContainers() {
                       </>
                     );
                   })()}
-                  {createForm.type === 'virtual-machine' && /^images:debian\/(13|12)$/.test(createForm.image) && (
+                  {createForm.type === 'virtual-machine' && createForm.image === 'images:debian/13' && (
                     <p className="text-xs text-muted-foreground">Incus downloads the Debian VM image when you create it.</p>
                   )}
-                  {imageSelection === '__custom__' && (
-                    <Input
-                      placeholder="images:ubuntu/24.04 or ubuntu:24.04"
-                      value={createForm.image}
-                      onChange={(e) => setCreateForm((f) => ({ ...f, image: e.target.value }))}
-                    />
-                  )}
                   <p className="text-xs text-muted-foreground">
-                    Cached images appear automatically. For something not yet pulled, use{' '}
-                    <span className="font-mono text-foreground/80">Custom image...</span> with an{' '}
-                    <a href="https://images.linuxcontainers.org" target="_blank" rel="noopener noreferrer" className="text-cyan-500 hover:underline">
-                      images:
-                    </a>{' '}
-                    reference like <span className="font-mono text-foreground/80">images:ubuntu/24.04</span>.
+                    New instances use Debian 13. ProxyPilot checks the guest OS after launch.
                   </p>
                 </div>
                 {/* Services / Port Mappings */}

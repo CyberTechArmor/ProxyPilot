@@ -26,6 +26,12 @@ source host ──(1) curl …/install.sh | sudo sh ─────────�
 | The guest | arrives by being streamed into Incus | is created first, from a base image |
 | Good for | lift-and-shift, including a stack you do not want to unpick | turning an old server into a ProxyPilot-shaped guest |
 
+New application guests use only `images:debian/13`. A whole-machine import
+must identify a Debian 13 source, and every resulting guest must prove
+`ID=debian` and `VERSION_ID=13` from its own `/etc/os-release` before the
+migration can complete. A source manifest or image alias alone does not prove
+the imported guest's OS. Unverifiable imports fail closed and remain fenced.
+
 `transport` is derived and rarely set by hand: whole-machine uses
 `incus-migrate`, except on a Proxmox or otherwise nested LXC, which takes
 `rootfs-tar` — it tars the rootfs, streams it to ProxyPilot, and imports it as

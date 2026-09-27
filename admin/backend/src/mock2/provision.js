@@ -49,11 +49,12 @@ import { deployProject, stampDeployedCommit } from './deploy.js';
 import { parseDeclaredEgress } from './egress-logic.js';
 import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
 import { projectHasBeenDeployed } from './cycles.js';
+import { NEW_GUEST_IMAGE, requireNewGuestImage, parseDebian13Release } from '../lib/debian13-guest.js';
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
-// Base image for project containers. Overridable for hosts that mirror images
-// under a different remote; default is the standard Incus images: remote.
-const MOCK2_BASE_IMAGE = process.env.MOCK2_BASE_IMAGE || 'images:debian/12';
+// Every new project guest must boot Debian 13. An override is accepted only
+// when it names the same image; the guest OS is checked after launch.
+const MOCK2_BASE_IMAGE = process.env.MOCK2_BASE_IMAGE || NEW_GUEST_IMAGE;
 const APP_DIR = '/srv/app';
 const REPO_MOUNT = '/srv/repo.git';
 
@@ -322,12 +323,15 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   const rehydrate = mode === 'rehydrate';
   const failLifecycle = rehydrate ? 'archived' : 'failed_provisioning';
   const bail = (reason) => fail(project, reason, { lifecycle: failLifecycle });
+  try { requireNewGuestImage(image); }
+  catch (error) { return bail(error.message); }
 
-  // Idempotency: clear any stale container of this name (a prior failed
-  // attempt, or a leftover) so the sequence can always start clean. No-op if
-  // absent. On rehydrate the container was destroyed at archive, so this is a
-  // cheap safety net.
-  await sh(`incus delete ${containerName} --force 2>/dev/null || true`, { timeoutMs: 60000 });
+  // A new provision or rehydrate must never replace an existing guest merely
+  // to apply the image policy. An operator can inspect a name collision.
+  const collision = await sh(`incus info ${containerName}`, { timeoutMs: 30000 });
+  if (collision.code === 0) return bail(`${containerName} already exists; refusing to replace an existing guest`);
+  if (!/not found|does not exist/i.test(collision.stderr || ''))
+    return bail(`could not establish that ${containerName} is absent; refusing to launch`);
 
   // ---- Create the per-project managed bridge (M4, ADR-010) ----
   // Each project gets its OWN bridge m2br<id>/<own /24> so the fence and proxy
@@ -352,6 +356,11 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   setStatus(projectId, { phase: 'launch', message: `${rehydrate ? 'Rehydrating' : 'Provisioning'}: launching container…` });
   const launch = await sh(`incus launch ${image} ${containerName} --network ${bridgeName}`, { timeoutMs: 300000 });
   if (launch.code !== 0) return bail(`container launch failed: ${(launch.stderr || '').trim().slice(-500)}`);
+  const release = await sh(`incus exec ${containerName} -- cat /etc/os-release`, { timeoutMs: 30000 }).catch((error) => ({ code: 1, stderr: error?.message }));
+  if (release.code !== 0 || !parseDebian13Release(release.stdout)) {
+    await sh(`incus stop ${containerName} --force`, { timeoutMs: 60000 }).catch(() => {});
+    return bail(`new project guest ${containerName} did not prove Debian 13 in /etc/os-release; it was stopped`);
+  }
 
   // ---- Wait for a bridge IP ----
   setStatus(projectId, { phase: 'network', message: 'Waiting for network…' });

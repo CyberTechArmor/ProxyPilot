@@ -1551,7 +1551,7 @@ async function toolCreateLxcContainer(args, auth) {
     return toolResult(`Confirm with the user, then re-call with confirm: true to create container ${name}.`, { isError: true });
   }
   const image = validImageAlias(args.image || 'images:debian/13');
-  if (!image) return toolResult('image must be an Incus image alias, e.g. "images:debian/13"', { isError: true });
+  if (!image) return toolResult('New instances require images:debian/13; image overrides are refused.', { isError: true });
   const options = mcpGuestCreateOptions(args);
   if (options.error) return toolResult(options.error, { isError: true });
   const { cpu, memoryGb, diskGb, isVm, dockerReady, autostart, config } = options;

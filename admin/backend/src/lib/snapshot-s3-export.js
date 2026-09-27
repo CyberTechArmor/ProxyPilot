@@ -310,6 +310,7 @@ export function getImportProgress({ exportId }) {
 export async function importSnapshotFromS3({
   destination, s3Key, incusName, snapshotName, exportId = null, audit = {},
 }) {
+  return { ok: false, error: 'Snapshot import cannot verify the resulting guest /etc/os-release as Debian 13; no guest was created' };
   if (!SAFE_NAME.test(incusName)) {
     return { ok: false, error: `unsafe instance name: ${incusName}` };
   }

@@ -27,6 +27,7 @@ import { parseInstanceList } from './restore-logic.js';
 import { createSnapshotWithFallback } from './restore-snapshot-op.js';
 import { hostArgv, noopJob, tailOf } from './op-kit.js';
 import { sanitizeReason } from './logic.js';
+import { verifyNewGuestRelease } from '../debian13-guest.js';
 
 const TIMEOUTS = Object.freeze({
   instance_start: 120_000, instance_stop: 180_000, instance_restart: 180_000, instance_delete: 300_000,
@@ -182,6 +183,19 @@ export async function runLifecycleOperation({ kind, params, exec, job = noopJob(
     return fail('issue', `incus ${kind.replace('_', ' ')} exited ${issue.code}${issue.code === 124 ? ' (timed out)' : ''}: ${tailOf(issue, 300) || 'no output'}; ${what} reads ${verdict.observed} afterwards — not claiming ${lifecycleOutcomeStep(kind)}`, { issued: true, instanceState: verdict.observed, identity, cleanup, verification: lifecycleVerification(kind, { ...verdict, ok: false }, { container: name, snapshot: snap }) });
   }
   if (!verdict.ok) return fail('verify', `incus ${kind.replace('_', ' ')} exited ${issue.code} but ${what} reads ${verdict.observed}, not ${verdict.expected}; not claiming success`, { issued: true, instanceState: verdict.observed, identity, verification: lifecycleVerification(kind, verdict, { container: name, snapshot: snap }) });
+
+  if (kind === 'instance_create') {
+    const release = await verifyNewGuestRelease(name, argv => host(argv, { timeoutMs: 30_000 }));
+    if (!release.ok) {
+      // This guest was absent before this job. Quarantine it without touching
+      // any pre-existing instance; an operator can inspect the failed job.
+      let stopped;
+      try { stopped = await host(['incus', 'stop', name, '--force'], { timeoutMs: TIMEOUTS.instance_stop }); }
+      catch (error) { stopped = { code: 1, stderr: error?.message }; }
+      return fail('verify_os', `${release.reason}; new guest ${stopped.code === 0 ? 'stopped' : `could not be stopped (${tailOf(stopped, 200)})`} and creation refused`,
+        { issued: true, instanceState: stopped.code === 0 ? 'Stopped' : verdict.observed, identity });
+    }
+  }
 
   // 5) a snapshot's best-effort note, never a failure.
   const warnings = [];

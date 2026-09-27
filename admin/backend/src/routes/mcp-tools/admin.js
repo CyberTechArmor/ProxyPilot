@@ -16,6 +16,7 @@ import { join, basename } from 'node:path';
 import { checkSuperadminProtection } from '../../lib/superadmin.js';
 import { encryptSecret, decryptSecret } from '../../lib/secrets.js';
 import { hasHostBinary } from '../../lib/host-exec.js';
+import { agentCall } from '../../lib/agent.js';
 import { mcpTokenOwnerStatus, mcpTokenExpiry, mcpTokenDefaultDays } from '../../lib/mcp-logic.js';
 import {
   validateTokenScope, parseTokenScope, scopeSubsetRefusal, intIn, stamp, sha256Hex, UNIT_NAME_RE, parseSystemctlUnits, parseDpkgList, parseAptUpgradable, pathUnder,
@@ -420,6 +421,31 @@ export function createAdminHandlers(kit) {
 
   /* --------------------------- proxypilot DB backups --------------------- */
 
+  const list_incus_upgrade_backups = reader('list_incus_upgrade_backups', async () => {
+    const result = await agentCall('incus.upgrade_backups_list');
+    return ok(result);
+  });
+
+  const remove_incus_upgrade_backup = mutation('remove_incus_upgrade_backup', { subjectType: 'host', flag: 'mcp.host_control' }, async (args, auth, _req, note) => {
+    const name = String(args.name || '');
+    const fingerprint = String(args.expected_fingerprint || '');
+    note.subject_id = name;
+    const { backups } = await agentCall('incus.upgrade_backups_list');
+    const backup = backups.find((b) => b.name === name);
+    if (!backup) return err('The named Incus upgrade archive is absent or cannot be safely inventoried.');
+    if (backup.fingerprint !== fingerprint) return err('The Incus upgrade archive changed since review; list it again.');
+    const preview = { path: backup.path, files: backup.files, bytes: backup.bytes, fingerprint,
+      note: 'The host agent removes these regular files and their directory only after the update runner is idle. ZFS snapshots are separate.' };
+    if (args.dry_run === true) return ok({ dry_run: true, preview });
+    const gate = confirmToken(args, auth, note, { tool: 'remove_incus_upgrade_backup', subject: `${name}:${fingerprint}`,
+      action: `remove Incus upgrade archive ${name}`, preview });
+    if (gate) return gate;
+    const result = await agentCall('incus.upgrade_backup_remove', { name, expected_fingerprint: fingerprint });
+    note.summary = `removed Incus upgrade archive ${name}`;
+    note.detail = { bytes: result.bytes, files: result.files, fingerprint };
+    return ok(result);
+  });
+
   const DB_BACKUP_DIR = () => join(dbPath.replace(/\/[^/]+$/, ''), 'backups');
 
   const backup_proxypilot_db = mutation('backup_proxypilot_db', { subjectType: 'host' }, async (args, auth, req, note) => {
@@ -700,7 +726,7 @@ export function createAdminHandlers(kit) {
     list_mcp_keys, create_scoped_key, revoke_mcp_key,
     get_settings, set_setting, list_feature_flags, set_feature_flag,
     query_audit_log, run_lynis, run_trivy, get_audit_report, export_grc_evidence,
-    backup_proxypilot_db, restore_proxypilot_db, list_host_snapshots, create_host_snapshot,
+    backup_proxypilot_db, restore_proxypilot_db, list_host_snapshots, list_incus_upgrade_backups, remove_incus_upgrade_backup, create_host_snapshot,
     get_host_services, host_service_control, list_host_packages, reboot_host,
     list_webhooks, set_webhook,
   };

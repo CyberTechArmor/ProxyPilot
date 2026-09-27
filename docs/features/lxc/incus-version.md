@@ -10,9 +10,14 @@ and the lifecycle runner removes any half-created instance.
 New ProxyPilot installs use Zabbly's `stable` APT channel on its supported
 Debian 12/13 and Ubuntu 22.04/24.04/26.04 releases. The installer verifies
 the repository key fingerprint before installing the current channel package.
-The Create dialog and `create_lxc_container` MCP tool default to
-`images:debian/13`; Debian 12 remains selectable. Incus downloads a separate
-VM image when `--vm` is requested, even if the container variant is cached.
+The Create dialog, `create_lxc_container` MCP tool, Mock2 provisioner and
+application migration use `images:debian/13` for new guests. Image overrides
+to Debian 12 or another alias are refused. Creation reads the running guest's
+`/etc/os-release` and requires `ID=debian` and `VERSION_ID=13`; an image alias
+by itself is insufficient. Clone and import paths also require guest readback,
+and paths that cannot safely obtain it fail closed. Existing guests are not
+upgraded or restarted by this rule. Incus downloads a separate VM image when
+`--vm` is requested, even if the container variant is cached.
 
 ## Existing hosts
 
@@ -26,6 +31,15 @@ external directory pools and clustered servers fail closed. The updater
 records the checkpoint path and verifies daemon response and instance count
 after the package change. It does not automatically downgrade a daemon whose
 database may have migrated; the checkpoint is retained for operator recovery.
+After the upgrade is independently accepted, `list_incus_upgrade_backups`
+lists the flat rollback archives under `/var/backups/proxypilot/incus` with a
+fingerprint and byte count. `remove_incus_upgrade_backup` removes only one
+reviewed archive with a matching fingerprint and one-time confirmation token;
+the host agent refuses while an update is active and rejects symlinks or
+unexpected directory entries. Recursive ZFS checkpoints are separate and
+must be inventoried by their exact `proxypilot-incus-pre-<stamp>` name before
+each snapshot is retired through the managed storage plan/confirm tool. This
+cleanup never removes Incus datasets or existing guests.
 The Incus package step can interrupt Incus management and guests during the
 service/package restart. A full update can take longer than a dashboard-only
 rebuild.

@@ -870,14 +870,11 @@ export function validIpv4(s) {
   return v;
 }
 
-/** An Incus image alias like images:debian/12 or ubuntu:24.04. Argv-passed
- *  (never a shell), so this only rejects confusing shapes — most importantly
- *  a leading '-' that incus would read as an option. */
+/** The sole allowed image for a new guest. The runner also verifies the OS
+ *  inside the resulting instance; this alias alone is not proof. */
 export function validImageAlias(s) {
   const v = String(s ?? '').trim();
-  if (!v || v.length > 200 || v.startsWith('-')) return null;
-  if (!/^[A-Za-z0-9][A-Za-z0-9:/._-]*$/.test(v)) return null;
-  return v;
+  return v === 'images:debian/13' ? v : null;
 }
 
 // ---- routing tools: domain/port validation + host-curl probe parsing ----

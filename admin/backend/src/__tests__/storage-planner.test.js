@@ -281,16 +281,14 @@ test('incus binding: set_incus_storage_pool (create vs keep, profile root), move
   assert.deepEqual(planMoveGuestStorage(legacy, { guests: ['pp-legacy'], pool: 'zfs', stop: true }).plan.steps[1].argv, ['incus', 'snapshot', 'pp-legacy', 'pp-premove-{{stamp}}']);
 });
 
-test('guest restore vs rollback are different tools: clone-to-new-guest (incus copy or the ZFS helper) vs in-place rollback with Incus-snapshot guard', () => {
+test('snapshot clone fails closed without Debian 13 guest proof; existing-guest rollback remains distinct', () => {
   assert.match(planRestoreGuestFromSnapshot(inv(), { guest: 'pp-web', snapshot: 'tank/incus/containers/pp-web@snapshot-before-upgrade', new_name: 'pp-web' }).error, /must differ/);
   assert.match(planRestoreGuestFromSnapshot(inv(), { guest: 'pp-web', snapshot: 'tank/backups@manual', new_name: 'pp-web2' }).error, /not a snapshot of pp-web's dataset/);
   assert.match(planRestoreGuestFromSnapshot(inv(), { guest: 'pp-legacy', snapshot: 'tank/backups@manual', new_name: 'x' }).error, /is the guest on a managed ZFS pool/);
   const viaIncus = planRestoreGuestFromSnapshot(inv(), { guest: 'pp-web', snapshot: 'tank/incus/containers/pp-web@snapshot-before-upgrade', new_name: 'pp-web2', start: true });
-  assert.deepEqual(viaIncus.plan.steps[0].argv, ['incus', 'copy', 'pp-web/before-upgrade', 'pp-web2']);
-  assert.equal(viaIncus.plan.steps[2].expect, 'Running');
+  assert.match(viaIncus.error, /cannot safely boot and verify.*Debian 13/);
   const viaZfs = planRestoreGuestFromSnapshot(inv(), { guest: 'pp-web', snapshot: 'tank/incus/containers/pp-web@autosnap_2026-09-19_09:00:01_hourly', new_name: 'pp-web3' });
-  assert.deepEqual(viaZfs.plan.steps[0].argv, ['/usr/local/sbin/proxypilot-storage-restore-guest', 'tank/incus/containers/pp-web@autosnap_2026-09-19_09:00:01_hourly', 'pp-web3', 'zfs']);
-  assert.notEqual(planToken(viaIncus.plan), planToken(viaZfs.plan));
+  assert.match(viaZfs.error, /cannot safely boot and verify.*Debian 13/);
   // rollback in place
   assert.match(planRollbackGuestDataset(inv(), { guest: 'pp-web', snapshot: 'tank/incus/containers/pp-web@autosnap_2026-09-18_00:00:01_daily', destroy_newer: true, stop: true }).error, /Incus snapshots newer than .* exist \(before-upgrade\)/);
   assert.match(planRollbackGuestDataset(inv(), { guest: 'pp-web', snapshot: 'tank/incus/containers/pp-web@autosnap_2026-09-19_09:00:01_hourly' }).error, /1 newer snapshot\(s\)/);

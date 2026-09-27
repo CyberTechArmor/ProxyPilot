@@ -890,8 +890,9 @@ test('validIpv4 and validImageAlias reject the confusing shapes', () => {
   assert.equal(validIpv4('10.0.0.01'), null);
   assert.equal(validIpv4('10.0.0'), null);
   assert.equal(validIpv4('fe80::1'), null);
-  assert.equal(validImageAlias('images:debian/12'), 'images:debian/12');
-  assert.equal(validImageAlias('ubuntu:24.04'), 'ubuntu:24.04');
+  assert.equal(validImageAlias('images:debian/13'), 'images:debian/13');
+  assert.equal(validImageAlias('images:debian/12'), null);
+  assert.equal(validImageAlias('ubuntu:24.04'), null);
   assert.equal(validImageAlias('--vm'), null);
   assert.equal(validImageAlias('a b'), null);
   assert.equal(validImageAlias(''), null);

@@ -705,6 +705,7 @@ export function planRestoreGuestFromSnapshot(inv, params = {}) {
   if (!inst.dataset || target.dataset !== inst.dataset) return { error: `${target.name} is not a snapshot of ${guest}'s dataset (${inst.dataset || 'unknown — is the guest on a managed ZFS pool?'})` };
   const snap = (inv.snapshots || []).find((s) => s.name === target.name);
   if (!snap) return { error: `snapshot ${target.name} does not exist` };
+  return { error: 'Snapshot clone cannot safely boot and verify the resulting guest /etc/os-release as Debian 13; no guest was created' };
   const plan = newPlan('restore_guest_from_snapshot', newName, `Create guest ${newName} from ${guest}'s snapshot @${target.snapshot} (${snap.kind}, ${snap.created_at || 'unknown time'})`);
   if (snap.kind === 'incus') {
     plan.steps.push(step(['incus', 'copy', `${guest}/${target.snapshot.replace(/^snapshot-/, '')}`, newName], 'Copy the Incus snapshot into a new guest', { timeout_ms: 3600 * 1000 }));

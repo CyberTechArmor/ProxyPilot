@@ -10,6 +10,10 @@ verified against the code and carries `file:line` citations.
 execute the plan phase by phase, the same way `docs/core/plan/` drives the
 core-infrastructure work.
 
+Current Mock2 provisioning defaults to `images:debian/13`. An explicit
+`MOCK2_BASE_IMAGE` override to another image is rejected, and new guests are
+checked through their own `/etc/os-release` after launch.
+
 ## Contents
 
 | File | What it is |

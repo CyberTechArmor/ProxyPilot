@@ -32,6 +32,7 @@ import { hasHostBinary } from '../lib/host-exec.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../lib/export-compression.js';
 import { resolveCertDir } from '../lib/caddy-cert.js';
 import { inspectIncusDevice } from '../lib/cert-mount-reconciler.js';
+import { parseDebian13Release } from '../lib/debian13-guest.js';
 import { manualTlsDirective } from '../lib/tls-certs.js';
 import { resolveTlsForHost } from '../lib/tls-cert-store.js';
 import { parseCaddySiteFile, sameHost } from '../lib/caddy-site-file.js';
@@ -83,6 +84,18 @@ export const lxcRouter = Router();
 const INSTANCE_PREFIX = 'pp-';
 const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';
 const NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
+async function proveImportedDebian13(incusName, leaveRunning) {
+  const quoted = shellSingleQuote(incusName);
+  await execOnHost(`incus start ${quoted}`, { timeout: 120000 });
+  let release;
+  try { release = await execOnHost(`incus exec ${quoted} -- cat /etc/os-release`, { timeout: 30000 }); }
+  catch (error) { release = { stdout: '', stderr: error?.message }; }
+  if (!parseDebian13Release(release.stdout)) {
+    await execOnHost(`incus stop ${quoted} --force`, { timeout: 120000 }).catch(() => {});
+    throw new Error(`${incusName}:/etc/os-release did not prove Debian 13; new guest stopped`);
+  }
+  if (!leaveRunning) await execOnHost(`incus stop ${quoted}`, { timeout: 120000 });
+}
 
 // In-memory tracking of active container creation jobs
 // Creation progress is no longer an in-memory map: GET /containers/:name/create-status
@@ -720,11 +733,11 @@ lxcRouter.post('/exports/:id/restore', requireSudo, async (req, res) => {
     notes.push(...restoreNotes({ ...hazards, pinRemoved, sourceContainer }));
   } catch { /* the guest exists either way; these notes are advice, not the job */ }
 
+  if (proxyDevices.length || (ipPinRemoved === null && notes.some((n) => /pinned/i.test(n))))
+    return res.status(422).json({ success: false, error: `Imported ${name} remains stopped: inherited network devices prevent safe Debian 13 guest verification.` });
   let started = false;
-  if (req.body?.start === true) {
-    try { await execOnHost(`incus start ${shellSingleQuote(incusName)}`, { timeout: 60000 }); started = true; }
-    catch (err) { notes.push(`Imported, but it would not start: ${(err?.stderr || err?.message || '').toString().trim().slice(0, 200)}`); }
-  }
+  try { await proveImportedDebian13(incusName, req.body?.start === true); started = req.body?.start === true; }
+  catch (error) { return res.status(422).json({ success: false, error: error.message }); }
 
   try {
     logAudit(req.user?.id || null, 'LXC_EXPORT_RESTORE', 'lxc', name,
@@ -1010,8 +1023,11 @@ lxcRouter.post('/containers', async (req, res) => {
   if (!image) {
     return res.status(400).json({
       success: false,
-      error: 'Image is required (e.g., "ubuntu:24.04", "images:debian/13").',
+      error: 'Image is required (images:debian/13).',
     });
+  }
+  if (image !== 'images:debian/13') {
+    return res.status(400).json({ success: false, error: 'New instances require images:debian/13; image overrides are refused.' });
   }
 
   const incusName = `${INSTANCE_PREFIX}${name}`;
@@ -3003,10 +3019,7 @@ lxcRouter.post('/import', upload.single('backup'), async (req, res) => {
       fileStream.pipe(child.stdin);
     });
 
-    // Start the container
-    try {
-      await execOnHost(`incus start ${incusName}`, { timeout: 30000 });
-    } catch {}
+    await proveImportedDebian13(incusName, true);
 
     res.status(201).json({ success: true, message: `Container '${name}' imported successfully.` });
   } catch (error) {

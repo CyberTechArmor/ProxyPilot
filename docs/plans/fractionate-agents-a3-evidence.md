@@ -792,3 +792,87 @@ No uncertain job was acknowledged,
 no stale lease was released, and the VM was not started. The actual setup
 job outcome, target network fence, browser and human takeover proofs remain
 unverified. A3 stays inactive and PR #686 stays draft.
+
+## 2026-09-27 continuation: Debian 13 policy and disposable VM readback
+
+The continuation integrated `origin/main` at
+`d3de8659add2f41a26ec15fd1943c45704ac857a` with a reviewable merge
+commit `c0d6041cfaae315af3e2a7345a50ce051a949890`. No existing guest was
+upgraded, deleted, or restarted. In particular, `pp-nodus` remained running
+and untouched. The two older named A3 proof VMs were absent; the remaining
+`agents-a3-synthetic-test` and `agents-a3-vm-test` were stopped containers.
+The two small, unmounted Incus-owned ZFS records for the deleted VMs were
+left for separate reconciliation; no direct ZFS mutation was attempted.
+
+Before creation, `list_lxc_containers` and `zfs_list` showed neither an Incus
+name nor storage collision for `agents-a3-debian13-proof-20260927`. The
+ProxyPilot MCP `create_lxc_container` request used `images:debian/13`,
+`vm:true`, 2 vCPU, 4 GiB RAM, 12 GiB root, `docker_ready:false`, and
+`autostart:false`. Setup job `813a3120-1e0c-4fc9-8226-ca02600a08cb`
+succeeded. `list_host_packages(filter=incus)` reported
+`incus 1:7.5.1-debian13-202609250203`. `get_lxc_container` read back a
+running virtual machine created `2026-09-27T09:19:00.951999976Z`, with
+`limits.cpu=2`, `limits.memory=4096MiB`, `security.guestapi=false`,
+`security.nesting=false` and `boot.autostart=false`. `get_lxc_usage` read back
+a `12GiB` root device, zero swap, 248,733,696 bytes guest memory used and
+123 processes at one sample; `free -m` reported 3,845 MiB total guest memory
+and zero swap, and `df -h /` reported 12 GiB total, 708 MiB used. These are
+guest/Incus measures, **not** host QEMU-plus-descendant RSS. The MCP catalog
+did not expose the actual Incus image fingerprint or host process RSS, so
+neither can be claimed as proved.
+
+`read_lxc_file(/etc/os-release)` on this VM returned `ID=debian`,
+`VERSION_ID="13"`, `DEBIAN_VERSION_FULL=13.7`, with SHA-256
+`e249e69c32d81350fdd6b05ac5575255f14e380ba14b8454acea14e49f088bfa`.
+This is the guest OS proof; the requested image alias alone was not used as
+proof. A Chromium/font `install_package` dry run was refused by the deployed
+MCP package allowlist. No browser was installed, no cold starts were measured,
+and no synthetic sign-in or human takeover was attempted. The local untracked
+probe archive `scripts/tests/a3-vm-probe.zip` was preserved without applying
+it; its SHA-256 is
+`4cae3e4a36c0b9809270aef126c6c47c0b3dd67fb144f387854c299616ad9fb`.
+
+Network negatives on the actual VM were decisive: `curl -I
+https://demo.fractionate.ai` returned HTTP/2 200, but `curl -I
+https://example.org` also returned HTTP/2 200, and a request to the bridge
+management address `http://10.185.17.1:8443` reached it and returned HTTP
+400. `stat /dev/incus/sock` found no guest API socket. The public and
+management reachability prevent host-boundary acceptance; redirects,
+subresources, DNS, raw IP, WebSocket and CONNECT escape denial have not been
+proved. The only VM mutation after these negatives was a clean stop via
+ProxyPilot MCP. Stop job `2ee88fd2-fe4f-40c6-b31d-20cec1ca1983`
+succeeded, and a final `get_lxc_container` readback showed **Stopped**, no
+addresses, no active Incus operation and no setup lease. The disposable VM
+was retained stopped for review.
+
+The source change now pins all new image aliases to `images:debian/13`,
+rejects explicit image overrides including Debian 12, and checks the
+resulting guest's `/etc/os-release` after creation. Dashboard/MCP, Mock2,
+application migration, clone and import paths either obtain guest readback or
+fail closed with a reason; snapshot/S3/host restore paths without a safe
+readback route are disabled before creating a guest. Mock2 also refuses an
+existing-name collision. The policy deliberately does not rewrite historical
+fixtures or existing guests. This source has **not** been deployed to the
+live ProxyPilot host.
+
+Local verification: 85 native SQLite/HTTP/worker/migration/Mock2 tests in
+the affected groups passed with Node's test runner and the bundled native
+dependency loader. Focused lifecycle, post-launch, dashboard and storage
+tests passed; broader Windows suites encounter baseline Unix `sh`, symlink
+and path assumptions. `node --check` on edited backend files, `git diff
+--check`, and the frontend Vite production build passed. The unsuppressed
+`scripts/host-boundary-inventory.py` returned **96 candidate backend files;
+S6 remains open**. No Security CI result for this new head is claimed here
+until a submitted exact-head run completes.
+
+Rollback for this source change is a code revert of the Debian 13 policy and
+documentation; it does not require changing any guest. Older writers remain
+unsafe for activating an A3 worker: keep `OPERATIONS_ENABLED=false` and the
+agent feature gate off while any older backend can write the operational
+tables. The durable run/attempt store and typed browser contract still have
+no independently enforced OS runner or credential broker. Cumulative CPU,
+memory, process and temporary-disk limits, private workspace/descendant
+teardown, cold browser starts, forced overruns, crash/restart recovery and
+human takeover are unproved on the VM. S6/SEC-01/SEC-04 stay open. PR #686
+must remain draft and unmerged; no deployment, live agent, provider,
+credential, vault or real sign-in identity is authorized by this evidence.

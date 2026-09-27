@@ -710,15 +710,19 @@ lxcRouter.post('/exports/:id/restore', requireSudo, async (req, res) => {
   // What came back with it.
   const notes = [];
   let ipPinRemoved = null;
+  let inheritedDevicesRead = false;
+  let pinRemovalFailed = false;
   const proxyDevices = [];
   try {
-    // `devices`, not `expanded_devices`: only what the BACKUP carried is the
-    // restore's doing. A device the profile supplies is shared by every
-    // guest already and is not this operation's to touch. Read as JSON
+    // Read effective devices for the safety decision, including inherited
+    // profile devices. Read as JSON
     // rather than scraped from YAML — the key order in `config show` is
     // alphabetical, so "the listen after the type" is not a thing.
     const q = await execOnHost(`incus query ${shellSingleQuote(`/1.0/instances/${incusName}`)} 2>/dev/null`, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
-    const devices = JSON.parse(String(q.stdout || '{}'))?.devices || {};
+    const detail = JSON.parse(String(q.stdout || '{}'));
+    const devices = detail?.expanded_devices || detail?.devices;
+    if (!devices || typeof devices !== 'object' || Array.isArray(devices)) throw new Error('Incus device inventory unavailable');
+    inheritedDevicesRead = true;
     const sourceContainer = open.row.container_name;
     const hazards = restoreHazards(devices, { sourceContainer });
     let pinRemoved = false;
@@ -727,13 +731,13 @@ lxcRouter.post('/exports/:id/restore', requireSudo, async (req, res) => {
         await execOnHost(`incus config device unset ${shellSingleQuote(incusName)} eth0 ipv4.address`, { timeout: 30000 });
         pinRemoved = true;
         ipPinRemoved = hazards.pinnedIp;
-      } catch { /* reported as still-pinned below */ }
+      } catch { pinRemovalFailed = true; }
     }
     proxyDevices.push(...hazards.proxyDevices);
     notes.push(...restoreNotes({ ...hazards, pinRemoved, sourceContainer }));
-  } catch { /* the guest exists either way; these notes are advice, not the job */ }
+  } catch { /* the guest remains stopped when inherited devices cannot be inspected */ }
 
-  if (proxyDevices.length || (ipPinRemoved === null && notes.some((n) => /pinned/i.test(n))))
+  if (!inheritedDevicesRead || pinRemovalFailed || proxyDevices.length)
     return res.status(422).json({ success: false, error: `Imported ${name} remains stopped: inherited network devices prevent safe Debian 13 guest verification.` });
   let started = false;
   try { await proveImportedDebian13(incusName, req.body?.start === true); started = req.body?.start === true; }
@@ -3018,6 +3022,14 @@ lxcRouter.post('/import', upload.single('backup'), async (req, res) => {
       fileStream.on('error', reject);
       fileStream.pipe(child.stdin);
     });
+
+    const q = await execOnHost(`incus query ${shellSingleQuote(`/1.0/instances/${incusName}`)}`, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+    const detail = JSON.parse(String(q.stdout || '{}'));
+    const devices = detail?.expanded_devices || detail?.devices;
+    if (!devices || typeof devices !== 'object' || Array.isArray(devices)) throw new Error('Incus device inventory unavailable');
+    const hazards = restoreHazards(devices, {});
+    if (hazards.pinnedIp || hazards.proxyDevices.length)
+      throw new Error('inherited pinned IP or proxy device prevents safe Debian 13 guest verification');
 
     await proveImportedDebian13(incusName, true);
 

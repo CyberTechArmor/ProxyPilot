@@ -67,6 +67,8 @@ Read-only MCP `get_lxc_container(nodus)` showed `pp-nodus` Running at
 http://10.185.17.240:3001/")` returned HTTP 200 in 33 ms, confirming the
 same-bridge bypass remains open. An IPv6 `curl` and `probe_lxc_port` were
 refused by the MCP argument validators, so IPv6 denial is not proved.
+The continuation source permits a bare IPv6 literal in `probe_lxc_port`
+and brackets it in the curl URL; this is not yet deployed or a bypass proof.
 `test_route(nodus-admin.fractionate.ai, test_websocket=true)` showed edge
 HTTP 302 to `/admin/`, direct upstream HTTP 200 and no WebSocket upgrade.
 An unauthenticated browser loaded the Nodus admin landing page without a

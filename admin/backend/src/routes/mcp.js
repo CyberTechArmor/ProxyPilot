@@ -51,7 +51,7 @@ import {
   validIpv4, validImageAlias,
   validDomainName, normalizePort, parseCurlProbeOutput, classifyCurlExit,
   summarizeAccessLog, caddyAccessLogPath,
-  parseStatFileList, parseSystemctlShow, validUnitName, validProbeHost, validFileGlob, normalizeServiceId,
+  parseStatFileList, parseSystemctlShow, validUnitName, validProbeHost, probeUrlHost, validFileGlob, normalizeServiceId,
   startupCandidates, validProjectFilePath,
   parseProjectCommand, projectCommandTimeoutMs, PROJECT_COMMAND_OUTPUT_CAP,
   applyStringEdit, normalizeReadRange,
@@ -1254,6 +1254,7 @@ async function toolProbeLxcPort(args) {
   if (!port) return toolResult('port must be a port number (1–65535)', { isError: true });
   const host = validProbeHost(args.host || '127.0.0.1');
   if (!host) return toolResult('host must be an IP or hostname', { isError: true });
+  const urlHost = probeUrlHost(host);
   const scheme = String(args.scheme || 'http');
   if (!['tcp', 'http', 'https'].includes(scheme)) return toolResult("scheme must be 'tcp', 'http', or 'https'", { isError: true });
   let path = '/';
@@ -1276,7 +1277,7 @@ async function toolProbeLxcPort(args) {
     // telnet:// makes curl connect and then wait for data — so a short
     // timeout AFTER a successful connect (exit 28) means the port is OPEN,
     // while refused/unreachable fail immediately.
-    const { r } = await guestCurl(`telnet://${host}:${port}`);
+    const { r } = await guestCurl(`telnet://${urlHost}:${port}`);
     if (r.status === 127) return toolResult('curl is not installed in this guest — apt install curl (via the startup script) first', { isError: true });
     const openish = r.status === 0 || r.status === 28 || r.status === 56;
     return toolResult({
@@ -1286,7 +1287,7 @@ async function toolProbeLxcPort(args) {
     });
   }
 
-  const url = `${scheme}://${host}:${port}${path}`;
+  const url = `${scheme}://${urlHost}:${port}${path}`;
   const { r, parsed } = await guestCurl(url);
   if (r.status === 127) return toolResult('curl is not installed in this guest — apt install curl (via the startup script) first', { isError: true });
   const failed = r.status !== 0 && !parsed.status_code;

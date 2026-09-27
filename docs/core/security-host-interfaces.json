@@ -462,6 +462,7 @@
       "host_command: const opsResult = await execOnHost('incus operation list --format json 2>/dev/null', { timeout: 5000 });": 1,
       "host_command: const probe = await execOnHost(": 1,
       "host_command: const q = await execOnHost(`incus query ${shellSingleQuote(`/1.0/instances/${incusName}`)} 2>/dev/null`, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });": 1,
+      "host_command: const q = await execOnHost(`incus query ${shellSingleQuote(`/1.0/instances/${incusName}`)}`, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });": 1,
       "host_command: const r = await execOnHost(": 2,
       "host_command: const r = await execOnHost('incus image list --format json 2>/dev/null', { timeout: 15000 });": 2,
       "host_command: const r = await execOnHost('incus list --format json 2>/dev/null', { timeout: 15000 });": 2,

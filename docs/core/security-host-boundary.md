@@ -71,6 +71,16 @@ that new guest. These host commands never target a pre-existing guest for
 Debian 13 conversion. The existing host command and filesystem boundary
 remains privileged; this check is an OS version gate, not an A3 worker
 isolation boundary. S6 remains open.
+
+The `inspect_a3_vm` MCP reader adds fixed, bounded Incus and `ps` calls for
+one named VM. It refuses containers, stopped guests, missing image fingerprint,
+non-Debian-13 guest `/etc/os-release`, and incomplete CPU/RAM/root/swap/QEMU
+readback. It returns only the matching QEMU PID and aggregate descendant RSS,
+never the process command line. The instance name comes through the existing
+MCP guest-name and token-scope checks, and no call starts or changes a guest.
+This remains a root-equivalent backend read path and does not prove A3 network
+or process isolation. The underlying host adapter still needs a typed
+least-privilege replacement for S6.
 | Project provisioning and component install / setup engine (A-17.10–11) | `mock2/provision.js`, `mock2/component-install.js`, `lib/project-lifecycle.js`, `mock2/{host,deploy,runner-sdk}.js`; launch, guest scripts, idle sweep | Existing runner job kinds with project lease, immutable approved inputs, guest-only execution and durable recovery; remove backend-allowed execution only after replacements pass |
 | Caddy, domains, TLS / edge controller (A-17.12) | `lib/{caddy-driver,caddy-cert,cert-mount-reconciler,tls-cert-store}.js`, `mock2/caddy.js`, `routes/{services,domains}.js`; writable `/etc/caddy`, adapt/reload | Constrained route/certificate methods and host-owned writes; canonical path/symlink policy, no arbitrary Caddy imports/config authority from a compromised backend. Current optional RPCs still accept broad config and are not isolation |
 | Firewall, L4, VPN, SSH / network controller | `lib/l4-*`, `lib/{platform-vpn-sync,vpn-startup}.js`, `mock2/{firewall,network}.js`, `routes/{firewall,vpn,ssh-access}.js`; host exec, sysctl, network/credential files | Typed validated rules and peer operations, host-owned ranges/ports/path policy, shared firewall lease; root-controlled grants for broader changes |

@@ -876,3 +876,26 @@ teardown, cold browser starts, forced overruns, crash/restart recovery and
 human takeover are unproved on the VM. S6/SEC-01/SEC-04 stay open. PR #686
 must remain draft and unmerged; no deployment, live agent, provider,
 credential, vault or real sign-in identity is authorized by this evidence.
+
+## MCP proof surface added after the stopped-VM probe
+
+Source now includes `inspect_a3_vm`, a read-only MCP tool restricted to an
+Incus virtual machine in the Running state. It reads the Incus server version,
+expanded CPU/memory/root-disk configuration, actual guest `/etc/os-release`,
+guest visible CPU/RAM/swap, image fingerprint, and the exact host QEMU process
+plus descendant RSS. Any missing item, a container, a stopped VM, or a guest
+that does not prove Debian 13 is refused with a reason. The package allowlist
+now includes Debian `chromium`, `fonts-liberation`, and `fonts-dejavu-core` for
+the existing confirmed `install_package` action. These changes are source
+only; the stopped proof VM was not started and no package was installed.
+
+Local commands `node --check src/routes/mcp-tools/lxc-admin.js` and
+`node --test --test-reporter=spec --test-name-pattern="inspect_a3_vm|extended
+catalog is well-formed" src/__tests__/mcp-extended.test.js` passed (2 tests).
+The unsuppressed `scripts/host-boundary-inventory.py` passed after reviewing
+and recording the new fixed host-read call site: 96 candidate backend files,
+with S6 still open. `git diff --check` passed.
+Actual image fingerprint, host QEMU RSS, browser latency and the host network
+boundary remain unmeasured until this tool is deployed and the VM can be
+started behind a verified deny-by-default fence. The older-writer and
+S6/SEC-01/SEC-04 limits above still apply.

@@ -100,7 +100,8 @@
       "postgresql", "postgresql-client", "postgresql-contrib", "mariadb-server", "mariadb-client", "redis-server", "redis-tools", "sqlite3",
       "nginx", "apache2", "certbot", "php-fpm", "php-cli", "php-mysql", "php-pgsql", "php-curl", "php-xml", "php-mbstring", "php-zip", "php-gd",
       "docker.io", "docker-compose-plugin", "docker-compose", "containerd", "supervisor", "cron", "logrotate", "fail2ban", "ufw",
-      "imagemagick", "ffmpeg", "libreoffice-core", "poppler-utils", "ghostscript", "tesseract-ocr", "graphviz"
+      "imagemagick", "ffmpeg", "libreoffice-core", "poppler-utils", "ghostscript", "tesseract-ocr", "graphviz",
+      "chromium", "fonts-liberation", "fonts-dejavu-core"
     ]
   },
   "lxc_devices": {

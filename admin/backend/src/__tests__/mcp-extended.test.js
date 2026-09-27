@@ -87,7 +87,7 @@ const AUTH = { id: 7, created_by: 'admin-1', name: 'test key', scope_json: null 
 /* -------------------------------- catalog ------------------------------ */
 
 test('the extended catalog is well-formed, unique, and every family is represented', () => {
-  assert.equal(MCP_EXT_TOOLS.length, 197);
+  assert.equal(MCP_EXT_TOOLS.length, 198);
   assert.equal(new Set(MCP_EXT_TOOL_NAMES).size, MCP_EXT_TOOL_NAMES.length);
   for (const t of MCP_EXT_TOOLS) {
     assert.match(t.name, /^[a-z][a-z0-9_]+$/);
@@ -97,7 +97,7 @@ test('the extended catalog is well-formed, unique, and every family is represent
     for (const r of t.inputSchema.required || []) assert.ok(t.inputSchema.properties[r], `${t.name}: required ${r} is not a property`);
   }
   assert.deepEqual(Object.keys(MCP_EXT_TOOL_GROUPS), ['builds', 'project_config', 'lxc_admin', 'edge', 'static_admin', 'admin', 'self_edit', 'storage', 'migration', 'platform']);
-  assert.equal(MCP_TOOLS.length, 72 + 197);
+  assert.equal(MCP_TOOLS.length, 72 + 198);
   assert.ok(Object.isFrozen(MCP_TOOLS));
   assert.match(MCP_SERVER_INSTRUCTIONS, /confirmation_token/);
   assert.match(MCP_SERVER_INSTRUCTIONS, /scope\.self_edit/);
@@ -215,6 +215,39 @@ test('destructive preconditions: delete_lxc_container refuses a guest with no sn
   assert.match(r.content[0].text, /no snapshot/);
   assert.equal(confirmations.size(), 0);
   assert.equal(ledger[0][8], 'refused');
+});
+
+test('inspect_a3_vm requires a VM and actual Debian 13 guest proof', async () => {
+  const image = 'a'.repeat(64);
+  const responses = new Map([
+    ['query /1.0', JSON.stringify({ environment: { server_version: '7.5.1' } })],
+    ['config show pp-proof --expanded --format=json', JSON.stringify({ expanded_config: { 'limits.cpu': '2', 'limits.memory': '4GiB' }, expanded_devices: { root: { type: 'disk', path: '/', size: '12GiB', pool: 'default' } } })],
+    ['query /1.0/instances/pp-proof/state', JSON.stringify({ pid: 42 })],
+    ['exec pp-proof -- cat /etc/os-release', 'ID=debian\nVERSION_ID="13"\n'],
+    ['exec pp-proof -- nproc', '2\n'],
+    ['exec pp-proof -- cat /proc/meminfo', 'MemTotal:       4000000 kB\nSwapTotal:             0 kB\n'],
+    ['exec pp-proof -- cat /proc/swaps', 'Filename\tType\tSize\tUsed\tPriority\n'],
+    ['exec pp-proof -- df -B1 --output=size /', '1B-blocks\n12884901888\n'],
+    ['-eo pid=,ppid=,rss=,comm=,args=', '42 1 1000 qemu-system-x86 qemu-system-x86_64 -name guest=pp-proof,debug-threads=on\n43 42 100 helper helper\n'],
+  ]);
+  const vm = { type: 'virtual-machine', status: 'Running', config: { 'volatile.base_image': image } };
+  const { ctx } = makeCtx({ fetchLxcInstance: async () => ({ instance: vm }), lxcContainerDetail: () => ({ status: 'Running' }),
+    runHostCapture: async (_bin, argv) => ({ status: 0, stdout: responses.get(argv.join(' ')) || '', stderr: '' }) });
+  const { handlers } = createExtendedHandlers(ctx);
+  const proof = parse(await handlers.inspect_a3_vm({ container: 'proof' }, AUTH));
+  assert.equal(proof.incus_server_version, '7.5.1');
+  assert.equal(proof.memory.guest_mem_total_bytes, 4000000 * 1024);
+  assert.equal(proof.root_disk.guest_filesystem_bytes, 12884901888);
+  assert.equal(proof.swap.disabled, true);
+  assert.equal(proof.host_qemu.descendant_rss_bytes, 1100 * 1024);
+  responses.set('-eo pid=,ppid=,rss=,comm=,args=', '43 1 100 helper helper\n');
+  assert.match((await handlers.inspect_a3_vm({ container: 'proof' }, AUTH)).content[0].text, /QEMU process/);
+  responses.set('-eo pid=,ppid=,rss=,comm=,args=', '42 1 1000 qemu-system-x86 qemu-system-x86_64 -name guest=pp-proof,debug-threads=on\n43 42 100 helper helper\n');
+  vm.type = 'container';
+  assert.match((await handlers.inspect_a3_vm({ container: 'proof' }, AUTH)).content[0].text, /not a VM/);
+  vm.type = 'virtual-machine';
+  responses.set('exec pp-proof -- cat /etc/os-release', 'ID=debian\nVERSION_ID=12\n');
+  assert.match((await handlers.inspect_a3_vm({ container: 'proof' }, AUTH)).content[0].text, /does not prove Debian 13/);
 });
 
 test('scoped keys: refusals are decided before the handler runs and the catalog is filtered', () => {
